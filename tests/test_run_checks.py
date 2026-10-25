@@ -1189,3 +1189,77 @@ async def test_a_typed_results_rewrite_that_a_later_try_writes_over_is_kept_on_a
     assert git("show", "refs/fi/refused/typed-simulate-1:simulate.py") == first
     assert git("rev-parse", "HEAD") == head
     assert set(git("status", "--porcelain").split()) <= {"M", "simulate.py"}  # the working folder is the newest try only
+
+
+# ---- a study that compares named alternatives is sized from the alternatives the run will search -------------------------
+
+_ALTERNATIVES_BLOCK: dict[str, Any] = {
+    "objective": {"quantity": "f", "direction": "minimise", "unit": "J"},
+    "design_variables": [{"name": "x", "low": -5.0, "high": 5.0, "kind": "continuous"}],
+    "fixed": {"shape": "cup"}, "baseline": {"values": {"x": 0.0}, "source": "the design in use"},
+    "numerical_settings": {"mesh": {"search": 0.5}},
+    "evaluation_budget": {"starts": 2, "per_start": 50},
+    "grid": {"shape": ["cup", "mug", "bowl"]},
+    "search_method": "bounded_local",
+}
+_IGNORES_THE_SHAPE = "def run_cell(cell):\n    return {'f': cell['x'] ** 2, 'clock': 1.0}\n"
+_READS_THE_SHAPE = ("def run_cell(cell):\n    shift = {'cup': 0.0, 'mug': 1.0, 'bowl': 2.0}[cell['shape']]\n"
+                    "    return {'f': cell['x'] ** 2 + shift, 'clock': 1.0}\n")
+
+
+async def _alternatives_engine(tmp_path: Path, simulate: str, monkeypatch: pytest.MonkeyPatch) -> tuple[Engine, Any]:
+    block = copy.deepcopy(_ALTERNATIVES_BLOCK)
+    eng, runner = await _search_engine(tmp_path, block)
+    (eng.quest_root / "code" / "simulate.py").write_text(simulate, encoding="utf-8")
+
+    async def fifteen(*a: Any, **k: Any) -> Any:
+        return run_estimate.Probe(None, None, {}, 15.0), ""
+
+    monkeypatch.setattr(run_estimate, "_time_one", fifteen)
+    return eng, runner
+
+
+@pytest.mark.asyncio
+async def test_alternatives_that_give_the_first_ones_results_are_not_counted_as_searches(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A live plan compared 84 combinations of two conditions and was stopped as 28 days long, every one of them counted as
+    a whole search. The simulation is asked what the run asks (the same designs at every alternative): the three
+    alternatives give the same results, so one search and the probes are counted, and the study fits."""
+    eng, runner = await _alternatives_engine(tmp_path, _IGNORES_THE_SHAPE, monkeypatch)
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    said = (eng.fi_dir / "run.log").read_text(encoding="utf-8")
+    assert "the others give the first one's results, so the search is counted for 1 of them, not 3" in said, said
+    # the line a person reads counts one search of 100 evaluations and the 16 designs asked at the other alternatives
+    assert "the search's coarse scan and its 116 evaluations" in said
+
+
+@pytest.mark.asyncio
+async def test_alternatives_that_differ_are_each_counted_and_the_stop_says_where_the_count_comes_from(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    eng, runner = await _alternatives_engine(tmp_path, _READS_THE_SHAPE, monkeypatch)
+    patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
+    assert patch is not None
+    text = patch["exec_result"]["too_long"]
+    assert "the search's 316 evaluations (3 alternatives the plan compares, each searched with 100 evaluations" in text, text
+    fit = patch["exec_result"]["too_long_fit"]
+    assert fit["alternatives"] == 3 and fit["alternatives_searched"] == 3 and fit["per_alternative"] == 100
+    assert fit["alternative_conditions"] == ["shape"] and fit["probes"] == 16
+    from core.engine import _fit_request
+
+    ask = _fit_request("too long", fit)
+    assert "come from 3 alternatives the plan compares" in ask and "each searched one is searched on its own with 100" in ask
+    assert "FI does not choose which" in ask
+
+
+def test_the_request_to_fit_says_how_many_alternatives_are_searched_and_leaves_the_choice_to_the_plan() -> None:
+    from core.engine import _fit_request
+
+    fit = {"seconds_per_setting": 3.0, "at_least": False, "settings": 20000, "settings_that_fit": 900, "limit_s": 28800.0,
+           "search": True, "alternatives": 19, "alternatives_searched": 4, "per_alternative": 8000, "probes": 144,
+           "alternative_conditions": ["axis_a", "axis_b"]}
+    text = _fit_request("too long", fit)
+    assert ("come from 19 alternatives the plan compares (the names of axis_a, axis_b the study has), 4 of which give "
+            "results different from the first one's and are searched: each searched one is searched on its own with 8,000 "
+            "evaluations, 32,000 in all, and 144 more evaluations") in text
+    plain = _fit_request("too long", {**fit, "alternatives": 0})
+    assert "alternatives the plan compares" not in plain

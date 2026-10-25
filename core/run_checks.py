@@ -1114,6 +1114,11 @@ class RunChecksMixin:
         check_s = 0.0
         checked = 0  # the evaluations of FI's check at finer settings, counted when they make the study too long
         whole: Any = None  # the scan with the search's evaluations, when one evaluation was timed
+        alternatives_note = ""  # how many alternatives the search's evaluations are for, when the plan compares several
+        alternatives = 1
+        searching = 1  # how many of them the run searches
+        per_alternative = 0
+        probe_n = 0
         if not _estimate.known_too_long(est, limit_s):
             # The search shares the scan's time (one deadline for both, core/optimise.py): every evaluation is a design
             # the scan did not compute, so it costs what a setting costs the first time it runs: the search's own
@@ -1121,6 +1126,12 @@ class RunChecksMixin:
             # may run on what the scan's timing computed) nor than the plan's own claim. Each evaluation is a whole
             # setting with its runs.
             search_n = int(_optimisation_plan.evaluations(block)[0] or 0)
+            # A study that compares named alternatives searches each one with the whole budget (the alternatives are
+            # counted from the plan's own scan, core/optimise_search.py::compared_levels), and asks a few designs of every
+            # alternative after the first before it is searched (compare): evaluations outside the budget, counted here.
+            alternatives = searching = _optimise_search.level_count(block)
+            per_alternative = search_n // alternatives if search_n else 0
+            probe_n = (alternatives - 1) * _optimise_search.PROBE_DESIGNS if search_n and alternatives > 1 else 0
             per_eval = max(per_setting or 0.0, first_s) or None
             lower = False
             left = budget_s - (time.monotonic() - timing_started)
@@ -1142,7 +1153,21 @@ class RunChecksMixin:
                 # population, a simplex's corners), as the search itself shows when it is rehearsed (_search_rounds);
                 # several together run ``at_once`` at a time, each as much slower as FI measured. Counted one after
                 # another, a search that runs 8 at a time was counted several times too long.
-                alone, batches, together_n = await asyncio.to_thread(_search_rounds, block, search_n, at_once)
+                # One search is rehearsed (all alternatives search alike); what is counted is its rounds once for each
+                # alternative the run searches, and the probes of every alternative after the first, asked together.
+                alone1, batches1, together1 = await asyncio.to_thread(_search_rounds, block, per_alternative, at_once)
+
+                def priced(searched_n: int) -> tuple[int, int, int, int]:
+                    a, b, t = alone1 * searched_n, batches1 * searched_n, together1 * searched_n
+                    if probe_n and at_once > 1:
+                        b += (alternatives - 1) * math.ceil(_optimise_search.PROBE_DESIGNS / at_once)
+                        t += probe_n
+                    elif probe_n:
+                        a += probe_n
+                    return a, b, t, per_alternative * searched_n + probe_n
+
+                # Every alternative is searched, until the simulation itself shows otherwise (below).
+                alone, batches, together_n, search_n = priced(searching)
                 if batches and slowdown is None and probes and _estimate.known_too_long(
                         _replace(est, seconds=est.seconds + per_eval * search_n), limit_s):
                     spent = time.monotonic() - timing_started
@@ -1152,11 +1177,37 @@ class RunChecksMixin:
                     if slowdown is not None and grid is not None:
                         est = _estimate.estimate(grid, runs, deterministic, probes, at_once=at_once,
                                                  slowdown=slowdown) or est
-                search_s = per_eval * (alone + (batches * slowdown if slowdown is not None else together_n))
-                together = _estimate.Estimate(seconds=est.seconds + search_s, at_least=est.at_least or lower,
-                                              complete=est.complete, cells=scan + search_n,
-                                              trials=(scan + search_n) * runs, once_s=est.once_s,
-                                              once_axes=list(est.once_axes))
+
+                def whole_study(a: int, b: int, t: int, n: int) -> _estimate.Estimate:
+                    search_s = per_eval * (a + (b * slowdown if slowdown is not None else t))
+                    return _estimate.Estimate(seconds=est.seconds + search_s, at_least=est.at_least or lower,
+                                              complete=est.complete, cells=scan + n, trials=(scan + n) * runs,
+                                              once_s=est.once_s, once_axes=list(est.once_axes))
+
+                together = whole_study(alone, batches, together_n, search_n)
+                if alternatives > 1 and _estimate.known_too_long(together, limit_s):
+                    # Too long when every alternative is searched: the run searches only those that give results
+                    # different from the first one's (compare), so FI asks the simulation, as the run will, before it
+                    # says the study does not fit.
+                    left = budget_s - (time.monotonic() - timing_started)
+                    searching = await self._alternatives_that_differ(
+                        state, block, runner, python, env, deterministic=deterministic, at_once=at_once,
+                        thresholds=thresholds, left_s=left) or alternatives
+                    if searching < alternatives:
+                        alone, batches, together_n, search_n = priced(searching)
+                        together = whole_study(alone, batches, together_n, search_n)
+                if alternatives > 1:
+                    alternatives_note = (
+                        f" ({alternatives} alternatives the plan compares"
+                        + (f", {searching} of them searched (the others give the first one's results)"
+                           if searching < alternatives else ", each searched")
+                        + f" with {per_alternative:,} evaluations, and {probe_n:,} evaluations that tell whether an "
+                        "alternative gives the same results as the first)")
+                    if searching < alternatives:
+                        self._log.info(  # type: ignore[attr-defined]
+                            "[execute] FI asked the simulation for %d designs at each of the %d alternatives the plan "
+                            "compares; the others give the first one's results, so the search is counted for %d of "
+                            "them, not %d", _optimise_search.PROBE_DESIGNS, alternatives, searching, alternatives)
                 whole = together
                 if _estimate.known_too_long(together, limit_s):
                     est, searched = together, search_n
@@ -1203,7 +1254,7 @@ class RunChecksMixin:
                 return await self._size_the_scan(state, runner, python, env, speed_done=True)
         text = self._too_long_text(est, limit_s, cut=False)
         if searched or checked:
-            text = (f"the coarse scan's {scan:,} settings and the search's {searched:,} evaluations"
+            text = (f"the coarse scan's {scan:,} settings and the search's {searched:,} evaluations{alternatives_note}"
                     + (f" and FI's check of the best design at finer settings ({checked:,} runs)" if checked else "")
                     + f" would take "
                     f"{'at least ' if est.at_least else 'about '}{_estimate.plain_duration(est.seconds * _estimate.SAFETY)}"
@@ -1221,7 +1272,52 @@ class RunChecksMixin:
                 fits_in["check"] = int(_optimisation_plan.budget(block).get("check") or 0)
             except (KeyError, TypeError, ValueError):
                 pass
+            if alternatives > 1:
+                # Where the search's evaluations come from, in FI's own numbers: the plan lowers them by comparing fewer
+                # alternatives or by giving each a smaller budget.
+                first_level = _optimise_search.compared_levels(block)[0]
+                fits_in["alternatives"] = alternatives
+                fits_in["alternatives_searched"] = searching
+                fits_in["alternative_conditions"] = [str(k) for k in first_level]
+                fits_in["per_alternative"] = per_alternative
+                fits_in["probes"] = probe_n
         return self._stop_too_long(text, fit=fits_in)
+
+    async def _alternatives_that_differ(self, state: Any, block: dict[str, Any], runner: Any, python: Any, env: Any, *,
+                                         deterministic: bool, at_once: int, thresholds: Any, left_s: float) -> int | None:
+        """How many of the alternatives a study compares the run would search, by asking the simulation what the run asks
+        (:func:`core.optimise_search.compare`): the same few designs (:func:`core.optimise_search.sizing_designs`) at every
+        alternative, one of them once more at the first to see which results change by themselves, and the same rule for
+        "gives the first one's results". ``None`` when it could not be asked in the time left or something did not answer
+        (every alternative is then counted as searched)."""
+        from time import monotonic as _clock  # the clock core/optimise.py judges its deadline by
+
+        from . import optimise as _optimise
+
+        if left_s < 15:
+            return None
+        levels = _optimise_search.compared_levels(block)
+        try:
+            designs = _optimise_search.sizing_designs(block)
+            names = _optimise_search.compared_names(block, _optimise.watched_results(self._protocol_block(state) or {}))  # type: ignore[attr-defined]
+            cells = [_optimise_search.cell_of(_optimise_search.level_block(block, lv), d) for lv in levels for d in designs]
+        except (KeyError, TypeError, ValueError):
+            return None
+        cells.append(dict(cells[0]))  # the first alternative's first design again
+        try:
+            got = await _optimise.evaluate_many(
+                self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(),  # type: ignore[attr-defined]
+                "run_cell" if deterministic else "run_trial", cells, at_once=max(1, at_once), runs=1, base_seed=0,
+                deadline=_clock() + left_s, env=env, thresholds=thresholds)
+        except Exception as exc:  # noqa: BLE001 -- the count stays the plan's whole count
+            self._log.warning("[execute] FI could not ask the simulation which alternatives give different results (%r); "  # type: ignore[attr-defined]
+                              "every alternative is counted as searched", exc)
+            return None
+        values = [a.get("values") if isinstance(a, dict) and isinstance(a.get("values"), dict) else None
+                  for a, _err, _loaded in got]
+        n = len(designs)
+        replies = [values[i * n:(i + 1) * n] for i in range(len(levels))]
+        return _optimise_search.alternatives_searched(block, levels, replies, values[-1], names)
 
     async def _pilot_gate(self, state: Any, runner: Any, python: Any, env: Any, grid: dict[str, list[Any]],
                           probes: list[_estimate.Probe], thresholds: dict[str, Any], limit_s: float,

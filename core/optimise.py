@@ -991,8 +991,12 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                 reply = ready  # type: ignore[assignment]
             elif request["kind"] == "evaluate":
                 left = deadline - time.monotonic()
+                # A design asked again to see what varies between calls (``repeat``) is never taken from the journal or
+                # put in it: it would be the very answer it is compared with.
+                again = bool(request.get("repeat"))
                 replayed = (replay.get(_replay_key(replay_space, request["design"], request.get("level")))
-                            if replay_space is not None and isinstance(request.get("design"), dict) else None)
+                            if replay_space is not None and isinstance(request.get("design"), dict) and not again
+                            else None)
                 if scan_unchanged:
                     reply: dict[str, Any] = {"stop": "scan_unchanged"}
                 elif replayed is not None:
@@ -1008,8 +1012,8 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                     )
                     if err:
                         stderr_parts.append(err)
-                    if ("values" in reply or "failed" in reply) and not load_error and not reply.get("process") \
-                            and isinstance(request.get("design"), dict):
+                    if (("values" in reply or "failed" in reply) and not load_error and not reply.get("process")
+                            and isinstance(request.get("design"), dict) and not again):
                         _journal(journal, request["design"], reply, request.get("level"))
             else:
                 left = deadline - time.monotonic()

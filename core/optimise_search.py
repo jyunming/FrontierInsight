@@ -1821,9 +1821,33 @@ def search(block, *, seed, method=None, rounds=None, results=None, batch=False, 
 # --- a comparison across named alternatives: one search for each -----------------------------------------------------
 
 
+def _combinations_in_the_study(block, axes):
+    """The combinations of values of ``axes`` (``{axis: [values]}``) that settings of the study have, from the plan's
+    ``sub_studies`` (each one varies some settings of the grid and holds the others at one value, a setting it neither
+    varies nor holds at its first value), as a set of value tuples in the order of ``axes``; ``None`` when the plan has no
+    sub-studies that read, so every combination is a setting of the study."""
+    grid = block.get("grid") if isinstance(block.get("grid"), dict) else {}
+    subs = block.get("sub_studies")
+    if not isinstance(subs, list) or not subs or not all(isinstance(s, dict) for s in subs):
+        return None
+    if not getattr(study_grid({"grid": grid, "sub_studies": subs}), "sub_studies", None):
+        return None  # sub-studies that do not read are not used by the scan either
+    found = []
+    for sub in subs:
+        vary, hold = sub["vary"], sub.get("hold") or {}
+        choices = []
+        for axis in axes:
+            values = list(grid[axis])
+            choices.append(values if axis in vary else [hold[axis]] if axis in hold else values[:1])
+        found.extend(itertools.product(*choices))
+    return found
+
+
 def compared_levels(block):
-    """The alternatives a study compares while it also searches for the best design: every combination of the names
-    listed on the scan (``grid``) for a condition the plan holds fixed (``fixed``). Each is a dict ``{condition: name}``;
+    """The alternatives a study compares while it also searches for the best design: the combinations of the names
+    listed on the scan (``grid``) for a condition the plan holds fixed (``fixed``). When the plan has ``sub_studies`` the
+    study has only the combinations its sub-studies have (an axis one sub-study varies is held by the others), as the
+    coarse scan has; the plan's own held combination is always one. Each is a dict ``{condition: name}``;
     the first is the one the plan holds. ``[]`` when the study compares no named condition (a condition compared across
     numbers stays what it was: measured by the scan, held at one value by the search). FI searches each alternative on
     its own (:func:`compare`): the comparison is made between their best designs, not by searching only the first."""
@@ -1839,7 +1863,11 @@ def compared_levels(block):
                 axes[str(axis)] = ordered
     if not axes:
         return []
-    return [dict(zip(axes, combo)) for combo in itertools.product(*axes.values())]
+    combos = list(itertools.product(*axes.values()))
+    in_study = _combinations_in_the_study(block, {a: grid[a] for a in axes})
+    if in_study is not None:
+        combos = combos[:1] + [c for c in combos[1:] if c in in_study]
+    return [dict(zip(axes, combo)) for combo in combos]
 
 
 def level_count(block):
@@ -1880,11 +1908,13 @@ def compare(block, *, seed, method=None, rounds=None, results=None, batch=False,
                                   stop_flat=stop_flat, stop_stepped=stop_stepped, stream=stream))
     outcomes = []
     seen = {}  # the first alternative's answers, by design: what the probe of each later alternative is compared with
-    names = _compared_names(block, results)
+    names = compared_names(block, results)
+    moving = {}  # the quantities that differ between two calls of the same design, once the first probe has shown them
     for number, level in enumerate(levels):
         sub = level_block(block, level)
         if number > 0:
-            same = yield from _probe_alternative(sub, level, outcomes[0], seen, names)
+            same = yield from _probe_alternative(sub, level, outcomes[0], seen, names, moving,
+                                                 repeat=(level_block(block, levels[0]), levels[0]) if number == 1 else None)
             if same is not None:
                 outcomes.append(_same_outcome(outcomes[0], levels[0], same))
                 continue
@@ -1921,11 +1951,29 @@ def _design_key(design):
     return json.dumps(design, sort_keys=True, default=str)
 
 
-def _compared_names(block, results):
+def compared_names(block, results):
     """The results two alternatives are compared on: the objective, every limited quantity and every result the plan names."""
     names = {str(block["objective"]["quantity"])}
     names |= {str(c.get("quantity")) for c in block.get("constraints") or [] if isinstance(c, dict)}
     return sorted(names | {str(r) for r in results or []})
+
+
+def varying_names(block, names, wanted, again):
+    """The quantities of ``names`` that are not the same in two calls of one design (``wanted``, ``again``: the values of
+    each): a result the simulation reports that changes by itself from call to call (how long it took) says nothing about the
+    alternative it was asked at, so it is left out of the comparison. The objective and every limited quantity are never left
+    out: when one of those varies, the alternatives cannot be told apart and each is searched."""
+    kept = {str(block["objective"]["quantity"])} | {str(c.get("quantity")) for c in block.get("constraints") or []
+                                                      if isinstance(c, dict)}
+    return {n for n in names if n not in kept and ((n in wanted) != (n in again) or (n in wanted and wanted[n] != again[n]))}
+
+
+def probe_answer(sub, values, names):
+    """What an alternative gave for one design, for the comparison: the value of each of ``names`` it reported, or ``None``
+    when the design was not judged ``ok`` (a failed or missing answer cannot show two alternatives are the same)."""
+    if not isinstance(values, dict) or judge(sub, values)["status"] != "ok":
+        return None
+    return {n: values[n] for n in names if n in values}
 
 
 def _remember(seen, request, reply, asked, names):
@@ -1973,7 +2021,42 @@ def _probe_designs(first, seen):
     return chosen + [pool[i] for i in order[:room]]
 
 
-def _probe_alternative(sub, level, first, seen, names):
+def sizing_designs(block):
+    """The designs a size estimate asks of every alternative before any search has run (so the search's own designs are
+    not known yet): the baseline and :data:`PROBE_DESIGNS` - 1 designs spread over the space by a fixed rule, the same on
+    every run."""
+    space = Space(block["design_variables"])
+    out = [dict(block["baseline"]["values"])]
+    for i in range(PROBE_DESIGNS - 1):
+        u = [(0.5 + 0.618034 * (i + 1) + 0.37 * k) % 1.0 for k in range(space.dims)]
+        out.append(space.design(u))
+    return out
+
+
+def alternatives_searched(block, levels, replies, repeat, names):
+    """How many of ``levels`` the run would search, from the values each gave for the designs of :func:`sizing_designs`
+    (``replies``: a list, one entry for each alternative, of the values for each design, ``None`` for one that did not
+    answer) and ``repeat`` (the first alternative's first design asked again): by the rule :func:`compare` applies, an
+    alternative that gives exactly the first one's values for every design (of the quantities that do not vary between
+    calls) is not searched. The first is always searched, and so is an alternative that did not answer every design."""
+    first = replies[0]
+    if not first or any(v is None for v in first):
+        return len(levels)
+    stable = [n for n in names if n not in varying_names(block, names, first[0], repeat or {})] if repeat else list(names)
+    mine = [probe_answer(level_block(block, levels[0]), v, stable) for v in first]
+    if any(m is None for m in mine):
+        return len(levels)
+    searched = 1
+    for number in range(1, len(levels)):
+        theirs = replies[number]
+        got = ([probe_answer(level_block(block, levels[number]), v, stable) for v in theirs]
+               if theirs and all(v is not None for v in theirs) else None)
+        if got is None or got != mine:
+            searched += 1
+    return searched
+
+
+def _probe_alternative(sub, level, first, seen, names, moving=None, repeat=None):
     """Before an alternative after the first is searched (a generator): ask the simulation for a few designs the first
     alternative evaluated, at this alternative (one ``evaluate_many`` request, answered in order). When every one gives
     exactly the first alternative's value of the objective, every limited quantity and every result the plan names (never
@@ -1981,13 +2064,26 @@ def _probe_alternative(sub, level, first, seen, names):
     rows of the probe are returned and the alternative is not searched. When any differs, or the simulation did not
     answer, ``None``: the alternative is searched as usual, and these evaluations stay outside its budget and its rows
     (a repeated search asks them again). Exact equality: a simulation whose answers vary between calls fails the test and
-    is searched."""
+    is searched, except for a result that varies by itself from call to call: ``repeat`` (``(the first alternative's
+    block, its level)``, given with the first probe) asks the first alternative's first probe design once more, outside
+    the rows, and a named result that is not the same in the two calls is left out of every comparison (kept in
+    ``moving["names"]``; :func:`varying_names`)."""
     probes = _probe_designs(first, seen)
     if len(probes) < 2:
         return None
     requests = [{"kind": "evaluate", "cell": cell_of(sub, d), "design": dict(d), "stage": "probe", "start": 0,
                  "level": dict(level)} for d in probes]
     replies = yield {"kind": "evaluate_many", "requests": requests, "level": dict(level)}
+    if repeat is not None:
+        again_block, again_level = repeat
+        again = yield {"kind": "evaluate", "cell": cell_of(again_block, probes[0]), "design": dict(probes[0]),
+                       "stage": "probe", "start": 0, "level": dict(again_level), "repeat": True}
+        values = again.get("values") if isinstance(again, dict) else None
+        if moving is not None:
+            wanted = seen[_design_key(probes[0])]
+            moving["names"] = (varying_names(sub, names, wanted, {n: values[n] for n in names if n in values})
+                               if isinstance(values, dict) else set())
+    used = [n for n in names if n not in (moving or {}).get("names", ())]
     if not isinstance(replies, list) or len(replies) != len(probes):
         return None
     rows = []
@@ -1996,7 +2092,7 @@ def _probe_alternative(sub, level, first, seen, names):
             return None
         values = reply["values"]
         wanted = seen[_design_key(design)]
-        if any((n in wanted) != (n in values) or (n in wanted and values[n] != wanted[n]) for n in names):
+        if any((n in wanted) != (n in values) or (n in wanted and values[n] != wanted[n]) for n in used):
             return None
         judged = judge(sub, values)
         if judged["status"] != "ok":

@@ -27916,6 +27916,21 @@ def _fit_request(why: str, fit: dict[str, Any], kept: list[str] | None = None) -
     if fit.get("search"):
         search = (" A search's evaluations count as settings too: each costs about as much as one setting, so its "
                   "evaluation_budget (starts times per_start) is part of the same total.")
+        alternatives = int(fit.get("alternatives") or 0)
+        if alternatives > 1:
+            per_alt = int(fit.get("per_alternative") or 0)
+            conditions = ", ".join(str(c) for c in fit.get("alternative_conditions") or [])
+            searched = int(fit.get("alternatives_searched") or alternatives)
+            search += (f" The search's evaluations come from {alternatives} alternatives the plan compares"
+                       + (f" (the names of {conditions} the study has)" if conditions else "")
+                       + (f", {searched} of which give results different from the first one's and are searched"
+                          if searched < alternatives else "")
+                       + f": each searched one is searched on its own with {per_alt:,} evaluations, "
+                       f"{searched * per_alt:,} in all"
+                       + (f", and {int(fit.get('probes') or 0):,} more evaluations show whether an alternative gives the "
+                          "first one's results" if fit.get("probes") else "")
+                       + ". The total falls with fewer alternatives or a smaller evaluation_budget for each; FI does not "
+                       "choose which.")
         if check:
             search += (f" After the search, FI checks the best designs at finer settings: about {check} more "
                        f"evaluations, not part of the search's budget, so the coarse scan and the search together "

@@ -178,3 +178,66 @@ def test_run_py_compares_the_same_named_results_as_fis_search(tmp_path) -> None:
     study = code_project.study_of(code, protocol)
     assert study is not None and study["results"] == ["mass"]
     assert 'results=study.get("results")' in code_project.RUN_SOURCE
+
+
+class _Clocked(Sim):
+    """A simulation that also reports how long it took: a result of the plan that changes from call to call."""
+
+    def __init__(self, reads: str) -> None:
+        super().__init__(reads)
+        self.ticks = 0
+
+    def __call__(self, cell: dict[str, Any]) -> dict[str, float]:
+        self.ticks += 1
+        return {**super().__call__(cell), "clock": float(self.ticks)}
+
+
+def test_a_named_result_that_changes_by_itself_between_calls_does_not_keep_alternatives_apart() -> None:
+    """A live plan named the run time among its results; no two calls gave the same time, so no alternative could ever be
+    "the same as the first" and every one was searched. One probe design is asked again at the first alternative: what is
+    not the same in the two calls is left out of the comparison."""
+    block = _block()
+    sim = _Clocked("nothing")
+    outcome = _run(block, sim, ["mass", "clock"])
+    assert all(p.get("same_as") == CUP for p in outcome["levels"][1:]), "the alternatives give the same other results"
+    assert all(r["stage"] == "probe" for r in _other_rows(outcome)) and len(_other_rows(outcome)) == 16
+    assert sim.calls["cup"] > 20 and sim.calls["mug"] == sim.calls["bowl"] == osearch.PROBE_DESIGNS + 3
+
+
+def test_a_result_that_changes_between_calls_never_hides_a_difference_in_another_result() -> None:
+    block = _block()
+    outcome = _run(block, _Clocked("result"), ["mass", "clock"])
+    assert all("same_as" not in p for p in outcome["levels"]), "the shape changes the mass"
+
+
+def test_the_design_asked_again_is_not_a_row_and_a_varying_objective_is_still_searched() -> None:
+    block = _block()
+    ticks = iter(range(10 ** 6))
+
+    def noisy(cell: dict[str, Any]) -> dict[str, float]:
+        return {"f": 2.0 + (cell["x"] + 3.0) ** 2 + next(ticks) * 1e-9, "mass": 1.0}
+
+    outcome = osearch.run_sync(block, noisy, seed=0, results=["mass"])
+    assert all("same_as" not in p for p in outcome["levels"])
+    assert all(r["stage"] != "probe" for r in outcome["rows"])
+
+
+def test_the_answers_a_size_estimate_asks_for_give_the_count_the_run_would_search() -> None:
+    block = _block()
+    levels = osearch.compared_levels(block)
+    designs = osearch.sizing_designs(block)
+    assert len(designs) == osearch.PROBE_DESIGNS and designs[0] == {"x": 0.0}
+    names = osearch.compared_names(block, ["mass", "clock"])
+
+    def asked(sim: Sim) -> tuple[list[list[dict[str, float]]], dict[str, float]]:
+        replies = [[sim({**lv, **d}) for d in designs] for lv in levels]
+        return replies, sim({**levels[0], **designs[0]})
+
+    same, again = asked(_Clocked("nothing"))
+    assert osearch.alternatives_searched(block, levels, same, again, names) == 1
+    differ, again = asked(_Clocked("result"))
+    assert osearch.alternatives_searched(block, levels, differ, again, names) == 3, "the known positive: all three differ"
+    # an alternative that did not answer is searched
+    same[1][2] = None  # type: ignore[assignment]
+    _, again = asked(_Clocked("nothing"))
+    assert osearch.alternatives_searched(block, levels, same, again, names) == 2
