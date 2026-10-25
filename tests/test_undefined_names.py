@@ -81,3 +81,10 @@ def test_the_fault_is_written_for_a_person_and_the_repair_request_names_it() -> 
     found = un.problems({"sim.py": "def simulate(n):\n    return Heater(n)\n"})
     assert "Heater" in un.plain_note(found, None) and "`Heater`" in un.directive(found, None)
     assert un.record(found, None)["names"][0]["name"] == "Heater"
+
+
+def test_every_static_check_finding_is_read_the_way_the_gate_reads_it() -> None:
+    # The gate calls ``says([])`` on whatever finding a check returns; the undefined-name finding took no argument and
+    # crashed the gate on a standing fault.
+    found = un.problems({"sim.py": "def simulate(n):\n    return Heater(n)\n"})
+    assert "Heater" in found[0].says([])

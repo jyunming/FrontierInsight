@@ -38,7 +38,8 @@ class Undefined:
     line: int
     function: str  # the scope the name is used in: "<module>" or the function's name
 
-    def says(self) -> str:
+    def says(self, supplied: list[str] | None = None) -> str:
+        # ``supplied`` is unused; every static check's finding takes it, so the gate calls them all alike.
         where = "at module level" if self.function == "<module>" else f"in `{self.function}`"
         return f"`{self.name}` ({self.script}, first used on line {self.line}, {where})"
 
