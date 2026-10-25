@@ -963,6 +963,7 @@ def facts(quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) ->
     if seed:
         out["seed"] = Fact("seed", seed, required=True)
     wall, least = measured_run_time(root, fallback_s)
+    serial_s = None
     stage, others = _run_facts.run_stage(root)
     if wall is not None:
         said = _plain(wall)
@@ -973,6 +974,14 @@ def facts(quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) ->
                         if isinstance(explore, (int, float)) and not isinstance(explore, bool) else ""))
         elif stage == "explore":
             said += " for the exploring run, whose results are reported"
+        serial = _run_facts.one_after_another_seconds(root)
+        if serial is not None:
+            serial += _search_seconds(root)
+            serial_s = serial
+            n = _run_facts.read(root).get("trials_run", {}).get("at_once")
+            said += (f", with {n} settings run at the same time" if isinstance(n, int) and n > 1
+                     else ", with the settings run at the same time")
+            said += f" (run one after another, as the delivered code does, the settings take {_plain(serial)})"
         out["run_time"] = Fact("run_time", said, required=True)
     elif least is not None:
         what = ("the settings run, the search and its check at finer settings; FI did not time the rest"
@@ -981,7 +990,9 @@ def facts(quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) ->
     limit = _disclosure.topic_limit(root, topic)
     if limit is not None:
         out["time_limit"] = Fact("time_limit", _plain(limit))
-        met = ("within" if wall <= limit else "over") if wall is not None else ("over" if least is not None
+        # The delivered code runs the settings one after another: when FI ran them at the same time, that time is judged.
+        judged = wall if wall is None or serial_s is None else max(wall, serial_s)
+        met = ("within" if judged <= limit else "over") if wall is not None else ("over" if least is not None
                                                                                and least > limit else "")
         if met:
             out["time_limit_met"] = Fact("time_limit_met", met, required=True)

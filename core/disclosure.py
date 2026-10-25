@@ -388,6 +388,14 @@ def _time_sentence(quest_root: Path, topic: str, duration_s: float | None) -> st
     ran = f"The experiment ran for {_plain_seconds(float(duration_s))}"
     if limit is None:
         return f"{ran}; FI did not check it against a limit in the topic."
+    from . import run_facts as _run_facts
+
+    # A reader's run of code/run.py runs the settings one after another: when FI ran them at the same time, the limit is
+    # judged against the time they add up to, and both times are said.
+    serial = _run_facts.one_after_another_seconds(quest_root)
+    if serial is not None and serial > duration_s:
+        return (f"{ran} with its settings run at the same time; one after another the settings take {_plain_seconds(serial)}"
+                f", which is {'within' if serial <= limit else 'over'} the topic's limit of {_plain_seconds(limit)}.")
     return f"{ran}; the topic sets a limit of {_plain_seconds(limit)}, and the run was {'within' if duration_s <= limit else 'over'} it."
 
 

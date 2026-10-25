@@ -121,7 +121,7 @@ def _write(quest_root: Path | str, **changes: Any) -> None:
 
 
 def record_trials(quest_root: Path | str, *, key: str, wall_s: float | None, trials: int, cells: int,
-                  trial_sum_s: float | None, stage: str | None = None) -> None:
+                  trial_sum_s: float | None, stage: str | None = None, at_once: int | None = None) -> None:
     """Keep the wall time of a run of the trials (``wall_s``: seconds from before the first setting to after the last;
     ``None`` when it is not known, as for a cluster job), how many trials and settings it ran, the sum of the per-trial
     times in the ledger, and the stage of a quest run in two stages (``explore`` / ``confirm``; ``None`` otherwise).
@@ -131,6 +131,8 @@ def record_trials(quest_root: Path | str, *, key: str, wall_s: float | None, tri
            "cells": int(cells), "trial_sum_s": None if trial_sum_s is None else round(float(trial_sum_s), 2)}
     if stage:
         run["stage"] = str(stage)
+    if at_once and int(at_once) > 1:
+        run["at_once"] = int(at_once)  # how many settings ran at the same time (absent: one at a time)
     changes: dict[str, Any] = {"trials_run": run}
     if stage:
         by_stage = read(quest_root).get("by_stage")
@@ -150,6 +152,20 @@ def run_seconds(quest_root: Path | str, fallback: Any = None) -> float | None:
     if isinstance(fallback, (int, float)) and not isinstance(fallback, bool) and 0 <= fallback < float("inf"):
         return float(fallback)
     return None
+
+
+def one_after_another_seconds(quest_root: Path | str) -> float | None:
+    """The time the settings' own trials add up to, when they ran at the same time (the sum of the per-trial times in the
+    ledger is then longer than the wall time of the run); ``None`` when the settings ran one at a time or FI has no wall
+    time to compare. The code a reader runs (``code/run.py``) runs the settings one after another, so this, not the wall
+    time, is the order of what the reader's run takes."""
+    run = read(quest_root).get("trials_run")
+    if not isinstance(run, dict):
+        return None
+    wall, total = run.get("wall_s"), run.get("trial_sum_s")
+    if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v < float("inf") for v in (wall, total)):
+        return None
+    return float(total) if total > 1.1 * wall else None
 
 
 def run_stage(quest_root: Path | str) -> tuple[str | None, dict[str, Any]]:

@@ -1202,7 +1202,7 @@ class TrialsRunner:
             _save_run(self.quest_root, key, run)
             # How long the experiment took is the time of THIS run of the trials; the analysis run again on stored trials
             # (the branch above) is not the experiment and leaves the record as it is (core/run_facts.py).
-            _keep_run_time(self.quest_root, key, run, time.monotonic() - ran_from)
+            _keep_run_time(self.quest_root, key, run, time.monotonic() - ran_from, self.at_once)
         self.last = run
         if self.log is not None:
             self.log.info("[execute] FI ran %d trial(s) in %d cell(s): %d ok, %d failed (ledger: %s)",
@@ -1389,7 +1389,7 @@ class TrialsRunner:
                                stderr=f"{run.stderr()[-4000:]}\n{directive}".strip())
 
 
-def _keep_run_time(quest_root: Path, key: str, run: TrialRun, wall_s: float | None) -> None:
+def _keep_run_time(quest_root: Path, key: str, run: TrialRun, wall_s: float | None, at_once: int = 1) -> None:
     """Keep the wall time of a run of the trials, how many it ran, the sum of the per-trial times and, in a quest run in
     two stages, which stage the run belongs to (exploring or confirming) in ``.fi/run_facts.json``."""
     from . import phased, run_facts
@@ -1402,7 +1402,7 @@ def _keep_run_time(quest_root: Path, key: str, run: TrialRun, wall_s: float | No
         stage = None
     run_facts.record_trials(quest_root, key=key, wall_s=wall_s, trials=len(rows), cells=len(run.cells),
                             trial_sum_s=sum(times) if times else None,
-                            stage=stage if stage in (phased.EXPLORE, phased.CONFIRM) else None)
+                            stage=stage if stage in (phased.EXPLORE, phased.CONFIRM) else None, at_once=at_once)
 
 
 def _note_job(quest_root: Path, record: dict[str, Any], job: dict[str, Any]) -> None:
