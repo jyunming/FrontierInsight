@@ -550,7 +550,7 @@ def normalize(block: Any) -> tuple[dict[str, Any] | None, str | None]:
 
     baseline = out.get("baseline")
     if not isinstance(baseline, dict) or not isinstance(baseline.get("values"), dict):
-        return None, (f"{_P}.baseline` must give the design to beat: `values` (one per design variable) and `source` "
+        return None, (f"{_P}.baseline` must give the design to beat: `values` ({BASELINE_VALUES_RULE}) and `source` "
                       "(where it comes from)")
     values = {_text(k): v for k, v in baseline["values"].items()}  # a name is read with its spaces collapsed
     out["baseline"] = {**baseline, "values": values}
@@ -1046,6 +1046,20 @@ def cell_of_names(block: dict[str, Any]) -> list[str]:
     return [str(k) for k in fixed] if isinstance(fixed, dict) else []
 
 
+#: What the reader requires of ``baseline.values``; the request to the plan's model and the reader's refusal both say it.
+BASELINE_VALUES_RULE = ("a mapping from each design variable's name to its value, for example "
+                        '{"<design variable name>": <its value>}; a variable that is an array has its list as that value')
+
+#: The parts of a measurement a search for the best design keeps inside its own block, never beside it
+#: (``core.plan.normalize_protocol`` refuses them at the top level of ``protocol``).
+BLOCK_OWN_PARTS = ("grid", "sub_studies", "in_each_run", "numerical_settings")
+
+#: The rule the reader applies to those parts; the reader's refusal and the request to the plan's model both say it.
+SCAN_PARTS_RULE = ("a search for the best design keeps its coarse scan and the parts that divide it inside "
+                   "`protocol.optimisation`: `protocol.optimisation.grid`, `.sub_studies`, `.in_each_run` and "
+                   "`.numerical_settings`; the same names at the top level of `protocol` cannot stand beside it")
+
+
 def scan_request(topic: str, problems: list[str], *, left_out: bool = False) -> str:
     """The request FI makes of the plan's model when the coarse scan of its search cannot run: the plan's own arithmetic
     (``problems``, from :func:`scan_problem`), the rule behind it, and what to rewrite. FI chooses nothing for the plan.
@@ -1142,7 +1156,7 @@ def ask_request(topic: str, problems: list[str], left_out: list[str] | None = No
         "use), optionally `unit` and `kind` (exactly one word: `continuous`, `integer`, or `choice` with `values`). A "
         "set of values (a vector or an image) is ONE variable with a `shape` such as [5, 5] (`low` and `high` a number, "
         "or a list of that shape; its baseline value a list of that shape).\n"
-        "- `baseline`: the design to beat: `values` (one value for each design variable, inside its range) and `source` "
+        "- `baseline`: the design to beat: `values` (" + BASELINE_VALUES_RULE + ", each inside its range) and `source` "
         "(where it comes from: the topic, or a source in the plan's list).\n"
         "- `evaluation_budget`: how many designs the search may try: `starts` (starting points) and `per_start` "
         "(evaluations from each), whole numbers.")
@@ -1152,6 +1166,10 @@ def ask_request(topic: str, problems: list[str], left_out: list[str] | None = No
                  "If the plan has a plain `protocol.grid`, remove it: a plan cannot hold both a sweep and a search (a "
                  "setting to compare goes in `protocol.optimisation.grid`: a design variable, or a condition listed under "
                  "`protocol.optimisation.fixed` with the value the search holds it at; a condition whose values are names needs no entry there). "
+                 "The rule FI applies: " + SCAN_PARTS_RULE + ". So the plan's own top-level `grid`, `sub_studies`, "
+                 "`in_each_run` and `numerical_settings` are not kept beside the block (FI removes them): what they "
+                 "compared is written again inside the block, where `sub_studies` entries vary settings of "
+                 "`protocol.optimisation.grid`. The baseline's `values` is " + BASELINE_VALUES_RULE + ". "
                  "Change nothing else in the plan: not a check, a threshold, a tolerance or a criterion.")
     return "\n\n".join(parts)
 

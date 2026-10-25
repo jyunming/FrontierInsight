@@ -93,3 +93,48 @@ def test_the_plan_prompt_says_a_run_the_method_describes_must_be_in_the_grid() -
     """Old prompt let a method text name an extra setting the grid did not hold, and nothing compared them."""
     source = Path(engine_mod.__file__).read_text(encoding="utf-8")
     assert "that run must be a value of a `grid` setting or a part of `sub_studies`" in source
+
+
+BLOCK = {"objective": {"quantity": "heat_flow", "direction": "maximise", "unit": "W"},
+         "design_variables": [{"name": "width", "low": 1.0, "high": 5.0, "kind": "continuous"}],
+         "baseline": {"values": {"width": 2.0}, "source": "the topic"},
+         "evaluation_budget": {"starts": 2, "per_start": 10},
+         "grid": {"kind": ["a", "b"], "size": [1, 2]},
+         "fixed": {"size": 1},
+         "sub_studies": [{"name": "kinds", "vary": ["kind"], "hold": {"size": 1}},
+                         {"name": "sizes", "vary": ["size"], "hold": {"kind": "a"}}]}
+
+
+def test_the_request_for_a_search_states_the_rules_the_reader_applies() -> None:
+    """Old request said only "remove a plain `protocol.grid`": a plan that also had a top-level `sub_studies` was then
+    refused ("cannot stand beside `protocol.optimisation`"), and `baseline.values` was described as "one value for each
+    design variable", so a model wrote a bare list and was refused ("must give the design to beat")."""
+    from core import optimisation_plan as op
+
+    text = op.ask_request("a topic", ["the block is missing"])
+    assert op.SCAN_PARTS_RULE in text and op.BASELINE_VALUES_RULE in text
+    assert "`.sub_studies`" in text and "a mapping from each design variable's name" in text
+    # the reader refuses exactly what the request now tells the model not to write, and quotes the same rule
+    _fixed, why = plan.normalize_protocol({"optimisation": BLOCK, "sub_studies": BLOCK["sub_studies"]})
+    assert "cannot stand beside `protocol.optimisation`" in why and op.SCAN_PARTS_RULE in why
+    bare = {**BLOCK, "baseline": {"values": [2.0], "source": "the topic"}}
+    _fixed, why = op.normalize(bare)
+    assert "a mapping from each design variable's name" in why
+
+
+@pytest.mark.asyncio
+async def test_a_search_answer_replaces_the_plans_top_level_scan_parts(tmp_path: Path) -> None:
+    """Old code dropped only the plan's top-level `grid` when it took the search block in, so the plan's own top-level
+    `sub_studies` stayed beside the block and the merged plan was refused ("the plan with your block in it cannot be
+    read"), twice, whatever the model answered."""
+    eng = _engine(tmp_path, [])
+    parts = [{"name": "k", "vary": ["kind", "size"], "hold": {"depth": 10}},
+             {"name": "d", "vary": ["depth"], "hold": {"kind": "a", "size": 1}}]
+    Model(eng, [], _draft(GRID, sub_studies=parts))
+    await eng._node_plan({"topic": TOPIC, "iteration": 0})
+    text = plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
+    assert "sub_studies" in plan.parse(text).design["protocol"]
+    kept = eng._keep_only_the_search(text, {"study_type": "find_best_design", "protocol": {"optimisation": BLOCK}})
+    protocol = plan.parse(kept).design["protocol"]
+    assert set(protocol) >= {"optimisation"} and not {"grid", "sub_studies", "in_each_run", "numerical_settings"} & set(protocol)
+    assert [s["name"] for s in protocol["optimisation"]["sub_studies"]] == ["kinds", "sizes"]

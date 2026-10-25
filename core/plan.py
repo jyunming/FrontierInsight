@@ -457,9 +457,11 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
         out["in_each_run"] = fixed_inside
     subs = out.get("sub_studies")
     if subs is not None and out.get("optimisation") is not None and out.get("grid") is None:
-        return None, ("`protocol.sub_studies` cannot stand beside `protocol.optimisation`: a search for the best design "
-                      "divides its coarse scan in `protocol.optimisation.sub_studies` (the settings of "
-                      "`protocol.optimisation.grid` each part varies, and the value it holds the others at)")
+        from . import optimisation_plan as _optim_rule
+
+        return None, ("`protocol.sub_studies` cannot stand beside `protocol.optimisation`: "
+                      + _optim_rule.SCAN_PARTS_RULE + " (the settings of `protocol.optimisation.grid` each part varies, "
+                      "and the value it holds the others at)")
     if subs is not None:
         fixed_subs, why = _sub_studies(subs, out.get("grid"), out.get("in_each_run"))
         if why:
