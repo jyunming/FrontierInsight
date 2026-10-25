@@ -120,6 +120,6 @@ def directive(found: list[NumericWarning]) -> str:
         "operation, and it must say why in a comment and in `patch_summary`. A NaN or an infinity in a result is a finding, "
         "not a value: emit null for it with a flag saying why.\n\n"
         "Keep everything else unchanged: the same functions, outputs and figures, the handling of FI_PILOT, FI_ORACLE and "
-        "FI_REPLICATE_SEED, and the same final RESULT_JSON line. Return the whole script in `code`, one sentence in "
+        "FI_REPLICATE_SEED, and the same final RESULT_JSON line. Return only the functions you change in `functions` (each one whole; FI keeps every other line), one sentence in "
         "`patch_summary`, and leave `give_up_reason` empty."
     )

@@ -799,6 +799,9 @@ def repair_breaks_contract(old: str, new: str, name: str, *, oracles: list[dict[
             return "it defines no oracle() and some check has no case FI can run"
         if not trial and "FI_ORACLE" not in new:
             return "it does not honour FI_ORACLE"
+    undefined = _called_but_dropped(old, tree)
+    if undefined:
+        return f"it calls {', '.join(undefined)}, which the script had and the reply no longer defines"
     if name == "simulate.py" and (oracles is None or trial):
         lost = sorted((set(_ENTRY_RE.findall(old or "")) & {"run_trial", "run_cell"}) - _top_level_names(tree))
         if lost:
@@ -806,6 +809,31 @@ def repair_breaks_contract(old: str, new: str, name: str, *, oracles: list[dict[
     elif "RESULT_JSON" in (old or "") and "RESULT_JSON" not in new:
         return "it no longer prints the RESULT_JSON line the script printed"
     return ""
+
+
+def _called_but_dropped(old: str, tree: ast.Module) -> list[str]:
+    """The functions the old script defined at its top level that the new text uses by name and defines nowhere (a helper
+    left out of a reply that was meant to be the whole script)."""
+    try:
+        before = {n.name for n in ast.parse(old or "").body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    except (SyntaxError, ValueError):
+        return []
+    dropped = before - _top_level_names(tree)
+    if not dropped:
+        return []
+    bound: set[str] = set()
+    used: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            (used if isinstance(node.ctx, ast.Load) else bound).add(node.id)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(node.name)
+            if not isinstance(node, ast.ClassDef):
+                a = node.args
+                bound.update(x.arg for x in [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg] if x)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            bound.update((x.asname or x.name).split(".")[0] for x in node.names)
+    return sorted((dropped & used) - bound)
 
 
 _READS_CELL = re.compile(r"\bcell\s*\[")

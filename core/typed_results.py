@@ -319,7 +319,7 @@ def directive(findings: list[TypedResult]) -> str:
         "is a constant that the simulation computes, compute it; if it is a setting, return it under the setting's own name. "
         "Do not replace one "
         "typed number with another, and do not change anything else (the model's equations, the other returned values, the "
-        "signatures, the printed RESULT_JSON). Return the whole corrected script."
+        "signatures, the printed RESULT_JSON). Return only the functions you change in `functions` (each one whole; FI keeps every other line)."
     )
 
 

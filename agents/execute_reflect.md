@@ -8,7 +8,7 @@ $topic_block
 
 # Your task
 
-Produce a corrected `experiment.py` that runs to completion on the available CPU venv and emits `RESULT_JSON: {...}` as the final line of stdout. The fix must address the actual bug shown in the traceback.
+Produce a corrected script that runs to completion on the available CPU venv and emits `RESULT_JSON: {...}` as the final line of stdout. The fix must address the actual bug shown in the traceback.
 
 **Forbidden "fixes" — do NOT do any of these:**
 
@@ -28,7 +28,8 @@ Respond with a single JSON object, no prose, no markdown fence:
 
 ```
 {
-  "code": "<full corrected experiment.py source — REQUIRED unless give_up_reason is set, or the oracle request, or the note on the model's package, in this prompt says to leave it empty; never a stand-in word>",
+  "functions": "<ONLY the functions to replace or add, each one written out whole (its def line, with the same parameters, and its body), as Python source. FI puts each into the script by name and keeps every other line as it is, so do not repeat what you do not change. REQUIRED (or `code`) unless give_up_reason is set, or the oracle request, or the note on the model's package, in this prompt says to leave it empty; never a stand-in word>",
+  "code": "<leave empty. Only if the fix changes a module-level statement (an import, a constant) that no function can carry, give the whole corrected script here, with every function it has now>",
   "deps": ["<pip-installable>", ...],
   "patch_summary": "<one sentence describing what you fixed and why>",
   "give_up_reason": "<set only if the experiment cannot be salvaged; leave empty/null otherwise>"

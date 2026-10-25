@@ -643,14 +643,15 @@ def file_blocks(reply: str) -> tuple[str, dict[str, str]]:
 
 
 def splice(source: str, reply: str, scope: set[str] | None = None,
-           ignored: list[str] | None = None) -> tuple[str | None, list[str], str]:
+           ignored: list[str] | None = None, *, limit: int | None = MAX_FUNCTIONS) -> tuple[str | None, list[str], str]:
     """``(the file with the reply's functions put in, the names it replaced, why not)``. The first fenced block of the
     reply that holds a ``def`` is read: each function it defines that the file has AND that is in ``scope`` (the
     function(s) the finding is about) replaces it (the parameter names must be the same, in the same order; at most
     :data:`MAX_FUNCTIONS`); a definition of any other function the file already has is not spliced (its name is appended to
     ``ignored``); a function the file has not is added at the end as a helper; imports it brings are added; anything else
     in the block is ignored. ``(None, [], why)`` when nothing can be used. With no ``scope`` every function the file has
-    may be replaced."""
+    may be replaced. ``limit`` is the most functions one reply may replace (``None``: no limit, for a repair of a script
+    that is asked for functions, :mod:`core.script_reply`)."""
     block = next((m.group(1) for m in _FENCE.finditer(reply or "") if "def " in m.group(1)), "")
     if not block and "def " in (reply or ""):
         block = reply
@@ -673,7 +674,7 @@ def splice(source: str, reply: str, scope: set[str] | None = None,
         ignored.extend(n for n in existing if n not in replaced)
     if scope is not None and not replaced:
         return None, [], f"the reply does not define the function the finding is about ({', '.join(sorted(scope))})"
-    if len(replaced) > MAX_FUNCTIONS:
+    if limit is not None and len(replaced) > limit:
         return None, [], f"the reply replaces {len(replaced)} functions; change only the ones the finding is about"
     for name in replaced:
         why = params_kept(old_funcs[name], new_funcs[name])

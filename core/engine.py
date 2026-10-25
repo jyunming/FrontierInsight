@@ -157,6 +157,7 @@ from . import optimise_search as _optimise_search
 from . import best_design_report as _best_report
 from . import protocol_check as _protocol
 from . import retractions as _retractions
+from . import script_reply as _script_reply
 from . import split_run as _split_run
 from . import stop_power as _stop_power
 from . import stats as _stats
@@ -6407,6 +6408,19 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         except OSError as e:
             self._log.warning("[%s] couldn't keep the repair's answer: %r", kind, e)
 
+    def _script_from_reply(self, node: str, old: str, code: object, parsed: Any, name: str) -> tuple[str, str]:
+        """``(the script a repair's reply makes, why none)``: the reply's ``functions`` are put into ``old`` and every other
+        byte of it stays (:mod:`core.script_reply`); a reply that is a whole script is taken whole. The one contract
+        check (``repair_breaks_contract``) still judges the result, in the caller."""
+        functions = parsed.get("functions") if isinstance(parsed, dict) else ""
+        made = _script_reply.resolve(old, code, functions)
+        if made.kind == "functions":
+            self._log.info("[%s] %s: the reply's %d function(s) are put into the script, the rest of it is as it was (%s)",
+                           node, name, len(made.replaced), ", ".join(made.replaced[:6]))
+        elif made.why:
+            self._log.warning("[%s] the repair of %s holds no usable script (%s)", node, name, made.why)
+        return made.code, made.why
+
     async def _ask_for_plan_parts(self, prompt: str) -> dict[str, Any]:
         """One JSON object of the asked parts from the plan's model (node ``plan_revise``, so it is the same model, limits
         and call count as every other request of the plan step). A reply that holds no such object is asked once more,
@@ -11318,7 +11332,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # The same script, redrawn: one that lost what FI reads from it (its result line, the oracle branch, the
         # seed, the simulation's entry points) is another script and is not used.
         self._keep_repair_answer("figures", text)
-        broken = _trial_runner.repair_breaks_contract(code, new_code, path.name)
+        new_code, split_why = self._script_from_reply("execute", code, new_code, parsed, path.name)
+        broken = split_why or _trial_runner.repair_breaks_contract(code, new_code, path.name)
         usable = not broken and all(mark in new_code for mark in _figdata.KEEP_MARKS if mark in code) and (
             not _code_review.prints_result_json(code) or _code_review.prints_result_json(new_code))
         if not usable:
@@ -12154,7 +12169,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if not (isinstance(new_code, str) and new_code.strip()):
             new_code, new_deps = _parse_implement_response(text)
         self._keep_repair_answer("protocol", text)
-        broken = _trial_runner.repair_breaks_contract(code, new_code, path.name)
+        new_code, split_why = self._script_from_reply("protocol", code, new_code, parsed, path.name)
+        broken = split_why or _trial_runner.repair_breaks_contract(code, new_code, path.name)
         if broken:
             self._log.warning("[protocol] the repair of %s is not usable (%s)", path.name, broken)
         usable = not broken
@@ -17339,7 +17355,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                            "own formula", path.name)
             return None, False, "disputed_fi_value"
         new_code = parsed.get("code")
-        if not (isinstance(new_code, str) and new_code.strip()):
+        gives_functions = isinstance(parsed.get("functions"), str) and bool(parsed["functions"].strip())
+        if not (isinstance(new_code, str) and new_code.strip()) and not gives_functions:
             if (path.name == _split_run.SIMULATE_NAME and self._package_repair_files(state, parsed)
                     and self._apply_package_repair(state, parsed, node="oracle")):
                 # The fault was in the model's package: that is fixed, simulate.py stays as it is.
@@ -17352,8 +17369,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # One rule decides whether a repaired script still keeps FI's contract (what FI calls it by, its result line, the
         # oracle marker or cases): `repair_breaks_contract`; its reason is logged.
         self._keep_repair_answer("oracle", text)
-        broken = _trial_runner.repair_breaks_contract(code, new_code, path.name, oracles=oracles,
-                                                      trial=bool(getattr(self, "_trial_mode", False)))
+        new_code, split_why = self._script_from_reply("oracle", code, new_code, parsed, path.name)
+        broken = split_why or _trial_runner.repair_breaks_contract(code, new_code, path.name, oracles=oracles,
+                                                                   trial=bool(getattr(self, "_trial_mode", False)))
         if broken:
             self._log.warning("[oracle] the repair of %s is not usable (%s); keeping it as written", path.name, broken)
             await self._keep_refused_repair("oracle", path.name, new_code, broken)
@@ -17493,7 +17511,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             new_code, new_deps = _parse_implement_response(text)  # fence drift
         if not why:
             self._keep_repair_answer("seed", text)
-            broken = _trial_runner.repair_breaks_contract(code, new_code, code_path.name)
+            new_code, split_why = self._script_from_reply("implement", code, new_code, parsed, code_path.name)
+            broken = split_why or _trial_runner.repair_breaks_contract(code, new_code, code_path.name)
             if broken:
                 why = f"the model returned no usable script ({broken})"
             elif "FI_REPLICATE_SEED" not in new_code:  # the test _script_reads_replicate_seed applies
@@ -19520,13 +19539,19 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             }
 
         new_code = parsed.get("code") or ""
+        script_name = (_trial_runner.SUBMIT_NAME if repair_submit
+                       else _split_run.SIMULATE_NAME if repair_simulation else "experiment.py")
+        # The reply's functions are put into the script and the rest of it stays as it was (core/script_reply.py).
+        split_why = ""
+        if new_code.strip() or (isinstance(parsed.get("functions"), str) and parsed["functions"].strip()):
+            new_code, split_why = self._script_from_reply("execute_reflect", script_code, new_code, parsed, script_name)
         # A package file that changes a parameter list the outline fixed is not used; the repair is still spent and the
         # history says why, so the next repair sees it (a refused package-only fix is not a repair that gave up).
         refused = self._package_refused(state, parsed) if repair_simulation else []
         if not new_code.strip() and repair_simulation and (self._package_repair_files(state, parsed) or refused):
             # The fix is in the model's package alone: simulate.py stays as it is.
-            new_code = script_code
-        if not new_code.strip():
+            new_code, split_why = script_code, ""
+        if not new_code.strip() and not split_why:
             self._log.warning(
                 "[execute_reflect] LLM returned no `code` field; proceeding without repair"
             )
@@ -19554,9 +19579,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         patch_summary = parsed.get("patch_summary") or "(no summary)"
         # The repaired script must keep what FI calls it by (a stand-in word parses as Python and defines nothing): a
         # reply that does not is refused with the script kept, and the reason goes back with the next try (the history).
-        script_name = (_trial_runner.SUBMIT_NAME if repair_submit
-                       else _split_run.SIMULATE_NAME if repair_simulation else "experiment.py")
-        broken = _trial_runner.repair_breaks_contract(script_code, new_code, script_name)
+        broken = split_why or _trial_runner.repair_breaks_contract(script_code, new_code, script_name)
         if broken:
             self._log.warning("[execute_reflect] the repair of %s is not used: %s; keeping it as written", script_name, broken)
             await self._keep_refused_repair("execute_reflect", script_name, new_code, broken, {
@@ -19564,8 +19587,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "result_json": exec_result.get("result_json")})
             history.append({
                 "iter": iters + 1, "returncode": rc, "stderr_tail": exec_result.get("stderr_tail", "")[-400:],
-                "patch_summary": (f"[the repair was not used and {script_name} is as it was: {broken}. Give the whole "
-                                  f"corrected {script_name}, with every function it has now.] " + patch_summary)[:400],
+                "patch_summary": (f"[the repair was not used and {script_name} is as it was: {broken}. Give the "
+                                  f"functions to change, each one whole.] " + patch_summary)[:400],
             })
             return {**spent, "exec_reflect_iter": iters + bump, "exec_reflect_history": history}
         if refused:
@@ -30218,7 +30241,7 @@ def _unseeded_rng_directive(calls: list[tuple[int, str]]) -> str:
         "functions, parameters, outputs and figures, and the same final RESULT_JSON "
         "line. Do not add randomness the experiment does not already have, and do not "
         "shorten or simplify anything.\n\n"
-        "Return the whole script in `code`, one sentence in `patch_summary`, and "
+        "Return only the functions you change in `functions` (each one whole; FI keeps every other line), one sentence in `patch_summary`, and "
         "leave `give_up_reason` empty."
     )
 
@@ -30356,7 +30379,7 @@ def _protocol_directive(protocol: dict[str, Any], mismatches: list[Any]) -> str:
         "and FI_REPLICATE_SEED, and the same final RESULT_JSON line. Do not shorten or simplify anything. If the "
         "timeout makes the full protocol impossible, keep the protocol's values anyway and say so in `patch_summary`: "
         "the person reading it decides, not this script.\n\n"
-        "Return the whole script in `code`, one sentence in `patch_summary`, and leave `give_up_reason` empty."
+        "Return only the functions you change in `functions` (each one whole; FI keeps every other line), one sentence in `patch_summary`, and leave `give_up_reason` empty."
     )
 
 
@@ -30377,7 +30400,7 @@ _SEED_REPAIR_DIRECTIVE = (
     "else in the script unchanged: the same functions, parameters, outputs and "
     "figures, and the same final RESULT_JSON line. Do not add randomness the "
     "experiment does not already have, and do not shorten or simplify anything.\n\n"
-    "Return the whole script in `code`, one sentence in `patch_summary`, and "
+    "Return only the functions you change in `functions` (each one whole; FI keeps every other line), one sentence in `patch_summary`, and "
     "leave `give_up_reason` empty."
 )
 
@@ -32361,7 +32384,7 @@ def _figure_overlap_directive(findings: list[str]) -> str:
         "the figure: make room (fig.subplots_adjust, or bbox_inches=\"tight\").\n\n"
         "Do NOT change any computation, data, parameter, use of the random seed, printed value, "
         "the final RESULT_JSON line, the file name of any figure, or what any panel plots: only "
-        "positions, sizes and the number of legend columns. Return the whole script in `code`, one "
+        "positions, sizes and the number of legend columns. Return only the functions you change in `functions` (each one whole; FI keeps every other line), one "
         "sentence in `patch_summary`, and leave `give_up_reason` empty."
     )
 
