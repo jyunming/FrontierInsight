@@ -1481,44 +1481,14 @@ class FunctionFiller:
                           f"{s.signature}\nWhat is wrong with it: {entry.get('error') or 'it fails its check'}")
         return _text_block(passing), "\n\n".join(broken)
 
-    def _with_labels(self, text: str, specs: list[Spec]) -> str:
-        """``text`` with the equation's id in a comment above each function of ``specs`` that lost it."""
-        from . import oracle_check as _oracle
-
-        for s in specs:
-            node = _find(text, s.name)
-            if node is None:
-                continue
-            first = _span(node)[0]
-            lines = text.splitlines(keepends=True)
-            near = "".join(lines[max(0, first - 3): node.end_lineno or first])
-            if not _oracle._labelled_in(s.equation, near):
-                lines.insert(first - 1, f"# {s.equation}\n")
-                text = "".join(lines)
-        return text
-
-    def _module_ok(self, text: str, specs: list[Spec]) -> str:
-        """Why a reply's module cannot be used (``""`` when it can): it parses, and every function has the parameters the
-        outline fixed."""
-        if not text.strip():
-            return "the reply held no code"
-        try:
-            ast.parse(text)
-        except SyntaxError as e:
-            return f"the reply is not valid Python ({e.msg}, line {e.lineno})"
-        for s in specs:
-            node = _find(text, s.name)
-            if node is None:
-                return f"the reply holds no function named `{s.name}`"
-            if _param_names(node) != s.params():
-                return f"the parameters of `{s.name}` must be exactly ({', '.join(s.params())})"
-        return ""
-
     async def _repair_module(self, specs: list[Spec], record: dict[str, Any]) -> None:
-        """The functions that failed their repairs are left to the repair of the whole module (at most ``module_repairs``
-        requests): the model is shown the module, the failed functions with what is wrong, and the names of the functions
-        that already pass, which must keep passing. Every function is checked again afterwards; a repair that breaks a
-        function that passed is undone."""
+        """The functions that failed their repairs are left to a focused repair (at most ``module_repairs`` requests): the
+        model is shown the module for context, the failed functions with what is wrong, and the names of the functions that
+        already pass, which are not to be touched. It is asked for the failed functions only (and the helpers they need), and
+        each is spliced into the module in place (:func:`replace_function`): every function that passes stays exactly as it
+        is, byte for byte. A module-level cause is reached only through what a spliced reply adds (an import, a helper
+        function or a constant the module does not have yet). Every function is checked again afterwards; a repair that
+        breaks a function that passed is undone."""
         if "module" not in self.prompts:
             return
         while failing(record) and int(record.get("module_repairs") or 0) < self.module_repairs:
@@ -1540,10 +1510,18 @@ class FunctionFiller:
             except Exception as e:  # noqa: BLE001 -- a request that failed is a repair that did not happen
                 self.log.warning("[implement] the repair of the module could not be asked for: %r", e)
                 continue
-            new = self._with_labels(reply_code(reply), specs)
-            why = self._module_ok(new, specs)
-            if why:
-                self.log.warning("[implement] the repair of the module was not used: %s", why)
+            code = reply_code(reply)
+            new, refused = source, []
+            for s_ in specs:
+                if record["functions"][s_.name]["status"] != FAILED:
+                    continue
+                got, why = replace_function(new, s_.name, code, signature=s_.signature, equation=s_.equation)
+                if got is None:
+                    refused.append(f"{s_.name}: {why}")
+                else:
+                    new = got
+            if new == source:
+                self.log.warning("[implement] the repair of the module was not used: %s", "; ".join(refused) or "it changed nothing")
                 continue
             self.model_path.write_text(new.rstrip("\n") + "\n", encoding="utf-8")
             known = _dumps(new)

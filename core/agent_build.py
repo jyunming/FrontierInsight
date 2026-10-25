@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from . import agent_coder as _agent_coder
+from . import agent_scope as _agent_scope
 from .finding_repair import finding_block as _finding_block
 from . import frozen_protocol as _frozen
 
@@ -545,7 +546,11 @@ class AgentBuildMixin:
                              "again without that.")
             self._log.info("[implement] FI's checks found %d problem(s) in the coding agent's code; sending them back to "  # type: ignore[attr-defined]
                            "it", len(found))
-            await coder.continue_("\n\n".join(found))
+            # A round that has only the run's failure to fix is limited to the code the traceback names; a round with
+            # other findings (the checks before the run) is not, since FI cannot name their place.
+            only_run = [c for c, ok in checks.items() if ok is False] == ["run"]
+            scope = _agent_scope.scope_from_traceback("\n\n".join(found), self.quest_root) if only_run else None  # type: ignore[attr-defined]
+            await _agent_scope.scoped_continue(coder, "\n\n".join(found), scope, self._log)  # type: ignore[attr-defined]
 
     # -- after the freeze ------------------------------------------------------------------------------------------------
 
@@ -565,7 +570,8 @@ class AgentBuildMixin:
         feedback = (f"FI ran the code and the run did not give a usable result (exit code {returncode}).\n\n"
                     f"What it printed (end):\n{stdout[-2000:]}\n\nErrors (end):\n"
                     f"{str(exec_result.get('stderr_tail') or '')[-2000:]}")
-        result = await coder.continue_(feedback)
+        scope = _agent_scope.scope_from_traceback(feedback, self.quest_root)  # type: ignore[attr-defined]
+        result = await _agent_scope.scoped_continue(coder, feedback, scope, self._log)  # type: ignore[attr-defined]
         if result.exhausted:
             kept = self._result_check_gave_up(state)  # type: ignore[attr-defined]
             if kept is not None:  # a run the results check sent back keeps its results
