@@ -16,7 +16,7 @@ no section is not guessed at: the caller writes the whole paper and says so in t
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from . import paper_patch
 
@@ -123,6 +123,7 @@ def mark(markdown: str) -> tuple[str, dict[str, "Place"]]:
         if sec.index:
             line_end = markdown.find("\n", sec.start)
             inserts.append((len(markdown) if line_end < 0 else line_end, f" <<section {sec.index}>>"))
+            table[f"section {sec.index}"] = Place(f"section {sec.index}", sec.title, "")  # the whole section
     out, last = [], 0
     for at, tag in sorted(inserts, key=lambda t: t[0]):
         out += [markdown[last:at], tag]
@@ -140,7 +141,7 @@ class Place:
     passage: str
 
 
-_ID_RE = re.compile(r"\d+\.\d+")
+_ID_RE = re.compile(r"section\s*(\d+)|(\d+\.\d+)", re.IGNORECASE)
 
 
 def read_places(raw: object, table: dict[str, "Place"]) -> list[dict[str, str]]:
@@ -151,7 +152,7 @@ def read_places(raw: object, table: dict[str, "Place"]) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
     for item in items:
         m = _ID_RE.search(str(item))
-        place = table.get(m.group(0)) if m else None
+        place = table.get(f"section {m.group(1)}" if m and m.group(1) else m.group(2)) if m else None
         if place and not any(o["id"] == place.id for o in out):
             out.append({"id": place.id, "section": place.section, "passage": place.passage})
     return out
@@ -166,6 +167,13 @@ def place(markdown: str, sections: list[Section], places: object) -> set[int] | 
         return None
     found: set[int] = set()
     for p in places:
+        if isinstance(p, dict) and str(p.get("id") or "").startswith("section "):
+            # A cited section: the section whose heading FI stored, when exactly one section of this draft has it.
+            same = {s.index for s in sections if s.index and _norm(s.title) == _norm(str(p.get("section") or ""))}
+            if len(same) != 1:
+                return None
+            found |= same
+            continue
         text = str(p.get("passage") or "") if isinstance(p, dict) else ""
         if not text.strip():
             return None
@@ -251,17 +259,37 @@ def changed(before: str, after: str) -> set[int] | None:
 class Spliced:
     text: str
     written: list[str]  # the sections taken from the reply
-    ignored: list[str]  # the sections the reply gave that were not asked for (dropped)
+    ignored: list[str]  # the sections the reply gave that were not asked for and did not declare (dropped)
+    added: list[str] = field(default_factory=list)  # new sections the writer declared with NEW SECTION: and FI kept
 
 
 class ScopeError(Exception):
     """The reply cannot be put back; the message says why, for the run log."""
 
 
+#: The line a writer adds to say that a new section is needed by the fix: ``NEW SECTION: <heading> -- why``.
+_NEW_SECTION_RE = re.compile(r"^[ \t]*NEW SECTION:[ \t]*(?P<rest>[^\n]*)$", re.MULTILINE)
+
+
+def declared_sections(reply: str) -> list[str]:
+    """The headings a writer declared as new sections (``NEW SECTION: Heading -- why``), the ``##`` and the reason removed."""
+    out = []
+    for m in _NEW_SECTION_RE.finditer(reply):
+        title = re.split(r"\s+(?:--|—|–)\s+", m.group("rest").strip(), maxsplit=1)[0]
+        title = _norm(title.lstrip("#").strip().strip("`"))
+        if title:
+            out.append(title)
+    return out
+
+
 def splice(markdown: str, sections: list[Section], asked: set[int], reply: str) -> Spliced:
     """``markdown`` with each asked section replaced by the same section of ``reply`` (found by its heading), every other
-    byte as it was. A section the reply gives that was not asked for is dropped, not kept: the earlier text stands. Raises
-    :class:`ScopeError` when the reply lacks an asked section or gives one empty."""
+    byte as it was. A section the reply gives that was not asked for is dropped, not kept: the earlier text stands, unless
+    the writer declared it with a ``NEW SECTION: <heading> -- why`` line and the draft has no section of that name: it is
+    then kept, right after the asked section it came with. Raises :class:`ScopeError` when the reply lacks an asked
+    section or gives one empty."""
+    declared = {d.lower() for d in declared_sections(reply)}
+    reply = _NEW_SECTION_RE.sub("", reply)
     given = split(reply)
     by_title: dict[str, list[Section]] = {}
     for g in given:
@@ -280,11 +308,33 @@ def splice(markdown: str, sections: list[Section], asked: set[int], reply: str) 
         trail = old[len(old.rstrip()):]
         chosen[index] = body.rstrip() + (trail or "\n")
     asked_titles = {_norm(s.title).lower() for s in wanted.values()}
-    ignored = [g.title for g in given if g.index and _norm(g.title).lower() not in asked_titles]
+    old_titles = {_norm(s.title).lower() for s in sections if s.index}
+    ignored, added = [], []
+    after: dict[int, str] = {}  # the asked section -> the declared new sections to put right after it
+    came_with = next(iter(sorted(wanted)), None)
+    for g in given:
+        if not g.index:
+            continue
+        key = _norm(g.title).lower()
+        if key in asked_titles:
+            came_with = next(i for i, w in wanted.items() if _norm(w.title).lower() == key)
+        elif key in declared and key not in old_titles and len(by_title.get(key, [])) == 1 and came_with is not None:
+            body = text_of(reply, g)
+            if _norm(body.split("\n", 1)[1] if "\n" in body else ""):
+                after[came_with] = after.get(came_with, "") + "\n" + body.rstrip() + "\n"
+                added.append(g.title)
+                continue
+            ignored.append(g.title)
+        else:
+            ignored.append(g.title)
     out, pos = [], 0
     for s in sections:
         if s.index in chosen:
-            out += [markdown[pos:s.start], chosen[s.index]]
+            piece = chosen[s.index]
+            if s.index in after:
+                trail = piece[len(piece.rstrip()):]
+                piece = piece.rstrip() + "\n" + after[s.index].rstrip() + trail
+            out += [markdown[pos:s.start], piece]
             pos = s.end
     out.append(markdown[pos:])
-    return Spliced("".join(out), [wanted[i].title for i in sorted(chosen)], ignored)
+    return Spliced("".join(out), [wanted[i].title for i in sorted(chosen)], ignored, added)

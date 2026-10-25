@@ -22396,12 +22396,29 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     else:
                         add(at, "the review flags a figure caption in it")
             else:
-                # A caption flagged with no finding naming its figure: the sections that hold a figure.
-                holders = _paper_scope.holds_figures(previous, sections)
-                if not holders:
-                    unplaced.append("a figure caption (no section holds a figure)")
-                for index in sorted(holders):
-                    add(index, "the review flags a figure caption and names no figure; it holds a figure")
+                # The passages the reviewer cited by id come first; only when it cited none (and FI has no finding) are
+                # all the sections that hold a figure asked for.
+                cited = review.get("hit_places") if isinstance(review.get("hit_places"), dict) else {}
+                cited_at: set[int] = set()
+                for h in hits:
+                    if _hit_name(h) == "figure_caption":
+                        found = _paper_scope.place(previous, sections,
+                                                   cited.get(h) or cited.get(re.sub(r"^\[[^\]]*\]\s*", "", h)))
+                        if found is None:
+                            cited_at = set()
+                            break
+                        cited_at |= found
+                if cited_at:
+                    for index in sorted(cited_at):
+                        add(index, "the review flags a figure caption in it")
+                else:
+                    holders = _paper_scope.holds_figures(previous, sections)
+                    self._log.info("[write] the review flags a figure caption with no cited passage and FI has no finding "
+                                   "naming a figure: asking for every section that holds a figure")
+                    if not holders:
+                        unplaced.append("a figure caption (no section holds a figure)")
+                    for index in sorted(holders):
+                        add(index, "the review flags a figure caption and names no figure; it holds a figure")
         quoted = [h for h in hits if _hit_name(h) in ("paper_record_mismatch", "mislabelled_statistic")]
         if quoted:
             passages, why = paper_patch.plan_passages(
@@ -22489,7 +22506,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             "text as it is. Keep every `{{...}}` placeholder, figure link and citation label of the text you keep. "
             "This round's instruction overrides \"Produce a single Markdown paper\" above.\n\n"
             "Reply with the sections listed, in this order, each starting with its heading line exactly as given "
-            "(`## Title`), its subsections inside it, and nothing else.\n\n"
+            "(`## Title`), its subsections inside it, and nothing else. If the fix truly needs a section that the "
+            "earlier draft does not have, write it right after the listed section it belongs with and put a line "
+            "`NEW SECTION: <heading> -- why it is needed` before it; a new section with no such line is dropped.\n\n"
             "Sections to write:\n" + "\n".join(lines) + "\n\n<earlier_draft>\n" + previous[:end].rstrip()
             + "\n</earlier_draft>\n"
         )
@@ -22513,6 +22532,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._log.warning("[write] the sections could not be put back (%s); writing the whole paper again. "
                               "The reply began: %r", e, " ".join(str(reply).split())[:160])
             return None
+        if spliced.added:
+            self._log.info("[write] the writer declared %s as new section(s) the fix needs; kept, each right after the "
+                           "section it came with", ", ".join(f"\"{t}\"" for t in spliced.added))
         if spliced.ignored:
             self._log.info("[write] the writer also gave %s, which were not asked for; the earlier text stands",
                            ", ".join(f"\"{t}\"" for t in spliced.ignored))

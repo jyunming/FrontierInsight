@@ -262,3 +262,42 @@ def test_the_claim_check_and_the_review_carry_fis_ids(tmp_path: Path) -> None:
     review_prompt = (agents / "review.md").read_text(encoding="utf-8")
     assert "must_flag_places" in review_prompt and "<<3.7>>" in review_prompt
     assert '"where"' in (agents / "claim_check.md").read_text(encoding="utf-8")
+
+
+# --- a cited section id, a cited figure caption, a declared new section -------------------------------------------------
+
+def test_a_cited_section_id_places_that_section() -> None:
+    paper = "# T\n\n## A\nOne sentence here today.\n\n## B\nAnother one.\n"
+    marked, table = paper_scope.mark(paper)
+    assert "## B <<section 2>>" in marked and "section 2" in table
+    for cited in ("<<section 2>>", "section 2", ["Section 2"]):
+        places = paper_scope.read_places(cited, table)
+        assert [p["id"] for p in places] == ["section 2"], cited
+        assert paper_scope.place(paper, paper_scope.split(paper), places) == {2}
+    assert paper_scope.read_places("<<section 9>>", table) == []
+
+
+def test_a_figure_caption_hit_is_placed_by_the_cited_passage_not_by_every_figure_section(tmp_path: Path) -> None:
+    hit = "figure_caption: the caption claims more than the figure shows"
+    place = [{"id": "2.3", "section": "Introduction", "passage": CLAIM}]
+    reply = "## Introduction\nRewritten introduction [1].\n"
+    eng, client, logged = _engine(tmp_path, [DRAFT, reply])
+    out1, before = _first_draft(eng)
+    after = _revise(eng, out1, [hit], claim_grounding={}, review={"hit_places": {hit: place}})
+    assert client.nodes == ["write", "write"]
+    assert "1. `## Introduction`" in client.calls[1][1] and "2. `" not in client.calls[1][1]
+    assert _section(after, "Results") == _section(before, "Results")
+    assert not any("asking for every section that holds a figure" in m for m in _info(logged))
+
+
+def test_a_declared_new_section_is_kept_right_after_the_section_it_came_with() -> None:
+    paper = "# T\n\n## A\nalpha\n\n## B\nbeta\n\n## C\ngamma\n"
+    sections = paper_scope.split(paper)
+    reply = ("## A\nnew alpha\n\nNEW SECTION: Limitations -- the fix needs a place to state them\n"
+             "## Limitations\nWhat limits it.\n\n## C\nsneaky\n")
+    spliced = paper_scope.splice(paper, sections, {1}, reply)
+    assert spliced.text == "# T\n\n## A\nnew alpha\n\n## Limitations\nWhat limits it.\n\n## B\nbeta\n\n## C\ngamma\n"
+    assert spliced.added == ["Limitations"] and spliced.ignored == ["C"]
+    undeclared = paper_scope.splice(paper, sections, {1}, "## A\nnew alpha\n\n## Limitations\nWhat limits it.\n")
+    assert undeclared.text == "# T\n\n## A\nnew alpha\n\n## B\nbeta\n\n## C\ngamma\n"
+    assert undeclared.ignored == ["Limitations"] and undeclared.added == []
