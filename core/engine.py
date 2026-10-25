@@ -5500,12 +5500,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # The rules for a search for the best design only when the topic or the person's answer points that way: a
         # topic with no word of looking for the best is planned as a measurement, as before, without their cost.
         await self._read_topic_before_the_prompt(state)
-        seek = (_optim.may_seek_best(state.get("topic") or self.config.topic)
-                or self._study_type_asked(state) == "find_best_design"
-                or bool(_topic_req.searched(self._topic_requirements_read())))
+        seek = self._seeks_best_design(state)
         card = state.get("scope_card")
-        prompt = (self._design_prompt(state) + _PLAN_DIRECTIVE + (_STUDY_TYPE_DIRECTIVE if seek else "")
-                  + self._study_type_note(state)
+        prompt = (self._design_prompt(state) + _PLAN_DIRECTIVE + self._study_type_part(state, seek=seek)
                   + (f"\n\n{_scope_cards.plan_note(card)}\n" if isinstance(card, dict) else ""))
         obj = await self._design_reply(prompt, node="plan")
         extra = obj.pop("plan", None)
@@ -5770,6 +5767,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 and any(s.get("main") for s in _topic_req.searched(self._topic_requirements_read()))):
             return "topic"
         return ""
+
+    def _seeks_best_design(self, state: QuestState) -> bool:
+        """Whether the study-type rules (measurement or search for the best design) belong in a design prompt: the topic
+        points at a best design, the person answered so, or FI's reading of the topic lists a design to search for. The
+        one rule behind the plan prompt and a design drafted from the topic (a redesign)."""
+        return bool(_optim.may_seek_best(state.get("topic") or self.config.topic)
+                    or self._study_type_asked(state) == "find_best_design"
+                    or _topic_req.searched(self._topic_requirements_read()))
+
+    def _study_type_part(self, state: QuestState, *, seek: bool) -> str:
+        """The study-type rules and the person's own answer, appended to a design prompt (plan and redesign alike)."""
+        return (_STUDY_TYPE_DIRECTIVE if seek else "") + self._study_type_note(state)
 
     def _study_type_note(self, state: QuestState) -> str:
         """For the plan prompt: the person's own answer on the kind of study, which the plan follows."""
@@ -8674,7 +8683,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             objections = state.get("design_objections")
         if design is None:
             await self._read_topic_before_the_prompt(state)
-            prompt = self._design_prompt(state)
+            # The same study-type rules as the plan's prompt: a redesign of a "find the best" topic must be able to
+            # write the search block, or it comes out as a plain sweep.
+            prompt = self._design_prompt(state) + self._study_type_part(state, seek=self._seeks_best_design(state))
             design = await self._design_reply(prompt, node="design")
             # Before the audit, so the receipt it leaves is for the design that runs (the hypothesis is part of it).
             design = self._keep_hypothesis_after_an_empty_run(state, design)
