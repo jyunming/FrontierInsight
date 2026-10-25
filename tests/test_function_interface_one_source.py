@@ -236,7 +236,11 @@ def test_a_reserved_word_symbol_is_the_input_with_a_trailing_underscore() -> Non
     equation = {"id": "E1", "formula": "d = 0.61*lambda/(sigma*NA)", "role": "generates",
                 "example": {"inputs": inputs, "expected_formula": "3.8317059702*lambda_/(2*pi*sigma*NA)"}}
     row = _rows(equation)["E1"]
-    # The example (0.6098) and the equation (0.61) are two sources for one number; FI now computes both.
-    assert row["state"] == "unusable" and "the equation as written gives" in row["why"]
+    # The example (0.6098) and the equation (0.61) are one number rounded two ways (0.61 carries about 0.8% of
+    # rounding): FI computes both, accepts the example, and the test bar grows to cover both.
+    assert row["state"] == "ok" and row["equation_agrees"] is True and row["rounded_form"] is True
+    # An example beyond what the rounding explains is two different numbers: refused, with both values stated.
+    wrong = {**equation, "example": {"inputs": inputs, "expected_formula": "0.8*lambda_/(sigma*NA)"}}
+    assert _rows(wrong)["E1"]["state"] == "unusable" and "the equation as written gives" in _rows(wrong)["E1"]["why"]
     good = {**equation, "example": {"inputs": inputs, "expected_formula": "0.61*lambda_/(sigma*NA)"}}
     assert _rows(good)["E1"]["state"] == "ok" and _rows(good)["E1"]["equation_agrees"] is True
