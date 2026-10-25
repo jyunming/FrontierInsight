@@ -20010,6 +20010,23 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 self._log.warning(
                     "[analyze] ensemble all-failed (%s); falling back to single-call path", e,
                 )
+        # The readers after this take these fields as lists (text, or objects for a finding with a record). A reply that
+        # is not an object, or whose findings are a bare number or string, is put in that shape here, once: an object
+        # that is not a list of findings is never read as one. A non-object reply then gets the unreadable rule below.
+        if not isinstance(analysis, dict):
+            analysis = {}
+        for key in ("key_findings", "claims_supported"):
+            if key in analysis:
+                value = analysis[key]
+                if isinstance(value, str):
+                    analysis[key] = [value]
+                elif isinstance(value, list):
+                    analysis[key] = [
+                        item if isinstance(item, dict) else str(item)
+                        for item in value if isinstance(item, (str, int, float, bool))
+                    ]
+                else:
+                    analysis[key] = []
         if not analysis:
             # One call; an answer that cannot be read is asked for once more. (When the ensemble's merged answer could
             # not be read, this is a fresh ask, so up to two more calls follow it.)
