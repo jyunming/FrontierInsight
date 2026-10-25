@@ -1648,36 +1648,6 @@ def edit_design_block(text: str, change: Any) -> str | None:
     return text[:fenced.start(1)] + block + text[fenced.end(1):]
 
 
-def without_unreadable_references(text: str) -> tuple[str, list[str]]:
-    """``(text, notes)``: ``text`` with the reference value of each metric the reader refuses left out of its design block
-    (the same repair a drafted plan gets, :func:`repair_protocol`), and a sentence per metric. For a plan FI edited itself
-    (a check's expected value computed from its formula can disagree with a metric's reference written against the old
-    number): the edit must not leave a plan.md the reader then refuses, which sends the design step to draft a new design
-    from the topic alone. ``text`` unchanged, no notes, when it reads or is refused for another reason."""
-    from . import reference_values
-
-    original, notes = text, []
-    for _ in range(20):
-        parsed = parse(text)
-        if parsed.design is not None:
-            break
-        result: list[str] = []
-
-        def change(design: dict[str, Any]) -> dict[str, Any] | None:
-            protocol = design.get("protocol")
-            fixed, note = reference_values.without_bad_reference(protocol, parsed.error) if isinstance(protocol, dict) else (None, "")
-            if fixed is None:
-                return None
-            result.append(note)
-            return {**design, "protocol": fixed}
-
-        edited = edit_design_block(text, change)
-        if edited is None or not result:
-            break
-        text, notes = edited, [*notes, *result]
-    return (text, notes) if notes and parse(text).design is not None else (original, [])
-
-
 def refresh_model_section(text: str) -> str:
     """``text`` with its *The model behind the numbers* section shown again from its design block, after the engine
     edited the block (the section is shown from it and never read back). Unchanged when either cannot be found."""

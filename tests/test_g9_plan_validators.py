@@ -140,22 +140,44 @@ async def test_a_search_answer_replaces_the_plans_top_level_scan_parts(tmp_path:
     assert [s["name"] for s in protocol["optimisation"]["sub_studies"]] == ["kinds", "sizes"]
 
 
-def test_a_plan_FI_edited_itself_stays_one_its_reader_accepts() -> None:
-    """Old code wrote the plan after computing a check's expected value from its formula without asking the reader again:
-    a metric's reference that then disagreed with the check made plan.md unreadable, and the design step dropped the whole
-    plan and drafted from the topic alone. Now only that metric's reference is left out, with a sentence saying so."""
+def test_an_edit_FI_would_make_to_its_own_plan_is_not_made_when_the_reader_then_refuses_the_plan() -> None:
+    """Old code wrote every recomputed expected value into plan.md without asking the reader again: a metric's reference
+    that agreed with the typed number then disagreed with the check, plan.md became unreadable, and the design step dropped
+    the whole plan. Now such a check keeps the typed number and the disagreement is returned for the record."""
+    from core import oracle_forms
     from tests import reference_values_plans as P
 
-    protocol = P.with_references(P.load("kin_s1", "protocol.json"), {"coverage_Ea": {"formula": "reference_coverage - 0.1"},
-                                                                      "coverage_lnA": {"formula": "reference_coverage"}})
-    text = plan.render("a topic", None, {"hypothesis": "h", "protocol": protocol})
-    assert plan.parse(text).design is None and "coverage_Ea" in plan.parse(text).error  # the plan the edit leaves
-    fixed, notes = plan.without_unreadable_references(text)
-    design = plan.parse(fixed).design
-    assert design is not None and len(notes) == 1 and "reference value of `coverage_Ea` was left out" in notes[0]
-    by_id = {m["id"]: m for m in design["protocol"]["metrics"]}
-    assert "reference" not in by_id["coverage_Ea"] and by_id["coverage_lnA"]["reference"]["formula"] == "reference_coverage"
-    # known positives: a plan that reads is not touched, and a refusal for another reason is not hidden
-    assert plan.without_unreadable_references(fixed) == (fixed, [])
-    broken = plan.render("a topic", None, {"hypothesis": "h", "protocol": {**protocol, "runs_per_setting": 0}})
-    assert plan.without_unreadable_references(broken)[1] == [] and plan.parse(broken).design is None
+    protocol = P.with_references(P.load("kin_s1", "protocol.json"), {"coverage_Ea": {"formula": "reference_coverage"}})
+    names = [o["name"] for o in protocol["oracles"]]
+    target = "low_noise_coverage_95"
+    assert target in names
+    # a typed number the formula disagrees with, and a formula that gives another one
+    def with_formula(typed: float, formula: str) -> str:
+        oracles = [{**o, "expected": typed, "expected_formula": formula} if o["name"] == target else o
+                   for o in protocol["oracles"]]
+        return plan.render("a topic", None, {"hypothesis": "h", "protocol": {**protocol, "oracles": oracles}})
+
+    original = next(o for o in protocol["oracles"] if o["name"] == target)["expected"]
+    text = with_formula(original, "0.9")  # the metric's reference (reference_coverage) agrees with the typed number
+    assert plan.parse(text).design is not None
+    refused: list = []
+    new_text, done = oracle_forms.apply_formulas(text, refused)
+    assert plan.parse(new_text).design is not None  # the plan FI wrote still reads
+    assert done == [] and new_text == text
+    assert [r["name"] for r in refused] == [target] and refused[0]["typed"] == original and refused[0]["formula_value"] == 0.9
+    assert "disagrees with a known-answer check" in refused[0]["why"]
+
+
+def test_an_edit_that_keeps_the_plan_readable_is_still_made() -> None:
+    """Known positive: a recomputed expected value no other part of the plan is held against is still written."""
+    from core import oracle_forms
+    from tests import reference_values_plans as P
+
+    protocol = P.load("kin_s1", "protocol.json")
+    target = next(o["name"] for o in protocol["oracles"] if o["name"] != "low_noise_coverage_95")
+    oracles = [{**o, "expected": 123.0, "expected_formula": "2 * 3"} if o["name"] == target else o for o in protocol["oracles"]]
+    text = plan.render("a topic", None, {"hypothesis": "h", "protocol": {**protocol, "oracles": oracles}})
+    refused: list = []
+    new_text, done = oracle_forms.apply_formulas(text, refused)
+    assert [d["name"] for d in done] == [target] and done[0]["now"] == 6.0 and refused == []
+    assert plan.parse(new_text).design is not None

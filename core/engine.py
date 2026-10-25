@@ -14857,6 +14857,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         record = self._oracle_record_read() or {}
         out = {str(e.get("name")) for e in record.get("went_on") or [] if isinstance(e, dict) and e.get("name")}
         out |= {str(n) for n in record.get("disputed") or []}
+        # A check whose formula gives another number than the plan typed, left as typed because correcting it would have
+        # made the plan unreadable: nothing confirms either number.
+        out |= {str(d.get("name")) for d in (self._oracles_added_read() or {}).get("formula_disagreements") or []
+                if isinstance(d, dict) and d.get("name")}
         out |= {str(n) for n in (record.get("set_aside") or {})}
         out |= {str(n) for n in record.get("fitted_to_test_run") or []}
         # Under ``engine.oracle_check: warn`` a failing check is only warned about: still not confirmed.
@@ -16322,7 +16326,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # ``fitted`` (checks the test run was fitted to) is never dropped by a later change: losing it would let such a
         # check count as independently validated (``_fitted_to_test_run``).
         fitted = sorted({str(n) for n in earlier.get("fitted") or []})
+        disagreements = [d for d in earlier.get("formula_disagreements") or [] if isinstance(d, dict)]
         self._oracles_added_write({
+            **({"formula_disagreements": disagreements} if disagreements else {}),
             "oracles": list(dict.fromkeys([*carried, *changed])), "removed": list(dict.fromkeys([*gone, *(removed or [])])),
             "shown": False, "at": _frozen.now(), **({"reason": merged} if merged else {}),
             **({"fitted": fitted} if fitted else {}),
@@ -16948,7 +16954,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if "formulas" in progress or _frozen.load(self.quest_root) is not None or self._simulation_ran():
             return [dict(c) for c in progress.get("formulas") or []]
         text = path.read_text(encoding="utf-8")
-        new_text, corrections = _forms.apply_formulas(text)
+        refused: list[dict[str, Any]] = []
+        new_text, corrections = _forms.apply_formulas(text, refused)
         design, _why = _plan.load_design(self.quest_root)
         protocol = design.get("protocol") if isinstance(design, dict) else None
         left = []
@@ -16967,7 +16974,23 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                "used as the plan wrote it", f["name"], why)
                 left.append(f"FI could not compute the expected value of {f['name']!r} itself ({why}); the check is "
                             "used as the plan wrote it.")
-        if left and not corrections:
+        if refused:
+            # An edit that would make plan.md unreadable is not made: the check keeps the number the plan wrote, and the
+            # disagreement is recorded as unconfirmed (.fi/oracles_added.json), so the evidence and the paper disclose it.
+            for r in refused:
+                line = (f"the check {r['name']!r} was not changed: its formula gives {r['formula_value']:.10g} but the plan "
+                        f"wrote {r['typed']:.10g}, and the plan with that change would no longer read ({_one_line(r['why'], 300)}); "
+                        "the number the plan wrote is kept and the check counts as unconfirmed")
+                self._log.warning("[oracle] %s", line)
+                left.append(line[0].upper() + line[1:] + ".")
+            earlier = self._oracles_added_read() or {}
+            known = {str(d.get("name")): d for d in earlier.get("formula_disagreements") or [] if isinstance(d, dict)}
+            known.update({str(r["name"]): {k: r[k] for k in ("name", "typed", "formula_value", "formula", "why")} for r in refused})
+            self._oracles_added_write({**earlier, "formula_disagreements": list(known.values())})
+            if not corrections:
+                self._write_plan_section(path, ["", *[f"- {line}" for line in left]],
+                                         note="expected values FI did not change")
+        if left and not corrections and not refused:
             self._write_plan_section(path, ["", *[f"- {line}" for line in left]],
                                      note="expected values FI could not compute itself")
         if corrections:
@@ -16982,12 +17005,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "it differed from the number the plan wrote (by more than that number's own digits), so the check uses the "
                 "formula's value (worked out before any run): "
                 + "; ".join(f"{c['name']!r} {c['was']:.10g} -> {c['now']:.10g}" for c in corrections) + "."))
-            # A metric's reference written against the old number can now disagree with the check: the plan FI wrote must
-            # still be one its own reader accepts, or the design step drops the whole plan and drafts from the topic alone.
-            new_text, dropped = _plan.without_unreadable_references(new_text)
-            for note in dropped:
-                self._log.warning("[oracle] %s", note)
-            left = [*left, *[f"{n[0].upper()}{n[1:]}." for n in dropped]]
             path.write_text(new_text, encoding="utf-8")
             _plan.record_version(self.quest_root, new_text, by="engine",
                                  note="expected values computed by FI from the plan's own formulas")

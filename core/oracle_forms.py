@@ -916,36 +916,55 @@ def formula_request(findings: list[dict[str, Any]], *, last: bool = True, fixed:
         + ("\nChange only these checks, and nothing else in the plan." if last else ""))
 
 
-def apply_formulas(text: str) -> tuple[str, list[dict[str, Any]]]:
+def apply_formulas(text: str, refused: list[dict[str, Any]] | None = None) -> tuple[str, list[dict[str, Any]]]:
     """``(text, corrections)``: ``text`` (a plan.md) with each check's ``expected`` set to what its ``expected_formula``
     computes where the two still disagree (:func:`disagrees`: by more than the typed number's own written precision or the check's tolerance); ``tolerance``, ``tolerance_mode``,
-    ``case`` and ``measure`` are never touched. Each correction is ``{"name", "was", "now", "formula"}``."""
+    ``case`` and ``measure`` are never touched. Each correction is ``{"name", "was", "now", "formula"}``.
+
+    FI never makes an edit to its own plan that the reader then refuses: each check is corrected on its own, and a
+    correction after which the plan no longer reads (another part of the plan, such as a metric's reference, agrees with the
+    typed number) is not applied; the check keeps the number the plan wrote. Those are added to ``refused`` (when given) as
+    ``{"name", "typed", "formula_value", "formula", "why"}``, the plan's own words for what no longer read."""
     from . import plan as _plan
 
     done: list[dict[str, Any]] = []
+    readable_before = _plan.parse(text).design is not None
 
-    def change(block: dict[str, Any]) -> dict[str, Any] | None:
-        protocol = block.get("protocol")
+    def one(name: str, found: dict[str, Any]) -> Any:
+        def change(block: dict[str, Any]) -> dict[str, Any] | None:
+            protocol = block.get("protocol")
+            if not isinstance(protocol, dict) or not isinstance(protocol.get("oracles"), list):
+                return None
+            items = [{**item, "expected": found["value"]}
+                     if isinstance(item, dict) and str(item.get("name") or "").strip() == name else item
+                     for item in protocol["oracles"]]
+            return {**block, "protocol": {**protocol, "oracles": items}}
+        return change
+
+    def wrong_in(current: str) -> dict[str, dict[str, Any]]:
+        design = _plan.raw_design_block(current)
+        protocol = design.get("protocol") if isinstance(design, dict) else None
         if not isinstance(protocol, dict) or not isinstance(protocol.get("oracles"), list):
-            return None
-        wrong = {f["name"]: f for f in formula_findings(protocol, fixed_settings_of_design(block))
-                 if f["state"] == "differs"}
-        if not wrong:
-            return None
-        items = []
-        for item in protocol["oracles"]:
-            name = str(item.get("name") or "").strip() if isinstance(item, dict) else ""
-            if name in wrong:
-                f = wrong[name]
-                done.append({"name": name, "was": f["expected"], "now": f["value"], "formula": f["formula"]})
-                item = {**item, "expected": f["value"]}
-            items.append(item)
-        return {**block, "protocol": {**protocol, "oracles": items}}
+            return {}
+        return {f["name"]: f for f in formula_findings(protocol, fixed_settings_of_design(design))
+                if f["state"] == "differs"}
 
-    edited = _plan.edit_design_block(text, change)
-    if edited is None or not done:
+    current = text
+    for name, found in wrong_in(text).items():
+        edited = _plan.edit_design_block(current, one(name, found))
+        if edited is None:
+            continue
+        after = _plan.parse(edited)
+        if readable_before and after.design is None:
+            if refused is not None:
+                refused.append({"name": name, "typed": found["expected"], "formula_value": found["value"],
+                                "formula": found["formula"], "why": after.error or ""})
+            continue
+        current = edited
+        done.append({"name": name, "was": found["expected"], "now": found["value"], "formula": found["formula"]})
+    if not done:
         return text, []
-    return _plan.refresh_model_section(edited), done
+    return _plan.refresh_model_section(current), done
 
 
 # --- a test run of the checks before the study -------------------------------------------------------------------------
