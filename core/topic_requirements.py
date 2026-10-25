@@ -1264,7 +1264,9 @@ def checklist_block(req: Any, *, limit: int = CHECKLIST_LIMIT, topic: Any = "") 
         else:  # its sentence is quoted above already
             lines.append(f"- constraint: {str(text)[:160]} (the topic {shown[words]})")
     head = ("What the topic asks for (each item must appear as a setting, a metric or an equation of the plan, "
-            "or be named in `simplifications`). " + PRECEDENCE + ":")
+            "or be named in `simplifications`). Also write `protocol.topic_map`: an entry for every setting the topic asks to "
+            "vary or compare, with `item` (the name listed below) and `by` (`setting:<the key of that setting>`). "
+            + PRECEDENCE + ":")
     out = [head]
     used = len(head)
     for i, line in enumerate(lines):

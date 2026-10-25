@@ -744,3 +744,11 @@ def test_an_unreadable_answer_for_a_gap_with_no_mapped_key_is_still_refused() ->
     gaps, _ = tr.gaps_from(req, tr.view(design), {"F1": "missing"})
     assert gaps and gaps[0]["axis"] == ""
     assert tr.merge(design, {"protocol": {"optimisation": {"grid": {"damping": [0.1, 0.2]}}}}, gaps) is None
+
+
+def test_the_list_shown_before_the_plan_is_written_asks_for_a_map_entry_for_every_setting_to_vary() -> None:
+    block = tr.checklist_block(tr.parse(EXTRACTION))
+    head = block.splitlines()[0]
+    assert "`protocol.topic_map`" in head and "every setting the topic asks to vary or compare" in head
+    assert "`setting:<the key of that setting>`" in head
+    assert tr.checklist_block({}) == "", "no reading, no list: the prompt is as it was"
