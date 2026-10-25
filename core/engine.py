@@ -81,6 +81,7 @@ from . import frozen_protocol as _frozen
 from . import design_parts as _design_parts
 from . import todo as _todo
 from . import crash_kind as _crash_kind
+from . import plan_scope as _plan_scope
 from . import oracle_card as _oracle_card
 from . import oracle_triage as _oracle_triage
 from . import oracle_challenge as _oracle_challenge
@@ -6630,7 +6631,50 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         raise ValueError("your answer was not one JSON object holding the asked parts (`protocol` with the parts under their "
                          "names); plan.md is unchanged")
 
-    async def _complete_plan_parts(self, request: str, path: Path, *, expect: str, keep: Any, note: str) -> dict[str, Any]:
+    async def _revise_plan_parts(
+        self, request: str, path: Path, *, scope: _plan_scope.PartScope, note: str, by: str = "engine",
+        finish: Any = None, passages: str = "",
+    ) -> dict[str, Any]:
+        """The way every repair of the plan asks its model for a change: the plan is shown read-only and the model returns
+        ONLY the parts ``scope`` names, as one small JSON object (:meth:`_complete_plan_parts`); FI merges them into the plan
+        (:meth:`_keep_only_the_parts`, each part read as the plan reads it) and writes plan.md, so every other byte of the
+        design block and of the prose stays as it was, and the sections FI shows from the block are shown again by FI. A reply
+        that names a part outside ``scope``, or a part that cannot be read, is refused with FI's reason and asked once more
+        with that reason. ``finish(text)``: may return the text to write instead, or ``None`` / raise ``ValueError`` for an
+        answer that must not be used. ``ValueError`` (plan.md unchanged) when neither answer can be used."""
+        expect = path.read_text(encoding="utf-8")
+        asked = request.rstrip() + "\n\n" + scope.describe()
+
+        def keep(before: str, answer: dict[str, Any]) -> str:
+            old = (_plan.raw_design_block(before) or {}).get("protocol")
+            translated, problems = _plan_scope.translate(scope, old if isinstance(old, dict) else {}, answer)
+            if problems:
+                raise _PartsRefused("; ".join(problems))
+            try:
+                kept = self._keep_only_the_parts(before, translated, scope.names(), passages)
+                if kept is not None and finish is not None:
+                    kept = finish(_plan.refresh_optimisation_section(_plan.refresh_model_section(kept)))
+            except _PartsRefused:
+                raise
+            except ValueError as e:
+                raise _PartsRefused(str(e)) from e
+            if kept is None:
+                raise _PartsRefused("none of the asked parts came back in a form that can be used")
+            return kept
+
+        problem = ""
+        for attempt in (1, 2):
+            ask = asked + (("\n\nYour last answer was not used. The reason, exactly:\n" + problem
+                            + "\nFix that, and keep everything the plan already has.") if problem else "")
+            try:
+                return await self._complete_plan_parts(ask, path, expect=expect, keep=keep, note=note, by=by)
+            except _PartsRefused as e:
+                problem = " ".join(str(e).split())[:1500]
+                self._log.warning("[plan] the plan's model answer was refused (attempt %d of 2): %s", attempt, problem)
+        raise ValueError(f"the model's answer could not be used ({problem}); plan.md is unchanged")
+
+    async def _complete_plan_parts(self, request: str, path: Path, *, expect: str, keep: Any, note: str,
+                                   by: str = "engine") -> dict[str, Any]:
         """The plan's model is asked for ONLY the missing parts, as JSON (:meth:`_ask_for_plan_parts`); FI is the only writer
         of the YAML: ``keep(plan_text, parts)`` splices the parts it accepts into the plan as it stands (every check on them
         is the keep's own) and returns the text to write, or ``None`` / raises ``ValueError`` for an answer that must not be
@@ -6649,7 +6693,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if path.read_text(encoding="utf-8") != expect:
             raise _PlanEditedMeanwhile("plan.md was changed while the request was being answered")
         path.write_text(kept, encoding="utf-8")
-        entry = _plan.record_version(self.quest_root, kept, by="engine", note=note[:300])
+        entry = _plan.record_version(self.quest_root, kept, by=by, note=note[:300])
         self._log.info("[plan] completed by the plan's model (the asked parts only): version %d", entry["version"])
         return {"version": entry["version"], "sha256": entry["sha256"], "path": str(path)}
 
@@ -8367,7 +8411,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # The plan step fills it in (never the model named for `oracle_review`: that one rechecks the expected values
         # later, and must not be the one that wrote their sources).
         try:
-            await self._rewrite_plan(self._fill_request(named, missing), path, by="engine")
+            fill_request = self._fill_request(named, missing)
+            await self._revise_plan_parts(fill_request, path, by="engine", note=fill_request,
+                                          scope=_fill_scope(bool(named), bool(missing)))
         except _ModelAnswerProblem as e:
             # A cut-off or withheld answer to a step the person never asked for is not a stop of its own: the stop for
             # the sources follows and says what is missing, and a resume asks again.
@@ -8646,9 +8692,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         for name in self.__dict__.pop("_step_proxies", []):
             await self.supervisor.release(name)
 
-    async def revise_plan(self, request: str, *, by: str = "request") -> dict[str, Any]:
+    async def revise_plan(self, request: str, *, by: str = "request", scope: _plan_scope.PartScope | None = None,
+                          note: str | None = None) -> dict[str, Any]:
         """Rewrite ``plan.md`` as the person asked (``--revise-plan``): the whole file goes to the model with the
-        request, and the reply replaces it only if its design block can be used (one retry with the reason).
+        request, and the reply replaces it only if its design block can be used (one retry with the reason). A free-text
+        request of a person cannot be mapped to parts of the plan, so it keeps the whole rewrite. FI's own repairs pass
+        ``scope``: the model is then asked for the parts it names alone (:meth:`_revise_plan_parts`), never for the file.
         The quest stays where it was; resuming runs the revised design. Every version is kept.
 
         Connects its own model client when the engine has none (a one-shot command), and closes it, and releases
@@ -8670,6 +8719,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 return await self._rewrite_plan(
                     request, path, by=by, expect=before,
                     finish=lambda revised: self._check_measure_instead(before, revised))
+            if scope is not None:
+                return await self._revise_plan_parts(request, path, scope=scope, by=by, note=note or request)
             return await self._rewrite_plan(request, path, by=by)
         finally:
             if connected_here and self._client is not None:
@@ -8903,6 +8954,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return {**design, "protocol": new}
 
         def finish(revised: str) -> str | None:
+            put_back.clear()  # the reply is judged again when it is asked for twice
             design = _plan.parse(revised).design
             if design is None:
                 return None
@@ -8922,8 +8974,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 raise ValueError("it changed nothing of the protocol")
             return revised
 
-        done = await self._rewrite_plan(request, path, by="engine", note="a design whose objective can move, asked by FI",
-                                        finish=finish)
+        # Only how the design is described and searched is asked for (what the results are judged by is not), and a new
+        # entry of the simplifications that says what was changed; `held` above still puts back what the reply touched.
+        scope = _plan_scope.PartScope(
+            parts=tuple(sorted(self._FLAT_MAY_CHANGE)),
+            entries={"simplifications": _plan_scope.EntryScope("id", frozenset(), True)})
+        done = await self._revise_plan_parts(request, path, scope=scope, by="engine", finish=finish,
+                                             note="a design whose objective can move, asked by FI")
         if put_back:
             self._log.warning("[evidence_gate] the rewrite changed what the results are judged by (%s); FI put it back as "
                               "it was", ", ".join(sorted(set(put_back))))
@@ -16666,7 +16723,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             )
         before = self._planned_oracles()
         try:
-            await self.revise_plan(request, by="engine")
+            await self.revise_plan(
+                request, by="engine", scope=_declare_scope(bool(incomplete)),
+                note="the checks against known answers the engine asked for" + (" (their numbers)" if incomplete else ""))
         except (FileNotFoundError, ValueError) as e:
             self._log.warning("[oracle] the plan could not be rewritten with an oracle: %s", e)
             return False
@@ -16803,8 +16862,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         check keeps a looser tolerance than it had (the equation changes, the bar never does)."""
         path = _plan.plan_path(self.quest_root)
         before_text = path.read_text(encoding="utf-8")
+        # Only the checks (written whole: a request may replace one), the criteria that read them and, when asked, the
+        # model's equations are asked for; the tolerance guards below still hold what comes back.
+        scope = _plan_scope.PartScope(
+            parts=("oracles", "criteria"), inside={"model": ("equations",)} if equations else {})
         try:
-            await self.revise_plan(request, by="engine")
+            await self.revise_plan(request, by="engine", scope=scope, note="the plan's checks changed on FI's request")
         except _ModelAnswerProblem:
             raise
         except Exception as e:  # noqa: BLE001 -- a request that got no usable answer leaves the plan as it was
@@ -20868,8 +20931,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # The study was too long to run: plan.md is rewritten to fit the time FI measured before the design is read
             # again. An answer that cannot be used leaves the stop as it was.
             try:
-                done = await self._rewrite_plan(str(parsed["fit_request"]), _plan.plan_path(self.quest_root), by="engine",
-                                                note="a study that fits the time FI measured, asked by FI")
+                plan_file = _plan.plan_path(self.quest_root)
+                fit = (state.get("exec_result") or {}).get("too_long_fit")
+                done = await self._revise_plan_parts(
+                    str(parsed["fit_request"]), plan_file, by="engine",
+                    scope=_fit_scope(fit if isinstance(fit, dict) else {},
+                                     (_plan.raw_design_block(plan_file.read_text(encoding="utf-8")) or {}).get("protocol")),
+                    note="a study that fits the time FI measured, asked by FI")
                 fitted = f"plan.md was rewritten (version {(done or {}).get('version')}) to fit the time FI measured"
                 self._log.warning("[evidence_gate] %s; the new design is timed again before it runs", _one_line(fitted, 300))
             except Exception as exc:  # noqa: BLE001 -- the stop stands
@@ -28652,16 +28720,39 @@ def _fit_request(why: str, fit: dict[str, Any], kept: list[str] | None = None) -
                    "what it computed, so " + ("fewer values of " + ", ".join(axes) + " save the most time." if axes else
                                               "that cost does not grow with the settings."))
     return (f"FI timed the study before running it: {why}. One setting takes {each} on this machine, so about {n} "
-            f"settings fit the {limit} allowed with FI's margin. Rewrite the design so that the whole study has at most "
-            f"{n} settings in all, counting every setting of the grid, of every sub-study and of a search's coarse scan."
+            f"settings fit the {limit} allowed with FI's margin. Change the parts of the design that set the size of the study "
+            f"so that the whole study has at most {n} settings in all, counting every setting of the grid, of every "
+            "sub-study and of a search's coarse scan."
             f"{search} Keep every comparison and every quantity the topic asks for, and every check, threshold and "
             "tolerance as it is: take fewer values of a swept setting, spread over the same range, give a part of the study "
             "fewer settings, or give a search fewer evaluations. A number worked out a second way only to check the method "
             "need not be worked out at every setting or evaluation: it may be worked out at a few, as long as every check "
-            "of the plan still runs. Say in the simplifications what was made smaller and that it was made smaller to fit "
-            "the time FI measured."
+            "of the plan still runs. Add one entry to the simplifications (a new id) that says what was made smaller and that "
+            "it was made smaller to fit the time FI measured."
             + ("\n\nWhat the topic asks to vary stays varied, in whichever part of the study varies it now:\n"
                + "\n".join(kept) if kept else ""))
+
+
+#: What sets the size of a study: the settings it sweeps, the division of them into sub-studies, what every run goes through
+#: together, the number of runs of each setting, and the constants a run is given.
+_SIZE_PARTS = ("grid", "sub_studies", "in_each_run", "runs_per_setting", "constants")
+#: What sets the size of a search, inside its ``optimisation`` block.
+_SEARCH_SIZE_KEYS = ("evaluation_budget", "grid", "sub_studies", "in_each_run")
+
+
+def _fit_scope(fit: dict[str, Any], protocol: Any) -> _plan_scope.PartScope:
+    """The parts of the plan the request of :func:`_fit_request` concerns: the parts that set the size of the study that the
+    protocol has (the settings it sweeps and their division, what every run goes through together, the runs of each
+    setting, the constants), for a search the keys of its ``optimisation`` block that set the number of evaluations, and
+    a new entry in the simplifications saying what was made smaller. Derived from what the request asks to change and from
+    the protocol's own keys, never from the topic."""
+    protocol = protocol if isinstance(protocol, dict) else {}
+    parts = tuple(k for k in _SIZE_PARTS if k in protocol)
+    block = protocol.get("optimisation")
+    inside = ({"optimisation": tuple(k for k in _SEARCH_SIZE_KEYS if k == "evaluation_budget" or k in block)}
+              if fit.get("search") and isinstance(block, dict) else {})
+    return _plan_scope.PartScope(parts=parts, inside=inside,
+                                 entries={"simplifications": _plan_scope.EntryScope("id", frozenset(), True)})
 
 
 #: The source and the approver of the change FI makes to a frozen protocol whose search's objective did not move.
@@ -28774,6 +28865,10 @@ def _manifest_repair_budget(configured: int, analysis_only: bool) -> int:
     return max(configured, _ANALYSIS_REPAIR_TRIES) if analysis_only and configured > 0 else configured
 
 
+class _PartsRefused(ValueError):
+    """The plan's model's answer to a request for some parts of the plan was not used (FI's reason is the message)."""
+
+
 class _PlanEditedMeanwhile(Exception):
     """plan.md was changed (by a person) while the plan's model was answering: the model's answer is not written."""
 
@@ -28833,6 +28928,25 @@ def _plan_checks_note(plan_md: str) -> str:
         if missing:
             lines.append(f"- the model behind the numbers leaves out {', '.join(missing)}")
     return "\n".join(lines) + "\n"
+
+
+def _declare_scope(incomplete: bool) -> _plan_scope.PartScope:
+    """The parts the request for the plan's checks concerns (``Engine._declare_oracles``): the numbers of the declared
+    checks it names (nothing else of a check), or, when the protocol declares none, the new checks and the criteria that read them."""
+    if incomplete:
+        fields = frozenset({"expected", "tolerance", "tolerance_mode", "expected_formula", "derivation",
+                            *_oracle._KIND_KEYS, *_oracle._REFERENCE_KEYS})
+        return _plan_scope.PartScope(entries={"oracles": _plan_scope.EntryScope("name", fields)})
+    return _plan_scope.PartScope(parts=("criteria",), entries={"oracles": _plan_scope.EntryScope("name", None, True)})
+
+
+def _fill_scope(checks: bool, model: bool) -> _plan_scope.PartScope:
+    """The parts the request to fill in the checks' sources concerns (``Engine._fill_plan_sources``): the source and kind of
+    each check it names (the other fields of a check are the plan's own), and the parts of the model behind the numbers."""
+    return _plan_scope.PartScope(
+        inside={"model": tuple(dict.fromkeys([*_oracle._SUMMARY_KEYS, *_oracle._ASSUMPTION_KEYS, *_oracle._HOLDS_KEYS,
+                                              *_oracle._EQUATION_KEYS]))} if model else {},
+        entries={"oracles": _plan_scope.EntryScope("name", frozenset(_FILL_FREE_KEYS))} if checks else {})
 
 
 def _fill_changed_more(before: Any, after: Any) -> str:
