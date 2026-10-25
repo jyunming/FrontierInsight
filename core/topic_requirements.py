@@ -1227,9 +1227,10 @@ def checklist_block(req: Any, *, limit: int = CHECKLIST_LIMIT, topic: Any = "") 
         return f" — the topic {shown[words]}: “{words}”"
 
     lines: list[str] = []
-    for item in req.get("factors") or []:
+    for index, item in enumerate(req.get("factors") or []):
         if not isinstance(item, dict) or not item.get("name"):
             continue
+        mark = _item_id("factors", index)
         levels = item.get("levels") or []
         rng = item.get("range") or []
         if levels:
@@ -1238,18 +1239,18 @@ def checklist_block(req: Any, *, limit: int = CHECKLIST_LIMIT, topic: Any = "") 
         else:
             detail = f": {rng[0]:g} to {rng[1]:g}" if len(rng) == 2 else ""
         if compared(req, item):
-            lines.append(f"- vary or compare {item['name']}{detail}{said(item.get('stated'))}")
+            lines.append(f"- {mark}: vary or compare {item['name']}{detail}{said(item.get('stated'))}")
         else:
-            lines.append(f"- use {item['name']}{detail} as the topic states it, in every run; the topic compares no result "
+            lines.append(f"- {mark}: use {item['name']}{detail} as the topic states it, in every run; the topic compares no result "
                          "across it, so it is not a setting of `protocol.grid` (all its values together in each run go in "
                          f"`protocol.in_each_run`){said(item.get('stated'))}")
-    for item in req.get("quantities") or []:
+    for index, item in enumerate(req.get("quantities") or []):
         if isinstance(item, dict) and item.get("name"):
-            lines.append(f"- report {item['name']}{said(item.get('stated'))}")
-    for item in req.get("formulas") or []:
+            lines.append(f"- {_item_id('quantities', index)}: report {item['name']}{said(item.get('stated'))}")
+    for index, item in enumerate(req.get("formulas") or []):
         if isinstance(item, dict) and item.get("text"):
             name = str(item.get("name") or "").strip()
-            lines.append(f"- formula{' ' + name if name else ''}: {str(item['text'])[:160]}")
+            lines.append(f"- {_item_id('formulas', index)}: formula{' ' + name if name else ''}: {str(item['text'])[:160]}")
     for item in req.get("comparisons") or []:
         if isinstance(item, dict) and item.get("what"):
             lines.append(f"- compare: {str(item['what'])[:200]}{said(text=item['what'])}")
@@ -1265,7 +1266,7 @@ def checklist_block(req: Any, *, limit: int = CHECKLIST_LIMIT, topic: Any = "") 
             lines.append(f"- constraint: {str(text)[:160]} (the topic {shown[words]})")
     head = ("What the topic asks for (each item must appear as a setting, a metric or an equation of the plan, "
             "or be named in `simplifications`). Also write `protocol.topic_map`: an entry for every setting the topic asks to "
-            "vary or compare, with `item` (the name listed below) and `by` (`setting:<the key of that setting>`). "
+            "vary or compare, with `item` (its id as listed below, such as `F1`) and `by` (`setting:<the key of that setting>`). "
             + PRECEDENCE + ":")
     out = [head]
     used = len(head)

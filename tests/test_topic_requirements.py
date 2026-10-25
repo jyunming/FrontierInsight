@@ -754,3 +754,16 @@ def test_the_list_shown_before_the_plan_is_written_asks_for_a_map_entry_for_ever
     assert "`protocol.topic_map`" in head and "every setting the topic asks to vary or compare" in head
     assert "`setting:<the key of that setting>`" in head
     assert tr.checklist_block({}) == "", "no reading, no list: the prompt is as it was"
+
+
+def test_the_list_shows_each_item_with_its_id_and_a_map_entry_by_that_id_resolves_but_a_reworded_name_does_not() -> None:
+    req = tr.parse(EXTRACTION)
+    block = tr.checklist_block(req)
+    assert "- F1: vary or compare lid material" in block and "- F2: vary or compare room temperature" in block
+    assert "- Q1: report time to reach 60 degrees" in block and "- M1: formula" in block
+    grid = {"lid_material": ["paper", "foam", "steel"], "room_temperature_C": [10, 20, 30]}
+    by_id = tr.view({"protocol": {"grid": grid, "topic_map": [{"item": "F1", "by": "setting:lid_material"}]}})
+    assert tr.mapped_axis(req, by_id, req["factors"][0]) == "lid_material"
+    reworded = tr.view({"protocol": {"grid": grid, "topic_map": [{"item": "material of the lid", "by": "setting:lid_material"}]}})
+    assert tr.mapped_axis(req, reworded, req["factors"][0]) == ""
+    assert "F1" in tr.match(req, reworded)[1], "a reworded name is not a map entry: the factor goes to the reader"
