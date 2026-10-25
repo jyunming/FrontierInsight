@@ -82,3 +82,22 @@ async def test_an_oracle_repair_with_one_function_changes_only_that_function(tmp
     assert outcome == "applied" and not failed
     assert new == before.replace(src, changed)
     assert (code / "simulate.py").read_text(encoding="utf-8") == before.replace(src, changed)
+
+
+def test_a_reply_with_functions_and_a_script_keeps_the_imports_and_constants_of_both() -> None:
+    old = "import os\n\nX = 1\n\n\ndef a(p):\n    return 1\n\n\ndef b():\n    return 2\n"
+    made = sr.resolve(old, "import math\nY = 5\n\ndef b():\n    return math.pi\n", "def b():\n    return math.pi\n")
+    assert made.kind == "functions" and "import math" in made.code and "Y = 5" in made.code
+    assert "def a(p):\n    return 1" in made.code and made.code.count("def b") == 1
+    clash = sr.resolve(old, "def b():\n    return 1\n", "def b():\n    return 3\n")
+    assert clash.code == "" and "`b`" in clash.why and "differ" in clash.why
+
+
+def test_a_dropped_helper_is_found_though_another_function_defines_a_name_like_it() -> None:
+    old = "def helper(x):\n    return x\n\n\ndef run_cell(cell, seed):\n    return helper(cell)\n"
+    # `helper` is a nested def and a parameter in OTHER functions; the one the call reaches is gone
+    new = ("def other(helper):\n    return helper\n\n\ndef third():\n    def helper(y):\n        return y\n    return helper\n\n\n"
+           "def run_cell(cell, seed):\n    return helper(cell)\n")
+    assert "helper" in tr.repair_breaks_contract(old, new, "simulate.py")
+    own = "def run_cell(cell, seed):\n    def helper(y):\n        return y\n    return helper(cell)\n"
+    assert tr.repair_breaks_contract(old, own, "simulate.py") == "", "a helper bound in its own scope is fine"

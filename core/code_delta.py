@@ -22,9 +22,11 @@ from pathlib import Path
 from typing import Any
 
 RECORD = Path(".fi") / "code_built_from.json"
-#: Parts of the protocol the scripts do not read: the model (its functions have a record of their own), and what FI itself
-#: checks or the writer reads (the checks, the simplifications, the topic map, the definitions and the criteria).
-NOT_READ_BY_SCRIPTS = frozenset({"model", "oracles", "simplifications", "topic_map", "definitions", "criteria"})
+#: Parts of the protocol the scripts do not read: the model (its functions have a record of their own), and what only the
+#: writer reads (the simplifications, the topic map, the definitions and the criteria). The checks (``oracles``) ARE read:
+#: the simulation answers each check with an ``oracle()`` or a case FI runs, and a check that needs a new output needs
+#: new code, so a change to them is a change to what the scripts are built from.
+NOT_READ_BY_SCRIPTS = frozenset({"model", "simplifications", "topic_map", "definitions", "criteria"})
 #: The most characters of one part's text shown, before and after, to the request that updates the scripts.
 SHOWN_CHARS = 6000
 
@@ -33,17 +35,21 @@ def _canon(value: Any) -> str:
     return json.dumps(value, sort_keys=True, indent=1, default=str, ensure_ascii=False)
 
 
-def parts(design: dict[str, Any] | None, signatures: dict[str, str] | None = None) -> dict[str, str]:
+def parts(design: dict[str, Any] | None, functions: dict[str, str] | None = None, package: str = "") -> dict[str, str]:
     """``{part name: its text}`` for what the scripts are written from: each key of the design's protocol that the scripts
-    read, the rest of the design, and the signatures of the model's functions (``signatures``: name to ``def`` line)."""
+    read, the rest of the design, the model's functions (``functions``: name to the hash it was built from, so a function
+    whose equation changed under the same signature changes this part, :func:`core.function_steps.function_hash`) and the
+    name of the package they are in."""
     design = design if isinstance(design, dict) else {}
     protocol = design.get("protocol") if isinstance(design.get("protocol"), dict) else {}
     out = {f"protocol.{k}": _canon(v) for k, v in protocol.items() if k not in NOT_READ_BY_SCRIPTS}
     rest = {k: v for k, v in design.items() if k != "protocol"}
     if rest:
         out["design"] = _canon(rest)
-    if signatures:
-        out["functions"] = _canon(sorted(signatures.items()))
+    if functions:
+        out["functions"] = _canon(sorted(functions.items()))
+    if package:
+        out["package"] = package
     return out
 
 

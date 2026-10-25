@@ -811,29 +811,59 @@ def repair_breaks_contract(old: str, new: str, name: str, *, oracles: list[dict[
     return ""
 
 
+def _local_names(fn: ast.AST) -> set[str]:
+    """The names bound inside ONE function's own scope: its parameters, what it assigns, imports, loops over or catches, and
+    the names of the functions and classes it defines (their bodies are other scopes)."""
+    names: set[str] = set()
+    if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        a = fn.args
+        names.update(x.arg for x in [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg] if x)
+    stack = list(fn.body) if isinstance(getattr(fn, "body", None), list) else [fn.body] if hasattr(fn, "body") else []
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+            continue
+        if isinstance(node, ast.Lambda):
+            continue
+        if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+            names.add(node.id)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            names.update((x.asname or x.name).split(".")[0] for x in node.names)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            names.add(node.name)
+        stack.extend(ast.iter_child_nodes(node))
+    return names
+
+
 def _called_but_dropped(old: str, tree: ast.Module) -> list[str]:
-    """The functions the old script defined at its top level that the new text uses by name and defines nowhere (a helper
-    left out of a reply that was meant to be the whole script)."""
+    """The functions the old script defined at its top level that the new text uses by name where nothing binds that name:
+    not at the module's top level, and not in the scope the use sits in (a nested def or a parameter of ANOTHER function
+    does not count). A helper left out of a reply that was meant to be the whole script."""
     try:
         before = {n.name for n in ast.parse(old or "").body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
     except (SyntaxError, ValueError):
         return []
-    dropped = before - _top_level_names(tree)
+    top = _top_level_names(tree) | {a.asname.split(".")[0] if a.asname else a.name.split(".")[0]
+                                    for n in tree.body if isinstance(n, ast.Import) for a in n.names}
+    dropped = before - top
     if not dropped:
         return []
-    bound: set[str] = set()
-    used: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Name):
-            (used if isinstance(node.ctx, ast.Load) else bound).add(node.id)
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            bound.add(node.name)
-            if not isinstance(node, ast.ClassDef):
-                a = node.args
-                bound.update(x.arg for x in [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg] if x)
-        elif isinstance(node, (ast.Import, ast.ImportFrom)):
-            bound.update((x.asname or x.name).split(".")[0] for x in node.names)
-    return sorted((dropped & used) - bound)
+    found: set[str] = set()
+
+    def visit(node: ast.AST, scope: set[str]) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                for deco in getattr(child, "decorator_list", []):
+                    visit(deco, scope)
+                visit(child, scope | _local_names(child))
+            else:
+                if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load) and child.id in dropped and child.id not in scope:
+                    found.add(child.id)
+                visit(child, scope)
+
+    visit(tree, set(top))
+    return sorted(found)
 
 
 _READS_CELL = re.compile(r"\bcell\s*\[")

@@ -356,16 +356,19 @@ def spec_hash(specs: list[Spec], protocol: dict[str, Any] | None) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
-def function_hash(spec: Spec, specs: list[Spec], protocol: dict[str, Any] | None) -> str:
+def function_hash(spec: Spec, specs: list[Spec], protocol: dict[str, Any] | None, _seen: tuple[str, ...] = ()) -> str:
     """What ONE function was written for: its name and parameters, the equation (formula, worked example, source,
-    derivation) or step card it implements, and the signatures of the functions it depends on. Recorded for each function
+    derivation) or step card it implements, and the hashes of the functions it depends on. Recorded for each function
     when it is done (``built_from``), so that a plan revised later re-writes only the functions whose own hash differs;
     a function whose plan did not change, with every repair it received, is kept as it is."""
     by_name = {s.name: s for s in specs}
+    # A function is also built from the functions it calls: their own hashes (and so, theirs in turn) are part of its hash,
+    # so a dependency whose equation or example changed, with the same parameters, writes its callers again.
     # The parameters, not the text of the signature: an outline written again for a revised plan words the same function
     # a little differently (an annotation, the order of its dependencies), and that is not a change of the function.
     body: dict[str, Any] = {"n": spec.name, "params": spec.params(), "eq": spec.equation, "kind": spec.kind,
-                            "deps": sorted([d, by_name[d].params() if d in by_name else []] for d in spec.depends_on)}
+                            "deps": sorted([d, function_hash(by_name[d], specs, protocol, (*_seen, spec.name)) if d in by_name and d not in _seen
+                                   and d != spec.name else ""] for d in spec.depends_on)}
     if spec.kind == STEP and spec.card:
         body["card"] = {k: spec.card.get(k) for k in ("id", "name", "does", "inputs", "output", "uses", "source", "example", "relations")}
     else:

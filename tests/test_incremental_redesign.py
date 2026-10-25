@@ -61,11 +61,11 @@ def test_a_record_without_what_the_functions_were_built_from_writes_every_functi
 
 
 def test_the_plan_parts_the_scripts_read_are_compared_from_the_record(tmp_path: Path) -> None:
-    design = {"protocol": {"optimisation": {"objective": "a"}, "metrics": [1], "oracles": [1], "model": {"x": 1}}, "note": "n"}
+    design = {"protocol": {"optimisation": {"objective": "a"}, "metrics": [1], "definitions": [1], "model": {"x": 1}}, "note": "n"}
     assert cd.compare(tmp_path, cd.parts(design)).known is False
     cd.save(tmp_path, cd.parts(design, {"f": "def f(x):"}), package="p")
-    same = {**design, "protocol": {**design["protocol"], "oracles": [2], "model": {"x": 2}}}
-    assert cd.compare(tmp_path, cd.parts(same, {"f": "def f(x):"})).changed == [], "checks and the model are not read by the scripts"
+    same = {**design, "protocol": {**design["protocol"], "definitions": [2], "model": {"x": 2}}}
+    assert cd.compare(tmp_path, cd.parts(same, {"f": "def f(x):"})).changed == [], "definitions and the model are not read by the scripts"
     moved = {**design, "protocol": {**design["protocol"], "optimisation": {"objective": "b"}}}
     delta = cd.compare(tmp_path, cd.parts(moved, {"f": "def f(x):"}))
     assert delta.known and delta.changed == ["protocol.optimisation"]
@@ -101,7 +101,7 @@ async def test_the_scripts_of_a_revised_plan_change_only_the_functions_the_revis
     cd.save(engine.quest_root, engine._scripts_built_from(state, outline), package=PKG)
     sim = (code / "simulate.py").read_text(encoding="utf-8")
     # the revision changes nothing the scripts read: kept, no request
-    kept = await engine._incremental_scripts({**state, "design": {"protocol": {**state["design"]["protocol"], "oracles": []}}}, outline)
+    kept = await engine._incremental_scripts({**state, "design": {"protocol": {**state["design"]["protocol"], "definitions": ["words only"]}}}, outline)
     assert kept is not None and kept["simulate"] == sim and not asked
     # the revision changes a part the scripts read: only the returned function is replaced
     import ast
@@ -117,3 +117,36 @@ async def test_the_scripts_of_a_revised_plan_change_only_the_functions_the_revis
     # a reply that needs a module-level change falls back to writing the scripts whole
     reply[0] = "FULL REWRITE NEEDED: a constant changes"
     assert await engine._incremental_scripts(revised, outline) is None
+
+
+def test_a_function_is_rewritten_when_a_function_it_calls_changed_under_the_same_signature() -> None:
+    specs, _ = fs.model_functions(OUTLINE, PROTOCOL)
+    revised = copy.deepcopy(PROTOCOL)
+    revised["model"]["equations"][0]["formula"] = "w = 1000 * sqrt(k / m)"  # E1, which `quality` calls
+    after, _ = fs.model_functions(OUTLINE, revised)
+    by = lambda ss, n: next(s for s in ss if s.name == n)  # noqa: E731
+    assert "frequency" in by(specs, "quality").depends_on
+    assert fs.function_hash(by(specs, "quality"), specs, PROTOCOL) != fs.function_hash(by(after, "quality"), after, revised)
+    assert fs.function_hash(by(specs, "decay"), specs, PROTOCOL) == fs.function_hash(by(after, "decay"), after, revised)
+
+
+def test_a_check_a_package_and_a_function_hash_are_parts_the_scripts_are_built_from() -> None:
+    design = {"protocol": {"oracles": [{"name": "a"}]}}
+    changed = {"protocol": {"oracles": [{"name": "a"}, {"name": "needs_a_new_output"}]}}
+    assert cd.parts(design) != cd.parts(changed), "a new check can need new code"
+    assert cd.parts(design, {"f": "h1"}, "pkg_a") != cd.parts(design, {"f": "h1"}, "pkg_b"), "another package is a change"
+    assert cd.parts(design, {"f": "h1"}, "p") != cd.parts(design, {"f": "h2"}, "p"), "a function built from another equation"
+
+
+@pytest.mark.asyncio
+async def test_the_scripts_record_the_functions_hashes_not_their_signatures(tmp_path: Path, monkeypatch) -> None:
+    from tests.test_code_layout import _engine_with_tool
+
+    engine, _code, state = _engine_with_tool(tmp_path)
+    monkeypatch.setattr(engine, "_protocol_block", lambda s: PROTOCOL)
+    first = engine._scripts_built_from(state, OUTLINE)
+    revised = copy.deepcopy(PROTOCOL)
+    revised["model"]["equations"][2]["formula"] = "x(t) = x0 * exp(-g * t) + b"
+    monkeypatch.setattr(engine, "_protocol_block", lambda s: revised)
+    second = engine._scripts_built_from(state, OUTLINE)
+    assert first["functions"] != second["functions"] and first["package"] == second["package"] != ""
