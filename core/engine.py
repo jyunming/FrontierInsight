@@ -6652,8 +6652,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 raise _PartsRefused("; ".join(problems))
             try:
                 kept = self._keep_only_the_parts(before, translated, scope.names(), passages)
-                if kept is not None and finish is not None:
-                    kept = finish(_plan.refresh_optimisation_section(_plan.refresh_model_section(kept)))
+                if kept is not None:
+                    # The sections FI shows from the block are shown again whatever the parts, finish or not.
+                    kept = _plan.refresh_optimisation_section(_plan.refresh_model_section(kept))
+                    if finish is not None:
+                        kept = finish(kept)
             except _PartsRefused:
                 raise
             except ValueError as e:
@@ -6668,7 +6671,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                             + "\nFix that, and keep everything the plan already has.") if problem else "")
             try:
                 return await self._complete_plan_parts(ask, path, expect=expect, keep=keep, note=note, by=by)
-            except _PartsRefused as e:
+            except ValueError as e:  # FI's refusal, or a reply with no JSON object (already re-asked once, shorter)
                 problem = " ".join(str(e).split())[:1500]
                 self._log.warning("[plan] the plan's model answer was refused (attempt %d of 2): %s", attempt, problem)
         raise ValueError(f"the model's answer could not be used ({problem}); plan.md is unchanged")

@@ -351,3 +351,42 @@ async def test_a_request_about_the_checks_refuses_a_reply_that_also_names_the_gr
     assert "could not be rewritten" in failed and "protocol.grid" in failed
     assert len(model.prompts) == 2
     assert path.read_text(encoding="utf-8") == before
+
+
+# --- a reply with no JSON, and the sections shown from the block ---------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_reply_with_no_json_is_asked_once_more_and_then_ends_as_a_failed_repair(tmp_path: Path) -> None:
+    from tests.test_plan_sources_way_forward import STATE
+
+    eng, path, before = _research_plan(tmp_path)
+    name = plan.raw_design_block(before)["protocol"]["oracles"][0]["name"]
+    prose = "I filled the sources in, as asked."
+    good = {"protocol": {"oracles": [{"name": name, "reference": "derivation: x = 1 by definition"}]}}
+    # no JSON twice (the shorter re-ask inside one request), then the repair's own re-ask gets a usable reply
+    model = Scripted(eng, [prose, prose, good])
+    await eng._fill_plan_sources(dict(STATE))
+    assert len(model.prompts) == 3 and "Your last answer was not used" in model.prompts[2]
+    assert "not one JSON object" in model.prompts[2]
+    assert plan.raw_design_block(path.read_text(encoding="utf-8"))["protocol"]["oracles"][0]["reference"].startswith("derivation")
+
+
+@pytest.mark.asyncio
+async def test_a_reply_with_no_json_at_all_leaves_the_plan_and_raises_the_error_callers_catch(tmp_path: Path) -> None:
+    eng, path, before = _planned(tmp_path)
+    Scripted(eng, ["no json here"] * 4)
+    with pytest.raises(ValueError, match="plan.md is unchanged"):
+        await eng._revise_plan_parts("change it", path, scope=plan_scope.PartScope(parts=("thresholds",)), note="n")
+    assert path.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.asyncio
+async def test_the_sections_shown_from_the_block_follow_a_change_without_a_finish(tmp_path: Path) -> None:
+    eng, path, before = _planned(tmp_path)
+    Scripted(eng, [{"protocol": {"optimisation": {"evaluation_budget": SMALLER}}}])
+    await eng._revise_plan_parts("smaller", path, scope=plan_scope.PartScope(inside={"optimisation": ("evaluation_budget",)}),
+                                 note="n")
+    after = path.read_text(encoding="utf-8")
+    assert plan.refresh_optimisation_section(plan.refresh_model_section(after)) == after
+    assert "2 starting points × 20" in after
