@@ -38,3 +38,21 @@ def test_the_placeholders_fill_to_the_ledger_values(tmp_path):
 def test_the_writer_is_told_to_use_the_count_placeholders(tmp_path):
     section = paper_facts.writer_section(_quest(tmp_path))
     assert "{{settings}}" in section and "{{trials_per_setting}}" in section
+
+
+GRID_PLAN = {"grid": {"a": [1, 2, 3, 4], "b": [10, 20, 30]}, "runs_per_setting": 20, "constants": {"z": 1.96}}
+
+
+def test_the_plans_count_of_settings_and_trials_is_not_a_typed_number():
+    """The plan's grid has 4 x 3 = 12 settings and 20 runs per setting; neither count is a number of the plan, so a typed
+    "12 settings" or "20 trials" is sent to {{settings}} / {{trials_per_setting}}, which FI fills from what actually ran."""
+    plan = tn.plan_numbers(GRID_PLAN, "Estimate the settle time of a controller.")
+    assert tn.Decimal(12) not in plan and tn.Decimal(20) in plan  # 20 is also the grid level 20 (a value, not a count)
+    assert tn.hits("All 12 settings support the mechanism.", plan)
+
+
+def test_a_plan_value_stays_allowed():
+    """Known positive: a level of the grid is a number of the plan, typed as the plan writes it."""
+    plan = tn.plan_numbers(GRID_PLAN)
+    assert not tn.hits("The second axis is varied over 10, 20 and 30.", plan)
+    assert not tn.hits("All {{settings}} settings support the mechanism.", plan)
