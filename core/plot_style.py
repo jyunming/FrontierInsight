@@ -1523,10 +1523,14 @@ _PAPER_SOURCE = '''\
             # The size of each panel's plotting area as the figure was drawn, in inches: what the copy is held to.
             try:
                 first = _fi_draw(fig)
-                drawn_panels = [(ax.get_window_extent(first).width / fig.dpi, ax.get_window_extent(first).height / fig.dpi)
-                                for ax in panels]
+                # Every visible Axes, a twin, an inset and a colorbar's included: the copy is made from this very
+                # figure, so each is the same object before and after.
+                measured_axes = [ax for ax in _fi_all_axes(fig) if ax.get_visible()]
+                drawn_panels = {id(ax): (ax.get_window_extent(first).width / fig.dpi,
+                                         ax.get_window_extent(first).height / fig.dpi) for ax in measured_axes}
             except Exception:
                 drawn_panels = None
+                measured_axes = []
             fig.set_layout_engine(mode)
             constrained = mode == "constrained"
             fig.set_size_inches(width, height)
@@ -1622,12 +1626,13 @@ _PAPER_SOURCE = '''\
             # How much of its drawn size each panel kept in the copy (both sizes taken from the drawn panels).
             panels_in, panel_share = [], None
             scale = width / drawn[0] if drawn[0] > 0 else 1.0
-            for index, ax in enumerate(panels):
+            for ax in (measured_axes if drawn_panels else []):
                 box_now = ax.get_window_extent(renderer)
                 now = (box_now.width / fig.dpi, box_now.height / fig.dpi)
                 panels_in.append([round(now[0], 3), round(now[1], 3)])
-                if drawn_panels and drawn_panels[index][0] > 0 and drawn_panels[index][1] > 0:
-                    share = min(now[0] / (drawn_panels[index][0] * scale), now[1] / (drawn_panels[index][1] * scale))
+                before = drawn_panels[id(ax)]
+                if before[0] > 0 and before[1] > 0:
+                    share = min(now[0] / (before[0] * scale), now[1] / (before[1] * scale))
                     panel_share = share if panel_share is None else min(panel_share, share)
             if panel_share is not None and panel_share < p["panel_min_share"]:
                 raise ValueError("a panel is left %.0f%% of its drawn size, under the %.0f%% a copy keeps"

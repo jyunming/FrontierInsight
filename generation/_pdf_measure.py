@@ -82,9 +82,6 @@ class Page:
     # The stored pixel size of each image in ``images`` (same order), or None
     # when the PDF library cannot say: what tells a figure file from another.
     image_px: list[tuple[int, int] | None] = field(default_factory=list)
-    # Each opaque filled rectangle drawn on the page with its colour: what a figure's canvas and its panels' plotting
-    # areas are in a vector figure (see ``figure_frames``).
-    fills: list[tuple[Box, tuple[int, int, int]]] = field(default_factory=list)
 
 
 @dataclass
@@ -198,80 +195,7 @@ def _measure_page(page, number: int, raw) -> Page:
         box = _object_box(obj, raw)
         if box[2] - box[0] >= 0.8 * width and box[3] - box[1] <= _RULE_MAX_HEIGHT:
             rules.append(box)
-    return Page(number, width, height, lines, images, rules, image_px, _read_fills(page, raw))
-
-
-_MAX_FILLS = 3000  # a scatter of rectangles must not make a page's record large
-
-
-def _fill_of(obj, raw) -> tuple[Box, tuple[int, int, int]] | None:
-    """The box and colour of an opaque, filled, straight-edged path object (a rectangle has a move and three or four
-    lines), or None. Curves (markers, circles) are not rectangles."""
-    fill_mode, stroke = ctypes.c_int(), ctypes.c_int()
-    if not raw.FPDFPath_GetDrawMode(obj.raw, ctypes.byref(fill_mode), ctypes.byref(stroke)) or not fill_mode.value:
-        return None
-    red, green, blue, alpha = (ctypes.c_uint() for _ in range(4))
-    if not raw.FPDFPageObj_GetFillColor(
-        obj.raw, ctypes.byref(red), ctypes.byref(green), ctypes.byref(blue), ctypes.byref(alpha),
-    ) or alpha.value < 255:
-        return None
-    count = raw.FPDFPath_CountSegments(obj.raw)
-    if not 4 <= count <= 6:
-        return None
-    for index in range(count):
-        if raw.FPDFPathSegment_GetType(raw.FPDFPath_GetPathSegment(obj.raw, index)) == raw.FPDF_SEGMENT_BEZIERTO:
-            return None
-    return _object_box(obj, raw), (red.value, green.value, blue.value)
-
-
-def _read_fills(page, raw) -> list[tuple[Box, tuple[int, int, int]]]:
-    """The filled rectangles of a page, in page coordinates. A figure the PDF engine placed from a PDF file is a form
-    whose paths are in the file's own coordinates; they are moved onto the page by the scale and shift that bring the
-    union of the form's rectangles (the figure's canvas) onto the form's own box on the page. A form inside a form
-    is left out."""
-    found: list[tuple[Box, tuple[int, int, int]]] = []
-    form_box: Box | None = None
-    inner: list[tuple[Box, tuple[int, int, int]]] = []
-
-    def close_form() -> None:
-        nonlocal form_box, inner
-        if form_box is not None and inner:
-            left = min(b[0] for b, _ in inner)
-            bottom = min(b[1] for b, _ in inner)
-            right = max(b[2] for b, _ in inner)
-            top = max(b[3] for b, _ in inner)
-            if right > left and top > bottom:
-                sx, sy = (form_box[2] - form_box[0]) / (right - left), (form_box[3] - form_box[1]) / (top - bottom)
-                for b, colour in inner:
-                    found.append((
-                        (form_box[0] + (b[0] - left) * sx, form_box[1] + (b[1] - bottom) * sy,
-                         form_box[0] + (b[2] - left) * sx, form_box[1] + (b[3] - bottom) * sy), colour,
-                    ))
-        form_box, inner = None, []
-
-    try:
-        for obj in page.get_objects(filter=[raw.FPDF_PAGEOBJ_PATH, raw.FPDF_PAGEOBJ_FORM], max_depth=5):
-            level = getattr(obj, "level", 0)
-            if level == 0:
-                close_form()
-                if obj.type == raw.FPDF_PAGEOBJ_FORM:
-                    form_box = _object_box(obj, raw)
-                    continue
-            if obj.type != raw.FPDF_PAGEOBJ_PATH:
-                continue
-            fill = _fill_of(obj, raw)
-            if fill is None:
-                continue
-            if level == 0:
-                found.append(fill)
-            elif level == 1 and form_box is not None:
-                inner.append(fill)
-            if len(found) + len(inner) >= _MAX_FILLS:
-                break
-        close_form()
-    except Exception:  # noqa: BLE001 — a measurement must never stop the quest
-        return []
-    return found
+    return Page(number, width, height, lines, images, rules, image_px)
 
 
 def _image_pixels(obj) -> tuple[int, int] | None:
@@ -1443,128 +1367,32 @@ def _producer_is_fallback_findings(doc: Document, expect_latex: bool) -> list[di
 # Paper
 
 
-@dataclass(frozen=True)
-class PaperFigure:
-    """What FI recorded of a figure's paper copy, to hold the copy placed in the paper to: the size of the copy and
-    of the canvas it was drawn from (inches), and each panel's plotting area on that canvas as shares of its width
-    and height, ``(left, bottom, width, height)``."""
-
-    name: str
-    width_in: float
-    height_in: float
-    drawn_in: tuple[float, float]
-    places: tuple[tuple[float, float, float, float], ...]
-
-
-def _contains(outer: Box, inner: Box, slack: float = 0.5) -> bool:
-    return (outer[0] - slack <= inner[0] and outer[1] - slack <= inner[1]
-            and inner[2] <= outer[2] + slack and inner[3] <= outer[3] + slack)
-
-
-def figure_frames(page: Page) -> list[tuple[Box, list[Box]]]:
-    """The vector figures of a page: ``(canvas, panels)``. A figure's canvas is a filled rectangle that holds filled
-    rectangles of its own colour (matplotlib paints each panel's plotting area in the canvas colour) and is not
-    inside another such canvas; the panels are those rectangles."""
-    fills = page.fills
-    frames: list[tuple[Box, list[Box]]] = []
-    for box, colour in fills:
-        if box[2] - box[0] < 72.0 or box[3] - box[1] < 36.0:
-            continue
-        inside = [
-            other for other, other_colour in fills
-            if other_colour == colour and other != box and _contains(box, other) and _area(other) < _area(box)
-        ]
-        if not inside:
-            continue
-        if any(c == colour and o != box and _contains(o, box) and _area(o) > _area(box) for o, c in fills):
-            continue
-        frames.append((box, inside))
-    return frames
-
-
-def panel_share(frame: Box, panels: Sequence[Box], figure: PaperFigure) -> float | None:
-    """The least share, over the panels, of the size a panel had on the canvas the figure was drawn from, the whole
-    canvas taken at the width ``frame`` is placed at; ``None`` when the panels are not those the figure recorded (a
-    different count)."""
-    if len(panels) != len(figure.places) or figure.drawn_in[0] <= 0 or figure.drawn_in[1] <= 0:
-        return None
-    frame_w, frame_h = frame[2] - frame[0], frame[3] - frame[1]
-    if frame_w <= 0 or frame_h <= 0:
-        return None
-    scale = (frame_w / 72.0) / figure.drawn_in[0]
-    measured = sorted(panels, key=lambda b: (-round((b[3] - frame[1]) / frame_h * 10), b[0]))
-    recorded = sorted(figure.places, key=lambda p: (-round((p[1] + p[3]) * 10), p[0]))
-    shares = []
-    for box, (_x, _y, w, h) in zip(measured, recorded):
-        want_w, want_h = w * figure.drawn_in[0] * scale * 72.0, h * figure.drawn_in[1] * scale * 72.0
-        if want_w <= 0 or want_h <= 0:
-            return None
-        shares.append(min((box[2] - box[0]) / want_w, (box[3] - box[1]) / want_h))
-    return min(shares) if shares else None
-
-
-def copy_panel_share(page: Page, figure: PaperFigure) -> float | None:
-    """``panel_share`` of the one-page PDF of a figure's paper copy, read from the file itself."""
-    frames = figure_frames(page)
-    if len(frames) != 1:
-        return None
-    return panel_share(frames[0][0], frames[0][1], figure)
-
-
-# A vector figure placed in the paper is the shape of the copy FI drew (aspect ratio within this share): a placed
-# figure is matched to its recorded copy by that shape.
-_COPY_ASPECT_SLACK = 0.03
-# A picture is placed at the shape it was stored in, within this share of it.
-_RASTER_ASPECT_SLACK = 0.03
-
-
-def figure_squeeze_findings(page: Page, figures: Sequence[PaperFigure]) -> list[dict]:
-    """A finding for each figure of the page drawn squeezed: a picture placed at another shape than its file's, or a
-    vector figure whose smallest panel is under ``PAPER_PANEL_MIN_SHARE`` of the size it had on the canvas the figure
-    was drawn from. Both are measured on the page itself. A vector figure is matched to the figure FI recorded by its
-    shape and panel count; one that matches none is left alone, and where several match, the best share counts."""
+def squeezed_copy_findings(doc: Document, placed: Sequence[tuple[int, str, float | None]]) -> list[dict]:
+    """A finding for each figure paper.pdf sets from a paper copy whose smallest panel FI recorded as under
+    ``PAPER_PANEL_MIN_SHARE`` of its drawn size. ``placed`` is what FI itself wrote into the paper's source: for each
+    figure ``(its number in the paper, the copy's name, the share the copy was recorded with)``; the page is the one
+    whose caption starts with that figure's number (the first page when none does). No shape or colour on the page
+    is used to find the figure."""
     from core.plot_style import PAPER_PANEL_MIN_SHARE
 
     found = []
-    for box, pixels in zip(page.images, page.image_px):
-        if pixels is None or min(pixels) < 100 or _is_decoration(box, page):
+    for number, name, share in placed:
+        if share is None or share >= PAPER_PANEL_MIN_SHARE:
             continue
-        width, height = box[2] - box[0], box[3] - box[1]
-        if width <= 0 or height <= 0:
-            continue
-        stored, placed = pixels[0] / pixels[1], width / height
-        if abs(placed - stored) > _RASTER_ASPECT_SLACK * stored:
-            found.append(_finding(
-                "figure_squeezed", page.number, "figure",
-                f"A figure is placed {width / 72:.1f} x {height / 72:.1f} in (shape {placed:.2f}), stretched or "
-                f"squeezed from the shape {stored:.2f} of its {pixels[0]} x {pixels[1]} px file.",
-                "high", placed_aspect=round(placed, 3), stored_aspect=round(stored, 3),
-            ))
-    for frame, panels in figure_frames(page):
-        aspect = (frame[2] - frame[0]) / (frame[3] - frame[1])
-        shares = []
-        for figure in figures:
-            if figure.height_in > 0 and abs(figure.width_in / figure.height_in - aspect) <= _COPY_ASPECT_SLACK * aspect:
-                share = panel_share(frame, panels, figure)
-                if share is not None:
-                    shares.append((share, figure.name))
-        if not shares:
-            continue
-        share, name = max(shares)
-        if share < PAPER_PANEL_MIN_SHARE:
-            found.append(_finding(
-                "figure_squeezed", page.number, "figure",
-                f"The figure {name} is placed {(frame[2] - frame[0]) / 72:.1f} x {(frame[3] - frame[1]) / 72:.1f} in "
-                f"with its panels squeezed: the smallest is {share:.0%} of the size it was drawn at, under the "
-                f"{PAPER_PANEL_MIN_SHARE:.0%} a figure keeps.",
-                "high", figure=name, panel_share=round(share, 3),
-            ))
+        caption = re.compile(rf"^(Figure|Fig\.?)\s*{number}\b", re.IGNORECASE)
+        page = next((p.number for p in doc.pages if any(caption.match(line.text) for line in p.lines)), 1)
+        found.append(_finding(
+            "figure_squeezed", page, "figure",
+            f"Figure {number} ({name}) is set from a copy whose panels were squeezed: the smallest kept {share:.0%} "
+            f"of the size it was drawn at, under the {PAPER_PANEL_MIN_SHARE:.0%} a figure keeps.",
+            "high", figure=name, panel_share=round(share, 3),
+        ))
     return found
 
 
 def paper_report(
     doc: Document, *, page_limit: int | None = None, expect_latex: bool = True,
-    figures: Sequence[PaperFigure] = (),
+    placed_copies: Sequence[tuple[int, str, float | None]] = (),
 ) -> dict:
     """Text or figures wider than the text block (an overfull table or a
     figure LaTeX could not fit), content off the page, and text too small.
@@ -1598,7 +1426,6 @@ def paper_report(
         findings += _column_gap_findings(page)
         findings += _raw_math_findings(page, paper=True)
         findings += _figure_over_text_findings(page)
-        findings += figure_squeeze_findings(page, figures)
         findings += _raw_table_findings(page)
         number_ids = _line_number_ids(page)
         page_lines = [line for line in page.lines if line.visible and id(line) not in number_ids]
@@ -1627,6 +1454,7 @@ def paper_report(
                     f"A figure runs {over:.0f} pt into the margin.",
                     object="figure", overhang_pt=round(over, 1),
                 ))
+    findings += squeezed_copy_findings(doc, placed_copies)
     findings += _bottom_overflow_findings(doc, body_pt)
     findings += _doubled_number_findings(doc, body_pt)
     findings += _orphan_table_row_findings(doc, body_pt)

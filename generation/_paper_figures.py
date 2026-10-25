@@ -15,7 +15,6 @@ import re
 from pathlib import Path
 
 from core.plot_style import PAPER_DIRNAME, PAPER_FULL_WIDTH_IN, PAPER_PANEL_MIN_SHARE, RECORDS_DIRNAME
-from generation._pdf_measure import PaperFigure, copy_panel_share, measure_pdf
 
 # The target of a Markdown image (or link) to a figure file in figures/, with an optional {attributes} block after it.
 _FIGURE_TARGET = re.compile(r"\]\(figures/([^)\s/]+)\.(png|jpe?g|svg)\)(\{[^}]*\})?", re.IGNORECASE)
@@ -37,46 +36,35 @@ def _width_in(pdf: Path) -> float | None:
     return (x1 - x0) / 72 if x1 > x0 else None
 
 
-def paper_figure(root: Path, stem: str) -> PaperFigure | None:
-    """What FI recorded of the paper copy of ``figures/<stem>``, from the figure's record
-    (``.fi/figure_records/<stem>.json``); ``None`` when there is none or it lacks a size or a panel."""
+def recorded_panel_share(root: Path, stem: str) -> float | None:
+    """The share of its drawn size the smallest panel of the paper copy of ``figures/<stem>`` kept, as the bootstrap
+    measured it on matplotlib's own axes and wrote it into the figure's record (``.fi/figure_records/<stem>.json``);
+    ``None`` when the record has none (a figure from before it was measured)."""
     try:
         record = json.loads((Path(root) / ".fi" / RECORDS_DIRNAME / f"{stem}.json").read_text(encoding="utf-8"))
-        paper = record["paper"]
-        drawn = (float(paper["drawn_in"][0]), float(paper["drawn_in"][1]))
-        places = tuple(tuple(float(v) for v in axes["place"]) for axes in record["axes"])
-        if not places or any(len(place) != 4 for place in places):
-            return None
-        return PaperFigure(stem, float(paper["width_in"]), float(paper["height_in"]), drawn, places)  # type: ignore[arg-type]
-    except (OSError, ValueError, KeyError, TypeError, IndexError):
+        share = record["paper"]["panel_share"]
+    except (OSError, ValueError, KeyError, TypeError):
         return None
+    return float(share) if isinstance(share, (int, float)) and not isinstance(share, bool) else None
 
 
-def paper_figures(root: Path) -> list[PaperFigure]:
-    """The recorded paper copies of every figure of the quest."""
-    found = []
-    records = Path(root) / ".fi" / RECORDS_DIRNAME
+_ANY_IMAGE = re.compile(r"!\[[^\n]*?\]\(([^)\s]+)\)")
+
+
+def placed_copies(root: Path) -> list[tuple[int, str, float | None]]:
+    """The paper copies the paper's source (``paper_pdf_source.md``, which FI wrote) points at, in order, each as
+    ``(figure number, stem, recorded panel share)``; the number is the figure's place among the images of the paper.
+    Empty when the paper has no such source."""
     try:
-        stems = sorted(p.stem for p in records.glob("*.json") if ".seed" not in p.name)
+        source = (Path(root) / "paper_pdf_source.md").read_text(encoding="utf-8")
     except OSError:
         return []
-    for stem in stems:
-        figure = paper_figure(root, stem)
-        if figure is not None:
-            found.append(figure)
+    found = []
+    for number, match in enumerate(_ANY_IMAGE.finditer(source), start=1):
+        target = re.fullmatch(rf"figures/{PAPER_DIRNAME}/([^/]+)\.pdf", match.group(1))
+        if target:
+            found.append((number, target.group(1), recorded_panel_share(root, target.group(1))))
     return found
-
-
-def copy_is_squeezed(pdf: Path, figure: PaperFigure | None) -> float | None:
-    """The share of its drawn size that the smallest panel of the copy ``pdf`` keeps, measured on the file, when that
-    is under ``PAPER_PANEL_MIN_SHARE``; ``None`` when the copy is fine or cannot be measured against a record."""
-    if figure is None:
-        return None
-    doc = measure_pdf(pdf, max_pages=1)
-    if doc is None or not doc.pages:
-        return None
-    share = copy_panel_share(doc.pages[0], figure)
-    return share if share is not None and share < PAPER_PANEL_MIN_SHARE else None
 
 
 #: The most of the page's text height a paper copy is set at: a third, so a tall figure leaves room for its caption
@@ -103,9 +91,10 @@ def prefer_paper_figures(markdown: str, root: Path, *, two_column: bool = False)
         # behind.
         if not pdf.is_file() or not (Path(root) / "figures" / f"{stem}.{suffix}").is_file():
             return match.group(0)
-        # A copy whose panels were drawn as slivers (measured on the file against the figure's record) is not used:
-        # the figure is set from its PNG.
-        if copy_is_squeezed(pdf, paper_figure(root, stem)) is not None:
+        # A copy whose smallest panel the bootstrap recorded under the share a copy keeps is not used: the figure is
+        # set from its PNG.
+        share = recorded_panel_share(root, stem)
+        if share is not None and share < PAPER_PANEL_MIN_SHARE:
             return match.group(0)
         if not attributes:
             width = _width_in(pdf)
