@@ -1189,7 +1189,7 @@ def _criteria_lines(protocol: Any) -> list[str]:
 
 def render(topic: str, extra: dict[str, Any] | None, design: dict[str, Any], audit: list[str] | None = None,
            sources: list[dict[str, str]] | None = None, code_layout: list[str] | None = None,
-           confirm: list[str] | None = None) -> str:
+           confirm: list[str] | None = None, held_back: list[str] | None = None) -> str:
     """The text of ``plan.md``: the prose the model wrote around ``design``, and ``design`` itself in the block
     that is used as written. ``code_layout``: the lines saying how the code will be laid out and what that costs
     (``core/code_layout.py``). ``confirm``: the lines saying whether and how the result will be confirmed once more on
@@ -1200,6 +1200,7 @@ def render(topic: str, extra: dict[str, Any] | None, design: dict[str, Any], aud
     block = yaml.safe_dump(design, sort_keys=False, allow_unicode=True, default_flow_style=False, width=100).rstrip()
     in_short = str(extra.get("in_short") or "").strip() or "(not written)"
     gap = str(extra.get("gap") or "").strip() or "(not written)"
+    held = [f"> {line}" for line in held_back or []]  # what FI did not apply of the audit's change, beside the design
     checks = _bullets(audit, "- (the methodology audit had nothing to add)")
     return "\n".join([
         f"# Plan: {topic.strip().splitlines()[0][:150] if topic.strip() else 'this quest'}",
@@ -1213,6 +1214,7 @@ def render(topic: str, extra: dict[str, Any] | None, design: dict[str, Any], aud
         "",
         in_short,
         "",
+        *([*held, ""] if held else []),
         "## What the literature says",
         "",
         _literature_lines(extra.get("literature")),
@@ -1245,6 +1247,7 @@ def render(topic: str, extra: dict[str, Any] | None, design: dict[str, Any], aud
         "",
         f"## {DESIGN_HEADING}",
         "",
+        *([*held, ""] if held else []),
         "```yaml",
         block,
         "```",

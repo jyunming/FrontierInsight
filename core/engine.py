@@ -5151,7 +5151,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         before = json.loads(json.dumps(design, default=str))
         try:
             # An unreadable reply is asked for once more, short (_chat_json); a second unreadable one is a failure.
-            _, critique = await self._chat_json(
+            raw_reply, critique = await self._chat_json(
                 critique_prompt, node=review_node, want=("objections_addressed",),
                 usable=lambda p: isinstance(p.get("objections_addressed"), list) and not (strict and _nothing_said(p)),
                 why_unusable=lambda p: ("it listed no objection and did not say what it checked: put every problem under "
@@ -5159,6 +5159,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                         "checked_no_problem") if strict and isinstance(p.get("objections_addressed"), list)
                 and _nothing_said(p) else "",
             )
+            self._keep_plan_answer(raw_reply)  # the audit's own answer, kept so a refusal of part of it can be replayed
             if strict and isinstance(critique, dict) and isinstance(critique.get("objections_addressed"), list)                     and _nothing_said(critique):
                 failure = f"the design was not reviewed: {_pairs.NOT_A_REVIEW}"
                 not_reviewed = True
@@ -5327,13 +5328,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         self._log.warning("[design_self_critique] asking the audit once to correct %s, with FI's reason for each",
                           ", ".join(f"`protocol.{k}`" for k in keys))
         try:
-            _, reply = await self._chat_json(
+            raw_correction, reply = await self._chat_json(
                 _plan.audit_repair_request([(k, new_p.get(k), n["reason"]) for k, n in zip(keys, asked)]),
                 node=node, want=("protocol",), usable=lambda p: isinstance(p.get("protocol"), dict),
             )
         except Exception as e:  # noqa: BLE001 — the audit is advisory: the first reading stands
             self._log.warning("[design_self_critique] the correction could not be asked for (%r); the first reading stands", e)
             return design, not_applied
+        self._keep_plan_answer(raw_correction)
         given = reply.get("protocol") if isinstance(reply, dict) else None
         corrected = {k: v for k, v in (given or {}).items() if k in keys}
         if not corrected:
@@ -5346,6 +5348,25 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._log.info("[design_self_critique] `%s` after the correction: %s", n["key"],
                            "still not fully readable" if n["key"] in left else "read in full")
         return design2, not_applied2
+
+    def _audit_changes_held_back(self) -> list[str]:
+        """One plain sentence per change the last methodology audit proposed that FI did not (fully) apply, from FI's own
+        record of what it applied, for the plan's prose: the audit's text about its change may describe more than the design
+        block below holds, and the block is what runs."""
+        try:
+            last = json.loads((self.quest_root / "needs" / "DESIGN_CRITIQUE.json").read_text(encoding="utf-8"))[-1]
+        except (OSError, ValueError, IndexError, TypeError):
+            return []
+        out = []
+        for n in last.get("not_applied") or []:
+            if not isinstance(n, dict):
+                continue
+            out.append((f"FI applied the methodology audit's change to `{n.get('key')}` except one part: {n.get('reason')}. "
+                        "Where the text of this plan describes that part as changed, the design block below is what runs.")
+                       if n.get("applied") else
+                       (f"FI did not apply the methodology audit's change to `{n.get('key')}`: {n.get('reason')}. "
+                        "Where the text of this plan describes that change as made, the design block below is what runs."))
+        return out
 
     def _critique_summary(self) -> list[str]:
         """What the last methodology audit did, for the plan's *Checks already made*: which parts of the design it changed,
@@ -5676,7 +5697,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                             normalized, audit,
                             sources=self._retrieved_sources(state) if self._runs_code(state) else None,
                             code_layout=self._plan_code_layout({**state, "design": normalized}),
-                            confirm=self._plan_confirm_lines(state))
+                            confirm=self._plan_confirm_lines(state), held_back=self._audit_changes_held_back())
         study = _scope_cards.plan_section(_scope_cards.read_record(self.quest_root))
         if study:
             body = body.rstrip("\n") + "\n\n" + study

@@ -863,6 +863,18 @@ def repair(block: Any) -> tuple[dict[str, Any] | None, list[str]]:
                 notes.append(f"the setting `{name}` {SCAN_SETTING_LEFT_OUT} ({why}{shown}); the other settings of the "
                              "scan are kept. Put it back, with what it needs, if the study should be compared across it")
                 continue
+        if key == "sub_studies" and isinstance(out.get("sub_studies"), list):
+            # One scan part that cannot be read is left out alone, read as the plan step reads a measurement's parts
+            # (:func:`core.plan.readable_sub_studies`); the other parts stay, and the rule that every value of the scan is
+            # run is still asked of them (when it fails, the next round leaves the list out as before).
+            from . import plan as _plan_parts
+
+            entries, entry_reasons = _plan_parts.readable_sub_studies(out["sub_studies"], out.get("grid"), out.get("in_each_run"))
+            if entries and entry_reasons and len(entries) < len(out["sub_studies"]):
+                out["sub_studies"] = entries
+                notes.extend(f"an entry of {_P}.sub_studies` {LEFT_OUT_UNREAD}: {reason.replace('`protocol.sub_studies`', _P + '.sub_studies`')}"
+                             for reason in entry_reasons)
+                continue
         if key in out:
             del out[key]
             notes.append(f"`protocol.optimisation.{key}` {LEFT_OUT_UNREAD} ({why}); it is not used")
