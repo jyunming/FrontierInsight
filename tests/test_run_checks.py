@@ -318,6 +318,13 @@ async def _sizing(tmp_path: Path, *, timeout_s: int, grid: dict[str, list[int]] 
     return eng, model, runner, eng.executor  # type: ignore[return-value]
 
 
+def _cut(eng: Engine) -> dict[str, Any]:
+    """FI's record of a study it runs only up to the time limit (``.fi/run_estimate.json`` ``truncated``)."""
+    cut = run_estimate.read_record(eng.quest_root).get("truncated")
+    assert isinstance(cut, dict), "the study was not recorded as cut at the time limit"
+    return cut
+
+
 def _log(eng: Engine) -> str:
     return (eng.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
 
@@ -364,11 +371,11 @@ async def test_a_run_that_is_too_long_has_its_runs_lowered_by_fi_without_asking_
 @pytest.mark.asyncio
 async def test_a_run_that_cannot_fit_at_the_fewest_runs_stops_plainly_and_a_resume_times_nothing_again(
         tmp_path: Path) -> None:
-    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=6)  # the plan states no fewest runs
+    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=1)  # the plan states no fewest runs; even the cheapest setting (about 2 s) cannot finish
     patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
     assert patch is not None and model.asked == []
     text = patch["exec_result"]["too_long"]
-    assert re.fullmatch(r"the experiment.s \d+ settings would take about .+, more than the 6 seconds allowed; FI does not run a smaller study "
+    assert re.fullmatch(r"the experiment.s \d+ settings would take about .+, more than the 1 second allowed; FI does not run a smaller study "
                         r"than the plan's settings, and they cannot fit even with the fewest runs per setting the plan allows",
                         text), text
     assert patch["exec_give_up_reason"] == text and patch["result_json"] == {} and patch["exec_result"]["returncode"] == 1
@@ -381,7 +388,7 @@ async def test_a_run_that_cannot_fit_at_the_fewest_runs_stops_plainly_and_a_resu
     # The plan was written before anything was timed: its model is asked once, with what FI measured, for a study that
     # fits; asked once already, the stop stands.
     fit = patch["exec_result"]["too_long_fit"]
-    assert fit["settings"] == 3 and fit["limit_s"] == 6 and fit["settings_that_fit"] >= 1 and fit["seconds_per_setting"] > 0
+    assert fit["settings"] == 3 and fit["limit_s"] == 1 and fit["settings_that_fit"] >= 1 and fit["seconds_per_setting"] > 0
     first = eng._no_results_verdict({"exec_result": patch["exec_result"], "result_json": {},
                                      "exec_give_up_reason": text, "iteration": 0})
     assert first is not None and first["redesign"] is True and not first.get("stuck")
@@ -392,7 +399,7 @@ async def test_a_run_that_cannot_fit_at_the_fewest_runs_stops_plainly_and_a_resu
     assert verdict is not None and verdict["stuck"] is True and verdict["stuck_reason"] == "too_long"
     stuck = await eng._node_stuck_no_findings({"evidence_assessment": {"stuck_reason": "too_long"},
                                                "exec_result": patch["exec_result"]})
-    assert "more than the 6 seconds allowed" in stuck["stuck"]["say"] and "does not run a smaller study" in stuck["stuck"]["say"]
+    assert "more than the 1 second allowed" in stuck["stuck"]["say"] and "does not run a smaller study" in stuck["stuck"]["say"]
     assert "No paper was written" in stuck["stuck"]["say"]
     assert (eng.quest_root / "needs" / "STUCK.json").is_file() and not (eng.quest_root / "paper.md").exists()
     calls = ex.calls
@@ -404,9 +411,10 @@ async def test_a_run_that_cannot_fit_at_the_fewest_runs_stops_plainly_and_a_resu
 async def test_a_resume_after_the_runs_were_lowered_does_not_lower_them_a_second_time(tmp_path: Path) -> None:
     eng, model, runner, ex = await _sizing(tmp_path, timeout_s=6, min_runs_per_setting=2)
     run_estimate.write_record(eng.quest_root, {"fits": False, "reduced": {"note": "FI lowered the runs per setting"}})
-    patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
-    assert patch is not None and model.asked == []
+    # still too long after the cut: the cheapest setting fits, so the study runs up to the limit (it is not stopped)
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None and model.asked == []
     assert plan.load_design(eng.quest_root)[0]["protocol"]["runs_per_setting"] == 40, "it was not cut again"
+    assert _cut(eng)["kind"] == "grid"
 
 
 @pytest.mark.asyncio
@@ -567,17 +575,39 @@ async def _fdr_sizing(tmp_path: Path, *, runs: int = 1600, **protocol: Any) -> t
 
 
 @pytest.mark.asyncio
-async def test_a_run_that_cannot_fit_at_the_plans_fewest_runs_stops_rather_than_run_a_smaller_study(tmp_path: Path) -> None:
+async def test_a_run_that_cannot_fit_at_the_plans_fewest_runs_is_run_up_to_the_limit_in_the_plans_order(
+        tmp_path: Path) -> None:
     # The real numbers: 27 settings x 1600 runs, about 43 minutes (28 in the real run) against 15 minutes allowed, and the
-    # plan's fewest runs (its precision) is 1537: no model is asked and no setting is taken out.
+    # plan's fewest runs (its precision) is 1537: no model is asked and no setting is taken out of the plan. One setting
+    # fits, so the study is not stopped: it runs in the plan's order up to the limit and the record says so.
     eng, model, runner = await _fdr_sizing(tmp_path, min_runs_per_setting=1537)
-    patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
-    assert patch is not None and model.asked == []
+    runner.cost = lambda cell: 1.0  # the costliest-first order of a study that fits
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    assert model.asked == []
     design = plan.load_design(eng.quest_root)[0]
     assert design["protocol"]["grid"] == FDR_GRID and design["protocol"]["runs_per_setting"] == 1600
-    text = patch["exec_result"]["too_long"]
-    assert "does not run a smaller study than the plan's settings" in text and "more than the 15 minutes allowed" in text
-    assert run_estimate.read_record(eng.quest_root).get("stopped") == text
+    assert runner.cost is None, "a study cut at the limit runs in the plan's order, not the costliest first"
+    cut = _cut(eng)
+    assert cut["kind"] == "grid" and cut["order"] == "plan" and cut["limit_s"] == 900 and cut["settings"] == 27
+    assert "more than the 15 minutes allowed" in cut["detail"] and "stopped" not in run_estimate.read_record(eng.quest_root)
+    assert "in the plan's order until the time limit" in _log(eng)
+    # A resume with the same simulation and plan goes on the same way and times nothing again.
+    runner.cost = lambda cell: 1.0
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None and runner.cost is None
+    assert "timed before" in _log(eng)
+
+
+@pytest.mark.asyncio
+async def test_a_study_whose_cheapest_setting_alone_cannot_finish_still_stops(tmp_path: Path) -> None:
+    # The known positive: the cheapest setting takes about 2 s (40 runs of 0.05 s) and 1 s is allowed, so running the study
+    # up to the limit would not give even one result of it. With 6 s allowed the cheapest fits and the study is cut instead.
+    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=1)
+    patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
+    assert patch is not None and "more than the 1 second allowed" in patch["exec_result"]["too_long"]
+    assert "truncated" not in run_estimate.read_record(eng.quest_root)
+    eng.config.execution.timeout_s = 6
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    assert _cut(eng)["settings"] == 3 and _cut(eng)["limit_s"] == 6
 
 
 @pytest.mark.asyncio
@@ -695,19 +725,24 @@ async def test_a_scan_of_billions_of_settings_stops_before_any_is_listed(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_a_scan_with_no_stated_time_is_timed_on_one_real_evaluation_and_stops_before_listing(
+async def test_a_scan_with_no_stated_time_is_timed_on_one_real_evaluation_and_is_cut_at_the_limit_before_listing(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     block = copy.deepcopy(_SCAN_BLOCK)
     block["grid"] = {"axis0": list(range(5)), "axis1": list(range(33)), "axis2": list(range(10)), "axis3": list(range(5))}
     eng, runner = await _search_engine(tmp_path, block)
     eng.config.execution.timeout_s = 1
-    # One evaluation costs half a second of the simulation's own clock: 8,250 settings cannot fit in one second.
+    # One evaluation costs half a second of the simulation's own clock: 8,250 settings cannot fit in one second, but one does.
     (eng.quest_root / "code" / "simulate.py").write_text(
         VIRTUAL_CLOCK + "\ndef run_cell(cell):\n    time.sleep(0.5)\n    return {'f': cell['x'] ** 2}\n", encoding="utf-8")
     _nothing_is_listed(monkeypatch)
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    assert "8,250 settings" in _cut(eng)["detail"] and _cut(eng)["scan"] == 8250
+    assert eng.executor.calls >= 1  # type: ignore[attr-defined]
+    # Not even one evaluation fits: the stop stays.
+    eng.config.execution.timeout_s = 0.2  # type: ignore[assignment]
     patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
     assert patch is not None and "8,250 settings" in patch["exec_result"]["too_long"]
-    assert eng.executor.calls >= 1  # type: ignore[attr-defined]
+    assert "truncated" not in run_estimate.read_record(eng.quest_root) and runner.check_reserve_s == 0.0
 
 
 @pytest.mark.asyncio
@@ -765,12 +800,12 @@ async def test_a_tiny_claimed_time_is_raised_to_the_measured_one(tmp_path: Path,
         return run_estimate.Probe(None, None, {}, 60.0), ""
 
     monkeypatch.setattr(run_estimate, "_time_one", slow)
-    patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
-    assert patch is not None and "8,250 settings" in patch["exec_result"]["too_long"]
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    assert "8,250 settings" in _cut(eng)["detail"]
 
 
 @pytest.mark.asyncio
-async def test_a_scan_evaluation_cut_at_its_allowance_is_timed_again_before_the_plan_is_asked_to_fit(
+async def test_a_scan_evaluation_cut_at_its_allowance_is_timed_again_before_the_study_is_cut_at_the_limit(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A real scan's one timed evaluation was cut at 60 s, so FI knew only "at least 60 s" while one setting took 98 s: a
     plan sized to the lower bound would not fit either. The one setting is timed again with longer, and the plan is asked
@@ -787,10 +822,10 @@ async def test_a_scan_evaluation_cut_at_its_allowance_is_timed_again_before_the_
         return run_estimate.Probe(None, None, {}, 98.0), ""
 
     monkeypatch.setattr(run_estimate, "_time_one", timed)
-    patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
-    assert patch is not None and "8,250 settings" in patch["exec_result"]["too_long"]
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    assert "8,250 settings" in _cut(eng)["detail"]
     assert allowed[:2] == [60, 180]  # a twentieth of the hour allowed
-    fit = patch["exec_result"]["too_long_fit"]
+    fit = _cut(eng)["fit"]
     assert fit["seconds_per_setting"] == 98.0 and fit["at_least"] is False and fit["search"] is True
     assert fit["settings_that_fit"] == int(3600 / (1.5 * 98.0))
     # FI's own check of the best design comes after the search and is counted for the plan too.
@@ -816,11 +851,13 @@ async def test_a_scan_run_several_settings_at_once_is_counted_at_once(tmp_path: 
     monkeypatch.setattr(run_estimate, "_time_one", timed)
     monkeypatch.setattr(run_estimate, "slowdown_at_once", slower)
     # 8,250 settings x 3 s one after another: about 10 h with FI's margin, more than the 2 h allowed.
-    alone = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
-    assert alone is not None and "8,250 settings" in alone["exec_result"]["too_long"]
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    assert "8,250 settings" in _cut(eng)["detail"]
     runner.at_once = 8  # execution.settings_at_once
     # 8 at a time, 1.2 times slower: 8,250 x 3 x 1.2 / 8 = 3,713 s, about 1.5 h with the margin.
     assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    assert "truncated" not in run_estimate.read_record(eng.quest_root), "a study that now fits is not described as cut"
+    assert runner.check_reserve_s == 0.0
 
 
 @pytest.mark.asyncio
@@ -951,7 +988,7 @@ def test_a_study_too_long_names_what_a_new_value_pays_once_apart_from_each_setti
 
 
 @pytest.mark.asyncio
-async def test_a_search_whose_evaluations_do_not_fit_the_time_left_after_its_scan_asks_the_plan_to_fit(
+async def test_a_search_whose_evaluations_do_not_fit_the_time_left_after_its_scan_is_run_up_to_the_limit(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A real search claimed 0.3 s per evaluation and planned 20,000 of them; one new design took about 15 s, so the search
     could not have finished a tenth of its budget in the time it shares with its scan. The scan alone fits; the scan and
@@ -965,16 +1002,19 @@ async def test_a_search_whose_evaluations_do_not_fit_the_time_left_after_its_sca
         return run_estimate.Probe(None, None, {}, 15.0), ""
 
     monkeypatch.setattr(run_estimate, "_time_one", fifteen)
-    patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
-    assert patch is not None
-    text = patch["exec_result"]["too_long"]
-    assert "the coarse scan's 3 settings and the search's 20,000 evaluations" in text, text
-    fit = patch["exec_result"]["too_long_fit"]
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    cut = _cut(eng)
+    assert "the coarse scan's 3 settings and the search's 20,000 evaluations" in cut["detail"], cut["detail"]
+    # the baseline and the coarse scan come first, then the search, then FI's check, which keeps the time it needs
+    assert cut["scan"] == 3 and cut["evaluations"] == 20000 and cut["check_runs"] == 10 and cut["order"] == "plan"
+    assert cut["check_reserve_s"] == 1.5 * 10 * 15.0 and runner.check_reserve_s == 1.5 * 10 * 15.0
+    fit = cut["fit"]
     assert fit["search"] is True and fit["settings"] == 20003
     # FI's check of the best design (10 runs, at least 15 s each) takes its share of the time out of the room for settings
     assert fit["settings_that_fit"] == int((3600 - 1.5 * 10 * 15.0) / (1.5 * 15.0))
     block["evaluation_budget"]["per_start"] = 10  # 80 evaluations: 83 x 15 s = 21 min, 31 min with the margin
     assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    assert "truncated" not in run_estimate.read_record(eng.quest_root) and runner.check_reserve_s == 0.0
 
 
 @pytest.mark.asyncio
@@ -1004,8 +1044,8 @@ async def test_a_search_that_asks_for_designs_together_is_counted_at_the_setting
     monkeypatch.setattr(run_estimate, "_time_one", fifteen)
     monkeypatch.setattr(run_estimate, "slowdown_at_once", slower)
     # One after another: 1,003 x 15 s, about 6.3 h with FI's margin, more than the 5 h allowed.
-    alone = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
-    assert alone is not None and "the search's 1,000 evaluations" in alone["exec_result"]["too_long"]
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    assert "the search's 1,000 evaluations" in _cut(eng)["detail"]
     assert slowdowns == []
     # 8 at a time: the simplexes' corners together, the rest one at a time, about 4 h with the margin.
     runner.at_once = 8
@@ -1019,8 +1059,8 @@ async def test_a_search_that_asks_for_designs_together_is_counted_at_the_setting
     assert "(the coarse scan alone: 27 seconds)" in line
     # A library method runs in the quest's own Python one design at a time: counted one after another.
     block["search_method"] = "scipy:minimize"
-    library = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
-    assert library is not None and "the search's 1,000 evaluations" in library["exec_result"]["too_long"]
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    assert "the search's 1,000 evaluations" in _cut(eng)["detail"]
 
 
 def test_the_search_rehearsal_counts_every_evaluation_and_the_designs_asked_together() -> None:
@@ -1137,8 +1177,8 @@ async def test_a_search_speed_up_that_changes_a_number_only_away_from_the_scan_i
     """The scan here computes one design only; a change that keeps its number but alters the ones the search would compute
     elsewhere is caught on the search's own designs, and the plan is then asked to fit, as before."""
     eng, runner, chat = await _slow_search(tmp_path, [_speed_reply(_WASTE, _ONLY_AT_THE_BASE)])
-    patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
-    assert patch is not None and "too_long_fit" in patch["exec_result"]
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    assert "fit" in _cut(eng)
     record = json.loads((eng.quest_root / ".fi" / "improve_speed.json").read_text(encoding="utf-8"))
     assert record["kept"] is False and record["rounds"][0]["outcome"] == "not kept"
     assert "changed" in record["rounds"][0]["reason"]
@@ -1234,14 +1274,13 @@ async def test_alternatives_that_give_the_first_ones_results_are_not_counted_as_
 
 
 @pytest.mark.asyncio
-async def test_alternatives_that_differ_are_each_counted_and_the_stop_says_where_the_count_comes_from(
+async def test_alternatives_that_differ_are_each_counted_and_the_cut_says_where_the_count_comes_from(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     eng, runner = await _alternatives_engine(tmp_path, _READS_THE_SHAPE, monkeypatch)
-    patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
-    assert patch is not None
-    text = patch["exec_result"]["too_long"]
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    text = _cut(eng)["detail"]
     assert "the search's 316 evaluations (3 alternatives the plan compares, each searched with 100 evaluations" in text, text
-    fit = patch["exec_result"]["too_long_fit"]
+    fit = _cut(eng)["fit"]
     assert fit["alternatives"] == 3 and fit["alternatives_searched"] == 3 and fit["per_alternative"] == 100
     assert fit["alternative_conditions"] == ["shape"] and fit["probes"] == 16
     from core.engine import _fit_request

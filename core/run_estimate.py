@@ -504,6 +504,22 @@ def fits(est: Estimate, limit_s: float) -> bool:
     return est.seconds * SAFETY <= limit_s
 
 
+def one_fits(seconds: float | None, limit_s: float) -> bool:
+    """Whether one setting (or one design of a search), at ``seconds`` with FI's margin, fits the time allowed. A study too
+    long to finish is run up to the limit when this holds for the cheapest setting FI timed; when it does not, not even
+    one setting could finish, and the quest stops. ``None`` or zero (nothing was timed) is not a reason to stop."""
+    return not seconds or seconds * SAFETY <= limit_s
+
+
+def cheapest_setting_s(probes: list[Probe] | None) -> float | None:
+    """What the cheapest timed setting takes, with what the first setting pays once added, or ``None`` when none was
+    timed: the least a study's first result costs."""
+    timed = [p for p in probes or [] if p.seconds > 0]
+    if not timed:
+        return None
+    return min(p.seconds for p in timed) + max(p.once_s for p in timed)
+
+
 def known_too_long(est: Estimate, limit_s: float, *, timed_again: bool = False) -> bool:
     """Whether the study cannot fit: the padded total is over the limit, and when it is only a lower bound it is over
     already. A lower bound that is under the limit says nothing. ``timed_again``: the smaller run FI chose (with the

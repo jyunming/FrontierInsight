@@ -608,6 +608,84 @@ def _untested_sentence(notes: list[str]) -> str:
     return text
 
 
+def _setting_counts(quest_root: Path) -> tuple[int, int, int, int] | None:
+    """``(settings planned, settings every trial of which ran, settings some trials of which ran, trials not run because the
+    study's time ran out)`` from FI's trial ledger, or ``None`` when it holds none. A trial that failed for another reason ran."""
+    try:
+        lines = (Path(quest_root) / "raw" / "ledger.jsonl").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    from .trial_runner import OUT_OF_TIME
+
+    planned: dict[str, int] = {}
+    late: dict[str, int] = {}
+    seen: dict[tuple[str, int], bool] = {}
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict) or not isinstance(row.get("cell"), str):
+            continue
+        if row.get("event") == "planned" and (n := _whole(row.get("trials"))) is not None:
+            planned[row["cell"]] = n
+        elif row.get("event") == "trial" and (t := _whole(row.get("trial"))) is not None:
+            seen[(row["cell"], t)] = str(row.get("reason") or "").startswith(OUT_OF_TIME)
+    if not seen:
+        return None
+    for (cell, _t), was_late in seen.items():
+        late[cell] = late.get(cell, 0) + (1 if was_late else 0)
+    cells = set(planned) | {c for c, _t in seen}
+    none_ran = sum(1 for c in cells if late.get(c, 0) and late[c] >= planned.get(c, late[c]))
+    some_late = sum(1 for c in cells if late.get(c, 0))
+    return len(cells), len(cells) - some_late, some_late - none_ran, sum(late.values())
+
+
+def cut_short_text(quest_root: Path) -> str:
+    """What the paper and the quality report must say of a study FI ran only up to the time limit because its own timing
+    said the whole study would not fit (``.fi/run_estimate.json`` ``truncated``, written by the run's sizing): the time it
+    estimated against the time allowed, that the plan's own order was kept, and, from FI's trial ledger and its record of
+    the search, how much of the plan ran and how much did not. ``""`` when the study was not cut. Nothing is asked of a
+    model: every number is FI's own record."""
+    from .run_estimate import plain_duration
+
+    root = Path(quest_root)
+    estimate = _read_json(root / ".fi" / "run_estimate.json")
+    cut = estimate.get("truncated") if isinstance(estimate, dict) else None
+    if not isinstance(cut, dict):
+        return ""
+    est, limit = cut.get("estimate_s"), cut.get("limit_s")
+    if not (isinstance(est, (int, float)) and isinstance(limit, (int, float))):
+        return ""
+    said = (f"FI estimated that the plan's study would take {'at least ' if cut.get('at_least') else 'about '}"
+            f"{plain_duration(float(est))}, more than the {plain_duration(float(limit))} allowed, so it ran the plan's "
+            "settings in the plan's order until the time limit; the results cover only what ran")
+    parts: list[str] = []
+    counts = _setting_counts(root)
+    if counts is not None:
+        total, whole, partly, late = counts
+        none = total - whole - partly
+        what = "scan settings" if cut.get("kind") == "search" else "settings"
+        parts.append(f"of {total:,} {what}, {whole:,} ran all their trials, {partly:,} ran some and {none:,} ran none "
+                     f"({late:,} trial{'' if late == 1 else 's'} {'was' if late == 1 else 'were'} not run)")
+    if cut.get("kind") == "search":
+        best = _read_json(root / "results" / "best_design.json")
+        ev = best.get("evaluations") if isinstance(best, dict) else None
+        if isinstance(ev, dict) and _whole(ev.get("search")) is not None and _whole(ev.get("budget")) is not None:
+            parts.append(f"the search made {ev['search']:,} of the {ev['budget']:,} evaluations the plan allows"
+                         + (", and stopped at the time limit" if ev.get("stopped_because") == "time" else ""))
+        compared = best.get("compared") if isinstance(best, dict) else None
+        levels = [p for p in (compared.get("levels") if isinstance(compared, dict) else None) or []
+                  if isinstance(p, dict) and not p.get("same_as")]
+        if len(levels) > 1 and all(_whole(p.get("evaluations")) is not None and _whole(p.get("budget")) is not None
+                                   for p in levels):
+            whole = sum(1 for p in levels if p["evaluations"] >= p["budget"])
+            none = sum(1 for p in levels if p["evaluations"] == 0)
+            parts.append(f"of the {len(levels):,} alternatives the plan compares, searched with their whole budget: "
+                         f"{whole:,}, searched only in part: {len(levels) - whole - none:,}, not searched: {none:,}")
+    return said + ("; " + "; ".join(parts) if parts else "") + "."
+
+
 def run_record(quest_root: Path, *, topic: str = "", duration_s: float | None = None) -> str:
     """One paragraph (no heading) of what FI recorded about the run, for the quality report and the claim check (the
     paper does not carry it: its facts go into the paper through placeholders FI fills, :mod:`core.paper_facts`): the seeds, the run
@@ -626,6 +704,7 @@ def run_record(quest_root: Path, *, topic: str = "", duration_s: float | None = 
     over = estimate.get("over_topic_limit") if isinstance(estimate, dict) else None
     if isinstance(over, dict) and isinstance(over.get("note"), str) and over["note"].strip():
         parts.append(over["note"].strip())
+    parts.append(cut_short_text(quest_root))
     covered = _read_json(quest_root / ".fi" / "topic_covered.json")
     left = _items(covered.get("left")) if isinstance(covered, dict) else []
     if left:

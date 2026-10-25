@@ -1374,6 +1374,9 @@ class OptimisationRunner:
         #: How many evaluations that do not depend on each other run at the same time (the coarse scan's settings, the
         #: check's designs at each finer level): ``execution.settings_at_once``.
         self.at_once = max(1, int(at_once or 1))
+        #: Seconds of the time limit kept for FI's check of the best design when the study was too long to finish (set by
+        #: the run's sizing, core/run_checks.py): the coarse scan and the search stop that much sooner.
+        self.check_reserve_s = 0.0
         #: Whether a repair of the simulation is left (a bool, or a callable asked at each run): FI's check of the failed
         #: trials (core/trial_checks.py) sends a fault back only while one is.
         self._repairs_left = repairs_left
@@ -1482,8 +1485,9 @@ class OptimisationRunner:
                                     stop_stepped=self._stepped_repair_left(),
                                     stop_unchanged=self._unchanged_repair_left())
 
-        run = await search(timeout_s)
-        run = await self._continue_while_improving(run, search, protocol, started, timeout_s)
+        search_s = max(1, int(timeout_s - self.check_reserve_s))
+        run = await search(search_s)
+        run = await self._continue_while_improving(run, search, protocol, started, search_s)
         self.last = run
         # The coarse scan's settings that changed no result (core/flat_output.py), kept in the search's record so a
         # search used again says it too.

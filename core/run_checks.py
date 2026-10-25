@@ -808,6 +808,11 @@ class RunChecksMixin:
                 self._log.info("[execute] %s (timed before; nothing in the experiment has changed)",  # type: ignore[attr-defined]
                                record.get("says") or "the experiment fits")
                 return None
+            if record.get("key") == key and record.get("truncated"):
+                self._log.info("[execute] %s (timed before; nothing in the experiment has changed)",  # type: ignore[attr-defined]
+                               record.get("says") or "the experiment is run up to the time limit")
+                runner.cost = None  # type: ignore[attr-defined]  # the plan's order
+                return None
             if record.get("key") == key and record.get("stopped"):
                 return self._stop_too_long(str(record["stopped"]), fit=record.get("fit"))
             probes, why = await _estimate.measure(
@@ -922,12 +927,18 @@ class RunChecksMixin:
             if fit is None:
                 text = self._too_long_text(est, hard_s)
                 fits_in = self._what_fits(est, hard_s)
+                if self._run_up_to_the_limit(runner, est, hard_s, _estimate.cheapest_setting_s(probes), kind="grid", base=base,
+                                             detail=text, fit=fits_in):
+                    return None
                 _estimate.write_record(self.quest_root, {**base, "fits": False, "stopped": text, "fit": fits_in})  # type: ignore[attr-defined]
                 return self._stop_too_long(text, fit=fits_in)
             note = self._lower_the_runs(state, runs, fit, est, limit_s, grid, protocol, topic=by_topic, over_topic=over_topic)
             if note is None:
                 text = self._too_long_text(est, hard_s)
                 fits_in = self._what_fits(est, hard_s)
+                if self._run_up_to_the_limit(runner, est, hard_s, _estimate.cheapest_setting_s(probes), kind="grid", base=base,
+                                             detail=text, fit=fits_in):
+                    return None
                 _estimate.write_record(self.quest_root, {**base, "fits": False, "stopped": text, "fit": fits_in})  # type: ignore[attr-defined]
                 return self._stop_too_long(text, fit=fits_in)
             cut_done = True
@@ -1047,6 +1058,7 @@ class RunChecksMixin:
         from . import optimise as _optimise
         from . import optimise_search as _optimise_search
 
+        self._clear_cut(runner)  # what an earlier sizing of this study decided is decided again below
         raw = _optimise.block_of(self._protocol_block(state))  # type: ignore[attr-defined]
         block, _why = _optimisation_plan.normalize(raw) if raw is not None else (None, "")
         if block is None:
@@ -1119,6 +1131,8 @@ class RunChecksMixin:
         searching = 1  # how many of them the run searches
         per_alternative = 0
         probe_n = 0
+        per_eval: float | None = None  # what one new design costs, once timed
+        lower = False
         if not _estimate.known_too_long(est, limit_s):
             # The search shares the scan's time (one deadline for both, core/optimise.py): every evaluation is a design
             # the scan did not compute, so it costs what a setting costs the first time it runs: the search's own
@@ -1133,7 +1147,6 @@ class RunChecksMixin:
             per_alternative = search_n // alternatives if search_n else 0
             probe_n = (alternatives - 1) * _optimise_search.PROBE_DESIGNS if search_n and alternatives > 1 else 0
             per_eval = max(per_setting or 0.0, first_s) or None
-            lower = False
             left = budget_s - (time.monotonic() - timing_started)
             if search_n and left >= 5:
                 baseline = _optimise.complete_case(self._protocol_block(state), {})  # type: ignore[attr-defined]
@@ -1261,7 +1274,6 @@ class RunChecksMixin:
                     f", more than the {_estimate.plain_duration(limit_s)} allowed (one new design takes about "
                     f"{'at least ' if lower else ''}{_estimate.plain_duration(per_eval or 0.0)}); FI does not run a smaller "
                     "study than the plan's")
-        self._log.warning("[execute] the search's coarse scan: %s", text)  # type: ignore[attr-defined]
         # The check's time comes out of the room for settings first: it is not a cost of each setting.
         fits_in = (self._what_fits(core_est, max(1.0, limit_s - check_s * _estimate.SAFETY), search=True)
                    if checked and core_est is not None else self._what_fits(est, limit_s, search=True))
@@ -1281,6 +1293,20 @@ class RunChecksMixin:
                 fits_in["alternative_conditions"] = [str(k) for k in first_level]
                 fits_in["per_alternative"] = per_alternative
                 fits_in["probes"] = probe_n
+        # Not stopped while at least one design fits: the scan runs in the plan's order, then the search, then FI's check (the
+        # time the check needs is kept for it), up to the time limit, and the paper says what ran and what did not.
+        try:
+            planned_search = int(_optimisation_plan.evaluations(block)[0] or 0)
+            planned_check = int(_optimisation_plan.budget(block).get("check") or 0)
+        except (KeyError, TypeError, ValueError):
+            planned_search = planned_check = 0
+        one_s = per_eval or first_s or _estimate.cheapest_setting_s(probes)
+        if self._run_up_to_the_limit(
+                runner, est, limit_s, one_s, kind="search", reserve_s=check_s * _estimate.SAFETY,
+                planned={"scan": scan, "evaluations": planned_search, "check_runs": planned_check}, detail=text,
+                fit=fits_in):
+            return None
+        self._log.warning("[execute] the search's coarse scan: %s", text)  # type: ignore[attr-defined]
         return self._stop_too_long(text, fit=fits_in)
 
     async def _alternatives_that_differ(self, state: Any, block: dict[str, Any], runner: Any, python: Any, env: Any, *,
@@ -1953,6 +1979,46 @@ class RunChecksMixin:
                 json.dumps({k: v for k, v in record.items() if k != "probes"}, indent=1, default=str), encoding="utf-8")
         except OSError:
             pass
+
+    def _clear_cut(self, runner: Any) -> None:
+        """A search is sized again at every run: the cut an earlier sizing recorded (and the time it kept for FI's check) is
+        taken away first, so a study that now fits is never described as cut."""
+        runner.check_reserve_s = 0.0
+        record = _estimate.read_record(self.quest_root)  # type: ignore[attr-defined]
+        if record.pop("truncated", None) is not None:
+            _estimate.write_record(self.quest_root, record)  # type: ignore[attr-defined]
+
+    def _run_up_to_the_limit(self, runner: Any, est: _estimate.Estimate, limit_s: float, one_s: float | None, *, kind: str,
+                             base: dict[str, Any] | None = None, planned: dict[str, Any] | None = None,
+                             reserve_s: float = 0.0, detail: str = "", fit: dict[str, Any] | None = None) -> bool:
+        """A study FI's own timing says does not fit the time allowed is run anyway, in the plan's order, up to the limit,
+        unless not even one setting (or one design) fits: ``True`` to go on. FI does not choose which settings matter, so
+        the grid runs in the plan's order (not costliest first), and a search runs its baseline, its coarse scan, its
+        search and then FI's check, as it always does; the check keeps the time it needs (``reserve_s``, never more than
+        half the limit) so the scan and the search cannot take all of it. The cut is kept in ``.fi/run_estimate.json``
+        (``truncated``); the paper and the quality report say what ran from FI's records (:func:`core.disclosure.cut_short_text`)."""
+        if not _estimate.one_fits(one_s, limit_s):
+            return False
+        reserve = min(max(0.0, reserve_s), limit_s / 2.0)
+        cut = {"kind": kind, "estimate_s": est.seconds * _estimate.SAFETY, "at_least": bool(est.at_least),
+               "limit_s": float(limit_s), "settings": int(est.cells), "one_s": one_s, "order": "plan",
+               "check_reserve_s": round(reserve, 1), **(planned or {}), "detail": detail.split("; FI does not run")[0], **({"fit": fit} if fit else {})}
+        what = "the search for the best design" if kind == "search" else "the experiment"
+        line = (f"FI estimates {what} would take {'at least ' if est.at_least else 'about '}"
+                f"{_estimate.plain_duration(est.seconds * _estimate.SAFETY)}, more than the "
+                f"{_estimate.plain_duration(limit_s)} allowed; it will run the plan's settings in the plan's order until "
+                "the time limit, and the paper will say what was and was not done")
+        self._log.warning("[execute] %s", line)  # type: ignore[attr-defined]
+        print(f"[FI] {line}")
+        if kind == "grid":
+            runner.cost = None
+        else:
+            runner.check_reserve_s = reserve
+        record = {k: v for k, v in (base or {}).items() if k not in ("stopped", "fit")}
+        record.setdefault("limit_s", float(limit_s))
+        record.update(fits=False, truncated=cut, says=line)
+        _estimate.write_record(self.quest_root, record)  # type: ignore[attr-defined]
+        return True
 
     def _stop_too_long(self, text: str, fit: dict[str, Any] | None = None) -> dict[str, Any]:
         """The quest's plain stop: nothing was run for the study, it would not fit, and no paper is written. ``fit``

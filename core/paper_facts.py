@@ -88,6 +88,7 @@ SECOND_VERSION, UNTESTED, CODE_FINDING, FAILED_TRIALS = "second_version", "untes
 SETTING_LEFT_OUT, CALIBRATION, TRIALS_UNCHECKED = "setting_left_out", "calibration", "trials_unchecked"
 UNDEFINED = "undefined"
 FEWER_RUNS = "fewer_runs"
+CUT_SHORT = "cut_short"
 RUN_DIFFERENCE = "run_difference"
 PAGE_LIMIT = "page_limit"
 SHARED_SEEDS = "shared_seeds"
@@ -104,6 +105,8 @@ PAGE_RECORD = Path(".fi") / "page_limit.json"
 RUN_DIFFERENCE_NAME = "difference from the run record"
 #: The name of the item the paper must place when FI ran fewer runs per setting than the plan asked for (to fit a time limit).
 FEWER_RUNS_NAME = "fewer runs than the plan asked for"
+#: The name of the item the paper must place when FI ran the plan's settings only up to the time limit.
+CUT_SHORT_NAME = "study cut at the time limit"
 _KIND_WORDS = {
     NOT_DONE: "a part of the topic the study did not do",
     LEFT_OUT: "a quantity left out of the results because a test showed the code computes it wrongly",
@@ -118,6 +121,7 @@ _KIND_WORDS = {
     TRIALS_UNCHECKED: "trials FI did not run itself, so it did not check them",
     UNDEFINED: "a value of the plan that has no number in some trials of a setting",
     FEWER_RUNS: "a part of the plan not fully done, to fit the time allowed",
+    CUT_SHORT: "a study run only up to the time limit: part of the plan's settings or evaluations did not run",
     RUN_DIFFERENCE: "a difference between what the analysis reports and FI's record of the trials that ran",
     PAGE_LIMIT: "that the paper is longer than the topic's page limit",
     SHARED_SEEDS: "that trial t has the same random seed in every setting, so the settings' results are not independent",
@@ -128,7 +132,7 @@ _ID_PREFIX = {NOT_DONE: "topic", LEFT_OUT: "left-out", NOT_COMPUTED: "not-comput
               SECOND_VERSION: "second-version", UNTESTED: "equation", CODE_FINDING: "finding", FAILED_TRIALS: "failed-trials",
               SETTING_LEFT_OUT: "setting-left-out", CALIBRATION: "calibration", TRIALS_UNCHECKED: "trials-unchecked",
               UNDEFINED: "undefined",
-              FEWER_RUNS: "fewer", RUN_DIFFERENCE: "difference", PAGE_LIMIT: "pages", SHARED_SEEDS: "shared-seeds",
+              FEWER_RUNS: "fewer", CUT_SHORT: "cut-short", RUN_DIFFERENCE: "difference", PAGE_LIMIT: "pages", SHARED_SEEDS: "shared-seeds",
               UNSUPPORTED_CLAIMS: "unsupported", UNRESOLVED_REVIEW: "review"}
 #: More settings left out than this are placed as one item.
 _MAX_SETTING_ITEMS = 6
@@ -408,6 +412,8 @@ def required_items(quest_root: Path | str) -> list[Item]:
     reduced = estimate.get("reduced") if isinstance(estimate, dict) else None
     if isinstance(reduced, dict) and (said := fewer_runs_text(reduced)):
         add(FEWER_RUNS, FEWER_RUNS_NAME, _sentence(f"The experiment ran {said}"), key="runs")
+    if (cut_said := _disclosure.cut_short_text(root)):
+        add(CUT_SHORT, CUT_SHORT_NAME, _sentence(cut_said), key="cut")
     manifest = _read(root, "needs/RUN_MANIFEST_CHECK.json")
     if (isinstance(manifest, dict) and manifest.get("status") in ("warned", "differs_in_replicates")
             and run_difference_text(manifest)):
