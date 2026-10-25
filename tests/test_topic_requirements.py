@@ -767,3 +767,42 @@ def test_the_list_shows_each_item_with_its_id_and_a_map_entry_by_that_id_resolve
     reworded = tr.view({"protocol": {"grid": grid, "topic_map": [{"item": "material of the lid", "by": "setting:lid_material"}]}})
     assert tr.mapped_axis(req, reworded, req["factors"][0]) == ""
     assert "F1" in tr.match(req, reworded)[1], "a reworded name is not a map entry: the factor goes to the reader"
+
+
+def test_an_old_plan_with_no_map_takes_the_widened_values_when_the_answer_maps_the_item_to_that_setting() -> None:
+    req = {"factors": [{"name": "damping of the second stage", "range": [0.1, 0.95], "main": True, "compared": True}]}
+    design = {"protocol": {"grid": {"damping": [0.5, 0.9]}}}
+    gaps, _ = tr.gaps_from(req, tr.view(design), {"F1": "missing"})
+    assert gaps[0]["axis"] == "" and gaps[0]["id"] == "F1"
+    answer = {"protocol": {"grid": {"damping": [0.1, 0.5, 0.95]}, "topic_map": [{"item": "F1", "by": "setting:damping"}]}}
+    merged = tr.merge(design, answer, gaps)
+    assert merged["protocol"]["grid"] == {"damping": [0.1, 0.5, 0.95]}
+    assert merged["protocol"]["topic_map"] == [{"item": "F1", "by": "setting:damping"}]
+    # Known positive: an answer that widens a setting its map does not name for the gap is still not taken.
+    other = {"protocol": {"grid": {"damping": [0.1, 0.5, 0.95]}, "topic_map": [{"item": "F2", "by": "setting:damping"}]}}
+    assert tr.merge(design, other, gaps) is None or tr.merge(design, other, gaps)["protocol"]["grid"] == design["protocol"]["grid"]
+
+
+def _search_design(baseline: float) -> dict[str, Any]:
+    return {"protocol": {"optimisation": {
+        "design_variables": [{"name": "width", "low": 1.0, "high": 4.0}, {"name": "depth", "low": 1.0, "high": 2.0}],
+        "baseline": {"values": {"width": baseline, "depth": 1.5}}, "grid": {"mode": ["a", "b"]}},
+        "topic_map": [{"item": "F1", "by": "design_variable:width"}]}}
+
+
+def test_a_changed_range_of_a_design_variable_a_gap_names_is_taken_and_the_baseline_stays_inside_it() -> None:
+    req = {"factors": [{"name": "channel breadth", "range": [1.0, 8.0], "main": True, "compared": True}]}
+    design = _search_design(2.0)
+    gaps, _ = tr.match(req, tr.view(design))
+    assert [(g["kind"], g["axis"]) for g in gaps] == [("level", "width")]
+    answer = {"protocol": {"optimisation": {"design_variables": [{"name": "width", "low": 1.0, "high": 8.0},
+                                                                  {"name": "depth", "low": 0.1, "high": 9.0}]}}}
+    block = tr.merge(design, answer, gaps)["protocol"]["optimisation"]
+    assert block["design_variables"] == [{"name": "width", "low": 1.0, "high": 8.0}, {"name": "depth", "low": 1.0, "high": 2.0}]
+    assert block["baseline"]["values"] == {"width": 2.0, "depth": 1.5}
+    # A baseline the new range leaves out takes the answer's value if that is inside, else the nearest end.
+    narrowed = {"protocol": {"optimisation": {"design_variables": [{"name": "width", "low": 3.0, "high": 8.0}],
+                                              "baseline": {"values": {"width": 3.5}}}}}
+    assert tr.merge(design, narrowed, gaps)["protocol"]["optimisation"]["baseline"]["values"]["width"] == 3.5
+    clamped = {"protocol": {"optimisation": {"design_variables": [{"name": "width", "low": 3.0, "high": 8.0}]}}}
+    assert tr.merge(design, clamped, gaps)["protocol"]["optimisation"]["baseline"]["values"]["width"] == 3.0

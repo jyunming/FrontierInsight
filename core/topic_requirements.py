@@ -557,7 +557,7 @@ def match(req: dict[str, Any], plan: dict[str, Any]) -> tuple[list[dict[str, Any
         if why is None:
             unresolved.append(_item_id("factors", i))
         elif why:
-            gaps.append(gap("level", factor, why=why, axis=axis))
+            gaps.append(gap("level", factor, why=why, axis=axis, ident=_item_id("factors", i)))
     for i, quantity in enumerate(req.get("quantities") or []):
         wanted = _tokens(quantity["name"])
         if not (wanted and any(wanted <= _tokens(text) for _id, text in plan["metrics"])):
@@ -599,7 +599,7 @@ def item_of(req: dict[str, Any], ident: str) -> tuple[str, dict[str, Any]] | Non
         return None
 
 
-def gap(kind: str, item: dict[str, Any], *, why: str = "", axis: str = "") -> dict[str, Any]:
+def gap(kind: str, item: dict[str, Any], *, why: str = "", axis: str = "", ident: str = "") -> dict[str, Any]:
     """One thing the topic asks for that the plan does not have, with the sentence a person reads."""
     name = item.get("name") or item.get("text") or ""
     stated = " ".join(str(item.get("stated") or "").split())
@@ -623,7 +623,10 @@ def gap(kind: str, item: dict[str, Any], *, why: str = "", axis: str = "") -> di
     else:
         sentence = (f"The topic states the formula `{item.get('text')}`, but the plan's model does not use it and does not "
                     "say why it uses another.")
-    return {"kind": kind, "name": str(name), "main": bool(item.get("main")), "axis": axis, "sentence": sentence}
+    out = {"kind": kind, "name": str(name), "main": bool(item.get("main")), "axis": axis, "sentence": sentence}
+    if ident:
+        out["id"] = ident  # FI's id for the item: an answer's topic map may name the item by it
+    return out
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -689,7 +692,8 @@ def gaps_from(req: dict[str, Any], plan: dict[str, Any], verdicts: dict[str, str
             unjudged.append(str(item.get("name") or item.get("text") or ident))
         elif verdicts[ident] == "missing" or (kind == "searches" and verdicts[ident] != "covered"):
             found_gap = gap({"factors": "factor", "quantities": "quantity", "formulas": "formula",
-                             "searches": "search"}[kind], item, axis=mapped_axis(req, plan, item) if kind == "factors" else "")
+                             "searches": "search"}[kind], item, axis=mapped_axis(req, plan, item) if kind == "factors" else "",
+                             ident=ident)
             named = mapping_of(req, plan, kind, item)
             if named is not None and named[0] == "judge":
                 # The plan's own map names an element for the item and the reading did not accept it: both are said, so the
@@ -926,6 +930,15 @@ def merge(old: dict[str, Any], new: dict[str, Any], gaps: list[dict[str, Any]]) 
     protocol = dict(o)
     taken = False
     named = {g.get("axis") for g in gaps if g.get("axis")}
+    # A setting the answer's own topic map gives for a gap's item is that gap's setting for this merge (a plan with no map
+    # of its own left the gap without one): the answer states which setting stands for the item, FI does not guess it.
+    gap_keys = [({_name_key(g.get("id")), _name_key(g.get("name"))} - {""}) for g in gaps]
+    for entry in n.get("topic_map") if isinstance(n.get("topic_map"), list) else []:
+        if not isinstance(entry, dict) or not any(_name_key(entry.get("item")) in keys for keys in gap_keys):
+            continue
+        head, _sep, mapped = str(entry.get("by") or "").partition(":")
+        if head.strip().lower() in ("setting", "grid", "design_variable", "variable") and mapped.strip():
+            named.add(mapped.strip())
     new_grid = n.get("grid") if isinstance(n.get("grid"), dict) else {}
     search = isinstance(o.get("optimisation"), dict)
     if search:
@@ -1015,6 +1028,37 @@ def merge(old: dict[str, Any], new: dict[str, Any], gaps: list[dict[str, Any]]) 
     if block_old is not None and block_new is not None:
         have_vars = {str(v.get("name")) for v in block_old.get("design_variables") or [] if isinstance(v, dict)}
         extra = [v for v in block_new.get("design_variables") or [] if isinstance(v, dict) and str(v.get("name")) not in have_vars]
+        # A design variable the plan already has, which a gap (or the answer's own map) names: the answer's `values`, `low`
+        # and `high` for it are taken. The baseline design keeps its value when it is still inside the new range; when it
+        # is not, it takes the answer's baseline value for the variable if that is inside, else the nearest end of the range.
+        named_keys = {_name_key(a) for a in named}
+        answered = {_name_key(v.get("name")): v for v in block_new.get("design_variables") or [] if isinstance(v, dict)}
+        moved: dict[str, Any] = {}
+        variables = []
+        for v in block_old.get("design_variables") or []:
+            nv = answered.get(_name_key(v.get("name"))) if isinstance(v, dict) and _name_key(v.get("name")) in named_keys else None
+            update = {k: nv[k] for k in ("values", "low", "high") if nv is not None and k in nv and nv[k] != v.get(k)}
+            if update:
+                v = {**v, **update}
+                moved[str(v.get("name"))] = v
+                taken = True
+            variables.append(v)
+        if moved:
+            base = protocol.get("optimisation", block_old)
+            old_base = base.get("baseline") if isinstance(base.get("baseline"), dict) else {}
+            old_values = old_base.get("values") if isinstance(old_base.get("values"), dict) else {}
+            new_base = block_new.get("baseline") if isinstance(block_new.get("baseline"), dict) else {}
+            new_values = new_base.get("values") if isinstance(new_base.get("values"), dict) else {}
+            fixed_values = dict(old_values)
+            for name, v in moved.items():
+                ends = [x for x in ((v.get("values") if isinstance(v.get("values"), list) else [v.get("low"), v.get("high")])) or []
+                        if isinstance(x, (int, float)) and not isinstance(x, bool)]
+                held = old_values.get(name)
+                if len(ends) >= 2 and isinstance(held, (int, float)) and not isinstance(held, bool)                         and not min(ends) <= held <= max(ends):
+                    offered = new_values.get(name)
+                    fixed_values[name] = offered if isinstance(offered, (int, float)) and min(ends) <= offered <= max(ends)                         else min(max(held, min(ends)), max(ends))
+            protocol["optimisation"] = {**base, "design_variables": variables,
+                                        **({"baseline": {**old_base, "values": fixed_values}} if old_base and fixed_values != old_values else {})}
         if extra:
             merged_block = {**protocol.get("optimisation", block_old),
                             "design_variables": [*(block_old.get("design_variables") or []), *extra]}
