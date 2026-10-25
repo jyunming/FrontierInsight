@@ -26238,7 +26238,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         inside = _in_run.of(self._protocol_block(state))
         block = (_SPLIT_PROTOCOL + (_CLUSTER_PROTOCOL if self.config.execution.background_jobs else "")
                  + (_SEARCH_PROTOCOL if search else "")
-                 + (_IN_EACH_RUN_PROTOCOL.replace("$factors", ", ".join(f"`{k}`" for k in inside)) if inside else ""))
+                 + (_IN_EACH_RUN_PROTOCOL.replace("$factors", ", ".join(f"`{k}`" for k in inside))
+                    .replace("$key_rule", "Key a mapping " + _in_run.key_forms(_in_run.level_cells(inside)) + ".") if inside else ""))
         layout = self._code_layout(state)
         # An extension of code kept as two scripts is not asked to restructure it into a package.
         extending_two_scripts = bool(state.get("refine_extend")) and not self._package_in_use(state)
@@ -27893,7 +27894,7 @@ that list); the function uses every value of it, never a value or a list of its 
 across all the values, a difference between two of them on the same data) is returned as a number. A number it gives FOR
 EACH value is returned as a mapping of each value to its number (`"power": {"bonferroni": 0.41, "bh": 0.52}`), or as a list
 of one number per value in the order the run was given them; every value is there (null where it does not exist, with
-the reason under `"why_missing"`).
+the reason under `"why_missing"`). $key_rule
 In FI_TRIALS each setting is followed by one record per value (its `cell` and `key` name the value too, as in
 `"key": "m=20,procedure=bh"`, with `"level"`): a number per value is in the value's own record and a number per run in the
 setting's own, each once. The analysis reports each from where it is, and never counts a number per run once per value.

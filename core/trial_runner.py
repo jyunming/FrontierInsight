@@ -458,7 +458,7 @@ def record_cells(runs: list[CellRun]) -> list[CellRun]:
                                  for r in run.rows]))
         if not any(_in_run.split(r.get("values"))[1] for r in run.rows if r.get("status") == "ok"):
             continue  # the run returned no number per value: no value has a record (core/in_run.py summary_cells)
-        for level in run.levels:
+        for level in _in_run.record_levels(run.levels, run.rows):
             lk = _in_run.level_key(level)
             out.append(CellRun(key=_in_run.record_key(run.key, lk), cell={**run.cell, **level}, planned=run.planned,
                                returncode=run.returncode, timed_out=run.timed_out, load_error=run.load_error,

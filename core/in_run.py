@@ -121,9 +121,41 @@ def _same_level_value(written, value):
     return _close(written, value)
 
 
+def factors_of(levels):
+    """``[(factor, [its values])]`` of the levels compared inside each run (a :class:`Levels`, or a list of levels as an
+    older record wrote them)."""
+    if isinstance(levels, Levels):
+        return levels.factors
+    out = {}
+    for level in levels or []:
+        for name, value in level.items():
+            seen = out.setdefault(name, [])
+            if not any(x == value for x in seen):
+                seen.append(value)
+    return list(out.items())
+
+
+def sub_levels(levels, axes):
+    """Every combination of the values of just ``axes`` (factor names, any order), written in the factors' order: the
+    values a result that varies over only those factors is given one number for."""
+    chosen = [(name, values) for name, values in factors_of(levels) if name in set(axes)]
+    return [dict(zip([n for n, _v in chosen], combo)) for combo in itertools.product(*[v for _n, v in chosen])] if chosen else []
+
+
+def axes_of_key(key):
+    """The factor names a returned key names (``("pitch", "gap")`` for ``"gap=80,pitch=74"``, in the order it wrote them),
+    or ``None`` when the key is not written ``factor=value[,factor=value]``."""
+    text = str(key).strip()
+    if "=" not in text:
+        return None
+    return tuple(part.partition("=")[0].strip() for part in text.split(",") if "=" in part)
+
+
 def _level_of(key, levels):
-    """The level (a dict of factor -> value from ``levels``) a returned key names, or ``None``. With one factor the key may
-    be the value alone (``"bh"``, ``290.2``, ``"290.2"``); any key may be written ``factor=value[,factor=value]``."""
+    """The level a returned key names, or ``None``: a dict of factor -> value. With one factor the key may be the value
+    alone (``"bh"``, ``290.2``, ``"290.2"``). Any key may be written ``factor=value[,factor=value]``; one that names every
+    factor is a combination of the run, one that names only some (``"pitch=74"``) is a value of just those, for a result that
+    varies over those factors alone (:func:`read_returned`). With several factors a bare value names none of them."""
     text = str(key).strip()
     for level in levels:
         # FI's own key for the level first: a value that is a text with a comma in it ("mirror-symmetric, optimised")
@@ -135,6 +167,15 @@ def _level_of(key, levels):
         for part in text.split(","):
             name, _, raw = part.partition("=")
             pairs[name.strip()] = raw.strip()
+        factors = factors_of(levels)
+        names = [n for n, _v in factors]
+        if not pairs or not set(pairs) <= set(names):
+            return None
+        if len(pairs) < len(names):
+            for level in sub_levels(levels, set(pairs)):
+                if all(_same_level_value(pairs[n], level[n]) for n in level):
+                    return level
+            return None
         for level in levels:
             if set(pairs) == set(level) and all(_same_level_value(pairs[n], level[n]) for n in level):
                 return level
@@ -145,6 +186,20 @@ def _level_of(key, levels):
             if (isinstance(key, str) and _same_level_value(key, only)) or (_number(key) and _close(key, only)):
                 return level
     return None
+
+
+def key_forms(levels):
+    """What a returned key may look like, with the run's own factor names: ``"pitch=74,gap=80"`` for a combination, and,
+    with several factors, ``"pitch=74"`` for a result over one of them alone."""
+    factors = factors_of(levels)
+    if not factors:
+        return ""
+    full = level_key(levels[0])
+    if len(factors) == 1:
+        return "`{}` (or the value alone)".format(full)
+    return ("`{}` for a number per combination of all {} ({}), or, for a number that varies over only some of them, "
+            "those alone (`{}`): a bare value names none of them"
+            .format(full, len(factors), ", ".join(n for n, _v in factors), level_key(sub_levels(levels, [factors[0][0]])[0])))
 
 
 #: The one name a run gives the reasons for results it has no number for (``None``): ``{result: reason}``, a reason in a
@@ -220,8 +275,8 @@ def read_returned(value, levels, entry):
         keys = [level_key(level) for level in levels]
         if isinstance(v, (list, tuple)) and len(levels[0]) > 1:
             return None, ("{}() returned `{}` as a list, and a list is only read when one thing is compared inside the "
-                          "run; with several, return a mapping keyed like {} (one number for each of the {} "
-                          "combinations)".format(entry, name, "`" + keys[0] + "`", len(levels)))
+                          "run; with several, return a mapping keyed {} (one number for each value of the settings it "
+                          "varies over)".format(entry, name, key_forms(levels)))
         if isinstance(v, (list, tuple)) and len(levels[0]) == 1:
             if len(v) != len(levels) or not all(_number(x) for x in v):
                 return None, ("{}() returned `{}` as a list of {} item(s): a value per level of what each run compares "
@@ -231,22 +286,29 @@ def read_returned(value, levels, entry):
             continue
         if isinstance(v, dict):
             got = {}
+            axes = None
             for k, x in v.items():
                 level = _level_of(k, levels)
                 if level is None:
-                    return None, ("{}() returned `{}` with the key {!r}, which is not one of the values the run was given "
-                                  "({})".format(entry, name, k, ", ".join(keys[:6])))
+                    return None, ("{}() returned `{}` with the key {!r}, which is not one of the values the run was given: key it "
+                                  "{}".format(entry, name, k, key_forms(levels)))
                 if not _number(x):
                     return None, "{}() returned `{}` with a non-number for {!r}".format(entry, name, k)
+                if axes is None:
+                    axes = set(level)
+                elif axes != set(level):
+                    return None, ("{}() returned `{}` keyed by {} and by {} in one result: key all of one result over the "
+                                  "same settings".format(entry, name, ", ".join(sorted(axes)), ", ".join(sorted(level))))
                 lk = level_key(level)
                 if lk in got:
                     return None, "{}() returned `{}` with {} given twice".format(entry, name, lk)
                 got[lk] = float(x)
-            missing = [k for k in keys if k not in got]
+            expected = [level_key(lv) for lv in (sub_levels(levels, axes) if axes and len(axes) < len(levels[0]) else levels)]
+            missing = [k for k in expected if k not in got]
             if missing:
                 return None, ("{}() returned `{}` without {}: a value per level must give every value the run was given "
                               "(NaN where it does not exist)".format(entry, name, ", ".join(missing[:6])))
-            out[name] = {k: got[k] for k in keys}
+            out[name] = {k: got[k] for k in expected}
             continue
         bad.append(name)
     if bad:
@@ -274,6 +336,26 @@ def flat(run_key, values):
     out = [(run_key, name, v) for name, v in per_run.items()]
     for lk, named in per_level.items():
         out.extend((record_key(run_key, lk), name, v) for name, v in named.items())
+    return out
+
+
+def record_levels(levels, rows):
+    """The levels that get a record of their own: for each set of factors the run's numbers per value were keyed by (all of
+    them for a number per combination, ``pitch`` alone for a number that varies over just that), every combination of
+    their values, the full set first. ``rows`` are the run's trials (only the ones that ended well count)."""
+    used = []
+    for row in rows:
+        if not (row.get("status") == "ok" if "status" in row else row.get("ok")):
+            continue
+        for lk in split(row.get("values"))[1]:
+            axes = axes_of_key(lk)
+            if axes is not None and set(axes) not in used:
+                used.append(set(axes))
+    names = [n for n, _v in factors_of(levels)]
+    used.sort(key=lambda a: len(a) != len(names))  # stable: the full set first, the others as met
+    out = []
+    for axes in used:
+        out.extend(list(levels) if len(axes) == len(names) else sub_levels(levels, axes))
     return out
 
 
@@ -315,8 +397,9 @@ def summary_cells(run_cell, run_key, planned, rows, levels):
     # claiming the run's trials. The list of values compared goes with them; without them it would be every combination
     # of the lists, written for nothing.
     if levels and any(split(r.get("values"))[1] for r in good):
-        first["compared_in_each_run"] = [level_key(level) for level in levels]
-        for level in levels:
+        recorded = record_levels(levels, rows)
+        first["compared_in_each_run"] = [level_key(level) for level in recorded]
+        for level in recorded:
             lk = level_key(level)
             out.append(dict(head, cell=dict(run_cell, **level), key=record_key(run_key, lk), level=dict(level),
                             metrics=metrics_of(lambda r, lk=lk: split(r.get("values"))[1].get(lk, {}))))
@@ -345,15 +428,21 @@ def levels_named(named, levels):
 
 def for_case(values, levels, named):
     """What a check reads from one run on its case: the numbers per run as they are; each number per value at the value
-    the case names, or, when the case names more than one of the run's values (it names only some of the factors
-    compared inside the run, or none), the list of the number at each of them in the order the run was given them. The
-    case does not pick the value of a factor it leaves out, so the check reads every one."""
+    the case names, or, when the case names more than one value of what that number varies over (it names only some of the
+    factors compared inside the run, or none), the list of the number at each of them in the order the run was given them.
+    The case does not pick the value of a factor it leaves out, so the check reads every one. A number that varies over
+    only some of the factors (keyed ``pitch=74``) is read at the values of those, whatever the case says of the others."""
     matching = levels_named(named, levels) if named else list(levels or [])
-    one = level_key(matching[0]) if (named and len(matching) == 1) else None
     out = {}
     for name, v in (values or {}).items():
         if isinstance(v, dict):
-            out[name] = v.get(one) if one is not None else [v[level_key(lv)] for lv in matching if level_key(lv) in v]
+            axes = axes_of_key(next(iter(v), ""))
+            keys = []
+            for lv in matching:
+                lk = level_key({n: lv[n] for n in lv if axes is None or n in axes})
+                if lk not in keys:
+                    keys.append(lk)
+            out[name] = v.get(keys[0]) if (named and len(keys) == 1) else [v[k] for k in keys if k in v]
         else:
             out[name] = v
     return out
