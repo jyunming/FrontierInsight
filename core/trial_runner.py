@@ -799,7 +799,7 @@ def repair_breaks_contract(old: str, new: str, name: str, *, oracles: list[dict[
             return "it defines no oracle() and some check has no case FI can run"
         if not trial and "FI_ORACLE" not in new:
             return "it does not honour FI_ORACLE"
-    undefined = _called_but_dropped(old, tree)
+    undefined = _called_but_dropped(old, new)
     if undefined:
         return f"it calls {', '.join(undefined)}, which the script had and the reply no longer defines"
     if name == "simulate.py" and (oracles is None or trial):
@@ -811,58 +811,34 @@ def repair_breaks_contract(old: str, new: str, name: str, *, oracles: list[dict[
     return ""
 
 
-def _local_names(fn: ast.AST) -> set[str]:
-    """The names bound inside ONE function's own scope: its parameters, what it assigns, imports, loops over or catches, and
-    the names of the functions and classes it defines (their bodies are other scopes)."""
-    names: set[str] = set()
-    if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-        a = fn.args
-        names.update(x.arg for x in [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg] if x)
-    stack = list(fn.body) if isinstance(getattr(fn, "body", None), list) else [fn.body] if hasattr(fn, "body") else []
-    while stack:
-        node = stack.pop()
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            names.add(node.name)
-            continue
-        if isinstance(node, ast.Lambda):
-            continue
-        if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
-            names.add(node.id)
-        elif isinstance(node, (ast.Import, ast.ImportFrom)):
-            names.update((x.asname or x.name).split(".")[0] for x in node.names)
-        elif isinstance(node, ast.ExceptHandler) and node.name:
-            names.add(node.name)
-        stack.extend(ast.iter_child_nodes(node))
-    return names
+def _called_but_dropped(old: str, new: str) -> list[str]:
+    """The functions the old script defined at its top level that the new text uses where nothing binds the name: not at the
+    module's top level, and not in a scope the use sits in. The scopes are Python's own (``symtable``: nested functions,
+    classes, comprehensions, imports and ``global`` as the interpreter resolves them), not a reading of the text. A helper
+    left out of a reply that was meant to be the whole script."""
+    import symtable
 
-
-def _called_but_dropped(old: str, tree: ast.Module) -> list[str]:
-    """The functions the old script defined at its top level that the new text uses by name where nothing binds that name:
-    not at the module's top level, and not in the scope the use sits in (a nested def or a parameter of ANOTHER function
-    does not count). A helper left out of a reply that was meant to be the whole script."""
     try:
         before = {n.name for n in ast.parse(old or "").body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        module = symtable.symtable(new or "", "<reply>", "exec")
     except (SyntaxError, ValueError):
         return []
-    top = _top_level_names(tree) | {a.asname.split(".")[0] if a.asname else a.name.split(".")[0]
-                                    for n in tree.body if isinstance(n, ast.Import) for a in n.names}
-    dropped = before - top
+    bound = {s.get_name() for s in module.get_symbols() if s.is_assigned() or s.is_imported() or s.is_namespace()}
+    dropped = before - bound
     if not dropped:
         return []
     found: set[str] = set()
 
-    def visit(node: ast.AST, scope: set[str]) -> None:
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-                for deco in getattr(child, "decorator_list", []):
-                    visit(deco, scope)
-                visit(child, scope | _local_names(child))
-            else:
-                if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load) and child.id in dropped and child.id not in scope:
-                    found.add(child.id)
-                visit(child, scope)
+    def walk(table: "symtable.SymbolTable") -> None:
+        for sym in table.get_symbols():
+            name = sym.get_name()
+            if (name in dropped and sym.is_referenced() and not sym.is_free()
+                    and not (sym.is_assigned() or sym.is_imported() or sym.is_namespace() or sym.is_parameter())):
+                found.add(name)
+        for child in table.get_children():
+            walk(child)
 
-    visit(tree, set(top))
+    walk(module)
     return sorted(found)
 
 

@@ -6418,8 +6418,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         protocol = self._protocol_block(state)
         specs, _notes = _function_steps.model_functions(outline, protocol if isinstance(protocol, dict) else None)
         layout = self._code_layout(state) or {}
-        return _code_delta.parts(design, {s.name: _function_steps.function_hash(s, specs, protocol if isinstance(protocol, dict) else None)
-                                          for s in specs}, str(layout.get("package") or ""))
+        hashes = _function_steps.function_hashes(specs, protocol if isinstance(protocol, dict) else None)
+        return _code_delta.parts(design, hashes, str(layout.get("package") or ""))
 
     async def _incremental_scripts(self, state: QuestState, outline: dict[str, Any]) -> dict[str, Any] | None:
         """On a revised plan, the two scripts as they are with ONLY the functions the revision touched replaced

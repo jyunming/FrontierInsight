@@ -82,18 +82,59 @@ def _both(old: str, code: str, functions: str) -> Resolved:
     made = _splice(old, "\n\n\n".join(pieces) + "\n")
     if made.kind != "functions":
         return made
-    taken: set[str] = set()
-    for n in o_tree.body:
-        taken |= _stored(n) if isinstance(n, (ast.Assign, ast.AnnAssign)) else (
-            {n.name} if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) else set())
-    extra = []
+    return _carry_units(old, made, sources)
+
+
+def _unit_key(node: ast.stmt) -> tuple | None:
+    """What a top-level statement is called, so that the same unit of the old file and of the reply can be paired: a class by
+    its name, an assignment by the names it binds, an ``if`` by its test (the ``if __name__`` block). Anything else (a bare
+    call, a loop) has no name: it is added when the file lacks it."""
+    if isinstance(node, ast.ClassDef):
+        return ("class", node.name)
+    if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+        names = _stored(node)
+        return ("assign", tuple(sorted(names))) if names else None
+    if isinstance(node, ast.If):
+        return ("if", ast.dump(node.test))
+    return None
+
+
+def _segment(lines: list[str], node: ast.stmt) -> str:
+    start = min([node.lineno, *[d.lineno for d in getattr(node, "decorator_list", [])]])
+    return "".join(lines[start - 1:node.end_lineno])
+
+
+def _carry_units(old: str, made: Resolved, sources: tuple) -> Resolved:
+    """Every top-level unit of the reply that is not a function or an import and that the file lacks or that the reply
+    changes (a class, a constant, the ``if __name__`` block, a bare statement) is in the result: put in place of the file's
+    own unit of the same name, else added at the end. Decorators go with their class. When two units of the file share one
+    name the reply cannot say which one it means: nothing is made."""
+    current = made.code
     for tree, text in sources:
-        for n in tree.body:
-            if isinstance(n, (ast.Assign, ast.AnnAssign)) and getattr(n, "value", None) is not None:
-                names = _stored(n)
-                if names and not names & taken:
-                    extra.append(ast.get_source_segment(text, n) or "")
-                    taken |= names
-    if extra:
-        made.code = made.code.rstrip("\n") + "\n\n\n" + "\n".join(extra) + "\n"
+        lines = text.splitlines(keepends=True)
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Import, ast.ImportFrom)):
+                continue
+            if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
+                continue  # a docstring or a bare value
+            now = ast.parse(current)
+            if any(ast.dump(n) == ast.dump(node) for n in now.body):
+                continue
+            key = _unit_key(node)
+            same = [n for n in now.body if key is not None and _unit_key(n) == key]
+            body = _segment(lines, node).rstrip("\n") + "\n"
+            if len(same) > 1:
+                return Resolved(why=f"the file has more than one top-level unit like `{key[1]}`; the reply cannot say which it changes")
+            cur = current.splitlines(keepends=True)
+            if same:
+                start = min([same[0].lineno, *[d.lineno for d in getattr(same[0], "decorator_list", [])]])
+                cur[start - 1:same[0].end_lineno] = [body]
+                current = "".join(cur)
+            else:
+                current = current.rstrip("\n") + "\n\n\n" + body
+    try:
+        ast.parse(current)
+    except SyntaxError as e:
+        return Resolved(why=f"the file would not be valid Python after the reply's classes and constants ({e.msg})")
+    made.code = current
     return made

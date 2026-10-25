@@ -101,3 +101,25 @@ def test_a_dropped_helper_is_found_though_another_function_defines_a_name_like_i
     assert "helper" in tr.repair_breaks_contract(old, new, "simulate.py")
     own = "def run_cell(cell, seed):\n    def helper(y):\n        return y\n    return helper(cell)\n"
     assert tr.repair_breaks_contract(old, own, "simulate.py") == "", "a helper bound in its own scope is fine"
+
+
+def test_a_reply_with_functions_and_a_script_keeps_its_classes_constants_and_main_block() -> None:
+    old = "import os\n\nX = 1\n\n\ndef a(p):\n    return 1\n\n\ndef b():\n    return 2\n\n\nif __name__ == '__main__':\n    a(1)\n"
+    code = ("import math\nX = 2\n\n\n@register\nclass Box:\n    size = 3\n\n\ndef b():\n    return math.pi\n\n\n"
+            "if __name__ == '__main__':\n    a(2)\n")
+    made = sr.resolve(old, code, "def b():\n    return math.pi\n")
+    assert made.kind == "functions"
+    assert "@register\nclass Box:\n    size = 3" in made.code, "a class with its decorator"
+    assert "X = 2" in made.code and "X = 1" not in made.code, "an updated constant replaces the old one"
+    assert "a(2)" in made.code and "a(1)" not in made.code and made.code.count("__main__") == 1
+    compile(made.code, "x", "exec")
+
+
+def test_a_dropped_helper_is_judged_by_pythons_own_scopes() -> None:
+    old = "def helper(x):\n    return x\n\n\ndef run_cell(cell, seed):\n    return helper(cell)\n"
+    imported = "from helper_mod import helper\n\n\ndef run_cell(cell, seed):\n    return helper(cell)\n"
+    assert tr.repair_breaks_contract(old, imported, "simulate.py") == "", "a name imported at the top is bound"
+    shadowed = "def run_cell(cell, seed):\n    xs = [helper for helper in cell]\n    return helper(0)\n"
+    assert "helper" in tr.repair_breaks_contract(old, shadowed, "simulate.py"), "a comprehension's variable binds only inside it"
+    in_class = "class K:\n    value = helper(1)\n\n\ndef run_cell(cell, seed):\n    return 0\n"
+    assert "helper" in tr.repair_breaks_contract(old, in_class, "simulate.py")

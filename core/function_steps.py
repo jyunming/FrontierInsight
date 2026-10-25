@@ -356,26 +356,58 @@ def spec_hash(specs: list[Spec], protocol: dict[str, Any] | None) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
-def function_hash(spec: Spec, specs: list[Spec], protocol: dict[str, Any] | None, _seen: tuple[str, ...] = ()) -> str:
-    """What ONE function was written for: its name and parameters, the equation (formula, worked example, source,
-    derivation) or step card it implements, and the hashes of the functions it depends on. Recorded for each function
-    when it is done (``built_from``), so that a plan revised later re-writes only the functions whose own hash differs;
-    a function whose plan did not change, with every repair it received, is kept as it is."""
-    by_name = {s.name: s for s in specs}
-    # A function is also built from the functions it calls: their own hashes (and so, theirs in turn) are part of its hash,
-    # so a dependency whose equation or example changed, with the same parameters, writes its callers again.
+#: The version of what ``built_from`` hashes. A record written by another version is not compared with the hashes of this one
+#: (a hash that differs only because the recipe differs would look like a plan change): every function is written again.
+BUILT_FROM_SCHEMA = 2
+
+
+def _own_hash_body(spec: Spec, protocol: dict[str, Any] | None) -> dict[str, Any]:
     # The parameters, not the text of the signature: an outline written again for a revised plan words the same function
     # a little differently (an annotation, the order of its dependencies), and that is not a change of the function.
-    body: dict[str, Any] = {"n": spec.name, "params": spec.params(), "eq": spec.equation, "kind": spec.kind,
-                            "deps": sorted([d, function_hash(by_name[d], specs, protocol, (*_seen, spec.name)) if d in by_name and d not in _seen
-                                   and d != spec.name else ""] for d in spec.depends_on)}
+    body: dict[str, Any] = {"n": spec.name, "params": spec.params(), "eq": spec.equation, "kind": spec.kind}
     if spec.kind == STEP and spec.card:
         body["card"] = {k: spec.card.get(k) for k in ("id", "name", "does", "inputs", "output", "uses", "source", "example", "relations")}
     else:
         eq = next((e for e in _eqt.eligible(protocol) if _eqt._text(e["id"]) == spec.equation), {})
         body["eq_def"] = {k: eq.get(k) for k in ("id", "formula", "example", "source", "derivation")}
-    blob = json.dumps(body, sort_keys=True, default=str)
-    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+    return body
+
+
+def function_hashes(specs: list[Spec], protocol: dict[str, Any] | None) -> dict[str, str]:
+    """``{function name: what it was written for}``: its name and parameters, the equation (formula, worked example, source,
+    derivation) or step card it implements, and the hashes of the functions it depends on, in turn. Recorded for each
+    function when it is done (``built_from``), so that a plan revised later re-writes only the functions whose own hash
+    differs (a dependency whose equation changed under the same parameters writes its callers again); a function whose plan
+    did not change, with every repair it received, is kept as it is. Each function is hashed once and the walk is
+    iterative, so a deep chain or a diamond of dependencies costs one pass; a dependency cycle is cut at its back edge."""
+    by_name = {s.name: s for s in specs}
+    done: dict[str, str] = {}
+    for root in by_name:
+        if root in done:
+            continue
+        stack: list[tuple[str, int]] = [(root, 0)]
+        on_path = {root}
+        while stack:
+            name, k = stack[-1]
+            deps = [d for d in by_name[name].depends_on if d in by_name]
+            if k < len(deps):
+                stack[-1] = (name, k + 1)
+                d = deps[k]
+                if d not in done and d not in on_path:
+                    stack.append((d, 0))
+                    on_path.add(d)
+                continue
+            body = _own_hash_body(by_name[name], protocol)
+            body["deps"] = sorted([d, done.get(d, "")] for d in by_name[name].depends_on)
+            done[name] = hashlib.sha256(json.dumps(body, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+            stack.pop()
+            on_path.discard(name)
+    return done
+
+
+def function_hash(spec: Spec, specs: list[Spec], protocol: dict[str, Any] | None) -> str:
+    """The hash of one function (:func:`function_hashes`)."""
+    return function_hashes(specs, protocol)[spec.name]
 
 
 # --- the module file --------------------------------------------------------------------------------------------------
@@ -1317,19 +1349,22 @@ class FunctionFiller:
         digest = spec_hash(specs, self.protocol)
         self._by_id = {s.equation: s for s in specs}
         record = load(self.root)
+        hashes = function_hashes(specs, self.protocol)
         if record.get("package") != self.package or record.get("hash") != digest:
-            kept = self._carry_over(record, specs)
+            kept = self._carry_over(record, specs, hashes)
             record = {"calls_total": int(record.get("calls_total") or 0), "package": self.package, "hash": digest,
-                      "functions": kept, "calls": 0, "status": "running"}
+                      "functions": kept, "calls": 0, "status": "running", "built_from_schema": BUILT_FROM_SCHEMA}
         elif record.get("status") == "fell_back":
             return Outcome("skipped", reason=str(record.get("reason") or "an earlier pass of the step fell back"))
         record["functions"] = {s.name: record["functions"].get(s.name) or
                                {"equation": s.equation, "status": PENDING, "attempts": 0} for s in specs}
         for s in specs:
             record["functions"][s.name]["kind"] = s.kind
-            if record["functions"][s.name].get("status") == DONE and not record["functions"][s.name].get("built_from")                     and record.get("hash") == digest:
+            if record["functions"][s.name].get("status") == DONE and not record["functions"][s.name].get("built_from") \
+                    and record.get("hash") == digest:
                 # written for exactly these specs (the whole hash is the same): say so, for the next revision of the plan
-                record["functions"][s.name]["built_from"] = function_hash(s, specs, self.protocol)
+                record["functions"][s.name]["built_from"] = hashes[s.name]
+                record["built_from_schema"] = BUILT_FROM_SCHEMA
         # A step with neither a usable worked example nor a relation to hold is not tested by anything but the static look;
         # said here so that the checks that come after can pick it up.
         record["untested_by_example"] = [s.equation for s in specs if s.kind == STEP and s.card
@@ -1378,7 +1413,7 @@ class FunctionFiller:
                                      spec.name, spec.equation, self.repairs, (problem.splitlines() or [""])[0][:120],
                                      exception_line(problem, 200))
                     continue
-                entry.update(status=DONE, error="", built_from=function_hash(spec, specs, self.protocol))
+                entry.update(status=DONE, error="", built_from=function_hashes(specs, self.protocol)[spec.name])
                 save(self.root, record)
                 self.log.info("[implement] function %s passes its checks%s", spec.name,
                               "" if spec.equation not in (record.get("untested") or {}) else
@@ -1392,21 +1427,21 @@ class FunctionFiller:
             await self._repair_module(specs, record)
         return self._finish(specs, record)
 
-    def _carry_over(self, prior: dict[str, Any], specs: list[Spec]) -> dict[str, Any]:
+    def _carry_over(self, prior: dict[str, Any], specs: list[Spec], hashes: dict[str, str]) -> dict[str, Any]:
         """The plan changed since the functions were written: the entries of the functions whose own hash is the same (and
         that are done, and have code on disk), kept as they are with every repair they received. The rest are written again.
         Nothing is kept, and the log says why, when the record does not say what the functions were built from."""
         old = prior.get("functions") if prior.get("package") == self.package and isinstance(prior.get("functions"), dict) else {}
         if not old or not self.model_path.is_file():
             return {}
-        if not any(isinstance(e, dict) and e.get("built_from") for e in old.values()):
-            self.log.info("[implement] the plan changed and the record does not say what each function was built from: "
-                          "every function is written again")
+        if prior.get("built_from_schema") != BUILT_FROM_SCHEMA:
+            self.log.info("[implement] the plan changed and the record of the functions was written by another version of FI "
+                          "(or does not say what each function was built from): every function is written again")
             return {}
         kept: dict[str, Any] = {}
         for s in specs:
             e = old.get(s.name)
-            if isinstance(e, dict) and e.get("status") == DONE and e.get("built_from") == function_hash(s, specs, self.protocol):
+            if isinstance(e, dict) and e.get("status") == DONE and e.get("built_from") == hashes[s.name]:
                 kept[s.name] = e
         again = [s.name for s in specs if s.name not in kept]
         self.log.info("[implement] the plan changed: %d of %d function(s) are as they were built and are kept (%s); %d "

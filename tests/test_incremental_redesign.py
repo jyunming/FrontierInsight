@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
+import logging
 from pathlib import Path
 
 import pytest
@@ -150,3 +151,46 @@ async def test_the_scripts_record_the_functions_hashes_not_their_signatures(tmp_
     monkeypatch.setattr(engine, "_protocol_block", lambda s: revised)
     second = engine._scripts_built_from(state, OUTLINE)
     assert first["functions"] != second["functions"] and first["package"] == second["package"] != ""
+
+
+def test_the_hashes_of_a_deep_chain_and_a_wide_diamond_cost_one_pass() -> None:
+    import time
+
+    def spec(name: str, deps: list[str]) -> fs.Spec:
+        return fs.Spec(name=name, signature=f"def {name}(x):", purpose=name, equation="E1", depends_on=deps)
+
+    diamond = [spec("f0", [])]
+    for level in range(1, 31):  # each level calls both functions of the level below: 2**30 paths
+        diamond += [spec(f"a{level}", [diamond[-1].name]), spec(f"b{level}", [diamond[-1].name])]
+        diamond.append(spec(f"f{level}", [f"a{level}", f"b{level}"]))
+    chain = [spec("c0", [])] + [spec(f"c{i}", [f"c{i - 1}"]) for i in range(1, 1500)]
+    cycle = [spec("p", ["q"]), spec("q", ["p"])]
+    started = time.time()
+    for specs in (diamond, chain, cycle):
+        got = fs.function_hashes(specs, PROTOCOL)
+        assert len(got) == len(specs)
+    assert time.time() - started < 5
+
+
+def test_a_record_of_another_version_writes_every_function_again_and_says_so(tmp_path: Path, caplog) -> None:
+    asyncio.run(_filler(tmp_path, _model(), PROTOCOL).run_all(_specs()))
+    record = fs.load(tmp_path)
+    assert record["built_from_schema"] == fs.BUILT_FROM_SCHEMA
+    record.pop("built_from_schema")  # a record from before the version was written
+    fs.save(tmp_path, record)
+    revised = copy.deepcopy(PROTOCOL)
+    revised["model"]["equations"][2]["formula"] = "x(t) = x0 * exp(-g * t) + b"
+    specs, _ = fs.model_functions(OUTLINE, revised)
+    again = _model()
+    with caplog.at_level(logging.INFO):
+        asyncio.run(_filler(tmp_path, again, revised).run_all(specs))
+    assert sorted(again.count) == ["decay", "frequency", "quality"]
+    assert "another version of FI" in caplog.text
+    cd.save(tmp_path, {"p": "1"})
+    path = tmp_path / cd.RECORD
+    import json
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data.pop("schema")
+    path.write_text(json.dumps(data), encoding="utf-8")
+    delta = cd.compare(tmp_path, {"p": "1"})
+    assert not delta.known and "another version" in delta.reason

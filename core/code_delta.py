@@ -22,6 +22,8 @@ from pathlib import Path
 from typing import Any
 
 RECORD = Path(".fi") / "code_built_from.json"
+#: The version of what the record holds; a record of another version says nothing (the scripts are written whole).
+SCHEMA = 2
 #: Parts of the protocol the scripts do not read: the model (its functions have a record of their own), and what only the
 #: writer reads (the simplifications, the topic map, the definitions and the criteria). The checks (``oracles``) ARE read:
 #: the simulation answers each check with an ``oracle()`` or a case FI runs, and a check that needs a new output needs
@@ -65,7 +67,7 @@ def save(quest_root: Path, now: dict[str, str], *, package: str = "") -> None:
     path = Path(quest_root) / RECORD
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"package": package, "parts": now}, indent=1, ensure_ascii=False) + "\n",
+        path.write_text(json.dumps({"schema": SCHEMA, "package": package, "parts": now}, indent=1, ensure_ascii=False) + "\n",
                         encoding="utf-8")
     except OSError:
         pass
@@ -84,6 +86,8 @@ class Delta:
 
 def compare(quest_root: Path, now: dict[str, str]) -> Delta:
     record = load(quest_root)
+    if record and record.get("schema") != SCHEMA:
+        return Delta(False, reason="the record of what the scripts were built from was written by another version of FI")
     before = record.get("parts") if isinstance(record.get("parts"), dict) else None
     if not before:
         return Delta(False, reason="there is no record of what the scripts were built from")
