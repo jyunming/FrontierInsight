@@ -148,7 +148,8 @@ def axes_of_key(key):
     text = str(key).strip()
     if "=" not in text:
         return None
-    return tuple(part.partition("=")[0].strip() for part in text.split(",") if "=" in part)
+    names = tuple(part.partition("=")[0].strip() for part in text.split(",") if "=" in part)
+    return names if len(set(names)) == len(names) else None  # one factor named twice is not a level
 
 
 def _level_of(key, levels):
@@ -166,6 +167,8 @@ def _level_of(key, levels):
     if "=" in text:
         for part in text.split(","):
             name, _, raw = part.partition("=")
+            if name.strip() in pairs:
+                return None  # one factor named twice ("pitch=0,pitch=74") is not a level; never keep just one of them
             pairs[name.strip()] = raw.strip()
         factors = factors_of(levels)
         names = [n for n, _v in factors]

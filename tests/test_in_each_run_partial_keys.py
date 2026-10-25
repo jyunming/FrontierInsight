@@ -102,3 +102,10 @@ def test_a_case_run_for_a_search_gets_the_values_and_its_per_setting_result_is_r
     old = asyncio.run(trial_runner.run_case(ex, sys.executable, root, "code/simulate.py", cell=case, timeout_s=60,
                                             in_each_run=in_run.of(SEARCH_PROTOCOL)))
     assert old[0] is None   # what the checks passed before: no list, so the run could not be read
+
+
+def test_a_key_naming_one_setting_twice_is_not_a_level() -> None:
+    assert in_run._level_of("width=0,width=74", LEVELS) is None
+    assert in_run.axes_of_key("width=0,width=74") is None
+    got, why = in_run.read_returned({"spread": {"width=0,width=74": 1.0, "width=80": 2.0, "width=90": 3.0}}, LEVELS, "run_cell")
+    assert got is None and "not one of the values" in why
