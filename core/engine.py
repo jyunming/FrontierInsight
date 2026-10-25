@@ -19399,6 +19399,19 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 return spent
 
         patch_summary = parsed.get("patch_summary") or "(no summary)"
+        # The repaired script must keep what FI calls it by (a stand-in word parses as Python and defines nothing): a
+        # reply that does not is refused with the script kept, and the reason goes back with the next try (the history).
+        script_name = (_trial_runner.SUBMIT_NAME if repair_submit
+                       else _split_run.SIMULATE_NAME if repair_simulation else "experiment.py")
+        broken = _trial_runner.repair_breaks_contract(script_code, new_code, script_name)
+        if broken:
+            self._log.warning("[execute_reflect] the repair of %s is not used: %s; keeping it as written", script_name, broken)
+            history.append({
+                "iter": iters + 1, "returncode": rc, "stderr_tail": exec_result.get("stderr_tail", "")[-400:],
+                "patch_summary": (f"[the repair was not used and {script_name} is as it was: {broken}. Give the whole "
+                                  f"corrected {script_name}, with every function it has now.] " + patch_summary)[:400],
+            })
+            return {**spent, "exec_reflect_iter": iters + bump, "exec_reflect_history": history}
         if refused:
             patch_summary = ("[the package change was not used: " + "; ".join(refused) + "] " + patch_summary)
         history.append({

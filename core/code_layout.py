@@ -445,7 +445,7 @@ def repair_note(package: str, sources: dict[str, str]) -> str:
         f"\nTHE MODEL'S PACKAGE: simulate.py computes with the package code/{package}/, which holds the model's equations. "
         "Its files are below. If the fault is in an equation, fix it there: add to your JSON "
         f"`\"package_files\": {{\"{package}/{MODEL_NAME}\": \"<the whole corrected file>\"}}` beside `code` (the whole "
-        "of simulate.py; when only the package needed a fix, give simulate.py back unchanged). Keep the equations in the "
+        "of simulate.py; when only the package needed a fix, leave `code` empty and simulate.py is kept as it is; never put a stand-in word in `code`). Keep the equations in the "
         "package (do not copy them into simulate.py) and keep every equation label (`# E1`). Leave `package_files` out "
         "when the package is right.\n\n"
         + sources_block(sources) + "\n"

@@ -766,6 +766,29 @@ def collect_cluster(quest_root: Path, record: dict[str, Any], *, run_id: str = "
                                  "on the cluster says why)")
 
 
+def repair_breaks_contract(old: str, new: str, name: str) -> str:
+    """Why a repaired script ``new`` cannot replace ``old`` (``name`` is the file), or ``""`` when it can. Read, not run.
+
+    The contract comes from FI's own records of the file it replaces, not from a list of names: the new text must parse,
+    must define each entry point FI calls that the old one defines (:data:`_ENTRY_RE`: ``run_trial`` / ``run_cell`` of
+    simulate.py), and an analysis that printed ``RESULT_JSON`` must still print it. A reply that is a stand-in for the
+    script (a bare word such as a placeholder parses as Python and defines nothing) is refused here.
+    """
+    try:
+        tree = ast.parse(new or "")
+    except (SyntaxError, ValueError) as exc:
+        return f"it is not Python that parses ({type(exc).__name__})"
+    if not any(not (isinstance(n, ast.Expr) and isinstance(n.value, (ast.Name, ast.Constant))) for n in tree.body):
+        return "it holds no code (only a name or a value), so it is not the whole of the script"
+    if name == "simulate.py":
+        lost = sorted((set(_ENTRY_RE.findall(old or "")) & {"run_trial", "run_cell"}) - set(_ENTRY_RE.findall(new)))
+        if lost:
+            return f"it does not define {', '.join(lost)}, which FI calls and the script has now"
+    elif "RESULT_JSON" in (old or "") and "RESULT_JSON" not in new:
+        return "it no longer prints the RESULT_JSON line the script printed"
+    return ""
+
+
 _READS_CELL = re.compile(r"\bcell\s*\[")
 _ENTRY_RE = re.compile(r"^def\s+(run_trial|run_cell|oracle)\s*\(", re.MULTILINE)
 
