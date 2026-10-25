@@ -7130,11 +7130,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         hash; a plan written anew (a revised plan, another round, another model) is asked afresh."""
         try:
             record = json.loads((self.fi_dir / _LEDGER_ASKED).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            if (isinstance(record, dict) and record.get("model") == self._plan_model_name()
+                    and int(record.get("iteration") or 0) == iteration and isinstance(record.get("seen"), dict)):
+                return {str(k): str(v) for k, v in record["seen"].items()}
+        except (OSError, ValueError, TypeError):  # an "iteration" that is not a number: the record is unreadable
             return {}
-        if (isinstance(record, dict) and record.get("model") == self._plan_model_name()
-                and int(record.get("iteration") or 0) == iteration and isinstance(record.get("seen"), dict)):
-            return {str(k): str(v) for k, v in record["seen"].items()}
         return {}
 
     def _ledger_seen_write(self, iteration: int, seen: dict[str, str]) -> None:

@@ -379,6 +379,17 @@ async def test_ledger_parts_are_asked_afresh_for_a_new_plan_or_round_and_not_for
     assert len(model.asked) == 3, "another design round is asked afresh"
 
 
+def test_a_ledger_record_whose_iteration_is_not_a_number_is_unreadable_and_does_not_crash(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    eng.fi_dir.mkdir(parents=True, exist_ok=True)
+    record = {"iteration": "x", "model": eng._plan_model_name(), "seen": {"base_temperature": "abc"}}
+    (eng.fi_dir / engine_mod._LEDGER_ASKED).write_text(json.dumps(record), encoding="utf-8")
+    assert eng._ledger_seen(0) == {}, "a record that cannot be read is treated as no record"
+    record["iteration"] = 0
+    (eng.fi_dir / engine_mod._LEDGER_ASKED).write_text(json.dumps(record), encoding="utf-8")
+    assert eng._ledger_seen(0) == {"base_temperature": "abc"}, "a valid record is still read as before"
+
+
 def test_the_plan_step_rerun_clears_the_ledger_and_the_parts_records() -> None:
     from core import rerun_from
     for name in (".fi/protocol_part_asked.json", ".fi/ledger.json", ".fi/ledger_asked.json"):
