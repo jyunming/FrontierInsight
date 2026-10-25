@@ -29,6 +29,8 @@ from .agent_coder import AgentCoder, AgentResult, TreeSnapshot, is_scratch, pars
 
 _FRAME = re.compile(r'File "([^"]+)", line (\d+)(?:, in (\S+))?')
 _NEEDS = re.compile(r"(?im)^\s*NEEDS:\s*(.+)$")
+ATTR = "<attributes>"  # the unit of a class for what is in its body outside its methods
+_SKIP_DIRS = {"__pycache__", ".venv", ".git", "node_modules"}
 
 
 @dataclass
@@ -64,14 +66,15 @@ class Violations:
 
 
 def _units(tree: ast.Module) -> dict[str, ast.stmt]:
-    """Every top-level function (``name``), every top-level class (``Class``, present or not) and every method
-    (``Class.method``)."""
+    """Every top-level function (``name``), every top-level class (``Class``, present or not), every method
+    (``Class.method``) and, for each class, what its body holds outside its methods (``Class.<attributes>``)."""
     out: dict[str, ast.stmt] = {}
     for n in tree.body:
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
             out[n.name] = n
         elif isinstance(n, ast.ClassDef):
             out[n.name] = n
+            out[f"{n.name}.{ATTR}"] = n
             for m in n.body:
                 if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     out[f"{n.name}.{m.name}"] = m
@@ -90,6 +93,21 @@ def _is_class(node: ast.stmt) -> bool:
     return isinstance(node, ast.ClassDef)
 
 
+def _is_marker(name: str, node: ast.stmt) -> bool:
+    """A class as a whole (only whether it is there is compared)."""
+    return _is_class(node) and not name.endswith("." + ATTR)
+
+
+def _class_stmts(node: ast.ClassDef) -> list[ast.stmt]:
+    return [x for x in node.body if not isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef))]
+
+
+def _text_of(lines: list[str], name: str, node: ast.stmt) -> str:
+    if name.endswith("." + ATTR):
+        return "".join(_segment(lines, x) for x in _class_stmts(node))  # type: ignore[arg-type]
+    return _segment(lines, node)
+
+
 def _rel_in_code(path: str, quest_root: Path) -> str:
     """The path of a traceback frame relative to this quest's ``code/`` folder; ``""`` for any other file (a library, a
     folder that merely has a ``code`` part in its name)."""
@@ -105,21 +123,26 @@ def _rel_in_code(path: str, quest_root: Path) -> str:
         return ""
 
 
-def _called_names(node: ast.AST) -> set[str]:
-    out: set[str] = set()
-    for sub in ast.walk(node):
-        if isinstance(sub, ast.Call):
-            f = sub.func
+def _call_kinds(node: ast.AST) -> tuple[set[str], set[str]]:
+    """The names ``node`` calls bare (``f(...)``, a function of a module) and through ``self``/``cls`` (``self.f(...)``, a
+    method of its own class). Any other attribute call (``obj.f(...)``, ``module.f(...)``) is not followed."""
+    bare: set[str] = set()
+    own: set[str] = set()
+    for sub_ in ast.walk(node):
+        if isinstance(sub_, ast.Call):
+            f = sub_.func
             if isinstance(f, ast.Name):
-                out.add(f.id)
-            elif isinstance(f, ast.Attribute):
-                out.add(f.attr)
-    return out
+                bare.add(f.id)
+            elif isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.value.id in ("self", "cls"):
+                own.add(f.attr)
+    return bare, own
 
 
 def _callees(code: Path, rel: str, unit: str, node: ast.stmt) -> dict[str, set[str]]:
-    """The functions and methods of the study's code (its tests and FI's skill copies left out) that ``node`` calls by name."""
-    wanted = _called_names(node)
+    """The functions and methods of the study's code (its tests and FI's skill copies left out) that ``node`` calls: bare
+    calls resolve to functions of a module, ``self.x()`` to the method ``x`` of the same class."""
+    bare, own = _call_kinds(node)
+    owner = unit.split(".", 1)[0] if "." in unit else ""
     out: dict[str, set[str]] = {}
     for path in sorted(code.rglob("*.py")):
         other = path.relative_to(code)
@@ -132,7 +155,9 @@ def _callees(code: Path, rel: str, unit: str, node: ast.stmt) -> dict[str, set[s
         for name, n in units.items():
             if _is_class(n) or (other.as_posix() == rel and name == unit):
                 continue
-            if name.rsplit(".", 1)[-1] in wanted:
+            if "." not in name and name in bare:
+                out.setdefault(other.as_posix(), set()).add(name)
+            elif owner and other.as_posix() == rel and name.startswith(owner + ".") and name.split(".", 1)[1] in own:
                 out.setdefault(other.as_posix(), set()).add(name)
     return out
 
@@ -155,7 +180,8 @@ def scope_from_traceback(text: str, quest_root: Path) -> RepairScope | None:
         units = _units(ast.parse((code / rel).read_text(encoding="utf-8")))
     except (OSError, SyntaxError, ValueError):
         return RepairScope({rel: None})
-    inside = [(n, node) for n, node in units.items() if _start(node) <= line <= (node.end_lineno or line)]
+    inside = [(n, node) for n, node in units.items()
+              if not n.endswith("." + ATTR) and _start(node) <= line <= (node.end_lineno or line)]
     methods = [(n, node) for n, node in inside if "." in n]
     pick = methods[0] if methods else next(((n, node) for n, node in inside if not _is_class(node)), None)
     if pick is None:
@@ -177,6 +203,8 @@ def scope_from_traceback(text: str, quest_root: Path) -> RepairScope | None:
 def _allowed(name: str, allowed: set[str]) -> bool:
     """Whether the scope (or what the agent claims as needed) lets the round change ``name``; a class (present or not) is
     allowed when one of its methods is."""
+    if name.endswith("." + ATTR):
+        return name.split(".", 1)[0] in allowed  # the class body is changed only when the class is claimed as needed
     return (name in allowed or name.rsplit(".", 1)[-1] in allowed
             or any(a.startswith(name + ".") for a in allowed))
 
@@ -197,14 +225,15 @@ def _claimed(name: str, claimed: set[str]) -> bool:
     return any(c == name or c == bare or c == name.split(".", 1)[0] or c.endswith("/" + name) for c in claimed)
 
 
-def find_violations(scope: RepairScope, snap: TreeSnapshot, code_dir: Path, claimed: set[str]) -> Violations:
+def find_violations(scope: RepairScope, snap: TreeSnapshot, code_dir: Path, claimed: set[str],
+                    originals: dict[str, bytes]) -> Violations:
     """What the round changed outside ``scope`` (and not claimed as needed): existing ``.py`` files and, in a scope file,
     existing functions and methods. Files and functions the round added are not limited."""
     out = Violations()
     for rel in snap.changed(code_dir):
-        if is_scratch(rel) or not rel.endswith(".py") or rel not in snap.files:
+        if is_scratch(rel) or not rel.endswith(".py") or rel not in originals:
             continue
-        old_bytes = snap.files[rel][1]
+        old_bytes = originals[rel]
         if old_bytes is None or _claimed(rel, claimed) or (rel in scope.files and scope.files[rel] is None):
             continue
         path = code_dir / rel
@@ -222,20 +251,21 @@ def find_violations(scope: RepairScope, snap: TreeSnapshot, code_dir: Path, clai
 
 
 def _differing_units(old: str, new: str, allowed: set[str]) -> list[str]:
-    """The units of ``old`` outside ``allowed`` that are gone from ``new`` or differ in it (a class: only if it is gone)."""
+    """The units of ``old`` outside ``allowed`` that are gone from ``new`` or differ in it (a class as a whole: only if it
+    is gone; what its body holds outside its methods is a unit of its own)."""
     try:
         old_units, new_units = _units(ast.parse(old)), _units(ast.parse(new))
     except (SyntaxError, ValueError):
         return []
     old_lines, new_lines = old.splitlines(keepends=True), new.splitlines(keepends=True)
-    gone_classes = {n for n, node in old_units.items() if _is_class(node) and n not in new_units}
+    gone_classes = {n for n, node in old_units.items() if _is_marker(n, node) and n not in new_units}
     out = []
     for n, node in old_units.items():
         if _allowed(n, allowed) or n.split(".", 1)[0] in gone_classes and "." in n:
             continue
         if n not in new_units:
             out.append(n)
-        elif not _is_class(node) and _segment(new_lines, new_units[n]) != _segment(old_lines, node):
+        elif not _is_marker(n, node) and _text_of(new_lines, n, new_units[n]) != _text_of(old_lines, n, node):
             out.append(n)
     return out
 
@@ -247,6 +277,20 @@ def _put_back_units(old: str, new: str, names: list[str]) -> str:
     old_units = _units(old_tree)
     old_lines = old.splitlines(keepends=True)
     text = new
+    # 0. what a class body holds outside its methods: statement for statement (the same number of them, else it cannot be done)
+    for n in [n for n in names if n.endswith("." + ATTR)]:
+        cls = n.split(".", 1)[0]
+        cur = _units(ast.parse(text))
+        if cls not in cur:
+            raise ValueError(f"class {cls} is gone")
+        old_stmts, new_stmts = _class_stmts(old_units[cls]), _class_stmts(cur[cls])  # type: ignore[arg-type]
+        if len(old_stmts) != len(new_stmts):
+            raise ValueError(f"the body of class {cls} has other statements now")
+        cur_lines = text.splitlines(keepends=True)
+        for o, c in reversed(list(zip(old_stmts, new_stmts))):
+            cur_lines[_start(c) - 1: c.end_lineno] = [_segment(old_lines, o)]
+        text = "".join(cur_lines)
+    names = [n for n in names if not n.endswith("." + ATTR)]
     # 1. the ones that are there, bottom up so earlier line numbers stay right
     new_units = _units(ast.parse(text))
     lines = text.splitlines(keepends=True)
@@ -265,6 +309,7 @@ def _insert_unit(text: str, old_units: dict[str, ast.stmt], old_lines: list[str]
     cur = _units(ast.parse(text))
     owner = name.split(".", 1)[0] if "." in name else ""
     siblings = [n for n in old_units if (n.split(".", 1)[0] == owner and "." in n)] if owner else         [n for n in old_units if "." not in n]
+    siblings = [n for n in siblings if not n.endswith("." + ATTR)]
     siblings.sort(key=lambda n: _start(old_units[n]))
     body = _segment(old_lines, old_units[name])
     lines = text.splitlines(keepends=True)
@@ -299,30 +344,31 @@ def _compile_problems(code_dir: Path, rels: list[str]) -> list[str]:
     return bad
 
 
-def put_back(v: Violations, snap: TreeSnapshot, code_dir: Path) -> tuple[list[str], bool]:
-    """Put back what ``v`` names; ``(one plain sentence for each thing put back, whether it was kept)``. When a file the
-    put-back touched no longer compiles, the whole put-back is undone and nothing is said to be put back."""
+def put_back(v: Violations, originals: dict[str, bytes], code_dir: Path) -> tuple[list[str], bool]:
+    """Put back what ``v`` names; ``(one plain sentence for each thing put back, whether it was done)``. When a file the
+    put-back touched no longer compiles, or something could not be put back, the whole put-back is undone and nothing is
+    said to be put back."""
     touched = [*v.files, *v.units]
     before: dict[str, bytes | None] = {rel: (code_dir / rel).read_bytes() if (code_dir / rel).is_file() else None
                                        for rel in touched}
     said: list[str] = []
+    stuck = False
     for rel in v.files:
-        data = snap.files[rel][1]
-        if data is not None:
-            (code_dir / rel).parent.mkdir(parents=True, exist_ok=True)
-            (code_dir / rel).write_bytes(data)
-            said.append(f"{rel} was changed outside the failing part; FI put it back")
+        (code_dir / rel).parent.mkdir(parents=True, exist_ok=True)
+        (code_dir / rel).write_bytes(originals[rel])
+        said.append(f"{rel} was changed outside the failing part; FI put it back")
     for rel, names in v.units.items():
-        old = (snap.files[rel][1] or b"").decode("utf-8", "replace")
+        old = originals[rel].decode("utf-8", "replace")
         new = (code_dir / rel).read_bytes().decode("utf-8", "replace")
         try:
             fixed = _put_back_units(old, new, names)
         except (SyntaxError, ValueError):
+            stuck = True
             continue
         (code_dir / rel).write_bytes(fixed.encode("utf-8"))
         said.append(f"{', '.join(names)} in {rel} {'was' if len(names) == 1 else 'were'} changed outside the failing part; "
                     "FI put " + ("it" if len(names) == 1 else "them") + " back")
-    if _compile_problems(code_dir, touched):
+    if stuck or _compile_problems(code_dir, touched):
         for rel, data in before.items():
             if data is None:
                 (code_dir / rel).unlink(missing_ok=True)
@@ -330,6 +376,35 @@ def put_back(v: Violations, snap: TreeSnapshot, code_dir: Path) -> tuple[list[st
                 (code_dir / rel).write_bytes(data)
         return [], False
     return said, True
+
+
+def _originals(code_dir: Path) -> dict[str, bytes]:
+    """A full copy of every ``.py`` file of ``code/`` (the snapshot's size limit does not apply to it)."""
+    out: dict[str, bytes] = {}
+    for path in code_dir.rglob("*.py"):
+        rel = path.relative_to(code_dir)
+        if any(part in _SKIP_DIRS for part in rel.parts) or is_scratch(rel.as_posix()):
+            continue
+        try:
+            out[rel.as_posix()] = path.read_bytes()
+        except OSError:
+            continue
+    return out
+
+
+def _undo(snap: TreeSnapshot, originals: dict[str, bytes], code_dir: Path) -> list[str]:
+    """The snapshot put back; a ``.py`` file too large for it comes from ``originals``. What still could not be put back."""
+    lost = snap.restore(code_dir)
+    left = []
+    for rel in lost:
+        if rel in originals:
+            try:
+                (code_dir / rel).write_bytes(originals[rel])
+                continue
+            except OSError:
+                pass
+        left.append(rel)
+    return left
 
 
 # -- the round -----------------------------------------------------------------------------------------------------------------
@@ -347,24 +422,26 @@ async def scoped_continue(coder: AgentCoder, feedback: str, scope: RepairScope |
             log.log(level, "[repair] " + text, *args)
 
     snap = await asyncio.to_thread(TreeSnapshot.take, code_dir)
+    originals = await asyncio.to_thread(_originals, code_dir)
     result = await coder.continue_(feedback + scope.describe())
     changed = [c for c in await asyncio.to_thread(snap.changed, code_dir) if not is_scratch(c)]
     bad = await asyncio.to_thread(parse_failures, code_dir, changed)
     if bad:
-        await asyncio.to_thread(snap.restore, code_dir)
-        say(logging.WARNING, "the coding agent's round left %s as invalid Python, so FI undid the whole round",
-            ", ".join(bad[:3]))
-        return dataclasses.replace(result, ok=False, error=f"{', '.join(bad[:3])} is not valid Python")
+        lost = await asyncio.to_thread(_undo, snap, originals, code_dir)
+        say(logging.WARNING, "the coding agent's round left %s as invalid Python, so FI undid the whole round%s",
+            ", ".join(bad[:3]), f" (it could not put back {', '.join(lost[:3])})" if lost else "")
+        return dataclasses.replace(result, ok=False, error=f"{', '.join(bad[:3])} is not valid Python"
+                                   + (f"; {', '.join(lost[:3])} could not be put back" if lost else ""))
     claimed, why = _parse_needs(result.message)
     if claimed:
         say(logging.INFO, "the coding agent says the fix needs %s (%s)", ", ".join(sorted(claimed)), why)
-    v = await asyncio.to_thread(find_violations, scope, snap, code_dir, claimed)
+    v = await asyncio.to_thread(find_violations, scope, snap, code_dir, claimed, originals)
     if not v:
         return result
-    said, kept = await asyncio.to_thread(put_back, v, snap, code_dir)
+    said, kept = await asyncio.to_thread(put_back, v, originals, code_dir)
     if not kept:
-        say(logging.WARNING, "the coding agent's round changed %s outside the failing part; putting that back would leave "
-            "the code not compiling, so FI kept it", ", ".join(v.names()))
+        say(logging.WARNING, "the coding agent's round changed %s outside the failing part; FI could not put that back "
+            "cleanly (it would not compile, or it is not a change it can undo), so FI kept it", ", ".join(v.names()))
         return result
     for line in said:
         say(logging.WARNING, "the coding agent's round went beyond the failing code: %s", line)
@@ -374,27 +451,35 @@ async def scoped_continue(coder: AgentCoder, feedback: str, scope: RepairScope |
              "make them again and end your last message with a line `NEEDS: <names> - <why>`; if it does not, there is "
              "nothing more to do.")
     mid = await asyncio.to_thread(TreeSnapshot.take, code_dir)
+    mid_originals = await asyncio.to_thread(_originals, code_dir)
     second = await coder.continue_(again)
+
+    async def undo_second(why: str) -> AgentResult | None:
+        lost = await asyncio.to_thread(_undo, mid, mid_originals, code_dir)
+        if lost:
+            say(logging.WARNING, "FI could not put back %s after the second round", ", ".join(lost[:3]))
+            return dataclasses.replace(result, ok=False, error=f"{', '.join(lost[:3])} could not be put back")
+        say(logging.INFO, "%s", why)
+        return None
+
     if second.exhausted or not second.ok:
-        say(logging.INFO, "the coding agent was not asked again (%s); the put-back stands",
-            "the rounds allowed are used" if second.exhausted else "its round did not finish")
-        await asyncio.to_thread(mid.restore, code_dir)
-        return result
+        failed = await undo_second("the coding agent was not asked again (" + (
+            "the rounds allowed are used" if second.exhausted else "its round did not finish") + "); the put-back stands")
+        return failed or result
     changed = [c for c in await asyncio.to_thread(mid.changed, code_dir) if not is_scratch(c)]
     bad = await asyncio.to_thread(parse_failures, code_dir, changed)
     if bad:
-        await asyncio.to_thread(mid.restore, code_dir)
-        say(logging.WARNING, "the coding agent's second round left %s as invalid Python; FI undid it", ", ".join(bad[:3]))
-        return result
+        failed = await undo_second(f"the coding agent's second round left {', '.join(bad[:3])} as invalid Python; FI undid it")
+        return failed or result
     claimed2, why2 = _parse_needs(second.message)
     claimed |= claimed2
     if claimed2:
         say(logging.INFO, "the coding agent says the fix needs %s (%s)", ", ".join(sorted(claimed2)), why2)
-    v2 = await asyncio.to_thread(find_violations, scope, snap, code_dir, claimed)
+    v2 = await asyncio.to_thread(find_violations, scope, snap, code_dir, claimed, originals)
     if v2:
-        said2, kept2 = await asyncio.to_thread(put_back, v2, snap, code_dir)
+        said2, kept2 = await asyncio.to_thread(put_back, v2, originals, code_dir)
         for line in said2:
             say(logging.WARNING, "the coding agent's round went beyond the failing code: %s", line)
         if not kept2:
-            say(logging.WARNING, "putting back %s would leave the code not compiling, so FI kept it", ", ".join(v2.names()))
+            say(logging.WARNING, "FI could not put back %s cleanly, so it kept it", ", ".join(v2.names()))
     return second

@@ -164,14 +164,11 @@ def test_an_edit_outside_the_scope_the_agent_says_the_fix_needs_is_kept(tmp_path
 
 
 def test_a_put_back_that_would_not_compile_is_undone(tmp_path: Path) -> None:
-    from core.agent_coder import TreeSnapshot
-
     code = tmp_path / "code"
     code.mkdir()
     (code / "m.py").write_text("def f(:\n", encoding="utf-8")  # the snapshot's own text does not compile
-    snap = TreeSnapshot.take(code)
     (code / "m.py").write_text("def f():\n    return 1\n", encoding="utf-8")
-    said, kept = agent_scope.put_back(agent_scope.Violations(files=["m.py"]), snap, code)
+    said, kept = agent_scope.put_back(agent_scope.Violations(files=["m.py"]), {"m.py": b"def f(:\n"}, code)
     assert kept is False and said == [] and (code / "m.py").read_text(encoding="utf-8") == "def f():\n    return 1\n"
 
 
@@ -205,8 +202,9 @@ def test_a_round_that_leaves_invalid_python_is_a_failed_round_and_the_code_is_as
     def edit(code: Path) -> None:
         (code / "experiment.py").write_text("def heat(x:\n    return 1\n", encoding="utf-8")
     eng, agent = _agent_with([_first, edit], [], tmp_path, monkeypatch)
-    _reflect(eng)
+    patch = _reflect(eng)
     assert _text(eng) == CODE and len(agent.prompts) == 2, "the whole round is undone, no widened scope"
+    assert "exec_give_up_reason" in patch and not patch.get("exec_patch_pending"), "the round is not recorded as a fix"
 
 
 # --- the module repair asks for the failing functions only ---------------------------------------------------------------
@@ -233,3 +231,64 @@ async def test_a_passing_function_in_the_module_reply_is_ignored(tmp_path: Path)
     outcome = await _filler(tmp_path, model).run_all(_specs())
     text = (tmp_path / "code" / "spring" / "model.py").read_text(encoding="utf-8")
     assert outcome.status == "done" and "return math.sqrt(k / m)" in text and "math.sqrt(m / k)" not in text
+
+
+# --- the second review ---------------------------------------------------------------------------------------------------------
+
+
+def test_a_file_over_the_snapshot_size_limit_that_the_agent_breaks_is_still_put_back(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr("core.agent_coder._KEEP_BYTES", 10)  # every file is "too large" for the snapshot to hold
+
+    def edit(code: Path) -> None:
+        (code / "experiment.py").write_text("def heat(x:\n    return 1\n", encoding="utf-8")
+    eng, agent = _agent_with([_first, edit], [], tmp_path, monkeypatch)
+    patch = _reflect(eng)
+    assert _text(eng) == CODE and "exec_give_up_reason" in patch
+
+
+def test_an_out_of_scope_edit_to_a_file_over_the_snapshot_limit_is_put_back(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr("core.agent_coder._KEEP_BYTES", 10)
+
+    def edit(code: Path) -> None:
+        text = (code / "experiment.py").read_text(encoding="utf-8")
+        (code / "experiment.py").write_text(text.replace("x / 0", "x / 1").replace("x * 2", "x * 5"), encoding="utf-8")
+        (code / "utils.py").write_text("def tidy(x):\n    return None\n", encoding="utf-8")
+    eng, _agent = _agent_with([_first, edit], [], tmp_path, monkeypatch)
+    _reflect(eng)
+    assert "x * 2" in _text(eng) and _text(eng, "utils.py") == UTILS and "x / 1" in _text(eng)
+
+
+ATTRS = (
+    "class Model:\n    SCALE = 2\n    NAME = 'm'\n\n    def run(self):\n        return 1 / 0\n\n\n"
+    "def main():\n    return Model().run()\n"
+)
+
+
+def test_a_class_attribute_changed_outside_the_failing_method_is_put_back(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    def edit(code: Path) -> None:
+        text = (code / "experiment.py").read_text(encoding="utf-8")
+        (code / "experiment.py").write_text(text.replace("1 / 0", "1 / 1").replace("SCALE = 2", "SCALE = 9"), encoding="utf-8")
+    agent = _Agent([_write_code(ATTRS), edit])
+    eng = _engine(tmp_path, agent=agent)
+    _first_write(eng, agent)
+    monkeypatch.setattr("core.agent_build._frozen.load", lambda _root: None)
+    path = eng.quest_root / "code" / "experiment.py"
+    failed = {"returncode": 1, "stdout_tail": "", "stderr_tail": f'File "{path}", line 6, in run\nZeroDivisionError'}
+    asyncio.run(eng._reflect_by_agent({"exec_reflect_history": []}, 0, 1, "1", "", failed, {}))
+    text = path.read_text(encoding="utf-8")
+    assert "1 / 1" in text and "SCALE = 2" in text and "SCALE = 9" not in text
+
+
+def test_the_scope_follows_bare_calls_and_self_calls_but_not_other_attribute_calls(tmp_path: Path) -> None:
+    src = (
+        "def helper(x):\n    return x\n\n\n"
+        "class A:\n    def step(self):\n        return 1\n\n    def run(self):\n        helper(1)\n"
+        "        self.step()\n        other.step()\n        return 1 / 0\n\n\n"
+        "class B:\n    def step(self):\n        return 2\n\n    def helper(self):\n        return 3\n"
+    )
+    (tmp_path / "code").mkdir()
+    (tmp_path / "code" / "experiment.py").write_text(src, encoding="utf-8")
+    path = tmp_path / "code" / "experiment.py"
+    scope = agent_scope.scope_from_traceback(f'File "{path}", line 13, in run', tmp_path)
+    assert scope is not None and scope.files == {"experiment.py": {"A.run", "A.step", "helper"}}, (
+        "B.step is another class's method and B.helper is a method, not the module function the bare call means")

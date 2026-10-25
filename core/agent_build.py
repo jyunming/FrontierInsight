@@ -579,6 +579,11 @@ class AgentBuildMixin:
             why = "the coding agent's rounds are used; the run's failure stands"
             self._log.warning("[execute_reflect] %s", why)  # type: ignore[attr-defined]
             return {**spent, "exec_give_up_reason": why}
+        if not result.ok:  # the round did not finish, or FI undid it (invalid Python, a file it could not put back)
+            why = (f"the coding agent's round did not give usable code ({(result.error or 'no message').strip()[:150]}); "
+                   "the run's failure stands")
+            self._log.warning("[execute_reflect] %s", why)  # type: ignore[attr-defined]
+            return {**spent, "exec_give_up_reason": why}
         note_judgement(self.quest_root, claimed=result.message, found=[feedback.splitlines()[0]], passed=False,  # type: ignore[attr-defined]
                        after_freeze=frozen)
         history = list(state.get("exec_reflect_history") or [])
