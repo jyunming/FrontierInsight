@@ -65,11 +65,33 @@ def test_a_part_that_is_not_a_part_of_a_design_is_refused() -> None:
     assert {r["key"] for r in refused} == {"banana", "protocol.two words"}
 
 
-def test_the_notes_name_parts_by_the_designs_own_part_names() -> None:
-    assert dp.allowed_for_notes(["The grid has a single point and the seeds are shared"]) == [
-        "protocol.grid", "protocol.seed_policy"]
-    assert dp.allowed_for_notes(["it is not convincing"]) == []
-    assert dp.allowed_for_notes([], ["circular_evaluation"]) == ["method"]
+def test_cited_paths_are_checked_against_the_real_design_in_full() -> None:
+    got = dp.cited_parts(["protocol.grid.strength", "method", "protocol", "protocol.orracles", "nothing", 3], DESIGN)
+    assert got == ["protocol.grid", "method"]  # `protocol` alone and unknown names are dropped; a deeper path is its listed part
+
+
+def test_a_protocol_pointer_names_only_that_sub_part() -> None:
+    assert dp.names("protocol.grid", "protocol.grid") and dp.names("protocol.grid.strength", "protocol.grid")
+    assert not dp.names("protocol", "protocol.runs_per_setting")
+    assert not dp.names("protocol.grid", "protocol.runs_per_setting")
+    assert dp.names("method", "method")
+
+
+def test_a_misspelt_protocol_part_is_refused_with_the_reason() -> None:
+    got, applied, refused = dp.merge_parts(DESIGN, {"protocol": {"orracles": [1]}}, None)
+    assert got == DESIGN and applied == []
+    assert refused[0]["key"] == "protocol.orracles" and "misspelt" in refused[0]["reason"]
+    assert dp.invalid_reason("protocol.grid.x", DESIGN) == ""  # a setting under a part that exists is fine
+    assert dp.invalid_reason("method.x", DESIGN)
+
+
+def test_a_part_that_is_needed_beyond_the_asked_ones_is_accepted_with_its_reason() -> None:
+    reply = {"protocol": {"runs_per_setting": 900, "seed_policy": "x"},
+             "needs": [{"path": "protocol.seed_policy", "why": "more runs need more streams"},
+                       {"path": "method", "why": ""}]}
+    got, applied, refused = dp.merge_parts(DESIGN, reply, ["protocol.runs_per_setting"])
+    assert got["protocol"]["seed_policy"] == "x" and got["method"] == DESIGN["method"]
+    assert applied == ["protocol.runs_per_setting", "protocol.seed_policy"] and refused == []
 
 
 # ---- the audit ------------------------------------------------------------------------------------------------------
@@ -118,6 +140,22 @@ async def test_a_change_to_a_path_that_is_not_a_part_of_a_design_is_refused(tmp_
     assert "secret_part" not in design and design["method"] == "better"
 
 
+@pytest.mark.asyncio
+async def test_an_objection_pointing_at_protocol_alone_names_no_protocol_part(tmp_path: Path) -> None:
+    whole = {**DESIGN, "protocol": {**DESIGN["protocol"], "runs_per_setting": 5}}
+    obj = [{"check": "precision", "where": "protocol", "objection": "o", "why": "w", "fix": "f", "severity": "low"}]
+    design, _ = await _audit(tmp_path, {"objections_addressed": obj, "amended_design": whole})
+    assert design["protocol"]["runs_per_setting"] == 100
+
+
+@pytest.mark.asyncio
+async def test_a_change_to_a_misspelt_protocol_part_is_refused(tmp_path: Path) -> None:
+    obj = [{"check": "oracle", "where": "protocol.oracles", "objection": "o", "why": "w", "fix": "f", "severity": "low",
+            "changes": [{"path": "protocol.orracles", "value": [1]}]}]
+    design, _ = await _audit(tmp_path, {"objections_addressed": obj, "checked_no_problem": []})
+    assert design == DESIGN
+
+
 def test_the_audit_prompt_no_longer_asks_for_a_whole_design() -> None:
     text = (Path(__file__).resolve().parent.parent / "agents" / "design_self_critique.md").read_text(encoding="utf-8")
     assert "amended_design" not in text and '"changes"' in text
@@ -147,21 +185,51 @@ async def test_a_precision_redesign_changes_only_the_sizing_parts_and_shows_the_
 
 
 @pytest.mark.asyncio
-async def test_a_review_that_names_a_part_allows_that_part_only(tmp_path: Path) -> None:
+async def test_a_precision_redesign_is_not_widened_by_what_a_person_said(tmp_path: Path) -> None:
+    state = {**PRECISION_STATE, "feedback_history": [{"iteration": 0, "text": "change the method"}],
+             "review": {"verdict": "revise", "design_parts": ["method"]}}
+    eng = _engine(tmp_path, [])
+    assert await eng._redesign_scope(state) == dp.allowed_for_precision()
+    assert eng._client.chat.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_a_review_that_cites_a_part_allows_that_part_only_and_asks_no_mapping(tmp_path: Path) -> None:
     state = {"topic": "t", "iteration": 1, "design": DESIGN,
-             "review": {"verdict": "revise", "weaknesses": ["the comparator is not tuned"], "suggestions": [], "blocking": ""}}
+             "review": {"verdict": "revise", "weaknesses": ["w"], "design_parts": ["method", "protocol.nonsense"]}}
     eng = _engine(tmp_path, [json.dumps({"method": "tuned", "expected_outcome": "changed"})])
     got = await eng._redesign_by_parts(state)
     assert got is not None and got["method"] == "tuned"
     assert got["expected_outcome"] == DESIGN["expected_outcome"]
+    assert eng._client.chat.call_count == 1  # the parts request only
 
 
 @pytest.mark.asyncio
-async def test_a_redesign_whose_notes_name_no_part_asks_for_the_whole_design(tmp_path: Path) -> None:
+async def test_a_persons_note_with_no_path_is_mapped_by_the_model_once(tmp_path: Path) -> None:
+    state = {"topic": "t", "iteration": 1, "design": DESIGN,
+             "feedback_history": [{"iteration": 0, "text": "use more repeats and a wider spread of strengths"}]}
+    eng = _engine(tmp_path, [json.dumps({"parts": ["protocol.runs_per_setting", "protocol.grid", "not.a.part"]}),
+                             json.dumps({"protocol": {"runs_per_setting": 400}, "method": "other"})])
+    got = await eng._redesign_by_parts(state)
+    assert got is not None and got["protocol"]["runs_per_setting"] == 400 and got["method"] == DESIGN["method"]
+    sent = _sent(eng)
+    assert len(sent) == 2 and "- `protocol.runs_per_setting`" in sent[0] and "more repeats" in sent[0]
+    assert "`protocol.grid`" in sent[1] and "- `method`" not in sent[1]
+
+
+@pytest.mark.asyncio
+async def test_a_note_that_maps_to_no_part_asks_for_the_whole_design(tmp_path: Path) -> None:
     state = {"topic": "t", "iteration": 1, "design": DESIGN, "review": {"verdict": "revise", "weaknesses": ["unconvincing"]}}
-    eng = _engine(tmp_path, [])
+    eng = _engine(tmp_path, [json.dumps({"parts": []})])
     assert await eng._redesign_by_parts(state) is None
-    assert eng._client.chat.call_count == 0
+    assert eng._client.chat.call_count == 1  # the mapping only
+
+
+def test_the_review_prompt_asks_for_the_parts_it_is_about() -> None:
+    from core.engine import _design_parts_listing
+    assert "`protocol.runs_per_setting`" in _design_parts_listing(DESIGN) and "`method`" in _design_parts_listing(DESIGN)
+    text = (Path(__file__).resolve().parent.parent / "agents" / "review.md").read_text(encoding="utf-8")
+    assert '"design_parts"' in text
 
 
 @pytest.mark.asyncio

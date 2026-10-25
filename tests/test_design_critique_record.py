@@ -25,7 +25,7 @@ DRAFT = {
     "dependencies": ["numpy"],
     "protocol": {"runs_per_setting": 300},
 }
-OBJECTION = {"check": "precision", "where": "method and protocol.runs_per_setting", "objection": "300 runs give about +-0.057", "fix": "raised the runs to 1000"}
+OBJECTION = {"check": "precision", "where": "method, protocol.runs_per_setting, protocol.optimisation", "objection": "300 runs give about +-0.057", "fix": "raised the runs to 1000"}
 
 
 def _engine(tmp_path: Path, replies: list[str]) -> Engine:

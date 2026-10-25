@@ -5048,26 +5048,53 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             ).strip()
         return review_feedback
 
-    def _redesign_scope(self, state: QuestState) -> list[str] | None:
-        """The design parts a redesign may change, from FI's own record of why the design is asked for again, or ``None``
-        when no part is named (the whole design is then asked for, as before). A missed precision target allows the parts
-        that size the study (trials per setting, the grid); a review's or a person's notes allow the parts they name, by the
-        design's own part names (:func:`core.design_parts.allowed_for_notes`)."""
-        precision = state.get("cross_check_route") == "redesign"
-        notes: list[Any] = [h.get("text") for h in state.get("feedback_history") or []
-                            if isinstance(h, dict) and not h.get("answered_by")]
-        hf = state.get("human_feedback") or {}
-        if not notes and isinstance(hf, dict) and hf.get("action") == "refine" and hf.get("feedback"):
-            notes.append(hf["feedback"])
-        notes += [str(p) for p in state.get("refine_needs_experiment") or []]
-        flags: list[str] = []
+    async def _redesign_scope(self, state: QuestState) -> list[str] | None:
+        """The design parts a redesign may change, or ``None`` when no part is named (the whole design is then asked for
+        again, as before). A missed precision target allows ONLY the parts that size the study, whatever else was said.
+        Otherwise the parts the notes cite: a review cites the paths of the design it is about (``design_parts``, checked
+        against the real design); a note with no path (a person's words, or a review that cited none) is mapped to the
+        design's listed paths by the model, once (:meth:`_map_notes_to_parts`). No word of a note is matched by FI."""
+        if state.get("cross_check_route") == "redesign":
+            return _design_parts.allowed_for_precision()
+        previous = state.get("design") if isinstance(state.get("design"), dict) else {}
         review = state.get("review") or {}
-        if not precision and isinstance(review, dict):
-            notes += [review.get(k) for k in ("weaknesses", "suggestions", "blocking", "why")]
-            flags = [str(f) for f in review.get("must_flag_hits") or []]
-        parts = list(_design_parts.allowed_for_precision()) if precision else []
-        parts += [p for p in _design_parts.allowed_for_notes(notes, flags) if p not in parts]
+        parts: list[str] = []
+        loose: list[str] = []  # notes that cite no path
+        if isinstance(review, dict):
+            cited = _design_parts.cited_parts(review.get("design_parts"), previous)
+            parts += cited
+            if not cited:
+                loose += [str(t) for k in ("blocking", "why") for t in [review.get(k)] if t]
+                loose += [str(t) for k in ("weaknesses", "suggestions") for t in (review.get(k) or []) if t]
+        history = [h.get("text") for h in state.get("feedback_history") or [] if isinstance(h, dict) and not h.get("answered_by")]
+        hf = state.get("human_feedback") or {}
+        if not history and isinstance(hf, dict) and hf.get("action") == "refine" and hf.get("feedback"):
+            history.append(hf["feedback"])
+        loose += [str(t) for t in history if t] + [str(p) for p in state.get("refine_needs_experiment") or []]
+        if loose:
+            parts += [p for p in await self._map_notes_to_parts(loose, previous) if p not in parts]
         return parts or None
+
+    async def _map_notes_to_parts(self, notes: list[str], design: dict[str, Any]) -> list[str]:
+        """The listed design paths the model says the notes are about (one call, structured JSON, checked against the real
+        design). A failed call, an unreadable answer or an empty one maps to nothing."""
+        listed = _design_parts.part_paths(design)
+        if not listed or not notes:
+            return []
+        prompt = self._prompts["design_parts_map"].substitute(
+            notes="\n".join(f"- {n}" for n in notes), paths="\n".join(f"- `{p}`" for p in listed))
+        try:
+            text, obj = await self._chat_json(prompt, node="design", want=("parts",),
+                                              usable=lambda p: isinstance(p.get("parts"), list))
+        except Exception as e:  # noqa: BLE001 -- nothing mapped: the whole design is asked for, as before
+            if _is_fatal_provider_error(e):
+                raise
+            self._log.warning("[design] the notes could not be mapped to parts of the design (%r)", e)
+            return []
+        self._keep_plan_answer(text)
+        mapped = _design_parts.cited_parts(obj.get("parts") if isinstance(obj, dict) else None, design)
+        self._log.info("[design] the notes were mapped to: %s", ", ".join(f"`{m}`" for m in mapped) or "(no part of the design)")
+        return mapped
 
     async def _redesign_by_parts(self, state: QuestState) -> dict[str, Any] | None:
         """A redesign (the design step run again after a review, a person's note or a missed precision target) that shows
@@ -5078,7 +5105,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if (state.get("iteration", 0) <= 0 or not isinstance(previous, dict) or not previous or self._client is None
                 or state.get("survey_mode_resolved")):
             return None
-        allowed = self._redesign_scope(state)
+        allowed = await self._redesign_scope(state)
         if allowed is None:
             self._log.info("[design] no note names a part of the design, so the whole design is asked for again")
             return None
@@ -5092,6 +5119,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         text, obj = await self._chat_json(prompt, node="design", want=(), usable=lambda p: bool(p))
         self._keep_plan_answer(text)
         design, applied, refused = _design_parts.merge_parts(previous, obj or {}, allowed)
+        for n in _design_parts.accepted_needs(previous, obj or {}, allowed):
+            self._log.info("[design] the redesign also needed `%s`: %s", n["path"], _one_line(n["why"], 200))
         for r in refused:
             self._log.warning("[design] the redesign's change to `%s` was not made: %s", r["key"], r["reason"])
         if not applied:
@@ -24278,7 +24307,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         base_prompt = self._prompts["review"].substitute(
             topic=state["topic"],
             clarify_block=_format_clarify(state),
-            design_block=json.dumps(state.get("design") or {}, indent=2),
+            design_block=json.dumps(state.get("design") or {}, indent=2) + _design_parts_listing(state.get("design")),
             analysis_block=json.dumps(state.get("analysis") or {}, indent=2),
             claim_grounding_block=_format_claim_grounding(state),
             figure_check_block=_format_figure_check(paper_md, state),
@@ -27121,10 +27150,19 @@ def _aggregate_cost_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _design_parts_listing(design: Any) -> str:
+    """The design's own part paths, listed from the design object, for a reviewer to cite (``design_parts``)."""
+    if not isinstance(design, dict) or not design:
+        return ""
+    return ("\n\nThe parts of the design, as paths (cite these in `design_parts`): "
+            + ", ".join(f"`{p}`" for p in _design_parts.part_paths(design)))
+
+
 def _load_prompts() -> dict[str, string.Template]:
     names = (
         "clarify", "ideate", "ideate_reflect", "ideate_tournament",
         "design", "design_self_critique",   # second-pass methodology audit
+        "design_parts_map",                 # a note with no path: which listed parts of the design it is about
         "design_parts",                     # a redesign: ONLY the parts the reason concerns, the rest carried over
         "plan_revise",                      # --revise-plan: rewrite plan.md as the person asked
         "plan_parts",                       # FI asks for ONLY the missing parts of the plan, as JSON (never the whole file)

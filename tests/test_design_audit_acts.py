@@ -194,7 +194,7 @@ async def test_the_audit_may_change_the_method_but_never_the_checks_the_results_
         **design["protocol"], "thresholds": {"max_error": 0.5}, "acceptance": ["anything"],
         "oracles": [{**check, "tolerance": 0.5}]}}
     eng._client.chat.side_effect = [
-        json.dumps({"objections_addressed": [{**OBJECTION, "where": "method and the protocol"}], "amended_design": loosened}),
+        json.dumps({"objections_addressed": [{**OBJECTION, "where": "method, protocol.thresholds, protocol.acceptance, protocol.oracles"}], "amended_design": loosened}),
         json.dumps({"objections_addressed": [], "amended_design": loosened})]
     runs = await eng._audit_the_design_that_runs({"topic": "t", "iteration": 0}, design)
     assert "interpolated" in runs["method"]

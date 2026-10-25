@@ -8,8 +8,8 @@ pattern the plan already uses (``core/plan.py``, ``agents/plan_parts.md``):
 * :func:`apply_changes` applies a list of ``(path, value)`` and refuses a path that is not a part of a design;
 * :func:`changed_parts` lists the parts one design changed against another (to hold a whole-object reply to the parts a
   reason named);
-* :func:`allowed_for_precision` / :func:`allowed_for_notes` say which parts a redesign may change, from FI's own record
-  (the route) or from the design's own part names in the notes;
+* :func:`allowed_for_precision` / :func:`cited_parts` say which parts a redesign may change: the route (FI's own record), or the
+  paths a reviewer cited, checked against the real design (no word of a note is matched);
 * :func:`merge_parts` merges a reply of parts into the previous design and returns what it refused.
 
 Nothing here calls a model.
@@ -20,6 +20,8 @@ import copy
 import re
 from typing import Any
 
+from .plan import PROTOCOL_PARTS
+
 #: The top-level keys of a design a change may name. ``rationale`` is the model's own account and is never a part.
 DESIGN_KEYS = (
     "hypothesis", "study_type", "variables", "method", "expected_outcome", "figures_planned", "dependencies", "protocol",
@@ -28,48 +30,45 @@ DESIGN_KEYS = (
 #: The protocol parts that size the study (how many trials per setting, how dense the grid, how it is divided).
 SIZING_PARTS = ("protocol.runs_per_setting", "protocol.min_runs_per_setting", "protocol.grid", "protocol.sub_studies")
 
-#: Words a note uses for a part, besides the part's own name. The design's own vocabulary and plain statistics words,
-#: never a topic's.
-_WORDS: dict[str, str] = {
-    "hypothesis": r"hypothes",
-    "variables": r"variables?\b|independent variable|dependent variable",
-    "method": r"\bmethod\b|baseline|comparator|evaluator|circular",
-    "expected_outcome": r"expected[ _]outcome",
-    "figures_planned": r"\bfigures?\b|\bplots?\b",
-    "dependencies": r"dependenc",
-    "protocol.grid": r"\bgrid\b|\bsweep|single[- ]point",
-    "protocol.runs_per_setting": r"runs[ _]per[ _]setting|\btrials\b|replicat|\brepeats\b|sample size",
-    "protocol.thresholds": r"threshold|cut-?off",
-    "protocol.oracles": r"oracle|closed form|invariant",
-    "protocol.seed_policy": r"\bseeds?\b|random stream",
-    "protocol.ci_method": r"confidence interval|\bci\b|interval",
-    "protocol.failure_policy": r"failed run|diverg|\bnan\b",
-    "protocol.acceptance": r"acceptance",
-    "protocol.metrics": r"\bmetrics?\b",
-    "protocol.sub_studies": r"sub[- ]?stud",
-    "protocol.numerical_axes": r"convergence|numerical axes",
-    "protocol.constants": r"\bconstants?\b",
-}
-
-#: The identifiers the review gives for a non-negotiable failure (``must_flag_hits``) and the part each concerns.
-_FLAGS: dict[str, tuple[str, ...]] = {
-    "circular_evaluation": ("method",),
-    "single_point_eval": ("protocol.grid",),
-    "weak_baseline_no_rerun": ("method",),
-    "pseudo_units": ("variables",),
-}
+#: Protocol parts a design may gain that the draft does not have yet (the audit adds an entry for check 16, for example).
+#: Any other sub-key of `protocol` must already be in the draft: an unknown one (a misspelt part) is refused.
+_NEW_PROTOCOL_PARTS = ("definitions", "labels", "simplifications", "numerical_settings", "result_assertions")
 
 
-def valid_part(path: Any, known: Any = ()) -> bool:
-    """A path that names a part of a design: its first segment is a design key (or a key the design already has, such as
-    ``result_assertions``), and under ``protocol`` the second is a plain name (the protocol's readers refuse a part they
-    do not know). No empty segment, no index."""
+def invalid_reason(path: Any, design: dict[str, Any]) -> str:
+    """``""`` when ``path`` names a part of ``design`` (every step but the last must exist in it; under ``protocol`` the
+    part itself must be one the protocol has or can gain), else the reason it does not. The WHOLE path is checked."""
     if not isinstance(path, str) or not path.strip():
-        return False
+        return "it is empty"
     segs = path.strip().split(".")
-    if any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", s.strip()) for s in segs):
-        return False
-    return segs[0] in DESIGN_KEYS or segs[0] in known
+    if any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", x) for x in segs):
+        return "it is not a plain path of names"
+    if segs[0] not in DESIGN_KEYS and segs[0] not in design:
+        return f"`{segs[0]}` is not a part of this design"
+    proto = design.get("protocol")
+    if segs[0] == "protocol" and len(segs) > 1:
+        known = {*PROTOCOL_PARTS, *_NEW_PROTOCOL_PARTS, *(proto if isinstance(proto, dict) else {})}
+        if segs[1] not in known:
+            return f"`protocol.{segs[1]}` is not a part of the protocol (a misspelt name?)"
+    node: Any = design
+    for i, x in enumerate(segs[:-1]):
+        if i == 1 and segs[0] == "protocol" and not (isinstance(node, dict) and x in node):
+            node = {}  # a protocol part the design may gain: nothing below it exists yet
+            continue
+        nxt = node.get(x) if isinstance(node, dict) else None
+        if nxt is None:
+            if i == 0 and segs[0] == "protocol":
+                node = {}
+                continue
+            return f"`{'.'.join(segs[:i + 1])}` is not in this design"
+        if not isinstance(nxt, dict):
+            return f"`{'.'.join(segs[:i + 1])}` is not a mapping, so nothing can be set under it"
+        node = nxt
+    return ""
+
+
+def valid_part(path: Any, design: Any = None) -> bool:
+    return not invalid_reason(path, design if isinstance(design, dict) else {})
 
 
 def _set(root: dict[str, Any], segs: list[str], value: Any) -> str:
@@ -93,8 +92,9 @@ def apply_changes(design: dict[str, Any], changes: list[tuple[str, Any]]) -> tup
     out = copy.deepcopy(design)
     refused: list[dict[str, str]] = []
     for path, value in changes:
-        if not valid_part(path, design):
-            refused.append({"key": str(path), "reason": "it is not a part of a design (a design key, or `protocol.<part>`)"})
+        why = invalid_reason(path, out)
+        if why:
+            refused.append({"key": str(path), "reason": why})
             continue
         if path.strip() == "protocol" and not isinstance(value, dict):
             refused.append({"key": "protocol", "reason": "`protocol` must be a mapping"})
@@ -122,11 +122,11 @@ def changed_parts(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
 
 def names(where: str, part: str) -> bool:
     """Whether ``where`` (an objection's pointer, free text a model wrote) names ``part``: the part's path, or a leading
-    piece of it (``protocol`` names every protocol part, ``protocol.grid`` names ``protocol.grid.x``), or the other way
-    round (``protocol.grid.x`` names ``protocol.grid``)."""
+    piece of it (``protocol.grid`` names ``protocol.grid.x``), or the other way round (``protocol.grid.x`` names
+    ``protocol.grid``). ``protocol`` alone names no protocol part: the pointer must say which."""
     text = (where or "").lower().replace("`", " ")
     segs = part.split(".")
-    for n in range(1, len(segs) + 1):
+    for n in range(2 if segs[0] == "protocol" and len(segs) > 1 else 1, len(segs) + 1):
         prefix = ".".join(segs[:n])
         if re.search(rf"(?<![\w.]){re.escape(prefix)}(?![\w])", text):
             return True
@@ -149,28 +149,33 @@ def allowed_for_precision() -> list[str]:
     return list(SIZING_PARTS)
 
 
-def _text_of(item: Any) -> str:
-    if isinstance(item, str):
-        return item
-    if isinstance(item, dict):
-        return " ".join(_text_of(v) for v in item.values())
-    if isinstance(item, (list, tuple)):
-        return " ".join(_text_of(v) for v in item)
-    return ""
-
-
-def allowed_for_notes(notes: list[Any], flags: list[str] | None = None) -> list[str]:
-    """The parts the notes (a review's weaknesses and suggestions, a person's words) name, by the design's own part names
-    and the review's failure identifiers. Empty when no note names a part: the caller then allows the whole design and says so."""
-    text = " ".join(_text_of(n) for n in notes).lower().replace("_", " ")
+def part_paths(design: dict[str, Any]) -> list[str]:
+    """The paths a note may cite, listed from the design object itself: each top-level key and each part of the protocol."""
     out: list[str] = []
-    for part, rx in _WORDS.items():
-        if re.search(rx, text) and part not in out:
-            out.append(part)
-    for f in flags or []:
-        for part in _FLAGS.get(str(f), ()):
-            if part not in out:
-                out.append(part)
+    for k, v in design.items():
+        if k == "rationale":
+            continue
+        if k == "protocol" and isinstance(v, dict):
+            out.extend(f"protocol.{p}" for p in v)
+        else:
+            out.append(k)
+    return out
+
+
+def cited_parts(cited: Any, design: dict[str, Any]) -> list[str]:
+    """The paths in ``cited`` (what a reviewer or a mapping wrote) that are parts of ``design``, the whole path checked,
+    each given as the listed path of :func:`part_paths` it lies in. The others are dropped."""
+    out: list[str] = []
+    listed = part_paths(design)
+    for c in cited if isinstance(cited, list) else []:
+        if not isinstance(c, str):
+            continue
+        c = c.strip().strip("`")
+        if invalid_reason(c, design) or not _get_part(design, c)[0]:
+            continue
+        top = next((p for p in listed if c == p or c.startswith(p + ".")), None)
+        if top and top not in out:
+            out.append(top)
     return out
 
 
@@ -186,6 +191,19 @@ def flatten_reply(reply: dict[str, Any]) -> list[tuple[str, Any]]:
     return out
 
 
+def accepted_needs(previous: dict[str, Any], reply: dict[str, Any], allowed: list[str] | None) -> list[dict[str, str]]:
+    """The extra parts a reply asks to change (``needs: [{path, why}]``): each with a valid path and a reason is accepted."""
+    out = []
+    for n in (reply.get("needs") or []) if isinstance(reply, dict) and isinstance(reply.get("needs"), list) else []:
+        if not (isinstance(n, dict) and isinstance(n.get("path"), str) and str(n.get("why") or "").strip()):
+            continue
+        path = n["path"].strip()
+        if invalid_reason(path, previous) or (allowed is not None and any(path == a or path.startswith(a + ".") for a in allowed)):
+            continue
+        out.append({"path": path, "why": str(n["why"]).strip()})
+    return out
+
+
 def merge_parts(
     previous: dict[str, Any], reply: dict[str, Any], allowed: list[str] | None,
 ) -> tuple[dict[str, Any], list[str], list[dict[str, str]]]:
@@ -195,12 +213,14 @@ def merge_parts(
     ``protocol`` reply that FI has already flattened. ``refused``: one ``{"key", "reason"}`` per part not taken."""
     changes: list[tuple[str, Any]] = []
     refused: list[dict[str, str]] = []
-    for path, value in flatten_reply(reply):
+    extra = [n["path"] for n in accepted_needs(previous, reply, allowed)]
+    for path, value in flatten_reply({k: v for k, v in reply.items() if k != "needs"}):
         if path == "rationale":
             continue
-        if not valid_part(path, previous):
-            refused.append({"key": path, "reason": "it is not a part of a design"})
-        elif allowed is not None and not any(path == a or path.startswith(a + ".") for a in allowed):
+        why = invalid_reason(path, previous)
+        if why:
+            refused.append({"key": path, "reason": why})
+        elif allowed is not None and not any(path == a or path.startswith(a + ".") for a in [*allowed, *extra]):
             refused.append({"key": path, "reason": "it was not one of the parts asked for"})
         else:
             changes.append((path, value))
