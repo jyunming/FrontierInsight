@@ -182,17 +182,20 @@ def _plan_text(eng: Any) -> str:
 # --- the matching that needs no model --------------------------------------------------------------------------------
 
 
+_FACTOR_MAP = [{"item": "F1", "by": "setting:lid_material"}, {"item": "F2", "by": "setting:room_temperature_C"}]
+
+
 def test_a_setting_that_does_not_cover_the_stated_levels_or_range_is_a_gap_and_a_name_match_settles_the_rest() -> None:
     req = tr.parse(EXTRACTION)
     assert req is not None
-    plan_view = tr.view(_draft(grid={"room_temperature_C": [10, 20], "lid_material": ["paper", "foam"]}))
+    plan_view = tr.view(_draft(grid={"room_temperature_C": [10, 20], "lid_material": ["paper", "foam"]}, topic_map=_FACTOR_MAP))
     gaps, unresolved = tr.match(req, plan_view)
     by_kind = {(g["kind"], g["name"]) for g in gaps}
     assert ("level", "room temperature") in by_kind and ("level", "lid material") in by_kind
     assert "its settings run from 10 to 20, not 10 to 30" in [g["sentence"] for g in gaps if g["name"] == "room temperature"][0]
     assert "steel" in [g["sentence"] for g in gaps if g["name"] == "lid material"][0]
-    assert unresolved == ["Q2", "M1"], "the heat quantity and the formula need a reader; the rest a name settles"
-    full = tr.view(_draft(grid={"room_temperature_C": [10, 20, 30], **LID_AXIS}, model={**MODEL, "equations": [*MODEL["equations"], NEWTON]}))
+    assert unresolved == ["Q2", "M1"], "the heat quantity and the formula need a reader; the rest the plan's own map settles"
+    full = tr.view(_draft(grid={"room_temperature_C": [10, 20, 30], **LID_AXIS}, topic_map=_FACTOR_MAP, model={**MODEL, "equations": [*MODEL["equations"], NEWTON]}))
     assert tr.match(req, full)[0] == [] and tr.match(req, full)[1] == ["Q2"]
 
 
@@ -200,7 +203,8 @@ def test_a_reply_that_names_nothing_is_no_reading_and_a_search_variable_counts_a
     assert tr.parse({"factors": [], "quantities": [], "formulas": []}) is None and tr.parse("x") is None
     req = tr.parse({"factors": [{"name": "fin spacing", "range": [1, 6], "main": True}]})
     block = {"objective": {"quantity": "base_temperature"}, "design_variables": [{"name": "fin_spacing", "low": 1.0, "high": 6.0}]}
-    assert tr.match(req, tr.view({"protocol": {"optimisation": block}})) == ([], [])
+    assert tr.match(req, tr.view({"protocol": {"optimisation": block, "topic_map": [{"item": "F1", "by": "setting:fin_spacing"}]}})) == ([], [])
+    assert tr.match(req, tr.view({"protocol": {"optimisation": block}})) == ([], ["F1"]), "no map: no setting is guessed from words"
 
 
 def test_named_levels_held_as_numbers_are_left_to_a_reader_not_passed() -> None:
@@ -213,12 +217,13 @@ def test_named_levels_held_as_numbers_are_left_to_a_reader_not_passed() -> None:
     assert tr.gaps_from(req, coded, {"F1": "covered"}) == ([], [])
 
 
+_CORRECTION_MAP = [{"item": "F1", "by": "setting:correction"}]
 _CORRECTION = {"factors": [{"name": "correction", "levels": ["uncorrected", "Bonferroni", "Benjamini-Hochberg"], "main": True}]}
 
 
 def test_a_level_given_by_an_abbreviation_is_left_to_a_reader_and_a_level_with_no_value_left_is_a_gap() -> None:
     """The topic names three methods; the plan compares all three inside each run but names the third ``bh``. A name match
-    cannot tell ``bh`` from ``holm``: the reader decides (and sees the values), and it is a gap without a reader only when
+    cannot tell ``bh`` from ``holm`` (and with no entry in the plan's own map no setting is picked by words): the reader decides (and sees the values), and it is a gap without a reader only when
     no value is left over that could stand for the missing level."""
     req = tr.parse(_CORRECTION)
     abbreviated = tr.view({"protocol": {"in_each_run": {"correction": ["uncorrected", "bonferroni", "bh"]}}})
@@ -228,11 +233,11 @@ def test_a_level_given_by_an_abbreviation_is_left_to_a_reader_and_a_level_with_n
     assert tr.match(req, other) == ([], ["F1"]), "a different method looks the same to a name match: the reader says"
     assert tr.gaps_from(req, other, {"F1": "missing"})[0][0]["kind"] == "factor"
     assert tr.gaps_from(req, other, {}) == ([], ["correction"]), "no judgement is not a pass: named as unchecked"
-    short = tr.view({"protocol": {"in_each_run": {"correction": ["uncorrected", "bonferroni"]}}})
+    short = tr.view({"protocol": {"in_each_run": {"correction": ["uncorrected", "bonferroni"]}, "topic_map": _CORRECTION_MAP}})
     gaps, unresolved = tr.match(req, short)
     assert unresolved == [] and [g["kind"] for g in gaps] == ["level"]
     assert "Benjamini-Hochberg" in gaps[0]["sentence"] and "it has bonferroni, uncorrected" in gaps[0]["sentence"]
-    named = tr.view({"protocol": {"in_each_run": {"correction": ["uncorrected", "bonferroni", "benjamini_hochberg"]}}})
+    named = tr.view({"protocol": {"in_each_run": {"correction": ["uncorrected", "bonferroni", "benjamini_hochberg"]}, "topic_map": _CORRECTION_MAP}})
     assert tr.match(req, named) == ([], [])
 
 

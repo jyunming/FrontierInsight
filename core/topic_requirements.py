@@ -542,9 +542,9 @@ def match(req: dict[str, Any], plan: dict[str, Any]) -> tuple[list[dict[str, Any
         if mapped is not None and mapped[0] == "judge":
             unresolved.append(_item_id("factors", i))
             continue
-        wanted = _tokens(factor["name"])
-        axis = mapped_axis(req, plan, factor) or next(
-            (a for a in plan["axes"] if wanted and (_tokens(a) <= wanted or wanted <= _tokens(a)) and _tokens(a)), None)
+        # The plan's own map is the only thing that says which setting a topic factor is: no setting is picked by comparing
+        # words (the first setting whose words fit named the wrong one). A factor the map does not place is left to the reader.
+        axis = mapped_axis(req, plan, factor) or None
         if axis is None and not compared(req, factor):
             # The topic uses its values (all of them in each run, a range every run covers) and compares no result across
             # them: it is not a setting the study must sweep. Asking for one put five values fitted together into the grid
@@ -836,7 +836,7 @@ def request(topic: str, gaps: list[dict[str, Any]], *, search: bool = False, req
         "states is an equation of `protocol.model.equations`, written as the topic writes it; if the plan needs another "
         "formula in its place, keep that one and say in its `source` that it replaces the topic's, and why. Also say, in "
         "`protocol.topic_map`, which element of the plan covers each thing the topic asks for (the ones above and the ones the "
-        "plan already has): a list of entries `item` ("
+        "plan already has), with an entry for EVERY setting the topic asks to vary or compare that names the key of that setting: a list of entries `item` ("
         + ("FI's id for it, exactly as in the list below, such as `F1`" if items else
            "the name of the factor or quantity, or the formula, as the topic words it")
         + ") and `by` (`setting:<the key in protocol.grid or protocol.optimisation.grid, or the design variable>`,`metric:<the metric id>` or "

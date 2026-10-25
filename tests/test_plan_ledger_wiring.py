@@ -38,7 +38,8 @@ LITERATURE = [{"content": SOURCE_TEXT, "metadata": {"title": "Heat sinks", "doi"
 def _draft(**protocol: Any) -> dict[str, Any]:
     draft = copy.deepcopy(HEAT_SINK)
     draft["study_type"] = "measure"
-    draft["protocol"] = {"oracles": copy.deepcopy(HEAT_SINK["protocol"]["oracles"]), "grid": GOOD_GRID, **protocol}
+    draft["protocol"] = {"oracles": copy.deepcopy(HEAT_SINK["protocol"]["oracles"]), "grid": GOOD_GRID,
+                         "topic_map": [{"item": "F1", "by": "setting:fin_spacing"}], **protocol}
     return draft
 
 

@@ -132,7 +132,7 @@ def test_a_level_that_is_the_searched_design_is_covered_by_the_search_not_by_a_s
                             "stated": "a searched fin shape", "main": True}]
     req = tr.parse(reading)
     searching = {"axes": {"fin_count": [8, 12, 16], "heat_sink_kind": ["straight fins", "pin fins"]}, "metrics": [],
-                 "equations": [], "assumptions": "", "topic_map": [], "search": True,
+                 "equations": [], "assumptions": "", "topic_map": [{"item": "F2", "by": "setting:heat_sink_kind"}], "search": True,
                  "design_variables": {"fin_profile": "the fin shape the search changes"}}
     factor = req["factors"][1]
     assert tr.searched_levels(req, searching, factor) == ["searched fin shape"]
