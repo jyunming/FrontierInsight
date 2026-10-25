@@ -165,7 +165,7 @@ def test_a_different_return_shape_with_equal_shared_values_is_not_a_disagreement
     ref = {**main, "covariance": [[0.48, 0.18], [0.18, 0.07]]}
     v = si.judge_rows([{"main": main, "ref": ref}, {"main": main, "ref": ref}], inputs, si.REL)
     assert v["status"] == "agree" and not v["disagreements"] and v["compared"] == 2
-    assert "only one version returns covariance" in v["shape_notes"][0]
+    assert "only the second version returns covariance" in v["shape_notes"][0]
     assert "those were not compared" in v["shape_notes"][0] and "description" not in v["shape_notes"][0]
 
 
@@ -199,7 +199,7 @@ def test_a_step_whose_versions_return_different_shapes_with_equal_values_is_reso
     root, s, rec = run_it(tmp_path, fake, main=main)
     e = rec["functions"]["activation_energy"]
     assert e["status"] == "agree" and rec["calls"] == 1
-    assert "only one version returns covariance" in e["shape_note"] and "limitation" not in e
+    assert "only the second version returns covariance" in e["shape_note"] and "limitation" not in e
 
 
 def test_key_functions_order_and_random_skip():
@@ -694,8 +694,19 @@ def _write_request(tmp_path, record):
 
 def test_the_second_writer_is_told_every_key_the_first_version_returned(tmp_path):
     text = _write_request(tmp_path, {"cases": {}, "returned": {"activation_energy": ["Ea", "ci_Ea", "cov"]}})
-    assert "When it returns a dict, the dict carries each of these keys under exactly these names: Ea, ci_Ea, cov." in text
+    assert "the first version's dict results carried these keys: Ea, ci_Ea, cov. A key may appear only for some inputs" in text
 
 
 def test_the_second_writer_gets_no_key_list_without_a_record(tmp_path):
     assert "What it must return" not in _write_request(tmp_path, None)
+
+
+def test_a_key_the_first_version_has_at_any_depth_that_the_second_lacks_is_unconfirmed_with_its_path():
+    one = [{"x": 1.0}]
+    nested = si.judge_rows([{"main": {"result": {"a": 1, "b": 2}}, "ref": {"result": {"a": 1}}}], one, si.REL)
+    assert nested["status"] == "unconfirmed" and "result.b" in nested["why"]
+    in_list = si.judge_rows([{"main": {"rows": [{"a": 1, "b": 2}]}, "ref": {"rows": [{"a": 1}]}}], one, si.REL)
+    assert in_list["status"] == "unconfirmed" and "rows[0].b" in in_list["why"]
+    # the second version may carry more at depth; a real difference at depth is still a disagreement
+    assert si.judge_rows([{"main": {"result": {"a": 1}}, "ref": {"result": {"a": 1, "c": 3}}}], one, si.REL)["status"] == "agree"
+    assert si.judge_rows([{"main": {"result": {"a": 1.0}}, "ref": {"result": {"a": 1.5}}}], one, si.REL)["status"] == "disagree"

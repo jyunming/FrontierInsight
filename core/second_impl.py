@@ -784,31 +784,35 @@ def same(a: Any, b: Any, rel: float = REL) -> bool:
     return False
 
 
-def compare_shared(a: Any, b: Any, rel: float = REL, path: str = "") -> tuple[int, bool, list[str]]:
-    """Compare what both versions return, matched by name (dict keys present in both) or position (lists of the same
-    length). ``(values compared, whether one of them differs, notes)``. A key only one version returns is not a value
-    disagreement: it is a note that it was not compared. Everything that is not a dict or a list
-    of the same length as the other is judged by :func:`same`, so a real difference is judged as before."""
+def compare_shared(a: Any, b: Any, rel: float = REL, path: str = "") -> tuple[int, bool, list[str], list[str]]:
+    """Compare what both versions return, matched by name (dict keys present in both, at every depth) or position (lists
+    of the same length). ``(values compared, whether one of them differs, notes, missing)``. ``missing`` holds the path of
+    every key the first version (``a``) returns that the second lacks: it was not compared, so the step cannot be agree.
+    A key only the second version returns is a note. Everything that is not a dict or a list of the same length as the
+    other is judged by :func:`same`, so a real difference is judged as before."""
     if isinstance(a, dict) and isinstance(b, dict):
         notes: list[str] = []
-        only = sorted(str(k) for k in set(a) ^ set(b))
-        if only:
-            notes.append(f"{path or 'the result'}: only one version returns {', '.join(only)}; those were not compared")
+        missing = [f"{path}.{k}" if path else str(k) for k in a if k not in b]
+        extra = sorted(str(k) for k in b if k not in a)
+        if extra:
+            notes.append(f"{path or 'the result'}: only the second version returns {', '.join(extra)}; those were not compared")
         n, differs = 0, False
         for k in a:
             if k in b:
-                cn, cd, cnotes = compare_shared(a[k], b[k], rel, f"{path}.{k}" if path else str(k))
+                cn, cd, cnotes, cmiss = compare_shared(a[k], b[k], rel, f"{path}.{k}" if path else str(k))
                 n, differs = n + cn, differs or cd
                 notes += cnotes
-        return n, differs, notes
+                missing += cmiss
+        return n, differs, notes, missing
     if isinstance(a, list) and isinstance(b, list) and len(a) == len(b) and any(isinstance(x, (dict, list)) for x in a + b):
-        n, differs, notes = 0, False, []
+        n, differs, notes, missing = 0, False, [], []
         for i, (x, y) in enumerate(zip(a, b)):
-            cn, cd, cnotes = compare_shared(x, y, rel, f"{path}[{i}]")
+            cn, cd, cnotes, cmiss = compare_shared(x, y, rel, f"{path}[{i}]")
             n, differs = n + cn, differs or cd
             notes += cnotes
-        return n, differs, notes
-    return 1, not same(a, b, rel), []
+            missing += cmiss
+        return n, differs, notes, missing
+    return 1, not same(a, b, rel), [], []
 
 
 def short(value: Any, limit: int = 120) -> str:
@@ -842,13 +846,9 @@ def judge_rows(rows: list[dict[str, Any]], inputs: list[dict[str, Any]], rel: fl
                         "main": f"raised {m_err}" if m_err else short(decode(row.get("main"))),
                         "other": f"raised {r_err}" if r_err else short(decode(row.get("ref")))})
         else:
-            shared, differs, case_notes = compare_shared(decode(row.get("main")), decode(row.get("ref")), rel)
+            shared, differs, case_notes, case_missing = compare_shared(decode(row.get("main")), decode(row.get("ref")), rel)
+            missing += [m for m in case_missing if m not in missing]
             notes += [n for n in case_notes if n not in notes]
-            m_val, r_val = decode(row.get("main")), decode(row.get("ref"))
-            if isinstance(m_val, dict) and isinstance(r_val, dict):
-                # Every key the first version returned must be carried by the second: one it lacks was never compared, so
-                # the step cannot be agree on the others alone.
-                missing += [str(k) for k in m_val if k not in r_val and str(k) not in missing]
             if differs:
                 bad.append({"inputs": case, "kind": "value", "main": short(decode(row.get("main"))),
                             "other": short(decode(row.get("ref")))})
@@ -1049,7 +1049,9 @@ def write_prompt(spec: _fs.Spec, *, template: string.Template, protocol: dict[st
     given = ", ".join(f"{k} = {short(v)}" for k, v in (example or {}).items())
     example_block = f"# Inputs it will be called with\n\nFI will call the function with, among others: {given}.\n" if given else ""
     rewrite_block = (f"# A first attempt was judged wrong\n\n{rewrite}\n") if rewrite else ""
-    return_block = ("# What it must return\n\nWhen it returns a dict, the dict carries each of these keys under exactly these names: " + ", ".join(return_keys) + ".\n") if return_keys else ""
+    return_block = ("# What it must return\n\nWhen it returns a dict: across the inputs FI ran, the first version's dict results carried these keys: "
+                    + ", ".join(return_keys) + ". A key may appear only for some inputs; for the same input return the same keys "
+                    "under exactly these names.\n") if return_keys else ""
     prompt = template.substitute(topic_block=topic_block or "(the topic is not available)", step_block=_spec_block(spec, protocol),
                                  return_block=return_block,
                                  signature=spec.signature.strip(), related_block=related, literature_block=literature,
@@ -1368,7 +1370,7 @@ class SecondImpl:
         return verdict
 
     def _return_keys(self, spec: _fs.Spec) -> list[str] | None:
-        """Every key the first version returned in its dict when FI ran the simulation (all settings run); ``None`` when
+        """Every key of the first version's dict results in the calls FI recorded when it ran the simulation; ``None`` when
         FI has no record."""
         every = (read_captured(self.root).get("returned") or {}).get(spec.name)
         return [str(k) for k in every] if isinstance(every, list) and every else None
