@@ -306,11 +306,30 @@ REACH_CHARS = 20000  # the most source text of reached functions a repair reques
 _OUTPUT_METHODS = {"append", "extend", "update", "write", "writelines", "dump", "add", "setdefault", "insert"}
 
 
+_COMPS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+
+def _walk_scope(nodes: list[ast.AST]):
+    """Like ``step_coverage._shallow`` and also not entering a comprehension (its own scope, as in Python 3)."""
+    stack = list(reversed(nodes))
+    while stack:
+        n = stack.pop()
+        yield n
+        if not isinstance(n, (*_sc._SCOPES, *_COMPS)):
+            stack.extend(reversed(list(ast.iter_child_nodes(n))))
+
+
 def _scope_names(body: list[ast.AST], params: set[str]) -> set[str]:
     """The names one scope binds itself (parameters, assignments, nested defs and classes, imports, loop and ``with`` names)."""
     out = set(params)
-    for n in _sc._shallow(body):
-        if isinstance(n, _sc._SCOPES):
+    for n in _walk_scope(body):
+        if isinstance(n, ast.MatchAs) and n.name:
+            out.add(n.name)
+        elif isinstance(n, ast.MatchStar) and n.name:
+            out.add(n.name)
+        elif isinstance(n, ast.MatchMapping) and n.rest:
+            out.add(n.rest)
+        elif isinstance(n, _sc._SCOPES):
             if not isinstance(n, ast.Lambda):
                 out.add(n.name)
         elif isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
@@ -329,11 +348,17 @@ def _resolved_calls(fn: ast.AST, top: set[str]) -> dict[int, str]:
 
     def scope(body: list[ast.AST], params: set[str], shadow: set[str]) -> None:
         shadow = shadow | _scope_names(body, params)
-        for n in _sc._shallow(body):
+        for n in _walk_scope(body):
             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in top and n.func.id not in shadow:
                 out[id(n)] = n.func.id
             if isinstance(n, _sc._SCOPES):
                 scope([n.body] if isinstance(n, ast.Lambda) else list(n.body), _sc._params(n), shadow)
+            elif isinstance(n, _COMPS):
+                targets = {x.id for g in n.generators for x in ast.walk(g.target) if isinstance(x, ast.Name)}
+                inner: list[ast.AST] = [n.key, n.value] if isinstance(n, ast.DictComp) else [n.elt]
+                for g in n.generators:
+                    inner += [g.iter, *g.ifs]
+                scope(inner, targets, shadow)
 
     scope(list(fn.body), _sc._params(fn), set())  # type: ignore[attr-defined]
     return out
@@ -351,6 +376,12 @@ def _live_callees(fn: ast.FunctionDef | ast.AsyncFunctionDef, top: set[str]) -> 
     def names_of(target: ast.AST) -> set[str]:
         return {n.id for n in ast.walk(target) if isinstance(n, ast.Name)}
 
+    params = _sc._params(fn)
+    outside = params | {g for x in ast.walk(fn) if isinstance(x, ast.Global) for g in x.names}
+    # (a name the function does not bind at all is the module's own)
+    # ``outside`` is completed below with the names the function never binds, once its locals are known
+    local = _scope_names(list(fn.body), set()) - outside
+    outside |= {x.id for x in ast.walk(fn) if isinstance(x, ast.Name) and x.id not in local and x.id not in params}
     for n in _sc._shallow(list(fn.body)):
         if isinstance(n, (ast.Return, ast.Yield, ast.YieldFrom)) and n.value is not None:
             outputs.append(n.value)
@@ -361,8 +392,22 @@ def _live_callees(fn: ast.FunctionDef | ast.AsyncFunctionDef, top: set[str]) -> 
                     edges.append(({n.name}, r.value, False))
         elif isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign)) and n.value is not None:
             targets = n.targets if isinstance(n, ast.Assign) else [n.target]
-            stored = any(isinstance(t, (ast.Subscript, ast.Attribute)) for t in targets)
-            edges.append((set().union(*(names_of(t) for t in targets)), n.value, stored))
+            plain: set[str] = set()
+            stored = False
+            for t in targets:
+                if isinstance(t, (ast.Subscript, ast.Attribute)):
+                    base = t
+                    while isinstance(base, (ast.Subscript, ast.Attribute)):
+                        base = base.value
+                    # a store is an output only when the object stored into reaches one: a parameter, a global, a name
+                    # the function does not bind, or a local that is itself returned or written
+                    if not isinstance(base, ast.Name) or base.id in outside:
+                        stored = True
+                    else:
+                        plain.add(base.id)
+                else:
+                    plain |= names_of(t)
+            edges.append((plain, n.value, stored))
         elif isinstance(n, ast.NamedExpr):
             edges.append((names_of(n.target), n.value, False))
         elif isinstance(n, (ast.For, ast.AsyncFor, ast.comprehension)):

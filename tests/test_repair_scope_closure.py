@@ -155,3 +155,30 @@ def test_the_parameter_check_reads_the_code_the_repair_leaves_including_its_new_
                         "def extra(m):\n    return ratio(m)\n"}
     assert fr.direct_callers(tmp_path, "mod.py", "ratio") == {"mod.py": {"run"}}
     assert fr.direct_callers(tmp_path, "mod.py", "ratio", staged) == {"mod.py": {"run", "extra"}}
+
+
+def test_a_store_into_a_local_container_that_reaches_no_output_is_not_an_output() -> None:
+    src = ("def validate(r):\n    return True\n\n\n"
+           "def run(r):\n    flags = {}\n    flags['ok'] = validate(r)\n    if not flags['ok']:\n        raise ValueError\n    return r\n")
+    assert fr.reached_functions(src, "run") == []
+    kept = src.replace("    return r\n", "    return flags\n")
+    assert fr.reached_functions(kept, "run") == ["validate"], "the container is returned, so its stores are outputs"
+    param = src.replace("def run(r):\n    flags = {}\n", "def run(r, flags):\n")
+    assert fr.reached_functions(param, "run") == ["validate"], "a store into a parameter reaches the caller"
+
+
+def test_a_name_bound_by_a_match_pattern_is_the_functions_own() -> None:
+    src = "def check(v):\n    return v\n\n\ndef run(obj):\n    match obj:\n        case check:\n            return check(1)\n"
+    assert fr.reached_functions(src, "run") == []
+    star = "def check(v):\n    return v\n\n\ndef run(obj):\n    match obj:\n        case [*check]:\n            return check(1)\n"
+    assert fr.reached_functions(star, "run") == []
+    rest = "def check(v):\n    return v\n\n\ndef run(obj):\n    match obj:\n        case {'a': 1, **check}:\n            return check(1)\n"
+    assert fr.reached_functions(rest, "run") == []
+
+
+def test_a_comprehension_target_shadows_only_inside_the_comprehension() -> None:
+    src = ("def check(v):\n    return v\n\n\n"
+           "def run(xs):\n    values = [check(x) for check in xs]\n    return check(1)\n")
+    assert fr.reached_functions(src, "run") == ["check"]
+    inside = "def check(v):\n    return v\n\n\ndef run(xs):\n    return [check(x) for check in xs]\n"
+    assert fr.reached_functions(inside, "run") == []
