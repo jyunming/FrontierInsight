@@ -40,4 +40,7 @@ def test_the_global_stage_spends_its_share_of_the_budget(dims: int, starts: int,
     budget = starts * per_start
     assert total <= budget
     # The baseline is one member of the population and is charged to the same share, so the global rows are one fewer.
-    assert count + 1 == max(dims + 2, int(budget * search.GLOBAL_SHARE)), (count, budget)
+    # ... and is never fewer than the designs the watches of a flat objective count (the baseline and NO_EFFECT_DESIGNS
+    # others), so a small budget still shows an objective that does not move (tests/test_search_flat_objective.py).
+    wanted = max(dims + 2, int(budget * search.GLOBAL_SHARE), search.NO_EFFECT_DESIGNS + 1)
+    assert count + 1 == min(wanted, budget), (count, budget)

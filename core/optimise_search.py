@@ -132,7 +132,8 @@ CMA_SPLIT = False
 #: maintainer's decision (2026-10-23): a recorded 144-number plan's search, 8 at once, took 36 h of simulation time
 #: instead of 97 h, with the same best design.
 DE_GENERATIONAL = True
-#: The share of the evaluation budget the global stage of ``global_then_local`` spends when there is no coarse scan; the
+#: The share of the evaluation budget the global stage of ``global_then_local`` spends when there is no coarse scan (never
+#: fewer evaluations than the watches of a flat objective count, ``NO_EFFECT_DESIGNS`` after the baseline); the
 #: rest goes to the local stage. At equal wall-clock time on test functions with 8, 32 and 144 design numbers, 15% ranked
 #: best in 14 of 26 cases and half the budget in 4 of 26.
 GLOBAL_SHARE = 0.15
@@ -1634,7 +1635,9 @@ class _Search:
 
     def _global_then_local(self):
         if not any(r["stage"] == "scan" for r in self.rows):
-            yield from self._evolution(max(self.space.dims + 2, int(self.total * GLOBAL_SHARE)))
+            # At least the designs the watches of a flat objective need (the baseline and NO_EFFECT_DESIGNS others), so what
+            # they can detect does not depend on how small a share of a small budget the global stage gets.
+            yield from self._evolution(max(self.space.dims + 2, int(self.total * GLOBAL_SHARE), NO_EFFECT_DESIGNS + 1))
         points = [self.space.unit(d) for d in self._best_designs(self.starts)] or [self.space.unit(self.baseline)]
         yield from self._local_starts(points)
 
