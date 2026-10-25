@@ -1587,6 +1587,22 @@ def block_fix_request(block: str, why: str) -> str:
     return "\n\n".join(parts)
 
 
+def audit_repair_request(parts: list[tuple[str, Any, str]]) -> str:
+    """The one request to the methodology audit's model to correct parts of its change that FI could not read: for each
+    protocol key, the value as the audit wrote it and FI's exact reason. Only those keys are asked for, in one JSON object."""
+    fence = "`" * 3
+    lines = ["Your amended design could not be used in full. For each protocol key below, the value you wrote and why part "
+             "of it could not be read:"]
+    for key, value, reason in parts:
+        lines.append(f"`protocol.{key}` as you wrote it:\n{fence}json\n{json.dumps(value, indent=1, default=str)}\n{fence}\n"
+                     f"Why part of it was left out: {reason}")
+    names = ", ".join(f'"{k}"' for k, _v, _r in parts)
+    lines.append('Return ONLY one JSON object of the form {"protocol": {...}} holding, for each of the keys ' + names
+                 + ", its whole corrected value. Fix only what the reason names; keep every other part exactly as you wrote it "
+                 "and add nothing.")
+    return "\n\n".join(lines)
+
+
 def block_from_reply(reply: str) -> str | None:
     """The design block in a reply to :func:`block_fix_request`: the block of a whole plan when the model sent one back,
     else its first fenced block, else the reply itself when it has no fence."""

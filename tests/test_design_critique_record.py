@@ -226,3 +226,61 @@ async def test_swapping_one_unreadable_part_for_another_is_not_a_repair(tmp_path
     assert design["protocol"]["thresholds"]["rule"] == "prose one"
     (entry,) = _record(eng)
     assert [n["key"] for n in entry["not_applied"]] == ["protocol.thresholds"]
+
+
+SCANNED = {**SEARCH, "fixed": {"a": 1, "b": 3}, "grid": {"a": [1, 2]}, "sub_studies": [{"name": "scan a", "vary": ["a"], "hold": {}}]}
+SCANNED_DRAFT = {**DRAFT, "study_type": "find_best_design", "protocol": {"optimisation": SCANNED}}
+
+
+def _scan_amended(entry_vary: str) -> dict:
+    """The audit's change: a new baseline, and a scan entry that varies ``entry_vary`` (not a setting of the grid unless "a")."""
+    opt = {**SCANNED, "baseline": {"values": {"w": 0.5}, "source": "the audit"},
+           "sub_studies": [{"name": "scan a", "vary": ["a"], "hold": {"b": 3}}, {"name": "scan b", "vary": [entry_vary], "hold": {"a": 1}}]}
+    return {**SCANNED_DRAFT, "protocol": {"optimisation": opt}}
+
+
+@pytest.mark.asyncio
+async def test_one_unreadable_part_of_a_change_does_not_cost_the_rest_and_is_asked_for_again_with_the_reason(tmp_path: Path) -> None:
+    amended = _scan_amended("b")
+    assert plan.normalize_design(SCANNED_DRAFT)[0] is not None
+    fixed_opt = {**amended["protocol"]["optimisation"], "grid": {"a": [1, 2], "b": [3, 4]}}
+    replies = [json.dumps({"objections_addressed": [OBJECTION], "amended_design": amended}),
+               json.dumps({"protocol": {"optimisation": fixed_opt}})]
+    eng = _engine(tmp_path, replies)
+    design, _ = await eng._audit_design({"topic": "OPC", "iteration": 0}, json.loads(json.dumps(SCANNED_DRAFT)))
+    asked = eng._client.chat.call_args_list[1].args[0][-1]["content"]
+    assert "not a setting of `protocol.optimisation.grid`" in asked and "protocol.optimisation" in asked, "the second call carries FI's exact reason"
+    assert eng._client.chat.call_count == 2, "asked once"
+    opt = design["protocol"]["optimisation"]
+    assert opt["baseline"]["values"] == {"w": 0.5} and [s["name"] for s in opt["sub_studies"]] == ["scan a", "scan b"]
+    (entry,) = _record(eng)
+    assert "not_applied" not in entry, "the corrected part is read in full: nothing is left out"
+
+
+@pytest.mark.asyncio
+async def test_a_part_still_unreadable_after_the_ask_is_left_out_alone_and_named(tmp_path: Path) -> None:
+    amended = _scan_amended("b")
+    replies = [json.dumps({"objections_addressed": [OBJECTION], "amended_design": amended}),
+               json.dumps({"protocol": {"optimisation": amended["protocol"]["optimisation"]}})]  # answers with no change
+    eng = _engine(tmp_path, replies)
+    design, _ = await eng._audit_design({"topic": "OPC", "iteration": 0}, json.loads(json.dumps(SCANNED_DRAFT)))
+    opt = design["protocol"]["optimisation"]
+    assert opt["baseline"]["values"] == {"w": 0.5}, "the readable part of the change is made"
+    assert "sub_studies" not in opt, "the scan parts are left out together (a part is the unit the plan step reads)"
+    (entry,) = _record(eng)
+    (item,) = entry["not_applied"]
+    assert item["key"] == "protocol.optimisation" and "sub_studies" in item["reason"] and item["applied"]
+    summary = " ".join(eng._critique_summary())
+    assert "applied except a part FI could not read" in summary and "did not apply it" not in summary
+    assert eng._client.chat.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_change_nothing_of_which_can_be_read_is_still_not_applied_and_not_asked_again(tmp_path: Path) -> None:
+    broken = _with_baseline([[0.1, 0.1], [0.0, 0.0]])
+    eng = _engine(tmp_path, [json.dumps({"objections_addressed": [OBJECTION], "amended_design": broken})])
+    design, _ = await eng._audit_design({"topic": "OPC", "iteration": 0}, json.loads(json.dumps(SEARCH_DRAFT)))
+    assert design["protocol"]["optimisation"]["baseline"]["values"] == {"w": 0.0}
+    assert eng._client.chat.call_count == 1
+    (entry,) = _record(eng)
+    assert [n["key"] for n in entry["not_applied"]] == ["protocol.optimisation"] and "applied" not in entry["not_applied"][0]

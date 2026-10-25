@@ -5195,7 +5195,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             draft_keys = set(design.keys())
             amended_keys = set(amended.keys())
             if draft_keys.issubset(amended_keys):
-                design, not_applied = self._hold_audit_repairs_to_the_schema(design, amended)
+                draft_design = design
+                design, not_applied = self._hold_audit_repairs_to_the_schema(draft_design, amended)
+                if any(n.get("part") for n in not_applied):
+                    design, not_applied = await self._ask_the_audit_to_correct_parts(
+                        draft_design, amended, design, not_applied, review_node)
             else:
                 failure = f"the amended design dropped the keys {sorted(draft_keys - amended_keys)}; the draft was kept"
                 self._log.warning(
@@ -5228,9 +5232,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         self._write_receipt(
             "design_audit", "unknown" if failure else "fail" if objected else "pass", started_at=audit_started,
             inputs={"design": before}, output=_receipts.design_core(design), error=failure,
-            detail=(("it objected to the design that ran: " if not adopt else "its repair could not be applied, so the "
+            detail=(("it objected to the design that ran: " if not adopt else "its repair could not be applied in full, so the "
                      "objection stands: ") + "; ".join(str(o)[:160] for o in objected[:3])
-                    + ("".join(f" [FI did not apply `{n['key']}`: {n['reason'][:160]}]" for n in not_applied[:3])
+                    + ("".join(f" [FI did not {'fully ' if n.get('applied') else ''}apply `{n['key']}`: {n['reason'][:160]}]" for n in not_applied[:3])
                        if not_applied else "")) if objected else "",
         )
         if failure and not_reviewed:
@@ -5272,11 +5276,19 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     continue
                 reason = (fresh[0] if fresh else f"`protocol.{', '.join(gone)}` could not be read with it" if gone
                           else f"the audit left `protocol.{key}` out")
-                if key in old_p:
+                item = {"key": f"protocol.{key}", "reason": " ".join("; ".join(fresh[:3]) .split())[:300] if fresh and not gone
+                        and not dropped else " ".join(reason.split())[:300]}
+                if fresh and not gone and not dropped:
+                    item["part"] = "yes"  # only a part of it cannot be read: the audit is asked to correct that part
+                if fresh and not gone and not dropped and key in (trial_fixed or {})                         and (trial_fixed or {})[key] != (base_fixed or {}).get(key):
+                    # Only a part of it cannot be read: the rest of the change is made, that part alone is left out.
+                    kept_p[key] = trial_fixed[key]
+                    item["applied"] = "all of it except the part named"
+                elif key in old_p:
                     kept_p[key] = old_p[key]
                 else:
                     kept_p.pop(key, None)
-                not_applied.append({"key": f"protocol.{key}", "reason": " ".join(reason.split())[:300]})
+                not_applied.append(item)
             out["protocol"] = kept_p
 
         def readable(d: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
@@ -5297,8 +5309,43 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 out = dict(before)
                 not_applied.append({"key": ", ".join(changed) or "design", "reason": " ".join(str(why).split())[:300]})
         for item in not_applied:
-            self._log.warning("[design_self_critique] the audit's change to `%s` was not applied: %s", item["key"], item["reason"])
+            self._log.warning("[design_self_critique] the audit's change to `%s` was %s: %s", item["key"],
+                              "applied except one part" if item.get("applied") else "not applied", item["reason"])
         return out, not_applied
+
+    async def _ask_the_audit_to_correct_parts(
+        self, before: dict[str, Any], amended: dict[str, Any], design: dict[str, Any], not_applied: list[dict[str, str]],
+        node: str,
+    ) -> tuple[dict[str, Any], list[dict[str, str]]]:
+        """``(design, not_applied)`` after the audit's model has been asked ONCE to correct the parts of its change that FI
+        could not read, each with FI's exact reason (as a plan part is asked for again with the reader's reason). What it
+        sends back is held to the same reading; whatever is still unreadable stays left out and is named in ``not_applied``.
+        A failed call or an unreadable answer leaves the first reading as it was."""
+        asked = [n for n in not_applied if n.get("part")]
+        keys = [n["key"].split(".", 1)[1] for n in asked]
+        new_p = amended.get("protocol") if isinstance(amended.get("protocol"), dict) else {}
+        self._log.warning("[design_self_critique] asking the audit once to correct %s, with FI's reason for each",
+                          ", ".join(f"`protocol.{k}`" for k in keys))
+        try:
+            _, reply = await self._chat_json(
+                _plan.audit_repair_request([(k, new_p.get(k), n["reason"]) for k, n in zip(keys, asked)]),
+                node=node, want=("protocol",), usable=lambda p: isinstance(p.get("protocol"), dict),
+            )
+        except Exception as e:  # noqa: BLE001 — the audit is advisory: the first reading stands
+            self._log.warning("[design_self_critique] the correction could not be asked for (%r); the first reading stands", e)
+            return design, not_applied
+        given = reply.get("protocol") if isinstance(reply, dict) else None
+        corrected = {k: v for k, v in (given or {}).items() if k in keys}
+        if not corrected:
+            self._log.warning("[design_self_critique] the correction named none of the asked parts; the first reading stands")
+            return design, not_applied
+        again = {**amended, "protocol": {**new_p, **corrected}}
+        design2, not_applied2 = self._hold_audit_repairs_to_the_schema(before, again)
+        left = {n["key"] for n in not_applied2}
+        for n in asked:
+            self._log.info("[design_self_critique] `%s` after the correction: %s", n["key"],
+                           "still not fully readable" if n["key"] in left else "read in full")
+        return design2, not_applied2
 
     def _critique_summary(self) -> list[str]:
         """What the last methodology audit did, for the plan's *Checks already made*: which parts of the design it changed,
@@ -5315,7 +5362,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                      f"that wrote it ({review.get('writer')}).",
                "self_review": "The design was read again by the model that wrote it: a self-review, not an independent "
                               "one."}.get(str(review.get("kind")), "")
-        held_back = [f"The audit proposed changing `{n.get('key')}`, but FI did not apply it: {n.get('reason')}"
+        held_back = [(f"The audit's change to `{n.get('key')}` was applied except a part FI could not read: {n.get('reason')}"
+                      if n.get("applied") else
+                      f"The audit proposed changing `{n.get('key')}`, but FI did not apply it: {n.get('reason')}")
                      for n in last.get("not_applied") or [] if isinstance(n, dict)]
         if held_back:
             who = " ".join([*held_back, who]).strip()
