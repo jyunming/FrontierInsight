@@ -383,6 +383,7 @@ async def capture_inputs(run: Callable[[list[str]], Awaitable[Any]], quest_root:
     out: dict[str, list[dict[str, Any]]] = {}
     called_at: dict[str, list[int]] = {}
     ran: list[int] = []
+    reads: dict[str, set[str]] = {}
     deadline = time.monotonic() + budget_s if budget_s else None
     for index, cell in enumerate(cells):
         if all(len(out.get(n, [])) >= CAPTURE_CALLS for n in names) and all(n in called_at for n in names):
@@ -398,6 +399,9 @@ async def capture_inputs(run: Callable[[list[str]], Awaitable[Any]], quest_root:
         for n, count in (got.get("counts") or {}).items():
             if str(n) in names and isinstance(count, int) and count > 0:
                 called_at.setdefault(str(n), []).append(index)
+        for n, keys in (got.get("reads") or {}).items():
+            if str(n) in names and isinstance(keys, list):
+                reads.setdefault(str(n), set()).update(str(k) for k in keys)
         for n, calls in (got.get("cases") or {}).items():
             if str(n) not in names or not isinstance(calls, list):
                 continue
@@ -407,6 +411,7 @@ async def capture_inputs(run: Callable[[list[str]], Awaitable[Any]], quest_root:
                     kept.append(c)
     out = {n: calls for n, calls in out.items() if calls}
     (root / CAPTURED).write_text(json.dumps({"cases": out, "called_at": called_at, "ran": ran,
+                                             "reads": {n: sorted(k) for n, k in reads.items()},
                                              "cells": [dict(c) for c in cells]}, default=str), encoding="utf-8")
     return out
 
@@ -455,8 +460,8 @@ async def _run_instrumented(run: Callable[[list[str]], Awaitable[Any]], root: Pa
 
 def read_captured(quest_root: Path | str) -> dict[str, Any]:
     """The record :func:`capture_inputs` saved: ``cases`` (calls by function), ``called_at`` (the indices of the cells
-    each function was called at), ``ran`` (the indices of the cells that ran to the end) and ``cells``; ``{}`` when there
-    is none."""
+    each function was called at), ``ran`` (the indices of the cells that ran to the end), ``reads`` (for a function that
+    returned a dict, the keys its callers read; ``"*"``: all of them) and ``cells``; ``{}`` when there is none."""
     try:
         data = json.loads((Path(quest_root) / CAPTURED).read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -818,7 +823,7 @@ def short(value: Any, limit: int = 120) -> str:
     return str(value)[:limit]
 
 
-def judge_rows(rows: list[dict[str, Any]], inputs: list[dict[str, Any]], rel: float, reads: Any = None) -> dict[str, Any]:
+def judge_rows(rows: list[dict[str, Any]], inputs: list[dict[str, Any]], rel: float, read: list[str] | None = None) -> dict[str, Any]:
     """The verdict on the rows the script returned (one per input: ``main`` / ``ref`` results, or ``main_err`` /
     ``ref_err``). Both raising excludes the input; one raising is a ``domain`` disagreement; otherwise the values are
     compared. ``{"status": agree|disagree|unconfirmed, "compared", "excluded", "disagreements": [{inputs, main, other, kind}]}``."""
@@ -841,9 +846,10 @@ def judge_rows(rows: list[dict[str, Any]], inputs: list[dict[str, Any]], rel: fl
             notes += [n for n in case_notes if n not in notes]
             m_val, r_val = decode(row.get("main")), decode(row.get("ref"))
             if isinstance(m_val, dict) and isinstance(r_val, dict):
-                # An output the rest of the code reads (or, when none is read, any output of the first version) that the
-                # second version does not return was never compared: the step cannot be agree on the others alone.
-                need = [k for k in m_val if reads is not None and reads(str(k))] or list(m_val)
+                # An output the callers read (FI recorded which when the simulation ran; with no record, every output of
+                # the first version) that the second version does not return was never compared: the step cannot be
+                # agree on the others alone.
+                need = list(m_val) if read is None or "*" in read else [k for k in m_val if str(k) in read]
                 missing += [str(k) for k in need if k not in r_val and str(k) not in missing]
             if differs:
                 bad.append({"inputs": case, "kind": "value", "main": short(decode(row.get("main"))),
@@ -1355,24 +1361,16 @@ class SecondImpl:
         rows = out.get("rows") if isinstance(out.get("rows"), list) else []
         if len(rows) != len(inputs):
             return {"status": UNCONFIRMED, "why": "the comparison returned fewer results than inputs", "disagreements": [], "retry": True}
-        verdict = judge_rows(rows, inputs, tolerance_for(spec, self.protocol), self._reads(spec))
+        verdict = judge_rows(rows, inputs, tolerance_for(spec, self.protocol), self._read_keys(spec))
         if verdict["status"] == UNCONFIRMED:
             verdict.update(why=verdict.get("why") or "both versions raised on every input", retry=False)
         return verdict
 
-    def _reads(self, spec: _fs.Spec):
-        """``reads(key)``: whether the rest of FI's record of the function (its card) or the study's code (outside this
-        function's own definition) names ``key`` as an output it uses."""
-        parts = [str((spec.card or {}).get(f) or "") for f in ("name", "does", "output")] + [spec.purpose]
-        own = _function_source(self.model_path, spec.name)
-        try:
-            for f in sorted((self.root / "code").rglob("*.py")):
-                text = f.read_text(encoding="utf-8")
-                parts.append(text.replace(own, "") if own and f == self.model_path else text)
-        except OSError:
-            pass
-        corpus = "\n".join(parts)
-        return lambda key: bool(re.search(rf"(?<![\w]){re.escape(key)}(?![\w])", corpus))
+    def _read_keys(self, spec: _fs.Spec) -> list[str] | None:
+        """The keys of the dict the function returned that its callers read when FI ran the simulation
+        (:func:`capture_inputs`); ``None`` when there is no such record (every output is then required)."""
+        got = (read_captured(self.root).get("reads") or {}).get(spec.name)
+        return [str(k) for k in got] if isinstance(got, list) else None
 
     # -- one function --
 

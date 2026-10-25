@@ -96,6 +96,63 @@ def _fi_capture(cfg):
     shift = cfg.get("shift") or {}
     shifted_name, scale = shift.get("name"), float(shift.get("scale") or 0.0)
     seen, counts, shifted = {}, {}, {}
+    # ``reads``: for each function that returned a dict, the keys its callers read (``"*"``: all of them, by iterating,
+    # copying or unpacking it).
+    reads = {}
+
+    class _Watched(dict):
+        # The dict a function returned, handing out the same values and noting which keys its callers ask for.
+        _fi_name = ""
+
+        def _note(self, key):
+            reads.setdefault(self._fi_name, set()).add(key if isinstance(key, str) else str(key))
+
+        def _all(self):
+            reads.setdefault(self._fi_name, set()).add("*")
+
+        def __getitem__(self, key):
+            self._note(key)
+            return dict.__getitem__(self, key)
+
+        def get(self, key, default=None):
+            self._note(key)
+            return dict.get(self, key, default)
+
+        def __contains__(self, key):
+            self._note(key)
+            return dict.__contains__(self, key)
+
+        def pop(self, key, *default):
+            self._note(key)
+            return dict.pop(self, key, *default)
+
+        def setdefault(self, key, default=None):
+            self._note(key)
+            return dict.setdefault(self, key, default)
+
+        def __iter__(self):
+            self._all()
+            return dict.__iter__(self)
+
+        def keys(self):
+            self._all()
+            return dict.keys(self)
+
+        def values(self):
+            self._all()
+            return dict.values(self)
+
+        def items(self):
+            self._all()
+            return dict.items(self)
+
+        def copy(self):
+            self._all()
+            return dict(dict.items(self))
+
+        def __reduce__(self):
+            self._all()
+            return (dict, (dict(dict.items(self)),))
 
     def conv(x, left):
         if np is not None and isinstance(x, np.ndarray):
@@ -181,6 +238,11 @@ def _fi_capture(cfg):
                 hit = [False]
                 got = changed(got, hit)
                 shifted[name] = shifted.get(name, 0) + (1 if hit[0] else 0)
+            if isinstance(got, dict) and type(got) in (dict, _Watched):
+                watched = _Watched(dict.items(got))
+                watched._fi_name = name
+                reads.setdefault(name, set())
+                return watched
             return got
         return recorded
 
@@ -197,7 +259,7 @@ def _fi_capture(cfg):
         for name, fn in originals.items():
             if getattr(m, name, None) is fn:
                 setattr(m, name, getattr(mod, name))
-    return {"cases": seen, "counts": counts, "shifted": shifted}
+    return {"cases": seen, "counts": counts, "shifted": shifted, "reads": reads}
 
 def main():
     import os
@@ -334,7 +396,7 @@ def main():
     if captured is not None:
         try:
             with open(capture["path"], "w", encoding="utf-8") as fh:
-                json.dump(captured, fh)
+                json.dump(captured, fh, default=lambda o: sorted(o) if isinstance(o, set) else str(o))
         except Exception:
             pass
     sys.stdout = real_stdout

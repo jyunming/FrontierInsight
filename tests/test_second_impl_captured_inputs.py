@@ -116,3 +116,19 @@ def test_the_scan_cells_of_a_search_are_given_the_values_every_evaluation_goes_t
     asyncio.run(eng._captured_calls({}, protocol, "pkg", [], {}))
     assert seen["in_each_run"] == {"case": [1, 2, 3]}
     assert len(seen["cells"]) > 1 and any("case" not in c for c in seen["cells"]), "the scan's cells, given the values"
+
+
+def test_fi_records_which_keys_of_a_returned_dict_the_callers_read(tmp_path: Path) -> None:
+    root = _quest(tmp_path)
+    (root / "code" / "pkg" / "model.py").write_text(
+        "def fit(x):\n    return {'slope': 2.0 * x, 'spare': 1.0, 'cov': 3.0, 'extra': 4.0}\n\n\n"
+        "def summary(x):\n    return {'a': x, 'b': 2 * x}\n\n\ndef plain(x):\n    return x\n", encoding="utf-8")
+    (root / "code" / "simulate.py").write_text(
+        "from pkg.model import fit, summary, plain\n\n\ndef run_cell(cell):\n"
+        "    r = fit(cell['gap'])\n    s = summary(cell['gap'])\n    plain(cell['gap'])\n"
+        "    return {'v': r['slope'] + r.get('cov', 0.0) + sum(v for v in s.values())}\n", encoding="utf-8")
+    asyncio.run(si.capture_inputs(_run(root), root, "pkg", ["fit", "summary", "plain"], [{"gap": 3.0}], deterministic=True))
+    reads = si.read_captured(root)["reads"]
+    assert reads["fit"] == ["cov", "slope"], "only the keys that were asked for, not the ones left alone"
+    assert reads["summary"] == ["*"], "iterating over the values reads them all"
+    assert "plain" not in reads, "a function that returned no dict has no record of reads"

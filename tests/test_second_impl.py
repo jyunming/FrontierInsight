@@ -163,7 +163,7 @@ def test_a_different_return_shape_with_equal_shared_values_is_not_a_disagreement
     inputs = [{"x": 1.0}, {"x": 2.0}]
     main = {"Ea": 49.6, "lnA": 15.3, "se_Ea": 0.69, "se_lnA": 0.26}
     ref = {"Ea": 49.6, "lnA": 15.3, "covariance": [[0.48, 0.18], [0.18, 0.07]], "se_Ea": 0.69}
-    v = si.judge_rows([{"main": main, "ref": ref}, {"main": main, "ref": ref}], inputs, si.REL, lambda k: k != "se_lnA")
+    v = si.judge_rows([{"main": main, "ref": ref}, {"main": main, "ref": ref}], inputs, si.REL, ["Ea", "lnA", "se_Ea"])
     assert v["status"] == "agree" and not v["disagreements"] and v["compared"] == 2
     assert "covariance" in v["shape_notes"][0] and "se_lnA" in v["shape_notes"][0]
     assert "those were not compared" in v["shape_notes"][0] and "description" not in v["shape_notes"][0]
@@ -171,13 +171,13 @@ def test_a_different_return_shape_with_equal_shared_values_is_not_a_disagreement
 
 def test_an_output_the_second_version_lacks_is_not_agree_on_the_strength_of_a_trivial_shared_one():
     main, ref = {"answer": 999, "count": 1}, {"count": 1}
-    v = si.judge_rows([{"main": main, "ref": ref}], [{"x": 1.0}], si.REL, lambda k: k == "answer")
+    v = si.judge_rows([{"main": main, "ref": ref}], [{"x": 1.0}], si.REL, ["answer"])
     assert v["status"] == "unconfirmed" and "answer" in v["why"] and not v["disagreements"]
     # nothing says which outputs are read: every output of the first version is required
     assert si.judge_rows([{"main": main, "ref": ref}], [{"x": 1.0}], si.REL)["status"] == "unconfirmed"
     assert si.judge_rows([{"main": main, "ref": {**ref, "answer": 999}}], [{"x": 1.0}], si.REL)["status"] == "agree"
     # an unread output the second version lacks does not block
-    assert si.judge_rows([{"main": main, "ref": {"answer": 999}}], [{"x": 1.0}], si.REL, lambda k: k == "answer")["status"] == "agree"
+    assert si.judge_rows([{"main": main, "ref": {"answer": 999}}], [{"x": 1.0}], si.REL, ["answer"])["status"] == "agree"
 
 
 def test_a_real_difference_in_a_shared_value_still_disagrees_when_the_shapes_differ():
