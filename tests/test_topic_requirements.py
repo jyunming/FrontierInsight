@@ -700,3 +700,42 @@ def test_a_study_made_smaller_is_told_what_the_topic_asks_to_vary() -> None:
     assert text.endswith("\n".join(kept)) and "stays varied" in text
     assert "stays varied" not in _fit_request("too long", fit, [])
     assert tr.kept_when_smaller(None) == []
+
+
+# ---- a gap carries the plan key its topic item is mapped to ----------------------------------------------------------
+
+def _mapped_scan_case() -> tuple[dict[str, Any], dict[str, Any]]:
+    req = {"factors": [{"name": "damping for the second stage", "range": [0.1, 0.95], "stated": "damping 0.1 to 0.95",
+                        "main": True, "compared": True}]}
+    design = {"protocol": {"optimisation": {"grid": {"damping": [0.5, 0.9], "stage2_damping": [0.25, 0.5, 0.75]}},
+                           "topic_map": [{"item": "F1", "by": "setting:stage2_damping"}]}}
+    return req, design
+
+
+def test_a_gap_carries_the_plan_key_its_topic_item_is_mapped_to_and_merge_takes_the_answer_for_it() -> None:
+    req, design = _mapped_scan_case()
+    gaps, _ = tr.match(req, tr.view(design))
+    assert [(g["kind"], g["axis"]) for g in gaps] == [("level", "stage2_damping")]  # not the first axis whose words fit
+    answer = {"protocol": {"optimisation": {"grid": {"stage2_damping": [0.1, 0.25, 0.5, 0.75, 0.95]}}}}
+    merged = tr.merge(design, answer, gaps)
+    assert merged["protocol"]["optimisation"]["grid"] == {"damping": [0.5, 0.9],
+                                                          "stage2_damping": [0.1, 0.25, 0.5, 0.75, 0.95]}
+
+
+def test_a_judged_missing_factor_carries_the_mapped_key_and_one_with_no_map_carries_none() -> None:
+    req, design = _mapped_scan_case()
+    unmapped = {"protocol": {"optimisation": design["protocol"]["optimisation"]}}
+    gaps, _ = tr.gaps_from({"factors": [{"name": "unrelated words", "compared": True}]}, tr.view(unmapped), {"F1": "missing"})
+    assert gaps[0]["axis"] == ""  # no entry maps it: behaviour as before
+    mapped_req = {"factors": [{"name": "unrelated words", "compared": True}]}
+    design["protocol"]["topic_map"] = [{"item": "F1", "by": "setting:stage2_damping"}]
+    gaps, _ = tr.gaps_from(mapped_req, tr.view(design), {"F1": "missing"})
+    assert gaps[0]["axis"] == "stage2_damping"
+
+
+def test_an_unreadable_answer_for_a_gap_with_no_mapped_key_is_still_refused() -> None:
+    req = {"factors": [{"name": "unrelated words", "compared": True}]}
+    design = {"protocol": {"optimisation": {"grid": {"damping": [0.5, 0.9]}}}}
+    gaps, _ = tr.gaps_from(req, tr.view(design), {"F1": "missing"})
+    assert gaps and gaps[0]["axis"] == ""
+    assert tr.merge(design, {"protocol": {"optimisation": {"grid": {"damping": [0.1, 0.2]}}}}, gaps) is None

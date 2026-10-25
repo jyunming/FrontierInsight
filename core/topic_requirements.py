@@ -511,6 +511,21 @@ def mapping_of(req: dict[str, Any], plan: dict[str, Any], kind: str, item: dict[
     return "bad", why
 
 
+def mapped_axis(req: dict[str, Any], plan: dict[str, Any], item: dict[str, Any]) -> str:
+    """The setting of the plan its own topic map (``protocol.topic_map``) gives for a topic factor, when that setting is one
+    of the plan's: the plan's key itself, however the topic words the factor. ``""`` when the map names none."""
+    keys = _map_keys(req, "factors", item)
+    for entry in plan.get("topic_map") or []:
+        if not isinstance(entry, dict) or _name_key(entry.get("item")) not in keys:
+            continue
+        head, _sep, name = str(entry.get("by") or "").partition(":")
+        if head.strip().lower() in ("setting", "grid", "design_variable", "variable"):
+            axis = next((a for a in plan["axes"] if _name_key(a) == _name_key(name)), None)
+            if axis is not None:
+                return str(axis)
+    return ""
+
+
 def match(req: dict[str, Any], plan: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
     """``(gaps, unresolved)``: the gaps a name match settles (a factor named by a setting whose values do not cover what the
     topic states for it), and the ids (``F1``, ``Q2``, ``M1``) of the items it cannot settle either way. An item a name
@@ -528,7 +543,8 @@ def match(req: dict[str, Any], plan: dict[str, Any]) -> tuple[list[dict[str, Any
             unresolved.append(_item_id("factors", i))
             continue
         wanted = _tokens(factor["name"])
-        axis = next((a for a in plan["axes"] if wanted and (_tokens(a) <= wanted or wanted <= _tokens(a)) and _tokens(a)), None)
+        axis = mapped_axis(req, plan, factor) or next(
+            (a for a in plan["axes"] if wanted and (_tokens(a) <= wanted or wanted <= _tokens(a)) and _tokens(a)), None)
         if axis is None and not compared(req, factor):
             # The topic uses its values (all of them in each run, a range every run covers) and compares no result across
             # them: it is not a setting the study must sweep. Asking for one put five values fitted together into the grid
@@ -673,7 +689,7 @@ def gaps_from(req: dict[str, Any], plan: dict[str, Any], verdicts: dict[str, str
             unjudged.append(str(item.get("name") or item.get("text") or ident))
         elif verdicts[ident] == "missing" or (kind == "searches" and verdicts[ident] != "covered"):
             found_gap = gap({"factors": "factor", "quantities": "quantity", "formulas": "formula",
-                             "searches": "search"}[kind], item)
+                             "searches": "search"}[kind], item, axis=mapped_axis(req, plan, item) if kind == "factors" else "")
             named = mapping_of(req, plan, kind, item)
             if named is not None and named[0] == "judge":
                 # The plan's own map names an element for the item and the reading did not accept it: both are said, so the
