@@ -191,17 +191,32 @@ def flatten_reply(reply: dict[str, Any]) -> list[tuple[str, Any]]:
     return out
 
 
-def accepted_needs(previous: dict[str, Any], reply: dict[str, Any], allowed: list[str] | None) -> list[dict[str, str]]:
-    """The extra parts a reply asks to change (``needs: [{path, why}]``): each with a valid path and a reason is accepted."""
-    out = []
-    for n in (reply.get("needs") or []) if isinstance(reply, dict) and isinstance(reply.get("needs"), list) else []:
-        if not (isinstance(n, dict) and isinstance(n.get("path"), str) and str(n.get("why") or "").strip()):
-            continue
-        path = n["path"].strip()
-        if invalid_reason(path, previous) or (allowed is not None and any(path == a or path.startswith(a + ".") for a in allowed)):
-            continue
-        out.append({"path": path, "why": str(n["why"]).strip()})
-    return out
+def accepted_needs(
+    previous: dict[str, Any], reply: dict[str, Any], allowed: list[str] | None,
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """``(accepted, refused)`` of the extra parts a reply asks to change (``needs: [{path, why}]``). A need is accepted when
+    its path is a valid, specific part of the design and it has a reason. It is refused when it has no reason, is not a part
+    of the design, is the whole of ``protocol``, or is an ancestor of a part already allowed (it would widen the allowed
+    parts to everything under it)."""
+    ok: list[dict[str, str]] = []
+    bad: list[dict[str, str]] = []
+    raw = reply.get("needs") if isinstance(reply, dict) else None
+    for n in raw if isinstance(raw, list) else []:
+        path = str(n.get("path") or "").strip() if isinstance(n, dict) else ""
+        why = str(n.get("why") or "").strip() if isinstance(n, dict) else ""
+        reason = (invalid_reason(path, previous) if path else "it has no path"
+                  or "")
+        if not reason and not why:
+            reason = "it gives no reason"
+        elif not reason and (path == "protocol" or any(a.startswith(path + ".") for a in allowed or [])):
+            reason = "it is a whole group of parts, not one specific part"
+        elif not reason and allowed is not None and any(path == a or path.startswith(a + ".") for a in allowed):
+            continue  # already allowed: not an extra part
+        if reason:
+            bad.append({"key": path or "(no path)", "reason": reason})
+        else:
+            ok.append({"path": path, "why": why})
+    return ok, bad
 
 
 def merge_parts(
@@ -213,7 +228,7 @@ def merge_parts(
     ``protocol`` reply that FI has already flattened. ``refused``: one ``{"key", "reason"}`` per part not taken."""
     changes: list[tuple[str, Any]] = []
     refused: list[dict[str, str]] = []
-    extra = [n["path"] for n in accepted_needs(previous, reply, allowed)]
+    extra = [n["path"] for n in accepted_needs(previous, reply, allowed)[0]]
     for path, value in flatten_reply({k: v for k, v in reply.items() if k != "needs"}):
         if path == "rationale":
             continue

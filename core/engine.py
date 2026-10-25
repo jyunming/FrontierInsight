@@ -5119,8 +5119,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         text, obj = await self._chat_json(prompt, node="design", want=(), usable=lambda p: bool(p))
         self._keep_plan_answer(text)
         design, applied, refused = _design_parts.merge_parts(previous, obj or {}, allowed)
-        for n in _design_parts.accepted_needs(previous, obj or {}, allowed):
+        needs, not_needs = _design_parts.accepted_needs(previous, obj or {}, allowed)
+        for n in needs:
             self._log.info("[design] the redesign also needed `%s`: %s", n["path"], _one_line(n["why"], 200))
+        for r in not_needs:
+            self._log.warning("[design] the redesign's need for `%s` was not accepted: %s", r["key"], r["reason"])
         for r in refused:
             self._log.warning("[design] the redesign's change to `%s` was not made: %s", r["key"], r["reason"])
         if not applied:
@@ -24507,6 +24510,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "weaknesses": parsed.get("weaknesses") or [],
                 "suggestions": parsed.get("suggestions") or [],
                 "blocking": parsed.get("blocking") or "",
+                "design_parts": [str(x).strip() for x in (parsed.get("design_parts") or []) if str(x).strip()]
+                if isinstance(parsed.get("design_parts"), list) else [],
                 "must_flag_hits": [str(h).strip() for h in mfh if str(h).strip()],
                 "status": "ok",
                 # Which model was asked for, and which provider and model actually answered (after a fallback, the
@@ -31386,12 +31391,19 @@ def _aggregate_panel_reviews(
             seen_mfh.add(key)
             mfh_out.append(f"[{persona}] {h}")
 
+    cited_out: list[str] = []  # the design paths any panelist cited (checked against the design where they are used)
+    for r in panel:
+        for x in r.get("design_parts") or []:
+            if isinstance(x, str) and x not in cited_out:
+                cited_out.append(x)
+
     return {
         "verdict": verdict, "score": median,
         "rigor_score": rigor_median, "depth_score": depth_median,
         "agreement": agreement,
         "strengths": strengths, "weaknesses": weaknesses,
         "suggestions": suggestions, "blocking": blocking,
+        "design_parts": cited_out,
         "must_flag_hits": mfh_out,
         "status": status,
     }

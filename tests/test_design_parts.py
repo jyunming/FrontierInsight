@@ -94,6 +94,25 @@ def test_a_part_that_is_needed_beyond_the_asked_ones_is_accepted_with_its_reason
     assert applied == ["protocol.runs_per_setting", "protocol.seed_policy"] and refused == []
 
 
+def test_a_need_that_is_a_whole_group_of_parts_is_refused() -> None:
+    reply = {"protocol": {"runs_per_setting": 900, "seed_policy": "x", "grid": {"strength": [9]}},
+             "needs": [{"path": "protocol", "why": "everything"}, {"path": "protocol.grid", "why": ""}]}
+    got, applied, refused = dp.merge_parts(DESIGN, reply, ["protocol.runs_per_setting"])
+    assert applied == ["protocol.runs_per_setting"] and got["protocol"]["seed_policy"] == DESIGN["protocol"]["seed_policy"]
+    _ok, bad = dp.accepted_needs(DESIGN, reply, ["protocol.runs_per_setting"])
+    assert {b["key"] for b in bad} == {"protocol", "protocol.grid"}
+    # an ancestor of an allowed part would widen it to everything under it
+    _ok, bad = dp.accepted_needs(DESIGN, {"needs": [{"path": "protocol.grid", "why": "w"}]}, ["protocol.grid.strength"])
+    assert bad and "whole group" in bad[0]["reason"]
+
+
+def test_a_panel_review_carries_and_merges_the_cited_parts() -> None:
+    from core.engine import _aggregate_panel_reviews as agg
+    panel = [{"persona": "a", "verdict": "revise", "score": 3, "status": "ok", "design_parts": ["method"]},
+             {"persona": "b", "verdict": "revise", "score": 3, "status": "ok", "design_parts": ["method", "protocol.grid"]}]
+    assert agg(panel)["design_parts"] == ["method", "protocol.grid"]
+
+
 # ---- the audit ------------------------------------------------------------------------------------------------------
 
 async def _audit(tmp_path: Path, reply: dict[str, Any]) -> tuple[dict[str, Any], Any]:
