@@ -80,15 +80,15 @@ def test_paper_and_run_record_read_the_same_time_with_the_search(tmp_path: Path)
     assert "at least 80 s" in said and met == "over" and "at least 80 s" in sentence
 
 
-def test_the_estimates_count_is_used_only_for_the_same_run(tmp_path: Path) -> None:
-    # no count in the run record: the estimate of the SAME run (same key) gives it; another run's estimate does not
+def test_the_estimates_count_is_never_used(tmp_path: Path) -> None:
+    # the estimate's number is how many FI let run, not how many did; a malformed estimate is not read at all
     root = _quest(tmp_path / "q", wall=12.0, total=40.0, at_once=None, key="confirm")
     (root / ".fi").mkdir(exist_ok=True)
-    (root / ".fi" / "run_estimate.json").write_text(json.dumps({"key": "explore", "at_once": 8}), encoding="utf-8")
-    said = paper_facts.facts(root, topic=TOPIC)["run_time"].text
-    assert "8 settings" not in said and "uncounted number" in said
-    (root / ".fi" / "run_estimate.json").write_text(json.dumps({"key": "confirm", "at_once": 8}), encoding="utf-8")
-    assert "8 settings run at the same time" in paper_facts.facts(root, topic=TOPIC)["run_time"].text
+    for text in (json.dumps({"key": "confirm", "at_once": 8}), "[1, 2]", "not json"):
+        (root / ".fi" / "run_estimate.json").write_text(text, encoding="utf-8")
+        said = paper_facts.facts(root, topic=TOPIC)["run_time"].text
+        assert "8 settings" not in said and "uncounted number" in said
+    assert run_facts.settings_at_once(root) is None
 
 
 def test_the_log_line_is_not_a_count_of_this_run(tmp_path: Path) -> None:
@@ -155,7 +155,7 @@ def test_the_runner_keeps_the_counted_number_and_each_settings_wall_time(tmp_pat
 
 def test_the_writer_is_told_when_the_third_wording_applies() -> None:
     words = paper_facts._FACT_WORDS["time_limit_met"]
-    assert NOT_SHOWN in words and "at or under the limit while the most it takes is over it or not known" in words
+    assert NOT_SHOWN in words and "at or under the limit or not known while the most it takes is over it or not known" in words
 
 
 def test_the_least_decides_over_whatever_the_count(tmp_path: Path) -> None:
@@ -163,3 +163,29 @@ def test_the_least_decides_over_whatever_the_count(tmp_path: Path) -> None:
     # the least a one-after-another run takes, and the limit is over
     met, said, sentence = _met(_quest(tmp_path / "q", wall=130.0, total=121.0, at_once=None), 130.0)
     assert met == "over" and "at least 121 s" in said and "is over the topic" in sentence
+
+
+def test_a_run_counted_as_serial_still_counts_the_search(tmp_path: Path) -> None:
+    # wall 45 s, trials 44 s, search 20 s, limit 60 s: a reader's run takes at least 64 s
+    root = _quest(tmp_path / "q", wall=45.0, total=44.0, at_once=1)
+    (root / "results").mkdir()
+    (root / "results" / "best_design.json").write_text(json.dumps({"time": {"seconds": 20.0}}), encoding="utf-8")
+    met, said, sentence = _met(root, 45.0)
+    assert met == "over" and "one at a time" in said and "is over the topic" in sentence
+
+
+def test_without_a_wall_time_the_bounds_still_give_the_same_verdict(tmp_path: Path) -> None:
+    root = tmp_path / "q"
+    run_facts.record_trials(root, key="k", wall_s=None, trials=10, cells=5, trial_sum_s=70.0, at_once=4)
+    known = paper_facts.facts(root, topic=TOPIC)
+    sentence = disclosure._time_sentence(root, TOPIC, None)
+    assert known["time_limit_met"].text == "over" and "is over the topic" in sentence
+    ok = tmp_path / "r"
+    run_facts.record_trials(ok, key="k", wall_s=None, trials=10, cells=5, trial_sum_s=30.0, at_once=4, settings_s=50.0)
+    assert paper_facts.facts(ok, topic=TOPIC)["time_limit_met"].text == "within"
+    assert "is within the topic" in disclosure._time_sentence(ok, TOPIC, None)
+
+
+def test_the_range_says_a_one_after_another_run_takes_at_most_the_upper_time(tmp_path: Path) -> None:
+    _met_, said, _s = _both(tmp_path / "q", least=40.0, most=50.0)
+    assert "takes at most that" in said

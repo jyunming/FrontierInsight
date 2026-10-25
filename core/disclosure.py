@@ -382,13 +382,20 @@ def topic_limit(quest_root: Path, topic: str) -> float | None:
 
 
 def _time_sentence(quest_root: Path, topic: str, duration_s: float | None) -> str:
+    from . import run_facts as _run_facts
+
     if isinstance(duration_s, bool) or not isinstance(duration_s, (int, float)) or not 0 <= duration_s < float("inf"):
-        return ""
+        # No wall time (FI did not time the whole run): the trials' own times can still show the limit missed or kept.
+        limit, reader = topic_limit(quest_root, topic), _run_facts.reader_run(quest_root)
+        if limit is None or reader is None:
+            return ""
+        return (f"FI did not time the whole run; one after another the settings take "
+                f"{_run_facts.reader_words(reader, _plain_seconds)}, which is {_run_facts.reader_verdict(reader, limit)} "
+                f"the topic's limit of {_plain_seconds(limit)}.")
     limit = topic_limit(quest_root, topic)
     ran = f"The experiment ran for {_plain_seconds(float(duration_s))}"
     if limit is None:
         return f"{ran}; FI did not check it against a limit in the topic."
-    from . import run_facts as _run_facts
 
     # A reader's run of code/run.py runs the settings one after another (run_facts.reader_run, the one place that time is
     # worked out): when FI ran them at the same time, the limit is judged against that, and both times are said.
