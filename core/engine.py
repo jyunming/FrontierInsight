@@ -17228,6 +17228,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         :meth:`_guide_oracles`); both go back to the plan in ONE request. Each part is done at most once, a resume
         included (``.fi/oracle_review.json`` records how far it got). What was rewritten, found, asked and left."""
         text, rewrites, requests = _forms.apply_to_plan(path.read_text(encoding="utf-8"), fi_runs=fi_runs)
+        too_tight = _forms.precision_gaps(text)  # checks whose tolerance is below the precision of their expected value
         left: list[str] = []
         for r in rewrites:
             self._log.info("[oracle] %s", r)
@@ -17283,6 +17284,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._oracle_review_write({**progress, "answered": True})
             self._log.warning("[oracle] the request to the plan about its checks was not answered before the quest "
                               "stopped; it is not made again")
+            self._widen_to_precision(path, progress.get("precision_asked") or [])
         elif (requests or findings or formula_asks or example_asks) and not progress.get("asked"):
             for r in requests:
                 self._log.warning("[oracle] asking the plan to change a check: %s", r)
@@ -17294,7 +17296,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                         f"{f.get('value'):.10g}" if f["state"] == "arithmetic" else ""}[f["state"]]
                 self._log.info("[oracle] asking the plan about the expected value of %r (%s)", f["name"], reason)
             # Recorded before the request: it is made at most once, even if this run stops while it is out.
-            self._oracle_review_write({**progress, "asked": True})
+            self._oracle_review_write({**progress, "asked": True, **({"precision_asked": too_tight} if too_tight else {})})
             before = self._planned_oracles()
             equations_before = self._planned_equations()
             for r in example_asks:
@@ -17338,6 +17340,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             text, again, left = _forms.apply_to_plan(path.read_text(encoding="utf-8"), fi_runs=fi_runs)
             if again:
                 path.write_text(text, encoding="utf-8")
+            # A tolerance the plan, asked once, left tighter than its expected value's own digits is widened by FI.
+            widened = self._widen_to_precision(path, too_tight)
+            if widened:
+                again = [*again, *widened]
+                text, _more, left = _forms.apply_to_plan(path.read_text(encoding="utf-8"), fi_runs=fi_runs)
             for r in left:
                 self._log.warning("[oracle] still not in its kind's form after the plan was asked once: %s", r)
             self._write_plan_section(path, [
@@ -17364,6 +17371,28 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 **({"expected_formula": {"asked": [f["name"] for f in formula_asks], "corrected": formulas}}
                    if formula_asks or formulas else {}),
                 **({"review": {k: v for k, v in review.items() if k != "lines"}} if review else {})}
+
+    def _widen_to_precision(self, path: Path, names: list[str]) -> list[str]:
+        """Widen, in plan.md, the tolerance of each named check that is still smaller than half a unit of the last digit
+        of its expected value (:func:`core.oracle_forms.widen_to_precision`) and say so: in the log, as a version of the
+        plan by the engine, among the checks the engine changed (shown before the freeze) and in ``oracle_review.json``.
+        The sentences, or ``[]`` when nothing was widened."""
+        if not names:
+            return []
+        text, told = _forms.widen_to_precision(path.read_text(encoding="utf-8"), [str(n) for n in names])
+        if not told:
+            return []
+        before = self._planned_oracles()
+        path.write_text(text, encoding="utf-8")
+        _plan.record_version(self.quest_root, text, by="engine",
+                             note="a tolerance widened to the precision of its expected value")
+        changed = [n for n, o in self._planned_oracles().items() if before.get(n) != o]
+        self._note_engine_change(changed, reason="; ".join(told) + ".")
+        for sentence in told:
+            self._log.warning("[oracle] %s", sentence)
+        record = self._oracle_review_read()
+        self._oracle_review_write({**record, "tolerance_widened": [*record.get("tolerance_widened", []), *told]})
+        return told
 
     def _simulation_ran(self) -> bool:
         """Whether the audit trace shows the experiment step ever started (the trace outlives a ``--from plan`` rerun,

@@ -568,3 +568,49 @@ async def test_the_same_model_judging_a_case_is_recorded_plainly_and_asks_nothin
     assert "cases were not judged by another model" in _section(engine)
     record = json.loads((engine.fi_dir / "oracle_review.json").read_text(encoding="utf-8"))
     assert record["isolation"]["read_by_other_model"] is False
+
+
+# --- a tolerance tighter than the digits its expected value is written to --------------------------------------------
+
+DIGITS_CHECK = {"name": "decay at t=1", "kind": "special_case", "check": "the state after one time unit",
+                "expected": 0.04978, "tolerance": 1e-6, "case": {"n": 4}, "measure": "y_end",
+                "reference": "derivation: the series summed to four digits"}
+DIGITS_PROTOCOL = {"grid": {"n": [4, 8]}, "model": MODEL, "oracles": [DIGITS_CHECK]}
+DIGITS_REVIEW = {**REVIEW, "equations_not_tested": [], "add": []}
+
+
+def _tolerance_of(engine: Engine) -> float:
+    return plan.load_design(engine.quest_root)[0]["protocol"]["oracles"][0]["tolerance"]
+
+
+@pytest.mark.asyncio
+async def test_a_tolerance_the_plan_leaves_tighter_than_its_expected_value_s_digits_is_widened_and_said(tmp_path: Path) -> None:
+    engine = Engine(_config(tmp_path))
+    model = _Model(DIGITS_PROTOCOL, DIGITS_REVIEW)  # asked once, it changes nothing
+    engine._client = model
+    await engine._node_plan({"topic": engine.config.topic, "literature": []})
+    assert len(model.revisions) == 1 and "written to 4 significant digits" in model.revisions[0]
+    assert _tolerance_of(engine) == 5e-06, "half a unit of the last digit of 0.04978"
+    assert plan.load_design(engine.quest_root)[0]["protocol"]["oracles"][0]["expected"] == 0.04978
+    section = _section(engine)
+    assert "FI widened the tolerance to 5e-06" in section and "Still not in its kind's form" not in section
+    record = json.loads((engine.fi_dir / "oracle_review.json").read_text(encoding="utf-8"))
+    assert len(record["tolerance_widened"]) == 1
+    # Once: another pass through the plan step asks and widens nothing more.
+    await engine._node_plan({"topic": engine.config.topic, "literature": []})
+    assert len(model.revisions) == 1 and _tolerance_of(engine) == 5e-06
+
+
+@pytest.mark.asyncio
+async def test_a_plan_that_fixes_the_tolerance_when_asked_is_not_widened(tmp_path: Path) -> None:
+    def looser(block: dict[str, Any]) -> dict[str, Any]:
+        oracles = [{**o, "tolerance": 2e-5} for o in block["protocol"]["oracles"]]
+        return {**block, "protocol": {**block["protocol"], "oracles": oracles}}
+
+    engine = Engine(_config(tmp_path))
+    model = _Model(DIGITS_PROTOCOL, DIGITS_REVIEW, revise=looser)
+    engine._client = model
+    await engine._node_plan({"topic": engine.config.topic, "literature": []})
+    assert _tolerance_of(engine) == 2e-5
+    record = json.loads((engine.fi_dir / "oracle_review.json").read_text(encoding="utf-8"))
+    assert not record.get("tolerance_widened")

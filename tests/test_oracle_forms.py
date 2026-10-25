@@ -339,7 +339,7 @@ async def test_the_plan_step_sends_a_bare_name_conservation_check_back_once_with
 
 
 @pytest.mark.asyncio
-async def test_a_check_the_plan_does_not_fix_is_left_for_the_person_with_a_plain_note(tmp_path: Path) -> None:
+async def test_a_check_the_plan_does_not_fix_has_its_tolerance_widened_to_its_digits_and_the_plan_says_so(tmp_path: Path) -> None:
     engine = Engine(_config(tmp_path))
     kimi = {"name": "decay at t=1", "kind": "special_case", "expected": 0.367879, "tolerance": 1e-12,
             "case": {"n": 4}, "measure": "P_out", "reference": "derivation: y(1) = exp(-1) = 0.367879"}
@@ -349,9 +349,11 @@ async def test_a_check_the_plan_does_not_fix_is_left_for_the_person_with_a_plain
     await engine._node_plan({"topic": engine.config.topic, "literature": []})
     assert len(model.revisions) == 1, "asked once, never in a loop"
     section = _plan_text(engine).split(f"## {of.HEADING}", 1)[1].split("\n## ", 1)[0]
-    assert "The plan did not change the checks." in section and "Still not in its kind's form" in section
+    assert "The plan did not change the checks." in section and "FI widened the tolerance to 5e-07" in section
+    assert "Still not in its kind's form" not in section
     assert _oracle_in_plan(engine)["expected"] == 0.367879, "no expected value is changed by FI itself"
-    assert "still not in its kind's form" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+    assert _oracle_in_plan(engine)["tolerance"] == 5e-07, "half a unit of the last digit of 0.367879"
+    assert "FI widened the tolerance" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
 
 
 TOY_VIOLATION = '''
@@ -576,3 +578,83 @@ async def test_a_criterion_that_reads_a_changed_check_may_change_with_it_and_no_
     assert "lower is better" in kept_line, "the criteria shown above the block are shown again with it"
     # The rewrite also moved the criterion on the unchanged check, which was put back, and the log says so.
     assert "only the checks were kept" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+
+
+# --- a tolerance tighter than the digits the expected value is written to ---------------------------------------------
+
+def test_a_tolerance_below_half_a_unit_of_the_last_stated_digit_is_found_whatever_the_digit_count() -> None:
+    four = {"name": "level", "kind": "special_case", "expected": 0.04978, "tolerance": 1e-6, "case": {"dt": 0.1},
+            "measure": "y_end"}
+    got = of.enforce({"oracles": [four]})
+    assert len(got.precision) == 1 and got.precision[0]["half"] == pytest.approx(5e-6) and len(got.requests) == 1
+    assert of.enforce({"oracles": [{**four, "tolerance": 5e-6}]}).requests == []
+    assert of.enforce({"oracles": [{**four, "expected": 0.049782963}]}).requests == []
+
+
+def test_the_digits_are_counted_from_the_text_the_plan_typed_not_the_float() -> None:
+    check = {"name": "level", "kind": "special_case", "expected": 0.017409, "tolerance": 1e-7, "case": {"dt": 0.1},
+             "measure": "y_end"}
+    # 0.0174090 is typed to seven digits: known to 5e-8, so a tolerance of 1e-7 is fine; the float alone says five digits.
+    assert of.enforce({"oracles": [check]}).precision[0]["digits"] == 5
+    typed = {"level": {"expected": "0.0174090"}}
+    assert of.enforce({"oracles": [check]}, typed=typed).precision == []
+    assert of.typed_precision("0.0174090", 0.017409) == (6, pytest.approx(5e-8))
+    assert of.typed_precision("1e-07", 1e-7) == (1, pytest.approx(5e-8))
+    assert of.typed_precision("0.5", 0.6) is None and of.typed_precision(0.5, 0.5) is None
+
+
+DIGITS_PLAN = '''# Plan
+
+## The design
+
+```yaml
+hypothesis: h
+protocol:
+  oracles:
+    - name: level
+      kind: special_case
+      expected: 0.0174090
+      tolerance: 1.0e-07
+      case: {dt: 0.1}
+      measure: y_end
+    - name: share
+      kind: special_case
+      expected: 0.5123
+      tolerance: 1.0e-05
+      tolerance_mode: relative
+      case: {dt: 0.1}
+      measure: y_end
+```
+'''
+
+
+def test_the_typed_numbers_of_a_plan_are_read_with_their_trailing_zeros() -> None:
+    assert of.typed_numbers(DIGITS_PLAN)["level"] == {"expected": "0.0174090", "tolerance": "1.0e-07"}
+
+
+def test_a_tolerance_still_too_tight_is_widened_to_half_a_unit_on_its_own_scale_and_the_expected_value_is_kept() -> None:
+    names = of.precision_gaps(DIGITS_PLAN)
+    assert names == ["share"], "level is typed to seven digits, so 1e-07 is within its precision"
+    text, told = of.widen_to_precision(DIGITS_PLAN, names)
+    assert len(told) == 1 and "FI widened the tolerance" in told[0] and "of the value" in told[0]
+    from core import plan as _plan
+    oracles = {o["name"]: o for o in _plan.raw_design_block(text)["protocol"]["oracles"]}
+    assert oracles["share"]["expected"] == 0.5123 and oracles["share"]["tolerance_mode"] == "relative"
+    assert oracles["share"]["tolerance"] * 0.5123 >= 5e-5 and oracles["share"]["tolerance"] * 0.5123 < 5.0001e-5
+    assert oracles["level"]["tolerance"] == 1e-7, "a check not named is not touched"
+    assert "share" not in of.precision_gaps(text), "widened once, no longer tighter than its digits"
+    assert of.widen_to_precision(text, names) == (text, [])
+
+
+def test_a_genuinely_wrong_value_still_fails_after_the_tolerance_is_widened_and_a_rounded_one_passes() -> None:
+    from core import oracle_check as oc
+    check = {"name": "level", "kind": "special_case", "expected": 0.017409, "tolerance": 1e-7, "case": {"dt": 0.1},
+             "measure": "y_end"}
+    text = DIGITS_PLAN.replace("0.0174090", "0.017409")
+    text, _told = of.widen_to_precision(text, of.precision_gaps(text))
+    from core import plan as _plan
+    widened = _plan.raw_design_block(text)["protocol"]["oracles"][0]
+    assert widened["tolerance"] == pytest.approx(5e-7)
+    for value, passes in ((0.0174088, True), (0.017409 + 10 * widened["tolerance"], False), (0.017409 - 1e-4, False)):
+        judged = oc.judged([{**check, "tolerance": widened["tolerance"]}], {"checks": [{"name": "level", "value": value}]})
+        assert judged[0]["passed_by_engine"] is passes, value
