@@ -175,11 +175,13 @@ async def _check(
         return {**result, "transport": "measurements only", "reason": "the AI check is off (output.visual_check_ai)"}
     result["pages_checked"] = len(images)
     checks = checks_for(kind)
+    parts = poster_parts(quest_root) if base == "poster" else {}
     prompt = string.Template(PROMPT_PATH.read_text(encoding="utf-8")).safe_substitute(
         kind=_KIND_NAMES.get(kind, kind),
         pages=len(images),
         measurements=_measurements_text(measured),
         checklist="\n".join(f"- `{name}`: {text}" for name, text in checks.items()),
+        parts=_parts_text(parts),
     )
     message = {"role": "user", "content": [{"type": "text", "text": prompt}, *(image_part(data) for data in images)]}
     try:
@@ -193,8 +195,38 @@ async def _check(
     if not isinstance(raw, list):
         result["reason"] = "the reply had no findings list"
         return result
-    result["findings"], result["dropped"] = grounded_findings(raw, doc, set(checks))
+    result["findings"], result["dropped"] = grounded_findings(raw, doc, set(checks), set(parts))
     return result
+
+
+def poster_parts(quest_root: Path) -> dict[str, str]:
+    """The poster's parts by id, from the reply the poster was laid out from: ``headline`` and ``b0``, ``b1``... (the
+    blocks in the order the model wrote them), each with its first words. A redo of the poster writes again the parts
+    a finding names by these ids. Empty when there is no such reply."""
+    try:
+        reply = _json_object((quest_root / ".fi" / "poster_reply.txt").read_text(encoding="utf-8"))
+    except OSError:
+        return {}
+    if not isinstance(reply, dict) or not isinstance(reply.get("blocks"), list):
+        return {}
+
+    def gist(text: Any) -> str:
+        return " ".join(str(text or "").split()[:12])
+
+    parts = {"headline": gist(reply.get("headline"))}
+    for i, block in enumerate(reply["blocks"]):
+        if isinstance(block, dict):
+            parts[f"b{i}"] = f"{block.get('type')}: " + gist(
+                block.get("text") or block.get("caption") or " ".join(map(str, block.get("items") or [])))
+    return parts
+
+
+def _parts_text(parts: dict[str, str]) -> str:
+    if not parts:
+        return ""
+    lines = [f"- `{block_id}` ({gist})" for block_id, gist in parts.items()]
+    return ("## The poster's parts\n\nA finding about one part of the poster names that part in `block` (one id from "
+            "this list; leave it out when the problem is not in one part):\n\n" + "\n".join(lines) + "\n")
 
 
 def _figure_sources(quest_root: Path) -> list[FigureSource]:
@@ -334,7 +366,9 @@ def _compact(text: str) -> str:
     return "".join(_words(_HYPHEN_BREAK_RE.sub(r"\1\2", text)))
 
 
-def grounded_findings(raw: list[Any], doc, checks: set[str]) -> tuple[list[dict], list[dict]]:
+def grounded_findings(
+    raw: list[Any], doc, checks: set[str], block_ids: set[str] | None = None,
+) -> tuple[list[dict], list[dict]]:
     """Split the model's findings into those tied to visible text on their
     page and those that are not, each dropped one with its reason."""
     page_text = {
@@ -358,6 +392,8 @@ def grounded_findings(raw: list[Any], doc, checks: set[str]) -> tuple[list[dict]
             "quote": str(item.get("quote") or "").strip(),
             "source": "model",
         }
+        if block_ids and str(item.get("block") or "").strip() in block_ids:
+            finding["block"] = str(item["block"]).strip()
         quote = _compact(finding["quote"])
         # Three words, or for Chinese, Japanese or Korean, which has no
         # spaces between words, six characters.
@@ -553,15 +589,24 @@ async def check_and_redo(
     report = await check_pdf(config, kind, pdf, quest_root, supervisor=supervisor)
     attempts: list[dict[str, Any]] = [{"attempt": 0, "score": score(report), "kept": True}]
     names = _VERSION_FILES.get(kind, ())
-    restore_pages = restore_pages or getattr(regenerate, "restore_pages", None)
     limit = min(int(getattr(config.output, "visual_check_max_redos", 0) or 0), _REDO_LIMITS.get(kind, 2))
     for attempt in range(1, limit + 1):
         fixable = redo_findings(kind, report)
+        unresolved: list[dict] = []
+        if kind == "poster":
+            # The poster is written again part by part, so a finding that names no part of it (no usable `block`) cannot
+            # be redone; it stays in the report as it is, unresolved.
+            unresolved = [f for f in fixable if not f.get("block")]
+            fixable = [f for f in fixable if f.get("block")]
         if not fixable or report.get("transport") == "none":
+            if unresolved:
+                attempts[-1]["unresolved"] = [f.get("problem") for f in unresolved]
             break
         saved = quest_root / ".fi" / "visual_check" / kind / f"before-redo-{attempt}"
         _copy_version(quest_root, saved, names)
         entry: dict[str, Any] = {"attempt": attempt, "redo_for": sorted({f["check"] for f in fixable})}
+        if unresolved:
+            entry["unresolved"] = [f.get("problem") for f in unresolved]
         attempts.append(entry)
         try:
             feedback = feedback_text(fixable)

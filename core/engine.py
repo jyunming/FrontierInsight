@@ -24907,20 +24907,22 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         self, prompt: str, text: str, *, node: str, want: tuple[str, ...], ok: Callable[[dict[str, Any]], bool],
     ) -> tuple[str, dict[str, Any]] | None:
         """A reply whose JSON object does not parse as a whole: what IS readable is kept (:func:`_readable_json_keys`),
-        and the model is asked again only for the keys that were unreadable or are missing
-        (``agents/json_reanswer_part.md``), never for the whole answer. ``(text of the merged object, the merged
-        object)``; ``None`` when nothing in the reply is readable, so the caller asks for the whole answer."""
+        and the model is asked again only for the keys that were unreadable or are missing, each by its path
+        (``protocol.tolerance``: the key ``tolerance`` inside ``protocol``), never for the whole answer
+        (``agents/json_reanswer_part.md``). The new values are merged at those paths, so the readable keys around them
+        are not touched. ``(text of the merged object, the merged object)``; ``None`` when nothing in the reply is
+        readable, or a key is written twice, so the caller asks for the whole answer."""
         found = _readable_json_keys(text)
         if found is None:
             return None
         readable, bad, reason = found
-        missing = list(bad) + [k for k in want if k not in readable and k not in bad]
+        missing = list(bad) + [(k,) for k in want if k not in readable and (k,) not in bad]
         if not missing:
             if ok(readable):
                 self._log.info("[%s] the reply did not parse as a whole, but every key asked for could be read from it", node)
                 return json.dumps(readable, ensure_ascii=False), readable
             return None
-        names = ", ".join(f"`{k}`" for k in missing)
+        names = ", ".join(f"`{'.'.join(path)}`" for path in missing)
         wrong = f"{names} could not be read ({reason})" if bad else f"it did not carry {names}"
         self._log.warning("[%s] the reply was read except %s; asking again only for %s", node, wrong, names)
         echo = (f"\nYour previous reply, for reference (say the same things for these keys):\n\n{text}\n"
@@ -24930,10 +24932,21 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         again = await self._chat(retry, node=node)
         if node == "plan_revise":
             self._keep_plan_answer(again)
-        reply = _parse_json_lenient(again, node=node, want=tuple(missing)) or {}
-        merged = dict(readable)
-        if isinstance(reply, dict):
-            merged.update({k: v for k, v in reply.items() if k in missing})
+        reply = _parse_json_lenient(again, node=node, want=tuple(dict.fromkeys(path[0] for path in missing))) or {}
+        merged = json.loads(json.dumps(readable))
+        for path in missing:
+            value: Any = reply
+            for key in path:
+                value = value.get(key, _NOT_GIVEN) if isinstance(value, dict) else _NOT_GIVEN
+            if value is _NOT_GIVEN:
+                continue
+            holder: Any = merged
+            for key in path[:-1]:
+                holder = holder.setdefault(key, {}) if isinstance(holder, dict) else None
+                if not isinstance(holder, dict):
+                    break
+            if isinstance(holder, dict):
+                holder[path[-1]] = value
         if ok(merged):
             self._log.info("[%s] the keys asked again could be read and were merged into the readable part", node)
         else:
@@ -33164,6 +33177,7 @@ def _top_level_json_objects(text: str) -> list[dict[str, Any]]:
     return out
 
 
+_NOT_GIVEN = object()
 _JSON_KEY_RE = re.compile(r'\s*,?\s*"((?:[^"\\]|\\.)*)"\s*:\s*')
 _JSON_NEXT_KEY_RE = re.compile(r',\s*"((?:[^"\\]|\\.)*)"\s*:\s*')
 
@@ -33189,54 +33203,81 @@ def _depth_change(chunk: str) -> int:
     return depth
 
 
-def _readable_json_keys(text: str) -> tuple[dict[str, Any], list[str], str] | None:
-    """What of ONE JSON object that does not parse as a whole can still be read, key by key: ``(readable, unreadable
-    keys, the parser's reason)``. A value that does not parse (a quote left unescaped, a reply cut off) is skipped to the
-    next key written at the top level of the object. ``None`` when nothing is readable or the reply holds more than one
-    object (which one is the answer is then not known)."""
+def _read_object_keys(body: str, pos: int) -> tuple[dict[str, Any], list[tuple[str, ...]], str, bool]:
+    """The keys of the object whose ``{`` is just before ``pos`` that can be read: ``(readable, key paths that could
+    not be read, the parser's reason, whether a key is written twice)``. A value that does not parse (a quote left
+    unescaped, a reply cut off) is skipped to the next key written at the same level of the object; inside an object
+    that is broken only in one place, the readable keys are kept and the path of the broken one is named
+    (``("protocol", "tolerance")``). A value that ends exactly where the reply ends is not trusted (``0.12`` may have
+    been ``0.125``)."""
+    decoder = json.JSONDecoder()
+    readable: dict[str, Any] = {}
+    bad: list[tuple[str, ...]] = []
+    reason = ""
+    seen: set[str] = set()
+    while (m := _JSON_KEY_RE.match(body, pos)):
+        try:
+            key = json.loads('"' + m.group(1) + '"')
+        except ValueError:
+            break
+        if key in seen:
+            return readable, bad, reason, True
+        seen.add(key)
+        start = m.end()
+        failure = ""
+        try:
+            value, end = decoder.raw_decode(body, start)
+            if body[end:].lstrip()[:1] not in (",", "}", "]", ""):  # a quote left unescaped ends the string early
+                failure = f"the value goes on past where it was read, at character {end}"
+            elif not isinstance(value, (dict, list, str)) and not body[end:].strip():
+                failure = f"the reply ends right after this value, at character {end}, so it may be cut short"
+        except ValueError as e:
+            failure = f"{getattr(e, 'msg', 'it is not valid JSON')} at character {getattr(e, 'pos', start)}"
+        if not failure:
+            readable[key] = value
+            pos = end
+            continue
+        reason = reason or failure
+        kept = False
+        if body[start:start + 1] == "{":
+            inner, inner_bad, _inner_reason, twice = _read_object_keys(body, start + 1)
+            if twice:
+                return readable, bad, reason, True
+            if inner and inner_bad:
+                readable[key] = inner
+                bad.extend((key, *path) for path in inner_bad)
+                kept = True
+        if not kept:
+            bad.append((key,))
+        nxt = None
+        for cand in _JSON_NEXT_KEY_RE.finditer(body, start):
+            if _depth_change(body[start:cand.start()]) != 0:
+                continue
+            try:
+                decoder.raw_decode(body, cand.end())
+            except ValueError:
+                continue
+            nxt = cand.start()
+            break
+        if nxt is None:
+            break
+        pos = nxt
+    return readable, bad, reason, False
+
+
+def _readable_json_keys(text: str) -> tuple[dict[str, Any], list[tuple[str, ...]], str] | None:
+    """What of ONE JSON object that does not parse as a whole can still be read, key by key
+    (:func:`_read_object_keys`): ``(readable, key paths that could not be read, the parser's reason)``. ``None`` when
+    nothing is readable, when the reply holds more than one object (which one is the answer is then not known), or
+    when a key is written twice (which value is meant is not known): the caller then asks for the whole answer."""
     if not (text or "").strip() or len(_top_level_json_objects(text)) > 1:
         return None
     body = _strip_outer_fence(text).strip()
     start = body.find("{")
     if start < 0:
         return None
-    decoder = json.JSONDecoder()
-    readable: dict[str, Any] = {}
-    bad: list[str] = []
-    reason = ""
-    pos = start + 1
-    while (m := _JSON_KEY_RE.match(body, pos)):
-        try:
-            key = json.loads('"' + m.group(1) + '"')
-        except ValueError:
-            break
-        failure = ""
-        try:
-            value, end = decoder.raw_decode(body, m.end())
-            if body[end:].lstrip()[:1] not in (",", "}", "]", ""):  # a quote left unescaped ends the string early
-                failure = f"the value goes on past where it was read, at character {end}"
-        except ValueError as e:
-            failure = f"{getattr(e, 'msg', 'it is not valid JSON')} at character {getattr(e, 'pos', m.end())}"
-        if failure:
-            bad.append(key)
-            reason = reason or failure
-            nxt = None
-            for cand in _JSON_NEXT_KEY_RE.finditer(body, m.end()):
-                if _depth_change(body[m.end():cand.start()]) != 0:
-                    continue
-                try:
-                    decoder.raw_decode(body, cand.end())
-                except ValueError:
-                    continue
-                nxt = cand.start()
-                break
-            if nxt is None:
-                break
-            pos = nxt
-            continue
-        readable[key] = value
-        pos = end
-    if not readable:
+    readable, bad, reason, twice = _read_object_keys(body, start + 1)
+    if twice or not readable:
         return None
     return readable, bad, reason
 

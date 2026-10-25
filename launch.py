@@ -3268,7 +3268,6 @@ async def _run_generators(
                 art, art.quest_root, supervisor=supervisor, keep_deck=True,
             ))
 
-        redo_slides.restore_pages = restore_slides_pages  # check_and_redo puts a redone slide that got worse back
         redo = {"paper": redo_paper, "slides": redo_slides, "poster": redo_poster}
         for kind, key, output_kind in (
             ("paper", "paper_pdf", "paper_pdf"), ("slides", "slides_pdf", "slides"), ("poster", "poster_pdf", "poster"),
@@ -3277,8 +3276,10 @@ async def _run_generators(
             if pdf is None or output_kind in carried:
                 continue
             if kind in redo:
+                # A redone slide that checks worse than before is put back on its own (restore_pages).
+                extra = {"restore_pages": restore_slides_pages} if kind == "slides" else {}
                 report = await check_and_redo(
-                    cfg, kind, Path(pdf), art.quest_root, redo[kind], supervisor=supervisor,
+                    cfg, kind, Path(pdf), art.quest_root, redo[kind], supervisor=supervisor, **extra,
                 )
             else:
                 report = await check_pdf(cfg, kind, Path(pdf), art.quest_root, supervisor=supervisor)

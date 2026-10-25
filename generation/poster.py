@@ -1324,8 +1324,9 @@ class PosterGenerator:
     @staticmethod
     def _flagged_parts(out_dir: Path, feedback: object) -> tuple[dict, bool, list[int]] | None:
         """``(the previous reply, whether its headline is flagged, indices of its flagged blocks)`` for a redo whose
-        feedback carries findings, found by the text each finding quotes; ``None`` (write the whole poster) when there is
-        no such feedback or no previous reply to build on."""
+        feedback carries findings, found by the part each finding names (``headline`` or ``b<index>``, the ids the
+        check was given with the rendered poster); ``None`` (write the whole poster) when there is no such feedback or no
+        previous reply to build on."""
         findings = getattr(feedback, "findings", None)
         if not findings:
             return None
@@ -1336,26 +1337,14 @@ class PosterGenerator:
         if not isinstance(previous, dict) or not isinstance(previous.get("blocks"), list):
             return None
 
-        def norm(text: object) -> str:
-            return " ".join(_re.sub(r"[$*\\{}]", " ", str(text or "")).lower().split())
-
-        def words(block: object) -> str:
-            if not isinstance(block, dict):
-                return ""
-            return norm(" ".join([str(block.get("text") or ""), str(block.get("caption") or ""),
-                                  *(str(x) for x in block.get("items") or [])]))
-
-        headline = norm(previous.get("headline"))
-        block_words = [words(b) for b in previous["blocks"]]
         headline_flagged = False
         indices: set[int] = set()
         for finding in findings:
-            quote = norm(finding.get("quote"))
-            if not quote:
-                continue
-            if headline and quote in headline:
+            block = str(finding.get("block") or "")
+            if block == "headline":
                 headline_flagged = True
-            indices.update(i for i, w in enumerate(block_words) if w and quote in w)
+            elif block[:1] == "b" and block[1:].isdigit() and int(block[1:]) < len(previous["blocks"]):
+                indices.add(int(block[1:]))
         return previous, headline_flagged, sorted(indices)
 
     @staticmethod

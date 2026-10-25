@@ -42,9 +42,9 @@ DECK = (
 )
 
 
-def _feedback(*pages: int, quote: str = "broken textbf") -> vc.Feedback:
+def _feedback(*pages: int, quote: str = "broken textbf", block: str = "") -> vc.Feedback:
     findings = [{"page": p, "region": "body", "check": "raw_markup", "problem": "raw LaTeX", "severity": "high",
-                 "quote": quote} for p in pages]
+                 "quote": quote, **({"block": block} if block else {})} for p in pages]
     return vc.feedback_text(findings)
 
 
@@ -164,7 +164,7 @@ async def test_a_poster_redo_rewrites_only_the_flagged_panel(tmp_path: Path, mon
 
     monkeypatch.setattr("core.provider.LLMClient.chat", fake_chat)
     monkeypatch.setattr("generation.poster.find_pdf_engine", lambda: None)
-    feedback = _feedback(1, quote="paragraph with textbf raw markup showing")
+    feedback = _feedback(1, block="b1")
     await PosterGenerator(_config(tmp_path, ["poster"])).generate(art, art.quest_root, feedback=feedback)
     assert len(prompts) == 1 and "block 1" in prompts[0] and "block 2" not in prompts[0]
     kept = json.loads((art.quest_root / ".fi" / "poster_reply.txt").read_text(encoding="utf-8"))
@@ -209,7 +209,7 @@ def _engine(tmp_path: Path, replies: list[str]) -> tuple[Engine, AsyncMock]:
 def test_the_readable_part_of_a_broken_object_is_found_key_by_key() -> None:
     text = '{"verdict": "sufficient", "rationale": "he said "hi" and left", "notes": ["a", "b"]}'
     readable, bad, reason = _readable_json_keys(text)
-    assert readable == {"verdict": "sufficient", "notes": ["a", "b"]} and bad == ["rationale"] and reason
+    assert readable == {"verdict": "sufficient", "notes": ["a", "b"]} and bad == [("rationale",)] and reason
     assert _readable_json_keys("no json at all") is None
     assert _readable_json_keys('{"a": }') is None
 
@@ -241,3 +241,142 @@ async def test_a_cut_off_plan_answer_is_asked_again_only_for_the_cut_key(tmp_pat
     parts = await eng._ask_for_plan_parts("ask")
     assert parts["protocol"]["grid"] == {"a": [1, 2]} and chat.await_count == 2
     assert "ONLY for these keys: `protocol`" in chat.await_args_list[1].args[0][0]["content"]
+
+
+# ---------- findings of the review of the first version ----------
+
+
+def test_a_break_line_inside_a_code_block_is_code_not_a_slide_break() -> None:
+    deck = "---\nmarp: true\n---\n\n# A\n\n```yaml\n---\nk: v\n```\n\n---\n\n# B\n"
+    head, segments, breaks = split_deck(deck)
+    assert len(segments) == 2 and "k: v" in segments[0] and join_deck(head, segments, breaks) == deck
+
+
+@pytest.mark.asyncio
+async def test_a_slide_that_got_worse_is_put_back_while_the_fixed_ones_stay(tmp_path: Path, monkeypatch) -> None:
+    def problem(page: int, severity: str = "high") -> dict:
+        return {"check": "raw_markup", "severity": severity, "page": page, "region": "body",
+                "problem": "x", "quote": "some visible words"}
+
+    def checked(*findings: dict) -> dict:
+        return {"transport": "images", "measured": {"findings": []}, "findings": list(findings)}
+
+    reports = iter([checked(problem(1, "medium"), problem(2), problem(3)), checked(problem(1, "high")),
+                    checked(problem(1, "medium"))])
+
+    async def fake_check(config, kind, pdf, quest_root, *, supervisor=None):  # noqa: ANN001
+        return next(reports)
+
+    monkeypatch.setattr(vc, "check_pdf", fake_check)
+    monkeypatch.setattr(vc, "_screenshots", lambda pdf, quest_root, kind: [])
+    deck = "---\nmarp: true\n---\n\n# one old\n\n---\n\n# two old\n\n---\n\n# three old\n"
+    (tmp_path / "slides.pdf").write_text("pdf", encoding="utf-8")
+    (tmp_path / "slides.md").write_text(deck, encoding="utf-8")
+
+    async def regenerate(feedback: str) -> None:
+        (tmp_path / "slides.md").write_text(
+            deck.replace("one old", "one new").replace("two old", "two new").replace("three old", "three new"),
+            encoding="utf-8")
+
+    async def restore(saved: Path, pages: list[int]) -> None:
+        restore_slides(tmp_path / "slides.md", saved / "slides.md", pages)
+
+    config = SimpleNamespace(output=SimpleNamespace(visual_check_max_redos=1))
+    report = await vc.check_and_redo(config, "slides", tmp_path / "slides.pdf", tmp_path, regenerate,
+                                     restore_pages=restore)
+    text = (tmp_path / "slides.md").read_text(encoding="utf-8")
+    assert "one old" in text and "two new" in text and "three new" in text
+    assert report["attempts"][1]["restored_pages"] == [1] and report["attempts"][1]["kept"] is True
+
+
+@pytest.mark.asyncio
+async def test_the_launch_gives_the_slides_check_the_restore(tmp_path: Path, monkeypatch) -> None:
+    import launch as fi_launch
+
+    seen: dict[str, object] = {}
+
+    async def fake_check_and_redo(cfg, kind, pdf, quest_root, regenerate, *, supervisor, **kw):  # noqa: ANN001
+        seen[kind] = kw.get("restore_pages")
+        return {"kind": kind, "transport": "images", "findings": [], "measured": {"findings": []}}
+
+    class _G:
+        def __init__(self, cfg):  # noqa: ANN001
+            pass
+
+        async def generate(self, art, out_dir, **kw):  # noqa: ANN001
+            return {"slides_pdf": out_dir / "slides.pdf", "paper_pdf": out_dir / "paper.pdf",
+                    "poster_pdf": out_dir / "poster.pdf"}
+
+    monkeypatch.setattr(fi_launch, "_apply_paper_venue_override", lambda c, a: None)
+    monkeypatch.setattr(fi_launch, "check_and_redo", fake_check_and_redo)
+    class _Paper:
+        def __init__(self, cfg):  # noqa: ANN001
+            pass
+
+        def generate(self, art, out_dir, **kw):  # noqa: ANN001
+            return {"paper_pdf": out_dir / "paper.pdf"}
+
+    monkeypatch.setattr(fi_launch, "SlideGenerator", _G)
+    monkeypatch.setattr(fi_launch, "PosterGenerator", _G)
+    monkeypatch.setattr(fi_launch, "PaperGenerator", _Paper)
+    cfg = SimpleNamespace(output=SimpleNamespace(kinds=["paper_pdf", "slides", "poster"], require_pdf=False,
+                                                  visual_check=True))
+    art = QuestArtifacts(quest_id="q", quest_root=tmp_path, paper_md=tmp_path / "paper.md")
+    await fi_launch._run_generators(cfg, art, supervisor=AsyncMock())
+    assert callable(seen["slides"]) and seen["poster"] is None and seen["paper"] is None
+
+
+def test_the_poster_check_is_given_the_parts_and_a_finding_keeps_the_part_it_names(tmp_path: Path) -> None:
+    (tmp_path / ".fi").mkdir()
+    (tmp_path / ".fi" / "poster_reply.txt").write_text(json.dumps(POSTER_REPLY), encoding="utf-8")
+    parts = vc.poster_parts(tmp_path)
+    assert set(parts) == {"headline", "b0", "b1", "b2"} and parts["b1"].startswith("text: First paragraph")
+    assert "`b1`" in vc._parts_text(parts) and vc._parts_text({}) == ""
+    doc = SimpleNamespace(pages=[SimpleNamespace(number=1, lines=[
+        SimpleNamespace(text="First paragraph with raw markup showing")])])
+    base = {"page": 1, "region": "body", "check": "raw_markup", "problem": "p", "severity": "high",
+            "quote": "First paragraph with raw markup"}
+    kept, _ = vc.grounded_findings([{**base, "block": "b1"}, {**base, "block": "b9"}], doc, {"raw_markup"}, set(parts))
+    assert [f.get("block") for f in kept] == ["b1", None]
+
+
+@pytest.mark.asyncio
+async def test_poster_findings_naming_no_part_are_listed_as_unresolved_not_dropped(tmp_path: Path, monkeypatch) -> None:
+    finding = {"check": "raw_markup", "severity": "high", "page": 1, "region": "body", "problem": "unplaced problem",
+               "quote": "some visible words"}
+    reports = iter([{"transport": "images", "measured": {"findings": []}, "findings": [finding]}])
+
+    async def fake_check(config, kind, pdf, quest_root, *, supervisor=None):  # noqa: ANN001
+        return next(reports)
+
+    monkeypatch.setattr(vc, "check_pdf", fake_check)
+    (tmp_path / "poster.pdf").write_text("pdf", encoding="utf-8")
+    asked: list[str] = []
+
+    async def regenerate(feedback: str) -> None:
+        asked.append("called")
+
+    config = SimpleNamespace(output=SimpleNamespace(visual_check_max_redos=2))
+    report = await vc.check_and_redo(config, "poster", tmp_path / "poster.pdf", tmp_path, regenerate)
+    assert asked == [] and report["attempts"][0]["unresolved"] == ["unplaced problem"]
+    assert report["findings"] == [finding], "the finding stays in the report"
+
+
+def test_a_value_cut_off_at_the_end_of_the_reply_is_not_trusted() -> None:
+    readable, bad, _ = _readable_json_keys('{"unit": "m", "threshold": 0.12')
+    assert readable == {"unit": "m"} and bad == [("threshold",)]
+
+
+def test_a_key_written_twice_in_a_broken_reply_is_not_read_at_all() -> None:
+    assert _readable_json_keys('{"a": 1, "a": 2, "b": "x "y" z"}') is None
+
+
+@pytest.mark.asyncio
+async def test_one_broken_nested_value_is_asked_by_its_path_and_merged_at_the_leaf(tmp_path: Path) -> None:
+    broken = ('{"protocol": {"grid": {"a": [1, 2]}, "tolerance": "within "five" percent", "unit": "m"}, '
+              '"study_type": "measure"}')
+    eng, chat = _engine(tmp_path, [broken, json.dumps({"protocol": {"tolerance": "5 percent"}})])
+    _, parsed = await eng._chat_json("ask", node="evidence_gate", want=("protocol", "study_type"))
+    assert parsed == {"protocol": {"grid": {"a": [1, 2]}, "tolerance": "5 percent", "unit": "m"},
+                      "study_type": "measure"}
+    assert "ONLY for these keys: `protocol.tolerance`" in chat.await_args_list[1].args[0][0]["content"]

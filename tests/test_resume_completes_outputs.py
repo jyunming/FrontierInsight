@@ -36,7 +36,7 @@ def _record_checks(monkeypatch) -> list[tuple[str, str]]:
         checked.append((kind, pdf.name))
         return {"kind": kind, "transport": "images", "findings": [], "measured": {"findings": []}}
 
-    async def fake_check_and_redo(cfg, kind, pdf, quest_root, regenerate, *, supervisor):  # noqa: ANN001
+    async def fake_check_and_redo(cfg, kind, pdf, quest_root, regenerate, *, supervisor, **_kw):  # noqa: ANN001
         return await fake_check(cfg, kind, pdf, quest_root, supervisor=supervisor)
 
     async def fake_check_pptx(cfg, pptx, quest_root, *, supervisor):  # noqa: ANN001
@@ -198,7 +198,7 @@ async def test_slides_and_poster_are_redone_with_the_feedback(
 
     redone: list[str] = []
 
-    async def fake_check_and_redo(cfg, kind, pdf, quest_root, regenerate, *, supervisor):  # noqa: ANN001
+    async def fake_check_and_redo(cfg, kind, pdf, quest_root, regenerate, *, supervisor, **_kw):  # noqa: ANN001
         redone.append(kind)
         if kind != "paper":  # the paper's repair has its own test
             await regenerate(f"fix the {kind}")
@@ -243,7 +243,7 @@ async def test_the_paper_is_repaired_by_recompiling_one_line_taller_per_attempt(
     for name in ("SlideGenerator", "PosterGenerator", "SpeechGenerator"):
         monkeypatch.setattr(fi_launch, name, _Nothing)
 
-    async def fake_check_and_redo(cfg, kind, pdf, quest_root, regenerate, *, supervisor):  # noqa: ANN001
+    async def fake_check_and_redo(cfg, kind, pdf, quest_root, regenerate, *, supervisor, **_kw):  # noqa: ANN001
         await regenerate("the last page holds one line")
         await regenerate("the last page holds one line")
         return {"transport": "images", "findings": [], "measured": {"findings": []}}
@@ -281,7 +281,7 @@ async def test_text_over_an_edge_is_repaired_by_setting_the_tables_smaller(tmp_p
     for name in ("SlideGenerator", "PosterGenerator", "SpeechGenerator"):
         monkeypatch.setattr(fi_launch, name, _Nothing)
 
-    async def fake_check_and_redo(cfg, kind, pdf, quest_root, regenerate, *, supervisor):  # noqa: ANN001
+    async def fake_check_and_redo(cfg, kind, pdf, quest_root, regenerate, *, supervisor, **_kw):  # noqa: ANN001
         await regenerate("fi-checks: text_overlap overwide\n- page 3: lines drawn over each other")
         return {"transport": "images", "findings": [], "measured": {"findings": []}}
 

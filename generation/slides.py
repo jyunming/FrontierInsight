@@ -292,7 +292,7 @@ class SlideGenerator:
         )
         text = await self._ask(art, prompt, supervisor=supervisor)
         reply = _math_as_dollars(_figures_as_own_paragraphs(_fences_as_slide_breaks(_strip_outer_fence(text))))
-        pieces = [p for p in _SLIDE_BREAK_RE.split(reply) if p.strip()]
+        pieces = [p for p in _split_slides(reply)[0] if p.strip()]
         if len(pieces) != len(pages):
             _log.warning("slides: asked for %d replacement slide(s) and got %d; the deck is unchanged",
                          len(pages), len(pieces))
@@ -623,16 +623,35 @@ def split_deck(content: str) -> tuple[str, list[str], list[str]]:
     ``content`` back exactly. The Nth slide is the Nth page of the rendered deck."""
     match = _FRONT_MATTER_RE.match(content)
     head = content[: match.end()] if match else ""
-    body = content[len(head):]
+    segments, breaks = _split_slides(content[len(head):])
+    return head, segments, breaks
+
+
+_CODE_FENCE_RE = re.compile(r"^[ \t]*(```|~~~)")
+
+
+def _split_slides(body: str) -> tuple[list[str], list[str]]:
+    """``body`` cut at its slide breaks. A ``---`` line inside a fenced code block is code, not a break."""
     segments: list[str] = []
     breaks: list[str] = []
     start = 0
-    for brk in _SLIDE_BREAK_RE.finditer(body):
-        segments.append(body[start:brk.start()])
-        breaks.append(brk.group(0))
-        start = brk.end()
+    fence = ""
+    offset = 0
+    for line in body.splitlines(keepends=True):
+        text = line.rstrip("\r\n")
+        opened = _CODE_FENCE_RE.match(text)
+        if fence:
+            if opened and opened.group(1) == fence:
+                fence = ""
+        elif opened:
+            fence = opened.group(1)
+        elif _SLIDE_BREAK_RE.fullmatch(text):
+            segments.append(body[start:offset])
+            breaks.append(text)
+            start = offset + len(text)
+        offset += len(line)
     segments.append(body[start:])
-    return head, segments, breaks
+    return segments, breaks
 
 
 def join_deck(head: str, segments: list[str], breaks: list[str]) -> str:
