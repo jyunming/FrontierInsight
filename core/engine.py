@@ -11788,13 +11788,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             from . import run_estimate as _estimate_record
 
             cut = _estimate_record.read_record(self.quest_root).get("truncated")
-            if isinstance(cut, dict) and isinstance(cut.get("planned_settings"), int)                     and cut["planned_settings"] < int(cut.get("settings") or 0):
+            grid_cut = (isinstance(cut, dict) and isinstance(cut.get("planned_settings"), int)
+                        and cut["planned_settings"] < int(cut.get("settings") or 0))
+            if grid_cut:
                 # More settings than FI lists: only the first of the plan's settings were planned and run (the paper says
-                # so, core/disclosure.py::cut_short_text). The ledger's rows are held to the protocol one by one above; the
-                # run cannot cover the whole grid, so it is not compared with it.
+                # so, core/disclosure.py::cut_short_text). The run cannot cover the whole grid, so it is not compared with
+                # it (the manifest's coverage of the grid is left out); every value the analysis reports is still held to
+                # the trials FI ran, one by one, below.
                 self._manifest_note = (f"only the first {cut['planned_settings']:,} of the plan's {int(cut['settings']):,} "
                                        "settings were planned, so the run was not compared with the whole grid")
-                return ("differs", row_problems) if row_problems else ("ok", [])
             # FI holds every trial's value: a list the analysis reports for one of the trials' own outcomes is checked
             # value by value, not only counted.
             per_cell, altered = _trial_runner.recorded_values_by_cell(self.quest_root)
@@ -11822,8 +11824,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                   **(counted.get("in_each_run") if isinstance(counted.get("in_each_run"), dict) else {})},
                 [str(m.get("id")) for m in counted.get("metrics") or [] if isinstance(m, dict) and m.get("id")])
             found = (row_problems + altered + ([random_run_cell] if random_run_cell else [])
-                     + _run_manifest.problems(counted, manifest, result_json=result_json, trial_mode=True,
-                                              recorded=recorded, recorded_by_cell=per_cell, copied=copied) + not_run
+                     + ([] if grid_cut else _run_manifest.problems(
+                         counted, manifest, result_json=result_json, trial_mode=True,
+                         recorded=recorded, recorded_by_cell=per_cell, copied=copied)) + not_run
                      + row_sim)
             # A list printed under the wrong name that holds another output's values at its setting is counted as that
             # output, and said once.
@@ -11845,12 +11848,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                       if self.config.rigor_profile == "research" else [])
             found = found + no_ids
             self._manifest_analysis_problems = (
-                _run_manifest.analysis_output_problems(counted, manifest, result_json, trial_mode=True, recorded=recorded,
-                                                     recorded_by_cell=per_cell, copied=copied)
+                ([] if grid_cut else _run_manifest.analysis_output_problems(
+                    counted, manifest, result_json, trial_mode=True, recorded=recorded,
+                    recorded_by_cell=per_cell, copied=copied))
                 + not_run + no_ids
             )
-            self._manifest_differences = _run_manifest.differences(counted, manifest, result_json, recorded=recorded,
-                                                                    recorded_by_cell=per_cell, copied=copied)
+            self._manifest_differences = [] if grid_cut else _run_manifest.differences(
+                counted, manifest, result_json, recorded=recorded, recorded_by_cell=per_cell, copied=copied)
             # The kind each finding was given where it was made; from here on the findings are plain sentences.
             self._manifest_fabricated = [str(f) for f in found if _run_manifest.kind_of(f) == _run_manifest.FABRICATED]
             self._manifest_unprinted = [str(f) for f in found if _run_manifest.kind_of(f) == _run_manifest.UNPRINTED]

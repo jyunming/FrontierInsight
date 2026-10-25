@@ -275,16 +275,12 @@ def _ledger_rows(quest_root: Path) -> tuple[dict[str, int], dict[tuple[str, int]
     """What FI's trial ledger holds: the trials planned per setting, and each trial's ``(status, seed)`` (a later line
     for the same trial replaces an earlier one). ``None`` when there is no readable ledger or it holds no trial."""
     try:
-        lines = (Path(quest_root) / "raw" / "ledger.jsonl").read_text(encoding="utf-8").splitlines()
+        handle = (Path(quest_root) / "raw" / "ledger.jsonl").open(encoding="utf-8")
     except OSError:
         return None
     planned: dict[str, int] = {}
     trials: dict[tuple[str, int], tuple[str, int | None]] = {}
-    for line in lines:
-        try:
-            row = json.loads(line)
-        except ValueError:
-            continue
+    for row in _stream_rows(handle):
         if not isinstance(row, dict) or not isinstance(row.get("cell"), str):
             continue
         if row.get("event") == "planned" and (n := _whole(row.get("trials"))) is not None:
@@ -608,24 +604,32 @@ def _untested_sentence(notes: list[str]) -> str:
     return text
 
 
+def _stream_rows(handle: Any):
+    """The rows of an open ledger, one line at a time (a ledger of a large study is never read whole into memory); the
+    file is closed when the rows are used up."""
+    with handle:
+        for line in handle:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            yield row
+
+
 def _setting_counts(quest_root: Path, run_id: str = "") -> tuple[int, int, int, int] | None:
     """``(settings planned, settings all of whose planned trials ran, settings some of whose trials ran, trials not run)``
     from FI's trial ledger, or ``None`` when it holds none of this run's rows. A trial counts as run when the ledger records
     it and the study's time limit did not cut it off (one that failed for another reason ran); a planned trial the ledger
     does not record was not run. With ``run_id`` only the rows FI wrote for that run are read."""
     try:
-        lines = (Path(quest_root) / "raw" / "ledger.jsonl").read_text(encoding="utf-8").splitlines()
+        handle = (Path(quest_root) / "raw" / "ledger.jsonl").open(encoding="utf-8")
     except OSError:
         return None
     from .trial_runner import OUT_OF_TIME
 
     planned: dict[str, int] = {}
     seen: dict[tuple[str, int], bool] = {}  # (setting, trial) -> cut off by the time limit
-    for line in lines:
-        try:
-            row = json.loads(line)
-        except ValueError:
-            continue
+    for row in _stream_rows(handle):
         if not isinstance(row, dict) or not isinstance(row.get("cell"), str):
             continue
         if run_id and row.get("run_id") != run_id:
@@ -668,7 +672,8 @@ def cut_short_text(quest_root: Path) -> str:
     parts: list[str] = []
     listed, total_settings = _whole(cut.get("planned_settings")), _whole(cut.get("settings"))
     if listed and total_settings and listed < total_settings:
-        parts.append(f"the plan has {total_settings:,} settings, more than FI lists, so only its first {listed:,} were planned")
+        parts.append(f"the plan has {total_settings:,} settings, more than FI lists, so it planned them in the plan's order, "
+                     "a few at a time, and only as far as the time limit allowed")
     run_id = str(cut.get("run_id") or "")
     counts = _setting_counts(root, run_id)
     if counts is not None:

@@ -752,6 +752,10 @@ class RunChecksMixin:
         the best design or a cluster job has its own limits, and a resume of a run that already fits is not timed again."""
         self._sized_protocol: dict[str, Any] | None = None
         self._pilot_spent = 0.0  # seconds the pilot's extra trials took in this sizing: they count against the same budget
+        # Every sizing starts with no cut: what an earlier sizing set (the settings planned, the run's id) is decided again below.
+        if isinstance(runner, _trial_runner.TrialsRunner):
+            runner.first_cells = None
+            runner.run_id = ""
         # A run_trial that returns the mean of many trials (it calls run_cell) is a fault of the code, not of the plan's size:
         # it goes back to the code step, never to the plan to shrink the grid (which dropped settings the topic required).
         if isinstance(runner, _trial_runner.TrialsRunner):
@@ -2003,6 +2007,8 @@ class RunChecksMixin:
         taken away first, so a study that now fits is never described as cut."""
         runner.check_reserve_s = 0.0
         runner.run_id = ""
+        if hasattr(runner, "first_cells"):
+            runner.first_cells = None
         record = _estimate.read_record(self.quest_root)  # type: ignore[attr-defined]
         if record.pop("truncated", None) is not None:
             _estimate.write_record(self.quest_root, record)  # type: ignore[attr-defined]

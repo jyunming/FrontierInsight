@@ -35,6 +35,7 @@ import ast
 import asyncio
 import contextlib
 import hashlib
+import itertools
 import json
 from collections import Counter
 from collections.abc import Collection
@@ -494,7 +495,8 @@ def _summary(runs: list[CellRun], thresholds: dict[str, Any] | None = None) -> d
 def _plan(quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *, runs_per_setting: int, base_seed: int,
           deterministic: bool, folder: Path, out_name: str, keep_spec: bool = False,
           paired: bool = False, thresholds: dict[str, Any] | None = None,
-          in_each_run: dict[str, list[Any]] | None = None, first: int | None = None) -> list[dict[str, Any]]:
+          in_each_run: dict[str, list[Any]] | None = None, first: int | None = None,
+          cell_list: list[dict[str, Any]] | None = None, offset: int = 0) -> list[dict[str, Any]]:
     """Write one spec per cell (the simulation file, the entry, the cell, its trials with their seeds, a nonce) into
     ``folder`` and return the plan: per cell its key, cell, trials, nonce, and the spec and results paths relative to
     ``quest_root``. ``in_each_run``: the values every run goes through together; the cell a run is given holds each such
@@ -505,7 +507,8 @@ def _plan(quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *, r
     inside = {str(k): list(v) for k, v in (in_each_run or {}).items()}
     levels = _in_run.level_cells(inside)
     plan = []
-    for index, cell in enumerate(cells(grid, first)):
+    # ``cell_list`` (with ``offset``, the plan's index of its first cell): a batch of a study planned a batch at a time.
+    for index, cell in enumerate(cell_list if cell_list is not None else cells(grid, first), start=offset):
         key = cell_key(cell)
         trials = [{"trial": t, "seed": None if deterministic else trial_seed(base_seed, "" if paired else key, t)}
                   for t in range(per_cell)]
@@ -625,11 +628,14 @@ async def run_trials(
     harness = quest_root / HARNESS_PATH
     harness.write_text(HARNESS_SOURCE, encoding="utf-8")  # fresh every run: nothing the experiment wrote is run
     (quest_root / RUN_RECORD).unlink(missing_ok=True)  # an earlier run's record never stands beside this run's ledger
-    plan = _plan(quest_root, module, grid, runs_per_setting=runs_per_setting, base_seed=base_seed,
-                 deterministic=deterministic, folder=work, out_name="cell{index}.out.jsonl", paired=paired,
-                 thresholds=thresholds, in_each_run=in_each_run, first=first_cells)
-    if on_plan is not None:
-        on_plan(plan)
+    lazy = first_cells is not None
+    plan: list[dict[str, Any]] = []
+    if not lazy:
+        plan = _plan(quest_root, module, grid, runs_per_setting=runs_per_setting, base_seed=base_seed,
+                     deterministic=deterministic, folder=work, out_name="cell{index}.out.jsonl", paired=paired,
+                     thresholds=thresholds, in_each_run=in_each_run)
+        if on_plan is not None:
+            on_plan(plan)
     results: dict[int, Any] = {}
     # Each cell runs from a copy of code/ outside the quest folder (core/outside_run.py): FI's records (needs/, .fi/)
     # are not next to the code; FI's harness, the cell's spec and its results file come and go by FI's own list.
@@ -652,7 +658,25 @@ async def run_trials(
             )
 
     try:
-        await asyncio.gather(*(one(task) for task in _costliest_first(plan, cost)))
+        if not lazy:
+            await asyncio.gather(*(one(task) for task in _costliest_first(plan, cost)))
+        else:
+            # More settings than FI lists: the first of them are planned and run a batch at a time, so the time before the
+            # first trial is one batch's, and the study's time limit decides how many batches there are. A setting never
+            # planned is not in the ledger (the paper says how many were: core/disclosure.py).
+            batch = max(64, 4 * int(at_once or 1))
+            source = itertools.islice(_search.iter_grid_cells(grid), max(1, int(first_cells)))
+            while time.monotonic() - started < timeout_s:
+                cells_now = list(itertools.islice(source, batch))
+                if not cells_now:
+                    break
+                part = _plan(quest_root, module, grid, runs_per_setting=runs_per_setting, base_seed=base_seed,
+                             deterministic=deterministic, folder=work, out_name="cell{index}.out.jsonl", paired=paired,
+                             thresholds=thresholds, in_each_run=in_each_run, cell_list=cells_now, offset=len(plan))
+                plan.extend(part)
+                if on_plan is not None:
+                    on_plan(plan)
+                await asyncio.gather(*(one(task) for task in _costliest_first(part, cost)))
     finally:
         await executor.settle()
         if gate.at_once > 1:

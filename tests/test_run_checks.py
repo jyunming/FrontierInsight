@@ -1302,3 +1302,12 @@ def test_the_request_to_fit_says_how_many_alternatives_are_searched_and_leaves_t
             "evaluations, 32,000 in all, and 144 more evaluations") in text
     plain = _fit_request("too long", {**fit, "alternatives": 0})
     assert "alternatives the plan compares" not in plain
+
+
+@pytest.mark.asyncio
+async def test_a_study_sized_again_that_fits_is_not_cut_to_the_first_settings_of_the_last_sizing(tmp_path: Path) -> None:
+    eng, _model, runner, _ex = await _sizing(tmp_path, timeout_s=3600)
+    runner.first_cells = 5
+    runner.run_id = "stale"
+    assert await eng._size_the_run({"topic": TOPIC, "iteration": 0}, runner, sys.executable, None) is None
+    assert runner.first_cells is None and runner.run_id == ""

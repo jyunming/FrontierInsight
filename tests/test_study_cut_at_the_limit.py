@@ -9,6 +9,7 @@ FI's records (``core.disclosure.cut_short_text``). The sizing itself is tested i
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import sys
 from pathlib import Path
@@ -16,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from core import disclosure, optimise, paper_facts, trial_runner
+from core import disclosure, optimise, optimise_search, paper_facts, trial_runner
 from core.execution import SharedInterpreterExecutor
 
 REASON = trial_runner.OUT_OF_TIME
@@ -269,10 +270,67 @@ async def test_a_grid_of_more_settings_than_fi_lists_is_planned_lazily_and_run_u
     assert result.returncode == 0, result.stderr
     rows = trial_runner.read_ledger(eng.quest_root)
     planned = {r["cell"] for r in rows}
-    assert len(planned) == cut["planned_settings"] and "n=0,m=0" in planned, "the first settings of the plan, in its order"
+    assert 1 <= len(planned) <= cut["planned_settings"] and "n=0,m=0" in planned, "the first settings of the plan, in its order"
     assert any(r["status"] == "ok" for r in rows)
     said = disclosure.cut_short_text(eng.quest_root)
-    assert f"only its first {cut['planned_settings']:,} were planned" in said and "640,000 settings" in said
+    assert "640,000 settings" in said and "only as far as the time limit allowed" in said
     # the record of the run is not rejected for the settings that were never planned
     manifest, row_problems = run_manifest.manifest_from_ledger(protocol, rows, {})
     assert not row_problems
+
+    # the values the analysis reports are still held to the trials FI ran, one by one (a cut grid is not compared with the
+    # whole grid, but a number no trial produced is found)
+    from core.execution import ExecutionResult
+
+    eng._trial_mode = True
+    first = trial_runner.recorded_values_by_cell(eng.quest_root)[0]
+    honest = sorted({v for by_name in first.values() for v in by_name.get("y", {})})[:3]
+    ok = ExecutionResult(0, "RESULT_JSON: " + json.dumps({"y_values": honest}), "", 0.1, False)
+    assert eng._run_manifest_problems({"iteration": 0}, True, ok)[0] == "ok"
+    bad = ExecutionResult(0, "RESULT_JSON: " + json.dumps({"y_values": [honest[0], 123456.789]}), "", 0.1, False)
+    status, problems = eng._run_manifest_problems({"iteration": 0}, True, bad)
+    assert status == "differs" and any("123456.789" in p or "never produced" in p for p in problems), problems
+
+
+@pytest.mark.asyncio
+async def test_a_grid_of_more_settings_than_fi_lists_is_never_planned_whole_before_its_first_trial(tmp_path: Path) -> None:
+    """Planning is a batch at a time: with a short limit only the first batches have a spec, not one per planned setting."""
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(BIG_SIM, encoding="utf-8")
+    grid = {"n": list(range(200)), "m": list(range(200))}
+    run = await trial_runner.run_trials(
+        SharedInterpreterExecutor(python_version=f"{sys.version_info[0]}.{sys.version_info[1]}"), sys.executable, root,
+        "code/simulate.py", grid, runs_per_setting=1, base_seed=1, deterministic=False, timeout_s=3, first_cells=20000)
+    specs = list((root / ".fi" / "trials").glob("cell*.json"))
+    assert 1 <= len(specs) < 2000, f"{len(specs)} specs were written before the limit ended the study"
+    rows = trial_runner.read_ledger(root)
+    first = {trial_runner.cell_key(c) for c in itertools.islice(optimise_search.iter_grid_cells(grid), len(specs))}
+    assert rows and {r["cell"] for r in rows if r.get("event") == "planned"} <= first, "the plan's own order"
+    assert run is not None
+
+
+
+def test_the_write_node_puts_the_cut_sentence_in_the_limitations_of_a_paper_that_left_it_out(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A real run's record (a saved quest with its ledger) that was cut at the limit: the writer's paper does not mention it,
+    the written paper.md does, in its Limitations, with FI's own counts."""
+    from tests.test_paper_record import WRITTEN, _engine, _quest
+
+    root, topic = _quest(tmp_path, "fdr_e1")
+    (root / ".fi" / "run_estimate.json").write_text(json.dumps({"fits": False, "truncated": {
+        "kind": "grid", "estimate_s": 64800.0, "at_least": False, "limit_s": 28800.0, "settings": 27, "order": "plan",
+        "run_id": ""}}), encoding="utf-8")
+
+    async def fake_chat(self: Any, messages: Any, **kw: Any) -> str:
+        return WRITTEN  # a paper that says nothing of the cut
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    (root / "paper").mkdir(exist_ok=True)
+    eng = _engine(root)
+    out = asyncio.run(eng._node_write({"topic": topic, "title": "t", "iteration": 0,  # type: ignore[arg-type]
+                                       "exec_result": {"returncode": 0, "duration_s": 7.4}}))
+    paper = paper_facts.without_marks(Path(out["paper_md"]).read_text(encoding="utf-8"))
+    limitations = paper[paper.index("## Limitations"):]
+    assert "FI estimated that the plan's study would take about 18 h, more than the 8 h allowed" in limitations
+    assert "the results cover only what ran" in limitations and "settings" in limitations
