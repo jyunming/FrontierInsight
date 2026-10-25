@@ -1052,10 +1052,10 @@ async def test_a_study_too_long_to_run_asks_the_plan_once_for_one_that_fits_then
     assert (await engine._node_evidence_gate(unmeasured))["evidence_assessment"]["route"] == "stuck"
     # An answer that cannot be used leaves the stop as it was.
 
-    async def broken_rewrite(request, path, by="person", note=""):  # noqa: ANN001
-        raise ValueError("the reply was not a plan")
+    async def broken_rewrite(request, path, *, scope, note, by="engine", **kw):  # noqa: ANN001
+        raise ValueError("the reply was not usable")
 
-    monkeypatch.setattr(engine, "_rewrite_plan", broken_rewrite)
+    monkeypatch.setattr(engine, "_revise_plan_parts", broken_rewrite)
     failed = await engine._node_evidence_gate(state)
     assert failed["evidence_assessment"]["route"] == "stuck" and "iteration" not in failed
 
