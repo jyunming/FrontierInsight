@@ -83,6 +83,7 @@ def _run(cmd: list[str], *, timeout: float, cwd: str | None = None) -> "subproce
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PROMPT_PATH = REPO_ROOT / "agents" / "poster.md"
+REDO_PROMPT_PATH = REPO_ROOT / "agents" / "poster_redo.md"
 TEMPLATE_PATH = REPO_ROOT / "templates" / "poster" / "poster.tex"
 # Frontier Insight brand mark, copied next to poster.tex for the header
 # lockup and the reference band.
@@ -997,7 +998,24 @@ class PosterGenerator:
             columns=str(sheet.columns),
             word_budget=str(sheet.words),
         )
-        if feedback:
+        # A redo with the check's findings writes again only the panels they name (the headline counts as one); every
+        # other block of the previous reply is kept as it was.
+        flagged = self._flagged_parts(out_dir, feedback)
+        if flagged is not None:
+            previous, headline_flagged, indices = flagged
+            if not headline_flagged and not indices:
+                _log.info("poster: no panel could be matched to the check's findings; nothing is redone")
+                return {}
+            targets = ", ".join([*(["the headline"] if headline_flagged else []), *(f"block {i}" for i in indices)])
+            prompt = string.Template(REDO_PROMPT_PATH.read_text(encoding="utf-8")).safe_substitute(
+                poster=json.dumps(previous, indent=1, ensure_ascii=False),
+                figure_list="\n".join(
+                    f"- figures/{name}" + (f": {captions[name]}" if captions.get(name) else "") for name in figures
+                ) or "(none)",
+                source_list="\n".join(_band_entry(src, label) for label, src in sources.items()) or "(none)",
+                feedback=str(feedback).strip(), targets=targets,
+            )
+        elif feedback:
             prompt = prompt.rstrip() + "\n\n" + feedback.strip() + "\n"
         own_supervisor = supervisor is None
         sup = supervisor or ProxySupervisor()
@@ -1018,8 +1036,12 @@ class PosterGenerator:
                 await sup.release(self.config.provider.name)
             if own_supervisor:
                 await sup.shutdown()
+        if flagged is not None:
+            parsed = self._merge_redone(previous, _lenient_json(text) or {}, headline_flagged, indices)
+            text = json.dumps(parsed, indent=1, ensure_ascii=False)
+        else:
+            parsed = _lenient_json(text) or {}
         self._write_reply(out_dir, text)
-        parsed = _lenient_json(text) or {}
 
         # The headline is the finding; the paper's own H1 goes under it. A
         # headline that is missing or runs to a paragraph gives way to the
@@ -1298,6 +1320,58 @@ class PosterGenerator:
             path.write_text(json.dumps(fit, indent=2, ensure_ascii=False), encoding="utf-8")
         except OSError as exc:
             _log.info("poster.pdf: could not write %s (%r)", path, exc)
+
+    @staticmethod
+    def _flagged_parts(out_dir: Path, feedback: object) -> tuple[dict, bool, list[int]] | None:
+        """``(the previous reply, whether its headline is flagged, indices of its flagged blocks)`` for a redo whose
+        feedback carries findings, found by the text each finding quotes; ``None`` (write the whole poster) when there is
+        no such feedback or no previous reply to build on."""
+        findings = getattr(feedback, "findings", None)
+        if not findings:
+            return None
+        try:
+            previous = _lenient_json((out_dir / ".fi" / "poster_reply.txt").read_text(encoding="utf-8"))
+        except OSError:
+            return None
+        if not isinstance(previous, dict) or not isinstance(previous.get("blocks"), list):
+            return None
+
+        def norm(text: object) -> str:
+            return " ".join(_re.sub(r"[$*\\{}]", " ", str(text or "")).lower().split())
+
+        def words(block: object) -> str:
+            if not isinstance(block, dict):
+                return ""
+            return norm(" ".join([str(block.get("text") or ""), str(block.get("caption") or ""),
+                                  *(str(x) for x in block.get("items") or [])]))
+
+        headline = norm(previous.get("headline"))
+        block_words = [words(b) for b in previous["blocks"]]
+        headline_flagged = False
+        indices: set[int] = set()
+        for finding in findings:
+            quote = norm(finding.get("quote"))
+            if not quote:
+                continue
+            if headline and quote in headline:
+                headline_flagged = True
+            indices.update(i for i, w in enumerate(block_words) if w and quote in w)
+        return previous, headline_flagged, sorted(indices)
+
+    @staticmethod
+    def _merge_redone(previous: dict, reply: dict, headline_flagged: bool, indices: list[int]) -> dict:
+        """The previous reply with the flagged headline and blocks replaced by the ones in ``reply``; a part the reply
+        did not hold (or held in a form that is not a block) stays as it was."""
+        merged = json.loads(json.dumps(previous))
+        if headline_flagged and isinstance(reply.get("headline"), str) and reply["headline"].strip():
+            merged["headline"] = reply["headline"]
+        redone = reply.get("blocks")
+        if isinstance(redone, dict):
+            for i in indices:
+                new = redone.get(str(i))
+                if isinstance(new, dict) and new.get("type"):
+                    merged["blocks"][i] = new
+        return merged
 
     @staticmethod
     def _write_reply(out_dir: Path, text: str) -> None:

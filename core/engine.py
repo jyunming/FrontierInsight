@@ -6516,7 +6516,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             wrong = f"it held {len(objects)} separate JSON objects, not one"
         else:
             wrong = "its JSON object was empty"
-        self._log.warning("[plan] the plan step's reply could not be used (%s); asking once more for one short JSON object", wrong)
+        if not objects and (text or "").strip():
+            merged = await self._reask_unreadable_keys(prompt, text, node="plan_revise", want=("protocol",), ok=bool)
+            if merged is not None and merged[1]:
+                return self._as_design_parts(merged[1])
+        self._log.warning("[plan] the plan step's reply could not be used (%s); asking once more for the whole answer (one "
+                          "short JSON object): nothing in it could be read", wrong)
         echo = (f"\nYour previous reply, for reference (say the same things, in the asked-for shape):\n\n{text}\n"
                 if text and len(text) <= self._REANSWER_ECHO_CHARS else "")
         retry = self._prompts["json_reanswer"].substitute(
@@ -24881,8 +24886,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             wrong = f"it was {len(text):,} characters and its JSON object did not carry {', '.join(want)} as asked"
         if isinstance(parsed, dict) and parsed and why_unusable is not None and (reason := why_unusable(parsed)):
             wrong = reason  # a reply that is an object of the right shape but says nothing: the caller names why
-        self._log.warning("[%s] the reply could not be used (%s); asking once more for one short JSON object", node,
-                          wrong)
+        if not objects and (text or "").strip():
+            merged = await self._reask_unreadable_keys(prompt, text, node=node, want=want, ok=ok)
+            if merged is not None:
+                return merged[0], merged[1]
+        self._log.warning("[%s] the reply could not be used (%s); asking once more for the whole answer (one short JSON "
+                          "object): nothing in it could be read", node, wrong)
         echo = (f"\nYour previous reply, for reference (say the same things, in the asked-for shape):\n\n{text}\n"
                 if len(text) <= self._REANSWER_ECHO_CHARS else "")
         retry = self._prompts["json_reanswer"].substitute(original_prompt=prompt, what_was_wrong=wrong, keys=", ".join(want), earlier_reply=echo)
@@ -24893,6 +24902,43 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return text, parsed
         self._log.warning("[%s] the second answer could not be used either (%d characters)", node, len(text or ""))
         return text, parsed if isinstance(parsed, dict) else {}
+
+    async def _reask_unreadable_keys(
+        self, prompt: str, text: str, *, node: str, want: tuple[str, ...], ok: Callable[[dict[str, Any]], bool],
+    ) -> tuple[str, dict[str, Any]] | None:
+        """A reply whose JSON object does not parse as a whole: what IS readable is kept (:func:`_readable_json_keys`),
+        and the model is asked again only for the keys that were unreadable or are missing
+        (``agents/json_reanswer_part.md``), never for the whole answer. ``(text of the merged object, the merged
+        object)``; ``None`` when nothing in the reply is readable, so the caller asks for the whole answer."""
+        found = _readable_json_keys(text)
+        if found is None:
+            return None
+        readable, bad, reason = found
+        missing = list(bad) + [k for k in want if k not in readable and k not in bad]
+        if not missing:
+            if ok(readable):
+                self._log.info("[%s] the reply did not parse as a whole, but every key asked for could be read from it", node)
+                return json.dumps(readable, ensure_ascii=False), readable
+            return None
+        names = ", ".join(f"`{k}`" for k in missing)
+        wrong = f"{names} could not be read ({reason})" if bad else f"it did not carry {names}"
+        self._log.warning("[%s] the reply was read except %s; asking again only for %s", node, wrong, names)
+        echo = (f"\nYour previous reply, for reference (say the same things for these keys):\n\n{text}\n"
+                if len(text) <= self._REANSWER_ECHO_CHARS else "")
+        retry = self._prompts["json_reanswer_part"].substitute(
+            original_prompt=prompt, what_was_wrong=wrong, keys=names, earlier_reply=echo)
+        again = await self._chat(retry, node=node)
+        if node == "plan_revise":
+            self._keep_plan_answer(again)
+        reply = _parse_json_lenient(again, node=node, want=tuple(missing)) or {}
+        merged = dict(readable)
+        if isinstance(reply, dict):
+            merged.update({k: v for k, v in reply.items() if k in missing})
+        if ok(merged):
+            self._log.info("[%s] the keys asked again could be read and were merged into the readable part", node)
+        else:
+            self._log.warning("[%s] the merged answer could not be used either", node)
+        return json.dumps(merged, ensure_ascii=False), merged
 
     def _seed_call_counts(self, state: Any) -> None:
         """Start this run's tally of model calls from the one the quest's state kept (a resumed quest)."""
@@ -27005,6 +27051,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "plan_parts",                       # FI asks for ONLY the missing parts of the plan, as JSON (never the whole file)
         "plan_criteria",                    # the plan named no check of correctness: ask once more
         "json_reanswer",                    # a required check's reply could not be read: one short JSON re-answer
+        "json_reanswer_part",               # ... when part of it could be read: only the unreadable keys are asked again
         "oracle_review",                    # a second model reads the plan's checks against known answers
         "topic_requirements",               # a second model lists what the topic asks for, from its text alone
         "topic_cover",                      # ... and judges the items a name match could not find in the plan
@@ -33115,6 +33162,83 @@ def _top_level_json_objects(text: str) -> list[dict[str, Any]]:
             out.append(_read_latex_object(text[i:end], strict=True) or obj)
         i = text.find("{", end)
     return out
+
+
+_JSON_KEY_RE = re.compile(r'\s*,?\s*"((?:[^"\\]|\\.)*)"\s*:\s*')
+_JSON_NEXT_KEY_RE = re.compile(r',\s*"((?:[^"\\]|\\.)*)"\s*:\s*')
+
+
+def _depth_change(chunk: str) -> int:
+    """How many more objects or lists ``chunk`` opens than it closes (brackets inside JSON strings not counted)."""
+    depth = 0
+    in_string = escaped = False
+    for ch in chunk:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+    return depth
+
+
+def _readable_json_keys(text: str) -> tuple[dict[str, Any], list[str], str] | None:
+    """What of ONE JSON object that does not parse as a whole can still be read, key by key: ``(readable, unreadable
+    keys, the parser's reason)``. A value that does not parse (a quote left unescaped, a reply cut off) is skipped to the
+    next key written at the top level of the object. ``None`` when nothing is readable or the reply holds more than one
+    object (which one is the answer is then not known)."""
+    if not (text or "").strip() or len(_top_level_json_objects(text)) > 1:
+        return None
+    body = _strip_outer_fence(text).strip()
+    start = body.find("{")
+    if start < 0:
+        return None
+    decoder = json.JSONDecoder()
+    readable: dict[str, Any] = {}
+    bad: list[str] = []
+    reason = ""
+    pos = start + 1
+    while (m := _JSON_KEY_RE.match(body, pos)):
+        try:
+            key = json.loads('"' + m.group(1) + '"')
+        except ValueError:
+            break
+        failure = ""
+        try:
+            value, end = decoder.raw_decode(body, m.end())
+            if body[end:].lstrip()[:1] not in (",", "}", "]", ""):  # a quote left unescaped ends the string early
+                failure = f"the value goes on past where it was read, at character {end}"
+        except ValueError as e:
+            failure = f"{getattr(e, 'msg', 'it is not valid JSON')} at character {getattr(e, 'pos', m.end())}"
+        if failure:
+            bad.append(key)
+            reason = reason or failure
+            nxt = None
+            for cand in _JSON_NEXT_KEY_RE.finditer(body, m.end()):
+                if _depth_change(body[m.end():cand.start()]) != 0:
+                    continue
+                try:
+                    decoder.raw_decode(body, cand.end())
+                except ValueError:
+                    continue
+                nxt = cand.start()
+                break
+            if nxt is None:
+                break
+            pos = nxt
+            continue
+        readable[key] = value
+        pos = end
+    if not readable:
+        return None
+    return readable, bad, reason
 
 
 def _matching_brace_end(text: str, start: int) -> int:

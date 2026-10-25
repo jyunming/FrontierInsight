@@ -3259,6 +3259,16 @@ async def _run_generators(
                 art, art.quest_root, supervisor=supervisor, feedback=feedback,
             ))
 
+        async def restore_slides_pages(saved: Path, pages: list[int]) -> None:
+            # A redone slide that checks worse goes back as it was; the deck is rendered again from the slides.md that results.
+            from generation.slides import restore_slides
+
+            restore_slides(art.quest_root / "slides.md", saved / "slides.md", pages)
+            written.update(await SlideGenerator(cfg).generate(
+                art, art.quest_root, supervisor=supervisor, keep_deck=True,
+            ))
+
+        redo_slides.restore_pages = restore_slides_pages  # check_and_redo puts a redone slide that got worse back
         redo = {"paper": redo_paper, "slides": redo_slides, "poster": redo_poster}
         for kind, key, output_kind in (
             ("paper", "paper_pdf", "paper_pdf"), ("slides", "slides_pdf", "slides"), ("poster", "poster_pdf", "poster"),

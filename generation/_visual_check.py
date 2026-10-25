@@ -488,7 +488,24 @@ def score(report: dict[str, Any]) -> int:
     return sum(_WEIGHTS.get(f.get("severity"), 2) for f in _open_findings(report))
 
 
-def feedback_text(findings: list[dict]) -> str:
+class Feedback(str):
+    """The text a redo is given, carrying the findings it came from (``findings``). A generator that redoes only the
+    flagged parts of its output reads them; anything that takes a plain string takes this one unchanged."""
+
+    findings: list[dict]
+
+    def __new__(cls, text: str, findings: list[dict] | None = None) -> "Feedback":
+        obj = super().__new__(cls, text)
+        obj.findings = list(findings or [])
+        return obj
+
+
+def page_score(report: dict[str, Any], page: int) -> int:
+    """``score`` of the findings on one page."""
+    return sum(_WEIGHTS.get(f.get("severity"), 2) for f in _open_findings(report) if f.get("page") == page)
+
+
+def feedback_text(findings: list[dict]) -> Feedback:
     lines = [
         "## Problems a check found in your previous version",
         "",
@@ -499,7 +516,7 @@ def feedback_text(findings: list[dict]) -> str:
         where = f"page {f.get('page')}" + (f", {f['region']}" if f.get("region") else "")
         near = f' Near: "{f["quote"]}".' if f.get("quote") else ""
         lines.append(f"- {where}: {f.get('problem')}{near}")
-    return "\n".join(lines)
+    return Feedback("\n".join(lines), findings)
 
 
 def _copy_version(source: Path, target: Path, names: tuple[str, ...]) -> None:
@@ -523,14 +540,20 @@ async def check_and_redo(
     regenerate: Callable[[str], Awaitable[Any]],
     *,
     supervisor: ProxySupervisor | None = None,
+    restore_pages: Callable[[Path, list[int]], Awaitable[Any]] | None = None,
 ) -> dict[str, Any]:
     """Check ``pdf``. While the check finds problems a new version could fix,
     ask ``regenerate(feedback)`` for one, at most
     ``output.visual_check_max_redos`` times, and keep the version that checks
-    best; a version that checks no better is put back. Never raises."""
+    best; a version that checks no better is put back. ``regenerate`` is given
+    the findings (``Feedback.findings``) and redoes only the pages they name.
+    ``restore_pages(saved_folder, pages)`` puts back, page by page, a redone
+    page that checks worse than it did, so each redone page keeps its better
+    version. Never raises."""
     report = await check_pdf(config, kind, pdf, quest_root, supervisor=supervisor)
     attempts: list[dict[str, Any]] = [{"attempt": 0, "score": score(report), "kept": True}]
     names = _VERSION_FILES.get(kind, ())
+    restore_pages = restore_pages or getattr(regenerate, "restore_pages", None)
     limit = min(int(getattr(config.output, "visual_check_max_redos", 0) or 0), _REDO_LIMITS.get(kind, 2))
     for attempt in range(1, limit + 1):
         fixable = redo_findings(kind, report)
@@ -543,7 +566,8 @@ async def check_and_redo(
         try:
             feedback = feedback_text(fixable)
             if kind == "paper":
-                feedback = f"{PAPER_FEEDBACK_TAG} {' '.join(sorted({f['check'] for f in fixable}))}\n{feedback}"
+                feedback = Feedback(
+                    f"{PAPER_FEEDBACK_TAG} {' '.join(sorted({f['check'] for f in fixable}))}\n{feedback}", fixable)
             await regenerate(feedback)
         except Exception as exc:  # noqa: BLE001 — a redo must never stop the quest
             _log.warning("visual check: redo %d of %s failed: %r", attempt, kind, exc)
@@ -551,6 +575,17 @@ async def check_and_redo(
             _copy_version(saved, quest_root, names)
             break
         new = await check_pdf(config, kind, pdf, quest_root, supervisor=supervisor)
+        if restore_pages is not None and new.get("transport") != "none":
+            # A redone page that checks worse than before goes back as it was; the pages that got better stay.
+            redone = sorted({f["page"] for f in fixable if isinstance(f.get("page"), int)})
+            worse = [p for p in redone if page_score(new, p) > page_score(report, p)]
+            if worse:
+                try:
+                    await restore_pages(saved, worse)
+                    new = await check_pdf(config, kind, pdf, quest_root, supervisor=supervisor)
+                    entry["restored_pages"] = worse
+                except Exception as exc:  # noqa: BLE001 — a restore must never stop the quest
+                    _log.warning("visual check: putting back pages %s of %s failed: %r", worse, kind, exc)
         entry["score"] = score(new)
         if new.get("transport") != "none" and entry["score"] < score(report):
             for earlier in attempts[:-1]:
