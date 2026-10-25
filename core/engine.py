@@ -20010,11 +20010,21 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 self._log.warning(
                     "[analyze] ensemble all-failed (%s); falling back to single-call path", e,
                 )
-        # The readers after this take these fields as lists (text, or objects for a finding with a record). A reply that
-        # is not an object, or whose findings are a bare number or string, is put in that shape here, once: an object
-        # that is not a list of findings is never read as one. A non-object reply then gets the unreadable rule below.
-        if not isinstance(analysis, dict):
+        if not isinstance(analysis, dict):  # a reply that is not an object gets the unreadable rule below
             analysis = {}
+        if not analysis:
+            # One call; an answer that cannot be read is asked for once more. (When the ensemble's merged answer could
+            # not be read, this is a fresh ask, so up to two more calls follow it.)
+            _, analysis = await self._chat_json(prompt, node="analyze", want=("summary",), usable=bool)
+            if not isinstance(analysis, dict):
+                analysis = {}
+        if not analysis:
+            # Unreadable twice: no finding is invented. The evidence gate reads `unreadable` and fails closed.
+            self._log.warning("[analyze] the model's analysis could not be read, even when asked once more; the run is "
+                              "treated as having no findings (the evidence gate says so)")
+            analysis = {"summary": "(parse failed)", "key_findings": [], "unreadable": True}
+        # The readers after this take these fields as lists (text, or objects for a finding with a record): findings
+        # that are a bare number or string are put in that shape here, once, whichever call gave the answer.
         for key in ("key_findings", "claims_supported"):
             if key in analysis:
                 value = analysis[key]
@@ -20023,19 +20033,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 elif isinstance(value, list):
                     analysis[key] = [
                         item if isinstance(item, dict) else str(item)
-                        for item in value if isinstance(item, (str, int, float, bool))
+                        for item in value if isinstance(item, (dict, str, int, float, bool))
                     ]
                 else:
                     analysis[key] = []
-        if not analysis:
-            # One call; an answer that cannot be read is asked for once more. (When the ensemble's merged answer could
-            # not be read, this is a fresh ask, so up to two more calls follow it.)
-            _, analysis = await self._chat_json(prompt, node="analyze", want=("summary",), usable=bool)
-        if not analysis:
-            # Unreadable twice: no finding is invented. The evidence gate reads `unreadable` and fails closed.
-            self._log.warning("[analyze] the model's analysis could not be read, even when asked once more; the run is "
-                              "treated as having no findings (the evidence gate says so)")
-            analysis = {"summary": "(parse failed)", "key_findings": [], "unreadable": True}
         # Default `next_step` to publish when the LLM omits it (older
         # prompts, parse failures) so the route doesn't break.
         analysis.setdefault("next_step", "publish")
