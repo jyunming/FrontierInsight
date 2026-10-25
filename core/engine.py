@@ -6375,6 +6375,25 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         except OSError as e:
             self._log.warning("[plan] couldn't keep the plan model's answer: %r", e)
 
+    async def _keep_refused_repair(self, path: str, script: str, new_code: str | None, reason: str,
+                                   result: dict[str, Any] | None = None) -> None:
+        """A repair that was refused is not lost: the script it proposed, why it was refused (``reason.txt``) and what is
+        known of the run it was meant to fix (``result.json``) go to ``refs/fi/refused/<NNN>`` in ``code/``'s own git
+        history (:func:`core.code_project.keep_refused`); the branch and the folder stay as the refusal left them. Best
+        effort: never stops or changes the repair, and a missing git is not an error."""
+        if not (isinstance(new_code, str) and new_code.strip()):
+            return
+        try:
+            from . import code_project as _project
+
+            body = {"repair_path": path, "script": script, "reason": reason, **(result or {})}
+            await asyncio.to_thread(
+                _project.keep_refused, self.quest_root, None, {script: new_code},
+                f"{path} repair refused: {script}: {reason}",
+                extras={"result.json": json.dumps(body, default=str)}, log=self._log)
+        except Exception:  # noqa: BLE001 -- the record is a convenience
+            pass
+
     def _keep_repair_answer(self, kind: str, text: str | None) -> None:
         """Write a repair's raw reply to ``.fi/repair_answers/<kind>_NNN.txt`` (bounded, like :meth:`_keep_plan_answer`), so a
         refusal of the repair can be read beside what the model wrote."""
@@ -11305,11 +11324,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if not usable:
             self._log.warning("[execute] the redraw of %s is not the same script with its figures drawn from the results "
                               "(%s); keeping it as written", path.name, broken or "it lost a part FI reads from the script")
+            await self._keep_refused_repair("figures", path.name, new_code,
+                                            broken or "it lost a part FI reads from the script")
             return False
         left = _figdata.typed_series(new_code, path.name)
         if len(left) >= len(found):
             self._log.warning("[execute] the rewritten %s still draws %d figure series from typed-in numbers; keeping it "
                               "as written", path.name, len(left))
+            await self._keep_refused_repair("figures", path.name, new_code,
+                                            f"{len(left)} figure series still drawn from typed-in numbers")
             return False
         # A figure repair changes how a figure is drawn, never what the study computes: the checks were made on that
         # computation (core/plot_scope.py). A reply that changed any of it is not used.
@@ -12139,6 +12162,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         remaining = [m for m in _protocol.check_repairable(protocol, scripts) if not m.where or path.name in m.where] if usable else mismatches
         if not usable or len(remaining) >= len(mismatches):
             self._log.warning("[protocol] the repair of %s did not remove the differences; keeping it as written", path.name)
+            await self._keep_refused_repair(
+                "protocol", path.name, new_code,
+                broken or f"the differences were not fewer ({len(mismatches)} -> {len(remaining)})")
             return code, deps, False
         path.write_text(new_code, encoding="utf-8")
         self._log.info(
@@ -17330,6 +17356,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                                       trial=bool(getattr(self, "_trial_mode", False)))
         if broken:
             self._log.warning("[oracle] the repair of %s is not usable (%s); keeping it as written", path.name, broken)
+            await self._keep_refused_repair("oracle", path.name, new_code, broken)
             return None, False, "not_usable"
         if (path.name == _split_run.SIMULATE_NAME and getattr(self, "_trial_mode", False)
                 and _trial_runner.trial_aggregates(new_code)):
@@ -17337,6 +17364,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # trial of the study as long as a whole cell. A cell-level check is measured on run_cell, which FI calls for it.
             self._log.warning("[oracle] the repair of %s is not used: %s; keeping it as written", path.name,
                               _trial_runner.TRIAL_AGGREGATE_WHY)
+            await self._keep_refused_repair("oracle", path.name, new_code, _trial_runner.TRIAL_AGGREGATE_WHY)
             return None, False, "not_usable"
         path.write_text(new_code, encoding="utf-8")
         if path.name == _split_run.SIMULATE_NAME:
@@ -17473,6 +17501,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             elif unseeded_rng_calls(new_code):
                 why = "the repaired script still builds a generator without a seed"
         if why:
+            await self._keep_refused_repair("seed", code_path.name, new_code, why)
             if reads_seed:
                 self._log.warning(
                     "[implement] %s: keeping the script as written. Its replicates will "
@@ -19515,6 +19544,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     "[execute_reflect] the figure redraw is not a Python script; keeping the "
                     "script as written, with its figures as drawn",
                 )
+                await self._keep_refused_repair(
+                    "execute_reflect",
+                    (_trial_runner.SUBMIT_NAME if repair_submit
+                     else _split_run.SIMULATE_NAME if repair_simulation else "experiment.py"),
+                    new_code, "the figure redraw is not a Python script")
                 return spent
 
         patch_summary = parsed.get("patch_summary") or "(no summary)"
@@ -19525,6 +19559,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         broken = _trial_runner.repair_breaks_contract(script_code, new_code, script_name)
         if broken:
             self._log.warning("[execute_reflect] the repair of %s is not used: %s; keeping it as written", script_name, broken)
+            await self._keep_refused_repair("execute_reflect", script_name, new_code, broken, {
+                "returncode": rc, "stderr_tail": str(exec_result.get("stderr_tail", ""))[-1500:],
+                "result_json": exec_result.get("result_json")})
             history.append({
                 "iter": iters + 1, "returncode": rc, "stderr_tail": exec_result.get("stderr_tail", "")[-400:],
                 "patch_summary": (f"[the repair was not used and {script_name} is as it was: {broken}. Give the whole "

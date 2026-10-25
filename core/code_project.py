@@ -787,12 +787,19 @@ def record_change(quest_root: Path, note: str, *, category: str = "changed", res
         return False
 
 
-def keep_refused(quest_root: Path, ref: str, files: dict[str, str], message: str, *, log: Any = None) -> bool:
+REFUSED_KEPT = 200  # the newest refused tries kept under refs/fi/refused/; older ones are dropped
+
+
+def keep_refused(quest_root: Path, ref: str | None, files: dict[str, str], message: str, *,
+                 extras: dict[str, str] | None = None, log: Any = None) -> bool:
     """Keep a version of ``rel`` that was tried and refused in ``code/``'s own git repository, on the side reference
     ``refs/fi/refused/<ref>``: one commit whose parent is the current HEAD and whose tree is HEAD's with each file of
     ``files`` (path -> text) set to its text. A reference of that name already there is never overwritten: the try is
-    kept beside it (``<ref>-2``, ...). The branch, the index and the working folder are not touched. Best effort:
-    ``False`` (and a log line) when git cannot do it."""
+    kept beside it (``<ref>-2``, ...); no ``ref`` takes the next number (``001``, ``002``, ...). The tree also holds
+    ``.fi_refused/reason.txt`` (the whole ``message``) and each of ``extras`` (name -> text, e.g. ``result.json``, what
+    the refused try returned) under ``.fi_refused/``. The branch, the index and the working folder are not touched;
+    only the newest :data:`REFUSED_KEPT` refused tries stay. Best effort: ``False`` (and a log line) when git cannot do
+    it."""
     import os
     import re
     import subprocess
@@ -803,7 +810,7 @@ def keep_refused(quest_root: Path, ref: str, files: dict[str, str], message: str
         return False
     index = git_dir / "fi_refused.index"
     # a name git takes: no "..", no ".lock" ending, no part starting with "."
-    name = re.sub(r"\.{2,}", ".", re.sub(r"[^A-Za-z0-9._-]+", "-", ref)).strip("-.") or "try"
+    name = re.sub(r"\.{2,}", ".", re.sub(r"[^A-Za-z0-9._-]+", "-", ref or "")).strip("-.")
     if name.endswith(".lock"):
         name = name[: -len(".lock")] + "-lock"
     try:
@@ -813,7 +820,11 @@ def keep_refused(quest_root: Path, ref: str, files: dict[str, str], message: str
         parent = head.stdout.strip() if head.returncode == 0 else ""
         if _git(code_dir, "read-tree", *([parent] if parent else ["--empty"]), env_extra=extra).returncode != 0:
             return False
-        for rel, text in files.items():
+        if not name:
+            have = _git(code_dir, "for-each-ref", "--format=%(refname:lstrip=3)", "refs/fi/refused/").stdout.split()
+            name = f"{max([int(n) for n in have if n.isdigit()] or [0]) + 1:03d}"
+        notes = {f".fi_refused/{k}": v for k, v in (extras or {}).items()}
+        for rel, text in {**files, ".fi_refused/reason.txt": message, **notes}.items():
             blob = _git(code_dir, "hash-object", "-w", "--stdin", stdin=text)
             if blob.returncode != 0:
                 return False
@@ -830,6 +841,10 @@ def keep_refused(quest_root: Path, ref: str, files: dict[str, str], message: str
             # an empty old value: made only when no reference of that name is there yet
             target = f"refs/fi/refused/{name}" + ("" if n == 1 else f"-{n}")
             if _git(code_dir, "update-ref", target, made.stdout.strip(), "").returncode == 0:
+                old = _git(code_dir, "for-each-ref", "--sort=-committerdate", "--format=%(refname)",
+                           "refs/fi/refused/").stdout.split()
+                for stale in [r for r in old[REFUSED_KEPT:] if r != target]:
+                    _git(code_dir, "update-ref", "-d", stale)
                 return True
         return False
     except (OSError, subprocess.SubprocessError) as exc:

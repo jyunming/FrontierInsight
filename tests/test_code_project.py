@@ -619,7 +619,7 @@ def test_a_left_over_index_does_not_carry_into_a_refused_try_without_history(tmp
                       "100644,e69de29bb2d1d6434b8b29ae775ad8c2e48c5391,stale.py", env_extra={"GIT_INDEX_FILE": str(stale)})
     assert stale.is_file()
     assert code_project.keep_refused(tmp_path, "F-1-1", {"a.py": "x = 2\n"}, "try")
-    assert _git_out(code, "ls-tree", "--name-only", "refs/fi/refused/F-1-1").split() == ["a.py"]
+    assert _git_out(code, "ls-tree", "--name-only", "refs/fi/refused/F-1-1").split() == [".fi_refused", "a.py"]
 def test_every_version_of_the_code_that_runs_is_a_commit_and_an_unchanged_one_is_not(tmp_path):
     import asyncio
     import shutil

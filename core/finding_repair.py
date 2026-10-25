@@ -1197,7 +1197,10 @@ def keep_try(env: "Env", issue: dict[str, Any], rel: str, number: int, accepted:
             _project.record_change(env.root, env.scrub(f"finding repair accepted: {who}"), category="fixed", log=env.log)
         elif env.tried:
             _project.keep_refused(env.root, f"{issue.get('id')}-{number}", dict(env.tried),
-                                  env.scrub(f"finding repair refused: {who}: {why[:300]}"), log=env.log)
+                                  env.scrub(f"finding repair refused: {who}: {why[:300]}"),
+                                  extras={"result.json": env.scrub(json.dumps({"path": "finding_repair", "finding": issue.get("id"),
+                                                                              "try": number, "reason": why}))},
+                                  log=env.log)
     except Exception:  # noqa: BLE001 -- the record is a convenience; the repair goes on whatever happens to it
         pass
 
