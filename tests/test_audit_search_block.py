@@ -193,3 +193,37 @@ async def test_a_whole_block_proposal_is_kept_per_part(tmp_path: Path) -> None:
     assert [x["path"] for x in record["open"]] == ["protocol.optimisation.objective.direction"]
     assert "judged by" in record["open"][0]["reason"]
     assert "protocol.optimisation.baseline" in [x["path"] for x in record["applied"]]
+
+
+def test_with_check_runs_written_only_it_is_put_back() -> None:
+    """`runs_per_evaluation` is then the search's own replication: it may change, the check's runs may not."""
+    eng = _engine(Path("."))
+    before = _with({"runs_per_evaluation": 8, "check_runs": 8})
+    got, changed = eng._keep_what_the_results_are_judged_by(before, _with({"runs_per_evaluation": 1, "check_runs": 1}))
+    block = got["protocol"]["optimisation"]
+    assert changed is True and block["runs_per_evaluation"] == 1 and block["check_runs"] == 8
+    # check_runs absent: the default comes from runs_per_evaluation, so that is put back and an added check_runs removed
+    got, changed = eng._keep_what_the_results_are_judged_by(_with({"runs_per_evaluation": 8}),
+                                                            _with({"runs_per_evaluation": 1, "check_runs": 1}))
+    block = got["protocol"]["optimisation"]
+    assert changed is True and block["runs_per_evaluation"] == 8 and "check_runs" not in block
+
+
+@pytest.mark.asyncio
+async def test_a_proposal_that_is_not_a_search_block_is_kept_open_with_that_reason(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+    design = _search_design()
+    path = plan.plan_path(eng.quest_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(plan.render("heat sink search", {}, design, []), encoding="utf-8")
+    plan.record_version(eng.quest_root, path.read_text(encoding="utf-8"), by="engine", note="test")
+    design = plan.parse(path.read_text(encoding="utf-8")).design
+    change = {"check": "weak_baseline", "where": "protocol.optimisation", "objection": "use another search",
+              "fix": "replace it", "changes": [{"path": "protocol.optimisation", "value": "a gradient search"}]}
+    eng._client.chat.side_effect = [json.dumps({"objections_addressed": [change]}), json.dumps({"objections_addressed": []})]
+    runs = await eng._audit_the_design_that_runs({"topic": "t", "iteration": 0}, design)
+    assert runs["protocol"]["optimisation"] == design["protocol"]["optimisation"]
+    item = ao.read(eng.quest_root)["open"][0]
+    assert item["path"] == "protocol.optimisation"
+    assert "not a valid search block" in item["reason"] and "must be a mapping" in item["reason"]
+    assert "kept as it was" in item["reason"]

@@ -12625,6 +12625,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         reasons = {p["path"]: ("the audit may change how the study is run, not what its results are judged by"
                                if self._audit_may_not_change(str(p["path"]))
                                and not _design_parts.invalid_reason(p["path"], before) else "") for p in held_back}
+        for p in held_back:
+            if p["path"] == "protocol.optimisation" and not isinstance(p["value"], dict):
+                _block, why = _optim.normalize(p["value"])
+                reasons[p["path"]] = (f"the proposal is not a valid search block ({why}); the whole block was kept as it was")
         reasons = {k: v for k, v in reasons.items() if v}
         lost: list[dict[str, Any]] = []
         if written is not None and isinstance(amended, dict):
@@ -12745,14 +12749,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             else:
                 block["objective"] = old_obj
         if self._effective_check_runs(old) != self._effective_check_runs(block):
-            # The runs of the finer check are ``check_runs``, else ``runs_per_evaluation``: a change to either that
-            # changes the runs the check really makes is put back (both keys, so the default stays what it was).
+            # The runs of the finer check are ``check_runs``, else ``runs_per_evaluation``: only what keeps them as they
+            # were is put back. With ``check_runs`` written, that is it alone (``runs_per_evaluation`` is then how many
+            # runs the search makes of a design); without it the default comes from ``runs_per_evaluation``.
             changed = True
-            for key in self._AUDIT_CHECK_RUNS_KEYS:
-                if key in old:
-                    block[key] = old[key]
+            if "check_runs" in old:
+                block["check_runs"] = old["check_runs"]
+            else:
+                block.pop("check_runs", None)
+                if "runs_per_evaluation" in old:
+                    block["runs_per_evaluation"] = old["runs_per_evaluation"]
                 else:
-                    block.pop(key, None)
+                    block.pop("runs_per_evaluation", None)
         return block, changed
 
     @staticmethod
