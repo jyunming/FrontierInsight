@@ -511,6 +511,19 @@ def test_what_a_repair_changes_outside_the_functions_is_found() -> None:
     assert fr.frame_changes(FRAMED, "import numpy as math\n" + FRAMED.replace("import math\n", ""))
 
 
+def test_a_docstring_that_runs_nothing_is_not_a_change_outside_the_functions() -> None:
+    doc_old = '"""The old docstring."""\n' + FRAMED
+    assert fr.frame_changes(doc_old, doc_old.replace("The old docstring.", "The new docstring.")) == []  # a module docstring
+    cls_old = FRAMED.replace("class Spring:\n", 'class Spring:\n    """A spring."""\n', 1)
+    assert fr.frame_changes(cls_old, cls_old.replace("A spring.", "A stiff spring.")) == []  # a class docstring
+    assert fr.frame_changes(FRAMED, doc_old) == []  # a docstring added
+    assert fr.frame_changes(doc_old, FRAMED) == []  # a docstring removed
+    # Not allowed: a bare statement that does run something, or a bare number, at module level.
+    assert fr.frame_changes(FRAMED, FRAMED + '\nsetup()\n')
+    assert fr.frame_changes(FRAMED, FRAMED + '\nprint("x")\n')
+    assert fr.frame_changes(FRAMED, FRAMED + "\n42\n")
+
+
 def test_a_repair_of_a_method_that_changes_a_module_constant_or_a_class_attribute_is_rejected(tmp_path: Path) -> None:
     test = "import spring\n\ndef test_s():\n    assert spring.Spring().stiffness(1) == 2, 'doubled'\n"
     run = Run(tmp_path, [{"id": "F-1", "function": "Spring.stiffness"}], {})

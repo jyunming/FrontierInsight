@@ -762,24 +762,9 @@ def _bound_names(node: ast.stmt) -> set[str]:
 def _frame(tree: ast.Module) -> list[tuple[str, str]]:
     """Every statement that is not a function, as ``(where, ast.dump)``: the module's own statements (constants, imports,
     guards) and those in the body of a class (its header and its class-level assignments); the methods and functions are
-    compared apart (:func:`other_functions_changed`)."""
-    out: list[tuple[str, str]] = []
-
-    def walk(body: list[ast.stmt], where: str) -> None:
-        for node in body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            if isinstance(node, ast.ClassDef):
-                bare = copy.copy(node)
-                bare.body = []
-                header = ast.dump(bare)
-                out.append((where, header))
-                walk(node.body, f"{where}{node.name}.")
-            else:
-                out.append((where, ast.dump(node)))
-
-    walk(tree.body, "")
-    return out
+    compared apart (:func:`other_functions_changed`). A bare string (a docstring) runs nothing and is not listed
+    (:func:`_frame_nodes`)."""
+    return [(where, dump) for where, dump, _node in _frame_nodes(tree)]
 
 
 def without_main_guard(old: str, new: str) -> tuple[str, str]:
@@ -1009,13 +994,16 @@ def _plain_class_statement(node: ast.stmt) -> bool:
 
 
 def _frame_nodes(tree: ast.Module) -> list[tuple[str, str, ast.stmt]]:
-    """:func:`_frame` with the statement node of each item."""
+    """The statements of :func:`_frame`, each with its node: every statement that is not a function, at module level and
+    in the body of a class; a bare string (a docstring) is not one."""
     out: list[tuple[str, str, ast.stmt]] = []
 
     def walk(body: list[ast.stmt], where: str) -> None:
         for node in body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
+            if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                continue  # a bare string (a docstring) runs nothing, so changing it does not change what the file does
             if isinstance(node, ast.ClassDef):
                 bare = copy.copy(node)
                 bare.body = []
