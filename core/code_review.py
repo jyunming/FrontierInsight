@@ -479,9 +479,9 @@ def plan_views(design: dict[str, Any] | None, protocol: dict[str, Any] | None,
     sections = plan_sections(design, protocol, open_items)
     left_out: list[str] = []
 
-    def note_for(shared: list[str], elsewhere: list[str], partial: list[str]) -> str:
+    def note_for(shared: list[str], elsewhere: list[str], partial: list[str], told: bool = True) -> str:
         parts = []
-        if left_out:
+        if left_out and told:
             parts.append(f"these sections of the plan are not shown: {', '.join(left_out)}")
         if elsewhere:
             parts.append(f"these sections are in the plan given with the other requests of this reading: {', '.join(elsewhere)}")
@@ -542,6 +542,16 @@ def plan_views(design: dict[str, Any] | None, protocol: dict[str, Any] | None,
         split = {n for n in every if sum(1 for g in groups if n in g) > 1}
         texts = [_dump(g, note_for(list(g), [n for n in every if n not in g], sorted(n for n in g if n in split)))
                  for g in groups]
+        told = [True] * len(groups)
+        for k, g in enumerate(groups):
+            if len(texts[k]) > limit and len(members[k]) == 1:
+                # a section that fits alone is not lost to the note about ANOTHER section: this request goes without the
+                # line about what was left out (the record names it, and a request that has room carries the line)
+                for others in ([n for n in every if n not in g], []):
+                    short = _dump(g, note_for(list(g), others, sorted(n for n in g if n in split), False))
+                    if len(short) <= limit:
+                        texts[k], told[k] = short, False
+                        break
         over = next((k for k, t in enumerate(texts) if len(t) > limit), None)
         if over is None:
             break
@@ -554,7 +564,10 @@ def plan_views(design: dict[str, Any] | None, protocol: dict[str, Any] | None,
                         if isinstance(value, list) else name)
     if not groups:  # nothing fits: the request says so and holds no section
         return [{"text": fit(_dump({}, note_for([], [], []))), "sections": [], "left_out": left_out}]
-    return [{"text": t, "sections": list(g), "left_out": left_out} for t, g in zip(texts, groups)]
+    out = [{"text": t, "sections": list(g), "left_out": left_out} for t, g in zip(texts, groups)]
+    if left_out and not any(told):  # no request had room to say what was left out: one with no section says it
+        out.append({"text": fit(_dump({}, note_for([], every, []))), "sections": [], "left_out": left_out})
+    return out
 
 
 def plan_view_fit(design: dict[str, Any] | None, protocol: dict[str, Any] | None,
@@ -596,37 +609,77 @@ def _cut(text: Any, n: int) -> str:
     return text if len(text) <= n else text[:max(n - 3, 0)] + "..."
 
 
+#: The most of the audit's note the reader is shown.
+_NOTE_CAP = 500
+_ITEM_FIELDS = ("proposed", "not_applied_because", "audit_said", "audit_fix")
+
+
 def compact_items(open_items: dict[str, Any] | None, room: int) -> tuple[str, list[dict[str, Any]]]:
-    """The audit's open items as the reader is shown them: ``(text, [{"part", "chars", "cut"}])``. Each item keeps its part;
-    its proposed value, the audit's text, the audit's fix and the reason it was not applied are cut to an equal share of
-    the item (never under :data:`_MIN_ITEM_CHARS`), the share being the largest for which the whole text fits ``room``.
-    The full items stay in the record and go to the code writer unchanged."""
+    """The audit's open items as the reader is shown them: ``(text, [{"part", "chars", "cut", "shown", ...}])``, the text
+    never longer than ``room``. Each item has an equal share of ``room`` (never under :data:`_MIN_ITEM_CHARS`) and keeps its
+    ``part`` whole; the share goes first to ``proposed`` and ``not_applied_because``, then ``audit_said`` from what is left,
+    and ``audit_fix`` only from leftover room. When the items do not fit even at the least share, fields are dropped in the
+    order ``audit_fix``, ``audit_said``, ``proposed`` (never ``part``); when ``part`` and the reason of every item do not fit,
+    as many whole items as fit are shown, in record order, and the text says how many more are in the record. The full items
+    stay in the record and go to the code writer unchanged."""
     items = list((open_items or {}).get("items") or [])
     if not items:
         return "", []
-    note = str((open_items or {}).get("note") or "")
+    note = _cut(str((open_items or {}).get("note") or ""), _NOTE_CAP)
+    head = (note + "%s%s" % (chr(10), chr(10)) if note else "") + "```json" + chr(10)
+    full = [{k: (it.get(k) if isinstance(it.get(k), str) else json.dumps(it.get(k), default=str)) for k in _ITEM_FIELDS}
+            for it in items]
+    for f in full:
+        for k in _ITEM_FIELDS:
+            if f[k] == "null":
+                f[k] = ""
 
-    def build(share: int) -> tuple[str, list[dict[str, Any]]]:
-        quarter = max(share // 4, 1)
-        shown: list[dict[str, Any]] = []
-        info: list[dict[str, Any]] = []
-        for it in items:
-            full = {k: (it.get(k) if isinstance(it.get(k), str) else json.dumps(it.get(k), default=str))
-                    for k in ("proposed", "audit_said", "audit_fix", "not_applied_because")}
-            row = {"part": it.get("part"), **{k: _cut(v, quarter) for k, v in full.items() if v not in ("", "null")}}
-            shown.append(row)
-            info.append({"part": it.get("part"), "chars": len(json.dumps(row, default=str)),
-                         "cut": any(len(v) > quarter for v in full.values())})
-        return (note + "\n\n" if note else "") + "```json\n" + json.dumps(shown, indent=1, default=str) + "\n```", info
+    def row_of(i: int, share: int, fields: tuple[str, ...]) -> dict[str, Any]:
+        f = full[i]
+        left = share
+        got: dict[str, str] = {}
+        plen, rlen = len(f["proposed"]) if "proposed" in fields else 0, len(f["not_applied_because"])
+        p_take = min(plen, max(left // 2, left - rlen))
+        r_take = min(rlen, left - p_take)
+        for k, n in (("proposed", p_take), ("not_applied_because", r_take)):
+            if k in fields and f[k]:
+                got[k], left = _cut(f[k], n), left - n
+        for k in ("audit_said", "audit_fix"):
+            if k in fields and f[k] and left > 0:
+                got[k] = _cut(f[k], left)
+                left -= len(got[k])
+        return {"part": items[i].get("part"), **got}
 
-    share = max(_MIN_ITEM_CHARS, room // len(items))
-    text, info = build(share)
-    for _ in range(12):  # the keys and quotes of an item are not part of its share: shrink until the whole text fits
-        if len(text) <= room or share <= _MIN_ITEM_CHARS:
-            break
-        share = max(_MIN_ITEM_CHARS, int(share * room / len(text)) - 1)
-        text, info = build(share)
-    return text, info
+    def build(share: int, fields: tuple[str, ...], count: int) -> tuple[str, list[dict[str, Any]]]:
+        shown = [row_of(i, share, fields) for i in range(count)]
+        tail = (chr(10) + f"{len(items) - count} more open item{'s' if len(items) - count != 1 else ''} "
+                "are in the record, not shown here") if count < len(items) else ""
+        info = []
+        for i in range(len(items)):
+            row = shown[i] if i < count else {}
+            info.append({"part": items[i].get("part"), "shown": i < count, "chars": len(json.dumps(row, default=str)),
+                         "cut": i >= count or any(len(row.get(k, "")) < len(full[i][k]) or (k not in row and full[i][k])
+                                                  for k in _ITEM_FIELDS),
+                         "proposed_whole": i < count and row.get("proposed", "") == full[i]["proposed"],
+                         "reason_whole": i < count and row.get("not_applied_because", "") == full[i]["not_applied_because"]})
+        return head + json.dumps(shown, indent=1, default=str) + chr(10) + "```" + tail, info
+
+    levels = [_ITEM_FIELDS, _ITEM_FIELDS[:3], _ITEM_FIELDS[:2], ("not_applied_because",)]
+    for fields in levels:
+        share = max(_MIN_ITEM_CHARS, room // len(items))
+        text, info = build(share, fields, len(items))
+        for _ in range(12):  # the keys and quotes of an item are not part of its share: shrink until the whole text fits
+            if len(text) <= room or share <= _MIN_ITEM_CHARS:
+                break
+            share = max(_MIN_ITEM_CHARS, int(share * room / len(text)) - 1)
+            text, info = build(share, fields, len(items))
+        if len(text) <= room:
+            return text, info
+    for count in range(len(items) - 1, -1, -1):  # as many whole items as fit, in record order
+        text, info = build(_MIN_ITEM_CHARS, ("not_applied_because",), count)
+        if len(text) <= room:
+            return text, info
+    return "", [{**x, "shown": False, "chars": 0, "cut": True, "proposed_whole": False, "reason_whole": False} for x in info]
 
 
 def plan_requests(design: dict[str, Any] | None, protocol: dict[str, Any] | None,
@@ -639,12 +692,12 @@ def plan_requests(design: dict[str, Any] | None, protocol: dict[str, Any] | None
     limit = _MAX_PLAN_CHARS if limit is None else limit
     n_items = len((open_items or {}).get("items") or [])
     # the heading, the note and the json skeleton of the items take a little more than the items themselves
-    overhead = 400 + len(str((open_items or {}).get("note") or "")) if n_items else 0
+    overhead = 400 + min(len(str((open_items or {}).get("note") or "")), _NOTE_CAP) if n_items else 0
     floor = n_items * (_MIN_ITEM_CHARS + 120) + overhead
     views = plan_views(design, protocol, limit=limit - floor if n_items else limit)
     out = []
     for v in views:
-        room = limit - len(v["text"]) - overhead
+        room = limit - len(v["text"])
         text, info = compact_items(open_items, room)
         out.append({"text": v["text"], "sections": v["sections"], "left_out": v["left_out"], "open_items": text, "items": info})
     return out

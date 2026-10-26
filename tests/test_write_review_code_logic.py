@@ -365,3 +365,40 @@ def test_the_prompt_puts_the_task_first_then_the_requirements_the_plan_the_audit
     at = [filled.index(m) for m in marks]
     assert at == sorted(at)
     assert "NOT the plan" in filled.split("@@ITEMS@@")[0].rsplit("# ", 1)[1]
+
+
+def test_the_open_items_never_exceed_the_room_and_say_how_many_are_not_shown() -> None:
+    items = {"note": "n" * 50000, "items": [{"part": f"p{i}", "proposed": "a" * 1000, "audit_said": "b" * 1000,
+                                             "audit_fix": "c" * 1000, "not_applied_because": "d" * 1000} for i in range(200)]}
+    for room in (40000, 20000, 6000, 900):
+        text, info = cr.compact_items(items, room)
+        assert len(text) <= room, (room, len(text))
+        shown = [i for i in info if i["shown"]]
+        assert len(info) == 200 and all(f'"p{k}"' in text for k in range(len(shown)))
+        if len(shown) < 200:
+            assert f"{200 - len(shown)} more open items are in the record, not shown here" in text
+        assert all(i["cut"] for i in info)
+
+
+def test_an_item_keeps_its_part_and_gives_its_share_to_the_proposal_and_the_reason_first() -> None:
+    long_item = {"part": "protocol.rule", "proposed": "P" * 150, "audit_said": "S" * 900, "audit_fix": "F" * 900,
+                 "not_applied_because": "R" * 150}
+    items = {"items": [long_item] * 40}
+    text, info = cr.compact_items(items, 20000)
+    rows = json.loads(text.split("```json")[1].split("```")[0])
+    assert len(text) <= 20000 and all(r["part"] == "protocol.rule" for r in rows)
+    assert all(r["proposed"] == "P" * 150 and r["not_applied_because"] == "R" * 150 for r in rows)
+    assert all(i["proposed_whole"] and i["reason_whole"] for i in info)
+    assert all(len(r.get("audit_said", "")) < 900 for r in rows) and not any("audit_fix" in r for r in rows)
+
+
+def test_a_section_that_fits_alone_is_not_lost_to_the_note_about_another_section() -> None:
+    limit = 1200
+    method = "m" * (limit - 60)
+    design = {**DESIGN, "method": method}
+    protocol = {**PROTOCOL, "failure_policy": "q" * 3000}
+    views = cr.plan_views(design, protocol, limit=limit)
+    assert all(len(v["text"]) <= limit for v in views)
+    assert "method" in _sections_of(views), [v["left_out"] for v in views]
+    assert "failure_policy" in views[0]["left_out"] and "method" not in " ".join(views[0]["left_out"])
+    assert any("not shown: failure_policy" in v["text"] for v in views), "some request tells the reader what was left out"
