@@ -369,3 +369,117 @@ async def test_a_plan_split_alone_is_counted_as_plan_parts_not_code_parts(
     record = cr.load(engine.quest_root)
     assert record["plan_parts"] > 1 and record["code_parts"] == 1 and len(record["requests"]) == record["plan_parts"]
     assert all("Part " not in p.split("# The code", 1)[1][:60] for p in reader.prompts), "the code is one part"
+
+
+# ---- a requirement is judged only by the requests that were given the plan's definition of it ----
+
+_SPLIT_DESIGN = {"variables": {"independent": ["c"], "dependent": ["dv"]}, "figures_planned": ["f.png"]}
+_SPLIT_PROTOCOL = {
+    "metrics": [{"id": "q", "estimand": "e"}, {"id": "w", "estimand": "e2"}],
+    "definitions": [{"metric": "q", "defined_as": "d" * 600, "source": "[1]"},
+                    {"metric": "w", "defined_as": "x" * 600, "source": "[1]"}],
+    "grid": {"c": [1, 2, 3]}, "in_each_run": {"k": [1, 2]},
+    "model": {"summary": "s", "equations": [{"id": "E1", "formula": "y = x", "role": "generates"}]},
+}
+
+
+def _by_kind(reqs: list[dict[str, Any]], kind: str, name: str = "") -> dict[str, Any]:
+    return next(r for r in reqs if r["kind"] == kind and (not name or r["name"] == name or name in r["text"]))
+
+
+def _entries_asking(calls: list[dict[str, Any]], req: dict[str, Any]) -> list[int]:
+    return sorted({c["plan_index"] for c in calls if req["id"] in c["asked"]})
+
+
+def test_a_requirement_names_the_plan_items_that_define_it() -> None:
+    reqs = cr.requirements(_SPLIT_DESIGN, _SPLIT_PROTOCOL)
+    assert _by_kind(reqs, "metric", "q")["defined_by"] == [["metrics", "q"], ["definitions", "q"]]
+    assert _by_kind(reqs, "sweep", "parameter c")["defined_by"] == [["grid", "c"]]
+    assert _by_kind(reqs, "sweep", "of k")["defined_by"] == [["in_each_run", "k"]]
+    assert _by_kind(reqs, "equation")["defined_by"] == [["equations", "E1"]]
+    assert _by_kind(reqs, "figure")["defined_by"] == [] and _by_kind(reqs, "dependent variable")["defined_by"] == []
+    no_definition = cr.requirements(_SPLIT_DESIGN, {**_SPLIT_PROTOCOL, "definitions": []})
+    assert _by_kind(no_definition, "metric", "q")["defined_by"] == [["metrics", "q"]]
+
+
+def test_a_split_plan_says_which_items_each_part_holds() -> None:
+    views = cr.plan_views(_SPLIT_DESIGN, _SPLIT_PROTOCOL, limit=1500)
+    assert len(views) == 3
+    assert views[0]["holds"]["metrics"] == ["q", "w"] and views[0]["holds"]["grid"] == ["c"]
+    assert views[0]["holds"]["in_each_run"] == ["k"] and views[0]["holds"]["equations"] == ["E1"]
+    assert [v["holds"] for v in views[1:]] == [{"definitions": ["q"]}, {"definitions": ["w"]}]
+    whole = cr.plan_views(_SPLIT_DESIGN, _SPLIT_PROTOCOL)
+    assert len(whole) == 1 and whole[0]["holds"]["definitions"] == ["q", "w"]
+
+
+def test_a_requirement_is_not_asked_of_a_request_whose_plan_part_lacks_its_definition(tmp_path: Path) -> None:
+    # metrics are split into two parts by their items: the one that lacks metric q's entry must not judge q
+    protocol = {**_SPLIT_PROTOCOL, "definitions": [],
+                "metrics": [{"id": f"m{i}", "estimand": "e" * 500} for i in range(6)] + [{"id": "q", "estimand": "e" * 500}]}
+    _write(tmp_path, {"simulate.py": "x = 1\n"})
+    reqs = cr.requirements(_SPLIT_DESIGN, protocol)
+    calls = cr.reading_calls(tmp_path, _SPLIT_DESIGN, protocol, reqs=reqs, limit=2000)
+    plans = cr.plan_requests(_SPLIT_DESIGN, protocol, limit=2000)
+    holders = [j for j, p in enumerate(plans) if "q" in p["holds"].get("metrics", [])]
+    assert len(plans) > 1 and len(holders) == 1
+    q = _by_kind(reqs, "metric", "q")
+    assert _entries_asking(calls, q) == holders
+    assert len(_entries_asking(calls, q)) < len(plans), "on the old rule every request judged q"
+    for fig in (_by_kind(reqs, "figure"), _by_kind(reqs, "dependent variable")):
+        assert _entries_asking(calls, fig) == list(range(len(plans)))
+
+
+def test_the_part_with_most_of_a_requirements_items_judges_it_when_no_part_holds_all(tmp_path: Path) -> None:
+    _write(tmp_path, {"simulate.py": "x = 1\n"})
+    reqs = cr.requirements(_SPLIT_DESIGN, _SPLIT_PROTOCOL)
+    calls = cr.reading_calls(tmp_path, _SPLIT_DESIGN, _SPLIT_PROTOCOL, reqs=reqs, limit=1500)
+    # q is defined in metrics (part 0) and definitions (part 1): no part holds both, the two that hold one are tied
+    assert _entries_asking(calls, _by_kind(reqs, "metric", "q")) == [0, 1]
+    assert _entries_asking(calls, _by_kind(reqs, "metric", "w")) == [0, 2]
+    assert _entries_asking(calls, _by_kind(reqs, "equation")) == [0]
+
+
+def test_an_item_left_out_of_every_request_is_ignored_and_a_requirement_with_none_held_is_asked_everywhere() -> None:
+    reqs = [{"id": "R1", "defined_by": [["definitions", "q"]]}, {"id": "R2", "defined_by": [["metrics", "q"], ["definitions", "q"]]},
+            {"id": "R3", "defined_by": []}]
+    plans = [{"holds": {"metrics": ["q"]}}, {"holds": {"grid": ["c"]}}]
+    # R1's only item is held nowhere: asked of both; R2 is judged where its one held item is
+    assert cr.asked_ids(reqs, plans) == [["R1", "R2", "R3"], ["R1", "R3"]]
+
+
+def test_a_plan_that_fits_asks_every_requirement_in_every_request(tmp_path: Path) -> None:
+    _write(tmp_path, {"simulate.py": "x = 1\n", "experiment.py": "y = 2\n" * 400})
+    reqs = cr.requirements(_SPLIT_DESIGN, _SPLIT_PROTOCOL)
+    import core.code_review as module
+
+    old = module._MAX_CODE_CHARS
+    module._MAX_CODE_CHARS = 300
+    try:
+        calls = cr.reading_calls(tmp_path, _SPLIT_DESIGN, _SPLIT_PROTOCOL, reqs=reqs)
+    finally:
+        module._MAX_CODE_CHARS = old
+    assert len(calls) > 1 and {c["plan_index"] for c in calls} == {0}
+    assert all(c["asked"] == [r["id"] for r in reqs] for c in calls)
+    assert all(c["asked"] is None for c in cr.reading_calls(tmp_path, _SPLIT_DESIGN, _SPLIT_PROTOCOL))
+
+
+@pytest.mark.asyncio
+async def test_a_request_with_nothing_to_judge_is_still_made_once_and_the_reading_goes_on(tmp_path: Path, monkeypatch) -> None:
+    from tests.test_write_review_code_logic import STATE, _Logic
+
+    real = cr.reading_calls
+
+    def two_requests(*args: Any, **kw: Any) -> list[dict[str, Any]]:
+        (call,) = real(*args, **kw)
+        return [{**call, "asked": []}, {**call, "plan_index": 1, "asked": None}]
+
+    monkeypatch.setattr(cr, "reading_calls", two_requests)
+    engine = _engine(tmp_path)
+    reader = _Logic()
+    engine._client = reader
+    assert await engine._code_review_gate(STATE) is None
+    record = cr.load(engine.quest_root)
+    asked = [len(json.loads(p.split("```json", 1)[1].split("```", 1)[0])) for p in reader.prompts]
+    assert asked[0] == 0 and asked[1] > 0 and len(reader.prompts) == 2
+    assert [r["asked"] for r in record["requests"]] == [0, asked[1]]
+    assert not record.get("error") and record["final"] is True
