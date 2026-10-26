@@ -549,8 +549,6 @@ def enforce(protocol: dict[str, Any] | None, *, fi_runs: bool = True,
             digits, half = precision
             limit = tolerance * abs(expected) if relative else tolerance  # type: ignore[arg-type]
             if digits < _TRUNCATED_DIGITS[1] and 0 <= limit < half:
-                out.precision.append({"name": name, "digits": digits, "half": half, "limit": limit, "relative": relative,
-                                      "tolerance": tolerance, "expected": expected, "expected_text": text})
                 out.requests.append(
                     f"The check {name!r} expects {text or _literal(expected)}, a value written to {digits} significant digits "  # type: ignore[arg-type]
                     f"(so known only to about ±{_fmt(half)}), but its tolerance is {_fmt(limit)}"
@@ -559,6 +557,9 @@ def enforce(protocol: dict[str, Any] | None, *, fi_runs: bool = True,
                     "tolerance (for example 0.300000, or worked out to 15 digits in its `reference`); otherwise give a "
                     "tolerance no tighter than the precision it is written to."
                 )
+                out.precision.append({"name": name, "digits": digits, "half": half, "limit": limit, "relative": relative,
+                                      "tolerance": tolerance, "expected": expected, "expected_text": text,
+                                      "request": out.requests[-1]})
     return out
 
 
@@ -578,15 +579,30 @@ def precision_gaps(text: str) -> list[str]:
     return [str(g["name"]) for g in enforce(protocol, typed=typed_numbers(text)).precision]
 
 
-def widen_to_precision(text: str, names: list[str] | None = None) -> tuple[str, list[str]]:
-    """``(text, sentences)``: ``text`` (a plan.md) with the tolerance of each check (the named ones; every one when
-    ``names`` is ``None``, which is how the reply to the ask is read: a check it renamed or added counts) that is still smaller than half a
+def precision_requests(text: str, names: list[str]) -> list[str]:
+    """The request to the plan for each named check of a plan.md that is tighter than its expected value's digits."""
+    from . import plan as _plan
+
+    block = _plan.raw_design_block(text)
+    protocol = block.get("protocol") if isinstance(block, dict) else None
+    wanted = {n.strip().lower() for n in names}
+    if not isinstance(protocol, dict):
+        return []
+    return [g["request"] for g in enforce(protocol, typed=typed_numbers(text)).precision
+            if str(g["name"]).strip().lower() in wanted]
+
+
+def widen_to_precision(text: str, names: list[str] | None = None,
+                       added: list[str] | None = None) -> tuple[str, list[str]]:
+    """``(text, sentences)``: ``text`` (a plan.md) with the tolerance of each named check (every one when ``names`` is
+    ``None``; ``added``: the named checks the reply to the first ask added, said so in their sentence) that is still smaller than half a
     unit of the last digit of its expected value, as typed, widened to exactly that (on the relative scale for a
     relative tolerance); a sentence per check widened. The expected value is never touched. ``text`` is returned as it
     is when nothing is widened."""
     from . import plan as _plan
 
     wanted = {n.strip().lower() for n in names} if names is not None else None
+    new_ones = {n.strip().lower() for n in added or []}
     told: list[str] = []
 
     def change(block: dict[str, Any]) -> dict[str, Any] | None:
@@ -612,7 +628,9 @@ def widen_to_precision(text: str, names: list[str] | None = None) -> tuple[str, 
                 told.append(
                     f"The check {gap['name']!r} expects {gap['expected_text'] or _literal(gap['expected'])}, written to "
                     f"{gap['digits']} significant digits, but its tolerance {_fmt(gap['tolerance'])}{of_value} was smaller "
-                    f"than half a unit of the last digit (±{_fmt(half)}) and the plan, asked once, did not fix it: FI "
+                    f"than half a unit of the last digit (±{_fmt(half)}) and the plan, "
+                    f"{'which added this check in its reply and was asked about it once more' if str(gap['name']).strip().lower() in new_ones else 'asked once'}"
+                    ", did not fix it: FI "
                     f"widened the tolerance to {_fmt(new)}{of_value}, the precision the value is written to (the "
                     "expected value is as the plan wrote it)")
             items.append(item)
