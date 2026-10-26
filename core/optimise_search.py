@@ -611,8 +611,11 @@ def _same_result(a, b):
 
 class _Search:
     def __init__(self, block, seed, method, rounds=None, results=None, batch=False, stop_flat=True,
-                 stop_stepped=True, stream=False):
+                 stop_stepped=True, stream=False, first_reply=None):
         self.block = block
+        #: The baseline's answer when it was asked for already (:func:`_first_evaluation`): used, counted and recorded
+        #: as the search's first evaluation, not asked for again.
+        self.first_reply = first_reply
         self.batch = bool(batch)
         #: Whether the starts running side by side are answered as each design finishes (:meth:`_stream`), not step by step.
         self.stream = bool(stream) and self.batch
@@ -1074,6 +1077,8 @@ class _Search:
                     f"evaluations just to start; {self.per_start} are allowed from each starting point, so a search may stop "
                     "before it improves anything (a library method, or more evaluations per starting point, fits better)")
             # The baseline first, always, at the search's settings; then the coarse scan (not counted in the budget).
+            if self.first_reply is not None:
+                self.prefetched[self.space.key(self.baseline)] = self.first_reply
             yield from self.evaluate(self.baseline, "baseline", 0)
             if isinstance(self.block.get("grid"), dict) and self.block["grid"]:
                 scan = yield {"kind": "scan", "grid": scan_grid(self.block)}
@@ -1850,7 +1855,7 @@ class _Search:
 
 
 def search(block, *, seed, method=None, rounds=None, results=None, batch=False, stop_flat=True, stop_stepped=True,
-           stream=False):
+           stream=False, first_reply=None):
     """The search as a generator of requests (see the module docstring); returns the outcome. ``rounds``: the rounds of
     a continued search, in order (each ``{"added": evaluations, "target": a value of the objective or None}``).
     ``results``: the names of the results the plan gives, watched for a design that changes none of them. ``batch``:
@@ -1860,7 +1865,7 @@ def search(block, *, seed, method=None, rounds=None, results=None, batch=False, 
     another, so the search and its record are the same. ``stop_flat``: whether a search whose objective never moves stops
     early (``flat_objective``); off, the fact is recorded and the search runs its budget."""
     return (yield from _Search(block, seed, method, rounds, results, batch=batch, stop_flat=stop_flat,
-                               stop_stepped=stop_stepped, stream=stream).run())
+                               stop_stepped=stop_stepped, stream=stream, first_reply=first_reply).run())
 
 
 # --- a comparison across named alternatives: one search for each -----------------------------------------------------
@@ -1955,11 +1960,13 @@ def compare(block, *, seed, method=None, rounds=None, results=None, batch=False,
     seen = {}  # the first alternative's answers, by design: what the probe of each later alternative is compared with
     names = compared_names(block, results)
     moving = {}  # the quantities that differ between two calls of the same design, once the first probe has shown them
+    baseline_reply = None  # the answer a later alternative's first evaluation already got, handed to its search
     check_first = False  # an alternative before had no objective in any answer: each later one shows its own first
     for number, level in enumerate(levels):
         sub = level_block(block, level)
+        baseline_reply = None
         if number > 0 and check_first:
-            lone = yield from _first_evaluation(sub, level, outcomes[0])
+            lone, baseline_reply = yield from _first_evaluation(sub, level, outcomes[0])
             if lone is not None:
                 outcomes.append(lone)
                 continue
@@ -1970,7 +1977,7 @@ def compare(block, *, seed, method=None, rounds=None, results=None, batch=False,
                 outcomes.append(_same_outcome(outcomes[0], levels[0], same))
                 continue
         gen = search(sub, seed=seed, method=method, rounds=rounds, results=results, batch=batch, stop_flat=stop_flat,
-                     stop_stepped=stop_stepped, stream=stream)
+                     stop_stepped=stop_stepped, stream=stream, first_reply=baseline_reply)
         asked = {}  # a streamed design, by its id
         try:
             request = next(gen)
@@ -2007,19 +2014,20 @@ NOT_SEARCHED_BECAUSE = "its first evaluation also returned no objective"
 def _first_evaluation(sub, level, first):
     """For an alternative after one whose every answer lacked the objective (a generator): its baseline, evaluated alone.
     When the answer also lacks the objective the alternative is not searched, and its outcome (``not_searched``) holds
-    that one evaluation; otherwise ``None``, and the alternative is searched as any other."""
+    that one evaluation; otherwise ``None``, and the alternative is searched as any other. Returns ``(outcome, reply)``:
+    the reply is then the search's own first evaluation (``first_reply``), not asked for again."""
     design = Space(sub["design_variables"]).canonical(sub["baseline"]["values"])
     reply = yield {"kind": "evaluate", "cell": cell_of(sub, design), "design": dict(design), "stage": "baseline",
                    "start": 0, "level": dict(level)}
     reply = reply if isinstance(reply, dict) else {"failed": "no answer for this design"}
     judged = judge(sub, reply.get("values") if "values" in reply else None, str(reply.get("failed") or ""))
     if judged.get("kind") != NO_OBJECTIVE:
-        return None
+        return None, reply
     row = {"event": "evaluation", "n": 1, "stage": "baseline", "start": 0, "design": dict(design), "objective": None,
            "constraints": {}, "feasible": False, "status": "failed", "method": first["method_used"], "counted": True,
            "elapsed_s": reply.get("elapsed_s") if _number(reply.get("elapsed_s")) else None,
            "reason": judged["reason"], "failure": NO_OBJECTIVE}
-    return {
+    return ({
         "rows": [row], "evaluations": 1, "scan_evaluations": 0, "budget": 1, "starts": first["starts"],
         "per_start": first["per_start"], "stopped_because": NOT_SEARCHED, "not_searched": NOT_SEARCHED_BECAUSE,
         "budget_ran_out": False, "method_requested": first["method_requested"], "method_used": first["method_used"],
@@ -2027,7 +2035,7 @@ def _first_evaluation(sub, level, first):
         "baseline": {"design": dict(design), "status": "failed", "objective": None, "constraints": {},
                      "feasible": False, "reason": judged["reason"]},
         "start_log": [], "seed": first["seed"], "failed": 1, "infeasible": 0, "best": None, "rounds": [],
-    }
+    }, reply)
 
 
 PROBE_DESIGNS = 8  # the designs an alternative is asked for before it is searched (see :func:`_probe_alternative`)
@@ -2236,7 +2244,10 @@ def merge_outcomes(outcomes, levels, block):
     winners = [p for p in per if p["best"] is not None]
     win = min(winners, key=lambda p: sign * p["best"]["objective"]) if winners else per[0]
     best = dict(win["best"], level=dict(win["level"])) if win["best"] else None
-    stops = [o["stopped_because"] for o in outcomes]
+    # The search's own end is that of the alternatives that were searched and gave results: one that failed every
+    # evaluation, or was not searched, is reported by its own entry (``levels``) and does not name the search's end.
+    stops = [o["stopped_because"] for o in outcomes if o["stopped_because"] not in ("failures", NOT_SEARCHED)]
+    stops = stops or [o["stopped_because"] for o in outcomes]
     stopped = next((s for s in ("time", "the simulation could not be loaded", "failures", "scan_unchanged") if s in stops),
                    "budget" if "budget" in stops else stops[0])
     first = outcomes[0]
@@ -2652,6 +2663,9 @@ def best_design(outcome, block, *, seed, check=None, extra=None):
     elif best is None:
         says = (f"No design that meets every limit was found in {outcome['evaluations']} evaluation(s) "
                 f"(of {outcome['budget']} allowed).")
+        for p in outcome.get("levels") or []:
+            if p.get("status") == NOT_SEARCHED:
+                says += " " + not_searched_says(p) + "."
     else:
         says = (f"Best design found in {outcome['evaluations']} evaluation(s) (of {outcome['budget']} allowed): "
                 f"{_describe(best['design'])}; {objective['quantity']} = {_fmt(best['objective'])}{u}")

@@ -6,6 +6,7 @@ answer was read, and each compared alternative repeated it, although the simulat
 from __future__ import annotations
 
 import copy
+import json
 from typing import Any
 
 from core import optimisation_plan as op
@@ -191,3 +192,58 @@ def test_streamed_healthy_search_is_unchanged_by_the_rule() -> None:
     streamed, _ = _drive_streamed(osearch.search(block, seed=0, batch=True, stream=True), bowl)
     plain, _, _ = _drive(osearch.search(block, seed=0, batch=False), bowl)
     assert [r["design"] for r in streamed["rows"]] == [r["design"] for r in plain["rows"]]
+
+
+def _first_lacks_objective(request):
+    return _no_objective(request) if request["cell"]["shape"] == "cup" else _healthy(request)
+
+
+def test_a_later_alternatives_first_evaluation_is_its_searchs_baseline_and_is_not_asked_twice() -> None:
+    outcome, asked, _ = _drive(osearch.compare(_block(), seed=0, batch=True), _first_lacks_objective)
+    assert asked == len(outcome["rows"]), "every design asked for is a row of the record, and the other way round"
+    for shape in ("mug", "bowl"):
+        own = [r for r in outcome["rows"] if r["level"] == {"shape": shape}]
+        assert [r["stage"] for r in own].count("baseline") == 1 and own[0]["stage"] == "baseline"
+
+
+def test_the_searchs_end_is_that_of_the_alternatives_that_gave_results() -> None:
+    block = _block()
+    outcome, _, _ = _drive(osearch.compare(block, seed=0, batch=True), _first_lacks_objective)
+    by_level = {p["level"]["shape"]: p["stopped_because"] for p in outcome["levels"]}
+    assert by_level["cup"] == "failures" and by_level["mug"] != "failures"
+    assert outcome["stopped_because"] == by_level["mug"] != "failures"
+    # An alternative that spent its whole budget lets the search go on in an extra round (it needs "budget").
+    merged = osearch.merge_outcomes(
+        [{**_stub(osearch, outcome, "failures")}, {**_stub(osearch, outcome, "budget")}], [{"shape": "cup"}, {"shape": "mug"}], block)
+    assert merged["stopped_because"] == "budget"
+
+
+def _stub(osearch_module, outcome, stopped):
+    """A one-evaluation outcome of the given end, built from a real outcome's fields."""
+    base = {k: v for k, v in outcome.items() if k not in ("levels", "level_count", "rows")}
+    return {**base, "rows": [], "evaluations": 1, "budget": 1, "stopped_because": stopped, "best": None, "failed": 0,
+            "infeasible": 0, "baseline": {"design": {}, "status": "ok", "objective": 1.0, "constraints": {},
+                                          "feasible": True}, "start_log": [], "rounds": [], "notes": [],
+            "scan_evaluations": 0}
+
+
+def test_the_log_does_not_say_the_first_evaluations_failed_when_a_winner_exists() -> None:
+    from core import optimise
+    block = _block()
+    outcome, _, _ = _drive(osearch.compare(block, seed=0, batch=True), _first_lacks_objective)
+    record = osearch.best_design(outcome, block, seed=0)
+    assert record["evaluations"]["stopped_because"] != "failures"
+    assert not any("first evaluations all failed" in line for line in optimise.summary_lines(record))
+
+
+def test_without_a_winner_the_summary_and_the_log_still_name_each_unsearched_alternative_and_why() -> None:
+    from core import optimise
+    block = _block()
+    outcome, _, _ = _drive(osearch.compare(block, seed=0, batch=True), _no_objective)
+    assert outcome["best"] is None
+    record = osearch.best_design(outcome, block, seed=0)
+    says = json.dumps(record)
+    for shape in ("mug", "bowl"):
+        assert f"shape = {shape} was not searched: its first evaluation also returned no objective" in says
+        assert any(f"shape = {shape} was not searched: its first evaluation also returned no objective" in line
+                   for line in optimise.summary_lines(record))

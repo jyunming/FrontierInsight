@@ -1247,11 +1247,11 @@ def summary_lines(record: dict[str, Any]) -> list[str]:
             change += ", less than the plan's threshold for better"
         lines.append(f"[optimise] the baseline ({_design(baseline.get('design') or {})}) gives {base_text}{change}")
     compared = (record.get("compared") or {}).get("levels") if isinstance(record.get("compared"), dict) else None
-    if compared and best is not None:
-        from . import optimise_search as _osearch
+    from . import optimise_search as _osearch
 
+    skipped = [p for p in compared or [] if isinstance(p, dict) and p.get("status") == _osearch.NOT_SEARCHED]
+    if compared and best is not None:
         same = [p for p in compared if p.get("same_as")]
-        skipped = [p for p in compared if p.get("status") == _osearch.NOT_SEARCHED]
         lines.append(f"[optimise] {len(compared)} alternatives were "
                      + ("compared" if same or skipped else "each searched on their own") + "; the best design is the "
                      f"one of {_osearch.level_says(best.get('level') or {})}. Best of each: "
@@ -1260,8 +1260,8 @@ def summary_lines(record: dict[str, Any]) -> list[str]:
                                  for p in compared))
         for p in same:
             lines.append(f"[optimise] {_osearch.same_as_says(p)}")
-        for p in skipped:
-            lines.append(f"[optimise] {_osearch.not_searched_says(p)}")
+    for p in skipped:  # named whether or not a best design was found
+        lines.append(f"[optimise] {_osearch.not_searched_says(p)}")
     for r in record.get("continued") or []:
         target = f", toward {quantity} = {_fmt(r['target'])}{unit}" if r.get("target") is not None else ""
         reached = ("; the target was reached at the search's settings" if r.get("target_reached") else
