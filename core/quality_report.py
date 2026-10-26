@@ -568,7 +568,11 @@ def _trial_checks_summary(q: _Quest) -> dict[str, Any] | None:
                 "; ".join(f"{t.get('key') or 'the one setting'}: {t.get('value')} from {_int(t.get('n')):,} trials"
                           for t in marked[:8]) + (f"; and {len(marked) - 8} more" if len(marked) > 8 else "")
                 if marked else "the settings taken together")
-                + ((f" (the other {_int(x.get('judged')) - len(marked)} of {_int(x.get('judged'))} settings matched)")
+                + ((f" (the other {_int(x.get('judged')) - len(marked)} of {_int(x.get('judged'))} settings: within the range "
+                    "FI accepts" + (f", except {sum(1 for t in _list(x.get('settings')) if isinstance(t, dict) and not t.get('gross') and t.get('below'))} "
+                                    "off by more than chance explains, though not grossly"
+                                    if any(isinstance(t, dict) and not t.get("gross") and t.get("below")
+                                           for t in _list(x.get("settings"))) else "") + ")")
                    if marked and len(marked) < _int(x.get("judged")) else ""))
     from . import trial_checks as _tc
 

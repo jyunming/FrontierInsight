@@ -18,7 +18,7 @@ N = 200
 KEYS = [f"noise={s},n={n}" for s in (0.1, 0.2) for n in (5, 10, 20)]
 
 
-def _cells(factor: dict[str, float] | None = None, interval: bool = False) -> list[dict[str, Any]]:
+def _cells(factor: dict[str, float] | None = None, interval: bool = False, n_trials: int = N) -> list[dict[str, Any]]:
     """Trials of a mean of ``n`` draws (true value 1.0): the reported standard error is the usual one, times ``factor[key]``
     where a fault is planted."""
     factor = factor or {}
@@ -28,7 +28,7 @@ def _cells(factor: dict[str, float] | None = None, interval: bool = False) -> li
         sigma = float(key.split(",")[0].split("=")[1])
         n = int(key.split("n=")[1])
         est, se, lo, hi = [], [], [], []
-        for _ in range(N):
+        for _ in range(n_trials):
             x = [rng.gauss(1.0, sigma) for _ in range(n)]
             m = sum(x) / n
             s = (sum((v - m) ** 2 for v in x) / (n - 1)) ** 0.5 / n ** 0.5 * factor.get(key, 1.0)
@@ -37,8 +37,8 @@ def _cells(factor: dict[str, float] | None = None, interval: bool = False) -> li
             lo.append(m - 1.96 * s)
             hi.append(m + 1.96 * s)
         metrics = {"x_hat": est, "x_se": se, **({"x_lo": lo, "x_hi": hi} if interval else {})}
-        out.append({"key": key, "cell": {}, "planned": N, "failed": 0,
-                    "metrics": {k: {"values": v, "trials": list(range(N))} for k, v in metrics.items()}})
+        out.append({"key": key, "cell": {}, "planned": n_trials, "failed": 0,
+                    "metrics": {k: {"values": v, "trials": list(range(n_trials))} for k, v in metrics.items()}})
     return out
 
 
@@ -74,11 +74,13 @@ def test_honest_one_setting_off_is_kept_and_scoped_once_the_repairs_are_spent(tm
     root = _quest(tmp_path, v)
     [item] = _disclosed(root)
     assert KEYS[0] in item.sentence and "1 of 6 settings" in item.sentence and "from 200 trials" in item.sentence
-    assert "In the other 5 settings the two were measured to agree" in item.sentence
+    assert "At the other 5 settings the value measured was within the range FI accepts" in item.sentence
+    assert "measured to agree" not in item.sentence
     assert KEYS[1] not in item.sentence
     assert "not presented as" in item.sentence
     lines = quality_report._trial_checks_summary(quality_report._Quest(root))["lines"]
-    assert any("measured not to match at: " + KEYS[0] in ln and "the other 5 of 6 settings matched" in ln for ln in lines)
+    assert any("measured not to match at: " + KEYS[0] in ln and "the other 5 of 6 settings: within the range FI accepts" in ln
+               for ln in lines)
 
 
 def test_planted_error_times_three_everywhere_is_sent_back_then_still_stops() -> None:
@@ -155,3 +157,96 @@ def test_the_runner_goes_on_when_a_disclosed_fault_stands(tmp_path: Path) -> Non
                           simulate=root / "code" / "simulate.py", analysis=root / "code" / "analysis.py",
                           repairs_left=lambda: True)
     assert runner._check_trials(run, plan, 0.0).returncode == 1 and runner.trial_fault["action"] == tc.REPAIR
+
+
+def test_a_setting_off_but_not_grossly_is_named_and_not_called_in_agreement(tmp_path: Path) -> None:
+    cells = _cells({KEYS[0]: 3.0, KEYS[1]: 1.3}, n_trials=2000)  # one gross, one off by more than chance but not grossly
+    v = _judge(cells, left=False)
+    assert v.action == tc.DISCLOSE, v.say
+    root = _quest(tmp_path, v)
+    [item] = _disclosed(root)
+    assert "measured to agree" not in item.sentence
+    assert "though not grossly" in item.sentence and KEYS[1] in item.sentence and "At the other 4 settings" in item.sentence
+    lines = quality_report._trial_checks_summary(quality_report._Quest(root))["lines"]
+    assert any("off by more than chance explains, though not grossly" in ln for ln in lines)
+
+
+def _shared_ledger(root: Path, keys: list[str], trials: int) -> None:
+    rows = []
+    for key in keys:
+        rows.append({"event": "planned", "cell": key, "trials": trials})
+        rows += [{"event": "trial", "cell": key, "trial": t, "seed": 1000 + t, "status": "ok"} for t in range(trials)]
+    (root / "raw").mkdir(parents=True, exist_ok=True)
+    (root / "raw" / "ledger.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+
+def _paired_interval_cells(hits: int, trials: int) -> list[dict[str, Any]]:
+    out = []
+    for key in KEYS[:2]:
+        est = [1.0 + 0.01 * ((t % 7) - 3) for t in range(trials)]
+        lo = [0.5 if t < hits else 2.0 for t in range(trials)]  # the same trials miss in both settings: the same draws
+        hi = [1.5 if t < hits else 3.0 for t in range(trials)]
+        out.append({"key": key, "cell": {}, "planned": trials, "failed": 0, "metrics": {
+            k: {"values": v, "trials": list(range(trials))} for k, v in (("x_hat", est), ("x_lo", lo), ("x_hi", hi))}})
+    return out
+
+
+def test_settings_that_share_their_draws_count_each_draw_once_in_the_pooled_measure(tmp_path: Path) -> None:
+    # two settings, 100 trials each on the same 100 seeds, the same 73 trials cover: 100 draws, not 200 independent trials
+    root = tmp_path / "q"
+    root.mkdir()
+    _shared_ledger(root, KEYS[:2], 100)
+    cells, plan = _paired_interval_cells(73, 100), _proto(known("x_hat", 1.0, interval=("x_lo", "x_hi")))
+    shared = tc.judge(cells, plan, None, None, repairs_left=False, quest_root=root)
+    assert not any(q.pooled and q.pooled.gross for q in shared.calibration.faults)
+    [q] = [q for q in shared.calibration.quantities if q.kind == "coverage"]
+    assert q.pooled.n == 100  # distinct draws
+    alone = tc.judge(cells, plan, None, None, repairs_left=False)  # no ledger: the trials are taken as independent
+    assert any(q.pooled and q.pooled.gross for q in alone.calibration.faults)
+
+
+def _disclosed_quest(tmp_path: Path):
+    from types import SimpleNamespace
+
+    from core.trial_runner import TrialsRunner
+
+    root = tmp_path / "q"
+    (root / "raw").mkdir(parents=True)
+    (root / "code").mkdir()
+    (root / "raw" / "trials.json").write_text(json.dumps({"cells": _cells({KEYS[0]: 3.0}, interval=True), "thresholds": {}}),
+                                              encoding="utf-8")
+    plan = _proto(known("x_hat", 1.0, se="x_se", interval=("x_lo", "x_hi")))
+    runner = TrialsRunner(object(), quest_root=root, protocol=lambda: plan, deterministic=False,
+                          simulate=root / "code" / "simulate.py", analysis=root / "code" / "analysis.py",
+                          repairs_left=lambda: False)
+    run = SimpleNamespace(summary_path=root / "raw" / "trials.json", cells=[], stderr=lambda: "")
+    assert runner._check_trials(run, plan, 0.0) is None
+    assert tc.read_record(root)["action"] == tc.DISCLOSE
+    return root, runner, run
+
+
+def test_the_error_and_interval_of_a_disclosed_setting_are_not_handed_on(tmp_path: Path) -> None:
+    from core import paper_values, trial_table
+
+    root, runner, run = _disclosed_quest(tmp_path)
+    assert tc.withheld_values(root) == {KEYS[0]: {"x_se", "x_lo", "x_hi"}}
+    # what the analysis reads: the estimate stays everywhere, the error and interval are gone at the marked setting only
+    data = json.loads(runner._without_left_out(run.summary_path).read_text(encoding="utf-8"))
+    by = {c["key"]: set(c["metrics"]) for c in data["cells"]}
+    assert by[KEYS[0]] == {"x_hat"} and all(by[k] == {"x_hat", "x_se", "x_lo", "x_hi"} for k in KEYS[1:])
+    # the results table and the paper's numbers read the same record
+    table = {c["key"]: set(c["metrics"]) for c in trial_table._record(root)}
+    assert table[KEYS[0]] == {"x_hat"} and table[KEYS[1]] == {"x_hat", "x_se", "x_lo", "x_hi"}
+    rec = paper_values.load(root, _plan())
+    assert {c["key"]: set(c["metrics"]) for c in rec.cells}[KEYS[0]] == {"x_hat"}
+    # FI's own record is unchanged
+    own = json.loads((root / "raw" / "trials.json").read_text(encoding="utf-8"))["cells"][0]["metrics"]
+    assert {"x_se", "x_lo", "x_hi"} <= set(own)
+
+
+def test_nothing_is_withheld_when_the_record_is_not_a_disclosure(tmp_path: Path) -> None:
+    root, _runner, _run = _disclosed_quest(tmp_path)
+    rec = tc.read_record(root)
+    rec["action"] = tc.REPAIR
+    tc.write_record(root, rec)
+    assert tc.withheld_values(root) == {}

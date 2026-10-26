@@ -1223,13 +1223,16 @@ class TrialsRunner:
         beside it. FI's summary and the ledger are not changed."""
         names = {str(n) for n in (self._leave_out() if callable(self._leave_out) else self._leave_out or ())}
         settings = set(self.left_out_settings)
-        if not names and not settings:
-            return summary
         from . import trial_checks as _checks
+
+        withheld = _checks.withheld_values(self.quest_root)  # the error / interval of a disclosed setting (the estimate stays)
+        if not names and not settings and not withheld:
+            return summary
 
         try:
             data = json.loads(summary.read_text(encoding="utf-8"))
             data["cells"] = [c for c in data.get("cells") or [] if not _checks.of_settings(c, settings)]
+            data["cells"] = _checks.without_withheld(data["cells"], withheld)
             for cell in data["cells"]:
                 cell["metrics"] = {k: v for k, v in (cell.get("metrics") or {}).items() if k not in names}
             copy = summary.with_name("trials.analysis.json")
@@ -1484,7 +1487,8 @@ class TrialsRunner:
         thresholds = data.get("thresholds") if isinstance(data.get("thresholds"), dict) else {}
         reasons = _checks.reasons_of_run(run.cells, self.quest_root) or _checks.ledger_reasons(self.quest_root)
         left = self._repairs_left() if callable(self._repairs_left) else bool(self._repairs_left)
-        verdict = _checks.judge(cells, protocol, thresholds or None, reasons, repairs_left=bool(left))
+        verdict = _checks.judge(cells, protocol, thresholds or None, reasons, repairs_left=bool(left),
+                                quest_root=self.quest_root)
         _checks.write_record(self.quest_root, verdict.record())
         stated = [f for f in verdict.fails if f.stated and not f.fault]
         if self.log is not None:

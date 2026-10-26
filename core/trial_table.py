@@ -51,6 +51,10 @@ def _record(quest_root: Path) -> list[dict[str, Any]]:
         return []
     gone = set(_left_out_by_record(quest_root))  # the one source of what FI left out (core/result_checks.py)
     out = [c for c in cells if isinstance(c, dict) and isinstance(c.get("metrics"), dict)]
+    from . import trial_checks as _checks
+
+    # the error and interval of a setting whose reported uncertainty FI measured not to match (the estimate stays)
+    out = _checks.without_withheld(out, _checks.withheld_values(quest_root))
     if not gone:
         return out
     # FI's own record (raw/trials.json) is unchanged; what the writer and the reader are shown has no left-out quantity.

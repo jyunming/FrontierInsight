@@ -807,8 +807,15 @@ def _disclosed_item(root: Path, q: dict[str, Any], add: Any) -> None:
         what = (f"The standard error reported for {shown} was measured not to match the spread of the estimates over the "
                 f"trials in {where} ({listed}; the spread divided by the reported error, 1 when they agree)")
     right = [s for s in settings if not s.get("gross")] if wrong else []
-    kept = (f". In the other {len(right)} setting{'s' if len(right) != 1 else ''} the two were measured to agree"
-            if right else "")
+    off = [s for s in right if s.get("below")]
+    kept = ""
+    if right:
+        kept = (f". At the other {len(right) - len(off)} setting{'s' if len(right) - len(off) != 1 else ''} the value measured "
+                "was within the range FI accepts" if len(right) > len(off) else "")
+        if off:
+            kept += (f"{'; at' if kept else '. At'} {len(off)} other setting{'s' if len(off) != 1 else ''} it was off by "
+                     "more than chance explains, though not grossly (" + "; ".join(measured(s) for s in off[:4])
+                     + (f"; and {len(off) - 4} more" if len(off) > 4 else "") + ")")
     where_off = "these settings" if right else where
     if coverage:
         valid = (f"valid {pct} intervals" if pct != "its stated level" else "valid intervals of their stated level")
@@ -817,7 +824,8 @@ def _disclosed_item(root: Path, q: dict[str, Any], add: Any) -> None:
         tail = (f"The standard error reported for {where_off} is therefore not presented as the error of the estimate there, "
                 "and no interval formed from it is presented as a valid interval of its stated level")
     add(CALIBRATION, f"{plain or label or 'a reported uncertainty'}: measured not to match the trials", _sentence(
-        what + kept + f". {tail}; the estimates themselves are reported as they were computed"),
+        what + kept + f". {tail}; FI does not hand on the reported error or interval of {where_off} (they are not in the results "
+        "table or in the numbers the paper can quote), and the estimates themselves are reported as they were computed"),
         key=f"disclosed-{q.get('kind')}-{label}")
 
 

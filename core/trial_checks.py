@@ -374,6 +374,9 @@ class Quantity:
     #: (:func:`ratio_detection_floor`). A reported standard error too small by less than this passes the check, whatever its
     #: size: the paper says so (core/paper_facts.py).
     detects_from: float | None = None
+    #: The columns of the trials a disclosure keeps from what FI hands on, at the settings it marks (:func:`withheld_values`):
+    #: the reported standard error (or variance) and the declared interval's two ends, or for a coverage the two ends.
+    withheld: list[str] = field(default_factory=list)
 
     @property
     def judged(self) -> int:
@@ -565,16 +568,19 @@ def _multipliers(cell: dict[str, Any], kv: dict[str, Any], want: float) -> list[
     return out
 
 
-def _coverage_check(key: str, hits: list[float], level: float, z: float = _Z95) -> SettingCheck | None:
+def _coverage_check(key: str, hits: list[float], level: float, z: float = _Z95, factor: float = 1.0) -> SettingCheck | None:
+    """``factor`` < 1: the trials behind ``hits`` are not independent (settings that ran on the same draws, see
+    :func:`_draw_factor`), so the share is judged on that fraction of them: distinct draws, not trials x settings."""
     n = len(hits)
     if n < MIN_TRIALS:
         return None
     k = sum(hits)
-    ci = _stats.wilson_interval(k, n, z=z)
+    ci = _stats.wilson_interval(k * factor, n * factor, z=z)
     if ci is None:
         return None
     lo, hi = ci
-    return SettingCheck(key, n, k / n, lo, hi, gross=hi < level - COVERAGE_GAP, below=hi < level, above=lo > level)
+    return SettingCheck(key, max(1, round(n * factor)), k / n, lo, hi, gross=hi < level - COVERAGE_GAP, below=hi < level,
+                        above=lo > level)
 
 
 def _ratio_of(est: list[float], se: list[float], constant_ok: bool = False) -> tuple[float, int] | None:
@@ -595,7 +601,7 @@ def _ratio_of(est: list[float], se: list[float], constant_ok: bool = False) -> t
     return sd / rms, n - 1
 
 
-def _ratio_band(key: str, n: int, ratio: float, dof: int, z: float = _Z95) -> SettingCheck:
+def _ratio_band(key: str, n: int, ratio: float, dof: float, z: float = _Z95) -> SettingCheck:
     half = z / math.sqrt(2.0 * dof)
     lo, hi = ratio * math.exp(-half), ratio * math.exp(half)
     return SettingCheck(key, n, ratio, lo, hi, gross=lo > RATIO_HIGH or hi < RATIO_LOW, below=lo > 1.25 or hi < 0.8)
@@ -605,14 +611,14 @@ def _ratio_band(key: str, n: int, ratio: float, dof: int, z: float = _Z95) -> Se
 POOLED = "all settings together"
 
 
-def _bias_band(key: str, n: int, b: float, z: float = _Z95) -> SettingCheck:
+def _bias_band(key: str, n: float, b: float, z: float = _Z95) -> SettingCheck:
     half = z / math.sqrt(n)
     lo, hi = b - half, b + half
-    return SettingCheck(key, n, b, lo, hi, gross=lo > BIAS_GROSS or hi < -BIAS_GROSS,
+    return SettingCheck(key, max(1, round(n)), b, lo, hi, gross=lo > BIAS_GROSS or hi < -BIAS_GROSS,
                         below=lo > BIAS_REPORTED or hi < -BIAS_REPORTED)
 
 
-def _judge_bias(q: "Quantity", per: list[tuple[str, list[float], float]]) -> None:
+def _judge_bias(q: "Quantity", per: list[tuple[str, list[float], float]], factor: float = 1.0) -> None:
     """Each setting's (mean estimate - truth) / spread of the estimates at the family level, and pooled at 95%. A setting
     with no spread (no noise) is not judged."""
     found = []
@@ -630,7 +636,7 @@ def _judge_bias(q: "Quantity", per: list[tuple[str, list[float], float]]) -> Non
         q.settings.append(_bias_band(key, n, b, z))
     if len(found) > 1:
         total = sum(n for _k, n, _b in found)
-        q.pooled = _bias_band(POOLED, total, sum(n * b for _k, n, b in found) / total)
+        q.pooled = _bias_band(POOLED, total * factor, sum(n * b for _k, n, b in found) / total)
 
 
 def _judge_no_estimate(q: "Quantity", per: list[tuple[str, int, int]]) -> None:
@@ -642,7 +648,7 @@ def _judge_no_estimate(q: "Quantity", per: list[tuple[str, int, int]]) -> None:
             q.settings.append(SettingCheck(key, ran, share, share, share, gross=share > FAULT_FRACTION, below=True))
 
 
-def _judge_coverage(q: "Quantity", per: list[tuple[str, list[float]]]) -> None:
+def _judge_coverage(q: "Quantity", per: list[tuple[str, list[float]]], factor: float = 1.0) -> None:
     """Each setting's coverage at the family level, and the pooled coverage at 95%."""
     judged = [(key, hits) for key, hits in per if len(hits) >= MIN_TRIALS]
     z = _z_family(len(judged))
@@ -651,10 +657,10 @@ def _judge_coverage(q: "Quantity", per: list[tuple[str, list[float]]]) -> None:
         if got is not None:
             q.settings.append(got)
     if len(judged) > 1:
-        q.pooled = _coverage_check(POOLED, [h for _k, hits in judged for h in hits], q.level or 0.95)
+        q.pooled = _coverage_check(POOLED, [h for _k, hits in judged for h in hits], q.level or 0.95, factor=factor)
 
 
-def ratio_detection_floor(free: int, z: float = _Z95) -> float:
+def ratio_detection_floor(free: float, z: float = _Z95) -> float:
     """The smallest ratio of (spread of the estimates / reported standard error) that :func:`_ratio_band` would call a gross
     miss on ``free`` degrees of freedom at critical value ``z``: the whole sampling interval of the ratio must lie above
     :data:`RATIO_HIGH`, so the ratio itself must exceed ``RATIO_HIGH * exp(z / sqrt(2 * free))``. A reported standard error too
@@ -662,7 +668,7 @@ def ratio_detection_floor(free: int, z: float = _Z95) -> float:
     return RATIO_HIGH * math.exp(z / math.sqrt(2.0 * max(1, free)))
 
 
-def _judge_ratio(q: "Quantity", per: list[tuple[str, list[float], list[float]]]) -> None:
+def _judge_ratio(q: "Quantity", per: list[tuple[str, list[float], list[float]]], factor: float = 1.0) -> None:
     """Each setting's spread / reported error at the family level, and the pooled ratio at 95% (the root of the mean squared
     ratio weighted by each setting's degrees of freedom)."""
     found = [(key, len(e), _ratio_of(e, s)) for key, e, s in per]
@@ -680,8 +686,8 @@ def _judge_ratio(q: "Quantity", per: list[tuple[str, list[float], list[float]]])
     if len(found) > 1:
         dof = sum(r[1] for _k, _n, r in found)
         pooled = math.sqrt(sum(r[1] * r[0] ** 2 for _k, _n, r in found) / dof)
-        q.pooled = _ratio_band(POOLED, sum(n for _k, n, _r in found), pooled, dof)
-        floors.append(ratio_detection_floor(sum(r[1] for _k, _n, r in found)))
+        q.pooled = _ratio_band(POOLED, round(sum(n for _k, n, _r in found) * factor), pooled, dof * factor)
+        floors.append(ratio_detection_floor(max(1.0, dof * factor)))
     if floors:
         q.detects_from = min(floors)
 
@@ -708,8 +714,35 @@ def _cell_hits(cell: dict[str, Any], kv: dict[str, Any], truth: float) -> tuple[
     return e, s, hits
 
 
+def _draw_factor(cells: list[dict[str, Any]], protocol: dict[str, Any] | None, quest_root: Path | str | None,
+                 held: dict[str, Any] | None = None) -> float:
+    """The share of the trials of ``cells`` that are different random draws: 1 when no two settings ran a trial on the same
+    seed (FI's ledger), else the number of distinct draws over the number of trials. It is the decision the paper's own
+    statistics follow (core/paper_values.py ``Records.share_draws`` and ``_draw_key``: one function, no second rule), so a
+    measure pooled over settings that share their draws counts each draw once."""
+    if quest_root is None or len(cells) < 2:
+        return 1.0
+    from . import paper_values as _pv
+
+    held = held if held is not None else {}
+    if "rec" not in held:  # the ledger is read once per check
+        held["rec"] = _pv.Records([], protocol)
+        held["rec"].seeds = _pv._ledger_seeds(Path(quest_root))
+    rec = held["rec"]
+    if not rec.seeds or not rec.share_draws(cells):
+        return 1.0
+    draws: set[Any] = set()
+    total = 0
+    for c in cells:
+        ids = sorted(_ran(c))
+        for i in range(len(ids)):
+            draws.add(_pv._draw_key(rec, c, ids, i))
+        total += len(ids)
+    return len(draws) / total if total else 1.0
+
+
 def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = None,
-                thresholds: dict[str, Any] | None = None) -> Calibration:
+                thresholds: dict[str, Any] | None = None, quest_root: Path | str | None = None) -> Calibration:
     """What the trials' intervals and standard errors say against the true values the plan declares (see the module's
     notes). Only the protocol's ``known_value`` declarations are read."""
     out = Calibration()
@@ -721,6 +754,7 @@ def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = N
     if not known:
         out.not_checked.append(NO_DECLARATION)
         return out
+    ledger: dict[str, Any] = {}
     returned = {n for c in cells for n in (c.get("metrics") or {})}
     if not returned:
         out.not_checked.append("no setting has trials to judge, so the calibration was not checked")
@@ -754,8 +788,10 @@ def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = N
         if missing:
             out.quantities.append(Quantity("missing", ident, missing, level=level, truth=truth_label))
             continue
-        cover = Quantity("coverage", " .. ".join(ends), list(ends), level=level, truth=truth_label) if ends else None
-        ratio = Quantity("se_ratio", est, [est, spread], truth=truth_label) if spread else None
+        cover = (Quantity("coverage", " .. ".join(ends), list(ends), level=level, truth=truth_label,
+                          withheld=list(ends)) if ends else None)
+        ratio = (Quantity("se_ratio", est, [est, spread], truth=truth_label, withheld=[spread, *(ends or [])])
+                 if spread else None)
         bias = Quantity("bias", est, [est], truth=truth_label)
         empty = Quantity("no_estimate", est, [est], truth=truth_label)
         cover_per: list[tuple[str, list[float]]] = []
@@ -775,11 +811,13 @@ def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = N
             if ratio is not None:
                 pairs = [(e[i], s[i]) for i in e if i in s and s[i] >= 0]
                 ratio_per.append((key, [x for x, _ in pairs], [v for _, v in pairs]))
+        judged_keys = {k for k, _h in cover_per}
+        factor = _draw_factor([c for c in cells if str(c.get("key")) in judged_keys], protocol, quest_root, ledger)
         if cover is not None:
-            _judge_coverage(cover, cover_per)
+            _judge_coverage(cover, cover_per, factor)
         if ratio is not None:
-            _judge_ratio(ratio, ratio_per)
-        _judge_bias(bias, bias_per)
+            _judge_ratio(ratio, ratio_per, factor)
+        _judge_bias(bias, bias_per, factor)
         _judge_no_estimate(empty, empty_per)
         if empty.settings:
             out.quantities.append(empty)
@@ -943,7 +981,8 @@ class Verdict:
 
 
 def judge(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = None, thresholds: dict[str, Any] | None = None,
-          reasons: dict[str, Counter] | None = None, *, repairs_left: bool, no_calibration: str = "") -> Verdict:
+          reasons: dict[str, Counter] | None = None, *, repairs_left: bool, no_calibration: str = "",
+          quest_root: Path | str | None = None) -> Verdict:
     """Both checks on a run's per-setting summary, and what follows from them. A setting where most trials failed is judged
     by the failure check alone (its numbers rest on the trials that survived), so the calibration reads the other settings.
     While a repair is left, any fault is sent back; once they are spent, a calibration fault or a failure in more than half
@@ -959,7 +998,7 @@ def judge(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = None, t
     most = bool(bad) and len(bad) * 2 > len(run)
     keys = {f.key for f in bad}
     cal = (Calibration(not_checked=[no_calibration]) if no_calibration else
-           calibration([c for c in cells if not of_settings(c, keys)], protocol, thresholds))
+           calibration([c for c in cells if not of_settings(c, keys)], protocol, thresholds, quest_root))
     out = Verdict(fails, cal, undefined=undefined(cells, protocol))
     if not bad and not cal.faults:
         return out
@@ -1039,9 +1078,9 @@ def summary(fails: list[SettingFailures], cal: Calibration | None) -> dict[str, 
                                if q.kind == "multiplier" and q.expected is not None else {}),
                             **({"detects_from": round(q.detects_from, 4)}
                                if q.kind == "se_ratio" and q.detects_from is not None else {}),
-                            "says": q.says(),
+                            "says": q.says(), "withheld": list(q.withheld),
                             "settings": [{"key": s.key, "n": s.n, "value": round(s.value, 6), "low": round(s.low, 6),
-                                          "high": round(s.high, 6), "gross": s.gross} for s in q.settings],
+                                          "high": round(s.high, 6), "gross": s.gross, "below": s.below} for s in q.settings],
                             "pooled": None if q.pooled is None else {
                                 "n": q.pooled.n, "value": round(q.pooled.value, 6), "low": round(q.pooled.low, 6),
                                 "high": round(q.pooled.high, 6), "gross": q.pooled.gross}}
@@ -1050,6 +1089,40 @@ def summary(fails: list[SettingFailures], cal: Calibration | None) -> dict[str, 
             "checked": cal.checked,
         },
     }
+
+
+def withheld_values(quest_root: Path | str) -> dict[str, set[str]]:
+    """``{setting key: the trial columns not handed on there}`` once the last run's record is a disclosure (``DISCLOSE``): at
+    each setting a reported standard error or interval was measured not to match, its error and interval columns (the
+    estimate stays). The one source of what FI keeps from the analysis, the results table and the paper's numbers there; empty
+    for any other action."""
+    rec = read_record(quest_root)
+    if rec.get("action") != DISCLOSE:
+        return {}
+    out: dict[str, set[str]] = {}
+    for q in ((rec.get("calibration") or {}).get("quantities") or []):
+        if not isinstance(q, dict) or not q.get("fault") or q.get("kind") not in DISCLOSABLE:
+            continue
+        for s in q.get("settings") or []:
+            if isinstance(s, dict) and s.get("gross"):
+                out.setdefault(str(s.get("key")), set()).update(str(n) for n in q.get("withheld") or [])
+    return out
+
+
+def without_withheld(cells: list[dict[str, Any]], withheld: dict[str, set[str]]) -> list[dict[str, Any]]:
+    """``cells`` with, at each setting of ``withheld`` (and the records of values compared inside it), those columns taken
+    out. The cells themselves are not changed."""
+    if not withheld:
+        return cells
+    out = []
+    for c in cells:
+        gone: set[str] = set()
+        for key, names in withheld.items():
+            if of_settings(c, {key}):
+                gone |= names
+        out.append({**c, "metrics": {k: v for k, v in (c.get("metrics") or {}).items() if k not in gone}}
+                   if gone and isinstance(c.get("metrics"), dict) else c)
+    return out
 
 
 def left_out_settings(quest_root: Path | str) -> list[dict[str, Any]]:

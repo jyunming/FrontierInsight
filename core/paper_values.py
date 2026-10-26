@@ -542,6 +542,11 @@ def load(quest_root: Path | str, protocol: dict[str, Any] | None = None,
     except (OSError, ValueError):
         return None
     cells = data.get("cells") if isinstance(data, dict) else None
+    if isinstance(cells, list):
+        from . import trial_checks as _checks
+
+        # no key reads the error or interval of a setting whose reported uncertainty FI measured not to match
+        cells = _checks.without_withheld([c for c in cells if isinstance(c, dict)], _checks.withheld_values(quest_root))
     rec = from_cells(cells, protocol, unread, left_out) if isinstance(cells, list) else None
     if rec is not None:
         rec.seeds = _ledger_seeds(Path(quest_root))
