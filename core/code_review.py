@@ -126,25 +126,40 @@ def requirements(design: dict[str, Any] | None, protocol: dict[str, Any] | None)
                 bool(headline_metric) and (mid.lower() == headline_metric or headline_metric in mid.lower()), mid, defined)
     for fig in design.get("figures_planned") if isinstance(design.get("figures_planned"), list) else []:
         add("figure", f"the script draws the planned figure {Path(str(fig)).name}")
-    grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+    grid, inside = _settings_of(protocol)  # where the plan view takes them from
     for name, values in grid.items():
         if isinstance(values, list) and len(values) > 1:
             add("sweep", f"the parameter {_text(name, 60)} is varied over all {len(values)} values of the plan's grid",
                 defined_by=[["grid", str(name)]])
-    inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else {}
     for name, values in inside.items():
         if isinstance(values, list) and len(values) > 1:
             add("sweep", f"every run uses all {len(values)} values of {_text(name, 60)} it is given in its cell, on the same "
                 "random numbers", defined_by=[["in_each_run", str(name)]])
     for o in _oracle.declared(protocol):
-        measure = _text(o.get("measure"), 160)
+        name, measure = _check_names(o)  # as the plan view shows them, without the values the check owns
         if measure:
-            add("check", f"the simulation returns what the measure '{measure}' of the check '{_text(o['name'], 60)}' uses",
-                defined_by=[["checks", _text(o["name"], 60)]])
+            add("check", f"the simulation returns what the measure '{measure}' of the check '{name}' uses",
+                defined_by=[["checks", name]])
     for eid in _oracle.generating_equations(protocol):
         add("equation", f"equation {eid} of the plan's model is computed in the code, in a function marked `# {eid}`",
             defined_by=[["equations", str(eid)]])
     return out
+
+
+def _settings_of(protocol: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """``(grid, in_each_run)`` of the plan: the protocol's own, else those of its search (``optimisation``). The one place
+    both the plan view (:func:`_raw_sections`) and the requirements (:func:`requirements`) take them from."""
+    optimisation = protocol.get("optimisation") if isinstance(protocol.get("optimisation"), dict) else {}
+    grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) and protocol.get("grid") else optimisation.get("grid")
+    inside = protocol.get("in_each_run") if protocol.get("in_each_run") else optimisation.get("in_each_run")
+    return (grid if isinstance(grid, dict) else {}), (inside if isinstance(inside, dict) else {})
+
+
+def _check_names(oracle: dict[str, Any]) -> tuple[str, str]:
+    """``(name, measure)`` of a check as the reader is shown them: without the values the check owns
+    (:func:`_owned_values`). The one place both the plan view (:func:`plan_sections`) and the requirements take them from."""
+    values = _owned_values(oracle)
+    return (_pairs.scrub(_text(oracle.get("name"), 60), values), _pairs.scrub(_text(oracle.get("measure"), 160), values))
 
 
 def _code_files(code_dir: Path) -> dict[str, str]:
@@ -379,8 +394,7 @@ def _raw_sections(design: dict[str, Any], protocol: dict[str, Any]) -> dict[str,
     if held:
         held = {"note": "The plan holds these values fixed: code that uses them as constants follows the plan and is "
                         "not a hardcoding fault.", **held}
-    grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) and protocol.get("grid") else optimisation.get("grid")
-    inside = protocol.get("in_each_run") if protocol.get("in_each_run") else optimisation.get("in_each_run")
+    grid, inside = _settings_of(protocol)
     sub = optimisation.get("sub_studies")
     # In the order of what matters for judging the code: the model, the statistics and checks, the settings, the method,
     # then the policies.
@@ -395,8 +409,8 @@ def _raw_sections(design: dict[str, Any], protocol: dict[str, Any]) -> dict[str,
         "checks": [{"name": _text(o.get("name"), 60), "kind": _text(o.get("kind"), 30), "check": _text(o.get("check"), 600),
                     "case": o.get("case"), "measure": _text(o.get("measure"), 160)} for o in _oracle.declared(protocol)],
         "settings_varied": variables.get("independent") if isinstance(variables.get("independent"), list) else [],
-        "grid": grid if isinstance(grid, dict) else {},
-        "in_each_run": inside if isinstance(inside, dict) else {},
+        "grid": grid,
+        "in_each_run": inside,
         "held_fixed": held,
         "sub_studies": sub if isinstance(sub, list) else [],
         "method": _text(design.get("method"), 6000),
@@ -461,8 +475,8 @@ def plan_sections(design: dict[str, Any] | None, protocol: dict[str, Any] | None
 
     if "checks" in view:
         owners = _oracle.declared(protocol)
-        view["checks"] = [{**c, **{k: clean(c[k], _owned_values(o)) for k in ("name", "check", "measure")}}
-                          for c, o in zip(view["checks"], owners)]
+        view["checks"] = [{**c, "check": clean(c["check"], _owned_values(o)),
+                           **dict(zip(("name", "measure"), _check_names(o)))} for c, o in zip(view["checks"], owners)]
     if "equations" in view:
         try:
             from . import equation_tests as _eqt

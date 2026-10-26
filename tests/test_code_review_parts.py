@@ -402,6 +402,31 @@ def test_a_requirement_names_the_plan_items_that_define_it() -> None:
     assert _by_kind(no_definition, "metric", "q")["defined_by"] == [["metrics", "q"]]
 
 
+def test_a_checks_requirement_names_it_as_the_plan_view_shows_it_without_its_own_values() -> None:
+    # a check whose name carries its expected value: the plan view hides the value, and the requirement must name the
+    # check the same way, or no part would hold it and every part would judge it
+    oracle = {"name": "limit at 2.5", "kind": "special_case", "check": "c", "case": {"c": 1}, "measure": "q_limit",
+              "expected": 2.5, "tolerance": 1e-6, "reference": "derivation: q = 2.5"}
+    protocol = {**_SPLIT_PROTOCOL, "oracles": [oracle]}
+    req = _by_kind(cr.requirements(_SPLIT_DESIGN, protocol), "check")
+    shown = cr.plan_sections(_SPLIT_DESIGN, protocol)["checks"][0]
+    assert req["defined_by"] == [["checks", shown["name"]]] and "2.5" not in shown["name"]
+    assert "2.5" not in req["text"]  # the reader is not told the value the check expects
+    views = cr.plan_views(_SPLIT_DESIGN, protocol, limit=1500)
+    assert any(shown["name"] in v["holds"].get("checks", []) for v in views)
+
+
+def test_a_search_studys_grid_is_a_requirement_like_the_protocols_own() -> None:
+    # the grid of a study that searches is under ``optimisation``; the plan view shows it, so the reader is asked of it
+    protocol = {k: v for k, v in _SPLIT_PROTOCOL.items() if k not in ("grid", "in_each_run")}
+    protocol["optimisation"] = {"grid": {"a": [1, 2]}, "in_each_run": {"b": [1, 2, 3]}}
+    reqs = cr.requirements(_SPLIT_DESIGN, protocol)
+    assert _by_kind(reqs, "sweep", "parameter a")["defined_by"] == [["grid", "a"]]
+    assert _by_kind(reqs, "sweep", "of b")["defined_by"] == [["in_each_run", "b"]]
+    sections = cr.plan_sections(_SPLIT_DESIGN, protocol)
+    assert sections["grid"] == {"a": [1, 2]} and sections["in_each_run"] == {"b": [1, 2, 3]}
+
+
 def test_a_split_plan_says_which_items_each_part_holds() -> None:
     views = cr.plan_views(_SPLIT_DESIGN, _SPLIT_PROTOCOL, limit=1500)
     assert len(views) == 3
