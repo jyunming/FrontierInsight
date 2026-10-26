@@ -229,6 +229,8 @@ def plan_view(design: dict[str, Any] | None, protocol: dict[str, Any] | None, op
         "checks": [{"name": _text(o.get("name"), 60), "kind": _text(o.get("kind"), 30), "check": _text(o.get("check"), 200),
                     "case": o.get("case"), "measure": _text(o.get("measure"), 160)} for o in _oracle.declared(protocol)],
     }
+    if open_items:  # first, so the plan's cut below can never fall inside it; one JSON object with the plan
+        view = {"proposed_by_the_methodology_audit_not_applied": open_items, **view}
     values = _pairs.plan_values(protocol)
 
     def clean(node: Any) -> Any:
@@ -243,10 +245,6 @@ def plan_view(design: dict[str, Any] | None, protocol: dict[str, Any] | None, op
 
     text = json.dumps(clean({k: v for k, v in view.items() if v not in ("", [], {}, None)}), indent=2, default=str)
     text = text if len(text) <= _MAX_PLAN_CHARS else text[:_MAX_PLAN_CHARS] + "\n(the rest of the plan is not shown)"
-    if open_items:
-        # Its own section, after the plan's cut: the audit's text is whole JSON and never cut with the plan.
-        text += ("\n\nProposed by the methodology audit and NOT part of the plan, as JSON:\n"
-                 + json.dumps(clean(open_items), indent=2, default=str))
     return text
 
 

@@ -9151,6 +9151,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # a run cut short, say): FI approves the change itself, or the frozen protocol would still hold the study that
             # did not fit and the smaller one would never run.
             design = self._amend_to_fit(design)
+        _audit_open.close_held(self.quest_root, design)  # the design handed on, after its last change in this node
         out: dict[str, Any] = {"design": design, "design_from_plan": False}
         if flat_pass:
             out["flat_objective_fact"] = {}  # used once: a later rewrite of the plan (to fit the time) is not this one
