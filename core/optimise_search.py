@@ -437,20 +437,16 @@ def cell_of(block, design):
 
 
 def supplied_names(block):
-    """``(axes, names)`` the study's code is given, from the same pieces :func:`cell_of` and :func:`scan_grid` build a cell
-    from: the axes are what the study compares (the grid's settings, the design variables, what each run compares inside
-    it); the names are those and every fixed condition, search setting (and its finer checks), setting a sub-study varies
-    or holds. The check of the code's reads (core/grid_keys.py) takes its names from here, so it cannot disagree with the
+    """``(axes, names)`` the study's code is given: exactly what :func:`cell_of` puts in a cell, the design variables (whole,
+    as :func:`scan_grid` and the search give them) and the finer values of the numerical settings (:func:`check_settings`).
+    The axes are the grid's settings that a cell has, the design variables, and what each run compares inside it. The check
+    of the code's reads (core/grid_keys.py) takes its names from here and from nowhere else, so it cannot disagree with the
     cells FI hands the code."""
     block = block if isinstance(block, dict) else {}
     grid = block.get("grid") if isinstance(block.get("grid"), dict) else {}
     designs = [str(v["name"]) for v in block.get("design_variables") or [] if isinstance(v, dict) and v.get("name")]
-    axes = list(dict.fromkeys([*map(str, grid), *designs, *in_each_run(block)]))
-    names = set(axes) | set(cell_of(block, {})) | set(check_settings(block))
-    for sub in block.get("sub_studies") or []:
-        if isinstance(sub, dict):
-            names.update(str(a) for a in sub.get("vary") or [])
-            names.update(str(a) for a in (sub.get("hold") or {}) if isinstance(sub.get("hold"), dict))
+    names = set(cell_of(block, {})) | set(designs) | set(check_settings(block))
+    axes = list(dict.fromkeys([*(str(k) for k in grid if str(k) in names), *designs, *in_each_run(block)]))
     return axes, names
 
 

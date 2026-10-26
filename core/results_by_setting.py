@@ -53,7 +53,7 @@ from . import unread_settings as _unread
 POOL_Z = 5.0
 #: FI's own scripts at the top of code/: they run the study, they are not the study's code (a file of the same name in a
 #: package of the study is).
-_FI_SCRIPTS = _grid_keys.FI_SCRIPTS
+_FI_SCRIPTS = frozenset({"run.py", "fi_search.py"})
 #: The most table rows FI puts into the paper itself (:func:`paper_block`); a longer table goes in as its slice.
 PAPER_MAX_ROWS = 60
 #: The tables as they go into the paper, written beside FI's other records for core/paper_facts.py to fill in.

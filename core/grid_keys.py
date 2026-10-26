@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import ast
 import difflib
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,9 +57,6 @@ RECORD_FIELDS = frozenset({"cell", "key", "planned", "ok", "failed", "metrics", 
 #: study has.
 IN_RUN_RECORD_FIELDS = frozenset({"level", "compared_in_each_run"})
 _GET = frozenset({"get", "pop", "setdefault"})
-#: FI's own scripts at the top of code/: they run the study (and read FI's own trial record, whose keys are not settings),
-#: they are not the study's code (a file of the same name in a package of the study is).
-FI_SCRIPTS = frozenset({"run.py", "fi_search.py"})
 
 
 @dataclass(frozen=True)
@@ -464,7 +462,6 @@ def supplied_names(protocol: dict[str, Any] | None, design: dict[str, Any] | Non
 
         axes, allowed = _search.supplied_names(block)
         allowed = set(allowed) | (set(IN_RUN_RECORD_FIELDS) if _search.in_each_run(block) else set())
-        allowed.update(_forms.fixed_settings_of_design({**(design or {}), "protocol": protocol}))
         _case_keys(protocol, allowed)
         return axes, allowed
     grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
@@ -905,8 +902,6 @@ def problems(files: dict[str, str], protocol: dict[str, Any] | None, design: dic
 
     plan_text = _constants.plan_text_of(protocol, design)
     for script, text in files.items():
-        if script in FI_SCRIPTS:
-            continue
         for r in reads(text, script):
             if set(r.keys) & allowed:
                 continue
@@ -972,14 +967,40 @@ def record(found: list[Read], protocol: dict[str, Any] | None) -> dict[str, Any]
                                                      for r in found]}
 
 
+def _fi_copies(code_dir: Path) -> set[str]:
+    """The files at the top of ``code/`` that are FI's own, unchanged: their hash is the one FI recorded when it wrote them
+    (core/code_project.py). They run the study and read FI's own trial record, whose keys are not settings of the study. A
+    file of the same name that anyone changed, or that FI did not write, is the study's code and is checked like the rest."""
+    from . import code_project as _project
+
+    try:
+        record = json.loads((code_dir.parent / _project.RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    out: set[str] = set()
+    for name, sha in (record.items() if isinstance(record, dict) else []):
+        path = code_dir / name
+        if name.endswith(".py") and "/" not in name and path.is_file():
+            try:
+                text = path.read_bytes().decode("utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            if sha in (_project._sha(text), _project._sha(text.replace("\r\n", "\n"))):
+                out.add(name)
+    return out
+
+
 def code_files(code_dir: Path) -> dict[str, str]:
     """The scripts and package files of ``code/`` that run the study, not their tests, as ``{relative path: text}``."""
     out: dict[str, str] = {}
     code_dir = Path(code_dir)
     if not code_dir.is_dir():
         return out
+    own = _fi_copies(code_dir)
     for path in sorted(code_dir.rglob("*.py")):
         rel = path.relative_to(code_dir)
+        if rel.as_posix() in own:
+            continue
         # code/skills/: FI's copy of the selected skills' files (Engine._skill_files_to_code), the skill's code.
         if "__pycache__" in rel.parts or "tests" in rel.parts or re.match(r"test_", path.name) or ".venv" in rel.parts \
                 or rel.parts[0] == "skills":

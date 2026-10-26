@@ -403,7 +403,7 @@ def test_a_summary_dict_filled_by_item_assignment_is_not_trusted() -> None:
 # A search for the best design keeps its fixed conditions, grid, search settings, sub-studies and design variables in
 # protocol.optimisation; the names the code may read are the ones its cells are built from.
 SEARCH_PROTOCOL = {"optimisation": {
-    "fixed": {"gain": 3.0, "mode": "a"},
+    "fixed": {"gain": 3.0, "mode": "a", "width": 1, "tilt": 1},
     "grid": {"mode": ["a", "b"], "width": [1, 2]},
     "sub_studies": [{"name": "s", "vary": ["width"], "hold": {"mode": "a", "tilt": 1}}],
     "design_variables": [{"name": "layout", "shape": [2, 2], "kind": "continuous", "low": 0, "high": 1}],
@@ -427,6 +427,44 @@ def test_a_name_a_search_never_supplies_is_still_a_fault() -> None:
     assert [r.keys for r in found] == [("nothing_gives_this",)]
 
 
-def test_fis_own_scripts_read_its_trial_record_not_settings() -> None:
-    own = "def rows(cell):\n    return cell.get('reason'), cell['elapsed_s']\n"
-    assert gk.problems({"fi_search.py": own, "simulate.py": SEARCH_SIM}, SEARCH_PROTOCOL) == []
+def test_a_name_only_the_top_level_of_the_plan_gives_is_not_supplied_to_a_search() -> None:
+    plan = {"constants": {"ghost": 1}, "optimisation": {"design_variables": [{"name": "x", "kind": "continuous", "low": 0, "high": 1}],
+                                                        "baseline": {"values": {"x": 0.5}}}}
+    sim = "def run_cell(cell):\n    return {'y': cell['x'] + cell['ghost']}\n"
+    assert [r.keys for r in gk.problems({"simulate.py": sim}, plan)] == [("ghost",)]
+
+
+def test_every_key_the_cell_builders_emit_is_supplied_and_nothing_else_is() -> None:
+    from core import optimise_search as search
+
+    block = SEARCH_PROTOCOL["optimisation"]
+    emitted: set[str] = set()
+    emitted.update(search.cell_of(block, {"layout": [[0, 1], [1, 0]]}))
+    for cell in search.iter_grid_cells(search.scan_grid(block)):
+        emitted.update(cell)
+    for level in range(2):
+        emitted.update({n: v[level] for n, v in search.check_settings(block).items()})
+    axes, names = gk.supplied_names(SEARCH_PROTOCOL)
+    assert emitted <= names
+    assert names - emitted <= {"level", "compared_in_each_run"}
+
+
+def _project_with(tmp_path: Path, name: str, text: str, recorded: str | None) -> Path:
+    from core import code_project
+
+    code = tmp_path / "code"
+    code.mkdir(parents=True)
+    (code / name).write_text(text, encoding="utf-8")
+    if recorded is not None:
+        (tmp_path / ".fi").mkdir()
+        (tmp_path / code_project.RECORD).write_text(json.dumps({name: code_project._sha(recorded)}), encoding="utf-8")
+    return code
+
+
+def test_a_script_is_skipped_only_when_fi_recorded_writing_it_unchanged(tmp_path: Path) -> None:
+    own = "def rows(cell):\n    return cell['missing']\n"
+    # FI's own copy, unchanged: its reads are FI's record, not settings.
+    assert gk.code_files(_project_with(tmp_path / "a", "fi_search.py", own, own)) == {}
+    # The same name in a study that FI did not write, or that was changed after FI wrote it: the study's code.
+    assert list(gk.code_files(_project_with(tmp_path / "b", "fi_search.py", own, None))) == ["fi_search.py"]
+    assert list(gk.code_files(_project_with(tmp_path / "c", "fi_search.py", own + "# edited\n", own))) == ["fi_search.py"]
