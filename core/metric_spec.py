@@ -315,7 +315,7 @@ def shares_draws(protocol: dict[str, Any] | None, quest_root: Path | str | None 
         return False
     if protocol.get("shared_draws") is not None:
         return protocol["shared_draws"] is True
-    if quest_root is None or not any(isinstance(m, dict) and m.get("paired") for m in protocol.get("metrics") or []):
+    if quest_root is None:
         return False
     try:
         study = json.loads((Path(quest_root) / "code" / "study.json").read_text(encoding="utf-8"))

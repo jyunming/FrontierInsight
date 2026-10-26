@@ -209,3 +209,38 @@ def test_count_where_uses_the_t_interval_over_draws_not_a_wilson_interval_of_all
     rec.seeds = seeds
     shared = pv.resolve(key, rec)
     assert naive.filled and shared.filled and naive.text != shared.text, (naive.text, shared.text)
+
+
+def test_sd_ci_under_shared_draws_is_the_spread_of_the_draws_values():
+    # the same two draws in both settings: per-draw values [0, 15], whose SD is 10.607 (the pooled raw SD is 11.18)
+    seeds = {"a": {0: 100, 1: 101}, "b": {0: 100, 1: 101}}
+    rec = _record({"a": {0: 0.0, 1: 10.0}, "b": {0: 0.0, 1: 20.0}}, seeds)
+    got = pv.resolve("x:sd_ci @ n=all", rec)
+    assert got.filled and "2 different random draws" in got.text
+    assert math.isclose(got.numbers[0], 10.6066, rel_tol=1e-4), got.numbers
+
+
+def test_values_are_paired_by_trial_number_never_by_position():
+    seeds = {k: {0: 100, 1: 101, 2: 102} for k in ("a", "b")}
+    cells = []
+    for i, key in enumerate(("a", "b")):
+        cells.append({"cell": {"n": i + 1}, "key": key, "planned": 3, "ok": 3, "failed": 0, "metrics": {
+            "x": {"values": [0.0, 1.0, 2.0], "trials": [0, 1, 2]},
+            "y": {"values": [2.2, 0.1, 1.3], "trials": [2, 0, 1]}}})
+    rec = pv.from_cells(cells)
+    rec.seeds = seeds
+    got = pv.resolve("x:corr:y @ n=all", rec)
+    # matched by trial number, y of trials 0, 1, 2 is 0.1, 1.3, 2.2: nearly a line with x; by position it would not be
+    assert got.filled and got.numbers[0] > 0.99, got
+    # numbers the record does not give: no pairing at all
+    for c in cells:
+        del c["metrics"]["y"]["trials"]
+    assert not pv.resolve("x:corr_ci:y @ n=all", rec).filled
+    assert not pv.resolve("x:corr:y @ n=all", rec).filled
+
+
+def test_a_study_that_recorded_shared_seeds_keeps_them_even_with_no_metric_marked_paired(tmp_path):
+    (tmp_path / "code").mkdir()
+    (tmp_path / "code" / "study.json").write_text(json.dumps({"paired": True}), encoding="utf-8")
+    assert mc_error.paired({"grid": {"n": [1, 2]}}, tmp_path) is True
+    assert mc_error.paired({"grid": {"n": [1, 2]}, "shared_draws": False}, tmp_path) is False

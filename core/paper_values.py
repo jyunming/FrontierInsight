@@ -744,8 +744,15 @@ def _per_draw_pairs(rec: Records, cells: list[dict[str, Any]], a: str, b: str) -
         ia, ib = ma.get("trials"), mb.get("trials")
         if not (isinstance(ra, (list, tuple)) and isinstance(rb, (list, tuple))) or len(ra) != len(rb):
             raise _Unfilled(f"{a} and {b} do not have one value per trial in the same trials, so they cannot be paired")
-        ids = ia if isinstance(ia, (list, tuple)) and ia == ib and len(ia) == len(ra) else None
-        for i, (x, y) in enumerate(zip(ra, rb)):
+        # The two values of one trial are matched by the trial number the record gives each; with no such numbers, or
+        # numbers that repeat or do not match, they cannot be matched and there is no interval: never by position.
+        if not (isinstance(ia, (list, tuple)) and isinstance(ib, (list, tuple)) and len(ia) == len(ra) and len(ib) == len(rb)
+                and len(set(ia)) == len(ia) and len(set(ib)) == len(ib)):
+            raise _Unfilled(f"{a} and {b} do not say which trial each value is, so they cannot be paired by draw")
+        by_b = dict(zip(ib, rb))
+        ids = list(ia)
+        for i, (t, x) in enumerate(zip(ia, ra)):
+            y = by_b.get(t)
             if _finite(x) and _finite(y):
                 groups.setdefault(_draw_key(rec, c, ids, i), []).append((float(x), float(y)))
     xs = [sum(p[0] for p in g) / len(g) for g in groups.values()]
@@ -963,18 +970,20 @@ def _measure(rec: Records, metric: str, form: str, arg: str, where: dict[str, Pi
             raise _Unfilled("fewer than two trials, so there is no standard error")
         return Measured(se)
     if form in ("sd", "sd_ci"):
-        sd, dof = _pooled_sd(cells, metric)
+        sd, df = _pooled_sd(cells, metric)
         if form == "sd":
             return Measured(sd)
         obs, shared = _observations(rec, cells, metric)
         if shared:
-            # every setting's SD comes from the same draws: the pooled one can not rest on more than they give
+            # the settings ran on the same draws: the spread, and the interval of it, are those of the draws' values
             if len(obs) < 2:
                 raise _Unfilled("the settings share their random draws and fewer than two different draws gave a value, "
                                 "so there is no interval")
-            dof = len(obs) - 1
-        return Measured(sd, "interval", sd * math.sqrt(dof / chi2_quantile(0.975, dof)),
-                        sd * math.sqrt(dof / chi2_quantile(0.025, dof)),
+            sd, df = _tt.summary(obs)["sd"], len(obs) - 1
+            if not sd > 0:
+                raise _Unfilled("the different random draws all gave one value, so there is no interval of its spread")
+        return Measured(sd, "interval", sd * math.sqrt(df / chi2_quantile(0.975, df)),
+                        sd * math.sqrt(df / chi2_quantile(0.025, df)),
                         "95% chi-square interval" + (f" over {len(obs)} different random draws, which the settings share" if shared else ""),
                         None if shared else summary["n"])
     shared = len(cells) > 1 and rec.share_draws(cells)
