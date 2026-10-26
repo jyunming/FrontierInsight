@@ -83,8 +83,8 @@ def test_the_whole_plan_is_shown_with_what_it_holds_fixed_and_is_never_cut_mid_t
     assert data["in_each_run"] == {"loads": [1, 2, 3]} and data["grid"] == PROTOCOL["grid"]
     assert data["definitions"][0]["defined_as"] == "the peak over the width"
     text, dropped = cr.plan_view_fit(DESIGN, {**protocol, "failure_policy": "x" * 3000, "seed_policy": "y" * 300}, limit=2500)
-    assert dropped and dropped[0] == "failure_policy" and "failure_policy" not in text.split("\n(these sections")[0]
-    assert text.rstrip().endswith("not shown: " + ", ".join(dropped) + ")") and json.loads(text.split("\n(these")[0])
+    assert dropped == ["failure_policy"] and "failure_policy" not in text.split("\n(these sections")[0]
+    assert "not shown: failure_policy" in text and json.loads(text.split("\n(these")[0])
 
 
 def test_a_value_the_plan_shows_as_a_setting_is_not_replaced_in_what_the_reader_writes() -> None:
@@ -265,3 +265,56 @@ def test_the_note_of_what_a_request_leaves_out_is_one_entry_per_section_and_the_
     assert "equations: 400 items left out" in set(notes), notes[:3]
     assert len(set(notes)) < 10 and all(len(v["left_out"]) < 10 for v in views)
     assert "spring" in json.dumps([json.loads(v["text"].split("\n(these")[0]) for v in views])
+
+
+def _sections_of(views: list[dict[str, Any]]) -> dict[str, list[Any]]:
+    """Every request's sections read back from its text: ``{section: [value in each request that holds it]}``."""
+    out: dict[str, list[Any]] = {}
+    for v in views:
+        for name, value in json.loads(v["text"].split("\n(these")[0]).items():
+            out.setdefault(name, []).append(value)
+    return out
+
+
+def _long_audit() -> dict[str, Any]:
+    return {"note": "proposed, not applied", "items": [{"path": f"p{i}", "proposed": "z" * 1500} for i in range(30)]}
+
+
+def test_a_plan_over_the_cap_shows_every_section_in_some_request_and_drops_none() -> None:
+    protocol = {**PROTOCOL, "constants": {"mass_kg": 2.5}, "optimisation": {"grid": {"c": [0.1, 0.5]},
+                "in_each_run": {"loads": [1, 2, 3]}},
+                "definitions": [{"metric": "quality", "defined_as": "the peak over the width", "source": "[1]"}],
+                "ci_method": "a percentile interval", "seed_policy": "one seed per cell", "failure_policy": "retry once"}
+    limit = 20000
+    whole = cr.plan_sections(DESIGN, protocol, _long_audit())
+    assert len(json.dumps(whole)) > limit
+    views = cr.plan_views(DESIGN, protocol, limit=limit, open_items=_long_audit())
+    assert len(views) > 1 and all(len(v["text"]) <= limit for v in views)
+    assert all(v["left_out"] == [] for v in views)
+    shown = _sections_of(views)
+    assert set(shown) == set(whole), set(whole) - set(shown)
+    for name in ("definitions", "grid", "in_each_run", "ci_method", "seed_policy", "failure_policy"):
+        assert shown[name] == [whole[name]]
+    # a list section is split by its items: each item is shown exactly once
+    items = [x for part in shown[cr._AUDIT_SECTION] for x in part]
+    assert sorted(i["path"] for i in items if "path" in i) == sorted(f"p{i}" for i in range(30))
+
+
+def test_a_section_too_big_alone_is_still_left_out_and_named() -> None:
+    protocol = {**PROTOCOL, "failure_policy": "q" * 3000, "seed_policy": "one seed per cell"}
+    views = cr.plan_views(DESIGN, protocol, limit=1200)
+    assert all(len(v["text"]) <= 1200 for v in views)
+    assert {n for v in views for n in v["left_out"]} == {"failure_policy"}
+    shown = _sections_of(views)
+    assert "failure_policy" not in shown and shown["seed_policy"] == ["one seed per cell"]
+    assert all("not shown: failure_policy" in v["text"] for v in views)
+
+
+def test_every_plan_part_reaches_a_request_and_requests_are_the_larger_of_code_and_plan_parts(tmp_path: Path) -> None:
+    (tmp_path / "simulate.py").write_text("def run_cell(cell):\n    return {}\n", encoding="utf-8")
+    protocol = {**PROTOCOL, "definitions": [{"metric": "m", "defined_as": "d" * 1000, "source": "[1]"}] * 60}
+    plans = cr.plan_views(DESIGN, protocol, open_items=_long_audit())
+    parts = cr.source_parts_detail(tmp_path)
+    calls = cr.reading_calls(tmp_path, DESIGN, protocol, open_items=_long_audit())
+    assert len(plans) > 1 and len(calls) == max(len(parts), len(plans))
+    assert {c["plan"] for c in calls} == {p["text"] for p in plans}

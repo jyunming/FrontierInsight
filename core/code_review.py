@@ -327,14 +327,12 @@ def problems(verdicts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [v for v in verdicts if v["status"] in (MISSING, DIFFERENT)]
 
 
-#: How much of the plan one reading request holds. A plan longer than this loses whole sections (the least needed first,
-#: :data:`_DROP_FIRST`) and, when that is not enough, is split by whole sections across the requests of the reading; the
-#: record names what each request got.
+#: How much of the plan one reading request holds. A plan longer than this is split by whole sections across the requests
+#: of the reading (a list section by its items); a section is left out only when it cannot fit a request alone. The record
+#: names what each request got and what was left out.
 _MAX_PLAN_CHARS = 40000
-#: The sections left out first when the plan is too long for one request.
-#: The section of the audit's open items (core/audit_open_items.py): first, never dropped.
+#: The section of the audit's open items (core/audit_open_items.py): first.
 _AUDIT_SECTION = "proposed_by_the_methodology_audit_not_applied"
-_DROP_FIRST = ("failure_policy", "seed_policy", "ci_method", "sub_studies", "definitions", "grid", "in_each_run")
 #: The sections that hold the plan's settings: numbers in them are shown as they are, whatever a check's expected value is.
 _SETTING_SECTIONS = ("settings_varied", "grid", "in_each_run", "held_fixed", "sub_studies")
 _WHERE_RE = re.compile(r"([\w./\-]+\.py)(?:\s*[:,]?\s*(?:lines?\s*)?(\d+))?", re.I)
@@ -471,18 +469,13 @@ def _dump(sections: dict[str, Any], note: str = "") -> str:
 def plan_views(design: dict[str, Any] | None, protocol: dict[str, Any] | None,
                limit: int | None = None, open_items: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """The plan as text for the requests of a reading: ``[{"text", "sections", "left_out"}]``, one entry when the plan fits in
-    ``limit`` characters. A plan that does not fit first loses the sections of :data:`_DROP_FIRST` whole, in that order
-    (the entry's ``left_out`` names them); one that still does not fit is split by whole sections into several entries (a
-    section that is a list of items is split by its items), each saying which sections the others hold. A section that does
-    not fit alone is left out, whole, and named in ``left_out``. No entry is longer than ``limit``."""
+    ``limit`` characters. A plan that does not fit is split by whole sections into several entries (a section that is a
+    list of items is split by its items), each saying which sections the others hold; nothing is dropped to make it fit.
+    A section that does not fit a request alone is left out, whole, and named in ``left_out`` (a list section loses only
+    an item that does not fit alone, and the entry counts them). No entry is longer than ``limit``."""
     limit = _MAX_PLAN_CHARS if limit is None else limit
     sections = plan_sections(design, protocol, open_items)
     left_out: list[str] = []
-    for name in _DROP_FIRST:
-        if len(_dump(sections)) <= limit:
-            break
-        if sections.pop(name, None) is not None:
-            left_out.append(name)
 
     def note_for(names: list[str], elsewhere: list[str]) -> str:
         parts = []
