@@ -189,17 +189,21 @@ def test_a_damaged_record_is_kept_aside_and_a_failed_read_is_never_written_over(
     assert ao.record(tmp_path, [], props, reasons={}, default_reason="x") == []
 
 
-def test_the_open_items_are_one_key_of_the_single_plan_json_and_come_before_the_plans_cut(tmp_path: Path) -> None:
+def test_the_open_items_are_the_first_section_of_the_plan_and_are_never_left_out(tmp_path: Path) -> None:
     ao.record(tmp_path, [], ao.proposals([_objection(("protocol.anchor_rule", ANCHOR))]), reasons={}, default_reason="x")
-    view = code_review.plan_view(DRAFT, DRAFT["protocol"], open_items=ao.for_code(tmp_path))
-    assert json.loads(view)["proposed_by_the_methodology_audit_not_applied"]["items"][0]["proposed"] == ANCHOR
+    view = json.loads(code_review.plan_view(DRAFT, DRAFT["protocol"], open_items=ao.for_code(tmp_path)))
+    section = view["proposed_by_the_methodology_audit_not_applied"]
+    assert list(view)[0] == "proposed_by_the_methodology_audit_not_applied"
+    assert section[0]["note"] == ao.NOTE and section[1]["proposed"] == ANCHOR
     big = "x" * 8000
     ao.record(tmp_path, [], ao.proposals([{**_objection(("protocol.other_rule", "y")), "objection": big}]),
               reasons={}, default_reason="x")
-    view = code_review.plan_view(DRAFT, {**DRAFT["protocol"], "grid": {"a": list(range(3000))}},
-                                 open_items=ao.for_code(tmp_path))
-    assert "(the rest of the plan is not shown)" in view  # the plan was cut, after the whole audit section
-    assert big in view and view.index(big) < view.index("(the rest of the plan is not shown)")
+    views = code_review.plan_views(DRAFT, {**DRAFT["protocol"], "grid": {"a": list(range(3000))}}, limit=12000,
+                                   open_items=ao.for_code(tmp_path))
+    assert all(len(v["text"]) <= 12000 for v in views)
+    shown = [v for v in views if "proposed_by_the_methodology_audit_not_applied" in v["sections"]]
+    assert shown and any(big in v["text"] for v in shown)  # the long item is shown whole, in some request
+    assert not any("proposed_by_the_methodology_audit_not_applied" in n for v in views for n in v["left_out"])
 
 
 def test_two_objections_with_the_same_text_keep_each_fix_as_an_origin(tmp_path: Path) -> None:

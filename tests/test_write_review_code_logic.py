@@ -64,11 +64,33 @@ def test_the_reviewer_is_shown_the_plans_equations_and_cases_but_never_an_expect
     assert data["equations"][0]["formula"] == "Q = m * w / c" and data["settings_varied"] == ["c"]
     assert data["checks"][0]["measure"] == "quality" and data["checks"][0]["case"] == {"c": 0.5}
     assert "0.123456789" not in view and "tolerance" not in view and "expected" not in view
-    # free text the reader sees is scrubbed too, so it cannot echo a value of the plan's checks
-    leaky = {**PROTOCOL, "model": {"summary": "a spring whose result should be 0.123456789",
-                                   "equations": [{"id": "E1", "formula": "Q = m * w / c", "source": "gives 0.123456789 at c=0.5"}]}}
-    shown = cr.plan_view({**DESIGN, "method": "check against 0.123456789 first"}, leaky)
-    assert "0.123456789" not in shown and pairs.PLACEHOLDER in shown and "Q = m * w / c" in shown
+    # a check's answer is hidden by its field: the expected value, tolerance and reference of every check, and the worked
+    # examples of the model's steps; the plan's own text is shown as written
+    hidden = {**PROTOCOL, "model": {"summary": "a spring", "equations": [{"id": "E1", "formula": "Q = m * w / c"}],
+                                    "steps": [{"id": "S1", "name": "load", "does": "scales the load",
+                                               "example": {"inputs": {"m": 2.0}, "expected_formula": "0.123456789"}}]}}
+    shown = cr.plan_view(DESIGN, hidden)
+    assert "0.123456789" not in shown and "Q = m * w / c" in shown and "scales the load" in shown
+
+
+def test_the_whole_plan_is_shown_with_what_it_holds_fixed_and_is_never_cut_mid_text() -> None:
+    protocol = {**PROTOCOL, "constants": {"mass_kg": 2.5}, "optimisation": {"fixed": {"stiffness": 40.0},
+                "grid": {"c": [0.1, 0.5]}, "in_each_run": {"loads": [1, 2, 3]}},
+                "definitions": [{"metric": "quality", "defined_as": "the peak over the width", "source": "[1]"}]}
+    data = json.loads(cr.plan_view(DESIGN, protocol))
+    assert data["held_fixed"]["constants"] == {"mass_kg": 2.5} and "not a hardcoding fault" in data["held_fixed"]["note"]
+    assert data["held_fixed"]["fixed_values_of_the_settings"] == {"stiffness": 40.0}
+    assert data["in_each_run"] == {"loads": [1, 2, 3]} and data["grid"] == PROTOCOL["grid"]
+    assert data["definitions"][0]["defined_as"] == "the peak over the width"
+    text, dropped = cr.plan_view_fit(DESIGN, {**protocol, "failure_policy": "x" * 3000, "seed_policy": "y" * 300}, limit=2500)
+    assert dropped and dropped[0] == "failure_policy" and "failure_policy" not in text.split("\n(these sections")[0]
+    assert text.rstrip().endswith("not shown: " + ", ".join(dropped) + ")") and json.loads(text.split("\n(these")[0])
+
+
+def test_a_value_the_plan_shows_as_a_setting_is_not_replaced_in_what_the_reader_writes() -> None:
+    protocol = {**PROTOCOL, "constants": {"mass_kg": 2.5}}
+    assert 2.5 not in cr.reportable_values(DESIGN, protocol)
+    assert set(cr.reportable_values(DESIGN, PROTOCOL)) <= set(pairs.plan_values(PROTOCOL))
 
 
 def test_findings_are_read_as_problems_of_logic_without_any_value() -> None:
@@ -181,17 +203,20 @@ async def test_an_agree_only_code_review_is_asked_again_and_then_recorded_as_not
     reader = _Agrees()
     engine._client = reader
     assert await engine._code_review_gate(STATE) is None
-    assert len(reader.prompts) == 2 and "Your previous reply was no review" in reader.prompts[1]
+    # "Implemented" with no file and line is not a review: nothing is counted, the requirements are asked for once more
+    assert len(reader.prompts) == 2
     record = cr.load(engine.quest_root)
-    assert record["error"] == pairs.NOT_A_REVIEW and not record.get("read_version")
+    assert record["error"] == "its answers cited no place in the code it was shown" and not record.get("read_version")
+    assert record["cited_outside_what_was_shown"]
     assert cr.write_note(engine.quest_root, engine.quest_root / "code") == ""
     assert "not compared with the plan by another model" in cr.findings_block(engine.quest_root, engine.quest_root / "code")
-    # Asked again, it says what it checked: a review with nothing found.
+    # Asked again, it cites the places and says what it checked: a review with nothing found.
     class _Then(_Logic):
         async def chat(self, messages, **kw):  # noqa: ANN001
             self.prompts.append(messages[-1]["content"])
             reqs = json.loads(messages[-1]["content"].split("```json", 1)[1].split("```", 1)[0])
-            out: dict[str, Any] = {"requirements": [{"id": r["id"], "status": "implemented"} for r in reqs]}
+            cite = {"file": "simulate.py", "line": 1} if len(self.prompts) > 1 else {}
+            out: dict[str, Any] = {"requirements": [{"id": r["id"], "status": "implemented", **cite} for r in reqs]}
             if len(self.prompts) > 1:
                 out["checked"] = ["E1: the factors and the signs agree with the plan"]
             return json.dumps(out)
@@ -202,3 +227,41 @@ async def test_an_agree_only_code_review_is_asked_again_and_then_recorded_as_not
     assert await second._code_review_gate(STATE) is None and len(reader.prompts) == 2
     record = cr.load(second.quest_root)
     assert record["final"] is True and record["checked"] == ["E1: the factors and the signs agree with the plan"]
+
+
+def test_a_value_is_hidden_in_the_entry_that_owns_it_and_nowhere_else() -> None:
+    check = {**PROTOCOL["oracles"][0], "check": "Q at c=0.5; the result must be 0.123456789 within 1e-9",
+             "expected_formula": "0.123456789"}
+    protocol = {**PROTOCOL, "oracles": [check, {"name": "other", "kind": "invariant", "check": "a second check",
+                                               "case": {"c": 1.0}, "measure": "quality", "expected": 10, "tolerance": 0.5}],
+                "model": {"summary": "the scan covers the interval [10, p-10] nm", "equations": [
+                    {"id": "E1", "formula": "Q = m * w / c", "source": "a plain derivation"}]}}
+    data = json.loads(cr.plan_view({**DESIGN, "method": "a window of [10, p-10] nm, then c = 0.5"}, protocol))
+    # a check's own text no longer states its expected value, tolerance or formula result
+    assert "0.123456789" not in data["checks"][0]["check"] and pairs.PLACEHOLDER in data["checks"][0]["check"]
+    assert "c=0.5" in data["checks"][0]["check"] and data["checks"][0]["case"] == {"c": 0.5}
+    # the same number in another section is the plan's own prose and stays as written
+    assert data["model"] == "the scan covers the interval [10, p-10] nm"
+    assert data["method"] == "a window of [10, p-10] nm, then c = 0.5"
+    assert "[10, p-10]" in json.dumps(data) and "0.123456789" not in json.dumps(data)
+
+
+def test_a_plan_that_does_not_fit_is_split_by_whole_sections_and_no_request_is_over_the_cap() -> None:
+    oracles = [{"name": f"c{i}", "kind": "invariant", "check": "x" * 600, "case": {"c": 0.5}, "measure": "quality",
+                "expected": 0, "tolerance": 1e-9} for i in range(100)]
+    views = cr.plan_views(DESIGN, {**PROTOCOL, "oracles": oracles}, limit=20000)
+    assert len(views) > 1 and all(len(v["text"]) <= 20000 for v in views)
+    got = sum(len(json.loads(v["text"].split("\n(these")[0]).get("checks", [])) for v in views)
+    assert got == 100, "every check is in some request"
+    assert any("other requests of this reading" in v["text"] for v in views)
+
+
+def test_the_note_of_what_a_request_leaves_out_is_one_entry_per_section_and_the_request_stays_under_the_cap() -> None:
+    equations = [{"id": f"E{i}", "formula": "x" * 30000} for i in range(400)]
+    protocol = {**PROTOCOL, "model": {"summary": "a spring", "equations": equations}}
+    views = cr.plan_views(DESIGN, protocol, limit=20000)
+    assert views and all(len(v["text"]) <= 20000 for v in views)
+    notes = [x for v in views for x in v["left_out"]]
+    assert "equations: 400 items left out" in set(notes), notes[:3]
+    assert len(set(notes)) < 10 and all(len(v["left_out"]) < 10 for v in views)
+    assert "spring" in json.dumps([json.loads(v["text"].split("\n(these")[0]) for v in views])
