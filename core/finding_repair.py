@@ -769,6 +769,8 @@ def _frame(tree: ast.Module) -> list[tuple[str, str]]:
         for node in body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
+            if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                continue  # a bare string (a docstring) runs nothing, so changing it does not change what the file does
             if isinstance(node, ast.ClassDef):
                 bare = copy.copy(node)
                 bare.body = []
