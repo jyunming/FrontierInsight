@@ -443,6 +443,29 @@ async def _evaluate(executor: Any, python: Any, quest_root: Path, module: str, e
             "elapsed_s": elapsed}, stderr, ""
 
 
+async def search_entry_returns_objective(
+    executor: Any, python: Any, quest_root: Path, module: str, block: dict[str, Any], cell: dict[str, Any], *,
+    timeout_s: int, env: dict[str, str] | None, thresholds: dict[str, Any] | None,
+) -> str:
+    """After a repair of the simulation: ``""`` when the search's own evaluation of one design (:func:`_evaluate`, with the
+    function the search calls, :func:`core.trial_runner.study_entry`) gives a reply the search reads an objective from
+    (:func:`core.optimise_search.judge` finds the objective in it), else a plain sentence. ``""`` also when the evaluation
+    failed or did not finish (judged by the runs that follow)."""
+    entry = _trials.study_entry(_trials.entries(quest_root / module))
+    if not entry:
+        return ""
+    answer, _stderr, load_error = await _evaluate(executor, python, quest_root, module, entry, dict(cell), runs=1, base_seed=0,
+                                                  timeout_s=timeout_s, env=env, thresholds=thresholds, name="entry_check")
+    values = answer.get("values") if isinstance(answer, dict) else None
+    if load_error or not isinstance(values, dict):
+        return ""
+    quantity = str(block["objective"]["quantity"])
+    if quantity in values:
+        return ""
+    return (f"the repaired code no longer returns the study's results: {entry}() on the search's baseline design returned "
+            f"{', '.join(sorted(map(str, values))[:8]) or 'nothing'}, not the objective `{quantity}`")
+
+
 class EvaluationPool:
     """Designs that do not depend on each other's answers, up to ``at_once`` at the same time, each in a process of its
     own exactly as :func:`_evaluate` runs one (the same seeds, so the answers are those of one after another). A design

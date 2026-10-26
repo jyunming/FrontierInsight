@@ -12,6 +12,8 @@ from typing import Any
 
 import pytest
 
+from core import optimise as optimise_mod
+from core import run_estimate as estimate
 from core import trial_runner as tr
 from core.config import Config, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig
 from core.engine import Engine
@@ -69,8 +71,8 @@ def _quest(tmp_path: Path, source: str) -> Path:
 
 
 async def _entry(root: Path, wanted: set[str]) -> str:
-    return await tr.entry_returns_study(VenvExecutor(), sys.executable, root, "code/simulate.py", cell=dict(CELL),
-                                        wanted=wanted, timeout_s=60)
+    return await estimate.entry_returns_study(VenvExecutor(), sys.executable, root, "code/simulate.py", dict(CELL),
+                                              wanted=wanted, timeout_s=60)
 
 
 def test_the_study_entry_is_one_rule_for_every_caller() -> None:
@@ -87,11 +89,11 @@ async def test_a_run_trial_that_sends_every_setting_to_the_check_returns_no_stud
 
 
 @pytest.mark.asyncio
-async def test_a_repair_that_keeps_the_study_result_passes_whatever_the_case_of_its_name(tmp_path: Path) -> None:
-    # The plan's headline ids are kept lower case without underscores; the code may spell the name as it likes.
+async def test_a_repair_that_keeps_the_study_result_passes(tmp_path: Path) -> None:
+    # The names are read as the pilot reads them: the plan's id as it is, not a normalised spelling.
     root = _quest(tmp_path, KEEPS_OBJECTIVE)
-    assert await _entry(root, {"yieldrate"}) == ""
     assert await _entry(root, {"Yield_Rate"}) == ""
+    assert "no longer returns" in await _entry(root, {"yieldrate"})
 
 
 @pytest.mark.asyncio
@@ -212,3 +214,151 @@ async def test_a_plan_with_a_run_level_and_an_analysis_derived_metric_passes_on_
     assert await engine._simulation_repair_fault(state, keeps) == ""
     (code / "simulate.py").write_text(CHECK_ONLY, encoding="utf-8")
     assert "no longer returns the study's results" in await engine._simulation_repair_fault(state, CHECK_ONLY)
+
+
+RUN_CELL_ONLY_LOST = '''
+def run_cell(cell):
+    return {"check_error": 0.0}
+'''
+
+RUN_CELL_ONLY_KEPT = '''
+def run_cell(cell):
+    return {"yield_rate": cell["width"] * 2.0}
+'''
+
+KEYED_BY_PITCH = '''
+def run_trial(cell, trial_id=0, seed=0):
+    return {"yield_rate": {"pitch=%d" % p: p * 0.01 for p in cell["pitch"]}}
+'''
+
+
+@pytest.mark.asyncio
+async def test_a_run_cell_only_simulation_that_loses_its_results_is_caught_without_trial_mode(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = _engine(tmp_path)
+    assert not getattr(engine, "_trial_mode", False)
+    code = engine.quest_root / "code"
+    code.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(engine, "_protocol_block", lambda state: PROTOCOL)
+    state: dict[str, Any] = {"design": {"protocol": PROTOCOL}}
+    (code / "simulate.py").write_text(RUN_CELL_ONLY_LOST, encoding="utf-8")
+    assert "run_cell() on the plan's first setting returned check_error" in await engine._simulation_repair_fault(
+        state, RUN_CELL_ONLY_LOST)
+    (code / "simulate.py").write_text(RUN_CELL_ONLY_KEPT, encoding="utf-8")
+    assert await engine._simulation_repair_fault(state, RUN_CELL_ONLY_KEPT) == ""
+
+
+@pytest.mark.asyncio
+async def test_a_headline_keyed_by_a_value_of_the_run_is_read_at_that_value(tmp_path: Path) -> None:
+    root = _quest(tmp_path, KEYED_BY_PITCH)
+    why = await estimate.entry_returns_study(VenvExecutor(), sys.executable, root, "code/simulate.py", {},
+                                             wanted={"yield_rate"}, timeout_s=60, in_each_run={"pitch": [74, 90]})
+    assert why == "", "yield_rate at pitch=74 and pitch=90 is the headline, read as the pilot reads it"
+    lost = _quest(tmp_path / "x", "def run_trial(cell, trial_id=0, seed=0):\n    return {'other': {'pitch=%d' % p: 1.0 for p in cell['pitch']}}\n")
+    why = await estimate.entry_returns_study(VenvExecutor(), sys.executable, lost, "code/simulate.py", {},
+                                             wanted={"yield_rate"}, timeout_s=60, in_each_run={"pitch": [74, 90]})
+    assert "none of yield_rate" in why
+
+
+SEARCH_KEPT = '''
+def run_trial(cell, trial_id=0, seed=0):
+    return {"obj": cell["x"] * 2.0, "side": 1.0}
+'''
+
+SEARCH_LOST = '''
+def run_trial(cell, trial_id=0, seed=0):
+    return {"side": 1.0}
+'''
+
+
+@pytest.mark.asyncio
+async def test_a_search_is_checked_through_its_own_evaluation_and_reader(tmp_path: Path) -> None:
+    block = {"objective": {"quantity": "obj", "direction": "maximise"}}
+    for source, expect_fault in ((SEARCH_KEPT, False), (SEARCH_LOST, True)):
+        root = _quest(tmp_path / ("a" if not expect_fault else "b"), source)
+        why = await optimise_mod.search_entry_returns_objective(
+            VenvExecutor(), sys.executable, root, "code/simulate.py", block, {"x": 1.0}, timeout_s=60, env=None,
+            thresholds=None)
+        assert bool(why) is expect_fault, why
+        if expect_fault:
+            assert "not the objective `obj`" in why
+
+
+PACKAGE_SIM = '''
+import pk.model as model
+
+def run_cell(cell):
+    return {"y": model.value()}
+
+def run_trial(cell, trial_id=0, seed=0):
+    return run_cell(cell)
+'''
+
+
+@pytest.mark.asyncio
+async def test_a_change_in_the_package_alone_makes_the_measurement_stale(tmp_path: Path) -> None:
+    root = _quest(tmp_path, PACKAGE_SIM)
+    package = root / "code" / "pk"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "model.py").write_text("def value():\n    return 1.0\n", encoding="utf-8")
+    source = (root / "code" / "simulate.py").read_text(encoding="utf-8")
+    assert await tr.settle_aggregate(VenvExecutor(), sys.executable, root, "code/simulate.py", cell=dict(CELL), timeout_s=60)
+    assert tr.trial_aggregates(source, root) == ""
+    (package / "model.py").write_text("import random\n\ndef value():\n    return random.random()\n", encoding="utf-8")
+    assert tr.trial_aggregates(source, root), "the file is the same, the package is not: measured again"
+
+
+class _Clock:
+    """``time`` for the engine, with a monotonic clock the test moves."""
+
+    def __init__(self) -> None:
+        import time as real
+
+        self._real, self.now = real, 1000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+
+@pytest.mark.asyncio
+async def test_the_check_of_one_repair_has_one_budget_and_never_a_third_call(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import core.engine as engine_mod
+
+    engine = _engine(tmp_path)
+    code = engine.quest_root / "code"
+    code.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(engine, "_protocol_block", lambda state: PROTOCOL)
+    clock = _Clock()
+    monkeypatch.setattr(engine_mod, "time", clock)
+    called: list[str] = []
+
+    async def entry(*a: Any, **k: Any) -> str:
+        called.append("entry")
+        return ""
+
+    monkeypatch.setattr(estimate, "entry_returns_study", entry)
+    state: dict[str, Any] = {"design": {"protocol": PROTOCOL}}
+    (code / "simulate.py").write_text(DELEGATING, encoding="utf-8")
+
+    async def settled_late(*a: Any, **k: Any) -> bool:
+        clock.now += 500.0  # the two seed calls used more than the whole budget
+        return True
+
+    monkeypatch.setattr(tr, "settle_aggregate", settled_late)
+    assert await engine._simulation_repair_fault(state, DELEGATING) == ""
+    assert called == [], "the budget is spent: the study's entry is not called"
+    log = (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+    assert "ran out of its" in log and "checking the repaired code took 500 s" in log
+
+    async def not_measured(*a: Any, **k: Any) -> None:
+        return None
+
+    monkeypatch.setattr(tr, "settle_aggregate", not_measured)
+    engine._entry_judged_fine = None
+    assert await engine._simulation_repair_fault(state, DELEGATING + "# again\n") == ""
+    assert called == [], "not judged after the seed calls: no third call"

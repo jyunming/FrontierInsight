@@ -970,6 +970,33 @@ async def run_values(
     return dict(row.get("values") or {}) if row else None
 
 
+async def entry_returns_study(
+    executor: Any, python: Path | str, quest_root: Path, module: Path | str, cell: dict[str, Any], *,
+    wanted: Iterable[str], timeout_s: int, env: dict[str, str] | None = None, thresholds: dict[str, Any] | None = None,
+    in_each_run: dict[str, list[Any]] | None = None,
+) -> str:
+    """After a repair of the simulation: ``""`` when the function FI calls for the study (:func:`core.trial_runner.study_entry`),
+    called the way the pilot calls it for one setting (:func:`run_values`) and read the way the pilot reads it
+    (:func:`observations`: a number per value of a run compared inside it is read at that value), returns at least one of the
+    names the study must return (``wanted``), else a plain sentence for the log. ``""`` also when nothing is named, there is no
+    entry to call, or the call failed or did not finish (a crash is judged by the runs that follow, never here)."""
+    wanted = {str(n) for n in wanted if str(n)}
+    path = Path(module) if Path(module).is_absolute() else Path(quest_root) / module
+    have = _tr.entries(path)
+    entry = _tr.study_entry(have)
+    if not wanted or not entry:
+        return ""
+    values = await run_values(executor, python, quest_root, module, dict(cell), deterministic="run_trial" not in have,
+                              timeout_s=timeout_s, env=env, thresholds=thresholds, in_each_run=in_each_run)
+    if values is None:
+        return ""
+    returned = {n for _c, v in observations([Probe(None, None, dict(cell), 0.0, trials=[values])]) for n in v}
+    if returned & wanted:
+        return ""
+    return (f"the repaired code no longer returns the study's results: {entry}() on the plan's first setting returned "
+            f"{', '.join(sorted(returned)[:8]) or 'nothing'}, none of {', '.join(sorted(wanted)[:6])}")
+
+
 async def pilot(
     executor: Any, python: Path | str, quest_root: Path, module: Path | str, grid: dict[str, list[Any]],
     probes: list[Probe], kinds: dict[str, str], *, deterministic: bool, budget_s: float, allowance_s: float,

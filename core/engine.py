@@ -13744,8 +13744,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         calls for the study, called once on that setting within the small run's time, must return at least one of the
         study's headline results (FI's record of the plan), or a repair that routes every setting to a check branch
         leaves a study with no result."""
-        if not getattr(self, "_trial_mode", False):
-            return ""
         # The same code (the script and the model's package) that was judged fine is not called again.
         seen = hashlib.sha256((new_code + json.dumps(self._package_snapshot(), sort_keys=True)).encode("utf-8")).hexdigest()
         if self.__dict__.get("_entry_judged_fine") == seen:
@@ -13756,34 +13754,68 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         return fault
 
     async def _simulation_repair_fault_uncached(self, state: QuestState, new_code: str) -> str:
+        simulate = self.quest_root / "code" / _split_run.SIMULATE_NAME
+        if not _trial_runner.study_entry(_trial_runner.entries(simulate)):
+            return ""
         protocol = self._protocol_block(state)
         first = self._first_study_cell(protocol) if isinstance(protocol, dict) else None
+        aggregate = _trial_runner.trial_aggregates(new_code, self.quest_root)
         if first is None:
-            if _trial_runner.trial_aggregates(new_code):
+            if aggregate:
                 self._log.warning("[execute] FI could not measure whether run_trial runs one trial (the plan gives no first "
                                   "setting to call it on); the reading of the code alone does not refuse it")
             return ""
         cell, inside = first
         py = self.executor.python_path(self.quest_root)
         env = dict(self.__dict__.get("_last_exec_env") or {})
+        from . import run_estimate as _estimate
         from .small_run import budget as _small_run_budget
 
-        limit = _small_run_budget(self.config.execution.timeout_s)
+        # One budget for the whole check of one repair (the small run's time): the two seed calls and the call of the
+        # study's entry share it.
+        budget = float(_small_run_budget(self.config.execution.timeout_s))
+        began = time.monotonic()
+
+        def left() -> int:
+            return int(budget - (time.monotonic() - began))
+
         module = f"code/{_split_run.SIMULATE_NAME}"
-        one_setting_s = int(self.config.execution.timeout_s)  # what the real run gives one setting
         thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None
-        if _trial_runner.trial_aggregates(new_code, self.quest_root):
-            if await self._await_with_heartbeat(
-                    _trial_runner.settle_aggregate(self.executor, py, self.quest_root, module, cell=cell, inside=inside,
-                                                   timeout_s=one_setting_s, env=env, thresholds=thresholds, log=self._log),
-                    label="calling the repaired trial function with two seeds") is False:
-                return _trial_runner.TRIAL_AGGREGATE_WHY
-        return await self._await_with_heartbeat(
-            _trial_runner.entry_returns_study(
-                self.executor, py, self.quest_root, module, cell=cell, inside=inside,
-                wanted=self._headline_result_names(state, protocol, dependent=False), timeout_s=limit, env=env,
-                thresholds=thresholds, log=self._log),
-            label="calling the repaired code on the plan's first setting")
+        try:
+            if aggregate:
+                settled = await self._await_with_heartbeat(
+                    _trial_runner.settle_aggregate(
+                        self.executor, py, self.quest_root, module, cell=cell, inside=inside,
+                        timeout_s=max(1, min(int(self.config.execution.timeout_s), left())), env=env,
+                        thresholds=thresholds, log=self._log),
+                    label="calling the repaired trial function with two seeds")
+                if settled is False:
+                    return _trial_runner.TRIAL_AGGREGATE_WHY
+                if settled is None:
+                    return ""  # not judged, and no third call
+            if left() < 1:
+                self._log.warning("[execute] the check of the repaired code ran out of its %d s before the study's entry "
+                                  "was called: not judged", int(budget))
+                return ""
+            block = _optimise.block_of(protocol)
+            if block is not None:
+                normal, _why = _optim.normalize(block)
+                if normal is None:
+                    return ""
+                return await self._await_with_heartbeat(
+                    _optimise.search_entry_returns_objective(
+                        self.executor, py, self.quest_root, module, normal, {**cell, **(inside or {})}, timeout_s=left(),
+                        env=env, thresholds=thresholds),
+                    label="calling the repaired code on the search's baseline design")
+            wanted = {str(m.get("id")).strip() for m in protocol.get("metrics") or []
+                      if isinstance(m, dict) and str(m.get("id") or "").strip()}
+            return await self._await_with_heartbeat(
+                _estimate.entry_returns_study(self.executor, py, self.quest_root, module, cell, wanted=wanted,
+                                              timeout_s=left(), env=env, thresholds=thresholds, in_each_run=inside),
+                label="calling the repaired code on the plan's first setting")
+        finally:
+            self._log.info("[execute] checking the repaired code took %.0f s of the %d s allowed",
+                           time.monotonic() - began, int(budget))
 
     def _headline_result_names(self, state: QuestState, protocol: dict[str, Any] | None, *,
                                dependent: bool = True) -> set[str]:
