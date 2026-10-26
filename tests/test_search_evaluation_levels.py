@@ -78,3 +78,48 @@ def test_an_objective_returned_per_value_fails_with_a_plain_message_and_picks_no
     assert judged["reason"] == ("the objective `f` is returned per value of p, but a search needs one number per design "
                                 "(the plan's objective must name one number)")
     assert optimise_search.judge(_BLOCK, {"f": 2.0})["status"] == "ok"
+
+
+def test_a_small_run_is_not_reused_once_the_values_compared_inside_each_run_change(tmp_path: Path) -> None:
+    from core import small_run
+
+    sim = _quest(tmp_path) / "code" / "simulate.py"
+    grid = {"x": [0.0, 1.0]}
+    plain = small_run.key_of(sim, grid, True, None)
+    assert small_run.key_of(sim, grid, True, None, None) == plain  # a study with none keeps its key
+    assert small_run.key_of(sim, grid, True, None, {"p": [1, 2, 3]}) != plain
+    assert small_run.key_of(sim, grid, True, None, {"p": [1, 2]}) != small_run.key_of(sim, grid, True, None, {"p": [1, 2, 3]})
+
+
+@pytest.mark.asyncio
+async def test_the_engines_small_run_is_made_again_when_only_in_each_run_is_added(tmp_path: Path) -> None:
+    from tests.test_run_checks import _search_engine
+
+    without = {k: v for k, v in _BLOCK.items() if k != "in_each_run"}
+    eng, _runner = await _search_engine(tmp_path, without)
+    eng._trial_mode, eng._trial_entries = True, {"run_cell"}
+    (eng.quest_root / "code" / "simulate.py").write_text(
+        "def run_cell(cell):\n    p = cell.get('p')\n    return {'f': 1.0} if p is None else "
+        "{'f': {f'p={v}': float(v) for v in p}}\n", encoding="utf-8")
+    block = {**without, "grid": {"x": [0.0]}, "baseline": {"values": {"x": 0.0}, "source": "s"}, "fixed": {}}
+    eng._protocol_block = lambda state: {"optimisation": block}  # type: ignore[method-assign]
+    first = await eng._small_run({}, sys.executable, {})
+    block = {**block, "in_each_run": {"p": [1, 2]}}
+    second = await eng._small_run({}, sys.executable, {})
+    assert first["key"] != second["key"]
+
+
+def test_the_coarse_scan_gives_a_per_value_objective_to_the_judge_as_an_evaluation_does() -> None:
+    block = {**_BLOCK, "fixed": {}, "baseline": {"values": {"x": 0}, "source": "s"}, "grid": {"x": [0, 1]},
+             "in_each_run": {"pitch_nm": [74, 80]}}
+    summary = {"cells": [
+        {"cell": {"x": 0}, "key": "x=0", "planned": 1, "ok": 1, "failed": 0, "metrics": {}},
+        {"cell": {"x": 0, "pitch_nm": 74}, "key": "x=0,pitch_nm=74", "level": {"pitch_nm": 74}, "planned": 1, "ok": 1,
+         "failed": 0, "metrics": {"f": {"values": [1.0]}}},
+        {"cell": {"x": 0, "pitch_nm": 80}, "key": "x=0,pitch_nm=80", "level": {"pitch_nm": 80}, "planned": 1, "ok": 1,
+         "failed": 0, "metrics": {"f": {"values": [2.0]}}},
+    ]}
+    rows = optimise_search.scan_rows(summary, block)
+    assert rows[0]["values"] == {"f": {"pitch_nm=74": 1.0, "pitch_nm=80": 2.0}}
+    judged = optimise_search.judge(block, rows[0]["values"])
+    assert "is returned per value of pitch_nm" in judged["reason"]

@@ -495,7 +495,31 @@ def scan_rows(summary, block):
             vals = [x for x in m.get("values") or [] if _number(x)]
             if vals and len(vals) == len(m.get("values") or []):
                 values[name] = math.fsum(vals) / len(vals)
+        quantity = str(block["objective"]["quantity"])
+        if quantity not in values:
+            # Returned per value of what each run compares inside it: the numbers are in the value rows of this setting
+            # only. They are given as an evaluation gives them, a number per value, so the objective is judged the same way.
+            per_value = _per_value(summary, cell, quantity)
+            if per_value:
+                values[quantity] = per_value
         out.append({"design": design, "values": values, "reason": "", "elapsed_s": cell.get("elapsed_s")})
+    return out
+
+
+def _per_value(summary, cell, quantity):
+    """``{value key: mean}`` of ``quantity`` over the value rows of ``cell`` (the rows the trial record keeps of a run's
+    numbers per value), or ``{}`` when it has none."""
+    from .in_run import level_key
+
+    out = {}
+    for row in (summary or {}).get("cells") or []:
+        level = row.get("level")
+        if not isinstance(level, dict) or row.get("ok") != row.get("planned"):
+            continue
+        parent = {k: v for k, v in (row.get("cell") or {}).items() if k not in level}
+        vals = ((row.get("metrics") or {}).get(quantity) or {}).get("values") or []
+        if parent == cell.get("cell") and vals and all(_number(x) for x in vals):
+            out[level_key(level)] = math.fsum(vals) / len(vals)
     return out
 
 

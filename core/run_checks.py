@@ -1582,14 +1582,14 @@ class RunChecksMixin:
             grid = _optimise_search.study_grid(protocol) if isinstance(protocol.get("grid"), dict) else {}  # knows its sub-studies
         thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None
         deterministic = "run_trial" not in set(getattr(self, "_trial_entries", set()) or ())
-        key = _small.key_of(simulate, grid, deterministic, thresholds)
+        inside = (_optimise_search.in_each_run(block) or None if search
+                  else protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else None)
+        key = _small.key_of(simulate, grid, deterministic, thresholds, inside)
         record = _small.read_record(self.quest_root)  # type: ignore[attr-defined]
         if record.get("key") == key:
             self._small_run_note = str(record.get("for_reader") or "")
             return record
         paired = any(isinstance(m, dict) and m.get("paired") for m in protocol.get("metrics") or [])
-        inside = (_optimise_search.in_each_run(block) or None if search
-                  else protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else None)
         got = await _small.run(
             self.executor, py, self.quest_root, simulate.relative_to(self.quest_root).as_posix(), grid,  # type: ignore[attr-defined]
             deterministic=deterministic, timeout_s=_small.budget(self.config.execution.timeout_s),  # type: ignore[attr-defined]
