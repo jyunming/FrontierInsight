@@ -13402,6 +13402,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "parent_sha256": _attempts._sha(old.encode("utf-8")), "sha256": _attempts._sha(new.encode("utf-8")),
                 "summary": ("the second model's finding " + str(issue.get("id")) + ": " + str(issue.get("text") or ""))[:300]})
 
+        notes: list[str] = []  # what went wrong in the measures of a try (core/finding_repair.py: ``Env.notes``)
         env = _finding_repair.Env(
             root=self.quest_root, code=code, record=record, save=lambda: _code_review.save(self.quest_root, record),
             ask=ask, run_tests=run_tests, snapshot=snapshot, static=static,
@@ -13412,7 +13413,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             equations=_code_review.equations_view(protocol if isinstance(protocol, dict) else None, values),
             scrub=lambda text: _pairs.scrub(text, values), log=self._log, package=package,
             other=(reader if same is False else ""), code_model=self._model_for_node("implement") or self.config.provider.model or "",
-            on_accept=on_accept, small_run=self._small_run_again)
+            on_accept=on_accept, small_run=self._small_run_again,
+            known_answers=lambda: self._finding_known_answers(protocol, notes),
+            design_response=lambda: self._finding_design_response(protocol, notes), notes=notes)
         with self._hold_code_runs():  # each try is its own commit or side reference (finding_repair.keep_try)
             changed = await _finding_repair.repair_issues(env)
         record["repaired"] = bool(changed)
@@ -13455,6 +13458,41 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             for got, run in _finding_repair.parse_runs(text, [path]).items():
                 out[f"finding:{got}"] = run.status
         return out
+
+    async def _finding_known_answers(self, protocol: Any, notes: list[str] | None = None) -> dict[str, dict[str, Any]] | None:
+        """What the plan's known-answer checks give on the code as it is now, run by FI as it runs them after the run
+        (:meth:`_oracle_gate`; a search is called with the conditions held fixed): ``{check: {"passed", "value"}}``, for the
+        repair of a finding to compare before and after. ``None`` when they cannot be run here (the simulation does not follow
+        the trial contract, or no check has numbers FI can judge by); the record of the quest's own checks (``needs/ORACLE_CHECK.json``) is not touched."""
+        if not isinstance(protocol, dict) or self.config.engine.oracle_check == "off":
+            return None
+        from . import code_checks as _code_checks
+
+        stride = max(1, int(self.config.engine.replicate_seed_stride))
+        return await _code_checks.known_answer_values(
+            self.quest_root, protocol, executor=self.executor, python=self.executor.python_path(self.quest_root),
+            env=_replicate_env(self.__dict__.get("_last_exec_env"), 0, stride),
+            timeout_s=max(30, int(self.config.execution.timeout_s * self.config.engine.pilot_timeout_frac)), log=self._log,
+            notes=notes)
+
+    async def _finding_design_response(self, protocol: Any, notes: list[str] | None = None) -> dict[str, Any] | None:
+        """For a search for the best design: the objective the study's entry gives on two designs, as
+        :func:`core.optimise.design_response`; ``None`` for a study without a search."""
+        block = _optimise.block_of(protocol) if isinstance(protocol, dict) else None
+        if block is None:
+            return None
+        normal, _why = _optim.normalize(block)
+        if normal is None:
+            return None
+        from .small_run import budget as _small_run_budget
+
+        return await _optimise.design_response(
+            self.executor, self.executor.python_path(self.quest_root), self.quest_root,
+            f"code/{_split_run.SIMULATE_NAME}", normal,
+            timeout_s=int(_small_run_budget(self.config.execution.timeout_s)),
+            env=dict(self.__dict__.get("_last_exec_env") or {}),
+            thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None, log=self._log,
+            notes=notes)
 
     def _finding_static_counts(self, state: QuestState, protocol: Any) -> dict[str, int]:
         """The number of faults each static check (core/static_checks.py) finds in the code as it is, read without a model."""

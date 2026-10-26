@@ -510,6 +510,48 @@ def copy_code(code_dir: Path, dest: Path) -> None:
         Path(dest).mkdir(parents=True, exist_ok=True)
 
 
+@contextlib.contextmanager
+def observation_copy(quest_root: Path | str, base: Path | str | None = None, *, notes: list[str] | None = None,
+                     log: Any = None):
+    """A throwaway copy of the quest to run a measurement in, so that measuring leaves nothing in the quest: the copy
+    holds ``code/`` (:func:`copy_code`), ``inputs/`` and ``data/`` without ``data/results/`` (:data:`CELL_INPUTS`,
+    :data:`CELL_SKIP`) and an empty ``.fi/``; what the runs write in it (their files, the shared cache of the settings, the
+    harness's own records) is deleted with it. The quest's cache is not copied: a value worked out by the code as it was
+    before is never read by the code being measured. Yields the copy's root. A copy that cannot be made raises (the measure
+    is then unavailable) and a copy that cannot be deleted is left; both are written to ``log`` and added to ``notes``."""
+    def say(sentence: str) -> None:
+        if notes is not None:
+            notes.append(sentence)
+        if log is not None:
+            log.warning("[code_review] %s", sentence)
+
+    scratch = new_scratch(base)
+    root = scratch / "quest"
+    try:
+        root.mkdir()
+        quest = Path(quest_root)
+        copy_code(quest / CODE, root / CODE)
+        for name in CELL_INPUTS:
+            src = quest / name
+            if src.is_dir():
+                skip = {Path(p).name for p in CELL_SKIP if Path(p).parent.as_posix() == name}
+                shutil.copytree(src, root / name, ignore=lambda folder, names, src=src, skip=skip: (
+                    skip & set(names) if Path(folder) == src else set()))
+        (root / ".fi").mkdir()
+    except OSError as e:
+        say(f"the quest could not be copied to measure in ({e!r})")
+        shutil.rmtree(scratch, ignore_errors=True)
+        raise
+    try:
+        yield root
+    finally:
+        failed: list[str] = []
+        shutil.rmtree(scratch, onerror=lambda _f, path, exc: failed.append(f"{path} ({exc[1]!r})"))
+        if failed or scratch.exists():
+            say(f"the copy the measure ran in was not fully deleted and is left at {scratch}"
+                + (f" ({failed[0]})" if failed else ""))
+
+
 def _sig(path: Path) -> Any:
     st = path.stat()
     if st.st_size <= _SMALL:
