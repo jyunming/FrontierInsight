@@ -13262,7 +13262,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         record["reviews_total"] = int(record["reviews_total"]) + 1
         _code_review.save(self.quest_root, record)  # counted before the request: a resume does not ask again
         plan_dict = protocol if isinstance(protocol, dict) else None
-        calls = _code_review.reading_calls(code, design, plan_dict, open_items=_audit_open.for_code(self.quest_root))
+        calls = _code_review.reading_calls(code, design, plan_dict, open_items=_audit_open.for_code(self.quest_root), reqs=reqs)
         topic = " ".join(str(state.get("topic") or self.config.topic or "").split())
         values = _pairs.plan_values(plan_dict)  # taken out of FI's own small-run text
         shown_values = _code_review.reportable_values(design, plan_dict)  # taken out of what the reader writes
@@ -13271,6 +13271,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         record["code_parts"] = 1 + max(c["code_index"] for c in calls)  # parts of the code, not requests
         record["plan_parts"] = 1 + max(c["plan_index"] for c in calls)
         record["requests"] = [{"files": {f: r for f, r in c["shown"].items()}, "plan_sections": c["plan_sections"],
+                               "asked": len(reqs) if c.get("asked") is None else len(c["asked"]),
                                "chars": len(c["code"]) + len(c["plan"]) + len(c["open_items"]),
                                **({"open_items": {"chars": [i["chars"] for i in c["items"]],
                                                   "cut": [i["part"] for i in c["items"] if i["cut"]]}}
@@ -13310,17 +13311,21 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 sources = _code_review.part_note(call["code_index"] + 1, record["code_parts"]) + call["code"]
                 p_verdicts = None
                 asked_again = False
+                # only the requirements this request was given the plan's definition of (:func:`core.code_review.asked_ids`)
+                call_reqs = [r for r in reqs if call.get("asked") is None or r["id"] in call["asked"]]
                 for _ask in range(2):
                     if _ask and int(record.get("reader_calls") or 0) + 2 + 2 * (len(calls) - p_index) > _code_review.MAX_READER_CALLS:
                         break  # the follow-up ask would use what the parts still to come need
-                    left = [r for r in reqs if r["id"] not in {v["id"] for v in p_verdicts or []}]
+                    left = [r for r in call_reqs if r["id"] not in {v["id"] for v in p_verdicts or []}]
                     again = ""
-                    if not left:
+                    if not left and not call_reqs and _ask == 0:
+                        pass  # a request with nothing to judge is still made once: it is read for problems of logic
+                    elif not left:
                         if asked_again or p_verdicts is None or not _code_review.reply_said_nothing(p_verdicts, logic, listed):
                             break
                         self._log.warning("[code_review] the reader named no problem and did not say what it checked; "
                                           "asking once more")
-                        again, left, asked_again = _pairs.REASK, list(reqs), True
+                        again, left, asked_again = _pairs.REASK, list(call_reqs), True
                     prompt = self._prompts["code_review"].substitute(
                         topic=topic, requirements=json.dumps([{k: r[k] for k in ("id", "kind", "text")} for r in left],
                                                              indent=2),
@@ -13339,6 +13344,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                         p_verdicts = [*kept, *(got or [])] or None
                     else:
                         p_verdicts = [*(p_verdicts or []), *(got or [])] or ([] if had else None)
+                    if not call_reqs:
+                        p_verdicts = p_verdicts or []  # nothing was asked of it: no verdicts is the whole answer
                     found = _code_review.parse_logic(parsed, reqs, shown_values)
                     seen = [f for f in found if _code_review.shown_in_part(call["shown"], f["file"], f["line"], call["cut"])]
                     outside.extend(_code_review.outside_entry(f, "finding", call["shown"], call["cut"])

@@ -90,17 +90,23 @@ def _text(value: Any, limit: int = 300) -> str:
 
 
 def requirements(design: dict[str, Any] | None, protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """The plan's required outputs, as ``{"id", "kind", "text", "headline"}`` (R1, R2 ...): the dependent variables, the
-    metrics, the planned figures, the swept parameters, the checks' measures and the equations the simulation computes
-    its data with. Names and descriptions only, never a number the code must reproduce."""
+    """The plan's required outputs, as ``{"id", "kind", "text", "headline", "name", "defined_by"}`` (R1, R2 ...): the
+    dependent variables, the metrics, the planned figures, the swept parameters, the checks' measures and the equations the
+    simulation computes its data with. Names and descriptions only, never a number the code must reproduce.
+
+    ``defined_by`` lists the plan items that define the requirement, as ``[section, key]`` pairs read from the plan's own
+    structure (a metric's entry in ``metrics`` and its entry in ``definitions``, a swept setting's entry in ``grid`` or
+    ``in_each_run``, a check's entry in ``checks``, an equation's entry in ``equations``). A dependent variable and a figure
+    have none. It is what :func:`asked_ids` uses to ask a requirement only of the requests that were given its definition."""
     design = design if isinstance(design, dict) else {}
     protocol = protocol if isinstance(protocol, dict) else {}
     out: list[dict[str, Any]] = []
 
-    def add(kind: str, text: str, headline: bool = False, name: str = "") -> None:
+    def add(kind: str, text: str, headline: bool = False, name: str = "", defined_by: list[list[str]] | None = None) -> None:
         text = _text(text)
         if text and not any(r["kind"] == kind and r["text"] == text for r in out):
-            out.append({"id": f"R{len(out) + 1}", "kind": kind, "text": text, "headline": headline, "name": _text(name, 80)})
+            out.append({"id": f"R{len(out) + 1}", "kind": kind, "text": text, "headline": headline, "name": _text(name, 80),
+                        "defined_by": defined_by or []})
 
     precision = protocol.get("precision") if isinstance(protocol.get("precision"), dict) else {}
     headline_metric = _text(precision.get("metric")).lower()
@@ -112,26 +118,50 @@ def requirements(design: dict[str, Any] | None, protocol: dict[str, Any] | None)
         if isinstance(m, dict) and _text(m.get("id")):
             mid = _text(m["id"])
             est = _text(m.get("estimand"))
+            defined = [["metrics", mid]]
+            if any(isinstance(d, dict) and _text(d.get("metric")) == mid
+                   for d in (protocol.get("definitions") if isinstance(protocol.get("definitions"), list) else [])):
+                defined.append(["definitions", mid])
             add("metric", f"the result reports {mid}" + (f" ({est})" if est else ""),
-                bool(headline_metric) and (mid.lower() == headline_metric or headline_metric in mid.lower()), mid)
+                bool(headline_metric) and (mid.lower() == headline_metric or headline_metric in mid.lower()), mid, defined)
     for fig in design.get("figures_planned") if isinstance(design.get("figures_planned"), list) else []:
         add("figure", f"the script draws the planned figure {Path(str(fig)).name}")
-    grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+    grid, inside = _settings_of(protocol)  # where the plan view takes them from
     for name, values in grid.items():
         if isinstance(values, list) and len(values) > 1:
-            add("sweep", f"the parameter {_text(name, 60)} is varied over all {len(values)} values of the plan's grid")
-    inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else {}
+            add("sweep", f"the parameter {_text(name, 60)} is varied over all {len(values)} values of the plan's grid",
+                defined_by=[["grid", str(name)]])
     for name, values in inside.items():
         if isinstance(values, list) and len(values) > 1:
             add("sweep", f"every run uses all {len(values)} values of {_text(name, 60)} it is given in its cell, on the same "
-                "random numbers")
+                "random numbers", defined_by=[["in_each_run", str(name)]])
     for o in _oracle.declared(protocol):
-        measure = _text(o.get("measure"), 160)
+        name, measure = _check_names(o)  # as the plan view shows them, without the values the check owns
         if measure:
-            add("check", f"the simulation returns what the measure '{measure}' of the check '{_text(o['name'], 60)}' uses")
+            add("check", f"the simulation returns what the measure '{measure}' of the check '{name}' uses",
+                defined_by=[["checks", name]])
     for eid in _oracle.generating_equations(protocol):
-        add("equation", f"equation {eid} of the plan's model is computed in the code, in a function marked `# {eid}`")
+        add("equation", f"equation {eid} of the plan's model is computed in the code, in a function marked `# {eid}`",
+            defined_by=[["equations", str(eid)]])
     return out
+
+
+def _settings_of(protocol: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """``(grid, in_each_run)`` of the plan: the protocol's own, else those of its search (``optimisation``). The one place
+    both the plan view (:func:`_raw_sections`) and the requirements (:func:`requirements`) take them from."""
+    optimisation = protocol.get("optimisation") if isinstance(protocol.get("optimisation"), dict) else {}
+    def own(key: str) -> dict[str, Any]:
+        value = protocol.get(key) if isinstance(protocol.get(key), dict) and protocol.get(key) else optimisation.get(key)
+        return value if isinstance(value, dict) else {}
+
+    return own("grid"), own("in_each_run")
+
+
+def _check_names(oracle: dict[str, Any]) -> tuple[str, str]:
+    """``(name, measure)`` of a check as the reader is shown them: without the values the check owns
+    (:func:`_owned_values`). The one place both the plan view (:func:`plan_sections`) and the requirements take them from."""
+    values = _owned_values(oracle)
+    return (_pairs.scrub(_text(oracle.get("name"), 60), values), _pairs.scrub(_text(oracle.get("measure"), 160), values))
 
 
 def _code_files(code_dir: Path) -> dict[str, str]:
@@ -366,8 +396,7 @@ def _raw_sections(design: dict[str, Any], protocol: dict[str, Any]) -> dict[str,
     if held:
         held = {"note": "The plan holds these values fixed: code that uses them as constants follows the plan and is "
                         "not a hardcoding fault.", **held}
-    grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) and protocol.get("grid") else optimisation.get("grid")
-    inside = protocol.get("in_each_run") if protocol.get("in_each_run") else optimisation.get("in_each_run")
+    grid, inside = _settings_of(protocol)
     sub = optimisation.get("sub_studies")
     # In the order of what matters for judging the code: the model, the statistics and checks, the settings, the method,
     # then the policies.
@@ -382,8 +411,8 @@ def _raw_sections(design: dict[str, Any], protocol: dict[str, Any]) -> dict[str,
         "checks": [{"name": _text(o.get("name"), 60), "kind": _text(o.get("kind"), 30), "check": _text(o.get("check"), 600),
                     "case": o.get("case"), "measure": _text(o.get("measure"), 160)} for o in _oracle.declared(protocol)],
         "settings_varied": variables.get("independent") if isinstance(variables.get("independent"), list) else [],
-        "grid": grid if isinstance(grid, dict) else {},
-        "in_each_run": inside if isinstance(inside, dict) else {},
+        "grid": grid,
+        "in_each_run": inside,
         "held_fixed": held,
         "sub_studies": sub if isinstance(sub, list) else [],
         "method": _text(design.get("method"), 6000),
@@ -448,8 +477,8 @@ def plan_sections(design: dict[str, Any] | None, protocol: dict[str, Any] | None
 
     if "checks" in view:
         owners = _oracle.declared(protocol)
-        view["checks"] = [{**c, **{k: clean(c[k], _owned_values(o)) for k in ("name", "check", "measure")}}
-                          for c, o in zip(view["checks"], owners)]
+        view["checks"] = [{**c, "check": clean(c["check"], _owned_values(o)),
+                           **dict(zip(("name", "measure"), _check_names(o)))} for c, o in zip(view["checks"], owners)]
     if "equations" in view:
         try:
             from . import equation_tests as _eqt
@@ -464,13 +493,33 @@ def plan_sections(design: dict[str, Any] | None, protocol: dict[str, Any] | None
     return view
 
 
+#: The key that names one item of a list section of the plan (what :func:`requirements` lists in ``defined_by``).
+_ITEM_KEY = {"metrics": "id", "equations": "id", "steps": "id", "definitions": "metric", "checks": "name"}
+
+
+def _holds(sections: dict[str, Any]) -> dict[str, list[str]]:
+    """The plan items a request holds, ``{section: [key, ...]}``, from the sections it was given: a dict section holds its
+    keys, a list section the identifying key of each item it holds (:data:`_ITEM_KEY`)."""
+    out: dict[str, list[str]] = {}
+    for name, value in sections.items():
+        key = _ITEM_KEY.get(name)
+        if isinstance(value, dict):
+            out[name] = [str(k) for k in value]
+        elif isinstance(value, list) and key:
+            out[name] = [_text(item.get(key)) for item in value if isinstance(item, dict) and _text(item.get(key))]
+        else:
+            out[name] = []
+    return out
+
+
 def _dump(sections: dict[str, Any], note: str = "") -> str:
     return json.dumps(sections, indent=1, default=str) + note
 
 
 def plan_views(design: dict[str, Any] | None, protocol: dict[str, Any] | None,
                limit: int | None = None, open_items: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-    """The plan as text for the requests of a reading: ``[{"text", "sections", "left_out"}]``, one entry when the plan fits in
+    """The plan as text for the requests of a reading: ``[{"text", "sections", "left_out", "holds"}]`` (``holds``: the plan
+    items the entry shows, ``{section: [key, ...]}``), one entry when the plan fits in
     ``limit`` characters. A plan that does not fit is split by whole sections into several entries (a section that is a
     list of items is split by its items), each saying which sections the others hold; nothing is dropped to make it fit.
     A section that does not fit a request alone is left out, whole, and named in ``left_out`` (a list section loses only
@@ -494,7 +543,8 @@ def plan_views(design: dict[str, Any] | None, protocol: dict[str, Any] | None,
         return text if len(text) <= limit else text[:limit]  # only when the note alone is longer than a request
 
     if len(_dump(sections, note_for([], [], []))) <= limit:
-        return [{"text": _dump(sections, note_for([], [], [])), "sections": list(sections), "left_out": left_out}]
+        return [{"text": _dump(sections, note_for([], [], [])), "sections": list(sections), "left_out": left_out,
+                 "holds": _holds(sections)}]
     # A piece is a section, or a run of items of a list section. It is left out only when it does not fit a request alone
     # (a request holds the piece and the shortest note); the pieces are packed by a bound on the notes, then every request
     # is composed with its real note and, when that is over the cap, the piece goes into a request of its own.
@@ -563,10 +613,10 @@ def plan_views(design: dict[str, Any] | None, protocol: dict[str, Any] | None,
         left_out.append(f"{name}: {len(value)} item{'s' if len(value) != 1 else ''} left out"
                         if isinstance(value, list) else name)
     if not groups:  # nothing fits: the request says so and holds no section
-        return [{"text": fit(_dump({}, note_for([], [], []))), "sections": [], "left_out": left_out}]
-    out = [{"text": t, "sections": list(g), "left_out": left_out} for t, g in zip(texts, groups)]
+        return [{"text": fit(_dump({}, note_for([], [], []))), "sections": [], "left_out": left_out, "holds": {}}]
+    out = [{"text": t, "sections": list(g), "left_out": left_out, "holds": _holds(g)} for t, g in zip(texts, groups)]
     if left_out and not any(told):  # no request had room to say what was left out: one with no section says it
-        out.append({"text": fit(_dump({}, note_for([], every, []))), "sections": [], "left_out": left_out})
+        out.append({"text": fit(_dump({}, note_for([], every, []))), "sections": [], "left_out": left_out, "holds": {}})
     return out
 
 
@@ -684,7 +734,7 @@ def compact_items(open_items: dict[str, Any] | None, room: int) -> tuple[str, li
 
 def plan_requests(design: dict[str, Any] | None, protocol: dict[str, Any] | None,
                   open_items: dict[str, Any] | None = None, limit: int | None = None) -> list[dict[str, Any]]:
-    """The plan for the requests of a reading: ``[{"text", "sections", "left_out", "open_items", "items"}]``. The plan
+    """The plan for the requests of a reading: ``[{"text", "sections", "left_out", "holds", "open_items", "items"}]``. The plan
     proper is whole in every request (one entry); the audit's open items come beside it in a compact form
     (:func:`compact_items`) cut to the room the plan leaves under ``limit``. Only a plan proper that does not leave
     :data:`_MIN_ITEM_CHARS` an item under the cap is split (:func:`plan_views`) into several entries, and then every code
@@ -699,24 +749,54 @@ def plan_requests(design: dict[str, Any] | None, protocol: dict[str, Any] | None
     for v in views:
         room = limit - len(v["text"])
         text, info = compact_items(open_items, room)
-        out.append({"text": v["text"], "sections": v["sections"], "left_out": v["left_out"], "open_items": text, "items": info})
+        out.append({"text": v["text"], "sections": v["sections"], "left_out": v["left_out"], "holds": v["holds"],
+                    "open_items": text, "items": info})
     return out
 
 
+def asked_ids(reqs: list[dict[str, Any]], plans: list[dict[str, Any]]) -> list[list[str]]:
+    """For each plan entry of a reading (``plans``, each with ``holds``), the ids of the requirements its requests must
+    judge. A verdict is made only by a request that was given the plan's definition of what it judges: when the plan is
+    split, a request whose plan part lacks the entry that defines a requirement (a metric's entry in ``metrics`` or
+    ``definitions``, a setting's in ``grid``, a check's, an equation's) would judge it without that definition and could
+    return ``different`` where the requests that have it say ``implemented``; ranked above ``implemented`` when the verdicts
+    are merged, it would win. So a requirement is asked of the entries that hold every plan item that defines it. Items no
+    entry holds (left out of every request) are ignored; a requirement with no item held anywhere (a dependent variable, a
+    figure, or all its items left out) is asked of every entry. When no entry holds all of its items, it is asked of the
+    entries that hold the most of them. Every code part is read with every plan part, so the code that implements it is
+    still read beside its definition."""
+    held = [{(s, k) for s, keys in (p.get("holds") or {}).items() for k in keys} for p in plans]
+    anywhere = set().union(*held) if held else set()
+    asked: list[list[str]] = [[] for _ in plans]
+    for r in reqs:
+        present = {(s, k) for s, k in (tuple(x) for x in r.get("defined_by") or []) if (s, k) in anywhere}
+        counts = [len(present & h) for h in held]
+        best = max(counts, default=0)
+        for j, n in enumerate(counts):
+            if not present or n == best:
+                asked[j].append(r["id"])
+    return asked
+
+
 def reading_calls(code_dir: Path, design: dict[str, Any] | None, protocol: dict[str, Any] | None,
-                  open_items: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+                  open_items: dict[str, Any] | None = None, reqs: list[dict[str, Any]] | None = None,
+                  limit: int | None = None) -> list[dict[str, Any]]:
     """The requests of one reading, from FI's own record of what each is given: ``[{"code", "shown", "cut", "plan",
-    "open_items", "items", "plan_sections", "left_out", "files", "code_index", "plan_index"}]``. The plan proper is whole
-    in every request, so each code part is one request; a plan that cannot be had whole is split, and then every code part
-    is read with every part of the plan."""
+    "open_items", "items", "plan_sections", "holds", "left_out", "files", "code_index", "plan_index", "asked"}]``. The plan
+    proper is whole in every request, so each code part is one request; a plan that cannot be had whole is split, and then
+    every code part is read with every part of the plan. ``asked`` is the ids of the requirements (``reqs``,
+    :func:`requirements`) the request must judge (:func:`asked_ids`); ``None``, every requirement, when ``reqs`` is not
+    given. ``limit`` is the plan's size cap (default :data:`_MAX_PLAN_CHARS`)."""
     parts = source_parts_detail(code_dir) or [{"text": "", "shown": {}, "cut": []}]
-    plans = plan_requests(design, protocol, open_items)
+    plans = plan_requests(design, protocol, open_items, limit)
+    asked = asked_ids(reqs, plans) if reqs is not None else [None] * len(plans)
     out = []
     for i, part in enumerate(parts):
         for j, plan in enumerate(plans):
             out.append({"code_index": i, "plan_index": j, "code": part["text"], "shown": part["shown"], "cut": part["cut"],
                         "plan": plan["text"], "open_items": plan["open_items"], "items": plan["items"],
-                        "plan_sections": plan["sections"], "left_out": plan["left_out"], "files": sorted(part["shown"])})
+                        "plan_sections": plan["sections"], "holds": plan["holds"], "left_out": plan["left_out"],
+                        "files": sorted(part["shown"]), "asked": asked[j]})
     return out
 
 
