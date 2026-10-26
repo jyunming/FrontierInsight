@@ -187,6 +187,21 @@ def _leaves(value):
     return [x for item in value for x in _leaves(item)] if isinstance(value, list) else [value]
 
 
+def _cell_fmt(value):
+    """A value as a cell key writes it: the text of ``core.in_run.fmt``. This file runs alone in a quest (code/fi_search.py),
+    so it cannot import that module; the two must stay the same."""
+    if isinstance(value, float) and value.is_integer():
+        return repr(value)
+    if isinstance(value, list):
+        return "[" + ";".join(_cell_fmt(x) for x in value) + "]"
+    return str(value)
+
+
+def _level_key(level):
+    """``"procedure=bh"``: the same text as ``core.in_run.level_key``."""
+    return ",".join("{}={}".format(name, _cell_fmt(value)) for name, value in level.items())
+
+
 # --- array design variables --------------------------------------------------------------------------------------------
 # A design variable with a ``shape`` is an array of numbers (``core.optimisation_plan`` checks the block). The search
 # moves in one coordinate per element; a design carries the array back in its shape (a nested list), so the simulation,
@@ -524,8 +539,6 @@ def scan_rows(summary, block):
 def _per_value(summary, cell, quantity):
     """``{value key: mean}`` of ``quantity`` over the value rows of ``cell`` (the rows the trial record keeps of a run's
     numbers per value), or ``{}`` when it has none."""
-    from .in_run import level_key
-
     out = {}
     for row in (summary or {}).get("cells") or []:
         level = row.get("level")
@@ -534,7 +547,7 @@ def _per_value(summary, cell, quantity):
         parent = {k: v for k, v in (row.get("cell") or {}).items() if k not in level}
         vals = ((row.get("metrics") or {}).get(quantity) or {}).get("values") or []
         if parent == cell.get("cell") and vals and all(_number(x) for x in vals):
-            out[level_key(level)] = math.fsum(vals) / len(vals)
+            out[_level_key(level)] = math.fsum(vals) / len(vals)
     return out
 
 
