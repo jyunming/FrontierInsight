@@ -1172,7 +1172,7 @@ class RunChecksMixin:
             per_eval = max(per_setting or 0.0, first_s) or None
             left = budget_s - (time.monotonic() - timing_started)
             if search_n and left >= 5:
-                baseline = _optimise.complete_case(self._protocol_block(state), {})  # type: ignore[attr-defined]
+                baseline = _optimise.complete_case(self._protocol_block(state), {}, keep_inside=True)  # type: ignore[attr-defined]
                 allowance = max(60.0, 3.0 * limit_s / max(1, (scan + search_n) * runs))
                 probe, why = await _estimate._time_one(
                     self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(),  # type: ignore[attr-defined]

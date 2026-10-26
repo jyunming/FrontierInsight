@@ -85,15 +85,24 @@ def block_of(protocol: Any) -> dict[str, Any] | None:
     return block if isinstance(block, dict) else None
 
 
-def complete_case(protocol: Any, case: dict[str, Any]) -> dict[str, Any]:
+def complete_case(protocol: Any, case: dict[str, Any], *, keep_inside: bool = False) -> dict[str, Any]:
     """An oracle's case as the simulation is called with it during the search: the conditions held fixed, the search's
     numerical settings and the baseline design, with what the case itself names on top (a check of the baseline may
-    name only some of its variables)."""
+    name only some of its variables).
+
+    The values every evaluation goes through together (``in_each_run``, each a whole list) are the run's, not the
+    case's: a check's case names one value of such a factor or none, and the trial runner gives the run all of them
+    (:func:`core.trial_runner.run_case`). So they are left out here unless the case names them, or ``keep_inside`` (the
+    call is a search evaluation, which is given each list whole)."""
     block = block_of(protocol)
     if block is None or not isinstance(case, dict):
         return dict(case or {})
     baseline = (block.get("baseline") or {}).get("values") if isinstance(block.get("baseline"), dict) else None
-    return {**_search.cell_of(block, dict(baseline) if isinstance(baseline, dict) else {}), **case}
+    full = _search.cell_of(block, dict(baseline) if isinstance(baseline, dict) else {})
+    if not keep_inside:
+        inside = _search.in_each_run(block)
+        full = {k: v for k, v in full.items() if k not in inside or k in case}
+    return {**full, **case}
 
 
 @dataclass
