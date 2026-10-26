@@ -19,7 +19,7 @@ import pytest
 matplotlib = pytest.importorskip("matplotlib")
 
 from core.plot_style import PAPER_PANEL_MIN_SHARE, write_boot  # noqa: E402
-from generation._paper_figures import placed_copies, prefer_paper_figures, recorded_panel_share  # noqa: E402
+from generation._paper_figures import copy_is_unusable, placed_copies, prefer_paper_figures, recorded_panel_state  # noqa: E402
 from generation._pdf_measure import Document, Line, Page, paper_report, squeezed_copy_findings  # noqa: E402
 
 # A figure of the pattern that collapsed: three panels, a legend outside the last, long labels and a text running past
@@ -95,38 +95,100 @@ def _doc(captions: dict[int, int]) -> Document:
     return Document(pages)
 
 
-def _paper_with(root: Path, shares: dict[str, float | None]) -> None:
+def _paper_with(root: Path, records: dict[str, dict | None], source: str | None = None) -> None:
+    """Figures with a copy and a record each: ``records[stem]`` is the "paper" part of the record (None: no record)."""
     (root / ".fi" / "figure_records").mkdir(parents=True)
     (root / "figures" / "paper").mkdir(parents=True)
-    source = ""
-    for stem, share in shares.items():
+    text = ""
+    for stem, paper in records.items():
         (root / "figures" / f"{stem}.png").write_bytes(b"png")
         (root / "figures" / "paper" / f"{stem}.pdf").write_bytes(b"%PDF-1.4\n/MediaBox [0 0 453.6 144]\n")
-        paper = {"drawn_in": [12.0, 3.8], "width_in": 6.3, "height_in": 1.9}
-        if share is not None:
-            paper["panel_share"] = share
-        (root / ".fi" / "figure_records" / f"{stem}.json").write_text(
-            json.dumps({"file": f"{stem}.png", "axes": [], "paper": paper}), encoding="utf-8")
-        source += f"![Cap.](figures/paper/{stem}.pdf){{width=100% height=33%}}\n\n"
-    (root / "paper_pdf_source.md").write_text(source, encoding="utf-8")
+        if paper is not None:
+            (root / ".fi" / "figure_records" / f"{stem}.json").write_text(
+                json.dumps({"file": f"{stem}.png", "axes": [], "paper": paper}), encoding="utf-8")
+        text += f"![Cap.](figures/paper/{stem}.pdf){{width=100% height=33%}}\n\n"
+    (root / "paper_pdf_source.md").write_text(text if source is None else source, encoding="utf-8")
+
+
+OK = {"panel_measure": "ok"}
 
 
 def test_of_two_figures_of_the_same_shape_the_one_squeezed_is_the_one_flagged(tmp_path: Path) -> None:
-    _paper_with(tmp_path, {"fig_a": 1.0, "fig_b": 0.01})
+    _paper_with(tmp_path, {"fig_a": {**OK, "panel_share": 1.0}, "fig_b": {**OK, "panel_share": 0.01}})
     copies = placed_copies(tmp_path)
-    assert copies == [(1, "fig_a", 1.0), (2, "fig_b", 0.01)]
+    assert copies == [(1, "fig_a", "ok", 1.0), (2, "fig_b", "ok", 0.01)]
     found = squeezed_copy_findings(_doc({1: 1, 2: 2}), copies)
-    assert [(f["figure"], f["page"]) for f in found] == [("fig_b", 2)]
+    assert [(f["check"], f["figure"], f["page"]) for f in found] == [("figure_squeezed", "fig_b", 2)]
     report = paper_report(_doc({1: 1, 2: 2}), placed_copies=copies)
     assert [f["figure"] for f in report["findings"] if f["check"] == "figure_squeezed"] == ["fig_b"]
-    # No record of a share (a figure from before it was measured) is not a finding.
-    assert squeezed_copy_findings(_doc({1: 1}), [(1, "fig_a", None)]) == []
 
 
-def test_a_copy_recorded_as_squeezed_is_not_used_and_a_sound_or_unrecorded_one_is(tmp_path: Path) -> None:
-    _paper_with(tmp_path, {"fig_a": 1.0, "fig_b": 0.01, "fig_c": None})
-    md = "".join(f"![Cap.](figures/{s}.png)\n" for s in ("fig_a", "fig_b", "fig_c"))
-    assert recorded_panel_share(tmp_path, "fig_b") == 0.01 and recorded_panel_share(tmp_path, "fig_c") is None
+def test_a_copy_whose_panels_could_not_be_measured_is_not_used_and_is_reported(tmp_path: Path) -> None:
+    records = {
+        "fig_a": {**OK, "panel_share": 1.0},
+        "fig_b": {**OK, "panel_share": 0.01},
+        "fig_c": {"panel_measure": "failed", "panel_share": None},
+        "fig_d": {"panel_measure": "failed", "panel_share": 0.9},  # measured in part: still not trusted
+        "fig_e": {"panel_share": None},  # made before a measurement was recorded: used as before
+        "fig_f": None,  # no record at all: used as before
+        "fig_g": {**OK, "panel_share": None},  # nothing with a size to measure: nothing squeezed
+    }
+    _paper_with(tmp_path, records)
+    states = {s: recorded_panel_state(tmp_path, s)[0] for s in records}
+    assert states == {"fig_a": "ok", "fig_b": "ok", "fig_c": "failed", "fig_d": "failed", "fig_e": "old",
+                      "fig_f": "old", "fig_g": "ok"}
+    md = "".join(f"![Cap.](figures/{s}.png)\n" for s in records)
     out, n = prefer_paper_figures(md, tmp_path)
-    assert n == 2
-    assert "](figures/paper/fig_a.pdf)" in out and "](figures/fig_b.png)" in out and "](figures/paper/fig_c.pdf)" in out
+    used = {s for s in records if f"](figures/paper/{s}.pdf)" in out}
+    assert used == {"fig_a", "fig_e", "fig_f", "fig_g"} and n == 4
+    assert [copy_is_unusable(tmp_path, s) for s in ("fig_b", "fig_c", "fig_a")] == [True, True, False]
+    found = squeezed_copy_findings(_doc({3: 1}), [(3, "fig_c", "failed", None)])
+    assert [f["check"] for f in found] == ["figure_not_measured"]
+
+
+def test_figure_numbers_skip_fenced_code_as_the_caption_numbering_does(tmp_path: Path) -> None:
+    source = (
+        "![Cap.](figures/paper/fig_a.pdf){width=100% height=33%}\n\n"
+        "```\n![Not a figure.](figures/paper/fig_a.pdf)\n```\n\n"
+        "Text with an inline ![icon](x.png) image.\n\n"
+        "![Cap.](figures/paper/fig_b.pdf){width=100% height=33%}\n"
+    )
+    _paper_with(tmp_path, {"fig_a": {**OK, "panel_share": 1.0}, "fig_b": {**OK, "panel_share": 0.01}}, source)
+    assert [(n, stem) for n, stem, _s, _sh in placed_copies(tmp_path)] == [(1, "fig_a"), (2, "fig_b")]
+
+
+BOOM = r'''
+import sys
+from matplotlib.axes import Axes
+_orig = Axes.get_window_extent
+_seen = set()
+def _boom(self, *a, **k):
+    frame = sys._getframe(1).f_code
+    if "sitecustomize" in frame.co_filename:
+        if MODE == "drawn" and id(self.figure) not in _seen:  # the first measurement of each figure, on the drawn one
+            _seen.add(id(self.figure))
+            raise RuntimeError("cannot measure")
+        if MODE == "copy" and frame.co_name == "_fi_paper_attempt":  # the measurement on the copy
+            raise RuntimeError("cannot measure")
+    return _orig(self, *a, **k)
+Axes.get_window_extent = _boom
+'''
+
+
+@pytest.mark.parametrize("mode", ["drawn", "copy"])
+def test_a_copy_whose_axes_could_not_be_measured_is_recorded_so_and_not_used(tmp_path: Path, mode: str) -> None:
+    boot = write_boot(tmp_path / "fi")
+    (tmp_path / "figures").mkdir()
+    (tmp_path / "rec").mkdir()
+    script = tmp_path / "make.py"
+    script.write_text(f"MODE = {mode!r}\n" + BOOM + SCRIPT, encoding="utf-8")
+    env = {**os.environ, "PYTHONPATH": str(boot), "FI_FIGURE_RECORDS": str(tmp_path / "rec"), "VARIANT": ""}
+    done = subprocess.run([sys.executable, str(script)], cwd=tmp_path, env=env, capture_output=True, text=True,
+                          timeout=300)
+    assert done.returncode == 0, done.stderr[-800:]
+    record = json.loads((tmp_path / "rec" / "fig1_x.json").read_text(encoding="utf-8"))
+    (tmp_path / ".fi").mkdir()
+    (tmp_path / ".fi" / "figure_records").mkdir()
+    (tmp_path / ".fi" / "figure_records" / "fig1_x.json").write_text(json.dumps(record), encoding="utf-8")
+    assert record["paper"]["panel_measure"] == "failed", record["paper"]
+    assert copy_is_unusable(tmp_path, "fig1_x"), "the paper sets the figure from its PNG"

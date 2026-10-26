@@ -1367,32 +1367,40 @@ def _producer_is_fallback_findings(doc: Document, expect_latex: bool) -> list[di
 # Paper
 
 
-def squeezed_copy_findings(doc: Document, placed: Sequence[tuple[int, str, float | None]]) -> list[dict]:
+def squeezed_copy_findings(doc: Document, placed: Sequence[tuple[int, str, str, float | None]]) -> list[dict]:
     """A finding for each figure paper.pdf sets from a paper copy whose smallest panel FI recorded as under
-    ``PAPER_PANEL_MIN_SHARE`` of its drawn size. ``placed`` is what FI itself wrote into the paper's source: for each
-    figure ``(its number in the paper, the copy's name, the share the copy was recorded with)``; the page is the one
-    whose caption starts with that figure's number (the first page when none does). No shape or colour on the page
-    is used to find the figure."""
+    ``PAPER_PANEL_MIN_SHARE`` of its drawn size (``figure_squeezed``), or whose panels it could not measure
+    (``figure_not_measured``). ``placed`` is what FI itself wrote into the paper's source: for each figure ``(its
+    number in the paper, the copy's name, the record's state, the share)``; the page is the one whose caption starts
+    with that number (the first page when none does). No shape or colour on the page is used to find the figure."""
     from core.plot_style import PAPER_PANEL_MIN_SHARE
 
     found = []
-    for number, name, share in placed:
-        if share is None or share >= PAPER_PANEL_MIN_SHARE:
+    for number, name, state, share in placed:
+        squeezed = state == "ok" and share is not None and share < PAPER_PANEL_MIN_SHARE
+        if not squeezed and state != "failed":
             continue
         caption = re.compile(rf"^(Figure|Fig\.?)\s*{number}\b", re.IGNORECASE)
         page = next((p.number for p in doc.pages if any(caption.match(line.text) for line in p.lines)), 1)
-        found.append(_finding(
-            "figure_squeezed", page, "figure",
-            f"Figure {number} ({name}) is set from a copy whose panels were squeezed: the smallest kept {share:.0%} "
-            f"of the size it was drawn at, under the {PAPER_PANEL_MIN_SHARE:.0%} a figure keeps.",
-            "high", figure=name, panel_share=round(share, 3),
-        ))
+        if squeezed:
+            found.append(_finding(
+                "figure_squeezed", page, "figure",
+                f"Figure {number} ({name}) is set from a copy whose panels were squeezed: the smallest kept "
+                f"{share:.0%} of the size it was drawn at, under the {PAPER_PANEL_MIN_SHARE:.0%} a figure keeps.",
+                "high", figure=name, panel_share=round(share, 3),
+            ))
+        else:
+            found.append(_finding(
+                "figure_not_measured", page, "figure",
+                f"Figure {number} ({name}) is set from a copy whose panels could not be measured.",
+                "medium", figure=name,
+            ))
     return found
 
 
 def paper_report(
     doc: Document, *, page_limit: int | None = None, expect_latex: bool = True,
-    placed_copies: Sequence[tuple[int, str, float | None]] = (),
+    placed_copies: Sequence[tuple[int, str, str, float | None]] = (),
 ) -> dict:
     """Text or figures wider than the text block (an overfull table or a
     figure LaTeX could not fit), content off the page, and text too small.

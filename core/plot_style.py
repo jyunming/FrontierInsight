@@ -1521,6 +1521,7 @@ _PAPER_SOURCE = '''\
             info = {"file": p["dirname"] + "/" + stem + ".pdf", "png": p["dirname"] + "/" + stem + ".png",
                     "drawn_in": [round(v, 3) for v in drawn], "width": rule}
             # The size of each panel's plotting area as the figure was drawn, in inches: what the copy is held to.
+            measure_failed = False
             try:
                 first = _fi_draw(fig)
                 # Every visible Axes, a twin, an inset and a colorbar's included: the copy is made from this very
@@ -1531,6 +1532,7 @@ _PAPER_SOURCE = '''\
             except Exception:
                 drawn_panels = None
                 measured_axes = []
+                measure_failed = True
             fig.set_layout_engine(mode)
             constrained = mode == "constrained"
             fig.set_size_inches(width, height)
@@ -1626,14 +1628,17 @@ _PAPER_SOURCE = '''\
             # How much of its drawn size each panel kept in the copy (both sizes taken from the drawn panels).
             panels_in, panel_share = [], None
             scale = width / drawn[0] if drawn[0] > 0 else 1.0
-            for ax in (measured_axes if drawn_panels else []):
-                box_now = ax.get_window_extent(renderer)
-                now = (box_now.width / fig.dpi, box_now.height / fig.dpi)
-                panels_in.append([round(now[0], 3), round(now[1], 3)])
-                before = drawn_panels[id(ax)]
-                if before[0] > 0 and before[1] > 0:
-                    share = min(now[0] / (before[0] * scale), now[1] / (before[1] * scale))
-                    panel_share = share if panel_share is None else min(panel_share, share)
+            try:
+                for ax in (measured_axes if drawn_panels else []):
+                    box_now = ax.get_window_extent(renderer)
+                    now = (box_now.width / fig.dpi, box_now.height / fig.dpi)
+                    panels_in.append([round(now[0], 3), round(now[1], 3)])
+                    before = drawn_panels[id(ax)]
+                    if before[0] > 0 and before[1] > 0:
+                        share = min(now[0] / (before[0] * scale), now[1] / (before[1] * scale))
+                        panel_share = share if panel_share is None else min(panel_share, share)
+            except Exception:
+                measure_failed = True
             if panel_share is not None and panel_share < p["panel_min_share"]:
                 raise ValueError("a panel is left %.0f%% of its drawn size, under the %.0f%% a copy keeps"
                                  % (100 * panel_share, 100 * p["panel_min_share"]))
@@ -1654,6 +1659,9 @@ _PAPER_SOURCE = '''\
                 "titles_dropped": dropped, "titles_kept": kept, "labels_wrapped": wrapped,
                 "legend_moved": moved, "layout": layout, "panels_in": panels_in,
                 "panel_share": None if panel_share is None else round(panel_share, 3),
+                # "ok" when every axes was measured; "failed" when a measurement was tried and not completed: the
+                # paper then does not use this copy.
+                "panel_measure": "failed" if measure_failed else "ok",
             })
             if rasterized:
                 info["rasterized"] = rasterized
