@@ -381,7 +381,7 @@ def study_of(code_dir: Path, protocol: dict[str, Any] | None, *, split: bool = T
     if not split or not simulate.is_file():
         return None
     entries = _trial_runner.entries(simulate)
-    entry = "run_trial" if "run_trial" in entries else "run_cell" if "run_cell" in entries else ""
+    entry = _trial_runner.study_entry(entries)
     if not entry:
         return None
     protocol = protocol or {}

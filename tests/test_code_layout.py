@@ -814,8 +814,8 @@ async def test_an_oracle_repair_that_makes_run_trial_return_run_cell_is_not_used
     engine, code, state = _engine_with_tool(tmp_path)
     engine._trial_mode = True
     before = (code / "simulate.py").read_text(encoding="utf-8")
-    bad = ("def run_trial(cell, trial_id, seed):\n    return run_cell(cell)\n\n"
-           "def run_cell(cell):\n    return {'error': 0.0}\n")
+    bad = ("import random\n\ndef run_trial(cell, trial_id, seed):\n    return run_cell(cell)\n\n"
+           "def run_cell(cell):\n    return {'error': random.random()}\n")
 
     async def aggregate(prompt, **kw):  # noqa: ANN001
         return json.dumps({"code": bad, "patch_summary": "the check reads a mean"})
@@ -883,8 +883,8 @@ async def test_a_repair_is_not_used_when_the_new_code_has_the_aggregate_even_if_
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     engine, code, state = _engine_with_tool(tmp_path)
     engine._trial_mode = True
-    bad = ("def run_trial(cell, trial_id, seed):\n    return run_cell(cell)\n\n"
-           "def run_cell(cell):\n    return {'error': 0.0}\n")
+    bad = ("import random\n\ndef run_trial(cell, trial_id, seed):\n    return run_cell(cell)\n\n"
+           "def run_cell(cell):\n    return {'error': random.random()}\n")
     (code / "simulate.py").write_text(bad, encoding="utf-8")
 
     async def aggregate(prompt, **kw):  # noqa: ANN001

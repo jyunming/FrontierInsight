@@ -13714,6 +13714,73 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         except Exception as e:  # noqa: BLE001 -- a check on top; never a stop
             self._log.info("[execute] whether the headline results use the tested functions could not be checked: %r", e)
 
+    def _first_study_cell(self, protocol: dict[str, Any]) -> tuple[dict[str, Any], dict[str, list[Any]] | None] | None:
+        """The plan's first setting for a call of the study's entry: a search's baseline design, else the middle of every
+        axis of the grid (core/small_run.py::settings), and the values each run compares inside it. ``None`` when the plan
+        gives none."""
+        from . import small_run as _small
+
+        try:
+            block = _optimise.block_of(protocol)
+            if block is not None:
+                normal, _why = _optim.normalize(block)
+                if normal is None:
+                    return None
+                cell = _optimise_search.cell_of(normal, (normal.get("baseline") or {}).get("values") or {})
+                return dict(cell), (_optimise_search.in_each_run(normal) or None)
+            grid = _optimise_search.study_grid(protocol) if isinstance(protocol.get("grid"), dict) else {}
+            cells = _small.settings(grid)
+            if not cells:
+                return None
+            inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else None
+            return dict(cells[0]), inside
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    async def _simulation_repair_fault(self, state: QuestState, new_code: str) -> str:
+        """After a repair of simulate.py is written to disk: why it cannot stay, or ``""``. Two facts, both from FI's own calls
+        of the code: a ``run_trial`` that its code shows reaching ``run_cell`` is kept when FI called it with two seeds on
+        the plan's first setting and the numbers were the same (one trial is the setting's number); and the function FI
+        calls for the study, called once on that setting within the small run's time, must return at least one of the
+        study's headline results (FI's record of the plan), or a repair that routes every setting to a check branch
+        leaves a study with no result."""
+        if not getattr(self, "_trial_mode", False):
+            return ""
+        # The same code (the script and the model's package) that was judged fine is not called again.
+        seen = hashlib.sha256((new_code + json.dumps(self._package_snapshot(), sort_keys=True)).encode("utf-8")).hexdigest()
+        if self.__dict__.get("_entry_judged_fine") == seen:
+            return ""
+        fault = await self._simulation_repair_fault_uncached(state, new_code)
+        if not fault:
+            self._entry_judged_fine = seen
+        return fault
+
+    async def _simulation_repair_fault_uncached(self, state: QuestState, new_code: str) -> str:
+        protocol = self._protocol_block(state)
+        first = self._first_study_cell(protocol) if isinstance(protocol, dict) else None
+        if first is None:
+            return "" if not _trial_runner.trial_aggregates(new_code) else _trial_runner.TRIAL_AGGREGATE_WHY
+        cell, inside = first
+        py = self.executor.python_path(self.quest_root)
+        env = dict(self.__dict__.get("_last_exec_env") or {})
+        from .small_run import budget as _small_run_budget
+
+        limit = _small_run_budget(self.config.execution.timeout_s)
+        module = f"code/{_split_run.SIMULATE_NAME}"
+        thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None
+        if _trial_runner.trial_aggregates(new_code, self.quest_root):
+            if not await self._await_with_heartbeat(
+                    _trial_runner.settle_aggregate(self.executor, py, self.quest_root, module, cell=cell, inside=inside,
+                                                   timeout_s=limit, env=env, thresholds=thresholds, log=self._log),
+                    label="calling the repaired trial function with two seeds"):
+                return _trial_runner.TRIAL_AGGREGATE_WHY
+        return await self._await_with_heartbeat(
+            _trial_runner.entry_returns_study(
+                self.executor, py, self.quest_root, module, cell=cell, inside=inside,
+                wanted=self._headline_result_names(state, protocol, dependent=False), timeout_s=limit, env=env,
+                thresholds=thresholds, log=self._log),
+            label="calling the repaired code on the plan's first setting")
+
     def _headline_result_names(self, state: QuestState, protocol: dict[str, Any] | None, *,
                                dependent: bool = True) -> set[str]:
         """The headline results: the protocol's headline metrics and (with ``dependent``) the design's dependent
@@ -17688,17 +17755,20 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._log.warning("[oracle] the repair of %s is not usable (%s); keeping it as written", path.name, broken)
             await self._keep_refused_repair("oracle", path.name, new_code, broken)
             return None, False, "not_usable"
-        if (path.name == _split_run.SIMULATE_NAME and getattr(self, "_trial_mode", False)
-                and _trial_runner.trial_aggregates(new_code)):
-            # run_trial is ONE trial: a repair that makes it return run_cell's number (the mean of many trials) made every
-            # trial of the study as long as a whole cell. A cell-level check is measured on run_cell, which FI calls for it.
-            self._log.warning("[oracle] the repair of %s is not used: %s; keeping it as written", path.name,
-                              _trial_runner.TRIAL_AGGREGATE_WHY)
-            await self._keep_refused_repair("oracle", path.name, new_code, _trial_runner.TRIAL_AGGREGATE_WHY)
-            return None, False, "not_usable"
+        package_before = self._package_snapshot() if path.name == _split_run.SIMULATE_NAME else {}
         path.write_text(new_code, encoding="utf-8")
         if path.name == _split_run.SIMULATE_NAME:
             self._apply_package_repair(state, parsed, node="oracle")
+            # run_trial is ONE trial, and the function FI calls for the study must still give the study's results: FI calls
+            # the repaired code (a run_trial that returns run_cell's mean of many trials made every trial as long as a whole
+            # cell; one that sends every setting to the check branch left the whole search with no objective).
+            fault = await self._simulation_repair_fault(state, new_code)
+            if fault:
+                path.write_text(code, encoding="utf-8")
+                self._restore_package(package_before)
+                self._log.warning("[oracle] the repair of %s is not used: %s; keeping it as written", path.name, fault)
+                await self._keep_refused_repair("oracle", path.name, new_code, fault)
+                return None, False, "not_usable"
         self._log.info(
             "[oracle] rewrote %s (%d bytes): %s", path.name, len(new_code),
             str(parsed.get("patch_summary") or "no summary")[:160],
@@ -19930,6 +20000,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         )
         code_path.parent.mkdir(parents=True, exist_ok=True)
         parent_sha = _attempts._file_sha(code_path)
+        package_before = self._package_snapshot() if repair_simulation else {}
         code_path.write_text(new_code, encoding="utf-8")
         package_fixed: dict[str, str] = {}
         if repair_simulation:
@@ -19937,6 +20008,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             package_fixed = {rel: _attempts._sha((code_dir / rel).read_bytes())
                              for rel in self._apply_package_repair(state, parsed, node="execute_reflect")
                              if (code_dir / rel).is_file()}
+            # The function FI calls for the study must still give the study's results (FI calls the repaired code once).
+            fault = await self._simulation_repair_fault(state, new_code)
+            if fault:
+                code_path.write_text(script_code, encoding="utf-8")
+                self._restore_package(package_before)
+                self._log.warning("[execute_reflect] the repair of %s is not used: %s; keeping it as written",
+                                  script_name, fault)
+                await self._keep_refused_repair("execute_reflect", script_name, new_code, fault)
+                history[-1]["patch_summary"] = (f"[the repair was not used and {script_name} is as it was: {fault}] "
+                                                + str(history[-1].get("patch_summary") or ""))[:400]
+                return {**spent, "exec_reflect_iter": iters + bump, "exec_reflect_history": history}
         self._last_ledger_id = self._record(_attempts.LEDGER, lambda: {
             "kind": "repair", "script": code_path.name, "attempt": iters + 1,
             "parent_sha256": parent_sha, "sha256": _attempts._sha(new_code.encode("utf-8")),

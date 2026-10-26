@@ -849,7 +849,8 @@ def _say_undefined(name: str, obs: list[tuple[dict[str, Any], dict[str, float]]]
 def pilot_problems(obs: list[tuple[dict[str, Any], dict[str, float]]], kinds: dict[str, str], *,
                    exempt: set[str] | frozenset[str] = frozenset(), tried_all: str = "",
                    unsure: set[str] | frozenset[str] = frozenset(), axes: set[str] | frozenset[str] = frozenset(),
-                   source: str | None = None, inside: Iterable[str] = (), stochastic: bool = False) -> Pilot:
+                   source: str | None = None, inside: Iterable[str] = (), stochastic: bool = False,
+                   quest_root: Path | str | None = None) -> Pilot:
     """What the pilot trials show. ``inside``: the names of what each run compares inside it (``protocol.in_each_run``), whose
     values are not settings. ``kinds``: the protocol's metrics (``{id: kind}``); only those the trials returned are read.
     ``tried_all``: a clause saying that every combination of the small settings was tried (when it was); ``unsure``: metrics
@@ -864,7 +865,7 @@ def pilot_problems(obs: list[tuple[dict[str, Any], dict[str, float]]], kinds: di
     from . import flat_output as _flat
 
     pilot = Pilot(trials=len(obs), settings=_setting_count(obs, inside))
-    if stochastic and source is not None and (why := _tr.trial_aggregates(source)):
+    if stochastic and source is not None and (why := _tr.trial_aggregates(source, quest_root)):
         pilot.problems.append(PilotProblem("", "aggregate", why))
     returned = sorted({n for _c, v in obs for n in v})
     pilot.checked = [n for n in kinds if n in returned]
@@ -1009,7 +1010,7 @@ async def pilot(
         else:
             unsure = set(suspects)
     return pilot_problems(obs, kinds, exempt=exempt, tried_all=tried_all, unsure=unsure, axes=axes, source=source,
-                          inside=tuple(in_each_run or ()), stochastic=not deterministic)
+                          inside=tuple(in_each_run or ()), stochastic=not deterministic, quest_root=quest_root)
 
 
 # ---- the record: so a resume neither times nor asks again -------------------------------------------------------------

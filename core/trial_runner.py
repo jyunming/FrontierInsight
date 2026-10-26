@@ -1010,7 +1010,7 @@ class _Module:
         return False
 
 
-def trial_aggregates(source: str) -> str:
+def trial_aggregates(source: str, quest_root: Path | str | None = None) -> str:
     """A plain sentence when ``run_trial`` in ``source`` (read, never run) is not one trial because it reaches ``run_cell``
     (it calls or names it, directly or through any number of the file's own functions and names, an alias such as
     ``_run = run_cell`` or ``run_trial = run_cell``, a table of functions, or an imported ``run_cell``), and ``""``
@@ -1020,11 +1020,138 @@ def trial_aggregates(source: str) -> str:
     ``run_trial`` once per trial and keeps each result, so a ``run_trial`` that returns ``run_cell``'s number makes every
     trial as long as a whole cell (the study would not fit its time) and every kept "trial" a mean of many (wrong
     statistics). The converse, a ``run_cell`` that calls ``run_trial``, is how a cell is built and is not flagged. Not
-    followed: a function looked up by a computed string (``globals()[name]``), ``getattr``, and code in other files."""
+    followed: a function looked up by a computed string (``globals()[name]``), ``getattr``, and code in other files.
+
+    The reading is only where the question starts: the harm is a setting's number that is a mean over trials, and a
+    setting whose number does not change with the trial (FI called this very entry on one setting with two seeds and the
+    numbers were the same, :func:`settle_aggregate`, kept in :data:`ONE_TRIAL_RECORD` for this text of the file) has
+    one trial for its number whatever the entry calls. With ``quest_root``, that measured fact is read first."""
     mod = _Module(source)
     if not mod.ok or "run_trial" not in mod.nodes:
         return ""
-    return TRIAL_AGGREGATE_WHY if mod.reaches("run_trial", "run_cell", calls_only=False) else ""
+    if not mod.reaches("run_trial", "run_cell", calls_only=False):
+        return ""
+    if quest_root is not None and one_trial_measured(quest_root, source):
+        return ""
+    return TRIAL_AGGREGATE_WHY
+
+
+ONE_TRIAL_RECORD = Path(".fi") / "trials" / "one_trial.json"
+
+
+def _source_sha(source: str) -> str:
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
+def one_trial_measured(quest_root: Path | str, source: str) -> bool:
+    """Whether FI measured, on this text of simulate.py, that its ``run_trial`` gives the same numbers whatever the trial
+    (:func:`settle_aggregate`)."""
+    try:
+        record = json.loads((Path(quest_root) / ONE_TRIAL_RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(record, dict) and record.get("sha256") == _source_sha(source) and record.get("same") is True
+
+
+async def settle_aggregate(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, cell: dict[str, Any],
+                           inside: dict[str, list[Any]] | None = None, timeout_s: int, env: dict[str, str] | None = None,
+                           thresholds: dict[str, Any] | None = None, log: Any = None) -> bool:
+    """Whether a ``run_trial`` that :func:`trial_aggregates` names by its code is harmless: FI calls it on ``cell`` with two
+    seeds, each call in a new process, and when every number that is not the call's own time is the same, the setting's
+    number does not depend on the trial (a study without randomness, whose ``run_cell`` is its one trial). The answer is
+    kept for this text of the file (:data:`ONE_TRIAL_RECORD`). ``False`` also when the calls could not be made."""
+    path = Path(module) if Path(module).is_absolute() else Path(quest_root) / module
+    module = _relative_module(quest_root, path)
+    try:
+        source = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    if one_trial_measured(quest_root, source):
+        return True
+    inside = {str(k): list(v) for k, v in (inside or {}).items()}
+    levels = _in_run.level_cells(inside) if inside else None
+    given = {**cell, **inside}
+    base = int((env or {}).get("FI_REPLICATE_SEED") or 0)
+    key = cell_key(cell)
+    got: list[tuple[dict[str, float], float]] = []
+    for step in (0, 1):
+        rows, _result = await _run_batch(executor, python, Path(quest_root), module, entry="run_trial", cell=dict(given),
+                                         trials=[{"trial": 0, "seed": trial_seed(base, key, step)}], timeout_s=timeout_s,
+                                         env=env, thresholds=thresholds, levels=levels, log=log)
+        row = next((r for r in rows if r.get("status") == "ok"), None)
+        if row is None:
+            return False
+        seconds = row.get("duration_s")
+        got.append(({_in_run.record_key(k, n) if k else n: v for k, n, v in _in_run.flat("", row.get("values") or {})},
+                    float(seconds) if isinstance(seconds, (int, float)) else 0.0))
+    (a, sa), (b, sb) = got
+    moved = [n for n in set(a) | set(b) if n not in a or n not in b or not _same_value(a[n], b[n])]
+    same = bool(a) and all(n in a and n in b and _is_run_time((a[n], sa), (b[n], sb)) for n in moved)
+    try:
+        record = Path(quest_root) / ONE_TRIAL_RECORD
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_text(json.dumps({"sha256": _source_sha(source), "same": same, "differing": sorted(moved)[:6]}),
+                          encoding="utf-8")
+    except OSError:
+        pass
+    return same
+
+
+def _relative_module(quest_root: Path | str, path: Path) -> str:
+    """The module as the harness is given it: relative to the quest folder when it lies in it."""
+    try:
+        return path.resolve().relative_to(Path(quest_root).resolve()).as_posix()
+    except ValueError:
+        return str(path).replace(chr(92), "/")
+
+
+def study_entry(have: Collection[str]) -> str:
+    """The function FI calls for the study (and a search): ``run_trial`` when the simulation defines it, else
+    ``run_cell``, else ``""``. One rule for every caller."""
+    return "run_trial" if "run_trial" in have else "run_cell" if "run_cell" in have else ""
+
+
+def _name_key(name: Any) -> str:
+    return re.sub(r"[\s_\-]+", "", str(name or "").lower())
+
+
+def returned_names(values: dict[str, Any]) -> set[str]:
+    """Every name a call of the study entry returned, plain or under a value compared inside the run."""
+    out = {str(name) for _key, name, _v in _in_run.flat("", values or {})}
+    return out | {str(k) for k in (values or {})}
+
+
+async def entry_returns_study(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, cell: dict[str, Any],
+                              wanted: Collection[str], inside: dict[str, list[Any]] | None = None, timeout_s: int,
+                              env: dict[str, str] | None = None, thresholds: dict[str, Any] | None = None,
+                              log: Any = None) -> str:
+    """After a repair of the simulation: ``""`` when the function FI calls for the study (:func:`study_entry`) gives, on
+    ``cell`` (the plan's first setting, with every value each run compares), at least one of the names the study must
+    return (``wanted``: the headline results FI's own record of the plan names), else a plain sentence for the log. Called
+    once, within ``timeout_s``. ``""`` also when nothing is named to look for, or the call could not be made or ran out of
+    time (a crash or a timeout is judged by the runs that follow, never here)."""
+    wanted = {str(n) for n in wanted if str(n)}
+    path = Path(module) if Path(module).is_absolute() else Path(quest_root) / module
+    module = _relative_module(quest_root, path)
+    entry = study_entry(entries(path))
+    if not wanted or not entry:
+        return ""
+    inside = {str(k): list(v) for k, v in (inside or {}).items()}
+    levels = _in_run.level_cells(inside) if inside else None
+    base = int((env or {}).get("FI_REPLICATE_SEED") or 0)
+    seed = trial_seed(base, cell_key(cell), 0) if entry == "run_trial" else None
+    values, _why = await _run_one(executor, python, Path(quest_root), module, entry=entry, cell={**cell, **inside}, seed=seed,
+                                  timeout_s=timeout_s, env=env, thresholds=thresholds, label=f"{entry}()", levels=levels,
+                                  log=log)
+    if values is None:
+        return ""
+    got = returned_names(values)
+    # The plan's headline ids are kept lower case without spaces, dashes or underscores (core/criteria.py::_key): both sides
+    # are compared as the headline check compares them.
+    if {_name_key(n) for n in got} & {_name_key(n) for n in wanted}:
+        return ""
+    return (f"the repaired code no longer returns the study's results: {entry}() on the plan's first setting returned "
+            f"{', '.join(sorted(got)[:8]) or 'nothing'}, none of {', '.join(sorted(wanted)[:6])}")
 
 
 def cell_runs_trials(source: str) -> bool:

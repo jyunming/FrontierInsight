@@ -674,7 +674,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
         return SearchRun(record={}, rows=[], problems=[why])
     simulate = quest_root / module
     have = _trials.entries(simulate)
-    entry = "run_trial" if "run_trial" in have else "run_cell" if "run_cell" in have else ""
+    entry = _trials.study_entry(have)
     thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None
     if not entry:
         why = (f"{Path(module).name} defines neither run_cell(cell) nor run_trial(cell, trial_id, seed): FI calls one of "

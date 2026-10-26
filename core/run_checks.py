@@ -759,8 +759,16 @@ class RunChecksMixin:
         # A run_trial that returns the mean of many trials (it calls run_cell) is a fault of the code, not of the plan's size:
         # it goes back to the code step, never to the plan to shrink the grid (which dropped settings the topic required).
         if isinstance(runner, _trial_runner.TrialsRunner):
+            from .small_run import budget as _small_run_budget
+
             try:
-                aggregate = _trial_runner.trial_aggregates(runner.simulate.read_text(encoding="utf-8"))
+                text = runner.simulate.read_text(encoding="utf-8")
+                aggregate = _trial_runner.trial_aggregates(text, self.quest_root)  # type: ignore[attr-defined]
+                first = self._first_study_cell(self._protocol_block(state) or {}) if aggregate else None  # type: ignore[attr-defined]
+                if aggregate and first is not None and await _trial_runner.settle_aggregate(
+                        self.executor, python, self.quest_root, runner.simulate, cell=first[0], inside=first[1],  # type: ignore[attr-defined]
+                        timeout_s=_small_run_budget(self.config.execution.timeout_s), env=env, log=self._log):  # type: ignore[attr-defined]
+                    aggregate = ""  # FI called it with two seeds: the setting's number does not depend on the trial
             except (OSError, ValueError):
                 aggregate = ""
             if aggregate:
@@ -1634,7 +1642,14 @@ class RunChecksMixin:
         if not ctx:
             return ""
         record = await self._small_run(*ctx)
-        return str(record.get("says") or "it failed") if record and record.get("crashed") else ""
+        if record and record.get("crashed"):
+            return str(record.get("says") or "it failed")
+        # The repaired code must also still give the study's results from the function FI calls for the study.
+        simulate = self.quest_root / "code" / _split_run.SIMULATE_NAME  # type: ignore[attr-defined]
+        try:
+            return await self._simulation_repair_fault(ctx[0], simulate.read_text(encoding="utf-8")) if simulate.is_file() else ""  # type: ignore[attr-defined]
+        except OSError:
+            return ""
 
     async def _review_crash_run(self, state: Any) -> dict[str, Any] | None:
         """A test written for a reader's finding that crashed inside the code (not in the test) showed a crash, not the

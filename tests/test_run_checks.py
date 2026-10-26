@@ -525,11 +525,14 @@ async def test_the_heartbeat_puts_that_line_into_the_log(tmp_path: Path) -> None
 
 
 AGGREGATING_SIM = '''\
+import random
+
 def run_trial(cell, trial, seed):
     return run_cell(cell)
 
 def run_cell(cell):
-    return {"y": sum(float(cell["n"]) * i for i in range(1000)) / 1000}
+    # a mean over many random draws: the numbers change from one call to the next
+    return {"y": sum(float(cell["n"]) * random.random() for _ in range(1000)) / 1000}
 '''
 
 
@@ -540,7 +543,8 @@ async def test_a_run_trial_that_is_a_cell_aggregate_goes_back_to_the_code_not_to
     patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
     assert patch is not None and patch["exec_result"]["failed_script"] == "simulate.py"
     assert "run_trial must run ONE trial" in patch["exec_result"]["stderr_tail"]
-    assert model.asked == [] and ex.calls == 0, "the plan is not asked to shrink the grid and nothing is timed"
+    # the plan is not asked to shrink the grid and no setting is timed; FI called the code twice, with two seeds, to settle it
+    assert model.asked == [] and ex.calls == 2
     assert "too_long" not in patch["exec_result"]
     assert "run_trial must run ONE trial" in _log(eng)
 

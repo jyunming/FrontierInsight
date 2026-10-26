@@ -69,7 +69,7 @@ def test_the_gate_sends_a_crash_to_repair_and_reads_back_an_unchanged_run(tmp_pa
     eng = _engine(root)
     eng.executor = _Counting(python_version="3.11")  # type: ignore[assignment]
     eng._trial_mode, eng._trial_entries = True, {"run_trial"}  # type: ignore[attr-defined]
-    eng._protocol_block = lambda state: {"grid": GRID, "metrics": [{"id": "x", "paired": True}]}  # type: ignore[assignment]
+    eng._protocol_block = lambda state: {"grid": GRID, "metrics": [{"id": "weighted_Ea_hat", "paired": True}]}  # type: ignore[assignment]
     state: dict[str, Any] = {"exec_reflect_iter": 0}
     sent = asyncio.run(eng._small_run_gate(state, sys.executable, {}))
     assert sent is not None and sent["exec_result"]["failed_script"] == "simulate.py"
