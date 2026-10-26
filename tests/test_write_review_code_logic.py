@@ -82,9 +82,9 @@ def test_the_whole_plan_is_shown_with_what_it_holds_fixed_and_is_never_cut_mid_t
     assert data["held_fixed"]["fixed_values_of_the_settings"] == {"stiffness": 40.0}
     assert data["in_each_run"] == {"loads": [1, 2, 3]} and data["grid"] == PROTOCOL["grid"]
     assert data["definitions"][0]["defined_as"] == "the peak over the width"
-    text, dropped = cr.plan_view_fit(DESIGN, {**protocol, "failure_policy": "x" * 3000, "seed_policy": "y" * 300}, limit=2500)
+    text, dropped = cr.plan_view_fit(DESIGN, {**protocol, "failure_policy": "x" * 3000, "seed_policy": "y" * 300}, limit=1200)
     assert dropped == ["failure_policy"] and "failure_policy" not in text.split("\n(these sections")[0]
-    assert "not shown: failure_policy" in text and json.loads(text.split("\n(these")[0])
+    assert "not shown: failure_policy" in text and json.loads(text.split("\n(")[0])
 
 
 def test_a_value_the_plan_shows_as_a_setting_is_not_replaced_in_what_the_reader_writes() -> None:
@@ -251,7 +251,7 @@ def test_a_plan_that_does_not_fit_is_split_by_whole_sections_and_no_request_is_o
                 "expected": 0, "tolerance": 1e-9} for i in range(100)]
     views = cr.plan_views(DESIGN, {**PROTOCOL, "oracles": oracles}, limit=20000)
     assert len(views) > 1 and all(len(v["text"]) <= 20000 for v in views)
-    got = sum(len(json.loads(v["text"].split("\n(these")[0]).get("checks", [])) for v in views)
+    got = sum(len(json.loads(v["text"].split("\n(")[0]).get("checks", [])) for v in views)
     assert got == 100, "every check is in some request"
     assert any("other requests of this reading" in v["text"] for v in views)
 
@@ -264,14 +264,14 @@ def test_the_note_of_what_a_request_leaves_out_is_one_entry_per_section_and_the_
     notes = [x for v in views for x in v["left_out"]]
     assert "equations: 400 items left out" in set(notes), notes[:3]
     assert len(set(notes)) < 10 and all(len(v["left_out"]) < 10 for v in views)
-    assert "spring" in json.dumps([json.loads(v["text"].split("\n(these")[0]) for v in views])
+    assert "spring" in json.dumps([json.loads(v["text"].split("\n(")[0]) for v in views])
 
 
 def _sections_of(views: list[dict[str, Any]]) -> dict[str, list[Any]]:
     """Every request's sections read back from its text: ``{section: [value in each request that holds it]}``."""
     out: dict[str, list[Any]] = {}
     for v in views:
-        for name, value in json.loads(v["text"].split("\n(these")[0]).items():
+        for name, value in json.loads(v["text"].split("\n(")[0]).items():
             out.setdefault(name, []).append(value)
     return out
 
@@ -318,3 +318,31 @@ def test_every_plan_part_reaches_a_request_and_requests_are_the_larger_of_code_a
     calls = cr.reading_calls(tmp_path, DESIGN, protocol, open_items=_long_audit())
     assert len(plans) > 1 and len(calls) == max(len(parts), len(plans))
     assert {c["plan"] for c in calls} == {p["text"] for p in plans}
+
+
+def test_a_section_that_fits_a_request_alone_is_never_left_out_and_no_text_is_over_the_cap() -> None:
+    cap = cr._MAX_PLAN_CHARS
+    protocol = {**PROTOCOL, "grid": {"a": ["x" * (cap - 2000)]}}
+    design = {**DESIGN, "method": "m" * 6000}
+    views = cr.plan_views(design, protocol)
+    assert all(v["left_out"] == [] for v in views), views[0]["left_out"]
+    assert "grid" in _sections_of(views) and "method" in _sections_of(views)
+    assert all(len(v["text"]) <= cap for v in views)
+    # a section that fits a request only with the shortest note is still shown
+    protocol = {**PROTOCOL, "grid": {"a": ["x" * (cap - 600)]}}
+    views = cr.plan_views(design, protocol)
+    assert "grid" in _sections_of(views) and all(len(v["text"]) <= cap for v in views)
+    # the cap holds for the composed text, whatever is left out, also when nothing fits
+    for limit in (40, 300):
+        small = cr.plan_views({**DESIGN, "method": "x" * 40}, PROTOCOL, limit=limit)
+        assert small and all(len(v["text"]) <= limit for v in small)
+
+
+def test_a_list_section_split_across_requests_says_the_other_items_are_elsewhere() -> None:
+    protocol = {**PROTOCOL, "definitions": [{"metric": f"m{i}", "defined_as": "d" * 1500, "source": "[1]"} for i in range(4)]}
+    views = cr.plan_views(DESIGN, protocol, limit=4000)
+    holding = [v for v in views if "definitions" in v["sections"]]
+    assert len(holding) > 1
+    for v in holding:
+        assert "the other items of these sections are in the plan given with the other requests" in v["text"]
+        assert "definitions" in v["text"].split("the other items of these sections")[1]

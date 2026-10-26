@@ -13268,7 +13268,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         shown_values = _code_review.reportable_values(design, plan_dict)  # taken out of what the reader writes
         # What each request is given, from FI's own record: the files and line ranges, the plan's sections, a line cut.
         record["files_read"] = sorted({f for c in calls for f in c["files"]})
-        record["code_parts"] = len(calls)
+        record["code_parts"] = 1 + max(c["code_index"] for c in calls)  # parts of the code, not requests
+        record["plan_parts"] = 1 + max(c["plan_index"] for c in calls)
         record["requests"] = [{"files": {f: r for f, r in c["shown"].items()}, "plan_sections": c["plan_sections"],
                                "chars": len(c["code"]) + len(c["plan"])} for c in calls]
         if any(c["left_out"] for c in calls):
@@ -13296,14 +13297,19 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # requirements, and the verdicts are merged from FI's own record (:func:`core.code_review.merge_parts`).
             # Per part: at most two requests, one, and one more for the requirements a reply left unanswered, or, when the
             # first answered every requirement but named no problem and said nothing it checked, for a review.
-            if int(record.get("reader_calls") or 0) + len(calls) > _code_review.MAX_READER_CALLS:
+            # A request is made for each part, and made once more if it fails: those 2 per part are reserved before the
+            # reading starts, so a reading is never admitted and then dropped for want of requests. The follow-up ask of a
+            # part (up to 2 more) is made only while the requests the later parts need stay reserved.
+            if int(record.get("reader_calls") or 0) + 2 * len(calls) > _code_review.MAX_READER_CALLS:
                 raise _code_review.BudgetSpent(f"the {_code_review.MAX_READER_CALLS} reader requests of a quest are "
-                                               f"used; this reading needs {len(calls)} more")
+                                               f"used; this reading needs {2 * len(calls)} more")
             for p_index, call in enumerate(calls, start=1):
-                sources = _code_review.part_note(p_index, len(calls)) + call["code"]
+                sources = _code_review.part_note(call["code_index"] + 1, record["code_parts"]) + call["code"]
                 p_verdicts = None
                 asked_again = False
                 for _ask in range(2):
+                    if _ask and int(record.get("reader_calls") or 0) + 2 + 2 * (len(calls) - p_index) > _code_review.MAX_READER_CALLS:
+                        break  # the follow-up ask would use what the parts still to come need
                     left = [r for r in reqs if r["id"] not in {v["id"] for v in p_verdicts or []}]
                     again = ""
                     if not left:

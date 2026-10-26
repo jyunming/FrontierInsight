@@ -477,19 +477,30 @@ def plan_views(design: dict[str, Any] | None, protocol: dict[str, Any] | None,
     sections = plan_sections(design, protocol, open_items)
     left_out: list[str] = []
 
-    def note_for(names: list[str], elsewhere: list[str]) -> str:
+    def note_for(shared: list[str], elsewhere: list[str], partial: list[str]) -> str:
         parts = []
         if left_out:
             parts.append(f"these sections of the plan are not shown: {', '.join(left_out)}")
         if elsewhere:
             parts.append(f"these sections are in the plan given with the other requests of this reading: {', '.join(elsewhere)}")
+        if partial:
+            parts.append(f"the other items of these sections are in the plan given with the other requests of this "
+                         f"reading: {', '.join(partial)}")
         return "\n(" + "; ".join(parts) + ")" if parts else ""
 
-    if len(_dump(sections, note_for([], []))) <= limit:
-        return [{"text": _dump(sections, note_for([], [])), "sections": list(sections), "left_out": left_out}]
-    room = max(limit // 2, limit - 2500)  # what the notes may take: one entry per section name, never one per item
-    pieces: list[tuple[str, Any]] = []
+    def fit(text: str) -> str:
+        return text if len(text) <= limit else text[:limit]  # only when the note alone is longer than a request
+
+    if len(_dump(sections, note_for([], [], []))) <= limit:
+        return [{"text": _dump(sections, note_for([], [], [])), "sections": list(sections), "left_out": left_out}]
+    # A piece is a section, or a run of items of a list section. It is left out only when it does not fit a request alone
+    # (a request holds the piece and the shortest note); the pieces are packed by a bound on the notes, then every request
+    # is composed with its real note and, when that is over the cap, the piece goes into a request of its own.
+    least = len(note_for([], [], []))
     omitted: dict[str, int] = {}  # items too long for a request alone, counted once per section
+    alone = limit - least
+    room = max(limit // 2, limit - 2500)
+    pieces: list[tuple[str, Any]] = []
     for name, value in sections.items():
         if len(_dump({name: value})) <= room:
             pieces.append((name, value))
@@ -499,28 +510,49 @@ def plan_views(design: dict[str, Any] | None, protocol: dict[str, Any] | None,
                 if len(_dump({name: [*chunk, item]})) > room and chunk:
                     pieces.append((name, chunk))
                     chunk = []
-                if len(_dump({name: [item]})) > room:
+                if len(_dump({name: [item]})) > alone:
                     omitted[name] = omitted.get(name, 0) + 1
                     continue
                 chunk.append(item)
             if chunk:
                 pieces.append((name, chunk))
+        elif len(_dump({name: value})) <= alone:
+            pieces.append((name, value))
         else:
             left_out.append(name)
     left_out.extend(f"{n}: {k} item{'s' if k != 1 else ''} left out" for n, k in omitted.items())
-    groups: list[dict[str, Any]] = []
-    for name, value in pieces:
-        for g in groups:
-            if len(_dump({**g, name: value})) <= room and name not in g:
-                g[name] = value
-                break
-        else:
-            groups.append({name: value})
+    solo: set[int] = set()  # pieces that go into a request of their own
+    ids = list(range(len(pieces)))
+    while True:
+        groups: list[dict[str, Any]] = []
+        members: list[list[int]] = []
+        for i in ids:
+            name, value = pieces[i]
+            for g, m in zip(groups, members):
+                if i not in solo and not (m[0] in solo) and name not in g and len(_dump({**g, name: value})) <= room:
+                    g[name] = value
+                    m.append(i)
+                    break
+            else:
+                groups.append({name: value})
+                members.append([i])
+        every = list(dict.fromkeys(n for g in groups for n in g))
+        split = {n for n in every if sum(1 for g in groups if n in g) > 1}
+        texts = [_dump(g, note_for(list(g), [n for n in every if n not in g], sorted(n for n in g if n in split)))
+                 for g in groups]
+        over = next((k for k, t in enumerate(texts) if len(t) > limit), None)
+        if over is None:
+            break
+        if len(members[over]) > 1:  # too long with its real note: the biggest piece goes alone
+            solo.add(max(members[over], key=lambda i: len(_dump({pieces[i][0]: pieces[i][1]}))))
+            continue
+        name, value = pieces[members[over][0]]  # does not fit even alone with its note: left out
+        ids.remove(members[over][0])
+        left_out.append(f"{name}: {len(value)} item{'s' if len(value) != 1 else ''} left out"
+                        if isinstance(value, list) else name)
     if not groups:  # nothing fits: the request says so and holds no section
-        return [{"text": _dump({}, note_for([], [])), "sections": [], "left_out": left_out}]
-    every = [n for g in groups for n in g]
-    return [{"text": _dump(g, note_for(list(g), [n for n in dict.fromkeys(every) if n not in g])),
-             "sections": list(g), "left_out": left_out} for g in groups]
+        return [{"text": fit(_dump({}, note_for([], [], []))), "sections": [], "left_out": left_out}]
+    return [{"text": t, "sections": list(g), "left_out": left_out} for t, g in zip(texts, groups)]
 
 
 def plan_view_fit(design: dict[str, Any] | None, protocol: dict[str, Any] | None,
@@ -556,15 +588,15 @@ class BudgetSpent(Exception):
 def reading_calls(code_dir: Path, design: dict[str, Any] | None, protocol: dict[str, Any] | None,
                   open_items: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """The requests of one reading, from FI's own record of what each is given: ``[{"code", "shown", "cut", "plan",
-    "plan_sections", "left_out", "files"}]``. The code parts and the plan's parts go together (a request gets part ``i`` of
+    "plan_sections", "left_out", "files", "code_index", "plan_index"}]``. The code parts and the plan's parts go together (a request gets part ``i`` of
     each, the shorter list repeating), so every part of both is in some request."""
     parts = source_parts_detail(code_dir) or [{"text": "", "shown": {}, "cut": []}]
     plans = plan_views(design, protocol, open_items=open_items)
     out = []
     for i in range(max(len(parts), len(plans))):
         part, plan = parts[i % len(parts)], plans[i % len(plans)]
-        out.append({"code": part["text"], "shown": part["shown"], "cut": part["cut"], "plan": plan["text"],
-                    "plan_sections": plan["sections"], "left_out": plan["left_out"], "files": sorted(part["shown"])})
+        out.append({"code_index": i % len(parts), "plan_index": i % len(plans), **{"code": part["text"], "shown": part["shown"], "cut": part["cut"], "plan": plan["text"],
+                    "plan_sections": plan["sections"], "left_out": plan["left_out"], "files": sorted(part["shown"])}})
     return out
 
 
