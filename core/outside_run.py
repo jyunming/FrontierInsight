@@ -510,6 +510,31 @@ def copy_code(code_dir: Path, dest: Path) -> None:
         Path(dest).mkdir(parents=True, exist_ok=True)
 
 
+@contextlib.contextmanager
+def observation_copy(quest_root: Path | str, base: Path | str | None = None):
+    """A throwaway copy of the quest to run a measurement in, so that measuring leaves nothing in the quest: the copy
+    holds ``code/`` (:func:`copy_code`), ``inputs/`` and ``data/`` without ``data/results/`` (:data:`CELL_INPUTS`,
+    :data:`CELL_SKIP`) and an empty ``.fi/``; what the runs write in it (their files, the shared cache of the settings, the
+    harness's own records) is deleted with it. The quest's cache is not copied: a value worked out by the code as it was
+    before is never read by the code being measured. Yields the copy's root."""
+    scratch = new_scratch(base)
+    root = scratch / "quest"
+    try:
+        root.mkdir()
+        quest = Path(quest_root)
+        copy_code(quest / CODE, root / CODE)
+        for name in CELL_INPUTS:
+            src = quest / name
+            if src.is_dir():
+                skip = {Path(p).name for p in CELL_SKIP if Path(p).parent.as_posix() == name}
+                shutil.copytree(src, root / name, ignore=lambda folder, names, src=src, skip=skip: (
+                    skip & set(names) if Path(folder) == src else set()))
+        (root / ".fi").mkdir()
+        yield root
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
 def _sig(path: Path) -> Any:
     st = path.stat()
     if st.st_size <= _SMALL:

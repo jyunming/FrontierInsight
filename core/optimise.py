@@ -508,18 +508,20 @@ async def design_response(
         return None
     quantity = str(block["objective"]["quantity"])
     replies: list[dict[str, Any]] = []
-    for number, design in enumerate((dict(base), other)):
-        answer, _stderr, load_error = await _evaluate(
-            executor, python, quest_root, module, entry, _search.cell_of(block, design), runs=1, base_seed=0,
-            timeout_s=timeout_s, env=env, thresholds=thresholds, name=f"design_response{number}",
-            in_each_run=_search.in_each_run(block) or None)
-        got = answer.get("values") if isinstance(answer, dict) else None
-        if load_error or not isinstance(got, dict) or quantity not in got:
-            if log is not None:
-                log.info("[code_review] the study's entry was not measured on design %d of 2 (%s)", number + 1,
-                         load_error or "it did not return the objective")
-            return None
-        replies.append(got)
+    # In a throwaway copy of the quest: the harness's files, the study's own files and its shared cache stay out of the quest.
+    with _outside.observation_copy(quest_root) as work:
+        for number, design in enumerate((dict(base), other)):
+            answer, _stderr, load_error = await _evaluate(
+                executor, python, work, module, entry, _search.cell_of(block, design), runs=1, base_seed=0,
+                timeout_s=timeout_s, env=env, thresholds=thresholds, name=f"design_response{number}",
+                in_each_run=_search.in_each_run(block) or None)
+            got = answer.get("values") if isinstance(answer, dict) else None
+            if load_error or not isinstance(got, dict) or quantity not in got:
+                if log is not None:
+                    log.info("[code_review] the study's entry was not measured on design %d of 2 (%s)", number + 1,
+                             load_error or "it did not return the objective")
+                return None
+            replies.append(got)
     numbers = [{str(k): _numbers_of(v) for k, v in r.items()} for r in replies]
     return {"quantity": quantity,
             "values": [r[quantity] if isinstance(r.get(quantity), (int, float)) else None for r in replies],
@@ -527,11 +529,12 @@ async def design_response(
 
 
 def _numbers_of(value: Any) -> list[float]:
-    """The finite numbers a returned value holds (a number, or the numbers inside a list or a mapping, in order)."""
+    """The numbers a returned value holds (a number, or the numbers inside a list or a mapping, in order); a NaN or an
+    infinity is kept as it is, for the reader to see that the value is not a finite number."""
     if isinstance(value, bool):
         return []
     if isinstance(value, (int, float)):
-        return [float(value)] if math.isfinite(value) else []
+        return [float(value)]
     if isinstance(value, dict):
         return [x for k in sorted(value, key=str) for x in _numbers_of(value[k])]
     if isinstance(value, (list, tuple)):

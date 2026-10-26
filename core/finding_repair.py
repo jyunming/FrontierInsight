@@ -28,6 +28,7 @@ import ast
 import asyncio
 import copy
 import json
+import math
 import re
 import string
 import time
@@ -1188,11 +1189,12 @@ class Env:
     changed: list[str] = field(default_factory=list)
     baseline: dict[str, str] = field(default_factory=dict)
     baseline_static: dict[str, int] = field(default_factory=dict)
-    #: What :attr:`known_answers` and :attr:`design_response` gave on the code before the repair being tried (measured the
-    #: first time a repair is about to be tried, then kept from the last accepted repair).
+    #: What :attr:`known_answers` and :attr:`design_response` gave on the code immediately before the repair being tried:
+    #: measured when a repair is about to be written and the value is ``None``, and replaced by what the last accepted
+    #: repair was measured to give. When that measure was not available the value becomes ``None``, so the next repair is
+    #: compared with a fresh measure of the code as it is, never with the code before the one accepted.
     baseline_answers: dict[str, dict[str, Any]] | None = None
     baseline_response: dict[str, Any] | None = None
-    baseline_measured: bool = False
     #: What the last :func:`_attempt` measured, for the record of the try (seconds, and the values compared).
     measured: dict[str, Any] = field(default_factory=dict)
     #: The files the last :func:`_attempt` took from the model's reply (path -> text; empty: it gave none), for
@@ -1440,32 +1442,48 @@ def _same_number(a: float, b: float) -> bool:
     return abs(float(a) - float(b)) <= 1e-9 * max(abs(float(a)), abs(float(b)))
 
 
-def _differ(numbers: Any) -> list[str]:
-    """The names of what the entry returned that is not the same on the two designs (a name only one design returned counts)."""
+def _compared(numbers: Any) -> dict[str, bool]:
+    """For each name the entry returned on both designs with finite numbers only: whether the two designs gave different
+    numbers. A name with a number that is not finite (NaN, an infinity) on either design, or returned on one design only, is
+    not here: it is undecided, never "the same" (two designs that both give NaN have not been shown to give one answer)."""
     if not isinstance(numbers, list) or len(numbers) != 2 or not all(isinstance(n, dict) for n in numbers):
-        return []
+        return {}
     first, second = numbers
-    out: list[str] = []
-    for name in sorted(set(first) | set(second)):
-        a, b = first.get(name), second.get(name)
-        if a is None or b is None or len(a) != len(b) or any(not _same_number(x, y) for x, y in zip(a, b)):
-            out.append(name)
+    out: dict[str, bool] = {}
+    for name in sorted(set(first) & set(second)):
+        a, b = first[name], second[name]
+        if any(not isinstance(x, (int, float)) or not math.isfinite(x) for x in (*a, *b)):
+            continue
+        out[name] = len(a) != len(b) or any(not _same_number(x, y) for x, y in zip(a, b))
     return out
 
 
+def _differ(numbers: Any) -> list[str]:
+    """The names (see :func:`_compared`) whose numbers differ between the two designs."""
+    return [n for n, differs in _compared(numbers).items() if differs]
+
+
+def _count(numbers: Any) -> str:
+    done = _compared(numbers)
+    undecided = len(numbers[0]) - len(done) if isinstance(numbers, list) and numbers and isinstance(numbers[0], dict) else 0
+    return f"{sum(done.values())} of {len(done)} compared" + (f" ({undecided} not decided: not a finite number)" if undecided else "")
+
+
 def design_blind(before: dict[str, Any] | None, after: dict[str, Any] | None) -> str:
-    """Why a repair is refused for what it did to a search for the best design, else ``""``: the study's entry returned
-    something different on the two designs before the repair and returns the same on both after it (the code no longer
-    depends on the design, so a search over it finds nothing). The test is on every number the entry returns, not on the
-    objective alone: an objective that is flat on most designs (zero outside a small region) says nothing of a design it
-    does not reach. Returning the same on both before is a property of the code, not of the repair: never a reason to refuse."""
+    """Why a repair is refused for what it did to a search for the best design, else ``""``: a number the study's entry
+    returned finite on both designs differed between them before the repair, and after it the entry returns at least one such
+    number and none of them differs (the code no longer depends on the design, so a search over it finds nothing). The test
+    is on every such number, not on the objective alone: an objective that is flat on most designs
+    (zero outside a small region) says nothing of a design it does not reach. A number that is not finite is not evidence
+    either way. The same on both before is a property of the code, not of the repair: never a reason to refuse."""
     if not before or not after:
         return ""
-    was, now = _differ(before.get("numbers")), _differ(after.get("numbers"))
-    if not was or now:
+    was, now = _compared(before.get("numbers")), _compared(after.get("numbers"))
+    shown = [n for n, differs in was.items() if differs]
+    if not shown or not now or any(now.values()):  # no difference before, nothing finite to compare after, or still different
         return ""
     a, b = before.get("values") or [], after.get("values") or []
-    return (f"after it the study's entry returns the same numbers on two different designs ({len(was)} of its values "
+    return (f"after it the study's entry returns the same numbers on two different designs ({len(shown)} of its values "
             f"differed between them before; the objective `{after.get('quantity')}` was {_shown(a[0] if a else None)} and "
             f"{_shown(a[1] if len(a) > 1 else None)}, and is {_shown(b[0] if b else None)} on both now): the repair made "
             "the study blind to the design")
@@ -1615,10 +1633,11 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
         for target, (before, _a) in edits.items():
             (env.code / target).write_text(before, encoding="utf-8")
 
-    if not env.baseline_measured:  # on the code as it is, before this repair is written
+    # on the code as it is, before this repair is written
+    if env.baseline_answers is None:
         env.baseline_answers = await _measure_behaviour(env, "known_answers")
+    if env.baseline_response is None:
         env.baseline_response = await _measure_behaviour(env, "design_response")
-        env.baseline_measured = True
     env.measured = {}
     answers: dict[str, dict[str, Any]] | None = None
     response: dict[str, Any] | None = None
@@ -1650,14 +1669,23 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
             if answers:
                 env.measured["known_answers"] = {n: [(env.baseline_answers or {}).get(n, {}).get("value"), a.get("value")]
                                                  for n, a in answers.items()}
+                undecided = sorted(n for n, a in answers.items() if a.get("undecided") and a.get("passed") is None
+                                   and (env.baseline_answers or {}).get(n, {}).get("passed") is True)
+                if undecided:  # not measured after the repair (cut off by the clock): neither held against it nor counted for it
+                    env.measured["not_decided"] = {n: str(answers[n].get("not_run") or "the trials could not decide it")[:160]
+                                                   for n in undecided}
+                    env.log.warning("[code_review] %s: known-answer check(s) %s could not be decided after this repair "
+                                    "(%s); they are not held against it", issue.get("id"), ", ".join(undecided),
+                                    "; ".join(env.measured["not_decided"].values()))
             if response:
                 env.measured["design_response"] = {
                     "objective_before": (env.baseline_response or {}).get("values"), "objective_after": response.get("values"),
-                    "values_that_differ_before": len(_differ((env.baseline_response or {}).get("numbers"))),
-                    "values_that_differ_after": len(_differ(response.get("numbers")))}
+                    "values_that_differ_before": _count((env.baseline_response or {}).get("numbers")),
+                    "values_that_differ_after": _count(response.get("numbers"))}
             env.log.info("[code_review] %s: the known-answer and design checks of this repair took %.0f s",
                          issue.get("id"), env.measured["seconds"])
-        if env.baseline_response and not _differ(env.baseline_response.get("numbers")):
+        if env.baseline_response and _compared(env.baseline_response.get("numbers")) and not _differ(
+                env.baseline_response.get("numbers")):
             env.log.info("[code_review] the study's entry returns the same numbers on two different designs in the code as it "
                          "is (a property of the code, not of this repair): a search over the design finds nothing")
         if lost:
@@ -1675,10 +1703,7 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
             env.on_accept(target, before, after_text, issue)
     env.baseline = {**after, f"finding:{test}": "pass"}
     env.baseline_static = env.static()
-    if answers is not None:
-        env.baseline_answers = answers
-    if response is not None:
-        env.baseline_response = response
+    env.baseline_answers, env.baseline_response = answers, response  # None: measured fresh before the next repair
     if test not in _accepted(env.record):
         _accepted(env.record).append(test)
     for target in edits:

@@ -2420,7 +2420,7 @@ async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, m
                           in_each_run: dict[str, list[Any]] | None = None, log: Any = None,
                           mean_names: Collection[str] | None = None, most_trials: int | None = None,
                           paired: bool = False, proportion_names: Collection[str] | None = None,
-                          repeated: bool | None = None,
+                          repeated: bool | None = None, unrun: dict[str, str] | None = None,
                           ) -> tuple[list[dict[str, Any]], list[str], bool]:
     """``(checks, problems, timed_out)`` for the declared oracles. An oracle with a case is measured by the ENGINE: it calls
     the simulation function on that case and reads the measure from what comes back (``measured_by: "engine"``). The rest
@@ -2432,7 +2432,9 @@ async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, m
     gave (``pass``, ``fail`` or ``undecided``). All of these checks share ``timeout_s`` (each is given what is left
     divided by the checks still to measure, so one that is decided quickly leaves its time to the others).
     ``mean_names``: the protocol's metrics that are means over runs (a mean check whose names are all among them is the
-    formula on their means). ``paired``: the study gives trial ``t`` of every setting one seed, and so do the checks."""
+    formula on their means). ``paired``: the study gives trial ``t`` of every setting one seed, and so do the checks.
+    ``unrun``: when given, it is filled with ``{check name: why}`` for each case the simulation could not be run on (the
+    reason is the run's own: a trial that did not report, "ran out of time", a load error)."""
     checks: list[dict[str, Any]] = []
     problems: list[str] = []
     timed_out = False
@@ -2488,6 +2490,8 @@ async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, m
                 if not_run:
                     problems.append(f"the oracle {name!r}: the simulation could not be run on its case "
                                     f"({clip_keeping_place(problem, 300)})")
+                    if unrun is not None:
+                        unrun[name] = str(problem)
                     timed_out = timed_out or "ran out of time" in problem
                 else:
                     if check is not None:
@@ -2500,6 +2504,8 @@ async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, m
         if values is None:
             problems.append(f"the oracle {name!r}: the simulation could not be run on its case "
                             f"({clip_keeping_place(why, 300)})")
+            if unrun is not None:
+                unrun[name] = str(why)
             timed_out = timed_out or "ran out of time" in why
             continue
         check, problem = _check_from(name, measure, values)

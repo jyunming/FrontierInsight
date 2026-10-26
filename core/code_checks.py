@@ -271,19 +271,32 @@ async def known_answer_values(quest_root: Path, protocol: dict[str, Any] | None,
     if _optimise.block_of(protocol) is not None:
         oracles = [{**o, "case": _optimise.complete_case(protocol, o["case"])} if isinstance(o.get("case"), dict) else o
                    for o in oracles]
-    raw_dir = _split_run.raw_root_of(quest_root) / "finding_replay"
-    raw_dir.mkdir(parents=True, exist_ok=True)
     run_env = {**env, "PYTHONDONTWRITEBYTECODE": "1"}
-    checks, _problems, _timed_out = await _trials.measure_oracles(
-        executor, python, quest_root, simulate.relative_to(quest_root).as_posix(), oracles, timeout_s=timeout_s,
-        env={**run_env, "FI_ORACLE": "1", _split_run.RAW_DIR_ENV: _split_run.env_value(raw_dir, quest_root)},
-        thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
-        case_env=dict(run_env), in_each_run=_in_run.of_study(protocol), mean_names=_mc_error.mean_names(protocol),
-        paired=_mc_error.paired(protocol, quest_root), proportion_names=_mc_error.proportion_names(protocol),
-        repeated=_mc_error.repeats_trials(protocol), log=log)
+    unrun: dict[str, str] = {}
+    paired = _mc_error.paired(protocol, quest_root)  # read from the quest's own records
+    # Measuring must leave nothing in the quest (raw files, the shared cache, files the code writes): the cases run in a
+    # throwaway copy of it, deleted after.
+    with _outside.observation_copy(quest_root) as work:
+        raw_dir = _split_run.raw_root_of(work) / "finding_replay"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        checks, _problems, _timed_out = await _trials.measure_oracles(
+            executor, python, work, simulate.relative_to(quest_root).as_posix(), oracles, timeout_s=timeout_s,
+            env={**run_env, "FI_ORACLE": "1", _split_run.RAW_DIR_ENV: _split_run.env_value(raw_dir, work)},
+            thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
+            case_env=dict(run_env), in_each_run=_in_run.of_study(protocol), mean_names=_mc_error.mean_names(protocol),
+            paired=paired, proportion_names=_mc_error.proportion_names(protocol),
+            repeated=_mc_error.repeats_trials(protocol), log=log, unrun=unrun)
     judged = _oracle.judged(oracles, {"checks": checks, "engine_measured": True})
-    return {str(j["name"]): {"passed": j["passed_by_engine"], "value": j["value"], "undecided": bool(j.get("undecided"))}
-            for j in judged}
+    out: dict[str, dict[str, Any]] = {}
+    for j in judged:
+        name = str(j["name"])
+        why = unrun.get(name)
+        # A case the clock cut off was not measured: nothing is learned from it either way (undecided), unlike one that
+        # ran and gave nothing or a failing answer.
+        out[name] = {"passed": j["passed_by_engine"], "value": j["value"],
+                     "undecided": bool(j.get("undecided")) or bool(why and "ran out of time" in why),
+                     **({"not_run": why[:300]} if why else {})}
+    return out
 
 
 async def _oracle_verdict(quest_root: Path, protocol: dict[str, Any] | None, *, executor: Any, python: Any,
