@@ -86,7 +86,7 @@ def _as_list(value: Any) -> list[str]:
 PROTOCOL_PARTS = (
     "optimisation", "grid", "sub_studies", "in_each_run", "runs_per_setting", "min_runs_per_setting", "numerical_axes",
     "thresholds", "constants", "metrics",
-    "oracles", "criteria", "precision", "seed_policy", "ci_method", "failure_policy", "acceptance", "topic_map", "model",
+    "oracles", "criteria", "precision", "seed_policy", "shared_draws", "ci_method", "failure_policy", "acceptance", "topic_map", "model",
 )
 
 
@@ -482,6 +482,8 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
     if thresholds is not None:
         if not isinstance(thresholds, dict) or not all(_number(v) for v in thresholds.values()):
             return None, "`protocol.thresholds` must map each name to a number"
+    if out.get("shared_draws") is not None and not isinstance(out["shared_draws"], bool):
+        return None, "`protocol.shared_draws` must be true or false"
     for key in ("seed_policy", "ci_method", "failure_policy"):
         if out.get(key) is not None and not isinstance(out[key], str):
             return None, f"`protocol.{key}` must be text"

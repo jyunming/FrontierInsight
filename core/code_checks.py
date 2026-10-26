@@ -171,7 +171,7 @@ async def _small_run_verdicts(quest_root: Path, protocol: dict[str, Any] | None,
         return [Verdict("small_run", None, why), Verdict("trial_checks", None, why)]
     grid = _optimise_search.study_grid(protocol) if isinstance(protocol.get("grid"), dict) else {}
     thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None
-    paired = _mc_error.paired(protocol)
+    paired = _mc_error.paired(protocol, quest_root)
     inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else None
     got = await _small.run(executor, python, quest_root, simulate.relative_to(quest_root).as_posix(), grid,
                            deterministic="run_trial" not in entries, timeout_s=_small.budget(timeout_s), env=dict(env),
@@ -280,7 +280,7 @@ async def _oracle_verdict(quest_root: Path, protocol: dict[str, Any] | None, *, 
             executor, python, quest_root, simulate.relative_to(quest_root).as_posix(), oracles, timeout_s=timeout_s,
             env={**base, "FI_ORACLE": "1", _split_run.RAW_DIR_ENV: _split_run.env_value(raw_dir, quest_root)},
             thresholds=thresholds, in_each_run=_in_run.of_study(protocol), mean_names=_mc_error.mean_names(protocol),
-            paired=_mc_error.paired(protocol), proportion_names=_mc_error.proportion_names(protocol),
+            paired=_mc_error.paired(protocol, quest_root), proportion_names=_mc_error.proportion_names(protocol),
             repeated=_mc_error.repeats_trials(protocol), log=log)
     except Exception as exc:  # noqa: BLE001 -- a run that cannot start is reported, not raised
         return Verdict("known_answers", None, _one(f"the known-answer checks could not be run ({exc!r})"))

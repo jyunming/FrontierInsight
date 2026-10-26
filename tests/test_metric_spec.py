@@ -223,7 +223,7 @@ def test_a_paired_mean_is_compared_pair_by_pair_and_an_unpaired_one_is_not() -> 
     base = [rng.gauss(0, 1) for _ in range(60)]
     shifted = [x + 0.3 + rng.gauss(0, 0.05) for x in base]  # the same random numbers plus a small consistent shift
     reps = _values_reps(shifted, base)
-    paired = ms.statistics(reps, {"metrics": [{"id": "m", "kind": "mean", "paired": True, **_ESTIMAND_UNIT}]})
+    paired = ms.statistics(reps, {"shared_draws": True, "metrics": [{"id": "m", "kind": "mean", "paired": True, **_ESTIMAND_UNIT}]})
     unpaired = ms.statistics(reps, {"metrics": [{"id": "m", "kind": "mean", "paired": False, **_ESTIMAND_UNIT}]})
     (cp,), (cu,) = paired["contrasts"], unpaired["contrasts"]
     assert cp["method"] == "paired_permutation_bootstrap" and cu["method"] == "bootstrap_permutation"
@@ -246,7 +246,7 @@ def test_a_paired_design_with_pair_ids_joins_by_id_even_when_the_order_differs()
             "b": {"m_values": [base[4], base[0], base[1], base[2], base[3]], "m_pair_id": [4, 0, 1, 2, 3]},
         },
     } for s in range(2)]
-    out = ms.statistics(reps, {"metrics": [{"id": "m", "kind": "mean", "paired": True, **_ESTIMAND_UNIT}]})
+    out = ms.statistics(reps, {"shared_draws": True, "metrics": [{"id": "m", "kind": "mean", "paired": True, **_ESTIMAND_UNIT}]})
     (c,) = out["contrasts"]
     assert c["paired_id_verified"] is True
     # `diff` (mean(a) - mean(b)) is invariant to how the two settings are matched up -- sum(a) - sum(b) does not
@@ -267,7 +267,7 @@ def test_a_paired_design_whose_pair_ids_disagree_between_settings_is_refused() -
             "b": {"m_values": [1.0, 2.0, 3.0], "m_pair_id": [0, 1, 99]},  # 99 names a trial "a" never reported
         },
     } for s in range(2)]
-    out = ms.statistics(reps, {"metrics": [{"id": "m", "kind": "mean", "paired": True, **_ESTIMAND_UNIT}]})
+    out = ms.statistics(reps, {"shared_draws": True, "metrics": [{"id": "m", "kind": "mean", "paired": True, **_ESTIMAND_UNIT}]})
     assert out["contrasts"] == []
     assert any("names different trials" in u["reason"] for u in out["unsupported"])
 
@@ -282,7 +282,7 @@ def test_a_pair_id_repeated_within_one_settings_own_seed_is_refused_not_silently
             "b": {"m_values": [1.0, 2.0, 3.0], "m_pair_id": [0, 1, 2]},
         },
     } for s in range(2)]
-    out = ms.statistics(reps, {"metrics": [{"id": "m", "kind": "mean", "paired": True, **_ESTIMAND_UNIT}]})
+    out = ms.statistics(reps, {"shared_draws": True, "metrics": [{"id": "m", "kind": "mean", "paired": True, **_ESTIMAND_UNIT}]})
     assert out["contrasts"] == []
     assert any("malformed" in u["reason"] for u in out["unsupported"])
 
@@ -295,7 +295,7 @@ def test_a_pair_id_given_by_only_one_setting_is_refused_not_silently_positional(
             "b": {"m_values": [1.0, 2.0, 3.0]},  # no pair_id at all
         },
     } for s in range(2)]
-    out = ms.statistics(reps, {"metrics": [{"id": "m", "kind": "mean", "paired": True, **_ESTIMAND_UNIT}]})
+    out = ms.statistics(reps, {"shared_draws": True, "metrics": [{"id": "m", "kind": "mean", "paired": True, **_ESTIMAND_UNIT}]})
     assert out["contrasts"] == []
     assert any("only one setting" in u["reason"] for u in out["unsupported"])
 
@@ -310,10 +310,10 @@ def test_a_cluster_design_uses_the_clusters_and_says_what_it_lacks() -> None:
     assert out["contrasts"][0]["method"] == "cluster_bootstrap"
     no_clusters = ms.statistics(_values_reps(a, a), spec)
     assert no_clusters["estimates"] == {} and "cluster design needs" in no_clusters["unsupported"][0]["reason"]
-    both = ms.statistics(reps, {"metrics": [{"id": "m", "kind": "proportion", "cluster": True, "paired": True, **_ESTIMAND_UNIT}]})
+    both = ms.statistics(reps, {"shared_draws": True, "metrics": [{"id": "m", "kind": "proportion", "cluster": True, "paired": True, **_ESTIMAND_UNIT}]})
     assert any("paired design over clusters is not supported" in u["reason"] for u in both["unsupported"])
     unequal = _values_reps([1.0, 0.0, 1.0], [1.0, 0.0])
-    uneq = ms.statistics(unequal, {"metrics": [{"id": "m", "kind": "mean", "paired": True, **_ESTIMAND_UNIT}]})
+    uneq = ms.statistics(unequal, {"shared_draws": True, "metrics": [{"id": "m", "kind": "mean", "paired": True, **_ESTIMAND_UNIT}]})
     assert "same number of trials" in uneq["unsupported"][0]["reason"]
 
 
@@ -448,3 +448,10 @@ def test_a_given_of_null_or_empty_is_no_given() -> None:
     assert why is None and [m["id"] for m in clean] == ["p", "m"] and all("given" not in m for m in clean)
     assert ms.repair([prop, mean]) == (clean, [])
     assert ms.normalize([prop, {**mean, "given": 5}])[0] is None, "a given that is not a name is still refused"
+
+
+def test_a_paired_metric_is_not_a_cross_setting_contrast_unless_the_plan_shares_the_draws() -> None:
+    metric = {"id": "m", "kind": "mean", "paired": True, **_ESTIMAND_UNIT}
+    assert [s["paired"] for s in ms.declared({"metrics": [metric]})] == [False]
+    assert [s["paired"] for s in ms.declared({"metrics": [metric], "shared_draws": True})] == [True]
+    assert [s["paired"] for s in ms.declared({"metrics": [metric], "shared_draws": True, "seed_policy": "x"})] == [True]

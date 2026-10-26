@@ -47,8 +47,9 @@ judges with them. The first rule is that a check the trials cannot decide is nev
 from __future__ import annotations
 
 import ast
+import json
 import math
-import re
+from pathlib import Path
 from typing import Any
 
 from . import metric_spec as _metric_spec
@@ -109,25 +110,23 @@ def repeats_trials(protocol: dict[str, Any] | None) -> bool | None:
     return max(runs) > 1
 
 
-#: Words of a ``seed_policy`` that ask for the same random draws in every setting. "paired" alone is not one: a metric
-#: pairs two estimates of the same trial's data, which says nothing about the draws of another setting.
-_COMMON_DRAWS_RE = re.compile(
-    r"(?<!no )(?<!not )(?<!without )common random|\bcrn\b|shared (random )?(stream|seed|draw|number)|"
-    r"same (random )?(stream|seed|draw|number)|coupled", re.IGNORECASE)
-
-
-def paired(protocol: dict[str, Any] | None) -> bool:
+def paired(protocol: dict[str, Any] | None, quest_root: Path | str | None = None) -> bool:
     """Whether trial ``t`` of every setting runs on one seed (common random numbers, :func:`core.trial_runner.trial_seed`
-    with ``key=""``, a check's trials then get those seeds too). Only when the plan asks for it: a metric says
-    ``paired: true`` (settings compared trial by trial) *and* the protocol's ``seed_policy`` says the settings share
-    their random numbers. A metric marked paired alone only pairs estimates inside a trial; the settings then each draw
-    their own stream, which is what a ``seed_policy`` of independent streams says."""
-    if not isinstance(protocol, dict):
+    with ``key=""``; a check's trials then get those seeds too). The plan states it as a fact: a metric marked
+    ``paired: true`` and ``protocol.shared_draws`` true (:func:`core.metric_spec.shares_draws`). Text in the
+    ``seed_policy`` never decides it, and a metric marked paired alone only pairs estimates inside one trial.
+
+    A quest begun before ``shared_draws`` existed (its plan has no such key, and its ``code/study.json`` was written with
+    ``paired: true``) keeps the seeds that study recorded, so a resumed quest does not mix two kinds in one ledger."""
+    if _metric_spec.shares_draws(protocol):
+        return True
+    if quest_root is None or not isinstance(protocol, dict) or "shared_draws" in protocol:
         return False
-    metrics = protocol.get("metrics")
-    if not any(isinstance(m, dict) and m.get("paired") for m in metrics or []):
+    try:
+        study = json.loads((Path(quest_root) / "code" / "study.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return False
-    return bool(_COMMON_DRAWS_RE.search(str(protocol.get("seed_policy") or "")))
+    return isinstance(study, dict) and study.get("paired") is True
 
 
 def per_trial_flag(oracle: dict[str, Any]) -> bool | None:

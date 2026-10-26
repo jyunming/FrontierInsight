@@ -542,7 +542,26 @@ def load(quest_root: Path | str, protocol: dict[str, Any] | None = None,
     except (OSError, ValueError):
         return None
     cells = data.get("cells") if isinstance(data, dict) else None
-    return from_cells(cells, protocol, unread, left_out) if isinstance(cells, list) else None
+    rec = from_cells(cells, protocol, unread, left_out) if isinstance(cells, list) else None
+    if rec is not None:
+        rec.seeds = _ledger_seeds(Path(quest_root))
+    return rec
+
+
+def _ledger_seeds(root: Path) -> dict[str, dict[int, int]]:
+    """The seed of each trial from FI's ledger, ``{setting key: {trial number: seed}}``; empty without a readable ledger
+    (the trials are then taken as independent)."""
+    try:
+        from . import disclosure as _disclosure
+
+        got = _disclosure._ledger_rows(root)
+    except Exception:  # noqa: BLE001
+        return {}
+    out: dict[str, dict[int, int]] = {}
+    for (cell, trial), (_status, seed) in (got[1].items() if got else ()):
+        if seed is not None:
+            out.setdefault(cell, {})[trial] = seed
+    return out
 
 
 def _exact(value: Any) -> Any:
@@ -1333,15 +1352,6 @@ def records_of(quest_root: Path | str, protocol: dict[str, Any] | None) -> Recor
         rec.unread = tuple(unread)
     except Exception:  # noqa: BLE001 -- an axis FI cannot tell is unread counts as read: nothing is pooled by guess
         rec.unread = ()
-    try:
-        from . import disclosure as _disclosure
-
-        got = _disclosure._ledger_rows(root)
-        for (cell, trial), (_status, seed) in (got[1].items() if got else ()):
-            if seed is not None:
-                rec.seeds.setdefault(cell, {})[trial] = seed
-    except Exception:  # noqa: BLE001 -- no readable ledger: the trials are taken as independent, as before
-        rec.seeds = {}
     return rec
 
 

@@ -14,6 +14,7 @@ from tests.test_evidence import ON, _quest, _state
 from tests.test_interview_roundtrip import _full_answers
 
 PAIRED = {
+    "shared_draws": True,
     "metrics": [{"id": "score", "estimand": "mean paired score difference", "kind": "mean", "unit": "trial",
                  "paired": True}],
     "contrasts": [{"metric": "score", "a": "a", "b": "b"}],

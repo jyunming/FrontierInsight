@@ -303,11 +303,22 @@ def repair(metrics: Any) -> tuple[list[dict[str, Any]], list[str]]:
     return kept, notes
 
 
+def shares_draws(protocol: dict[str, Any] | None) -> bool:
+    """Whether the plan has settings share their random draws: a metric marked ``paired`` and ``protocol.shared_draws``
+    true. A missing ``shared_draws`` is false: a metric marked paired alone pairs estimates inside one trial."""
+    if not isinstance(protocol, dict) or protocol.get("shared_draws") is not True:
+        return False
+    return any(isinstance(m, dict) and m.get("paired") for m in protocol.get("metrics") or [])
+
+
 def declared(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """The valid metric specs of a protocol (an entry that is not a mapping with an id and a kind is left out)."""
+    """The valid metric specs of a protocol (an entry that is not a mapping with an id and a kind is left out). A spec is
+    ``paired`` (a contrast joins the settings' trials by number) only when the plan has the settings share their draws
+    (:func:`shares_draws`); without it the settings' trials are independent and are not joined."""
     items = protocol.get("metrics") if isinstance(protocol, dict) else None
     clean, _why = normalize(items) if items is not None else ([], None)
-    return clean or []
+    shared = shares_draws(protocol)
+    return [{**spec, "paired": bool(spec.get("paired")) and shared} for spec in clean or []]
 
 
 def _cluster_key(spec: dict[str, Any]) -> str | None:

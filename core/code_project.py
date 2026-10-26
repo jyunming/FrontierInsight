@@ -435,7 +435,7 @@ def study_of(code_dir: Path, protocol: dict[str, Any] | None, *, split: bool = T
         **({"in_each_run": inside} if inside else {}),
         "runs_per_setting": int(protocol.get("runs_per_setting") or 1),
         "base_seed": 0,
-        "paired": _mc_error.paired(protocol),
+        "paired": _mc_error.paired(protocol, code_dir.parent),
         "thresholds": protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else {},
     }
 

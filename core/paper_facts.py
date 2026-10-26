@@ -444,7 +444,7 @@ def shared_seeds_text(root: Path) -> str:
     """The sentence FI puts in the Limitations when its own trial record shows the settings sharing seeds: trial ``t`` of
     every setting ran on one seed (``paired: true``, common random numbers; ``core/trial_runner.py::trial_seed`` with an
     empty key). ``""`` when the ledger shows the settings drew different seeds, or there is one setting only.
-    Only a plan that asks for common random numbers (``seed_policy``, with a metric marked paired) has the settings share
+    Only a plan that states ``protocol.shared_draws`` (with a metric marked paired) has the settings share
     seeds; the interval across them is FI's own, from the different draws (``core/paper_values.py``).
 
     Why it is stated: settings that share their random draws move together, so their results are one correlated

@@ -1141,7 +1141,7 @@ class TrialsRunner:
         runs = int(protocol.get("runs_per_setting") or 1)
         key = _run_key(self.simulate, protocol, runs, base, self.deterministic)
         # Each trial number gets one seed across the settings only when the plan asks for common random numbers.
-        paired = _mc.paired(protocol)
+        paired = _mc.paired(protocol, self.quest_root)
         inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else None
         run = _load_run(self.quest_root, key)
         if run is not None:

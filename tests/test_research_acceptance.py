@@ -478,7 +478,7 @@ def test_a_clean_rerun_from_the_run_redoes_the_trials_and_keeps_the_old_outputs(
 
 # --- faults that need a quest of their own ----------------------------------------------------------------------------
 
-PAIRED = {**RESEARCH_PROTOCOL, "seed_policy": "common random numbers: trial i of every setting uses the same seed",
+PAIRED = {**RESEARCH_PROTOCOL, "shared_draws": True,
           "metrics": [{**METRIC, "paired": True}]}
 ANALYSIS_WITH_PAIR_IDS = ANALYSIS_TRIAL.replace(
     '"final_size_count": m["count"]}', '"final_size_count": m["count"], "final_size_pair_id": m["trials"]}')

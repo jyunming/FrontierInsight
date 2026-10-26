@@ -16,8 +16,10 @@ from core import stats as _stats
 METRIC = {"id": "x", "kind": "mean", "estimand": "the mean of x", "unit": "one run", "paired": True}
 
 
-def _protocol(policy: str | None) -> dict:
+def _protocol(shared: bool | None = None, policy: str | None = None) -> dict:
     p: dict = {"grid": {"n": [5, 12]}, "runs_per_setting": 4, "metrics": [dict(METRIC)]}
+    if shared is not None:
+        p["shared_draws"] = shared
     if policy is not None:
         p["seed_policy"] = policy
     return p
@@ -40,22 +42,48 @@ def _seeds(study: dict) -> dict[str, list[int]]:
 
 def test_a_paired_metric_alone_gives_each_setting_its_own_seeds(tmp_path):
     # A metric that pairs two estimates of one trial's data says nothing about the draws of another setting.
-    study = _study(tmp_path, _protocol("independent stream per (setting, trial)"))
-    seeds = _seeds(study)
-    assert study["paired"] is False
-    assert not set(seeds["n=5"]) & set(seeds["n=12"])
-    assert _study(tmp_path, _protocol(None))["paired"] is False
+    for protocol in (_protocol(), _protocol(False), _protocol(None, "independent stream per (setting, trial)")):
+        study = _study(tmp_path, protocol)
+        seeds = _seeds(study)
+        assert study["paired"] is False and not mc_error.paired(protocol)
+        assert not set(seeds["n=5"]) & set(seeds["n=12"])
+
+
+def test_the_words_of_the_seed_policy_alone_never_decide_it(tmp_path):
+    for words in ("common random numbers across settings", "CRN", "the same random numbers across arms",
+                  "no common random numbers"):
+        protocol = _protocol(None, words)
+        assert _study(tmp_path, protocol)["paired"] is False and not mc_error.paired(protocol)
+    # and a policy of independent streams does not undo what the plan states
+    assert mc_error.paired(_protocol(True, "independent streams"))
 
 
 def test_an_explicit_request_for_common_draws_still_shares_them(tmp_path):
-    for policy in ("common random numbers across settings", "CRN by trial index", "every setting uses the same stream by trial index"):
-        study = _study(tmp_path, _protocol(policy))
-        seeds = _seeds(study)
-        assert study["paired"] is True and mc_error.paired(_protocol(policy))
-        assert seeds["n=5"] == seeds["n=12"]
-    # asking for them in the policy without a paired metric changes nothing
-    assert _study(tmp_path, {**_protocol("common random numbers"), "metrics": []})["paired"] is False
-    assert not mc_error.paired(_protocol("no common random numbers; independent streams"))
+    study = _study(tmp_path, _protocol(True))
+    seeds = _seeds(study)
+    assert study["paired"] is True and mc_error.paired(_protocol(True))
+    assert seeds["n=5"] == seeds["n=12"]
+    # stating it without a paired metric changes nothing
+    assert not mc_error.paired({**_protocol(True), "metrics": []})
+    assert _study(tmp_path, {**_protocol(True), "metrics": []})["paired"] is False
+
+
+def test_the_paired_contrast_of_the_analysis_follows_the_same_decision():
+    from core import metric_spec
+
+    assert [s["paired"] for s in metric_spec.declared(_protocol())] == [False]
+    assert [s["paired"] for s in metric_spec.declared(_protocol(True))] == [True]
+
+
+def test_a_quest_begun_before_the_field_keeps_the_seeds_it_recorded(tmp_path):
+    (tmp_path / "code").mkdir()
+    (tmp_path / "code" / "study.json").write_text(json.dumps({"paired": True}), encoding="utf-8")
+    assert mc_error.paired(_protocol(), tmp_path)             # an older plan: no field, recorded as shared
+    assert not mc_error.paired(_protocol(False), tmp_path)    # a plan that states it is believed
+    assert not mc_error.paired(_protocol())                   # no quest folder, nothing recorded
+    # study_of keeps the recorded value when it writes the study again from such a plan
+    (tmp_path / "code" / "simulate.py").write_text("def run_trial(setting, trial, seed):\n    return {}\n", encoding="utf-8")
+    assert code_project.study_of(tmp_path / "code", _protocol())["paired"] is True
 
 
 def _cells(shared: bool) -> tuple[list[dict], dict[str, dict[int, int]]]:
@@ -98,3 +126,14 @@ def test_settings_with_their_own_draws_are_pooled_as_before():
     before = pv.resolve(KEY, rec).text
     rec.seeds = seeds
     assert pv.resolve(KEY, rec).text == before and "share random" not in before
+
+
+def test_every_way_of_loading_the_records_reads_the_seeds(tmp_path):
+    cells, seeds = _cells(shared=True)
+    (tmp_path / "raw").mkdir()
+    (tmp_path / "raw" / "trials.json").write_text(json.dumps({"cells": cells}), encoding="utf-8")
+    rows = [{"event": "trial", "cell": k, "trial": t, "seed": sd, "status": "ok"} for k, per in seeds.items() for t, sd in per.items()]
+    (tmp_path / "raw" / "ledger.jsonl").write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+    rec = pv.load(tmp_path)
+    assert rec is not None and rec.share_draws(rec.cells)
+    assert "different random draws" in pv.resolve(KEY, rec).text
