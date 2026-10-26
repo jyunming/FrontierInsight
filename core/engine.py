@@ -13643,7 +13643,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 normal, _why = _optim.normalize(block)
                 if normal is None:
                     return {}
-                cells = [_in_run.with_kind(
+                cells = [_in_run.tag_kind(
                     _optimise_search.cell_of(normal, (normal.get("baseline") or {}).get("values") or {}), "search")]
                 if isinstance(normal.get("grid"), dict) and normal["grid"]:  # a search's first scan: a measurement
                     cells += _small.settings(_optimise_search.scan_grid(normal))
@@ -13731,7 +13731,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 if normal is None:
                     return None
                 cell = _optimise_search.cell_of(normal, (normal.get("baseline") or {}).get("values") or {})
-                return dict(cell), (_optimise_search.in_each_run(normal) or None)
+                return _in_run.tag_kind(cell, "search"), (_optimise_search.in_each_run(normal) or None)
             grid = _optimise_search.study_grid(protocol) if isinstance(protocol.get("grid"), dict) else {}
             cells = _small.settings(grid)
             if not cells:
@@ -28844,9 +28844,10 @@ the line `# file: experiment.py`, then the `DEPS:` line, and nothing else.
   (`numpy.random.default_rng(seed)` or `random.Random(seed)`) and use only it. FI calls it `runs_per_setting` times for
   every setting of the protocol's grid, each call with its own seed: the `FI_REPLICATE_SEED` rule above does not apply
   here, and the function never picks, derives or fixes a seed of its own.
-- FI adds one reserved key to every `cell` it passes, `cell["fi_kind"]`: `"scan"` (a setting of the grid), `"search"` (a
-  design a search evaluates) or `"check"` (a case of one of the plan's checks). It is not a setting of the study; read it
-  when the function must treat these differently, never infer the kind from the values.
+- Before every call FI sets the environment variable `FI_CELL_KIND` (`cell` itself holds only the study's settings):
+  `"scan"` (a setting of the grid), `"search"` (a design a search evaluates) or `"check"` (a case of one of the plan's
+  checks; also when the variable is unset). Read it, as `os.environ.get("FI_CELL_KIND", "check")`, when the function
+  must treat these differently; never infer the kind from the values.
 - For a deterministic study (no randomness): `def run_cell(cell: dict) -> dict` computes one setting, called once per
   setting. It takes no seed and reads no `FI_REPLICATE_SEED`: FI calls it once for each setting, with nothing repeated.
 - Each equation of the design's `model` whose role is `generates` carries its id in a comment (`# E1`) on or above the
@@ -28905,11 +28906,12 @@ the record. The rules above still hold, with these differences:
   plan holds fixed, and each numerical setting at the value the search uses. Read them all from `cell` by name; do not
   write any of them into the script as a number of its own, and do not choose a mesh, a time step or a tolerance
   yourself.
-- FI says in every cell what it is, under `cell["fi_kind"]`: `"search"` is a design the search evaluates (the design
-  variables are the design to compute), `"scan"` is a row of the coarse scan or of the comparison grid (its design
-  variables are that row's values, the baseline's where the row leaves one out), `"check"` is a case of one of the
-  plan's checks. Decide which of these you were called with from this key alone, never from the values (a grid row at
-  the baseline and a search design at the baseline have the same values); a call without the key is a `"check"`.
+- FI says what it is asking for in the environment variable `FI_CELL_KIND`, set before every call (the cell holds only
+  the study's settings): `"search"` is a design the search evaluates (the design variables are the design to compute),
+  `"scan"` is a row of the coarse scan or of the comparison grid (its design variables are that row's values, the
+  baseline's where the row leaves one out), `"check"` is a case of one of the plan's checks, and so is a call with the
+  variable unset. Decide which of these you were called with from `os.environ.get("FI_CELL_KIND", "check")` alone,
+  never from the values (a grid row at the baseline and a search design at the baseline have the same values).
 - The returned dict holds the objective and every constrained quantity, under the exact names the plan gives them
   (`objective.quantity`, each `constraints[].quantity`), plus anything else the analysis wants.
 - simulate.py never searches, optimises or loops over designs itself (no `scipy.optimize`, no Optuna, no grid of

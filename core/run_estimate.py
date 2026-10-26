@@ -640,7 +640,8 @@ async def _time_one(
     nonce = f"pilot{time.time_ns()}"
     inside = {str(k): list(v) for k, v in (in_each_run or {}).items()}
     spec.write_text(json.dumps({"module": str(module).replace("\\", "/"), "entry": "run_cell" if deterministic else "run_trial",
-                                "cell": _in_run.with_kind({**cell, **inside}, "scan"), "levels": _in_run.levels_json(_in_run.level_cells(inside)), "trials": trials,
+                                "cell": _in_run.split_kind({**cell, **inside}, "scan")[0],
+                                "kind": _in_run.split_kind(cell, "scan")[1], "levels": _in_run.levels_json(_in_run.level_cells(inside)), "trials": trials,
                                 "nonce": nonce, "thresholds": dict(thresholds or {}),
                                 **({"stop_after_s": TIMING_LATER_S} if n > 1 else {})},
                                default=str), encoding="utf-8")
@@ -955,7 +956,8 @@ async def run_values(
     nonce = f"pilot{time.time_ns()}"
     inside = {str(k): list(v) for k, v in (in_each_run or {}).items()}
     spec.write_text(json.dumps({"module": str(module).replace("\\", "/"), "entry": "run_cell" if deterministic else "run_trial",
-                                "cell": _in_run.with_kind({**cell, **inside}, "scan"), "levels": _in_run.levels_json(_in_run.level_cells(inside)),
+                                "cell": _in_run.split_kind({**cell, **inside}, "scan")[0],
+                                "kind": _in_run.split_kind(cell, "scan")[1], "levels": _in_run.levels_json(_in_run.level_cells(inside)),
                                 "trials": [{"trial": 0, "seed": None if deterministic else _tr.trial_seed(0, key, 0)}],
                                 "nonce": nonce, "thresholds": dict(thresholds or {})}, default=str), encoding="utf-8")
     await _outside.execute_keeping_only_finished(

@@ -16,24 +16,33 @@ import itertools
 import math
 
 
-#: The one reserved key of a cell FI gives the code: what FI is asking for. The cell of a design the search evaluates
-#: says ``"search"``, a row of the coarse scan or the comparison grid ``"scan"``, a case of one of the plan's checks
-#: ``"check"``. The other keys of a search design and of a grid row at the baseline are the same, so the code cannot tell
-#: them apart from their values; FI says which it is. It is never part of a cell's name (:func:`fmt` callers use
-#: :func:`without_kind`) and never a setting of the study.
-CELL_KIND = "fi_kind"
+#: What FI is asking for in a call of the simulation, told to the code in the environment variable ``FI_CELL_KIND``
+#: (set by FI's harness for each call; unset when the function is called some other way, which is a ``"check"``): a
+#: ``"search"`` design the search evaluates, a ``"scan"`` row of the coarse scan or the comparison grid, a ``"check"`` case
+#: of one of the plan's checks. A search design and a grid row at the baseline have the same keys and values, so the code
+#: cannot tell them apart from the cell; FI says which it is, and the cell itself stays exactly the study's settings (code
+#: that expands it into a function's arguments is not broken by an added key).
+KIND_ENV = "FI_CELL_KIND"
 CELL_KINDS = ("search", "scan", "check")
+#: FI's own mark on a cell it passes between its functions (a search's baseline cell inside a list of grid rows), taken off
+#: by :func:`split_kind` before the cell is written for the code.
+_MARK = "__fi_kind__"
+
+
+def tag_kind(cell, kind):
+    """The cell marked as built for ``kind``, for the FI function that writes the call (:func:`split_kind`)."""
+    return {**without_kind(cell), _MARK: kind}
 
 
 def without_kind(cell):
-    """The cell with FI's reserved key left out (its name, its seed, its record)."""
-    return {k: v for k, v in cell.items() if k != CELL_KIND}
+    """The cell without FI's mark (its name, its seed, its record)."""
+    return {k: v for k, v in cell.items() if k != _MARK}
 
 
-def with_kind(cell, kind):
-    """The cell as the code is called with it: the kind FI built it as. A cell that already says what it is keeps that
-    (a search's baseline design inside a list of grid rows)."""
-    return {**without_kind(cell), CELL_KIND: cell.get(CELL_KIND) if cell.get(CELL_KIND) in CELL_KINDS else kind}
+def split_kind(cell, default):
+    """``(the cell as the code gets it, the kind of the call)``: the kind FI marked the cell with, else ``default``."""
+    kind = cell.get(_MARK)
+    return without_kind(cell), kind if kind in CELL_KINDS else default
 
 
 def fmt(value):

@@ -92,7 +92,7 @@ def cells(grid, sub_studies=None):
 
 
 def cell_key(cell):
-    return ",".join(f"{axis}={fmt(value)}" for axis, value in cell.items() if axis != CELL_KIND)
+    return ",".join(f"{axis}={fmt(value)}" for axis, value in cell.items())
 
 
 def trial_seed(base, key, trial):
@@ -118,6 +118,7 @@ def load_simulation():
 def run_cell_child(study, index, out_path):
     """One setting's trials, in a process of its own (as FI runs them)."""
     module = load_simulation()
+    os.environ[KIND_ENV] = "scan"  # a row of the scan or the comparison grid, as FI tells the code
     entry = study["entry"]
     fn = getattr(module, entry)
     cell = cells(study.get("grid") or {}, study.get("sub_studies"))[index]
@@ -129,7 +130,7 @@ def run_cell_child(study, index, out_path):
     for trial in range(runs):
         seed = trial_seed(int(study.get("base_seed") or 0), "" if study.get("paired") else key, trial)
         try:
-            given = with_kind(dict(cell, **inside), "scan")  # every value each run compares inside it, as FI gives them
+            given = dict(cell, **inside)  # every value each run compares inside it, as FI gives them
             value = fn(given) if entry == "run_cell" else fn(given, trial, seed)
             kept, why = read_returned(value, levels, entry)
             if kept is None:
@@ -166,14 +167,14 @@ def evaluate_child(spec_path, out_path):
     """One design of the search, in a process of its own (as FI runs it)."""
     spec = json.loads(Path(spec_path).read_text(encoding="utf-8"))
     module = load_simulation()
+    os.environ[KIND_ENV] = "search"  # a design of the search, as FI tells the code
     entry = spec["entry"]
     fn = getattr(module, entry)
     levels = levels_of(spec.get("levels"))  # as the harness reads its spec (FI's evaluation names none)
     rows = []
     for trial in spec["trials"]:
         try:
-            given = with_kind(dict(spec["cell"]), "search")  # a design of the search, as FI gives it
-            value = fn(given) if entry == "run_cell" else fn(given, trial["trial"], trial["seed"])
+            value = fn(dict(spec["cell"])) if entry == "run_cell" else fn(dict(spec["cell"]), trial["trial"], trial["seed"])
             # Read as FI's trial harness reads it: None is a value that does not exist (NaN), the reasons under
             # why_missing are kept on the row, and a per-value result is read when the spec names its levels.
             kept, why = read_returned(value, levels, entry)
