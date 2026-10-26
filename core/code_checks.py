@@ -257,6 +257,35 @@ async def _equation_verdict(quest_root: Path, protocol: dict[str, Any] | None, *
                     "tested": tested, "not_tested": notes})
 
 
+async def known_answer_values(quest_root: Path, protocol: dict[str, Any] | None, *, executor: Any, python: Any,
+                              env: dict[str, str], timeout_s: int, log: Any = None) -> dict[str, dict[str, Any]] | None:
+    """What each known-answer check the engine can judge gives on ``<quest_root>/code`` as it is, run by FI the way the gate
+    after the run runs them (a search is called with the conditions held fixed): ``{check: {"passed", "value",
+    "undecided"}}``, for a caller that compares two versions of the code (the repair of a reader's finding). ``None`` when
+    they cannot be run (no trial contract, no check with numbers to judge by). Nothing in the quest's own records changes."""
+    simulate = quest_root / "code" / _split_run.SIMULATE_NAME
+    oracles = [o for o in _oracle.declared(protocol) if _oracle.limit_of(o)[1] is not None]
+    if not oracles or not simulate.is_file() or not _trials.entries(simulate) & {"run_trial", "run_cell"}:
+        return None
+    protocol = protocol if isinstance(protocol, dict) else {}
+    if _optimise.block_of(protocol) is not None:
+        oracles = [{**o, "case": _optimise.complete_case(protocol, o["case"])} if isinstance(o.get("case"), dict) else o
+                   for o in oracles]
+    raw_dir = _split_run.raw_root_of(quest_root) / "finding_replay"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    run_env = {**env, "PYTHONDONTWRITEBYTECODE": "1"}
+    checks, _problems, _timed_out = await _trials.measure_oracles(
+        executor, python, quest_root, simulate.relative_to(quest_root).as_posix(), oracles, timeout_s=timeout_s,
+        env={**run_env, "FI_ORACLE": "1", _split_run.RAW_DIR_ENV: _split_run.env_value(raw_dir, quest_root)},
+        thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
+        case_env=dict(run_env), in_each_run=_in_run.of_study(protocol), mean_names=_mc_error.mean_names(protocol),
+        paired=_mc_error.paired(protocol, quest_root), proportion_names=_mc_error.proportion_names(protocol),
+        repeated=_mc_error.repeats_trials(protocol), log=log)
+    judged = _oracle.judged(oracles, {"checks": checks, "engine_measured": True})
+    return {str(j["name"]): {"passed": j["passed_by_engine"], "value": j["value"], "undecided": bool(j.get("undecided"))}
+            for j in judged}
+
+
 async def _oracle_verdict(quest_root: Path, protocol: dict[str, Any] | None, *, executor: Any, python: Any,
                           env: dict[str, str], log: Any, timeout_s: int) -> Verdict:
     simulate = quest_root / "code" / _split_run.SIMULATE_NAME

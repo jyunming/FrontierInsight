@@ -487,6 +487,58 @@ async def search_entry_returns_objective(
             f"{', '.join(sorted(map(str, values))[:8]) or 'nothing'}, not the objective `{quantity}`")
 
 
+async def design_response(
+    executor: Any, python: Any, quest_root: Path, module: str, block: dict[str, Any], *,
+    timeout_s: int, env: dict[str, str] | None, thresholds: dict[str, Any] | None, log: Any = None,
+) -> dict[str, Any] | None:
+    """What the study's entry returns on two different designs, each called as the search calls it
+    (:func:`core.optimise_search.cell_of`, :func:`_evaluate`): the plan's baseline and the first design of FI's fixed spread
+    over the declared ranges that is not the baseline (:func:`core.optimise_search.sizing_designs`, the same on every run).
+    ``{"quantity": name, "values": [the objective on the baseline, on the other], "numbers": [each reply's numbers by name]}``;
+    ``None`` when there is no entry, no second design, or either evaluation did not return the objective (judged by the runs
+    that follow). A code that returns the same numbers on both designs is blind to the design: a search over it finds nothing
+    (:func:`core.finding_repair.design_blind` compares before and after a repair)."""
+    entry = _trials.study_entry(_trials.entries(quest_root / module))
+    if not entry:
+        return None
+    base = block["baseline"]["values"]
+    designs = _search.sizing_designs(block)
+    other = next((d for d in designs[1:] if _search._design_key(d) != _search._design_key(base)), None)
+    if other is None:
+        return None
+    quantity = str(block["objective"]["quantity"])
+    replies: list[dict[str, Any]] = []
+    for number, design in enumerate((dict(base), other)):
+        answer, _stderr, load_error = await _evaluate(
+            executor, python, quest_root, module, entry, _search.cell_of(block, design), runs=1, base_seed=0,
+            timeout_s=timeout_s, env=env, thresholds=thresholds, name=f"design_response{number}",
+            in_each_run=_search.in_each_run(block) or None)
+        got = answer.get("values") if isinstance(answer, dict) else None
+        if load_error or not isinstance(got, dict) or quantity not in got:
+            if log is not None:
+                log.info("[code_review] the study's entry was not measured on design %d of 2 (%s)", number + 1,
+                         load_error or "it did not return the objective")
+            return None
+        replies.append(got)
+    numbers = [{str(k): _numbers_of(v) for k, v in r.items()} for r in replies]
+    return {"quantity": quantity,
+            "values": [r[quantity] if isinstance(r.get(quantity), (int, float)) else None for r in replies],
+            "numbers": numbers}
+
+
+def _numbers_of(value: Any) -> list[float]:
+    """The finite numbers a returned value holds (a number, or the numbers inside a list or a mapping, in order)."""
+    if isinstance(value, bool):
+        return []
+    if isinstance(value, (int, float)):
+        return [float(value)] if math.isfinite(value) else []
+    if isinstance(value, dict):
+        return [x for k in sorted(value, key=str) for x in _numbers_of(value[k])]
+    if isinstance(value, (list, tuple)):
+        return [x for item in value for x in _numbers_of(item)]
+    return []
+
+
 class EvaluationPool:
     """Designs that do not depend on each other's answers, up to ``at_once`` at the same time, each in a process of its
     own exactly as :func:`_evaluate` runs one (the same seeds, so the answers are those of one after another). A design

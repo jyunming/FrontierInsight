@@ -30,6 +30,7 @@ import copy
 import json
 import re
 import string
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
@@ -1177,9 +1178,23 @@ class Env:
     #: FI's small run of the simulation on the code as it is: ``""`` when it ran, else why not (a repair that breaks it is
     #: not kept); ``None`` when there is none to make.
     small_run: Callable[[], Awaitable[str]] | None = None
+    #: FI's own run of the plan's known-answer checks on the code as it is: ``{check: {"passed": True/False/None, "value":
+    #: number or None}}``; ``None`` when they cannot be run here (see :func:`answers_lost`).
+    known_answers: Callable[[], Awaitable[dict[str, dict[str, Any]] | None]] | None = None
+    #: For a search for the best design: the objective the study's entry gives on two designs FI picks, ``{"quantity": name,
+    #: "values": [first, second]}``; ``None`` for a study without a search or when it could not be measured (see
+    #: :func:`design_blind`).
+    design_response: Callable[[], Awaitable[dict[str, Any] | None]] | None = None
     changed: list[str] = field(default_factory=list)
     baseline: dict[str, str] = field(default_factory=dict)
     baseline_static: dict[str, int] = field(default_factory=dict)
+    #: What :attr:`known_answers` and :attr:`design_response` gave on the code before the repair being tried (measured the
+    #: first time a repair is about to be tried, then kept from the last accepted repair).
+    baseline_answers: dict[str, dict[str, Any]] | None = None
+    baseline_response: dict[str, Any] | None = None
+    baseline_measured: bool = False
+    #: What the last :func:`_attempt` measured, for the record of the try (seconds, and the values compared).
+    measured: dict[str, Any] = field(default_factory=dict)
     #: The files the last :func:`_attempt` took from the model's reply (path -> text; empty: it gave none), for
     #: :func:`keep_try`.
     tried: dict[str, str] = field(default_factory=dict)
@@ -1397,6 +1412,78 @@ def _callers_block(env: Env, callers: dict[str, set[str]]) -> str:
     return "\n\n".join(parts[:4])
 
 
+def _shown(value: Any) -> str:
+    return "no number" if not isinstance(value, (int, float)) or isinstance(value, bool) else f"{value:.6g}"
+
+
+def answers_lost(before: dict[str, dict[str, Any]] | None, after: dict[str, dict[str, Any]] | None) -> list[str]:
+    """The known-answer checks a repair broke: the ones that passed on the code before it and do not on the code after it,
+    each as one sentence naming the check and the value it now measures. A check that did not pass before (it failed, or could not be
+    decided) is never held against the repair, and neither is one the run did not report at all."""
+    if not before or not after:
+        return []
+    out: list[str] = []
+    for name, was in before.items():
+        now = after.get(name)
+        if was.get("passed") is not True or now is None:
+            continue
+        if now.get("passed") is False or (now.get("passed") is None and not now.get("undecided")):
+            # What the check measured before is its expected value to within the tolerance: kept out of this sentence, which
+            # the next try of the code model is shown (both values are in the record of the try, ``measured``)
+            out.append(f"the known-answer check `{name}` passed before the repair and "
+                       + (f"fails after it (measured {_shown(now.get('value'))})" if now.get("value") is not None
+                          else "could not be measured after it"))
+    return out
+
+
+def _same_number(a: float, b: float) -> bool:
+    return abs(float(a) - float(b)) <= 1e-9 * max(abs(float(a)), abs(float(b)))
+
+
+def _differ(numbers: Any) -> list[str]:
+    """The names of what the entry returned that is not the same on the two designs (a name only one design returned counts)."""
+    if not isinstance(numbers, list) or len(numbers) != 2 or not all(isinstance(n, dict) for n in numbers):
+        return []
+    first, second = numbers
+    out: list[str] = []
+    for name in sorted(set(first) | set(second)):
+        a, b = first.get(name), second.get(name)
+        if a is None or b is None or len(a) != len(b) or any(not _same_number(x, y) for x, y in zip(a, b)):
+            out.append(name)
+    return out
+
+
+def design_blind(before: dict[str, Any] | None, after: dict[str, Any] | None) -> str:
+    """Why a repair is refused for what it did to a search for the best design, else ``""``: the study's entry returned
+    something different on the two designs before the repair and returns the same on both after it (the code no longer
+    depends on the design, so a search over it finds nothing). The test is on every number the entry returns, not on the
+    objective alone: an objective that is flat on most designs (zero outside a small region) says nothing of a design it
+    does not reach. Returning the same on both before is a property of the code, not of the repair: never a reason to refuse."""
+    if not before or not after:
+        return ""
+    was, now = _differ(before.get("numbers")), _differ(after.get("numbers"))
+    if not was or now:
+        return ""
+    a, b = before.get("values") or [], after.get("values") or []
+    return (f"after it the study's entry returns the same numbers on two different designs ({len(was)} of its values "
+            f"differed between them before; the objective `{after.get('quantity')}` was {_shown(a[0] if a else None)} and "
+            f"{_shown(a[1] if len(a) > 1 else None)}, and is {_shown(b[0] if b else None)} on both now): the repair made "
+            "the study blind to the design")
+
+
+async def _measure_behaviour(env: Env, which: str) -> Any:
+    """One of FI's own measures of the code as it is (``known_answers`` or ``design_response``); ``None`` when there is none
+    or it could not be made (a measure that cannot be made judges nothing, and never stops a repair)."""
+    hook = getattr(env, which)
+    if hook is None:
+        return None
+    try:
+        return await hook()
+    except Exception as e:  # noqa: BLE001
+        env.log.warning("[code_review] %s could not be measured on the code (%r); not judged", which, e)
+        return None
+
+
 async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: str) -> tuple[bool, str]:
     """One repair request and its checks. ``(accepted, why not)``; a rejected change is undone, in every file it touched.
 
@@ -1528,6 +1615,14 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
         for target, (before, _a) in edits.items():
             (env.code / target).write_text(before, encoding="utf-8")
 
+    if not env.baseline_measured:  # on the code as it is, before this repair is written
+        env.baseline_answers = await _measure_behaviour(env, "known_answers")
+        env.baseline_response = await _measure_behaviour(env, "design_response")
+        env.baseline_measured = True
+    env.measured = {}
+    answers: dict[str, dict[str, Any]] | None = None
+    response: dict[str, Any] | None = None
+
     for target, (_b, after_text) in edits.items():
         (env.code / target).write_text(after_text, encoding="utf-8")
     try:
@@ -1545,6 +1640,30 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
             stopped = await env.small_run()
             if stopped:
                 raise _Rejected("FI's small run of the simulation no longer runs: " + stopped)
+        began = time.monotonic()
+        answers = await _measure_behaviour(env, "known_answers")
+        response = await _measure_behaviour(env, "design_response")
+        lost = answers_lost(env.baseline_answers, answers)
+        blind = design_blind(env.baseline_response, response)
+        if answers or response:
+            env.measured = {"seconds": round(time.monotonic() - began, 1)}
+            if answers:
+                env.measured["known_answers"] = {n: [(env.baseline_answers or {}).get(n, {}).get("value"), a.get("value")]
+                                                 for n, a in answers.items()}
+            if response:
+                env.measured["design_response"] = {
+                    "objective_before": (env.baseline_response or {}).get("values"), "objective_after": response.get("values"),
+                    "values_that_differ_before": len(_differ((env.baseline_response or {}).get("numbers"))),
+                    "values_that_differ_after": len(_differ(response.get("numbers")))}
+            env.log.info("[code_review] %s: the known-answer and design checks of this repair took %.0f s",
+                         issue.get("id"), env.measured["seconds"])
+        if env.baseline_response and not _differ(env.baseline_response.get("numbers")):
+            env.log.info("[code_review] the study's entry returns the same numbers on two different designs in the code as it "
+                         "is (a property of the code, not of this repair): a search over the design finds nothing")
+        if lost:
+            raise _Rejected("it broke known-answer checks that passed before: " + "; ".join(lost[:3]))
+        if blind:
+            raise _Rejected(blind)
     except _Rejected as e:
         put_back()
         return False, str(e)
@@ -1556,6 +1675,10 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
             env.on_accept(target, before, after_text, issue)
     env.baseline = {**after, f"finding:{test}": "pass"}
     env.baseline_static = env.static()
+    if answers is not None:
+        env.baseline_answers = answers
+    if response is not None:
+        env.baseline_response = response
     if test not in _accepted(env.record):
         _accepted(env.record).append(test)
     for target in edits:
@@ -1584,7 +1707,8 @@ async def repair_issue(env: Env, issue: dict[str, Any], rel: str) -> bool:
         await asyncio.to_thread(keep_try, env, issue, rel, number, accepted, why)
         by = env.other if who == "other" else env.code_model
         issue["repairs"].append({"try": number, "by": who, "model": by or who, "outcome": "accepted" if accepted else "rejected",
-                                 **({} if accepted else {"why": why[:300]})})
+                                 **({} if accepted else {"why": why[:300]}),
+                                 **({"measured": dict(env.measured)} if env.measured else {})})
         env.log.info("[code_review] %s: %s repair %s%s", issue["id"], who, "accepted" if accepted else "rejected",
                      "" if accepted else f" ({why[:140]})")
         if accepted:
