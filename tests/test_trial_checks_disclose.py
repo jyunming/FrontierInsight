@@ -250,3 +250,116 @@ def test_nothing_is_withheld_when_the_record_is_not_a_disclosure(tmp_path: Path)
     rec["action"] = tc.REPAIR
     tc.write_record(root, rec)
     assert tc.withheld_values(root) == {}
+
+
+# ---- the analysis copy's raw record, the record that cannot be kept, partly shared draws, the words' scope ----------------
+
+SIM = """
+import random
+
+def run_trial(cell, trial_id, seed):
+    rng = random.Random(seed)
+    sigma = float(cell["sigma"])
+    n = 8
+    x = [rng.gauss(1.0, sigma) for _ in range(n)]
+    m = sum(x) / n
+    se = (sum((v - m) ** 2 for v in x) / (n - 1)) ** 0.5 / n ** 0.5
+    if cell["sigma"] == 0.2:
+        se *= 3.0  # the planted fault, at one setting
+    return {"x_hat": m, "x_se": se, "x_lo": m - 2.4 * se, "x_hi": m + 2.4 * se}
+"""
+
+PEEK = """
+import json, os
+from pathlib import Path
+via_trials = json.load(open(os.environ["FI_TRIALS"]))["cells"]
+via_raw = json.load(open(Path(os.environ["FI_RAW_DIR"]) / "trials.json"))["cells"]
+def cols(cells):
+    return {str(c["cell"]["sigma"]): sorted(c["metrics"]) for c in cells}
+print("RESULT_JSON: " + json.dumps({"trials": cols(via_trials), "raw": cols(via_raw)}))
+"""
+
+
+def _end_to_end(tmp_path: Path, left: bool):
+    import asyncio
+    import sys
+
+    from core import trial_runner
+    from core.execution import SharedInterpreterExecutor
+
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(SIM, encoding="utf-8")
+    (root / "code" / "experiment.py").write_text(PEEK, encoding="utf-8")
+    plan = {"grid": {"sigma": [0.1, 0.15, 0.2, 0.25]}, "runs_per_setting": 300,
+            "metrics": [known("x_hat", 1.0, se="x_se", interval=("x_lo", "x_hi"))]}
+    runner = trial_runner.TrialsRunner(
+        SharedInterpreterExecutor(python_version=f"{sys.version_info[0]}.{sys.version_info[1]}"), quest_root=root,
+        protocol=plan, deterministic=False, simulate=root / "code" / "simulate.py", analysis=root / "code" / "experiment.py",
+        repairs_left=lambda: left)
+    result = asyncio.run(runner.execute([sys.executable, str(root / "code" / "experiment.py")], cwd=root, timeout_s=300,
+                                        env={"FI_REPLICATE_SEED": "0"}))
+    return root, runner, result
+
+
+def test_the_folder_the_analysis_reads_raw_trials_from_holds_no_withheld_column(tmp_path: Path) -> None:
+    root, runner, result = _end_to_end(tmp_path, left=False)
+    assert result.returncode == 0, result.stderr[-800:]
+    assert tc.read_record(root)["action"] == tc.DISCLOSE
+    seen = json.loads(result.stdout.split("RESULT_JSON: ", 1)[1].splitlines()[0])
+    full = ["x_hat", "x_hi", "x_lo", "x_se"]
+    for via in ("trials", "raw"):  # FI_TRIALS and FI_RAW_DIR/trials.json give the same filtered record
+        assert seen[via]["0.2"] == ["x_hat"] and all(seen[via][k] == full for k in ("0.1", "0.15", "0.25")), (via, seen)
+    own = json.loads((root / "raw" / "trials.json").read_text(encoding="utf-8"))["cells"]
+    assert all(sorted(c["metrics"]) == full for c in own)  # the quest's own record is untouched
+
+
+def test_a_disclosure_that_cannot_be_recorded_is_a_stop_not_an_unfiltered_hand_on(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from core.trial_runner import TrialsRunner
+
+    root, _runner, run = _disclosed_quest(tmp_path)
+    plan = _proto(known("x_hat", 1.0, se="x_se", interval=("x_lo", "x_hi")))
+    (root / ".fi" / "trial_checks.json").unlink()
+    (root / ".fi" / "trial_checks.json").mkdir()  # the record cannot be written
+    runner = TrialsRunner(object(), quest_root=root, protocol=lambda: plan, deterministic=False,
+                          simulate=root / "code" / "simulate.py", analysis=root / "code" / "analysis.py",
+                          repairs_left=lambda: False)
+    sent = runner._check_trials(SimpleNamespace(summary_path=run.summary_path, cells=[], stderr=lambda: ""), plan, 0.0)
+    assert sent is not None and sent.returncode == 1 and runner.trial_fault["action"] == tc.STOP
+    assert "could not" in runner.trial_fault["say"]
+
+
+def test_partly_shared_draws_count_each_draw_once_in_the_pooled_coverage(tmp_path: Path) -> None:
+    # A runs seeds 0-99, B runs seeds 0-49 and 100-149: the 50 shared draws cover in both, each side's own 50 cover 24 times
+    root = tmp_path / "q"
+    (root / "raw").mkdir(parents=True)
+    rows = []
+    seeds = {KEYS[0]: list(range(100)), KEYS[1]: list(range(50)) + list(range(100, 150))}
+    for key, ss in seeds.items():
+        rows.append({"event": "planned", "cell": key, "trials": 100})
+        rows += [{"event": "trial", "cell": key, "trial": t, "seed": sd, "status": "ok"} for t, sd in enumerate(ss)]
+    (root / "raw" / "ledger.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    cells = []
+    for key, ss in seeds.items():
+        hit = [1 if (sd < 50 or (sd - (50 if sd >= 100 else 0)) % 50 < 24) else 0 for sd in ss]
+        cells.append({"key": key, "cell": {}, "planned": 100, "failed": 0, "metrics": {
+            "x_hat": {"values": [1.0 + 0.01 * ((t % 7) - 3) for t in range(100)], "trials": list(range(100))},
+            "x_lo": {"values": [0.5 if h else 2.0 for h in hit], "trials": list(range(100))},
+            "x_hi": {"values": [1.5 if h else 3.0 for h in hit], "trials": list(range(100))}}})
+    plan = _proto(known("x_hat", 1.0, interval=("x_lo", "x_hi")))
+    v = tc.judge(cells, plan, None, None, repairs_left=False, quest_root=root)
+    [q] = [q for q in v.calibration.quantities if q.kind == "coverage"]
+    assert q.pooled.n == 150 and abs(q.pooled.value - 98 / 150) < 1e-9  # not 111/150 = 0.74
+    assert q.pooled.gross and v.action == tc.STOP
+
+
+def test_the_words_name_which_settings_are_withheld_and_which_are_kept_as_reported(tmp_path: Path) -> None:
+    cells = _cells({KEYS[0]: 3.0, KEYS[1]: 1.3}, n_trials=2000)
+    [item] = _disclosed(_quest(tmp_path, _judge(cells, left=False)))
+    text = item.sentence
+    assert "for the setting named above is therefore not presented" in text
+    assert "FI does not hand on the reported error or interval of the setting named above" in text
+    assert "the reported error and interval of that setting are kept as reported" in text
+    assert "these settings" not in text

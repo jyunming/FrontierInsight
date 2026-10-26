@@ -568,18 +568,20 @@ def _multipliers(cell: dict[str, Any], kv: dict[str, Any], want: float) -> list[
     return out
 
 
-def _coverage_check(key: str, hits: list[float], level: float, z: float = _Z95, factor: float = 1.0) -> SettingCheck | None:
-    """``factor`` < 1: the trials behind ``hits`` are not independent (settings that ran on the same draws, see
-    :func:`_draw_factor`), so the share is judged on that fraction of them: distinct draws, not trials x settings."""
+def _coverage_check(key: str, hits: list[float], level: float, z: float = _Z95,
+                    weights: list[float] | None = None) -> SettingCheck | None:
+    """``weights``: how much each trial counts (1 over the draw's records, :func:`_draw_weights`; ``None``: each counts 1),
+    so a draw that several settings share is counted once."""
     n = len(hits)
     if n < MIN_TRIALS:
         return None
-    k = sum(hits)
-    ci = _stats.wilson_interval(k * factor, n * factor, z=z)
-    if ci is None:
+    w = weights if weights is not None and len(weights) == n else [1.0] * n
+    k, total = sum(h * x for h, x in zip(hits, w)), sum(w)
+    ci = _stats.wilson_interval(k, total, z=z)
+    if ci is None or total <= 0:
         return None
     lo, hi = ci
-    return SettingCheck(key, max(1, round(n * factor)), k / n, lo, hi, gross=hi < level - COVERAGE_GAP, below=hi < level,
+    return SettingCheck(key, max(1, round(total)), k / total, lo, hi, gross=hi < level - COVERAGE_GAP, below=hi < level,
                         above=lo > level)
 
 
@@ -601,8 +603,8 @@ def _ratio_of(est: list[float], se: list[float], constant_ok: bool = False) -> t
     return sd / rms, n - 1
 
 
-def _ratio_band(key: str, n: int, ratio: float, dof: float, z: float = _Z95) -> SettingCheck:
-    half = z / math.sqrt(2.0 * dof)
+def _ratio_band(key: str, n: int, ratio: float, free: float, z: float = _Z95) -> SettingCheck:
+    half = z / math.sqrt(2.0 * free)
     lo, hi = ratio * math.exp(-half), ratio * math.exp(half)
     return SettingCheck(key, n, ratio, lo, hi, gross=lo > RATIO_HIGH or hi < RATIO_LOW, below=lo > 1.25 or hi < 0.8)
 
@@ -618,11 +620,12 @@ def _bias_band(key: str, n: float, b: float, z: float = _Z95) -> SettingCheck:
                         below=lo > BIAS_REPORTED or hi < -BIAS_REPORTED)
 
 
-def _judge_bias(q: "Quantity", per: list[tuple[str, list[float], float]], factor: float = 1.0) -> None:
+def _judge_bias(q: "Quantity", per: list[tuple[Any, ...]]) -> None:
     """Each setting's (mean estimate - truth) / spread of the estimates at the family level, and pooled at 95%. A setting
-    with no spread (no noise) is not judged."""
+    with no spread (no noise) is not judged. ``per``: ``(key, estimates, truth[, share])``; ``share`` is the part of the
+    setting's trials that are draws no other judged setting ran (1 when none shares its draws)."""
     found = []
-    for key, est, truth in per:
+    for key, est, truth, *rest in per:
         n = len(est)
         if n < MIN_TRIALS:
             continue
@@ -630,13 +633,13 @@ def _judge_bias(q: "Quantity", per: list[tuple[str, list[float], float]], factor
         sd = math.sqrt(sum((x - mean) ** 2 for x in est) / (n - 1))
         if sd <= 1e-12 * max(abs(mean), 1e-300):
             continue
-        found.append((key, n, (mean - truth) / sd))
+        found.append((key, n, (mean - truth) / sd, rest[0] if rest else 1.0))
     z = _z_family(len(found))
-    for key, n, b in found:
+    for key, n, b, _share in found:
         q.settings.append(_bias_band(key, n, b, z))
     if len(found) > 1:
-        total = sum(n for _k, n, _b in found)
-        q.pooled = _bias_band(POOLED, total * factor, sum(n * b for _k, n, b in found) / total)
+        total = sum(n * sh for _k, n, _b, sh in found)
+        q.pooled = _bias_band(POOLED, total, sum(n * sh * b for _k, n, b, sh in found) / total)
 
 
 def _judge_no_estimate(q: "Quantity", per: list[tuple[str, int, int]]) -> None:
@@ -648,16 +651,18 @@ def _judge_no_estimate(q: "Quantity", per: list[tuple[str, int, int]]) -> None:
             q.settings.append(SettingCheck(key, ran, share, share, share, gross=share > FAULT_FRACTION, below=True))
 
 
-def _judge_coverage(q: "Quantity", per: list[tuple[str, list[float]]], factor: float = 1.0) -> None:
-    """Each setting's coverage at the family level, and the pooled coverage at 95%."""
-    judged = [(key, hits) for key, hits in per if len(hits) >= MIN_TRIALS]
+def _judge_coverage(q: "Quantity", per: list[tuple[Any, ...]]) -> None:
+    """Each setting's coverage at the family level, and the pooled coverage at 95% (``per``: ``(key, hits[, weights])``;
+    with weights, the pool counts each random draw once)."""
+    judged = [(key, hits, *rest) for key, hits, *rest in per if len(hits) >= MIN_TRIALS]
     z = _z_family(len(judged))
-    for key, hits in judged:
+    for key, hits, *_w in judged:
         got = _coverage_check(key, hits, q.level or 0.95, z)
         if got is not None:
             q.settings.append(got)
     if len(judged) > 1:
-        q.pooled = _coverage_check(POOLED, [h for _k, hits in judged for h in hits], q.level or 0.95, factor=factor)
+        weights = [x for _k, hits, *w in judged for x in (w[0] if w and w[0] is not None else [1.0] * len(hits))]
+        q.pooled = _coverage_check(POOLED, [h for _k, hits, *_w in judged for h in hits], q.level or 0.95, weights=weights)
 
 
 def ratio_detection_floor(free: float, z: float = _Z95) -> float:
@@ -668,26 +673,28 @@ def ratio_detection_floor(free: float, z: float = _Z95) -> float:
     return RATIO_HIGH * math.exp(z / math.sqrt(2.0 * max(1, free)))
 
 
-def _judge_ratio(q: "Quantity", per: list[tuple[str, list[float], list[float]]], factor: float = 1.0) -> None:
+def _judge_ratio(q: "Quantity", per: list[tuple[Any, ...]]) -> None:
     """Each setting's spread / reported error at the family level, and the pooled ratio at 95% (the root of the mean squared
-    ratio weighted by each setting's degrees of freedom)."""
-    found = [(key, len(e), _ratio_of(e, s)) for key, e, s in per]
-    found = [(key, n, r) for key, n, r in found if r is not None]
+    ratio weighted by each setting's degrees of freedom; ``per``: ``(key, estimates, errors[, share])``, ``share`` as in
+    :func:`_judge_bias`: the pool's degrees of freedom count each random draw once)."""
+    found = [(key, len(e), _ratio_of(e, s), rest[0] if rest else 1.0) for key, e, s, *rest in per]
+    found = [(key, n, r, sh) for key, n, r, sh in found if r is not None]
     if not found:
         # No setting shows any spread while the trials report an error: the estimates never vary, anywhere (a simulation
         # that ignores its seed). One setting without noise among settings that have some is only a setting without noise
         # (a correct estimator reports a small error there): it is skipped as before.
-        found = [(key, len(e), r) for key, e, s in per if (r := _ratio_of(e, s, constant_ok=True)) is not None]
+        found = [(key, len(e), r, rest[0] if rest else 1.0) for key, e, s, *rest in per
+                 if (r := _ratio_of(e, s, constant_ok=True)) is not None]
     z = _z_family(len(found))
-    for key, n, (ratio, dof) in found:
-        q.settings.append(_ratio_band(key, n, ratio, dof, z))
+    for key, n, (ratio, free), _sh in found:
+        q.settings.append(_ratio_band(key, n, ratio, free, z))
     # The power of this run's check: the best any one of its judgements could do (the pool has the most degrees of freedom).
-    floors = [ratio_detection_floor(r[1], z) for _k, _n, r in found]
+    floors = [ratio_detection_floor(r[1], z) for _k, _n, r, _sh in found]
     if len(found) > 1:
-        dof = sum(r[1] for _k, _n, r in found)
-        pooled = math.sqrt(sum(r[1] * r[0] ** 2 for _k, _n, r in found) / dof)
-        q.pooled = _ratio_band(POOLED, round(sum(n for _k, n, _r in found) * factor), pooled, dof * factor)
-        floors.append(ratio_detection_floor(max(1.0, dof * factor)))
+        free = sum(r[1] * sh for _k, _n, r, sh in found)
+        pooled = math.sqrt(sum(r[1] * sh * r[0] ** 2 for _k, _n, r, sh in found) / free)
+        q.pooled = _ratio_band(POOLED, round(sum(n * sh for _k, n, _r, sh in found)), pooled, free)
+        floors.append(ratio_detection_floor(max(1.0, free)))
     if floors:
         q.detects_from = min(floors)
 
@@ -714,31 +721,40 @@ def _cell_hits(cell: dict[str, Any], kv: dict[str, Any], truth: float) -> tuple[
     return e, s, hits
 
 
-def _draw_factor(cells: list[dict[str, Any]], protocol: dict[str, Any] | None, quest_root: Path | str | None,
-                 held: dict[str, Any] | None = None) -> float:
-    """The share of the trials of ``cells`` that are different random draws: 1 when no two settings ran a trial on the same
-    seed (FI's ledger), else the number of distinct draws over the number of trials. It is the decision the paper's own
-    statistics follow (core/paper_values.py ``Records.share_draws`` and ``_draw_key``: one function, no second rule), so a
-    measure pooled over settings that share their draws counts each draw once."""
+def _draw_weights(cells: list[dict[str, Any]], protocol: dict[str, Any] | None, quest_root: Path | str | None,
+                  held: dict[str, Any]) -> dict[str, dict[int, float]] | None:
+    """``{setting key: {trial: weight}}`` where each random draw counts once over ``cells``: a trial's weight is 1 over the
+    number of the settings' trials that ran on its draw. ``None`` when no two settings ran a trial on the same seed (FI's
+    ledger). The decision and the draw key are the paper's own statistics' (core/paper_values.py ``Records.share_draws`` and
+    ``_draw_key``): one rule, so a measure pooled over settings that share draws is judged on the different draws."""
     if quest_root is None or len(cells) < 2:
-        return 1.0
+        return None
     from . import paper_values as _pv
 
-    held = held if held is not None else {}
     if "rec" not in held:  # the ledger is read once per check
         held["rec"] = _pv.Records([], protocol)
         held["rec"].seeds = _pv._ledger_seeds(Path(quest_root))
     rec = held["rec"]
     if not rec.seeds or not rec.share_draws(cells):
-        return 1.0
-    draws: set[Any] = set()
-    total = 0
+        return None
+    drawn: dict[Any, list[tuple[str, int]]] = {}
     for c in cells:
         ids = sorted(_ran(c))
-        for i in range(len(ids)):
-            draws.add(_pv._draw_key(rec, c, ids, i))
-        total += len(ids)
-    return len(draws) / total if total else 1.0
+        for i, t in enumerate(ids):
+            drawn.setdefault(_pv._draw_key(rec, c, ids, i), []).append((str(c.get("key")), t))
+    out: dict[str, dict[int, float]] = {}
+    for users in drawn.values():
+        for key, t in users:
+            out.setdefault(key, {})[t] = 1.0 / len(users)
+    return out
+
+
+def _share(weights: dict[int, float] | None, trials: Any) -> float:
+    """The part of ``trials`` that count as their own draw: the mean weight of those trials (1 without shared draws)."""
+    ids = list(trials)
+    if weights is None or not ids:
+        return 1.0
+    return sum(weights.get(t, 1.0) for t in ids) / len(ids)
 
 
 def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = None,
@@ -794,30 +810,32 @@ def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = N
                  if spread else None)
         bias = Quantity("bias", est, [est], truth=truth_label)
         empty = Quantity("no_estimate", est, [est], truth=truth_label)
-        cover_per: list[tuple[str, list[float]]] = []
-        ratio_per: list[tuple[str, list[float], list[float]]] = []
-        bias_per: list[tuple[str, list[float], float]] = []
+        cover_per: list[tuple[Any, ...]] = []
+        ratio_per: list[tuple[Any, ...]] = []
+        bias_per: list[tuple[Any, ...]] = []
         empty_per: list[tuple[str, int, int]] = []
+        judged_cells = [c for c in cells if (t0 := _truth_of(truth, c, thresholds)) is not None
+                        and not _undefined_here(spec.get("undefined_when") or {}, c) and est in (c.get("metrics") or {})]
+        draw_weights = _draw_weights(judged_cells, protocol, quest_root, ledger)
         for c in cells:
             key = str(c.get("key"))
             t = _truth_of(truth, c, thresholds)
             if t is None or _undefined_here(spec.get("undefined_when") or {}, c) or est not in (c.get("metrics") or {}):
                 continue
             e, s, hits = _cell_hits(c, kv, t)
-            cover_per.append((key, hits))
-            bias_per.append((key, list(e.values()), t))
+            w = (draw_weights or {}).get(key)
             ran = _ran(c)
+            cover_per.append((key, hits, [w.get(i, 1.0) for i in sorted(ran)] if w and hits else None))
+            bias_per.append((key, list(e.values()), t, _share(w, e)))
             empty_per.append((key, len(ran), len(ran - set(e))))
             if ratio is not None:
-                pairs = [(e[i], s[i]) for i in e if i in s and s[i] >= 0]
-                ratio_per.append((key, [x for x, _ in pairs], [v for _, v in pairs]))
-        judged_keys = {k for k, _h in cover_per}
-        factor = _draw_factor([c for c in cells if str(c.get("key")) in judged_keys], protocol, quest_root, ledger)
+                used = [i for i in e if i in s and s[i] >= 0]
+                ratio_per.append((key, [e[i] for i in used], [s[i] for i in used], _share(w, used)))
         if cover is not None:
-            _judge_coverage(cover, cover_per, factor)
+            _judge_coverage(cover, cover_per)
         if ratio is not None:
-            _judge_ratio(ratio, ratio_per, factor)
-        _judge_bias(bias, bias_per, factor)
+            _judge_ratio(ratio, ratio_per)
+        _judge_bias(bias, bias_per)
         _judge_no_estimate(empty, empty_per)
         if empty.settings:
             out.quantities.append(empty)
@@ -1133,13 +1151,15 @@ def left_out_settings(quest_root: Path | str) -> list[dict[str, Any]]:
     return [f for f in rec.get("failures") or [] if isinstance(f, dict) and f.get("key") in keys]
 
 
-def write_record(quest_root: Path | str, record: dict[str, Any]) -> None:
+def write_record(quest_root: Path | str, record: dict[str, Any]) -> bool:
+    """Write the record; whether it was written."""
     try:
         path = Path(quest_root) / RECORD
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(record, indent=1, allow_nan=True), encoding="utf-8")
+        return True
     except OSError:
-        pass
+        return False
 
 
 #: Why FI's checks of the trials did not run on the last run, by how the simulation ran its trials (the record's

@@ -1411,8 +1411,12 @@ class TrialsRunner:
                         "FI_RAW_DIR": run.summary_path.parent.relative_to(self.quest_root).as_posix()}
         # The analysis runs from a copy outside the quest folder too; what it writes under raw/, figures/, results/,
         # data/ (and FI's figure records) comes back, anything else is said in run.log and dropped.
+        # The copy's raw trial record is the filtered one FI_TRIALS gives (the quest's own is not touched), so the folder
+        # FI_RAW_DIR names holds no column FI keeps back either.
+        own = run.summary_path.relative_to(self.quest_root).as_posix()
+        swap = {own: summary_path} if summary_path != run.summary_path else None
         result = await _outside.OutsideExecutor(self.executor, self.quest_root, inputs=_outside.ANALYSIS_INPUTS, skip=(),
-                                                log=self.log).execute(
+                                                log=self.log, replace=swap).execute(
             cmd, cwd=cwd, timeout_s=timeout_s, env=analysis_env)
         self.failed_script = None if result.returncode == 0 else self.analysis.name
         if result.returncode != 0 and self.left_out_settings and not self.trial_fault:
@@ -1489,7 +1493,14 @@ class TrialsRunner:
         left = self._repairs_left() if callable(self._repairs_left) else bool(self._repairs_left)
         verdict = _checks.judge(cells, protocol, thresholds or None, reasons, repairs_left=bool(left),
                                 quest_root=self.quest_root)
-        _checks.write_record(self.quest_root, verdict.record())
+        kept = _checks.write_record(self.quest_root, verdict.record())
+        if verdict.action == _checks.DISCLOSE and not (kept and _checks.withheld_values(self.quest_root)):
+            # The columns FI keeps back are read from this record: without it nothing would be kept back, so it is a stop.
+            verdict.action = _checks.STOP
+            verdict.say = ("FI measured a reported standard error or interval that does not match the trials and could not "
+                           "keep its record of which settings it is (.fi/trial_checks.json could not be written or read back), "
+                           "so it could not keep that error and interval from the analysis")
+            verdict.tried = [*verdict.tried, "tried to write and read back the record of the disclosure; it failed"]
         stated = [f for f in verdict.fails if f.stated and not f.fault]
         if self.log is not None:
             for f in stated:

@@ -539,8 +539,11 @@ class OutsideCopy:
 
     def __init__(self, quest_root: Path | str, *, named: list[str] | tuple[str, ...] = (), base: Path | str | None = None,
                  inputs: tuple[str, ...] = CELL_INPUTS, skip: tuple[str, ...] = CELL_SKIP, share: bool = True,
-                 only_named: bool = False) -> None:
+                 only_named: bool = False, replace: dict[str, Path | str] | None = None) -> None:
         self.quest_root = Path(quest_root).resolve()
+        #: Files of the quest the copy holds another file in place of (``{path in the quest: file to put there}``): the copy
+        #: reads the replacement and the quest's own file is not touched.
+        self.replace = {k.strip("/"): Path(v) for k, v in (replace or {}).items()}
         #: Whether :data:`SHARED_CACHE` may be linked into the copy (False: it was not prepared, or the run cannot follow
         #: a link to the quest's own folder); unlinked, the run works out its shared values in its own copy.
         self.share = share
@@ -586,6 +589,10 @@ class OutsideCopy:
                 shutil.copy2(src, root / rel)
             elif "/" in rel:
                 (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        for rel, src in self.replace.items():
+            if src.is_file() and not _never(rel):
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, root / rel)
         # The study's shared folder, when the copy would not hold it: linked to the quest's own, not copied.
         if any(SHARED_CACHE == s or SHARED_CACHE.startswith(s + "/") for s in self.skip):
             target = self.quest_root / SHARED_CACHE
@@ -700,8 +707,9 @@ class OutsideExecutor:
 
     def __init__(self, inner: Any, quest_root: Path | str, *, base: Path | str | None = None,
                  inputs: tuple[str, ...] = CELL_INPUTS, skip: tuple[str, ...] = CELL_SKIP, log: Any = None,
-                 share: bool = True, only_named: bool = False) -> None:
+                 share: bool = True, only_named: bool = False, replace: dict[str, Path | str] | None = None) -> None:
         self.inner = inner
+        self._replace = replace
         # ``share`` False: the run never sees the quest's shared folder (it works out every value itself); ``only_named``:
         # only the paths FI named for it come back. Both for a check whose run must neither read what the study kept nor
         # leave anything in the quest (core/second_impl.py changes a function's result to see what depends on it).
@@ -749,7 +757,7 @@ class OutsideExecutor:
         if shares:
             shares = await asyncio.to_thread(prepare_shared_cache, self.quest_root, self._log) is not None
         box = OutsideCopy(self.quest_root, named=named, base=self._base, inputs=self._inputs, skip=self._skip,
-                          share=shares, only_named=self._only_named)
+                          share=shares, only_named=self._only_named, replace=self._replace)
         root = await asyncio.to_thread(box.make)
         self.last = box
         if box.not_shared and self._share and not self._said_not_shared:
