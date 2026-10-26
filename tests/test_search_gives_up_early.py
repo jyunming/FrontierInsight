@@ -105,3 +105,51 @@ def test_a_late_failure_after_a_working_answer_is_not_a_reason_to_stop() -> None
 
     outcome, asked, _ = _drive(osearch.search(_block(), seed=0, batch=True), first_works_then_fails)
     assert asked > 10 and outcome["stopped_because"] != "failures"
+
+
+def _drive_streamed(gen, answer, at_once=8):
+    """Run a streamed search with a pool of ``at_once``: returns (outcome, designs answered)."""
+    import collections
+    queue, answered = collections.deque(), 0
+    try:
+        request = next(gen)
+        while True:
+            if request["kind"] == "evaluate_stream":
+                queue.extend(request["requests"])
+                out = []
+                while queue and len(out) < at_once:
+                    one = queue.popleft()
+                    out.append((one["id"], answer(one)))
+                answered += len(out)
+                reply = out
+            elif request["kind"] == "evaluate":
+                answered += 1
+                reply = answer(request)
+            elif request["kind"] == "evaluate_many":
+                answered += len(request["requests"])
+                reply = [answer(r) for r in request["requests"]]
+            else:
+                reply = {"cells": [], "levels": []}
+            request = gen.send(reply)
+    except StopIteration as done:
+        return done.value, answered
+
+
+def test_streamed_starts_do_not_send_more_designs_than_it_takes_to_give_up() -> None:
+    from tests.test_search_stream import _block as stream_block
+    block = stream_block(starts=4, per_start=60, method="bounded_local")
+    outcome, answered = _drive_streamed(osearch.search(block, seed=0, batch=True, stream=True), _no_objective)
+    assert outcome["stopped_because"] == "failures"
+    assert answered == 10 and not outcome.get("run_not_used")
+
+
+def test_streamed_healthy_search_is_unchanged_by_the_rule() -> None:
+    from tests.test_search_stream import _block as stream_block, _bowl
+    block = stream_block(starts=4, per_start=40, method="bounded_local")
+
+    def bowl(request):
+        return {"values": {"f": _bowl(request["design"])}}
+
+    streamed, _ = _drive_streamed(osearch.search(block, seed=0, batch=True, stream=True), bowl)
+    plain, _, _ = _drive(osearch.search(block, seed=0, batch=False), bowl)
+    assert [r["design"] for r in streamed["rows"]] == [r["design"] for r in plain["rows"]]

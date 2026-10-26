@@ -1447,6 +1447,14 @@ class _Search:
                 if not new and not inflight:
                     raise RuntimeError("the search waits for a design nobody asked for")
                 asked_now, new = new, []
+                if not self._worked(list(answers.values())):
+                    # As in :meth:`_ask_all`: while no answer has worked, only as many designs go to the pool as it takes
+                    # to give up if all of them fail; the others wait until those are answered.
+                    held = {n["id"] for n in asked_now}
+                    out = len(inflight - held) + sum(1 for k in answers if k not in self.cache)
+                    room = _FAILURES_BEFORE_GIVING_UP - self.failures_in_a_row - out
+                    room = max(room, 1 if not out else 0)
+                    asked_now, new = asked_now[:room], asked_now[room:]
                 replies = yield {"kind": "evaluate_stream", "requests": asked_now}
                 for key, reply in replies if isinstance(replies, list) else []:
                     answers[key] = reply
