@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from . import plan as _plan
-from .design_parts import get_part
+from .design_parts import apply_changes, get_part
 
 FILE = "audit_open_items.json"
 _log = logging.getLogger(__name__)
@@ -42,55 +42,68 @@ def _plain(value: Any) -> Any:
     return json.loads(json.dumps(value, default=str))
 
 
-def normal(path: str, value: Any) -> Any:
-    """``value`` at ``path`` as the plan reads a design (a scalar grid value becomes a list of one, and so on): the value
-    is put at its path in a minimal design and read by :func:`core.plan.normalize_design`, the reading the written plan and
-    the frozen protocol come from. A value the plan cannot read alone stays as it is."""
-    segs = path.split(".")
-    if segs == ["hypothesis"]:
-        return _plain(value)
-    node: Any = value
-    for s in reversed(segs):
-        node = {s: node}
-    design, _why = _plan.normalize_design({"hypothesis": "x", **node})
-    found, now = get_part(design or {}, path)
-    return _plain(now if design is not None and found else value)
-
-
 def _canon(value: Any) -> str:
     return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
 
 
-def item_id(path: str, value: Any) -> str:
-    return hashlib.sha256(f"{path}\n{_canon(normal(path, value))}".encode("utf-8")).hexdigest()[:12]
+def in_context(design: Any, path: str, value: Any) -> tuple[bool, Any]:
+    """``(held, normal)``: whether the proposal ``value`` for ``path`` changes nothing in ``design``, and the value as the
+    plan reads it in this design. The proposal is applied to a copy of the actual design, both are read by
+    :func:`core.plan.normalize_design` (the reading the written plan and the frozen protocol come from, with the context
+    it needs: a scalar grid value becomes a list, a numerical setting is folded into the grid), and the value at ``path`` in
+    the two readings is compared. When the design or the proposal cannot be read that way, the raw values are compared."""
+    design = design if isinstance(design, dict) else {}
+    value = _plain(value)
+    merged, refused = apply_changes(design, [(path, value)])
+    if not refused:
+        have, _why = _plan.normalize_design(design)
+        want, _why = _plan.normalize_design(merged)
+        if have is not None and want is not None:
+            had, before = get_part(have, path)
+            has, after = get_part(want, path)
+            if has:
+                return had and _canon(before) == _canon(after), _plain(after)
+    found, now = get_part(design, path)
+    return found and _canon(now) == _canon(value), value
+
+
+def holds(design: Any, path: str, value: Any) -> bool:
+    """Whether ``design`` has the proposal ``value`` at ``path`` (:func:`in_context`)."""
+    return in_context(design, path, value)[0]
+
+
+def item_id(path: str, normal: Any) -> str:
+    """The id of an item: its path and its value as the plan read it in the design at the time it was recorded
+    (:func:`in_context`). Kept as it was when the item is recorded again, so a later design never renames an item."""
+    return hashlib.sha256(f"{path}{chr(10)}{_canon(normal)}".encode("utf-8")).hexdigest()[:12]
 
 
 def proposals(objections: Any) -> list[dict[str, Any]]:
     """Each change the audit's objections carry, with the objection's own text: ``{path, value, objection, fix, check}``.
-    Two changes to one path with different values are both kept; an identical change from the same objection once."""
-    out: dict[tuple[str, str, str], dict[str, Any]] = {}
+    Two changes to one path with different values are both kept. Two changes are one only when path, value, objection, fix
+    and check are all the same (one objection naming a change twice)."""
+    out: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
     for o in objections if isinstance(objections, list) else []:
         if not isinstance(o, dict):
             continue
         for c in o.get("changes") or []:
             if isinstance(c, dict) and isinstance(c.get("path"), str) and "value" in c:
-                path, text = c["path"].strip(), str(o.get("objection") or "")
-                out[(path, _canon(c["value"]), text)] = {
-                    "path": path, "value": c["value"], "objection": text, "fix": str(o.get("fix") or ""),
-                    "check": str(o.get("check") or "")}
+                path = c["path"].strip()
+                row = {"path": path, "value": c["value"], "objection": str(o.get("objection") or ""),
+                       "fix": str(o.get("fix") or ""), "check": str(o.get("check") or "")}
+                out[(path, _canon(c["value"]), row["objection"], row["fix"], row["check"])] = row
     return list(out.values())
 
 
-def holds(design: Any, path: str, value: Any) -> bool:
-    """Whether ``design`` has ``value`` at ``path``, both read as the plan reads them."""
-    found, now = get_part(design if isinstance(design, dict) else {}, path)
-    return found and _canon(normal(path, now)) == _canon(normal(path, value))
-
-
 def split(props: list[dict[str, Any]], design: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """``(held, missing)``: the proposals the design has, and the ones it does not."""
-    held = [p for p in props if holds(design, p["path"], p["value"])]
-    return held, [p for p in props if p not in held]
+    """``(held, missing)``: the proposals the design has, and the ones it does not, each with its ``id`` and ``norm`` (the
+    value as the plan reads it in this design)."""
+    held: list[dict[str, Any]] = []
+    missing: list[dict[str, Any]] = []
+    for p in props:
+        ok, norm = in_context(design, p["path"], p["value"])
+        (held if ok else missing).append({**p, "id": item_id(p["path"], norm), "norm": norm})
+    return held, missing
 
 
 class Unreadable(Exception):
@@ -106,13 +119,13 @@ def _load(quest_root: Path) -> dict[str, list[dict[str, Any]]]:
     said plainly, and read as empty; one that cannot be opened raises :class:`Unreadable`."""
     path = _path(quest_root)
     try:
-        text = path.read_text(encoding="utf-8")
+        raw = path.read_bytes()
     except FileNotFoundError:
         return {"open": [], "applied": []}
     except OSError as e:
         raise Unreadable(f"{path} cannot be read ({e!r})") from e
     try:
-        data = json.loads(text)
+        data = json.loads(raw.decode("utf-8"))
         if not isinstance(data, dict):
             raise ValueError("not a mapping")
     except ValueError:
@@ -192,21 +205,15 @@ def record(quest_root: Path, held: list[dict[str, Any]], missing: list[dict[str,
     open_ = {x.get("id") or item_id(x["path"], x.get("value")): x for x in now["open"]}
     applied = {x.get("id") or item_id(x["path"], x.get("value")): x for x in now["applied"]}
     for p in held:
-        i = item_id(p["path"], p["value"])
+        i = p.get("id") or item_id(p["path"], p.get("norm", p["value"]))
         origin = _origin(p, iteration)
-        if i in open_:
-            origin_list = open_[i].get("origins") or []
-            applied[i] = {"id": i, "path": p["path"], "value": normal(p["path"], p["value"]),
-                          "origins": [*origin_list, *([origin] if origin not in origin_list else [])]}
-            del open_[i]
-        else:
-            old = applied.get(i, {}).get("origins") or []
-            applied[i] = {"id": i, "path": p["path"], "value": normal(p["path"], p["value"]),
-                          "origins": [*old, *([origin] if origin not in old else [])]}
+        old = (open_.pop(i, None) or applied.get(i) or {}).get("origins") or []
+        applied[i] = {"id": i, "path": p["path"], "value": p.get("norm", p["value"]),
+                      "origins": [*old, *([origin] if origin not in old else [])]}
     for p in missing:
-        i = item_id(p["path"], p["value"])
+        i = p.get("id") or item_id(p["path"], p.get("norm", p["value"]))
         applied.pop(i, None)
-        item = open_.get(i) or {"id": i, "path": p["path"], "value": normal(p["path"], p["value"]), "origins": [], "reason": ""}
+        item = open_.get(i) or {"id": i, "path": p["path"], "value": p.get("norm", p["value"]), "origins": [], "reason": ""}
         origin = _origin(p, iteration)
         if origin not in item["origins"]:
             item["origins"].append(origin)
@@ -236,14 +243,15 @@ def check_against(quest_root: Path, protocol: Any, *, why: str) -> list[dict[str
     """After the protocol is frozen: each applied change to the protocol that the frozen protocol does not hold becomes an
     open item with reason ``why``. Returns those items."""
     now = read(quest_root)
-    frozen = {"protocol": protocol if isinstance(protocol, dict) else {}}
+    frozen = {"hypothesis": "x", "protocol": protocol if isinstance(protocol, dict) else {}}
     gone = [x for x in now["applied"] if x["path"].startswith("protocol.") and not holds(frozen, x["path"], x.get("value"))]
     if not gone:
         return []
     for x in gone:
         for o in x.get("origins") or [{}]:
-            record(quest_root, [], [{"path": x["path"], "value": x.get("value"), "objection": o.get("objection", ""),
-                                     "fix": o.get("fix", ""), "check": o.get("check", "")}],
+            record(quest_root, [], [{"id": x.get("id"), "path": x["path"], "value": x.get("value"),
+                                     "objection": o.get("objection", ""), "fix": o.get("fix", ""),
+                                     "check": o.get("check", "")}],
                    reasons={}, default_reason=why, iteration=int(o.get("iteration") or 0))
     return gone
 

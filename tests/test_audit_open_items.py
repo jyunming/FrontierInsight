@@ -189,10 +189,74 @@ def test_a_damaged_record_is_kept_aside_and_a_failed_read_is_never_written_over(
     assert ao.record(tmp_path, [], props, reasons={}, default_reason="x") == []
 
 
-def test_the_open_items_are_their_own_whole_section_after_the_plans_cut(tmp_path: Path) -> None:
-    huge = "x" * 20000
-    ao.record(tmp_path, [], ao.proposals([{**_objection(("protocol.anchor_rule", ANCHOR)), "objection": huge}]),
-              reasons={}, default_reason="x")
+def test_the_open_items_are_one_key_of_the_single_plan_json_and_come_before_the_plans_cut(tmp_path: Path) -> None:
+    ao.record(tmp_path, [], ao.proposals([_objection(("protocol.anchor_rule", ANCHOR))]), reasons={}, default_reason="x")
     view = code_review.plan_view(DRAFT, DRAFT["protocol"], open_items=ao.for_code(tmp_path))
-    section = view.split("as JSON:\n", 1)[1]
-    assert json.loads(section)["items"][0]["audit_said"] == huge
+    assert json.loads(view)["proposed_by_the_methodology_audit_not_applied"]["items"][0]["proposed"] == ANCHOR
+    big = "x" * 8000
+    ao.record(tmp_path, [], ao.proposals([{**_objection(("protocol.other_rule", "y")), "objection": big}]),
+              reasons={}, default_reason="x")
+    view = code_review.plan_view(DRAFT, {**DRAFT["protocol"], "grid": {"a": list(range(3000))}},
+                                 open_items=ao.for_code(tmp_path))
+    assert "(the rest of the plan is not shown)" in view  # the plan was cut, after the whole audit section
+    assert big in view and view.index(big) < view.index("(the rest of the plan is not shown)")
+
+
+def test_two_objections_with_the_same_text_keep_each_fix_as_an_origin(tmp_path: Path) -> None:
+    objs = [{**_objection(("method", "M1")), "fix": "F1"}, {**_objection(("method", "M1")), "fix": "F2"}]
+    props = ao.proposals(objs)
+    assert [p["fix"] for p in props] == ["F1", "F2"]
+    ao.record(tmp_path, [], props, reasons={}, default_reason="x")
+    (item,) = ao.read(tmp_path)["open"]
+    assert [o["fix"] for o in item["origins"]] == ["F1", "F2"]
+
+
+def test_held_is_decided_in_the_context_of_the_actual_design() -> None:
+    """A numerical setting is folded into the grid by the plan: the design holds the grid as the proposal gives it."""
+    design, why = plan.normalize_design({
+        **DRAFT, "protocol": {"grid": {"x": [1, 2]}, "numerical_settings": {"n": {"search": 8, "check": [4]}}}})
+    assert design is not None, why
+    assert design["protocol"]["grid"] == {"x": [1, 2], "n": [8]}
+    held, missing = ao.split(ao.proposals([_objection(("protocol.grid", {"x": [1, 2]}))]), design)
+    assert held and not missing and held[0]["norm"] == {"x": [1, 2], "n": [8]}  # the value in this design's context
+    held, missing = ao.split(ao.proposals([_objection(("protocol.grid", {"x": [1, 2, 3]}))]), design)
+    assert missing and not held
+
+
+def test_an_item_keeps_its_id_when_it_is_recorded_again_in_another_context(tmp_path: Path) -> None:
+    props = ao.proposals([_objection(("method", "M1"))])
+    ao.record(tmp_path, [], ao.split(props, DRAFT)[1], reasons={}, default_reason="x")
+    (first,) = ao.read(tmp_path)["open"]
+    ao.record(tmp_path, [], [{**first, "objection": "again", "fix": "", "check": ""}], reasons={}, default_reason="x",
+              iteration=1)
+    (again,) = ao.read(tmp_path)["open"]
+    assert again["id"] == first["id"] and len(again["origins"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_the_design_handed_to_implementation_closes_the_items_it_holds(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+    eng._keep_audit_open_items([_objection(("method", "measure from interpolated crossings"))], DRAFT, reasons={},
+                               default_reason="x")
+    design = _write_plan(eng)
+    edited = {**design, "method": "measure from interpolated crossings"}
+    state = {"topic": "t", "iteration": 0, "design": edited, "design_from_plan": True}
+    eng._stop_if_no_settings_to_vary = lambda *a, **k: None
+    eng._stop_if_the_search_cannot_start = lambda *a, **k: None
+    eng._audit_the_design_that_runs = AsyncMock(return_value=edited)
+    eng._hold_the_design_to_the_topic = AsyncMock(return_value=(edited, "sha"))
+    eng._amend_to_fit = lambda d: d
+    try:
+        await eng._node_design(state)
+    except Exception:  # noqa: BLE001 -- the node's later steps are not under test; the close comes before them
+        pass
+    assert _items(eng)["open"] == []
+
+
+def test_a_record_with_a_byte_that_is_not_text_is_kept_aside_not_a_crash(tmp_path: Path) -> None:
+    fi = tmp_path / ".fi"
+    fi.mkdir()
+    (fi / "audit_open_items.json").write_bytes(b'{"open": [\xff]}')
+    assert ao.read(tmp_path) == {"open": [], "applied": []}
+    assert len(list(fi.glob("audit_open_items.corrupt-*.json"))) == 1
+    assert ao.record(tmp_path, [], ao.proposals([_objection(("method", "M1"))]), reasons={}, default_reason="x")
