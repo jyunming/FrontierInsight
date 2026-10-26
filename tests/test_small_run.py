@@ -90,7 +90,7 @@ def test_the_gate_sends_a_crash_to_repair_and_reads_back_an_unchanged_run(tmp_pa
 
 def test_the_reader_is_shown_the_small_run() -> None:
     text = (Path(__file__).parent.parent / "agents" / "code_review.md").read_text(encoding="utf-8")
-    filled = string.Template(text).substitute(topic="t", requirements="[]", plan="{}", code="c", previous="",
+    filled = string.Template(text).substitute(topic="t", requirements="[]", plan="{}", open_items="", code="c", previous="",
                                               small_run="Setting a=1: 3 of 3 trial(s) ran")
     assert "What the code gave when FI ran it" in filled and "Setting a=1: 3 of 3" in filled
 

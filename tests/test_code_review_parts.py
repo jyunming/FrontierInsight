@@ -341,3 +341,31 @@ async def test_a_line_that_was_cut_is_not_fully_shown_so_a_citation_of_it_is_not
     assert not record.get("verdicts"), "a verdict whose only evidence is the cut line is not counted"
     assert record["lines_cut"][0]["file"] == "study.json"
     assert any(o.get("cut") for o in record["cited_outside_what_was_shown"])
+
+
+@pytest.mark.asyncio
+async def test_a_reading_is_not_admitted_unless_each_part_can_be_asked_and_asked_again_if_it_fails(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = _engine(tmp_path)
+    _write(engine.quest_root / "code", {"simulate.py": SIM, "experiment.py": EXP})
+    monkeypatch.setattr(cr, "_MAX_CODE_CHARS", 700)
+    monkeypatch.setattr(cr, "MAX_READER_CALLS", 3)  # two parts need 2 requests and 2 more for a failed one
+    reader = _PartReader()
+    engine._client = reader
+    await engine._code_review_gate(WITH_PLAN)
+    record = cr.load(engine.quest_root)
+    assert reader.prompts == [] and "not read in full" in record["error"]
+
+
+@pytest.mark.asyncio
+async def test_a_plan_split_alone_is_counted_as_plan_parts_not_code_parts(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = _engine(tmp_path)
+    _write(engine.quest_root / "code", {"simulate.py": SIM, "experiment.py": EXP})
+    monkeypatch.setattr(cr, "_MAX_PLAN_CHARS", 400)
+    reader = _PartReader()
+    engine._client = reader
+    await engine._code_review_gate(WITH_PLAN)
+    record = cr.load(engine.quest_root)
+    assert record["plan_parts"] > 1 and record["code_parts"] == 1 and len(record["requests"]) == record["plan_parts"]
+    assert all("Part " not in p.split("# The code", 1)[1][:60] for p in reader.prompts), "the code is one part"
