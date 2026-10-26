@@ -12622,7 +12622,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         meant = amended if isinstance(amended, dict) and written is not None else before
         _held, held_back = _audit_open.split(props, meant)
         reasons = {p["path"]: ("the audit may change how the study is run, not what its results are judged by"
-                               if str(p["path"]).startswith("protocol.") and p["path"].split(".")[1] not in self._AUDIT_MAY_CHANGE
+                               if self._audit_may_not_change(str(p["path"]))
                                and not _design_parts.invalid_reason(p["path"], before) else "") for p in held_back}
         reasons = {k: v for k, v in reasons.items() if v}
         lost: list[dict[str, Any]] = []
@@ -12663,8 +12663,63 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         merged = {k: v for k, v in old.items() if k not in self._AUDIT_MAY_CHANGE}
         merged.update({k: new[k] for k in new if k in self._AUDIT_MAY_CHANGE})
         merged.update({k: old[k] for k in old if k in self._AUDIT_MAY_CHANGE and k not in new})
-        changed = any(new.get(k) != old.get(k) for k in {*old, *new} if k not in self._AUDIT_MAY_CHANGE)
+        searched = isinstance(old.get("optimisation"), dict) and isinstance(new.get("optimisation"), dict)
+        changed = any(new.get(k) != old.get(k) for k in {*old, *new}
+                      if k not in self._AUDIT_MAY_CHANGE and not (searched and k == "optimisation"))
+        if searched:
+            # A search for the best design: the design to beat, the variables and their ranges, the search and the
+            # settings it runs at may change; what a design is judged by (the objective's quantity, unit and direction,
+            # the limits, the margin of "better", the target, the check's runs, the assertions) stays as it was.
+            block, judged_changed = self._keep_what_a_search_is_judged_by(old["optimisation"], new["optimisation"])
+            merged["optimisation"] = block
+            changed = changed or judged_changed
         return {**amended, "protocol": merged}, changed
+
+    #: Inside the search block (``protocol.optimisation``), what judges a design. The objective's own parts are below.
+    _AUDIT_SEARCH_JUDGED = _FLAT_SEARCH_JUDGED
+    _AUDIT_OBJECTIVE_JUDGED = ("quantity", "unit", "direction")
+
+    def _audit_may_not_change(self, path: str) -> bool:
+        """Whether ``path`` names what the results are judged by, which the audit may not change (see ``_AUDIT_MAY_CHANGE``)."""
+        parts = path.split(".")
+        if len(parts) < 2 or parts[0] != "protocol" or parts[1] in self._AUDIT_MAY_CHANGE:
+            return False
+        if parts[1] != "optimisation":
+            return True
+        if len(parts) < 3:
+            return False  # the whole block: only its judged parts are put back, the rest is applied
+        return parts[2] in self._AUDIT_SEARCH_JUDGED or (parts[2] == "objective" and (
+            len(parts) == 3 or parts[3] in self._AUDIT_OBJECTIVE_JUDGED))
+
+    def _keep_what_a_search_is_judged_by(self, old: dict[str, Any], new: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        """``(block, changed)``: the audit's search block with what judges a design put back as it was."""
+        block = dict(new)
+        changed = False
+        for key in self._AUDIT_SEARCH_JUDGED:
+            if block.get(key) != old.get(key):
+                changed = True
+                if key in old:
+                    block[key] = old[key]
+                else:
+                    block.pop(key, None)
+        old_obj, new_obj = old.get("objective"), block.get("objective")
+        if isinstance(old_obj, dict) and isinstance(new_obj, dict):
+            obj = dict(new_obj)
+            for key in self._AUDIT_OBJECTIVE_JUDGED:
+                if obj.get(key) != old_obj.get(key):
+                    changed = True
+                    if key in old_obj:
+                        obj[key] = old_obj[key]
+                    else:
+                        obj.pop(key, None)
+            block["objective"] = obj
+        elif new_obj != old_obj:
+            changed = True
+            if old_obj is None:
+                block.pop("objective", None)
+            else:
+                block["objective"] = old_obj
+        return block, changed
 
     def _write_receipt(self, check: str, status: str, **kwargs: Any) -> None:
         """Leave the receipt of a required check (core/receipts.py). A receipt that cannot be written is logged: the
