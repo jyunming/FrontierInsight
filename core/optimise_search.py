@@ -527,6 +527,10 @@ def judge(block, values, reason=""):
                 "reason": f"the simulation returned {', '.join(sorted(map(str, values))[:8]) or 'nothing'} "
                           f"but not the objective `{quantity}`"}
     objective = values[quantity]
+    if isinstance(objective, dict):
+        inside = ", ".join(sorted(in_each_run(block))) or "the values each run compares"
+        return {**failed, "reason": f"the objective `{quantity}` is returned per value of {inside}, but a search needs one "
+                                    "number per design (the plan's objective must name one number)"}
     if not _number(objective):
         return {**failed, "reason": f"the objective `{quantity}` is not a finite number ({objective!r})"}
     constraints, violation = {}, 0.0

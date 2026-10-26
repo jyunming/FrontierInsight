@@ -1107,6 +1107,7 @@ async def run_check(executor: Any, python: Any, quest_root: Path, module: str, p
                         executor, python, quest_root, module, entry, [r["cell"] for r in request["requests"]],
                         at_once=at_once, runs=runs, base_seed=int(base_seed), deadline=deadline, env=env,
                         thresholds=thresholds, seed_key=seed_key, log=log,
+                        in_each_run=_search.in_each_run(block) or None,
                         on_done=lambda _k, answer, _loaded: progress(answer)) if not load_error else []
                     load_error = load_error or next((le for _r, _e, le in answers if le), "")
                     replies = [r for r, _e, _le in answers] or [{"failed": load_error}] * len(request["requests"])
@@ -1119,7 +1120,8 @@ async def run_check(executor: Any, python: Any, quest_root: Path, module: str, p
                 else:
                     reply, _err, load_error = await _optimise._evaluate(
                         executor, python, quest_root, module, entry, request["cell"], runs=runs,
-                        base_seed=int(base_seed), timeout_s=left, env=env, thresholds=thresholds, seed_key=seed_key)
+                        base_seed=int(base_seed), timeout_s=left, env=env, thresholds=thresholds, seed_key=seed_key,
+                        in_each_run=_search.in_each_run(block) or None)
                     progress(reply)
                 request = gen.send(reply)
         except StopIteration as done:

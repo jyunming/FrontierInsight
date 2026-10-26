@@ -47,6 +47,7 @@ from typing import Any
 
 from . import execution as _execution
 from . import flat_output as _flat
+from . import in_run as _in_run
 from . import metric_spec as _metric_spec
 from . import optimisation_plan as _plan
 from . import optimise_search as _search
@@ -365,15 +366,26 @@ def read(quest_root: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def _mean_values(rows: list[dict[str, Any]]) -> dict[str, float]:
+def _mean_values(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Each returned quantity averaged over the runs. A plain number gives a number; a quantity returned per value of what
+    each run compares inside it (``{level key: number}``) is averaged per key and stays a mapping (the harness gives every
+    run the same keys, so none is left out)."""
     names = set.intersection(*(set(r.get("values") or {}) for r in rows)) if rows else set()
-    return {name: sum(float(r["values"][name]) for r in rows) / len(rows) for name in sorted(names)}
+    out: dict[str, Any] = {}
+    for name in sorted(names):
+        parts = [r["values"][name] for r in rows]
+        if isinstance(parts[0], dict):
+            keys = [k for k in parts[0] if all(isinstance(p, dict) and k in p for p in parts)]
+            out[name] = {k: sum(float(p[k]) for p in parts) / len(parts) for k in keys}
+        else:
+            out[name] = sum(float(p) for p in parts) / len(parts)
+    return out
 
 
 async def _evaluate(executor: Any, python: Any, quest_root: Path, module: str, entry: str, cell: dict[str, Any], *,
                     runs: int, base_seed: int, timeout_s: int, env: dict[str, str] | None,
                     thresholds: dict[str, Any] | None, seed_key: str = "", name: str = "eval",
-                    outside: Any = None) -> tuple[dict[str, Any], str, str]:
+                    outside: Any = None, in_each_run: dict[str, list[Any]] | None = None) -> tuple[dict[str, Any], str, str]:
     """One design, in a process of its own through FI's harness: ``(answer for the search, stderr, load error)``. The
     answer's ``trials`` holds each run's own values (in trial order), beside their mean in ``values``. ``seed_key`` picks
     another family of seeds (the check at finer settings uses seeds the search never used). ``name``: the files of this
@@ -386,8 +398,12 @@ async def _evaluate(executor: Any, python: Any, quest_root: Path, module: str, e
     trials = [{"trial": t, "seed": None if entry == "run_cell" else _trials.trial_seed(base_seed, seed_key, t)}
               for t in range(1 if entry == "run_cell" else max(1, runs))]
     nonce = _sha(f"optimise|{time.time_ns()}|{id(trials)}".encode())[:24]
-    spec.write_text(json.dumps({"module": module, "entry": entry, "cell": cell, "trials": trials, "nonce": nonce,
-                                "thresholds": dict(thresholds or {})}, default=str), encoding="utf-8")
+    # The values each run compares inside it are given whole, as the scan and the timing give them, and the run may return
+    # a number per value (core/in_run.py::read_returned).
+    inside = {str(k): list(v) for k, v in (in_each_run or {}).items()}
+    spec.write_text(json.dumps({"module": module, "entry": entry, "cell": {**cell, **inside},
+                                "levels": _in_run.levels_json(_in_run.level_cells(inside)), "trials": trials,
+                                "nonce": nonce, "thresholds": dict(thresholds or {})}, default=str), encoding="utf-8")
     if outside is None:
         # Fresh for every evaluation: nothing an earlier evaluation wrote there is run.
         (quest_root / _trials.HARNESS_PATH).write_text(_trials.HARNESS_SOURCE, encoding="utf-8")
@@ -482,8 +498,10 @@ class EvaluationPool:
 
     def __init__(self, executor: Any, python: Any, quest_root: Path, module: str, entry: str, *, at_once: int, runs: int,
                  base_seed: int, deadline: float, env: dict[str, str] | None, thresholds: dict[str, Any] | None,
-                 seed_key: str = "", on_done: Any = None, log: Any = None, gate: Any = None):
+                 seed_key: str = "", on_done: Any = None, log: Any = None, gate: Any = None,
+                 in_each_run: dict[str, list[Any]] | None = None):
         self.executor, self.python, self.quest_root = executor, python, quest_root
+        self.in_each_run = in_each_run
         self.module, self.entry, self.runs, self.base_seed = module, entry, runs, base_seed
         self.deadline, self.thresholds, self.seed_key, self.on_done = deadline, thresholds, seed_key, on_done
         (quest_root / _trials.HARNESS_PATH).write_text(_trials.HARNESS_SOURCE, encoding="utf-8")
@@ -514,7 +532,7 @@ class EvaluationPool:
                     got = await _evaluate(self.executor, self.python, self.quest_root, self.module, self.entry, cell,
                                           runs=self.runs, base_seed=self.base_seed, timeout_s=left, env=self.env,
                                           thresholds=self.thresholds, seed_key=self.seed_key, name=name,
-                                          outside=self.outside)
+                                          outside=self.outside, in_each_run=self.in_each_run)
                 except Exception as exc:  # noqa: BLE001 -- one design's trouble (a file it could not write) is its answer
                     got = {"failed": f"FI could not run this design ({type(exc).__name__}: {exc})"[:300]}, "", ""
                 finally:
@@ -568,7 +586,8 @@ async def evaluate_many(executor: Any, python: Any, quest_root: Path, module: st
                         cells: list[dict[str, Any]], *, at_once: int, runs: int, base_seed: int, deadline: float,
                         env: dict[str, str] | None, thresholds: dict[str, Any] | None,
                         seed_key: str = "", on_done: Any = None, log: Any = None,
-                        gate: Any = None) -> list[tuple[dict[str, Any], str, str]]:
+                        gate: Any = None,
+                        in_each_run: dict[str, list[Any]] | None = None) -> list[tuple[dict[str, Any], str, str]]:
     """Designs that do not depend on each other's answers, up to ``at_once`` at the same time, each in a process of its
     own exactly as :func:`_evaluate` runs one (the same seeds, so the answers are those of one after another):
     ``[(answer, stderr, load error)]`` in the order of ``cells``. A design not started before ``deadline`` is answered
@@ -579,7 +598,8 @@ async def evaluate_many(executor: Any, python: Any, quest_root: Path, module: st
         for cell in cells:
             left = deadline - time.monotonic()
             got = (await _evaluate(executor, python, quest_root, module, entry, cell, runs=runs, base_seed=base_seed,
-                                   timeout_s=left, env=env, thresholds=thresholds, seed_key=seed_key)
+                                   timeout_s=left, env=env, thresholds=thresholds, seed_key=seed_key,
+                                   in_each_run=in_each_run)
                    if left > 0 else ({"stop": "time"}, "", ""))
             if on_done is not None:
                 on_done(len(out), got[0], got[2])
@@ -587,7 +607,7 @@ async def evaluate_many(executor: Any, python: Any, quest_root: Path, module: st
         return out
     pool = EvaluationPool(executor, python, quest_root, module, entry, at_once=at_once, runs=runs, base_seed=base_seed,
                           deadline=deadline, env=env, thresholds=thresholds, seed_key=seed_key, on_done=on_done, log=log,
-                          gate=gate)
+                          gate=gate, in_each_run=in_each_run)
     for k, cell in enumerate(cells):
         pool.submit(k, cell)
     answers: dict[int, tuple[dict[str, Any], str, str]] = {}
@@ -989,7 +1009,8 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
 
                 got = await evaluate_many(executor, python, quest_root, module, entry, [asked[k]["cell"] for k in fresh],
                                           at_once=at_once, runs=runs, base_seed=int(base_seed), deadline=deadline,
-                                          env=env, thresholds=thresholds, on_done=finished, log=log, gate=gate)
+                                          env=env, thresholds=thresholds, on_done=finished, log=log, gate=gate,
+                                          in_each_run=_search.in_each_run(block) or None)
                 for k, (answer, err, loaded) in zip(fresh, got):
                     if err:
                         stderr_parts.append(err)
@@ -1003,7 +1024,8 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                 if pool is None:
                     pool = EvaluationPool(executor, python, quest_root, module, entry, at_once=at_once, runs=runs,
                                           base_seed=int(base_seed), deadline=deadline, env=env, thresholds=thresholds,
-                                          on_done=finished_streamed, log=log, gate=gate)
+                                          on_done=finished_streamed, log=log, gate=gate,
+                                          in_each_run=_search.in_each_run(block) or None)
                 ready: list[Any] = []
                 for one in request["requests"]:
                     replayed = (replay.get(_replay_key(replay_space, one["design"], one.get("level")))
@@ -1046,6 +1068,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                     reply, err, load_error = await _evaluate(
                         executor, python, quest_root, module, entry, request["cell"], runs=runs,
                         base_seed=int(base_seed), timeout_s=left, env=env, thresholds=thresholds,
+                        in_each_run=_search.in_each_run(block) or None,
                     )
                     if err:
                         stderr_parts.append(err)

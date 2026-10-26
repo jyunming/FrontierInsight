@@ -1366,7 +1366,8 @@ class RunChecksMixin:
             got = await _optimise.evaluate_many(
                 self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(),  # type: ignore[attr-defined]
                 "run_cell" if deterministic else "run_trial", cells, at_once=max(1, at_once), runs=1, base_seed=0,
-                deadline=_clock() + left_s, env=env, thresholds=thresholds)
+                deadline=_clock() + left_s, env=env, thresholds=thresholds,
+                in_each_run=_optimise_search.in_each_run(block) or None)
         except Exception as exc:  # noqa: BLE001 -- the count stays the plan's whole count
             self._log.warning("[execute] FI could not ask the simulation which alternatives give different results (%r); "  # type: ignore[attr-defined]
                               "every alternative is counted as searched", exc)
