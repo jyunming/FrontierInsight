@@ -17,32 +17,14 @@ import math
 
 
 #: What FI is asking for in a call of the simulation, told to the code in the environment variable ``FI_CELL_KIND``
-#: (set by FI's harness for each call; unset when the function is called some other way, which is a ``"check"``): a
+#: (set by FI's harness for each call from the call's own record, never from the cell; unset when the function is called some
+#: other way, which is a ``"check"``; a child process the study starts inherits it): a
 #: ``"search"`` design the search evaluates, a ``"scan"`` row of the coarse scan or the comparison grid, a ``"check"`` case
 #: of one of the plan's checks. A search design and a grid row at the baseline have the same keys and values, so the code
 #: cannot tell them apart from the cell; FI says which it is, and the cell itself stays exactly the study's settings (code
 #: that expands it into a function's arguments is not broken by an added key).
 KIND_ENV = "FI_CELL_KIND"
 CELL_KINDS = ("search", "scan", "check")
-#: FI's own mark on a cell it passes between its functions (a search's baseline cell inside a list of grid rows), taken off
-#: by :func:`split_kind` before the cell is written for the code.
-_MARK = "__fi_kind__"
-
-
-def tag_kind(cell, kind):
-    """The cell marked as built for ``kind``, for the FI function that writes the call (:func:`split_kind`)."""
-    return {**without_kind(cell), _MARK: kind}
-
-
-def without_kind(cell):
-    """The cell without FI's mark (its name, its seed, its record)."""
-    return {k: v for k, v in cell.items() if k != _MARK}
-
-
-def split_kind(cell, default):
-    """``(the cell as the code gets it, the kind of the call)``: the kind FI marked the cell with, else ``default``."""
-    kind = cell.get(_MARK)
-    return without_kind(cell), kind if kind in CELL_KINDS else default
 
 
 def fmt(value):

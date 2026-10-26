@@ -130,8 +130,7 @@ async def run_sample(executor: Any, python: Path | str, quest_root: Path, module
             nonce = f"speed{time.time_ns()}"
             spec.write_text(json.dumps({
                 "module": module.replace("\\", "/"), "entry": "run_cell" if deterministic else "run_trial",
-                "cell": _in_run.split_kind({**cell, **inside}, "scan")[0],
-                "kind": _in_run.split_kind(cell, "scan")[1], "levels": _in_run.levels_json(_in_run.level_cells(inside)),
+                "cell": {**cell, **inside}, "kind": "scan", "levels": _in_run.levels_json(_in_run.level_cells(inside)),
                 "trials": [{"trial": t, "seed": None if deterministic else _tr.trial_seed(0, key, t)} for t in range(n)],
                 "nonce": nonce, "thresholds": dict(thresholds or {})}, default=str), encoding="utf-8")
             await ex.execute([str(python), _tr.HARNESS_PATH.as_posix(), spec.relative_to(quest_root).as_posix(),
@@ -239,8 +238,7 @@ async def profile_text(executor: Any, python: Path | str, quest_root: Path, modu
     n = 1 if deterministic else 2
     spec.write_text(json.dumps({
         "module": module.replace("\\", "/"), "entry": "run_cell" if deterministic else "run_trial",
-        "cell": _in_run.split_kind({**cell, **inside}, "scan")[0],
-        "kind": _in_run.split_kind(cell, "scan")[1], "levels": _in_run.levels_json(_in_run.level_cells(inside)),
+        "cell": {**cell, **inside}, "kind": "scan", "levels": _in_run.levels_json(_in_run.level_cells(inside)),
         "trials": [{"trial": t, "seed": None if deterministic else _tr.trial_seed(0, key, t)} for t in range(n)],
         "nonce": f"profile{time.time_ns()}", "thresholds": dict(thresholds or {}),
         "profile": prof.relative_to(quest_root).as_posix()}, default=str), encoding="utf-8")

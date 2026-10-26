@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from core import engine, in_run, oracle_check, optimise, optimise_search, trial_runner
+from core import engine, oracle_check, optimise, optimise_search, trial_runner
 from core.execution import SharedInterpreterExecutor
 
 # A condition the plan holds fixed (``mode``) differs from the value a guess from values expects, so a rule over values
@@ -91,11 +91,58 @@ def test_a_scan_row_is_planned_as_a_scan_and_the_cell_the_code_gets_is_only_the_
     assert plan[0]["key"] == "x=1.0" and plan[0]["cell"] == {"x": 1.0}
 
 
-def test_a_cell_marked_by_fi_gives_its_kind_and_the_mark_is_never_part_of_a_name_or_the_cell() -> None:
-    marked = in_run.tag_kind({"x": 1.0}, "search")
-    assert in_run.split_kind(marked, "scan") == ({"x": 1.0}, "search")
-    assert in_run.split_kind({"x": 1.0}, "scan") == ({"x": 1.0}, "scan")
-    assert trial_runner.cell_key(marked) == "x=1.0"
+def test_a_protocol_setting_of_any_name_is_only_a_setting_and_never_changes_what_the_call_is_for(tmp_path: Path) -> None:
+    root = _quest(tmp_path, _DISPATCHING)
+    folder = root / ".fi" / "trials"
+    folder.mkdir(parents=True)
+    plan = trial_runner._plan(root, "code/simulate.py", {"x": [2.0], "__fi_kind__": ["search"]}, runs_per_setting=1,
+                              base_seed=0, deterministic=True, folder=folder, out_name="c{index}.out.jsonl")
+    spec = json.loads((root / plan[0]["spec"]).read_text(encoding="utf-8"))
+    assert spec["kind"] == "scan" and spec["cell"] == {"x": 2.0, "__fi_kind__": "search"}
+    assert plan[0]["cell"] == {"x": 2.0, "__fi_kind__": "search"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("written", [None, "bogus"])
+async def test_the_harness_never_takes_the_kind_from_the_callers_environment(tmp_path: Path, written: str | None) -> None:
+    root = _quest(tmp_path, _DISPATCHING)
+    folder = root / ".fi" / "trials"
+    folder.mkdir(parents=True)
+    plan = trial_runner._plan(root, "code/simulate.py", {"x": [2.0]}, runs_per_setting=1, base_seed=0,
+                              deterministic=True, folder=folder, out_name="c{index}.out.jsonl")
+    spec_path = root / plan[0]["spec"]
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    spec.pop("kind")
+    if written is not None:
+        spec["kind"] = written
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    (root / trial_runner.HARNESS_PATH).write_text(trial_runner.HARNESS_SOURCE, encoding="utf-8")
+    await _executor().execute([sys.executable, trial_runner.HARNESS_PATH.as_posix(), plan[0]["spec"], plan[0]["out"]],
+                              cwd=root, timeout_s=120, env={"FI_CELL_KIND": "search"})
+    row = json.loads((root / plan[0]["out"]).read_text(encoding="utf-8").splitlines()[0])
+    assert row["values"] == {"f": 8.0}  # a check, not the search the caller's environment said
+
+
+def test_what_a_cell_is_for_is_kept_beside_the_cell_in_the_capture_record_and_the_cell_has_no_mark(tmp_path: Path) -> None:
+    root = tmp_path
+    (root / "code" / "pkg").mkdir(parents=True)
+    (root / "code" / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "code" / "pkg" / "model.py").write_text("def f(gap):\n    return gap\n", encoding="utf-8")
+    (root / "code" / "simulate.py").write_text(
+        "from pkg import model\ndef run_cell(cell):\n    return {'y': model.f(cell['gap'])}\n", encoding="utf-8")
+
+    async def run(argv: list[str]) -> Any:
+        import subprocess
+        done = subprocess.run([sys.executable, "-B", *argv], cwd=root, capture_output=True, text=True, timeout=120)
+        return done.returncode, done.stdout, done.stderr
+
+    import asyncio
+
+    from core import second_impl
+    asyncio.run(second_impl.capture_inputs(run, root, "pkg", ["f"], [{"gap": 3.0}, {"gap": 4.0}], deterministic=True,
+                                           kinds=["search", "scan"]))
+    record = second_impl.read_captured(root)
+    assert record["cells"] == [{"gap": 3.0}, {"gap": 4.0}] and record["kinds"] == ["search", "scan"]
 
 
 @pytest.mark.asyncio
