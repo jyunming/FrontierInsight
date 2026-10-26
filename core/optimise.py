@@ -471,7 +471,8 @@ async def search_entry_returns_objective(
     if not entry:
         return ""
     answer, _stderr, load_error = await _evaluate(executor, python, quest_root, module, entry, dict(cell), runs=1, base_seed=0,
-                                                  timeout_s=timeout_s, env=env, thresholds=thresholds, name="entry_check")
+                                                  timeout_s=timeout_s, env=env, thresholds=thresholds, name="entry_check",
+                                                  in_each_run=_search.in_each_run(block) or None)
     values = answer.get("values") if isinstance(answer, dict) else None
     if load_error or not isinstance(values, dict):
         if log is not None:

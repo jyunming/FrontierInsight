@@ -141,3 +141,19 @@ def test_a_limit_on_a_quantity_returned_per_value_gets_the_same_plain_message_in
             "(the plan's constraint must name one number)")
     assert optimise_search.judge(block, values)["reason"] == want
     assert optimise_search.judge(block, {"f": 1.0, "g": 2.0})["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_the_repair_check_judges_a_search_whose_results_are_given_per_value(tmp_path: Path) -> None:
+    # The check after a repair runs the search's own evaluation with the values compared inside each run, so a repaired
+    # simulation that lost the objective is caught, and one that kept it is accepted (not left unjudged).
+    async def check(source: str) -> str:
+        (tmp_path / str(len(source))).mkdir()
+        root = _quest(tmp_path / str(len(source)), source)
+        return await optimise.search_entry_returns_objective(
+            SharedInterpreterExecutor(python_version="3.11"), sys.executable, root, "code/simulate.py", _BLOCK,
+            optimise_search.cell_of(_BLOCK, {"x": 2.0}), timeout_s=120, env=None, thresholds=None)
+
+    lost = await check("def run_cell(cell):\n    return {'curve': {f'p={v}': cell['x'] + v for v in cell['p']}}\n")
+    assert "not the objective `f`" in lost
+    assert await check(_SIM) == ""
