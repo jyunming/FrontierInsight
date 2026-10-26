@@ -224,3 +224,25 @@ async def test_an_agree_only_code_review_is_asked_again_and_then_recorded_as_not
     assert await second._code_review_gate(STATE) is None and len(reader.prompts) == 2
     record = cr.load(second.quest_root)
     assert record["final"] is True and record["checked"] == ["E1: the factors and the signs agree with the plan"]
+
+
+def test_a_hidden_value_is_taken_out_of_the_plans_prose_unless_the_plan_also_shows_it_as_a_setting() -> None:
+    protocol = {**PROTOCOL,
+                "model": {"summary": "a spring whose result must be 0.123456789", "equations": [
+                    {"id": "E1", "formula": "Q = m * w / c", "source": "gives 0.123456789 at c=0.5"}]},
+                "oracles": [{**PROTOCOL["oracles"][0], "check": "Q at c=0.5; the result must be 0.123456789; width 0.5"}]}
+    shown = cr.plan_view({**DESIGN, "method": "check against 0.123456789 first, then c = 0.5"}, protocol)
+    assert "0.123456789" not in shown and pairs.PLACEHOLDER in shown and "Q = m * w / c" in shown
+    # 0.5 is the check's case (a setting) as well as a hidden tolerance-like number elsewhere: it is never taken out
+    hidden_too = {**protocol, "oracles": [{**protocol["oracles"][0], "expected": 0.5}]}
+    assert "c=0.5" in cr.plan_view(DESIGN, hidden_too) and 0.5 not in cr.hidden_values(DESIGN, hidden_too)
+
+
+def test_a_plan_that_does_not_fit_is_split_by_whole_sections_and_no_request_is_over_the_cap() -> None:
+    oracles = [{"name": f"c{i}", "kind": "invariant", "check": "x" * 600, "case": {"c": 0.5}, "measure": "quality",
+                "expected": 0, "tolerance": 1e-9} for i in range(100)]
+    views = cr.plan_views(DESIGN, {**PROTOCOL, "oracles": oracles}, limit=20000)
+    assert len(views) > 1 and all(len(v["text"]) <= 20000 for v in views)
+    got = sum(len(json.loads(v["text"].split("\n(these")[0]).get("checks", [])) for v in views)
+    assert got == 100, "every check is in some request"
+    assert any("other requests of this reading" in v["text"] for v in views)

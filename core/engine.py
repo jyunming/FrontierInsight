@@ -13078,31 +13078,47 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return False
         record["reviews_total"] = int(record["reviews_total"]) + 1
         _code_review.save(self.quest_root, record)  # counted before the request: a resume does not ask again
-        code_parts = _code_review.source_parts(code) or [""]
-        topic = " ".join(str(state.get("topic") or self.config.topic or "").split())
         plan_dict = protocol if isinstance(protocol, dict) else None
+        calls = _code_review.reading_calls(code, design, plan_dict)
+        topic = " ".join(str(state.get("topic") or self.config.topic or "").split())
         values = _pairs.plan_values(plan_dict)  # taken out of FI's own small-run text
         shown_values = _code_review.reportable_values(design, plan_dict)  # taken out of what the reader writes
-        plan_text, plan_dropped = _code_review.plan_view_fit(design, plan_dict)
-        record["files_read"] = sorted({f for part in code_parts for f in _code_review.part_files(part)})
-        record["code_parts"] = len(code_parts)
-        if plan_dropped:
-            record["plan_not_shown"] = plan_dropped
+        # What each request is given, from FI's own record: the files and line ranges, the plan's sections, a line cut.
+        record["files_read"] = sorted({f for c in calls for f in c["files"]})
+        record["code_parts"] = len(calls)
+        record["requests"] = [{"files": {f: r for f, r in c["shown"].items()}, "plan_sections": c["plan_sections"],
+                               "chars": len(c["code"]) + len(c["plan"])} for c in calls]
+        if any(c["left_out"] for c in calls):
+            record["plan_not_shown"] = sorted({n for c in calls for n in c["left_out"]})
+        if any(c["cut"] for c in calls):
+            record["lines_cut"] = [x for c in calls for x in c["cut"]]
         earlier = _code_review.earlier_block(previous)
         verdicts: list[dict[str, Any]] | None = None
         logic: list[dict[str, Any]] = []
         listed: list[str] = []
+        outside: list[dict[str, Any]] = []  # what a request said about a place it was not shown
         part_verdicts: list[list[dict[str, Any]]] = []
         p_verdicts: list[dict[str, Any]] | None = None
+        many = len(calls) > 1
+
+        def spend() -> None:
+            used = int(record.get("reader_calls") or 0)
+            if used >= _code_review.MAX_READER_CALLS:
+                raise _code_review.BudgetSpent(f"the {_code_review.MAX_READER_CALLS} reader requests of a quest are used")
+            record["reader_calls"] = used + 1
+            _code_review.save(self.quest_root, record)  # counted before the request, as the repair requests are
+
         try:
             # The code is read whole; when it does not fit in one request it is read in parts, each against all the
             # requirements, and the verdicts are merged from FI's own record (:func:`core.code_review.merge_parts`).
             # Per part: at most two requests, one, and one more for the requirements a reply left unanswered, or, when the
             # first answered every requirement but named no problem and said nothing it checked, for a review.
-            for p_index, sources in enumerate(code_parts, start=1):
-                seen_files = _code_review.part_files(sources)
-                sources = _code_review.part_note(p_index, len(code_parts)) + sources
-                p_verdicts: list[dict[str, Any]] | None = None
+            if int(record.get("reader_calls") or 0) + len(calls) > _code_review.MAX_READER_CALLS:
+                raise _code_review.BudgetSpent(f"the {_code_review.MAX_READER_CALLS} reader requests of a quest are "
+                                               f"used; this reading needs {len(calls)} more")
+            for p_index, call in enumerate(calls, start=1):
+                sources = _code_review.part_note(p_index, len(calls)) + call["code"]
+                p_verdicts = None
                 asked_again = False
                 for _ask in range(2):
                     left = [r for r in reqs if r["id"] not in {v["id"] for v in p_verdicts or []}]
@@ -13116,39 +13132,49 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     prompt = self._prompts["code_review"].substitute(
                         topic=topic, requirements=json.dumps([{k: r[k] for k in ("id", "kind", "text")} for r in left],
                                                              indent=2),
-                        plan=plan_text, code=sources, previous=earlier,
+                        plan=call["plan"], code=sources, previous=earlier,
                         small_run=_pairs.scrub(getattr(self, "_small_run_note", ""), values, printed=True)
                         or "(FI did not run the simulation before this reading)"
                     ) + again
-                    reply = await self._ask_reader(prompt, review_node)
+                    reply = await self._ask_reader(prompt, review_node, spend)
                     parsed = _parse_json_lenient(reply, node=review_node)
                     got = _code_review.parse(parsed, left, shown_values)
+                    if many:  # a verdict or a finding at a place this request was not shown is not counted
+                        got = _code_review.keep_seen(got, call["shown"], outside) if got else got
                     if again:
                         kept = [v for v in p_verdicts or [] if v["id"] not in {g["id"] for g in got or []}]
                         p_verdicts = [*kept, *(got or [])] or None
                     else:
                         p_verdicts = [*(p_verdicts or []), *(got or [])] or None
                     found = _code_review.parse_logic(parsed, reqs, shown_values)
-                    if len(code_parts) > 1:  # a fault in a file this request was not shown cannot be judged from it
-                        found = [f for f in found if f["file"] in seen_files]
+                    if many:
+                        seen = [f for f in found if _code_review.shown_in_part(call["shown"], f["file"], f["line"])]
+                        outside.extend({"id": f["id"], "status": "finding", "file": f["file"], "line": f["line"]}
+                                       for f in found if f not in seen)
+                        found = seen
                     logic = _code_review.merge_logic(logic, found)
                     listed = [*listed, *(c for c in _pairs.checked(parsed.get("checked") if isinstance(parsed, dict) else None)
                                          if c not in listed)]
-                if p_verdicts is None and len(code_parts) > 1:
+                if p_verdicts is None and many:
                     # A part that was not read could hold what the others call missing: no verdict is made from the rest.
-                    raise RuntimeError(f"part {p_index} of {len(code_parts)} of the code got no usable answer")
+                    raise RuntimeError(f"part {p_index} of {len(calls)} of the code got no usable answer")
                 part_verdicts.append(p_verdicts or [])
             verdicts = _code_review.merge_parts(part_verdicts) or None
             if verdicts is None:
                 record["error"] = "its answer named none of the plan's requirements"
             elif _code_review.reply_said_nothing(verdicts, logic, listed):
                 verdicts, record["error"] = None, _pairs.NOT_A_REVIEW
+        except _code_review.BudgetSpent as e:
+            record["error"] = f"the code was not read in full: {str(e)[:160]}"
+            verdicts = None
         except _ModelAnswerProblem as e:
             record["error"] = f"the provider withheld or cut off its answer, twice ({str(e)[:120] or type(e).__name__})"
-            verdicts = p_verdicts if len(code_parts) == 1 else None  # one part: what the first request answered is kept
+            verdicts = p_verdicts if not many else None  # one part: what the first request answered is kept
         except Exception as e:  # noqa: BLE001 -- a reading that could not be had never stops a quest
             record["error"] = f"the call failed, twice ({str(e)[:120] or type(e).__name__})"
-            verdicts = p_verdicts if len(code_parts) == 1 else None
+            verdicts = p_verdicts if not many else None
+        if outside:
+            record["cited_outside_what_was_shown"] = outside[:50]
         same, reader, planner, named = self._reader_vs_planner(review_node, after_call=True, writer="implement")
         record.update(reviewer=reader, planner=planner, reported=named, same_model=same)
         if verdicts is not None and same is False:
@@ -13184,14 +13210,19 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         _code_review.save(self.quest_root, record)
         return True
 
-    async def _ask_reader(self, prompt: str, review_node: str) -> str:
+    async def _ask_reader(self, prompt: str, review_node: str, spend: Callable[[], None] | None = None) -> str:
         """One request to the reader; a request that failed is made once more (a reading that fails twice is recorded as
-        such, and the quest goes on)."""
+        such, and the quest goes on). ``spend`` is called before each request made (the quest's reader requests are
+        counted and bounded, :data:`core.code_review.MAX_READER_CALLS`)."""
+        if spend:
+            spend()
         try:
             return await self._chat(prompt, node=review_node)
         except Exception as e:  # noqa: BLE001 -- once more; the second failure is the caller's to record
             self._log.warning("[code_review] the request to the reader failed (%s); asking once more",
                               str(e)[:120] or type(e).__name__)
+            if spend:
+                spend()
             return await self._chat(prompt, node=review_node)
 
     async def _repair_review_findings(self, state: QuestState, record: dict[str, Any], protocol: Any,
