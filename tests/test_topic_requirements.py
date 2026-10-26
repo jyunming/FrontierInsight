@@ -806,3 +806,47 @@ def test_a_changed_range_of_a_design_variable_a_gap_names_is_taken_and_the_basel
     assert tr.merge(design, narrowed, gaps)["protocol"]["optimisation"]["baseline"]["values"]["width"] == 3.5
     clamped = {"protocol": {"optimisation": {"design_variables": [{"name": "width", "low": 3.0, "high": 8.0}]}}}
     assert tr.merge(design, clamped, gaps)["protocol"]["optimisation"]["baseline"]["values"]["width"] == 3.0
+
+
+def test_a_gap_that_has_its_setting_is_merged_on_it_and_an_answers_map_to_another_key_changes_nothing_else() -> None:
+    req = {"factors": [{"name": "operating temperature", "range": [10, 40], "main": True, "compared": True}]}
+    design = {"protocol": {"grid": {"temperature": [20, 30], "pressure": [1, 2]},
+                           "topic_map": [{"item": "F1", "by": "setting:temperature"}]}}
+    gaps, _ = tr.match(req, tr.view(design))
+    assert [(g["axis"], g["id"]) for g in gaps] == [("temperature", "F1")]
+    answer = {"protocol": {"grid": {"temperature": [10, 20, 30, 40], "pressure": [99]},
+                           "topic_map": [{"item": "F1", "by": "setting:pressure"}]}}
+    seen: list[str] = []
+    grid = tr.merge(design, answer, gaps, seen)["protocol"]["grid"]
+    assert grid == {"temperature": [10, 20, 30, 40], "pressure": [1, 2]} and seen == []
+    # Known positive: a gap with no setting of its own takes the key the answer's map names, and the merge says so.
+    bare = {"protocol": {"grid": {"temperature": [20, 30], "pressure": [1, 2]}}}
+    open_gaps, _ = tr.gaps_from(req, tr.view(bare), {"F1": "missing"})
+    wider = {"protocol": {"grid": {"temperature": [10, 20, 30, 40]}, "topic_map": [{"item": "F1", "by": "setting:temperature"}]}}
+    assert tr.merge(bare, wider, open_gaps, seen)["protocol"]["grid"]["temperature"] == [10, 20, 30, 40]
+    assert seen == ["temperature"]
+
+
+def test_a_baseline_of_a_variable_that_takes_listed_values_is_one_of_them_and_the_block_still_reads() -> None:
+    from core import optimisation_plan as op
+    req = {"factors": [{"name": "layout kind", "levels": ["a", "b", "c", "d"], "main": True, "compared": True}]}
+    design = {"protocol": {"optimisation": {
+        "objective": {"quantity": "loss", "direction": "minimise"},
+        "design_variables": [{"name": "layout", "kind": "choice", "values": ["a", "b"]}],
+        "baseline": {"values": {"layout": "a"}}, "budget": {"evaluations": 20}},
+        "topic_map": [{"item": "F1", "by": "design_variable:layout"}]}}
+    gaps, _ = tr.match(req, tr.view(design))
+    assert [g["axis"] for g in gaps] == ["layout"]
+
+    def merged(values: list[Any], base: Any | None) -> dict[str, Any]:
+        block = {"design_variables": [{"name": "layout", "kind": "choice", "values": values}]}
+        if base is not None:
+            block["baseline"] = {"values": {"layout": base}}
+        out = tr.merge(design, {"protocol": {"optimisation": block}}, gaps)["protocol"]["optimisation"]
+        assert op.normalize(out)[1] is None, op.normalize(out)[1]
+        return out
+
+    assert merged(["a", "b", "c", "d"], None)["baseline"]["values"]["layout"] == "a"  # still a member: kept
+    assert merged(["b", "c", "d"], "c")["baseline"]["values"]["layout"] == "c"  # the answer's, a member
+    assert merged(["b", "c", "d"], "zz")["baseline"]["values"]["layout"] == "b"  # else the first listed
+    assert merged(["b", "c", "d"], None)["baseline"]["values"]["layout"] == "b"

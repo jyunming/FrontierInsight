@@ -917,12 +917,14 @@ def moved_holds(old_protocol: Any, new_protocol: Any) -> list[str]:
     return out
 
 
-def merge(old: dict[str, Any], new: dict[str, Any], gaps: list[dict[str, Any]]) -> dict[str, Any] | None:
+def merge(old: dict[str, Any], new: dict[str, Any], gaps: list[dict[str, Any]],
+          from_answer_map: list[str] | None = None) -> dict[str, Any] | None:
     """``old`` (a design block as written) with only what was asked taken from ``new``: settings of ``protocol.grid`` that
     are new, or that a gap names; what each run compares inside it (``protocol.in_each_run``) the same way, and a factor
     ``old`` compares inside each run stays there, whichever of the two places the answer wrote it in; metrics and equations
     whose id is new; design variables of a search that are new. Every check, threshold, tolerance and the rest are
-    ``old``'s. ``None`` when nothing was taken."""
+    ``old``'s. ``None`` when nothing was taken. ``from_answer_map``, when a list is given, gets each key that was named by
+    the answer's own topic map (for a gap that had no setting of its own), so the caller can say so."""
     if not isinstance(old, dict) or not isinstance(new, dict):
         return None
     o = old.get("protocol") if isinstance(old.get("protocol"), dict) else {}
@@ -932,13 +934,16 @@ def merge(old: dict[str, Any], new: dict[str, Any], gaps: list[dict[str, Any]]) 
     named = {g.get("axis") for g in gaps if g.get("axis")}
     # A setting the answer's own topic map gives for a gap's item is that gap's setting for this merge (a plan with no map
     # of its own left the gap without one): the answer states which setting stands for the item, FI does not guess it.
-    gap_keys = [({_name_key(g.get("id")), _name_key(g.get("name"))} - {""}) for g in gaps]
+    # Only a gap that has no setting yet: a gap that has one is merged on that one, whatever the answer's map says.
+    gap_keys = [({_name_key(g.get("id")), _name_key(g.get("name"))} - {""}) for g in gaps if not g.get("axis")]
     for entry in n.get("topic_map") if isinstance(n.get("topic_map"), list) else []:
         if not isinstance(entry, dict) or not any(_name_key(entry.get("item")) in keys for keys in gap_keys):
             continue
         head, _sep, mapped = str(entry.get("by") or "").partition(":")
         if head.strip().lower() in ("setting", "grid", "design_variable", "variable") and mapped.strip():
             named.add(mapped.strip())
+            if from_answer_map is not None and mapped.strip() not in from_answer_map:
+                from_answer_map.append(mapped.strip())
     new_grid = n.get("grid") if isinstance(n.get("grid"), dict) else {}
     search = isinstance(o.get("optimisation"), dict)
     if search:
@@ -1051,12 +1056,20 @@ def merge(old: dict[str, Any], new: dict[str, Any], gaps: list[dict[str, Any]]) 
             new_values = new_base.get("values") if isinstance(new_base.get("values"), dict) else {}
             fixed_values = dict(old_values)
             for name, v in moved.items():
-                ends = [x for x in ((v.get("values") if isinstance(v.get("values"), list) else [v.get("low"), v.get("high")])) or []
-                        if isinstance(x, (int, float)) and not isinstance(x, bool)]
                 held = old_values.get(name)
-                if len(ends) >= 2 and isinstance(held, (int, float)) and not isinstance(held, bool)                         and not min(ends) <= held <= max(ends):
-                    offered = new_values.get(name)
-                    fixed_values[name] = offered if isinstance(offered, (int, float)) and min(ends) <= offered <= max(ends)                         else min(max(held, min(ends)), max(ends))
+                offered = new_values.get(name)
+                if isinstance(v.get("values"), list) and v["values"]:
+                    # A variable that takes one of a list of values: the baseline stays when it is one of them, else the
+                    # answer's baseline if that is one, else the first listed. Never a value between the ends.
+                    members = v["values"]
+                    if name in old_values and held not in members:
+                        fixed_values[name] = offered if offered in members else members[0]
+                    continue
+                ends = [x for x in (v.get("low"), v.get("high")) if isinstance(x, (int, float)) and not isinstance(x, bool)]
+                if len(ends) >= 2 and isinstance(held, (int, float)) and not isinstance(held, bool) \
+                        and not min(ends) <= held <= max(ends):
+                    fixed_values[name] = offered if isinstance(offered, (int, float)) and min(ends) <= offered <= max(ends) \
+                        else min(max(held, min(ends)), max(ends))
             protocol["optimisation"] = {**base, "design_variables": variables,
                                         **({"baseline": {**old_base, "values": fixed_values}} if old_base and fixed_values != old_values else {})}
         if extra:
