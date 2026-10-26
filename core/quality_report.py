@@ -178,6 +178,7 @@ class _Quest:
         self.step_coverage = _dict(_json(fi / "step_coverage.json"))
         self.drafted_asked = _dict(_json(fi / "drafted_parts_asked.json"))
         self.design_acted = _list(_json(fi / "design_audit_acted.json"))
+        self.audit_open = [x for x in _list(_dict(_json(fi / "audit_open_items.json")).get("open")) if isinstance(x, dict)]
         self.pause = _dict(_json(fi / "pause.json"))
         self.scope = _dict(_json(fi / "scope.json"))
         self.cost = _dict(_json(fi / "cost.summary.json"))
@@ -380,6 +381,10 @@ def _design_problems(q: _Quest) -> list[dict[str, str]]:
             for part in parts:
                 out.append(_problem("design", part, "the design audit",
                                     "fixed" if q.design_acted else "not fixed", "needs/receipts/design_audit.json"))
+    for it in q.audit_open:
+        out.append(_problem("design", f"proposed by the audit, not applied: `{it.get('path')}` "
+                                      f"({_one(it.get('objection') or it.get('fix'), 120)}); {it.get('reason')}",
+                            "the design audit", "not fixed", ".fi/audit_open_items.json"))
     substituted = [str(x) for x in _list(q.drafted_asked.get("substituted"))]
     if substituted:
         names = {"grid": "settings to vary", "metrics": "metrics", "runs_per_setting": "runs per setting"}

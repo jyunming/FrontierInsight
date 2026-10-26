@@ -205,10 +205,11 @@ _MAX_PLAN_CHARS = 12000
 _WHERE_RE = re.compile(r"([\w./\-]+\.py)(?:\s*[:,]?\s*(?:lines?\s*)?(\d+))?", re.I)
 
 
-def plan_view(design: dict[str, Any] | None, protocol: dict[str, Any] | None) -> str:
+def plan_view(design: dict[str, Any] | None, protocol: dict[str, Any] | None, open_items: dict[str, Any] | None = None) -> str:
     """What the logic checks are made against, as JSON text: the plan's model (its equations as written), the method, the
     statistics it names, the grid, and the checks' cases and measures. Never an expected value, a tolerance or a worked
-    example: the reader is asked what is wrong, not what a number should be."""
+    example: the reader is asked what is wrong, not what a number should be. ``open_items``: what the methodology audit
+    proposed and the plan does not hold (core/audit_open_items.py), shown so the reader does not take it for the plan."""
     design = design if isinstance(design, dict) else {}
     protocol = protocol if isinstance(protocol, dict) else {}
     model = protocol.get("model") if isinstance(protocol.get("model"), dict) else {}
@@ -227,6 +228,7 @@ def plan_view(design: dict[str, Any] | None, protocol: dict[str, Any] | None) ->
         "ci_method": _text(protocol.get("ci_method"), 200), "seed_policy": _text(protocol.get("seed_policy"), 200),
         "checks": [{"name": _text(o.get("name"), 60), "kind": _text(o.get("kind"), 30), "check": _text(o.get("check"), 200),
                     "case": o.get("case"), "measure": _text(o.get("measure"), 160)} for o in _oracle.declared(protocol)],
+        "proposed_by_the_audit_not_applied": open_items,
     }
     values = _pairs.plan_values(protocol)
 

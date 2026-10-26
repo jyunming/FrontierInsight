@@ -74,6 +74,7 @@ from .proc_tree import AsyncProcessTree
 from . import acceptance as _acceptance
 from . import agent_coder as _agent_coder
 from . import audit_log as _audit_log
+from . import audit_open_items as _audit_open
 from . import confirmations as _confirmations
 from . import record_anchor as _record_anchor
 from . import evidence as _evidence
@@ -5316,6 +5317,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                        "step": review_node}
         self._record_design_critique(iteration, before, design, objections, failure, node=review_node, review=review_info,
                                      not_applied=not_applied)
+        if not failure and isinstance(objections, list):
+            self._keep_audit_open_items(
+                objections, design, reasons={n["key"]: n["reason"] for n in not_applied if n.get("key") and not n.get("applied")},
+                default_reason="FI did not apply it" if adopt else "the design was already settled, so the audit only checked it",
+                iteration=int(iteration or 0))
         if not failure:
             self._log.info(
                 "[design_self_critique] the design was read by %s: %s", reviewer,
@@ -5445,6 +5451,25 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._log.info("[design_self_critique] `%s` after the correction: %s", n["key"],
                            "still not fully readable" if n["key"] in left else "read in full")
         return design2, not_applied2
+
+    def _keep_audit_open_items(
+        self, objections: Any, design: Any, *, reasons: dict[str, str], default_reason: str, iteration: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Compare each change the audit proposed with ``design``, the design FI holds, and keep every one it does not hold as
+        an open item with the audit's full text (core/audit_open_items.py): the code-writing step and the code reader are
+        shown it, QUALITY.md lists it and the paper's limitations say it. A proposal the design holds is remembered as
+        applied, to be compared with the frozen protocol. FI's own records decide; no word of the audit is matched."""
+        props = _audit_open.proposals(objections)
+        if not props:
+            return []
+        held, missing = _audit_open.split(props, design)
+        items = _audit_open.record(self.quest_root, held, missing, reasons=reasons, default_reason=default_reason,
+                                   iteration=iteration)
+        for p in missing:
+            self._log.warning("[design_self_critique] the audit's change to `%s` is not in the design; it is kept as an open "
+                              "item for the code and the paper (%s)", p["path"],
+                              _audit_open.reason_for(p["path"], reasons) or default_reason)
+        return items
 
     def _audit_changes_held_back(self) -> list[str]:
         """One plain sentence per change the last methodology audit proposed that FI did not (fully) apply, from FI's own
@@ -10866,8 +10891,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             "figures": [],
         }
 
-    @staticmethod
-    def _code_design_block(state: QuestState, *, names_only: bool = False) -> str:
+    def _code_design_block(self, state: QuestState, *, names_only: bool = False) -> str:
         """The design as a request that writes or repairs code may see it: without the plan's own numbers for what the
         code must reproduce. Each equation's worked ``example`` is dropped (``names_only``: kept as the names of its
         inputs, which the outline needs to name a function's parameters), and each check's ``expected`` and
@@ -10875,6 +10899,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         design = copy.deepcopy(state.get("design") or {})
         if isinstance(design, dict) and isinstance(design.get("protocol"), dict):
             _strip_plan_numbers(design["protocol"], names_only=names_only)
+        if isinstance(design, dict) and (open_items := _audit_open.for_code(self.quest_root)):
+            design["proposed_by_the_methodology_audit_not_applied"] = open_items  # what the plan does not hold, said openly
         return json.dumps(design, indent=2)
 
     async def _node_implement_outline(self, state: QuestState) -> QuestState:
@@ -11467,6 +11493,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         else:
             record = _frozen.freeze(self.quest_root, protocol, approved_by=approved_by, source=source,
                                     sources=self._retrieved_sources(state))
+        for lost in _audit_open.check_against(
+                self.quest_root, record.get("protocol"),
+                why="the protocol that was frozen does not have it, though the audit's change was reported as made"):
+            self._log.warning("[protocol] the audit's change to `%s` was reported as made and the frozen protocol does not "
+                              "have it; it is kept as an open item for the code and the paper", lost["path"])
         self._log.info(
             "[protocol] frozen %s (%s, sha256 %s, run %s)%s",
             "at the end of exploration" if at_confirm else "before the first full run",
@@ -12548,6 +12579,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         self._mark_design_audit_acted(key)
         amended, objections = await self._audit_design(state, design, adopt=True, writer=writer)
         kept_checks = False
+        written: dict[str, Any] | None = None
         if isinstance(amended, dict):
             amended, kept_checks = self._keep_what_the_results_are_judged_by(design, amended)
         if isinstance(amended, dict) and _receipts.design_core(amended) != _receipts.design_core(design):
@@ -12560,6 +12592,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     "[design] before the experiment ran, a second look at the design found a problem and FI changed "
                     "the design to fix it: %s", str(first)[:160] or "see needs/DESIGN_CRITIQUE.json")
                 design = written
+        self._reconcile_audit_changes(design, amended, objections, written, iteration=int(state.get("iteration", 0) or 0))
         if kept_checks:
             self._log.info("[design] the audit also suggested changing the checks the results are judged by; FI kept "
                            "them as they were")
@@ -12570,6 +12603,45 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                  "checks, thresholds, acceptance rules, metrics, precision target and model); FI kept "
                                  "them as they were.")
         return design
+
+    def _reconcile_audit_changes(
+        self, before: dict[str, Any], amended: Any, objections: Any, written: dict[str, Any] | None, *, iteration: int,
+    ) -> None:
+        """After the audit's changes were made: compare each with the design FI holds now. ``amended`` is what FI meant to
+        write (the checks the results are judged by put back); ``written`` is what plan.md holds when read back, ``None``
+        when nothing was written. A proposal missing from ``amended`` was held back on purpose; one in ``amended`` and not
+        in ``written`` was lost in the writing. Both become open items (a change reported as made is never only a log line)."""
+        props = _audit_open.proposals(objections)
+        if not props:
+            return
+        meant = amended if isinstance(amended, dict) and written is not None else before
+        _held, held_back = _audit_open.split(props, meant)
+        reasons = {p["path"]: ("the audit may change how the study is run, not what its results are judged by"
+                               if str(p["path"]).startswith("protocol.") and p["path"].split(".")[1] not in self._AUDIT_MAY_CHANGE
+                               and not _design_parts.invalid_reason(p["path"], before) else "") for p in held_back}
+        reasons = {k: v for k, v in reasons.items() if v}
+        lost: list[dict[str, Any]] = []
+        if written is not None and isinstance(amended, dict):
+            expected, _why = _plan.normalize_design({k: v for k, v in amended.items() if k != "rationale"})
+            for p in _held:
+                found, now = _design_parts.get_part(written, p["path"])
+                was, want = _design_parts.get_part(expected or {}, p["path"])
+                if was and (not found or json.dumps(now, sort_keys=True, default=str) != json.dumps(want, sort_keys=True, default=str)):
+                    lost.append(p)
+        held = [p for p in _held if p not in lost]
+        for p in lost:
+            reasons[p["path"]] = "plan.md was written with it and read back without it"
+        self._audit_open_record(held, held_back + lost, reasons, iteration)
+
+    def _audit_open_record(self, held: list[dict[str, Any]], missing: list[dict[str, Any]], reasons: dict[str, str],
+                           iteration: int) -> None:
+        _audit_open.record(self.quest_root, held, missing, reasons=reasons, default_reason="", iteration=iteration)
+        for p in missing:
+            self._log.warning("[design] the audit's change to `%s` is not in the design that runs (%s); it is kept as an open "
+                              "item for the code and the paper", p["path"], reasons.get(p["path"]) or "FI did not apply it")
+        if missing:
+            print(f"[FI] The methodology audit proposed {len(missing)} change(s) the plan does not hold; they are listed in "
+                  f"QUALITY.md and passed to the code. See .fi/{_audit_open.FILE}")
 
     #: The protocol keys an audit may change: how the study is run, never what its results are judged by.
     _AUDIT_MAY_CHANGE = frozenset({"grid", "in_each_run", "seed_policy", "failure_policy", "ci_method"})
@@ -13081,7 +13153,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         sources, _partial = _code_review.sources_text(code)
         topic = " ".join(str(state.get("topic") or self.config.topic or "").split())[:1500]
         values = _pairs.plan_values(protocol if isinstance(protocol, dict) else None)
-        plan_text = _code_review.plan_view(design, protocol if isinstance(protocol, dict) else None)
+        plan_text = _code_review.plan_view(design, protocol if isinstance(protocol, dict) else None,
+                                           open_items=_audit_open.for_code(self.quest_root))
         earlier = _code_review.earlier_block(previous)
         verdicts: list[dict[str, Any]] | None = None
         logic: list[dict[str, Any]] = []
@@ -21907,6 +21980,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                              + "\n".join(f"- {line}" for line in depends)).strip()
         if typed_note := self._typed_figures_note():
             evidence_note = f"{evidence_note}\n\n{typed_note}".strip()
+        if audit_note := _audit_open.writer_note(self.quest_root):
+            evidence_note = f"{evidence_note}\n\n{audit_note}".strip()
         if code_note := _code_review.write_note(self.quest_root, self.quest_root / "code"):
             evidence_note = f"{evidence_note}\n\n{code_note}".strip()
         if topic_note := _topic_req.write_note(self.quest_root):
