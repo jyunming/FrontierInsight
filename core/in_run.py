@@ -16,6 +16,26 @@ import itertools
 import math
 
 
+#: The one reserved key of a cell FI gives the code: what FI is asking for. The cell of a design the search evaluates
+#: says ``"search"``, a row of the coarse scan or the comparison grid ``"scan"``, a case of one of the plan's checks
+#: ``"check"``. The other keys of a search design and of a grid row at the baseline are the same, so the code cannot tell
+#: them apart from their values; FI says which it is. It is never part of a cell's name (:func:`fmt` callers use
+#: :func:`without_kind`) and never a setting of the study.
+CELL_KIND = "fi_kind"
+CELL_KINDS = ("search", "scan", "check")
+
+
+def without_kind(cell):
+    """The cell with FI's reserved key left out (its name, its seed, its record)."""
+    return {k: v for k, v in cell.items() if k != CELL_KIND}
+
+
+def with_kind(cell, kind):
+    """The cell as the code is called with it: the kind FI built it as. A cell that already says what it is keeps that
+    (a search's baseline design inside a list of grid rows)."""
+    return {**without_kind(cell), CELL_KIND: cell.get(CELL_KIND) if cell.get(CELL_KIND) in CELL_KINDS else kind}
+
+
 def fmt(value):
     """A value as a cell key writes it (the same as ``core.trial_runner._fmt``)."""
     if isinstance(value, float) and value.is_integer():

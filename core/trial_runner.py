@@ -387,7 +387,7 @@ def _fmt(value: Any) -> str:
 
 def cell_key(cell: dict[str, Any]) -> str:
     """``"R0=0.9,N=100"``: the run-manifest checker's way of naming a cell."""
-    return ",".join(f"{axis}={_fmt(value)}" for axis, value in cell.items())
+    return ",".join(f"{axis}={_fmt(value)}" for axis, value in cell.items() if axis != _in_run.CELL_KIND)
 
 
 def trial_seed(base: int, key: str, trial: int) -> int:
@@ -526,7 +526,8 @@ def _plan(quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *, r
         out_path.unlink(missing_ok=True)
         nonce = hashlib.sha256(f"{time.time_ns()}|{index}|{id(trials)}".encode()).hexdigest()[:24]
         spec_path.write_text(json.dumps({"module": str(module).replace("\\", "/"), "entry": entry,
-                                         "cell": {**cell, **inside}, "levels": _in_run.levels_json(levels),
+                                         "cell": _in_run.with_kind({**cell, **inside}, "scan"),
+                                         "levels": _in_run.levels_json(levels),
                                          "trials": trials, "nonce": nonce, "keep_spec": keep_spec,
                                          "thresholds": dict(thresholds or {})}, default=str),
                              encoding="utf-8")
@@ -1657,7 +1658,8 @@ async def _run_batch(executor: Any, python: Path | str, quest_root: Path, module
     out = work / "oracle.out.jsonl"
     out.unlink(missing_ok=True)
     nonce = hashlib.sha256(f"oracle|{time.time_ns()}".encode()).hexdigest()[:24]
-    spec.write_text(json.dumps({"module": str(module).replace(chr(92), "/"), "entry": entry, "cell": cell,
+    spec.write_text(json.dumps({"module": str(module).replace(chr(92), "/"), "entry": entry,
+                                "cell": _in_run.with_kind(cell, "check"),
                                 "levels": _in_run.levels_json(levels), "trials": list(trials), "nonce": nonce,
                                 "thresholds": dict(thresholds or {}), "spy_trial": bool(spy_trial),
                                 **({"budget_s": float(budget_s)} if budget_s is not None else {})}, default=str),

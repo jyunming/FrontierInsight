@@ -92,7 +92,7 @@ def cells(grid, sub_studies=None):
 
 
 def cell_key(cell):
-    return ",".join(f"{axis}={fmt(value)}" for axis, value in cell.items())
+    return ",".join(f"{axis}={fmt(value)}" for axis, value in cell.items() if axis != CELL_KIND)
 
 
 def trial_seed(base, key, trial):
@@ -129,7 +129,7 @@ def run_cell_child(study, index, out_path):
     for trial in range(runs):
         seed = trial_seed(int(study.get("base_seed") or 0), "" if study.get("paired") else key, trial)
         try:
-            given = dict(cell, **inside)  # every value each run compares inside it, as FI gives them
+            given = with_kind(dict(cell, **inside), "scan")  # every value each run compares inside it, as FI gives them
             value = fn(given) if entry == "run_cell" else fn(given, trial, seed)
             kept, why = read_returned(value, levels, entry)
             if kept is None:
@@ -172,7 +172,8 @@ def evaluate_child(spec_path, out_path):
     rows = []
     for trial in spec["trials"]:
         try:
-            value = fn(dict(spec["cell"])) if entry == "run_cell" else fn(dict(spec["cell"]), trial["trial"], trial["seed"])
+            given = with_kind(dict(spec["cell"]), "search")  # a design of the search, as FI gives it
+            value = fn(given) if entry == "run_cell" else fn(given, trial["trial"], trial["seed"])
             # Read as FI's trial harness reads it: None is a value that does not exist (NaN), the reasons under
             # why_missing are kept on the row, and a per-value result is read when the spec names its levels.
             kept, why = read_returned(value, levels, entry)

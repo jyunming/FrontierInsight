@@ -729,7 +729,7 @@ def _measure(check):
         value = next((v for k, v in found.items() if str(k).strip().lower() == want), None)
         assert value is not None, f"{{check['name']}}: simulate.oracle() does not return this check"
         return value
-    case = dict(check["case"])
+    case = {{**check["case"], "fi_kind": "check"}}  # as FI calls the function for a case of a check
     # With both functions the study runs only run_trial: a check that holds in every single trial runs on it, and so does any
     # other check unless run_cell really calls run_trial (its mean then comes from the study's own trials), as Frontier
     # Insight does.

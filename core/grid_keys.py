@@ -457,6 +457,7 @@ def supplied_names(protocol: dict[str, Any] | None, design: dict[str, Any] | Non
     inside = _in_run.of_study(protocol) or {}
     axes = [str(k) for k in grid] + [str(k) for k in inside if str(k) not in grid]
     allowed = set(axes) | (set(IN_RUN_RECORD_FIELDS) if inside else set())
+    allowed.add(_in_run.CELL_KIND)  # FI says in every cell what it is (search design, scan row, check case)
     allowed.update(_forms.fixed_settings_of_design({**(design or {}), "protocol": protocol}))
     _case_keys(protocol, allowed)
     return axes, allowed
