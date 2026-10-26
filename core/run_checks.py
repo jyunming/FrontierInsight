@@ -355,7 +355,10 @@ class RunChecksMixin:
                 "[execute] the rewritten %s still returns %d number(s) typed into the code; keeping it as written",
                 path.name, len(left))
             return False
+        package_was = self._package_snapshot()  # type: ignore[attr-defined]
         path.write_text(new_code, encoding="utf-8")
+        if await self._simulation_kept_or_back(state, path, code, package_was, "execute"):  # type: ignore[attr-defined]
+            return False
         self._log.info(  # type: ignore[attr-defined]
             "[execute] rewrote %s so its results are computed (%d typed-in left): %s", path.name, len(left),
             str(parsed.get("patch_summary") or "no summary")[:120])

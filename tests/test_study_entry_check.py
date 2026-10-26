@@ -124,6 +124,12 @@ async def test_a_run_trial_that_returns_a_random_mean_is_still_named(tmp_path: P
     assert "run_trial must run ONE trial" in tr.trial_aggregates(source, root)
 
 
+def _gave(engine: Engine, *names: str) -> None:
+    """FI's record of what the study's entry returned before the repair (its small run's record)."""
+    (engine.quest_root / ".fi").mkdir(parents=True, exist_ok=True)
+    (engine.quest_root / ".fi" / "small_run.json").write_text(json.dumps({"returned": list(names)}), encoding="utf-8")
+
+
 def _engine(tmp_path: Path) -> Engine:
     return Engine(Config(
         topic="t", title="entry-check", provider=ProviderConfig(name="openai"), execution=ExecutionConfig(sandbox="venv"),
@@ -142,6 +148,7 @@ async def test_the_engine_rejects_a_repair_with_no_study_result_and_keeps_one_th
     code = engine.quest_root / "code"
     code.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(engine, "_protocol_block", lambda state: PROTOCOL)
+    _gave(engine, "yield_rate")
     (code / "simulate.py").write_text(CHECK_ONLY, encoding="utf-8")
     state: dict[str, Any] = {"design": {"protocol": PROTOCOL}}
     assert "no longer returns the study's results" in await engine._simulation_repair_fault(state, CHECK_ONLY)
@@ -160,6 +167,7 @@ async def test_an_oracle_repair_with_no_study_result_is_put_back(tmp_path: Path,
     code = engine.quest_root / "code"
     code.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(engine, "_protocol_block", lambda state: PROTOCOL)
+    _gave(engine, "yield_rate")
     before = DELEGATING
     (code / "simulate.py").write_text(before, encoding="utf-8")
     oracle = {"name": "zero", "kind": "special_case", "check": "c", "expected": 0.0, "tolerance": 0.1,
@@ -208,6 +216,7 @@ async def test_a_plan_with_a_run_level_and_an_analysis_derived_metric_passes_on_
     protocol = {"grid": {"width": [1.0, 2.0]}, "metrics": [{"id": "yield_rate", "kind": "mean"},
                                                           {"id": "relative_gain", "kind": "mean"}]}  # derived in analysis
     monkeypatch.setattr(engine, "_protocol_block", lambda state: protocol)
+    _gave(engine, "yield_rate")  # FI's record: the entry returns yield_rate; relative_gain is the analysis's
     state: dict[str, Any] = {"design": {"protocol": protocol}}
     keeps = KEEPS_OBJECTIVE.replace("Yield_Rate", "yield_rate")
     (code / "simulate.py").write_text(keeps, encoding="utf-8")
@@ -240,6 +249,7 @@ async def test_a_run_cell_only_simulation_that_loses_its_results_is_caught_witho
     code = engine.quest_root / "code"
     code.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(engine, "_protocol_block", lambda state: PROTOCOL)
+    _gave(engine, "yield_rate")
     state: dict[str, Any] = {"design": {"protocol": PROTOCOL}}
     (code / "simulate.py").write_text(RUN_CELL_ONLY_LOST, encoding="utf-8")
     assert "run_cell() on the plan's first setting returned check_error" in await engine._simulation_repair_fault(
@@ -362,3 +372,126 @@ async def test_the_check_of_one_repair_has_one_budget_and_never_a_third_call(
     engine._entry_judged_fine = None
     assert await engine._simulation_repair_fault(state, DELEGATING + "# again\n") == ""
     assert called == [], "not judged after the seed calls: no third call"
+
+
+COUNTS = '''
+def run_trial(cell, trial_id=0, seed=0):
+    return {"yield_rate_count": 9, "yield_rate_total": 10}
+'''
+
+SLOW_TRIAL = '''
+import time
+
+def run_trial(cell, trial_id=0, seed=0):
+    time.sleep(2.5)
+    return {"y": 1.0}
+'''
+
+
+@pytest.mark.asyncio
+async def test_a_metric_returned_as_its_counts_is_a_returned_metric(tmp_path: Path) -> None:
+    # core/metric_spec.py reads a metric as its id, or `<id>_count` and `<id>_total`, or `<id>_values`.
+    root = _quest(tmp_path, COUNTS)
+    assert await _entry(root, {"yield_rate"}) == ""
+
+
+@pytest.mark.asyncio
+async def test_the_two_seed_calls_share_the_time_they_are_given(tmp_path: Path) -> None:
+    root = _quest(tmp_path, SLOW_TRIAL)
+    # each call takes ~2.5 s: with 4 s for both, the second has less than it needs (before: each was given the whole 4 s)
+    done = await tr.settle_aggregate(VenvExecutor(), sys.executable, root, "code/simulate.py", cell=dict(CELL), timeout_s=4)
+    assert done is None
+
+
+def test_the_cache_key_follows_every_file_the_simulation_reads(tmp_path: Path) -> None:
+    root = _quest(tmp_path, DELEGATING)
+    (root / "code" / "helper.py").write_text("X = 1\n", encoding="utf-8")
+    source = (root / "code" / "simulate.py").read_text(encoding="utf-8")
+    before = tr.code_inputs_sha(root, source)
+    (root / "code" / "helper.py").write_text("X = 2\n", encoding="utf-8")
+    assert tr.code_inputs_sha(root, source) != before, "a helper beside simulate.py is part of the key"
+    (root / "inputs").mkdir()
+    (root / "inputs" / "table.csv").write_text("1,2\n", encoding="utf-8")
+    assert tr.code_inputs_sha(root, source) != before
+
+
+@pytest.mark.asyncio
+async def test_the_record_of_a_measurement_is_stale_when_a_helper_changes(tmp_path: Path) -> None:
+    root = _quest(tmp_path, "import helper\n\ndef run_cell(cell):\n    return {'yield_rate': helper.value()}\n\n"
+                            "def run_trial(cell, trial_id=0, seed=0):\n    return run_cell(cell)\n")
+    (root / "code" / "helper.py").write_text("def value():\n    return 1.0\n", encoding="utf-8")
+    source = (root / "code" / "simulate.py").read_text(encoding="utf-8")
+    assert await tr.settle_aggregate(VenvExecutor(), sys.executable, root, "code/simulate.py", cell=dict(CELL), timeout_s=60)
+    assert tr.trial_aggregates(source, root) == ""
+    (root / "code" / "helper.py").write_text("import random\n\ndef value():\n    return random.random()\n", encoding="utf-8")
+    assert tr.trial_aggregates(source, root), "the helper changed: measured again"
+
+
+@pytest.mark.asyncio
+async def test_a_search_whose_evaluation_failed_is_not_judged_and_says_why(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+
+    root = _quest(tmp_path, "def run_trial(cell, trial_id=0, seed=0):\n    raise RuntimeError('boom')\n")
+    log = logging.getLogger("entry-check-test")
+    with caplog.at_level(logging.WARNING, logger="entry-check-test"):
+        why = await optimise_mod.search_entry_returns_objective(
+            VenvExecutor(), sys.executable, root, "code/simulate.py", {"objective": {"quantity": "obj"}}, {"x": 1.0},
+            timeout_s=60, env=None, thresholds=None, log=log)
+    assert why == ""
+    assert "not judged" in caplog.text and "boom" in caplog.text
+
+
+PK_SIM = '''
+import pk.model as model
+
+def run_trial(cell, trial_id=0, seed=0):
+    return model.run(cell)
+'''
+
+
+def _package_quest(engine: Engine) -> Path:
+    code = engine.quest_root / "code"
+    (code / "pk").mkdir(parents=True, exist_ok=True)
+    (code / "pk" / "__init__.py").write_text("", encoding="utf-8")
+    (code / "pk" / "model.py").write_text("def run(cell):\n    return {'yield_rate': cell['width'] * 2.0}\n", encoding="utf-8")
+    (code / "simulate.py").write_text(PK_SIM, encoding="utf-8")
+    return code
+
+
+@pytest.mark.asyncio
+async def test_a_package_only_oracle_repair_that_removes_the_study_result_is_put_back(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import code_layout as cl
+
+    engine = _engine(tmp_path)
+    engine._trial_mode = True
+    code = _package_quest(engine)
+    cl.save(engine.quest_root, {"shape": cl.PACKAGE, "package": "pk"})
+    monkeypatch.setattr(engine, "_protocol_block", lambda state: PROTOCOL)
+    _gave(engine, "yield_rate")
+    before = (code / "pk" / "model.py").read_text(encoding="utf-8")
+    oracle = {"name": "zero", "kind": "special_case", "check": "c", "expected": 0.0, "tolerance": 0.1,
+              "case": {"width": 2.0}, "measure": "check_error"}
+
+    async def answer(prompt: str, **kw: Any) -> str:
+        return json.dumps({"code": "", "package_files": {"pk/model.py": "def run(cell):\n    return {'check_error': 0.0}\n"},
+                           "patch_summary": "the package returns the check"})
+
+    monkeypatch.setattr(engine, "_chat", answer)
+    new, failed, outcome = await engine._repair_script_for_oracle(
+        {"design": {"protocol": PROTOCOL}}, code / "simulate.py", [oracle], ["zero is off"], passing=[])
+    assert outcome == "not_usable" and new is None
+    assert (code / "pk" / "model.py").read_text(encoding="utf-8") == before
+
+
+@pytest.mark.asyncio
+async def test_with_no_record_that_the_entry_returns_a_headline_nothing_is_judged(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = _engine(tmp_path)
+    code = engine.quest_root / "code"
+    code.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(engine, "_protocol_block", lambda state: PROTOCOL)
+    (code / "simulate.py").write_text(CHECK_ONLY, encoding="utf-8")
+    state: dict[str, Any] = {"design": {"protocol": PROTOCOL}}
+    assert await engine._simulation_repair_fault(state, CHECK_ONLY) == "", "never a refusal on a guess"
+    assert "was not judged" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")

@@ -12435,7 +12435,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "protocol", path.name, new_code,
                 broken or f"the differences were not fewer ({len(mismatches)} -> {len(remaining)})")
             return code, deps, False
+        package_was = self._package_snapshot()
         path.write_text(new_code, encoding="utf-8")
+        if await self._simulation_kept_or_back(state, path, code, package_was, "protocol"):
+            return code, deps, False
         self._log.info(
             "[protocol] rewrote %s (%d bytes): %d difference(s) left in it (%s)",
             path.name, len(new_code), len(remaining), str(parsed.get("patch_summary") or "no summary")[:120],
@@ -13745,12 +13748,26 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         study's headline results (FI's record of the plan), or a repair that routes every setting to a check branch
         leaves a study with no result."""
         # The same code (the script and the model's package) that was judged fine is not called again.
-        seen = hashlib.sha256((new_code + json.dumps(self._package_snapshot(), sort_keys=True)).encode("utf-8")).hexdigest()
+        seen = _trial_runner.code_inputs_sha(self.quest_root, new_code)
         if self.__dict__.get("_entry_judged_fine") == seen:
             return ""
         fault = await self._simulation_repair_fault_uncached(state, new_code)
         if not fault:
             self._entry_judged_fine = seen
+        return fault
+
+    async def _simulation_kept_or_back(self, state: QuestState, path: Path, old_code: str,
+                                       package_before: dict[str, str], node: str) -> str:
+        """For every place that adopts a changed simulation: the check of :meth:`_simulation_repair_fault` on the file now on
+        disk (``path``: simulate.py; any other file is not this check's). On a fault the old text and package are put back and
+        the sentence is returned; ``""`` keeps the change."""
+        if path.name != _split_run.SIMULATE_NAME:
+            return ""
+        fault = await self._simulation_repair_fault(state, path.read_text(encoding="utf-8"))
+        if fault:
+            path.write_text(old_code, encoding="utf-8")
+            self._restore_package(package_before)
+            self._log.warning("[%s] the change to %s is not kept: %s", node, path.name, fault)
         return fault
 
     async def _simulation_repair_fault_uncached(self, state: QuestState, new_code: str) -> str:
@@ -13805,10 +13822,20 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 return await self._await_with_heartbeat(
                     _optimise.search_entry_returns_objective(
                         self.executor, py, self.quest_root, module, normal, {**cell, **(inside or {})}, timeout_s=left(),
-                        env=env, thresholds=thresholds),
+                        env=env, thresholds=thresholds, log=self._log),
                     label="calling the repaired code on the search's baseline design")
+            # Only the headlines FI's own record shows the entry returns (its small run's record of what it gave): a metric the
+            # analysis derives later is not the entry's to return. With no such headline there is nothing to judge.
+            from . import small_run as _small
+
+            gave = {str(n) for n in _small.read_record(self.quest_root).get("returned") or []}
             wanted = {str(m.get("id")).strip() for m in protocol.get("metrics") or []
-                      if isinstance(m, dict) and str(m.get("id") or "").strip()}
+                      if isinstance(m, dict) and str(m.get("id") or "").strip()
+                      and gave & set(_metric_spec.result_forms(str(m.get("id")).strip()))}
+            if not wanted:
+                self._log.info("[execute] the repaired code was not judged on the plan's first setting: FI has no record "
+                               "that the study's entry returns any headline metric itself")
+                return ""
             return await self._await_with_heartbeat(
                 _estimate.entry_returns_study(self.executor, py, self.quest_root, module, cell, wanted=wanted,
                                               timeout_s=left(), env=env, thresholds=thresholds, in_each_run=inside),
@@ -16147,6 +16174,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 verdict = _improve.verdict(comparison)
                 values = _improve.values_line(rows, comparison)
                 kept = bool(verdict["best"])
+                study_fault = ""
+                if kept:
+                    # A version that meets the checks of correctness is kept only if the function FI calls for the study still
+                    # returns the study's results (a checks-only simulation can satisfy every check).
+                    study_fault = await self._simulation_repair_fault(
+                        state, (root / "code" / _split_run.SIMULATE_NAME).read_text(encoding="utf-8"))
+                    if study_fault:
+                        kept = False
+                        self._log.warning("[improve] round %d is not kept: %s", used, study_fault)
                 entry.update(values=values, better=verdict["better"], worse=verdict["worse"], broken=verdict["broken"])
                 if problems:
                     entry["problems"] = problems[:5]
@@ -16176,7 +16212,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                 summary=f"round {used} kept: {values}"[:300])
                 else:
                     back = f"round {best['round']}'s version" if best["round"] else "the first version"
-                    if verdict["broken"]:
+                    if study_fault:
+                        reason = study_fault
+                    elif verdict["broken"]:
                         reason = ("the change stopped the simulation from running its checks"
                                   + (f" ({_improve.one_line('; '.join(problems), 200)})" if problems else ""))
                     elif verdict["worse"]:
@@ -17772,9 +17810,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         new_code = parsed.get("code")
         gives_functions = isinstance(parsed.get("functions"), str) and bool(parsed["functions"].strip())
         if not (isinstance(new_code, str) and new_code.strip()) and not gives_functions:
+            package_was = self._package_snapshot() if path.name == _split_run.SIMULATE_NAME else {}
             if (path.name == _split_run.SIMULATE_NAME and self._package_repair_files(state, parsed)
                     and self._apply_package_repair(state, parsed, node="oracle")):
-                # The fault was in the model's package: that is fixed, simulate.py stays as it is.
+                # The fault was in the model's package: that is fixed, simulate.py stays as it is. The study's entry must
+                # still return the study's results with it.
+                fault = await self._simulation_kept_or_back(state, path, code, package_was, "oracle")
+                if fault:
+                    await self._keep_refused_repair("oracle", path.name, code, fault)
+                    return None, False, "not_usable"
                 self._log.info("[oracle] %s is kept as it is: the repair fixed the model's package (%s)", path.name,
                                str(parsed.get("patch_summary") or "no summary")[:160])
                 return code, False, "applied"

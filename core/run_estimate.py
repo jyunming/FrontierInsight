@@ -72,6 +72,7 @@ from typing import Any, Iterable
 
 from . import execution as _execution
 from . import in_run as _in_run
+from . import metric_spec as _metric_spec
 from . import optimise_search as _search
 from . import outside_run as _outside
 from . import trial_checks as _checks
@@ -991,7 +992,8 @@ async def entry_returns_study(
     if values is None:
         return ""
     returned = {n for _c, v in observations([Probe(None, None, dict(cell), 0.0, trials=[values])]) for n in v}
-    if returned & wanted:
+    # A metric is returned as its id, or as the counts or values it is estimated from (core/metric_spec.py::result_forms).
+    if returned & {form for n in wanted for form in _metric_spec.result_forms(n)}:
         return ""
     return (f"the repaired code no longer returns the study's results: {entry}() on the plan's first setting returned "
             f"{', '.join(sorted(returned)[:8]) or 'nothing'}, none of {', '.join(sorted(wanted)[:6])}")

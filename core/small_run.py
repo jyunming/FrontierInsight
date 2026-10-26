@@ -163,6 +163,9 @@ class SmallRun:
 
     def record(self) -> dict[str, Any]:
         return {"says": self.says(), "crashed": self.crashed, "load_error": self.load_error, "seconds": round(self.seconds, 2),
+                # The names the simulation's entry returned in the settings that ran: FI's record of what the entry itself
+                # gives (a headline metric listed here is one the entry returns, not one the analysis derives later).
+                "returned": sorted({name for s in self.settings for name in s.values}),
                 "settings": [{"key": s.key, "planned": s.planned, "ok": s.ok, "failed": s.failed, "timed_out": s.timed_out,
                               "reasons": [[r, n] for r, n in s.reasons[:3]]} for s in self.settings]}
 

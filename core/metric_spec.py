@@ -324,6 +324,12 @@ def shares_draws(protocol: dict[str, Any] | None, quest_root: Path | str | None 
     return isinstance(study, dict) and study.get("paired") is True
 
 
+def result_forms(ident: str) -> tuple[str, ...]:
+    """The names a run may return a metric under: the number itself, or the counts or values it is estimated from (the
+    forms :func:`_settings` reads)."""
+    return (ident, f"{ident}_count", f"{ident}_total", f"{ident}_values")
+
+
 def declared(protocol: dict[str, Any] | None, quest_root: Path | str | None = None) -> list[dict[str, Any]]:
     """The valid metric specs of a protocol (an entry that is not a mapping with an id and a kind is left out). A spec is
     ``paired`` (a contrast joins the settings' trials by number) only when the settings share their draws
@@ -387,7 +393,7 @@ def _settings(replicates: list[dict[str, Any]], spec: dict[str, Any]) -> dict[tu
     walked = [_walk(r) for r in replicates]
     parents: set[tuple[str, ...]] = set()
     for path in walked[0]:
-        if path[-1] in (ident, f"{ident}_count", f"{ident}_total", f"{ident}_values"):
+        if path[-1] in result_forms(ident):
             parents.add(path[:-1])
     out: dict[tuple[str, ...], dict[str, Any]] = {}
     for parent in sorted(parents):

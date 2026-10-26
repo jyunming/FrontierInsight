@@ -1039,13 +1039,20 @@ def trial_aggregates(source: str, quest_root: Path | str | None = None) -> str:
 ONE_TRIAL_RECORD = Path(".fi") / "trials" / "one_trial.json"
 
 
-def _code_sha(quest_root: Path | str, source: str) -> str:
-    """The code a measurement was made on: simulate.py's text and every file of the model's package (a change in the package
-    alone changes what ``run_trial`` returns)."""
+def code_inputs_sha(quest_root: Path | str, source: str = "") -> str:
+    """The code a measurement was made on: ``source`` (simulate.py's text) and every file the simulation may read
+    (:func:`core.code_layout.simulation_inputs`: the model's package, a helper module, a parameter file, the quest's
+    ``inputs/``), the same set the trials' own key hashes."""
     from . import code_layout as _code_layout
 
-    package = json.dumps(_code_layout.package_sources(Path(quest_root) / "code"), sort_keys=True)
-    return hashlib.sha256((source + "\n" + package).encode("utf-8")).hexdigest()
+    root = Path(quest_root)
+    text = source.encode("utf-8")
+    for path in _code_layout.simulation_inputs(root, root / "code"):
+        try:
+            text += f"\n{_code_layout.input_label(path, root)}\n".encode("utf-8") + path.read_bytes()
+        except OSError:
+            continue
+    return hashlib.sha256(text).hexdigest()
 
 
 def one_trial_measured(quest_root: Path | str, source: str) -> bool:
@@ -1056,14 +1063,14 @@ def one_trial_measured(quest_root: Path | str, source: str) -> bool:
         record = json.loads((Path(quest_root) / ONE_TRIAL_RECORD).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
-    return isinstance(record, dict) and record.get("sha256") == _code_sha(quest_root, source) and record.get("same") is not False
+    return isinstance(record, dict) and record.get("sha256") == code_inputs_sha(quest_root, source) and record.get("same") is not False
 
 
 async def settle_aggregate(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, cell: dict[str, Any],
                            inside: dict[str, list[Any]] | None = None, timeout_s: int, env: dict[str, str] | None = None,
                            thresholds: dict[str, Any] | None = None, log: Any = None) -> bool | None:
     """Whether a ``run_trial`` that :func:`trial_aggregates` names by its code is harmless: FI calls it on ``cell`` with two
-    seeds, each call in a new process (``timeout_s``: the time the real run gives one setting), and when every number that
+    seeds, each call in a new process (``timeout_s``: the time the two calls share), and when every number that
     is not the call's own time is the same, the setting's number does not depend on the trial (a study without randomness,
     whose ``run_cell`` is its one trial): ``True``; ``False`` when a number changed. ``None`` when the calls could not be
     finished: a guess from the code's shape does not stand in for a measurement, so the rule is then set aside for this
@@ -1082,10 +1089,13 @@ async def settle_aggregate(executor: Any, python: Path | str, quest_root: Path, 
     base = int((env or {}).get("FI_REPLICATE_SEED") or 0)
     key = cell_key(cell)
     got: list[tuple[dict[str, float], float]] = []
+    began = time.monotonic()
     for step in (0, 1):
+        # ``timeout_s`` is the whole time the two calls share: each is given what is left of it.
+        left = int(timeout_s - (time.monotonic() - began))
         rows, _result = await _run_batch(executor, python, Path(quest_root), module, entry="run_trial", cell=dict(given),
-                                         trials=[{"trial": 0, "seed": trial_seed(base, key, step)}], timeout_s=timeout_s,
-                                         env=env, thresholds=thresholds, levels=levels, log=log)
+                                         trials=[{"trial": 0, "seed": trial_seed(base, key, step)}],
+                                         timeout_s=max(1, left), env=env, thresholds=thresholds, levels=levels, log=log)
         row = next((r for r in rows if r.get("status") == "ok"), None)
         if row is None:
             if log is not None:
@@ -1108,7 +1118,7 @@ def _write_one_trial(quest_root: Path | str, source: str, same: bool | None, mov
     try:
         record = Path(quest_root) / ONE_TRIAL_RECORD
         record.parent.mkdir(parents=True, exist_ok=True)
-        record.write_text(json.dumps({"sha256": _code_sha(quest_root, source), "same": same, "differing": sorted(moved)[:6]}),
+        record.write_text(json.dumps({"sha256": code_inputs_sha(quest_root, source), "same": same, "differing": sorted(moved)[:6]}),
                           encoding="utf-8")
     except OSError:
         pass

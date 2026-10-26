@@ -445,7 +445,7 @@ async def _evaluate(executor: Any, python: Any, quest_root: Path, module: str, e
 
 async def search_entry_returns_objective(
     executor: Any, python: Any, quest_root: Path, module: str, block: dict[str, Any], cell: dict[str, Any], *,
-    timeout_s: int, env: dict[str, str] | None, thresholds: dict[str, Any] | None,
+    timeout_s: int, env: dict[str, str] | None, thresholds: dict[str, Any] | None, log: Any = None,
 ) -> str:
     """After a repair of the simulation: ``""`` when the search's own evaluation of one design (:func:`_evaluate`, with the
     function the search calls, :func:`core.trial_runner.study_entry`) gives a reply the search reads an objective from
@@ -458,6 +458,10 @@ async def search_entry_returns_objective(
                                                   timeout_s=timeout_s, env=env, thresholds=thresholds, name="entry_check")
     values = answer.get("values") if isinstance(answer, dict) else None
     if load_error or not isinstance(values, dict):
+        if log is not None:
+            log.warning("[execute] the repaired code was not judged on the search's baseline design: its own evaluation "
+                        "gave no result (%s)", load_error or (answer.get("failed") if isinstance(answer, dict) else None)
+                        or ("it ran out of time" if isinstance(answer, dict) and answer.get("stop") else "no reason given"))
         return ""
     quantity = str(block["objective"]["quantity"])
     if quantity in values:

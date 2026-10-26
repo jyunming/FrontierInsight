@@ -767,3 +767,23 @@ def test_a_cache_test_in_another_function_is_not_taken_for_a_setting_test() -> N
     special = 'def width(cell):\n    c = cell["sigma"]\n    if c == 0:\n        return 0.0\n    return 2 * c\n'
     text, why = check('def width(cell):\n    c = cell["sigma"]\n    return 2 * c\n', special)
     assert text is None and "a setting a check runs on" in why
+
+
+@pytest.mark.asyncio
+async def test_a_round_that_meets_the_checks_but_leaves_the_study_without_its_results_is_not_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, _model = await _quest(tmp_path, [_edit(EULER, RK4)])
+    calls: list[str] = []
+
+    async def no_study_result(state: Any, new_code: str) -> str:
+        calls.append(new_code)
+        return "the repaired code no longer returns the study's results: run_trial() returned check_error, none of y"
+
+    monkeypatch.setattr(engine, "_simulation_repair_fault", no_study_result)
+    out = await engine._node_improve(dict(STATE))
+    assert calls and "k4" in calls[0], "the check is made on the version that met the checks"
+    assert out["improve_rerun"] is False, "no version was kept"
+    assert "euler" in (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8").lower() \
+        or "k4" not in (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")
+    assert "no longer returns the study's results" in _log(engine)

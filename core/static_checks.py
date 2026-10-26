@@ -217,6 +217,8 @@ class StaticChecksMixin:
             self._log.warning(  # type: ignore[attr-defined]
                 "[execute] the rewritten %s still has %d fault(s) of this kind; keeping it as written", script, after)
             return False
+        if await self._simulation_kept_or_back(state, path, code, self._package_snapshot(), "execute"):  # type: ignore[attr-defined]
+            return False
         self._log.info(  # type: ignore[attr-defined]
             "[execute] rewrote %s to repair the fault (%d left in it): %s", script, after,
             str(parsed.get("patch_summary") or "no summary")[:120])
