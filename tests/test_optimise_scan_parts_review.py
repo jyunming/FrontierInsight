@@ -4,11 +4,16 @@ measurement's; a run's numbers per value are not designs of their own; ``code/ru
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
 import sys
 import types
+from pathlib import Path
 from typing import Any
 
 from core import code_project
+from core import in_run
 from core import optimisation_plan as op
 from core import optimise_search as osearch
 from tests.test_optimise_runner import BLOCK
@@ -103,3 +108,30 @@ def test_one_scan_setting_that_cannot_be_read_is_left_out_not_the_scan_and_its_p
     # and a design variable's own scan values that cannot be used still cost the whole scan, as before
     outside, _notes = op.repair({**BLOCK, "grid": {"x": [0.0, 9.0], "y": [0.0, 1.0]}})
     assert outside is not None and "grid" not in outside
+
+
+_PER_VALUE_SUMMARY = {"cells": [{
+    "level": {"x": 2.0, "method": "a"},
+    "cell": {"y": 2, "x": 2.0, "method": "a"},
+    "ok": 3, "planned": 3,
+    "metrics": {"err": {"values": [1.0, 3.0, 2.0]}},
+}]}
+
+
+def test_the_copied_search_reads_per_value_rows_without_the_fi_package(tmp_path: Path) -> None:
+    """code/fi_search.py runs alone beside run.py with no ``core`` package, so the per-value rows it reads must not need one.
+    The copy's import of ``core.in_run`` raised ImportError here."""
+    shutil.copy(Path(osearch.__file__), tmp_path / "fi_search.py")
+    (tmp_path / "summary.json").write_text(json.dumps(_PER_VALUE_SUMMARY), encoding="utf-8")
+    script = ("import json, fi_search as s; summary = json.load(open('summary.json', encoding='utf-8')); "
+              "print(json.dumps(s._per_value(summary, {'cell': {'y': 2}}, 'err')))")
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    done = subprocess.run([sys.executable, "-c", script], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0, done.stderr
+    assert json.loads(done.stdout.strip().splitlines()[-1]) == {"x=2.0,method=a": 2.0}
+
+
+def test_the_private_level_key_writes_the_same_text_as_in_run_level_key() -> None:
+    levels = [{"x": 1}, {"x": 2.0}, {"x": 0.25}, {"method": "a"}, {"x": [1.0, 2.5], "method": "a"}, {"x": 1, "y": "b"}]
+    for level in levels:
+        assert osearch._level_key(level) == in_run.level_key(level), level
