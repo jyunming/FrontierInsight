@@ -53,6 +53,7 @@ _STOPPED = {
     "time": "the time limit set for the run was reached",
     "not_run": "it did not run: the search before it had stopped (its time limit, or every evaluation failed)",
     "failures": "the first evaluations all failed",
+    "not_searched": "its first evaluation returned no objective, as the alternative searched before it did",
     "library_error": "the library's method stopped with an error",
     "target": "a design reached the target asked for",
     "no_effect": "its first designs, which between them changed every number of the design, all gave the baseline's results",
@@ -330,7 +331,8 @@ def section(quest_root: Path, block: dict[str, Any] | None = None, *, heading_le
     compared = (best.get("compared") or {}).get("levels") if isinstance(best.get("compared"), dict) else None
     if compared:
         won = (best.get("best") or {}).get("level")
-        searched = "Each of the" if not any(p.get("same_as") for p in compared) else "Each of the searched ones of the"
+        searched = ("Each of the" if not any(p.get("same_as") or p.get("status") == "not_searched" for p in compared)
+                    else "Each of the searched ones of the")
         lines += [f"**Alternatives compared.** {searched} {len(compared)} alternatives was searched on its own, with the "
                   "plan's own variables and budget, and the comparison is between their best designs:", ""]
         for p in compared:
@@ -338,6 +340,10 @@ def section(quest_root: Path, block: dict[str, Any] | None = None, *, heading_le
             top = p.get("best") if isinstance(p.get("best"), dict) else None
             text = (f"{quantity} = {_fmt(top.get('objective'))}{u} at {_design(top.get('design'))}" if top
                     else "no design that meets every limit was found")
+            if p.get("status") == "not_searched":
+                why = p.get("not_searched_because") or "its first evaluation also returned no objective"
+                lines.append(f"- {name}: not searched, because {why}; {p.get('evaluations')} evaluation(s).")
+                continue
             if p.get("same_as"):
                 other = ", ".join(f"{k} = {v}" for k, v in p["same_as"].items())
                 lines.append(f"- {name}: gave the same results as {other} for every one of the {p.get('probes')} designs "

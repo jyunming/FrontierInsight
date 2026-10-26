@@ -1181,6 +1181,7 @@ _STOPPED = {
     "finished": "every combination was evaluated",
     "time": "the time limit (execution.timeout_s) was reached",
     "failures": "the first evaluations all failed",
+    "not_searched": "its first evaluation returned no objective, as the alternative searched before it did",
     "library_error": "the library's method stopped with an error",
     "the simulation could not be loaded": "the simulation could not be loaded",
     "target": "a design reached the target asked for",
@@ -1250,14 +1251,17 @@ def summary_lines(record: dict[str, Any]) -> list[str]:
         from . import optimise_search as _osearch
 
         same = [p for p in compared if p.get("same_as")]
+        skipped = [p for p in compared if p.get("status") == _osearch.NOT_SEARCHED]
         lines.append(f"[optimise] {len(compared)} alternatives were "
-                     + ("compared" if same else "each searched on their own") + "; the best design is the "
+                     + ("compared" if same or skipped else "each searched on their own") + "; the best design is the "
                      f"one of {_osearch.level_says(best.get('level') or {})}. Best of each: "
                      + "; ".join(f"{_osearch.level_says(p['level'])}: "
                                  + (f"{_fmt(p['best']['objective'])}{unit}" if p.get("best") else "no design that meets every limit")
                                  for p in compared))
         for p in same:
             lines.append(f"[optimise] {_osearch.same_as_says(p)}")
+        for p in skipped:
+            lines.append(f"[optimise] {_osearch.not_searched_says(p)}")
     for r in record.get("continued") or []:
         target = f", toward {quantity} = {_fmt(r['target'])}{unit}" if r.get("target") is not None else ""
         reached = ("; the target was reached at the search's settings" if r.get("target_reached") else
@@ -1644,7 +1648,8 @@ class OptimisationRunner:
             # A round continues every level of a compared search that was searched: it costs per_start evaluations
             # for each (a level that gave the first level's results is not searched, core/optimise_search.py).
             parts = max(1, sum(1 for part in ((run.record or {}).get("compared") or {}).get("levels") or []
-                               if isinstance(part, dict) and not part.get("same_as")))
+                               if isinstance(part, dict) and not part.get("same_as")
+                               and part.get("status") != "not_searched"))
             # Whole seconds, as the search is given them: a round that fits only in a fraction of a second more is not
             # started, and the search is never given more than is left.
             left = int(timeout_s - (time.monotonic() - started))

@@ -1955,8 +1955,14 @@ def compare(block, *, seed, method=None, rounds=None, results=None, batch=False,
     seen = {}  # the first alternative's answers, by design: what the probe of each later alternative is compared with
     names = compared_names(block, results)
     moving = {}  # the quantities that differ between two calls of the same design, once the first probe has shown them
+    check_first = False  # an alternative before had no objective in any answer: each later one shows its own first
     for number, level in enumerate(levels):
         sub = level_block(block, level)
+        if number > 0 and check_first:
+            lone = yield from _first_evaluation(sub, level, outcomes[0])
+            if lone is not None:
+                outcomes.append(lone)
+                continue
         if number > 0:
             same = yield from _probe_alternative(sub, level, outcomes[0], seen, names, moving,
                                                  repeat=(level_block(block, levels[0]), levels[0]) if number == 1 else None)
@@ -1988,21 +1994,39 @@ def compare(block, *, seed, method=None, rounds=None, results=None, batch=False,
             outcomes.append(finished.value)
         if outcomes[-1].get("every_failure"):
             # Every evaluation failed because the simulation's answer had no objective (the outcome's own record of why,
-            # :data:`NO_OBJECTIVE`): what the simulation returns does not depend on the alternative, so the others
-            # would fail the same way and are not searched.
-            outcomes.extend(_not_searched_outcome(outcomes[0], "failures") for _ in levels[number + 1:])
-            break
+            # :data:`NO_OBJECTIVE`). Whether it has one can depend on the alternative, so each later one is first asked
+            # for its baseline alone (:func:`_first_evaluation`): it is searched when that answer has the objective.
+            check_first = True
     return merge_outcomes(outcomes, levels, block)
 
 
-def _not_searched_outcome(first, why):
-    """The outcome of an alternative whose search was not run because the one before it showed it cannot work."""
+NOT_SEARCHED = "not_searched"
+NOT_SEARCHED_BECAUSE = "its first evaluation also returned no objective"
+
+
+def _first_evaluation(sub, level, first):
+    """For an alternative after one whose every answer lacked the objective (a generator): its baseline, evaluated alone.
+    When the answer also lacks the objective the alternative is not searched, and its outcome (``not_searched``) holds
+    that one evaluation; otherwise ``None``, and the alternative is searched as any other."""
+    design = Space(sub["design_variables"]).canonical(sub["baseline"]["values"])
+    reply = yield {"kind": "evaluate", "cell": cell_of(sub, design), "design": dict(design), "stage": "baseline",
+                   "start": 0, "level": dict(level)}
+    reply = reply if isinstance(reply, dict) else {"failed": "no answer for this design"}
+    judged = judge(sub, reply.get("values") if "values" in reply else None, str(reply.get("failed") or ""))
+    if judged.get("kind") != NO_OBJECTIVE:
+        return None
+    row = {"event": "evaluation", "n": 1, "stage": "baseline", "start": 0, "design": dict(design), "objective": None,
+           "constraints": {}, "feasible": False, "status": "failed", "method": first["method_used"], "counted": True,
+           "elapsed_s": reply.get("elapsed_s") if _number(reply.get("elapsed_s")) else None,
+           "reason": judged["reason"], "failure": NO_OBJECTIVE}
     return {
-        "rows": [], "evaluations": 0, "scan_evaluations": 0, "budget": 0, "starts": first["starts"],
-        "per_start": first["per_start"], "stopped_because": why, "budget_ran_out": False,
-        "method_requested": first["method_requested"], "method_used": first["method_used"],
-        "method_why": first["method_why"], "notes": [], "baseline": first["baseline"], "start_log": [],
-        "seed": first["seed"], "failed": 0, "infeasible": 0, "best": None, "rounds": [],
+        "rows": [row], "evaluations": 1, "scan_evaluations": 0, "budget": 1, "starts": first["starts"],
+        "per_start": first["per_start"], "stopped_because": NOT_SEARCHED, "not_searched": NOT_SEARCHED_BECAUSE,
+        "budget_ran_out": False, "method_requested": first["method_requested"], "method_used": first["method_used"],
+        "method_why": first["method_why"], "notes": [],
+        "baseline": {"design": dict(design), "status": "failed", "objective": None, "constraints": {},
+                     "feasible": False, "reason": judged["reason"]},
+        "start_log": [], "seed": first["seed"], "failed": 1, "infeasible": 0, "best": None, "rounds": [],
     }
 
 
@@ -2204,6 +2228,8 @@ def merge_outcomes(outcomes, levels, block):
         per.append({"level": dict(level), "best": dict(best, evaluation=best["evaluation"] + shift) if best else None,
                     "baseline": outcome["baseline"], "evaluations": outcome["evaluations"],
                     "budget": outcome["budget"], "stopped_because": outcome["stopped_because"],
+                    **({"status": NOT_SEARCHED, "not_searched_because": outcome["not_searched"]}
+                       if outcome.get("not_searched") else {}),
                     **({"same_as": dict(outcome["same_as"]), "probes": outcome["probes"]}
                        if outcome.get("same_as") else {})})
         offset += len(outcome["rows"])
@@ -2239,6 +2265,11 @@ def merge_outcomes(outcomes, levels, block):
         if all(o.get(key) for o in outcomes):
             out[key] = dict(first[key])
     return out
+
+
+def not_searched_says(entry):
+    """The plain sentence for an alternative that was not searched (``status`` ``not_searched``) and why."""
+    return f"{level_says(entry['level'])} was not searched: {entry.get('not_searched_because') or NOT_SEARCHED_BECAUSE}"
 
 
 def same_as_says(entry):
@@ -2636,11 +2667,14 @@ def best_design(outcome, block, *, seed, check=None, extra=None):
                                                         else ": no design that meets every limit")
                               for p in outcome["levels"])
             same = [p for p in outcome["levels"] if p.get("same_as")]
+            skipped = [p for p in outcome["levels"] if p.get("status") == NOT_SEARCHED]
             says += (f" It is the best of {len(outcome['levels'])} alternatives"
-                     f"{', each searched on its own' if not same else ''} ({shown}); the winner is "
+                     f"{', each searched on its own' if not same and not skipped else ''} ({shown}); the winner is "
                      f"{level_says(best['level'])}.")
             for p in same:
                 says += " " + same_as_says(p) + "."
+            for p in skipped:
+                says += " " + not_searched_says(p) + "."
     rounds = [r for r in outcome.get("rounds") or [] if isinstance(r, dict)]
     if rounds:
         by_fi = sum(1 for r in rounds if r.get("by") == "FI")

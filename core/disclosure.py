@@ -721,8 +721,8 @@ def cut_short_text(quest_root: Path) -> str:
                   if isinstance(p, dict) and not p.get("same_as")]
         if compared and levels and all(_whole(p.get("evaluations")) is not None and _whole(p.get("budget")) is not None
                                    for p in levels):
-            whole = sum(1 for p in levels if p["evaluations"] >= p["budget"])
-            none = sum(1 for p in levels if p["evaluations"] == 0)
+            whole = sum(1 for p in levels if p["evaluations"] >= p["budget"] and p.get("status") != "not_searched")
+            none = sum(1 for p in levels if p["evaluations"] == 0 or p.get("status") == "not_searched")
             parts.append(f"of the {len(levels):,} alternative{'' if len(levels) == 1 else 's'} the plan compares, searched with their whole budget: "
                          f"{whole:,}, searched only in part: {len(levels) - whole - none:,}, not searched: {none:,}")
     return said + ("; " + "; ".join(parts) if parts else "") + "."

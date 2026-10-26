@@ -61,14 +61,52 @@ def _healthy(request):
     return {"values": {"f": (d["x"] - shift) ** 2 + d["y"] ** 2}}
 
 
-def test_a_reply_without_the_objective_stops_after_ten_and_skips_the_other_alternatives() -> None:
+def test_each_later_alternative_is_asked_for_its_baseline_when_the_first_had_no_objective_anywhere() -> None:
     block = _block()
     assert osearch.level_count(block) == 3
     outcome, asked, _ = _drive(osearch.compare(block, seed=0, batch=True), _no_objective)
-    assert asked == 10
+    assert asked == 12  # ten for the first alternative, then one baseline for each of the other two
     assert outcome["stopped_because"] == "failures"
-    assert [p["evaluations"] for p in outcome["levels"]] == [10, 0, 0]
+    assert [p["evaluations"] for p in outcome["levels"]] == [10, 1, 1]
+    assert [p.get("status") for p in outcome["levels"]] == [None, "not_searched", "not_searched"]
+    assert all(p["not_searched_because"] == osearch.NOT_SEARCHED_BECAUSE for p in outcome["levels"][1:])
     assert outcome["level_count"] == 3
+    own = [r for r in outcome["rows"] if r["level"] == {"shape": "mug"}]
+    assert len(own) == 1 and own[0]["stage"] == "baseline" and own[0]["failure"] == osearch.NO_OBJECTIVE
+
+
+def test_an_alternative_whose_first_answer_has_the_objective_is_searched_when_another_had_none() -> None:
+    def only_the_first_lacks_it(request):
+        return _no_objective(request) if request["cell"]["shape"] == "cup" else _healthy(request)
+
+    outcome, asked, _ = _drive(osearch.compare(_block(), seed=0, batch=True), only_the_first_lacks_it)
+    by_level = {p["level"]["shape"]: p for p in outcome["levels"]}
+    assert by_level["cup"]["evaluations"] == 10
+    assert by_level["mug"]["evaluations"] > 10 and by_level["mug"].get("status") is None and by_level["mug"]["best"]
+    assert by_level["bowl"]["evaluations"] > 10 and by_level["bowl"].get("status") is None and by_level["bowl"]["best"]
+
+
+def test_the_report_and_the_log_say_plainly_which_alternative_was_not_searched_and_why(tmp_path) -> None:
+    import json
+    from core import best_design_report, optimise
+
+    def mug_only(request):
+        return _healthy(request) if request["cell"]["shape"] == "mug" else _no_objective(request)
+
+    block = _block()
+    outcome, _, _ = _drive(osearch.compare(block, seed=0, batch=True), mug_only)
+    by_level = {p["level"]["shape"]: p for p in outcome["levels"]}
+    assert by_level["cup"]["stopped_because"] == "failures" and by_level["bowl"]["status"] == "not_searched"
+    record = osearch.best_design(outcome, block, seed=0)
+    path = tmp_path / optimise.BEST_PATH
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(record), encoding="utf-8")
+    text = best_design_report.section(tmp_path, block)
+    assert "bowl" in text and "not searched, because its first evaluation also returned no objective" in text
+    assert "Each of the searched ones of the 3 alternatives" in text
+    assert "Each of the 3 alternatives was searched on its own" not in text
+    assert "bowl was not searched: its first evaluation also returned no objective" in json.dumps(record)
+    assert "bowl was not searched" in osearch.not_searched_says(by_level["bowl"])
 
 
 def test_one_search_alone_does_not_pay_for_its_whole_first_batch() -> None:
