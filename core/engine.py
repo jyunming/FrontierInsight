@@ -5321,7 +5321,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._keep_audit_open_items(
                 objections, design, reasons={n["key"]: n["reason"] for n in not_applied if n.get("key") and not n.get("applied")},
                 default_reason="FI did not apply it" if adopt else "the design was already settled, so the audit only checked it",
-                iteration=int(iteration or 0))
+                iteration=int(iteration or 0), before=before)
         if not failure:
             self._log.info(
                 "[design_self_critique] the design was read by %s: %s", reviewer,
@@ -5454,13 +5454,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
 
     def _keep_audit_open_items(
         self, objections: Any, design: Any, *, reasons: dict[str, str], default_reason: str, iteration: int = 0,
+        before: Any = None,
     ) -> list[dict[str, Any]]:
         """Compare each change the audit proposed with ``design``, the design FI holds, and keep every one it does not hold as
         an open item with the audit's full text (core/audit_open_items.py): the code-writing step and the code reader are
         shown it, QUALITY.md lists it and the paper's limitations say it. A proposal the design holds is remembered as
         applied, to be compared with the frozen protocol. FI's own records decide; no word of the audit is matched."""
         _audit_open.close_held(self.quest_root, design)  # an item the design holds now is closed, repeated or not
-        props = _audit_open.proposals(objections)
+        props = self._search_proposals_by_part(_audit_open.proposals(objections), before)
         if not props:
             return []
         held, missing = _audit_open.split(props, design)
@@ -12616,7 +12617,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         in ``written`` was lost in the writing. Both become open items (a change reported as made is never only a log line)."""
         if written is not None:
             _audit_open.close_held(self.quest_root, written)
-        props = _audit_open.proposals(objections)
+        props = self._search_proposals_by_part(_audit_open.proposals(objections), before)
         if not props:
             return
         meant = amended if isinstance(amended, dict) and written is not None else before
@@ -12637,6 +12638,25 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         for p in lost:
             reasons[p["path"]] = "plan.md was written with it and read back without it"
         self._audit_open_record(held, held_back + lost, reasons, iteration)
+
+    @staticmethod
+    def _search_proposals_by_part(props: list[dict[str, Any]], before: Any) -> list[dict[str, Any]]:
+        """A proposal that replaces the whole search block (or its objective) is compared and kept part by part: the parts
+        FI applied are applied, and an open item names the part it put back and why, not the block. A part the proposal
+        leaves as the design had it is not a change."""
+        out: list[dict[str, Any]] = []
+        for p in props:
+            value = p["value"]
+            if p["path"] in ("protocol.optimisation", "protocol.optimisation.objective") and isinstance(value, dict):
+                parts = []
+                for k, v in value.items():
+                    found, now = _design_parts.get_part(before if isinstance(before, dict) else {}, f"{p['path']}.{k}")
+                    if not found or json.dumps(now, sort_keys=True, default=str) != json.dumps(v, sort_keys=True, default=str):
+                        parts.append({**p, "path": f"{p['path']}.{k}", "value": v})
+                out.extend(Engine._search_proposals_by_part(parts, before))
+            else:
+                out.append(p)
+        return out
 
     def _audit_open_record(self, held: list[dict[str, Any]], missing: list[dict[str, Any]], reasons: dict[str, str],
                            iteration: int) -> None:
@@ -12676,7 +12696,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         return {**amended, "protocol": merged}, changed
 
     #: Inside the search block (``protocol.optimisation``), what judges a design. The objective's own parts are below.
-    _AUDIT_SEARCH_JUDGED = _FLAT_SEARCH_JUDGED
+    #: Besides the limits and the margin of "better": the conditions held fixed and the cases each design is judged over
+    #: (they define what the objective is computed over), and the numerical settings (their search value and the finer
+    #: values are the points the check's numerical error and its verdict are read from).
+    _AUDIT_SEARCH_JUDGED = (*(k for k in _FLAT_SEARCH_JUDGED if k != "check_runs"), "numerical_settings", "fixed", "in_each_run")
+    #: The two keys that give the runs of the finer check: ``check_runs``, or ``runs_per_evaluation`` when it is absent.
+    _AUDIT_CHECK_RUNS_KEYS = ("check_runs", "runs_per_evaluation")
     _AUDIT_OBJECTIVE_JUDGED = ("quantity", "unit", "direction")
 
     def _audit_may_not_change(self, path: str) -> bool:
@@ -12688,7 +12713,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return True
         if len(parts) < 3:
             return False  # the whole block: only its judged parts are put back, the rest is applied
-        return parts[2] in self._AUDIT_SEARCH_JUDGED or (parts[2] == "objective" and (
+        return parts[2] in (*self._AUDIT_SEARCH_JUDGED, *self._AUDIT_CHECK_RUNS_KEYS) or (parts[2] == "objective" and (
             len(parts) == 3 or parts[3] in self._AUDIT_OBJECTIVE_JUDGED))
 
     def _keep_what_a_search_is_judged_by(self, old: dict[str, Any], new: dict[str, Any]) -> tuple[dict[str, Any], bool]:
@@ -12719,7 +12744,25 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 block.pop("objective", None)
             else:
                 block["objective"] = old_obj
+        if self._effective_check_runs(old) != self._effective_check_runs(block):
+            # The runs of the finer check are ``check_runs``, else ``runs_per_evaluation``: a change to either that
+            # changes the runs the check really makes is put back (both keys, so the default stays what it was).
+            changed = True
+            for key in self._AUDIT_CHECK_RUNS_KEYS:
+                if key in old:
+                    block[key] = old[key]
+                else:
+                    block.pop(key, None)
         return block, changed
+
+    @staticmethod
+    def _effective_check_runs(block: dict[str, Any]) -> Any:
+        """The runs of the finer check as FI reads them (``optimisation_plan.budget``, the reader the check's budget and
+        the check itself use); the two keys as written when the block cannot be read."""
+        try:
+            return _optim.budget(block)["check_runs"]
+        except Exception:  # noqa: BLE001 -- an unreadable block is compared as written
+            return (block.get("check_runs"), block.get("runs_per_evaluation"))
 
     def _write_receipt(self, check: str, status: str, **kwargs: Any) -> None:
         """Leave the receipt of a required check (core/receipts.py). A receipt that cannot be written is logged: the

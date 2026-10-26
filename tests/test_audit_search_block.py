@@ -128,3 +128,68 @@ async def test_the_audits_baseline_is_in_the_design_that_runs_and_a_changed_limi
     assert [x["path"] for x in record["open"]] == ["protocol.optimisation.constraints"]
     assert "judged by" in record["open"][0]["reason"]
     assert [x["path"] for x in record["applied"]] == ["protocol.optimisation.baseline"]
+
+
+def _with(block_changes: dict) -> dict:
+    design = _search_design()
+    design["protocol"]["optimisation"].update(block_changes)
+    return design
+
+
+def test_the_conditions_the_cases_and_the_numerical_settings_are_judged_by_and_put_back() -> None:
+    eng = _engine(Path("."))
+    before = _with({"in_each_run": {"load_case": ["low", "nominal", "high"]}})
+    amended = copy.deepcopy(before)
+    block = amended["protocol"]["optimisation"]
+    block["fixed"] = {"heat_load_W": 80, "air_speed_m_s": 2.0}
+    block["in_each_run"] = {"load_case": ["low", "nominal"]}
+    block["numerical_settings"] = {"mesh_size_mm": {"search": 0.5, "check": [0.45]}}
+    block["baseline"] = NEW_BASELINE
+    got, changed = eng._keep_what_the_results_are_judged_by(before, amended)
+    kept, old = got["protocol"]["optimisation"], before["protocol"]["optimisation"]
+    assert changed is True
+    assert kept["fixed"] == old["fixed"] and kept["in_each_run"] == old["in_each_run"]
+    assert kept["numerical_settings"] == old["numerical_settings"] and kept["baseline"] == NEW_BASELINE
+
+
+def test_runs_of_the_check_are_compared_as_they_are_read_not_as_written() -> None:
+    """No `check_runs` is written: the check makes `runs_per_evaluation` runs. Cutting that to 1 cuts the check's runs."""
+    eng = _engine(Path("."))
+    before = _with({"runs_per_evaluation": 8})
+    cut = _with({"runs_per_evaluation": 1})
+    got, changed = eng._keep_what_the_results_are_judged_by(before, cut)
+    assert changed is True and got["protocol"]["optimisation"]["runs_per_evaluation"] == 8
+    # the same runs of the check, written in a different place, are not a change
+    same = _with({"runs_per_evaluation": 2, "check_runs": 8})
+    got, changed = eng._keep_what_the_results_are_judged_by(before, same)
+    assert changed is False and got["protocol"]["optimisation"]["runs_per_evaluation"] == 2
+    # an explicit `check_runs` cut is still put back
+    explicit = _with({"runs_per_evaluation": 8, "check_runs": 8})
+    got, changed = eng._keep_what_the_results_are_judged_by(explicit, _with({"runs_per_evaluation": 8, "check_runs": 1}))
+    assert changed is True and got["protocol"]["optimisation"]["check_runs"] == 8
+
+
+@pytest.mark.asyncio
+async def test_a_whole_block_proposal_is_kept_per_part(tmp_path: Path) -> None:
+    """The audit replaces the whole block: the baseline is applied (and is not listed as open), the objective's direction
+    is put back and the open item names that part and why, not the block."""
+    eng = _engine(tmp_path)
+    design = _search_design()
+    path = plan.plan_path(eng.quest_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(plan.render("heat sink search", {}, design, []), encoding="utf-8")
+    plan.record_version(eng.quest_root, path.read_text(encoding="utf-8"), by="engine", note="test")
+    design = plan.parse(path.read_text(encoding="utf-8")).design
+    block = copy.deepcopy(design["protocol"]["optimisation"])
+    block["baseline"] = NEW_BASELINE
+    block["objective"]["direction"] = "maximise"
+    change = {"check": "weak_baseline", "where": "protocol.optimisation", "objection": "the baseline and the goal",
+              "fix": "replace the block", "changes": [{"path": "protocol.optimisation", "value": block}]}
+    eng._client.chat.side_effect = [json.dumps({"objections_addressed": [change]}), json.dumps({"objections_addressed": []})]
+    runs = await eng._audit_the_design_that_runs({"topic": "t", "iteration": 0}, design)
+    assert runs["protocol"]["optimisation"]["baseline"] == NEW_BASELINE
+    assert runs["protocol"]["optimisation"]["objective"]["direction"] == "minimise"
+    record = ao.read(eng.quest_root)
+    assert [x["path"] for x in record["open"]] == ["protocol.optimisation.objective.direction"]
+    assert "judged by" in record["open"][0]["reason"]
+    assert "protocol.optimisation.baseline" in [x["path"] for x in record["applied"]]
