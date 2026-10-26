@@ -222,6 +222,14 @@ def _read_yaml(path: Path) -> dict[str, Any]:
 
 # ------------------------------------------------------------------------------------------------------ stages
 
+def _first_said(item: dict[str, Any]) -> str:
+    for o in _list(item.get("origins")):
+        o = _dict(o)
+        if o.get("objection") or o.get("fix"):
+            return str(o.get("objection") or o.get("fix"))
+    return ""
+
+
 def _problem(stage: str, text: str, by: str, status: str, source: str) -> dict[str, str]:
     return {"stage": stage, "text": _one(text, 220), "found_by": by, "status": status, "source": source}
 
@@ -383,7 +391,7 @@ def _design_problems(q: _Quest) -> list[dict[str, str]]:
                                     "fixed" if q.design_acted else "not fixed", "needs/receipts/design_audit.json"))
     for it in q.audit_open:
         out.append(_problem("design", f"proposed by the audit, not applied: `{it.get('path')}` "
-                                      f"({_one(it.get('objection') or it.get('fix'), 120)}); {it.get('reason')}",
+                                      f"({_one(_first_said(it), 120)}); {it.get('reason')}",
                             "the design audit", "not fixed", ".fi/audit_open_items.json"))
     substituted = [str(x) for x in _list(q.drafted_asked.get("substituted"))]
     if substituted:

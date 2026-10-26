@@ -5459,6 +5459,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         an open item with the audit's full text (core/audit_open_items.py): the code-writing step and the code reader are
         shown it, QUALITY.md lists it and the paper's limitations say it. A proposal the design holds is remembered as
         applied, to be compared with the frozen protocol. FI's own records decide; no word of the audit is matched."""
+        _audit_open.close_held(self.quest_root, design)  # an item the design holds now is closed, repeated or not
         props = _audit_open.proposals(objections)
         if not props:
             return []
@@ -12565,6 +12566,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         for the design that runs. Returns the design to run."""
         if self.config.engine.analyze_local_first or not isinstance(design, dict):
             return design
+        _audit_open.close_held(self.quest_root, design)  # every design that will run: a person's edit may apply an open item
         writer = "plan" if _plan.plan_path(self.quest_root).is_file() else "design"  # the step that wrote the design
         _status, record, problem = _receipts.read(self.quest_root, "design_audit")
         key = _receipts.sha256(_receipts.design_core(design))
@@ -12611,6 +12613,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         write (the checks the results are judged by put back); ``written`` is what plan.md holds when read back, ``None``
         when nothing was written. A proposal missing from ``amended`` was held back on purpose; one in ``amended`` and not
         in ``written`` was lost in the writing. Both become open items (a change reported as made is never only a log line)."""
+        if written is not None:
+            _audit_open.close_held(self.quest_root, written)
         props = _audit_open.proposals(objections)
         if not props:
             return

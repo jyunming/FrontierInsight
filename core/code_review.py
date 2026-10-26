@@ -228,7 +228,6 @@ def plan_view(design: dict[str, Any] | None, protocol: dict[str, Any] | None, op
         "ci_method": _text(protocol.get("ci_method"), 200), "seed_policy": _text(protocol.get("seed_policy"), 200),
         "checks": [{"name": _text(o.get("name"), 60), "kind": _text(o.get("kind"), 30), "check": _text(o.get("check"), 200),
                     "case": o.get("case"), "measure": _text(o.get("measure"), 160)} for o in _oracle.declared(protocol)],
-        "proposed_by_the_audit_not_applied": open_items,
     }
     values = _pairs.plan_values(protocol)
 
@@ -243,7 +242,12 @@ def plan_view(design: dict[str, Any] | None, protocol: dict[str, Any] | None, op
         return node
 
     text = json.dumps(clean({k: v for k, v in view.items() if v not in ("", [], {}, None)}), indent=2, default=str)
-    return text if len(text) <= _MAX_PLAN_CHARS else text[:_MAX_PLAN_CHARS] + "\n(the rest of the plan is not shown)"
+    text = text if len(text) <= _MAX_PLAN_CHARS else text[:_MAX_PLAN_CHARS] + "\n(the rest of the plan is not shown)"
+    if open_items:
+        # Its own section, after the plan's cut: the audit's text is whole JSON and never cut with the plan.
+        text += ("\n\nProposed by the methodology audit and NOT part of the plan, as JSON:\n"
+                 + json.dumps(clean(open_items), indent=2, default=str))
+    return text
 
 
 def parse_logic(reply: Any, reqs: list[dict[str, Any]], values: list[float] | None = None) -> list[dict[str, Any]]:

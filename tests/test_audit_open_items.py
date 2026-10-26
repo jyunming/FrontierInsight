@@ -11,7 +11,7 @@ import pytest
 
 from core import audit_open_items as ao
 from core import design_parts as dp
-from core import plan, quality_report
+from core import code_review, plan, quality_report
 from core.config import (
     Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig,
 )
@@ -128,6 +128,71 @@ async def test_a_change_held_back_after_the_audit_reported_it_is_kept_open(tmp_p
 
 def test_quality_lists_what_the_audit_proposed_and_the_plan_lacks() -> None:
     q = SimpleNamespace(critique=[], calls=[], receipts={}, drafted_asked={}, design_acted=[],
-                        audit_open=[{"path": "protocol.anchor_rule", "objection": "different anchors", "reason": "no home"}])
+                        audit_open=[{"path": "protocol.anchor_rule", "origins": [{"objection": "different anchors"}],
+                                     "reason": "no home"}])
     got = quality_report._design_problems(q)
     assert any("proposed by the audit, not applied" in p["text"] and "protocol.anchor_rule" in p["text"] for p in got)
+
+
+# ---- the faults an outside review found -------------------------------------------------------------------------------
+
+def test_a_later_proposal_on_the_same_path_does_not_close_an_earlier_one(tmp_path: Path) -> None:
+    first = ao.proposals([_objection(("method", "M1"))])
+    ao.record(tmp_path, [], first, reasons={}, default_reason="x", iteration=0)
+    later = ao.proposals([_objection(("method", "M2"))])
+    ao.record(tmp_path, later, [], reasons={}, default_reason="", iteration=1)
+    assert [x["value"] for x in ao.read(tmp_path)["open"]] == ["M1"]
+    both = ao.proposals([_objection(("method", "A"), ("method", "B"))])
+    assert [p["value"] for p in both] == ["A", "B"]
+
+
+def test_the_same_proposal_in_two_passes_is_one_item_with_two_origins(tmp_path: Path) -> None:
+    for n in (0, 1):
+        ao.record(tmp_path, [], ao.proposals([_objection(("protocol.anchor_rule", ANCHOR))]), reasons={},
+                  default_reason="x", iteration=n)
+    (item,) = ao.read(tmp_path)["open"]
+    assert [o["iteration"] for o in item["origins"]] == [0, 1]
+
+
+def test_an_applied_scalar_the_plan_reads_as_a_list_is_not_lost_at_the_freeze(tmp_path: Path) -> None:
+    props = ao.proposals([_objection(("protocol.grid.dt", 0.1))])
+    design, _why = plan.normalize_design({**DRAFT, "protocol": {**DRAFT["protocol"], "grid": {"dt": [0.1]}}})
+    held, missing = ao.split(props, design)
+    assert held and not missing
+    ao.record(tmp_path, held, [], reasons={}, default_reason="")
+    assert ao.read(tmp_path)["applied"][0]["value"] == [0.1]
+    assert ao.check_against(tmp_path, design["protocol"], why="w") == [] and ao.read(tmp_path)["open"] == []
+
+
+@pytest.mark.asyncio
+async def test_an_open_item_the_design_now_holds_is_closed_without_the_audit_repeating_it(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+    objs = [_objection(("method", "measure from interpolated crossings"))]
+    eng._keep_audit_open_items(objs, DRAFT, reasons={}, default_reason="the design was already settled")
+    assert len(_items(eng)["open"]) == 1
+    edited = {**DRAFT, "method": "measure from interpolated crossings"}
+    eng._keep_audit_open_items([], edited, reasons={}, default_reason="")  # a re-audit that proposes nothing
+    assert _items(eng)["open"] == [] and _items(eng)["applied"][0]["path"] == "method"
+
+
+def test_a_damaged_record_is_kept_aside_and_a_failed_read_is_never_written_over(tmp_path: Path) -> None:
+    fi = tmp_path / ".fi"
+    fi.mkdir()
+    (fi / "audit_open_items.json").write_text('{"open": [{"path": "me', encoding="utf-8")
+    props = ao.proposals([_objection(("method", "M1"))])
+    ao.record(tmp_path, [], props, reasons={}, default_reason="x")
+    kept = list(fi.glob("audit_open_items.corrupt-*.json"))
+    assert len(kept) == 1 and kept[0].read_text(encoding="utf-8").startswith('{"open": [{"path": "me')
+    assert [x["path"] for x in ao.read(tmp_path)["open"]] == ["method"] and not list(fi.glob("*.tmp"))
+    (fi / "audit_open_items.json").unlink()
+    (fi / "audit_open_items.json").mkdir()  # cannot be opened as a file: nothing may be written over it
+    assert ao.record(tmp_path, [], props, reasons={}, default_reason="x") == []
+
+
+def test_the_open_items_are_their_own_whole_section_after_the_plans_cut(tmp_path: Path) -> None:
+    huge = "x" * 20000
+    ao.record(tmp_path, [], ao.proposals([{**_objection(("protocol.anchor_rule", ANCHOR)), "objection": huge}]),
+              reasons={}, default_reason="x")
+    view = code_review.plan_view(DRAFT, DRAFT["protocol"], open_items=ao.for_code(tmp_path))
+    section = view.split("as JSON:\n", 1)[1]
+    assert json.loads(section)["items"][0]["audit_said"] == huge
