@@ -369,24 +369,26 @@ def _raw_sections(design: dict[str, Any], protocol: dict[str, Any]) -> dict[str,
     grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) and protocol.get("grid") else optimisation.get("grid")
     inside = protocol.get("in_each_run") if protocol.get("in_each_run") else optimisation.get("in_each_run")
     sub = optimisation.get("sub_studies")
+    # In the order of what matters for judging the code: the model, the statistics and checks, the settings, the method,
+    # then the policies.
     view = {
         "model": _text(model.get("summary"), 2000),
         "assumptions": model.get("assumptions"), "holds_for": model.get("holds_for"),
         "equations": _pick(model.get("equations"), ("id", "formula", "role", "source")),
         "steps": _pick(model.get("steps"), ("id", "name", "does", "inputs", "output", "uses", "source", "relations")),
-        "method": _text(design.get("method"), 6000),
+        "metrics": _pick(protocol.get("metrics"), ("id", "label", "estimand", "kind", "unit")),
+        "headline_metric": _text(precision.get("metric"), 80),
+        "definitions": _pick(protocol.get("definitions"), ("metric", "defined_as", "source")),
+        "checks": [{"name": _text(o.get("name"), 60), "kind": _text(o.get("kind"), 30), "check": _text(o.get("check"), 600),
+                    "case": o.get("case"), "measure": _text(o.get("measure"), 160)} for o in _oracle.declared(protocol)],
         "settings_varied": variables.get("independent") if isinstance(variables.get("independent"), list) else [],
         "grid": grid if isinstance(grid, dict) else {},
         "in_each_run": inside if isinstance(inside, dict) else {},
         "held_fixed": held,
         "sub_studies": sub if isinstance(sub, list) else [],
-        "definitions": _pick(protocol.get("definitions"), ("metric", "defined_as", "source")),
-        "metrics": _pick(protocol.get("metrics"), ("id", "label", "estimand", "kind", "unit")),
-        "headline_metric": _text(precision.get("metric"), 80),
+        "method": _text(design.get("method"), 6000),
         "ci_method": _text(protocol.get("ci_method"), 600), "seed_policy": _text(protocol.get("seed_policy"), 400),
         "failure_policy": _text(protocol.get("failure_policy"), 1500),
-        "checks": [{"name": _text(o.get("name"), 60), "kind": _text(o.get("kind"), 30), "check": _text(o.get("check"), 600),
-                    "case": o.get("case"), "measure": _text(o.get("measure"), 160)} for o in _oracle.declared(protocol)],
     }
     return {k: v for k, v in view.items() if v not in ("", [], {}, None)}
 
@@ -585,18 +587,83 @@ class BudgetSpent(Exception):
     """The quest's reader requests (:data:`MAX_READER_CALLS`) are used up."""
 
 
+#: The least an open item of the audit is shown with (characters of its text), however many there are.
+_MIN_ITEM_CHARS = 200
+
+
+def _cut(text: Any, n: int) -> str:
+    text = text if isinstance(text, str) else json.dumps(text, default=str)
+    return text if len(text) <= n else text[:max(n - 3, 0)] + "..."
+
+
+def compact_items(open_items: dict[str, Any] | None, room: int) -> tuple[str, list[dict[str, Any]]]:
+    """The audit's open items as the reader is shown them: ``(text, [{"part", "chars", "cut"}])``. Each item keeps its part;
+    its proposed value, the audit's text, the audit's fix and the reason it was not applied are cut to an equal share of
+    the item (never under :data:`_MIN_ITEM_CHARS`), the share being the largest for which the whole text fits ``room``.
+    The full items stay in the record and go to the code writer unchanged."""
+    items = list((open_items or {}).get("items") or [])
+    if not items:
+        return "", []
+    note = str((open_items or {}).get("note") or "")
+
+    def build(share: int) -> tuple[str, list[dict[str, Any]]]:
+        quarter = max(share // 4, 1)
+        shown: list[dict[str, Any]] = []
+        info: list[dict[str, Any]] = []
+        for it in items:
+            full = {k: (it.get(k) if isinstance(it.get(k), str) else json.dumps(it.get(k), default=str))
+                    for k in ("proposed", "audit_said", "audit_fix", "not_applied_because")}
+            row = {"part": it.get("part"), **{k: _cut(v, quarter) for k, v in full.items() if v not in ("", "null")}}
+            shown.append(row)
+            info.append({"part": it.get("part"), "chars": len(json.dumps(row, default=str)),
+                         "cut": any(len(v) > quarter for v in full.values())})
+        return (note + "\n\n" if note else "") + "```json\n" + json.dumps(shown, indent=1, default=str) + "\n```", info
+
+    share = max(_MIN_ITEM_CHARS, room // len(items))
+    text, info = build(share)
+    for _ in range(12):  # the keys and quotes of an item are not part of its share: shrink until the whole text fits
+        if len(text) <= room or share <= _MIN_ITEM_CHARS:
+            break
+        share = max(_MIN_ITEM_CHARS, int(share * room / len(text)) - 1)
+        text, info = build(share)
+    return text, info
+
+
+def plan_requests(design: dict[str, Any] | None, protocol: dict[str, Any] | None,
+                  open_items: dict[str, Any] | None = None, limit: int | None = None) -> list[dict[str, Any]]:
+    """The plan for the requests of a reading: ``[{"text", "sections", "left_out", "open_items", "items"}]``. The plan
+    proper is whole in every request (one entry); the audit's open items come beside it in a compact form
+    (:func:`compact_items`) cut to the room the plan leaves under ``limit``. Only a plan proper that does not leave
+    :data:`_MIN_ITEM_CHARS` an item under the cap is split (:func:`plan_views`) into several entries, and then every code
+    part is read with every one of them (:func:`reading_calls`); each entry carries the items too."""
+    limit = _MAX_PLAN_CHARS if limit is None else limit
+    n_items = len((open_items or {}).get("items") or [])
+    # the heading, the note and the json skeleton of the items take a little more than the items themselves
+    overhead = 400 + len(str((open_items or {}).get("note") or "")) if n_items else 0
+    floor = n_items * (_MIN_ITEM_CHARS + 120) + overhead
+    views = plan_views(design, protocol, limit=limit - floor if n_items else limit)
+    out = []
+    for v in views:
+        room = limit - len(v["text"]) - overhead
+        text, info = compact_items(open_items, room)
+        out.append({"text": v["text"], "sections": v["sections"], "left_out": v["left_out"], "open_items": text, "items": info})
+    return out
+
+
 def reading_calls(code_dir: Path, design: dict[str, Any] | None, protocol: dict[str, Any] | None,
                   open_items: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """The requests of one reading, from FI's own record of what each is given: ``[{"code", "shown", "cut", "plan",
-    "plan_sections", "left_out", "files", "code_index", "plan_index"}]``. The code parts and the plan's parts go together (a request gets part ``i`` of
-    each, the shorter list repeating), so every part of both is in some request."""
+    "open_items", "items", "plan_sections", "left_out", "files", "code_index", "plan_index"}]``. The plan proper is whole
+    in every request, so each code part is one request; a plan that cannot be had whole is split, and then every code part
+    is read with every part of the plan."""
     parts = source_parts_detail(code_dir) or [{"text": "", "shown": {}, "cut": []}]
-    plans = plan_views(design, protocol, open_items=open_items)
+    plans = plan_requests(design, protocol, open_items)
     out = []
-    for i in range(max(len(parts), len(plans))):
-        part, plan = parts[i % len(parts)], plans[i % len(plans)]
-        out.append({"code_index": i % len(parts), "plan_index": i % len(plans), **{"code": part["text"], "shown": part["shown"], "cut": part["cut"], "plan": plan["text"],
-                    "plan_sections": plan["sections"], "left_out": plan["left_out"], "files": sorted(part["shown"])}})
+    for i, part in enumerate(parts):
+        for j, plan in enumerate(plans):
+            out.append({"code_index": i, "plan_index": j, "code": part["text"], "shown": part["shown"], "cut": part["cut"],
+                        "plan": plan["text"], "open_items": plan["open_items"], "items": plan["items"],
+                        "plan_sections": plan["sections"], "left_out": plan["left_out"], "files": sorted(part["shown"])})
     return out
 
 

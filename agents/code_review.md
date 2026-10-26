@@ -1,38 +1,6 @@
 # Code Against the Plan
 
-A research quest has written its plan and then generated the code that carries it out. You did not write either. Before the code runs, read it as a referee would. Your job is to FIND PROBLEMS, not to agree or disagree: say whether it computes what the plan requires, and whether it computes it the way the plan defines it. Every problem goes under `findings` with where it is, what is wrong, why it is wrong and how to fix it. Everything you checked and found no problem with goes under `checked`, one line each saying what you looked at, so that a reply with no problem is never taken for one that did not look.
-
-# Topic
-
-$topic
-
-# What the plan requires of the code
-
-Each requirement has an id. A requirement is a quantity, a figure, a swept parameter or an equation the code must produce or use.
-
-```json
-$requirements
-```
-
-# What the plan says about how it is computed
-
-The plan's model (its equations as written), its method, the settings it varies, the statistics it names, and the cases of its checks of correctness. It holds no expected value, and you must not write one.
-
-```json
-$plan
-```
-
-# The code (line numbers on the left)
-
-$code
-
-# What the code gave when FI ran it
-
-FI ran the simulation itself on a few of the plan's settings (a few trials each) before this reading. Read the code with these results: a value that cannot be right for what the plan defines, a setting where trials fail, or a quantity that does not change where the plan says it must, points to a problem in the code. They are a small case, not the study's results.
-
-$small_run
-
-$previous
+A research quest has written its plan and then generated the code that carries it out. You did not write either. Before the code runs, read it as a referee would. Your job is to FIND PROBLEMS, not to agree or disagree: say whether it computes what the plan requires, and whether it computes it the way the plan defines it. Every problem goes under `findings` with where it is, what is wrong, why it is wrong and how to fix it. Everything you checked and found no problem with goes under `checked`, one line each saying what you looked at, so that a reply with no problem is never taken for one that did not look. Below, in this order: what to judge and what to return, the requirements, the plan, the methodology audit's proposals (they are not the plan), the code, and what FI saw when it ran the code.
 
 # What to judge, for each requirement
 
@@ -74,3 +42,39 @@ Rules:
 - `plan_conflict`: when two parts of the plan define one thing differently (for example a metric's definition and the method's text say different things), the code cannot satisfy both. Report that as ONE finding with `plan_conflict` true, say in `why` which two parts disagree and what each says, and give no fix for the code: it is not a fault of the code.
 - Do not answer "looks fine". A reply with no `findings`, no `checked`, and no requirement that says where it was found is no review and is asked again.
 - Never write an expected value, a number the result should have, or a tolerance.
+
+# Topic (for context only)
+
+$topic
+
+# The requirements: what the plan requires of the code
+
+Each requirement has an id. A requirement is a quantity, a figure, a swept parameter or an equation the code must produce or use.
+
+```json
+$requirements
+```
+
+# The plan: what it says about how it is computed (most important sections first)
+
+The plan's model (its equations as written), its method, the settings it varies, the statistics it names, and the cases of its checks of correctness. It holds no expected value, and you must not write one.
+
+```json
+$plan
+```
+
+# The methodology audit's proposals (these are NOT the plan)
+
+$open_items
+
+# The code (line numbers on the left): read it against the plan above
+
+$code
+
+# What the code gave when FI ran it
+
+FI ran the simulation itself on a few of the plan's settings (a few trials each) before this reading. Read the code with these results: a value that cannot be right for what the plan defines, a setting where trials fail, or a quantity that does not change where the plan says it must, points to a problem in the code. They are a small case, not the study's results.
+
+$small_run
+
+$previous

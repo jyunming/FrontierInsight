@@ -310,39 +310,58 @@ def test_a_section_too_big_alone_is_still_left_out_and_named() -> None:
     assert all("not shown: failure_policy" in v["text"] for v in views)
 
 
-def test_every_plan_part_reaches_a_request_and_requests_are_the_larger_of_code_and_plan_parts(tmp_path: Path) -> None:
+def test_every_plan_part_is_read_with_every_code_part_when_the_plan_must_be_split(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / "simulate.py").write_text("def run_cell(cell):\n    return {}\n", encoding="utf-8")
+    (tmp_path / "experiment.py").write_text("x = 1\n" * 60, encoding="utf-8")
+    monkeypatch.setattr(cr, "_MAX_CODE_CHARS", 200)
     protocol = {**PROTOCOL, "definitions": [{"metric": "m", "defined_as": "d" * 1000, "source": "[1]"}] * 60}
-    plans = cr.plan_views(DESIGN, protocol, open_items=_long_audit())
+    monkeypatch.setattr(cr, "_MAX_PLAN_CHARS", 20000)
+    plans = cr.plan_requests(DESIGN, protocol)
     parts = cr.source_parts_detail(tmp_path)
-    calls = cr.reading_calls(tmp_path, DESIGN, protocol, open_items=_long_audit())
-    assert len(plans) > 1 and len(calls) == max(len(parts), len(plans))
-    assert {c["plan"] for c in calls} == {p["text"] for p in plans}
+    calls = cr.reading_calls(tmp_path, DESIGN, protocol)
+    assert len(plans) > 1 and len(parts) > 1 and len(calls) == len(parts) * len(plans)
+    assert {(c["code_index"], c["plan_index"]) for c in calls} == {(i, j) for i in range(len(parts)) for j in range(len(plans))}
 
 
-def test_a_section_that_fits_a_request_alone_is_never_left_out_and_no_text_is_over_the_cap() -> None:
-    cap = cr._MAX_PLAN_CHARS
-    protocol = {**PROTOCOL, "grid": {"a": ["x" * (cap - 2000)]}}
-    design = {**DESIGN, "method": "m" * 6000}
-    views = cr.plan_views(design, protocol)
-    assert all(v["left_out"] == [] for v in views), views[0]["left_out"]
-    assert "grid" in _sections_of(views) and "method" in _sections_of(views)
-    assert all(len(v["text"]) <= cap for v in views)
-    # a section that fits a request only with the shortest note is still shown
-    protocol = {**PROTOCOL, "grid": {"a": ["x" * (cap - 600)]}}
-    views = cr.plan_views(design, protocol)
-    assert "grid" in _sections_of(views) and all(len(v["text"]) <= cap for v in views)
-    # the cap holds for the composed text, whatever is left out, also when nothing fits
-    for limit in (40, 300):
-        small = cr.plan_views({**DESIGN, "method": "x" * 40}, PROTOCOL, limit=limit)
-        assert small and all(len(v["text"]) <= limit for v in small)
+def test_the_plan_is_whole_in_every_request_and_the_audit_items_come_beside_it_cut_to_an_equal_share(tmp_path: Path) -> None:
+    (tmp_path / "simulate.py").write_text("x = 1\n", encoding="utf-8")
+    items = {"note": "proposed, not applied", "items": [
+        {"part": f"p{i}", "proposed": "z" * 3000, "audit_said": "a" * 3000, "audit_fix": "f" * 3000,
+         "not_applied_because": "r" * 500} for i in range(25)]}
+    before = json.dumps(items, sort_keys=True)
+    protocol = {**PROTOCOL, "definitions": [{"metric": "m", "defined_as": "d" * 1500, "source": "[1]"}] * 12}
+    (call,) = cr.reading_calls(tmp_path, DESIGN, protocol, open_items=items)
+    whole = cr.plan_sections(DESIGN, protocol, None)
+    assert json.loads(call["plan"]) == whole and call["left_out"] == []
+    assert cr._AUDIT_SECTION not in call["plan"] and "p24" in call["open_items"]
+    assert len(call["plan"]) + len(call["open_items"]) <= cr._MAX_PLAN_CHARS
+    chars = [i["chars"] for i in call["items"]]
+    assert len(chars) == 25 and max(chars) - min(chars) < 40 and all(i["cut"] for i in call["items"])
+    assert json.dumps(items, sort_keys=True) == before, "the full items are not changed"
+    short = {"items": [{"part": "p", "proposed": "v", "audit_said": "s", "audit_fix": "", "not_applied_because": "r"}]}
+    (one,) = cr.reading_calls(tmp_path, DESIGN, PROTOCOL, open_items=short)
+    assert not one["items"][0]["cut"] and '"proposed": "v"' in one["open_items"]
 
 
-def test_a_list_section_split_across_requests_says_the_other_items_are_elsewhere() -> None:
-    protocol = {**PROTOCOL, "definitions": [{"metric": f"m{i}", "defined_as": "d" * 1500, "source": "[1]"} for i in range(4)]}
-    views = cr.plan_views(DESIGN, protocol, limit=4000)
-    holding = [v for v in views if "definitions" in v["sections"]]
-    assert len(holding) > 1
-    for v in holding:
-        assert "the other items of these sections are in the plan given with the other requests" in v["text"]
-        assert "definitions" in v["text"].split("the other items of these sections")[1]
+def test_the_plan_sections_come_in_the_order_that_matters_for_judging_the_code() -> None:
+    protocol = {**PROTOCOL, "ci_method": "c", "seed_policy": "s", "failure_policy": "f", "constants": {"k": 1},
+                "definitions": [{"metric": "quality", "defined_as": "d", "source": "[1]"}],
+                "optimisation": {"grid": {"c": [1, 2]}, "sub_studies": [{"name": "x"}]},
+                "model": {"summary": "a spring", "equations": [{"id": "E1", "formula": "Q = m"}]}}
+    names = list(cr.plan_sections(DESIGN, protocol, None))
+    order = ["model", "equations", "metrics", "definitions", "checks", "settings_varied", "grid", "held_fixed",
+             "sub_studies", "method", "ci_method", "seed_policy", "failure_policy"]
+    assert [n for n in order if n in names] == [n for n in names if n in order] and "equations" in names
+
+
+def test_the_prompt_puts_the_task_first_then_the_requirements_the_plan_the_audit_the_code_and_the_run() -> None:
+    import string
+
+    text = (Path(__file__).parent.parent / "agents" / "code_review.md").read_text(encoding="utf-8")
+    filled = string.Template(text).substitute(topic="t", requirements="@@REQS@@", plan="@@PLAN@@", open_items="@@ITEMS@@", code="@@CODE@@",
+                                              small_run="@@RUN@@", previous="@@PREV@@")
+    marks = ["# What to judge, for each requirement", "# What to judge about the logic", "# What to return", "# Topic",
+             "@@REQS@@", "@@PLAN@@", "@@ITEMS@@", "# The code", "@@RUN@@", "@@PREV@@"]
+    at = [filled.index(m) for m in marks]
+    assert at == sorted(at)
+    assert "NOT the plan" in filled.split("@@ITEMS@@")[0].rsplit("# ", 1)[1]

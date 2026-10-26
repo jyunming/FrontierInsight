@@ -13271,7 +13271,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         record["code_parts"] = 1 + max(c["code_index"] for c in calls)  # parts of the code, not requests
         record["plan_parts"] = 1 + max(c["plan_index"] for c in calls)
         record["requests"] = [{"files": {f: r for f, r in c["shown"].items()}, "plan_sections": c["plan_sections"],
-                               "chars": len(c["code"]) + len(c["plan"])} for c in calls]
+                               "chars": len(c["code"]) + len(c["plan"]) + len(c["open_items"]),
+                               **({"open_items": {"chars": [i["chars"] for i in c["items"]],
+                                                  "cut": [i["part"] for i in c["items"] if i["cut"]]}}
+                                  if c["items"] else {})} for c in calls]
         if any(c["left_out"] for c in calls):
             record["plan_not_shown"] = sorted({n for c in calls for n in c["left_out"]})
         if any(c["cut"] for c in calls):
@@ -13321,7 +13324,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     prompt = self._prompts["code_review"].substitute(
                         topic=topic, requirements=json.dumps([{k: r[k] for k in ("id", "kind", "text")} for r in left],
                                                              indent=2),
-                        plan=call["plan"], code=sources, previous=earlier,
+                        plan=call["plan"], open_items=call["open_items"] or "(none)", code=sources, previous=earlier,
                         small_run=_pairs.scrub(getattr(self, "_small_run_note", ""), values, printed=True)
                         or "(FI did not run the simulation before this reading)"
                     ) + again
