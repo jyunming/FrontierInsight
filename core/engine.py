@@ -13078,52 +13078,77 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return False
         record["reviews_total"] = int(record["reviews_total"]) + 1
         _code_review.save(self.quest_root, record)  # counted before the request: a resume does not ask again
-        sources, _partial = _code_review.sources_text(code)
-        topic = " ".join(str(state.get("topic") or self.config.topic or "").split())[:1500]
-        values = _pairs.plan_values(protocol if isinstance(protocol, dict) else None)
-        plan_text = _code_review.plan_view(design, protocol if isinstance(protocol, dict) else None)
+        code_parts = _code_review.source_parts(code) or [""]
+        topic = " ".join(str(state.get("topic") or self.config.topic or "").split())
+        plan_dict = protocol if isinstance(protocol, dict) else None
+        values = _pairs.plan_values(plan_dict)  # taken out of FI's own small-run text
+        shown_values = _code_review.reportable_values(design, plan_dict)  # taken out of what the reader writes
+        plan_text, plan_dropped = _code_review.plan_view_fit(design, plan_dict)
+        record["files_read"] = sorted({f for part in code_parts for f in _code_review.part_files(part)})
+        record["code_parts"] = len(code_parts)
+        if plan_dropped:
+            record["plan_not_shown"] = plan_dropped
         earlier = _code_review.earlier_block(previous)
         verdicts: list[dict[str, Any]] | None = None
         logic: list[dict[str, Any]] = []
         listed: list[str] = []
-        asked_again = False
+        part_verdicts: list[list[dict[str, Any]]] = []
+        p_verdicts: list[dict[str, Any]] | None = None
         try:
-            # At most two requests: one, and one more for the requirements a reply left unanswered, or, when the first
-            # answered every requirement but named no problem and said nothing it checked, for a review (never a third).
-            for _ask in range(2):
-                left = [r for r in reqs if r["id"] not in {v["id"] for v in verdicts or []}]
-                again = ""
-                if not left:
-                    if asked_again or verdicts is None or not _code_review.reply_said_nothing(verdicts, logic, listed):
-                        break
-                    self._log.warning("[code_review] the reader named no problem and did not say what it checked; "
-                                      "asking once more")
-                    again, left, asked_again = _pairs.REASK, list(reqs), True
-                prompt = self._prompts["code_review"].substitute(
-                    topic=topic, requirements=json.dumps([{k: r[k] for k in ("id", "kind", "text")} for r in left], indent=2),
-                    plan=plan_text, code=sources, previous=earlier,
-                    small_run=_pairs.scrub(getattr(self, "_small_run_note", ""), values, printed=True)
-                    or "(FI did not run the simulation before this reading)"
-                ) + again
-                reply = await self._ask_reader(prompt, review_node)
-                parsed = _parse_json_lenient(reply, node=review_node)
-                got = _code_review.parse(parsed, left, values)
-                if again:
-                    kept = [v for v in verdicts or [] if v["id"] not in {g["id"] for g in got or []}]
-                    verdicts = [*kept, *(got or [])] or None
-                else:
-                    verdicts = [*(verdicts or []), *(got or [])] or None
-                logic = _code_review.merge_logic(logic, _code_review.parse_logic(parsed, reqs, values))
-                listed = [*listed, *(c for c in _pairs.checked(parsed.get("checked") if isinstance(parsed, dict) else None)
-                                     if c not in listed)]
+            # The code is read whole; when it does not fit in one request it is read in parts, each against all the
+            # requirements, and the verdicts are merged from FI's own record (:func:`core.code_review.merge_parts`).
+            # Per part: at most two requests, one, and one more for the requirements a reply left unanswered, or, when the
+            # first answered every requirement but named no problem and said nothing it checked, for a review.
+            for p_index, sources in enumerate(code_parts, start=1):
+                seen_files = _code_review.part_files(sources)
+                sources = _code_review.part_note(p_index, len(code_parts)) + sources
+                p_verdicts: list[dict[str, Any]] | None = None
+                asked_again = False
+                for _ask in range(2):
+                    left = [r for r in reqs if r["id"] not in {v["id"] for v in p_verdicts or []}]
+                    again = ""
+                    if not left:
+                        if asked_again or p_verdicts is None or not _code_review.reply_said_nothing(p_verdicts, logic, listed):
+                            break
+                        self._log.warning("[code_review] the reader named no problem and did not say what it checked; "
+                                          "asking once more")
+                        again, left, asked_again = _pairs.REASK, list(reqs), True
+                    prompt = self._prompts["code_review"].substitute(
+                        topic=topic, requirements=json.dumps([{k: r[k] for k in ("id", "kind", "text")} for r in left],
+                                                             indent=2),
+                        plan=plan_text, code=sources, previous=earlier,
+                        small_run=_pairs.scrub(getattr(self, "_small_run_note", ""), values, printed=True)
+                        or "(FI did not run the simulation before this reading)"
+                    ) + again
+                    reply = await self._ask_reader(prompt, review_node)
+                    parsed = _parse_json_lenient(reply, node=review_node)
+                    got = _code_review.parse(parsed, left, shown_values)
+                    if again:
+                        kept = [v for v in p_verdicts or [] if v["id"] not in {g["id"] for g in got or []}]
+                        p_verdicts = [*kept, *(got or [])] or None
+                    else:
+                        p_verdicts = [*(p_verdicts or []), *(got or [])] or None
+                    found = _code_review.parse_logic(parsed, reqs, shown_values)
+                    if len(code_parts) > 1:  # a fault in a file this request was not shown cannot be judged from it
+                        found = [f for f in found if f["file"] in seen_files]
+                    logic = _code_review.merge_logic(logic, found)
+                    listed = [*listed, *(c for c in _pairs.checked(parsed.get("checked") if isinstance(parsed, dict) else None)
+                                         if c not in listed)]
+                if p_verdicts is None and len(code_parts) > 1:
+                    # A part that was not read could hold what the others call missing: no verdict is made from the rest.
+                    raise RuntimeError(f"part {p_index} of {len(code_parts)} of the code got no usable answer")
+                part_verdicts.append(p_verdicts or [])
+            verdicts = _code_review.merge_parts(part_verdicts) or None
             if verdicts is None:
                 record["error"] = "its answer named none of the plan's requirements"
             elif _code_review.reply_said_nothing(verdicts, logic, listed):
                 verdicts, record["error"] = None, _pairs.NOT_A_REVIEW
         except _ModelAnswerProblem as e:
             record["error"] = f"the provider withheld or cut off its answer, twice ({str(e)[:120] or type(e).__name__})"
+            verdicts = p_verdicts if len(code_parts) == 1 else None  # one part: what the first request answered is kept
         except Exception as e:  # noqa: BLE001 -- a reading that could not be had never stops a quest
             record["error"] = f"the call failed, twice ({str(e)[:120] or type(e).__name__})"
+            verdicts = p_verdicts if len(code_parts) == 1 else None
         same, reader, planner, named = self._reader_vs_planner(review_node, after_call=True, writer="implement")
         record.update(reviewer=reader, planner=planner, reported=named, same_model=same)
         if verdicts is not None and same is False:

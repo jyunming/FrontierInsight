@@ -75,7 +75,7 @@ MAX_FINDING_CALLS = 60
 #: The most findings read from one reply. The reader is asked for every finding, ranked by effect on the reported
 #: results, so this is a guard against a runaway reply and not a cap on what is reported.
 FINDING_LIMIT = 200
-#: How much code the reader is shown (whole files; the rest is said not to be shown).
+#: How much code one reading request holds; more code is read in several requests (:func:`source_parts`).
 _MAX_CODE_CHARS = 60000
 IMPLEMENTED, MISSING, DIFFERENT = "implemented", "missing", "different"
 _STATUS_WORDS = {
@@ -134,28 +134,95 @@ def requirements(design: dict[str, Any] | None, protocol: dict[str, Any] | None)
     return out
 
 
-def sources_text(code_dir: Path) -> tuple[str, bool]:
-    """``(the scripts with line numbers, whether some were left out)``: simulate.py, experiment.py and the model's
-    package; whole files only, as many as fit."""
+def _code_files(code_dir: Path) -> dict[str, str]:
+    """Every file the study runs: simulate.py, experiment.py, the other scripts beside them (run.py, FI's own search), the
+    model's package and the study's settings (study.json)."""
     from . import code_layout as _layout
 
     code_dir = Path(code_dir)
     files: dict[str, str] = {}
-    for name in ("simulate.py", "experiment.py"):
+    first = ("simulate.py", "experiment.py")
+    last = ("fi_search.py",)  # FI's own search: the study's own files come first and fill the first requests
+    rest = sorted(p.name for p in code_dir.glob("*.py")
+                  if p.is_file() and p.name not in (*first, *last) and not p.name.startswith("test_"))         if code_dir.is_dir() else []
+    for name in (*first, *rest, "study.json"):
         if (code_dir / name).is_file():
             files[name] = (code_dir / name).read_text(encoding="utf-8", errors="replace")
     files.update(_layout.package_sources(code_dir))
-    parts: list[str] = []
-    used, partial = 0, False
-    for name, text in files.items():
-        numbered = "\n".join(f"{i:4d}  {line}" for i, line in enumerate(text.splitlines(), start=1))
-        block = f"### {name}\n```python\n{numbered}\n```\n"
-        if used + len(block) > _MAX_CODE_CHARS and parts:
-            partial = True
+    for name in last:
+        if (code_dir / name).is_file():
+            files[name] = (code_dir / name).read_text(encoding="utf-8", errors="replace")
+    return files
+
+
+def source_parts(code_dir: Path, limit: int | None = None) -> list[str]:
+    """The scripts (simulate.py, experiment.py and the model's package) with line numbers, as one text when they fit in
+    ``limit`` characters (``_MAX_CODE_CHARS``), else as several parts that together hold every line of every file: each
+    part holds whole files, and a file too large for one part is cut by its own line ranges (the header names the range;
+    the numbers are the file's own). An empty list when there is no code."""
+    limit = _MAX_CODE_CHARS if limit is None else limit
+    units: list[str] = []
+
+    def unit(header: str, shown: list[str]) -> str:
+        return f"### {header}\n```python\n" + "\n".join(shown) + "\n```\n"
+
+    for name, text in _code_files(code_dir).items():
+        lines = [f"{i:4d}  {line}" for i, line in enumerate(text.splitlines(), start=1)]
+        whole = unit(name, lines)
+        if len(whole) <= limit:
+            units.append(whole)
             continue
-        parts.append(block)
-        used += len(block)
-    return "\n".join(parts) + ("\n(some files are not shown)" if partial else ""), partial
+        start, size = 0, 0
+        for i, line in enumerate([*lines, None]):
+            if line is None or (size + len(line) + 1 > limit - 200 and i > start):
+                units.append(unit(f"{name} (lines {start + 1}-{i} of {len(lines)}; the other lines are in other parts)",
+                                  lines[start:i]))
+                start, size = i, 0
+            if line is not None:
+                size += len(line) + 1
+    packed: list[list[str]] = []  # each unit goes into the first part that still has room
+    for u in units:
+        for group in packed:
+            if sum(len(x) + 1 for x in group) + len(u) <= limit:
+                group.append(u)
+                break
+        else:
+            packed.append([u])
+    return ["\n".join(g) for g in packed]
+
+
+def part_note(index: int, count: int) -> str:
+    """What the reader is told when the code comes in parts (empty for the one part of a short code)."""
+    if count <= 1:
+        return ""
+    return (f"(Part {index} of {count} of the code. The files and line ranges in the other parts are read separately, "
+            "each against the same requirements. Judge only the code shown here: if a requirement is not in this part, "
+            "answer missing for this part.)\n\n")
+
+
+def part_files(part: str) -> set[str]:
+    """The names (without folders) of the files a part of the code holds, from its headers."""
+    return {m.group(1).replace("\\", "/").split("/")[-1] for m in re.finditer(r"^### (\S+)", part, re.M)}
+
+
+def merge_parts(per_part: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """One verdict per requirement from the verdicts of the readings of the code's parts. A part that does not hold the code
+    of a requirement says ``missing``; so a requirement is missing only when no part found it, implemented when any part
+    found it implemented, and different when a part found something there that is not what the plan says. The file and line
+    are those of the part that decided it."""
+    rank = {MISSING: 0, IMPLEMENTED: 1, DIFFERENT: 2}
+    best: dict[str, dict[str, Any]] = {}
+    for verdicts in per_part:
+        for v in verdicts:
+            if v["id"] not in best or rank[v["status"]] > rank[best[v["id"]]["status"]]:
+                best[v["id"]] = v
+    return list(best.values())
+
+
+def sources_text(code_dir: Path) -> tuple[str, bool]:
+    """``(the first part of the scripts with line numbers, whether there are more parts)``; see :func:`source_parts`."""
+    parts = source_parts(code_dir)
+    return (parts[0] if parts else ""), len(parts) > 1
 
 
 def version(code_dir: Path) -> str:
@@ -200,48 +267,107 @@ def problems(verdicts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [v for v in verdicts if v["status"] in (MISSING, DIFFERENT)]
 
 
-#: How much of the plan the reader is shown for the logic checks.
-_MAX_PLAN_CHARS = 12000
+#: How much of the plan the reader is shown for the logic checks. A plan longer than this loses whole sections (the least
+#: needed first, :data:`_DROP_FIRST`), never the end of its text, and the record names what was left out.
+_MAX_PLAN_CHARS = 40000
+#: The sections left out first when the plan is too long for one request.
+_DROP_FIRST = ("failure_policy", "seed_policy", "ci_method", "sub_studies", "simplifications_note", "definitions",
+               "grid", "in_each_run")
 _WHERE_RE = re.compile(r"([\w./\-]+\.py)(?:\s*[:,]?\s*(?:lines?\s*)?(\d+))?", re.I)
 
 
-def plan_view(design: dict[str, Any] | None, protocol: dict[str, Any] | None) -> str:
-    """What the logic checks are made against, as JSON text: the plan's model (its equations as written), the method, the
-    statistics it names, the grid, and the checks' cases and measures. Never an expected value, a tolerance or a worked
-    example: the reader is asked what is wrong, not what a number should be."""
+def _pick(items: Any, keys: tuple[str, ...]) -> list[dict[str, Any]]:
+    return [{k: e.get(k) for k in keys if e.get(k) not in (None, "", [], {})}
+            for e in (items if isinstance(items, list) else []) if isinstance(e, dict)]
+
+
+def plan_sections(design: dict[str, Any] | None, protocol: dict[str, Any] | None) -> dict[str, Any]:
+    """The plan the code must implement, section by section, in the order the reader gets them: the model (equations as
+    written, steps), the method, the settings varied and their grid, the values held fixed by the plan (marked as such),
+    the values compared inside each run, the definitions of the statistics, and the checks' cases and measures. What is
+    hidden is hidden by its field: each check's ``expected``, ``expected_formula``, ``tolerance`` and ``reference``, and
+    the worked examples of equations and steps; no number is removed from the text that is shown."""
     design = design if isinstance(design, dict) else {}
     protocol = protocol if isinstance(protocol, dict) else {}
     model = protocol.get("model") if isinstance(protocol.get("model"), dict) else {}
-    equations = [{k: e.get(k) for k in ("id", "formula", "role", "source") if e.get(k)}
-                 for e in (model.get("equations") if isinstance(model.get("equations"), list) else []) if isinstance(e, dict)]
-    metrics = [{k: m.get(k) for k in ("id", "estimand", "kind") if m.get(k)}
-               for m in (protocol.get("metrics") if isinstance(protocol.get("metrics"), list) else []) if isinstance(m, dict)]
+    optimisation = protocol.get("optimisation") if isinstance(protocol.get("optimisation"), dict) else {}
     precision = protocol.get("precision") if isinstance(protocol.get("precision"), dict) else {}
     variables = design.get("variables") if isinstance(design.get("variables"), dict) else {}
+    held = {k: protocol.get(k) for k in ("constants", "thresholds") if isinstance(protocol.get(k), dict) and protocol.get(k)}
+    if isinstance(optimisation.get("fixed"), dict) and optimisation["fixed"]:
+        held["fixed_values_of_the_settings"] = optimisation["fixed"]
+    if held:
+        held = {"note": "The plan holds these values fixed: code that uses them as constants follows the plan and is "
+                        "not a hardcoding fault.", **held}
+    grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) and protocol.get("grid") else optimisation.get("grid")
+    inside = protocol.get("in_each_run") if protocol.get("in_each_run") else optimisation.get("in_each_run")
+    sub = optimisation.get("sub_studies")
     view = {
-        "model": _text(model.get("summary"), 600), "equations": equations,
-        "method": _text(design.get("method"), 1500),
+        "model": _text(model.get("summary"), 2000),
+        "assumptions": model.get("assumptions"), "holds_for": model.get("holds_for"),
+        "equations": _pick(model.get("equations"), ("id", "formula", "role", "source")),
+        "steps": _pick(model.get("steps"), ("id", "name", "does", "inputs", "output", "uses", "source", "relations")),
+        "method": _text(design.get("method"), 6000),
         "settings_varied": variables.get("independent") if isinstance(variables.get("independent"), list) else [],
-        "grid": protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {},
-        "metrics": metrics, "headline_metric": _text(precision.get("metric"), 80),
-        "ci_method": _text(protocol.get("ci_method"), 200), "seed_policy": _text(protocol.get("seed_policy"), 200),
-        "checks": [{"name": _text(o.get("name"), 60), "kind": _text(o.get("kind"), 30), "check": _text(o.get("check"), 200),
+        "grid": grid if isinstance(grid, dict) else {},
+        "in_each_run": inside if isinstance(inside, dict) else {},
+        "held_fixed": held,
+        "sub_studies": sub if isinstance(sub, list) else [],
+        "definitions": _pick(protocol.get("definitions"), ("metric", "defined_as", "source")),
+        "metrics": _pick(protocol.get("metrics"), ("id", "label", "estimand", "kind", "unit")),
+        "headline_metric": _text(precision.get("metric"), 80),
+        "ci_method": _text(protocol.get("ci_method"), 600), "seed_policy": _text(protocol.get("seed_policy"), 400),
+        "failure_policy": _text(protocol.get("failure_policy"), 1500),
+        "checks": [{"name": _text(o.get("name"), 60), "kind": _text(o.get("kind"), 30), "check": _text(o.get("check"), 600),
                     "case": o.get("case"), "measure": _text(o.get("measure"), 160)} for o in _oracle.declared(protocol)],
     }
-    values = _pairs.plan_values(protocol)
+    return {k: v for k, v in view.items() if v not in ("", [], {}, None)}
 
-    def clean(node: Any) -> Any:
-        """The free text the reader is shown, without the plan's values (it could echo them into a finding)."""
-        if isinstance(node, str):
-            return _pairs.scrub(node, values)
-        if isinstance(node, list):
-            return [clean(x) for x in node]
-        if isinstance(node, dict):
-            return {k: clean(v) for k, v in node.items()}
-        return node
 
-    text = json.dumps(clean({k: v for k, v in view.items() if v not in ("", [], {}, None)}), indent=2, default=str)
-    return text if len(text) <= _MAX_PLAN_CHARS else text[:_MAX_PLAN_CHARS] + "\n(the rest of the plan is not shown)"
+def plan_view_fit(design: dict[str, Any] | None, protocol: dict[str, Any] | None,
+                  limit: int | None = None) -> tuple[str, list[str]]:
+    """``(the plan as JSON text, the sections left out)``. When the whole plan is longer than ``limit`` the sections of
+    :data:`_DROP_FIRST` are left out whole, in that order, until it fits; the text says which, and so does the record."""
+    limit = _MAX_PLAN_CHARS if limit is None else limit
+    sections = plan_sections(design, protocol)
+    dropped: list[str] = []
+
+    def dump() -> str:
+        text = json.dumps(sections, indent=1, default=str)
+        note = f"\n(these sections of the plan are not shown: {', '.join(dropped)})"
+        return text + (note if dropped else "")
+
+    text = dump()
+    for name in _DROP_FIRST:
+        if len(text) <= limit:
+            break
+        if sections.pop(name, None) is not None:
+            dropped.append(name)
+            text = dump()
+    return text, dropped
+
+
+def plan_view(design: dict[str, Any] | None, protocol: dict[str, Any] | None) -> str:
+    """What the reading is made against, as JSON text (:func:`plan_sections`). Never a check's expected value, tolerance
+    or worked answer: the reader is asked what is wrong, not what a number should be."""
+    return plan_view_fit(design, protocol)[0]
+
+
+_NUMBER_RE = re.compile(r"(?<![A-Za-z_\d.])[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
+
+
+def reportable_values(design: dict[str, Any] | None, protocol: dict[str, Any] | None) -> list[float]:
+    """The plan's hidden values (:func:`core.review_pairs.plan_values`) that the reader was NOT shown in the plan as a
+    setting, case or constant. Only these are replaced in what the reader writes: a number the plan itself shows the reader
+    and the code writer (a held-fixed setting, a check's case) tells nothing about a check's answer."""
+    shown: list[float] = []
+    for m in _NUMBER_RE.finditer(json.dumps(plan_sections(design, protocol), default=str)):
+        try:
+            shown.append(float(m.group(0)))
+        except ValueError:
+            continue
+    return [v for v in _pairs.plan_values(protocol)
+            if not any(abs(v - n) <= 1e-6 * max(abs(v), abs(n)) for n in shown)]
 
 
 def parse_logic(reply: Any, reqs: list[dict[str, Any]], values: list[float] | None = None) -> list[dict[str, Any]]:
@@ -1372,10 +1498,13 @@ def plain_lines(record: dict[str, Any]) -> str:
     items = [v for v in record.get("problems") or [] if isinstance(v, dict)]
     n = sum(1 for v in items if v.get("kind") != "logic")
     m = len(items) - n
-    return f"the code was read by {record.get('reviewer') or 'another model'}: " + (
+    out = f"the code was read by {record.get('reviewer') or 'another model'}: " + (
         (f"{n} requirement(s) of the plan are missing or implemented differently" if n else "")
         + (" and " if n and m else "")
         + (f"{m} problem(s) in how it computes what the plan says" if m else "")
         if items else "every requirement is met and no problem was found")
+    if record.get("plan_not_shown"):
+        out += f" (parts of the plan not shown to it: {', '.join(record['plan_not_shown'])})"
+    return out
 
 

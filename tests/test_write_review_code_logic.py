@@ -64,11 +64,33 @@ def test_the_reviewer_is_shown_the_plans_equations_and_cases_but_never_an_expect
     assert data["equations"][0]["formula"] == "Q = m * w / c" and data["settings_varied"] == ["c"]
     assert data["checks"][0]["measure"] == "quality" and data["checks"][0]["case"] == {"c": 0.5}
     assert "0.123456789" not in view and "tolerance" not in view and "expected" not in view
-    # free text the reader sees is scrubbed too, so it cannot echo a value of the plan's checks
-    leaky = {**PROTOCOL, "model": {"summary": "a spring whose result should be 0.123456789",
-                                   "equations": [{"id": "E1", "formula": "Q = m * w / c", "source": "gives 0.123456789 at c=0.5"}]}}
-    shown = cr.plan_view({**DESIGN, "method": "check against 0.123456789 first"}, leaky)
-    assert "0.123456789" not in shown and pairs.PLACEHOLDER in shown and "Q = m * w / c" in shown
+    # a check's answer is hidden by its field: the expected value, tolerance and reference of every check, and the worked
+    # examples of the model's steps; the plan's own text is shown as written
+    hidden = {**PROTOCOL, "model": {"summary": "a spring", "equations": [{"id": "E1", "formula": "Q = m * w / c"}],
+                                    "steps": [{"id": "S1", "name": "load", "does": "scales the load",
+                                               "example": {"inputs": {"m": 2.0}, "expected_formula": "0.123456789"}}]}}
+    shown = cr.plan_view(DESIGN, hidden)
+    assert "0.123456789" not in shown and "Q = m * w / c" in shown and "scales the load" in shown
+
+
+def test_the_whole_plan_is_shown_with_what_it_holds_fixed_and_is_never_cut_mid_text() -> None:
+    protocol = {**PROTOCOL, "constants": {"mass_kg": 2.5}, "optimisation": {"fixed": {"stiffness": 40.0},
+                "grid": {"c": [0.1, 0.5]}, "in_each_run": {"loads": [1, 2, 3]}},
+                "definitions": [{"metric": "quality", "defined_as": "the peak over the width", "source": "[1]"}]}
+    data = json.loads(cr.plan_view(DESIGN, protocol))
+    assert data["held_fixed"]["constants"] == {"mass_kg": 2.5} and "not a hardcoding fault" in data["held_fixed"]["note"]
+    assert data["held_fixed"]["fixed_values_of_the_settings"] == {"stiffness": 40.0}
+    assert data["in_each_run"] == {"loads": [1, 2, 3]} and data["grid"] == PROTOCOL["grid"]
+    assert data["definitions"][0]["defined_as"] == "the peak over the width"
+    text, dropped = cr.plan_view_fit(DESIGN, {**protocol, "failure_policy": "x" * 3000, "seed_policy": "y" * 300}, limit=2500)
+    assert dropped and dropped[0] == "failure_policy" and "failure_policy" not in text.split("\n(these sections")[0]
+    assert text.rstrip().endswith("not shown: " + ", ".join(dropped) + ")") and json.loads(text.split("\n(these")[0])
+
+
+def test_a_value_the_plan_shows_as_a_setting_is_not_replaced_in_what_the_reader_writes() -> None:
+    protocol = {**PROTOCOL, "constants": {"mass_kg": 2.5}}
+    assert 2.5 not in cr.reportable_values(DESIGN, protocol)
+    assert set(cr.reportable_values(DESIGN, PROTOCOL)) <= set(pairs.plan_values(PROTOCOL))
 
 
 def test_findings_are_read_as_problems_of_logic_without_any_value() -> None:
