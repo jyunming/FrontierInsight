@@ -19031,7 +19031,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 # Set when the run was sent back because the simulation's numbers did not depend on what it was given
                 # (core/flat_output.py): the honest stop after the repairs says so in those words.
                 "flat_output": (str(getattr(runner, "flat", None) or "") if result.returncode != 0 else ""),
-                # A fault FI's checks of the trials found (core/trial_checks.py): the stop once the repairs are spent.
+                # A fault FI's checks of the trials found (core/trial_checks.py): the stop once the repairs are spent (a reported
+                # uncertainty measured not to match is not one: the run goes on, DISCLOSE).
                 "trial_checks": (dict(getattr(runner, "trial_fault", None) or {}) if result.returncode != 0 else {}),
                 # The search's objective did not move across the design space, and the plan may still be revised for it
                 # (core/optimise.py): the gate sends what FI measured back to the plan.

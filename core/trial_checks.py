@@ -899,7 +899,12 @@ def calibration_directive(faults: list[Quantity]) -> str:
 
 # ---- what FI does with them --------------------------------------------------------------------------------------------
 
-OK, REPAIR, STOP, LEAVE_OUT = "ok", "repair", "stop", "leave_out"
+OK, REPAIR, STOP, LEAVE_OUT, DISCLOSE = "ok", "repair", "stop", "leave_out", "disclose"
+#: The kinds of reported uncertainty whose disagreement with the trials, once the repairs are spent, is a measured property
+#: of the estimator rather than a code fault FI can name: the quest goes on and the paper says, setting by setting, where it
+#: was measured. (``multiplier``: the code does not use the multiplier the plan fixes, a fault; ``missing``, ``bias`` and
+#: ``no_estimate`` concern the estimate itself: those still stop.)
+DISCLOSABLE = ("coverage", "se_ratio")
 
 
 def of_settings(cell: dict[str, Any], keys: set[str]) -> bool:
@@ -914,7 +919,9 @@ class Verdict:
     """What FI does after the two checks of a run's trials: ``action`` is :data:`OK` (go on), :data:`REPAIR` (send the
     simulation back with ``directive``), :data:`STOP` (the repairs are spent and a fault stands: the quest stops, ``say`` /
     ``tried`` are its plain record) or :data:`LEAVE_OUT` (the repairs are spent and only some settings are faulty: their
-    numbers are left out of what the analysis is given, ``left_out``)."""
+    numbers are left out of what the analysis is given, ``left_out``) or :data:`DISCLOSE` (the repairs are spent and the only
+    fault standing is a reported standard error or interval measured not to match the trials, at the settings the record's
+    quantities mark ``gross``: the quest goes on, and the paper and the quality report say where)."""
 
     fails: list[SettingFailures]
     calibration: Calibration
@@ -978,6 +985,11 @@ def judge(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = None, t
                 out.say += "; more than half of the settings would be left out, which leaves too little to report"
             out.tried = ["ran every trial of the study and counted the failed trials of each setting",
                          *[f.says() for f in bad[:2]]]
+        # What stands is a reported uncertainty measured not to match the trials (and no failed trials): that is a result
+        # about the estimator, kept for the settings where it was measured, not a reason to write no paper.
+        if (out.action == STOP and cal.faults and not bad
+                and all(q.kind in DISCLOSABLE for q in cal.faults)):
+            out.action = DISCLOSE
         return out
     # Where the plan declares a true value, settings are left out only when what remains is shown sound: every remaining
     # setting's intervals and standard errors were judged against the truth (and passed, else there was a fault above).

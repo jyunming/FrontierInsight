@@ -550,12 +550,26 @@ def _trial_checks_summary(q: _Quest) -> dict[str, Any] | None:
     else:
         lines.append(f"no trial failed in the {_int(rec.get('settings'))} setting(s)")
     for x in quantities:
-        state = (("not the multiplier the plan fixes (a fault)" if x.get("kind") == "multiplier" else "grossly wrong (a fault)")
+        disclosed = rec.get("action") == "disclose" and x.get("fault") and x.get("kind") in ("coverage", "se_ratio")
+        state = ("measured not to match the trials, and the repairs did not remove it: the study went on and the paper "
+                 "says at which settings; " + ("the interval reported there is" if x.get("kind") == "coverage" else
+                                               "the standard error reported there, and any interval formed from it, is")
+                 + " not presented as valid"
+                 if disclosed else
+                 ("not the multiplier the plan fixes (a fault)" if x.get("kind") == "multiplier" else "grossly wrong (a fault)")
                  if x.get("fault") else
                  f"below the level in {_int(x.get('below'))} setting(s): reported, not a fault" if _int(x.get("below"))
                  else f"above the level in {_int(x.get('above'))} setting(s) (wider than need be): reported, not a fault"
                  if _int(x.get("above")) else "as it should be")
         lines.append(f"{_one(x.get('says'), 300)} - {state}")
+        if disclosed:
+            marked = [t for t in _list(x.get("settings")) if isinstance(t, dict) and t.get("gross")]
+            lines.append("measured not to match at: " + (
+                "; ".join(f"{t.get('key') or 'the one setting'}: {t.get('value')} from {_int(t.get('n')):,} trials"
+                          for t in marked[:8]) + (f"; and {len(marked) - 8} more" if len(marked) > 8 else "")
+                if marked else "the settings taken together")
+                + ((f" (the other {_int(x.get('judged')) - len(marked)} of {_int(x.get('judged'))} settings matched)")
+                   if marked and len(marked) < _int(x.get("judged")) else ""))
     from . import trial_checks as _tc
 
     for u in [u for u in _list(rec.get("undefined")) if isinstance(u, dict)][:8]:

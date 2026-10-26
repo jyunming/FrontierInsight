@@ -707,7 +707,7 @@ def _trial_check_items(root: Path, add: Any) -> None:
     """What FI's checks of the trials (core/trial_checks.py) could not show, for a plan with more than one trial a setting:
     that the trials were not FI's to check at all, that the reported intervals and standard errors were not measured
     against the true values (and why), and each one measured below its level in some settings (beyond chance, but not
-    grossly: a gross miss stops the quest)."""
+    grossly: a gross one is disclosed by :func:`_disclosed_item`)."""
     from . import trial_checks as _trial_checks
 
     rec = _trial_checks.read_record(root)
@@ -742,6 +742,9 @@ def _trial_check_items(root: Path, add: Any) -> None:
             said + ("; the study searched for the best design, and the intervals of a search are not compared with true "
                     "values" if search else "")), key="all")
     for q in cal.get("quantities") or []:
+        if isinstance(q, dict) and q.get("fault") and rec.get("action") == _trial_checks.DISCLOSE:
+            _disclosed_item(root, q, add)
+    for q in cal.get("quantities") or []:
         if not isinstance(q, dict) or q.get("fault") or not q.get("below"):
             continue
         vals = [s.get("value") for s in q.get("settings") or [] if isinstance(s, dict)
@@ -768,6 +771,54 @@ def _trial_check_items(root: Path, add: Any) -> None:
                     + (f" (ratio {min(vals):.2g} to {max(vals):.2g}; 1 when right)" if vals else ""))
         add(CALIBRATION, plain or label or "a reported uncertainty", _sentence(said), key=f"{q.get('kind')}-{label}")
     _power_limit_item(root, cal, add)
+
+
+def _disclosed_item(root: Path, q: dict[str, Any], add: Any) -> None:
+    """A reported standard error or interval FI measured not to match the trials, which the repairs did not remove: the
+    quest went on (core/trial_checks.py ``DISCLOSE``), and the paper says at which settings it was measured, from FI's own
+    record: the number measured and how many trials, and that the interval reported there is not a valid interval of its
+    stated level. The settings where it was measured to match are not named as wrong."""
+    settings = [s for s in q.get("settings") or [] if isinstance(s, dict) and isinstance(s.get("value"), (int, float))]
+    wrong = [s for s in settings if s.get("gross")]
+    pooled = q.get("pooled") if isinstance(q.get("pooled"), dict) else None
+    plain = _label_of_names(root, q.get("names") or [], "")
+    label = _one(q.get("label"))
+    shown = f'"{plain}"' if plain else f"`{label}`"
+    coverage = q.get("kind") == "coverage"
+    level = q.get("level")
+    pct = f"{float(level):.0%}" if isinstance(level, (int, float)) else "its stated level"
+
+    def measured(s: dict[str, Any]) -> str:
+        v = f"{float(s['value']):.3g}" if not coverage else f"{float(s['value']):.2f}"
+        return f"{s.get('key') or 'the one setting'}: {v} from {int(s.get('n') or 0):,} trials"
+
+    if wrong:
+        where = ("every setting" if len(wrong) == len(settings) else f"{len(wrong)} of {len(settings)} settings")
+        listed = "; ".join(measured(s) for s in wrong[:6]) + (f"; and {len(wrong) - 6} more" if len(wrong) > 6 else "")
+    elif pooled is not None and pooled.get("gross"):
+        where = "the settings taken together"
+        listed = f"{float(pooled['value']):.3g} from {int(pooled.get('n') or 0):,} trials"
+    else:
+        return
+    if coverage:
+        what = (f"The {pct} intervals reported for {shown} were measured to contain the true value in "
+                f"far fewer trials than {pct} in {where} ({listed}; the share of trials whose interval holds the true value)")
+    else:
+        what = (f"The standard error reported for {shown} was measured not to match the spread of the estimates over the "
+                f"trials in {where} ({listed}; the spread divided by the reported error, 1 when they agree)")
+    right = [s for s in settings if not s.get("gross")] if wrong else []
+    kept = (f". In the other {len(right)} setting{'s' if len(right) != 1 else ''} the two were measured to agree"
+            if right else "")
+    where_off = "these settings" if right else where
+    if coverage:
+        valid = (f"valid {pct} intervals" if pct != "its stated level" else "valid intervals of their stated level")
+        tail = f"The intervals reported for {where_off} are therefore not presented as {valid}"
+    else:
+        tail = (f"The standard error reported for {where_off} is therefore not presented as the error of the estimate there, "
+                "and no interval formed from it is presented as a valid interval of its stated level")
+    add(CALIBRATION, f"{plain or label or 'a reported uncertainty'}: measured not to match the trials", _sentence(
+        what + kept + f". {tail}; the estimates themselves are reported as they were computed"),
+        key=f"disclosed-{q.get('kind')}-{label}")
 
 
 def _power_limit_item(root: Path, cal: dict[str, Any], add: Any) -> None:

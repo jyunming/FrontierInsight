@@ -1470,7 +1470,8 @@ class TrialsRunner:
         """FI's two checks of what the trials gave (core/trial_checks.py): the failed trials of each setting, and the reported
         intervals and standard errors against the true values. A fault is sent back like a failed run of the simulation (the
         directive at the end of its stderr) while a repair is left; once they are spent, a fault in some settings leaves
-        them out of what the analysis reads, and any other fault is a failed run the engine stops on. ``None`` to go on."""
+        them out of what the analysis reads, a reported standard error or interval still measured not to match the trials goes on
+        and is disclosed (``DISCLOSE``), and any other fault is a failed run the engine stops on. ``None`` to go on."""
         from core.execution import ExecutionResult
 
         from . import trial_checks as _checks
@@ -1502,6 +1503,11 @@ class TrialsRunner:
                 self.log.warning("[execute] in %d setting(s) more than half of the trials failed and the repairs are spent: "
                                  "their numbers are left out of the results and the paper says so (%s)",
                                  len(verdict.left_out), ", ".join(verdict.left_out[:6]))
+            return None
+        if verdict.action == _checks.DISCLOSE:
+            if self.log is not None:
+                self.log.warning("[execute] the repairs are spent and a reported uncertainty still does not match the "
+                                 "trials: the study goes on and the paper says at which settings (%s)", verdict.say[:600])
             return None
         if verdict.action == _checks.OK:
             return None
