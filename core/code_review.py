@@ -230,28 +230,43 @@ def part_files(part: str) -> set[str]:
     return {m.group(1).replace("\\", "/").split("/")[-1] for m in re.finditer(r"^### (\S+)", part, re.M)}
 
 
-def shown_in_part(shown: dict[str, list[list[int]]], file: str, line: int | None) -> bool:
-    """Whether a part that holds ``shown`` (:func:`source_parts_detail`) was shown the place ``file`` (a name, with or without
-    its folder) and ``line`` name: the file, and the line when one is named, within a line range of it."""
+def shown_in_part(shown: dict[str, list[list[int]]], file: str, line: int | None,
+                  cut: list[dict[str, Any]] | None = None) -> bool:
+    """Whether a request that holds ``shown`` (:func:`source_parts_detail`) was shown the place ``file`` (a name, with or
+    without its folder) and ``line`` name: the file AND a line within a line range of it, and not a line that was cut
+    (``cut``, :func:`source_parts_detail`: a cut line is not fully shown). A citation without a line is not a place."""
     base = str(file or "").replace("\\", "/").split("/")[-1]
     ranges = [r for name, rs in shown.items() if name.replace("\\", "/").split("/")[-1] == base for r in rs]
-    if not base or not ranges:
+    if not base or not ranges or not isinstance(line, int) or isinstance(line, bool):
         return False
-    return line is None or any(a <= line <= b for a, b in ranges)
+    if any(c["line"] == line and str(c["file"]).replace("\\", "/").split("/")[-1] == base for c in cut or []):
+        return False
+    return any(a <= line <= b for a, b in ranges)
 
 
-def keep_seen(verdicts: list[dict[str, Any]], shown: dict[str, list[list[int]]],
-              outside: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """``verdicts`` of one part with each ``implemented`` or ``different`` that cites a place the part was not shown counted
-    as ``missing`` for this part (what the part says about code it did not see is no finding); the place cited goes to
-    ``outside``."""
+def keep_seen(verdicts: list[dict[str, Any]], shown: dict[str, list[list[int]]], outside: list[dict[str, Any]],
+              cut: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """The verdicts of one request that count: a ``missing`` as it is, and an ``implemented`` or ``different`` only when it
+    cites a place the request was shown (:func:`shown_in_part`: a file AND a line within what it was given, not a line that
+    was cut). One that does not is not counted: the requirement stays unjudged by this request (the reading asks again for
+    it, and says it was not reviewed when it stays so), and the place cited goes to ``outside`` (``cut`` true when the line
+    was cut)."""
     out: list[dict[str, Any]] = []
     for v in verdicts:
-        if v["status"] != MISSING and not shown_in_part(shown, v.get("file", ""), v.get("line")):
-            outside.append({"id": v["id"], "status": v["status"], "file": v.get("file", ""), "line": v.get("line")})
-            v = {**v, "status": MISSING, "file": "", "line": None, "note": "it cited a place this request was not shown"}
+        if v["status"] != MISSING and not shown_in_part(shown, v.get("file", ""), v.get("line"), cut):
+            outside.append(outside_entry(v, v["status"], shown, cut))
+            continue
         out.append(v)
     return out
+
+
+def outside_entry(item: dict[str, Any], status: str, shown: dict[str, list[list[int]]],
+                  cut: list[dict[str, Any]] | None) -> dict[str, Any]:
+    """The record of a citation that was not counted: what was cited, and whether the line was one that was cut."""
+    line = item.get("line")
+    was_cut = bool(cut) and shown_in_part(shown, item.get("file", ""), line) and not shown_in_part(
+        shown, item.get("file", ""), line, cut)
+    return {"id": item["id"], "status": status, "file": item.get("file", ""), "line": line, **({"cut": True} if was_cut else {})}
 
 
 def merge_parts(per_part: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
@@ -469,8 +484,9 @@ def plan_views(design: dict[str, Any] | None, protocol: dict[str, Any] | None,
 
     if len(_dump(sections, note_for([], []))) <= limit:
         return [{"text": _dump(sections, note_for([], [])), "sections": list(sections), "left_out": left_out}]
-    room = max(1, limit - 600)  # what the notes may take
+    room = max(limit // 2, limit - 2500)  # what the notes may take: one entry per section name, never one per item
     pieces: list[tuple[str, Any]] = []
+    omitted: dict[str, int] = {}  # items too long for a request alone, counted once per section
     for name, value in sections.items():
         if len(_dump({name: value})) <= room:
             pieces.append((name, value))
@@ -481,13 +497,14 @@ def plan_views(design: dict[str, Any] | None, protocol: dict[str, Any] | None,
                     pieces.append((name, chunk))
                     chunk = []
                 if len(_dump({name: [item]})) > room:
-                    left_out.append(f"{name} (one item)")
+                    omitted[name] = omitted.get(name, 0) + 1
                     continue
                 chunk.append(item)
             if chunk:
                 pieces.append((name, chunk))
         else:
             left_out.append(name)
+    left_out.extend(f"{n}: {k} item{'s' if k != 1 else ''} left out" for n, k in omitted.items())
     groups: list[dict[str, Any]] = []
     for name, value in pieces:
         for g in groups:
@@ -496,6 +513,8 @@ def plan_views(design: dict[str, Any] | None, protocol: dict[str, Any] | None,
                 break
         else:
             groups.append({name: value})
+    if not groups:  # nothing fits: the request says so and holds no section
+        return [{"text": _dump({}, note_for([], [])), "sections": [], "left_out": left_out}]
     every = [n for g in groups for n in g]
     return [{"text": _dump(g, note_for(list(g), [n for n in dict.fromkeys(every) if n not in g])),
              "sections": list(g), "left_out": left_out} for g in groups]

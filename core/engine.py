@@ -13139,19 +13139,19 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     reply = await self._ask_reader(prompt, review_node, spend)
                     parsed = _parse_json_lenient(reply, node=review_node)
                     got = _code_review.parse(parsed, left, shown_values)
-                    if many:  # a verdict or a finding at a place this request was not shown is not counted
-                        got = _code_review.keep_seen(got, call["shown"], outside) if got else got
+                    # a verdict or a finding must cite a file and a line this request was shown (not a line that was cut)
+                    had = got is not None
+                    got = _code_review.keep_seen(got, call["shown"], outside, call["cut"]) if got else got
                     if again:
                         kept = [v for v in p_verdicts or [] if v["id"] not in {g["id"] for g in got or []}]
                         p_verdicts = [*kept, *(got or [])] or None
                     else:
-                        p_verdicts = [*(p_verdicts or []), *(got or [])] or None
+                        p_verdicts = [*(p_verdicts or []), *(got or [])] or ([] if had else None)
                     found = _code_review.parse_logic(parsed, reqs, shown_values)
-                    if many:
-                        seen = [f for f in found if _code_review.shown_in_part(call["shown"], f["file"], f["line"])]
-                        outside.extend({"id": f["id"], "status": "finding", "file": f["file"], "line": f["line"]}
-                                       for f in found if f not in seen)
-                        found = seen
+                    seen = [f for f in found if _code_review.shown_in_part(call["shown"], f["file"], f["line"], call["cut"])]
+                    outside.extend(_code_review.outside_entry(f, "finding", call["shown"], call["cut"])
+                                   for f in found if f not in seen)
+                    found = seen
                     logic = _code_review.merge_logic(logic, found)
                     listed = [*listed, *(c for c in _pairs.checked(parsed.get("checked") if isinstance(parsed, dict) else None)
                                          if c not in listed)]
@@ -13161,7 +13161,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 part_verdicts.append(p_verdicts or [])
             verdicts = _code_review.merge_parts(part_verdicts) or None
             if verdicts is None:
-                record["error"] = "its answer named none of the plan's requirements"
+                record["error"] = ("its answers cited no place in the code it was shown" if outside
+                                   else "its answer named none of the plan's requirements")
             elif _code_review.reply_said_nothing(verdicts, logic, listed):
                 verdicts, record["error"] = None, _pairs.NOT_A_REVIEW
         except _code_review.BudgetSpent as e:

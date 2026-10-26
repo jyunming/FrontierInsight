@@ -191,7 +191,7 @@ def test_a_change_to_any_file_the_reader_is_given_is_another_code_version(tmp_pa
 
 def test_a_place_counts_as_shown_only_inside_the_line_ranges_of_the_part() -> None:
     shown = {"pkg/model.py": [[1, 40]], "run.py": [[1, 10], [30, 50]]}
-    assert cr.shown_in_part(shown, "model.py", 40) and cr.shown_in_part(shown, "run.py", None)
+    assert cr.shown_in_part(shown, "model.py", 40) and not cr.shown_in_part(shown, "run.py", None)
     assert cr.shown_in_part(shown, "run.py", 35)
     assert not cr.shown_in_part(shown, "model.py", 41) and not cr.shown_in_part(shown, "run.py", 20)
     assert not cr.shown_in_part(shown, "experiment.py", 1) and not cr.shown_in_part(shown, "", None)
@@ -199,7 +199,7 @@ def test_a_place_counts_as_shown_only_inside_the_line_ranges_of_the_part() -> No
     got = cr.parse({"requirements": [{"id": "R1", "status": "implemented", "file": "experiment.py", "line": 2}]}, reqs)
     outside: list = []
     kept = cr.keep_seen(got, shown, outside)
-    assert kept[0]["status"] == "missing" and outside == [{"id": "R1", "status": "implemented", "file": "experiment.py",
+    assert kept == [] and outside == [{"id": "R1", "status": "implemented", "file": "experiment.py",
                                                            "line": 2}]
 
 
@@ -247,7 +247,7 @@ async def test_a_part_that_cites_a_file_it_was_not_shown_does_not_find_the_requi
     engine._client = Liar()
     await engine._code_review_gate(WITH_PLAN)
     record = cr.load(engine.quest_root)
-    assert seen == [False, True]
+    assert seen == [False, False, True], "the first part is asked again for what it left unjudged"
     assert {v["status"] for v in record["verdicts"]} == {"missing"}, "a claim about a file it did not see is not counted"
     assert record["cited_outside_what_was_shown"]
     assert record["requests"][0]["files"].keys() == {"simulate.py"} and record["code_parts"] == 2
@@ -272,3 +272,72 @@ async def test_the_readers_requests_of_a_quest_are_counted_and_a_reading_that_ca
     await engine2._code_review_gate(WITH_PLAN)
     record = cr.load(engine2.quest_root)
     assert reader2.prompts == [] and "not read in full" in record["error"] and not record.get("verdicts")
+
+
+class _Cites:
+    """Answers every requirement implemented, citing the place it is given, and reports one finding at a place too."""
+
+    def __init__(self, file: str, line, where: str) -> None:
+        self.file, self.line, self.where, self.prompts = file, line, where, []
+
+    async def chat(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        if not prompt.lstrip().startswith("# Code Against the Plan"):
+            return ""
+        self.prompts.append(prompt)
+        reqs = json.loads(prompt.split("```json", 1)[1].split("```", 1)[0])
+        out = [{"id": r["id"], "status": "implemented", "file": self.file, "line": self.line, "note": ""} for r in reqs]
+        finding = {"where": self.where, "what": "a step is skipped", "why": "w", "fix": "f", "severity": "high"}
+        return json.dumps({"requirements": out, "findings": [finding], "checked": ["x"], "summary": "s"})
+
+    async def aclose(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("file,line,where", [("other.py", 1, "other.py:1"), ("simulate.py", None, "simulate.py"),
+                                             ("simulate.py", 9999, "simulate.py:9999")])
+async def test_one_request_counts_only_a_citation_of_a_file_and_a_line_it_was_shown(
+        tmp_path: Path, file: str, line, where: str) -> None:
+    engine = _engine(tmp_path)
+    _write(engine.quest_root / "code", {"simulate.py": SIM, "experiment.py": EXP})
+    reader = _Cites(file, line, where)
+    engine._client = reader
+    await engine._code_review_gate(WITH_PLAN)
+    record = cr.load(engine.quest_root)
+    assert len(reader.prompts) == 2 and record["code_parts"] == 1, "asked once more for what it left unjudged"
+    assert not record.get("verdicts") and not [p for p in record.get("problems", []) if p.get("kind") == "logic"]
+    assert record["error"] == "its answers cited no place in the code it was shown"
+    assert record["cited_outside_what_was_shown"]
+
+
+@pytest.mark.asyncio
+async def test_a_citation_of_a_line_inside_what_was_shown_is_counted_in_one_request(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    _write(engine.quest_root / "code", {"simulate.py": SIM, "experiment.py": EXP})
+    engine._client = _Cites("experiment.py", 2, "simulate.py:3")
+    await engine._code_review_gate(WITH_PLAN)
+    record = cr.load(engine.quest_root)
+    assert {v["status"] for v in record["verdicts"]} == {"implemented"}
+    assert [p["line"] for p in record["problems"] if p.get("kind") == "logic"] == [3]
+    assert "cited_outside_what_was_shown" not in record
+
+
+@pytest.mark.asyncio
+async def test_a_line_that_was_cut_is_not_fully_shown_so_a_citation_of_it_is_not_counted(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = _engine(tmp_path)
+    one_line = '{"padding": "' + "p" * 20000 + '", "grid": {"quality_factor": [0, 1]}}\n'
+    _write(engine.quest_root / "code", {"simulate.py": SIM, "experiment.py": EXP, "study.json": one_line})
+    monkeypatch.setattr(cr, "_MAX_CODE_CHARS", 8000)  # a line over a quarter of it (2000) is cut
+    parts = cr.source_parts_detail(engine.quest_root / "code")
+    cut = [c for p in parts for c in p["cut"]]
+    assert cut and cut[0]["file"] == "study.json" and cut[0]["line"] == 1
+    assert not cr.shown_in_part({"study.json": [[1, 1]]}, "study.json", 1, cut)
+    reader = _Cites("study.json", 1, "study.json:1")  # the key it needs is past the cut
+    engine._client = reader
+    await engine._code_review_gate(WITH_PLAN)
+    record = cr.load(engine.quest_root)
+    assert not record.get("verdicts"), "a verdict whose only evidence is the cut line is not counted"
+    assert record["lines_cut"][0]["file"] == "study.json"
+    assert any(o.get("cut") for o in record["cited_outside_what_was_shown"])

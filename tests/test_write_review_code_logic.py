@@ -203,17 +203,20 @@ async def test_an_agree_only_code_review_is_asked_again_and_then_recorded_as_not
     reader = _Agrees()
     engine._client = reader
     assert await engine._code_review_gate(STATE) is None
-    assert len(reader.prompts) == 2 and "Your previous reply was no review" in reader.prompts[1]
+    # "Implemented" with no file and line is not a review: nothing is counted, the requirements are asked for once more
+    assert len(reader.prompts) == 2
     record = cr.load(engine.quest_root)
-    assert record["error"] == pairs.NOT_A_REVIEW and not record.get("read_version")
+    assert record["error"] == "its answers cited no place in the code it was shown" and not record.get("read_version")
+    assert record["cited_outside_what_was_shown"]
     assert cr.write_note(engine.quest_root, engine.quest_root / "code") == ""
     assert "not compared with the plan by another model" in cr.findings_block(engine.quest_root, engine.quest_root / "code")
-    # Asked again, it says what it checked: a review with nothing found.
+    # Asked again, it cites the places and says what it checked: a review with nothing found.
     class _Then(_Logic):
         async def chat(self, messages, **kw):  # noqa: ANN001
             self.prompts.append(messages[-1]["content"])
             reqs = json.loads(messages[-1]["content"].split("```json", 1)[1].split("```", 1)[0])
-            out: dict[str, Any] = {"requirements": [{"id": r["id"], "status": "implemented"} for r in reqs]}
+            cite = {"file": "simulate.py", "line": 1} if len(self.prompts) > 1 else {}
+            out: dict[str, Any] = {"requirements": [{"id": r["id"], "status": "implemented", **cite} for r in reqs]}
             if len(self.prompts) > 1:
                 out["checked"] = ["E1: the factors and the signs agree with the plan"]
             return json.dumps(out)
@@ -251,3 +254,14 @@ def test_a_plan_that_does_not_fit_is_split_by_whole_sections_and_no_request_is_o
     got = sum(len(json.loads(v["text"].split("\n(these")[0]).get("checks", [])) for v in views)
     assert got == 100, "every check is in some request"
     assert any("other requests of this reading" in v["text"] for v in views)
+
+
+def test_the_note_of_what_a_request_leaves_out_is_one_entry_per_section_and_the_request_stays_under_the_cap() -> None:
+    equations = [{"id": f"E{i}", "formula": "x" * 30000} for i in range(400)]
+    protocol = {**PROTOCOL, "model": {"summary": "a spring", "equations": equations}}
+    views = cr.plan_views(DESIGN, protocol, limit=20000)
+    assert views and all(len(v["text"]) <= 20000 for v in views)
+    notes = [x for v in views for x in v["left_out"]]
+    assert "equations: 400 items left out" in set(notes), notes[:3]
+    assert len(set(notes)) < 10 and all(len(v["left_out"]) < 10 for v in views)
+    assert "spring" in json.dumps([json.loads(v["text"].split("\n(these")[0]) for v in views])
