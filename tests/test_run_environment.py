@@ -76,7 +76,7 @@ def _cache_with(root: Path, *names: str) -> None:
 def test_a_session_that_was_stopped_from_outside_is_found_said_and_its_locks_removed(tmp_path: Path, caplog) -> None:  # noqa: ANN001
     pid, _ = _dead_pid()
     _write_record(tmp_path, {"pid": pid, "started": 1.0e9, "seen_at": 1.0e9 + 60, "ended": None})
-    _cache_with(tmp_path, "freeform_ab12.json.lock", "table.npz.tmp123", "table.npz")
+    _cache_with(tmp_path, "design_ab12.json.lock", "table.npz.tmp123", "table.npz")
     marker = rm.RunMarker(tmp_path, beat_s=0.05)
     with caplog.at_level(logging.WARNING):
         found = marker.start()
@@ -338,7 +338,7 @@ def test_a_quest_run_finds_a_session_stopped_from_outside_and_records_how_it_end
     eng = _quest_engine(tmp_path)
     pid, _ = _dead_pid()
     _write_record(eng.quest_root, {"pid": pid, "started": 1.0e9, "seen_at": 1.0e9 + 60, "ended": None})
-    _cache_with(eng.quest_root, "freeform_ab12.json.lock")
+    _cache_with(eng.quest_root, "design_ab12.json.lock")
 
     async def _boom(self) -> None:  # noqa: ANN001
         raise RuntimeError("a planted failure right after the start")
@@ -348,6 +348,6 @@ def test_a_quest_run_finds_a_session_stopped_from_outside_and_records_how_it_end
         asyncio.run(eng.run())
     # The quest's own log (run.log) is where a person reads it.
     assert "ended without recording an end" in (eng.fi_dir / "run.log").read_text(encoding="utf-8")
-    assert not (eng.quest_root / SHARED_CACHE / "freeform_ab12.json.lock").exists()
+    assert not (eng.quest_root / SHARED_CACHE / "design_ab12.json.lock").exists()
     record = json.loads((eng.quest_root / rm.RECORD).read_text(encoding="utf-8"))
     assert record["pid"] == os.getpid() and record["ended"] == "failed: RuntimeError"

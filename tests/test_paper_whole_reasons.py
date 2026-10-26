@@ -1,5 +1,5 @@
 """A reason a model wrote is quoted whole in the paper's limitations or left out; FI never cuts it in the middle of a word
-or a bracket (a delivered paper read "nils, meef and ambit are hard-coded to )."). No model is called."""
+or a bracket (a delivered paper read "gain, drift and spread are hard-coded to )."). No model is called."""
 
 from __future__ import annotations
 

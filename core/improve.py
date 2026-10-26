@@ -492,7 +492,7 @@ def _aliases(text: str | ast.AST, names: set[str]) -> dict[str, str]:
 
 
 def _literals(operand: ast.AST) -> list[Any]:
-    """The values an operand of a comparison writes out itself: a number or a text (``0.1``, ``-3``, ``"abbe"``), or a
+    """The values an operand of a comparison writes out itself: a number or a text (``0.1``, ``-3``, ``"alpha"``), or a
     tuple, list or set of them (``in (0.1, 0.2)``); nothing for anything computed or looked up (``c[0]``, ``f(x)``)."""
     if isinstance(operand, ast.Constant) and not isinstance(operand.value, bool) and operand.value is not None:
         return [operand.value]

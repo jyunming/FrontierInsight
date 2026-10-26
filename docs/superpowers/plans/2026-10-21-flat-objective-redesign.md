@@ -221,7 +221,7 @@ After the one revision, the search watch still records the fact but never stops 
 
 ### Task 6: Shown fixed (outside the repository)
 
-- [ ] **Step 1: Replay d21's search record** (`C:/fi_runs/suite/rounds/d21/duv/`, a copy of its code and
+- [ ] **Step 1: Replay d21's search record** (`<run folder>`, a copy of its code and
   `.fi/optimisation`): drive `core.optimise_search.search` with the recorded scan and global answers; expected: the
   watch fires at the scan or the global stage with `designs >= 50`, the request text names the stuck results, and the
   engine routes to `design` once (the gate run on the replayed `exec_result`).

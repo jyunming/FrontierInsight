@@ -9,7 +9,7 @@ A live search for the best design spent its whole budget (6000 evaluations, near
 choice of how the design is represented: the region of the design space where the objective is above 0 is narrower
 than one element of the representation, and every element that touches it also covers a region that drives the
 objective back to 0. Designs finer than the plan's representation reach the objective the topic asks for (measured on
-the quest's own simulation: a common depth of focus of 35-45 nm where every element of the plan's representation
+the quest's own simulation: a common working range of 35-45 nm where every element of the plan's representation
 gave 0). So the study was possible; the plan made it impossible, and FI never told the plan what it had measured.
 
 FI first learned to stop such a search early and report it (`stopped_because: flat_objective`). That is right for a
@@ -107,7 +107,7 @@ reach it. The research goal is the hard result, so a flat objective must first g
 
 A small test with the plan's own model on the real quest's plan and the measured fact (two calls), scored on two
 axes: does the revised design make the objective move, and does it still answer the topic. Results are recorded with
-the test (C:/fi_runs/suite/rounds/d21/duv/ab_redesign, outside the repository). The feature is built only if the
+the test (<run folder>/ab_redesign, outside the repository). The feature is built only if the
 revision is both.
 
 Result (2026-10-21, the plan's model, two calls, the topic as the next run will state it):

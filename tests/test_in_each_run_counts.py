@@ -16,14 +16,14 @@ from tests.test_in_each_run import INSIDE, PAIRED, _executor, _run
 ONLY_INSIDE = PAIRED.replace('found = rng.random() * cell["m"]', "found = rng.random() * 10")
 
 
-def _record(tmp_path: Path, grid: dict, source: str = PAIRED):
+def _record(tmp_path: Path, grid: dict, source: str = PAIRED, in_each_run: dict = INSIDE):
     root = tmp_path / "quest"
     (root / "code").mkdir(parents=True)
     (root / "code" / "simulate.py").write_text(source, encoding="utf-8")
     run = asyncio.run(trial_runner.run_trials(
         SharedInterpreterExecutor(python_version=f"{sys.version_info[0]}.{sys.version_info[1]}"), sys.executable, root,
         "code/simulate.py", grid, runs_per_setting=3, base_seed=0, deterministic=False, timeout_s=60, run_id="r1",
-        in_each_run=INSIDE))
+        in_each_run=in_each_run))
     trial_runner._save_run(root, "k", run)
     per_cell, _ = trial_runner.recorded_values_by_cell(root)
     return root, per_cell, trial_runner.pooled(per_cell)
@@ -154,16 +154,17 @@ import random
 def run_trial(cell, trial_id, seed):
     rng = random.Random(int(cell["m"]) * 1000 + trial_id)
     first, second = rng.random(), rng.random()
-    return {"d": {"bonferroni": second - first, "bh": second - first}, "own": {"bonferroni": first, "bh": second}}
+    return {"d": {"first_rule": second - first, "second_rule": second - first}, "own": {"first_rule": first, "second_rule": second}}
 '''
+RULES = {"procedure": ["first_rule", "second_rule"]}
 
 
 def test_a_copy_under_what_each_run_compares_is_found_and_a_list_per_value_is_still_complete(tmp_path: Path) -> None:
-    root, per_cell, recorded = _record(tmp_path, {"m": [10, 20]}, INSIDE_COPY)
-    grid = {"m": [10, 20], **INSIDE}
+    root, per_cell, recorded = _record(tmp_path, {"m": [10, 20]}, INSIDE_COPY, RULES)
+    grid = {"m": [10, 20], **RULES}
     copied = trial_runner.copied_settings(root, grid, ["d", "own"])
     assert copied == {"d": ["procedure"]}
-    protocol = {"grid": {"m": [10, 20]}, "in_each_run": INSIDE, "runs_per_setting": 3,
+    protocol = {"grid": {"m": [10, 20]}, "in_each_run": RULES, "runs_per_setting": 3,
                 "metrics": [{"id": "d", "kind": "mean"}]}
     manifest = {"successful_per_cell": {"m=10": 3, "m=20": 3}}
     series = trial_runner.recorded_series(root, ["d"])["d"]
@@ -172,19 +173,19 @@ def test_a_copy_under_what_each_run_compares_is_found_and_a_list_per_value_is_st
         return [s for s, _ in run_manifest._value_count_findings(
             protocol, manifest, result, recorded=recorded, recorded_by_cell=per_cell, copied=copied)]
 
-    once = {f"m={m}": {"d_values": series[f"m={m},procedure=bh"]} for m in (10, 20)}
+    once = {f"m={m}": {"d_values": series[f"m={m},procedure=second_rule"]} for m in (10, 20)}
     assert found(once) == [], "one copy per setting"
-    per_value = {f"m={m},procedure={p}": {"d_values": series[f"m={m},procedure={p}"]} for m in (10, 20) for p in INSIDE["procedure"]}
+    per_value = {f"m={m},procedure={p}": {"d_values": series[f"m={m},procedure={p}"]} for m in (10, 20) for p in RULES["procedure"]}
     assert found(per_value) == [], "a copy per value, as the record holds it, is complete too"
     assert run_manifest.differences(protocol, manifest, per_value, recorded=recorded, recorded_by_cell=per_cell,
                                     copied=copied) == []
     one_left_out = {k: v for k, v in per_value.items() if not k.startswith("m=20")}
     assert any("`d`" in s and "m=20" in s for s in found(one_left_out)), "a setting left out of the lists per value is found"
-    half = {k: v for k, v in per_value.items() if k != "m=20,procedure=bh"}
+    half = {k: v for k, v in per_value.items() if k != "m=20,procedure=second_rule"}
     assert found(half) == [], "a copy of every setting is there"
-    tripled = {**per_value, "m=10,procedure=bh": {"d_values": series["m=10,procedure=bh"] * 3}}
+    tripled = {**per_value, "m=10,procedure=second_rule": {"d_values": series["m=10,procedure=second_rule"] * 3}}
     assert any("`d`" in s for s in found(tripled)), "the record's values listed three times are more than it holds"
-    made_up = {**per_value, "m=10,procedure=bh": {"d_values": series["m=10,procedure=bh"] + [0.123, 0.456]}}
+    made_up = {**per_value, "m=10,procedure=second_rule": {"d_values": series["m=10,procedure=second_rule"] + [0.123, 0.456]}}
     assert any("`d`" in s for s in found(made_up)), "numbers FI's trials never returned are still found"
 
 
