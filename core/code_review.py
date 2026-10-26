@@ -376,11 +376,10 @@ def _raw_sections(design: dict[str, Any], protocol: dict[str, Any]) -> dict[str,
 
 
 def hidden_values(design: dict[str, Any] | None, protocol: dict[str, Any] | None) -> list[float]:
-    """The plan's hidden values (:func:`core.review_pairs.plan_values`: a check's expected value, tolerance and formula
-    result, a worked example's inputs and output) that the plan does not also show as a setting (a held-fixed value, the
-    grid, a value compared in each run, a check's case). A number the plan shows as a setting tells nothing about a check's
-    answer, so it is never taken out; every other hidden value is taken out wherever it stands in the plan's prose and in what
-    the reader writes."""
+    """The values replaced in what the reader WRITES: the plan's hidden values (:func:`core.review_pairs.plan_values`: a
+    check's expected value, tolerance and formula result, a worked example's inputs and output) that the plan does not also
+    show as a setting (a held-fixed value, the grid, a value compared in each run, a check's case). A number the plan shows
+    as a setting tells nothing about a check's answer, so a finding that quotes it keeps it."""
     design = design if isinstance(design, dict) else {}
     protocol = protocol if isinstance(protocol, dict) else {}
     raw = _raw_sections(design, protocol)
@@ -390,36 +389,54 @@ def hidden_values(design: dict[str, Any] | None, protocol: dict[str, Any] | None
             if not any(abs(v - n) <= 1e-6 * max(abs(v), abs(n)) for n in shown)]
 
 
+def _owned_values(oracle: dict[str, Any]) -> list[float]:
+    """The values a check entry owns and hides: its expected value, tolerance and the result of its ``expected_formula``."""
+    from . import oracle_forms as _forms
+
+    out: list[float] = []
+    for v in (_oracle._num(oracle.get("expected")), _oracle._num(oracle.get("tolerance")),
+              _forms.formula_value(oracle)[0] if oracle.get("expected_formula") else None):
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and abs(v) not in (0, 1, float("inf")):
+            out.append(float(v))
+    return out
+
+
 def plan_sections(design: dict[str, Any] | None, protocol: dict[str, Any] | None) -> dict[str, Any]:
     """The plan the code must implement, section by section, in the order the reader gets them: the model (equations as
     written, steps), the method, the settings varied and their grid, the values held fixed by the plan (marked as such),
-    the values compared inside each run, the definitions of the statistics, and the checks' cases and measures. What is
-    hidden is each check's ``expected``, ``expected_formula``, ``tolerance`` and ``reference`` and the worked ``example`` of
-    equations and steps (those fields are not copied), and, wherever it is written in the prose of a section, each hidden
-    value (:func:`hidden_values`) that is not also one of the plan's settings."""
+    the values compared inside each run, the definitions of the statistics, and the checks' cases and measures.
+
+    What is hidden is hidden by location. Each check's ``expected``, ``expected_formula``, ``tolerance`` and ``reference``
+    and the worked ``example`` of equations and steps are not copied; and the values a check entry owns (its expected value,
+    tolerance and formula result; an equation's worked outputs) are taken out of that entry's own text and nowhere else.
+    Every other section is shown as the plan wrote it; a worked example's inputs are settings of its case and stay."""
     design = design if isinstance(design, dict) else {}
     protocol = protocol if isinstance(protocol, dict) else {}
     view = _raw_sections(design, protocol)
-    values = hidden_values(design, protocol)
 
-    def clean(node: Any) -> Any:
+    def clean(node: Any, values: list[float]) -> Any:
         if isinstance(node, str):
             return _pairs.scrub(node, values)
         if isinstance(node, list):
-            return [clean(x) for x in node]
+            return [clean(x, values) for x in node]
         if isinstance(node, dict):
-            return {k: clean(v) for k, v in node.items()}
+            return {k: clean(v, values) for k, v in node.items()}
         return node
 
-    out: dict[str, Any] = {}
-    for key, value in view.items():
-        if key in _SETTING_SECTIONS:
-            out[key] = value
-        elif key == "checks":
-            out[key] = [{**c, **{k: clean(c[k]) for k in ("name", "check", "measure")}} for c in value]
-        else:
-            out[key] = clean(value)
-    return out
+    if "checks" in view:
+        owners = _oracle.declared(protocol)
+        view["checks"] = [{**c, **{k: clean(c[k], _owned_values(o)) for k in ("name", "check", "measure")}}
+                          for c, o in zip(view["checks"], owners)]
+    if "equations" in view:
+        try:
+            from . import equation_tests as _eqt
+
+            worked = {str(r["id"]): _numbers(r.get("expected")) for r in _eqt.example_rows(protocol)}
+        except Exception:  # noqa: BLE001 -- a plan whose examples cannot be read shows its equations as written
+            worked = {}
+        view["equations"] = [clean(e, [v for v in worked.get(str(e.get("id")), []) if abs(v) not in (0, 1)])
+                             for e in view["equations"]]
+    return view
 
 
 def _dump(sections: dict[str, Any], note: str = "") -> str:

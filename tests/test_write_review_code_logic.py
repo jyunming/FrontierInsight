@@ -226,16 +226,21 @@ async def test_an_agree_only_code_review_is_asked_again_and_then_recorded_as_not
     assert record["final"] is True and record["checked"] == ["E1: the factors and the signs agree with the plan"]
 
 
-def test_a_hidden_value_is_taken_out_of_the_plans_prose_unless_the_plan_also_shows_it_as_a_setting() -> None:
-    protocol = {**PROTOCOL,
-                "model": {"summary": "a spring whose result must be 0.123456789", "equations": [
-                    {"id": "E1", "formula": "Q = m * w / c", "source": "gives 0.123456789 at c=0.5"}]},
-                "oracles": [{**PROTOCOL["oracles"][0], "check": "Q at c=0.5; the result must be 0.123456789; width 0.5"}]}
-    shown = cr.plan_view({**DESIGN, "method": "check against 0.123456789 first, then c = 0.5"}, protocol)
-    assert "0.123456789" not in shown and pairs.PLACEHOLDER in shown and "Q = m * w / c" in shown
-    # 0.5 is the check's case (a setting) as well as a hidden tolerance-like number elsewhere: it is never taken out
-    hidden_too = {**protocol, "oracles": [{**protocol["oracles"][0], "expected": 0.5}]}
-    assert "c=0.5" in cr.plan_view(DESIGN, hidden_too) and 0.5 not in cr.hidden_values(DESIGN, hidden_too)
+def test_a_value_is_hidden_in_the_entry_that_owns_it_and_nowhere_else() -> None:
+    check = {**PROTOCOL["oracles"][0], "check": "Q at c=0.5; the result must be 0.123456789 within 1e-9",
+             "expected_formula": "0.123456789"}
+    protocol = {**PROTOCOL, "oracles": [check, {"name": "other", "kind": "invariant", "check": "a second check",
+                                               "case": {"c": 1.0}, "measure": "quality", "expected": 10, "tolerance": 0.5}],
+                "model": {"summary": "the scan covers the interval [10, p-10] nm", "equations": [
+                    {"id": "E1", "formula": "Q = m * w / c", "source": "a plain derivation"}]}}
+    data = json.loads(cr.plan_view({**DESIGN, "method": "a window of [10, p-10] nm, then c = 0.5"}, protocol))
+    # a check's own text no longer states its expected value, tolerance or formula result
+    assert "0.123456789" not in data["checks"][0]["check"] and pairs.PLACEHOLDER in data["checks"][0]["check"]
+    assert "c=0.5" in data["checks"][0]["check"] and data["checks"][0]["case"] == {"c": 0.5}
+    # the same number in another section is the plan's own prose and stays as written
+    assert data["model"] == "the scan covers the interval [10, p-10] nm"
+    assert data["method"] == "a window of [10, p-10] nm, then c = 0.5"
+    assert "[10, p-10]" in json.dumps(data) and "0.123456789" not in json.dumps(data)
 
 
 def test_a_plan_that_does_not_fit_is_split_by_whole_sections_and_no_request_is_over_the_cap() -> None:
