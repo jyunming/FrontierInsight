@@ -495,13 +495,14 @@ def scan_rows(summary, block):
             vals = [x for x in m.get("values") or [] if _number(x)]
             if vals and len(vals) == len(m.get("values") or []):
                 values[name] = math.fsum(vals) / len(vals)
-        quantity = str(block["objective"]["quantity"])
-        if quantity not in values:
-            # Returned per value of what each run compares inside it: the numbers are in the value rows of this setting
-            # only. They are given as an evaluation gives them, a number per value, so the objective is judged the same way.
-            per_value = _per_value(summary, cell, quantity)
-            if per_value:
-                values[quantity] = per_value
+        # Returned per value of what each run compares inside it: the numbers are in the value rows of this setting only.
+        # They are given as an evaluation gives them, a number per value, so the objective and each limit's quantity are
+        # judged the same way.
+        for quantity in [str(block["objective"]["quantity"])] + [str(c["quantity"]) for c in block.get("constraints") or []]:
+            if quantity not in values:
+                per_value = _per_value(summary, cell, quantity)
+                if per_value:
+                    values[quantity] = per_value
         out.append({"design": design, "values": values, "reason": "", "elapsed_s": cell.get("elapsed_s")})
     return out
 
@@ -538,6 +539,13 @@ def _parse_limit(text):
     return (_OPS[match.group(1)], number) if math.isfinite(number) else None
 
 
+def _per_value_reason(kind, name, block):
+    """Why a quantity returned per value of what each run compares inside it cannot be judged: a search needs one number."""
+    inside = ", ".join(sorted(in_each_run(block))) or "the values each run compares"
+    return (f"the {kind} `{name}` is returned per value of {inside}, but a search needs one number per design "
+            f"(the plan's {kind} must name one number)")
+
+
 def judge(block, values, reason=""):
     """What one evaluation gave: ``status`` (ok / failed), the ``objective``, each constrained quantity, how far past
     its limits the design is (``violation``, 0 when it meets every limit) and whether it is ``feasible``."""
@@ -552,9 +560,7 @@ def judge(block, values, reason=""):
                           f"but not the objective `{quantity}`"}
     objective = values[quantity]
     if isinstance(objective, dict):
-        inside = ", ".join(sorted(in_each_run(block))) or "the values each run compares"
-        return {**failed, "reason": f"the objective `{quantity}` is returned per value of {inside}, but a search needs one "
-                                    "number per design (the plan's objective must name one number)"}
+        return {**failed, "reason": _per_value_reason("objective", quantity, block)}
     if not _number(objective):
         return {**failed, "reason": f"the objective `{quantity}` is not a finite number ({objective!r})"}
     constraints, violation = {}, 0.0
@@ -566,6 +572,8 @@ def judge(block, values, reason=""):
         if name not in values:
             return {**failed, "reason": f"the simulation did not return `{name}`, which a limit is set on"}
         value = values[name]
+        if isinstance(value, dict):
+            return {**failed, "reason": _per_value_reason("constraint", name, block)}
         if not _number(value):
             return {**failed, "reason": f"`{name}` is not a finite number ({value!r})"}
         constraints[name] = float(value)

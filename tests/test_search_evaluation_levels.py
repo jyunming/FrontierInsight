@@ -123,3 +123,21 @@ def test_the_coarse_scan_gives_a_per_value_objective_to_the_judge_as_an_evaluati
     assert rows[0]["values"] == {"f": {"pitch_nm=74": 1.0, "pitch_nm=80": 2.0}}
     judged = optimise_search.judge(block, rows[0]["values"])
     assert "is returned per value of pitch_nm" in judged["reason"]
+
+
+def test_a_limit_on_a_quantity_returned_per_value_gets_the_same_plain_message_in_the_scan_and_an_evaluation() -> None:
+    block = {**_BLOCK, "fixed": {}, "baseline": {"values": {"x": 0}, "source": "s"}, "grid": {"x": [0, 1]},
+             "constraints": [{"quantity": "g", "limit": "<= 3"}]}
+    summary = {"cells": [
+        {"cell": {"x": 0}, "key": "x=0", "planned": 1, "ok": 1, "failed": 0, "metrics": {"f": {"values": [1.0]}}},
+        {"cell": {"x": 0, "p": 1}, "key": "x=0,p=1", "level": {"p": 1}, "planned": 1, "ok": 1, "failed": 0,
+         "metrics": {"g": {"values": [2.0]}}},
+        {"cell": {"x": 0, "p": 2}, "key": "x=0,p=2", "level": {"p": 2}, "planned": 1, "ok": 1, "failed": 0,
+         "metrics": {"g": {"values": [4.0]}}},
+    ]}
+    values = optimise_search.scan_rows(summary, block)[0]["values"]
+    assert values == {"f": 1.0, "g": {"p=1": 2.0, "p=2": 4.0}}
+    want = ("the constraint `g` is returned per value of p, but a search needs one number per design "
+            "(the plan's constraint must name one number)")
+    assert optimise_search.judge(block, values)["reason"] == want
+    assert optimise_search.judge(block, {"f": 1.0, "g": 2.0})["status"] == "ok"
