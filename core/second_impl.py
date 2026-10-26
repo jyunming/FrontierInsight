@@ -365,13 +365,15 @@ async def capture_inputs(run: Callable[[list[str]], Awaitable[Any]], quest_root:
                          names: list[str], cells: list[dict[str, Any]], *, deterministic: bool,
                          in_each_run: dict[str, list[Any]] | None = None,
                          thresholds: dict[str, Any] | None = None,
-                         budget_s: float | None = None) -> dict[str, list[dict[str, Any]]]:
+                         budget_s: float | None = None,
+                         kinds: list[str] | None = None) -> dict[str, list[dict[str, Any]]]:
     """FI runs the simulation at each of ``cells`` in turn (settings of the plan; each part of a study takes other paths
     through the code) through its own trial harness, with each of ``names`` (functions of the package's model) recording
     the distinct calls it gets, each argument by its parameter's name, kept only when every argument is plain data
     (numbers, text, real arrays of at most :data:`CAPTURE_ELEMENTS` numbers); it stops once every function has
     :data:`CAPTURE_CALLS` calls. ``run(argv)`` runs ``python <argv>`` from the quest folder. Saved in :data:`CAPTURED`;
-    ``{}`` when no run could be made. Never an expected value: only what each function is given."""
+    ``{}`` when no run could be made. Never an expected value: only what each function is given. ``kinds``: what each cell
+    is for (``"scan"`` unless it says ``"search"``: a search's baseline design), told to the code beside the cell."""
     from . import trial_runner as _trials
 
     root = Path(quest_root)
@@ -391,7 +393,8 @@ async def capture_inputs(run: Callable[[list[str]], Awaitable[Any]], quest_root:
         if deadline is not None and index and time.monotonic() > deadline:
             break  # the time given is spent: the settings run so far are the record
         got = await _run_instrumented(run, root, package, names, cell, f"calls{index}", deterministic=deterministic,
-                                      in_each_run=in_each_run, thresholds=thresholds)
+                                      in_each_run=in_each_run, thresholds=thresholds,
+                                      kind=(kinds or [])[index] if index < len(kinds or []) else "scan")
         if got is None:
             continue
         if (got.get("row") or {}).get("status") == "ok":
@@ -412,14 +415,16 @@ async def capture_inputs(run: Callable[[list[str]], Awaitable[Any]], quest_root:
     out = {n: calls for n, calls in out.items() if calls}
     (root / CAPTURED).write_text(json.dumps({"cases": out, "called_at": called_at, "ran": ran,
                                              "returned": {n: sorted(k) for n, k in returned.items()},
-                                             "cells": [dict(c) for c in cells]}, default=str), encoding="utf-8")
+                                             "cells": [dict(c) for c in cells],
+                                             "kinds": [(kinds or [])[i] if i < len(kinds or []) else "scan"
+                                                       for i in range(len(cells))]}, default=str), encoding="utf-8")
     return out
 
 
 async def _run_instrumented(run: Callable[[list[str]], Awaitable[Any]], root: Path, package: str, names: list[str],
                             cell: dict[str, Any], tag: str, *, deterministic: bool,
                             in_each_run: dict[str, list[Any]] | None, thresholds: dict[str, Any] | None,
-                            shift: dict[str, Any] | None = None) -> dict[str, Any] | None:
+                            shift: dict[str, Any] | None = None, kind: str = "scan") -> dict[str, Any] | None:
     """One run of the simulation at ``cell`` through FI's trial harness with ``names`` instrumented (and, with ``shift``
     ``{"name", "scale"}``, that function's result changed by that share): ``{"cases", "counts", "shifted", "row"}`` (the
     trial's row as the harness wrote it), ``None`` when the run could not be made."""
@@ -428,7 +433,7 @@ async def _run_instrumented(run: Callable[[list[str]], Awaitable[Any]], root: Pa
     folder = root / DIR / "capture"
     plan = _trials._plan(root, "code/simulate.py", {k: [v] for k, v in cell.items()}, runs_per_setting=1, base_seed=0,
                          deterministic=deterministic, folder=folder, out_name=tag + "-{index}.out.jsonl",
-                         thresholds=thresholds, in_each_run=in_each_run)
+                         thresholds=thresholds, in_each_run=in_each_run, kind=kind)
     if not plan:
         return None
     task = plan[0]
@@ -533,6 +538,7 @@ async def dependence(run: Callable[[list[str]], Awaitable[Any]], quest_root: Pat
     root = Path(quest_root)
     record = read_captured(root)
     cells = record.get("cells") or []
+    kinds = record.get("kinds") or []
     called_at = record.get("called_at") or {}
     ran = [i for i in record.get("ran") or [] if isinstance(i, int)]
     keys = {_criteria._key(h) for h in headline}
@@ -545,7 +551,8 @@ async def dependence(run: Callable[[list[str]], Awaitable[Any]], quest_root: Pat
     async def plain(i: int, again: int = 0) -> dict[str, Any]:
         if (i, again) not in plain_runs:
             got = await _run_instrumented(run, root, package, [], cells[i], f"plain{i}" + ("b" if again else ""),
-                                          deterministic=deterministic, in_each_run=in_each_run, thresholds=thresholds)
+                                          deterministic=deterministic, in_each_run=in_each_run, thresholds=thresholds,
+                                          kind=kinds[i] if i < len(kinds) else "scan")
             plain_runs[(i, again)] = (got or {}).get("row") or {}
         return plain_runs[(i, again)]
 
@@ -575,7 +582,8 @@ async def dependence(run: Callable[[list[str]], Awaitable[Any]], quest_root: Pat
                 return {"status": NOT_RUN, "why": "the time given to this check was spent"}
             got = await _run_instrumented(run, root, package, [name], cells[i], f"shift_{name}_{i}",
                                           deterministic=deterministic, in_each_run=in_each_run, thresholds=thresholds,
-                                          shift={"name": name, "scale": scale})
+                                          shift={"name": name, "scale": scale},
+                                          kind=kinds[i] if i < len(kinds) else "scan")
             row = (got or {}).get("row") or {}
             if not row:
                 return {"status": NOT_RUN, "why": "the run with its result changed gave no result"}

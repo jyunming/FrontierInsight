@@ -118,6 +118,7 @@ def load_simulation():
 def run_cell_child(study, index, out_path):
     """One setting's trials, in a process of its own (as FI runs them)."""
     module = load_simulation()
+    os.environ[KIND_ENV] = "scan"  # a row of the scan or the comparison grid, as FI tells the code
     entry = study["entry"]
     fn = getattr(module, entry)
     cell = cells(study.get("grid") or {}, study.get("sub_studies"))[index]
@@ -166,6 +167,7 @@ def evaluate_child(spec_path, out_path):
     """One design of the search, in a process of its own (as FI runs it)."""
     spec = json.loads(Path(spec_path).read_text(encoding="utf-8"))
     module = load_simulation()
+    os.environ[KIND_ENV] = "search"  # a design of the search, as FI tells the code
     entry = spec["entry"]
     fn = getattr(module, entry)
     levels = levels_of(spec.get("levels"))  # as the harness reads its spec (FI's evaluation names none)

@@ -401,7 +401,8 @@ async def _evaluate(executor: Any, python: Any, quest_root: Path, module: str, e
     # The values each run compares inside it are given whole, as the scan and the timing give them, and the run may return
     # a number per value (core/in_run.py::read_returned).
     inside = {str(k): list(v) for k, v in (in_each_run or {}).items()}
-    spec.write_text(json.dumps({"module": module, "entry": entry, "cell": {**cell, **inside},
+    spec.write_text(json.dumps({"module": module, "entry": entry,
+                                "cell": {**cell, **inside}, "kind": "search",
                                 "levels": _in_run.levels_json(_in_run.level_cells(inside)), "trials": trials,
                                 "nonce": nonce, "thresholds": dict(thresholds or {})}, default=str), encoding="utf-8")
     if outside is None:

@@ -16,6 +16,17 @@ import itertools
 import math
 
 
+#: What FI is asking for in a call of the simulation, told to the code in the environment variable ``FI_CELL_KIND``
+#: (set by FI's harness for each call from the call's own record, never from the cell; unset when the function is called some
+#: other way, which is a ``"check"``; a child process the study starts inherits it): a
+#: ``"search"`` design the search evaluates, a ``"scan"`` row of the coarse scan or the comparison grid, a ``"check"`` case
+#: of one of the plan's checks. A search design and a grid row at the baseline have the same keys and values, so the code
+#: cannot tell them apart from the cell; FI says which it is, and the cell itself stays exactly the study's settings (code
+#: that expands it into a function's arguments is not broken by an added key).
+KIND_ENV = "FI_CELL_KIND"
+CELL_KINDS = ("search", "scan", "check")
+
+
 def fmt(value):
     """A value as a cell key writes it (the same as ``core.trial_runner._fmt``)."""
     if isinstance(value, float) and value.is_integer():

@@ -13922,14 +13922,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 if normal is None:
                     return {}
                 cells = [_optimise_search.cell_of(normal, (normal.get("baseline") or {}).get("values") or {})]
+                kinds = ["search"]  # the baseline design is a design of the search; the scan's cells are scan rows
                 if isinstance(normal.get("grid"), dict) and normal["grid"]:  # a search's first scan: a measurement
                     cells += _small.settings(_optimise_search.scan_grid(normal))
+                    kinds += ["scan"] * (len(cells) - 1)
                 # The scan's cells leave them out and the trial runner gives each cell all of them (the baseline cell
                 # holds them already, with the same values).
                 inside = _optimise_search.in_each_run(normal) or None
             else:
                 grid = _optimise_search.study_grid(protocol) if isinstance(protocol.get("grid"), dict) else {}
                 cells = _small.settings(grid)
+                kinds = ["scan"] * len(cells)
                 inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else None
             if not cells:
                 return {}
@@ -13947,7 +13950,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             budget = 2 * _small_run_budget(self.config.execution.timeout_s)  # each of the two checks, in all
             got = await self._await_with_heartbeat(
                 _second_impl.capture_inputs(run, self.quest_root, package, names, cells, deterministic=deterministic,
-                                            in_each_run=inside, thresholds=thresholds, budget_s=budget),
+                                            in_each_run=inside, thresholds=thresholds, budget_s=budget, kinds=kinds),
                 label="recording what the tested functions are called with")
         except Exception as e:  # noqa: BLE001 -- a record of the calls is an aid to a check; never a stop
             self._log.info("[implement] what the model's functions are called with could not be recorded: %r", e)
@@ -13997,8 +14000,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
 
     def _first_study_cell(self, protocol: dict[str, Any]) -> tuple[dict[str, Any], dict[str, list[Any]] | None] | None:
         """The plan's first setting for a call of the study's entry: a search's baseline design, else the middle of every
-        axis of the grid (core/small_run.py::settings), and the values each run compares inside it. ``None`` when the plan
-        gives none."""
+        axis of the grid (core/small_run.py::settings), the values each run compares inside it, and what the call is for
+        (``"search"`` or ``"scan"``). ``None`` when the plan gives none."""
         from . import small_run as _small
 
         try:
@@ -14008,13 +14011,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 if normal is None:
                     return None
                 cell = _optimise_search.cell_of(normal, (normal.get("baseline") or {}).get("values") or {})
-                return dict(cell), (_optimise_search.in_each_run(normal) or None)
+                return dict(cell), (_optimise_search.in_each_run(normal) or None), "search"
             grid = _optimise_search.study_grid(protocol) if isinstance(protocol.get("grid"), dict) else {}
             cells = _small.settings(grid)
             if not cells:
                 return None
             inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else None
-            return dict(cells[0]), inside
+            return dict(cells[0]), inside, "scan"
         except (KeyError, TypeError, ValueError):
             return None
 
@@ -14060,7 +14063,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 self._log.warning("[execute] FI could not measure whether run_trial runs one trial (the plan gives no first "
                                   "setting to call it on); the reading of the code alone does not refuse it")
             return ""
-        cell, inside = first
+        cell, inside, kind = first
         py = self.executor.python_path(self.quest_root)
         env = dict(self.__dict__.get("_last_exec_env") or {})
         from . import run_estimate as _estimate
@@ -14082,7 +14085,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     _trial_runner.settle_aggregate(
                         self.executor, py, self.quest_root, module, cell=cell, inside=inside,
                         timeout_s=max(1, min(int(self.config.execution.timeout_s), left())), env=env,
-                        thresholds=thresholds, log=self._log),
+                        thresholds=thresholds, log=self._log, kind=kind),
                     label="calling the repaired trial function with two seeds")
                 if settled is False:
                     return _trial_runner.TRIAL_AGGREGATE_WHY
@@ -29124,6 +29127,11 @@ the line `# file: experiment.py`, then the `DEPS:` line, and nothing else.
   (`numpy.random.default_rng(seed)` or `random.Random(seed)`) and use only it. FI calls it `runs_per_setting` times for
   every setting of the protocol's grid, each call with its own seed: the `FI_REPLICATE_SEED` rule above does not apply
   here, and the function never picks, derives or fixes a seed of its own.
+- Before every call FI sets the environment variable `FI_CELL_KIND` (`cell` itself holds only the study's settings):
+  `"scan"` (a setting of the grid), `"search"` (a design a search evaluates) or `"check"` (a case of one of the plan's
+  checks; also when the variable is unset). Read it, as `os.environ.get("FI_CELL_KIND", "check")`, when the function
+  must treat these differently; never infer the kind from the values. A child process the function starts inherits the variable, so it sees the kind of
+  the call that started it.
 - For a deterministic study (no randomness): `def run_cell(cell: dict) -> dict` computes one setting, called once per
   setting. It takes no seed and reads no `FI_REPLICATE_SEED`: FI calls it once for each setting, with nothing repeated.
 - Each equation of the design's `model` whose role is `generates` carries its id in a comment (`# E1`) on or above the
@@ -29182,6 +29190,13 @@ the record. The rules above still hold, with these differences:
   plan holds fixed, and each numerical setting at the value the search uses. Read them all from `cell` by name; do not
   write any of them into the script as a number of its own, and do not choose a mesh, a time step or a tolerance
   yourself.
+- FI says what it is asking for in the environment variable `FI_CELL_KIND`, set before every call (the cell holds only
+  the study's settings): `"search"` is a design the search evaluates (the design variables are the design to compute),
+  `"scan"` is a row of the coarse scan or of the comparison grid (its design variables are that row's values, the
+  baseline's where the row leaves one out), `"check"` is a case of one of the plan's checks, and so is a call with the
+  variable unset. Decide which of these you were called with from `os.environ.get("FI_CELL_KIND", "check")` alone,
+  never from the values (a grid row at the baseline and a search design at the baseline have the same values). A
+  child process the function starts inherits the variable, so it sees the kind of the call that started it.
 - The returned dict holds the objective and every constrained quantity, under the exact names the plan gives them
   (`objective.quantity`, each `constraints[].quantity`), plus anything else the analysis wants.
 - simulate.py never searches, optimises or loops over designs itself (no `scipy.optimize`, no Optuna, no grid of
