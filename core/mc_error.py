@@ -47,7 +47,6 @@ judges with them. The first rule is that a check the trials cannot decide is nev
 from __future__ import annotations
 
 import ast
-import json
 import math
 from pathlib import Path
 from typing import Any
@@ -112,21 +111,9 @@ def repeats_trials(protocol: dict[str, Any] | None) -> bool | None:
 
 def paired(protocol: dict[str, Any] | None, quest_root: Path | str | None = None) -> bool:
     """Whether trial ``t`` of every setting runs on one seed (common random numbers, :func:`core.trial_runner.trial_seed`
-    with ``key=""``; a check's trials then get those seeds too). The plan states it as a fact: a metric marked
-    ``paired: true`` and ``protocol.shared_draws`` true (:func:`core.metric_spec.shares_draws`). Text in the
-    ``seed_policy`` never decides it, and a metric marked paired alone only pairs estimates inside one trial.
-
-    A quest begun before ``shared_draws`` existed (its plan has no such key, and its ``code/study.json`` was written with
-    ``paired: true``) keeps the seeds that study recorded, so a resumed quest does not mix two kinds in one ledger."""
-    if _metric_spec.shares_draws(protocol):
-        return True
-    if quest_root is None or not isinstance(protocol, dict) or "shared_draws" in protocol:
-        return False
-    try:
-        study = json.loads((Path(quest_root) / "code" / "study.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return False
-    return isinstance(study, dict) and study.get("paired") is True
+    with ``key=""``; a check's trials then get those seeds too): :func:`core.metric_spec.shares_draws`, the one decision
+    the trial seeds and the analysis's paired contrast both follow. Text in the ``seed_policy`` never decides it."""
+    return _metric_spec.shares_draws(protocol, quest_root)
 
 
 def per_trial_flag(oracle: dict[str, Any]) -> bool | None:

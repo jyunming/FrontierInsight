@@ -40,10 +40,12 @@ call the statistics adequate while there is one.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from . import stats as _stats
@@ -303,21 +305,33 @@ def repair(metrics: Any) -> tuple[list[dict[str, Any]], list[str]]:
     return kept, notes
 
 
-def shares_draws(protocol: dict[str, Any] | None) -> bool:
-    """Whether the plan has settings share their random draws: a metric marked ``paired`` and ``protocol.shared_draws``
-    true. A missing ``shared_draws`` is false: a metric marked paired alone pairs estimates inside one trial."""
-    if not isinstance(protocol, dict) or protocol.get("shared_draws") is not True:
+def shares_draws(protocol: dict[str, Any] | None, quest_root: Path | str | None = None) -> bool:
+    """Whether trial ``t`` of every setting runs on one seed (common random numbers): the plan says so with
+    ``protocol.shared_draws: true``. That alone decides it (the metric marked ``paired`` only says the analysis
+    compares the settings trial by trial, and that is read only when the draws are shared). A missing ``shared_draws``
+    is false, except for a quest begun before the field existed: its ``code/study.json`` was written with
+    ``paired: true`` and records the seeds it ran, which a resumed quest keeps (``quest_root`` names the quest)."""
+    if not isinstance(protocol, dict):
         return False
-    return any(isinstance(m, dict) and m.get("paired") for m in protocol.get("metrics") or [])
+    if protocol.get("shared_draws") is not None:
+        return protocol["shared_draws"] is True
+    if quest_root is None or not any(isinstance(m, dict) and m.get("paired") for m in protocol.get("metrics") or []):
+        return False
+    try:
+        study = json.loads((Path(quest_root) / "code" / "study.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(study, dict) and study.get("paired") is True
 
 
-def declared(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
+def declared(protocol: dict[str, Any] | None, quest_root: Path | str | None = None) -> list[dict[str, Any]]:
     """The valid metric specs of a protocol (an entry that is not a mapping with an id and a kind is left out). A spec is
-    ``paired`` (a contrast joins the settings' trials by number) only when the plan has the settings share their draws
-    (:func:`shares_draws`); without it the settings' trials are independent and are not joined."""
+    ``paired`` (a contrast joins the settings' trials by number) only when the settings share their draws
+    (:func:`shares_draws`, the same answer the trial seeds follow); otherwise their trials are independent and are not
+    joined."""
     items = protocol.get("metrics") if isinstance(protocol, dict) else None
     clean, _why = normalize(items) if items is not None else ([], None)
-    shared = shares_draws(protocol)
+    shared = shares_draws(protocol, quest_root)
     return [{**spec, "paired": bool(spec.get("paired")) and shared} for spec in clean or []]
 
 
@@ -506,13 +520,14 @@ _PROGRESS_EVERY_CONTRASTS = 50
 
 def statistics(
     replicates: list[dict[str, Any]], protocol: dict[str, Any] | None, *, progress: Callable[[str], None] | None = None,
+    quest_root: Path | str | None = None,
 ) -> dict[str, Any]:
     """What the declared metrics estimate, and every pairwise contrast between the settings of a factor, with the p-values of
     each family adjusted together. ``{}`` when the protocol declares no metric.
 
     ``progress`` receives one plain line ("[evidence] statistics: k of n contrasts") at most every ~30 seconds or 50
     contrasts, so a long run is not silent; without it the line goes to the ``frontier_insight.metric_spec`` logger."""
-    specs = declared(protocol)
+    specs = declared(protocol, quest_root)
     if not specs or not replicates or not all(isinstance(r, dict) for r in replicates):
         return {}
     say = progress or logging.getLogger("frontier_insight.metric_spec").info
@@ -662,11 +677,11 @@ def coverage_gaps(protocol: dict[str, Any] | None, replicates: list[dict[str, An
     return gaps
 
 
-def missing_pair_ids(protocol: dict[str, Any] | None, result_json: Any) -> list[str]:
+def missing_pair_ids(protocol: dict[str, Any] | None, result_json: Any, quest_root: Path | str | None = None) -> list[str]:
     """The paired metrics whose per-trial values the results print with no ``<id>_pair_id`` beside them: one sentence
     each. Without an id a paired comparison can only join trials by position (``rigor_profile: research`` stops for
     this; otherwise it is a gap in the evidence)."""
-    paired = [spec["id"] for spec in declared(protocol) if spec.get("paired")]
+    paired = [spec["id"] for spec in declared(protocol, quest_root) if spec.get("paired")]
     lacking: set[str] = set()
 
     def walk(node: Any) -> None:

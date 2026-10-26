@@ -704,10 +704,20 @@ def _trials(cells: list[dict[str, Any]], metric: str) -> list[float]:
     return [v for c in cells for v in _tt._values(c["metrics"][metric])]
 
 
+def _draw_key(rec: Records, c: dict[str, Any], ids: Any, i: int) -> Any:
+    """The random draw behind the ``i``-th value of a cell's metric: its seed in FI's ledger, else a draw of its own (a
+    trial with no recorded seed, or a record that does not say which trial each value is)."""
+    seed = rec.seeds_of(c).get(ids[i]) if ids is not None else None
+    return seed if seed is not None else ("own", str(c.get("key")), i)
+
+
+def _finite(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(float(v))
+
+
 def _per_draw(rec: Records, cells: list[dict[str, Any]], metric: str) -> list[float]:
     """One value per different random draw behind ``metric`` in ``cells``: the mean of the trials that ran on one seed
-    (FI's ledger), in any setting. A trial with no recorded seed, or a record that does not say which trial each value
-    is, counts as a draw of its own."""
+    (FI's ledger), in any setting."""
     groups: dict[Any, list[float]] = {}
     for c in cells:
         m = c["metrics"].get(metric)
@@ -715,13 +725,61 @@ def _per_draw(rec: Records, cells: list[dict[str, Any]], metric: str) -> list[fl
         ids = m.get("trials") if isinstance(m, dict) else None
         if not isinstance(raw, (list, tuple)):
             continue
-        aligned = isinstance(ids, (list, tuple)) and len(ids) == len(raw)
+        ids = ids if isinstance(ids, (list, tuple)) and len(ids) == len(raw) else None
         for i, v in enumerate(raw):
-            if not (isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(float(v))):
-                continue
-            seed = rec.seeds_of(c).get(ids[i]) if aligned else None
-            groups.setdefault(seed if seed is not None else ("own", str(c.get("key")), i), []).append(float(v))
+            if _finite(v):
+                groups.setdefault(_draw_key(rec, c, ids, i), []).append(float(v))
     return [sum(g) / len(g) for g in groups.values()]
+
+
+def _per_draw_pairs(rec: Records, cells: list[dict[str, Any]], a: str, b: str) -> tuple[list[float], list[float]]:
+    """The pairs ``(a, b)`` of the trials of ``cells``, one pair per different random draw: the means of ``a`` and of ``b``
+    over the trials that ran on one seed."""
+    groups: dict[Any, list[tuple[float, float]]] = {}
+    for c in cells:
+        if a not in c["metrics"] or b not in c["metrics"]:
+            raise _Unfilled(f"{b} is not recorded in every setting that records {a}")
+        ma, mb = c["metrics"][a], c["metrics"][b]
+        ra, rb = ma.get("values"), mb.get("values")
+        ia, ib = ma.get("trials"), mb.get("trials")
+        if not (isinstance(ra, (list, tuple)) and isinstance(rb, (list, tuple))) or len(ra) != len(rb):
+            raise _Unfilled(f"{a} and {b} do not have one value per trial in the same trials, so they cannot be paired")
+        ids = ia if isinstance(ia, (list, tuple)) and ia == ib and len(ia) == len(ra) else None
+        for i, (x, y) in enumerate(zip(ra, rb)):
+            if _finite(x) and _finite(y):
+                groups.setdefault(_draw_key(rec, c, ids, i), []).append((float(x), float(y)))
+    xs = [sum(p[0] for p in g) / len(g) for g in groups.values()]
+    ys = [sum(p[1] for p in g) / len(g) for g in groups.values()]
+    return xs, ys
+
+
+def _observations(rec: Records, cells: list[dict[str, Any]], metric: str) -> tuple[list[float], bool]:
+    """The observations the statistics of ``metric`` over ``cells`` use, and whether they are draws. Settings that ran
+    trials on the same seed (FI's ledger) are not independent repeats: each different draw is one observation (the mean
+    of the trials that ran on it). Otherwise every trial is one."""
+    if len(cells) > 1 and rec.share_draws(cells):
+        return _per_draw(rec, cells, metric), True
+    return _trials(cells, metric), False
+
+
+def _interval(rec: Records, cells: list[dict[str, Any]], metric: str) -> tuple[float, float | None, float | None, str, int | None, bool, float | None]:
+    """``(mean, lower, upper, method, n, symmetric, standard error)`` of ``metric`` over ``cells``, from
+    :func:`_observations`. With shared draws it is a t interval over the different draws (also for a 0/1 value: the
+    draws' proportions); with fewer than two draws there is no interval."""
+    obs, shared = _observations(rec, cells, metric)
+    summary = _tt.summary(obs)
+    if shared:
+        if len(obs) < 2:
+            raise _Unfilled("the settings share their random draws and fewer than two different draws gave a value, "
+                            "so there is no interval")
+        se = summary["sd"] / math.sqrt(len(obs))
+        half = _stats._t95(len(obs) - 1) * se
+        return (summary["mean"], summary["mean"] - half, summary["mean"] + half,
+                f"95% t interval over {len(obs)} different random draws, which the settings share", None, True, se)
+    lo, hi, how = _tt.interval(summary)
+    se = summary["sd"] / math.sqrt(summary["n"]) if summary["n"] >= 2 else None
+    return (summary["mean"], lo, hi, "95% Wilson interval" if how == "Wilson" else f"95% {how}", summary["n"],
+            how != "Wilson", se)
 
 
 def _setting_values(cells: list[dict[str, Any]], metric: str) -> list[float] | None:
@@ -893,46 +951,45 @@ def _measure(rec: Records, metric: str, form: str, arg: str, where: dict[str, Pi
             raise _Unfilled(f"{metric} is not a 0/1 value, so there is no count of successes")
         return Measured(summary["mean"], "count", n=summary["n"], successes=int(summary["successes"]))
     if form == "mean":
-        return Measured(summary["mean"])
-    if form in ("mean_ci", "ci", "pm", "se") and len(cells) > 1 and rec.share_draws(cells):
-        # The settings ran trials on the same seeds, so those trials are not independent repeats. What FI counts is the
-        # number of different draws: a draw's value is the mean of the trials that ran on it, whatever the setting.
-        draws = _per_draw(rec, cells, metric)
-        if len(draws) < 2:
-            raise _Unfilled("the settings share their random draws and fewer than two different draws gave a value, "
-                            "so there is no interval")
-        across = _tt.summary(draws)
-        se = across["sd"] / math.sqrt(len(draws))
-        if form == "se":
-            return Measured(se)
-        half = _stats._t95(len(draws) - 1) * se
-        return Measured(across["mean"], "interval", across["mean"] - half, across["mean"] + half,
-                        f"95% t interval over {len(draws)} different random draws, which the settings share", None,
-                        symmetric=True)
+        return Measured(_tt.summary(_observations(rec, cells, metric)[0])["mean"])
     if form in ("mean_ci", "ci", "pm"):
-        lo, hi, how = _tt.interval(summary)
+        mean, lo, hi, words, n, symmetric, _se = _interval(rec, cells, metric)
         if lo is None or hi is None:
             raise _Unfilled("too few trials for an interval")
-        words = "95% Wilson interval" if how == "Wilson" else f"95% {how}"
-        return Measured(summary["mean"], "interval", lo, hi, words, summary["n"], symmetric=how != "Wilson")
+        return Measured(mean, "interval", lo, hi, words, n, symmetric=symmetric)
     if form == "se":
-        if summary["n"] < 2:
+        _mean, _lo, _hi, _words, _n, _sym, se = _interval(rec, cells, metric)
+        if se is None:
             raise _Unfilled("fewer than two trials, so there is no standard error")
-        return Measured(summary["sd"] / math.sqrt(summary["n"]))
+        return Measured(se)
     if form in ("sd", "sd_ci"):
         sd, dof = _pooled_sd(cells, metric)
         if form == "sd":
             return Measured(sd)
+        obs, shared = _observations(rec, cells, metric)
+        if shared:
+            # every setting's SD comes from the same draws: the pooled one can not rest on more than they give
+            if len(obs) < 2:
+                raise _Unfilled("the settings share their random draws and fewer than two different draws gave a value, "
+                                "so there is no interval")
+            dof = len(obs) - 1
         return Measured(sd, "interval", sd * math.sqrt(dof / chi2_quantile(0.975, dof)),
-                        sd * math.sqrt(dof / chi2_quantile(0.025, dof)), "95% chi-square interval", summary["n"])
-    xs, ys = _paired(cells, metric, arg)
+                        sd * math.sqrt(dof / chi2_quantile(0.025, dof)),
+                        "95% chi-square interval" + (f" over {len(obs)} different random draws, which the settings share" if shared else ""),
+                        None if shared else summary["n"])
+    shared = len(cells) > 1 and rec.share_draws(cells)
+    xs, ys = _per_draw_pairs(rec, cells, metric, arg) if shared else _paired(cells, metric, arg)
+    if shared and len(xs) < 2:
+        raise _Unfilled("the settings share their random draws and fewer than two different draws gave a pair")
     r = _pearson(xs, ys)
     if form == "corr":
         return Measured(r)
     if len(xs) < 4:
-        raise _Unfilled("too few paired trials for an interval")
+        raise _Unfilled("too few paired " + ("draws" if shared else "trials") + " for an interval")
     z, half = math.atanh(r), 1.96 / math.sqrt(len(xs) - 3)
-    return Measured(r, "interval", math.tanh(z - half), math.tanh(z + half), "95% Fisher interval", len(xs))
+    return Measured(r, "interval", math.tanh(z - half), math.tanh(z + half),
+                    "95% Fisher interval" + (f" over {len(xs)} different random draws, which the settings share" if shared else ""),
+                    None if shared else len(xs))
 
 
 def _combine(key: Key, a: Measured, b: float) -> Measured:
@@ -1006,8 +1063,16 @@ def _reduce(rec: Records, key: Key) -> tuple[Measured, str]:
             fixed = {a: (Pick("value", combo[each.index(a)]) if a in each else p) for a, p in key.where.items()}
             cells = _matching(rec, fixed, key.metric)
             ref, ref_kind = _reference(rec, key.metric, cells)
-            s = _tt.summary(_trials(cells, key.metric))
-            lo, hi, _how = _tt.interval(s)
+            obs, shared = _observations(rec, cells, key.metric)
+            s = _tt.summary(obs)
+            if shared:
+                if len(obs) < 2:
+                    raise _Unfilled("the settings share their random draws and fewer than two different draws gave a "
+                                    "value, so there is no interval to compare with the reference")
+                half = _stats._t95(len(obs) - 1) * s["sd"] / math.sqrt(len(obs))
+                lo, hi = s["mean"] - half, s["mean"] + half
+            else:
+                lo, hi, _how = _tt.interval(s)
             k += _rbs.comparison(ref_kind, ref, m.value, lo, hi, s["n"]) == key.word
         return Measured(k, "words", words=_number_word(k)), "count"
     if r in ("min", "max"):

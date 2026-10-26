@@ -63,9 +63,9 @@ def test_an_explicit_request_for_common_draws_still_shares_them(tmp_path):
     seeds = _seeds(study)
     assert study["paired"] is True and mc_error.paired(_protocol(True))
     assert seeds["n=5"] == seeds["n=12"]
-    # stating it without a paired metric changes nothing
-    assert not mc_error.paired({**_protocol(True), "metrics": []})
-    assert _study(tmp_path, {**_protocol(True), "metrics": []})["paired"] is False
+    # the field alone makes the settings share their draws; no metric needs to be marked paired
+    assert mc_error.paired({**_protocol(True), "metrics": []})
+    assert _study(tmp_path, {**_protocol(True), "metrics": []})["paired"] is True
 
 
 def test_the_paired_contrast_of_the_analysis_follows_the_same_decision():
@@ -81,6 +81,19 @@ def test_a_quest_begun_before_the_field_keeps_the_seeds_it_recorded(tmp_path):
     assert mc_error.paired(_protocol(), tmp_path)             # an older plan: no field, recorded as shared
     assert not mc_error.paired(_protocol(False), tmp_path)    # a plan that states it is believed
     assert not mc_error.paired(_protocol())                   # no quest folder, nothing recorded
+    # the analysis's paired contrast follows the very same answer (the seeds and the contrast never disagree)
+    from core import metric_spec
+
+    assert [m["paired"] for m in metric_spec.declared(_protocol(), tmp_path)] == [True]
+    assert [m["paired"] for m in metric_spec.declared(_protocol(False), tmp_path)] == [False]
+    assert [m["paired"] for m in metric_spec.declared(_protocol())] == [False]
+    a = [float(i % 7) for i in range(40)]
+    b = [x + 0.3 + (0.01 * (i % 3)) for i, x in enumerate(a)]
+    reps = [{"_seed": k, "by_g": {"a": {"m_values": a}, "b": {"m_values": b}}} for k in range(2)]
+    legacy = {"metrics": [{"id": "m", "kind": "mean", "paired": True, "estimand": "e", "unit": "u"}]}
+    got = metric_spec.statistics(reps, legacy, quest_root=tmp_path)["contrasts"][0]["method"]
+    assert got == "paired_permutation_bootstrap"                       # the old quest keeps its paired contrast
+    assert metric_spec.statistics(reps, legacy)["contrasts"][0]["method"] == "bootstrap_permutation"
     # study_of keeps the recorded value when it writes the study again from such a plan
     (tmp_path / "code" / "simulate.py").write_text("def run_trial(setting, trial, seed):\n    return {}\n", encoding="utf-8")
     assert code_project.study_of(tmp_path / "code", _protocol())["paired"] is True
@@ -137,3 +150,62 @@ def test_every_way_of_loading_the_records_reads_the_seeds(tmp_path):
     rec = pv.load(tmp_path)
     assert rec is not None and rec.share_draws(rec.cells)
     assert "different random draws" in pv.resolve(KEY, rec).text
+
+
+# --- every reducer and interval form counts the draws, with the inputs the review used ----------------------------
+
+
+def _record(per_setting: dict[str, dict[int, float]], seeds: dict[str, dict[int, int]], extra=None, metric="x"):
+    cells = []
+    for i, (key, vals) in enumerate(per_setting.items()):
+        ids = sorted(vals)
+        metrics = {metric: {"values": [vals[t] for t in ids], "trials": ids}}
+        for name, other in (extra or {}).items():
+            metrics[name] = {"values": [other[key][t] for t in ids], "trials": ids}
+        cells.append({"cell": {"n": i + 1}, "key": key, "planned": len(ids), "ok": len(ids), "failed": 0, "metrics": metrics})
+    rec = pv.from_cells(cells)
+    rec.seeds = seeds
+    return rec
+
+
+def test_the_mean_over_settings_with_unequal_trials_is_the_mean_of_the_draws():
+    # setting A ran draws 100 and 101, B only 101 (a trial failed): the draws' means are 0 and 10, so 5 (not 6.667)
+    rec = _record({"a": {0: 0.0, 1: 10.0}, "b": {1: 10.0}}, {"a": {0: 100, 1: 101}, "b": {1: 101}})
+    assert pv.resolve("x:mean @ n=all", rec).text == "5.000"
+
+
+def test_sd_ci_and_corr_ci_count_the_draws_and_give_none_for_one_draw():
+    seeds = {"a": {0: 100, 1: 101, 2: 102, 3: 103, 4: 104, 5: 105}, "b": {0: 100, 1: 101, 2: 102, 3: 103, 4: 104, 5: 105}}
+    vals = {"a": {t: float(t * t % 7) for t in range(6)}, "b": {t: float(t * t % 7) + 0.1 for t in range(6)}}
+    other = {k: {t: v + t for t, v in d.items()} for k, d in vals.items()}
+    rec = _record(vals, seeds, {"y": other})
+    shared = pv.resolve("x:sd_ci @ n=all", rec)
+    rec.seeds = {}
+    naive = pv.resolve("x:sd_ci @ n=all", rec)
+    rec.seeds = seeds
+    assert "6 different random draws" in shared.text and "different random draws" not in naive.text
+    assert shared.numbers[2] - shared.numbers[1] > naive.numbers[2] - naive.numbers[1]   # fewer degrees of freedom: wider
+    corr = pv.resolve("x:corr_ci:y @ n=all", rec)
+    assert corr.filled and "6 different random draws" in corr.text    # 6 pairs, not 12 trials
+    one = _record({"a": {0: 1.0, 1: 2.0}, "b": {0: 1.0, 1: 2.0}}, {"a": {0: 5, 1: 5}, "b": {0: 5, 1: 5}}, {"y": {"a": {0: 1.0, 1: 2.0}, "b": {0: 1.0, 1: 2.0}}})
+    for key in ("x:mean_ci @ n=all", "x:se @ n=all", "x:sd_ci @ n=all", "x:corr_ci:y @ n=all"):
+        assert not pv.resolve(key, one).filled, key
+
+
+def test_count_where_uses_the_t_interval_over_draws_not_a_wilson_interval_of_all_trials():
+    protocol = {"grid": {"n": [1, 2], "m": [1, 2]}, "thresholds": {"r": 0.75},
+                "metrics": [{"id": "b", "reference": {"value": "b", "formula": "r"}}]}
+    cells, seeds = [], {}
+    for n in (1, 2):
+        for m in (1, 2):
+            key = f"n={n},m={m}"
+            vals = [1.0] * 5 + [0.0] * 5
+            cells.append({"cell": {"n": n, "m": m}, "key": key, "planned": 10, "ok": 10, "failed": 0,
+                          "metrics": {"b": {"values": vals, "trials": list(range(10))}}})
+            seeds[key] = {t: 100 * n + t for t in range(10)}      # the two m settings of one n share their 10 draws
+    rec = pv.from_cells(cells, protocol)
+    key = "b @ n=each, m=all | count_where:differs"
+    naive = pv.resolve(key, rec)
+    rec.seeds = seeds
+    shared = pv.resolve(key, rec)
+    assert naive.filled and shared.filled and naive.text != shared.text, (naive.text, shared.text)
