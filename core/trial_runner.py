@@ -1710,6 +1710,11 @@ async def _run_batch(executor: Any, python: Path | str, quest_root: Path, module
     return kept, result
 
 
+class TimeLimit(str):
+    """The reason of a run FI itself stopped at its time limit (``result.timed_out`` of the executor). A reason is a plain
+    string everywhere else, so what a program prints or raises can never be mistaken for it: only FI makes this class."""
+
+
 async def _run_one(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, entry: str, cell: dict[str, Any],
                    seed: int | None, timeout_s: int, env: dict[str, str] | None, thresholds: dict[str, Any] | None,
                    label: str, trial: int = 0, spy_trial: bool = False,
@@ -1732,7 +1737,7 @@ async def _run_one(executor: Any, python: Path | str, quest_root: Path, module: 
         if row.get("status") == "failed":
             where = last_frame(str(row.get("traceback") or ""), quest_root)
             return None, str(row.get("reason") or f"{label} failed") + (f" (at {where})" if where else "")
-    return None, (f"{label} ran out of time" if getattr(result, "timed_out", False)
+    return None, (TimeLimit(f"{label} ran out of time") if getattr(result, "timed_out", False)
                   else f"{label} did not report (exit code {result.returncode})")
 
 
@@ -1990,7 +1995,7 @@ async def run_case_trials(executor: Any, python: Path | str, quest_root: Path, m
             return [], str(row.get("reason") or "run_trial() failed"), [], started
         failed.append(str(row.get("reason") or "run_trial() failed"))
     if not values:
-        return [], ("run_trial() ran out of time" if getattr(result, "timed_out", False)
+        return [], (TimeLimit("run_trial() ran out of time") if getattr(result, "timed_out", False)
                     else f"run_trial() did not report (exit code {getattr(result, 'returncode', None)})"), failed, started
     return values, "", failed, started
 
@@ -2133,7 +2138,7 @@ async def _seeded_once(executor: Any, python: Path | str, quest_root: Path, modu
             return numbers, float(seconds) if isinstance(seconds, (int, float)) else 0.0, ""
         if row.get("status") == "failed":
             return None, 0.0, str(row.get("reason") or "run_trial failed")
-    return None, 0.0, ("run_trial ran out of time" if getattr(result, "timed_out", False)
+    return None, 0.0, (TimeLimit("run_trial ran out of time") if getattr(result, "timed_out", False)
                        else f"run_trial did not report (exit code {result.returncode})")
 
 
@@ -2434,7 +2439,7 @@ async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, m
     ``mean_names``: the protocol's metrics that are means over runs (a mean check whose names are all among them is the
     formula on their means). ``paired``: the study gives trial ``t`` of every setting one seed, and so do the checks.
     ``unrun``: when given, it is filled with ``{check name: why}`` for each case the simulation could not be run on (the
-    reason is the run's own: a trial that did not report, "ran out of time", a load error)."""
+    run's own reason: a trial that did not report, a load error; a :class:`TimeLimit` when FI stopped it at its limit)."""
     checks: list[dict[str, Any]] = []
     problems: list[str] = []
     timed_out = False
@@ -2491,8 +2496,8 @@ async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, m
                     problems.append(f"the oracle {name!r}: the simulation could not be run on its case "
                                     f"({clip_keeping_place(problem, 300)})")
                     if unrun is not None:
-                        unrun[name] = str(problem)
-                    timed_out = timed_out or "ran out of time" in problem
+                        unrun[name] = problem
+                    timed_out = timed_out or isinstance(problem, TimeLimit)
                 else:
                     if check is not None:
                         checks.append(check)
@@ -2505,8 +2510,8 @@ async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, m
             problems.append(f"the oracle {name!r}: the simulation could not be run on its case "
                             f"({clip_keeping_place(why, 300)})")
             if unrun is not None:
-                unrun[name] = str(why)
-            timed_out = timed_out or "ran out of time" in why
+                unrun[name] = why
+            timed_out = timed_out or isinstance(why, TimeLimit)
             continue
         check, problem = _check_from(name, measure, values)
         if check is not None:
@@ -2519,7 +2524,7 @@ async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, m
         if values is None:
             problems.append(f"simulate.py's oracle() did not give its values: "
                             f"{clip_keeping_place(why.strip(), 300) or 'no reason given'}")
-            timed_out = timed_out or "ran out of time" in why
+            timed_out = timed_out or isinstance(why, TimeLimit)
         else:
             checks += [{"name": k, "value": v, "measured_by": "script"} for k, v in values.items()
                        if not any(str(o["name"]).strip().lower() == str(k).strip().lower() for o in oracles if _oracle.case_of(o))]

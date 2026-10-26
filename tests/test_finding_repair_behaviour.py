@@ -38,8 +38,8 @@ def _response(run: Run):
     async def measure() -> dict[str, Any]:
         q = _quality(run)
         a, b = float(q(1, 1, 1)), float(q(2, 3, 2))
-        return {"quantity": "quality", "values": [a, b], "numbers": [{"quality": [a], "other": [a + 1]},
-                                                                    {"quality": [b], "other": [b + 1]}]}
+        return {"quantity": "quality", "values": [a, b], "numbers": [{"quality": a, "other": a + 1},
+                                                                    {"quality": b, "other": b + 1}]}
     return measure
 
 
@@ -103,7 +103,7 @@ def test_the_same_repair_is_kept_when_the_study_was_already_blind_before_it(tmp_
     run = Run(tmp_path, [{"id": "F-1"}], {"code:test": [_block(FAILING)], "code:repair": [_block(CONSTANT)]})
 
     async def flat() -> dict[str, Any]:
-        return {"quantity": "quality", "values": [1.0, 1.0], "numbers": [{"quality": [1.0]}, {"quality": [1.0]}]}
+        return {"quantity": "quality", "values": [1.0, 1.0], "numbers": [{"quality": 1.0}, {"quality": 1.0}]}
 
     run.env.design_response = flat
     assert run.go() == ["spring.py"], "a property of the code, not of the repair"
@@ -120,8 +120,8 @@ def test_answers_lost_names_only_what_passed_before_and_fails_after() -> None:
 
 
 def test_design_blind_looks_at_every_number_the_entry_returns_not_the_objective_alone() -> None:
-    differ = {"quantity": "o", "values": [0.0, 0.0], "numbers": [{"o": [0.0], "x": [1.0]}, {"o": [0.0], "x": [2.0]}]}
-    same = {"quantity": "o", "values": [0.0, 0.0], "numbers": [{"o": [0.0], "x": [1.0]}, {"o": [0.0], "x": [1.0]}]}
+    differ = {"quantity": "o", "values": [0.0, 0.0], "numbers": [{"o": 0.0, "x": 1.0}, {"o": 0.0, "x": 2.0}]}
+    same = {"quantity": "o", "values": [0.0, 0.0], "numbers": [{"o": 0.0, "x": 1.0}, {"o": 0.0, "x": 1.0}]}
     assert fr.design_blind(differ, same) and "blind to the design" in fr.design_blind(differ, same)
     assert fr.design_blind(differ, differ) == "" and fr.design_blind(same, same) == "" and fr.design_blind(same, differ) == ""
     assert fr.design_blind(None, same) == "" and fr.design_blind(differ, None) == ""

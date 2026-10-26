@@ -1197,6 +1197,9 @@ class Env:
     baseline_response: dict[str, Any] | None = None
     #: What the last :func:`_attempt` measured, for the record of the try (seconds, and the values compared).
     measured: dict[str, Any] = field(default_factory=dict)
+    #: What went wrong while measuring (a measure that could not be made, a copy that could not be made or deleted): filled by
+    #: the measures (the engine passes the same list to both), cleared at the start of each try, kept in ``measured``.
+    notes: list[str] = field(default_factory=list)
     #: The files the last :func:`_attempt` took from the model's reply (path -> text; empty: it gave none), for
     #: :func:`keep_try`.
     tried: dict[str, str] = field(default_factory=dict)
@@ -1443,18 +1446,19 @@ def _same_number(a: float, b: float) -> bool:
 
 
 def _compared(numbers: Any) -> dict[str, bool]:
-    """For each name the entry returned on both designs with finite numbers only: whether the two designs gave different
-    numbers. A name with a number that is not finite (NaN, an infinity) on either design, or returned on one design only, is
-    not here: it is undecided, never "the same" (two designs that both give NaN have not been shown to give one answer)."""
+    """For each path (``m[1].left``) the entry returned a number at on both designs, finite on both: whether the two designs
+    gave different numbers there. A path only one design has (a list of another length, another key) and a path with a number
+    that is not finite (NaN, an infinity) are not here: they are not evidence either way (two designs that both give NaN have
+    not been shown to give one answer, and a longer list is not a different answer by itself)."""
     if not isinstance(numbers, list) or len(numbers) != 2 or not all(isinstance(n, dict) for n in numbers):
         return {}
     first, second = numbers
     out: dict[str, bool] = {}
-    for name in sorted(set(first) & set(second)):
-        a, b = first[name], second[name]
-        if any(not isinstance(x, (int, float)) or not math.isfinite(x) for x in (*a, *b)):
+    for path in sorted(set(first) & set(second)):
+        a, b = first[path], second[path]
+        if not all(isinstance(x, (int, float)) and math.isfinite(x) for x in (a, b)):
             continue
-        out[name] = len(a) != len(b) or any(not _same_number(x, y) for x, y in zip(a, b))
+        out[path] = not _same_number(a, b)
     return out
 
 
@@ -1465,8 +1469,7 @@ def _differ(numbers: Any) -> list[str]:
 
 def _count(numbers: Any) -> str:
     done = _compared(numbers)
-    undecided = len(numbers[0]) - len(done) if isinstance(numbers, list) and numbers and isinstance(numbers[0], dict) else 0
-    return f"{sum(done.values())} of {len(done)} compared" + (f" ({undecided} not decided: not a finite number)" if undecided else "")
+    return f"{sum(done.values())} of {len(done)} compared"
 
 
 def design_blind(before: dict[str, Any] | None, after: dict[str, Any] | None) -> str:
@@ -1499,6 +1502,7 @@ async def _measure_behaviour(env: Env, which: str) -> Any:
         return await hook()
     except Exception as e:  # noqa: BLE001
         env.log.warning("[code_review] %s could not be measured on the code (%r); not judged", which, e)
+        env.notes.append(f"{which} could not be measured: {e!r}"[:300])
         return None
 
 
@@ -1634,6 +1638,7 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
             (env.code / target).write_text(before, encoding="utf-8")
 
     # on the code as it is, before this repair is written
+    env.notes.clear()
     if env.baseline_answers is None:
         env.baseline_answers = await _measure_behaviour(env, "known_answers")
     if env.baseline_response is None:
@@ -1664,8 +1669,10 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
         response = await _measure_behaviour(env, "design_response")
         lost = answers_lost(env.baseline_answers, answers)
         blind = design_blind(env.baseline_response, response)
-        if answers or response:
+        if answers or response or env.notes:
             env.measured = {"seconds": round(time.monotonic() - began, 1)}
+            if env.notes:  # a measure that was unavailable is undecided, and said
+                env.measured["not_measured"] = list(env.notes)
             if answers:
                 env.measured["known_answers"] = {n: [(env.baseline_answers or {}).get(n, {}).get("value"), a.get("value")]
                                                  for n, a in answers.items()}
@@ -1684,6 +1691,8 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
                     "values_that_differ_after": _count(response.get("numbers"))}
             env.log.info("[code_review] %s: the known-answer and design checks of this repair took %.0f s",
                          issue.get("id"), env.measured["seconds"])
+            if env.notes:
+                env.log.warning("[code_review] %s: not measured or not cleaned up: %s", issue.get("id"), "; ".join(env.notes))
         if env.baseline_response and _compared(env.baseline_response.get("numbers")) and not _differ(
                 env.baseline_response.get("numbers")):
             env.log.info("[code_review] the study's entry returns the same numbers on two different designs in the code as it "

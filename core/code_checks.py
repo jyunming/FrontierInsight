@@ -258,7 +258,8 @@ async def _equation_verdict(quest_root: Path, protocol: dict[str, Any] | None, *
 
 
 async def known_answer_values(quest_root: Path, protocol: dict[str, Any] | None, *, executor: Any, python: Any,
-                              env: dict[str, str], timeout_s: int, log: Any = None) -> dict[str, dict[str, Any]] | None:
+                              env: dict[str, str], timeout_s: int, log: Any = None,
+                              notes: list[str] | None = None) -> dict[str, dict[str, Any]] | None:
     """What each known-answer check the engine can judge gives on ``<quest_root>/code`` as it is, run by FI the way the gate
     after the run runs them (a search is called with the conditions held fixed): ``{check: {"passed", "value",
     "undecided"}}``, for a caller that compares two versions of the code (the repair of a reader's finding). ``None`` when
@@ -276,7 +277,7 @@ async def known_answer_values(quest_root: Path, protocol: dict[str, Any] | None,
     paired = _mc_error.paired(protocol, quest_root)  # read from the quest's own records
     # Measuring must leave nothing in the quest (raw files, the shared cache, files the code writes): the cases run in a
     # throwaway copy of it, deleted after.
-    with _outside.observation_copy(quest_root) as work:
+    with _outside.observation_copy(quest_root, notes=notes, log=log) as work:
         raw_dir = _split_run.raw_root_of(work) / "finding_replay"
         raw_dir.mkdir(parents=True, exist_ok=True)
         checks, _problems, _timed_out = await _trials.measure_oracles(
@@ -291,11 +292,12 @@ async def known_answer_values(quest_root: Path, protocol: dict[str, Any] | None,
     for j in judged:
         name = str(j["name"])
         why = unrun.get(name)
-        # A case the clock cut off was not measured: nothing is learned from it either way (undecided), unlike one that
-        # ran and gave nothing or a failing answer.
+        # A case FI stopped at its time limit was not measured: nothing is learned from it either way (undecided), unlike
+        # one that ran and gave nothing or a failing answer. Decided by FI's own stop (``TimeLimit``), never by the text a
+        # program printed.
         out[name] = {"passed": j["passed_by_engine"], "value": j["value"],
-                     "undecided": bool(j.get("undecided")) or bool(why and "ran out of time" in why),
-                     **({"not_run": why[:300]} if why else {})}
+                     "undecided": bool(j.get("undecided")) or isinstance(why, _trials.TimeLimit),
+                     **({"not_run": str(why)[:300]} if why else {})}
     return out
 
 
