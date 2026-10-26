@@ -172,3 +172,43 @@ async def test_an_oracle_repair_with_no_study_result_is_put_back(tmp_path: Path,
     assert new is None and not failed and outcome == "not_usable"
     assert (code / "simulate.py").read_text(encoding="utf-8") == before
     assert "no longer returns the study's results" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+
+
+SLOW_DELEGATING = '''
+import time
+
+def run_cell(cell):
+    time.sleep(30)
+    return {"yield_rate": 1.0}
+
+def run_trial(cell, trial_id=0, seed=0):
+    return run_cell(cell)
+'''
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_cannot_be_finished_leaves_no_guessed_shape_rule_in_force(tmp_path: Path) -> None:
+    root = _quest(tmp_path, SLOW_DELEGATING)
+    source = (root / "code" / "simulate.py").read_text(encoding="utf-8")
+    assert tr.trial_aggregates(source, root), "the code's shape alone names it before anything is measured"
+    done = await tr.settle_aggregate(VenvExecutor(), sys.executable, root, "code/simulate.py", cell=dict(CELL), timeout_s=3)
+    assert done is None, "not measured is neither the same nor different"
+    assert tr.trial_aggregates(source, root) == "", "the shape rule alone does not refuse"
+
+
+@pytest.mark.asyncio
+async def test_a_plan_with_a_run_level_and_an_analysis_derived_metric_passes_on_the_run_level_one(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = _engine(tmp_path)
+    engine._trial_mode = True
+    code = engine.quest_root / "code"
+    code.mkdir(parents=True, exist_ok=True)
+    protocol = {"grid": {"width": [1.0, 2.0]}, "metrics": [{"id": "yield_rate", "kind": "mean"},
+                                                          {"id": "relative_gain", "kind": "mean"}]}  # derived in analysis
+    monkeypatch.setattr(engine, "_protocol_block", lambda state: protocol)
+    state: dict[str, Any] = {"design": {"protocol": protocol}}
+    keeps = KEEPS_OBJECTIVE.replace("Yield_Rate", "yield_rate")
+    (code / "simulate.py").write_text(keeps, encoding="utf-8")
+    assert await engine._simulation_repair_fault(state, keeps) == ""
+    (code / "simulate.py").write_text(CHECK_ONLY, encoding="utf-8")
+    assert "no longer returns the study's results" in await engine._simulation_repair_fault(state, CHECK_ONLY)

@@ -13759,7 +13759,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         protocol = self._protocol_block(state)
         first = self._first_study_cell(protocol) if isinstance(protocol, dict) else None
         if first is None:
-            return "" if not _trial_runner.trial_aggregates(new_code) else _trial_runner.TRIAL_AGGREGATE_WHY
+            if _trial_runner.trial_aggregates(new_code):
+                self._log.warning("[execute] FI could not measure whether run_trial runs one trial (the plan gives no first "
+                                  "setting to call it on); the reading of the code alone does not refuse it")
+            return ""
         cell, inside = first
         py = self.executor.python_path(self.quest_root)
         env = dict(self.__dict__.get("_last_exec_env") or {})
@@ -13767,12 +13770,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
 
         limit = _small_run_budget(self.config.execution.timeout_s)
         module = f"code/{_split_run.SIMULATE_NAME}"
+        one_setting_s = int(self.config.execution.timeout_s)  # what the real run gives one setting
         thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None
         if _trial_runner.trial_aggregates(new_code, self.quest_root):
-            if not await self._await_with_heartbeat(
+            if await self._await_with_heartbeat(
                     _trial_runner.settle_aggregate(self.executor, py, self.quest_root, module, cell=cell, inside=inside,
-                                                   timeout_s=limit, env=env, thresholds=thresholds, log=self._log),
-                    label="calling the repaired trial function with two seeds"):
+                                                   timeout_s=one_setting_s, env=env, thresholds=thresholds, log=self._log),
+                    label="calling the repaired trial function with two seeds") is False:
                 return _trial_runner.TRIAL_AGGREGATE_WHY
         return await self._await_with_heartbeat(
             _trial_runner.entry_returns_study(

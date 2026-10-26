@@ -759,16 +759,14 @@ class RunChecksMixin:
         # A run_trial that returns the mean of many trials (it calls run_cell) is a fault of the code, not of the plan's size:
         # it goes back to the code step, never to the plan to shrink the grid (which dropped settings the topic required).
         if isinstance(runner, _trial_runner.TrialsRunner):
-            from .small_run import budget as _small_run_budget
-
             try:
                 text = runner.simulate.read_text(encoding="utf-8")
                 aggregate = _trial_runner.trial_aggregates(text, self.quest_root)  # type: ignore[attr-defined]
                 first = self._first_study_cell(self._protocol_block(state) or {}) if aggregate else None  # type: ignore[attr-defined]
                 if aggregate and first is not None and await _trial_runner.settle_aggregate(
                         self.executor, python, self.quest_root, runner.simulate, cell=first[0], inside=first[1],  # type: ignore[attr-defined]
-                        timeout_s=_small_run_budget(self.config.execution.timeout_s), env=env, log=self._log):  # type: ignore[attr-defined]
-                    aggregate = ""  # FI called it with two seeds: the setting's number does not depend on the trial
+                        timeout_s=int(self.config.execution.timeout_s), env=env, log=self._log) is not False:  # type: ignore[attr-defined]
+                    aggregate = ""  # two seeds gave the same numbers, or the call could not be measured (said in the log)
             except (OSError, ValueError):
                 aggregate = ""
             if aggregate:

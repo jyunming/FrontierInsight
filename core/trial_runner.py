@@ -1044,28 +1044,31 @@ def _source_sha(source: str) -> str:
 
 
 def one_trial_measured(quest_root: Path | str, source: str) -> bool:
-    """Whether FI measured, on this text of simulate.py, that its ``run_trial`` gives the same numbers whatever the trial
-    (:func:`settle_aggregate`)."""
+    """Whether the shape rule is set aside for this text of simulate.py: FI measured that its ``run_trial`` gives the same
+    numbers whatever the trial, or tried and could not measure it (:func:`settle_aggregate`); only a measured difference
+    keeps the rule in force."""
     try:
         record = json.loads((Path(quest_root) / ONE_TRIAL_RECORD).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
-    return isinstance(record, dict) and record.get("sha256") == _source_sha(source) and record.get("same") is True
+    return isinstance(record, dict) and record.get("sha256") == _source_sha(source) and record.get("same") is not False
 
 
 async def settle_aggregate(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, cell: dict[str, Any],
                            inside: dict[str, list[Any]] | None = None, timeout_s: int, env: dict[str, str] | None = None,
-                           thresholds: dict[str, Any] | None = None, log: Any = None) -> bool:
+                           thresholds: dict[str, Any] | None = None, log: Any = None) -> bool | None:
     """Whether a ``run_trial`` that :func:`trial_aggregates` names by its code is harmless: FI calls it on ``cell`` with two
-    seeds, each call in a new process, and when every number that is not the call's own time is the same, the setting's
-    number does not depend on the trial (a study without randomness, whose ``run_cell`` is its one trial). The answer is
-    kept for this text of the file (:data:`ONE_TRIAL_RECORD`). ``False`` also when the calls could not be made."""
+    seeds, each call in a new process (``timeout_s``: the time the real run gives one setting), and when every number that
+    is not the call's own time is the same, the setting's number does not depend on the trial (a study without randomness,
+    whose ``run_cell`` is its one trial): ``True``; ``False`` when a number changed. ``None`` when the calls could not be
+    finished: a guess from the code's shape does not stand in for a measurement, so the rule is then set aside for this
+    text of the file (and said in the log). The answer is kept in :data:`ONE_TRIAL_RECORD`."""
     path = Path(module) if Path(module).is_absolute() else Path(quest_root) / module
     module = _relative_module(quest_root, path)
     try:
         source = path.read_text(encoding="utf-8")
     except OSError:
-        return False
+        return None
     if one_trial_measured(quest_root, source):
         return True
     inside = {str(k): list(v) for k, v in (inside or {}).items()}
@@ -1080,13 +1083,23 @@ async def settle_aggregate(executor: Any, python: Path | str, quest_root: Path, 
                                          env=env, thresholds=thresholds, levels=levels, log=log)
         row = next((r for r in rows if r.get("status") == "ok"), None)
         if row is None:
-            return False
+            if log is not None:
+                log.warning("[execute] FI could not measure whether run_trial runs one trial (calling it with two seeds on the "
+                            "plan's first setting did not finish within %s s); the reading of the code alone does not refuse it",
+                            timeout_s)
+            _write_one_trial(quest_root, source, None, [])
+            return None
         seconds = row.get("duration_s")
         got.append(({_in_run.record_key(k, n) if k else n: v for k, n, v in _in_run.flat("", row.get("values") or {})},
                     float(seconds) if isinstance(seconds, (int, float)) else 0.0))
     (a, sa), (b, sb) = got
     moved = [n for n in set(a) | set(b) if n not in a or n not in b or not _same_value(a[n], b[n])]
     same = bool(a) and all(n in a and n in b and _is_run_time((a[n], sa), (b[n], sb)) for n in moved)
+    _write_one_trial(quest_root, source, same, moved)
+    return same
+
+
+def _write_one_trial(quest_root: Path | str, source: str, same: bool | None, moved: list[str]) -> None:
     try:
         record = Path(quest_root) / ONE_TRIAL_RECORD
         record.parent.mkdir(parents=True, exist_ok=True)
@@ -1094,7 +1107,6 @@ async def settle_aggregate(executor: Any, python: Path | str, quest_root: Path, 
                           encoding="utf-8")
     except OSError:
         pass
-    return same
 
 
 def _relative_module(quest_root: Path | str, path: Path) -> str:
