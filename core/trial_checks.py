@@ -901,8 +901,8 @@ def calibration_directive(faults: list[Quantity]) -> str:
 
 OK, REPAIR, STOP, LEAVE_OUT, DISCLOSE = "ok", "repair", "stop", "leave_out", "disclose"
 #: The kinds of reported uncertainty whose disagreement with the trials, once the repairs are spent, is a measured property
-#: of the estimator rather than a code fault FI can name: the quest goes on and the paper says, setting by setting, where it
-#: was measured. (``multiplier``: the code does not use the multiplier the plan fixes, a fault; ``missing``, ``bias`` and
+#: of the estimator rather than a code fault FI can name, and only while the error is right over all settings together (the
+#: pooled measure is inside its range): the quest goes on and the paper says, setting by setting, where it was measured. (``multiplier``: the code does not use the multiplier the plan fixes, a fault; ``missing``, ``bias`` and
 #: ``no_estimate`` concern the estimate itself: those still stop.)
 DISCLOSABLE = ("coverage", "se_ratio")
 
@@ -920,7 +920,8 @@ class Verdict:
     simulation back with ``directive``), :data:`STOP` (the repairs are spent and a fault stands: the quest stops, ``say`` /
     ``tried`` are its plain record) or :data:`LEAVE_OUT` (the repairs are spent and only some settings are faulty: their
     numbers are left out of what the analysis is given, ``left_out``) or :data:`DISCLOSE` (the repairs are spent and the only
-    fault standing is a reported standard error or interval measured not to match the trials, at the settings the record's
+    fault standing is a reported standard error or interval measured not to match the trials at some settings only (right over all
+    of them together), at the settings the record's
     quantities mark ``gross``: the quest goes on, and the paper and the quality report say where)."""
 
     fails: list[SettingFailures]
@@ -987,8 +988,11 @@ def judge(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = None, t
                          *[f.says() for f in bad[:2]]]
         # What stands is a reported uncertainty measured not to match the trials (and no failed trials): that is a result
         # about the estimator, kept for the settings where it was measured, not a reason to write no paper.
+        # Only when the error is right over all the settings together: the check's own pooled measure, at the same range and
+        # sampling-error rule as per setting, is inside its accepted range for every such quantity. A pooled measure that is
+        # itself outside it (a fault everywhere, or a fault wide enough to move the whole) still stops.
         if (out.action == STOP and cal.faults and not bad
-                and all(q.kind in DISCLOSABLE for q in cal.faults)):
+                and all(q.kind in DISCLOSABLE and q.pooled is not None and not q.pooled.gross for q in cal.faults)):
             out.action = DISCLOSE
         return out
     # Where the plan declares a true value, settings are left out only when what remains is shown sound: every remaining

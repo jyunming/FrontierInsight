@@ -81,18 +81,18 @@ def test_honest_one_setting_off_is_kept_and_scoped_once_the_repairs_are_spent(tm
     assert any("measured not to match at: " + KEYS[0] in ln and "the other 5 of 6 settings matched" in ln for ln in lines)
 
 
-def test_planted_error_times_three_everywhere_is_sent_back_then_every_setting_is_disclosed(tmp_path: Path) -> None:
+def test_planted_error_times_three_everywhere_is_sent_back_then_still_stops() -> None:
     cells = _cells({k: 3.0 for k in KEYS})
     assert _judge(cells, left=True).action == tc.REPAIR  # caught and sent back for repair
     v = _judge(cells, left=False)
-    assert v.action == tc.DISCLOSE
     [q] = v.calibration.faults
-    assert q.gross == len(KEYS)  # every setting measured wrong
-    [item] = _disclosed(_quest(tmp_path, v))
-    assert "in every setting" in item.sentence and "In the other" not in item.sentence
-    assert "no interval formed from it is presented as a valid interval" in item.sentence
-    for key in KEYS[:6]:
-        assert key in item.sentence
+    assert q.gross == len(KEYS) and q.pooled is not None and q.pooled.gross  # wrong over all settings together
+    assert v.action == tc.STOP  # a fault everywhere is never kept: nothing it can vouch for
+
+
+def test_a_standard_error_on_the_wrong_scale_everywhere_stops() -> None:
+    v = _judge(_cells({k: 16.0 for k in KEYS}), left=False)
+    assert v.action == tc.STOP and v.calibration.faults[0].pooled.gross
 
 
 def test_planted_error_times_three_at_half_the_settings_names_exactly_those(tmp_path: Path) -> None:
@@ -109,14 +109,14 @@ def test_planted_error_times_three_at_half_the_settings_names_exactly_those(tmp_
 
 
 def test_an_interval_measured_to_miss_is_disclosed_as_not_valid_at_its_level(tmp_path: Path) -> None:
-    cells = _cells({k: 0.3 for k in KEYS[:2]}, interval=True)  # intervals far too narrow at two settings
+    cells = _cells({KEYS[0]: 0.3}, interval=True)  # intervals far too narrow at one setting
     plan = _proto(known("x_hat", 1.0, interval=("x_lo", "x_hi")))
     assert tc.judge(cells, plan, None, None, repairs_left=True).action == tc.REPAIR
     v = tc.judge(cells, plan, None, None, repairs_left=False)
     assert v.action == tc.DISCLOSE
     [item] = _disclosed(_quest(tmp_path, v))
     assert "95% intervals" in item.sentence and "not presented as valid 95% intervals" in item.sentence
-    assert KEYS[0] in item.sentence and KEYS[1] in item.sentence and KEYS[2] not in item.sentence
+    assert KEYS[0] in item.sentence and KEYS[1] not in item.sentence
 
 
 def test_failed_trials_with_a_standing_calibration_fault_still_stop() -> None:

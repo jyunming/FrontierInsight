@@ -101,7 +101,7 @@ def test_replay_r12_most_noisy_trials_fail_sent_back_then_left_out(tmp_path: Pat
     assert report["trial_checks"]["left_out"] == ["noise_std_rel=0.08,n_timepoints=12"]
 
 
-def test_replay_r12_with_the_crashes_repaired_a_grossly_wrong_interval_is_sent_back_then_kept_and_disclosed(tmp_path: Path) -> None:
+def test_replay_r12_with_the_crashes_repaired_a_grossly_wrong_interval_is_sent_back_then_stops(tmp_path: Path) -> None:
     pytest.importorskip("scipy")
     root = _quest(tmp_path, relaxed=True)
     runner, result = _run(root, [0.04, 0.08], repairs_left=True)
@@ -109,11 +109,8 @@ def test_replay_r12_with_the_crashes_repaired_a_grossly_wrong_interval_is_sent_b
     assert not runner.trial_fault["partial"]
     assert "weighted_Ea_lower .. weighted_Ea_upper" in result.stderr and "grossly wrong" in result.stderr
     runner, result = _run(root, [0.04, 0.08], repairs_left=False)
-    # the repairs are spent and the interval is still measured wrong: the study goes on (no stop) and the record says where
-    assert result.returncode == 0 and not getattr(runner, "trial_fault", None)
-    rec = trial_checks.read_record(root)
-    assert rec["action"] == trial_checks.DISCLOSE
-    assert any(q["fault"] and q["kind"] == "coverage" for q in rec["calibration"]["quantities"])
+    assert result.returncode == 1 and runner.trial_fault["action"] == trial_checks.STOP
+    assert "grossly wrong" in runner.trial_fault["say"]
 
 
 # ---- the engine's side: the stop, or a run once more with the settings left out -----------------------------------------
