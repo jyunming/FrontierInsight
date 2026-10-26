@@ -66,3 +66,13 @@ def test_the_one_line_for_a_zero_improvement(monkeypatch) -> None:
     monkeypatch.setattr(report, "records", lambda _root: {"best_design": _best(improvement=-0.0), "optimum_check": None})
     line = report.summary_line(Path("."))
     assert "-0" not in line and "no better than the baseline" in line
+
+
+def test_the_starting_points_said_are_those_that_ran_not_the_plans_count(monkeypatch) -> None:
+    best = _best(method="global_then_local")
+    best["evaluations"].update(starts=6, per_start=10)
+    best["starts"] = [{"start": 0, "evaluations": 30, "stopped_because": "budget"}]
+    text = _section(monkeypatch, best)
+    assert "for each of 6 starting points; the local search ran from 1 starting point)" in text
+    best["starts"] = [{"start": k} for k in range(6)]
+    assert "the local search ran from" not in _section(monkeypatch, best), "as planned: nothing more to say"

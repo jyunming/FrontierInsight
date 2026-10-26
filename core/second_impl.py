@@ -15,6 +15,10 @@ and compares the answers:
 * ``unconfirmed``: the comparison could not be made (no inputs, a version that would not load, a request that was lost,
   the call limit). Never a repair, never a stop.
 
+The inputs come from the plan's worked example when it has one; otherwise from FI's own record of what the function is
+called with when the simulation runs once at a setting of the plan (:func:`capture_inputs`, through FI's trial harness),
+so a function the plan gives no example for is still compared, on the very inputs the study gives it.
+
 ``unresolved`` and ``unconfirmed`` come with one plain sentence for QUALITY.md and the paper's limitations
 (:func:`limitations`); an ``unresolved`` one is an item FI fills into the paper's Limitations itself and checks is there
 (:mod:`core.paper_facts`). Nothing here stops a quest and nothing asks a person.
@@ -41,14 +45,21 @@ import logging
 import math
 import re
 import string
+import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from . import equation_tests as _eqt
 from . import function_steps as _fs
+from . import oracle_forms as _forms
 
 RECORD = Path(".fi") / "second_impl.json"
 DIR = Path(".fi") / "second_impl"
+#: What each key function was called with when FI ran the simulation once (:func:`capture_inputs`).
+CAPTURED = DIR / "captured_inputs.json"
+#: The calls kept per function, and the most numbers kept from one call.
+CAPTURE_CALLS = 3
+CAPTURE_ELEMENTS = 20000
 #: Fixed limits (not settings).
 MAX_KEY = 6
 MAX_ROUNDS = 2
@@ -223,20 +234,57 @@ def _shift(v: Any, d: float) -> Any:
     return v + int(d) if isinstance(v, int) else float(v) + d
 
 
-def build_inputs(base: dict[str, Any], ranges: dict[str, Any] | None = None, limit: int = MAX_INPUTS) -> list[dict[str, Any]]:
+def domain_of(spec: _fs.Spec, protocol: dict[str, Any] | None, base: dict[str, Any] | None) -> Callable[[dict[str, Any]], bool] | None:
+    """Whether the plan's own worked example still defines the function at an input: a predicate on a case, or ``None``
+    when there is none to apply. The example's ``expected_formula`` is the plan's statement of the function's value in
+    terms of its inputs, and FI's calculator computes it (:func:`core.oracle_forms.formula_value`); an input at which the
+    formula has no real value (a square root of a negative number, a division by zero) is outside the function's domain,
+    where both versions are free to answer anything, so a difference there says nothing about either. Only used when the
+    formula is computable at the example's own inputs (so it is read, and its names are the inputs'), and only for
+    inputs that are all plain numbers; every other case is taken as defined."""
+    example: Any = None
+    if spec.card:
+        example = spec.card.get("example")
+    else:
+        eq = next((e for e in _eqt.eligible(protocol) if _eqt._text(e["id"]) == spec.equation), None)
+        example = (eq or {}).get("example")
+    formula = example.get("expected_formula") if isinstance(example, dict) else None
+    formulas = list(formula.values()) if isinstance(formula, dict) else [formula]
+    if (not formulas or any(f is None or not str(f).strip() for f in formulas) or not isinstance(base, dict)
+            or not all(_is_num(v) for v in base.values())):
+        return None
+
+    def value(case: dict[str, Any], f: Any) -> float | None:
+        return _forms.formula_value({"expected_formula": f, "case": case})[0]
+
+    if any(value(base, f) is None for f in formulas):
+        return None  # not readable from the example's inputs: nothing says where the function is defined
+
+    def defined(case: dict[str, Any]) -> bool:
+        if not all(_is_num(v) for v in case.values()):
+            return True
+        return all(value(case, f) is not None for f in formulas)
+
+    return defined
+
+
+def build_inputs(base: dict[str, Any], ranges: dict[str, Any] | None = None, limit: int = MAX_INPUTS,
+                 defined: Callable[[dict[str, Any]], bool] | None = None) -> list[dict[str, Any]]:
     """The inputs both versions are called with: the example inputs; every scalar at x0.5, x2 and x0.9; arrays rescaled and
     shifted; the edges of a known range. Deterministic; duplicates dropped; at most ``limit``. Strings and booleans are
-    kept as they are. A function with only such inputs is called on the example alone."""
+    kept as they are. A function with only such inputs is called on the example alone. ``defined`` (:func:`domain_of`):
+    a case outside the function's domain is left out (the example itself always stays), so the scaled copies of the
+    example never ask a function a question its own formula cannot answer."""
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
 
-    def add(case: dict[str, Any]) -> None:
+    def add(case: dict[str, Any], *, first: bool = False) -> None:
         key = json.dumps(case, sort_keys=True, default=str)
-        if key not in seen and len(out) < limit:
+        if key not in seen and len(out) < limit and (first or defined is None or defined(case)):
             seen.add(key)
             out.append(case)
 
-    add(dict(base))
+    add(dict(base), first=True)
     scalars = [k for k, v in base.items() if _is_num(v)]
     arrays = [k for k, v in base.items() if _is_array(v)]
     for f in (0.5, 2.0, 0.9):
@@ -286,9 +334,11 @@ def _signature_defaults(signature: str) -> dict[str, Any] | None:
     return case or None
 
 
-def example_inputs(spec: _fs.Spec, protocol: dict[str, Any] | None) -> dict[str, Any] | None:
-    """The inputs of the plan's worked example (the INPUTS only, never the expected value), else the signature's defaults
-    when it has them for every parameter, else ``None``."""
+def example_inputs(spec: _fs.Spec, protocol: dict[str, Any] | None,
+                   captured: dict[str, list[dict[str, Any]]] | None = None) -> dict[str, Any] | None:
+    """The inputs of the plan's worked example (the INPUTS only, never the expected value), else the first call FI
+    recorded when the simulation ran (``captured``, :func:`capture_inputs`), else the signature's defaults when it has
+    them for every parameter, else ``None``."""
     row: dict[str, Any] | None = None
     if spec.kind == _fs.STEP and spec.card and spec.card.get("example") is not None:
         pseudo = {"model": {"equations": [{"id": spec.equation, "formula": spec.card.get("does") or spec.card.get("name") or "step",
@@ -305,7 +355,336 @@ def example_inputs(spec: _fs.Spec, protocol: dict[str, Any] | None) -> dict[str,
         case = {k: v for k, v in row["inputs"].items() if k in params}
         if case:
             return case
+    calls = (captured or {}).get(spec.name) or []
+    if calls and isinstance(calls[0], dict) and calls[0]:
+        return dict(calls[0])
     return _signature_defaults(spec.signature)
+
+
+async def capture_inputs(run: Callable[[list[str]], Awaitable[Any]], quest_root: Path | str, package: str,
+                         names: list[str], cells: list[dict[str, Any]], *, deterministic: bool,
+                         in_each_run: dict[str, list[Any]] | None = None,
+                         thresholds: dict[str, Any] | None = None,
+                         budget_s: float | None = None) -> dict[str, list[dict[str, Any]]]:
+    """FI runs the simulation at each of ``cells`` in turn (settings of the plan; each part of a study takes other paths
+    through the code) through its own trial harness, with each of ``names`` (functions of the package's model) recording
+    the distinct calls it gets, each argument by its parameter's name, kept only when every argument is plain data
+    (numbers, text, real arrays of at most :data:`CAPTURE_ELEMENTS` numbers); it stops once every function has
+    :data:`CAPTURE_CALLS` calls. ``run(argv)`` runs ``python <argv>`` from the quest folder. Saved in :data:`CAPTURED`;
+    ``{}`` when no run could be made. Never an expected value: only what each function is given."""
+    from . import trial_runner as _trials
+
+    root = Path(quest_root)
+    folder = root / DIR / "capture"
+    folder.mkdir(parents=True, exist_ok=True)
+    (root / _trials.HARNESS_PATH).parent.mkdir(parents=True, exist_ok=True)
+    (root / _trials.HARNESS_PATH).write_text(_trials.HARNESS_SOURCE, encoding="utf-8")
+    (root / CAPTURED).unlink(missing_ok=True)
+    out: dict[str, list[dict[str, Any]]] = {}
+    called_at: dict[str, list[int]] = {}
+    ran: list[int] = []
+    returned: dict[str, set[str]] = {}
+    deadline = time.monotonic() + budget_s if budget_s else None
+    for index, cell in enumerate(cells):
+        if all(len(out.get(n, [])) >= CAPTURE_CALLS for n in names) and all(n in called_at for n in names):
+            break
+        if deadline is not None and index and time.monotonic() > deadline:
+            break  # the time given is spent: the settings run so far are the record
+        got = await _run_instrumented(run, root, package, names, cell, f"calls{index}", deterministic=deterministic,
+                                      in_each_run=in_each_run, thresholds=thresholds)
+        if got is None:
+            continue
+        if (got.get("row") or {}).get("status") == "ok":
+            ran.append(index)
+        for n, count in (got.get("counts") or {}).items():
+            if str(n) in names and isinstance(count, int) and count > 0:
+                called_at.setdefault(str(n), []).append(index)
+        for n, keys in (got.get("returned") or {}).items():
+            if str(n) in names and isinstance(keys, list):
+                returned.setdefault(str(n), set()).update(str(k) for k in keys)
+        for n, calls in (got.get("cases") or {}).items():
+            if str(n) not in names or not isinstance(calls, list):
+                continue
+            kept = out.setdefault(str(n), [])
+            for c in calls:
+                if isinstance(c, dict) and c and c not in kept and len(kept) < CAPTURE_CALLS:
+                    kept.append(c)
+    out = {n: calls for n, calls in out.items() if calls}
+    (root / CAPTURED).write_text(json.dumps({"cases": out, "called_at": called_at, "ran": ran,
+                                             "returned": {n: sorted(k) for n, k in returned.items()},
+                                             "cells": [dict(c) for c in cells]}, default=str), encoding="utf-8")
+    return out
+
+
+async def _run_instrumented(run: Callable[[list[str]], Awaitable[Any]], root: Path, package: str, names: list[str],
+                            cell: dict[str, Any], tag: str, *, deterministic: bool,
+                            in_each_run: dict[str, list[Any]] | None, thresholds: dict[str, Any] | None,
+                            shift: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """One run of the simulation at ``cell`` through FI's trial harness with ``names`` instrumented (and, with ``shift``
+    ``{"name", "scale"}``, that function's result changed by that share): ``{"cases", "counts", "shifted", "row"}`` (the
+    trial's row as the harness wrote it), ``None`` when the run could not be made."""
+    from . import trial_runner as _trials
+
+    folder = root / DIR / "capture"
+    plan = _trials._plan(root, "code/simulate.py", {k: [v] for k, v in cell.items()}, runs_per_setting=1, base_seed=0,
+                         deterministic=deterministic, folder=folder, out_name=tag + "-{index}.out.jsonl",
+                         thresholds=thresholds, in_each_run=in_each_run)
+    if not plan:
+        return None
+    task = plan[0]
+    spec_path = root / task["spec"]
+    part = DIR / "capture" / f"{tag}.json"
+    (root / part).unlink(missing_ok=True)
+    try:
+        data = json.loads(spec_path.read_text(encoding="utf-8"))
+        data["capture"] = {"module": f"{package}.model", "names": list(names), "path": part.as_posix(),
+                           "limit": CAPTURE_CALLS, "max_elements": CAPTURE_ELEMENTS, "shift": shift}
+        spec_path.write_text(json.dumps(data, default=str), encoding="utf-8")
+        # The record's path is named on the command line too, so a run made from a copy of the quest gives it back.
+        await run([_trials.HARNESS_PATH.as_posix(), task["spec"], task["out"], part.as_posix()])
+        got = json.loads((root / part).read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 -- no record of the run
+        return None
+    if not isinstance(got, dict):
+        return None
+    row: dict[str, Any] = {}
+    try:
+        for line in (root / task["out"]).read_text(encoding="utf-8").splitlines():
+            item = json.loads(line) if line.strip().startswith("{") else None
+            if isinstance(item, dict) and item.get("nonce") == task["nonce"] and "trial" in item:
+                row = item
+    except (OSError, ValueError):
+        pass
+    return {**got, "row": row}
+
+
+def read_captured(quest_root: Path | str) -> dict[str, Any]:
+    """The record :func:`capture_inputs` saved: ``cases`` (calls by function), ``called_at`` (the indices of the cells
+    each function was called at), ``ran`` (the indices of the cells that ran to the end), ``returned`` (for a function that
+    returned a dict, every key it returned) and ``cells``; ``{}`` when there is none."""
+    try:
+        data = json.loads((Path(quest_root) / CAPTURED).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) and "cases" in data else {}
+
+
+#: Where FI keeps which checked functions the headline results depend on (:func:`dependence`).
+DEPENDENCE = DIR / "dependence.json"
+#: The verdicts of :func:`dependence`. ``stops_when_changed``: the simulation stops when the function's result is changed
+#: (it may compare its own number with it); neither shown to feed the headline results nor shown not to.
+FEEDS, NOT_FEEDING, NOT_CALLED, NOT_RUN, STOPS = ("feeds", "does_not_feed", "not_called", "could_not_run",
+                                                 "stops_when_changed")
+#: The shares by which a checked function's result is changed, in turn: the second only when the run stops at the first.
+SHIFTS = (0.05, 0.005)
+#: At most this many of the settings a function was called at are tried (the first, the last, one between).
+DEPENDENCE_CELLS = 3
+
+
+def _same_value(a: Any, b: Any) -> bool:
+    if isinstance(a, dict) and isinstance(b, dict):
+        return set(a) == set(b) and all(_same_value(a[k], b[k]) for k in a)
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(_same_value(x, y) for x, y in zip(a, b))
+    if _is_num(a) and _is_num(b):
+        fa, fb = float(a), float(b)
+        if math.isnan(fa) and math.isnan(fb):
+            return True
+        return fa == fb or abs(fa - fb) <= 1e-12 * max(1.0, abs(fa), abs(fb))
+    return a == b
+
+
+def _has_finite(v: Any) -> bool:
+    """Whether ``v`` holds at least one finite number (a number, or a dict or list of them)."""
+    if isinstance(v, dict):
+        return any(_has_finite(x) for x in v.values())
+    if isinstance(v, list):
+        return any(_has_finite(x) for x in v)
+    return _is_num(v) and math.isfinite(float(v))
+
+
+def _spread_cells(where: list[int]) -> list[int]:
+    """The first, the last and one between of the settings a function was called at."""
+    if len(where) <= DEPENDENCE_CELLS:
+        return list(where)
+    return sorted({where[0], where[len(where) // 2], where[-1]})
+
+
+async def dependence(run: Callable[[list[str]], Awaitable[Any]], quest_root: Path | str, package: str,
+                     names: list[str], headline: set[str], *, deterministic: bool,
+                     in_each_run: dict[str, list[Any]] | None = None,
+                     thresholds: dict[str, Any] | None = None, budget_s: float | None = None) -> dict[str, Any]:
+    """Whether the headline results are computed with each checked function of ``names``. At up to
+    :data:`DEPENDENCE_CELLS` settings where the function was called (:func:`read_captured`), FI runs the simulation once
+    as it is and once with every real number the function returns changed by up to :data:`SHIFTS` (5%; 0.5% when the run
+    stops at 5%). A headline result that changes depends on it (``feeds``), once a second run as it is gives the same
+    numbers as the first (a result that differs between the two is left out of the comparison; when none repeats,
+    ``could_not_run``). Headline results that come out the very
+    same at every setting tried do not (``does_not_feed``: the checks of that function do not check them). A run that
+    stops whenever the result is changed is ``stops_when_changed`` (neither). A function never called at the settings
+    that ran is ``not_called``. ``headline``: the names of the headline results, compared as the headline check compares
+    them; only finite numbers of the run as it is are compared (every result it returns when a headline result is not
+    among them, since that one is computed later from them; said so).
+    Only references to the function through its module are reached (a copy kept before the run, in a table, is not).
+    Saved in :data:`DEPENDENCE` with the hash of the code it was made on. Never a stop."""
+    from . import criteria as _criteria
+    from . import hidden_check as _hidden
+
+    root = Path(quest_root)
+    record = read_captured(root)
+    cells = record.get("cells") or []
+    called_at = record.get("called_at") or {}
+    ran = [i for i in record.get("ran") or [] if isinstance(i, int)]
+    keys = {_criteria._key(h) for h in headline}
+    plain_runs: dict[tuple[int, int], dict[str, Any]] = {}
+    deadline = time.monotonic() + budget_s if budget_s else None
+
+    def late() -> bool:
+        return deadline is not None and time.monotonic() > deadline
+
+    async def plain(i: int, again: int = 0) -> dict[str, Any]:
+        if (i, again) not in plain_runs:
+            got = await _run_instrumented(run, root, package, [], cells[i], f"plain{i}" + ("b" if again else ""),
+                                          deterministic=deterministic, in_each_run=in_each_run, thresholds=thresholds)
+            plain_runs[(i, again)] = (got or {}).get("row") or {}
+        return plain_runs[(i, again)]
+
+    def _whole(value: Any) -> bool:
+        items = value if isinstance(value, (list, tuple)) else [value]
+        nums = [float(v) for v in items if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)]
+        return bool(nums) and all(v == int(v) for v in nums)
+
+    async def at_cell(name: str, i: int) -> dict[str, Any]:
+        if late() and (i, 0) not in plain_runs:
+            return {"status": NOT_RUN, "why": "the time given to this check was spent"}
+        base = await plain(i)
+        if base.get("status") != "ok":
+            return {"status": NOT_RUN, "why": "the setting did not run as it is"}
+        values = base.get("values") or {}
+        finite = [k for k in values if _has_finite(values[k])]
+        judged = [k for k in finite if _criteria._key(k) in keys]
+        # A headline result the run does not return is computed later from what it returns (an average over runs, a
+        # fit across settings): then every result the run returns may feed it, and all of them are compared.
+        fallback = not keys or not keys <= {_criteria._key(k) for k in values}
+        judged = finite if fallback else judged
+        if not judged:
+            return {"status": NOT_RUN, "why": "the setting gave no number to compare"}
+        stopped = False
+        for scale in SHIFTS:
+            if late():
+                return {"status": NOT_RUN, "why": "the time given to this check was spent"}
+            got = await _run_instrumented(run, root, package, [name], cells[i], f"shift_{name}_{i}",
+                                          deterministic=deterministic, in_each_run=in_each_run, thresholds=thresholds,
+                                          shift={"name": name, "scale": scale})
+            row = (got or {}).get("row") or {}
+            if not row:
+                return {"status": NOT_RUN, "why": "the run with its result changed gave no result"}
+            if not (got.get("counts") or {}).get(name):
+                return {"status": NOT_RUN, "why": "it was not called when the setting was run again"}
+            if not (got.get("shifted") or {}).get(name):
+                return {"status": NOT_RUN, "why": "what it returns holds no number other than zero that FI can change"}
+            if row.get("status") != "ok":
+                stopped = True
+                continue
+            changed = [k for k in judged if not _same_value(values.get(k), (row.get("values") or {}).get(k))]
+            if not changed and all(_whole(values.get(k)) for k in judged):
+                return {"status": NOT_RUN, "why": "every result compared is a whole number (a count, a yes/no, a step "
+                                                  "of a grid), which a change of a few percent need not move"}
+            if not changed:
+                return {"status": NOT_FEEDING, "results": judged[:8], "scale": scale, "all_results": fallback}
+            if late():
+                return {"status": NOT_RUN, "why": "the time given to this check was spent"}
+            # A result that differs between two runs of the setting as it is (a time it took, an unseeded draw) says
+            # nothing either way: only the results that repeat are judged.
+            again = await plain(i, 1)
+            if again.get("status") != "ok":
+                return {"status": NOT_RUN, "why": "the setting did not run as it is a second time"}
+            noisy = {k for k in judged if not _same_value(values.get(k), (again.get("values") or {}).get(k))}
+            steady = [k for k in judged if k not in noisy]
+            real = [k for k in changed if k not in noisy]
+            if real:
+                # Which of them are headline results by name: with the fallback, a value that moved may be one the
+                # analysis never uses, so the record keeps the two apart.
+                return {"status": FEEDS, "scale": scale, "all_results": fallback,
+                        "headline_moved": [k for k in real if _criteria._key(k) in keys][:5],
+                        "how": "changed with its result changed: " + ", ".join(real[:5])}
+            if not steady:
+                return {"status": NOT_RUN, "why": "the results change between two runs of the same setting"}
+            if all(_whole(values.get(k)) for k in steady):
+                return {"status": NOT_RUN, "why": "every result compared is a whole number (a count, a yes/no, a step "
+                                                  "of a grid), which a change of a few percent need not move"}
+            return {"status": NOT_FEEDING, "results": steady[:8], "scale": scale, "all_results": fallback,
+                    "not_repeating": sorted(noisy)[:8]}
+        return {"status": STOPS} if stopped else {"status": NOT_RUN, "why": "no run was made"}
+
+    out: dict[str, Any] = {}
+    for name in names:
+        if not ran:
+            out[name] = {"status": NOT_RUN, "why": "the simulation did not run to the end at the settings FI tried"}
+            continue
+        where = [i for i in called_at.get(name) or [] if isinstance(i, int) and 0 <= i < len(cells)]
+        if not where:
+            out[name] = {"status": NOT_CALLED, "settings_run": len(ran)}
+            continue
+        tried: list[dict[str, Any]] = []
+        for i in _spread_cells(where):
+            if late() and tried:
+                break
+            entry = {**await at_cell(name, i), "cell": cells[i]}
+            tried.append(entry)
+            if entry["status"] == FEEDS:
+                break
+        states = [e["status"] for e in tried]
+        if FEEDS in states:
+            out[name] = next(e for e in tried if e["status"] == FEEDS)
+        elif states and all(s == NOT_FEEDING for s in states):
+            out[name] = {**tried[0], "settings_tried": len(tried)}
+        elif STOPS in states:
+            out[name] = {"status": STOPS, "settings_tried": len(tried)}
+        else:
+            out[name] = next((e for e in tried if e["status"] == NOT_RUN), {"status": NOT_RUN, "why": "no run was made"})
+    (root / DEPENDENCE).parent.mkdir(parents=True, exist_ok=True)
+    (root / DEPENDENCE).write_text(json.dumps({"code_sha256": _hidden.code_sha(root), "names": list(names),
+                                               "functions": out}, indent=1, default=str), encoding="utf-8")
+    return out
+
+
+def read_dependence(quest_root: Path | str) -> dict[str, Any]:
+    """The verdicts :func:`dependence` saved, by function; ``{}`` when there is none or it was made on other code."""
+    from . import hidden_check as _hidden
+
+    try:
+        data = json.loads((Path(quest_root) / DEPENDENCE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict) or data.get("code_sha256") != _hidden.code_sha(Path(quest_root)):
+        return {}
+    functions = data.get("functions")
+    return functions if isinstance(functions, dict) else {}
+
+
+def dependence_gaps(quest_root: Path | str) -> list[str]:
+    """Evidence gaps: a checked function the headline results were shown not to use (its tests say nothing about them).
+    A function never called at the settings FI ran is said, not a gap: a reference formula or a function of the analysis
+    is not called by the simulation, and that is no fault."""
+    return [line for name, e in read_dependence(quest_root).items() if (e or {}).get("status") == NOT_FEEDING
+            for line in dependence_sentences({name: e})]
+
+
+def dependence_sentences(record: dict[str, Any]) -> list[str]:
+    """One plain sentence per checked function the headline results were not shown to use."""
+    out = []
+    for name, e in (record or {}).items():
+        status = (e or {}).get("status")
+        if status == NOT_FEEDING:
+            share = f"{100 * float(e.get('scale') or SHIFTS[0]):g}%"
+            what = "results" if e.get("all_results") else "headline results"
+            out.append(f"the {what} do not use `{name}`: with its result changed by up to {share} where the simulation calls "
+                       f"it, they came out the same, so the tests of `{name}` say nothing about them")
+        elif status == NOT_CALLED:
+            out.append(f"`{name}`, a function FI tested, was not called at the {e.get('settings_run')} setting(s) FI "
+                       "ran, so FI could not show that the headline results are computed with it")
+    return out
 
 
 def ranges_of(spec: _fs.Spec, protocol: dict[str, Any] | None) -> dict[str, Any]:
@@ -405,6 +784,37 @@ def same(a: Any, b: Any, rel: float = REL) -> bool:
     return False
 
 
+def compare_shared(a: Any, b: Any, rel: float = REL, path: str = "") -> tuple[int, bool, list[str], list[str]]:
+    """Compare what both versions return, matched by name (dict keys present in both, at every depth) or position (lists
+    of the same length). ``(values compared, whether one of them differs, notes, missing)``. ``missing`` holds the path of
+    every key the first version (``a``) returns that the second lacks: it was not compared, so the step cannot be agree.
+    A key only the second version returns is a note. Everything that is not a dict or a list of the same length as the
+    other is judged by :func:`same`, so a real difference is judged as before."""
+    if isinstance(a, dict) and isinstance(b, dict):
+        notes: list[str] = []
+        missing = [f"{path}.{k}" if path else str(k) for k in a if k not in b]
+        extra = sorted(str(k) for k in b if k not in a)
+        if extra:
+            notes.append(f"{path or 'the result'}: only the second version returns {', '.join(extra)}; those were not compared")
+        n, differs = 0, False
+        for k in a:
+            if k in b:
+                cn, cd, cnotes, cmiss = compare_shared(a[k], b[k], rel, f"{path}.{k}" if path else str(k))
+                n, differs = n + cn, differs or cd
+                notes += cnotes
+                missing += cmiss
+        return n, differs, notes, missing
+    if isinstance(a, list) and isinstance(b, list) and len(a) == len(b) and any(isinstance(x, (dict, list)) for x in a + b):
+        n, differs, notes, missing = 0, False, [], []
+        for i, (x, y) in enumerate(zip(a, b)):
+            cn, cd, cnotes, cmiss = compare_shared(x, y, rel, f"{path}[{i}]")
+            n, differs = n + cn, differs or cd
+            notes += cnotes
+            missing += cmiss
+        return n, differs, notes, missing
+    return 1, not same(a, b, rel), [], []
+
+
 def short(value: Any, limit: int = 120) -> str:
     """A result in few characters for a sentence or a prompt."""
     if isinstance(value, float):
@@ -421,8 +831,10 @@ def judge_rows(rows: list[dict[str, Any]], inputs: list[dict[str, Any]], rel: fl
     """The verdict on the rows the script returned (one per input: ``main`` / ``ref`` results, or ``main_err`` /
     ``ref_err``). Both raising excludes the input; one raising is a ``domain`` disagreement; otherwise the values are
     compared. ``{"status": agree|disagree|unconfirmed, "compared", "excluded", "disagreements": [{inputs, main, other, kind}]}``."""
-    compared = excluded = 0
+    compared = excluded = unshared = 0
+    missing: list[str] = []
     bad: list[dict[str, Any]] = []
+    notes: list[str] = []
     for case, row in zip(inputs, rows):
         m_err, r_err = row.get("main_err"), row.get("ref_err")
         if m_err and r_err:
@@ -433,16 +845,29 @@ def judge_rows(rows: list[dict[str, Any]], inputs: list[dict[str, Any]], rel: fl
             bad.append({"inputs": case, "kind": "domain",
                         "main": f"raised {m_err}" if m_err else short(decode(row.get("main"))),
                         "other": f"raised {r_err}" if r_err else short(decode(row.get("ref")))})
-        elif not same(decode(row.get("main")), decode(row.get("ref")), rel):
-            bad.append({"inputs": case, "kind": "value", "main": short(decode(row.get("main"))),
-                        "other": short(decode(row.get("ref")))})
+        else:
+            shared, differs, case_notes, case_missing = compare_shared(decode(row.get("main")), decode(row.get("ref")), rel)
+            missing += [m for m in case_missing if m not in missing]
+            notes += [n for n in case_notes if n not in notes]
+            if differs:
+                bad.append({"inputs": case, "kind": "value", "main": short(decode(row.get("main"))),
+                            "other": short(decode(row.get("ref")))})
+            elif shared == 0:
+                unshared += 1
     if bad:
         status = DISAGREE
-    elif compared == 0:
+    elif compared == 0 or unshared == compared or missing:
         status = UNCONFIRMED
     else:
         status = AGREE
-    return {"status": status, "compared": compared, "excluded": excluded, "disagreements": bad}
+    out: dict[str, Any] = {"status": status, "compared": compared - unshared, "excluded": excluded, "disagreements": bad}
+    if notes:
+        out["shape_notes"] = notes[:3]
+    if status == UNCONFIRMED and missing:
+        out["why"] = f"the second version does not return {', '.join(missing[:3])}, so that was not compared"
+    elif status == UNCONFIRMED and unshared:
+        out["why"] = "the two versions return no value in common to compare"
+    return out
 
 
 _SCRIPT = r'''
@@ -615,7 +1040,7 @@ def _spec_block(spec: _fs.Spec, protocol: dict[str, Any] | None) -> str:
 
 def write_prompt(spec: _fs.Spec, *, template: string.Template, protocol: dict[str, Any] | None, specs: list[_fs.Spec],
                  passages: str, example: dict[str, Any] | None, topic_block: str = "", rewrite: str = "",
-                 main_source: str = "") -> str:
+                 main_source: str = "", return_keys: list[str] | None = None) -> str:
     """The request that writes the second version. It holds the description, the signature, the passages, the signatures of
     the functions it calls and the example INPUTS. Raises ``ValueError`` if a line of the main implementation ended up in it."""
     by_name = {s.name: s for s in specs}
@@ -624,7 +1049,11 @@ def write_prompt(spec: _fs.Spec, *, template: string.Template, protocol: dict[st
     given = ", ".join(f"{k} = {short(v)}" for k, v in (example or {}).items())
     example_block = f"# Inputs it will be called with\n\nFI will call the function with, among others: {given}.\n" if given else ""
     rewrite_block = (f"# A first attempt was judged wrong\n\n{rewrite}\n") if rewrite else ""
+    return_block = ("# What it must return\n\nWhen it returns a dict: across the inputs FI ran, the first version's dict results carried these keys: "
+                    + ", ".join(return_keys) + ". A key may appear only for some inputs; for the same input return the same keys "
+                    "under exactly these names.\n") if return_keys else ""
     prompt = template.substitute(topic_block=topic_block or "(the topic is not available)", step_block=_spec_block(spec, protocol),
+                                 return_block=return_block,
                                  signature=spec.signature.strip(), related_block=related, literature_block=literature,
                                  example_block=example_block, rewrite_block=rewrite_block)
     sig = spec.signature.strip()
@@ -751,7 +1180,8 @@ class SecondImpl:
                  prompts: dict[str, string.Template], chat: ChatFn, run: RunFn, repair_main: RepairFn, still_passes: PassesFn,
                  passages: dict[str, str] | None = None, family_of: FamilyFn | None = None, topic_block: str = "",
                  cap: int = MAX_KEY, log: Any = None,
-                 verify_package: Callable[[], Awaitable[str]] | None = None) -> None:
+                 verify_package: Callable[[], Awaitable[str]] | None = None,
+                 captured: dict[str, list[dict[str, Any]]] | None = None) -> None:
         self.root, self.package, self.specs, self.protocol = Path(quest_root), package, list(specs), protocol
         self.prompts, self.chat, self.run = prompts, chat, run
         self.repair_main, self.still_passes = repair_main, still_passes
@@ -764,6 +1194,8 @@ class SecondImpl:
         self.log = log or logging.getLogger(__name__)
         self.model_path = self.root / "code" / package / "model.py"
         self.record: dict[str, Any] = {}
+        #: What each function was called with when FI ran the simulation once (:func:`capture_inputs`).
+        self.captured = {str(k): list(v) for k, v in (captured or {}).items() if isinstance(v, list)}
 
     # -- bookkeeping --
 
@@ -851,8 +1283,9 @@ class SecondImpl:
         main_source = _function_source(self.model_path, spec.name)
         try:
             prompt = write_prompt(spec, template=self.prompts["write"], protocol=self.protocol, specs=self.specs,
-                                  passages=self._spec_passages(spec), example=example_inputs(spec, self.protocol),
-                                  topic_block=self.topic_block, rewrite=rewrite, main_source=main_source)
+                                  passages=self._spec_passages(spec), example=example_inputs(spec, self.protocol, self.captured),
+                                  topic_block=self.topic_block, rewrite=rewrite, main_source=main_source,
+                                  return_keys=self._return_keys(spec))
         except ValueError as e:
             return str(e)
         if not self._spend(entry, kind):
@@ -877,9 +1310,9 @@ class SecondImpl:
     def _inputs_problem(self, spec: _fs.Spec) -> str:
         """Why the function cannot be called with inputs FI knows (``""`` when it can): checked before a second version is
         asked for, so no request is spent on a function that can only end unconfirmed."""
-        base = example_inputs(spec, self.protocol)
+        base = example_inputs(spec, self.protocol, self.captured)
         if not base:
-            return "the plan gives no example inputs to call it with"
+            return "the plan gives no example inputs to call it with, and FI's run of the simulation did not call it"
         if not all(p in base for p in _required(spec.signature)):
             return "the example inputs do not cover the function's parameters"
         return ""
@@ -889,8 +1322,12 @@ class SecondImpl:
         why = self._inputs_problem(spec)
         if why:
             return {"status": UNCONFIRMED, "why": why, "disagreements": [], "retry": False}
-        base = example_inputs(spec, self.protocol)
-        inputs = build_inputs(base, ranges_of(spec, self.protocol))
+        base = example_inputs(spec, self.protocol, self.captured)
+        inputs = build_inputs(base, ranges_of(spec, self.protocol), defined=domain_of(spec, self.protocol, base))
+        # Every other call FI recorded is an input too: the settings the study really gives the function.
+        for call in self.captured.get(spec.name, [])[1:]:
+            if len(inputs) < MAX_INPUTS + CAPTURE_CALLS and call not in inputs:
+                inputs.append(dict(call))
         (self.root / DIR).mkdir(parents=True, exist_ok=True)
         inputs_path = DIR / f"{spec.name}.inputs.json"
         (self.root / inputs_path).write_text(json.dumps(inputs), encoding="utf-8")
@@ -929,8 +1366,14 @@ class SecondImpl:
             return {"status": UNCONFIRMED, "why": "the comparison returned fewer results than inputs", "disagreements": [], "retry": True}
         verdict = judge_rows(rows, inputs, tolerance_for(spec, self.protocol))
         if verdict["status"] == UNCONFIRMED:
-            verdict.update(why="both versions raised on every input", retry=False)
+            verdict.update(why=verdict.get("why") or "both versions raised on every input", retry=False)
         return verdict
+
+    def _return_keys(self, spec: _fs.Spec) -> list[str] | None:
+        """Every key of the first version's dict results in the calls FI recorded when it ran the simulation; ``None`` when
+        FI has no record."""
+        every = (read_captured(self.root).get("returned") or {}).get(spec.name)
+        return [str(k) for k in every] if isinstance(every, list) and every else None
 
     # -- one function --
 
@@ -964,8 +1407,13 @@ class SecondImpl:
             entry["disagreements"] = res["disagreements"][:3]
             entry["compared"] = res.get("compared", 0)
             entry["excluded"] = res.get("excluded", 0)
+            if res.get("shape_notes"):
+                entry["shape_note"] = "; ".join(res["shape_notes"])
+            else:
+                entry.pop("shape_note", None)
             if res["status"] == AGREE:
-                self._finish(spec, entry, AGREE, f"{res.get('compared', 0)} input(s) compared")
+                self._finish(spec, entry, AGREE, f"{res.get('compared', 0)} input(s) compared"
+                             + (f"; {entry['shape_note']}" if entry.get("shape_note") else ""))
                 return
             if res["status"] == UNCONFIRMED:
                 self._finish(spec, entry, UNCONFIRMED, res.get("why", ""), recheck=bool(res.get("retry")))

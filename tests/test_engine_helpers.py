@@ -556,6 +556,50 @@ async def test_evidence_gate_disabled_is_passthrough(tmp_path: Path) -> None:
     assert patch == {}
 
 
+async def test_evidence_gate_off_still_stops_on_a_fault_fi_has_shown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Old code: with the gate off the node returned at once, so a fault a test had shown (FI's own fact, not the
+    model's judgement) no longer stopped the quest and the paper was written over it."""
+    engine = Engine(_route_config(
+        tmp_path, review_loop=True, max_iterations=2, evidence_gate=False))
+
+    async def shown(_state):  # noqa: ANN001
+        return {"verdict": "insufficient", "stuck": True, "stuck_reason": "shown_fault",
+                "rationale": "a test shows a fault in a reported number"}
+
+    async def no_model(*_a, **_k):  # noqa: ANN002, ANN003
+        raise AssertionError("the gate is off: the model is never asked")
+
+    monkeypatch.setattr(engine, "_shown_fault_verdict", shown)
+    monkeypatch.setattr(engine, "_chat", no_model)
+    patch = await engine._node_evidence_gate({"topic": "t", "literature": [], "analysis": {}})
+    assert patch["evidence_assessment"]["route"] == "stuck"
+    assert patch["evidence_assessment"]["decided_by"] == "rule"
+
+
+async def test_evidence_gate_off_records_a_failed_own_check_as_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Old code: with the gate off, an exception in FI's own rule verdicts was caught and the node returned {}, so the
+    paper was written although FI could not check its own stop conditions. It now follows the failed-gate route."""
+    engine = Engine(_route_config(
+        tmp_path, review_loop=True, max_iterations=2, evidence_gate=False))
+
+    def boom(_state):  # noqa: ANN001
+        raise RuntimeError("rule verdict broke")
+
+    async def no_model(*_a, **_k):  # noqa: ANN002, ANN003
+        raise AssertionError("the gate is off: the model is never asked")
+
+    monkeypatch.setattr(engine, "_flat_objective_verdict", boom)
+    monkeypatch.setattr(engine, "_chat", no_model)
+    patch = await engine._node_evidence_gate({"topic": "t", "literature": [], "analysis": {}})
+    assert patch != {}
+    assert patch["evidence_assessment"]["status"] == "unknown"
+    assert "rule verdict broke" in patch["evidence_assessment"]["failure"]
+
+
 async def test_evidence_gate_fails_open_on_unparseable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -672,8 +716,9 @@ def test_a_protocol_stop_names_the_script_the_difference_was_found_in(tmp_path: 
     engine._pause_for_human = lambda **kw: seen.update(kw)  # type: ignore[method-assign]
     engine._stop_for_protocol([Mismatch("runs", "runs_per_setting", [200.0], [50.0], "N_RUNS in simulate.py, line 7")])
     assert seen == {}, "nobody is asked to change the script"
-    stop = engine._cannot_repair_stop()
-    said = stop["exec_result"]["cannot_repair"]
+    # A protocol difference is FI's reading of the code: recorded and said, and the quest goes on (core/stop_power.py).
+    assert engine._cannot_repair_stop() is None
+    said = " ".join(p["text"] for p in engine._cannot_repair_problems())
     assert "simulate.py" in said and "experiment.py" not in said
 
 
@@ -959,6 +1004,62 @@ async def test_a_simulation_with_no_results_goes_back_once_then_stops_with_no_pa
     assert engine._no_results_verdict({**state, "result_json": {"x": 1}}) is None
 
 
+async def test_a_study_too_long_to_run_asks_the_plan_once_for_one_that_fits_then_stops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real plan's study had thousands of settings at about 100 s each, for an 8 h limit: FI timed it, stopped, and
+    wrote no paper. The plan was written before anything was timed, so its model is told what FI measured, once."""
+    from core import plan as _plan
+
+    cfg = _route_config(tmp_path, review_loop=True, max_iterations=2)
+    engine = Engine(cfg)
+    asked: list[tuple[str, str]] = []
+
+    async def fake_rewrite(request, path, *, scope, note, by="engine", **kw):  # noqa: ANN001
+        asked.append((request, by))
+        assert "simplifications" in scope.names(), "the plan is asked to say what was made smaller"
+        return {"version": 2, "sha256": "x", "path": str(path)}
+
+    async def no_chat(prompt, node=None):  # noqa: ANN001
+        raise AssertionError("the gate decides a stop by rule")
+
+    monkeypatch.setattr(engine, "_revise_plan_parts", fake_rewrite)
+    monkeypatch.setattr(engine, "_chat", no_chat)
+    why = "the experiment's 3802 settings would take at least 3 days, more than the 8 hours allowed"
+    fit = {"seconds_per_setting": 98.0, "at_least": False, "settings": 3802, "settings_that_fit": 195,
+           "limit_s": 28800.0, "search": True, "check": 70}
+    state = {"topic": "t", "literature": _gate_sources(30), "result_json": {}, "iteration": 0,
+             "exec_result": {"returncode": 1, "too_long": why, "too_long_fit": fit}, "exec_give_up_reason": why}
+    # No plan.md on disk: there is nothing to rewrite, so the stop stands.
+    plain = await engine._node_evidence_gate(state)
+    assert plain["evidence_assessment"]["route"] == "stuck" and asked == []
+    _plan.plan_path(engine.quest_root).parent.mkdir(parents=True, exist_ok=True)
+    _plan.plan_path(engine.quest_root).write_text("# plan\n", encoding="utf-8")
+    first = await engine._node_evidence_gate(state)
+    # Nothing ran: no design iteration is spent, so the smaller design is timed and checked as the plan's first one.
+    assert first["evidence_assessment"]["route"] == "redesign" and "iteration" not in first
+    assert first["evidence_fit_redesigns"] == 1 and "evidence_no_result_retries" not in first
+    assert first["design_from_plan"] is True  # the design node reads the rewritten plan, not a new draft
+    (request, by), = asked
+    assert by == "engine" and "about 195 settings fit the 8 h" in request and "evaluation_budget" in request
+    assert "about 70 more evaluations" in request and "together have at most 125" in request
+    assert "every check, threshold and tolerance as it is" in request
+    # The new design is still too long: asked once already, the quest stops plainly.
+    again = await engine._node_evidence_gate({**state, **first})
+    assert again["evidence_assessment"]["route"] == "stuck" and len(asked) == 1
+    # A stop with nothing measured (no fit) stops as before.
+    unmeasured = {**state, "exec_result": {"returncode": 1, "too_long": why}}
+    assert (await engine._node_evidence_gate(unmeasured))["evidence_assessment"]["route"] == "stuck"
+    # An answer that cannot be used leaves the stop as it was.
+
+    async def broken_rewrite(request, path, *, scope, note, by="engine", **kw):  # noqa: ANN001
+        raise ValueError("the reply was not usable")
+
+    monkeypatch.setattr(engine, "_revise_plan_parts", broken_rewrite)
+    failed = await engine._node_evidence_gate(state)
+    assert failed["evidence_assessment"]["route"] == "stuck" and "iteration" not in failed
+
+
 async def test_auto_collect_relevance_guards_reused_literature(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1085,7 +1186,9 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     # between the literature and it: a passthrough unless pauses.supply asks
     # for a stop there, so a resume starts after the search, not inside it.
     assert ("literature", "pause_after_literature") in plain_edges
-    assert ("pause_after_literature", "select_skills") in plain_edges
+    # The study cards sit between them: a person picks the study before the tools and the plan.
+    assert ("pause_after_literature", "scope") in plain_edges
+    assert ("scope", "select_skills") in plain_edges
     # `plan` sits between select_skills and design: it reads the literature and writes plan.md, whose design
     # block the design step then adopts.
     assert ("select_skills", "plan") in plain_edges

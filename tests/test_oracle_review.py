@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from tests.plan_parts_helpers import checks_reply, is_scoped_ask, parts_of, plan_shown
 
 from core import oracle_forms as of, oracle_review as orv, plan
 from core.config import Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, PausesConfig, ProviderConfig
@@ -121,12 +122,12 @@ class _Model:
         if prompt.lstrip().startswith("# Second Opinion on the Checks"):
             self.reviews.append({"prompt": prompt, "model": kw.get("model")})
             return self.review if isinstance(self.review, str) else json.dumps(self.review)
-        if "You are revising the plan" in prompt:
+        if is_scoped_ask(prompt):
             self.revisions.append(prompt)
-            current = prompt.split("# The plan as it stands", 1)[1].split("# What the person asked for", 1)[0].strip()
+            current = plan_shown(prompt)
             if self.revise is None:
-                return current
-            return plan.edit_design_block(current, self.revise) or current
+                return checks_reply(current, prompt)
+            return checks_reply(plan.edit_design_block(current, self.revise) or current, prompt)
         if _classify(prompt) == "Experiment Design":
             body = json.loads(_FAKE_RESPONSES["design"])
             body["protocol"] = self.protocol
@@ -311,7 +312,7 @@ async def test_a_resume_after_the_request_stopped_the_quest_asks_nothing_again(t
 
     class _Truncating(_Model):
         async def chat(self, messages, **kw):  # noqa: ANN001
-            if "You are revising the plan" in messages[-1]["content"]:
+            if is_scoped_ask(messages[-1]["content"]):
                 self.revisions.append(messages[-1]["content"])
                 raise ModelAnswerTruncated("cut off at the output limit")
             return await super().chat(messages, **kw)
@@ -481,6 +482,24 @@ def test_a_rewrite_that_drops_an_equation_gets_it_back_and_a_looser_bar_is_refus
     assert tighter[0]["tolerance"] == 1e-4
 
 
+def test_a_check_rewritten_to_measure_another_quantity_is_held_to_its_width_against_the_size_expected() -> None:
+    # A check of a small fraction (0.5 within 0.1, 20%) rewritten to measure a time (300 s within 30 s, 10%): the two
+    # absolute widths are of other quantities, and the rewrite is the stricter of the two.
+    was = [{"name": "cooling", "measure": "frac_left", "expected": 0.5, "tolerance": 0.1, "tolerance_mode": "absolute"}]
+    stricter = orv.never_looser(was, [{"name": "cooling", "measure": "half_time_s", "expected": 300, "tolerance": 30,
+                                       "tolerance_mode": "absolute"}])
+    assert stricter[0]["tolerance"] == 30 and stricter[0]["measure"] == "half_time_s"
+    looser = orv.never_looser(was, [{"name": "cooling", "measure": "half_time_s", "expected": 300, "tolerance": 90,
+                                     "tolerance_mode": "absolute"}])
+    assert looser[0]["tolerance"] == pytest.approx(60) and looser[0]["tolerance_mode"] == "absolute",         "the old bar, 20% of what is expected, is kept"
+    as_share = orv.never_looser(was, [{"name": "cooling", "measure": "half_time_s", "expected": 300, "tolerance": 0.5,
+                                       "tolerance_mode": "relative"}])
+    assert as_share[0]["tolerance"] == pytest.approx(0.2) and as_share[0]["tolerance_mode"] == "relative"
+    same = orv.never_looser(was, [{"name": "cooling", "measure": "frac_left", "expected": 0.5, "tolerance": 0.3,
+                                   "tolerance_mode": "absolute"}])
+    assert same[0]["tolerance"] == 0.1, "an expected value that did not move keeps the old rule"
+
+
 def test_an_equation_the_reader_cannot_tell_is_not_recorded_as_standard() -> None:
     reply = {**_cup_review(), "equations": [{"id": "E1", "standard": "yes"}, {"id": "E2", "standard": ""}]}
     review = orv.parse(reply, CUP_PROTOCOL)
@@ -549,3 +568,113 @@ async def test_the_same_model_judging_a_case_is_recorded_plainly_and_asks_nothin
     assert "cases were not judged by another model" in _section(engine)
     record = json.loads((engine.fi_dir / "oracle_review.json").read_text(encoding="utf-8"))
     assert record["isolation"]["read_by_other_model"] is False
+
+
+# --- a tolerance tighter than the digits its expected value is written to --------------------------------------------
+
+DIGITS_CHECK = {"name": "decay at t=1", "kind": "special_case", "check": "the state after one time unit",
+                "expected": 0.04978, "tolerance": 1e-6, "case": {"n": 4}, "measure": "y_end",
+                "reference": "derivation: the series summed to four digits"}
+DIGITS_PROTOCOL = {"grid": {"n": [4, 8]}, "model": MODEL, "oracles": [DIGITS_CHECK]}
+DIGITS_REVIEW = {**REVIEW, "equations_not_tested": [], "add": []}
+
+
+def _tolerance_of(engine: Engine) -> float:
+    return plan.load_design(engine.quest_root)[0]["protocol"]["oracles"][0]["tolerance"]
+
+
+@pytest.mark.asyncio
+async def test_a_tolerance_the_plan_leaves_tighter_than_its_expected_value_s_digits_is_widened_and_said(tmp_path: Path) -> None:
+    engine = Engine(_config(tmp_path))
+    model = _Model(DIGITS_PROTOCOL, DIGITS_REVIEW)  # asked once, it changes nothing
+    engine._client = model
+    await engine._node_plan({"topic": engine.config.topic, "literature": []})
+    assert len(model.revisions) == 1 and "written to 4 significant digits" in model.revisions[0]
+    assert _tolerance_of(engine) == 5e-06, "half a unit of the last digit of 0.04978"
+    assert plan.load_design(engine.quest_root)[0]["protocol"]["oracles"][0]["expected"] == 0.04978
+    section = _section(engine)
+    assert "FI widened the tolerance to 5e-06" in section and "Still not in its kind's form" not in section
+    record = json.loads((engine.fi_dir / "oracle_review.json").read_text(encoding="utf-8"))
+    assert len(record["tolerance_widened"]) == 1
+    # Once: another pass through the plan step asks and widens nothing more.
+    await engine._node_plan({"topic": engine.config.topic, "literature": []})
+    assert len(model.revisions) == 1 and _tolerance_of(engine) == 5e-06
+
+
+@pytest.mark.asyncio
+async def test_a_plan_that_fixes_the_tolerance_when_asked_is_not_widened(tmp_path: Path) -> None:
+    def looser(block: dict[str, Any]) -> dict[str, Any]:
+        oracles = [{**o, "tolerance": 2e-5} for o in block["protocol"]["oracles"]]
+        return {**block, "protocol": {**block["protocol"], "oracles": oracles}}
+
+    engine = Engine(_config(tmp_path))
+    model = _Model(DIGITS_PROTOCOL, DIGITS_REVIEW, revise=looser)
+    engine._client = model
+    await engine._node_plan({"topic": engine.config.topic, "literature": []})
+    assert _tolerance_of(engine) == 2e-5
+    record = json.loads((engine.fi_dir / "oracle_review.json").read_text(encoding="utf-8"))
+    assert not record.get("tolerance_widened")
+
+
+def _adds_a_tight_check(fix_on_second_ask: bool):
+    calls: list[int] = []
+
+    def revise(block: dict[str, Any]) -> dict[str, Any]:
+        calls.append(1)
+        oracles = list(block["protocol"]["oracles"])
+        if len(calls) == 1:
+            oracles.append({**DIGITS_CHECK, "name": "second level", "expected": 0.1234, "tolerance": 1e-5})
+        elif fix_on_second_ask:
+            oracles = [{**o, "tolerance": 1e-3} if o["name"] == "second level" else o for o in oracles]
+        return {**block, "protocol": {**block["protocol"], "oracles": oracles}}
+    return revise
+
+
+@pytest.mark.asyncio
+async def test_a_too_tight_check_the_reply_added_is_asked_about_once_and_then_widened_with_its_own_sentence(
+        tmp_path: Path) -> None:
+    engine = Engine(_config(tmp_path))
+    model = _Model(DIGITS_PROTOCOL, DIGITS_REVIEW, revise=_adds_a_tight_check(False))
+    engine._client = model
+    await engine._node_plan({"topic": engine.config.topic, "literature": []})
+    assert len(model.revisions) == 2, "the first ask, and one more for the check the reply added"
+    assert "'second level'" in model.revisions[1] and "decay at t=1" not in model.revisions[1].split("These checks do not fit")[-1]
+    got = {o["name"]: o["tolerance"] for o in plan.load_design(engine.quest_root)[0]["protocol"]["oracles"]}
+    assert got == {"decay at t=1": 5e-06, "second level": 5e-05}
+    told = json.loads((engine.fi_dir / "oracle_review.json").read_text(encoding="utf-8"))["tolerance_widened"]
+    assert len(told) == 2
+    assert "asked once, did not fix it" in told[0] and "'decay at t=1'" in told[0]
+    assert "added this check in its reply and was asked about it once more" in told[1] and "'second level'" in told[1]
+    await engine._node_plan({"topic": engine.config.topic, "literature": []})
+    assert len(model.revisions) == 2, "never asked again"
+
+
+@pytest.mark.asyncio
+async def test_a_check_the_reply_added_is_not_widened_when_the_second_ask_fixes_it(tmp_path: Path) -> None:
+    engine = Engine(_config(tmp_path))
+    model = _Model(DIGITS_PROTOCOL, DIGITS_REVIEW, revise=_adds_a_tight_check(True))
+    engine._client = model
+    await engine._node_plan({"topic": engine.config.topic, "literature": []})
+    got = {o["name"]: o["tolerance"] for o in plan.load_design(engine.quest_root)[0]["protocol"]["oracles"]}
+    assert got == {"decay at t=1": 5e-06, "second level": 1e-3}
+    assert len(json.loads((engine.fi_dir / "oracle_review.json").read_text(encoding="utf-8"))["tolerance_widened"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_resume_after_an_unanswered_ask_widens_only_the_checks_it_asked_about_and_says_so(tmp_path: Path) -> None:
+    engine = Engine(_config(tmp_path))
+    model = _Model(DIGITS_PROTOCOL, DIGITS_REVIEW)
+    engine._client = model
+    await engine._node_plan({"topic": engine.config.topic, "literature": []})
+    # As if the run had stopped while the request was out, with the plan as the reply left it (not widened yet).
+    path = plan.plan_path(engine.quest_root)
+    path.write_text(path.read_text(encoding="utf-8").replace("5e-06", "1e-06").replace("5.0e-06", "1.0e-06"), encoding="utf-8")
+    record_path = engine.fi_dir / "oracle_review.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record_path.write_text(json.dumps({**record, "answered": False, "tolerance_widened": []}), encoding="utf-8")
+    (engine.fi_dir / "oracle_guidance.json").unlink()
+    await engine._node_plan({"topic": engine.config.topic, "literature": []})
+    assert len(model.revisions) == 1, "not asked again"
+    assert _tolerance_of(engine) == 5e-06
+    assert "FI widened the tolerance" in _section(engine)
+    assert "is widened" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")

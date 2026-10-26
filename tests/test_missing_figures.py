@@ -264,3 +264,30 @@ def test_the_write_node_restores_the_figures_without_spending_an_iteration(tmp_p
     assert "iteration" not in patch, "restoring a figure costs no iteration"
     # And the review the draft now goes to has no missing figure to force.
     assert _missing_planned_figures(written, {"design": PLAN, "figures": FIGURES}) == []
+
+
+def _record(*panels: tuple[str, list[str]]) -> dict:
+    return {"axes": [{"title": t, "series": [{"label": f"s{i}", "shows": s} for i, s in enumerate(shows)]}
+                     for t, shows in panels]}
+
+
+def test_a_figure_whose_every_line_has_no_point_is_not_put_in_the_paper() -> None:
+    records = {
+        "final_size.png": _record(("Sizes", ["yes"])),
+        "outbreak_prob.png": _record(("Probability", ["no points", "no points"]), ("Odds", ["no points"])),
+        # An image or histogram panel lists no series: not known to be empty, so it is still placed.
+        "gap_fraction.png": {"axes": [{"title": "Gap map", "series": []}]},
+    }
+    state = {"design": DESIGN, "figures": FIGURES, "figure_records": records}
+    assert _names(_missing_planned_figures(PAPER, state)) == ["gap_fraction.png"]
+    out, placed = _place_missing_figures(PAPER, state)
+    assert placed == ["gap_fraction.png"] and "outbreak_prob.png" not in out
+
+
+def test_a_figure_with_data_in_one_panel_is_placed_and_its_caption_leaves_the_empty_panel_out() -> None:
+    records = {"outbreak_prob.png": _record(("Probability", ["yes"]), ("Odds", ["no points"]))}
+    state = {"design": {"figures_planned": ["outbreak_prob.png"]}, "figures": ["outbreak_prob.png"],
+             "figure_records": records}
+    out, placed = _place_missing_figures("## Results\n\nText.\n", state)
+    assert placed == ["outbreak_prob.png"]
+    assert "Probability" in out and "Odds" not in out

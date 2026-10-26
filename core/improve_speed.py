@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -129,7 +130,7 @@ async def run_sample(executor: Any, python: Path | str, quest_root: Path, module
             nonce = f"speed{time.time_ns()}"
             spec.write_text(json.dumps({
                 "module": module.replace("\\", "/"), "entry": "run_cell" if deterministic else "run_trial",
-                "cell": {**cell, **inside}, "levels": _in_run.level_cells(inside),
+                "cell": {**cell, **inside}, "levels": _in_run.levels_json(_in_run.level_cells(inside)),
                 "trials": [{"trial": t, "seed": None if deterministic else _tr.trial_seed(0, key, t)} for t in range(n)],
                 "nonce": nonce, "thresholds": dict(thresholds or {})}, default=str), encoding="utf-8")
             await ex.execute([str(python), _tr.HARNESS_PATH.as_posix(), spec.relative_to(quest_root).as_posix(),
@@ -212,10 +213,71 @@ def fast_enough(before_s: float, after_s: float) -> bool:
     return before_s > 0 and after_s <= KEEP_BELOW * before_s
 
 
-def speed_block(est_seconds: float, limit_s: float, before: Sample, cells: list[dict[str, Any]], runs: int) -> str:
+#: How many functions of the measured breakdown the model is shown.
+PROFILE_TOP = 10
+
+
+async def profile_text(executor: Any, python: Path | str, quest_root: Path, module: str, cell: dict[str, Any], *,
+                       deterministic: bool, thresholds: dict[str, Any] | None, in_each_run: dict[str, list[Any]] | None,
+                       env: dict[str, str] | None, timeout_s: int, log: Any = None) -> str:
+    """Where one setting of the sample spends its time, measured by FI (Python's own profiler around the same harness the
+    sample runs): the :data:`PROFILE_TOP` functions that take the most time themselves, each with how often it was called
+    and the time spent in it and in what it calls. The model is shown what costs the time instead of guessing it from
+    the code. Empty when the setting could not be profiled."""
+    import pstats
+
+    quest_root = Path(quest_root)
+    work = quest_root / ".fi" / "trials"
+    work.mkdir(parents=True, exist_ok=True)
+    (quest_root / _tr.HARNESS_PATH).write_text(_tr.HARNESS_SOURCE, encoding="utf-8")
+    key = _tr.cell_key(cell)
+    inside = {str(k): list(v) for k, v in (in_each_run or {}).items()}
+    spec, out, prof = work / "profile.json", work / "profile.out.jsonl", work / "profile.prof"
+    for path in (out, prof):
+        path.unlink(missing_ok=True)
+    n = 1 if deterministic else 2
+    spec.write_text(json.dumps({
+        "module": module.replace("\\", "/"), "entry": "run_cell" if deterministic else "run_trial",
+        "cell": {**cell, **inside}, "levels": _in_run.levels_json(_in_run.level_cells(inside)),
+        "trials": [{"trial": t, "seed": None if deterministic else _tr.trial_seed(0, key, t)} for t in range(n)],
+        "nonce": f"profile{time.time_ns()}", "thresholds": dict(thresholds or {}),
+        "profile": prof.relative_to(quest_root).as_posix()}, default=str), encoding="utf-8")
+    ex = _outside.OutsideExecutor(executor, quest_root, log=log)
+    try:
+        # The profile's path is named in the environment too, so the outside copy brings the file back.
+        named = {**(env if env is not None else dict(os.environ)), "FI_PROFILE_OUT": str(prof)}
+        await ex.execute([str(python), _tr.HARNESS_PATH.as_posix(), spec.relative_to(quest_root).as_posix(),
+                          out.relative_to(quest_root).as_posix()], cwd=quest_root, timeout_s=timeout_s, env=named)
+        stats = pstats.Stats(str(prof))
+    except Exception:  # noqa: BLE001 -- no breakdown is no breakdown; the step goes on without it
+        return ""
+    finally:
+        for path in (spec, out):
+            path.unlink(missing_ok=True)
+    rows = []
+    total = 0.0
+    for (file, line, name), (_cc, calls, own, cum, _callers) in stats.stats.items():  # type: ignore[attr-defined]
+        total += own
+        if "trial_harness" in file or name.startswith("<"):
+            continue
+        where = f"{Path(file).name}:{line}" if file and file != "~" else "built-in"
+        rows.append((own, calls, cum, f"{name} ({where})"))
+    prof.unlink(missing_ok=True)
+    rows.sort(key=lambda r: -r[0])
+    if not rows or total <= 0:
+        return ""
+    lines = [f"- {label}: {own:.2f} s of its own ({own / total:.0%} of the setting), called {calls:,} times, "
+             f"{cum:.2f} s with what it calls" for own, calls, cum, label in rows[:PROFILE_TOP]]
+    return (f"Where the time goes, measured by FI on one setting of the sample ({total:.1f} s in all; the functions that "
+            "take the most time themselves):\n" + "\n".join(lines))
+
+
+def speed_block(est_seconds: float, limit_s: float, before: Sample, cells: list[dict[str, Any]], runs: int,
+                profile: str = "") -> str:
     per_cell = before.seconds / max(1, len(cells))
     return (f"FI estimates the whole study at about {_estimate.plain_duration(est_seconds)}; the time allowed is "
             f"{_estimate.plain_duration(limit_s)}. It has to be about {est_seconds / max(limit_s, 1e-9):.1f} times faster.\n"
             f"FI timed {len(cells)} settings ({SAMPLE_TRIALS} trials each, fixed seeds): about "
             f"{per_cell * 1000:.0f} ms of computing per setting on average for the trials after the first, in the "
-            f"code below. The study runs {runs} trials of each setting.")
+            f"code below. The study runs {runs} trials of each setting."
+            + (f"\n\n{profile}" if profile else ""))

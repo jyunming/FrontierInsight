@@ -312,6 +312,11 @@ def load_snapshot(quest_root: Path, name: str, *, fi_real: Path | None = None) -
 # --- the edit --------------------------------------------------------------------------------------------------------
 
 
+#: The keys of the one edit a model is asked for. A reply that writes a first try and then a correction holds two such
+#: objects; the last one is the answer.
+EDIT_KEYS = ("file", "find", "replace")
+
+
 @dataclass
 class Edit:
     file: str
@@ -467,12 +472,16 @@ def _reads_setting(node: ast.AST, names: set[str], aliases: dict[str, str] | Non
     return read
 
 
-def _aliases(text: str, names: set[str]) -> dict[str, str]:
-    """The variables the code gives a setting's value to (``h = cell["dt"]``), by the setting they hold."""
-    try:
-        tree = ast.parse(text)
-    except (SyntaxError, ValueError):
-        return {}
+def _aliases(text: str | ast.AST, names: set[str]) -> dict[str, str]:
+    """The variables the code (a text, or one function of it) gives a setting's value to (``h = cell["dt"]``), by the
+    setting they hold."""
+    if isinstance(text, ast.AST):
+        tree = text
+    else:
+        try:
+            tree = ast.parse(text)
+        except (SyntaxError, ValueError):
+            return {}
     out: dict[str, str] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
@@ -482,23 +491,61 @@ def _aliases(text: str, names: set[str]) -> dict[str, str]:
     return out
 
 
+def _literals(operand: ast.AST) -> list[Any]:
+    """The values an operand of a comparison writes out itself: a number or a text (``0.1``, ``-3``, ``"alpha"``), or a
+    tuple, list or set of them (``in (0.1, 0.2)``); nothing for anything computed or looked up (``c[0]``, ``f(x)``)."""
+    if isinstance(operand, ast.Constant) and not isinstance(operand.value, bool) and operand.value is not None:
+        return [operand.value]
+    if (isinstance(operand, ast.UnaryOp) and isinstance(operand.op, (ast.USub, ast.UAdd))
+            and isinstance(operand.operand, ast.Constant) and _num(operand.operand.value) is not None):
+        value = operand.operand.value
+        return [-value if isinstance(operand.op, ast.USub) else value]
+    if isinstance(operand, (ast.Tuple, ast.List, ast.Set)):
+        return [v for e in operand.elts for v in _literals(e)]
+    return []
+
+
+def _compares_in_scope(text: str) -> list[tuple[ast.Compare, ast.AST]]:
+    """Every comparison of the code with the function it is written in (the module for one outside every function)."""
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return []
+    out: list[tuple[ast.Compare, ast.AST]] = []
+
+    def visit(node: ast.AST, scope: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            inner = child if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)) else scope
+            if isinstance(child, ast.Compare):
+                out.append((child, scope))
+            visit(child, inner)
+
+    visit(tree, tree)
+    return out
+
+
 def _asks_for_a_setting(old: str, new: str, settings: dict[str, list[Any]]) -> list[Any]:
     """The values of a check's settings that a comparison the edit adds tests a setting for (``if cell["dt"] == 0.1``,
     ``if dt == 0.1``): the way to answer a check specially instead of computing it. A comparison of a setting with any
-    other value, and one that does not read a setting, is a change like any other."""
+    other value, and one that does not read a setting, is a change like any other. A variable holds a setting only
+    within the function that gives it the setting (one name can mean other things in other functions), and only a value
+    the comparison writes out itself is tested for (an index such as ``c[0]`` is not a value compared)."""
     before = {ast.dump(c) for c in _compares(old)}
-    aliases = _aliases(new, set(settings))
     found: list[Any] = []
-    for compare in _compares(new):
+    scoped: dict[int, dict[str, str]] = {}
+    for compare, scope in _compares_in_scope(new):
         if ast.dump(compare) in before:
             continue
+        aliases = scoped.setdefault(id(scope), _aliases(scope, set(settings)))
+        operands = [compare.left, *compare.comparators]
+        written = [v for o in operands for v in _literals(o)]
+        if not written:
+            continue
         for name in _reads_setting(compare, set(settings), aliases):
-            for node in ast.walk(compare):
-                if not isinstance(node, ast.Constant) or isinstance(node.value, bool):
-                    continue
+            for literal in written:
                 for value in settings[name]:
-                    same = (math.isclose(float(node.value), float(value), rel_tol=1e-12, abs_tol=0.0)
-                            if _num(node.value) is not None and _num(value) is not None else node.value == value)
+                    same = (math.isclose(float(literal), float(value), rel_tol=1e-12, abs_tol=0.0)
+                            if _num(literal) is not None and _num(value) is not None else literal == value)
                     if same and value not in found:
                         found.append(value)
     return found

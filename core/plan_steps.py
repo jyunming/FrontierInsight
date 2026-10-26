@@ -24,8 +24,11 @@ DIRECTIVE_TEXT = (
     '"<unit or meaning>"}, "output": "<what it returns, with unit>", "uses": ["E1"], "source": "<where the method is '
     'from>", "example": {"inputs": {"<name>": <number>}, "expected_formula": "<formula in those inputs only>", '
     '"tolerance": <number>}, "relations": ["<a property the output must have, e.g. it doubles when x doubles>"]}`. '
-    "`example` and `relations` are optional, but give one when the step has a worked case or a property that must hold. "
-    "FI computes the expected value from your formula itself; never write a number you did not compute.")
+    "Give `example` for every step that computes a stated formula or a value with a known answer, and `relations` for "
+    "every step with a property its output must have; leave both out only for a step that has neither, or write "
+    '`"example": {"untestable": "<why>"}`. Take the inputs of the example at a case whose output is known by another route '
+    "than the step's own form (a limit, a special value, a value a source prints), so that a slip in the step cannot "
+    "pass. FI computes the expected value from your formula itself; never write a number you did not compute.")
 
 _ID = re.compile(r"S[0-9]+")
 _NAME = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")

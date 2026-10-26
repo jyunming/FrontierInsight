@@ -20,7 +20,7 @@ If part of the code is listed as NOT SHOWN, do not call a claim about that part 
 
 A value between `<!-- fi:v {{v:...}} -->` and `<!-- /fi:v -->` was filled in by FI from its own records, not typed by the writer: take the number as true and judge the claim's words ("BH controls the false discovery rate at every setting", "higher at larger noise", "better than the baseline") against it, never the number. The key inside the marker names the quantity and the settings it was computed for, so a claim that says the number is something else, or from another setting, is `unsupported`.
 
-Be strict and honest: when a claim asserts a specific number about a RESULT, that number MUST appear in the evidence block (for `experiment`) or in the cited source — otherwise it is `unsupported`. A specific number in a claim about HOW the study was run (a step size, a constant, a setting) may be grounded by the code shown or by FI's record; a constant in the code is never a result. Prefer `unsupported` over a generous benefit-of-the-doubt label. Do not invent a `citation_index` that doesn't correspond to a real claim-supporting reference.
+Be strict and honest: when a claim asserts a specific number about a RESULT, that number MUST appear in the evidence block (for `experiment`) or in the cited source — otherwise it is `unsupported`. A specific number in a claim about HOW the study was run (a step size, a constant, a setting) may be grounded by the code shown or by FI's record; a constant in the code is never a result. A claim is grounded only by all of what it states: a point value that matches a row while the claim's interval, count or setting does not is `unsupported`, with `evidence` naming the part that differs. A claim about every setting ("across the grid", "at every setting", "in all cases", a bound said to hold throughout) is judged against each setting's own row in the evidence block, never against a value pooled over settings: one setting that breaks it makes the claim `unsupported`, and `evidence` names that setting. Prefer `unsupported` over a generous benefit-of-the-doubt label. Do not invent a `citation_index` that doesn't correspond to a real claim-supporting reference.
 
 # Output format
 
@@ -34,13 +34,16 @@ Respond with a single JSON object, no prose, no markdown fence:
       "basis": "<experiment | citation | unsupported>",
       "citation_index": <the source: its References number (e.g. 3), its Further reading label as a string (e.g. "W2"), or null>,
       "quote": "<for citation: the supporting words copied exactly from that source's text; otherwise null>",
-      "evidence": "<for experiment: which number/finding; for citation: what the source supports; for unsupported: why nothing backs it>"
+      "evidence": "<for experiment: which number/finding; for citation: what the source supports; for unsupported: why nothing backs it>",
+      "where": ["<the id(s) FI printed before the sentence(s) of the paper that the claim is about, such as \"3.7\">"]
     },
     ...
   ],
   "summary": "<one short paragraph: how well-grounded is the paper overall, and what are the most serious unsupported claims if any?>"
 }
 ```
+
+The paper below carries FI's id (`<<3.7>>`: the 7th sentence of section 3) before each sentence, caption and table row, and `<<section 3>>` after each section heading. `where` gives, for every claim, the id(s) of the passage the claim is about, copied from the paper. FI places an unsupported claim by that id alone: a claim with no valid id cannot be placed, and the paper is then written again as a whole.
 
 `basis` MUST be one of the three exact lowercase strings. Every claim with `basis: "citation"` MUST give a `citation_index` that names a source in the Inputs section (a References number or a Further reading label such as `"W2"`); otherwise use `basis: "unsupported"`.
 

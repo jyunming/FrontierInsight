@@ -63,6 +63,27 @@ def test_runs_with_no_target_are_told_what_they_give() -> None:
     assert pc.precision_notes({"runs_per_setting": 1}, 3) == []
 
 
+def test_a_target_on_a_mean_is_not_sized_as_a_probability() -> None:
+    mean = {"runs_per_setting": 10, "precision": {"target_half_width": 0.05, "metric": "settle_time"},
+            "metrics": [{"id": "settle_time", "kind": "mean"}]}
+    (note,) = pc.precision_notes(mean, 1)
+    # 10 trials reach ±0.05 when one trial's spread is at most 0.05 * sqrt(10) / 1.96 = 0.0807
+    assert "on the mean `settle_time`" in note and "at most 0.0807" in note and "probability" not in note
+    # the plan's only metric is a mean and the target names none: the same
+    (note,) = pc.precision_notes({**mean, "precision": {"target_half_width": 0.05}}, 1)
+    assert "at most 0.0807" in note
+    # a prose name keeps the probability's count
+    (note,) = pc.precision_notes({**mean, "precision": {"target_half_width": 0.05, "metric": "the settling time"}}, 1)
+    assert "needs about 385 trials" in note
+    # over 3 seeds the trials are 30, and the trials asked for are divided over them
+    (note,) = pc.precision_notes(mean, 3)
+    assert "give 30 trials" in note and "at most 0.14" in note and "divided over the 3 seeds" in note
+    # known positive: the same target on a probability still asks for its trials
+    prob = {**mean, "metrics": [{"id": "settle_time", "kind": "proportion"}]}
+    (note,) = pc.precision_notes(prob, 1)
+    assert "needs about" in note
+
+
 @pytest.mark.parametrize("design, expected", [
     ({"hypothesis": "the error converges as N grows", "protocol": {"grid": {"N": [100, 1000, 5000]}}}, True),
     ({"hypothesis": "h", "expected_outcome": "a phase transition near R0 = 1", "protocol": {"grid": {"R0": [0.9, 1.5, 3.0]}}}, True),

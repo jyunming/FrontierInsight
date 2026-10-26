@@ -275,16 +275,12 @@ def _ledger_rows(quest_root: Path) -> tuple[dict[str, int], dict[tuple[str, int]
     """What FI's trial ledger holds: the trials planned per setting, and each trial's ``(status, seed)`` (a later line
     for the same trial replaces an earlier one). ``None`` when there is no readable ledger or it holds no trial."""
     try:
-        lines = (Path(quest_root) / "raw" / "ledger.jsonl").read_text(encoding="utf-8").splitlines()
+        handle = (Path(quest_root) / "raw" / "ledger.jsonl").open(encoding="utf-8")
     except OSError:
         return None
     planned: dict[str, int] = {}
     trials: dict[tuple[str, int], tuple[str, int | None]] = {}
-    for line in lines:
-        try:
-            row = json.loads(line)
-        except ValueError:
-            continue
+    for row in _stream_rows(handle):
         if not isinstance(row, dict) or not isinstance(row.get("cell"), str):
             continue
         if row.get("event") == "planned" and (n := _whole(row.get("trials"))) is not None:
@@ -386,12 +382,31 @@ def topic_limit(quest_root: Path, topic: str) -> float | None:
 
 
 def _time_sentence(quest_root: Path, topic: str, duration_s: float | None) -> str:
+    from . import run_facts as _run_facts
+
     if isinstance(duration_s, bool) or not isinstance(duration_s, (int, float)) or not 0 <= duration_s < float("inf"):
-        return ""
+        # No wall time (FI did not time the whole run): the trials' own times can still show the limit missed or kept.
+        limit, reader = topic_limit(quest_root, topic), _run_facts.reader_run(quest_root)
+        if limit is None or reader is None:
+            return ""
+        return (f"FI did not time the whole run; one after another the settings take "
+                f"{_run_facts.reader_words(reader, _plain_seconds)}, which is {_run_facts.reader_verdict(reader, limit)} "
+                f"the topic's limit of {_plain_seconds(limit)}.")
     limit = topic_limit(quest_root, topic)
     ran = f"The experiment ran for {_plain_seconds(float(duration_s))}"
     if limit is None:
         return f"{ran}; FI did not check it against a limit in the topic."
+
+    # A reader's run of code/run.py runs the settings one after another (run_facts.reader_run, the one place that time is
+    # worked out): when FI ran them at the same time, the limit is judged against that, and both times are said.
+    reader = _run_facts.reader_run(quest_root)
+    if reader is not None:
+        verdict = _run_facts.reader_verdict(reader, limit)
+        said = verdict
+        clause = _run_facts.reader_clause(reader)
+        return (f"{ran}{' ' if clause.startswith('with') else '; '}{clause}; one after another the settings take "
+                f"{_run_facts.reader_words(reader, _plain_seconds)}, which is {said} the topic's limit of "
+                f"{_plain_seconds(limit)}.")
     return f"{ran}; the topic sets a limit of {_plain_seconds(limit)}, and the run was {'within' if duration_s <= limit else 'over'} it."
 
 
@@ -487,6 +502,17 @@ def stated_objections(quest_root: Path) -> set[str]:
     return {str(n) for r in _objection_rows(quest_root) for n in r.get("names") or [] if str(n).strip()}
 
 
+def reason_key(said: Any) -> str:
+    """A reviewer's own reason in a form two wordings of the same sentence share: lower case, one space between words,
+    no closing full stop."""
+    return " ".join(str(said or "").lower().split()).rstrip(".!? ")
+
+
+def stated_reasons(quest_root: Path) -> set[str]:
+    """The reviewer's own reasons (free text, as :func:`reason_key` reads them) the record already holds."""
+    return {k for k in (reason_key(r.get("said")) for r in _objection_rows(quest_root)) if k}
+
+
 def add_objections(quest_root: Path, hits: list[tuple[str, str]], said: str) -> None:
     """Add one review's objections (``hits``: each ``(key, the hit as the reviewer wrote it)``, and the reviewer's own
     reason ``said``) to the record."""
@@ -495,6 +521,42 @@ def add_objections(quest_root: Path, hits: list[tuple[str, str]], said: str) -> 
     path = Path(quest_root) / OBJECTIONS_RECORD
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(rows, indent=1) + "\n", encoding="utf-8")
+
+
+def mark_unresolved(quest_root: Path, said: Any) -> None:
+    """The reviewer gave this reason again after the paper was written again for it: the rewrite did not answer it. The
+    record's rows with that reason are marked ``unresolved`` (the quality report and the paper's Limitations say so)."""
+    key = reason_key(said)
+    rows = _objection_rows(quest_root)
+    changed = False
+    for r in rows:
+        if key and reason_key(r.get("said")) == key and not r.get("unresolved"):
+            r["unresolved"], changed = True, True
+    if changed:
+        path = Path(quest_root) / OBJECTIONS_RECORD
+        path.write_text(json.dumps(rows, indent=1) + "\n", encoding="utf-8")
+
+
+def unresolved_reasons(rows: Any) -> list[str]:
+    """The reviewer's reasons (one line each, in its words) that the paper written again for them did not answer."""
+    out: list[str] = []
+    for r in rows if isinstance(rows, list) else []:
+        if isinstance(r, dict) and r.get("unresolved"):
+            reason = " ".join(str(r.get("said") or "").split()).rstrip(".")
+            if reason and reason not in out:
+                out.append(reason)
+    return out
+
+
+def unresolved_sentence(rows: Any) -> str:
+    """The sentence for the quality report and the Limitations: the reviewer's verdict stays revise on these reasons."""
+    said = unresolved_reasons(rows)
+    if not said:
+        return ""
+    more = f" and {len(said) - _SHOWN} more" if len(said) > _SHOWN else ""
+    return ("The reviewer still asked for a revision after the paper was written again for its reason, and no check of FI's "
+            f"confirms or rules out that reason, so it is not resolved: {'; '.join(chr(34) + w + chr(34) for w in said[:_SHOWN])}"
+            f"{more}.")
 
 
 def clear_objections(quest_root: Path) -> None:
@@ -536,6 +598,13 @@ def _precision_sentence(missed: Any) -> str:
             f"{', '.join(said)}{more}.")
 
 
+def _widened_sentence(record: Any) -> str:
+    """The known-answer checks whose tolerance FI widened to the digits their expected value is written to, after the plan,
+    asked once, left it tighter (``Engine._widen_to_precision`` keeps the sentences in ``.fi/oracle_review.json``)."""
+    told = [t.strip() for t in record.get("tolerance_widened") or [] if isinstance(t, str) and t.strip()]         if isinstance(record, dict) else []
+    return " ".join(t if t.endswith(".") else t + "." for t in told)
+
+
 def _untested_sentence(notes: list[str]) -> str:
     """The equations FI did not test before the run, by id, in one short sentence (the paper has little room; the reasons
     are in the quality report, from the same record). A note whose id cannot be read is kept as written."""
@@ -561,6 +630,104 @@ def _untested_sentence(notes: list[str]) -> str:
     return text
 
 
+def _stream_rows(handle: Any):
+    """The rows of an open ledger, one line at a time (a ledger of a large study is never read whole into memory); the
+    file is closed when the rows are used up."""
+    with handle:
+        for line in handle:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            yield row
+
+
+def _setting_counts(quest_root: Path, run_id: str = "") -> tuple[int, int, int, int] | None:
+    """``(settings planned, settings all of whose planned trials ran, settings some of whose trials ran, trials not run)``
+    from FI's trial ledger, or ``None`` when it holds none of this run's rows. A trial counts as run when the ledger records
+    it and the study's time limit did not cut it off (one that failed for another reason ran); a planned trial the ledger
+    does not record was not run. With ``run_id`` only the rows FI wrote for that run are read."""
+    try:
+        handle = (Path(quest_root) / "raw" / "ledger.jsonl").open(encoding="utf-8")
+    except OSError:
+        return None
+    from .trial_runner import OUT_OF_TIME
+
+    planned: dict[str, int] = {}
+    seen: dict[tuple[str, int], bool] = {}  # (setting, trial) -> cut off by the time limit
+    for row in _stream_rows(handle):
+        if not isinstance(row, dict) or not isinstance(row.get("cell"), str):
+            continue
+        if run_id and row.get("run_id") != run_id:
+            continue
+        if row.get("event") == "planned" and (n := _whole(row.get("trials"))) is not None:
+            planned[row["cell"]] = n
+        elif row.get("event") == "trial" and (t := _whole(row.get("trial"))) is not None:
+            seen[(row["cell"], t)] = str(row.get("reason") or "").startswith(OUT_OF_TIME)
+    if not seen and not planned:
+        return None
+    ran: dict[str, int] = {}
+    for (cell, _t), was_late in seen.items():
+        ran[cell] = ran.get(cell, 0) + (0 if was_late else 1)
+    cells = set(planned) | {c for c, _t in seen}
+    wanted = {c: planned.get(c, ran.get(c, 0)) for c in cells}
+    whole = sum(1 for c in cells if ran.get(c, 0) >= wanted[c])
+    none = sum(1 for c in cells if ran.get(c, 0) == 0 and wanted[c] > 0)
+    return len(cells), whole, len(cells) - whole - none, sum(max(0, wanted[c] - ran.get(c, 0)) for c in cells)
+
+
+def cut_short_text(quest_root: Path) -> str:
+    """What the paper and the quality report must say of a study FI ran only up to the time limit because its own timing
+    said the whole study would not fit (``.fi/run_estimate.json`` ``truncated``, written by the run's sizing): the time it
+    estimated against the time allowed, that the plan's own order was kept, and, from FI's trial ledger and its record of
+    the search, how much of the plan ran and how much did not. ``""`` when the study was not cut. Nothing is asked of a
+    model: every number is FI's own record."""
+    from .run_estimate import plain_duration
+
+    root = Path(quest_root)
+    estimate = _read_json(root / ".fi" / "run_estimate.json")
+    cut = estimate.get("truncated") if isinstance(estimate, dict) else None
+    if not isinstance(cut, dict):
+        return ""
+    est, limit = cut.get("estimate_s"), cut.get("limit_s")
+    if not (isinstance(est, (int, float)) and isinstance(limit, (int, float))):
+        return ""
+    said = (f"FI estimated that the plan's study would take {'at least ' if cut.get('at_least') else 'about '}"
+            f"{plain_duration(float(est))}, more than the {plain_duration(float(limit))} allowed, so it ran the plan's "
+            "settings in the plan's order until the time limit; the results cover only what ran")
+    parts: list[str] = []
+    listed, total_settings = _whole(cut.get("planned_settings")), _whole(cut.get("settings"))
+    if listed and total_settings and listed < total_settings:
+        parts.append(f"the plan has {total_settings:,} settings, more than FI lists, so it planned them in the plan's order, "
+                     "a few at a time, and only as far as the time limit allowed")
+    run_id = str(cut.get("run_id") or "")
+    counts = _setting_counts(root, run_id)
+    if counts is not None:
+        total, whole, partly, late = counts
+        none = total - whole - partly
+        what = "scan settings" if cut.get("kind") == "search" else "settings"
+        parts.append(f"of {total:,} {what}, {whole:,} ran all their trials, {partly:,} ran some and {none:,} ran none "
+                     f"({late:,} trial{'' if late == 1 else 's'} {'was' if late == 1 else 'were'} not run)")
+    if cut.get("kind") == "search":
+        best = _read_json(root / "results" / "best_design.json")
+        if not (isinstance(best, dict) and run_id and best.get("run_id") == run_id):
+            best = None  # a record of another design or run is not this study's
+        ev = best.get("evaluations") if isinstance(best, dict) else None
+        if isinstance(ev, dict) and _whole(ev.get("search")) is not None and _whole(ev.get("budget")) is not None:
+            parts.append(f"the search made {ev['search']:,} of the {ev['budget']:,} evaluations the plan allows"
+                         + (", and stopped at the time limit" if ev.get("stopped_because") == "time" else ""))
+        compared = best.get("compared") if isinstance(best, dict) else None
+        levels = [p for p in (compared.get("levels") if isinstance(compared, dict) else None) or []
+                  if isinstance(p, dict) and not p.get("same_as")]
+        if compared and levels and all(_whole(p.get("evaluations")) is not None and _whole(p.get("budget")) is not None
+                                   for p in levels):
+            whole = sum(1 for p in levels if p["evaluations"] >= p["budget"] and p.get("status") != "not_searched")
+            none = sum(1 for p in levels if p["evaluations"] == 0 or p.get("status") == "not_searched")
+            parts.append(f"of the {len(levels):,} alternative{'' if len(levels) == 1 else 's'} the plan compares, searched with their whole budget: "
+                         f"{whole:,}, searched only in part: {len(levels) - whole - none:,}, not searched: {none:,}")
+    return said + ("; " + "; ".join(parts) if parts else "") + "."
+
+
 def run_record(quest_root: Path, *, topic: str = "", duration_s: float | None = None) -> str:
     """One paragraph (no heading) of what FI recorded about the run, for the quality report and the claim check (the
     paper does not carry it: its facts go into the paper through placeholders FI fills, :mod:`core.paper_facts`): the seeds, the run
@@ -579,10 +746,11 @@ def run_record(quest_root: Path, *, topic: str = "", duration_s: float | None = 
     over = estimate.get("over_topic_limit") if isinstance(estimate, dict) else None
     if isinstance(over, dict) and isinstance(over.get("note"), str) and over["note"].strip():
         parts.append(over["note"].strip())
+    parts.append(cut_short_text(quest_root))
     covered = _read_json(quest_root / ".fi" / "topic_covered.json")
     left = _items(covered.get("left")) if isinstance(covered, dict) else []
     if left:
-        parts.append(_listed("FI did not do all of the topic's requirements.", left))
+        parts.append(_listed("FI's check did not find all of the topic's requirements in the study's plan.", left))
     not_done = _items(covered.get("not_done")) if isinstance(covered, dict) else []
     if not_done:
         parts.append(_listed("The study did not do all it was asked to, as written.", not_done))
@@ -592,7 +760,9 @@ def run_record(quest_root: Path, *, topic: str = "", duration_s: float | None = 
     if untested:
         parts.append(_untested_sentence(untested))
     parts.append(_precision_sentence(_read_json(quest_root / PRECISION_RECORD)))
+    parts.append(_widened_sentence(_read_json(quest_root / ".fi" / "oracle_review.json")))
     parts.append(_objections_sentence(_read_json(quest_root / OBJECTIONS_RECORD)))
+    parts.append(unresolved_sentence(_read_json(quest_root / OBJECTIONS_RECORD)))
     parts = [p for p in parts if p]
     return f"{_RECORD_LEAD} " + " ".join(parts) if parts else ""
 

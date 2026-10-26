@@ -69,7 +69,7 @@ def test_the_gate_sends_a_crash_to_repair_and_reads_back_an_unchanged_run(tmp_pa
     eng = _engine(root)
     eng.executor = _Counting(python_version="3.11")  # type: ignore[assignment]
     eng._trial_mode, eng._trial_entries = True, {"run_trial"}  # type: ignore[attr-defined]
-    eng._protocol_block = lambda state: {"grid": GRID, "metrics": [{"id": "x", "paired": True}]}  # type: ignore[assignment]
+    eng._protocol_block = lambda state: {"grid": GRID, "metrics": [{"id": "weighted_Ea_hat", "paired": True}]}  # type: ignore[assignment]
     state: dict[str, Any] = {"exec_reflect_iter": 0}
     sent = asyncio.run(eng._small_run_gate(state, sys.executable, {}))
     assert sent is not None and sent["exec_result"]["failed_script"] == "simulate.py"
@@ -127,3 +127,41 @@ def test_a_study_of_parts_runs_a_setting_of_every_part_each_with_its_share_of_th
     asyncio.run(small_run.run(ex2, sys.executable, root, "code/simulate.py", plain, deterministic=True, timeout_s=60))
     # the whole time less what setting up took (a second on a busy machine), not a share of it
     assert ex2.given[0] >= 55, ex2.given
+
+
+#: A search whose simulation reads a value it compares inside each run as one number: every evaluation fails.
+_SEARCH_BLOCK: dict[str, Any] = {
+    "objective": {"quantity": "f", "direction": "minimise", "unit": "J"},
+    "design_variables": [{"name": "x", "low": -5.0, "high": 5.0, "kind": "continuous"}],
+    "baseline": {"values": {"x": 0.0}, "source": "the design in use"},
+    "evaluation_budget": {"starts": 2, "per_start": 10},
+    "in_each_run": {"depth": [1.0, 2.0, 4.0]},
+}
+_READS_ONE = "def run_cell(cell):\n    return {'f': float(cell['x']) ** 2 + float(cell['depth'])}\n"
+_READS_EACH = ("def run_cell(cell):\n"
+               "    return {f'f_depth{d:g}': float(cell['x']) ** 2 + d for d in cell['depth']}\n")
+
+
+@pytest.mark.usefixtures("this_python")
+@pytest.mark.parametrize("code, crashed", [(_READS_ONE, True), (_READS_EACH, False)])
+def test_a_search_gets_the_small_run_on_its_scan_settings(tmp_path: Path, code: str, crashed: bool) -> None:
+    """A live search's simulation read a value compared inside each run as one number and crashed at every evaluation;
+    a search had no small run, so the known-answer checks met the crash first and spent one of their two repairs on it.
+    The small run now runs a search on its coarse scan's settings, with the baseline design and the values compared
+    inside each run, as the search calls the simulation; code that reads them as the search gives them still passes."""
+    from tests.test_disclosure import _engine
+
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(code, encoding="utf-8")
+    eng = _engine(root)
+    eng.executor = SharedInterpreterExecutor(python_version="3.11")  # type: ignore[assignment]
+    eng._trial_mode, eng._trial_entries = True, {"run_cell"}  # type: ignore[attr-defined]
+    eng._protocol_block = lambda state: {"optimisation": _SEARCH_BLOCK}  # type: ignore[assignment]
+    sent = asyncio.run(eng._small_run_gate({"exec_reflect_iter": 0}, sys.executable, {}))
+    if crashed:
+        assert sent is not None and sent["exec_result"]["failed_script"] == "simulate.py"
+        assert "float() argument must be" in sent["exec_result"]["stderr_tail"]
+    else:
+        assert sent is None
+        assert "ran" in eng._small_run_note  # type: ignore[attr-defined]

@@ -39,6 +39,11 @@ from typing import Any
 
 from .goal_coverage import _generated, _literal, asked_numbers, code_numbers
 
+from .stop_power import READ
+
+#: What a fault found here rests on (core/stop_power.py): FI's reading of the script's text.
+SOURCE = READ
+
 _RUN_WORDS = {
     "runs", "run", "replicates", "replicate", "reps", "trials", "trial", "samples", "sample", "realizations",
     "realisations", "simulations", "simulation", "sims", "repeats",
@@ -58,6 +63,9 @@ _DRAW_ONLY = {"samples", "sample"}
 _STRONG_RESAMPLE = re.compile(r"^n?(bootstraps?|boots?|resamples?|resampling|jackknife|jackknifes)\d*$")
 _WEAK_RESAMPLE = re.compile(r"^n?(mcmc|hmc|posterior|burnin|warmup)\d*$")
 _ALWAYS_RUNS = {"runs", "run", "trials", "trial", "realizations", "realisations", "simulations", "simulation", "sims"}
+#: Words of a name that holds a floor on the runs (``MIN_RUNS``), not the runs themselves: only such a name may hold the
+#: plan's own fewest runs (a ``N_RUNS = 10`` beside a plan of 200 is a different run count all the same).
+_FEWEST_WORDS = {"min", "minimum", "least", "fewest", "floor"}
 
 
 def _is_resample_count(name: str) -> bool:
@@ -90,6 +98,8 @@ class Mismatch:
     found: list[float] = field(default_factory=list)  # what the script holds under a matching name
     where: str = ""  # "R0_LIST in experiment.py, line 166"; empty when the script holds no such list
     missing: list[float] = field(default_factory=list)  # protocol values the script does not contain at all
+    part: str = "grid"  # where the protocol fixes the axis: "grid", or "in_each_run" (compared inside each run)
+    from_loop: bool = False  # the list compared is a ``for`` loop's literal values, not a list the script assigns to a name
 
     def left_out(self) -> list[float]:
         """The protocol values of a grid axis that the list found does not hold."""
@@ -99,7 +109,8 @@ class Mismatch:
         want = _fmt(self.expected)
         if self.kind == "grid":
             if not self.found:
-                return f"the protocol fixes {self.name} at {want}, and the script contains no such list (missing {_fmt(self.missing)})"
+                fixes = f"{self.name} at {want}" if self.part == "grid" else f"{self.name} at {want} inside each run"
+                return f"the protocol fixes {fixes}, and the script contains no such list (missing {_fmt(self.missing)})"
             extra = [v for v in self.found if not _has(self.expected, v)]
             left_out = [v for v in self.expected if not _has(self.found, v)]
             parts = []
@@ -107,8 +118,10 @@ class Mismatch:
                 parts.append(f"adds {_fmt(extra)}")
             if left_out:
                 parts.append(f"leaves out {_fmt(left_out)}")
+            fixes = (f"{self.name} at {want}" if self.part == "grid"
+                     else f"{self.name} at {want} inside each run")
             return (
-                f"the protocol fixes {self.name} at {want}; {self.where} is {_fmt(self.found)}"
+                f"the protocol fixes {fixes}; {self.where} is {_fmt(self.found)}"
                 + (f": it {' and '.join(parts)}" if parts else "")
             )
         if self.kind == "runs":
@@ -150,6 +163,7 @@ class _Found:
     line: int
     script: str
     positional: bool = False  # a loop variable the body never hands on as an argument: it picks positions or output names
+    loop: bool = False  # found as ``for name in (literal, ...)``, not assigned to a name
 
 
 def _numeric_sequence(node: ast.AST) -> list[float] | None:
@@ -254,7 +268,7 @@ class _Reader(ast.NodeVisitor):
                     and any(isinstance(a, ast.Name) and a.id == var for a in [*call.args, *[k.value for k in call.keywords]])
                     for stmt in node.body for call in ast.walk(stmt)
                 )
-                self.lists.append(_Found(var, seq, node.lineno, self.script, positional=not handed_on))
+                self.lists.append(_Found(var, seq, node.lineno, self.script, positional=not handed_on, loop=True))
         self.generic_visit(node)
 
 
@@ -490,6 +504,7 @@ def check(protocol: dict[str, Any] | None, scripts: dict[str, str], *, analysis_
         want = [float(v) for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)] if isinstance(values, list) else []
         if not want:
             continue
+        part = "grid" if isinstance(protocol.get("grid"), dict) and axis in protocol["grid"] else "in_each_run"
         named = [f for f in lists if _is_named_for(f, str(axis))]
         candidates = (
             named
@@ -499,11 +514,12 @@ def check(protocol: dict[str, Any] | None, scripts: dict[str, str], *, analysis_
         if candidates:
             if not any(_same_set(f.values, want) for f in candidates):
                 best = max(candidates, key=lambda f: sum(_has(want, v) for v in f.values))
-                out.append(Mismatch("grid", str(axis), want, best.values, f"{best.name} in {best.script}, line {best.line}"))
+                out.append(Mismatch("grid", str(axis), want, best.values, f"{best.name} in {best.script}, line {best.line}",
+                                    part=part, from_loop=best.loop))
         elif not fi_runs_trials:  # under the trial contract FI hands the grid in: absent is expected, a contradiction is not
             absent = [v for v in want if not _has(numbers, v)]
             if absent:
-                out.append(Mismatch("grid", str(axis), want, [], "", absent))
+                out.append(Mismatch("grid", str(axis), want, [], "", absent, part=part))
 
     runs = protocol.get("runs_per_setting")
     if isinstance(runs, (int, float)) and not isinstance(runs, bool):
@@ -511,10 +527,16 @@ def check(protocol: dict[str, Any] | None, scripts: dict[str, str], *, analysis_
         # ``n_runs = 0`` ... ``n_runs += 2``, and was stopped as "the script sets 0 runs per setting"). Only zero is
         # skipped, not every name the script adds to (a real setting that is also incremented somewhere is still read),
         # and not a negative count either (that is a wrong setting, and is reported like any other).
+        # The plan's own fewest runs (`min_runs_per_setting`, which FI may lower the runs toward) is a count the plan
+        # gives too: an analysis that keeps a setting only with at least that many runs follows the plan (a live
+        # quest's `MIN_RUNS = 10` beside 200 runs per setting was read as "the script sets 10 runs per setting").
+        fewest = protocol.get("min_runs_per_setting")
         counts = [
             f for f in scalars
             if set(_tokens(f.name)) & _RUN_WORDS and not _is_resample_count(f.name)
             and float(f.values[0]).is_integer() and f.values[0] != 0
+            and not (isinstance(fewest, (int, float)) and not isinstance(fewest, bool)
+                     and set(_tokens(f.name)) & _FEWEST_WORDS and math.isclose(f.values[0], float(fewest)))
         ]
         if counts and not any(math.isclose(f.values[0], float(runs)) for f in counts):
             first = counts[0]
@@ -530,6 +552,27 @@ def check(protocol: dict[str, Any] | None, scripts: dict[str, str], *, analysis_
             if not any(_has(numbers, form) for form in forms):
                 out.append(Mismatch("threshold", str(name), [float(v)]))
     return out
+
+
+def check_repairable(protocol: dict[str, Any] | None, scripts: dict[str, str], *, analysis_loops: bool = False) -> list[Mismatch]:
+    """The differences :func:`check` finds that may send a script back to be rewritten: all but the ones that rest only on
+    a ``for`` loop's literal values (:func:`loop_hints`).
+
+    A loop over literals is how a script walks the values of a computation as often as it is how it defines the grid: a
+    live quest's acceptance function looped over ``(0.05, 0.2)`` to test a property that is undefined at 0, the plan's grid
+    was run in full, and the script was read as "leaves out 0" and sent back twice. A reading of that kind (core/stop_power.py)
+    is told to the reader, never fought; what the loop's values did to the grid is counted from FI's record after the run."""
+    return [m for m in check(protocol, scripts, analysis_loops=analysis_loops) if not m.from_loop]
+
+
+def loop_hints(protocol: dict[str, Any] | None, scripts: dict[str, str]) -> list[str]:
+    """The differences that rest only on a ``for`` loop's literal values, as notes in plain words (never a repair, never a
+    stop)."""
+    return [
+        "FI read a loop over fixed values in the script as a setting's values, and they differ from the plan: "
+        + m.message() + ". This is only a reading of the code; what the run covered is counted from FI's record of its trials."
+        for m in check(protocol, scripts) if m.from_loop
+    ]
 
 
 def analysis_suspects(protocol: dict[str, Any] | None, scripts: dict[str, str]) -> list[Mismatch]:
@@ -564,6 +607,21 @@ def precision_notes(protocol: dict[str, Any] | None, seeds: int) -> list[str]:
             f"The protocol fixes {int(runs)} runs per setting ({trials} trials over {max(1, int(seeds))} seed(s)) but no "
             f"target precision: for a probability near 0.5 that is at best a 95% interval of about "
             f"±{reach:.3f}. Say the width the claim needs in `precision.target_half_width`, and the runs follow from it."
+        ]
+    from .run_estimate import precision_metric
+    from .stats import _Z95
+
+    on, kind = precision_metric(protocol)
+    if kind == "mean":
+        # A mean's half-width follows from the spread of one trial's value, not from the count a probability near 0.5
+        # needs: say the largest spread the planned trials reach the target with, for the plan to hold its own spread to.
+        widest = float(target) * math.sqrt(trials) / _Z95
+        return [
+            f"The protocol targets a 95% half-width of ±{target:g} on the mean `{on}`: {int(runs)} runs over "
+            f"{max(1, int(seeds))} seed(s) give {trials} trials per setting, which reach it only if one trial's `{on}` "
+            f"varies with a standard deviation of at most {widest:.3g} (in `{on}`'s own units, as the target is). If the "
+            f"spread you expect is larger, raise the trials per setting to (1.96 x spread / {target:g})^2"
+            + (f", divided over the {int(seeds)} seeds" if int(seeds) > 1 else "") + ", or widen the target."
         ]
     need = trials_for_half_width(float(target))
     if need is not None and trials < need:
@@ -665,6 +723,12 @@ def metric_notes(protocol: dict[str, Any] | None) -> list[str]:
                          "intervals and standard errors against the truth, and the paper will say that their calibration "
                          "was not checked; declare one for each number the simulation estimates and knows the true "
                          "value of, while the plan is a draft.")
+        open_multiplier = metric_spec.multiplier_unstated(protocol)
+        if open_multiplier:
+            notes.append("The plan gives no `degrees_of_freedom` for the interval of " + ", ".join(f"`{i}`" for i in open_multiplier)
+                         + ", so FI counts how often it covers the truth but does not hold its multiplier (t or normal) to the "
+                         "one the design chose; if the interval is the estimate plus and minus one multiplier times the "
+                         "standard error, add it while the plan is a draft.")
         return notes
     if not isinstance(protocol.get("runs_per_setting"), (int, float)) and not isinstance(protocol.get("precision"), dict):
         return []

@@ -78,7 +78,7 @@ def test_a_whole_script_repair_that_changes_an_outline_signature_is_not_used_and
     kept = {"package_files": {"spring/model.py": good_file}}
     assert engine._apply_package_repair(WITH_OUTLINE, kept, node="execute_reflect") == ["spring/model.py"]
     note = engine._package_repair_note(WITH_OUTLINE)
-    assert "`def frequency(k, m) -> float`" in note and "`def quality(m, w, c) -> float`" in note
+    assert "`def frequency(k, m)`" in note and "`def quality(m, w, c)`" in note  # the code's own defs: the test can call them
     # Without an outline nothing is held: the note and the repair are as they were.
     assert "Keep the parameters of these functions" not in engine._package_repair_note(STATE)
     assert engine._package_repair_files(STATE, parsed) == {"spring/model.py": parsed["package_files"]["spring/model.py"].strip("\n") + "\n"}

@@ -158,6 +158,12 @@ LANGUAGE = (
 )
 
 
+def formula_problem(text: Any) -> str:
+    """Why FI's evaluator would refuse ``text`` as a formula (the very test it applies: length, nodes, what it may call),
+    or ``""`` when it would read it."""
+    return _tree(text)[1]
+
+
 def _tree(text: Any, functions: dict[str, Callable[..., float]] | None = None) -> tuple[ast.Expression | None, str]:
     """The parsed formula, or ``(None, why it cannot be read)``. ``functions``: the functions it may call (default
     :data:`FUNCTIONS`)."""
@@ -345,6 +351,60 @@ def written_precision(value: Any) -> tuple[int, float] | None:
     return digits, 0.5 * 10.0 ** exponent
 
 
+def typed_precision(text: Any, value: float) -> tuple[int, float] | None:
+    """``(significant digits, half a unit of the last one)`` of a number as the plan TYPED it (``"0.0174090"`` is six
+    digits, not the five its float repr shows), or ``None`` when ``text`` is not a plain decimal that reads as ``value``
+    (then the float's own shortest form is the only record of what was written)."""
+    if not isinstance(text, str):
+        return None
+    try:
+        dec = Decimal(text.strip())
+    except InvalidOperation:
+        return None
+    exponent = dec.as_tuple().exponent
+    if not dec.is_finite() or not isinstance(exponent, int) or dec == 0 or float(dec) != value:
+        return None
+    return len(dec.as_tuple().digits), float(Decimal(5).scaleb(exponent - 1))
+
+
+def typed_numbers(text: str) -> dict[str, dict[str, str]]:
+    """The ``expected`` and ``tolerance`` of each check of a plan.md's design block as typed there (the scalar's own text,
+    by lower-cased check name); ``{}`` when the block cannot be read. The parsed plan holds floats, which have lost the
+    digits the plan wrote (a trailing zero), and the digits a number was written to are the precision it claims."""
+    import yaml
+
+    from . import plan as _plan
+
+    heading = _plan._HEADING_RE.search(text or "")
+    fenced = _plan._FENCE_RE.search(text, heading.end()) if heading else None
+    if fenced is None:
+        return {}
+    try:
+        root = yaml.compose(fenced.group(1))
+    except yaml.YAMLError:
+        return {}
+
+    def get(node: Any, key: str) -> Any:
+        if not isinstance(node, yaml.MappingNode):
+            return None
+        for k, v in node.value:
+            if isinstance(k, yaml.ScalarNode) and k.value == key:
+                return v
+        return None
+
+    items = get(root, "oracles")
+    if items is None:
+        items = get(get(root, "protocol"), "oracles")
+    out: dict[str, dict[str, str]] = {}
+    for item in items.value if isinstance(items, yaml.SequenceNode) else []:
+        name = get(item, "name")
+        if not isinstance(name, yaml.ScalarNode):
+            continue
+        entry = {k: v.value for k in ("expected", "tolerance") if isinstance(v := get(item, k), yaml.ScalarNode)}
+        out[str(name.value).strip().lower()] = entry
+    return out
+
+
 def disagrees(value: float, expected: float, limit: float) -> bool:
     """Whether FI's own computation ``value`` of a check's expected value is another number than the ``expected`` the plan
     typed: when they differ by more than half a unit of the last place the plan wrote (``0.99975`` is known to 5e-6), or
@@ -359,9 +419,10 @@ def disagrees(value: float, expected: float, limit: float) -> bool:
     return abs(value - expected) > reach
 
 
-#: A value written with at least this many significant digits and fewer than a float holds reads as a truncated
-#: decimal (0.367879 for exp(-1)), not an exact one (0.5, 2, 0.25).
-_TRUNCATED_DIGITS = (5, 13)
+#: A value written with fewer significant digits than a float holds is known only to the digits it is written to
+#: (0.367879 for exp(-1), 0.04978); a value of 13 digits or more is full precision. An exact one (0.5, 2, 0.25) is
+#: taken out earlier (:func:`written_precision`).
+_TRUNCATED_DIGITS = (1, 13)
 
 
 def _criteria_on(protocol: dict[str, Any] | None, name: str, *, value_only: bool) -> list[str]:
@@ -387,17 +448,24 @@ class Enforced:
     oracles: list[dict[str, Any]]
     rewrites: list[str] = field(default_factory=list)
     requests: list[str] = field(default_factory=list)
+    #: The checks whose tolerance is smaller than half a unit of the last digit of their expected value (one dict each:
+    #: ``name``, ``digits``, ``half``, ``limit``, ``relative``, ``tolerance``, ``expected``, ``expected_text``); a
+    #: request is among ``requests`` for each.
+    precision: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _describe(kind: str | None) -> str:
     return _oracle.KINDS.get(kind or "", "check")
 
 
-def enforce(protocol: dict[str, Any] | None, *, fi_runs: bool = True) -> Enforced:
+def enforce(protocol: dict[str, Any] | None, *, fi_runs: bool = True,
+            typed: dict[str, dict[str, str]] | None = None) -> Enforced:
     """Hold each declared check to its kind's numeric form (see the module docstring). A check of an unrecognised
     kind is left alone (the plan's notes already say its kind is none of the six). ``fi_runs``: FI runs the simulation
     on each check's case itself and computes its formula (two scripts, the trial contract); when it does not, the
-    script reports each check's number by name, so a rewritten formula would not be applied and nothing is rewritten."""
+    script reports each check's number by name, so a rewritten formula would not be applied and nothing is rewritten.
+    ``typed``: the numbers as the plan typed them (:func:`typed_numbers`), by lower-cased check name; the digits a value
+    was written to are counted from that text when it is given."""
     oracles = [dict(o) for o in _oracle.declared(protocol)]
     out = Enforced(oracles=oracles)
     names_seen = [str(o["name"]).strip().lower() for o in oracles]
@@ -474,21 +542,104 @@ def enforce(protocol: dict[str, Any] | None, *, fi_runs: bool = True) -> Enforce
             )
             continue
         precision = written_precision(expected)
+        text = (typed or {}).get(name.lower(), {}).get("expected")
+        if precision is not None and text is not None:
+            precision = typed_precision(text, expected) or precision  # type: ignore[arg-type]
         if precision is not None and tolerance is not None:
             digits, half = precision
             limit = tolerance * abs(expected) if relative else tolerance  # type: ignore[arg-type]
-            if _TRUNCATED_DIGITS[0] <= digits < _TRUNCATED_DIGITS[1] and 0 <= limit < half:
+            if digits < _TRUNCATED_DIGITS[1] and 0 <= limit < half:
                 out.requests.append(
-                    f"The check {name!r} expects {_literal(expected)}, a value written to {digits} significant digits "  # type: ignore[arg-type]
-                    f"(so known only to about ±{_fmt(half)}), but its tolerance is {_fmt(limit)}: a correct simulation "
-                    "would fail it. Give the expected value to full precision (worked out to 15 digits in its "
-                    "`reference`), or a tolerance no tighter than the precision it is written to."
+                    f"The check {name!r} expects {text or _literal(expected)}, a value written to {digits} significant digits "  # type: ignore[arg-type]
+                    f"(so known only to about ±{_fmt(half)}), but its tolerance is {_fmt(limit)}"
+                    f"{' (' + _fmt(tolerance) + ' of the value)' if relative else ''}: a correct simulation "
+                    "would fail it. If the value is exact or known to more digits, write it with enough digits for the "
+                    "tolerance (for example 0.300000, or worked out to 15 digits in its `reference`); otherwise give a "
+                    "tolerance no tighter than the precision it is written to."
                 )
+                out.precision.append({"name": name, "digits": digits, "half": half, "limit": limit, "relative": relative,
+                                      "tolerance": tolerance, "expected": expected, "expected_text": text,
+                                      "request": out.requests[-1]})
     return out
 
 
 #: The section of plan.md that says what FI did to the checks before anything ran (prose, never read back).
 HEADING = "A second look at the checks against known answers"
+
+
+def precision_gaps(text: str) -> list[str]:
+    """The names of the checks of a plan.md whose tolerance is smaller than half a unit of the last digit of their
+    expected value as typed (:func:`enforce`)."""
+    from . import plan as _plan
+
+    block = _plan.raw_design_block(text)
+    protocol = block.get("protocol") if isinstance(block, dict) else None
+    if not isinstance(protocol, dict):
+        return []
+    return [str(g["name"]) for g in enforce(protocol, typed=typed_numbers(text)).precision]
+
+
+def precision_requests(text: str, names: list[str]) -> list[str]:
+    """The request to the plan for each named check of a plan.md that is tighter than its expected value's digits."""
+    from . import plan as _plan
+
+    block = _plan.raw_design_block(text)
+    protocol = block.get("protocol") if isinstance(block, dict) else None
+    wanted = {n.strip().lower() for n in names}
+    if not isinstance(protocol, dict):
+        return []
+    return [g["request"] for g in enforce(protocol, typed=typed_numbers(text)).precision
+            if str(g["name"]).strip().lower() in wanted]
+
+
+def widen_to_precision(text: str, names: list[str] | None = None,
+                       added: list[str] | None = None) -> tuple[str, list[str]]:
+    """``(text, sentences)``: ``text`` (a plan.md) with the tolerance of each named check (every one when ``names`` is
+    ``None``; ``added``: the named checks the reply to the first ask added, said so in their sentence) that is still smaller than half a
+    unit of the last digit of its expected value, as typed, widened to exactly that (on the relative scale for a
+    relative tolerance); a sentence per check widened. The expected value is never touched. ``text`` is returned as it
+    is when nothing is widened."""
+    from . import plan as _plan
+
+    wanted = {n.strip().lower() for n in names} if names is not None else None
+    new_ones = {n.strip().lower() for n in added or []}
+    told: list[str] = []
+
+    def change(block: dict[str, Any]) -> dict[str, Any] | None:
+        protocol = block.get("protocol")
+        if not isinstance(protocol, dict) or not isinstance(protocol.get("oracles"), list):
+            return None
+        gaps = {str(g["name"]).strip().lower(): g
+                for g in enforce(protocol, typed=typed_numbers(text)).precision if wanted is None or str(g["name"]).strip().lower() in wanted}
+        if not gaps:
+            return None
+        items = []
+        for item in protocol["oracles"]:
+            gap = gaps.get(str(item.get("name") or "").strip().lower()) if isinstance(item, dict) else None
+            if gap is not None:
+                half, expected = gap["half"], abs(gap["expected"])
+                new = half
+                if gap["relative"]:
+                    new = half / expected
+                    while new * expected < half:
+                        new = math.nextafter(new, math.inf)
+                item = {**item, "tolerance": new}
+                of_value = " of the value" if gap["relative"] else ""
+                told.append(
+                    f"The check {gap['name']!r} expects {gap['expected_text'] or _literal(gap['expected'])}, written to "
+                    f"{gap['digits']} significant digits, but its tolerance {_fmt(gap['tolerance'])}{of_value} was smaller "
+                    f"than half a unit of the last digit (±{_fmt(half)}) and the plan, "
+                    f"{'which added this check in its reply and was asked about it once more' if str(gap['name']).strip().lower() in new_ones else 'asked once'}"
+                    ", did not fix it: FI "
+                    f"widened the tolerance to {_fmt(new)}{of_value}, the precision the value is written to (the "
+                    "expected value is as the plan wrote it)")
+            items.append(item)
+        return {**block, "protocol": {**protocol, "oracles": items}}
+
+    edited = _plan.edit_design_block(text, change)
+    if edited is None or not told:
+        return text, []
+    return _plan.refresh_model_section(edited), told
 
 
 def apply_to_plan(text: str, *, fi_runs: bool = True) -> tuple[str, list[str], list[str]]:
@@ -503,7 +654,7 @@ def apply_to_plan(text: str, *, fi_runs: bool = True) -> tuple[str, list[str], l
         protocol = block.get("protocol")
         if not isinstance(protocol, dict) or not isinstance(protocol.get("oracles"), list):
             return None
-        enforced = enforce(protocol, fi_runs=fi_runs)
+        enforced = enforce(protocol, fi_runs=fi_runs, typed=typed_numbers(text))
         found["e"] = enforced
         if not enforced.rewrites:
             return None
@@ -784,8 +935,11 @@ def formula_findings(protocol: dict[str, Any] | None, fixed: dict[str, float] | 
     for oracle in _oracle.declared(protocol):
         # A sum the plan works out in its own words (a reference, a derivation) is computed too: the plan's own hand
         # arithmetic can be wrong where its `expected_formula` is right (a stated 3.4486 where the sum gives 3.4519).
-        for key, value in oracle.items():
-            if key in ("measure", "expected_formula") or not isinstance(value, str):
+        # Only the keys that hold such a working-out are read (the reference keys and `derivation`), not every text
+        # field of the check (its name, its case words, a note).
+        for key in (*_oracle._REFERENCE_KEYS, "derivation"):
+            value = oracle.get(key)
+            if not isinstance(value, str):
                 continue
             for sw in stated_arithmetic(value):
                 found.append({"name": str(oracle["name"]).strip(), "state": "arithmetic", **sw})
@@ -907,36 +1061,55 @@ def formula_request(findings: list[dict[str, Any]], *, last: bool = True, fixed:
         + ("\nChange only these checks, and nothing else in the plan." if last else ""))
 
 
-def apply_formulas(text: str) -> tuple[str, list[dict[str, Any]]]:
+def apply_formulas(text: str, refused: list[dict[str, Any]] | None = None) -> tuple[str, list[dict[str, Any]]]:
     """``(text, corrections)``: ``text`` (a plan.md) with each check's ``expected`` set to what its ``expected_formula``
     computes where the two still disagree (:func:`disagrees`: by more than the typed number's own written precision or the check's tolerance); ``tolerance``, ``tolerance_mode``,
-    ``case`` and ``measure`` are never touched. Each correction is ``{"name", "was", "now", "formula"}``."""
+    ``case`` and ``measure`` are never touched. Each correction is ``{"name", "was", "now", "formula"}``.
+
+    FI never makes an edit to its own plan that the reader then refuses: each check is corrected on its own, and a
+    correction after which the plan no longer reads (another part of the plan, such as a metric's reference, agrees with the
+    typed number) is not applied; the check keeps the number the plan wrote. Those are added to ``refused`` (when given) as
+    ``{"name", "typed", "formula_value", "formula", "why"}``, the plan's own words for what no longer read."""
     from . import plan as _plan
 
     done: list[dict[str, Any]] = []
+    readable_before = _plan.parse(text).design is not None
 
-    def change(block: dict[str, Any]) -> dict[str, Any] | None:
-        protocol = block.get("protocol")
+    def one(name: str, found: dict[str, Any]) -> Any:
+        def change(block: dict[str, Any]) -> dict[str, Any] | None:
+            protocol = block.get("protocol")
+            if not isinstance(protocol, dict) or not isinstance(protocol.get("oracles"), list):
+                return None
+            items = [{**item, "expected": found["value"]}
+                     if isinstance(item, dict) and str(item.get("name") or "").strip() == name else item
+                     for item in protocol["oracles"]]
+            return {**block, "protocol": {**protocol, "oracles": items}}
+        return change
+
+    def wrong_in(current: str) -> dict[str, dict[str, Any]]:
+        design = _plan.raw_design_block(current)
+        protocol = design.get("protocol") if isinstance(design, dict) else None
         if not isinstance(protocol, dict) or not isinstance(protocol.get("oracles"), list):
-            return None
-        wrong = {f["name"]: f for f in formula_findings(protocol, fixed_settings_of_design(block))
-                 if f["state"] == "differs"}
-        if not wrong:
-            return None
-        items = []
-        for item in protocol["oracles"]:
-            name = str(item.get("name") or "").strip() if isinstance(item, dict) else ""
-            if name in wrong:
-                f = wrong[name]
-                done.append({"name": name, "was": f["expected"], "now": f["value"], "formula": f["formula"]})
-                item = {**item, "expected": f["value"]}
-            items.append(item)
-        return {**block, "protocol": {**protocol, "oracles": items}}
+            return {}
+        return {f["name"]: f for f in formula_findings(protocol, fixed_settings_of_design(design))
+                if f["state"] == "differs"}
 
-    edited = _plan.edit_design_block(text, change)
-    if edited is None or not done:
+    current = text
+    for name, found in wrong_in(text).items():
+        edited = _plan.edit_design_block(current, one(name, found))
+        if edited is None:
+            continue
+        after = _plan.parse(edited)
+        if readable_before and after.design is None:
+            if refused is not None:
+                refused.append({"name": name, "typed": found["expected"], "formula_value": found["value"],
+                                "formula": found["formula"], "why": after.error or ""})
+            continue
+        current = edited
+        done.append({"name": name, "was": found["expected"], "now": found["value"], "formula": found["formula"]})
+    if not done:
         return text, []
-    return _plan.refresh_model_section(edited), done
+    return _plan.refresh_model_section(current), done
 
 
 # --- a test run of the checks before the study -------------------------------------------------------------------------

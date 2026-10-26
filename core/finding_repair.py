@@ -25,6 +25,7 @@ Nothing here knows the engine: the model, the test runs and the regression snaps
 from __future__ import annotations
 
 import ast
+import asyncio
 import copy
 import json
 import re
@@ -35,6 +36,7 @@ from typing import Any, Awaitable, Callable, Iterable
 
 from . import code_findings as _issues
 from . import function_steps as _steps
+from . import step_coverage as _sc
 from . import optimise as _optimise
 from . import trial_runner as _trials
 
@@ -295,8 +297,179 @@ def swallowed_call(text: str) -> str:
     return ""
 
 
-def _top_functions(tree: ast.Module) -> dict[str, ast.FunctionDef]:
-    return {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+def _top_functions(tree: ast.Module) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    return {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+
+REACH_CHARS = 20000  # the most source text of reached functions a repair request shows, and so may change
+
+_OUTPUT_METHODS = {"append", "extend", "update", "write", "writelines", "dump", "add", "setdefault", "insert"}
+
+
+_COMPS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+
+def _walk_scope(nodes: list[ast.AST]):
+    """Like ``step_coverage._shallow`` and also not entering a comprehension (its own scope, as in Python 3)."""
+    stack = list(reversed(nodes))
+    while stack:
+        n = stack.pop()
+        yield n
+        if not isinstance(n, (*_sc._SCOPES, *_COMPS)):
+            stack.extend(reversed(list(ast.iter_child_nodes(n))))
+
+
+def _scope_names(body: list[ast.AST], params: set[str]) -> set[str]:
+    """The names one scope binds itself (parameters, assignments, nested defs and classes, imports, loop and ``with`` names)."""
+    out = set(params)
+    for n in _walk_scope(body):
+        if isinstance(n, ast.MatchAs) and n.name:
+            out.add(n.name)
+        elif isinstance(n, ast.MatchStar) and n.name:
+            out.add(n.name)
+        elif isinstance(n, ast.MatchMapping) and n.rest:
+            out.add(n.rest)
+        elif isinstance(n, _sc._SCOPES):
+            if not isinstance(n, ast.Lambda):
+                out.add(n.name)
+        elif isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+            out.add(n.id)
+        elif isinstance(n, ast.ExceptHandler) and n.name:
+            out.add(n.name)
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            out.update((a.asname or a.name.split(".")[0]) for a in n.names)
+    return out
+
+
+def _resolved_calls(fn: ast.AST, top: set[str]) -> dict[int, str]:
+    """``{id(call): name}`` for the calls inside ``fn`` that go to a top-level function of the module: a name that a scope
+    between the call and the module binds (a parameter, a local, a nested def) is that scope's own, not the module's."""
+    out: dict[int, str] = {}
+
+    def scope(body: list[ast.AST], params: set[str], shadow: set[str]) -> None:
+        shadow = shadow | _scope_names(body, params)
+        for n in _walk_scope(body):
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in top and n.func.id not in shadow:
+                out[id(n)] = n.func.id
+            if isinstance(n, _sc._SCOPES):
+                scope([n.body] if isinstance(n, ast.Lambda) else list(n.body), _sc._params(n), shadow)
+            elif isinstance(n, _COMPS):
+                targets = {x.id for g in n.generators for x in ast.walk(g.target) if isinstance(x, ast.Name)}
+                inner: list[ast.AST] = [n.key, n.value] if isinstance(n, ast.DictComp) else [n.elt]
+                for g in n.generators:
+                    inner += [g.iter, *g.ifs]
+                scope(inner, targets, shadow)
+
+    scope(list(fn.body), _sc._params(fn), set())  # type: ignore[attr-defined]
+    return out
+
+
+def _live_callees(fn: ast.FunctionDef | ast.AsyncFunctionDef, top: set[str]) -> list[str]:
+    """The top-level functions ``fn`` calls whose return value flows into what ``fn`` produces: its return and yield values,
+    the values it stores into an object or file (``out[k] = v``, ``print``, ``.write``, ``.append`` ...), followed back
+    through assignments. A call used only as a statement (a check, a plot) or whose result reaches no output is not listed.
+    In the order they are called."""
+    resolved = _resolved_calls(fn, top)
+    outputs: list[ast.AST] = []
+    edges: list[tuple[set[str], ast.AST, bool]] = []  # (names set, expression, goes to an output regardless)
+
+    def names_of(target: ast.AST) -> set[str]:
+        return {n.id for n in ast.walk(target) if isinstance(n, ast.Name)}
+
+    params = _sc._params(fn)
+    outside = params | {g for x in ast.walk(fn) if isinstance(x, ast.Global) for g in x.names}
+    # (a name the function does not bind at all is the module's own)
+    # ``outside`` is completed below with the names the function never binds, once its locals are known
+    local = _scope_names(list(fn.body), set()) - outside
+    outside |= {x.id for x in ast.walk(fn) if isinstance(x, ast.Name) and x.id not in local and x.id not in params}
+    for n in _sc._shallow(list(fn.body)):
+        if isinstance(n, (ast.Return, ast.Yield, ast.YieldFrom)) and n.value is not None:
+            outputs.append(n.value)
+    for n in ast.walk(fn):
+        if n is not fn and isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for r in _sc._shallow(list(n.body)):
+                if isinstance(r, ast.Return) and r.value is not None:
+                    edges.append(({n.name}, r.value, False))
+        elif isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign)) and n.value is not None:
+            targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+            plain: set[str] = set()
+            stored = False
+            for t in targets:
+                if isinstance(t, (ast.Subscript, ast.Attribute)):
+                    base = t
+                    while isinstance(base, (ast.Subscript, ast.Attribute)):
+                        base = base.value
+                    # a store is an output only when the object stored into reaches one: a parameter, a global, a name
+                    # the function does not bind, or a local that is itself returned or written
+                    if not isinstance(base, ast.Name) or base.id in outside:
+                        stored = True
+                    else:
+                        plain.add(base.id)
+                else:
+                    plain |= names_of(t)
+            edges.append((plain, n.value, stored))
+        elif isinstance(n, ast.NamedExpr):
+            edges.append((names_of(n.target), n.value, False))
+        elif isinstance(n, (ast.For, ast.AsyncFor, ast.comprehension)):
+            edges.append((names_of(n.target), n.iter, False))
+        elif isinstance(n, ast.withitem) and n.optional_vars is not None:
+            edges.append((names_of(n.optional_vars), n.context_expr, False))
+        elif isinstance(n, ast.Expr) and isinstance(n.value, ast.Call):
+            f = n.value.func
+            if (isinstance(f, ast.Name) and f.id == "print") or (isinstance(f, ast.Attribute) and f.attr in _OUTPUT_METHODS):
+                outputs.extend([*n.value.args, *(k.value for k in n.value.keywords)])
+    need: set[str] = set()
+
+    def take(expr: ast.AST) -> None:
+        need.update(x.id for x in ast.walk(expr) if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Load))
+
+    live = list(outputs)
+    for o in outputs:
+        take(o)
+    taken: set[int] = set()
+    changed = True
+    while changed:
+        changed = False
+        for i, (names, expr, always) in enumerate(edges):
+            if i not in taken and (always or names & need):
+                taken.add(i)
+                live.append(expr)
+                take(expr)
+                changed = True
+    calls = {id(c): c for e in live for c in ast.walk(e) if isinstance(c, ast.Call) and id(c) in resolved}
+    out: list[str] = []
+    for c in sorted(calls.values(), key=lambda c: (c.lineno, c.col_offset)):
+        if resolved[id(c)] not in out:
+            out.append(resolved[id(c)])
+    return out
+
+
+def reached_functions(source: str, name: str) -> list[str]:
+    """The top-level functions of ``source`` whose return value flows into what ``name`` produces, through other such
+    functions as well (nearest first, in the order they are called; until their text reaches :data:`REACH_CHARS`; ``name``
+    itself is not listed). A repair of ``name`` may need to change what computes a value ``name`` only passes on; a
+    function ``name`` only calls for its effect or whose result goes nowhere (a check, a plot) is not among them. This one
+    list is both what the request shows and what the reply may replace."""
+    try:
+        funcs = _top_functions(ast.parse(source))
+    except SyntaxError:
+        return []
+    if name not in funcs:
+        return []
+    top = set(funcs)
+    seen, order, queue, used = {name}, [], [name], 0
+    while queue:
+        for callee in _live_callees(funcs[queue.pop(0)], top):
+            if callee in seen:
+                continue
+            seen.add(callee)
+            size = len(function_source(source, callee))
+            if used + size > REACH_CHARS:
+                continue
+            used += size
+            order.append(callee)
+            queue.append(callee)
+    return order
 
 
 def params_kept(old: ast.FunctionDef | ast.AsyncFunctionDef, new: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
@@ -328,16 +501,18 @@ def params_kept(old: ast.FunctionDef | ast.AsyncFunctionDef, new: ast.FunctionDe
     return ""
 
 
-def direct_callers(code: Path, rel: str, name: str) -> dict[str, set[str]]:
+def direct_callers(code: Path, rel: str, name: str, staged: dict[str, str] | None = None) -> dict[str, set[str]]:
     """``{file under code/: the top-level functions in it that call `name` directly}`` (``name(...)`` or ``module.name(...)``),
-    in every Python file of ``code/`` but its tests; ``name`` itself is not its own caller."""
+    in every Python file of ``code/`` but its tests; ``name`` itself is not its own caller. ``staged`` (``{file: text}``) is
+    read in place of the file on disk: the code as a repair would leave it."""
     out: dict[str, set[str]] = {}
     for path in sorted(code.rglob("*.py")):
         other = path.relative_to(code).as_posix()
-        if any(part in ("tests", "__pycache__") for part in path.relative_to(code).parts[:-1]):
+        if any(part in ("tests", "__pycache__") for part in path.relative_to(code).parts[:-1]) \
+                or path.relative_to(code).parts[0] == "skills":  # FI's copy of the skills' files (not the study's code)
             continue
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            tree = ast.parse(staged[other] if staged and other in staged else path.read_text(encoding="utf-8"))
         except (OSError, SyntaxError, ValueError):
             continue
         for fname, fn in _top_functions(tree).items():
@@ -419,7 +594,7 @@ def caller_edit_problem(before: str, after: str, caller_names: set[str] | Iterab
     except SyntaxError:
         return ""
 
-    def masked(fn: ast.FunctionDef) -> str:
+    def masked(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
         fn = copy.deepcopy(fn)
         for call in _calls_to(fn, callee):
             call.args, call.keywords = [], []
@@ -468,14 +643,15 @@ def file_blocks(reply: str) -> tuple[str, dict[str, str]]:
 
 
 def splice(source: str, reply: str, scope: set[str] | None = None,
-           ignored: list[str] | None = None) -> tuple[str | None, list[str], str]:
+           ignored: list[str] | None = None, *, limit: int | None = MAX_FUNCTIONS) -> tuple[str | None, list[str], str]:
     """``(the file with the reply's functions put in, the names it replaced, why not)``. The first fenced block of the
     reply that holds a ``def`` is read: each function it defines that the file has AND that is in ``scope`` (the
     function(s) the finding is about) replaces it (the parameter names must be the same, in the same order; at most
     :data:`MAX_FUNCTIONS`); a definition of any other function the file already has is not spliced (its name is appended to
     ``ignored``); a function the file has not is added at the end as a helper; imports it brings are added; anything else
     in the block is ignored. ``(None, [], why)`` when nothing can be used. With no ``scope`` every function the file has
-    may be replaced."""
+    may be replaced. ``limit`` is the most functions one reply may replace (``None``: no limit, for a repair of a script
+    that is asked for functions, :mod:`core.script_reply`)."""
     block = next((m.group(1) for m in _FENCE.finditer(reply or "") if "def " in m.group(1)), "")
     if not block and "def " in (reply or ""):
         block = reply
@@ -498,7 +674,7 @@ def splice(source: str, reply: str, scope: set[str] | None = None,
         ignored.extend(n for n in existing if n not in replaced)
     if scope is not None and not replaced:
         return None, [], f"the reply does not define the function the finding is about ({', '.join(sorted(scope))})"
-    if len(replaced) > MAX_FUNCTIONS:
+    if limit is not None and len(replaced) > limit:
         return None, [], f"the reply replaces {len(replaced)} functions; change only the ones the finding is about"
     for name in replaced:
         why = params_kept(old_funcs[name], new_funcs[name])
@@ -934,7 +1110,7 @@ def scope_function(issue: dict[str, Any], source: str) -> str:
         return ""
 
 
-def signatures(source: str, skip: str = "") -> str:
+def signatures(source: str, skip: str = "", also_skip: Iterable[str] = ()) -> str:
     """One line per top-level function of ``source`` (its ``def`` line): what the rest of the file offers."""
     try:
         tree = ast.parse(source)
@@ -942,7 +1118,7 @@ def signatures(source: str, skip: str = "") -> str:
         return "(the file does not parse)"
     out = []
     for n in tree.body:
-        if isinstance(n, ast.FunctionDef) and n.name != skip:
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name != skip and n.name not in also_skip:
             out.append(f"def {n.name}({', '.join(_steps._param_names(n))})")
     return "\n".join(out) or "(none)"
 
@@ -1004,6 +1180,30 @@ class Env:
     changed: list[str] = field(default_factory=list)
     baseline: dict[str, str] = field(default_factory=dict)
     baseline_static: dict[str, int] = field(default_factory=dict)
+    #: The files the last :func:`_attempt` took from the model's reply (path -> text; empty: it gave none), for
+    #: :func:`keep_try`.
+    tried: dict[str, str] = field(default_factory=dict)
+
+
+def keep_try(env: "Env", issue: dict[str, Any], rel: str, number: int, accepted: bool, why: str) -> None:
+    """Keep one repair try in ``code/``'s git history so a later change to the checks can be replayed on it: an accepted
+    one is a commit on the branch (:func:`core.code_project.record_change`); a refused one is a commit of the model's file
+    on the side reference ``refs/fi/refused/<finding id>-<try>`` (:func:`core.code_project.keep_refused`), the branch not
+    moved. Never stops or changes the repair: a git failure is dropped."""
+    try:
+        from . import code_project as _project
+
+        who = f"{issue.get('id')} ({issue.get('function') or 'no function'}; {issue.get('quantity') or 'no quantity'})"
+        if accepted:
+            _project.record_change(env.root, env.scrub(f"finding repair accepted: {who}"), category="fixed", log=env.log)
+        elif env.tried:
+            _project.keep_refused(env.root, f"{issue.get('id')}-{number}", dict(env.tried),
+                                  env.scrub(f"finding repair refused: {who}: {why[:300]}"),
+                                  extras={"result.json": env.scrub(json.dumps({"path": "finding_repair", "finding": issue.get("id"),
+                                                                              "try": number, "reason": why}))},
+                                  log=env.log)
+    except Exception:  # noqa: BLE001 -- the record is a convenience; the repair goes on whatever happens to it
+        pass
 
 
 def _accepted(record: dict[str, Any]) -> list[str]:
@@ -1212,11 +1412,16 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
     failure = issue.get("failure") or ""
     callers = direct_callers(env.code, rel, scope) if scope else {}
     shown = _callers_block(env, callers)
-    code_block = (f"### {rel} (the function `{scope}`)\n```python\n{function_source(old, scope)}\n```\n\nThe rest of {rel} "
-                  f"offers (do not change these unless the finding is about them):\n{signatures(old, scope)}"
+    reach = reached_functions(old, scope) if scope else []
+    reach_block = "".join(f"\n\n### {rel} (the function `{n}`, which `{scope}` reaches by calls)\n```python\n"
+                          f"{function_source(old, n)}\n```" for n in reach)
+    may = (f"You may change `{scope}`" + (" and, where the fix is there, " + ", ".join(f"`{n}`" for n in reach)
+                                          + " (each with the same parameters or more with defaults)" if reach else "") + ". ")
+    code_block = (f"### {rel} (the function `{scope}`)\n```python\n{function_source(old, scope)}\n```{reach_block}\n\n{may}"
+                  f"The rest of {rel} offers (do not change these):\n{signatures(old, scope, reach)}"
                   + (f"\n\nIt is called by:\n\n{shown}" if shown else "")
                   if scope else f"### {rel}\n```python\n{old.rstrip()}\n```")
-    how = ("Reply with ONE fenced Python block holding the corrected function(s), each whole, with the same names and "
+    how = ("Reply with ONE fenced Python block holding the corrected function(s) (only ones named above as yours to change), each whole, with the same names and "
            "parameters (you may add small helper functions and import lines). If the fix needs a value the function is not "
            "given, add it as a parameter AFTER the existing ones, with a default value, and change each function that "
            "calls it (shown above) to pass it: that function whole, in its own fenced block whose first line is "
@@ -1234,12 +1439,11 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
         main, marked = file_blocks(reply)
         mine_too = callers.get(rel, set())
         skipped: list[str] = []
-        new, names, why = splice(old, f"```python\n{main or marked.get(rel, '')}\n```", {scope, *mine_too}, skipped)
+        new, names, why = splice(old, f"```python\n{main or marked.get(rel, '')}\n```", {scope, *reach, *mine_too}, skipped)
+        env.tried = {rel: new} if new is not None else {}  # the model's files as they came, kept even when refused
         if skipped:
-            env.log.warning("[code_review] %s: the reply also defined %s, which the finding is not about; not used",
-                            issue.get("id"), ", ".join(f"`{n}`" for n in skipped))
-        if new is not None and scope not in names:
-            new, why = None, f"the reply does not define the function the finding is about ({scope})"
+            env.log.warning("[code_review] %s: the reply also defined %s, which `%s` does not reach; not used",
+                            issue.get("id"), ", ".join(f"`{n}`" for n in skipped), scope)
         for other, text in marked.items():
             if new is None or other == rel:
                 continue
@@ -1254,11 +1458,13 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
                 new, why = None, f"its change to {target}: {why_not}"
             elif changed != before:
                 edits[target] = (before, changed)
+                env.tried[target] = changed
                 names = [*names, *(f"{target}:{n}" for n in done)]
     else:
         from . import code_review as _review
 
         new = _review.parse_files(reply, [rel]).get(rel)
+        env.tried = {rel: new} if new else {}  # the model's file as it came, kept even when a check below refuses it
         names, why = [rel], "" if new else "the reply held no whole file"
         # moving what runs on import under a main guard is not a change of the module the finding must speak of
         was, now = without_main_guard(old, new) if new else (old, new)
@@ -1302,6 +1508,17 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
                                    callers)
         if unpassed:
             return False, unpassed
+    if scope and rel in edits:
+        # a changed function the scope function reaches: every function that calls it, in any file, as the repair leaves the
+        # code (the reply's own new callers included), must pass on a parameter the repair added
+        staged = {t: after_text for t, (_b, after_text) in edits.items()}
+        for changed in [n for n in names if n in reach]:
+            its = direct_callers(env.code, rel, changed, staged)
+            final = {c: (staged[c] if c in staged else _read(env.code / c)) for c in its}
+            unpassed = unpassed_params(function_source(old, changed), function_source(edits[rel][1], changed), changed,
+                                       final, its)
+            if unpassed:
+                return False, unpassed
     for target, (before, after_text) in edits.items():
         problem = env.keeps(before, after_text, target)
         if problem:
@@ -1362,7 +1579,9 @@ async def repair_issue(env: Env, issue: dict[str, Any], rel: str) -> bool:
         if not spend(env, issue, kind):
             continue
         number = len(issue.setdefault("repairs", [])) + 1
+        env.tried = {}
         accepted, why = await _attempt(env, issue, rel, who, detail)
+        await asyncio.to_thread(keep_try, env, issue, rel, number, accepted, why)
         by = env.other if who == "other" else env.code_model
         issue["repairs"].append({"try": number, "by": who, "model": by or who, "outcome": "accepted" if accepted else "rejected",
                                  **({} if accepted else {"why": why[:300]})})

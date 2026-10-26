@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from tests.plan_parts_helpers import checks_reply, is_scoped_ask, parts_of, plan_shown
 
 from core import evidence, hidden_check as hc, oracle_review as orv
 from core.config import Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, PausesConfig, ProviderConfig
@@ -209,8 +210,8 @@ def _fake(review: Any, *, fail_review: bool = False):
             if fail_review:
                 raise TimeoutError("no answer")
             return json.dumps(review)
-        if "You are revising the plan" in prompt:
-            return prompt.split("# The plan as it stands", 1)[1].split("# What the person asked for", 1)[0].strip()
+        if is_scoped_ask(prompt):
+            return checks_reply(plan_shown(prompt), prompt)
         if _classify(prompt) == "Experiment Design":
             body = json.loads(_FAKE_RESPONSES["design"])
             body["protocol"] = PROTOCOL

@@ -282,6 +282,24 @@ def typed_series(source: str, script: str = "experiment.py") -> list[TypedSeries
     return sorted(found, key=lambda s: s.line)
 
 
+def typed_series_in(code_dir: Path) -> dict[Path, list[TypedSeries]]:
+    """Each top-level script of ``code_dir`` that saves a figure and has a plotting call drawing numbers typed into the code
+    (read, never run): ``{script path: findings}``."""
+    found: dict[Path, list[TypedSeries]] = {}
+    code_dir = Path(code_dir)
+    for path in sorted(code_dir.glob("*.py")) if code_dir.is_dir() else []:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if ".savefig(" not in text:
+            continue
+        typed = typed_series(text, path.name)
+        if typed:
+            found[path] = typed
+    return found
+
+
 def figures_to_drop(findings: list[TypedSeries], saved: list[str]) -> list[str]:
     """The saved figure files a script's typed-in series are in: exactly the file the call's own ``savefig`` names (a figure
     in another format of the same name is a different file and stays). When that file cannot be told, the figures this
@@ -311,7 +329,7 @@ def directive(findings: list[TypedSeries]) -> str:
         "not replace one typed list with another, and do not change anything else (the analysis, the printed "
         "RESULT_JSON, the other figures). A reference or theory curve is no exception: compute the curve from its formula "
         "(or from the results); do not type its values. Reference lines (a limit, a target, y = x) and axis limits may "
-        "stay as they are. Return the whole corrected script."
+        "stay as they are. Return only the functions you change in `functions` (each one whole; FI keeps every other line)."
     )
 
 

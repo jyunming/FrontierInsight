@@ -80,7 +80,7 @@ async def test_design_self_critique_amended_design_replaces_draft(
     eng = Engine(cfg)
 
     objections = [
-        {"check": "circular_evaluation",
+        {"check": "circular_evaluation", "where": "hypothesis and method",
          "objection": "evaluator and optimizer share simulator",
          "fix": "introduce independent evaluator with different sigma"},
     ]

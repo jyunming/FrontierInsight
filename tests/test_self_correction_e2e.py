@@ -46,8 +46,10 @@ _GOOD_EXPERIMENT = textwrap.dedent("""\
 # with no RESULT_JSON line.
 _BAD_EXPERIMENT = textwrap.dedent("""\
     import sys
-    # `undefined_name` doesn't exist; this raises NameError immediately.
-    print(undefined_name)
+    # A fault only running finds (an undefined name is found by the static check before the run and repaired there):
+    # the list is empty, so this raises IndexError immediately.
+    values = []
+    print(values[3])
 """)
 
 

@@ -241,6 +241,66 @@ def test_the_evidence_record_keeps_a_precision_target_no_result_was_held_to(tmp_
     assert "precision_not_judged" not in record
 
 
+
+def test_a_mean_the_target_names_given_without_its_values_is_a_gap_beside_a_judged_probability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core import engine as engine_mod
+
+    monkeypatch.setattr(engine_mod, "_aggregate_result_json_replicates", lambda *_a, **_k: {
+        "hit_rate": {"ci_method": engine_mod._CI_WILSON, "ci_lower": 0.40, "ci_upper": 0.60},
+        "settle_time": {"ci_method": "t_between_seeds", "ci_lower": 1.0, "ci_upper": 3.0}})
+    metrics = [{"id": "settle_time", "kind": "mean"}, {"id": "hit_rate", "kind": "proportion"}]
+    state = {"result_json_replicates": [{"hit_rate": 0.5, "settle_time": 2.0}, {"hit_rate": 0.4, "settle_time": 2.1}]}
+    eng = _engine_with_precision(tmp_path / "m", {"target_half_width": 0.05, "metric": "settle_time"})
+    eng._protocol_block = lambda _state: {"precision": {"target_half_width": 0.05, "metric": "settle_time"},  # type: ignore[method-assign]
+                                          "metrics": metrics}
+    record = eng._write_evidence(state, write=False)
+    assert record["precision_not_judged"] == {"target": 0.05, "metric": "settle_time"}
+    # the probability is not held to a target set on the mean's scale
+    agg = engine_mod._aggregate_result_json_replicates()
+    eng._annotate_precision(state, agg)
+    assert "target_half_width" not in agg["hit_rate"]
+    # known positive: the target on the probability, judged there, is no gap
+    eng._protocol_block = lambda _state: {"precision": {"target_half_width": 0.05, "metric": "hit_rate"},  # type: ignore[method-assign]
+                                          "metrics": metrics}
+    assert "precision_not_judged" not in eng._write_evidence(state, write=False)
+    agg = engine_mod._aggregate_result_json_replicates()
+    eng._annotate_precision(state, agg)
+    assert agg["hit_rate"]["precision_reached"] is False and "target_half_width" not in agg["settle_time"]
+
+
+def test_the_plans_only_metric_keeps_an_unnamed_target_and_a_dotted_name_is_matched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core import engine as engine_mod
+
+    monkeypatch.setattr(engine_mod, "_aggregate_result_json_replicates", lambda *_a, **_k: {
+        "hit_rate": {"ci_method": engine_mod._CI_WILSON, "ci_lower": 0.40, "ci_upper": 0.60},
+        "by_n.4.risk.rate": {"ci_method": engine_mod._CI_WILSON, "ci_lower": 0.48, "ci_upper": 0.52}})
+    state = {"result_json_replicates": [{"hit_rate": 0.5}, {"hit_rate": 0.4}]}
+    eng = _engine_with_precision(tmp_path / "u", {"target_half_width": 0.05})
+    # the plan's only metric is a mean, the target names none: it is on that mean, never on a probability beside it
+    eng._protocol_block = lambda _state: {"precision": {"target_half_width": 0.05},  # type: ignore[method-assign]
+                                          "metrics": [{"id": "settle_time", "kind": "mean"}]}
+    agg = engine_mod._aggregate_result_json_replicates()
+    assert eng._annotate_precision(state, agg) == "" and "target_half_width" not in agg["hit_rate"]
+    assert eng._write_evidence(state, write=False)["precision_not_judged"] == {"target": 0.05, "metric": "settle_time"}
+    # a declared name with a dot in it is the end of the pooled key's path
+    eng._protocol_block = lambda _state: {"precision": {"target_half_width": 0.05, "metric": "risk.rate"},  # type: ignore[method-assign]
+                                          "metrics": [{"id": "risk.rate", "kind": "proportion"}]}
+    agg = engine_mod._aggregate_result_json_replicates()
+    eng._annotate_precision(state, agg)
+    assert agg["by_n.4.risk.rate"]["precision_reached"] is True and "target_half_width" not in agg["hit_rate"]
+    assert "precision_not_judged" not in eng._write_evidence(state, write=False)
+    # a shorter declared name is not the end of a longer one's key: `rate` is not `risk.rate`
+    eng._protocol_block = lambda _state: {"precision": {"target_half_width": 0.05, "metric": "rate"},  # type: ignore[method-assign]
+                                          "metrics": [{"id": "risk.rate", "kind": "proportion"}, {"id": "rate", "kind": "proportion"}]}
+    agg = engine_mod._aggregate_result_json_replicates()
+    eng._annotate_precision(state, agg)
+    assert "target_half_width" not in agg["by_n.4.risk.rate"]
+    assert eng._write_evidence(state, write=False)["precision_not_judged"]["metric"] == "rate"
+
 def test_a_quest_waiting_for_the_reviews_human_decision_is_not_publication_ready(tmp_path: Path) -> None:
     root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
     (root / ".fi").mkdir()
@@ -887,3 +947,79 @@ def test_a_check_the_code_reader_flags_is_not_independent_evidence(tmp_path: Pat
     rec.update(version=code_review.version(code), read_version=code_review.version(code), problems=[], final=True)
     code_review.save(root, rec)
     assert evidence.assess(root, _state(), settings=ON)["status"] == "publication_ready"
+
+
+# --- a known answer the plan's model derived is not validation (the maintainer's rule 3) ------------------------------------
+
+SOURCES = [{"label": "1", "title": "A handbook of heat sinks", "doi": "10.1000/handbook"}]
+
+
+def _checked(tmp_path: Path, oracles: list[dict[str, Any]], *, corrected: dict[str, Any] | None = None,
+             passed: tuple[str, ...] = ()) -> dict[str, Any]:
+    root = _quest(tmp_path, freeze=False, protocol_status="ok", oracle_status="ok", protocol={"oracles": oracles})
+    frozen_protocol.freeze(root, {"oracles": oracles}, approved_by="test", source="plan.md", sources=SOURCES)
+    judged = [{"name": o["name"], "value": 1.0, "passed_by_engine": True, "measured_by": "engine"} for o in oracles]
+    (root / "needs" / "ORACLE_CHECK.json").write_text(json.dumps({
+        "status": "ok", "judged_by": "engine", "contract": "trial", "attempts": [{"judged": judged}],
+        **({"corrected": corrected} if corrected else {}),
+    }), encoding="utf-8")
+    return evidence.assess(root, _state(design={"hypothesis": "h", "protocol": {"oracles": oracles}}), settings=ON)
+
+
+DERIVED = {"name": "cooling_time", "expected": 1.0, "tolerance": 0.01,
+           "reference": "derivation: the cup cools by exp(-t/tau), so at t = tau the excess is 1/e = 0.3679 of the start"}
+CITED = {"name": "plate_conduction", "expected": 2.0, "tolerance": 0.01,
+         "reference": "Steady conduction through a slab, q = k dT / L, from [1] (Handbook, eq. 3)"}
+INDEPENDENT = {"name": "two_ways", "kind": "second_implementation", "expected": 0, "tolerance": 1e-9,
+               "reference": "A second implementation sharing no code with the simulation: it uses a plain loop"}
+
+
+def _rests_on_derivation(got: dict[str, Any]) -> bool:
+    return any("rests on the plan's own derivation" in g for g in got["all_gaps"].get("independently_validated", []))
+
+
+def test_a_result_whose_every_passing_check_is_the_plans_own_derivation_is_not_independently_validated(tmp_path: Path) -> None:
+    got = _checked(tmp_path, [DERIVED])
+    assert _rests_on_derivation(got) and got["levels"]["independently_validated"] is False
+
+
+def test_one_check_from_a_source_or_a_second_implementation_is_enough(tmp_path: Path) -> None:
+    """The known positive: a literature value, or a second implementation that shares no code, still validates."""
+    assert not _rests_on_derivation(_checked(tmp_path / "a", [DERIVED, CITED]))
+    assert not _rests_on_derivation(_checked(tmp_path / "b", [DERIVED, INDEPENDENT]))
+
+
+def test_a_check_fi_corrected_never_validates_even_when_it_cites_a_source(tmp_path: Path) -> None:
+    """A referee-corrected check is not validated (maintainer, 2026-10-22): only a literature value or an independent
+    second implementation is. A correction a judge or the plan's model settled had no gap at all."""
+    for source in ("challenge", "numeric", "recompute"):
+        got = _checked(tmp_path / source, [CITED], corrected={"plate_conduction": {
+            "from": 1.0, "to": 2.0, "source": source, "confirmed_by": {"source": source}}})
+        assert _rests_on_derivation(got) and any("plate_conduction" in g and "corrected" in g
+                                                 for g in got["all_gaps"]["independently_validated"]), source
+
+
+def test_a_second_implementation_that_cites_a_retrieved_source_validates_by_that_route() -> None:
+    """Either route validates: it cites a frozen source, or it shares no code. A second implementation whose reference
+    cites a source but does not say it shares no code was downgraded."""
+    from core import oracle_check as oc
+
+    cited = {"name": "two_ways", "kind": "second_implementation",
+             "reference": "Compared with the closed form of the handbook, [1] (eq. 3), computed by a plain loop"}
+    assert not oc._NOT_SHARED_RE.search(oc.reference_of(cited))
+    assert oc.validates(cited, {}, SOURCES)
+    index_only = {"name": "two_ways", "kind": "second_implementation", "reference": "the field u [1] is compared point by point"}
+    assert not oc.validates(index_only, {}, SOURCES), "a bracketed index after a symbol is not a citation"
+    assert oc.validates({**index_only, "reference": "compared with the field u from [1]"}, {}, SOURCES)
+    assert not oc.validates(cited, {}, [])  # the known negative: no retrieved source, no statement of independence
+
+
+def test_only_a_plain_statement_that_no_code_is_shared_counts_for_a_second_implementation() -> None:
+    from core import oracle_check as oc
+
+    for said in ("shares no code with the simulation", "sharing no BH decision code with the simulation",
+                 "a second solver that shares no function with the simulation"):
+        assert oc._NOT_SHARED_RE.search(said), said
+    for said in ("shares no assumptions with that part of the model", "shares no data, only the simulation code is reused",
+                 "shares nothing but the grid"):
+        assert not oc._NOT_SHARED_RE.search(said), said

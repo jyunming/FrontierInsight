@@ -110,6 +110,28 @@ def pooled(items: list[dict[str, Any]]) -> dict[str, Any]:
             "digest": "+".join(sorted(s["digest"] for s in items))}
 
 
+def _summary_of(c: dict[str, Any], name: str) -> dict[str, Any] | None:
+    """The summary of one value in one record; for a record of a setting that never ran, which names no value, the
+    summary of "not run" (core/trial_table.py :func:`~core.trial_table.not_run_summary`)."""
+    s = c["metrics"].get(name)
+    if s is None and c.get("not_run"):
+        return _trial_table.not_run_summary()
+    return s
+
+
+def _status_of(whole: dict[str, Any], members: list[dict[str, Any] | None]) -> dict[str, Any]:
+    """``{"status": ...}`` for a setting none of whose pooled records gave a number: "no finite value" when any record
+    ran and gave only non-finite ones, "not run" when none ran; ``{}`` when the setting has a number."""
+    if whole.get("n"):
+        return {}
+    got = [s for s in members if s]
+    if any(s.get("status") == _trial_table.NO_FINITE or s.get("missing") for s in got):
+        return {"status": _trial_table.NO_FINITE}
+    if got and all(s.get("status") == _trial_table.NOT_RUN for s in got):
+        return {"status": _trial_table.NOT_RUN}
+    return {}
+
+
 def _differs(items: list[dict[str, Any]], whole: dict[str, Any]) -> bool:
     """Whether cells' summaries of one value differ by more than chance: a mean further than :data:`POOL_Z` standard
     errors from the pooled mean, or (for a value that is not 0/1, whose spread its mean fixes) an SD further than
@@ -189,7 +211,9 @@ class Distinct:
 def distinct(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, unread: list[str]) -> Distinct:
     """The distinct settings of a trial record (:func:`core.trial_table.summaries`), pooling the cells that differ only
     in ``unread`` axes (see the module docstring)."""
-    records = [c for c in summarised if c.get("metrics")]
+    # A record of a setting that never ran (core/trial_table.py ``not_run``) holds no value, but the setting is still one
+    # the plan fixed: it stays, to be said as "not run" in each table, never dropped and never described as a failure.
+    records = [c for c in summarised if c.get("metrics") or c.get("not_run")]
     values = _trial_table.kept_values(records)
     unread_set = set(unread)
     groups: dict[str, list[dict[str, Any]]] = {}
@@ -208,7 +232,7 @@ def distinct(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, 
         for name in values if not apart else ():
             seen: dict[str, dict[str, Any]] = {}
             for c in members:
-                s = c["metrics"].get(name)
+                s = _summary_of(c, name)
                 if s and s.get("n") and s.get("digest") not in seen:
                     seen[s["digest"]] = s
             items = list(seen.values())
@@ -217,14 +241,15 @@ def distinct(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, 
             if len(items) > 1 and _differs(items, whole):
                 apart = True
                 break
-            if any(name in c["metrics"] for c in members):  # a record that never returned a value has no row for it
-                merged[name] = whole
+            if any(_summary_of(c, name) is not None for c in members):  # a record that never returned a value has no row
+                merged[name] = {**whole, **_missing_of(_each_set_once(_summary_of(c, name) for c in members)),
+                                **_status_of(whole, [_summary_of(c, name) for c in members])}
         if apart and len(members) > 1:
             kept_apart.append(_label(setting))
             for c in members:
                 own = dict(c.get("cell") or {})
-                out.append(Setting(own, _label(own), [c["key"]], {n: dict(c["metrics"][n]) for n in values
-                                                                  if c["metrics"].get(n)},
+                out.append(Setting(own, _label(own), [c["key"]], {n: dict(_summary_of(c, n)) for n in values
+                                                                  if _summary_of(c, n)},
                                    level=dict(c.get("level") or {})))
             continue
         copied += dropped
@@ -334,6 +359,46 @@ def _ref_text(kind: str, ref: float | None) -> str:
     if ref is None:
         return "no reference"
     return {"bound": "≤ ", "lower_bound": "≥ "}.get(kind, "") + _sig(ref)
+
+
+def _each_set_once(summaries: Any) -> list[dict[str, Any]]:
+    """The summaries of the pooled records with a set of trials counted once, as ``n`` counts it (same ``digest``): a copy
+    that gave the very same trials gave the very same runs with no value. A record with no number at all has no digest to
+    tell by, so it is told by its runs with no value and their reasons (the two kinds of key cannot meet: a digest is hex)."""
+    seen: set[str] = set()
+    out = []
+    for s in summaries:
+        if not s:
+            continue
+        key = s["digest"] if s.get("n") else json.dumps([int(s.get("missing") or 0),
+                                                         sorted((s.get("why_missing") or {}).items())], default=str)
+        if key not in seen:
+            seen.add(key)
+            out.append(s)
+    return out
+
+
+def _missing_of(summaries: Any) -> dict[str, Any]:
+    """The runs with no value of the records pooled into one setting, and their reasons, added up."""
+    count, why = 0, {}
+    for s in summaries:
+        count += int((s or {}).get("missing") or 0)
+        for reason, n in ((s or {}).get("why_missing") or {}).items():
+            why[reason] = why.get(reason, 0) + int(n)
+    return {"missing": count, **({"why_missing": why} if why else {})} if count else {}
+
+
+def _missing_text(summary: dict[str, Any] | None, *, every: bool = False) -> str:
+    """`` (2 runs with no value: no crossing in the focus range)``: the runs of a setting that gave no number for a result,
+    and why, as the runs said (core/in_run.py ``why_missing``); ``""`` when every run gave one."""
+    count = int((summary or {}).get("missing") or 0)
+    if not count:
+        return ""
+    why = (summary or {}).get("why_missing") or {}
+    reasons = "; ".join(f"{r}" + (f" ({n})" if len(why) > 1 else "") for r, n in sorted(why.items(), key=lambda kv: -kv[1]))
+    if every:
+        return f": {reasons}" if reasons else ""
+    return f" ({count} run{'s' if count != 1 else ''} with no value" + (f": {reasons}" if reasons else "") + ")"
 
 
 def _axis_text(v: Any) -> str:
@@ -451,22 +516,26 @@ def build(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, fil
             if summary and summary.get("n"):
                 methods.add(method)
                 mean = summary["mean"]
-                cells += [str(summary["n"]), format_pm(mean, lower, upper)]
+                cells += [str(summary["n"]), format_pm(mean, lower, upper) + _missing_text(summary)]
                 if not binary:
                     cells.append(_sig(summary["sd"]))
                 verdict = comparison(kind, ref, mean, lower, upper, int(summary["n"]))
             else:
-                cells += ["0", "no value"]
+                if summary and summary.get("status") == _trial_table.NOT_RUN:
+                    # No trial ran at this setting: said so, and never as a failure with a reason it does not have.
+                    cells += ["0", _trial_table.NOT_RUN]
+                else:
+                    cells += ["0", "no value" + _missing_text(summary, every=True)]
                 if not binary:
                     cells.append("")
                 mean = None
-                verdict = "no value" if ref is not None else "no reference"
+                verdict = ("not run" if summary and summary.get("status") == _trial_table.NOT_RUN else "no value")                     if ref is not None else "no reference"
             if has_ref:
                 cells += [_ref_text(kind, ref), verdict]
             body.append(cells)
             rows.append({"value": value, "metric": metric, "setting": s.label, **s.setting,
                          "n": (summary or {}).get("n", 0), "mean": mean, "sd": (summary or {}).get("sd"),
-                         "ci_lower": lower, "ci_upper": upper, "interval": method, "reference": ref,
+                         "ci_lower": lower, "ci_upper": upper, "interval": method, "status": (summary or {}).get("status", ""), "reference": ref,
                          "reference_kind": kind if ref is not None else "", "comparison": verdict})
         how = " and ".join(sorted(m for m in methods if m)) or "no interval"
         caption = (f"`{value}` at each of the {len({_run_setting(s) for s, *_ in stats})} settings: mean ± half-width of its 95% interval "

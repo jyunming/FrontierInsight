@@ -77,6 +77,17 @@ KNOWN_CHECKS: dict[str, list[tuple[str, str]]] = {
         "reverse complement of ATGC is GCAT",
         "import skbio\nok = str(skbio.DNA('ATGC').reverse_complement()) == 'GCAT'",
     )],
+    "numba": [(
+        "a compiled loop gives the same sum as the same loop in Python, to the last digit",
+        "import numpy as np\nfrom numba import njit\n"
+        "def total(x):\n    s = 0.0\n    for v in x:\n        s += v * v\n    return s\n"
+        "x = np.linspace(0.0, 1.0, 1001)\nok = njit(total)(x) == total(x)",
+    )],
+    "numpy": [(
+        "a whole-array sum of squares equals the loop's within rounding",
+        "import numpy as np\nx = np.arange(1000, dtype=float)\n"
+        "ok = abs(float(np.dot(x, x)) - sum(v * v for v in x.tolist())) < 1e-6",
+    )],
     "scikit-image": [(
         "two diagonal pixels are two regions at 4-connectivity",
         "import numpy as np\nfrom skimage.measure import label\n"

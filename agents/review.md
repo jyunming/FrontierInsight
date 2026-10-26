@@ -37,8 +37,12 @@ Respond with a single JSON object, no prose, no markdown fence:
   "suggestions": ["<actionable change — particularly any that would raise rigor_score or depth_score>", ...],
   "blocking": "<one sentence — only if verdict is 'revise'; otherwise empty string>",
   "why": "<one short sentence: the main reason for your verdict, accept or revise>",
-  "must_flag_hits": ["<short identifier of any non-negotiable failure detected: 'figure_caption' when the Figures block lists captions that describe what their figure does not show, plus any methodology failure your persona's MUST-FLAG checks detected, e.g. 'circular_evaluation', 'single_point_eval', 'weak_baseline_no_rerun', 'pseudo_units' — empty list when none apply>"]
+  "design_parts": ["<only when the verdict is revise and a weakness or suggestion is about the design itself: the path(s), from the list under the design in the Inputs, of the part(s) it is about; otherwise an empty list>"],
+  "must_flag_hits": ["<short identifier of any non-negotiable failure detected: 'figure_caption' when the Figures block lists captions that describe what their figure does not show, plus any methodology failure your persona's MUST-FLAG checks detected, e.g. 'circular_evaluation', 'single_point_eval', 'weak_baseline_no_rerun', 'pseudo_units' — empty list when none apply>"],
+  "must_flag_places": [{"hit": "<one item of must_flag_hits, copied exactly>", "ids": ["<the id(s) FI printed before the sentence(s) of the paper draft that the hit is about, such as \"3.7\">"]}]
 }
+
+The paper draft below carries FI's id (`<<3.7>>`: the 7th sentence of section 3) before each sentence, caption and table row, and `<<section 3>>` after each section heading. In `must_flag_places`, give for each item of `must_flag_hits` that is about a passage of the paper the id(s) of that passage, copied from the draft; an item about the paper as a whole has no entry. FI places the item by the id alone: an item with no valid id cannot be placed, and the paper is then written again as a whole.
 
 The ``must_flag_hits`` field is non-negotiable: any item in this list overrides ``engine.review_loop = false`` and has the paper written again. An objection to the design itself (such as the methodology identifiers above) does not change the design: the paper is written again with your objection in hand and FI keeps it in its quality report, so name only what you can point to in the inputs. Personas without their own MUST-FLAG rules return ``[]``, except for the shared one above (`figure_caption`) and `user_feedback_unaddressed` when the person's refine notes are shown below and the paper does not answer one.
 

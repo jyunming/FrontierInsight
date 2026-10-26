@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from . import review_pairs as _pairs
+from . import stop_power as _stop_power
 
 SCHEMA = "fi.quality/v1"
 STAGES = ("plan", "checks", "design", "code", "run", "analysis", "paper", "review")
@@ -172,10 +173,13 @@ class _Quest:
         self.search_asked = _dict(_json(fi / "search_block_asked.json"))
         self.protocol_asked = _dict(_json(fi / "protocol_part_asked.json"))
         self.pilot = _dict(_json(fi / "pilot_check.json"))
+        self.cannot_repair = _dict(_json(fi / "cannot_repair.json"))
         self.trial_checks = _dict(_json(fi / "trial_checks.json"))
+        self.step_coverage = _dict(_json(fi / "step_coverage.json"))
         self.drafted_asked = _dict(_json(fi / "drafted_parts_asked.json"))
         self.design_acted = _list(_json(fi / "design_audit_acted.json"))
         self.pause = _dict(_json(fi / "pause.json"))
+        self.scope = _dict(_json(fi / "scope.json"))
         self.cost = _dict(_json(fi / "cost.summary.json"))
         self.stuck = _dict(_json(root / "needs" / "STUCK.json"))
         self.critique = [x for x in _list(_json(root / "needs" / "DESIGN_CRITIQUE.json")) if isinstance(x, dict)]
@@ -185,6 +189,7 @@ class _Quest:
         self.evidence = _dict(_json(root / "needs" / "EVIDENCE.json"))
         self.summary = _dict(_json(root / "frontier_insight_summary.json"))
         self.paper_check = _dict(_json(root / ".fi" / "paper_record_check.json"))
+        self.record_taken_out = _list(_dict(_json(root / ".fi" / "record_claims_taken_out.json")).get("taken_out"))
         self.numeric_warnings = _dict(_json(root / "needs" / "NUMERIC_WARNINGS.json"))
         self.receipts = {p.stem: _dict(_json(p)) for p in sorted((root / "needs" / "receipts").glob("*.json"))} \
             if (root / "needs" / "receipts").is_dir() else {}
@@ -244,20 +249,25 @@ def _oracle_problems(q: _Quest) -> list[dict[str, str]]:
         return []
     out: list[dict[str, str]] = []
     seen: dict[str, int] = {}
-    first_text: dict[str, tuple[str, str]] = {}
+    kinds: dict[str, dict[str, int]] = {}
+    latest: dict[str, tuple[str, str]] = {}
     for status, problems, src in rounds:
         for p in problems:
             key = next(iter(_pending_names([p])))
             seen[key] = seen.get(key, 0) + 1
-            first_text.setdefault(key, (str(p), src))
+            # Each round is named by its own sentence: a check its trials could not decide did not fail.
+            kind = "not decided" if " was not decided" in str(p) else "failed"
+            kinds.setdefault(key, {})[kind] = kinds.setdefault(key, {}).get(kind, 0) + 1
+            latest[key] = (str(p), src)  # the latest round: the sentence says what the check is now
     last_status, last_problems, _ = rounds[-1]
     still = _pending_names(last_problems)
-    for key, (text, src) in first_text.items():
+    for key, (text, src) in latest.items():
         if key in still:
             status = "left out" if last_status == "went_on_failing" else "not fixed"
         else:
             status = "fixed"
-        tries = f" (failed {seen[key]} times)" if seen[key] > 1 else ""
+        tries = (" (" + ", ".join(f"{k} {n} time{'s' if n != 1 else ''}" for k, n in kinds[key].items()) + ")"
+                 if seen[key] > 1 else "")
         out.append(_problem("run", text + tries, "FI's own known-answer check", status, src))
     return out
 
@@ -285,6 +295,15 @@ def _checks_problems(q: _Quest) -> list[dict[str, str]]:
     for eid in _list(eq.get("not_tested")):
         out.append(_problem("checks", f"equation {eid} has no test", "FI's equation test", "left out",
                             ".fi/equation_tests.json"))
+    from . import code_review as _cr
+
+    now = _cr.version(q.root / "code")
+    for p in map(_dict, _list(q.cannot_repair.get("problems"))):
+        if p.get("text") and not _stop_power.may_stop(p.get("source")):
+            stale = bool(p.get("code_version")) and p.get("code_version") != now
+            out.append(_problem("checks", str(p["text"]), _stop_power.source_words(p.get("source")),
+                                "not checked again after a later repair" if stale else "not fixed",
+                                ".fi/cannot_repair.json"))
     for note in _list(q.protocol_check.get("notes")):
         out.append(_problem("checks", str(note), "FI's reading of the code (a note, not a stop)", "left out",
                             "needs/PROTOCOL_CHECK.json"))
@@ -371,6 +390,23 @@ def _design_problems(q: _Quest) -> list[dict[str, str]]:
     return out
 
 
+def _scope_summary(q: _Quest) -> dict[str, Any] | None:
+    """Which study was picked, or that nobody picked one and which studies the topic could also have meant
+    (``.fi/scope.json``). ``None`` when there is no such record."""
+    if not q.scope:
+        return None
+    from . import scope_cards as _sc
+
+    cards = [_dict(c) for c in _list(q.scope.get("cards"))]
+    chosen = _dict(q.scope.get("chosen"))
+    removed = [str(x) for x in _list(q.scope.get("removed")) if str(x).strip()]
+    if q.scope.get("chosen_by") == "person" and chosen:
+        return {"chosen_by": "person", "chosen": str(chosen.get("question") or ""), "removed": removed,
+                "lines": [f"The person chose this study: {_one(chosen.get('question'), 300)}"]}
+    return {"chosen_by": "nobody", "chosen": "", "removed": removed,
+            "lines": [_sc.nobody_line(), *[_one(c.get("question"), 300) for c in cards if c.get("question")]]}
+
+
 def _plan_problems(q: _Quest) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
     sb = q.search_asked
@@ -430,6 +466,7 @@ def _run_problems(q: _Quest) -> list[dict[str, str]]:
         out.append(_problem("run", _one(str(_list(pilot["problems"])[0]), 200), "FI's pilot check",
                             "fixed" if pilot.get("outcome") == "passed" else "not fixed", ".fi/pilot_check.json"))
     out += _precision_not_judged(q)
+    out += _precision_per_setting(q)
     stop = _dict(_json(q.root / ".fi" / "run_manifest_stop.json"))
     if stop and not any(p["found_by"].startswith("FI's run-record check") for p in out):
         out.append(_problem("run", stop.get("headline") or stop.get("problem") or "the run did not report what the protocol fixed",
@@ -451,6 +488,15 @@ def _precision_not_judged(q: _Quest) -> list[dict[str, str]]:
                      "needs/EVIDENCE.json")]
 
 
+def _precision_per_setting(q: _Quest) -> list[dict[str, str]]:
+    """The plan's precision target held to each setting's own trials (``needs/EVIDENCE.json`` ``precision_per_setting``),
+    when not every setting met it."""
+    from . import evidence as _evidence
+
+    words = _evidence.precision_per_setting_words(_dict(q.evidence.get("precision_per_setting")))
+    return [_problem("run", words, "FI's precision check", "not fixed", "needs/EVIDENCE.json")] if words else []
+
+
 def _pilot_summary(q: _Quest) -> dict[str, Any] | None:
     """What the pilot before the full run showed and how many repairs it caused, or ``None`` when no pilot ran."""
     p = q.pilot
@@ -467,6 +513,13 @@ def _pilot_summary(q: _Quest) -> dict[str, Any] | None:
         said = f"{read}; they showed the simulation does not measure what the protocol names, and it was sent back to be repaired"
     return {"outcome": p["outcome"], "trials": trials, "settings": settings, "repairs": repairs,
             "problems": [str(x) for x in _list(p.get("problems"))], "says": said}
+
+
+def _step_coverage_summary(q: _Quest) -> dict[str, Any] | None:
+    """FI's reading of which reported numbers are computed through the model's package (core/step_coverage.py): the plain
+    sentence of each that is not. ``None`` when every one is, or the check did not apply."""
+    warnings = [str(w) for w in _list(q.step_coverage.get("warnings"))]
+    return {"warnings": [_one(w, 300) for w in warnings]} if warnings else None
 
 
 def _trial_checks_summary(q: _Quest) -> dict[str, Any] | None:
@@ -547,9 +600,21 @@ def _paper_problems(q: _Quest) -> list[dict[str, str]]:
         out.append(_problem("paper", f"FI could not fill the value {r.get('key')} from its records ({r.get('how')}): "
                             f"{_one(r.get('sentence'), 200)}",
                             "FI's check of the paper's numbers", "left out", ".fi/paper_record_check.json"))
+    for r in q.record_taken_out:
+        r = _dict(r)
+        out.append(_problem("paper", f"after the paper was written again, it still said what FI's records contradict, so "
+                            f"this was taken out: {_one(r.get('text'), 200)} (why: {_one(r.get('why'), 300)})",
+                            "FI's records", "left out", ".fi/record_claims_taken_out.json"))
     if q.stuck and _stuck_stage(q) == "paper":
         out.append(_problem("paper", q.stuck.get("problem") or "the paper contradicts FI's records",
                             "FI's records", "not fixed", "needs/STUCK.json"))
+    # A poster problem the visual check found but could name no part of the poster for is not redone (the poster is
+    # written again part by part): it is listed here.
+    poster = _dict(_dict(_json(q.root / ".fi" / "visual_check.json")).get("poster"))
+    unplaced = list(dict.fromkeys(str(t) for a in _list(poster.get("attempts")) for t in _list(_dict(a).get("unresolved"))))
+    for text in unplaced:
+        out.append(_problem("paper", f"a poster problem in no single part of it, so not fixed: {_one(text, 160)}",
+                            "FI's visual check of the poster", "not fixed", ".fi/visual_check.json"))
     pdf = _paper_pdf(q)
     if pdf and not pdf["typeset"] and _paper_exists(q.root):
         out.append(_problem("paper", "paper.pdf is not typeset (a browser drew it): " + _one(pdf["reason"], 200),
@@ -1107,6 +1172,8 @@ def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, A
         "quest_id": quest_id, "title": str(q.summary.get("title") or q.config.get("title") or ""),
         "outcome": outcome, "stages": [stages[s] for s in STAGES], "failure": failure, "code": _code_metrics(q),
         "pilot": _pilot_summary(q),
+        "scope": _scope_summary(q),
+        "step_coverage": _step_coverage_summary(q),
         "trial_checks": _trial_checks_summary(q),
         "citations": _citations(q),
         "paper_pdf": _paper_pdf(q),
@@ -1306,6 +1373,17 @@ def render(report: dict[str, Any]) -> str:
     pilot = report.get("pilot")
     if pilot:
         lines += ["", f"Pilot check: {pilot['says']}. Repairs it caused: {pilot['repairs']}."]
+    scope = report.get("scope")
+    if scope:
+        lines += ["", "## The study", "", scope["lines"][0]]
+        lines += [f"- {line}" for line in scope["lines"][1:]]
+        lines += [f"- Removed: {_cell(x)}" for x in scope.get("removed") or []]
+    steps = report.get("step_coverage")
+    if steps:
+        lines += ["", "## Numbers not shown to come from the model", "",
+                  "FI read the simulation and found a number it reports that is not computed through the functions of the "
+                  "model's package. It is recorded as a gap in the evidence; nothing was stopped or sent back."]
+        lines += [f"- {w}" for w in steps["warnings"]]
     trials = report.get("trial_checks")
     if trials:
         lines += ["", "## FI's checks of the trials", ""]

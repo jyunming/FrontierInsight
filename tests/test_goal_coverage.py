@@ -84,6 +84,15 @@ def test_the_numbers_in_the_keys_of_the_results_count() -> None:
     assert {1.5, 1000.0} <= gc.result_key_numbers({"by_R0": {"R0_1.5_N_1000": {"p": 0.3}}, "n": 5})
 
 
+def test_a_number_the_results_store_as_a_value_is_not_reported_missing() -> None:
+    # The run wrote its setting into its results as a value ("pressure_kpa": 2000), not into a key.
+    topic = "Sweep the cooling pressure over {1500, 2000, 2500} kPa."
+    script = "pressures = [1500, 2500]\n"
+    assert 2000.0 in gc.result_key_numbers({"pressure_kpa": 2000, "p": 0.3})
+    assert gc.notes(topic, [script], {"pressure_kpa": 2000, "p": 0.3}) == []
+    assert any("2000" in line for line in gc.notes(topic, [script], {"p": 0.3}))
+
+
 # --- the comparison --------------------------------------------------------------------------------
 
 def test_a_script_that_follows_the_topic_has_no_note() -> None:
@@ -95,7 +104,7 @@ def test_a_changed_grid_is_reported_with_the_number_and_its_words() -> None:
     assert len(notes) == 2
     assert notes[0].startswith("The topic gives 0.9") and "R0 in {0.9, 1.5, 3.0}" in notes[0]
     assert notes[1].startswith("The topic gives 1.5")
-    assert all("neither the experiment's code nor the keys of its results" in n for n in notes)
+    assert all("neither the experiment's code nor its results" in n for n in notes)
 
 
 def test_a_number_that_a_range_generates_or_that_a_result_key_names_is_not_missing() -> None:

@@ -717,6 +717,32 @@ def _interval_remainder(key: str, stem_tokens: list[str]) -> bool:
     return all(t in _INTERVAL_WORDS or re.fullmatch(r"ci?\d*|\d+", t) for t in rest)
 
 
+def names_a_key(name: Any) -> bool:
+    """Whether a plan's name for a quantity is written as an identifier a result can carry as a key (``settle_time``,
+    ``Hit-Rate``), not as a sentence ("the mean time to settle, per setting"). FI matches a name to the run's keys only
+    for the first kind: a sentence is a description the plan wrote for a reader, no key of any result is ever spelled like
+    it, and a match of words would need a new exception for every new wording."""
+    text = str(name or "").strip()
+    return 0 < len(text) <= 80 and not re.search(r"\s", text)
+
+
+def _the_longer_form_of(want_tokens: list[str], keys: list[str]) -> str | None:
+    """The one key of the results that is the plan's name written with more words in it (``Ea_lnA_correlation`` for
+    ``Ea_lnA_empirical_correlation``): the plan's words, in the plan's order, all inside the key's words. Only when the
+    name has two words or more and exactly one such key exists (the intervals of a key go with it, not beside it); with
+    none, or with several that could each be it, ``None``: FI does not choose between them."""
+    if len(want_tokens) < 2:
+        return None
+
+    def inside(key: str) -> bool:
+        it = iter(_tokens(key))
+        return all(any(t == u for u in it) for t in want_tokens)
+
+    found = {k for k in keys if inside(k)}
+    alone = [k for k in found if not any(o != k and _interval_remainder(k, _tokens(o)) for o in found)]
+    return alone[0] if len(alone) == 1 else None
+
+
 def named_in_results(name: str, result: Any) -> set[str]:
     """The keys of the run's results (at any depth, holding a number) that are the quantity the plan calls ``name``, and its
     intervals. Case, punctuation and underscores are ignored.
@@ -750,6 +776,8 @@ def named_in_results(name: str, result: Any) -> set[str]:
             shortest = min(len(normed[k]) for k in plain)
             ties = [k for k in plain if len(normed[k]) == shortest]
             pick = ties[0] if len(ties) == 1 else None
+        if pick is None and not prefixed and names_a_key(name):
+            pick = _the_longer_form_of(wt, keys)
         if pick is not None:
             found.add(pick)
             stems = [_tokens(pick)]
@@ -787,14 +815,18 @@ def _requirements_of(record: dict[str, Any], issue: dict[str, Any]) -> list[dict
 
 
 def missing_quantities(record: dict[str, Any], issue: dict[str, Any]) -> list[str]:
-    """The plan's quantities an issue says the code does not compute, when that is all the issue says: every requirement
-    it stands for in the latest reading is a quantity of the plan (a dependent variable, a metric) the reader called
-    missing. ``[]`` otherwise. Such an issue makes no reported number wrong: the paper is short of a quantity the plan
-    asks for."""
+    """What the plan asks for that an issue says the code does not produce, when that is all the issue says: every
+    requirement it stands for in the latest reading is one the reader called missing (a quantity of the plan, a planned
+    figure, a swept setting, a check). ``[]`` otherwise. Such an issue makes no reported number wrong, whatever the reader
+    says about its effect: a thing that is not there changes no value that is. It is a part not done, which the paper
+    states; it never rests a stop on the reader's word. A quantity is named by the plan's name for it; any other kind by
+    the requirement's own text (FI wrote it, from the plan)."""
     reqs = _requirements_of(record, issue)
-    if not reqs or any(v.get("kind") not in QUANTITY_KINDS or v.get("status") != MISSING for v in reqs):
+    if not reqs or any(v.get("kind") == "logic" or v.get("status") != MISSING for v in reqs):
         return []
-    return list(dict.fromkeys(n for v in reqs if (n := str(v.get("name") or "").strip())))
+    names = [str(v.get("name") or "").strip() if v.get("kind") in QUANTITY_KINDS else str(v.get("text") or "").strip()
+             for v in reqs]
+    return list(dict.fromkeys(n for n in names if n))
 
 
 def quantity_names(record: dict[str, Any], issue: dict[str, Any]) -> list[str]:
@@ -820,6 +852,10 @@ def about_headline(record: dict[str, Any], issue: dict[str, Any], result: Any, h
     """Whether an issue may be about the study's main quantity: the reading says so, or one of its quantity names and a
     headline name hold one another (``yield`` and ``total_yield``), or the keys of the results it names are among the
     headline's. When in doubt it is: a fault there leaves nothing to report."""
+    if missing_quantities(record, issue):
+        # Said to be missing, not wrong: there is no number of the main quantity to be wrong, and the reader's word that
+        # it is absent stops nothing (:func:`resolve_headline`); it is a part not done, which the paper states.
+        return False
     if issue.get("headline"):
         return True
     exact = {n for n in (_norm(h) for h in headline) if n}
@@ -836,9 +872,51 @@ def keys_of_issue(record: dict[str, Any], issue: dict[str, Any], result: Any) ->
     """The keys of the run's results that hold the quantities an issue is about (:func:`named_in_results` for each of
     :func:`quantity_names`). ``[]`` when the results hold none of them."""
     keys: set[str] = set()
-    for name in quantity_names(record, issue):
+    names = quantity_names(record, issue)
+    for name in names:
         keys |= named_in_results(name, result)
+    if not keys:
+        # The quantity's own key holding no number (an empty list, null, a text): it is still the result the issue is
+        # about, and leaving it out removes it.
+        wanted = {_norm(n) for n in names} - {""}
+        keys = {k for k in _all_keys(result) if _norm(k) in wanted}
     return sorted(keys)
+
+
+def holds_no_number(result: Any, keys: set[str]) -> bool:
+    """Whether every value under ``keys`` (at any depth of the results) holds no number: an empty list, null, a text."""
+    found = False
+
+    def walk(node: Any) -> None:
+        nonlocal found
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if str(k) in keys and _holds_numbers(v):
+                    found = True
+                walk(v)
+        elif isinstance(node, (list, tuple)):
+            for v in node:
+                walk(v)
+
+    walk(result)
+    return not found
+
+
+def _all_keys(result: Any) -> list[str]:
+    """Every key of the results, at any depth."""
+    out: list[str] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                out.append(str(k))
+                walk(v)
+        elif isinstance(node, (list, tuple)):
+            for v in node:
+                walk(v)
+
+    walk(result)
+    return out
 
 
 def absent_from_results(names: list[str], result: Any) -> list[str]:
@@ -909,7 +987,7 @@ def differing_quantities(quest_root: Path, code_dir: Path) -> list[dict[str, Any
 
 def resolve_headline(quest_root: Path, code_dir: Path, result: Any) -> list[str]:
     """After a run: of the headline requirements a reader still called missing, those the run's results do not hold
-    either (the quest then stops, honestly). The ones the results do hold are recorded as a disagreement between the
+    either (the paper says, in its limitations, that they are not computed: a reading never ends the quest). The ones the results do hold are recorded as a disagreement between the
     reader and the results (the reader was wrong, and the paper is not told they were not computed). Only a requirement
     the reader called missing: one it called computed differently from the plan is computed, by its own reading, so it
     never stops the quest as "not computed" (the paper says it is not as the plan defines it, and FI leaves its values out
@@ -923,7 +1001,8 @@ def resolve_headline(quest_root: Path, code_dir: Path, result: Any) -> list[str]
         if (not isinstance(v, dict) or not v.get("headline") or v.get("contradicted") or v.get("kind") == "logic"
                 or v.get("status") != MISSING):
             continue
-        if in_results(str(v.get("name") or ""), result):
+        name = str(v.get("name") or "")
+        if in_results(name, result) or (names_a_key(name) and _the_longer_form_of(_tokens(name), _keys_with_numbers(result)) is not None):
             v["contradicted"] = True
             changed = True
         else:

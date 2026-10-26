@@ -247,7 +247,7 @@ def test_the_layout_is_for_a_simulation_only(tmp_path: Path) -> None:
     assert f"{PKG}/" not in _engine(tmp_path / "e", split_analysis=False)._split_block(state)
 
 
-def test_a_missing_part_is_a_warning_and_a_stop_only_under_research(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_missing_part_is_a_warning_and_a_repair_only_under_research(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     engine = _engine(tmp_path)
     code = engine.quest_root / "code"
     code.mkdir(parents=True, exist_ok=True)
@@ -267,10 +267,12 @@ def test_a_missing_part_is_a_warning_and_a_stop_only_under_research(tmp_path: Pa
     patch = engine._code_problems_stop({"design": {"protocol": PROTOCOL}, "exec_reflect_iter": 0})
     assert patch is not None and "package code/engine_callable/ is missing" in patch["exec_result"]["stderr_tail"]
     assert "cannot_repair" not in patch["exec_result"] and stops == []
-    # With the repairs used up the quest ends in the honest stop.
+    # With the repairs used up it is recorded and said in the paper, and the quest goes on: it is read from the code.
     last = engine._code_problems_stop({"design": {"protocol": PROTOCOL},
                                        "exec_reflect_iter": engine.config.engine.exec_reflect_max_iterations})
-    assert last is not None and last["exec_result"]["cannot_repair"] and stops == []
+    assert last is None and stops == []
+    assert "package code/engine_callable/ is missing" in engine._run_checks_note()
+    engine._forget_cannot_repair()
     # Once the repair has added the missing parts the folder is read again and nothing is sent back.
     _write_tool(code)
     assert engine._check_code_layout({"design": {"protocol": PROTOCOL}}) == []
@@ -333,7 +335,11 @@ async def test_a_simulation_quest_gets_the_research_tool_layout_by_default(
     ran = _pytest_file(code)
     assert ran.returncode == 0, ran.stdout + ran.stderr
     record = json.loads((engine.quest_root / "needs" / "EVIDENCE.json").read_text(encoding="utf-8"))
-    assert record["levels"]["independently_validated"] is True, record["all_gaps"]
+    # The one check is the plan's own derivation (no retrieved source, no second implementation), which the level does
+    # not count (core/evidence.py); the layout adds no other gap.
+    gaps = record["all_gaps"].get("independently_validated", [])
+    assert len(gaps) == 1 and "rests on the plan's own derivation" in gaps[0], record["all_gaps"]
+    assert record["levels"]["independently_validated"] is False
 
 
 @pytest.mark.asyncio
@@ -808,8 +814,8 @@ async def test_an_oracle_repair_that_makes_run_trial_return_run_cell_is_not_used
     engine, code, state = _engine_with_tool(tmp_path)
     engine._trial_mode = True
     before = (code / "simulate.py").read_text(encoding="utf-8")
-    bad = ("def run_trial(cell, trial_id, seed):\n    return run_cell(cell)\n\n"
-           "def run_cell(cell):\n    return {'error': 0.0}\n")
+    bad = ("import random\n\ndef run_trial(cell, trial_id, seed):\n    return run_cell(cell)\n\n"
+           "def run_cell(cell):\n    return {'error': random.random()}\n")
 
     async def aggregate(prompt, **kw):  # noqa: ANN001
         return json.dumps({"code": bad, "patch_summary": "the check reads a mean"})
@@ -818,6 +824,47 @@ async def test_an_oracle_repair_that_makes_run_trial_return_run_cell_is_not_used
     new, failed, outcome = await engine._repair_script_for_oracle(state, code / "simulate.py", [ORACLE], ["off"], passing=[])
     assert new is None and not failed and outcome == "not_usable"
     assert (code / "simulate.py").read_text(encoding="utf-8") == before
+
+
+@pytest.mark.asyncio
+async def test_an_oracle_repair_that_drops_the_functions_fi_calls_is_not_used(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A live repair reply held the reply format's own template in a code fence; it parses as Python (a dict literal) and
+    # replaced the whole simulation, and every check then failed on `null`.
+    engine, code, state = _engine_with_tool(tmp_path)
+    engine._trial_mode = True
+    before = (code / "simulate.py").read_text(encoding="utf-8")
+    assert re.search(r"^def run_(trial|cell)\(", before, re.M)
+    template = '{"code": "PLACEHOLDER", "deps": ["numpy"], "patch_summary": "PLACEHOLDER", "give_up_reason": null}'
+
+    async def template_reply(prompt, **kw):  # noqa: ANN001
+        return f"The fix is below.\n\n```python\n{template}\n```\n"
+
+    monkeypatch.setattr(engine, "_chat", template_reply)
+    new, failed, outcome = await engine._repair_script_for_oracle(state, code / "simulate.py", [ORACLE], ["off"], passing=[])
+    assert new is None and not failed and outcome == "not_usable"
+    assert (code / "simulate.py").read_text(encoding="utf-8") == before
+
+
+@pytest.mark.asyncio
+async def test_an_oracle_repair_that_imports_its_entry_points_is_used_and_a_stand_in_says_why(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine, code, state = _engine_with_tool(tmp_path)
+    engine._trial_mode = True
+    moved = "def oracle():\n    return {}\n\nfrom helper_mod import run_cell, run_trial\n"
+    reply = {"code": moved}
+
+    async def answer(prompt, **kw):  # noqa: ANN001
+        return json.dumps(reply)
+
+    monkeypatch.setattr(engine, "_chat", answer)
+    new, failed, outcome = await engine._repair_script_for_oracle(state, code / "simulate.py", [ORACLE], ["off"], passing=[])
+    assert outcome == "applied" and new == moved
+    assert list((engine.fi_dir / "repair_answers").glob("oracle_*.txt")), "the raw reply is kept"
+    reply["code"] = "PLACEHOLDER"
+    new, failed, outcome = await engine._repair_script_for_oracle(state, code / "simulate.py", [ORACLE], ["off"], passing=[])
+    assert new is None and outcome == "not_usable"
+    assert "holds no code" in (engine.fi_dir / "run.log").read_text(encoding="utf-8"), "the log says why"
 
 
 def test_the_generated_tests_call_run_cell_for_a_mean_and_run_trial_for_an_invariant() -> None:
@@ -836,8 +883,8 @@ async def test_a_repair_is_not_used_when_the_new_code_has_the_aggregate_even_if_
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     engine, code, state = _engine_with_tool(tmp_path)
     engine._trial_mode = True
-    bad = ("def run_trial(cell, trial_id, seed):\n    return run_cell(cell)\n\n"
-           "def run_cell(cell):\n    return {'error': 0.0}\n")
+    bad = ("import random\n\ndef run_trial(cell, trial_id, seed):\n    return run_cell(cell)\n\n"
+           "def run_cell(cell):\n    return {'error': random.random()}\n")
     (code / "simulate.py").write_text(bad, encoding="utf-8")
 
     async def aggregate(prompt, **kw):  # noqa: ANN001

@@ -4,6 +4,7 @@ import subprocess
 import sys
 
 from core import attempt_records, code_project, trial_runner
+from core.code_project import _drain
 
 SIMULATE = '''
 def run_trial(cell, trial_id, seed):
@@ -540,3 +541,172 @@ def test_verify_defaults_to_the_same_limit_as_the_config():
 
     default = inspect.signature(code_project.verify).parameters["run_timeout_s"].default
     assert default == ExecutionConfig().clean_check_timeout_s
+
+
+class _StoppedRun:
+    """A stopped process whose communicate() times out; its pipes record whether they were closed."""
+
+    def __init__(self, stderr):
+        self._exc_stderr = stderr
+        self.stdout = _Pipe()
+        self.stderr = _Pipe()
+
+    def communicate(self, timeout=None):
+        raise subprocess.TimeoutExpired(cmd="x", timeout=30, output=b"", stderr=self._exc_stderr)
+
+
+class _Pipe:
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+def test_a_stopped_run_that_does_not_close_its_pipes_keeps_the_error_already_read():
+    fake = _StoppedRun(b"Traceback: boom")
+    assert _drain(fake) == "Traceback: boom"
+    assert fake.stdout.closed and fake.stderr.closed
+
+
+def test_a_stopped_run_with_no_error_text_read_returns_empty():
+    fake = _StoppedRun(None)
+    assert _drain(fake) == ""
+    assert fake.stdout.closed and fake.stderr.closed
+
+
+def _git_out(code, *args):
+    return subprocess.run(["git", *args], cwd=code, capture_output=True, text=True, encoding="utf-8").stdout.strip()
+
+
+def test_a_refused_try_keeps_every_file_it_changed_and_never_overwrites_an_earlier_one(tmp_path):
+    import shutil
+
+    if shutil.which("git") is None:
+        import pytest
+
+        pytest.skip("git is not installed")
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "a.py").write_text("x = 1\n", encoding="utf-8")
+    (code / "b.py").write_text("y = 1\n", encoding="utf-8")
+    assert code_project.record_change(tmp_path, "code written")
+    files = {"a.py": "x = 2\n", "b.py": "y = 2\n"}
+    assert code_project.keep_refused(tmp_path, "F..1.lock", files, "first")
+    refs = _git_out(code, "for-each-ref", "--format=%(refname)", "refs/fi/refused/").split()
+    assert refs == ["refs/fi/refused/F.1-lock"]
+    assert _git_out(code, "show", f"{refs[0]}:a.py") == "x = 2"
+    assert _git_out(code, "show", f"{refs[0]}:b.py") == "y = 2"
+    # the same name again (a resume that numbers the try again): kept beside it, the first one untouched
+    assert code_project.keep_refused(tmp_path, "F..1.lock", {"a.py": "x = 3\n"}, "second")
+    assert _git_out(code, "log", "--format=%s", "-1", "refs/fi/refused/F.1-lock") == "first"
+    assert _git_out(code, "show", "refs/fi/refused/F.1-lock-2:a.py") == "x = 3"
+    assert _git_out(code, "status", "--porcelain") == ""
+
+
+def test_a_left_over_index_does_not_carry_into_a_refused_try_without_history(tmp_path):
+    import shutil
+
+    if shutil.which("git") is None:
+        import pytest
+
+        pytest.skip("git is not installed")
+    code = tmp_path / "code"
+    code.mkdir()
+    code_project._git(code, "init", "-q")
+    stale = code / ".git" / "fi_refused.index"
+    code_project._git(code, "update-index", "--add", "--info-only", "--cacheinfo",
+                      "100644,e69de29bb2d1d6434b8b29ae775ad8c2e48c5391,stale.py", env_extra={"GIT_INDEX_FILE": str(stale)})
+    assert stale.is_file()
+    assert code_project.keep_refused(tmp_path, "F-1-1", {"a.py": "x = 2\n"}, "try")
+    assert _git_out(code, "ls-tree", "--name-only", "refs/fi/refused/F-1-1").split() == [".fi_refused", "a.py"]
+def test_every_version_of_the_code_that_runs_is_a_commit_and_an_unchanged_one_is_not(tmp_path):
+    import asyncio
+    import shutil
+
+    import pytest
+
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "sim.py").write_text("x = 1\n", encoding="utf-8")
+    runs = code_project.CodeRuns(tmp_path, node=lambda: "execute_reflect")
+
+    def subjects():
+        out = subprocess.run(["git", "log", "--format=%s"], cwd=code, capture_output=True, text=True, encoding="utf-8")
+        return out.stdout.split("\n")[:-1]
+
+    async def go():
+        await runs.before_run()  # the first version
+        await runs.before_run()  # the same code again: no commit
+        (code / "sim.py").write_text("x = 2\n", encoding="utf-8")  # a repair, then its run
+        await asyncio.gather(*(runs.before_run() for _ in range(6)))  # settings that start at once: one commit
+        with runs.held():  # a step that commits each version itself
+            (code / "sim.py").write_text("x = 3\n", encoding="utf-8")
+            await runs.before_run()
+
+    asyncio.run(go())
+    assert subjects() == ["the code as it ran (execute_reflect)"] * 2
+    out = subprocess.run(["git", "show", "HEAD:sim.py"], cwd=code, capture_output=True, text=True, encoding="utf-8")
+    assert out.stdout == "x = 2\n"
+
+
+def test_the_executor_records_the_code_before_it_runs(tmp_path):
+    import asyncio
+
+    from core.execution import VenvExecutor
+
+    calls = []
+
+    async def before():
+        calls.append("before")
+
+    ex = VenvExecutor()
+    ex.before_run = before
+    result = asyncio.run(ex.execute([sys.executable, "-c", "print('ran')"], cwd=tmp_path, timeout_s=60))
+    assert calls == ["before"] and "ran" in result.stdout
+
+
+def test_a_rewrite_of_the_same_size_and_time_is_still_committed_and_a_failed_commit_is_tried_again(tmp_path, monkeypatch):
+    import asyncio
+    import os
+    import shutil
+
+    import pytest
+
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    code = tmp_path / "code"
+    code.mkdir()
+    sim = code / "sim.py"
+    sim.write_text("x = 1\n", encoding="utf-8")
+    runs = code_project.CodeRuns(tmp_path, node=lambda: "execute")
+    asyncio.run(runs.before_run())
+    stamp = sim.stat()
+    sim.write_text("x = 2\n", encoding="utf-8")  # same size; the clock put back to the same tick
+    os.utime(sim, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+    real = code_project.record_change
+    monkeypatch.setattr(code_project, "record_change", lambda *a, **k: False)  # git could not commit this time
+    asyncio.run(runs.before_run())
+    monkeypatch.setattr(code_project, "record_change", real)
+    asyncio.run(runs.before_run())  # the next run tries again
+    out = subprocess.run(["git", "show", "HEAD:sim.py"], cwd=code, capture_output=True, text=True, encoding="utf-8")
+    assert out.stdout == "x = 2\n"
+
+
+def test_installs_and_probes_are_not_runs_of_the_code(tmp_path):
+    import asyncio
+
+    from core.execution import VenvExecutor
+
+    calls = []
+
+    async def before():
+        calls.append("before")
+
+    ex = VenvExecutor()
+    ex.before_run = before
+    asyncio.run(ex.install([], quest_root=tmp_path))  # nothing to install: no run at all
+    asyncio.run(ex._run([sys.executable, "-c", "pass"], cwd=tmp_path, timeout_s=60))
+    assert calls == []

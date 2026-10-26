@@ -71,7 +71,7 @@ def test_the_fi_marker_is_not_the_writers_text():
 
 
 def test_code_urls_references_and_html_comments_are_left_out():
-    text = "Run `x = 4321`. See https://x.org/9876. <!-- 5555 -->\n\n## References\n\n1. Smith 2019, vol 3456."
+    text = "See https://x.org/9876. <!-- 5555 -->\n\n## References\n\n1. Smith 2019, vol 3456."
     assert _typed(text) == []
 
 
@@ -164,3 +164,65 @@ def test_a_run_that_is_not_consecutive_is_not_structure():
 def test_a_label_run_does_not_cross_paragraphs():
     text = "(1) First point here.\n\nUnrelated text (2) with a count."
     assert _typed_empty_plan(text) == ["1", "2"]
+
+
+# --- the rule was too loose at four places and too strict at two -----------------------------------------------------------
+
+
+def test_a_number_in_inline_code_is_checked():
+    """Old code blanked inline code, so a typed result in backticks reached the paper unflagged."""
+    assert _typed("The hit rate was `94.3%` overall.") == ["94.3%"]
+
+
+def test_a_closed_fence_is_skipped_and_an_unclosed_fence_hides_only_its_paragraph():
+    """Old code blanked everything after an unclosed fence, so a later typed result went unflagged."""
+    assert _typed("```\nfor i in range(1000): seed = 42\n```") == []
+    assert _typed("```\nsetup 5555\n\nLater the gain was 7.7 here.") == ["7.7"]
+    assert _typed("```\nfor i in range(1000):\n```\n\nThe gain was 7.7.") == ["7.7"]
+
+
+def test_a_section_after_the_references_is_checked_but_the_list_is_not():
+    """Old code skipped everything after the References heading, appendix included."""
+    text = "## References\n\n1. Smith 2019, vol 3456.\n\n## Appendix\n\nThe bias was 0.8244."
+    assert _typed(text) == ["0.8244"]
+    assert _typed("## References\n\n1. Smith 2019, vol 3456.\n\n### Books\n\n2. Lee 2001, p 77.") == []
+
+
+def test_only_the_number_before_the_citation_in_its_clause_is_left_to_the_claim_check():
+    """Old code exempted every number of a sentence that holds a citation."""
+    text = "Prior work gets 80% [3]; we get 94.3%."
+    assert _typed(text) == ["94.3%"]
+    assert tn.report(text, _plan()).left_to_claim_check == 1
+
+
+def test_a_citation_before_the_number_in_its_clause_covers_it():
+    """A review finding: searching only after the number made "As reported in [W1], the rate was 25%." a typed result."""
+    assert _typed("As reported in [W1], the rate was 25%.") == []
+    assert _typed("As reported in [W1]; the rate was 35%.") == ["35%"]
+
+
+def test_a_semicolon_inside_a_citation_is_not_a_clause_boundary():
+    """A review finding: the ";" of "[W1; W2]" or "(Smith 2020; Lee 2021)" cut the clause, so the cited number looked uncited."""
+    assert _typed("As reported in [W1; W2], the rate was 35%.") == []
+    assert tn._clause_breaks("As reported (Smith 2020; Lee 2021), then [3]; and more.", []) == [len("As reported (Smith 2020; Lee 2021), then [3]")]
+    assert _typed("As reported in [W1; W2]; the rate was 35%.") == ["35%"]
+
+
+def test_a_cited_prior_number_before_its_marker_is_still_exempt():
+    assert _typed("Prior work found a barrier of 71.3 kJ/mol [3].") == []
+
+
+def test_a_typed_result_in_plain_prose_is_still_found():
+    assert _typed("The mean gain was 12.7 in the main grid.") == ["12.7"]
+
+
+def test_the_replacement_takes_only_the_number_not_its_operator_or_neighbour():
+    """Old code took the operator and the space before the number with it ("a - 2.5", "7-13")."""
+    out, _taken = tn.remove("Value a - 2.5 and range 7-13 and 12 %.", _plan())
+    assert out == f"Value a - {tn.REMOVED} and range {tn.REMOVED}-{tn.REMOVED} and {tn.REMOVED}."
+
+
+def test_a_quantile_level_named_in_the_method_is_not_a_typed_result():
+    """Old code removed the 97.5 of "the 97.5th percentile". (A critical value the plan does not state stays flagged.)"""
+    assert _typed("We take the 97.5th percentile of the errors.") == []
+    assert _typed("The gain was 97.5 here.") == ["97.5"]

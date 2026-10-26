@@ -613,6 +613,7 @@ PauseForUserInput = Literal[
 ClarifyPause = Literal["off", "auto", "ask"]       # was clarify_mode (interactive→ask)
 ReviewPause = Literal["off", "ask"]                # was human_feedback_gate (after_review→ask)
 PlanPause = Literal["off", "ask"]                  # stop once plan.md is written, to read and edit it
+ScopePause = Literal["off", "ask"]                 # before the plan, pick the study to run from a few FI offers
 SupplyPause = Literal[                              # was pause_for_user_input
     "never", "after_literature", "before_build", "before_review", "both", "all",
 ]
@@ -661,6 +662,9 @@ class PausesConfig(BaseModel):
     # file. ``plan.md`` is written whatever this is set to; ``"off"`` (default) only means the quest does
     # not wait for you, so unattended and fleet runs are not held up.
     plan: PlanPause = "off"
+    # ANSWER — before the plan, pick the study to run from a few FI offers (or write your own); ``off`` skips it.
+    # With nobody to answer, the offers are recorded and the plan is written from the topic alone.
+    scope: ScopePause = "ask"
     # ANSWER — pause after the review verdict for accept / reject / refine.
     #   "ask" (default) pauses · "off" lets the review-loop drive unattended.
     review: ReviewPause = "ask"
@@ -700,11 +704,20 @@ class PausesConfig(BaseModel):
         # The unquoted-`off` Norway problem again, as for ``review`` and ``clarify``.
         return "off" if v is False else v
 
+    @field_validator("scope", mode="before")
+    @classmethod
+    def _norm_scope(cls, v: Any) -> Any:
+        return "off" if v is False else v
+
 
 class EngineConfig(BaseModel):
     framework: EngineFramework = "langgraph"
     max_iterations: int = Field(default=2, ge=0)
     review_loop: bool = True
+    # Who writes the experiment's code. ``chat`` (the default) is today's way: a chat model writes the code function by
+    # function. ``agent`` hands the whole program to one coding agent, which writes, runs and fixes it in the quest's
+    # ``code/`` folder; FI's checks only judge it, and what they find goes back to the agent (core/agent_build.py).
+    code_writer: Literal["chat", "agent"] = "chat"
     # Write ``<quest>/.fi/audit.jsonl``: every node, check verdict, route and the model's stated reasons, in order, with a hash
     # chain (core/audit_log.py). A record only: a failure to write it never stops a quest. Off writes nothing.
     audit_trace: bool = True
@@ -858,10 +871,12 @@ class EngineConfig(BaseModel):
     # is noisy.
     execute_replicates: int = Field(default=3, ge=1)
     # What the experiment does when its script contradicts the protocol the plan fixed (the grid, the runs per
-    # setting, the thresholds; ``core/protocol_check.py``). ``block`` (default) sends the script back for up to
-    # ``protocol_repair_attempts`` repairs and, if it still differs, stops the quest for you to read and edit the
-    # plan or the script, then resume; ``warn`` only logs and records it; ``off`` does not look. Nothing is checked
-    # when the plan has no ``protocol`` block, or for a study with no experiment.
+    # setting, the thresholds; ``core/protocol_check.py``). ``block`` (default) and ``warn`` send the script back for
+    # up to ``protocol_repair_attempts`` repairs; a difference that still stands is recorded (run.log, QUALITY.md) and
+    # the paper says it, and the quest goes on: the comparison reads the script's text, and a reading never ends a
+    # quest (``core/stop_power.py``); what the run did is measured afterwards from FI's own record of its trials.
+    # ``off`` does not look. Nothing is checked when the plan has no ``protocol`` block, or for a study with no
+    # experiment.
     protocol_check: Literal["block", "warn", "off"] = "block"
     protocol_repair_attempts: int = Field(default=2, ge=0, le=5)
     # The oracles the plan's protocol declares (a closed form, a limiting case, an invariant, an exact small case:

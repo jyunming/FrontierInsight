@@ -1864,6 +1864,25 @@ def _pick_clarify_callback(
     return None
 
 
+def _pick_scope_callback(cfg: Config, engine: Engine, interactive: bool, clarify: object) -> object:
+    """Where the pick of the study is asked. The terminal and the VS Code bridge answer it themselves (the clarify
+    callback is the one that asks); a quest the web server started asks on its quest page in its own files, never in
+    the setup answer's. Nobody to ask: no callback."""
+    if interactive:
+        return clarify
+    if cfg.provider.name == "vscode_extension":
+        extra = cfg.provider.extra if isinstance(cfg.provider.extra, dict) else {}
+        try:
+            port = int(extra.get("bridge_port", 0))
+        except (TypeError, ValueError):
+            port = 0
+        if port > 0:
+            return clarify
+    if _web_can_answer():
+        return _web_page_clarify_callback(engine.fi_dir, engine._log, engine.human_feedback_timeout_s, name="scope")
+    return None
+
+
 # Set by the web server (web/quest_launcher.py) for a quest it starts or resumes as its own process: the person can
 # answer the setup questions on the quest page, so the run asks there instead of answering for itself.
 WEB_ANSWERS_ENV = "FI_WEB_ANSWERS"
@@ -1886,16 +1905,18 @@ def _write_json_atomic(path: Path, data: object) -> None:
         path.write_text(text, encoding="utf-8")
 
 
-def _web_page_clarify_callback(fi_dir: Path, log: logging.Logger, timeout_s: float = 0.0):  # noqa: ANN202
+def _web_page_clarify_callback(fi_dir: Path, log: logging.Logger, timeout_s: float = 0.0,
+                               name: str = "clarify"):  # noqa: ANN202
     """The setup questions for a quest the web server runs as its own process: written to
     ``.fi/clarify_questions.json`` (the quest page shows them as a form), answered by the page into
     ``.fi/clarify_answer.json``. While it waits, ``.fi/clarify_waiting.json`` holds this process's id, so the page
     knows the answers reach a running quest (even after the server restarted) and does not start a second run. The
     engine bounds the wait with ``pauses.timeout_s`` and then does what ``pauses.clarify`` says, as for a quest the
-    web server runs in-process."""
-    answer_path = fi_dir / "clarify_answer.json"
-    questions_path = fi_dir / "clarify_questions.json"
-    waiting_path = fi_dir / "clarify_waiting.json"
+    web server runs in-process. ``name`` sets the file stems: ``"scope"`` carries the pick of the study in
+    ``scope_questions.json`` / ``scope_answer.json`` / ``scope_waiting.json``, apart from the setup questions."""
+    answer_path = fi_dir / f"{name}_answer.json"
+    questions_path = fi_dir / f"{name}_questions.json"
+    waiting_path = fi_dir / f"{name}_waiting.json"
 
     def staged() -> dict[str, object] | None:
         try:
@@ -1917,12 +1938,22 @@ def _web_page_clarify_callback(fi_dir: Path, log: logging.Logger, timeout_s: flo
             pass
         try:
             _write_json_atomic(questions_path, questions)
-            log.info("[clarify] waiting for your answers to the setup questions on the quest page")
+            log.info("[%s] waiting for your answers to the %s on the quest page", name,
+                     "study choice" if name == "scope" else "setup questions")
             while True:
                 await asyncio.sleep(1.0)
                 answers = staged()
                 if answers is not None:
                     return answers
+        except BaseException:
+            # The run stopped waiting (the time allowed ran out, or it was stopped): the page must not go on showing
+            # a question nobody waits on. A run killed outright leaves it for a resume, which asks it again.
+            if staged() is None:
+                try:
+                    questions_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise
         finally:
             try:
                 waiting_path.unlink(missing_ok=True)
@@ -1989,6 +2020,36 @@ def _pick_human_feedback_callback(
     return None
 
 
+def _cli_pick_card(entry: dict[str, object]) -> object:
+    """One line from the person: a card number (asked once more when out of range), ``e <n>`` to edit card n's
+    question in one more line (empty keeps it), or a sentence. Returns the number, the edited card or the sentence."""
+    cards = [c for c in entry["cards"] if isinstance(c, dict)]  # type: ignore[union-attr]
+    print()
+    print(entry.get("question", ""))
+
+    def ask(prompt: str) -> str:
+        try:
+            return input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            return ""
+
+    for attempt in range(2):
+        text = ask(f"  study (1-{len(cards)}, e <n> to edit one, or write your own): ")
+        if text[:1] in ("e", "E") and text[1:].strip().isdigit() and 1 <= int(text[1:]) <= len(cards):
+            card = dict(cards[int(text[1:]) - 1])
+            new = ask("    new question (Enter keeps it): ")
+            if new:
+                card["question"] = new
+            return card
+        if text.isdigit():
+            if 1 <= int(text) <= len(cards):
+                return int(text)
+            print(f"    Pick a number from 1 to {len(cards)}.")
+            continue
+        return text
+    return ""
+
+
 async def _cli_clarify_callback(questions: dict[str, object]) -> dict[str, object]:
     """Terminal-based clarify-question collector. Prints each question
     with its agent-suggested default, reads one line of stdin per slot,
@@ -2001,6 +2062,9 @@ async def _cli_clarify_callback(questions: dict[str, object]) -> dict[str, objec
     answers: dict[str, object] = {}
     for key, value in questions.items():
         if not isinstance(value, dict):
+            continue
+        if isinstance(value.get("cards"), list) and value["cards"]:
+            answers[key] = _cli_pick_card(value)
             continue
         question = value.get("question", key)
         default = value.get("default", "")
@@ -2570,6 +2634,7 @@ async def run_one(
     #                            (the engine catches this and produces
     #                            a clear RuntimeError).
     callback = None if headless else _pick_clarify_callback(cfg, engine, interactive)
+    scope_callback = None if headless else _pick_scope_callback(cfg, engine, interactive, callback)
     # Wire the human-feedback gate callback when the gate is on. CLI
     # ``--interactive`` gets terminal prompts; ``vscode_extension``
     # provider gets a bridge round-trip. Headless runs (no flag, not
@@ -2582,7 +2647,7 @@ async def run_one(
         hf_callback = _pick_human_feedback_callback(cfg, engine, interactive, approved_by or "")
     try:
         art: QuestArtifacts = await _maybe_profiled(
-            engine, profile=profile, clarify_callback=callback,
+            engine, profile=profile, clarify_callback=callback, scope_callback=scope_callback,
             human_feedback_callback=hf_callback, reopen=reopen, from_step=from_step,
             approved_by=approved_by,
         )
@@ -3194,6 +3259,15 @@ async def _run_generators(
                 art, art.quest_root, supervisor=supervisor, feedback=feedback,
             ))
 
+        async def restore_slides_pages(saved: Path, pages: list[int]) -> None:
+            # A redone slide that checks worse goes back as it was; the deck is rendered again from the slides.md that results.
+            from generation.slides import restore_slides
+
+            restore_slides(art.quest_root / "slides.md", saved / "slides.md", pages)
+            written.update(await SlideGenerator(cfg).generate(
+                art, art.quest_root, supervisor=supervisor, keep_deck=True,
+            ))
+
         redo = {"paper": redo_paper, "slides": redo_slides, "poster": redo_poster}
         for kind, key, output_kind in (
             ("paper", "paper_pdf", "paper_pdf"), ("slides", "slides_pdf", "slides"), ("poster", "poster_pdf", "poster"),
@@ -3202,8 +3276,10 @@ async def _run_generators(
             if pdf is None or output_kind in carried:
                 continue
             if kind in redo:
+                # A redone slide that checks worse than before is put back on its own (restore_pages).
+                extra = {"restore_pages": restore_slides_pages} if kind == "slides" else {}
                 report = await check_and_redo(
-                    cfg, kind, Path(pdf), art.quest_root, redo[kind], supervisor=supervisor,
+                    cfg, kind, Path(pdf), art.quest_root, redo[kind], supervisor=supervisor, **extra,
                 )
             else:
                 report = await check_pdf(cfg, kind, Path(pdf), art.quest_root, supervisor=supervisor)
@@ -3240,6 +3316,7 @@ async def _maybe_profiled(
     *,
     profile: bool,
     clarify_callback: object = None,
+    scope_callback: object = None,
     human_feedback_callback: object = None,
     reopen: bool = False,
     from_step: str | None = None,
@@ -3248,6 +3325,7 @@ async def _maybe_profiled(
     if not profile:
         return await engine.run(
             clarify_callback=clarify_callback,
+            scope_callback=scope_callback,
             human_feedback_callback=human_feedback_callback,
             reopen=reopen,
             from_step=from_step,
@@ -3259,6 +3337,7 @@ async def _maybe_profiled(
         print("[FI] --profile requested but viztracer is not installed; skipping")
         return await engine.run(
             clarify_callback=clarify_callback,
+            scope_callback=scope_callback,
             human_feedback_callback=human_feedback_callback,
             reopen=reopen,
             from_step=from_step,
@@ -3269,6 +3348,7 @@ async def _maybe_profiled(
     with VizTracer(output_file=str(trace_path)):
         art = await engine.run(
             clarify_callback=clarify_callback,
+            scope_callback=scope_callback,
             human_feedback_callback=human_feedback_callback,
             reopen=reopen,
             from_step=from_step,

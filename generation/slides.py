@@ -71,6 +71,7 @@ from generation._skip_md import render_skip_md
 _log = logging.getLogger("frontier_insight.slides")
 
 PROMPT_PATH = Path(__file__).resolve().parent.parent / "agents" / "slides.md"
+REDO_PROMPT_PATH = Path(__file__).resolve().parent.parent / "agents" / "slides_redo.md"
 # Custom Marp theme (a polished look layered on the default). Passed to the
 # Marp CLI with --theme; the deck's `theme: fi` front-matter selects it.
 THEME_PATH = Path(__file__).resolve().parent.parent / "templates" / "slides" / "fi.css"
@@ -108,9 +109,13 @@ class SlideGenerator:
         *,
         supervisor: ProxySupervisor | None = None,
         feedback: str = "",
+        keep_deck: bool = False,
     ) -> dict[str, Path]:
-        # ``feedback`` is what a visual check of the previous deck found; it
-        # is appended to the authoring prompt.
+        # ``feedback`` is what a visual check of the previous deck found. When it
+        # carries the findings (``Feedback.findings``) and a deck exists, only the
+        # slides they name are written again (:meth:`_redo_flagged`); every other
+        # slide is kept byte for byte. ``keep_deck``: render the slides.md that is
+        # there without asking the model (a redone slide was put back).
         # Cleanup gate: if "slides" is no longer in output.kinds (user
         # removed it from their YAML between runs), remove any stale
         # ``slides_skipped.md`` left over from a prior run. Mirrors
@@ -128,7 +133,12 @@ class SlideGenerator:
         if art.paper_md is None:
             return {}
 
-        slides_md = await self._author_marp(art, out_dir, supervisor=supervisor, feedback=feedback)
+        if keep_deck and (out_dir / "slides.md").is_file():
+            slides_md = out_dir / "slides.md"
+        elif getattr(feedback, "findings", None) and (out_dir / "slides.md").is_file():
+            slides_md = await self._redo_flagged(art, out_dir, feedback, supervisor=supervisor)
+        else:
+            slides_md = await self._author_marp(art, out_dir, supervisor=supervisor, feedback=feedback)
         result: dict[str, Path] = {"slides_md": slides_md}
         diag_path = out_dir / "slides_skipped.md"
         # Will be set to a (reason_code, summary, how_to_fix) triple
@@ -253,6 +263,67 @@ class SlideGenerator:
             result["slides_pptx"] = pptx_path
 
         return result
+
+    async def _redo_flagged(
+        self, art: QuestArtifacts, out_dir: Path, feedback, *, supervisor: ProxySupervisor | None,
+    ) -> Path:
+        """Write again only the slides the check flagged (its findings name pages; a page is a slide). The model sees the
+        deck as it is and answers with one replacement per flagged slide; FI puts each back at its place, so every other
+        slide is the same bytes. An answer that does not hold exactly one slide per flagged one changes nothing."""
+        slides_md = out_dir / "slides.md"
+        content = slides_md.read_text(encoding="utf-8")
+        head, segments, breaks = split_deck(content)
+        pages = sorted({
+            f["page"] for f in feedback.findings
+            if isinstance(f.get("page"), int) and 1 <= f["page"] <= len(segments)
+        })
+        if not pages:
+            _log.info("slides: the check named no slide of the deck; nothing is redone")
+            return slides_md
+        deck = "\n\n".join(f"## Slide {i}\n\n{seg.strip()}" for i, seg in enumerate(segments, 1))
+        figures = []
+        if art.figures_dir and art.figures_dir.is_dir():
+            figures = sorted(p.name for p in art.figures_dir.iterdir() if p.is_file())
+        numbers = ", ".join(str(p) for p in pages)
+        prompt = string.Template(REDO_PROMPT_PATH.read_text(encoding="utf-8")).safe_substitute(
+            slide_numbers=numbers, count=str(len(pages)), deck=deck,
+            figure_list="\n".join(f"- figures/{f}" for f in figures) or "(none)",
+            feedback=str(feedback).strip(),
+        )
+        text = await self._ask(art, prompt, supervisor=supervisor)
+        reply = _math_as_dollars(_figures_as_own_paragraphs(_fences_as_slide_breaks(_strip_outer_fence(text))))
+        pieces = [p for p in _split_slides(reply)[0] if p.strip()]
+        if len(pieces) != len(pages):
+            _log.warning("slides: asked for %d replacement slide(s) and got %d; the deck is unchanged",
+                         len(pages), len(pieces))
+            return slides_md
+        for page, piece in zip(pages, pieces):
+            segments[page - 1] = _same_margins(segments[page - 1], piece)
+        slides_md.write_text(join_deck(head, segments, breaks), encoding="utf-8")
+        _log.info("slides.md: slide(s) %s written again, the other %d kept", numbers, len(segments) - len(pages))
+        return slides_md
+
+    async def _ask(self, art: QuestArtifacts, prompt: str, *, supervisor: ProxySupervisor | None) -> str:
+        own_supervisor = supervisor is None
+        sup = supervisor or ProxySupervisor()
+        endpoint = await resolve_endpoint_async(self.config.provider, sup)
+        client = LLMClient(endpoint, run_log=quest_run_log(art.quest_root))
+        try:
+            text = await client.chat(
+                [{"role": "user", "content": prompt}],
+                temperature=0.2,
+                model=model_for_node(self.config.provider.node_models, "slides"),
+                node="slides",
+            )
+            append_cost_row(art.quest_root / ".fi", node="slides", model=client.last_model, usage=client.last_usage,
+                            client=client, messages=[{"role": "user", "content": prompt}], response=text)
+        finally:
+            await client.aclose()
+            if self.config.provider.name in PROXY_PROVIDERS:
+                await sup.release(self.config.provider.name)
+            if own_supervisor:
+                await sup.shutdown()
+        return text
 
     async def _author_marp(
         self,
@@ -545,6 +616,71 @@ def _strip_outer_fence(text: str) -> str:
 
 _FRONT_MATTER_RE = re.compile(r"\A---[ \t]*\n.*?\n---[ \t]*(?:\n|\Z)", re.DOTALL)
 _SLIDE_BREAK_RE = re.compile(r"^---[ \t]*$", re.MULTILINE)
+
+
+def split_deck(content: str) -> tuple[str, list[str], list[str]]:
+    """A deck as ``(front matter, one text per slide, the break lines between them)``; :func:`join_deck` gives
+    ``content`` back exactly. The Nth slide is the Nth page of the rendered deck."""
+    match = _FRONT_MATTER_RE.match(content)
+    head = content[: match.end()] if match else ""
+    segments, breaks = _split_slides(content[len(head):])
+    return head, segments, breaks
+
+
+_CODE_FENCE_RE = re.compile(r"^[ \t]*(```|~~~)")
+
+
+def _split_slides(body: str) -> tuple[list[str], list[str]]:
+    """``body`` cut at its slide breaks. A ``---`` line inside a fenced code block is code, not a break."""
+    segments: list[str] = []
+    breaks: list[str] = []
+    start = 0
+    fence = ""
+    offset = 0
+    for line in body.splitlines(keepends=True):
+        text = line.rstrip("\r\n")
+        opened = _CODE_FENCE_RE.match(text)
+        if fence:
+            if opened and opened.group(1) == fence:
+                fence = ""
+        elif opened:
+            fence = opened.group(1)
+        elif _SLIDE_BREAK_RE.fullmatch(text):
+            segments.append(body[start:offset])
+            breaks.append(text)
+            start = offset + len(text)
+        offset += len(line)
+    segments.append(body[start:])
+    return segments, breaks
+
+
+def join_deck(head: str, segments: list[str], breaks: list[str]) -> str:
+    out = [head]
+    for i, seg in enumerate(segments):
+        out.append(seg)
+        if i < len(breaks):
+            out.append(breaks[i])
+    return "".join(out)
+
+
+def _same_margins(old: str, new: str) -> str:
+    """``new`` with the blank lines around ``old``, so the break lines stay where they were."""
+    lead = old[: len(old) - len(old.lstrip())]
+    trail = old[len(old.rstrip()):]
+    return lead + new.strip() + trail
+
+
+def restore_slides(slides_md: Path, saved_md: Path, pages: list[int]) -> None:
+    """Put slides ``pages`` (1-based) of ``saved_md`` back into ``slides_md``; every other slide is left alone. Does
+    nothing when the two decks do not have the same number of slides."""
+    head, segments, breaks = split_deck(slides_md.read_text(encoding="utf-8"))
+    _, old_segments, _ = split_deck(saved_md.read_text(encoding="utf-8"))
+    if len(old_segments) != len(segments):
+        return
+    for page in pages:
+        if 1 <= page <= len(segments):
+            segments[page - 1] = old_segments[page - 1]
+    slides_md.write_text(join_deck(head, segments, breaks), encoding="utf-8")
 _BARE_FENCE_LINE_RE = re.compile(r"^```[ \t]*$", re.MULTILINE)
 
 

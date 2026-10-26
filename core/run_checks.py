@@ -21,10 +21,14 @@ They live here and not in ``engine.py`` so the node only calls them. Every metho
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import math
 import re
 import time
+import uuid
+from dataclasses import replace as _replace
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +40,8 @@ from . import plan as _plan
 from . import run_estimate as _estimate
 from .result_checks import TYPED_RECORD
 from . import split_run as _split_run
+from . import step_coverage as _step_coverage
+from . import stop_power as _stop_power
 from . import trial_runner as _trial_runner
 from . import typed_results as _typed
 
@@ -80,6 +86,128 @@ def _read_json(path: Path) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def typed_result_exempt(protocol: dict[str, Any] | None, design: dict[str, Any] | None = None) -> set[str]:
+    """Names the plan fixes (its fixed settings, the grid's settings, what each run compares, the thresholds): echoed back,
+    not results. The one place that list is made (the engine's check and :mod:`core.code_checks` both read it)."""
+    protocol = protocol if isinstance(protocol, dict) else {}
+    design = design if isinstance(design, dict) else {}
+    names = set(_forms.fixed_settings_of_design({**design, "protocol": protocol}))
+    grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+    names |= {str(k) for k in grid} | {str(k) for k in _in_run.of(protocol) or {}}
+    thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else {}
+    return names | {str(k) for k in thresholds}
+
+
+def settings_the_study_compares(fi_dir: Path, design: Any, protocol: dict[str, Any], axes: list[str]) -> dict[str, str]:
+    """``{setting: why it is part of the study}`` for each of ``axes`` that the study compares, from FI's records: a
+    factor the topic compares (:func:`core.topic_requirements.compared_axes`, read from ``fi_dir``), a key of a check's
+    case, of ``in_each_run``, or a name a metric or the plan's comparisons use."""
+    from . import in_run as _in_run
+    from . import oracle_check as _oracle
+    from . import topic_requirements as _tr
+
+    design = design if isinstance(design, dict) else {}
+    out: dict[str, str] = {}
+    req = _read_json(Path(fi_dir) / _tr.FILE)
+    if isinstance(req, dict) and isinstance(req.get("factors"), list):
+        for axis, factor in _tr.compared_axes(req, design, protocol).items():
+            out.setdefault(axis, f"the topic compares {factor}")
+    for oracle in _oracle.declared(protocol):
+        own = _oracle.case_of(oracle)
+        for axis in (own[0] or {}) if own else {}:
+            out.setdefault(str(axis), f"the check `{oracle.get('name')}` runs at a value of it")
+    for axis in _in_run.of(protocol) or {}:
+        out.setdefault(str(axis), "each run compares its values")
+
+    def names(value: Any) -> set[str]:
+        if isinstance(value, str):
+            return {value}
+        if isinstance(value, dict):
+            return {n for v in value.values() for n in names(v)}
+        if isinstance(value, list):
+            return {n for v in value for n in names(v)}
+        return set()
+
+    for metric in protocol.get("metrics") or []:
+        for axis in names({k: v for k, v in metric.items() if k not in ("id", "description", "kind")}
+                          if isinstance(metric, dict) else {}):
+            out.setdefault(axis, f"the metric `{metric.get('id')}` is given per value of it")
+    for axis in names(protocol.get("comparisons")) | names(design.get("comparisons")):
+        out.setdefault(axis, "the plan compares its values")
+    return {axis: why for axis, why in out.items() if axis in axes}
+
+
+def unread_findings(files: dict[str, str], protocol: dict[str, Any], design: Any, fi_dir: Path) -> tuple[
+        list[Any], dict[str, str], list[str], str]:
+    """FI's reading of which settings of ``protocol.grid`` the code never reads: ``(misread, compared, unread, why)``.
+    ``misread``: reads of a name the plan does not give (a fault the static check owns: nothing else is said then).
+    ``compared``: ``{setting: why}`` for a swept setting the code never reads that the study compares (a fault of the
+    code; :func:`settings_the_study_compares`). ``unread``: the swept settings nothing reads (the compared ones among
+    them), or ``[]`` with ``why`` when the reading is not certain. Nothing is run and no model is asked."""
+    from . import grid_keys as _grid_keys
+    from . import unread_settings as _unread
+
+    misread = _grid_keys.problems(files, protocol, design)
+    if misread:
+        return misread, {}, [], ""
+    grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+    # A setting the study compares and the simulation itself never reads is the simulation's fault, even when the
+    # analysis reads it (then it groups results that differ in nothing but their seeds).
+    swept = [str(a) for a, v in grid.items() if isinstance(v, list) and len(v) >= 2]
+    simulated, _why = _unread.setting_reads(files, analysis=False)
+    if simulated is not None and any(a in simulated for a in swept):
+        compared = settings_the_study_compares(fi_dir, design, protocol, [a for a in swept if a not in simulated])
+        if compared:
+            return [], compared, [], ""
+    unread, why = _unread.unread_axes(files, protocol)
+    return [], (settings_the_study_compares(fi_dir, design, protocol, unread) if unread else {}), unread, why
+
+
+#: How many designs of a search's own space (besides its baseline) a speed-up is held to.
+SEARCH_SAMPLE_DESIGNS = 3
+
+
+def _search_rounds(block: dict[str, Any], search_n: int, at_once: int) -> tuple[int, int, int]:
+    """How the search's ``search_n`` evaluations wait, from the search itself rehearsed on a stand-in objective
+    (:func:`core.optimise_search.rehearse`, with the run's own ``batch``): ``(alone, batches, together)``: the evaluations
+    asked for one at a time, the rounds of ``at_once`` the designs asked for together run in, and how many designs those
+    are. Evaluations the rehearsal did not spend (a start that converged early on the stand-in) are counted alone, and a
+    search that cannot be rehearsed (a library method) is counted one at a time."""
+    widths = _optimise_search.rehearse(block, batch=at_once > 1) if at_once > 1 else None
+    if not widths:
+        return search_n, 0, 0
+    alone = sum(w for w in widths if w == 1)
+    together = sum(w for w in widths if w > 1)
+    batches = sum(math.ceil(w / at_once) for w in widths if w > 1)
+    return alone + max(0, search_n - alone - together), batches, together
+
+
+def _search_sample(block: dict[str, Any], grid: Any) -> list[dict[str, Any]]:
+    """The settings a search's speed-up is held to besides its coarse scan's: the baseline and
+    :data:`SEARCH_SAMPLE_DESIGNS` designs spread over the search's space (fixed points of it, so the sample is the same on
+    every run), each with the scan's other settings at their base values. A design the scan never computes (an array
+    of free values, say) is where a search spends its time, so a change that alters a number there is caught too."""
+    try:
+        space = _optimise_search.Space(block["design_variables"])
+        base = dict(next(iter(_estimate.probe_cells(grid)))[2])
+        baseline = dict((block.get("baseline") or {}).get("values") or {})
+    except (KeyError, TypeError, ValueError, StopIteration):
+        return []
+    out = [{**base, **baseline}] if baseline else []
+    n = SEARCH_SAMPLE_DESIGNS
+    for i in range(n):
+        # points of the unit cube spread over it by the golden ratio (each coordinate its own offset), off its centre,
+        # where a baseline often sits
+        u = [(0.5 + 0.618034 * (i + 1) + 0.37 * k) % 1.0 for k in range(space.dims)]
+        try:
+            cell = {**base, **space.design(u)}
+        except (KeyError, TypeError, ValueError, IndexError):
+            continue
+        if cell not in out:
+            out.append(cell)
+    return out
+
+
 class RunChecksMixin:
     """Methods of :class:`core.engine.Engine`; see the module docstring."""
 
@@ -90,11 +218,7 @@ class RunChecksMixin:
         not results."""
         protocol = self._protocol_block(state) or {}  # type: ignore[attr-defined]
         design = state.get("design") if isinstance(state.get("design"), dict) else {}
-        names = set(_forms.fixed_settings_of_design({**design, "protocol": protocol}))
-        grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
-        names |= {str(k) for k in grid} | {str(k) for k in _in_run.of(protocol) or {}}
-        thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else {}
-        return names | {str(k) for k in thresholds}
+        return typed_result_exempt(protocol, design)
 
     def _typed_results_in_simulation(self, state: Any) -> tuple[Path, list[_typed.TypedResult]]:
         path = self.quest_root / "code" / _split_run.SIMULATE_NAME  # type: ignore[attr-defined]
@@ -140,6 +264,7 @@ class RunChecksMixin:
             self._typed_checked_sha = sha
             return False
         rewrote = False
+        written: str | None = None  # the text a try of this pass wrote and no run has used yet
         text = path.read_text(encoding="utf-8")
         used = self._typed_counter(text)
         while found and used < TYPED_RESULT_REPAIRS:
@@ -147,8 +272,15 @@ class RunChecksMixin:
             self._log.warning(  # type: ignore[attr-defined]
                 "[execute] %s returns numbers typed into the code (%s); asking for them to be computed (%d of %d)",
                 path.name, "; ".join(f.says() for f in found[:4]), used, TYPED_RESULT_REPAIRS)
-            rewrote = await self._repair_typed_results(state, path, found) or rewrote
+            earlier = path.read_text(encoding="utf-8") if written is not None else ""
+            wrote = await self._repair_typed_results(state, path, found)
+            rewrote = wrote or rewrote
             text = path.read_text(encoding="utf-8")
+            if written is not None and wrote and earlier and earlier != text:
+                # the version the first try wrote was replaced by this one before any run of it
+                await self._keep_overwritten_try(path, used - 1, earlier, "typed-results repair replaced before it ran: "
+                                                 "a later try wrote over it")
+            written = text if wrote else written
             self._save_typed_counter(text, used)
             path, found = self._typed_results_in_simulation(state)
         self._typed_checked_sha = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else ""
@@ -166,6 +298,19 @@ class RunChecksMixin:
             "[execute] %s The paper does not use %s and says so in its limitations.", note,
             "it" if len(keys) == 1 else "them")
         return rewrote
+
+    async def _keep_overwritten_try(self, path: Path, number: int, text: str, message: str) -> None:
+        """Keep a version written into ``code/`` and overwritten before any run, on a side reference of the folder's git
+        history. Best effort: never changes what the check does."""
+        try:
+            from . import code_project as _project
+
+            code_dir = self.quest_root / "code"  # type: ignore[attr-defined]
+            rel = path.relative_to(code_dir).as_posix()
+            await asyncio.to_thread(_project.keep_refused, self.quest_root, f"typed-{path.stem}-{number}",  # type: ignore[attr-defined]
+                                    {rel: text}, message, log=self._log)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 -- the record is a convenience; the check goes on whatever happens to it
+            pass
 
     async def _repair_typed_results(self, state: Any, path: Path, found: list[_typed.TypedResult]) -> bool:
         """ONE repair of the simulation: kept only if it parses, keeps what FI reads from it, and has fewer typed-in
@@ -210,7 +355,10 @@ class RunChecksMixin:
                 "[execute] the rewritten %s still returns %d number(s) typed into the code; keeping it as written",
                 path.name, len(left))
             return False
+        package_was = self._package_snapshot()  # type: ignore[attr-defined]
         path.write_text(new_code, encoding="utf-8")
+        if await self._simulation_kept_or_back(state, path, code, package_was, "execute"):  # type: ignore[attr-defined]
+            return False
         self._log.info(  # type: ignore[attr-defined]
             "[execute] rewrote %s so its results are computed (%d typed-in left): %s", path.name, len(left),
             str(parsed.get("patch_summary") or "no summary")[:120])
@@ -405,8 +553,25 @@ class RunChecksMixin:
             parts.append(self._withhold_left_out_values(checked))
         if static := self._static_checks_note():  # type: ignore[attr-defined]  # core/static_checks.py
             parts.append(static)
+        from . import code_review as _code_review
+
+        now = _code_review.version(self.quest_root / "code")  # type: ignore[attr-defined]
+        for p in self._cannot_repair_problems():  # type: ignore[attr-defined]  # core/engine.py
+            if _stop_power.may_stop(p.get("source")):
+                continue
+            if p.get("code_version") and p["code_version"] != now:
+                # The code was repaired again after this was found, and no check looked at it again.
+                parts.append(f"FI's checks of an earlier version of the code found this: {p['text']}. The code was "
+                             "repaired again after that and this was not checked again. Say it in the limitations as "
+                             "not known to be fixed, not as a fact of the results.")
+                continue
+            parts.append(f"FI's checks of the code before the run found this, and the repairs did not remove it: {p['text']}. "
+                         f"It is {_stop_power.source_words(p.get('source'))}, so the run went on. Say it in the "
+                         "limitations as FI's reading of the code, not as a fact of the results.")
         if observed := self._no_difference_note():
             parts.append(observed)
+        if uncomputed := self._step_coverage_note():
+            parts.append(uncomputed)
         sized = _read_json(self.quest_root / _estimate.RECORD)  # type: ignore[attr-defined]
         reduced = sized.get("reduced")
         if isinstance(reduced, dict) and reduced.get("note"):
@@ -415,7 +580,26 @@ class RunChecksMixin:
         over = sized.get("over_topic_limit")
         if isinstance(over, dict) and over.get("note"):
             parts.append(f"{over['note']} Say this in the paper (it is among FI's facts about this run, given below).")
+        if scope := self._scope_gap_note():
+            parts.append(scope)
         return "\n\n".join(parts)
+
+    def _scope_gap_note(self) -> str:
+        """For the writer: each result or setting of the study the person chose that the frozen plan has no name for
+        (core/scope_cards.py ``gaps``, a reading by names). It is told in the limitations and never stops the quest."""
+        from . import scope_cards as _sc
+
+        record = _sc.read_record(self.quest_root)  # type: ignore[attr-defined]
+        card = record.get("chosen") if isinstance(record, dict) else None
+        protocol = _frozen.protocol_of(self.quest_root)  # type: ignore[attr-defined]
+        if not isinstance(card, dict) or not card or protocol is None:
+            return ""
+        design = {"protocol": protocol}
+        names = [r for r in _sc._strings(card.get("main_results")) if _sc.gaps({"main_results": [r]}, design)]
+        names += [s for s in _sc._strings(card.get("compared_settings"))
+                  if _sc.gaps({"compared_settings": [s]}, design)]
+        return "\n".join(f"The person chose a study that names {x}; the plan does not cover it and gives no reason. "
+                         "Say so in the limitations." for x in names)
 
     # ---- a setting of the grid the code never reads ----------------------------------------------------------------------
 
@@ -437,7 +621,6 @@ class RunChecksMixin:
         Returns the failed run for the repair, or ``None`` to go on."""
         from . import engine as _e
         from . import grid_keys as _grid_keys
-        from . import unread_settings as _unread
 
         if _frozen.load(self.quest_root) is not None or int(state.get("iteration", 0) or 0) > 0:  # type: ignore[attr-defined]
             return None
@@ -447,28 +630,18 @@ class RunChecksMixin:
             return None
         files = {rel: text for rel, text in _grid_keys.code_files(simulate.parent).items()
                  if rel not in ("run.py", _trial_runner.SUBMIT_NAME)}
-        misread = _grid_keys.problems(files, protocol, state.get("design"))
+        misread, compared, unread, why = unread_findings(files, protocol, state.get("design"), self.fi_dir)  # type: ignore[attr-defined]
         if misread:
             self._log.info("[execute] the code reads a name the plan does not give (%s); left to the check of the code",  # type: ignore[attr-defined]
                            ", ".join(f"`{k}`" for r in misread for k in r.keys) or "a fixed number of runs")
             return None
-        # A setting the study compares and the simulation itself never reads is the simulation's fault, even when the
-        # analysis reads it (then it groups results that differ in nothing but their seeds).
-        swept = [str(a) for a, v in grid.items() if isinstance(v, list) and len(v) >= 2]
-        simulated, _why = _unread.setting_reads(files, analysis=False)
-        if simulated is not None and any(a in simulated for a in swept):
-            compared = self._settings_the_study_compares(state, protocol, [a for a in swept if a not in simulated])
-            if compared:
-                return self._unread_compared_setting(state, grid, compared, simulate)
-        unread, why = _unread.unread_axes(files, protocol)
+        if compared:
+            return self._unread_compared_setting(state, grid, compared, simulate)
         if not unread:
             if why:
                 self._log.info("[execute] FI could not tell whether the code reads every setting of the grid (%s); "  # type: ignore[attr-defined]
                                "every setting is kept and run", why)
             return None
-        compared = self._settings_the_study_compares(state, protocol, unread)
-        if compared:
-            return self._unread_compared_setting(state, grid, compared, simulate)
         line = (f"FI's reading of the code finds no use of {', '.join(f'`{k}`' for k in unread)}; every setting is kept "
                 "and run.")
         self._log.warning("[execute] %s", line)  # type: ignore[attr-defined]
@@ -485,43 +658,55 @@ class RunChecksMixin:
             self._log.warning("[execute] FI could not add that line to plan.md: %r", e)  # type: ignore[attr-defined]
         return None
 
+    def _record_step_coverage(self, state: Any, simulate: Path) -> list[str]:
+        """After the checks of the code and before the run: is each metric the simulation returns computed through the
+        functions of the model's package (core/step_coverage.py)? A ``run_trial`` that returns the plan's true value plus noise
+        with a matching standard error, and never calls the model, passes the failure-rate, calibration, seed and typed-result
+        checks; only this question tells it from an honest one.
+
+        RECORD ONLY, as the checks that read code without running it always were: the metrics that are not computed through the
+        package are written to ``.fi/step_coverage.json``, become a gap in the evidence record (core/evidence.py) and a line in
+        QUALITY.md, and are given to the writer for the limitations. The quest is neither stopped nor is the code sent back,
+        because a reading of syntax can miss a call it should have followed. Nothing is said when the quest has no package or
+        the simulation has no ``run_trial`` / ``run_cell``. Never raises; returns the warnings."""
+        try:
+            from . import code_layout as _code_layout
+            from . import code_review as _code_review
+
+            code_dir = self.quest_root / "code"  # type: ignore[attr-defined]
+            sources = _code_layout.package_sources(code_dir)
+            names = _step_coverage.package_function_names(sources)
+            protocol = self._protocol_block(state) or {}  # type: ignore[attr-defined]
+            metrics = protocol.get("metrics") if isinstance(protocol.get("metrics"), list) else []
+            path = self.fi_dir / _step_coverage.RECORD  # type: ignore[attr-defined]
+            if not names or not metrics or not simulate.is_file():
+                path.unlink(missing_ok=True)   # an earlier reading is not about this code
+                return []
+            warnings = _step_coverage.check(simulate.read_text(encoding="utf-8"), names, metrics, only_returned=True,
+                                            package_modules=_step_coverage.package_module_names(sources))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"warnings": warnings, "package_functions": names,
+                                        "code_version": _code_review.version(code_dir)}, indent=2) + "\n", encoding="utf-8")
+            for w in warnings:
+                self._log.warning("[execute] FI's step check: %s", w)  # type: ignore[attr-defined]
+            return warnings
+        except Exception as e:  # noqa: BLE001 -- a check that cannot be made never stops a quest
+            self._log.warning("[execute] FI could not check which numbers are computed through the model (%s)",  # type: ignore[attr-defined]
+                              str(e)[:200] or type(e).__name__)
+            return []
+
+    def _step_coverage_note(self) -> str:
+        """For the writer: a metric the simulation returns without computing it through the model's functions."""
+        warnings = [str(w) for w in _read_json(self.fi_dir / _step_coverage.RECORD).get("warnings") or []]  # type: ignore[attr-defined]
+        if not warnings:
+            return ""
+        return ("FI's reading of the simulation found: " + "; ".join(_one(w, 300) for w in warnings[:4])
+                + ".\nSay so plainly in the limitations: those numbers are not shown to come from the model's equations.")
+
     def _settings_the_study_compares(self, state: Any, protocol: dict[str, Any], axes: list[str]) -> dict[str, str]:
-        """``{setting: why it is part of the study}`` for each of ``axes`` that the study compares, from FI's records: a
-        factor the topic compares (:func:`core.topic_requirements.compared_axes`), a key of a check's case, of
-        ``in_each_run``, or a name a metric or the plan's comparisons use."""
-        from . import in_run as _in_run
-        from . import oracle_check as _oracle
-        from . import topic_requirements as _tr
-
-        out: dict[str, str] = {}
-        req = _read_json(self.fi_dir / _tr.FILE)  # type: ignore[attr-defined]
-        if isinstance(req, dict) and isinstance(req.get("factors"), list):
-            for axis, factor in _tr.compared_axes(req, state.get("design") or {}, protocol).items():
-                out.setdefault(axis, f"the topic compares {factor}")
-        for oracle in _oracle.declared(protocol):
-            own = _oracle.case_of(oracle)
-            for axis in (own[0] or {}) if own else {}:
-                out.setdefault(str(axis), f"the check `{oracle.get('name')}` runs at a value of it")
-        for axis in _in_run.of(protocol) or {}:
-            out.setdefault(str(axis), "each run compares its values")
-
-        def names(value: Any) -> set[str]:
-            if isinstance(value, str):
-                return {value}
-            if isinstance(value, dict):
-                return {n for v in value.values() for n in names(v)}
-            if isinstance(value, list):
-                return {n for v in value for n in names(v)}
-            return set()
-
-        for metric in protocol.get("metrics") or []:
-            for axis in names({k: v for k, v in metric.items() if k not in ("id", "description", "kind")}
-                              if isinstance(metric, dict) else {}):
-                out.setdefault(axis, f"the metric `{metric.get('id')}` is given per value of it")
-        design = state.get("design") if isinstance(state.get("design"), dict) else {}
-        for axis in names(protocol.get("comparisons")) | names(design.get("comparisons")):
-            out.setdefault(axis, "the plan compares its values")
-        return {axis: why for axis, why in out.items() if axis in axes}
+        """``{setting: why it is part of the study}`` for each of ``axes`` that the study compares, from FI's records
+        (:func:`settings_the_study_compares`)."""
+        return settings_the_study_compares(self.fi_dir, state.get("design"), protocol, axes)  # type: ignore[attr-defined]
 
     def _unread_compared_setting(self, state: Any, grid: dict[str, Any], compared: dict[str, str],
                                  simulate: Path) -> dict[str, Any] | None:
@@ -570,11 +755,21 @@ class RunChecksMixin:
         the best design or a cluster job has its own limits, and a resume of a run that already fits is not timed again."""
         self._sized_protocol: dict[str, Any] | None = None
         self._pilot_spent = 0.0  # seconds the pilot's extra trials took in this sizing: they count against the same budget
+        # Every sizing starts with no cut: what an earlier sizing set (the settings planned, the run's id) is decided again below.
+        if isinstance(runner, _trial_runner.TrialsRunner):
+            runner.first_cells = None
+            runner.run_id = ""
         # A run_trial that returns the mean of many trials (it calls run_cell) is a fault of the code, not of the plan's size:
         # it goes back to the code step, never to the plan to shrink the grid (which dropped settings the topic required).
         if isinstance(runner, _trial_runner.TrialsRunner):
             try:
-                aggregate = _trial_runner.trial_aggregates(runner.simulate.read_text(encoding="utf-8"))
+                text = runner.simulate.read_text(encoding="utf-8")
+                aggregate = _trial_runner.trial_aggregates(text, self.quest_root)  # type: ignore[attr-defined]
+                first = self._first_study_cell(self._protocol_block(state) or {}) if aggregate else None  # type: ignore[attr-defined]
+                if aggregate and first is not None and await _trial_runner.settle_aggregate(
+                        self.executor, python, self.quest_root, runner.simulate, cell=first[0], inside=first[1],  # type: ignore[attr-defined]
+                        timeout_s=int(self.config.execution.timeout_s), env=env, log=self._log) is not False:  # type: ignore[attr-defined]
+                    aggregate = ""  # two seeds gave the same numbers, or the call could not be measured (said in the log)
             except (OSError, ValueError):
                 aggregate = ""
             if aggregate:
@@ -588,9 +783,15 @@ class RunChecksMixin:
 
         if isinstance(runner, _optimise.OptimisationRunner):
             return await self._size_the_scan(state, runner, python, env)
-        if (not isinstance(runner, _trial_runner.TrialsRunner) or self.config.execution.background_jobs  # type: ignore[attr-defined]
-                or _frozen.load(self.quest_root) is not None or int(state.get("iteration", 0) or 0) > 0):  # type: ignore[attr-defined]
+        if not isinstance(runner, _trial_runner.TrialsRunner) or self.config.execution.background_jobs:  # type: ignore[attr-defined]
             return None
+        # A frozen protocol (or a redesign) cannot be cut, but its run is still timed and the estimate said before it starts:
+        # a redesign's run took four hours with nothing said beforehand because only the first design was timed.
+        if int(state.get("iteration", 0) or 0) > 0:  # type: ignore[attr-defined]
+            await self._say_estimate_only(state, runner, python, env)
+            return None
+        if _frozen.load(self.quest_root) is not None:  # type: ignore[attr-defined]
+            return None  # a resume of a run that was timed before it was frozen
         # The time the run is sized to: the topic's own limit when it states one (never more than FI's), else FI's
         # ``execution.timeout_s``, which stays the hard stop of a run in either case.
         hard_s = float(self.config.execution.timeout_s)  # type: ignore[attr-defined]
@@ -607,6 +808,11 @@ class RunChecksMixin:
         speed_done = False
         at_once = int(getattr(runner, "at_once", 1) or 1)
         slowdown: float | None = None  # measured once, only when the settings one after another would not fit
+        # The timing with the most paid once: a later timing runs on the cache the earlier one filled (run_estimate.with_once).
+        once_seen: _estimate.Estimate | None = None
+        if float(prior.get("once_s") or 0.0) > 0:  # a resume times on the cache the earlier session filled
+            once_seen = _estimate.Estimate(seconds=0.0, at_least=False, complete=True, cells=0, trials=0,
+                                           once_s=float(prior["once_s"]), once_axes=list(prior.get("once_axes") or []))
         for _round in range(3):
             grid, runs, thresholds = self._grid_and_runs(state)
             inside = _in_run.of(self._protocol_block(state) or {})  # type: ignore[attr-defined]
@@ -616,8 +822,15 @@ class RunChecksMixin:
                 self._log.info("[execute] %s (timed before; nothing in the experiment has changed)",  # type: ignore[attr-defined]
                                record.get("says") or "the experiment fits")
                 return None
+            if record.get("key") == key and record.get("truncated"):
+                self._log.info("[execute] %s (timed before; nothing in the experiment has changed)",  # type: ignore[attr-defined]
+                               record.get("says") or "the experiment is run up to the time limit")
+                runner.cost = None  # type: ignore[attr-defined]  # the plan's order
+                runner.run_id = str((record.get("truncated") or {}).get("run_id") or "")  # type: ignore[attr-defined]
+                runner.first_cells = (record.get("truncated") or {}).get("planned_settings")  # type: ignore[attr-defined]
+                return None
             if record.get("key") == key and record.get("stopped"):
-                return self._stop_too_long(str(record["stopped"]))
+                return self._stop_too_long(str(record["stopped"]), fit=record.get("fit"))
             probes, why = await _estimate.measure(
                 self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(), grid,  # type: ignore[attr-defined]
                 runs=runs, deterministic=runner.deterministic, limit_s=limit_s,
@@ -635,22 +848,30 @@ class RunChecksMixin:
                 return broken
             if isinstance(runner, _trial_runner.TrialsRunner):
                 runner.cost = _estimate.setting_cost(grid, probes)  # the run starts the costliest settings first
-            est = _estimate.estimate(grid, runs, runner.deterministic, probes)
+            est = _estimate.with_once(_estimate.estimate(grid, runs, runner.deterministic, probes), once_seen)
             if est is None:
                 return None
+            if est.once_s > (once_seen.once_s if once_seen is not None else 0.0):
+                once_seen = est
             if at_once > 1 and _estimate.known_too_long(est, limit_s):
                 if slowdown is None:
                     slowdown = await self._slowdown_at_once(runner, python, env, probes, runs, thresholds, inside,
                                                             at_once, budget_s)
                 if slowdown is not None:
-                    est = _estimate.estimate(grid, runs, runner.deterministic, probes, at_once=at_once, slowdown=slowdown)
+                    est = _estimate.with_once(_estimate.estimate(grid, runs, runner.deterministic, probes, at_once=at_once,
+                                                                 slowdown=slowdown), once_seen)
             line = _estimate.says(est, limit_s, topic=by_topic)
             base = {"key": key, "estimate_s": est.seconds * _estimate.SAFETY, "limit_s": limit_s, "says": line,
                     "reduced": reduced, "at": time.time(), "timed": est.timed, "cells": est.cells, "trials": est.trials,
-                    "limit": "topic" if by_topic else "execution.timeout_s", "topic_limit_s": topic_s, "hard_limit_s": hard_s}
+                    "limit": "topic" if by_topic else "execution.timeout_s", "topic_limit_s": topic_s, "hard_limit_s": hard_s,
+                    "once_s": est.once_s, "once_axes": list(est.once_axes),
+                    "at_once": est.at_once}
             # The smaller run FI chose is timed again: it goes on unless it is over the limit even without the margin
             # (the margin was spent choosing it; a second timing of the same run differs by about as much).
-            if not _estimate.known_too_long(est, limit_s, timed_again=cut_done):
+            # More settings than FI lists: the whole grid is never built. The settings the time allowed can reach are planned,
+            # in the plan's order, and run up to the limit (a study that fits would still be cut at what FI lists).
+            oversized = _optimise_search.grid_size(grid) > _optimise_search.MAX_LISTED_SETTINGS
+            if not oversized and not _estimate.known_too_long(est, limit_s, timed_again=cut_done):
                 if _estimate.known_too_long(est, limit_s):
                     line += (" (timed again with the fewer runs; without FI's margin of one half it is "
                              f"{_estimate.plain_duration(est.seconds)}, within the limit)")
@@ -660,6 +881,18 @@ class RunChecksMixin:
                 self._say_headroom(est, hard_s)
                 _estimate.write_record(self.quest_root, {**base, "fits": True})  # type: ignore[attr-defined]
                 return None
+            if oversized:
+                fits_in = self._what_fits(est, hard_s)
+                reach = int(fits_in["settings_that_fit"]) if fits_in else _optimise_search.MAX_LISTED_SETTINGS
+                first = max(1, min(_optimise_search.MAX_LISTED_SETTINGS, reach))
+                if self._run_up_to_the_limit(runner, est, hard_s, _estimate.cheapest_setting_s(probes), kind="grid",
+                                             base=base, detail=self._too_long_text(est, hard_s), fit=fits_in,
+                                             first_cells=first):
+                    return None
+                text = _optimise_search.grid_too_large(_optimise_search.study_grid(self._protocol_block(state) or {})) \
+                    or self._too_long_text(est, hard_s)
+                _estimate.write_record(self.quest_root, {**base, "fits": False, "stopped": text, "fit": fits_in})  # type: ignore[attr-defined]
+                return self._stop_too_long(text, fit=fits_in)
             self._log.warning("[execute] %s, so it would not finish within it", line)  # type: ignore[attr-defined]
             if (not speed_done and not cut_done and int(self.config.engine.improve_rounds or 0) > 0  # type: ignore[attr-defined]
                     and isinstance(runner, _trial_runner.TrialsRunner)):
@@ -725,13 +958,21 @@ class RunChecksMixin:
                         return None
             if fit is None:
                 text = self._too_long_text(est, hard_s)
-                _estimate.write_record(self.quest_root, {**base, "fits": False, "stopped": text})  # type: ignore[attr-defined]
-                return self._stop_too_long(text)
+                fits_in = self._what_fits(est, hard_s)
+                if self._run_up_to_the_limit(runner, est, hard_s, _estimate.cheapest_setting_s(probes), kind="grid", base=base,
+                                             detail=text, fit=fits_in):
+                    return None
+                _estimate.write_record(self.quest_root, {**base, "fits": False, "stopped": text, "fit": fits_in})  # type: ignore[attr-defined]
+                return self._stop_too_long(text, fit=fits_in)
             note = self._lower_the_runs(state, runs, fit, est, limit_s, grid, protocol, topic=by_topic, over_topic=over_topic)
             if note is None:
                 text = self._too_long_text(est, hard_s)
-                _estimate.write_record(self.quest_root, {**base, "fits": False, "stopped": text})  # type: ignore[attr-defined]
-                return self._stop_too_long(text)
+                fits_in = self._what_fits(est, hard_s)
+                if self._run_up_to_the_limit(runner, est, hard_s, _estimate.cheapest_setting_s(probes), kind="grid", base=base,
+                                             detail=text, fit=fits_in):
+                    return None
+                _estimate.write_record(self.quest_root, {**base, "fits": False, "stopped": text, "fit": fits_in})  # type: ignore[attr-defined]
+                return self._stop_too_long(text, fit=fits_in)
             cut_done = True
             reduced = note
             self._sized_protocol = {**(self._sized_protocol or {}), "runs_per_setting": fit.runs}
@@ -741,8 +982,38 @@ class RunChecksMixin:
                 return None  # sized to the plan's minimum, knowingly over the topic's limit: nothing to gain by timing again
         return None
 
+    async def _say_estimate_only(self, state: Any, runner: Any, python: Any, env: Any) -> None:
+        """The estimate of a run whose protocol cannot be changed (frozen, or a redesign): time the same settings as for a first
+        design, say the one plain line, and go on. Nothing is cut, stopped or recorded as sized, and a timing that fails or finds
+        nothing says nothing (a failed timing never prints an estimate)."""
+        try:
+            hard_s = float(self.config.execution.timeout_s)  # type: ignore[attr-defined]
+            topic_s = self._topic_limit_s(state)
+            by_topic = topic_s is not None and topic_s < hard_s
+            limit_s = float(topic_s) if by_topic else hard_s  # type: ignore[arg-type]
+            budget_s = max(hard_s * float(self.config.engine.pilot_timeout_frac), 30.0)  # type: ignore[attr-defined]
+            grid, runs, thresholds = self._grid_and_runs(state)
+            inside = _in_run.of(self._protocol_block(state) or {})  # type: ignore[attr-defined]
+            probes, why = await _estimate.measure(
+                self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(), grid,  # type: ignore[attr-defined]
+                runs=runs, deterministic=runner.deterministic, limit_s=limit_s, budget_s=budget_s, env=env,
+                thresholds=thresholds, in_each_run=inside)
+            if probes is None:
+                self._log.info("[execute] the run was not timed before it started (%s)", why)  # type: ignore[attr-defined]
+                return
+            est = _estimate.estimate(grid, runs, runner.deterministic, probes)
+            if est is None:
+                return
+            line = _estimate.says(est, limit_s, topic=by_topic)
+            self._log.info("[execute] %s (this design is not cut: its plan is already fixed)", line)  # type: ignore[attr-defined]
+            print(f"[FI] {line}")
+            self._say_headroom(est, hard_s)
+        except Exception as exc:  # noqa: BLE001 - a number said for information must never stop the run
+            self._log.warning("[execute] the run could not be timed before it started (%r)", exc)  # type: ignore[attr-defined]
+
     async def _slowdown_at_once(self, runner: Any, python: Any, env: Any, probes: list[Any], runs: int,
-                                thresholds: dict[str, Any], inside: Any, at_once: int, budget_s: float) -> float | None:
+                                thresholds: dict[str, Any], inside: Any, at_once: int, budget_s: float,
+                                deterministic: bool | None = None) -> float | None:
         """How many times slower a setting runs when ``at_once`` run at the same time on this machine
         (:func:`core.run_estimate.slowdown_at_once`), or ``None`` when it could not be measured in the time left for timing;
         then the estimate counts the settings one after another, as before. It is measured on the costliest timed setting
@@ -769,7 +1040,8 @@ class RunChecksMixin:
         started = time.monotonic()
         factor, why = await _estimate.slowdown_at_once(
             self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(),  # type: ignore[attr-defined]
-            dict(base.cell), at_once=at_once, runs=runs, deterministic=runner.deterministic,
+            dict(base.cell), at_once=at_once, runs=runs,
+            deterministic=runner.deterministic if deterministic is None else deterministic,
             timeout_s=int(max(30, 3 * timing + 10)), env=env, thresholds=thresholds, in_each_run=inside)
         self._pilot_spent += time.monotonic() - started
         if factor is None:
@@ -800,19 +1072,25 @@ class RunChecksMixin:
                 "so a run much slower than the estimate would be stopped before it ends",
                 _estimate.plain_duration(hard_s), self._padded(est))
 
-    async def _size_the_scan(self, state: Any, runner: Any, python: Any, env: Any) -> dict[str, Any] | None:
+    async def _size_the_scan(self, state: Any, runner: Any, python: Any, env: Any,
+                             speed_done: bool = False) -> dict[str, Any] | None:
         """The coarse scan of a search for the best design runs every setting of the plan's grid, so its size is counted
         (the product of the axes' lengths, nothing listed) and its time added up BEFORE anything lists or runs the settings.
-        More settings than FI lists: the quest's plain stop. Otherwise the time of one setting is the larger of the plan's own
-        estimate and one real evaluation of the baseline (a plan's claim alone is not trusted); over ``execution.timeout_s``:
-        the same stop, as for a measurement (FI does not run a smaller scan than the plan's). ``None`` to go on.
+        More settings than FI lists: the quest's plain stop. Otherwise the scan's time is the larger of the plan's own estimate
+        and FI's timing of the scan's settings as a measurement's are timed (a plan's claim alone is not trusted), and the
+        search's evaluations, which share the scan's time, are added at what one new design (the search's baseline) costs;
+        over ``execution.timeout_s``: the same stop, as for a measurement (FI does not run a smaller scan than the plan's),
+        with what fits for the plan. ``None`` to go on. Before that stop, the simulation is made faster with the same
+        numbers as a measurement's is (:meth:`_speed_up`, once; ``speed_done``), on the scan's settings and a few designs of
+        the search's own space, and timed again.
 
-        Not skipped for a frozen protocol or a background job: the search runs here either way, sizing never changes the
-        protocol, and the check is arithmetic and at most one timed evaluation, so a resume may repeat it."""
+        Not skipped for a frozen protocol or a background job: the search runs here either way and sizing never changes the
+        protocol; the timing is bounded by ``engine.pilot_timeout_frac`` of the time allowed, and a resume repeats it."""
         from . import optimisation_plan as _optimisation_plan
         from . import optimise as _optimise
         from . import optimise_search as _optimise_search
 
+        self._clear_cut(runner)  # what an earlier sizing of this study decided is decided again below
         raw = _optimise.block_of(self._protocol_block(state))  # type: ignore[attr-defined]
         block, _why = _optimisation_plan.normalize(raw) if raw is not None else (None, "")
         if block is None:
@@ -831,28 +1109,274 @@ class RunChecksMixin:
         limit_s = float(self.config.execution.timeout_s)  # type: ignore[attr-defined]
         claimed = (block.get("evaluation_budget") or {}).get("seconds_per_evaluation")
         per_setting = float(claimed) * runs if isinstance(claimed, (int, float)) and not isinstance(claimed, bool)             and claimed > 0 else None
-        at_least = False
-        baseline = _optimise.complete_case(self._protocol_block(state), {})  # type: ignore[attr-defined]
-        # The same allowance a measurement's timed trial gets (core/run_estimate.py::measure), for this many trials.
-        allowance = max(60.0, 3.0 * limit_s / max(1, scan * runs))
-        probe, why = await _estimate._time_one(
-            self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(),  # type: ignore[attr-defined]
-            baseline, runs=runs, deterministic=deterministic, timeout_s=int(max(5, min(allowance, limit_s))), env=env,
-            thresholds=(self._protocol_block(state) or {}).get("thresholds"))  # type: ignore[attr-defined]
-        if probe is None:
-            # A baseline that cannot be timed fails in the real run, where it is repaired; the plan's claim, when it gave one,
-            # still counts, and the count above has already kept the listing within what memory holds.
-            self._log.warning("[execute] FI could not time one evaluation of the search's baseline (%s)", why)  # type: ignore[attr-defined]
-        elif per_setting is None or probe.seconds > per_setting:
-            per_setting, at_least = probe.seconds, probe.at_least
-        if per_setting is None:
+        thresholds = (self._protocol_block(state) or {}).get("thresholds")  # type: ignore[attr-defined]
+        # The scan's settings are timed as a measurement's are (core/run_estimate.py::measure): the base twice, each setting
+        # at its ends (and quarter points), every part of the scan, so a cost that depends on the settings, or is paid once
+        # per new value and reused, is counted as the scan will pay it; one evaluation of the baseline alone was not.
+        est: _estimate.Estimate | None = None
+        first_s = 0.0  # what the scan's first timed setting took the first time it ran
+        probes: list[Any] | None = None
+        at_once = int(getattr(runner, "at_once", 1) or 1)
+        slowdown: float | None = None  # how much slower a setting runs beside ``at_once - 1`` others, once measured
+        timing_started = time.monotonic()
+        budget_s = max(limit_s * float(self.config.engine.pilot_timeout_frac), 30.0)  # type: ignore[attr-defined]
+        try:
+            grid = _optimise_search.scan_grid(block)
+            inside = _optimise_search.in_each_run(block)
+        except (KeyError, TypeError, ValueError):
+            grid, inside = None, {}
+        if grid is not None:
+            probes, why = await _estimate.measure(
+                self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(),  # type: ignore[attr-defined]
+                grid, runs=runs, deterministic=deterministic, limit_s=limit_s, budget_s=budget_s, env=env,
+                thresholds=thresholds, in_each_run=inside or None)
+            if probes is None:
+                # A setting that fails when timed is a setting the simulation fails at, as for a measurement: the same repair
+                # as a failed run, before the protocol is frozen. Going on, the scan was sized from the plan's claim alone.
+                self._log.warning("[execute] the simulation failed while FI timed the search's coarse scan %s", why)  # type: ignore[attr-defined]
+                return self._sizing_failed(why)
+            else:
+                est = _estimate.estimate(grid, runs, deterministic, probes)
+                if probes:
+                    first_s = float(probes[0].first_s or probes[0].seconds)
+                # The scan runs ``execution.settings_at_once`` settings at the same time (core/optimise.py::run_search), so
+                # it is counted that way, with how much slower a setting runs beside the others on this machine, as a
+                # measurement is (_size_the_run); one after another it was counted many times too long.
+                if at_once > 1 and probes and _estimate.known_too_long(est, limit_s):
+                    spent = time.monotonic() - timing_started
+                    slowdown = await self._slowdown_at_once(runner, python, env, probes, runs, thresholds or {},
+                                                            inside or None, at_once, max(0.0, budget_s - spent),
+                                                            deterministic=deterministic)
+                    if slowdown is not None:
+                        est = _estimate.estimate(grid, runs, deterministic, probes, at_once=at_once, slowdown=slowdown)
+        if per_setting is not None and (est is None or per_setting * scan > est.seconds):
+            est = _estimate.Estimate(seconds=per_setting * scan, at_least=False, complete=True, cells=scan, trials=scan * runs)
+        if est is None:
             return None
-        est = _estimate.Estimate(seconds=per_setting * scan, at_least=at_least, complete=True, cells=scan, trials=scan * runs)
+        searched = 0
+        core_est: Any = None  # the scan and the search without the check, once the check was added
+        check_s = 0.0
+        checked = 0  # the evaluations of FI's check at finer settings, counted when they make the study too long
+        whole: Any = None  # the scan with the search's evaluations, when one evaluation was timed
+        alternatives_note = ""  # how many alternatives the search's evaluations are for, when the plan compares several
+        alternatives = 1
+        searching = 1  # how many of them the run searches
+        per_alternative = 0
+        probe_n = 0
+        per_eval: float | None = None  # what one new design costs, once timed
+        lower = False
         if not _estimate.known_too_long(est, limit_s):
-            return None
+            # The search shares the scan's time (one deadline for both, core/optimise.py): every evaluation is a design
+            # the scan did not compute, so it costs what a setting costs the first time it runs: the search's own
+            # baseline timed once here, never less than the scan's first timed setting took the first time (the baseline
+            # may run on what the scan's timing computed) nor than the plan's own claim. Each evaluation is a whole
+            # setting with its runs.
+            search_n = int(_optimisation_plan.evaluations(block)[0] or 0)
+            # A study that compares named alternatives searches each one with the whole budget (the alternatives are
+            # counted from the plan's own scan, core/optimise_search.py::compared_levels), and asks a few designs of every
+            # alternative after the first before it is searched (compare): evaluations outside the budget, counted here.
+            alternatives = searching = _optimise_search.level_count(block)
+            per_alternative = search_n // alternatives if search_n else 0
+            probe_n = (alternatives - 1) * _optimise_search.PROBE_DESIGNS if search_n and alternatives > 1 else 0
+            per_eval = max(per_setting or 0.0, first_s) or None
+            left = budget_s - (time.monotonic() - timing_started)
+            if search_n and left >= 5:
+                baseline = _optimise.complete_case(self._protocol_block(state), {}, keep_inside=True)  # type: ignore[attr-defined]
+                allowance = max(60.0, 3.0 * limit_s / max(1, (scan + search_n) * runs))
+                probe, why = await _estimate._time_one(
+                    self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(),  # type: ignore[attr-defined]
+                    baseline, runs=runs, deterministic=deterministic, timeout_s=int(max(5, min(allowance, left))),
+                    env=env, thresholds=thresholds, in_each_run=inside or None)
+                if probe is None:
+                    # The baseline is the first design the search evaluates: one it fails at is the same repair.
+                    self._log.warning("[execute] the simulation failed while FI timed the search's baseline %s", why)  # type: ignore[attr-defined]
+                    return self._sizing_failed(why)
+                if per_eval is None or probe.seconds > per_eval:
+                    per_eval, lower = probe.seconds, probe.at_least
+            if search_n and per_eval:
+                # The search asks for designs one at a time or several together (its starting points side by side, a
+                # population, a simplex's corners), as the search itself shows when it is rehearsed (_search_rounds);
+                # several together run ``at_once`` at a time, each as much slower as FI measured. Counted one after
+                # another, a search that runs 8 at a time was counted several times too long.
+                # One search is rehearsed (all alternatives search alike); what is counted is its rounds once for each
+                # alternative the run searches, and the probes of every alternative after the first, asked together.
+                alone1, batches1, together1 = await asyncio.to_thread(_search_rounds, block, per_alternative, at_once)
+
+                def priced(searched_n: int) -> tuple[int, int, int, int]:
+                    a, b, t = alone1 * searched_n, batches1 * searched_n, together1 * searched_n
+                    if probe_n and at_once > 1:
+                        b += (alternatives - 1) * math.ceil(_optimise_search.PROBE_DESIGNS / at_once)
+                        t += probe_n
+                    elif probe_n:
+                        a += probe_n
+                    return a, b, t, per_alternative * searched_n + probe_n
+
+                # Every alternative is searched, until the simulation itself shows otherwise (below).
+                alone, batches, together_n, search_n = priced(searching)
+                if batches and slowdown is None and probes and _estimate.known_too_long(
+                        _replace(est, seconds=est.seconds + per_eval * search_n), limit_s):
+                    spent = time.monotonic() - timing_started
+                    slowdown = await self._slowdown_at_once(runner, python, env, probes, runs, thresholds or {},
+                                                            inside or None, at_once, max(0.0, budget_s - spent),
+                                                            deterministic=deterministic)
+                    if slowdown is not None and grid is not None:
+                        est = _estimate.estimate(grid, runs, deterministic, probes, at_once=at_once,
+                                                 slowdown=slowdown) or est
+
+                def whole_study(a: int, b: int, t: int, n: int) -> _estimate.Estimate:
+                    search_s = per_eval * (a + (b * slowdown if slowdown is not None else t))
+                    return _estimate.Estimate(seconds=est.seconds + search_s, at_least=est.at_least or lower,
+                                              complete=est.complete, cells=scan + n, trials=(scan + n) * runs,
+                                              once_s=est.once_s, once_axes=list(est.once_axes))
+
+                together = whole_study(alone, batches, together_n, search_n)
+                if alternatives > 1 and _estimate.known_too_long(together, limit_s):
+                    # Too long when every alternative is searched: the run searches only those that give results
+                    # different from the first one's (compare), so FI asks the simulation, as the run will, before it
+                    # says the study does not fit.
+                    left = budget_s - (time.monotonic() - timing_started)
+                    searching = await self._alternatives_that_differ(
+                        state, block, runner, python, env, deterministic=deterministic, at_once=at_once,
+                        thresholds=thresholds, left_s=left) or alternatives
+                    if searching < alternatives:
+                        alone, batches, together_n, search_n = priced(searching)
+                        together = whole_study(alone, batches, together_n, search_n)
+                if alternatives > 1:
+                    alternatives_note = (
+                        f" ({alternatives} alternatives the plan compares"
+                        + (f", {searching} of them searched (the others give the first one's results)"
+                           if searching < alternatives else ", each searched")
+                        + f" with {per_alternative:,} evaluations, and {probe_n:,} evaluations that tell whether an "
+                        "alternative gives the same results as the first)")
+                    if searching < alternatives:
+                        self._log.info(  # type: ignore[attr-defined]
+                            "[execute] FI asked the simulation for %d designs at each of the %d alternatives the plan "
+                            "compares; the others give the first one's results, so the search is counted for %d of "
+                            "them, not %d", _optimise_search.PROBE_DESIGNS, alternatives, searching, alternatives)
+                whole = together
+                if _estimate.known_too_long(together, limit_s):
+                    est, searched = together, search_n
+            # FI's check of the best design at finer settings runs after the search and is held to the same time limit
+            # (core/optimise.py): its evaluations are counted at what one design costs here, at the least (a finer setting
+            # costs more, so this is a lower bound; a check of 72 runs at ~75 minutes each was not counted and ran far past
+            # the limit).
+            try:
+                check_n = int(_optimisation_plan.budget(block).get("check") or 0)
+            except (KeyError, TypeError, ValueError):
+                check_n = 0
+            unit = per_eval or first_s or None
+            if check_n and unit:
+                core_est = whole if whole is not None else est
+                # The check runs its designs ``at_once`` at a time like the search, each as much slower as FI measured.
+                share = (slowdown if slowdown is not None else 1.0) / at_once if at_once > 1 else 1.0
+                check_s = unit / runs * check_n * share
+                with_check = _replace(core_est, seconds=core_est.seconds + check_s, at_least=True)
+                whole = with_check
+                if _estimate.known_too_long(with_check, limit_s):
+                    est, checked = with_check, check_n
+                    if not searched and search_n:
+                        searched = search_n
+                    elif not searched:
+                        searched = 0
+            if not searched and not checked:
+                # The line a person reads is the whole study: the scan alone said "about 6 minutes" of a search that ran
+                # for hours.
+                if whole is not None:
+                    self._log.info("[execute] the search's coarse scan and its %s evaluations: %s (the coarse scan alone: "  # type: ignore[attr-defined]
+                                   "%s)", f"{search_n:,}", _estimate.says(whole, limit_s),
+                                   _estimate.plain_duration(est.seconds * _estimate.SAFETY))
+                else:
+                    self._log.info("[execute] the search's coarse scan: %s", _estimate.says(est, limit_s))  # type: ignore[attr-defined]
+                return None
+        if not speed_done and grid is not None and int(self.config.engine.improve_rounds or 0) > 0:  # type: ignore[attr-defined]
+            # What FI runs is the same simulation, whatever the study is called: the speed-up a measurement gets is tried
+            # here too, on the scan's settings and a few designs the search itself would try.
+            sped = await self._speed_up(
+                state, runner, python, env, grid, runs, thresholds or {}, inside or {}, est, limit_s,
+                budget_s=max(0.0, budget_s - (time.monotonic() - timing_started)), probes=probes,
+                deterministic=deterministic, extra_cells=_search_sample(block, grid))
+            if sped.get("kept"):
+                return await self._size_the_scan(state, runner, python, env, speed_done=True)
         text = self._too_long_text(est, limit_s, cut=False)
+        if searched or checked:
+            text = (f"the coarse scan's {scan:,} settings and the search's {searched:,} evaluations{alternatives_note}"
+                    + (f" and FI's check of the best design at finer settings ({checked:,} runs)" if checked else "")
+                    + f" would take "
+                    f"{'at least ' if est.at_least else 'about '}{_estimate.plain_duration(est.seconds * _estimate.SAFETY)}"
+                    f", more than the {_estimate.plain_duration(limit_s)} allowed (one new design takes about "
+                    f"{'at least ' if lower else ''}{_estimate.plain_duration(per_eval or 0.0)}); FI does not run a smaller "
+                    "study than the plan's")
+        # The check's time comes out of the room for settings first: it is not a cost of each setting.
+        fits_in = (self._what_fits(core_est, max(1.0, limit_s - check_s * _estimate.SAFETY), search=True)
+                   if checked and core_est is not None else self._what_fits(est, limit_s, search=True))
+        if fits_in is not None:
+            # FI's own check of the best design at finer settings runs after the search and is not in its budget: the plan
+            # is told what it costs, so the scan and the search are sized to the time left.
+            try:
+                fits_in["check"] = int(_optimisation_plan.budget(block).get("check") or 0)
+            except (KeyError, TypeError, ValueError):
+                pass
+            if alternatives > 1:
+                # Where the search's evaluations come from, in FI's own numbers: the plan lowers them by comparing fewer
+                # alternatives or by giving each a smaller budget.
+                first_level = _optimise_search.compared_levels(block)[0]
+                fits_in["alternatives"] = alternatives
+                fits_in["alternatives_searched"] = searching
+                fits_in["alternative_conditions"] = [str(k) for k in first_level]
+                fits_in["per_alternative"] = per_alternative
+                fits_in["probes"] = probe_n
+        # Not stopped while at least one design fits: the scan runs in the plan's order, then the search, then FI's check (the
+        # time the check needs is kept for it), up to the time limit, and the paper says what ran and what did not.
+        try:
+            planned_search = int(_optimisation_plan.evaluations(block)[0] or 0)
+            planned_check = int(_optimisation_plan.budget(block).get("check") or 0)
+        except (KeyError, TypeError, ValueError):
+            planned_search = planned_check = 0
+        one_s = per_eval or first_s or _estimate.cheapest_setting_s(probes)
+        if self._run_up_to_the_limit(
+                runner, est, limit_s, one_s, kind="search", reserve_s=check_s * _estimate.SAFETY,
+                planned={"scan": scan, "evaluations": planned_search, "check_runs": planned_check}, detail=text,
+                fit=fits_in):
+            return None
         self._log.warning("[execute] the search's coarse scan: %s", text)  # type: ignore[attr-defined]
-        return self._stop_too_long(text)
+        return self._stop_too_long(text, fit=fits_in)
+
+    async def _alternatives_that_differ(self, state: Any, block: dict[str, Any], runner: Any, python: Any, env: Any, *,
+                                         deterministic: bool, at_once: int, thresholds: Any, left_s: float) -> int | None:
+        """How many of the alternatives a study compares the run would search, by asking the simulation what the run asks
+        (:func:`core.optimise_search.compare`): the same few designs (:func:`core.optimise_search.sizing_designs`) at every
+        alternative, one of them once more at the first to see which results change by themselves, and the same rule for
+        "gives the first one's results". ``None`` when it could not be asked in the time left or something did not answer
+        (every alternative is then counted as searched)."""
+        from time import monotonic as _clock  # the clock core/optimise.py judges its deadline by
+
+        from . import optimise as _optimise
+
+        if left_s < 15:
+            return None
+        levels = _optimise_search.compared_levels(block)
+        try:
+            designs = _optimise_search.sizing_designs(block)
+            names = _optimise_search.compared_names(block, _optimise.watched_results(self._protocol_block(state) or {}))  # type: ignore[attr-defined]
+            cells = [_optimise_search.cell_of(_optimise_search.level_block(block, lv), d) for lv in levels for d in designs]
+        except (KeyError, TypeError, ValueError):
+            return None
+        cells.append(dict(cells[0]))  # the first alternative's first design again
+        try:
+            got = await _optimise.evaluate_many(
+                self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(),  # type: ignore[attr-defined]
+                "run_cell" if deterministic else "run_trial", cells, at_once=max(1, at_once), runs=1, base_seed=0,
+                deadline=_clock() + left_s, env=env, thresholds=thresholds,
+                in_each_run=_optimise_search.in_each_run(block) or None)
+        except Exception as exc:  # noqa: BLE001 -- the count stays the plan's whole count
+            self._log.warning("[execute] FI could not ask the simulation which alternatives give different results (%r); "  # type: ignore[attr-defined]
+                              "every alternative is counted as searched", exc)
+            return None
+        values = [a.get("values") if isinstance(a, dict) and isinstance(a.get("values"), dict) else None
+                  for a, _err, _loaded in got]
+        n = len(designs)
+        replies = [values[i * n:(i + 1) * n] for i in range(len(levels))]
+        return _optimise_search.alternatives_searched(block, levels, replies, values[-1], names)
 
     async def _pilot_gate(self, state: Any, runner: Any, python: Any, env: Any, grid: dict[str, list[Any]],
                           probes: list[_estimate.Probe], thresholds: dict[str, Any], limit_s: float,
@@ -897,7 +1421,7 @@ class RunChecksMixin:
                 runner.simulate.relative_to(self.quest_root).as_posix(),  # type: ignore[attr-defined]
                 grid, probes, kinds, deterministic=runner.deterministic, budget_s=left,
                 allowance_s=allowance, env=env, thresholds=thresholds, exempt=_degenerate.expected_constants(protocol),
-                in_each_run=_in_run.of(protocol))
+                in_each_run=_in_run.of_study(protocol))
             self._pilot_spent += time.monotonic() - began
         base = {"trials": result.trials, "settings": result.settings, "metrics_read": result.checked,
                 "not_ruled_out": result.unsure, "at": time.time(), "trial_count_read": total, "code_key": code_key,
@@ -1041,20 +1565,31 @@ class RunChecksMixin:
         from . import optimisation_plan as _optim
         from . import optimise as _optimise
 
-        # A search for the best design has no grid: FI's search runner evaluates the baseline first, at its own settings.
-        if _optim.has_block(state.get("design")) or _optimise.block_of(protocol) is not None:
+        # A search for the best design runs on its coarse scan's settings, with the search's baseline design and every
+        # value it compares inside each run, as the search calls the simulation: a fault there would otherwise be met
+        # first by the known-answer checks, on their own few repairs.
+        block = _optimise.block_of(protocol)
+        search = block is not None or _optim.has_block(state.get("design"))
+        if search and block is None:
             return None
         self._small_run_ctx = (state, py, exec_env)
-        grid = _optimise_search.study_grid(protocol) if isinstance(protocol.get("grid"), dict) else {}  # knows its sub-studies
+        if search:
+            try:
+                grid = _optimise_search.scan_grid(block)
+            except (KeyError, TypeError, ValueError):
+                return None  # a block the scan cannot be built from is reported by the run
+        else:
+            grid = _optimise_search.study_grid(protocol) if isinstance(protocol.get("grid"), dict) else {}  # knows its sub-studies
         thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None
         deterministic = "run_trial" not in set(getattr(self, "_trial_entries", set()) or ())
-        key = _small.key_of(simulate, grid, deterministic, thresholds)
+        inside = (_optimise_search.in_each_run(block) or None if search
+                  else protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else None)
+        key = _small.key_of(simulate, grid, deterministic, thresholds, inside)
         record = _small.read_record(self.quest_root)  # type: ignore[attr-defined]
         if record.get("key") == key:
             self._small_run_note = str(record.get("for_reader") or "")
             return record
         paired = any(isinstance(m, dict) and m.get("paired") for m in protocol.get("metrics") or [])
-        inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else None
         got = await _small.run(
             self.executor, py, self.quest_root, simulate.relative_to(self.quest_root).as_posix(), grid,  # type: ignore[attr-defined]
             deterministic=deterministic, timeout_s=_small.budget(self.config.execution.timeout_s),  # type: ignore[attr-defined]
@@ -1109,7 +1644,14 @@ class RunChecksMixin:
         if not ctx:
             return ""
         record = await self._small_run(*ctx)
-        return str(record.get("says") or "it failed") if record and record.get("crashed") else ""
+        if record and record.get("crashed"):
+            return str(record.get("says") or "it failed")
+        # The repaired code must also still give the study's results from the function FI calls for the study.
+        simulate = self.quest_root / "code" / _split_run.SIMULATE_NAME  # type: ignore[attr-defined]
+        try:
+            return await self._simulation_repair_fault(ctx[0], simulate.read_text(encoding="utf-8")) if simulate.is_file() else ""  # type: ignore[attr-defined]
+        except OSError:
+            return ""
 
     async def _review_crash_run(self, state: Any) -> dict[str, Any] | None:
         """A test written for a reader's finding that crashed inside the code (not in the test) showed a crash, not the
@@ -1248,15 +1790,24 @@ class RunChecksMixin:
                    f"sent the simulation back to be repaired with these numbers ({repairs} repair"
                    f"{'s' if repairs != 1 else ''}); the fault stood"])
 
-    async def _speed_up(self, state: Any, runner: Any, python: Any, env: Any, grid: dict[str, list[Any]], runs: int,
-                        thresholds: dict[str, Any], inside: dict[str, list[Any]], est: Any, limit_s: float,
-                        budget_s: float = 600.0, probes: list[Any] | None = None) -> dict[str, Any]:
+    async def _speed_up(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        """:meth:`_speed_up_rounds`, which commits each version it keeps with its own words (code_project.CodeRuns)."""
+        with self._hold_code_runs():  # type: ignore[attr-defined]
+            return await self._speed_up_rounds(*args, **kwargs)
+
+    async def _speed_up_rounds(self, state: Any, runner: Any, python: Any, env: Any, grid: dict[str, list[Any]], runs: int,
+                               thresholds: dict[str, Any], inside: dict[str, list[Any]], est: Any, limit_s: float,
+                               budget_s: float = 600.0, probes: list[Any] | None = None,
+                               deterministic: bool | None = None,
+                               extra_cells: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         """The study would not fit the time allowed: up to ``engine.improve_rounds`` edits that make the simulation itself
         faster without changing a number (core/improve_speed.py). FI runs a fixed sample of trials, the checks' own cases
         included, before and after each edit; an edit is kept only when every number is the same and the sample takes
         clearly less time, and it passes every guard the correctness loop has. The study is then timed twice and the
         slower timing stands (``probes``), so the noise of one timing cannot make it fit. ``{"kept": bool, "rounds": [...],
-        "calls": n, "speedup": x, "probes": [...] | None}``."""
+        "calls": n, "speedup": x, "probes": [...] | None}``. ``deterministic``: whether a setting is one call with no
+        randomness (default: the runner's own); ``extra_cells``: settings the sample holds the change to as well (a
+        search's designs outside its coarse scan)."""
         import asyncio
 
         from . import changelog as _changelog
@@ -1278,7 +1829,9 @@ class RunChecksMixin:
         countable = _criteria.countable(protocol)
         trial_names = {c["trials"] for c in countable if c.get("trials")}
         expected, measures, settings = _improve.guards(protocol, oracles, countable, trial_names)
+        det = bool(runner.deterministic if deterministic is None else deterministic)
         cells = _speed.sample_cells(grid, oracles)
+        cells += [dict(c) for c in extra_cells or [] if c not in cells]
         for cell in cells:
             for key, value in cell.items():
                 if isinstance(value, (int, float, str)) and not isinstance(value, bool):
@@ -1288,7 +1841,7 @@ class RunChecksMixin:
         if probes is not None:
             # The sample is held to what the timing measured: a setting it did not see finish is left out, each gets a
             # few times its measured cost, and every sample of the step fits in the time left for timing.
-            cells, timeouts, why = _speed.bounded_sample(cells, probes, runs=runs, deterministic=runner.deterministic,
+            cells, timeouts, why = _speed.bounded_sample(cells, probes, runs=runs, deterministic=det,
                                                          budget_s=budget_s, samples=2 + limit)
             if not cells:
                 log.info("[improve] The simulation is not sped up: %s.", why)
@@ -1299,28 +1852,33 @@ class RunChecksMixin:
 
         async def sample() -> Any:
             return await _speed.run_sample(self.executor, python, root, module, cells,  # type: ignore[attr-defined]
-                                           deterministic=runner.deterministic, thresholds=thresholds, in_each_run=inside,
+                                           deterministic=det, thresholds=thresholds, in_each_run=inside,
                                            env=env, timeout_s=timeout_s, log=log, timeouts=timeouts)
 
         async def time_study() -> list[Any] | None:
             probes, _why = await _estimate.measure(
-                self.executor, python, root, module, grid, runs=runs, deterministic=runner.deterministic,  # type: ignore[attr-defined]
+                self.executor, python, root, module, grid, runs=runs, deterministic=det,  # type: ignore[attr-defined]
                 limit_s=limit_s, budget_s=budget_s, env=env, thresholds=thresholds, cached=None, in_each_run=inside)
             return probes
 
         padded = est.seconds * _estimate.SAFETY
         record: dict[str, Any] = {"goal": "speed", "limit_s": limit_s, "estimate_s": padded, "rounds": [], "kept": False,
                                   "calls": 0, "probes": None}
+        def stop(why: str) -> dict[str, Any]:
+            # Every way the step ends without trying a change says why, in run.log and the record.
+            record["stopped"] = why
+            log.info("[improve] The simulation is not sped up: %s.", why)
+            self._save_speed_record(record)
+            return record
+
         first = await sample()
         if first.failed or first.seconds <= 0:
-            record["stopped"] = f"the sample did not run ({first.failed or 'no time measured'})"
-            return record
+            return stop(f"the sample did not run ({first.failed or 'no time measured'})")
         # The unchanged code is run a second time: a number that is not the same in both runs is not fixed by the code (a
         # measure of its own run time, say), so it cannot show that an edit changed a result and is left out of every comparison.
         again = await sample()
         if again.failed:
-            record["stopped"] = f"the sample did not run a second time ({again.failed})"
-            return record
+            return stop(f"the sample did not run a second time ({again.failed})")
         noisy = _speed.varying(first, again)
         if noisy:
             names = sorted(noisy)
@@ -1331,15 +1889,21 @@ class RunChecksMixin:
                      "speed-up is judged on the other numbers.", len(noisy),
                      ", ".join(which[:3]) + (f" and {len(which) - 3} more" if len(which) > 3 else ""))
             if len(noisy) >= _speed.count_numbers(first):
-                record["stopped"] = "every number of the sample differs from one run of the unchanged code to the next, so an edit cannot be judged"
-                log.info("[improve] The simulation is not sped up: %s.", record["stopped"])
-                return record
+                return stop("every number of the sample differs from one run of the unchanged code to the next, so an "
+                            "edit cannot be judged")
         needed = padded / max(limit_s, 1e-9)
         target = needed * _speed.MARGIN
         original = _improve.snapshot(root)
         best = {"files": original, "sample": first}
         tried = {_improve.fingerprint(original)}
-        block = _speed.speed_block(padded, limit_s, first, cells, runs)
+        # Where the time goes, measured on the costliest setting the timing saw (the base when none was timed).
+        timed = {_trial_runner.cell_key(p.cell): float(p.seconds) for p in probes or [] if getattr(p, "cell", None)}
+        costliest = max(cells, key=lambda c: timed.get(_trial_runner.cell_key(c), 0.0))
+        profile = await _speed.profile_text(self.executor, python, root, module, costliest,  # type: ignore[attr-defined]
+                                            deterministic=det, thresholds=thresholds, in_each_run=inside, env=env,
+                                            timeout_s=max(60, int(min(timeout_s, budget_s or timeout_s))), log=log)
+        record["profiled"] = bool(profile)
+        block = _speed.speed_block(padded, limit_s, first, cells, runs, profile=profile)
         log.info("[improve] The study would take about %s, more than the %s allowed. Trying to make the simulation itself "
                  "faster without changing any result (up to %d change(s)).", _estimate.plain_duration(padded),
                  _estimate.plain_duration(limit_s), limit)
@@ -1364,13 +1928,16 @@ class RunChecksMixin:
                 break
             from .engine import _parse_json_lenient
 
-            edit, why = _improve.parse_edit(_parse_json_lenient(reply, node="improve"))
+            edit, why = _improve.parse_edit(_parse_json_lenient(reply, node="improve", want=_improve.EDIT_KEYS))
             new_text = None
             if edit is not None:
                 new_text, why = _improve.check_edit(files, edit, allowed, tried=tried, expected=expected,
                                                     measures=measures, settings=settings)
             if edit is None or new_text is None:
-                entry.update(outcome="refused", reason=why, why=edit.why if edit else "")
+                # The edit is kept with its refusal, so whether a guard refused it rightly can be judged afterwards.
+                entry.update(outcome="refused", reason=why, why=edit.why if edit else "",
+                             **({"file": edit.file, "diff": _improve.diff_text(edit)} if edit is not None
+                                else {"reply": str(reply or "")[:8000]}))
                 log.info("[improve] Speed-up %d refused before it ran: %s", used, why)
                 continue
             name = _improve.edited_path(edit)
@@ -1425,29 +1992,111 @@ class RunChecksMixin:
                 probes = await time_study()
                 if probes is None:
                     break
-                e = _estimate.estimate(grid, runs, runner.deterministic, probes)
+                e = _estimate.estimate(grid, runs, det, probes)
                 if e is not None:
                     runs_timed.append((e.seconds, probes))
             if len(runs_timed) == 2:
                 slower = max(runs_timed, key=lambda t: t[0])
                 record["probes"] = slower[1]
                 record["estimate_after_s"] = [round(t[0] * _estimate.SAFETY, 1) for t in runs_timed]
+            # For a search this timing is of its coarse scan only: the whole study, with the search's evaluations, is
+            # timed again right after (_size_the_scan), and says its own estimate.
+            what = "the search's coarse scan" if extra_cells else "the study"
             log.info("[improve] The simulation is %.1f times faster with the same numbers on the sample%s.", record["speedup"],
-                     f"; timed twice, the study would now take about {_estimate.plain_duration(max(record['estimate_after_s']))}"
+                     f"; timed twice, {what} would now take about "
+                     f"{_estimate.plain_duration(max(record['estimate_after_s']))}"
                      if record.get("estimate_after_s") else "")
         else:
             log.info("[improve] No change made the simulation clearly faster with the same numbers; it is left as it was.")
+        self._save_speed_record(record)
+        return record
+
+    def _save_speed_record(self, record: dict[str, Any]) -> None:
+        root = self.quest_root  # type: ignore[attr-defined]
         try:
             (root / ".fi").mkdir(parents=True, exist_ok=True)
             (root / ".fi" / "improve_speed.json").write_text(
                 json.dumps({k: v for k, v in record.items() if k != "probes"}, indent=1, default=str), encoding="utf-8")
         except OSError:
             pass
-        return record
 
-    def _stop_too_long(self, text: str) -> dict[str, Any]:
-        """The quest's plain stop: nothing was run for the study, it would not fit, and no paper is written."""
-        return self._stop_before_run(text, "too_long")
+    def _clear_cut(self, runner: Any) -> None:
+        """A search is sized again at every run: the cut an earlier sizing recorded (and the time it kept for FI's check) is
+        taken away first, so a study that now fits is never described as cut."""
+        runner.check_reserve_s = 0.0
+        runner.run_id = ""
+        if hasattr(runner, "first_cells"):
+            runner.first_cells = None
+        record = _estimate.read_record(self.quest_root)  # type: ignore[attr-defined]
+        if record.pop("truncated", None) is not None:
+            _estimate.write_record(self.quest_root, record)  # type: ignore[attr-defined]
+
+    def _run_up_to_the_limit(self, runner: Any, est: _estimate.Estimate, limit_s: float, one_s: float | None, *, kind: str,
+                             base: dict[str, Any] | None = None, planned: dict[str, Any] | None = None,
+                             reserve_s: float = 0.0, detail: str = "", fit: dict[str, Any] | None = None,
+                             first_cells: int | None = None) -> bool:
+        """A study FI's own timing says does not fit the time allowed is run anyway, in the plan's order, up to the limit,
+        unless not even one setting (or one design) fits: ``True`` to go on. FI does not choose which settings matter, so
+        the grid runs in the plan's order (not costliest first), and a search runs its baseline, its coarse scan, its
+        search and then FI's check, as it always does; the check keeps the time it needs (``reserve_s``, never more than
+        half the limit) so the scan and the search cannot take all of it. The cut is kept in ``.fi/run_estimate.json``
+        (``truncated``); the paper and the quality report say what ran from FI's records (:func:`core.disclosure.cut_short_text`)."""
+        if not _estimate.one_fits(one_s, limit_s):
+            return False
+        reserve = min(max(0.0, reserve_s), limit_s / 2.0)
+        cut = {"kind": kind, "estimate_s": est.seconds * _estimate.SAFETY, "at_least": bool(est.at_least),
+               "limit_s": float(limit_s), "settings": int(est.cells), "one_s": one_s, "order": "plan",
+               "run_id": uuid.uuid4().hex[:12], "check_reserve_s": round(reserve, 1), **(planned or {}), "detail": detail.split("; FI does not run")[0],
+               **({"planned_settings": int(first_cells)} if first_cells else {}), **({"fit": fit} if fit else {})}
+        what = "the search for the best design" if kind == "search" else "the experiment"
+        line = (f"The plan has {int(est.cells):,} settings, more than the {_optimise_search.MAX_LISTED_SETTINGS:,} FI lists at most; FI estimates they "
+                f"would take {'at least ' if est.at_least else 'about '}{_estimate.plain_duration(est.seconds * _estimate.SAFETY)}"
+                f" (the limit is {_estimate.plain_duration(limit_s)}); it will plan the first {first_cells:,} in the plan's order "
+                "and run them until the time limit, and the paper will say what was and was not done") if first_cells else (
+                f"FI estimates {what} would take {'at least ' if est.at_least else 'about '}"
+                f"{_estimate.plain_duration(est.seconds * _estimate.SAFETY)}, more than the "
+                f"{_estimate.plain_duration(limit_s)} allowed; it will run the plan's settings in the plan's order until "
+                "the time limit, and the paper will say what was and was not done")
+        self._log.warning("[execute] %s", line)  # type: ignore[attr-defined]
+        print(f"[FI] {line}")
+        runner.run_id = cut["run_id"]
+        if first_cells:
+            runner.first_cells = int(first_cells)
+        if kind == "grid":
+            runner.cost = None
+        else:
+            runner.check_reserve_s = reserve
+        record = {k: v for k, v in (base or {}).items() if k not in ("stopped", "fit")}
+        record.setdefault("limit_s", float(limit_s))
+        record.update(fits=False, truncated=cut, says=line)
+        _estimate.write_record(self.quest_root, record)  # type: ignore[attr-defined]
+        return True
+
+    def _stop_too_long(self, text: str, fit: dict[str, Any] | None = None) -> dict[str, Any]:
+        """The quest's plain stop: nothing was run for the study, it would not fit, and no paper is written. ``fit``
+        (:meth:`_what_fits`): what FI measured, which lets the evidence gate ask the plan once for a study that fits."""
+        out = self._stop_before_run(text, "too_long")
+        if fit:
+            out["exec_result"]["too_long_fit"] = dict(fit)
+        return out
+
+    @staticmethod
+    def _what_fits(est: _estimate.Estimate, limit_s: float, *, search: bool = False) -> dict[str, Any] | None:
+        """What FI measured about a study too long to run: the seconds one setting takes (as the run would take them,
+        with the settings that run at the same time), how many settings fit the time allowed with FI's margin, and the
+        settings the plan has. ``None`` when nothing was measured."""
+        if est.cells <= 0 or est.seconds <= 0:
+            return None
+        # What is paid once per new value is not a cost of every setting: it is named apart, so the plan can take fewer of
+        # those values, and the settings that fit are counted from what is left of the time.
+        once = min(float(est.once_s) * max(1.0, float(est.slowdown or 1.0)), est.seconds * 0.999)
+        per = (est.seconds - once) / est.cells
+        room = max(per, limit_s / _estimate.SAFETY - once)
+        out = {"seconds_per_setting": round(per, 3), "at_least": bool(est.at_least), "settings": int(est.cells),
+               "settings_that_fit": max(1, int(room / per)), "limit_s": float(limit_s), "search": bool(search)}
+        if once > 0:
+            out.update(once_s=round(once, 1), once_axes=list(est.once_axes))
+        return out
 
     def _stop_before_run(self, text: str, kind: str, tried: list[str] | None = None,
                          advice: str | None = None) -> dict[str, Any]:

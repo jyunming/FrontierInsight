@@ -2,6 +2,12 @@
 
 Ingest history timeline. Newest entries on top.
 
+## 2026-10-24 — picking the study to run
+
+New page: [[study-cards|Picking the study to run]] (the `scope` step: three or four study cards after the literature, the pick through the terminal, the web quest page, VS Code or `.fi/scope_answer.json`, `pauses.scope`, the record in `.fi/scope.json`, and `--from studies`).
+
+Sources: core/scope_cards.py, agents/scope.md, core/config.py, core/rerun_from.py, core/quality_report.py, core/run_checks.py, launch.py, web/static/quest.html, vscode-frontier-insight/src/bridge.ts.
+
 ## 2026-10-03 — what a search for the best design hands over, and searching further
 
 Updated by hand: [[study-types|Study types]] (the paper's *Best design found* section, written by FI from `results/best_design.json` and `needs/OPTIMUM_CHECK.json`; `results/best_design.md`; the one line and the files in the CLI, the web quest page and the VS Code chat; a refine with "push further", a target or more evaluations continues the search from the best design so far and checks it again, while a refine that changes the objective, a limit or a range is refused as a new study).

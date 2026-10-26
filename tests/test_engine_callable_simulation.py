@@ -185,7 +185,7 @@ def test_a_missing_label_is_a_gap_below_independently_validated(tmp_path: Path) 
     assert any("E1" in g for g in got["gaps"]), got["gaps"]
 
 
-def test_under_research_a_missing_label_goes_to_the_repair_and_then_ends_in_the_honest_stop(
+def test_under_research_a_missing_label_goes_to_the_repair_and_then_is_recorded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     engine = _engine(tmp_path)
@@ -202,9 +202,10 @@ def test_under_research_a_missing_label_goes_to_the_repair_and_then_ends_in_the_
     patch = engine._code_problems_stop({"exec_reflect_iter": 0})
     assert patch is not None and stops == []
     assert "`# E1`" in patch["exec_result"]["stderr_tail"] and "cannot_repair" not in patch["exec_result"]
-    # With the repairs used up the quest ends in the honest stop.
+    # With the repairs used up the missing label is recorded and said (a reading of the code), and the quest goes on.
     last = engine._code_problems_stop({"exec_reflect_iter": engine.config.engine.exec_reflect_max_iterations})
-    assert last is not None and "E1" in last["exec_result"]["cannot_repair"] and stops == []
+    assert last is None and stops == []
+    assert any("E1" in p["text"] for p in engine._cannot_repair_problems())
     # Once the repair has labelled the equation the script is read again and nothing is sent back.
     (engine.quest_root / "code" / "simulate.py").write_text(SIMULATE, encoding="utf-8")
     assert engine._check_equation_labels({}) == [] and engine._code_problems_stop({"exec_reflect_iter": 0}) is None
@@ -294,7 +295,10 @@ async def test_a_deterministic_quest_under_auto_is_run_by_fi_and_reaches_indepen
     assert not state.get("result_json_trials") and not state.get("result_json_replicates"), \
         "no replicate statistics are computed for a deterministic run"
     record = _json(engine, "needs/EVIDENCE.json")
-    assert record["levels"]["independently_validated"] is True, record["all_gaps"]
+    # FI measured the check itself, so nothing is wrong with how it was measured; the one check is the plan's own
+    # derivation (the quest has no retrieved source and no second implementation), which the level does not count.
+    gaps = record["all_gaps"].get("independently_validated", [])
+    assert len(gaps) == 1 and "rests on the plan's own derivation" in gaps[0], record["all_gaps"]
 
 
 @pytest.mark.asyncio

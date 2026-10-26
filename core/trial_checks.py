@@ -370,6 +370,10 @@ class Quantity:
     df: int | str | None = None
     #: The same number over every setting together (at 95%): what catches a moderate miss present everywhere.
     pooled: SettingCheck | None = None
+    #: ``se_ratio`` only: the smallest (spread / reported error) ratio this run's trials could have flagged as a gross miss
+    #: (:func:`ratio_detection_floor`). A reported standard error too small by less than this passes the check, whatever its
+    #: size: the paper says so (core/paper_facts.py).
+    detects_from: float | None = None
 
     @property
     def judged(self) -> int:
@@ -650,6 +654,14 @@ def _judge_coverage(q: "Quantity", per: list[tuple[str, list[float]]]) -> None:
         q.pooled = _coverage_check(POOLED, [h for _k, hits in judged for h in hits], q.level or 0.95)
 
 
+def ratio_detection_floor(free: int, z: float = _Z95) -> float:
+    """The smallest ratio of (spread of the estimates / reported standard error) that :func:`_ratio_band` would call a gross
+    miss on ``free`` degrees of freedom at critical value ``z``: the whole sampling interval of the ratio must lie above
+    :data:`RATIO_HIGH`, so the ratio itself must exceed ``RATIO_HIGH * exp(z / sqrt(2 * free))``. A reported standard error too
+    small by less than this passes the check: the power limit of what the trials can show."""
+    return RATIO_HIGH * math.exp(z / math.sqrt(2.0 * max(1, free)))
+
+
 def _judge_ratio(q: "Quantity", per: list[tuple[str, list[float], list[float]]]) -> None:
     """Each setting's spread / reported error at the family level, and the pooled ratio at 95% (the root of the mean squared
     ratio weighted by each setting's degrees of freedom)."""
@@ -663,10 +675,15 @@ def _judge_ratio(q: "Quantity", per: list[tuple[str, list[float], list[float]]])
     z = _z_family(len(found))
     for key, n, (ratio, dof) in found:
         q.settings.append(_ratio_band(key, n, ratio, dof, z))
+    # The power of this run's check: the best any one of its judgements could do (the pool has the most degrees of freedom).
+    floors = [ratio_detection_floor(r[1], z) for _k, _n, r in found]
     if len(found) > 1:
         dof = sum(r[1] for _k, _n, r in found)
         pooled = math.sqrt(sum(r[1] * r[0] ** 2 for _k, _n, r in found) / dof)
         q.pooled = _ratio_band(POOLED, sum(n for _k, n, _r in found), pooled, dof)
+        floors.append(ratio_detection_floor(sum(r[1] for _k, _n, r in found)))
+    if floors:
+        q.detects_from = min(floors)
 
 
 def _cell_hits(cell: dict[str, Any], kv: dict[str, Any], truth: float) -> tuple[dict[int, float], dict[int, float], list[float]]:
@@ -1004,6 +1021,8 @@ def summary(fails: list[SettingFailures], cal: Calibration | None) -> dict[str, 
                             "judged": q.judged, "gross": q.gross, "below": q.below, "above": q.above, "fault": q.fault,
                             **({"expected": round(q.expected, 6), "degrees_of_freedom": q.df}
                                if q.kind == "multiplier" and q.expected is not None else {}),
+                            **({"detects_from": round(q.detects_from, 4)}
+                               if q.kind == "se_ratio" and q.detects_from is not None else {}),
                             "says": q.says(),
                             "settings": [{"key": s.key, "n": s.n, "value": round(s.value, 6), "low": round(s.low, 6),
                                           "high": round(s.high, 6), "gross": s.gross} for s in q.settings],

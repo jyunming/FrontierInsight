@@ -22,6 +22,10 @@ from typing import Any
 
 from . import grid_keys as _grid_keys
 from . import oracle_check as _oracle
+from .stop_power import READ
+
+#: What a fault found here rests on (core/stop_power.py): FI's reading of the script's text.
+SOURCE = READ
 
 _ALIASES = frozenset({"np", "numpy", "math", "scipy", "linalg", "jnp", "torch"})
 _FAMILY = {

@@ -203,3 +203,23 @@ async def test_an_analysis_unreadable_twice_stops_the_whole_quest_with_no_paper_
     assert (root / "code").is_dir() and any((root / "code").iterdir())  # the run's files are kept
     from core import todo
     assert any(i.kind == "stuck" for i in todo.waiting(root))
+
+
+@pytest.mark.asyncio
+async def test_an_analysis_that_is_a_list_or_has_a_bare_number_for_its_findings_is_put_in_shape_and_crashes_no_reader(
+        tmp_path: Path) -> None:
+    eng = _analysis_engine(tmp_path, ['["a", "b"]', '["a", "b"]'])
+    patch = await eng._node_analyze(dict(_ANALYZE_STATE))  # type: ignore[arg-type]
+    assert patch["analysis"]["unreadable"] is True and patch["analysis"]["key_findings"] == []
+
+    reply = '{"summary": "s", "key_findings": 5, "claims_supported": "one claim", "next_step": "publish"}'
+    eng = _analysis_engine(tmp_path / "n", [reply])
+    patch = await eng._node_analyze(dict(_ANALYZE_STATE))  # type: ignore[arg-type]
+    assert patch["analysis"]["key_findings"] == []
+    assert patch["analysis"]["claims_supported"] == ["one claim"]
+    assert "unreadable" not in patch["analysis"]
+
+    mixed = '{"summary": "s", "key_findings": ["ok", 2, null, ["nested"], {"finding": "kept"}], "next_step": "publish"}'
+    eng = _analysis_engine(tmp_path / "m", [mixed])
+    patch = await eng._node_analyze(dict(_ANALYZE_STATE))  # type: ignore[arg-type]
+    assert patch["analysis"]["key_findings"] == ["ok", "2", {"finding": "kept"}]

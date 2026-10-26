@@ -1,7 +1,7 @@
 """FI's own check at a setting the code never saw (a hidden check), under ``rigor_profile: research``.
 
-Every check against a known answer the plan declares is shown to the model that writes the simulation: its case, its
-measure, its expected value. Code can therefore be written to pass the cases it was shown (special-cased, or tuned to
+Every check against a known answer the plan declares is shown to the model that writes the simulation: its case and its
+measure (FI holds the expected value back from the code writer). Code can therefore be written to pass the cases it was shown (special-cased, or tuned to
 them) and be wrong everywhere else. So after the run, with the simulation's code as it ran, FI makes one more run of
 some checks at a setting of FI's own choosing, which no prompt ever named, through the same harness the checks use
 (:func:`core.trial_runner.measure_oracles`: FI calls ``run_trial``/``run_cell`` on the case in its own process and
@@ -43,6 +43,7 @@ import random
 from pathlib import Path
 from typing import Any
 
+from . import code_project as _code_project
 from . import in_run as _in_run
 from . import mc_error as _mc
 from . import optimise as _optimise
@@ -158,11 +159,16 @@ def derive(oracle: dict[str, Any], protocol: dict[str, Any] | None,
 _NOT_THE_SIMULATION = ("analysis.py", "experiment.py", "web_plots.py", "replot_figures.py", "replot_figures.json",
                        "replot_layout.py", "run.py", "submit.py", "fi_search.py")
 _NOT_THE_SIMULATION_DIRS = ("__pycache__", ".git")
+# The project files FI writes into code/ itself after the run (core/code_project.py): its own record of the study, not the
+# simulation, so writing them never makes a check of the simulation look as if it ran on other code.
+_FI_PROJECT_FILES = (_code_project.README, _code_project.REQUIREMENTS, _code_project.RUN, _code_project.STUDY,
+                     _code_project.SEARCH)
 
 
 def code_sha(quest_root: Path) -> str:
     """One hash of the simulation's code as it is now: simulate.py and every other file under ``code/`` it may use
-    (the model's package, a parameter file), not the analysis, the notes (``*.md``) or git's own; ``""`` when there is
+    (the model's package, a parameter file), not the analysis, the notes (``*.md``), git's own or the project files FI
+    writes itself (``requirements.txt``, ``study.json``); ``""`` when there is
     no simulate.py."""
     code = Path(quest_root) / "code"
     if not (Path(quest_root) / _SIMULATE).is_file():
@@ -171,7 +177,8 @@ def code_sha(quest_root: Path) -> str:
     for path in sorted(p for p in code.rglob("*") if p.is_file()):
         rel = path.relative_to(code)
         # FI's own scripts are named only at the top of code/: a file of the model's package with such a name is code.
-        if ((len(rel.parts) == 1 and path.name in _NOT_THE_SIMULATION) or path.suffix.lower() == ".md"
+        if ((len(rel.parts) == 1 and (path.name in _NOT_THE_SIMULATION or path.name in _FI_PROJECT_FILES))
+                or path.suffix.lower() == ".md"
                 or any(part in _NOT_THE_SIMULATION_DIRS for part in rel.parts)):
             continue
         try:
@@ -269,8 +276,8 @@ async def run(executor: Any, python: Path | str, quest_root: Path, protocol: dic
             try:
                 checks, problems, _ = await _trial_runner.measure_oracles(
                     executor, python, quest_root, _SIMULATE.as_posix(), [hidden], timeout_s=timeout_s, env=env,
-                    thresholds=thresholds, case_env=env, in_each_run=_in_run.of(protocol),
-                    mean_names=_mc.mean_names(protocol), paired=_mc.paired(protocol),
+                    thresholds=thresholds, case_env=env, in_each_run=_in_run.of_study(protocol),
+                    mean_names=_mc.mean_names(protocol), paired=_mc.paired(protocol, quest_root),
                     proportion_names=_mc.proportion_names(protocol), repeated=_mc.repeats_trials(protocol))
             except Exception as e:  # noqa: BLE001 -- a run that cannot start is recorded, never raised
                 checks, problems = [], [f"the run could not start: {type(e).__name__}: {str(e)[:200]}"]

@@ -241,6 +241,28 @@ def test_a_sweep_whose_numbers_never_change_is_sent_back_and_one_that_varies_is_
     assert runner.flat is None and runner.failed_script is None and '"cells": 3' in result.stdout
 
 
+def test_a_sweep_whose_every_setting_gives_the_same_numbers_is_a_fault_only_if_the_code_never_reads_the_setting(
+        tmp_path: Path) -> None:
+    """End to end on the runner's own run.cells: the same numbers at every setting. The code reads the setting (a term that
+    is zero) so the sweep is an observation that the run goes on with, named in ``no_difference``; the same numbers from
+    code that never reads it are the fault (the known positive, sent back)."""
+    cmd_for = lambda root: [sys.executable, str(root / "code" / "experiment.py")]  # noqa: E731
+    reads = _quest(tmp_path / "reads", 'def run_cell(cell):\n    return {"t_out": 20.0 + 0.0 * cell["flow"], "drop": 0.0}\n')
+    (reads / "code" / "experiment.py").write_text(SWEEP_ANALYSIS, encoding="utf-8")
+    runner = _sweep_runner(reads)
+    result = asyncio.run(runner.execute(cmd_for(reads), cwd=reads, timeout_s=60, env={"FI_REPLICATE_SEED": "0"}))
+    assert result.returncode == 0 and runner.flat is None and runner.failed_script is None
+    assert runner.no_difference and "`t_out`" in runner.no_difference, runner.no_difference
+    assert '"cells": 3' in result.stdout
+
+    ignores = _quest(tmp_path / "ignores", 'def run_cell(cell):\n    return {"t_out": 20.0, "drop": 0.0}\n')
+    (ignores / "code" / "experiment.py").write_text(SWEEP_ANALYSIS, encoding="utf-8")
+    runner = _sweep_runner(ignores)
+    result = asyncio.run(runner.execute(cmd_for(ignores), cwd=ignores, timeout_s=60, env={"FI_REPLICATE_SEED": "0"}))
+    assert result.returncode == 1 and runner.failed_script == "simulate.py" and runner.flat
+    assert runner.no_difference is None
+
+
 # --- the stop --------------------------------------------------------------------------------------------------------
 
 
@@ -385,3 +407,157 @@ def test_numbers_that_cannot_be_told_apart_by_their_own_size_are_not_called_flat
     assert flat._all_same([0.0, 0.0, 0.0])
     assert not flat._all_same([0.0, 1e-30]), "a zero beside a number that is not zero: undecided, never flat"
     assert not flat._all_same([-1e-15, 1e-15]), "noise around zero is not a constant"
+
+
+# --- one setting that changes nothing, while others do ----------------------------------------------------------------
+
+def test_a_setting_that_changes_no_result_while_another_does_is_named() -> None:
+    cells = [_cell({"flow": f, "coating": c, "mesh": m}, {"t_out": 20.0 - f, "drop": 0.1 * f})
+             for f in (1.0, 2.0) for c in ("bare", "painted") for m in (0.5, 0.25)]
+    assert flat.observed_flat_sweep(cells) is None, "results move: not a flat sweep"
+    got = flat.unchanged_axes(cells, skip={"mesh"})
+    assert got == [("coating", 4)], "the coating and nothing else; a numerical setting is the finer check's to judge"
+    note = flat.unchanged_axes_note(got)
+    assert "`coating`" in note and "not a comparison" in note and "``" not in note
+
+
+def test_a_setting_that_moves_any_result_once_or_has_one_pair_is_not_named() -> None:
+    moving = [_cell({"flow": f, "coating": c}, {"t_out": 20.0 - f + (0.5 if (c, f) == ("painted", 2.0) else 0.0)})
+              for f in (1.0, 2.0) for c in ("bare", "painted")]
+    assert flat.unchanged_axes(moving) == []
+    one_pair = [_cell({"flow": 1.0, "coating": "bare"}, {"t_out": 19.0}),
+                _cell({"flow": 1.0, "coating": "painted"}, {"t_out": 19.0}),
+                _cell({"flow": 2.0, "coating": "bare"}, {"t_out": 18.0})]
+    assert flat.unchanged_axes(one_pair) == [], "one pair proves nothing"
+
+
+def test_a_sweep_with_a_setting_that_changes_nothing_runs_and_says_so(tmp_path: Path) -> None:
+    root = _quest(tmp_path, 'def run_cell(cell):\n    return {"t_out": 20.0 - cell["flow"], "drop": 0.0}\n')
+    (root / "code" / "experiment.py").write_text(SWEEP_ANALYSIS, encoding="utf-8")
+    runner = trial_runner.TrialsRunner(
+        SharedInterpreterExecutor(python_version=f"{sys.version_info[0]}.{sys.version_info[1]}"), quest_root=root,
+        protocol={"grid": {"flow": [1.0, 2.0, 3.0], "coating": ["bare", "painted"]}}, deterministic=True,
+        simulate=root / "code" / "simulate.py", analysis=root / "code" / "experiment.py")
+    cmd = [sys.executable, str(root / "code" / "experiment.py")]
+    # FI measured that the coating reaches no result: the simulation is sent back once, told which setting.
+    sent = asyncio.run(runner.execute(cmd, cwd=root, timeout_s=60, env={"FI_REPLICATE_SEED": "0"}))
+    assert sent.returncode == 1 and runner.failed_script == "simulate.py" and "changing coating" in sent.stderr
+    assert "`flow`" not in (runner.no_difference or "") and "flow," not in sent.stderr
+    # The repair is spent: the run goes on and the fact is said.
+    runner = trial_runner.TrialsRunner(
+        SharedInterpreterExecutor(python_version=f"{sys.version_info[0]}.{sys.version_info[1]}"), quest_root=root,
+        protocol={"grid": {"flow": [1.0, 2.0, 3.0], "coating": ["bare", "painted"]}}, deterministic=True,
+        simulate=root / "code" / "simulate.py", analysis=root / "code" / "experiment.py")
+    result = asyncio.run(runner.execute(cmd, cwd=root, timeout_s=60, env={"FI_REPLICATE_SEED": "0"}))
+    assert result.returncode == 0 and runner.flat is None, "an observation after the repair: the run goes on"
+    assert runner.no_difference and "`coating`" in runner.no_difference and "`flow`" not in runner.no_difference
+
+
+@pytest.mark.asyncio
+async def test_a_coarse_scan_setting_that_changes_nothing_stops_the_search_and_sends_the_simulation_back_once(
+        tmp_path: Path) -> None:
+    """FI measured that a compared setting reaches no result: the search would compare one result repeated, so it stops
+    before its budget and the simulation is repaired once, told which setting. After that, the fact is only said."""
+    root = _quest(tmp_path, WORKING_SIM)
+    protocol = {"optimisation": _block(fixed={"finish": "matte"},
+                                       grid={"fin": [1.0, 4.0], "finish": ["matte", "gloss"]})}
+
+    def runner() -> Any:
+        return optimise.OptimisationRunner(LocalExecutor(), quest_root=root, protocol=protocol,
+                                           simulate=root / "code" / "simulate.py",
+                                           analysis=root / "code" / "experiment.py")
+
+    cmd = [sys.executable, str(root / "code" / "experiment.py")]
+    first = runner()
+    result = await first.execute(cmd, cwd=root, timeout_s=300)
+    assert result.returncode == 1 and first.failed_script == "simulate.py"
+    assert "changing finish changed no number the simulation returned" in result.stderr
+    assert "Repair simulate.py" in result.stderr and "fin," not in result.stderr
+    sent = json.loads((root / optimise.UNCHANGED_SENT).read_text(encoding="utf-8"))
+    assert sent["settings"] == ["finish"]
+    again = runner()  # the repair is spent: the search runs and the fact is said
+    result = await again.execute(cmd, cwd=root, timeout_s=300)
+    assert result.returncode == 0, result.stderr[-1500:]
+    assert again.no_difference and "`finish`" in again.no_difference and "`fin`" not in again.no_difference
+    best = json.loads((root / "results" / "best_design.json").read_text(encoding="utf-8"))
+    assert "`finish`" in best["scan_settings_without_effect"]
+
+
+@pytest.mark.asyncio
+async def test_a_timing_the_simulation_returns_does_not_hide_a_setting_that_changes_nothing_with_values_inside_each_run(
+        tmp_path: Path) -> None:
+    """A run that compares values inside it and also returns its own run time: FI calls a setting again, sees the time
+    differ, and leaves it out, so the compared setting that reaches no result is still found."""
+    sim = ("import time\n"
+           "def run_cell(cell):\n"
+           "    return {'mass': float(cell['fin']) * 2.0, 'seconds': time.perf_counter()}\n")
+    root = _quest(tmp_path, sim)
+    cells = [trial_runner.CellRun(key=f"{f}-{g}", cell={"fin": f, "finish": g}, planned=1,
+                                  rows=[{"trial": 0, "seed": None, "status": "ok", "duration_s": 0.01,
+                                         "values": {"mass": f * 2.0, "seconds": 0.001 * (i + 1)}}],
+                                  levels=[{"load": 1.0}, {"load": 2.0}])
+             for i, (f, g) in enumerate((f, g) for f in (1.0, 4.0) for g in ("matte", "gloss"))]
+    assert flat.unchanged_axes(cells) == [], "with the time compared, the setting looks like it moved something"
+    unsteady = await trial_runner.unsteady_names(
+        LocalExecutor(), sys.executable, root, "code/simulate.py", cells, timeout_s=60, in_each_run={"load": [1.0, 2.0]})
+    assert "seconds" in unsteady and "mass" not in unsteady
+    assert [a for a, _ in flat.unchanged_axes(cells, ignore=unsteady)] == ["finish"]
+
+
+def test_a_setting_that_moves_only_the_numbers_per_value_inside_each_run_is_not_named() -> None:
+    """A run that goes through several values itself returns a number per value: those count as results too. A fitted
+    constant that ignores the setting beside them must not make the setting look like one that changes nothing."""
+    cells = [_cell({"coating": c, "flow": f},
+                   {"constant": 1.5, "t_out": {"speed=1": 20.0 - f * (2.0 if c == "painted" else 1.0), "speed=2": 18.0}})
+             for c in ("bare", "painted") for f in (1.0, 2.0, 3.0)]
+    assert flat.unchanged_axes(cells) == []
+
+
+# --- a timing the simulation returns is no result of the setting -------------------------------------------------------
+#
+# A live study's coarse scan varied four settings over 60 cells and every number came back the same, except the
+# simulation's own run time: that one number made FI read every setting as one that changed a result, and the 60
+# identical cells went to the paper as a comparison. FI calls the fastest setting again: a number that differs between
+# two calls of the same setting is left out of the judgement.
+
+TIMED = "import time\n"
+
+
+def test_a_sweep_whose_only_moving_number_is_a_timing_names_the_setting_that_changed_nothing(tmp_path: Path) -> None:
+    root = _quest(tmp_path, TIMED + 'def run_cell(cell):\n    return {"t_out": 20.0 - cell["flow"], "drop": 0.0, '
+                                    '"wall_s": time.perf_counter()}\n')
+    (root / "code" / "experiment.py").write_text(SWEEP_ANALYSIS, encoding="utf-8")
+    runner = trial_runner.TrialsRunner(
+        SharedInterpreterExecutor(python_version=f"{sys.version_info[0]}.{sys.version_info[1]}"), quest_root=root,
+        protocol={"grid": {"flow": [1.0, 2.0, 3.0], "coating": ["bare", "painted"]}}, deterministic=True,
+        simulate=root / "code" / "simulate.py", analysis=root / "code" / "experiment.py")
+    cmd = [sys.executable, str(root / "code" / "experiment.py")]
+    result = asyncio.run(runner.execute(cmd, cwd=root, timeout_s=60, env={"FI_REPLICATE_SEED": "0"}))
+    # The timing is left out, so `coating` is found and the simulation is sent back once (it used to be a note only).
+    assert result.returncode == 1 and runner.failed_script == "simulate.py"
+    assert runner.no_difference and "`coating`" in runner.no_difference and "`flow`" not in runner.no_difference
+
+
+@pytest.mark.asyncio
+async def test_a_coarse_scan_whose_only_moving_number_is_a_timing_says_which_setting_changed_nothing(
+        tmp_path: Path) -> None:
+    sim = TIMED + WORKING_SIM.replace('"mass": cell["fin"]}', '"mass": cell["fin"], "wall_s": time.perf_counter()}')
+    root = _quest(tmp_path, sim)
+    protocol = {"optimisation": _block(fixed={"finish": "matte"},
+                                       grid={"fin": [1.0, 4.0], "finish": ["matte", "gloss"]})}
+    runner = optimise.OptimisationRunner(LocalExecutor(), quest_root=root, protocol=protocol,
+                                         simulate=root / "code" / "simulate.py",
+                                         analysis=root / "code" / "experiment.py")
+    result = await runner.execute([sys.executable, str(root / "code" / "experiment.py")], cwd=root, timeout_s=300)
+    # The timing differs on a second call, so it is left out and `finish` is found: the simulation is sent back once.
+    assert result.returncode == 1 and runner.failed_script == "simulate.py"
+    assert "changing finish changed no number" in result.stderr
+    assert runner.no_difference and "`finish`" in runner.no_difference and "`fin`" not in runner.no_difference
+
+
+def test_a_number_left_out_is_never_compared_and_the_others_still_are() -> None:
+    cells = [_cell({"flow": f, "coating": c}, {"t_out": 20.0 - f, "wall_s": 0.1 * f + (0.01 if c == "painted" else 0.0)})
+             for f in (1.0, 2.0) for c in ("bare", "painted")]
+    assert flat.unchanged_axes(cells) == [], "the timing moves with the coating"
+    assert flat.unchanged_axes(cells, ignore={"wall_s"}) == [("coating", 2)]
+    assert flat.unchanged_axes(cells, ignore={"t_out", "wall_s"}) == [], "nothing left to compare"

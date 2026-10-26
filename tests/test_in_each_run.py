@@ -67,6 +67,18 @@ def test_a_number_per_value_must_give_every_value_and_nothing_else() -> None:
     assert in_run.read_returned({"k": [1.0, 2.0]}, [], "run_trial") == (None, "run_trial() returned non-numbers for ['k']")
 
 
+def test_a_value_written_as_a_text_with_a_comma_is_read_back_under_fis_own_key() -> None:
+    """A real study compared text values inside each run, one of them with a comma in it; the run returned them under
+    the very keys FI gives, and every one was refused, because the key was split back into pairs at its commas."""
+    levels = in_run.level_cells({"family": ["plain", "shaped (symmetric, tuned for the target)"], "mode": ["a", "b"]})
+    keys = [in_run.level_key(level) for level in levels]
+    assert any("," in k.split("family=")[-1] for k in keys)
+    got, why = in_run.read_returned({"r": {k: float(i) for i, k in enumerate(keys)}}, levels, "run_cell")
+    assert why == "" and got == {"r": {k: float(i) for i, k in enumerate(keys)}}
+    # a key that is none of the values is still refused
+    assert "not one of the values" in in_run.read_returned({"r": {"family=other,mode=a": 1.0}}, levels, "run_cell")[1]
+
+
 def test_a_check_reads_a_number_per_value_at_the_value_its_case_names_or_as_the_list() -> None:
     got = {"a": 5.0, "k": {"T=300.0": 1.0, "T=310.0": 2.0, "T=320.0": 3.0}}
     assert in_run.for_case(got, LEVELS, {"T": 310}) == {"a": 5.0, "k": 2.0}
@@ -284,3 +296,114 @@ def test_none_is_read_as_no_value_inside_a_run_too() -> None:
     as_list, why = in_run.read_returned({"k": [1.0, None, 3.0]}, LEVELS, "run_trial")
     assert why == "" and math.isnan(as_list["k"]["T=310.0"])
     assert "non-numbers" in in_run.read_returned({"k": "none"}, [], "run_trial")[1]
+
+
+NUMERIC_INSIDE = {"temperature": [300.0, 320.0]}
+NUMERIC = '''
+def run_trial(cell, trial_id, seed):
+    return {"rate": [cell["scale"] * t / 100.0 for t in cell["temperature"]]}
+'''
+
+
+def test_a_check_on_a_number_each_run_does_not_compare_is_run_with_that_number_added(tmp_path: Path) -> None:
+    """A real plan compared two values of a number inside each run and checked a limiting case at a third value; FI
+    refused to run the case and sent the code back for a repair no code can make."""
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(NUMERIC, encoding="utf-8")
+    at, why = asyncio.run(trial_runner.run_case(_executor(), sys.executable, root, "code/simulate.py",
+                                                cell={"scale": 2.0, "temperature": 310.0}, timeout_s=60,
+                                                in_each_run=NUMERIC_INSIDE))
+    assert why == "" and math.isclose(at["rate"], 6.2), (at, why)
+    rows, why, _later, started = asyncio.run(trial_runner.run_case_trials(
+        _executor(), sys.executable, root, "code/simulate.py", cell={"scale": 2.0, "temperature": 310.0}, trials=[0, 1],
+        timeout_s=60, in_each_run=NUMERIC_INSIDE))
+    assert why == "" and started == 2 and len(rows) == 2, (rows, why)
+    assert trial_runner.case_inside(NUMERIC_INSIDE, {"temperature": 320.0}) == NUMERIC_INSIDE, "a value it has: as it is"
+    assert trial_runner.case_inside(INSIDE, {"procedure": "other"}) == INSIDE, "a choice it does not have: not added"
+
+
+SEVEN_LISTS = {"pitch": list(range(61)), "distance": list(range(83)), "family": list(range(5)), "kind": list(range(3)),
+               "rep": list(range(4)), "state": [0, 1], "method": [0, 1]}
+
+
+def test_a_run_given_long_lists_that_returns_one_number_per_run_stays_small(tmp_path: Path) -> None:
+    """A live plan put seven lists in each run (1,215,120 combinations); its runs returned plain numbers, and FI wrote every
+    combination into each setting's spec (251 MB each) and held them (a 30 GB process)."""
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(
+        "def run_cell(cell):\n    return {'y': float(len(cell['pitch']) + cell['m'])}\n", encoding="utf-8")
+    sizes: list[int] = []
+    run = asyncio.run(trial_runner.run_trials(
+        _executor(), sys.executable, root, "code/simulate.py", {"m": [1, 2]}, runs_per_setting=1, base_seed=0,
+        deterministic=True, timeout_s=120, run_id="r1", in_each_run=SEVEN_LISTS,
+        on_plan=lambda plan: sizes.extend((root / t["spec"]).stat().st_size for t in plan)))
+    assert len(sizes) == 2 and max(sizes) < 20_000, sizes
+    summary = json.loads(run.summary_path.read_text(encoding="utf-8"))
+    assert [c["key"] for c in summary["cells"]] == ["m=1", "m=2"]
+    assert all("compared_in_each_run" not in c for c in summary["cells"])
+    assert [c["metrics"]["y"]["values"] for c in summary["cells"]] == [[62.0], [63.0]]
+    trial_runner._save_run(root, "k", run)
+    again = trial_runner._load_run(root, "k")
+    assert again is not None and len(again.cells[0].levels) == 1_215_120
+
+
+def test_the_combinations_are_read_one_at_a_time_in_the_order_they_were_listed() -> None:
+    levels = in_run.level_cells({"a": [1, 2], "b": ["x", "y", "z"]})
+    assert list(levels) == [{"a": 1, "b": "x"}, {"a": 1, "b": "y"}, {"a": 1, "b": "z"},
+                            {"a": 2, "b": "x"}, {"a": 2, "b": "y"}, {"a": 2, "b": "z"}]
+    assert len(levels) == 6 and levels[4] == {"a": 2, "b": "y"} and levels[-1] == {"a": 2, "b": "z"}
+    assert levels[:2] == [{"a": 1, "b": "x"}, {"a": 1, "b": "y"}]
+    assert in_run.levels_of(json.loads(json.dumps(in_run.levels_json(levels)))) == levels
+    assert in_run.level_cells({}) == [] and in_run.levels_of([{"a": 1}]) == [{"a": 1}]
+
+
+def test_a_pilot_run_reads_a_number_per_value_from_the_lists_it_was_given(tmp_path: Path) -> None:
+    """The time estimate's and the values pilot's specs wrote the combinations with ``default=str``: the run then read a
+    string as its levels and a number per value broke it."""
+    from core import run_estimate
+
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(
+        "def run_cell(cell):\n    return {'y': {str(t): t * 2.0 for t in cell['T']}, 'n': 1.0}\n", encoding="utf-8")
+    got = asyncio.run(run_estimate.run_values(
+        _executor(), sys.executable, root, "code/simulate.py", {"m": 1}, deterministic=True, timeout_s=60, env=None,
+        thresholds=None, in_each_run={"T": [1.0, 2.0]}))
+    assert got is not None and got["n"] == 1.0 and got["y"] == {"T=1.0": 2.0, "T=2.0": 4.0}, got
+
+
+TWO_INSIDE = {"method": ["fast", "exact"], "focus": [0.0, 100.0]}
+TWO = '''
+def run_trial(cell, trial_id, seed):
+    base = {"fast": 1.0, "exact": 2.0}
+    return {"signal": {f"method={m},focus={f}": base[m] + f / 100.0
+                       for m in cell["method"] for f in cell["focus"]}}
+'''
+
+
+def test_a_case_that_names_only_some_of_the_values_compared_in_each_run_is_run_at_every_value_it_leaves_out(
+        tmp_path: Path) -> None:
+    """A real plan compared two things inside each run and wrote its known-answer cases with one of them (a focus); FI
+    refused every such case ("a case names one of the values each run is given for every one of them") and the checks
+    stayed unjudged, the code sent to a repair no code can make. The case now reads the number at each value of what
+    it leaves out; a value the run is not given is still refused."""
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(TWO, encoding="utf-8")
+
+    def case(cell):
+        return asyncio.run(trial_runner.run_case(_executor(), sys.executable, root, "code/simulate.py", cell=cell,
+                                                 timeout_s=60, in_each_run=TWO_INSIDE))
+
+    some, why = case({"focus": 100.0})
+    assert why == "" and some["signal"] == [2.0, 3.0], (some, why)  # fast, exact at focus 100
+    one, why = case({"focus": 100.0, "method": "exact"})
+    assert why == "" and one["signal"] == 3.0
+    none, why = case({})
+    assert why == "" and sorted(none["signal"]) == [1.0, 2.0, 2.0, 3.0]
+    bad, why = case({"focus": 100.0, "method": "other"})
+    assert bad is None and "no value each run is given has that" in why  # the known positive: a wrong value is still refused
+    assert in_run.levels_named({"focus": 100.0}, in_run.level_cells(TWO_INSIDE)) == [
+        {"method": "fast", "focus": 100.0}, {"method": "exact", "focus": 100.0}]

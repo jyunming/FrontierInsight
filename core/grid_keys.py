@@ -41,6 +41,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .stop_power import READ
+
+#: What a fault found here rests on (core/stop_power.py): FI's reading of the script's text.
+SOURCE = READ
+
 #: Names that hold one setting (one cell of the grid).
 SETTING_NAMES = frozenset({"cell", "setting", "settings"})
 #: The trial contract's entry points: their first parameter is the setting.
@@ -245,6 +250,10 @@ def _assignments_of(name: str, nodes: list[ast.AST]) -> list[ast.AST] | None:
     loop variable, ``:=``, ``global``, a tuple target, a ``with`` / ``import`` name)."""
     values: list[ast.AST] = []
     for node in nodes:
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == name:
+            if node.value is not None:  # ``cells: list[dict] = []`` binds like ``cells = []``; ``cells: list`` binds nothing
+                values.append(node.value)
+            continue
         if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
             if len(node.targets) != 1:
                 return None
@@ -445,7 +454,7 @@ def supplied_names(protocol: dict[str, Any] | None, design: dict[str, Any] | Non
 
     protocol = protocol if isinstance(protocol, dict) else {}
     grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
-    inside = _in_run.of(protocol) or {}
+    inside = _in_run.of_study(protocol) or {}
     axes = [str(k) for k in grid] + [str(k) for k in inside if str(k) not in grid]
     allowed = set(axes) | (set(IN_RUN_RECORD_FIELDS) if inside else set())
     allowed.update(_forms.fixed_settings_of_design({**(design or {}), "protocol": protocol}))
@@ -955,7 +964,9 @@ def code_files(code_dir: Path) -> dict[str, str]:
         return out
     for path in sorted(code_dir.rglob("*.py")):
         rel = path.relative_to(code_dir)
-        if "__pycache__" in rel.parts or "tests" in rel.parts or re.match(r"test_", path.name) or ".venv" in rel.parts:
+        # code/skills/: FI's copy of the selected skills' files (Engine._skill_files_to_code), the skill's code.
+        if "__pycache__" in rel.parts or "tests" in rel.parts or re.match(r"test_", path.name) or ".venv" in rel.parts \
+                or rel.parts[0] == "skills":
             continue
         try:
             out[rel.as_posix()] = path.read_text(encoding="utf-8")

@@ -58,3 +58,18 @@ async def test_the_comparison_is_measured_and_kept_but_never_starts_the_search(t
     # three cells at the held value, one of them the baseline (evaluated first, never twice): the cells at 3.0 are no design
     assert [r["design"]["x"] for r in scan] == [-4.0, 4.0], "only the cells at the held value are designs of the search"
     assert run.record["evaluations"]["scan"] == 2
+
+
+@pytest.mark.asyncio
+async def test_the_scan_run_with_several_settings_at_once_gives_the_same_search(tmp_path: Path) -> None:
+    """The coarse scan's settings do not depend on each other: run 4 at a time, the scan and the search after it are
+    the same as one after another (the same seeds, the same best design)."""
+    records = []
+    for at_once in (1, 4):
+        root = _quest(tmp_path / f"a{at_once}")
+        run = await _run(root, _protocol(grid={"scale": [1.0, 3.0], "x": [-4.0, 0.0, 4.0]},
+                                         search_method="global_then_local",
+                                         evaluation_budget={"starts": 2, "per_start": 10}), at_once=at_once)
+        scan = [(r["design"], r.get("values")) for r in _ledger(root) if r.get("event") == "evaluation"]
+        records.append((run.record["best"], run.record["evaluations"], scan))
+    assert records[0] == records[1]

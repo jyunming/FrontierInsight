@@ -63,24 +63,13 @@ async def test_a_failed_call_does_not_earn_the_extra_tries(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_the_stop_reads_the_design_steps_reason_for_this_round_not_a_stale_plan_step_one(tmp_path: Path) -> None:
+async def test_what_the_redesign_still_lacks_never_stops_the_quest(tmp_path: Path) -> None:
     eng, _model, redesign, state = await _redesign_setup(tmp_path)  # the model never adds the axis
     (eng.fi_dir / "topic_asked.json").write_text(json.dumps({"problem": "an old plan-step reason", "count": 2}), encoding="utf-8")
     await eng._hold_the_design_to_the_topic(state, redesign, "")
-    stop = json.loads((eng.fi_dir / "topic_unmet.json").read_text(encoding="utf-8"))
-    assert not any("an old plan-step reason" in t for t in stop["tried"])
-    assert eng._topic_last_problem(1) and "an old plan-step reason" not in eng._topic_last_problem(1)
-
-
-@pytest.mark.asyncio
-async def test_the_design_record_of_another_round_is_not_this_rounds(tmp_path: Path) -> None:
-    eng = _critique_engine(tmp_path, [])
-    eng.fi_dir.mkdir(parents=True, exist_ok=True)
-    (eng.fi_dir / "topic_design_asked.json").write_text(
-        json.dumps({"iteration": 1, "asks": 2, "problem": "round one's reason"}), encoding="utf-8")
-    assert eng._topic_design_record(1)["asks"] == 2
-    assert eng._topic_design_record(2) == {}
-    assert eng._topic_last_problem(2) == "" and eng._topic_last_problem(1) == "round one's reason"
+    assert not (eng.fi_dir / "topic_unmet.json").exists()
+    covered = json.loads((eng.fi_dir / "topic_covered.json").read_text(encoding="utf-8"))
+    assert any("lid" in str(g.get("name")) for g in covered["left"]), "it is kept for the paper"
 
 
 @pytest.mark.asyncio

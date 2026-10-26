@@ -158,11 +158,11 @@ class Reader:
         return _NO_OBJECTIONS
 
 
-def _honest_stop(eng: Any) -> dict[str, Any]:
-    """The plain stop a plan that leaves out what the topic needs ends in (no paper, nobody asked to pick another model)."""
-    stop = eng._topic_unmet_stop()
-    assert stop is not None, "the quest records the stop for the code step"
-    return stop["exec_result"]
+def _went_on(eng: Any) -> str:
+    """What FI's check did not find, as kept for the paper: the quest goes on (no stop record), and the names are returned."""
+    assert not (eng.fi_dir / "topic_unmet.json").exists(), "what the check did not find never stops the quest"
+    covered = json.loads((eng.fi_dir / "topic_covered.json").read_text(encoding="utf-8"))
+    return " ".join(str(g.get("name")) for g in covered.get("left") or [])
 
 
 def _stop(eng: Any) -> list[dict[str, Any]]:
@@ -182,17 +182,20 @@ def _plan_text(eng: Any) -> str:
 # --- the matching that needs no model --------------------------------------------------------------------------------
 
 
+_FACTOR_MAP = [{"item": "F1", "by": "setting:lid_material"}, {"item": "F2", "by": "setting:room_temperature_C"}]
+
+
 def test_a_setting_that_does_not_cover_the_stated_levels_or_range_is_a_gap_and_a_name_match_settles_the_rest() -> None:
     req = tr.parse(EXTRACTION)
     assert req is not None
-    plan_view = tr.view(_draft(grid={"room_temperature_C": [10, 20], "lid_material": ["paper", "foam"]}))
+    plan_view = tr.view(_draft(grid={"room_temperature_C": [10, 20], "lid_material": ["paper", "foam"]}, topic_map=_FACTOR_MAP))
     gaps, unresolved = tr.match(req, plan_view)
     by_kind = {(g["kind"], g["name"]) for g in gaps}
     assert ("level", "room temperature") in by_kind and ("level", "lid material") in by_kind
     assert "its settings run from 10 to 20, not 10 to 30" in [g["sentence"] for g in gaps if g["name"] == "room temperature"][0]
     assert "steel" in [g["sentence"] for g in gaps if g["name"] == "lid material"][0]
-    assert unresolved == ["Q2", "M1"], "the heat quantity and the formula need a reader; the rest a name settles"
-    full = tr.view(_draft(grid={"room_temperature_C": [10, 20, 30], **LID_AXIS}, model={**MODEL, "equations": [*MODEL["equations"], NEWTON]}))
+    assert unresolved == ["Q2", "M1"], "the heat quantity and the formula need a reader; the rest the plan's own map settles"
+    full = tr.view(_draft(grid={"room_temperature_C": [10, 20, 30], **LID_AXIS}, topic_map=_FACTOR_MAP, model={**MODEL, "equations": [*MODEL["equations"], NEWTON]}))
     assert tr.match(req, full)[0] == [] and tr.match(req, full)[1] == ["Q2"]
 
 
@@ -200,7 +203,8 @@ def test_a_reply_that_names_nothing_is_no_reading_and_a_search_variable_counts_a
     assert tr.parse({"factors": [], "quantities": [], "formulas": []}) is None and tr.parse("x") is None
     req = tr.parse({"factors": [{"name": "fin spacing", "range": [1, 6], "main": True}]})
     block = {"objective": {"quantity": "base_temperature"}, "design_variables": [{"name": "fin_spacing", "low": 1.0, "high": 6.0}]}
-    assert tr.match(req, tr.view({"protocol": {"optimisation": block}})) == ([], [])
+    assert tr.match(req, tr.view({"protocol": {"optimisation": block, "topic_map": [{"item": "F1", "by": "setting:fin_spacing"}]}})) == ([], [])
+    assert tr.match(req, tr.view({"protocol": {"optimisation": block}})) == ([], ["F1"]), "no map: no setting is guessed from words"
 
 
 def test_named_levels_held_as_numbers_are_left_to_a_reader_not_passed() -> None:
@@ -213,12 +217,13 @@ def test_named_levels_held_as_numbers_are_left_to_a_reader_not_passed() -> None:
     assert tr.gaps_from(req, coded, {"F1": "covered"}) == ([], [])
 
 
+_CORRECTION_MAP = [{"item": "F1", "by": "setting:correction"}]
 _CORRECTION = {"factors": [{"name": "correction", "levels": ["uncorrected", "Bonferroni", "Benjamini-Hochberg"], "main": True}]}
 
 
 def test_a_level_given_by_an_abbreviation_is_left_to_a_reader_and_a_level_with_no_value_left_is_a_gap() -> None:
     """The topic names three methods; the plan compares all three inside each run but names the third ``bh``. A name match
-    cannot tell ``bh`` from ``holm``: the reader decides (and sees the values), and it is a gap without a reader only when
+    cannot tell ``bh`` from ``holm`` (and with no entry in the plan's own map no setting is picked by words): the reader decides (and sees the values), and it is a gap without a reader only when
     no value is left over that could stand for the missing level."""
     req = tr.parse(_CORRECTION)
     abbreviated = tr.view({"protocol": {"in_each_run": {"correction": ["uncorrected", "bonferroni", "bh"]}}})
@@ -229,10 +234,12 @@ def test_a_level_given_by_an_abbreviation_is_left_to_a_reader_and_a_level_with_n
     assert tr.gaps_from(req, other, {"F1": "missing"})[0][0]["kind"] == "factor"
     assert tr.gaps_from(req, other, {}) == ([], ["correction"]), "no judgement is not a pass: named as unchecked"
     short = tr.view({"protocol": {"in_each_run": {"correction": ["uncorrected", "bonferroni"]}}})
+    short["topic_map"] = _CORRECTION_MAP
     gaps, unresolved = tr.match(req, short)
     assert unresolved == [] and [g["kind"] for g in gaps] == ["level"]
     assert "Benjamini-Hochberg" in gaps[0]["sentence"] and "it has bonferroni, uncorrected" in gaps[0]["sentence"]
     named = tr.view({"protocol": {"in_each_run": {"correction": ["uncorrected", "bonferroni", "benjamini_hochberg"]}}})
+    named["topic_map"] = _CORRECTION_MAP
     assert tr.match(req, named) == ([], [])
 
 
@@ -340,24 +347,24 @@ async def test_a_formula_the_plan_replaces_and_says_why_is_not_a_gap(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_a_main_factor_still_missing_after_the_bound_stops_before_anything_runs(tmp_path: Path) -> None:
+async def test_a_main_factor_still_missing_after_the_bound_goes_on_and_is_said(tmp_path: Path) -> None:
+    """FI's check of a plan against the topic misses settings held under another name often enough that what it did not
+    find is said in the paper, never a stop: the quest goes on to the code."""
     eng = _engine(tmp_path, [])
     model = Reader(eng, _draft(), adds=set())  # the plan's model never adds anything
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
     seen = _stop(eng)
-    await eng._node_design({"topic": TOPIC, "iteration": 0})
-    assert seen == [], "nobody is asked to pick another model: the plan's rules, not the model, left it out"
+    patch = await eng._node_design({"topic": TOPIC, "iteration": 0})
+    assert seen == [], "nobody is asked to pick another model"
     assert 1 <= len(model.asked) <= 4
-    result = _honest_stop(eng)
-    shown = " ".join([result["topic_unmet"], *result["topic_unmet_tried"]])
-    assert "lid material" in shown and "asked the plan's model" in shown
-    assert "heat lost per minute" not in shown, "a secondary item does not stop the quest"
-    assert not (eng.quest_root / "paper.md").exists()
+    assert "lid material" in _went_on(eng)
+    assert not (patch.get("exec_result") or {}).get("returncode"), "the design step does not end the quest"
     asked_before = len(model.asked)
-    await eng._node_design({"topic": TOPIC, "iteration": 0})  # a resume stops again and asks no more
+    await eng._node_design({"topic": TOPIC, "iteration": 0})  # a resume asks no more
     assert len(model.asked) == asked_before and seen == []
-    assert "the quest stops before anything runs" in _plan_text(eng)
-    assert "the quest stops before anything runs" in _plan_text(eng)
+    text = _plan_text(eng)
+    assert "the study runs, and the paper says FI's check did not find it" in text
+    assert "stops before anything runs" not in text
 
 
 @pytest.mark.asyncio
@@ -369,7 +376,7 @@ async def test_a_secondary_item_still_missing_is_said_in_the_limitations_and_the
     patch = await eng._node_design({"topic": TOPIC, "iteration": 0})
     assert seen == [] and "lid_material" in patch["design"]["protocol"]["grid"]
     note = tr.write_note(eng.quest_root)
-    assert "The topic asked for more than this study did" in note and "heat lost per minute" in note
+    assert "FI's check of the plan against the topic did not find all it asks for" in note and "heat lost per minute" in note
     assert "through the not_done placeholders" in note and "do not write a result for them" in note
     assert tr.write_note(tmp_path / "nowhere") == ""
 
@@ -400,7 +407,7 @@ async def test_a_redesign_that_drops_an_axis_is_caught_and_asked_once(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_a_redesign_that_stays_without_the_axis_stops_before_the_run_and_is_asked_within_its_bound(tmp_path: Path) -> None:
+async def test_a_redesign_that_stays_without_the_axis_is_asked_within_its_bound_and_goes_on(tmp_path: Path) -> None:
     eng = _engine(tmp_path, [])
     model = Reader(eng, _draft(grid={**LID_AXIS, "room_temperature_C": [10, 20, 30]}, metrics=[METRIC_TIME, METRIC_HEAT],
                                model={**MODEL, "equations": [*MODEL["equations"], NEWTON]}))
@@ -414,7 +421,7 @@ async def test_a_redesign_that_stays_without_the_axis_stops_before_the_run_and_i
     assert seen == []
     asked = [p for p in model.prompts if "The topic asks for things this plan does not yet include" in p]
     assert len(asked) == 2 and "Your last answer was not used" not in asked[0] and "Your last answer was not used" in asked[1]
-    assert "lid material" in _honest_stop(eng)["topic_unmet"]
+    assert "lid material" in _went_on(eng)
 
 
 @pytest.mark.asyncio
@@ -439,7 +446,7 @@ async def test_a_mapping_to_something_the_plan_does_not_have_does_not_save_a_mis
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
     seen = _stop(eng)
     await eng._node_design({"topic": TOPIC, "iteration": 0})
-    assert seen == [] and "lid material" in _honest_stop(eng)["topic_unmet"]
+    assert seen == [] and "lid material" in _went_on(eng)
 
 
 def test_a_mapping_is_checked_for_the_levels_it_must_cover() -> None:
@@ -502,6 +509,74 @@ async def test_a_formula_mapped_to_an_unrelated_equation_that_the_reader_rejects
     patch = await eng._node_design({"topic": TOPIC, "iteration": 0})
     assert seen == [] and "design" in patch
     assert "states the formula `dT/dt = -k*(T - Tr)`" in tr.write_note(eng.quest_root)
+
+
+def test_a_gap_the_plans_own_map_names_an_element_for_says_both_and_one_with_no_map_does_not() -> None:
+    req = tr.parse({"quantities": [{"name": "heat lost per minute", "main": False}]})
+    mapped = tr.view(_draft(topic_map=[{"item": "heat lost per minute", "by": "metric:time_to_60_degrees"}]))
+    assert tr.mapping_of(req, mapped, "quantities", req["quantities"][0]) == ("judge", "time_to_60_degrees")
+    gaps, _ = tr.gaps_from(req, mapped, {"Q1": "missing"})
+    assert gaps[0]["named"] == "time_to_60_degrees"
+    assert gaps[0]["sentence"].endswith("The plan names the metric `time_to_60_degrees` for it, which FI's check (one model's "
+                                        "reading of the plan) did not accept as covering it.")
+    bare, _ = tr.gaps_from(req, tr.view(_draft()), {"Q1": "missing"})
+    assert "named" not in bare[0] and bare[0]["sentence"].endswith("but the plan does not measure it."), "no map, nothing said"
+
+
+def test_an_answer_that_gives_the_plans_own_map_again_is_told_so_and_any_other_answer_is_not() -> None:
+    req = tr.parse({"quantities": [{"name": "heat lost per minute", "main": False}],
+                    "formulas": [{"name": "cooling law", "text": "dT/dt = -k*(T - Tr)", "main": False}]})
+    view = tr.view(_draft(topic_map=[{"item": "heat lost per minute", "by": "metric:time_to_60_degrees"}]))
+    gaps, _ = tr.gaps_from(req, view, {"Q1": "missing", "M1": "missing"})
+    again = {"protocol": {"topic_map": [{"item": "Q1", "by": "metric:time_to_60_degrees"}]}}
+    reason = tr.restated(again, gaps)
+    assert "gives again the plan's own map (heat lost per minute to `time_to_60_degrees`)" in reason
+    assert "cooling law" not in reason, "the formula the plan maps nothing for is not said to be given again"
+    bare = {"protocol": {"topic_map": [{"item": "heat lost per minute", "by": "time_to_60_degrees"}]}}
+    assert "heat lost per minute to" in tr.restated(bare, gaps), "the item's name and an element without its kind alike"
+    assert tr.restated({"protocol": {"topic_map": [{"item": "Q1", "by": "metric:other_one"}]}}, gaps) == ""
+    assert tr.restated({"protocol": {"topic_map": [{"item": "M1", "by": "metric:time_to_60_degrees"}]}}, gaps) == "",         "the same element for another item is not the plan's map of this one"
+    assert tr.restated({"protocol": {}}, gaps) == "" and tr.restated("not an object", gaps) == ""
+
+
+def test_a_search_the_plans_own_map_names_is_told_as_given_again() -> None:
+    req = tr.parse({"searches": [{"what": "best light pattern", "objective": "largest depth", "main": True}]})
+    view = tr.view(_draft(topic_map=[{"item": "best light pattern", "by": "search:pattern_shape"}]))
+    view["search"], view["design_variables"] = True, {"pattern_shape": {}}
+    named = tr.mapping_of(req, view, "searches", req["searches"][0])
+    gaps, _ = tr.gaps_from(req, view, {"S1": "missing"})
+    assert named == ("judge", "optimisation")
+    assert "The plan names its search for the best design for it" in gaps[0]["sentence"]
+    assert "best light pattern" in tr.restated({"protocol": {"topic_map": [{"item": "S1", "by": "search:pattern_shape"}]}}, gaps)
+
+
+def test_the_papers_line_for_a_gap_the_plans_map_names_says_both(tmp_path: Path) -> None:
+    from core import paper_facts
+    fi = tmp_path / ".fi"
+    fi.mkdir()
+    gap = {"kind": "quantity", "name": "heat lost per minute", "named": "time_to_60_degrees", "sentence": "s"}
+    (fi / "topic_covered.json").write_text(json.dumps({"left": [gap]}), encoding="utf-8")
+    said = " ".join(i.sentence for i in paper_facts.required_items(tmp_path))
+    assert "FI's check did not find it among what the study's plan measures" in said
+    assert "The plan names the metric `time_to_60_degrees` for it" in said
+
+
+@pytest.mark.asyncio
+async def test_a_plan_model_that_holds_its_own_map_is_told_what_was_not_accepted_and_the_paper_says_both(tmp_path: Path) -> None:
+    # The plan maps the heat to a metric of another name; the reader does not accept it; the plan's model answers with the
+    # same map. It was told "none of what was asked in a form that can be read", which is not what happened.
+    eng = _engine(tmp_path, [])
+    model = Reader(eng, _draft(grid={**LID_AXIS, "room_temperature_C": [10, 20, 30]}, metrics=[METRIC_TIME],
+                               model={**MODEL, "equations": [*MODEL["equations"], NEWTON]},
+                               topic_map=[{"item": "heat lost per minute", "by": "metric:time_to_60_degrees"}]),
+                   judge=lambda item, shown: "missing" if item["kind"] == "quantity" and "heat" in item["name"] else "covered")
+    await eng._node_plan({"topic": TOPIC, "iteration": 0})
+    asked = [p for p in model.prompts if "The topic asks for things this plan does not yet include" in p]
+    assert asked and "The plan names the metric `time_to_60_degrees` for it" in asked[0]
+    told = [p for p in asked if "Your last answer was not used" in p]
+    assert told and "gives again the plan's own map (heat lost per minute to `time_to_60_degrees`)" in told[0]
+    assert "none of what was asked" not in told[0]
+    assert "The plan names the metric `time_to_60_degrees` for it" in tr.write_note(eng.quest_root)
 
 
 # --- constraints: the cap and the writer's note -----------------------------------------------------------------------
@@ -584,15 +659,13 @@ async def _redesign_setup(tmp_path: Path) -> tuple[Any, Any, dict[str, Any], dic
 
 
 @pytest.mark.asyncio
-async def test_the_stop_names_the_design_steps_real_ask_count_and_why_its_last_answer_was_not_used(tmp_path: Path) -> None:
+async def test_the_design_steps_asks_are_counted_with_why_the_last_answer_was_not_used_and_the_quest_goes_on(
+        tmp_path: Path) -> None:
     eng, _model, redesign, state = await _redesign_setup(tmp_path)  # the model never adds the axis
     await eng._hold_the_design_to_the_topic(state, redesign, "")
     record = json.loads((eng.fi_dir / "topic_design_asked.json").read_text(encoding="utf-8"))
-    assert record["asks"] == 2 and record["problem"]  # written after the last failed attempt too  # the same refusal twice ends the asking
-    stop = json.loads((eng.fi_dir / "topic_unmet.json").read_text(encoding="utf-8"))
-    assert stop["asked"] == 2
-    assert record["problem"] in eng._topic_last_problem(1)
-    assert any(record["problem"][:40] in t for t in stop["tried"])
+    assert record["asks"] == 2 and record["problem"]  # written after the last failed attempt too
+    assert "lid material" in _went_on(eng)
 
 
 @pytest.mark.asyncio
@@ -615,3 +688,165 @@ async def test_a_failed_call_for_the_topic_is_noted_and_the_next_try_is_still_ma
     design, _sha = await eng._hold_the_design_to_the_topic(state, redesign, "")
     assert design["protocol"]["grid"]["lid_material"] == ["paper", "foam", "steel"]
     assert len(prompts) == 2 and "connection reset" in prompts[1]
+
+
+def test_a_study_made_smaller_is_told_what_the_topic_asks_to_vary() -> None:
+    """A real plan rewritten to fit the time FI measured cut two settings the topic asks to vary to one value each, and
+    the design that would run then lacked them: the fit request names each one with what still covers it."""
+    from core.engine import _fit_request
+
+    req = {"factors": [{"name": "lid material", "levels": ["paper", "foam", "steel"]},
+                       {"name": "starting temperature", "range": [20.0, 90.0]},
+                       {"name": "stirring", "levels": [], "range": []}]}
+    kept = tr.kept_when_smaller(req)
+    assert kept == ["- lid material: every level (paper, foam, steel)",
+                    "- starting temperature: at least 20 and 90, the two ends of the range the topic states",
+                    "- stirring: at least two values"]
+    fit = {"seconds_per_setting": 98.0, "settings_that_fit": 195, "limit_s": 28800.0}
+    text = _fit_request("the study's 3,802 settings would take about 4 days", fit, kept)
+    assert text.endswith("\n".join(kept)) and "stays varied" in text
+    assert "stays varied" not in _fit_request("too long", fit, [])
+    assert tr.kept_when_smaller(None) == []
+
+
+# ---- a gap carries the plan key its topic item is mapped to ----------------------------------------------------------
+
+def _mapped_scan_case() -> tuple[dict[str, Any], dict[str, Any]]:
+    req = {"factors": [{"name": "damping for the second stage", "range": [0.1, 0.95], "stated": "damping 0.1 to 0.95",
+                        "main": True, "compared": True}]}
+    design = {"protocol": {"optimisation": {"grid": {"damping": [0.5, 0.9], "stage2_damping": [0.25, 0.5, 0.75]}},
+                           "topic_map": [{"item": "F1", "by": "setting:stage2_damping"}]}}
+    return req, design
+
+
+def test_a_gap_carries_the_plan_key_its_topic_item_is_mapped_to_and_merge_takes_the_answer_for_it() -> None:
+    req, design = _mapped_scan_case()
+    gaps, _ = tr.match(req, tr.view(design))
+    assert [(g["kind"], g["axis"]) for g in gaps] == [("level", "stage2_damping")]  # not the first axis whose words fit
+    answer = {"protocol": {"optimisation": {"grid": {"stage2_damping": [0.1, 0.25, 0.5, 0.75, 0.95]}}}}
+    merged = tr.merge(design, answer, gaps)
+    assert merged["protocol"]["optimisation"]["grid"] == {"damping": [0.5, 0.9],
+                                                          "stage2_damping": [0.1, 0.25, 0.5, 0.75, 0.95]}
+
+
+def test_a_judged_missing_factor_carries_the_mapped_key_and_one_with_no_map_carries_none() -> None:
+    req, design = _mapped_scan_case()
+    unmapped = {"protocol": {"optimisation": design["protocol"]["optimisation"]}}
+    gaps, _ = tr.gaps_from({"factors": [{"name": "unrelated words", "compared": True}]}, tr.view(unmapped), {"F1": "missing"})
+    assert gaps[0]["axis"] == ""  # no entry maps it: behaviour as before
+    mapped_req = {"factors": [{"name": "unrelated words", "compared": True}]}
+    design["protocol"]["topic_map"] = [{"item": "F1", "by": "setting:stage2_damping"}]
+    gaps, _ = tr.gaps_from(mapped_req, tr.view(design), {"F1": "missing"})
+    assert gaps[0]["axis"] == "stage2_damping"
+
+
+def test_an_unreadable_answer_for_a_gap_with_no_mapped_key_is_still_refused() -> None:
+    req = {"factors": [{"name": "unrelated words", "compared": True}]}
+    design = {"protocol": {"optimisation": {"grid": {"damping": [0.5, 0.9]}}}}
+    gaps, _ = tr.gaps_from(req, tr.view(design), {"F1": "missing"})
+    assert gaps and gaps[0]["axis"] == ""
+    assert tr.merge(design, {"protocol": {"optimisation": {"grid": {"damping": [0.1, 0.2]}}}}, gaps) is None
+
+
+def test_the_list_shown_before_the_plan_is_written_asks_for_a_map_entry_for_every_setting_to_vary() -> None:
+    block = tr.checklist_block(tr.parse(EXTRACTION))
+    head = block.splitlines()[0]
+    assert "`protocol.topic_map`" in head and "every setting the topic asks to vary or compare" in head
+    assert "`setting:<the key of that setting>`" in head
+    assert tr.checklist_block({}) == "", "no reading, no list: the prompt is as it was"
+
+
+def test_the_list_shows_each_item_with_its_id_and_a_map_entry_by_that_id_resolves_but_a_reworded_name_does_not() -> None:
+    req = tr.parse(EXTRACTION)
+    block = tr.checklist_block(req)
+    assert "- F1: vary or compare lid material" in block and "- F2: vary or compare room temperature" in block
+    assert "- Q1: report time to reach 60 degrees" in block and "- M1: formula" in block
+    grid = {"lid_material": ["paper", "foam", "steel"], "room_temperature_C": [10, 20, 30]}
+    by_id = tr.view({"protocol": {"grid": grid, "topic_map": [{"item": "F1", "by": "setting:lid_material"}]}})
+    assert tr.mapped_axis(req, by_id, req["factors"][0]) == "lid_material"
+    reworded = tr.view({"protocol": {"grid": grid, "topic_map": [{"item": "material of the lid", "by": "setting:lid_material"}]}})
+    assert tr.mapped_axis(req, reworded, req["factors"][0]) == ""
+    assert "F1" in tr.match(req, reworded)[1], "a reworded name is not a map entry: the factor goes to the reader"
+
+
+def test_an_old_plan_with_no_map_takes_the_widened_values_when_the_answer_maps_the_item_to_that_setting() -> None:
+    req = {"factors": [{"name": "damping of the second stage", "range": [0.1, 0.95], "main": True, "compared": True}]}
+    design = {"protocol": {"grid": {"damping": [0.5, 0.9]}}}
+    gaps, _ = tr.gaps_from(req, tr.view(design), {"F1": "missing"})
+    assert gaps[0]["axis"] == "" and gaps[0]["id"] == "F1"
+    answer = {"protocol": {"grid": {"damping": [0.1, 0.5, 0.95]}, "topic_map": [{"item": "F1", "by": "setting:damping"}]}}
+    merged = tr.merge(design, answer, gaps)
+    assert merged["protocol"]["grid"] == {"damping": [0.1, 0.5, 0.95]}
+    assert merged["protocol"]["topic_map"] == [{"item": "F1", "by": "setting:damping"}]
+    # Known positive: an answer that widens a setting its map does not name for the gap is still not taken.
+    other = {"protocol": {"grid": {"damping": [0.1, 0.5, 0.95]}, "topic_map": [{"item": "F2", "by": "setting:damping"}]}}
+    assert tr.merge(design, other, gaps) is None or tr.merge(design, other, gaps)["protocol"]["grid"] == design["protocol"]["grid"]
+
+
+def _search_design(baseline: float) -> dict[str, Any]:
+    return {"protocol": {"optimisation": {
+        "design_variables": [{"name": "width", "low": 1.0, "high": 4.0}, {"name": "depth", "low": 1.0, "high": 2.0}],
+        "baseline": {"values": {"width": baseline, "depth": 1.5}}, "grid": {"mode": ["a", "b"]}},
+        "topic_map": [{"item": "F1", "by": "design_variable:width"}]}}
+
+
+def test_a_changed_range_of_a_design_variable_a_gap_names_is_taken_and_the_baseline_stays_inside_it() -> None:
+    req = {"factors": [{"name": "channel breadth", "range": [1.0, 8.0], "main": True, "compared": True}]}
+    design = _search_design(2.0)
+    gaps, _ = tr.match(req, tr.view(design))
+    assert [(g["kind"], g["axis"]) for g in gaps] == [("level", "width")]
+    answer = {"protocol": {"optimisation": {"design_variables": [{"name": "width", "low": 1.0, "high": 8.0},
+                                                                  {"name": "depth", "low": 0.1, "high": 9.0}]}}}
+    block = tr.merge(design, answer, gaps)["protocol"]["optimisation"]
+    assert block["design_variables"] == [{"name": "width", "low": 1.0, "high": 8.0}, {"name": "depth", "low": 1.0, "high": 2.0}]
+    assert block["baseline"]["values"] == {"width": 2.0, "depth": 1.5}
+    # A baseline the new range leaves out takes the answer's value if that is inside, else the nearest end.
+    narrowed = {"protocol": {"optimisation": {"design_variables": [{"name": "width", "low": 3.0, "high": 8.0}],
+                                              "baseline": {"values": {"width": 3.5}}}}}
+    assert tr.merge(design, narrowed, gaps)["protocol"]["optimisation"]["baseline"]["values"]["width"] == 3.5
+    clamped = {"protocol": {"optimisation": {"design_variables": [{"name": "width", "low": 3.0, "high": 8.0}]}}}
+    assert tr.merge(design, clamped, gaps)["protocol"]["optimisation"]["baseline"]["values"]["width"] == 3.0
+
+
+def test_a_gap_that_has_its_setting_is_merged_on_it_and_an_answers_map_to_another_key_changes_nothing_else() -> None:
+    req = {"factors": [{"name": "operating temperature", "range": [10, 40], "main": True, "compared": True}]}
+    design = {"protocol": {"grid": {"temperature": [20, 30], "pressure": [1, 2]},
+                           "topic_map": [{"item": "F1", "by": "setting:temperature"}]}}
+    gaps, _ = tr.match(req, tr.view(design))
+    assert [(g["axis"], g["id"]) for g in gaps] == [("temperature", "F1")]
+    answer = {"protocol": {"grid": {"temperature": [10, 20, 30, 40], "pressure": [99]},
+                           "topic_map": [{"item": "F1", "by": "setting:pressure"}]}}
+    seen: list[str] = []
+    grid = tr.merge(design, answer, gaps, seen)["protocol"]["grid"]
+    assert grid == {"temperature": [10, 20, 30, 40], "pressure": [1, 2]} and seen == []
+    # Known positive: a gap with no setting of its own takes the key the answer's map names, and the merge says so.
+    bare = {"protocol": {"grid": {"temperature": [20, 30], "pressure": [1, 2]}}}
+    open_gaps, _ = tr.gaps_from(req, tr.view(bare), {"F1": "missing"})
+    wider = {"protocol": {"grid": {"temperature": [10, 20, 30, 40]}, "topic_map": [{"item": "F1", "by": "setting:temperature"}]}}
+    assert tr.merge(bare, wider, open_gaps, seen)["protocol"]["grid"]["temperature"] == [10, 20, 30, 40]
+    assert seen == ["temperature"]
+
+
+def test_a_baseline_of_a_variable_that_takes_listed_values_is_one_of_them_and_the_block_still_reads() -> None:
+    from core import optimisation_plan as op
+    req = {"factors": [{"name": "layout kind", "levels": ["a", "b", "c", "d"], "main": True, "compared": True}]}
+    design = {"protocol": {"optimisation": {
+        "objective": {"quantity": "loss", "direction": "minimise"},
+        "design_variables": [{"name": "layout", "kind": "choice", "values": ["a", "b"]}],
+        "baseline": {"values": {"layout": "a"}}, "budget": {"evaluations": 20}},
+        "topic_map": [{"item": "F1", "by": "design_variable:layout"}]}}
+    gaps, _ = tr.match(req, tr.view(design))
+    assert [g["axis"] for g in gaps] == ["layout"]
+
+    def merged(values: list[Any], base: Any | None) -> dict[str, Any]:
+        block = {"design_variables": [{"name": "layout", "kind": "choice", "values": values}]}
+        if base is not None:
+            block["baseline"] = {"values": {"layout": base}}
+        out = tr.merge(design, {"protocol": {"optimisation": block}}, gaps)["protocol"]["optimisation"]
+        assert op.normalize(out)[1] is None, op.normalize(out)[1]
+        return out
+
+    assert merged(["a", "b", "c", "d"], None)["baseline"]["values"]["layout"] == "a"  # still a member: kept
+    assert merged(["b", "c", "d"], "c")["baseline"]["values"]["layout"] == "c"  # the answer's, a member
+    assert merged(["b", "c", "d"], "zz")["baseline"]["values"]["layout"] == "b"  # else the first listed
+    assert merged(["b", "c", "d"], None)["baseline"]["values"]["layout"] == "b"

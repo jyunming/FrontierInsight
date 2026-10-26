@@ -356,6 +356,60 @@ def spec_hash(specs: list[Spec], protocol: dict[str, Any] | None) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
+#: The version of what ``built_from`` hashes. A record written by another version is not compared with the hashes of this one
+#: (a hash that differs only because the recipe differs would look like a plan change): every function is written again.
+BUILT_FROM_SCHEMA = 2
+
+
+def _own_hash_body(spec: Spec, protocol: dict[str, Any] | None) -> dict[str, Any]:
+    # The parameters, not the text of the signature: an outline written again for a revised plan words the same function
+    # a little differently (an annotation, the order of its dependencies), and that is not a change of the function.
+    body: dict[str, Any] = {"n": spec.name, "params": spec.params(), "eq": spec.equation, "kind": spec.kind}
+    if spec.kind == STEP and spec.card:
+        body["card"] = {k: spec.card.get(k) for k in ("id", "name", "does", "inputs", "output", "uses", "source", "example", "relations")}
+    else:
+        eq = next((e for e in _eqt.eligible(protocol) if _eqt._text(e["id"]) == spec.equation), {})
+        body["eq_def"] = {k: eq.get(k) for k in ("id", "formula", "example", "source", "derivation")}
+    return body
+
+
+def function_hashes(specs: list[Spec], protocol: dict[str, Any] | None) -> dict[str, str]:
+    """``{function name: what it was written for}``: its name and parameters, the equation (formula, worked example, source,
+    derivation) or step card it implements, and the hashes of the functions it depends on, in turn. Recorded for each
+    function when it is done (``built_from``), so that a plan revised later re-writes only the functions whose own hash
+    differs (a dependency whose equation changed under the same parameters writes its callers again); a function whose plan
+    did not change, with every repair it received, is kept as it is. Each function is hashed once and the walk is
+    iterative, so a deep chain or a diamond of dependencies costs one pass; a dependency cycle is cut at its back edge."""
+    by_name = {s.name: s for s in specs}
+    done: dict[str, str] = {}
+    for root in by_name:
+        if root in done:
+            continue
+        stack: list[tuple[str, int]] = [(root, 0)]
+        on_path = {root}
+        while stack:
+            name, k = stack[-1]
+            deps = [d for d in by_name[name].depends_on if d in by_name]
+            if k < len(deps):
+                stack[-1] = (name, k + 1)
+                d = deps[k]
+                if d not in done and d not in on_path:
+                    stack.append((d, 0))
+                    on_path.add(d)
+                continue
+            body = _own_hash_body(by_name[name], protocol)
+            body["deps"] = sorted([d, done.get(d, "")] for d in by_name[name].depends_on)
+            done[name] = hashlib.sha256(json.dumps(body, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+            stack.pop()
+            on_path.discard(name)
+    return done
+
+
+def function_hash(spec: Spec, specs: list[Spec], protocol: dict[str, Any] | None) -> str:
+    """The hash of one function (:func:`function_hashes`)."""
+    return function_hashes(specs, protocol)[spec.name]
+
+
 # --- the module file --------------------------------------------------------------------------------------------------
 
 
@@ -539,6 +593,29 @@ def match_example_names(source: str, name: str, inputs: list[str], *, random: bo
     pairs = pair_parameter_names(extra, lacking) if lacking else None
     renamed = rename_parameters(source, name, pairs, callers=callers) if pairs else None
     return (renamed, pairs or {}) if renamed is not None else (None, {})
+
+
+def held_signatures(fixed: dict[str, str], sources: dict[str, str], cases: list[dict[str, Any]]) -> dict[str, str]:
+    """The ``def`` line a repair must keep for each function of ``fixed`` (its name to the outline's ``def``): ONE source of a
+    function's interface at a time. The test calls a function by the names of the worked example's inputs, so the outline's
+    line (already given those names, :func:`example_signature`) is held only where the code does not meet that contract
+    yet (``cases``: the equation tests, :func:`core.equation_tests.cases`; a name the function lacks, or a parameter without
+    a default that the example gives no value for). A function the code already writes so that the test can call it, and
+    a function no test calls, keeps the ``def`` it has in ``sources``: the code its callers were written against is what a
+    repair must not break, and the outline's order of parameters (which no test reads) is not a second claim on it. A
+    function ``sources`` does not define keeps the outline's line."""
+    by_function: dict[str, list[dict[str, Any]]] = {}
+    for case in cases:
+        by_function.setdefault(str(case.get("function")), []).append(case)
+    out = dict(fixed)
+    for name in fixed:
+        node = next((n for text in sources.values() for n in [_find(text, name)] if n is not None), None)
+        if node is None:
+            continue
+        if any(_eqt._contract_here(c) for c in by_function.get(name, [])):
+            continue  # the test cannot call the function as written: the outline's names are what the repair must give
+        out[name] = f"def {name}({ast.unparse(node.args)}):"
+    return out
 
 
 def changed_signatures(source: str, fixed: dict[str, str]) -> list[str]:
@@ -1272,15 +1349,22 @@ class FunctionFiller:
         digest = spec_hash(specs, self.protocol)
         self._by_id = {s.equation: s for s in specs}
         record = load(self.root)
+        hashes = function_hashes(specs, self.protocol)
         if record.get("package") != self.package or record.get("hash") != digest:
+            kept = self._carry_over(record, specs, hashes)
             record = {"calls_total": int(record.get("calls_total") or 0), "package": self.package, "hash": digest,
-                      "functions": {}, "calls": 0, "status": "running"}
+                      "functions": kept, "calls": 0, "status": "running", "built_from_schema": BUILT_FROM_SCHEMA}
         elif record.get("status") == "fell_back":
             return Outcome("skipped", reason=str(record.get("reason") or "an earlier pass of the step fell back"))
         record["functions"] = {s.name: record["functions"].get(s.name) or
                                {"equation": s.equation, "status": PENDING, "attempts": 0} for s in specs}
         for s in specs:
             record["functions"][s.name]["kind"] = s.kind
+            if record["functions"][s.name].get("status") == DONE and not record["functions"][s.name].get("built_from") \
+                    and record.get("hash") == digest:
+                # written for exactly these specs (the whole hash is the same): say so, for the next revision of the plan
+                record["functions"][s.name]["built_from"] = hashes[s.name]
+                record["built_from_schema"] = BUILT_FROM_SCHEMA
         # A step with neither a usable worked example nor a relation to hold is not tested by anything but the static look;
         # said here so that the checks that come after can pick it up.
         record["untested_by_example"] = [s.equation for s in specs if s.kind == STEP and s.card
@@ -1329,7 +1413,7 @@ class FunctionFiller:
                                      spec.name, spec.equation, self.repairs, (problem.splitlines() or [""])[0][:120],
                                      exception_line(problem, 200))
                     continue
-                entry.update(status=DONE, error="")
+                entry.update(status=DONE, error="", built_from=function_hashes(specs, self.protocol)[spec.name])
                 save(self.root, record)
                 self.log.info("[implement] function %s passes its checks%s", spec.name,
                               "" if spec.equation not in (record.get("untested") or {}) else
@@ -1342,6 +1426,27 @@ class FunctionFiller:
         if failing(record):
             await self._repair_module(specs, record)
         return self._finish(specs, record)
+
+    def _carry_over(self, prior: dict[str, Any], specs: list[Spec], hashes: dict[str, str]) -> dict[str, Any]:
+        """The plan changed since the functions were written: the entries of the functions whose own hash is the same (and
+        that are done, and have code on disk), kept as they are with every repair they received. The rest are written again.
+        Nothing is kept, and the log says why, when the record does not say what the functions were built from."""
+        old = prior.get("functions") if prior.get("package") == self.package and isinstance(prior.get("functions"), dict) else {}
+        if not old or not self.model_path.is_file():
+            return {}
+        if prior.get("built_from_schema") != BUILT_FROM_SCHEMA:
+            self.log.info("[implement] the plan changed and the record of the functions was written by another version of FI "
+                          "(or does not say what each function was built from): every function is written again")
+            return {}
+        kept: dict[str, Any] = {}
+        for s in specs:
+            e = old.get(s.name)
+            if isinstance(e, dict) and e.get("status") == DONE and e.get("built_from") == hashes[s.name]:
+                kept[s.name] = e
+        again = [s.name for s in specs if s.name not in kept]
+        self.log.info("[implement] the plan changed: %d of %d function(s) are as they were built and are kept (%s); %d "
+                      "are written again (%s)", len(kept), len(specs), ", ".join(kept) or "none", len(again), ", ".join(again) or "none")
+        return kept
 
     def _finish(self, specs: list[Spec], record: dict[str, Any]) -> Outcome:
         """The step's end: ``done`` when every function passes, ``partial`` when the module imports and every function
@@ -1376,44 +1481,14 @@ class FunctionFiller:
                           f"{s.signature}\nWhat is wrong with it: {entry.get('error') or 'it fails its check'}")
         return _text_block(passing), "\n\n".join(broken)
 
-    def _with_labels(self, text: str, specs: list[Spec]) -> str:
-        """``text`` with the equation's id in a comment above each function of ``specs`` that lost it."""
-        from . import oracle_check as _oracle
-
-        for s in specs:
-            node = _find(text, s.name)
-            if node is None:
-                continue
-            first = _span(node)[0]
-            lines = text.splitlines(keepends=True)
-            near = "".join(lines[max(0, first - 3): node.end_lineno or first])
-            if not _oracle._labelled_in(s.equation, near):
-                lines.insert(first - 1, f"# {s.equation}\n")
-                text = "".join(lines)
-        return text
-
-    def _module_ok(self, text: str, specs: list[Spec]) -> str:
-        """Why a reply's module cannot be used (``""`` when it can): it parses, and every function has the parameters the
-        outline fixed."""
-        if not text.strip():
-            return "the reply held no code"
-        try:
-            ast.parse(text)
-        except SyntaxError as e:
-            return f"the reply is not valid Python ({e.msg}, line {e.lineno})"
-        for s in specs:
-            node = _find(text, s.name)
-            if node is None:
-                return f"the reply holds no function named `{s.name}`"
-            if _param_names(node) != s.params():
-                return f"the parameters of `{s.name}` must be exactly ({', '.join(s.params())})"
-        return ""
-
     async def _repair_module(self, specs: list[Spec], record: dict[str, Any]) -> None:
-        """The functions that failed their repairs are left to the repair of the whole module (at most ``module_repairs``
-        requests): the model is shown the module, the failed functions with what is wrong, and the names of the functions
-        that already pass, which must keep passing. Every function is checked again afterwards; a repair that breaks a
-        function that passed is undone."""
+        """The functions that failed their repairs are left to a focused repair (at most ``module_repairs`` requests): the
+        model is shown the module for context, the failed functions with what is wrong, and the names of the functions that
+        already pass, which are not to be touched. It is asked for the failed functions only (and the helpers they need), and
+        each is spliced into the module in place (:func:`replace_function`): every function that passes stays exactly as it
+        is, byte for byte. A module-level cause is reached only through what a spliced reply adds (an import, a helper
+        function or a constant the module does not have yet). Every function is checked again afterwards; a repair that
+        breaks a function that passed is undone."""
         if "module" not in self.prompts:
             return
         while failing(record) and int(record.get("module_repairs") or 0) < self.module_repairs:
@@ -1435,10 +1510,18 @@ class FunctionFiller:
             except Exception as e:  # noqa: BLE001 -- a request that failed is a repair that did not happen
                 self.log.warning("[implement] the repair of the module could not be asked for: %r", e)
                 continue
-            new = self._with_labels(reply_code(reply), specs)
-            why = self._module_ok(new, specs)
-            if why:
-                self.log.warning("[implement] the repair of the module was not used: %s", why)
+            code = reply_code(reply)
+            new, refused = source, []
+            for s_ in specs:
+                if record["functions"][s_.name]["status"] != FAILED:
+                    continue
+                got, why = replace_function(new, s_.name, code, signature=s_.signature, equation=s_.equation)
+                if got is None:
+                    refused.append(f"{s_.name}: {why}")
+                else:
+                    new = got
+            if new == source:
+                self.log.warning("[implement] the repair of the module was not used: %s", "; ".join(refused) or "it changed nothing")
                 continue
             self.model_path.write_text(new.rstrip("\n") + "\n", encoding="utf-8")
             known = _dumps(new)

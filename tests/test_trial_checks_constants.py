@@ -68,8 +68,13 @@ def test_a_true_value_that_is_nowhere_in_the_plan_is_still_not_checked_and_says_
 
 
 def test_the_plan_check_accepts_a_constant_and_a_computable_formula():
-    assert protocol_check.metric_notes(_protocol("Ea_true")) == []
-    assert protocol_check.metric_notes(_protocol("2 * Ea_true")) == []
+    # The fixture states no interval multiplier (`degrees_of_freedom`), which has its own note; this test pins only that
+    # no note is made about the true value.
+    def about_the_true_value(truth):
+        return [n for n in protocol_check.metric_notes(_protocol(truth)) if "degrees_of_freedom" not in n]
+
+    assert about_the_true_value("Ea_true") == []
+    assert about_the_true_value("2 * Ea_true") == []
 
 
 def test_a_planted_miscalibration_of_a_constant_true_value_is_caught():

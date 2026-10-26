@@ -308,6 +308,11 @@
       <div class="fi-banner fi-banner-info"><b>Paused for clarification.</b> Fill in the answers below to resume.</div>
       <form id="clarify-form" class="fi-form" onsubmit="return submitClarify(event)"></form>
     </div>
+    <!-- Study panel: the studies the topic could mean, to pick one -->
+    <div id="scope-section" class="hidden col-span-1 md:col-span-12 bg-surface-mid cyber-border p-6 rounded-xl flex-col gap-4">
+      <div class="fi-banner fi-banner-info"><b>Pick the study to run.</b> Choose one, change its question, or write your own.</div>
+      <form id="scope-form" class="fi-form" onsubmit="return submitScope(event)"></form>
+    </div>
     <!-- Human-review panel -->
     <div id="human-review-section" class="hidden col-span-1 md:col-span-12 bg-surface-mid cyber-border p-6 rounded-xl flex-col gap-4">
       <div class="fi-banner fi-banner-warning"><b>Paused for human review.</b> Confirm the verdict, reject, or refine with feedback to resume.</div>
@@ -579,7 +584,7 @@
     // panels). That covers supply pauses (drop files → Resume), crashed /
     // incomplete quests, AND finished quests — so a setting changed via Update
     // can be re-run. Never without config.yaml.
-    const answerPause = data.pending_clarify || !!data.pending_human_review;
+    const answerPause = data.pending_clarify || !!data.pending_scope || !!data.pending_human_review;
     const resumable = !data.alive && data.has_config && !answerPause;
     const resumeBtn = document.getElementById('resume-btn');
     // Redoing a step is open at an ANSWER pause too (a paper waiting for review can be written again): the menu shows,
@@ -622,6 +627,12 @@
       loadClarifyPanel();
     } else {
       const sec = document.getElementById('clarify-section');
+      sec.classList.add('hidden'); sec.classList.remove('flex');
+    }
+    if (data.pending_scope) {
+      loadScopePanel();
+    } else {
+      const sec = document.getElementById('scope-section');
       sec.classList.add('hidden'); sec.classList.remove('flex');
     }
     if (data.pending_human_review) {
@@ -900,6 +911,8 @@
   function jumpToAnswerForm() {
     const target = !document.getElementById('clarify-section').classList.contains('hidden')
       ? 'clarify-section'
+      : !document.getElementById('scope-section').classList.contains('hidden')
+      ? 'scope-section'
       : (!document.getElementById('human-review-section').classList.contains('hidden')
           ? 'human-review-section' : null);
     if (target) document.getElementById(target).scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -1605,6 +1618,89 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
     submit.innerHTML = '<button type="submit" class="bg-gradient-to-r from-primary-container to-secondary-container text-white px-6 py-3 rounded font-label-sm text-label-sm uppercase">Resume with these answers</button>';
     form.appendChild(submit);
     form.dataset.loaded = '1';
+  }
+  async function loadScopePanel() {
+    const sec = document.getElementById('scope-section');
+    sec.classList.remove('hidden'); sec.classList.add('flex');
+    const form = document.getElementById('scope-form');
+    if (form.dataset.loaded === '1') return;
+    const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/scope`);
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!data.pending) return;
+    const cards = ((data.questions || {}).study || {}).cards || [];
+    form.innerHTML = '';
+    const line = (label, text) => {
+      if (!text || (Array.isArray(text) && !text.length)) return null;
+      const d = document.createElement('div'); d.className = 'text-sm opacity-80';
+      d.textContent = label + ': ' + (Array.isArray(text) ? text.join('; ') : text); return d;
+    };
+    cards.forEach((card, i) => {
+      const fs = document.createElement('fieldset');
+      const label = document.createElement('label'); label.className = 'flex items-start gap-2';
+      const radio = document.createElement('input'); radio.type = 'radio'; radio.name = 'study'; radio.value = String(i + 1);
+      if (i === 0) radio.checked = true;
+      const box = document.createElement('div');
+      const title = document.createElement('div'); title.className = 'font-bold'; title.textContent = (i + 1) + '. ' + (card.question || '');
+      box.appendChild(title);
+      for (const d of [
+        line('Kind', card.study_type === 'find_best_design' ? 'find the best design' : 'measure and compare'),
+        line('Reports', card.main_results), line('Varies', card.compared_settings),
+        line('Run time', card.run_time),
+      ]) if (d) box.appendChild(d);
+      for (const lit of (card.literature || [])) {
+        const d = document.createElement('div'); d.className = 'text-sm opacity-80';
+        d.textContent = 'Literature: ' + (lit.says || '') + ' [' + (lit.source || '') + ']'; box.appendChild(d);
+      }
+      label.appendChild(radio); label.appendChild(box); fs.appendChild(label);
+      const edit = document.createElement('input'); edit.type = 'text'; edit.dataset.edit = String(i + 1);
+      edit.placeholder = "Change this study's question (optional)"; edit.className = 'mt-2 w-full';
+      fs.appendChild(edit);
+      form.appendChild(fs);
+    });
+    const own = document.createElement('fieldset');
+    const ownLabel = document.createElement('label'); ownLabel.className = 'flex items-start gap-2';
+    const ownRadio = document.createElement('input'); ownRadio.type = 'radio'; ownRadio.name = 'study'; ownRadio.value = 'own';
+    const ownText = document.createElement('span'); ownText.textContent = 'Write my own';
+    ownLabel.appendChild(ownRadio); ownLabel.appendChild(ownText); own.appendChild(ownLabel);
+    const ownBox = document.createElement('input'); ownBox.type = 'text'; ownBox.dataset.own = '1';
+    ownBox.placeholder = 'The study you want, in a sentence'; ownBox.className = 'mt-2 w-full';
+    ownBox.oninput = () => { ownRadio.checked = true; };
+    own.appendChild(ownBox); form.appendChild(own);
+    const submit = document.createElement('div');
+    submit.innerHTML = '<button type="submit" class="bg-gradient-to-r from-primary-container to-secondary-container text-white px-6 py-3 rounded font-label-sm text-label-sm uppercase">Run this study</button>';
+    form.appendChild(submit);
+    form.dataset.cards = JSON.stringify(cards);
+    form.dataset.loaded = '1';
+  }
+  async function submitScope(ev) {
+    ev.preventDefault();
+    const form = document.getElementById('scope-form');
+    const cards = JSON.parse(form.dataset.cards || '[]');
+    const picked = form.querySelector('input[name="study"]:checked');
+    let study;
+    if (!picked) { alert('Pick a study first.'); return false; }
+    if (picked.value === 'own') {
+      study = form.querySelector('input[data-own]').value.trim();
+      if (!study) { alert('Write the study you want, or pick one of the cards.'); return false; }
+    } else {
+      const n = parseInt(picked.value, 10);
+      const edited = (form.querySelector(`input[data-edit="${n}"]`).value || '').trim();
+      study = edited ? Object.assign({}, cards[n - 1], { question: edited }) : n;
+    }
+    const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/scope`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ answers: { study } }) });
+    if (!res.ok) { alert('Submit failed: ' + await res.text()); return false; }
+    form.dataset.loaded = '0';
+    const payload = await res.json().catch(() => ({}));
+    // A run that is not waiting for it (it stopped, or the server restarted) goes on from where it stopped.
+    if (payload && !payload.run_waiting) {
+      try {
+        await fetch(`/api/quests/${encodeURIComponent(questId)}/resume`, { method: 'POST' });
+        if (!pollHandle) pollHandle = setInterval(refresh, 3000);
+      } catch (_) {}
+    }
+    refresh();
+    return false;
   }
   async function submitClarify(ev) {
     ev.preventDefault();

@@ -17,6 +17,12 @@ with none of the words that hedge or deny it, and only when the record says the 
 types for it is a typed number: ``core/typed_numbers.py`` finds it.)
 
 When unsure, nothing is flagged: a missing record, an unreadable one or a sentence with any hedge in it gives no hit.
+
+The reading of the sentence is a reading of free text, so it can flag a sentence that says what the record says (in live
+quests it flagged "the best design found is the baseline" and "nothing ... is validated against that known answer"). So a
+hit never stops the quest: the paper is written again with the contradiction named, and a sentence still flagged after
+those rewrites is taken out of the paper (:func:`take_out`) and listed in QUALITY.md. A claim the records contradict is
+never delivered either way, and a sentence flagged wrongly costs that sentence, not the paper.
 """
 
 from __future__ import annotations
@@ -25,6 +31,8 @@ import re
 from typing import Any
 
 HIT = "record_contradiction"
+#: What FI took out of the paper after its rewrites (QUALITY.md prints it).
+TAKEN_OUT = ".fi/record_claims_taken_out.json"
 
 _OPTIMISED = re.compile(
     r"\b(?:optimi[sz]ed|optimal|optimum|best|improved)\s+(?:design|configuration|geometry|layout|setting|solution|shape|"
@@ -110,7 +118,39 @@ def contradictions(paper_md: str, *, best_design: Any = None, optimum_check: Any
     """The must-fix hits for what ``paper_md`` claims against FI's records, each starting ``record_contradiction:`` and
     saying in plain words what the paper says, what the record says and what to do. Empty when nothing is contradicted.
     ``figures_on_disk``: the file names of the figures the run drew (``None``: not known, so no figure is judged)."""
-    hits: list[str] = []
+    return [hit for hit, _span in found(paper_md, best_design=best_design, optimum_check=optimum_check, oracle=oracle,
+                                        figures_on_disk=figures_on_disk)]
+
+
+def take_out(paper_md: str, spans: list[str]) -> tuple[str, list[str]]:
+    """``paper_md`` with each of ``spans`` (a sentence, or a figure's image line, as :func:`found` gives them) taken out
+    once, and the spans that were there. An image line goes with its whole line; a sentence leaves the rest of its line."""
+    text, taken = paper_md or "", []
+    for span in spans:
+        if not span or span not in text:
+            continue
+        if span.startswith("!["):
+            lines = text.splitlines(keepends=True)
+            at = next((i for i, line in enumerate(lines) if span in line), None)
+            if at is None:
+                continue
+            del lines[at]
+            text = "".join(lines)
+        else:
+            at = text.index(span)
+            end = at + len(span)
+            while end < len(text) and text[end] in " \t":
+                end += 1
+            text = text[:at] + text[end:]
+        taken.append(span)
+    return text, taken
+
+
+def found(paper_md: str, *, best_design: Any = None, optimum_check: Any = None, oracle: Any = None,
+          figures_on_disk: set[str] | None = None) -> list[tuple[str, str]]:
+    """:func:`contradictions`, each hit with the text of the paper it is about (the sentence, or the figure's image), so
+    that text can be taken out (:func:`take_out`)."""
+    hits: list[tuple[str, str]] = []
     sentences = _sentences(paper_md)
 
     # (a) a design called optimised, improved or best when the record says it did not beat the baseline.
@@ -118,8 +158,8 @@ def contradictions(paper_md: str, *, best_design: Any = None, optimum_check: Any
     if why_not:
         for s in sentences:
             if _asserted(s, _OPTIMISED) and not _SAME_AS_BASELINE.search(s):
-                hits.append(f"{HIT}: the paper says \"{_shown(s)}\", but FI's record of the search says {why_not}. "
-                            "Remove the claim, or say plainly what the record shows (no better design was found).")
+                hits.append((f"{HIT}: the paper says \"{_shown(s)}\", but FI's record of the search says {why_not}. "
+                             "Remove the claim, or say plainly what the record shows (no better design was found).", s))
                 break
 
     # (b) a figure the run did not draw, or one captioned as the optimised design when there is none.
@@ -128,15 +168,17 @@ def contradictions(paper_md: str, *, best_design: Any = None, optimum_check: Any
             path = m.group(2).strip()
             name = path.replace("\\", "/").rsplit("/", 1)[-1]
             if "figures/" in path.replace("\\", "/") and name and name not in figures_on_disk:
-                hits.append(f"{HIT}: the paper shows {path}, but the run drew no figure of that name (FI's record of the "
-                            "run's figures does not have it). Take the figure out, or show one the run drew.")
+                hits.append((f"{HIT}: the paper shows {path}, but the run drew no figure of that name (FI's record of "
+                             "the run's figures does not have it). Take the figure out, or show one the run drew.",
+                             m.group(0)))
     if why_not:
-        captions = [m.group(1) for m in _IMAGE.finditer(paper_md or "")] + [
-            s for s in sentences if _CAPTION.match(s)]
-        for c in captions:
+        captions = [(m.group(1), m.group(0)) for m in _IMAGE.finditer(paper_md or "")] + [
+            (s, s) for s in sentences if _CAPTION.match(s)]
+        for c, span in captions:
             if _asserted(c, _CAPTION_OPTIMISED):
-                hits.append(f"{HIT}: a figure is captioned \"{_shown(c)}\", but FI's record of the search says {why_not}, "
-                            "so no optimised design was computed to draw. Take the figure out, or caption what it does show.")
+                hits.append((f"{HIT}: a figure is captioned \"{_shown(c)}\", but FI's record of the search says "
+                             f"{why_not}, so no optimised design was computed to draw. Take the figure out, or caption "
+                             "what it does show.", span))
                 break
 
     # (c) validated or confirmed against known answers while those checks are recorded as unconfirmed or failed.
@@ -144,8 +186,8 @@ def contradictions(paper_md: str, *, best_design: Any = None, optimum_check: Any
     if status in _UNCONFIRMED_ORACLE:
         for s in sentences:
             if _asserted(s, _VALIDATED):
-                hits.append(f"{HIT}: the paper says \"{_shown(s)}\", but FI's record of the known-answer checks says they "
-                            "were unconfirmed or failed (needs/ORACLE_CHECK.json). Do not call the result validated or "
-                            "confirmed against known answers; say plainly that those checks did not pass.")
+                hits.append((f"{HIT}: the paper says \"{_shown(s)}\", but FI's record of the known-answer checks says "
+                             "they were unconfirmed or failed (needs/ORACLE_CHECK.json). Do not call the result validated "
+                             "or confirmed against known answers; say plainly that those checks did not pass.", s))
                 break
     return hits

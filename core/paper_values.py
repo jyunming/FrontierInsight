@@ -20,6 +20,11 @@ The grammar::
                FI setting by setting, e.g. ``below <metric2> at all 5 values of sigma (0.914 to 0.927 times <metric2>)``;
                "within" means the reference lies inside the measured value's 95% interval at that setting
 
+A quantity the plan names and no trial returns, which the analysis works out across the settings (a threshold, a fit
+parameter: one value for the whole study), is placed as ``{{v:<metric>}}`` with no ``@``: FI reads it from the result it
+recorded for the run (``.fi/analysis_answers.json``, :func:`write_answers`), the value under that exact plan name and no
+other. It has one form (the value, with ``| %`` for a percent); it has no settings to name.
+
 Naming every axis is deliberate: a key that left one out would render a pooled number that reads like a per-setting
 one. Pooling is defined once: the trials of the matching settings are concatenated (Wilson interval for a 0/1 value,
 t interval otherwise, :mod:`core.trial_table`); ``sd`` is the pooled within-setting SD, sqrt(sum((n_i - 1) s_i^2) /
@@ -27,7 +32,8 @@ sum(n_i - 1)), not the SD of the concatenated trials.
 
 A key FI cannot fill (an unknown metric, form or axis value, an axis left out, a record that lacks the data) renders
 ``not recorded`` and is reported as a :class:`Hit`; it is never filled with a guess. No number is read from the
-analysis script's output: only the trials and the plan.
+analysis script's output except a plan metric no trial returns, by its exact name (above): the rest comes from the trials
+and the plan.
 
 Nothing here knows what a metric or an axis means; the names are the plan's.
 """
@@ -52,7 +58,14 @@ from . import trial_table as _tt
 
 NOT_RECORDED = "not recorded"
 FORMS = ("mean", "mean_ci", "ci", "pm", "sd", "sd_ci", "se", "n", "count", "failed", "ref", "corr", "corr_ci")
+#: Which statistic of the quantity each form renders: ``mean`` is the quantity's own value (alone or with its interval), the
+#: others are a spread, a count, a reference or a correlation. The paper places a quantity when a key renders its ``mean``.
+FORM_STATISTIC = {"mean": "mean", "mean_ci": "mean", "ci": "mean", "pm": "mean", "sd": "sd", "sd_ci": "sd", "se": "se",
+                  "n": "count", "count": "count", "failed": "count", "ref": "reference", "corr": "corr", "corr_ci": "corr"}
 OPS = ("diff", "ratio", "rel_diff")
+#: The reducers whose result is a value of the quantity (its lowest, highest or widest); the others (``argmin``, ``argmax``,
+#: ``count_where``) give a setting or a count.
+VALUE_REDUCERS = ("min", "max", "range", "max_abs")
 REDUCERS = ("min", "max", "range", "max_abs", "argmin", "argmax", "count_where")
 VS = "vs"
 #: The forms ``vs`` can judge, and the interval form it judges them by (a comparison is decided by the interval, never by a
@@ -306,6 +319,12 @@ class Records:
     unread: tuple[str, ...] = ()
     #: The quantities FI left out of the results (name -> the check's note); no key reads one (:func:`left_out_of`).
     left_out: dict[str, str] = field(default_factory=dict)
+    #: The plan's quantities that no trial returned and the analysis recorded one value for (name -> value): placed without
+    #: settings, ``{{v:<name>}}`` (:func:`write_answers`).
+    answers: dict[str, float] = field(default_factory=dict)
+    #: The same kind of quantity when the analysis ran more than once (one run per replicate seed) and gave different values:
+    #: name -> [(run, value)]. No single value stands for the study, so no key fills it (:meth:`fillable`).
+    by_run: dict[str, list[tuple[str, float]]] = field(default_factory=dict)
     _refs_cache: dict[str, Any] = field(default_factory=dict)
     _alias_cache: dict[str, str] | None = None
     #: The topic as the person wrote it: its numbers may be used in a ``{{calc:...}}``, as they may be typed.
@@ -314,12 +333,56 @@ class Records:
     #: never change; the axes depend on ``unread`` too). A study with values compared inside each run has a record per
     #: value: a real one had 455,292, and each key worked these out again over all of them.
     _derived: dict[Any, Any] = field(default_factory=dict)
+    #: The seed each trial ran on, from FI's ledger: ``{setting key: {trial number: seed}}``. Empty without a ledger.
+    seeds: dict[str, dict[int, int]] = field(default_factory=dict)
+
+    def seeds_of(self, cell: dict[str, Any]) -> dict[int, int]:
+        """The seeds of the trials behind ``cell``. The record of a value compared inside each run is the run's own
+        setting with that value added to its key; the trials, and so the seeds, are the setting's."""
+        key = str(cell.get("key"))
+        if key not in self.seeds and isinstance(cell.get("level"), dict) and cell["level"]:
+            key = ",".join(key.split(",")[: -len(cell["level"])])
+        return self.seeds.get(key, {})
+
+    def share_draws(self, cells: list[dict[str, Any]]) -> bool:
+        """Whether two of ``cells`` ran a trial on the same seed (FI's ledger): their trials are then not independent
+        repeats, so one interval over all their trials would be narrower than the data allow."""
+        used: set[int] = set()
+        for c in cells:
+            mine = set(self.seeds_of(c).values())
+            if used & mine:
+                return True
+            used |= mine
+        return False
 
     def _once(self, name: str, make: Any) -> Any:
         key = (name, self.unread)
         if key not in self._derived:
             self._derived[key] = make()
         return self._derived[key]
+
+    def fillable(self) -> set[str]:
+        """The names a key can fill: the quantities the trials recorded and the analysis's single recorded values, never
+        one FI left out. The one set the sheet, the keys and the review's check of what the paper places all use."""
+        return {m for m in (*self.metrics(), *self.answers) if m not in self.left_out and self._fills(m)}
+
+    def _fills(self, metric: str) -> bool:
+        """Whether at least one key for ``metric`` fills: the key is tried through :func:`resolve`, the one path that fills
+        keys (the quantity pooled over every setting first, then each setting a trial recorded), so a quantity whose every
+        value is missing or not a number is not one."""
+        if metric in self.answers:
+            return resolve(placeholder(metric), self).filled
+        axes = {a: vs for a, vs in self.axes().items()}
+        tries = [{a: Pick("all") for a in axes}]
+        seen: set[str] = set()
+        for c in self.carrying(metric):
+            where = {a: c["cell"][a] for a in axes if a in c["cell"]}
+            mark = json.dumps(where, default=str, sort_keys=True)
+            if mark not in seen and all(_addressable(v) for v in where.values()):
+                seen.add(mark)
+                tries.append(where)
+        short = self.aliases()
+        return any(resolve(_line_key(metric, "mean", where, short), self).filled for where in tries)
 
     def carrying(self, metric: str | None) -> list[dict[str, Any]]:
         """The cells that carry ``metric`` (every cell for ``None``), in the record's order."""
@@ -479,7 +542,26 @@ def load(quest_root: Path | str, protocol: dict[str, Any] | None = None,
     except (OSError, ValueError):
         return None
     cells = data.get("cells") if isinstance(data, dict) else None
-    return from_cells(cells, protocol, unread, left_out) if isinstance(cells, list) else None
+    rec = from_cells(cells, protocol, unread, left_out) if isinstance(cells, list) else None
+    if rec is not None:
+        rec.seeds = _ledger_seeds(Path(quest_root))
+    return rec
+
+
+def _ledger_seeds(root: Path) -> dict[str, dict[int, int]]:
+    """The seed of each trial from FI's ledger, ``{setting key: {trial number: seed}}``; empty without a readable ledger
+    (the trials are then taken as independent)."""
+    try:
+        from . import disclosure as _disclosure
+
+        got = _disclosure._ledger_rows(root)
+    except Exception:  # noqa: BLE001
+        return {}
+    out: dict[str, dict[int, int]] = {}
+    for (cell, trial), (_status, seed) in (got[1].items() if got else ()):
+        if seed is not None:
+            out.setdefault(cell, {})[trial] = seed
+    return out
 
 
 def _exact(value: Any) -> Any:
@@ -620,6 +702,91 @@ def _matching(rec: Records, where: dict[str, Pick], metric: str) -> list[dict[st
 
 def _trials(cells: list[dict[str, Any]], metric: str) -> list[float]:
     return [v for c in cells for v in _tt._values(c["metrics"][metric])]
+
+
+def _draw_key(rec: Records, c: dict[str, Any], ids: Any, i: int) -> Any:
+    """The random draw behind the ``i``-th value of a cell's metric: its seed in FI's ledger, else a draw of its own (a
+    trial with no recorded seed, or a record that does not say which trial each value is)."""
+    seed = rec.seeds_of(c).get(ids[i]) if ids is not None else None
+    return seed if seed is not None else ("own", str(c.get("key")), i)
+
+
+def _finite(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(float(v))
+
+
+def _per_draw(rec: Records, cells: list[dict[str, Any]], metric: str) -> list[float]:
+    """One value per different random draw behind ``metric`` in ``cells``: the mean of the trials that ran on one seed
+    (FI's ledger), in any setting."""
+    groups: dict[Any, list[float]] = {}
+    for c in cells:
+        m = c["metrics"].get(metric)
+        raw = m.get("values") if isinstance(m, dict) else None
+        ids = m.get("trials") if isinstance(m, dict) else None
+        if not isinstance(raw, (list, tuple)):
+            continue
+        ids = ids if isinstance(ids, (list, tuple)) and len(ids) == len(raw) else None
+        for i, v in enumerate(raw):
+            if _finite(v):
+                groups.setdefault(_draw_key(rec, c, ids, i), []).append(float(v))
+    return [sum(g) / len(g) for g in groups.values()]
+
+
+def _per_draw_pairs(rec: Records, cells: list[dict[str, Any]], a: str, b: str) -> tuple[list[float], list[float]]:
+    """The pairs ``(a, b)`` of the trials of ``cells``, one pair per different random draw: the means of ``a`` and of ``b``
+    over the trials that ran on one seed."""
+    groups: dict[Any, list[tuple[float, float]]] = {}
+    for c in cells:
+        if a not in c["metrics"] or b not in c["metrics"]:
+            raise _Unfilled(f"{b} is not recorded in every setting that records {a}")
+        ma, mb = c["metrics"][a], c["metrics"][b]
+        ra, rb = ma.get("values"), mb.get("values")
+        ia, ib = ma.get("trials"), mb.get("trials")
+        if not (isinstance(ra, (list, tuple)) and isinstance(rb, (list, tuple))) or len(ra) != len(rb):
+            raise _Unfilled(f"{a} and {b} do not have one value per trial in the same trials, so they cannot be paired")
+        # The two values of one trial are matched by the trial number the record gives each; with no such numbers, or
+        # numbers that repeat or do not match, they cannot be matched and there is no interval: never by position.
+        if not (isinstance(ia, (list, tuple)) and isinstance(ib, (list, tuple)) and len(ia) == len(ra) and len(ib) == len(rb)
+                and len(set(ia)) == len(ia) and len(set(ib)) == len(ib)):
+            raise _Unfilled(f"{a} and {b} do not say which trial each value is, so they cannot be paired by draw")
+        by_b = dict(zip(ib, rb))
+        ids = list(ia)
+        for i, (t, x) in enumerate(zip(ia, ra)):
+            y = by_b.get(t)
+            if _finite(x) and _finite(y):
+                groups.setdefault(_draw_key(rec, c, ids, i), []).append((float(x), float(y)))
+    xs = [sum(p[0] for p in g) / len(g) for g in groups.values()]
+    ys = [sum(p[1] for p in g) / len(g) for g in groups.values()]
+    return xs, ys
+
+
+def _observations(rec: Records, cells: list[dict[str, Any]], metric: str) -> tuple[list[float], bool]:
+    """The observations the statistics of ``metric`` over ``cells`` use, and whether they are draws. Settings that ran
+    trials on the same seed (FI's ledger) are not independent repeats: each different draw is one observation (the mean
+    of the trials that ran on it). Otherwise every trial is one."""
+    if len(cells) > 1 and rec.share_draws(cells):
+        return _per_draw(rec, cells, metric), True
+    return _trials(cells, metric), False
+
+
+def _interval(rec: Records, cells: list[dict[str, Any]], metric: str) -> tuple[float, float | None, float | None, str, int | None, bool, float | None]:
+    """``(mean, lower, upper, method, n, symmetric, standard error)`` of ``metric`` over ``cells``, from
+    :func:`_observations`. With shared draws it is a t interval over the different draws (also for a 0/1 value: the
+    draws' proportions); with fewer than two draws there is no interval."""
+    obs, shared = _observations(rec, cells, metric)
+    summary = _tt.summary(obs)
+    if shared:
+        if len(obs) < 2:
+            raise _Unfilled("the settings share their random draws and fewer than two different draws gave a value, "
+                            "so there is no interval")
+        se = summary["sd"] / math.sqrt(len(obs))
+        half = _stats._t95(len(obs) - 1) * se
+        return (summary["mean"], summary["mean"] - half, summary["mean"] + half,
+                f"95% t interval over {len(obs)} different random draws, which the settings share", None, True, se)
+    lo, hi, how = _tt.interval(summary)
+    se = summary["sd"] / math.sqrt(summary["n"]) if summary["n"] >= 2 else None
+    return (summary["mean"], lo, hi, "95% Wilson interval" if how == "Wilson" else f"95% {how}", summary["n"],
+            how != "Wilson", se)
 
 
 def _setting_values(cells: list[dict[str, Any]], metric: str) -> list[float] | None:
@@ -791,31 +958,47 @@ def _measure(rec: Records, metric: str, form: str, arg: str, where: dict[str, Pi
             raise _Unfilled(f"{metric} is not a 0/1 value, so there is no count of successes")
         return Measured(summary["mean"], "count", n=summary["n"], successes=int(summary["successes"]))
     if form == "mean":
-        return Measured(summary["mean"])
+        return Measured(_tt.summary(_observations(rec, cells, metric)[0])["mean"])
     if form in ("mean_ci", "ci", "pm"):
-        lo, hi, how = _tt.interval(summary)
+        mean, lo, hi, words, n, symmetric, _se = _interval(rec, cells, metric)
         if lo is None or hi is None:
             raise _Unfilled("too few trials for an interval")
-        words = "95% Wilson interval" if how == "Wilson" else f"95% {how}"
-        return Measured(summary["mean"], "interval", lo, hi, words, summary["n"], symmetric=how != "Wilson")
+        return Measured(mean, "interval", lo, hi, words, n, symmetric=symmetric)
     if form == "se":
-        if summary["n"] < 2:
+        _mean, _lo, _hi, _words, _n, _sym, se = _interval(rec, cells, metric)
+        if se is None:
             raise _Unfilled("fewer than two trials, so there is no standard error")
-        return Measured(summary["sd"] / math.sqrt(summary["n"]))
+        return Measured(se)
     if form in ("sd", "sd_ci"):
-        sd, dof = _pooled_sd(cells, metric)
+        sd, df = _pooled_sd(cells, metric)
         if form == "sd":
             return Measured(sd)
-        return Measured(sd, "interval", sd * math.sqrt(dof / chi2_quantile(0.975, dof)),
-                        sd * math.sqrt(dof / chi2_quantile(0.025, dof)), "95% chi-square interval", summary["n"])
-    xs, ys = _paired(cells, metric, arg)
+        obs, shared = _observations(rec, cells, metric)
+        if shared:
+            # the settings ran on the same draws: the spread, and the interval of it, are those of the draws' values
+            if len(obs) < 2:
+                raise _Unfilled("the settings share their random draws and fewer than two different draws gave a value, "
+                                "so there is no interval")
+            sd, df = _tt.summary(obs)["sd"], len(obs) - 1
+            if not sd > 0:
+                raise _Unfilled("the different random draws all gave one value, so there is no interval of its spread")
+        return Measured(sd, "interval", sd * math.sqrt(df / chi2_quantile(0.975, df)),
+                        sd * math.sqrt(df / chi2_quantile(0.025, df)),
+                        "95% chi-square interval" + (f" over {len(obs)} different random draws, which the settings share" if shared else ""),
+                        None if shared else summary["n"])
+    shared = len(cells) > 1 and rec.share_draws(cells)
+    xs, ys = _per_draw_pairs(rec, cells, metric, arg) if shared else _paired(cells, metric, arg)
+    if shared and len(xs) < 2:
+        raise _Unfilled("the settings share their random draws and fewer than two different draws gave a pair")
     r = _pearson(xs, ys)
     if form == "corr":
         return Measured(r)
     if len(xs) < 4:
-        raise _Unfilled("too few paired trials for an interval")
+        raise _Unfilled("too few paired " + ("draws" if shared else "trials") + " for an interval")
     z, half = math.atanh(r), 1.96 / math.sqrt(len(xs) - 3)
-    return Measured(r, "interval", math.tanh(z - half), math.tanh(z + half), "95% Fisher interval", len(xs))
+    return Measured(r, "interval", math.tanh(z - half), math.tanh(z + half),
+                    "95% Fisher interval" + (f" over {len(xs)} different random draws, which the settings share" if shared else ""),
+                    None if shared else len(xs))
 
 
 def _combine(key: Key, a: Measured, b: float) -> Measured:
@@ -889,8 +1072,16 @@ def _reduce(rec: Records, key: Key) -> tuple[Measured, str]:
             fixed = {a: (Pick("value", combo[each.index(a)]) if a in each else p) for a, p in key.where.items()}
             cells = _matching(rec, fixed, key.metric)
             ref, ref_kind = _reference(rec, key.metric, cells)
-            s = _tt.summary(_trials(cells, key.metric))
-            lo, hi, _how = _tt.interval(s)
+            obs, shared = _observations(rec, cells, key.metric)
+            s = _tt.summary(obs)
+            if shared:
+                if len(obs) < 2:
+                    raise _Unfilled("the settings share their random draws and fewer than two different draws gave a "
+                                    "value, so there is no interval to compare with the reference")
+                half = _stats._t95(len(obs) - 1) * s["sd"] / math.sqrt(len(obs))
+                lo, hi = s["mean"] - half, s["mean"] + half
+            else:
+                lo, hi, _how = _tt.interval(s)
             k += _rbs.comparison(ref_kind, ref, m.value, lo, hi, s["n"]) == key.word
         return Measured(k, "words", words=_number_word(k)), "count"
     if r in ("min", "max"):
@@ -1017,7 +1208,10 @@ def _calc_text(x: float) -> str:
     if x == int(x) and abs(x) < 1e15:
         return str(int(x))
     text = sig(x, 4)
-    return _clean(text.rstrip("0").rstrip(".")) if "." in text and "e" not in text else text
+    if "e" in text:  # 1.500e-05 reads as 1.5e-05: the zeros of the mantissa say nothing
+        mantissa, _e, exponent = text.partition("e")
+        return (mantissa.rstrip("0").rstrip(".") if "." in mantissa else mantissa) + "e" + exponent
+    return _clean(text.rstrip("0").rstrip(".")) if "." in text else text
 
 
 def calc(expression: str, protocol: dict[str, Any] | None, topic: str = "") -> Value:
@@ -1087,6 +1281,9 @@ def resolve(text: str, rec: Records | None) -> Value:
     shown = shown[2:] if shown.startswith("v:") else shown
     if shown.startswith(CALC):
         return calc(shown[len(CALC):].strip(), rec.protocol if rec else None, rec.topic if rec else "")
+    answer = _answer(shown, rec)
+    if answer is not None:
+        return answer
     try:
         key = parse(shown)
         if rec is None or not rec.cells:
@@ -1208,6 +1405,12 @@ def records_of(quest_root: Path | str, protocol: dict[str, Any] | None) -> Recor
     rec = load(root, protocol, left_out=_checks.left_out_by_record(root))
     if rec is None or not rec.cells:
         return rec
+    # The plan's quantities no trial returned, which the analysis recorded one value for (never one FI left out).
+    planned = {str(m["id"]) for m in (protocol.get("metrics") if isinstance(protocol, dict) else None) or []
+               if isinstance(m, dict) and m.get("id")}
+    single, by_run = _read_answers(root)
+    rec.answers = {k: v for k, v in single.items() if k in planned and k not in rec.metrics() and k not in rec.left_out}
+    rec.by_run = {k: v for k, v in by_run.items() if k in planned and k not in rec.metrics() and k not in rec.left_out}
     try:
         from . import grid_keys as _grid_keys
 
@@ -1224,6 +1427,119 @@ def records_of(quest_root: Path | str, protocol: dict[str, Any] | None) -> Recor
     except Exception:  # noqa: BLE001 -- an axis FI cannot tell is unread counts as read: nothing is pooled by guess
         rec.unread = ()
     return rec
+
+
+#: Where FI keeps what the analysis recorded for the plan's quantities no trial returns.
+ANSWERS = Path(".fi") / "analysis_answers.json"
+
+
+def write_answers(quest_root: Path | str, result_json: Any, protocol: dict[str, Any] | None,
+                  runs: list[Any] | None = None, scheduled: int | None = None) -> list[str]:
+    """Keep, from each run of the analysis (``runs``: one result per replicate seed, as :class:`core.engine.Engine` publishes
+    them; ``result_json`` alone is one run), the number under each name the plan gives a quantity
+    (``protocol.metrics[].id``): the exact name and nothing matched by its words, after FI took out the quantities it left
+    out. ``scheduled`` is how many runs FI scheduled (a run that failed is not among ``runs`` and counts as missing). An empty
+    or missing result leaves the earlier record as it was (a run that failed recorded nothing). Returns the names kept."""
+    results = [r for r in (runs if runs and len(runs) > 1 else [result_json]) if isinstance(r, dict) and r]
+    if not results:
+        return []
+    ids = list(dict.fromkeys(str(m["id"]) for m in (protocol.get("metrics") if isinstance(protocol, dict) else None) or []
+                             if isinstance(m, dict) and m.get("id")))
+    rows = []
+    for n, result in enumerate(results):
+        values = {i: float(result[i]) for i in ids
+                  if isinstance(result.get(i), (int, float)) and not isinstance(result.get(i), bool)
+                  and math.isfinite(float(result[i]))}
+        rows.append({"run": str(result.get("_seed", n)), "values": values})
+    try:
+        path = Path(quest_root) / ANSWERS
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"scheduled": max(int(scheduled or 0), len(rows)), "runs": rows}, indent=1) + "\n", encoding="utf-8")
+    except OSError:
+        return []
+    return list(dict.fromkeys(k for row in rows for k in row["values"]))
+
+
+def _read_answers(quest_root: Path | str) -> tuple[dict[str, float], dict[str, list[tuple[str, float]]]]:
+    """``(single, by_run)``: a name every run of the analysis gave the same value for (one run always does), and a name the
+    runs gave different values for, or not all gave (a failed run counts as one that did not), with each run's value. The values are compared exactly, not within a tolerance: the conservative reading, so a difference in the last digit is a difference and no value is offered. Nothing is picked among different values."""
+    try:
+        data = json.loads((Path(quest_root) / ANSWERS).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}, {}
+    if isinstance(data, dict) and "runs" not in data and isinstance(data.get("values"), dict):
+        data = {"runs": [{"run": "0", "values": data["values"]}]}  # a record written before runs were kept: one run
+    runs = [r for r in (data.get("runs") if isinstance(data, dict) else None) or [] if isinstance(r, dict)]
+    scheduled = max(len(runs), int(data.get("scheduled") or 0)) if isinstance(data, dict) and runs else 0
+    per_name: dict[str, list[tuple[str, float]]] = {}
+    for r in runs:
+        for k, v in (r.get("values") if isinstance(r.get("values"), dict) else {}).items():
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(float(v)):
+                per_name.setdefault(str(k), []).append((str(r.get("run")), float(v)))
+    single: dict[str, float] = {}
+    by_run: dict[str, list[tuple[str, float]]] = {}
+    for name, found in per_name.items():
+        # Every run FI scheduled gave it, and the same number each time (compared exactly: the conservative reading, a
+        # difference in the last digit is a difference); a run that failed is missing, and then no value is offered.
+        if len(found) == scheduled and len({v for _, v in found}) == 1:
+            single[name] = found[0][1]
+        else:
+            by_run[name] = found
+    return single, by_run
+
+
+def _answer(shown: str, rec: Records | None) -> Value | None:
+    """The value of a key that names a quantity the analysis recorded one value for (``{{v:<name>}}``); ``None`` when the
+    key names no such quantity, so the settings' keys are read as always."""
+    if rec is None or not (rec.answers or rec.by_run):
+        return None
+    segments = [s.strip() for s in shown.split("|")]
+    head = segments[0].partition("@")[0]
+    metric = head.partition(":")[0].strip()
+    if metric in rec.by_run:
+        return Value(shown, NOT_RECORDED, Hit(shown, f"the analysis ran once per replicate and gave {metric} different "
+                                              f"values ({_by_run_text(rec.by_run[metric])}): FI offers no single value "
+                                              "for the study, so say it in words or leave it out"))
+    if metric not in rec.answers:
+        return None
+    value = rec.answers[metric]
+    if "@" in segments[0] or ":" in head or any(s != "%" for s in segments[1:]):
+        return Value(shown, NOT_RECORDED, Hit(shown, f"{metric} is one value for the whole study, worked out by the analysis "
+                                              f"across the settings: write it as {placeholder(metric)} (add | % for a "
+                                              "percent), with no settings, form, comparison or reducer"))
+    percent = "%" in segments[1:]
+    return Value(shown, fmt(Measured(value), "mean", percent), numbers=[value],
+                 inputs={"value": metric, "source": "the analysis's recorded result"})
+
+
+def _by_run_text(found: list[tuple[str, float]]) -> str:
+    return "; ".join(f"run {run}: {sig(v, 4)}" for run, v in found)
+
+
+def _places_value(key_text: str) -> str | None:
+    """The quantity a key renders the value of (its mean, with or without an interval, or the lowest, highest or widest of its
+    settings), else ``None``: a count, a spread, a reference, a correlation, a comparison or a setting is not the quantity."""
+    body = key_text.strip()
+    if body.startswith(CALC):
+        return None
+    segments = [x.strip() for x in body.split("|")]
+    if "@" not in segments[0]:  # the key of a value the analysis recorded: {{v:<name>}} or {{v:<name> | %}}
+        name = segments[0]
+        return name if name and ":" not in name and all(x == "%" for x in segments[1:]) else None
+    try:
+        key = parse(body)
+    except _Unfilled:
+        return None
+    if key.op or FORM_STATISTIC.get(key.form) != "mean" or (key.reducer and key.reducer not in VALUE_REDUCERS):
+        return None
+    return key.metric
+
+
+def placed_metrics(markdown: str) -> set[str]:
+    """The quantities the paper places with a key FI filled (a rendered key, or a key not yet rendered) that renders the
+    quantity's value (:func:`_places_value`, from the form table :data:`FORM_STATISTIC`), by name."""
+    unfilled = set(unfilled_in(markdown))
+    return {m for k in keys_in(markdown) if k not in unfilled and (m := _places_value(k))}
 
 
 def to_placeholders(markdown: str) -> str:
@@ -1351,6 +1667,28 @@ def _keys(lines: list[str]) -> int:
     return sum(1 for line in lines if line.startswith("- "))
 
 
+def _answers_block(rec: Records) -> str:
+    """The sheet's lines for the quantities the analysis worked out across the settings: one value for the whole study, a key
+    with no settings, the plan's label beside it. ``""`` when there are none."""
+    if not (rec.answers or rec.by_run):
+        return ""
+    labels = {str(m["id"]): str(m.get("label") or "") for m in (rec.protocol.get("metrics") if isinstance(rec.protocol, dict) else None) or []
+              if isinstance(m, dict) and m.get("id")}
+    lines = []
+    for name in [m for m in labels if m in rec.answers] + [m for m in rec.answers if m not in labels]:
+        shown = resolve(placeholder(name), rec)
+        lines.append(f"- {placeholder(name)} -> {shown.text}" + (f"  ({labels[name]})" if labels.get(name) else ""))
+    text = ""
+    if lines:
+        text = ("Worked out by the analysis across the settings (one value for the whole study; its key has no '@' and no "
+                "settings):\n" + "\n".join(lines) + "\n")
+    if rec.by_run:
+        text += ("Worked out once per replicate, with different values, so FI offers no key and no single value for the "
+                 "study (do not state one):\n" + "\n".join(
+                     f"- {name}: {_by_run_text(found)}" for name, found in rec.by_run.items()) + "\n")
+    return text
+
+
 def sheet(rec: Records | None, max_lines: int = SHEET_MAX_LINES, max_shown: int = SHEET_MAX_SHOWN) -> str:
     """The "Results you can place" block: for each value the trials recorded, a line per setting (the key and the value
     as FI will write it, with its SD and the plan's reference where there are any), then the pooled line of each axis.
@@ -1416,14 +1754,14 @@ def sheet(rec: Records | None, max_lines: int = SHEET_MAX_LINES, max_shown: int 
                             listed.add(line)
                             body.append(line)
                             room -= 1
-        return head + "\n" + "\n".join(body) + "\n" + _set_by_setting_line(rec, varied) + SHEET_GRAMMAR
+        return head + "\n" + "\n".join(body) + "\n" + _answers_block(rec) + _set_by_setting_line(rec, varied) + SHEET_GRAMMAR
     full = [line for m in names for line in parts[m][0]]
     pooled = list(dict.fromkeys(line for m in names for _, line in parts[m][2]))  # a line pinned to one value can also be the line of that value's own axis
     extremes = [line for m in names for line in parts[m][1]]
     body = full + ["Pooled (the trials of the other axes together; sd is the within-setting pooled SD):"] + pooled
     if sum(1 for line in body if line.startswith("- ")) > max_lines:
         body = ["Too many settings to list; the pooled lines and each value's extremes:"] + pooled + extremes
-    return head + "\n" + "\n".join(body) + "\n" + _set_by_setting_line(rec, varied) + SHEET_GRAMMAR
+    return head + "\n" + "\n".join(body) + "\n" + _answers_block(rec) + _set_by_setting_line(rec, varied) + SHEET_GRAMMAR
 
 
 # --- what the prompts say -------------------------------------------------------------------------------------------
@@ -1437,6 +1775,10 @@ paper is saved, so the reader sees the number.
 You may type only: a number the plan or the topic states, written exactly as the plan writes it (a setting, a true value, a
 nominal level, a constant of the method); the number of a figure, table, section or citation (Figure 2, Section 3, [4]); and a
 whole number from 0 to 10 inside a formula. A typed result, or any other typed number, is sent back to you.
+A number the method works out from the plan's numbers (a quantile, a cutoff or bound from a formula of the plan's constants, a
+reference value, a count from the grid) is not typed either: write {{calc:EXPR}} and FI computes it, also inside a formula.
+Build EXPR from the plan's numbers as the plan writes them, e.g. {{calc:1 - 0.05 / 2}} or, for a bound a / (b * c) - 1 of
+the plan's own a, b and c, {{calc:a / (b * c) - 1}} with their digits for a, b and c.
 How to write a key: {{v:<value> @ <where>}}. The value is a quantity from the list below. <where> names every setting the
 study varied, each as name=<value it took> (one setting), name=all (the trials of all its settings together) or name=each (kept
 apart, for a smallest, largest or range). Add :<form> after the value for another form of it (default is the mean). Add | % to
@@ -1449,6 +1791,8 @@ To say how a measured value compares with a theory or reference value, place {{v
 values of sigma (0.914 to 0.927 times ...)", or "consistent with" where the value's 95% interval holds it), setting by setting.
 Do not type above, below, larger, smaller, exceeds, within or equal for such a comparison; never set one pooled number beside
 another.
+A quantity listed under "Worked out by the analysis across the settings" is placed with its key as listed ({{v:<name>}}, no
+settings): it is the study's answer for that quantity, so place it where the paper gives that quantity.
 Numbers that are not available: a number that only the analysis script computed, and that no key on this list gives, is not
 available. The Analysis block above shows such numbers; do not copy any of them as digits. Use the key for the same quantity
 when the list has one, otherwise say it in words or leave it out."""

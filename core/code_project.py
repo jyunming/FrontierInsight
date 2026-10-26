@@ -24,6 +24,7 @@ from typing import Any
 from . import experiment_deps as _experiment_deps
 from .execution import scrub_secrets
 from .proc_tree import ProcessTree as _ProcessTree
+from . import mc_error as _mc_error
 from . import optimise_search as _search
 from . import split_run as _split_run
 from . import trial_runner as _trial_runner
@@ -133,7 +134,8 @@ def run_cell_child(study, index, out_path):
             kept, why = read_returned(value, levels, entry)
             if kept is None:
                 raise TypeError(why)
-            rows.append({"trial": trial, "ok": True, "values": kept})
+            rows.append({"trial": trial, "ok": True, "values": kept,
+                         **({WHY_MISSING: missing_reasons(value, kept)} if missing_reasons(value, kept) else {})})
         except BaseException as exc:
             if isinstance(exc, KeyboardInterrupt):
                 raise
@@ -166,18 +168,18 @@ def evaluate_child(spec_path, out_path):
     module = load_simulation()
     entry = spec["entry"]
     fn = getattr(module, entry)
+    levels = levels_of(spec.get("levels"))  # as the harness reads its spec (FI's evaluation names none)
     rows = []
     for trial in spec["trials"]:
         try:
             value = fn(dict(spec["cell"])) if entry == "run_cell" else fn(dict(spec["cell"]), trial["trial"], trial["seed"])
-            if not isinstance(value, dict) or not value:
-                raise TypeError(f"{entry}() must return a dict of numbers")
-            # None is a value that does not exist (the code writer's null), read as NaN as the trial harness reads it.
-            value = {k: float("nan") if v is None else v for k, v in value.items()}
-            bad = [k for k, v in value.items() if not is_number(v)]
-            if bad:
-                raise TypeError(f"{entry}() returned non-numbers for {bad[:5]}")
-            rows.append({"trial": trial["trial"], "ok": True, "values": {str(k): float(v) for k, v in value.items()}})
+            # Read as FI's trial harness reads it: None is a value that does not exist (NaN), the reasons under
+            # why_missing are kept on the row, and a per-value result is read when the spec names its levels.
+            kept, why = read_returned(value, levels, entry)
+            if kept is None:
+                raise TypeError(why)
+            reasons = missing_reasons(value, kept)
+            rows.append({"trial": trial["trial"], "ok": True, "values": kept, **({WHY_MISSING: reasons} if reasons else {})})
         except BaseException as exc:
             if isinstance(exc, KeyboardInterrupt):
                 raise
@@ -197,9 +199,19 @@ def search(study):
     base = int(study.get("base_seed") or 0)
     runs = 1 if entry == "run_cell" else int(study.get("runs_per_evaluation") or 1)
 
-    def scan(grid):
-        summary = run_trials({"entry": entry, "grid": grid, "runs_per_setting": runs, "base_seed": base,
-                              "paired": True, "thresholds": study.get("thresholds") or {}})
+    scanned = {}
+
+    def scan(grid, block=block):
+        # The scan's parts and what every evaluation goes through, as FI ran them (a part is not kept by JSON).
+        # The scan measures every alternative of a compared condition together: it runs once, and is read for the
+        # alternative each search starts (``block``).
+        key = json.dumps({k: list(v) for k, v in grid.items()}, sort_keys=True, default=str)
+        if key in scanned:
+            return fi_search.scan_rows(scanned[key], block)
+        summary = scanned[key] = run_trials({"entry": entry, "grid": dict(grid), "runs_per_setting": runs, "base_seed": base,
+                              "paired": True, "thresholds": study.get("thresholds") or {},
+                              "sub_studies": getattr(grid, "sub_studies", None) or block.get("sub_studies"),
+                              "in_each_run": block.get("in_each_run") or {}})
         (WORK / "raw" / "trials.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
         os.environ["FI_TRIALS"] = "raw/trials.json"
         return fi_search.scan_rows(summary, block)
@@ -219,7 +231,8 @@ def search(study):
 
     # A search FI stopped at its time limit is repeated to the same point, not further.
     outcome = fi_search.run_sync(block, evaluate, seed=base, method=study.get("method"), scan_step=scan,
-                                 max_evaluations=study.get("max_evaluations"), rounds=study.get("rounds"))
+                                 max_evaluations=study.get("max_evaluations"), rounds=study.get("rounds"),
+                                 results=study.get("results"))
     record = fi_search.best_design(outcome, block, seed=base, check=study.get("check_settings"))
     (WORK / "raw" / "optimisation_ledger.jsonl").write_bytes(
         ("\n".join(fi_search.ledger_lines(outcome, block)) + "\n").encode("utf-8"))
@@ -368,7 +381,7 @@ def study_of(code_dir: Path, protocol: dict[str, Any] | None, *, split: bool = T
     if not split or not simulate.is_file():
         return None
     entries = _trial_runner.entries(simulate)
-    entry = "run_trial" if "run_trial" in entries else "run_cell" if "run_cell" in entries else ""
+    entry = _trial_runner.study_entry(entries)
     if not entry:
         return None
     protocol = protocol or {}
@@ -398,14 +411,18 @@ def study_of(code_dir: Path, protocol: dict[str, Any] | None, *, split: bool = T
             "check_settings": {str(n): _optimisation_plan.check_levels(s if isinstance(s, dict) else {"search": s})[0]
                                for n, s in settings.items()},
         }
-        if evaluations.get("stopped_because") == "time" and isinstance(evaluations.get("search"), int):
-            study["max_evaluations"] = evaluations["search"]
-        # The rounds a person asked the search to continue with (core/optimise_refine.py): run.py continues it the same.
+        # The results FI's search compares (a design or an alternative that changes none of them), so run.py stops
+        # and skips the same way.
         from . import optimise as _optimise
 
+        study["results"] = _optimise.watched_results(protocol)
+        if evaluations.get("stopped_because") == "time" and isinstance(evaluations.get("search"), int):
+            study["max_evaluations"] = evaluations["search"]
+        # The rounds the search was continued with (a person's, core/optimise_refine.py, or FI's own while it was still
+        # improving, core/optimise.py): run.py continues it the same.
         rounds = _optimise.read_rounds(code_dir.parent, block)
         if rounds:
-            study["rounds"] = [{k: r[k] for k in ("added", "target", "search_target") if k in r} for r in rounds]
+            study["rounds"] = [{k: r[k] for k in ("added", "target", "search_target", "auto") if k in r} for r in rounds]
         return study
     grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
     sub_studies = getattr(_search.study_grid(protocol), "sub_studies", None)
@@ -418,7 +435,7 @@ def study_of(code_dir: Path, protocol: dict[str, Any] | None, *, split: bool = T
         **({"in_each_run": inside} if inside else {}),
         "runs_per_setting": int(protocol.get("runs_per_setting") or 1),
         "base_seed": 0,
-        "paired": any(isinstance(m, dict) and m.get("paired") for m in metrics),
+        "paired": _mc_error.paired(protocol, code_dir.parent),
         "thresholds": protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else {},
     }
 
@@ -659,7 +676,7 @@ def pin(python: Path | str, deps: list[str]) -> list[str]:
     return [f"{names[d]}=={versions[names[d]]}" if d in names and names[d] in versions else d for d in deps]
 
 
-def _git(code_dir: Path, *args: str) -> Any:
+def _git(code_dir: Path, *args: str, stdin: str | None = None, env_extra: dict[str, str] | None = None) -> Any:
     import subprocess
 
     import os
@@ -671,12 +688,13 @@ def _git(code_dir: Path, *args: str) -> Any:
     # And git never looks above code/ for a repository: with code/.git gone or broken, a commit must fail, never land in
     # a repository that happens to hold the quest folder (with whatever that repository has uncommitted).
     env = {**scrub_secrets(), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
-           "GIT_CEILING_DIRECTORIES": str(Path(code_dir).resolve().parent)}
+           "GIT_CEILING_DIRECTORIES": str(Path(code_dir).resolve().parent), **(env_extra or {})}
     return subprocess.run(
         ["git", "-c", "user.name=Frontier Insight", "-c", "user.email=fi@localhost", "-c", "commit.gpgsign=false",
          "-c", "core.autocrlf=false", "-c", f"core.hooksPath={null}", "-c", "core.fsmonitor=false",
          "-c", f"safe.directory={code_dir.as_posix()}", *args],
         cwd=code_dir, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60, env=env,
+        input=stdin,
     )
 
 
@@ -768,6 +786,168 @@ def record_change(quest_root: Path, note: str, *, category: str = "changed", res
         if log is not None:
             log.warning("[code] could not record this change in code/'s history: %s", exc)
         return False
+
+
+REFUSED_KEPT = 200  # the newest refused tries kept under refs/fi/refused/; older ones are dropped
+
+
+def keep_refused(quest_root: Path, ref: str | None, files: dict[str, str], message: str, *,
+                 extras: dict[str, str] | None = None, log: Any = None) -> bool:
+    """Keep a version of ``rel`` that was tried and refused in ``code/``'s own git repository, on the side reference
+    ``refs/fi/refused/<ref>``: one commit whose parent is the current HEAD and whose tree is HEAD's with each file of
+    ``files`` (path -> text) set to its text. A reference of that name already there is never overwritten: the try is
+    kept beside it (``<ref>-2``, ...); no ``ref`` takes the next number (``001``, ``002``, ...). The tree also holds
+    ``.fi_refused/reason.txt`` (the whole ``message``) and each of ``extras`` (name -> text, e.g. ``result.json``, what
+    the refused try returned) under ``.fi_refused/``. The branch, the index and the working folder are not touched;
+    only the newest :data:`REFUSED_KEPT` refused tries stay. Best effort: ``False`` (and a log line) when git cannot do
+    it."""
+    import os
+    import re
+    import subprocess
+
+    code_dir = Path(quest_root) / "code"
+    git_dir = code_dir / ".git"
+    if not git_dir.is_dir():
+        return False
+    import tempfile
+
+    # one index file per call: two refusals at the same time never share a tree
+    fd, index_name = tempfile.mkstemp(prefix="fi_refused_", suffix=".index", dir=git_dir)
+    os.close(fd)
+    index = Path(index_name)
+    # a name git takes: no "..", no ".lock" ending, no part starting with "."
+    name = re.sub(r"\.{2,}", ".", re.sub(r"[^A-Za-z0-9._-]+", "-", ref or "")).strip("-.")
+    if name.endswith(".lock"):
+        name = name[: -len(".lock")] + "-lock"
+    try:
+        index.unlink(missing_ok=True)  # an empty file is not an index: read-tree makes it
+        extra = {"GIT_INDEX_FILE": str(index)}
+        head = _git(code_dir, "rev-parse", "--verify", "-q", "HEAD")
+        parent = head.stdout.strip() if head.returncode == 0 else ""
+        if _git(code_dir, "read-tree", *([parent] if parent else ["--empty"]), env_extra=extra).returncode != 0:
+            return False
+        notes = {f".fi_refused/{k}": v for k, v in (extras or {}).items() if k != "reason.txt"}
+        for rel, text in {**files, **notes, ".fi_refused/reason.txt": message}.items():
+            blob = _git(code_dir, "hash-object", "-w", "--stdin", stdin=text)
+            if blob.returncode != 0:
+                return False
+            cache = f"100644,{blob.stdout.strip()},{Path(rel).as_posix()}"
+            if _git(code_dir, "update-index", "--add", "--cacheinfo", cache, env_extra=extra).returncode != 0:
+                return False
+        tree = _git(code_dir, "write-tree", env_extra=extra)
+        if tree.returncode != 0:
+            return False
+        made = _git(code_dir, "commit-tree", tree.stdout.strip(), *(["-p", parent] if parent else []), "-m", message)
+        if made.returncode != 0:
+            return False
+        for n in range(1, 100):
+            if name:
+                target = f"refs/fi/refused/{name}" + ("" if n == 1 else f"-{n}")
+            else:  # the next number, asked again each time: another refusal may have taken it
+                have = _git(code_dir, "for-each-ref", "--format=%(refname:lstrip=3)", "refs/fi/refused/").stdout.split()
+                target = f"refs/fi/refused/{max([int(r) for r in have if r.isdigit()] or [0]) + 1:03d}"
+            # an empty old value: made only when no reference of that name is there yet
+            if _git(code_dir, "update-ref", target, made.stdout.strip(), "").returncode == 0:
+                every = _git(code_dir, "for-each-ref", "--format=%(refname:lstrip=3)", "refs/fi/refused/").stdout.split()
+                numbered = sorted((r for r in every if r.isdigit()), key=int, reverse=True)
+                for stale in numbered[REFUSED_KEPT:]:  # exactly the newest REFUSED_KEPT numbered tries stay
+                    _git(code_dir, "update-ref", "-d", f"refs/fi/refused/{stale}")
+                named = _git(code_dir, "for-each-ref", "--sort=-committerdate", "--format=%(refname:lstrip=3)",
+                             "refs/fi/refused/").stdout.split()
+                for stale in [r for r in named if not r.isdigit()][REFUSED_KEPT:]:
+                    if f"refs/fi/refused/{stale}" != target:
+                        _git(code_dir, "update-ref", "-d", f"refs/fi/refused/{stale}")
+                return True
+        return False
+    except (OSError, subprocess.SubprocessError) as exc:
+        if log is not None:
+            log.warning("[code] could not keep a refused version in code/'s history: %s", exc)
+        return False
+    finally:
+        try:
+            index.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _fingerprint(code_dir: Path) -> tuple[tuple[str, str], ...] | None:
+    """Each file of ``code/`` (path, hash of its bytes), git's own folder and Python's caches left out; ``None``
+    without the folder. About a millisecond on a quest's code, so it is read before every run; the bytes, not the
+    modification time, so a rewrite of the same size within one tick of a coarse clock is still seen."""
+    if not code_dir.is_dir():
+        return None
+    import os
+
+    out: list[tuple[str, str]] = []
+    for here, dirs, files in os.walk(code_dir):
+        dirs[:] = [d for d in dirs if d not in (".git", "__pycache__")]
+        for name in files:
+            path = os.path.join(here, name)
+            try:
+                with open(path, "rb") as fh:
+                    digest = hashlib.sha256(fh.read()).hexdigest()
+            except OSError:
+                continue
+            out.append((os.path.relpath(path, code_dir), digest))
+    return tuple(sorted(out))
+
+
+class CodeRuns:
+    """Before each run of ``code/``, the code as it is goes into ``code/``'s history when it changed since the last
+    commit: every version that ran is a commit, whichever step wrote it (a repair, a fix of a crashed script, a change
+    a check asked for). The check is a listing of the files; git is called only on a difference.
+
+    A step that commits each version it tries with its own words (the improve rounds, the speed-up, the finding
+    repairs) runs inside :meth:`held`, so its commits keep their messages and results."""
+
+    def __init__(self, quest_root: Path, *, node: Any = None, log: Any = None) -> None:
+        import asyncio
+
+        self.quest_root = Path(quest_root)
+        self._node = node
+        self._log = log
+        self._lock = asyncio.Lock()
+        self._seen: Any = None
+        self._held = 0
+
+    def held(self) -> Any:
+        import contextlib
+
+        @contextlib.contextmanager
+        def hold() -> Any:
+            self._held += 1
+            try:
+                yield
+            finally:
+                self._held -= 1
+        return hold()
+
+    async def before_run(self) -> None:
+        import asyncio
+
+        if self._held:
+            return
+        code_dir = self.quest_root / "code"
+        try:
+            async with self._lock:  # settings that start at once commit once
+                now = await asyncio.to_thread(_fingerprint, code_dir)
+                if now is None or now == self._seen:
+                    return
+                step = (self._node() if callable(self._node) else "") or "a check"
+                if (code_dir / ".git").is_dir():
+                    # git skips a file whose size and time match its index entry; a rewrite of the same size within
+                    # one tick of the clock would not be committed. --renormalize reads every tracked file again (the
+                    # index keeps every entry, whatever happens to the commit after).
+                    await asyncio.to_thread(_git, code_dir, "add", "--renormalize", "--", ".")
+                await asyncio.to_thread(record_change, self.quest_root, f"the code as it ran ({step})",
+                                        category="changed", log=self._log)
+                # Seen only once code/ is committed: a commit git could not make now (a lock left for a moment) is
+                # tried again before the next run.
+                _commit, dirty = await asyncio.to_thread(head, self.quest_root)
+                self._seen = await asyncio.to_thread(_fingerprint, code_dir) if dirty is False else None
+        except Exception as exc:  # noqa: BLE001 -- the record never stops a run
+            if self._log is not None:
+                self._log.warning("[code] could not record the code before a run: %s", exc)
 
 
 def record_note(quest_root: Path, note: str, *, log: Any = None) -> bool:
@@ -890,13 +1070,19 @@ def _drain(proc: Any) -> str:
 
     try:
         return proc.communicate(timeout=30)[1] or ""
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
         for pipe in (proc.stdout, proc.stderr):
             try:
                 if pipe is not None:
                     pipe.close()
             except OSError:
                 pass
+        # The error text already read before the timeout is the reason the run failed; keep it.
+        if isinstance(exc.stderr, bytes):
+            return exc.stderr.decode(errors="replace")
+        if isinstance(exc.stderr, str):
+            return exc.stderr
+        return ""
     except (OSError, ValueError):
         pass
     return ""

@@ -408,13 +408,16 @@ def read_request(note: str, block: dict[str, Any] | None, best: dict[str, Any] |
 def add_round(quest_root: Path, block: dict[str, Any], round_: dict[str, Any]) -> list[dict[str, Any]]:
     """Add ``round_`` to the rounds of the search kept for this plan (a file kept for another plan is started over).
     ``round_["refine"]`` (which of the person's refines asked for it) makes this idempotent: a review step run again
-    for the same refine (a resume) does not add the round twice."""
+    for the same refine (a resume) does not add the round twice; so does ``round_["auto"]`` (the number of a round FI
+    added itself because the search was still improving when its budget ran out)."""
     path = Path(quest_root) / _optimise.ROUNDS_PATH
     rounds = _optimise.read_rounds(quest_root, block)
     if round_.get("refine") is not None and any(
             r.get("refine") == round_["refine"] and r.get("asked") == round_.get("asked") for r in rounds):
         return rounds
-    rounds.append({k: round_.get(k) for k in ("added", "target", "search_target", "asked", "read_as", "refine")
+    if round_.get("auto") is not None and any(r.get("auto") == round_["auto"] for r in rounds):
+        return rounds  # a round FI added itself (core/optimise.py) is already there: not added twice
+    rounds.append({k: round_.get(k) for k in ("added", "target", "search_target", "asked", "read_as", "refine", "auto")
                    if k in ("added", "target", "asked", "read_as") or round_.get(k) is not None})
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"block_sha256": _optimise.block_sha(block), "rounds": rounds}, indent=1) + "\n",

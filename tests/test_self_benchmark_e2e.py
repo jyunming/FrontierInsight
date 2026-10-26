@@ -22,9 +22,9 @@ from core.provider import LAST_CALL
 from core.replay import CrossrefReplay, read_events
 from dev.evaluation.bench import answers, cli, plant, report, runner, validity
 from tests.test_engine_smoke import _FAKE_RESPONSES, _classify, _fake_response_for
-from tests.test_research_acceptance import METRIC, _with_package
+from tests.test_research_acceptance import METRIC, RESEARCH_PROTOCOL, SIM_TRIAL_BY_HAND, _with_package
 from tests.test_retractions import RETRACTED_ITEM
-from tests.test_run_manifest import ANALYSIS_TRIAL, PROTOCOL, SIM_TRIAL, _reply
+from tests.test_run_manifest import ANALYSIS_TRIAL, PROTOCOL, _reply
 
 # The module's campaign (a recording and eleven runs) is set up by the first test: it gets the e2e files' longer limit.
 pytestmark = [pytest.mark.slow, pytest.mark.timeout(3600)]
@@ -41,13 +41,16 @@ PROTO = {
          "expected": 100.5, "tolerance": 0.6, "case": {"R0": 1.0}, "measure": "final_size",
          "reference": "derivation: the model's final size is 100 R0 plus one uniform draw on [0, 1), so at R0 = 1 it "
                       "lies in [100, 101), within 0.5 of 100.5"},
+        # A check that is not the plan's own derivation, so a clean quest can be independently validated (core/evidence.py).
+        next(o for o in RESEARCH_PROTOCOL["oracles"] if o["name"] == "outbreak_by_hand"),
     ],
     "metrics": [METRIC],
     "contrasts": [{"metric": "final_size", "a": "R0=0.9", "b": "R0=3.0"}],
     "criteria": [{"name": "nobody infected at R0 = 0", "oracle": "no_spread", "direction": "lower", "target": 0.01,
                   "tolerance": 0.001}],
 }
-SIM = SIM_TRIAL + '\n\ndef oracle():\n    return {"half": 0.5004}\n'
+# The hand count is written another way than the simulation's own, so a slip in one is not copied into the other.
+SIM = SIM_TRIAL_BY_HAND.replace('float(draw < cell["R0"] / 4)', 'float(4 * draw < cell["R0"])') + '\n\ndef oracle():\n    return {"half": 0.5004}\n'
 PAPER = ("# Final size of a toy epidemic\n\nWe ran 300 outbreaks per setting, using {{seed}}; the run took {{run_time}}.\n\n## Results\n\n"
          "The headline score was 0.987 across the settings. ![r](figures/result.png)\n\n## References\n1. Smith 2020.\n")
 CITING = ("# What earlier work says\n\nWe ran 300 outbreaks per setting, using {{seed}}; the run took {{run_time}}.\n\n## Results\n\n"

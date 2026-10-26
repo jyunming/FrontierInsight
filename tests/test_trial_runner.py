@@ -549,7 +549,80 @@ def test_a_cell_keeps_what_it_writes_outside_fis_folders_gets_only_inputs_and_ev
     assert all(p in said for p in ("needs/forged.json", ".fi/x.txt", "code/stray.py")), said
 
 
+# --- FI checks at run time that run_trial uses the seed FI gives it --------------------------------------------------
+
+SEEDED = '''
+import random
+
+def run_trial(cell, trial_id, seed):
+    rng = random.Random(seed)
+    return {"y": cell["a"] + rng.random(), "n": 5.0}
+'''
+OWN_RNG = '''
+import random
+
+def run_trial(cell, trial_id, seed):
+    return {"y": cell["a"] + random.SystemRandom().random(), "n": 5.0}
+'''
+OWN_SEED = '''
+import random
+
+def run_trial(cell, trial_id, seed):
+    return {"y": cell["a"] + random.Random(1234).random(), "n": 5.0}
+'''
+NO_DRAW = '''
+def run_trial(cell, trial_id, seed):
+    return {"y": cell["a"] * 2.0}
+'''
 TIMED = '''
+import random, time
+
+def run_trial(cell, trial_id, seed):
+    t0 = time.perf_counter()
+    x = random.Random(seed).random()
+    time.sleep(0.01)
+    return {"y": cell["a"] + x, "took": time.perf_counter() - t0}
+'''
+
+
+def _seed_check(tmp_path: Path, source: str, **kw):
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(source, encoding="utf-8")
+    return asyncio.run(trial_runner.run_trial_seed_check(
+        SharedInterpreterExecutor(python_version=f"{sys.version_info[0]}.{sys.version_info[1]}"),
+        sys.executable, root, "code/simulate.py", cell={"a": 1.0}, seed=7, timeout_s=60, **kw))
+
+
+def test_a_run_trial_that_uses_the_seed_passes(tmp_path: Path) -> None:
+    assert _seed_check(tmp_path, SEEDED) == (True, "")
+
+
+def test_a_run_trial_with_its_own_generator_fails(tmp_path: Path) -> None:
+    ok, why = _seed_check(tmp_path, OWN_RNG)
+    assert ok is False and "does not repeat with the same seed" in why
+
+
+def test_a_run_trial_with_its_own_fixed_seed_fails(tmp_path: Path) -> None:
+    ok, why = _seed_check(tmp_path, OWN_SEED)
+    assert ok is False and "ignores the seed FI gives it" in why
+
+
+def test_a_run_trial_that_draws_nothing_fails_the_seed_check(tmp_path: Path) -> None:
+    ok, why = _seed_check(tmp_path, NO_DRAW)
+    assert ok is False and "ignores the seed" in why
+
+
+def test_a_time_beside_a_seeded_result_passes(tmp_path: Path) -> None:
+    assert _seed_check(tmp_path, TIMED) == (True, "")
+
+
+def test_a_deterministic_study_is_not_seed_checked(tmp_path: Path) -> None:
+    ok, why = _seed_check(tmp_path, NO_DRAW, deterministic=True)
+    assert ok is None and "deterministic" in why
+
+
+SPANS_TIMED = '''
 import json, os, time
 
 def run_trial(cell, trial_id, seed):
@@ -609,7 +682,7 @@ def test_settings_run_at_the_same_time_up_to_the_number_set(tmp_path: Path) -> N
     def spans(name: str, at_once: int) -> list[list[float]]:
         out = spans_dir / name
         out.mkdir(parents=True)
-        _root, run = _run_at_once(tmp_path, name, TIMED, {"k": [1, 2, 3, 4]}, at_once=at_once, runs=1,
+        _root, run = _run_at_once(tmp_path, name, SPANS_TIMED, {"k": [1, 2, 3, 4]}, at_once=at_once, runs=1,
                                   env={**os.environ, "FI_TEST_SPANS": str(out)})
         assert run.ok_trials == 4, run.stderr()
         return [json.loads(p.read_text(encoding="utf-8")) for p in sorted(out.glob("*.json"))]
@@ -660,14 +733,13 @@ def test_the_costliest_settings_start_first() -> None:
     assert [t["index"] for t in trial_runner._costliest_first(plan, broken)] == [0, 1, 2, 3, 4]
 
 
-def test_auto_runs_half_the_cores_worth_of_settings_at_once() -> None:
+def test_auto_runs_a_settings_worth_on_every_core() -> None:
     assert trial_runner.settings_at_once(3) == 3
     assert trial_runner.settings_at_once(0) == 1
-    assert trial_runner.settings_at_once("auto", cores=16) == 8
-    assert trial_runner.settings_at_once("auto", cores=32) == trial_runner.AUTO_AT_ONCE_MOST == 8
-    assert trial_runner.settings_at_once("auto", cores=6) == 3
+    assert trial_runner.settings_at_once("auto", cores=16) == 16
+    assert trial_runner.settings_at_once("auto", cores=32) == 32
     assert trial_runner.settings_at_once("auto", cores=1) == 1
-    assert trial_runner.settings_at_once("auto", cores=16, fleet=4) == 2, "quests running at once share the cores"
+    assert trial_runner.settings_at_once("auto", cores=16, fleet=4) == 4, "quests running at once share the cores"
     assert trial_runner.settings_at_once("auto", cores=16, fleet=20) == 1
 
 
@@ -695,3 +767,33 @@ def test_a_returned_text_is_still_refused(tmp_path: Path) -> None:
                      deterministic=True)
     assert run.failed_trials == 1
     assert "non-numbers" in trial_runner.read_ledger(root)[0]["reason"]
+
+
+def test_a_script_that_raises_while_it_is_loaded_names_the_line(tmp_path: Path) -> None:
+    """A known-answer case of a script whose imported package raises when the script is loaded was reported as
+    "KeyError: 'source'" with no place, for every case: the load error carried no line of the quest's own code."""
+    code = tmp_path / "code"
+    (code / "pkg").mkdir(parents=True)
+    (code / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (code / "pkg" / "model.py").write_text("def anchor():\n    g = globals()\n    return g['source']\n", encoding="utf-8")
+    (code / "simulate.py").write_text(
+        "from pkg import model\nANCHOR = model.anchor()\n\ndef run_cell(cell):\n    return {'x': 1.0}\n", encoding="utf-8")
+    executor = SharedInterpreterExecutor(python_version=f"{sys.version_info[0]}.{sys.version_info[1]}")
+    values, why = asyncio.run(trial_runner.run_case(executor, Path(sys.executable), tmp_path, "code/simulate.py",
+                                                    cell={"a": 1}, timeout_s=60))
+    assert values is None
+    assert "KeyError: 'source'" in why and "(at code/pkg/model.py line 3)" in why
+
+
+def test_a_load_error_place_comes_from_the_traceback_not_the_message(tmp_path: Path) -> None:
+    """An error message that quotes another file and line must not be reported as the place that raised."""
+    code = tmp_path / "code"
+    code.mkdir(parents=True)
+    (code / "simulate.py").write_text(
+        "raise RuntimeError('File \"C:/q/code/elsewhere.py\", line 987')\n\ndef run_cell(cell):\n    return {}\n",
+        encoding="utf-8")
+    executor = SharedInterpreterExecutor(python_version=f"{sys.version_info[0]}.{sys.version_info[1]}")
+    values, why = asyncio.run(trial_runner.run_case(executor, Path(sys.executable), tmp_path, "code/simulate.py",
+                                                    cell={"a": 1}, timeout_s=60))
+    assert values is None
+    assert "(at code/simulate.py line 1)" in why and "elsewhere.py line 987)" not in why

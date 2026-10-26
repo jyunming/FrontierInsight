@@ -37,6 +37,7 @@ from typing import Any
 STEPS: dict[str, tuple[str, ...]] = {
     "ideas": ("ideate",),
     "literature": ("literature",),
+    "studies": ("scope",),
     "plan": ("plan",),
     "design": ("design",),
     # The skills are picked again just before the code (or, with no simulation, the data) is made: the same place in
@@ -60,7 +61,7 @@ _WITHIN: dict[str, tuple[str, ...]] = {"run": ("execute_reflect", "improve")}
 # The big blocks a map of the quest shows, and the steps in each.
 GROUPS: dict[str, tuple[str, ...]] = {
     "Ideas & literature": ("ideas", "literature"),
-    "Skills & plan": ("plan", "skills"),
+    "Skills & plan": ("studies", "plan", "skills"),
     "Design": ("design",),
     "Code": ("code",),
     "Run": ("run", "figures"),
@@ -69,7 +70,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
     "Review": ("review",),
 }
 # Steps that change the plan or the frozen protocol: they need a named approval.
-NEEDS_APPROVAL: frozenset[str] = frozenset({"ideas", "literature", "plan", "design"})
+NEEDS_APPROVAL: frozenset[str] = frozenset({"ideas", "literature", "studies", "plan", "design"})
 
 # What running the quest again from each step does, in one sentence a person reads before choosing.
 _REPLACES = "the experiment plan (frozen) is replaced by the new design's"
@@ -78,6 +79,8 @@ REDOES: dict[str, str] = {
              f"after; {_REPLACES}, and the old one is kept in .fi/previous/",
     "literature": "searches the literature again, then redoes the plan, design, code and everything after; "
                   f"the ideas are kept, {_REPLACES}, and the old one is kept in .fi/previous/",
+    "studies": "offers the studies the topic could mean again and asks which one to run, then writes plan.md for it and redoes the design, code and everything after; "
+               f"{_REPLACES}, and the old one is kept in .fi/previous/",
     "plan": "writes plan.md again from the same literature and waits for you to read it, then redoes the design, code "
             f"and everything after; {_REPLACES}, and the old one is kept in .fi/previous/",
     "design": "takes the design written in plan.md again (edit plan.md first to change it; `plan` writes it anew), then "
@@ -102,6 +105,7 @@ _ALIASES = {
     "ideate": "ideas", "idea": "ideas", "ideas & literature": "ideas",
     "literature review": "literature", "lit": "literature",
     "select_skills": "skills", "skill": "skills",
+    "scope": "studies", "study": "studies",
     "implement": "code", "implement_outline": "code", "execute": "run", "data_load": "run",
     "auto_collect_data": "run", "web_plots": "figures", "web_figures": "figures", "plots": "figures",
     "analyze": "analysis",
@@ -114,7 +118,8 @@ _ALIASES = {
 _DELIVERED = ["slides.md", "slides.html", "slides.pdf", "slides.pptx", "poster.tex", "poster.pdf", "poster.pptx",
               "poster.html", "speech.md", "frontier_insight_summary.json", "NEXT_STEP.md"]
 _PAPER = ["paper", "paper.md", "paper.pdf", "paper.html", "paper_html_body.md", "paper_html_source.html",
-          "paper_html_theme.css", "paper_pdf_source.md", ".fi/paper_record_check.json", *_DELIVERED]
+          "paper_html_theme.css", "paper_pdf_source.md", ".fi/paper_record_check.json",
+          ".fi/record_claims_taken_out.json", *_DELIVERED]
 # What the claim check writes into paper/ (the folder itself is the writing step's), and its receipt.
 _CLAIM_CHECK = ["paper/claims.json", "paper/CLAIMS.md", "paper/goal_coverage.json",
                 "paper/statistics_audit.json", "needs/receipts/claim_check.json"]
@@ -151,7 +156,7 @@ _PLAN_LOOK = [".fi/oracle_guidance.json", ".fi/oracle_review.json", ".fi/oracle_
 _OWN: dict[str, list[str]] = {
     # The review's own file is its check of the paper against FI's records; what is made from the reviewed paper is made
     # again after it.
-    "review": [".fi/paper_record_check.json", *_CITATION_CHECK, *_DELIVERED],
+    "review": [".fi/paper_record_check.json", ".fi/record_claims_taken_out.json", *_CITATION_CHECK, *_DELIVERED],
     "claims": [*_CLAIM_CHECK, *_CITATION_CHECK, *_DELIVERED],
     "writing": [*_PAPER, *_CLAIM_CHECK, *_CITATION_CHECK],
     "evidence": [*_EVIDENCE, *_PAPER, *_CLAIM_CHECK, *_CITATION_CHECK],
@@ -168,6 +173,8 @@ _OWN: dict[str, list[str]] = {
     # A redesign starts the protocol over: the old one is moved aside, and the run's records with it.
     "design": _FROM_DESIGN,
     # The record of the oracles the engine added to plan.md goes with plan.md: a design rerun keeps both.
+    # The study cards and the answer to them: run again, they are offered and answered again.
+    "studies": [".fi/scope.json", ".fi/scope_answer.json"],
     "plan": ["plan.md", ".fi/paused_at_plan.flag", ".fi/oracles_added.json", *_PLAN_LOOK, "needs/receipts/design_audit.json",
              *_FROM_DESIGN],
     "literature": ["data/literature", "plan.md", ".fi/paused_at_plan.flag", ".fi/oracles_added.json", *_PLAN_LOOK,
@@ -182,7 +189,8 @@ OUTPUTS: dict[str, list[str]] = {
 }
 # The graph node that leads into a step's first node with a plain edge, for the steps up to the design: the state the
 # engine writes before running them again (the design history, see ``Engine.run``) is written as that node's.
-LEADS_INTO: dict[str, str] = {"ideas": "clarify", "literature": "ideate", "plan": "select_skills", "design": "plan"}
+LEADS_INTO: dict[str, str] = {"ideas": "clarify", "literature": "ideate", "studies": "pause_after_literature",
+                              "plan": "select_skills", "design": "plan"}
 
 
 def in_quest(path: Any, quest_root: Path) -> str:
@@ -273,6 +281,9 @@ NODES: dict[str, dict[str, str]] = {
     "pause_after_literature": {"block": "lit", "title": "Wait for papers",
                                "sentence": "Stops so you can add paywalled papers. Skipped when none are needed.",
                                "reads": "needs/WANTED_PAPERS.md", "writes": "inputs/papers/"},
+    "scope": {"block": "plan", "title": "Pick the study",
+              "sentence": "Offers the few studies the topic could mean; you pick the one to run.",
+              "reads": "topic, literature", "writes": ".fi/scope.json"},
     "select_skills": {"block": "plan", "title": "Choose tools",
                       "sentence": "Picks which tools (skills) the code may use.",
                       "reads": "literature, approved tools", "writes": "chosen tools"},

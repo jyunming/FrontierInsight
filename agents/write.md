@@ -120,6 +120,10 @@ Reproducibility lives in the bundled `experiment.py` (and `paper_bundle_manifest
 
 If a code-style fragment is genuinely necessary (e.g. a one-line command or filename), use *inline* monospace with single backticks. For pseudocode that's load-bearing for the method, write 4–8 lines of plain numbered prose ("1. Sample dose ~ U(0.7, 1.3). 2. Convolve with Gaussian PSF …"), not a fenced block.
 
+## Formulas and headings
+
+Write every formula and symbol in LaTeX math between dollar signs, e.g. `$$\sigma = 0.6$$`, `$$k_1 \approx 0.28$$`; do not use Unicode math symbols (σ, ≈, ×). Do not number the section headings; FI numbers them.
+
 ## A new draft of a reviewed paper
 
 When the review slot in the Inputs section is not `(none — first draft)`, an earlier draft of this paper was reviewed. Write the whole paper again and fix every point of that review that applies to it:
@@ -182,3 +186,5 @@ $skills_block
 
 ## Review of the previous draft
 $review_feedback
+
+$scope_block

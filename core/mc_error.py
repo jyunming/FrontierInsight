@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import ast
 import math
+from pathlib import Path
 from typing import Any
 
 from . import metric_spec as _metric_spec
@@ -60,6 +61,9 @@ from . import trial_checks as _trial_checks
 BAND_SE = 3.0
 #: The first batch of trials, from which the spread is read (and on which a rule of every trial is judged).
 PILOT_TRIALS = 20
+#: How many trials a rule of every trial is judged on when no study size is given: the first batch, then more up to this
+#: many (a disagreement that shows only in a later trial must not pass on the first batch alone).
+EVERY_TRIALS = 10 * PILOT_TRIALS
 #: Fewer trials than this give a spread too rough to decide anything by.
 MIN_TRIALS = 10
 #: The most trials FI runs for one check.
@@ -105,19 +109,21 @@ def repeats_trials(protocol: dict[str, Any] | None) -> bool | None:
     return max(runs) > 1
 
 
-def paired(protocol: dict[str, Any] | None) -> bool:
-    """Whether the study is paired (a metric says ``paired: true``): it runs trial ``t`` of every setting on one seed, and
-    a check's trials then get those seeds too (:func:`core.trial_runner.trial_seed` with ``key=""``)."""
-    metrics = (protocol or {}).get("metrics") if isinstance(protocol, dict) else None
-    return any(isinstance(m, dict) and m.get("paired") for m in metrics or [])
+def paired(protocol: dict[str, Any] | None, quest_root: Path | str | None = None) -> bool:
+    """Whether trial ``t`` of every setting runs on one seed (common random numbers, :func:`core.trial_runner.trial_seed`
+    with ``key=""``; a check's trials then get those seeds too): :func:`core.metric_spec.shares_draws`, the one decision
+    the trial seeds and the analysis's paired contrast both follow. Text in the ``seed_policy`` never decides it."""
+    return _metric_spec.shares_draws(protocol, quest_root)
 
 
 def per_trial_flag(oracle: dict[str, Any]) -> bool | None:
     """What a check's ``per_trial`` says: ``True`` (a rule of every trial), ``False`` (a number on the average over
-    trials), or ``None`` when it says nothing."""
+    trials), or ``None`` when it says nothing. The whole numbers 1 and 0 mean the same as true and false."""
     flag = oracle.get("per_trial")
     if isinstance(flag, bool):
         return flag
+    if isinstance(flag, int) and flag in (0, 1):
+        return bool(flag)
     if isinstance(flag, str):
         word = flag.strip().lower()
         if word in ("true", "yes", "1"):
@@ -475,6 +481,20 @@ def failed_share_verdict(failed: int, started: int, verdict: str | None) -> tupl
     return verdict, ""
 
 
+def is_partial(mc: dict[str, Any] | None) -> bool:
+    """True for a rule of every trial that held in every trial judged, when time ran out before all were (verdict
+    ``"partial"``). Stop and repair logic reads it as a pass; what was checked is reported as not fully checked."""
+    return isinstance(mc, dict) and mc.get("verdict") == "partial"
+
+
+def partial_words(mc: dict[str, Any] | None) -> str:
+    """The plain sentence for a partial check, ``""`` for any other."""
+    if not is_partial(mc):
+        return ""
+    return (f"passed on {int(mc.get('judged') or 0)} of {int(mc.get('planned') or 0)} trials; the rest were not judged "
+            "in the time allowed")
+
+
 def words(mc: dict[str, Any] | None) -> str:
     """How the check's number was had, in a few plain words for a record line: ``the mean over 310 trials, Monte Carlo
     error ±0.0024 (one standard error)``, ``the worst of 20 trials``; ``""`` for a check judged on one number."""
@@ -488,6 +508,11 @@ def words(mc: dict[str, Any] | None) -> str:
             text += f", Monte Carlo error ±{_oracle.fmt_digits(float(se), 2)} (one standard error)"
     elif read_as == "every_trial":
         text = f"the worst of {n} trial{'s' if n != 1 else ''}"
+        asked = int(mc.get("trials_asked") or 0)
+        if is_partial(mc):
+            text += f" ({partial_words(mc)})"
+        elif asked > n and mc.get("why") != "failed_trials":
+            text += f" (judged on {n} of {asked} trials)"
     else:
         text = "one trial's number, the same in every trial"
     failed, started = int(mc.get("failed_trials") or 0), int(mc.get("started") or 0)
@@ -503,11 +528,20 @@ def undecided_words(mc: dict[str, Any] | None, limit: float | None) -> str:
         return "the trials did not decide it"
     if mc.get("why") == "failed_trials":
         return (f"{mc.get('failed_trials')} of {mc.get('started')} trials on its case failed, so the trials that "
-                "finished cannot stand for the case")
+                "finished cannot stand for the case and the check was not decided (it is not a pass)")
+    if mc.get("read_as") == "every_trial":
+        return (f"a rule of every trial held in the {int(mc.get('trials') or 0)} trials FI could run in the time it had, "
+                f"fewer than the {int(mc.get('trials_asked') or 0)} it needs, so it is not shown to hold in all of them")
     n, se = int(mc.get("trials") or 0), mc.get("se")
-    band = f"±{_oracle.fmt_digits(BAND_SE * float(se), 2)}" if _number(se) else "their band"
     when = ("the most FI runs for one check" if mc.get("why") == "most_trials" else "all FI could run in the time it had")
     tolerance = f"±{_oracle.fmt_digits(float(limit), 2)}" if _number(limit) else "its tolerance"
+    interval = mc.get("binomial_interval")
+    if isinstance(interval, list) and len(interval) == 2 and all(_number(x) for x in interval):
+        # A 0/1 outcome is decided on its binomial interval (:func:`binomial_verdict`), so that interval is what is shown.
+        lo, hi = (_oracle.fmt_digits(float(x), 2) for x in interval)
+        return (f"the range of the share of {n} trials ({when}), from {lo} to {hi}, lies neither inside nor outside "
+                f"the tolerance {tolerance}")
+    band = f"±{_oracle.fmt_digits(BAND_SE * float(se), 2)}" if _number(se) else "their band"
     return (f"three standard errors ({band}) around the mean of {n} trials ({when}) lie neither inside nor outside "
             f"the tolerance {tolerance}")
 
@@ -515,7 +549,8 @@ def undecided_words(mc: dict[str, Any] | None, limit: float | None) -> str:
 def record(stat: dict[str, Any] | None, *, read_as: str, verdict: str | None, why: str, failed: int, started: int,
            failed_example: str = "", **extra: Any) -> dict[str, Any]:
     """The ``mc`` entry a check keeps (``needs/ORACLE_CHECK.json``): how it was read, its trials and their error, and
-    the verdict they gave (``pass``, ``fail``, ``undecided``) with why it was not decided (``time``, ``most_trials``,
+    the verdict they gave (``pass``, ``fail``, ``undecided``, or ``partial``: passed on every trial judged but time ran
+    out before all ``planned`` were; it carries ``judged`` and ``planned``) with why it was not decided (``time``, ``most_trials``,
     ``failed_trials``)."""
     stat = stat or {}
     se = stat.get("se")

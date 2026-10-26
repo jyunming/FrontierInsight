@@ -253,7 +253,8 @@ def test_a_twice_biased_random_simulation_fails(tmp_path: Path) -> None:
     _c, _p, wrong, found = _rate(tmp_path / "wrong", 0.10, larger)
     assert right[0]["passed_by_engine"] is True and right[0]["mc"]["verdict"] == "pass"
     assert wrong[0]["passed_by_engine"] is False and found and wrong[0]["mc"]["verdict"] == "fail"
-    assert wrong[0]["mc"]["trials"] <= mc.PILOT_TRIALS, "a 2x bias is decided by the first batch"
+    assert wrong[0]["mc"]["trials"] <= 2 * mc.PILOT_TRIALS, "a 2x bias is decided by the first batch"
+    assert wrong[0]["mc"]["confirm"]["verdict"] == "fail", "and shown again on as many fresh trials"
 
 
 @pytest.mark.parametrize("most", [5, 40])
@@ -1168,3 +1169,50 @@ def test_the_answer_sets_per_trial_only_on_the_checks_the_question_named(tmp_pat
     assert after["fdp_le_one"]["per_trial"] is True
     assert "per_trial" not in after["counts_agree"], after["counts_agree"]
     assert mc.reads_a_mean(after["counts_agree"]), "unset: the mean"
+
+
+UNLUCKY = '''
+import random
+
+def run_trial(cell, trial_id, seed):
+    rng = random.Random(seed)
+    hit = 1.0 if (trial_id < UNLUCKY_FIRST or rng.random() < P) else 0.0
+    return {"event": hit, "noise": rng.random()}
+'''
+
+
+@pytest.mark.parametrize("first, p, passes", [(6, 0.05, True), (0, 0.3, False)])
+def test_a_fail_of_the_first_trials_counts_only_when_fresh_trials_show_it_again(
+        tmp_path: Path, first: int, p: float, passes: bool) -> None:
+    """The trials' seeds are fixed, so a rare draw of the first batch (6 events in 20 of a rate of 0.05, as the seeds of
+    a real run gave) would fail correct code at every run of the checks. A fail is confirmed on as many fresh trials;
+    a real fault (a rate of 0.3 in every trial) fails there too."""
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(f"P = {p}\nUNLUCKY_FIRST = {first}\n" + UNLUCKY, encoding="utf-8")
+    check = {**RARE_CHECK, "name": "error_rate_bound", "expected": 0.05, "tolerance": 0.05}
+    _c, _p, judged, found = _measure(root, [check], mean_names=frozenset(), in_each_run=None)
+    (j,) = judged
+    assert j["mc"]["verdict"] == ("pass" if passes else "fail") and j["passed_by_engine"] is passes, j
+    assert bool(found) is not passes
+    confirm = j["mc"].get("confirm") or (_c[0].get("mc") or {}).get("confirm")
+    assert confirm and confirm["trials"] == mc.PILOT_TRIALS
+    assert (confirm["verdict"] == "fail") is (not passes)
+
+
+@pytest.mark.parametrize(
+    "written, expected",
+    [(1, True), (0, False), (2, None), (True, True), (False, False), ("yes", True), (None, None), (1.0, None)],
+)
+def test_a_per_trial_flag_written_as_a_whole_number_is_read(written: Any, expected: Any) -> None:
+    oracle = {"name": "rule", "per_trial": written} if written is not None else {"name": "rule"}
+    assert mc.per_trial_flag(oracle) is expected
+
+
+def test_an_undecided_outcome_is_described_by_the_interval_that_decided_it() -> None:
+    # A 0/1 outcome is decided on its binomial interval, so the message shows that interval, not a three-standard-error band.
+    record = {"trials": 200, "se": 0.02, "why": "time", "binomial_interval": [0.031, 0.12]}
+    words = mc.undecided_words(record, 0.01)
+    assert "0.031" in words and "0.12" in words and "standard errors" not in words, words
+    plain = {"trials": 200, "se": 0.02, "why": "time"}
+    assert "standard errors" in mc.undecided_words(plain, 0.01)

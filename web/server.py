@@ -302,14 +302,14 @@ def _read_json_or_none(path: Path) -> Any:
         return None
 
 
-def _clarify_run_waiting(quest_root: Path) -> bool:
+def _clarify_run_waiting(quest_root: Path, name: str = "clarify") -> bool:
     """Whether a quest started from the web page as its own process is running and waiting for its setup answers
     (``.fi/clarify_waiting.json``, written by ``launch.py`` ``_web_page_clarify_callback``). Read from the quest
     folder rather than the launcher's memory, so it still holds after the server restarted."""
     from core.axon_sidecar import _pid_is_running
 
     try:
-        marker = json.loads((quest_root / ".fi" / "clarify_waiting.json").read_text(encoding="utf-8"))
+        marker = json.loads((quest_root / ".fi" / f"{name}_waiting.json").read_text(encoding="utf-8"))
         pid = int(marker["pid"])
         until = marker.get("until")
         if until is not None and time.time() > float(until):
@@ -345,6 +345,9 @@ def _quest_pending(quest_root: Path) -> str | None:
     if ((fi / "clarify_questions.json").is_file()
             and not (fi / "clarify_answer.json").is_file()):
         return "clarify"
+    if ((fi / "scope_questions.json").is_file()
+            and not (fi / "scope_answer.json").is_file()):
+        return "scope"
     return None
 
 
@@ -2446,6 +2449,7 @@ def make_app(
                     "summary": None,
                     "alive": bool(launcher_status.get("alive")),
                     "pending_clarify": False,
+                    "pending_scope": False,
                     "pending_human_review": None,
                     "review": None,
                     "review_panel": None,
@@ -2570,6 +2574,10 @@ def make_app(
                     (quest_root / ".fi" / "clarify_questions.json").is_file()
                     and not (quest_root / ".fi" / "clarify_answer.json").is_file()
                 )
+            ),
+            "pending_scope": (
+                (quest_root / ".fi" / "scope_questions.json").is_file()
+                and not (quest_root / ".fi" / "scope_answer.json").is_file()
             ),
             "pending_human_review": pending_human_review,
             # The pause this quest is waiting on (kind), or null — the same
@@ -2744,6 +2752,70 @@ def make_app(
         if disk_write_error is not None:
             payload["disk_write_warning"] = disk_write_error
         return JSONResponse(payload)
+
+    @app.get("/api/quests/{quest_id}/scope")
+    async def get_scope(quest_id: str) -> JSONResponse:
+        """The study cards a quest waits on (``.fi/scope_questions.json``), until ``scope_answer.json`` exists."""
+        try:
+            quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        except HTTPException:
+            return JSONResponse({"pending": False, "questions": None})
+        asked = quest_root / ".fi" / "scope_questions.json"
+        if not asked.is_file() or (quest_root / ".fi" / "scope_answer.json").is_file():
+            return JSONResponse({"pending": False, "questions": None})
+        try:
+            questions = json.loads(asked.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return JSONResponse({"pending": False, "questions": None})
+        return JSONResponse({"pending": True, "source": "disk", "questions": questions})
+
+    @app.post("/api/quests/{quest_id}/scope")
+    async def post_scope(quest_id: str, request: Request) -> JSONResponse:
+        """The pick of the study: ``{"answers": {"study": <card number | edited card | sentence>}}``, written whole
+        to ``.fi/scope_answer.json`` for the run that waits on it (or for the next resume)."""
+        body = await request.json()
+        answers = body.get("answers") if isinstance(body, dict) else None
+        if not isinstance(answers, dict):
+            raise HTTPException(400, "request body must contain {'answers': {...}}")
+        try:
+            quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        except HTTPException:
+            raise HTTPException(409, f"no pending study choice for quest {quest_id}") from None
+        fi = quest_root / ".fi"
+        if not (fi / "scope_questions.json").is_file() or (fi / "scope_answer.json").is_file():
+            raise HTTPException(409, f"no pending study choice for quest {quest_id}")
+        try:
+            asked = json.loads((fi / "scope_questions.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            asked = {}
+        entry = asked.get("study") if isinstance(asked, dict) else None
+        cards = entry.get("cards") if isinstance(entry, dict) else None
+        from core import scope_cards as _scope_cards
+
+        if _scope_cards.read_answer(answers, cards if isinstance(cards, list) else []) is None:
+            raise HTTPException(400, "pick one of the studies by its number, or write the study you want")
+        # Each request writes its own file; linking it into place fails when an answer is there already, so of two
+        # answers sent at once one is kept and the other is told so.
+        tmp = fi / f"scope_answer.{secrets.token_hex(8)}.tmp"
+        try:
+            tmp.write_text(json.dumps(answers, indent=2) + "\n", encoding="utf-8")
+            try:
+                try:
+                    os.link(tmp, fi / "scope_answer.json")
+                except FileExistsError:
+                    raise
+                except OSError:
+                    # A drive without links: the answer file is created only when none is there (a run reading it
+                    # half-written reads it again a second later).
+                    with open(fi / "scope_answer.json", "x", encoding="utf-8") as out:
+                        out.write(tmp.read_text(encoding="utf-8"))
+            except FileExistsError:
+                raise HTTPException(409, f"the study for quest {quest_id} was already chosen") from None
+        except OSError as e:
+            raise HTTPException(500, f"could not save the answer: {e}") from e
+        finally:
+            tmp.unlink(missing_ok=True)
+        return JSONResponse({"ok": True, "run_waiting": _clarify_run_waiting(quest_root, "scope")})
 
     @app.get("/api/quests/{quest_id}/human-review")
     async def get_human_review(quest_id: str) -> JSONResponse:
@@ -3219,6 +3291,12 @@ def make_app(
             fut = registry.register_clarify(quest_id, questions)
             return await fut
 
+        # The study choice is asked on the quest page in its own files (the card form needs more than text boxes).
+        from launch import _web_page_clarify_callback
+
+        gui_scope_callback = _web_page_clarify_callback(
+            engine.fi_dir, engine._log, engine.human_feedback_timeout_s, name="scope")
+
         async def gui_human_review_callback(
             snapshot: dict[str, Any],
         ) -> dict[str, Any]:
@@ -3233,6 +3311,7 @@ def make_app(
             try:
                 art = await engine.run(
                     clarify_callback=gui_clarify_callback,
+                    scope_callback=gui_scope_callback,
                     human_feedback_callback=gui_human_review_callback,
                 )
                 # Snapshot review_panel + final review so the

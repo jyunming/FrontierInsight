@@ -226,3 +226,16 @@ def test_report_is_explicit_when_ranking_did_not_run(library, monkeypatch) -> No
 def test_report_handles_an_empty_library() -> None:
     _, report = layers.select_layers([], "topic")
     assert "No domain-tagged skills installed." in layers.render_layer_report(report)
+
+
+def test_by_default_every_domain_skill_is_a_candidate_closest_first(library, tmp_path: Path) -> None:
+    """A cap of 15 held most of a real library's domain skills out of the selector's sight by word overlap alone; every
+    one is a candidate now, in order of how close it reads to the topic."""
+    extra = [make(tmp_path, f"tool{i}", f"a solver for problem class {i}", ["engineering"]) for i in range(20)]
+    library = [*library, *extra]
+    _, tagged = layers.split_layers(library)
+    assert len(tagged) > 15
+    _chosen, report = layers.select_layers(library, "single-cell RNA-seq clustering and marker genes")
+    assert set(report["domain_admitted"]) == {s.skill.name for s in tagged}
+    assert report["domain_admitted"][0] == "scanpy"
+    assert "all" in layers.render_layer_report(report) and "cap" not in layers.render_layer_report(report)

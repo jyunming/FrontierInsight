@@ -28,8 +28,8 @@ evaluates again, through the same harness and in a process of its own for each d
 The check never stops the quest: a failed check is the study's honest result ("the improvement over the baseline
 disappears at finer settings"), written into ``needs/OPTIMUM_CHECK.json`` (one plain verdict and a plain sentence per
 check, with the numbers) and run.log, and it limits the evidence level (:func:`evidence_gaps`). Its evaluations are its
-own: they are not taken from the search's budget, and they have their own time limit (``execution.timeout_s``); a check
-cut short by it is ``unverified``, never a pass.
+own: they are not taken from the search's budget, and they share the one time limit (``execution.timeout_s``) with the search, the check
+getting what the search left; a check cut short by it is ``unverified``, never a pass.
 
 Like :mod:`core.optimise_search`, the check itself is a generator that asks for evaluations and is sent the answers
 (:func:`check`), so the same logic runs through FI's harness (:func:`run_check`) and in-process (:func:`check_sync`).
@@ -51,6 +51,8 @@ from . import stats as _stats
 SCHEMA = "fi.optimum-check/v1"
 CHECK_PATH = Path("needs") / "OPTIMUM_CHECK.json"
 RECORD = Path(".fi") / "optimisation" / "check.json"
+#: Seconds between the progress lines of a running check in run.log.
+PROGRESS_EVERY_S = 30
 #: The environment variable that tells the analysis script where FI's check is.
 CHECK_ENV = "FI_OPTIMUM_CHECK"
 #: How far each variable is nudged around the best design, as a share of its range.
@@ -65,6 +67,35 @@ VERDICTS = {
     "unverified": "the best design could not be checked at finer numerical settings",
 }
 PASSED, FAILED, NOT_CHECKED = "passed", "failed", "not_checked"
+#: What a ``verified`` check says when the improvement is above the plan's threshold but FI's own estimate of the numerical
+#: error of the two designs is as large or larger (``improvement.beyond_numerical_error`` is ``False``): the improvement is
+#: not said to "hold".
+VERIFIED_NOT_BEYOND_ERROR = ("the improvement over the baseline is above the plan's threshold at finer numerical settings, "
+                             "but is not shown to be more than their numerical error")
+
+
+def verdict_phrase(verdict: str, improvement: Any = None) -> str:
+    """The verdict as a phrase, from the check's own record: a ``verified`` improvement that is not beyond the numerical
+    error of the two designs is said so, never as one that "holds"."""
+    if verdict == "verified" and isinstance(improvement, dict) and improvement.get("beyond_numerical_error") is False:
+        return VERIFIED_NOT_BEYOND_ERROR
+    return VERDICTS.get(verdict, verdict)
+
+
+def says_of(record: Any) -> str:
+    """The check's one sentence for a reader, from its record. A record written before the verdict was qualified (a
+    ``verified`` improvement not beyond the numerical error, opening "The improvement ... holds") is said the qualified way
+    too: the opening FI's own template wrote is replaced, the check's reason after it is kept."""
+    if not isinstance(record, dict):
+        return ""
+    says = str(record.get("says") or "")
+    old = VERDICTS["verified"][0].upper() + VERDICTS["verified"][1:] + ":"
+    new = verdict_phrase(str(record.get("verdict") or ""), record.get("improvement"))
+    if says.startswith(old) and new != VERDICTS["verified"]:
+        return new[0].upper() + new[1:] + ":" + says[len(old):]
+    return says
+
+
 BLIND_SPOTS = [
     "Refining the numerical settings rules out a numerical error only: an error of the model itself (an assumption, a "
     "material value) is the same at every setting, so the improvement is an improvement within the model.",
@@ -160,8 +191,12 @@ def numerical_error(values: list[float], ratios: list[float | None]) -> dict[str
                        "factor 3)"}
     s = 1.0 if e32 / e21 > 0 else -1.0
     if s < 0:
-        return {"error": 3.0 * max(abs(e21), abs(e32)) / (r21 - 1.0), "order": None, "asymptotic": False,
-                "how": "the value swings back and forth as the settings get finer (safety factor 3)"}
+        # No order can be observed: the error is bounded by the largest change itself, three times over (on sequences
+        # with a known value -- smooth and slowly decaying swings, no convergence, values counted on a grid, noise --
+        # this covered the true error at least 96.5% of the time; dividing by r21 - 1 as well, as for a first order,
+        # covered it at most 0.7 points more with an error twice as wide).
+        return {"error": 3.0 * max(abs(e21), abs(e32)), "order": None, "asymptotic": False,
+                "how": "the value swings back and forth as the settings get finer (three times its largest change)"}
     p = 1.0
     for _ in range(200):
         q = math.log((r21 ** p - s) / (r32 ** p - s)) if abs(r21 - r32) > 1e-12 else 0.0
@@ -245,6 +280,12 @@ def check(block: dict[str, Any], search_record: dict[str, Any], rows: list[dict[
     and its answer ``{"values": {...}, "trials": [{...}, ...]}``, ``{"failed": why}`` or ``{"stop": "time"}``."""
     if not isinstance(search_record.get("best"), dict):
         return _nothing_to_check(block, search_record)
+    best_level = search_record["best"].get("level")
+    if isinstance(best_level, dict) and best_level:
+        # A study that compares named alternatives searched each one: the best design belongs to one of them, and so do
+        # the baseline and the other designs the check recomputes (a design means something only under its alternative).
+        block = _search.level_block(block, best_level)
+        rows = [r for r in rows if isinstance(r, dict) and r.get("level") == best_level]
     objective = block["objective"]
     quantity = str(objective["quantity"])
     space = _search.Space(block["design_variables"])
@@ -256,14 +297,44 @@ def check(block: dict[str, Any], search_record: dict[str, Any], rows: list[dict[
     sign = _search._sign(block)
     counts = {"designs": 0, "failed": 0}
     cache: dict[tuple[str, int], dict[str, Any]] = {}
+    pending: dict[tuple[str, int], Any] = {}  # answers asked for together (evaluate_level), each used once by evaluate
 
     def evaluate(design: dict[str, Any], level: int, role: str):
         design = space.canonical(design)
         key = (space.key(design), level)
         if key in cache:
             return cache[key]
-        cell = {**_search.cell_of(block, design), **levels[level]}
-        reply = yield {"kind": "evaluate", "cell": cell, "design": dict(design), "level": level, "role": role}
+        if key in pending:
+            reply = pending.pop(key)
+        else:
+            cell = {**_search.cell_of(block, design), **levels[level]}
+            reply = yield {"kind": "evaluate", "cell": cell, "design": dict(design), "level": level, "role": role}
+        return judge(key, reply)
+
+    def evaluate_level(items: list[dict[str, Any]], level: int):
+        """Every item's design at one level: they do not depend on each other's answers, so they are asked for
+        together (run at the same time), and judged in the items' order as one after another would be."""
+        todo, keys = [], []
+        for item in items:
+            design = space.canonical(item["design"])
+            key = (space.key(design), level)
+            if key in cache or key in keys:
+                continue
+            keys.append(key)
+            todo.append({"kind": "evaluate", "cell": {**_search.cell_of(block, design), **levels[level]},
+                         "design": dict(design), "level": level, "role": item["role"]})
+        if len(todo) > 1:
+            replies = yield {"kind": "evaluate_many", "requests": todo}
+            replies = list(replies) if isinstance(replies, list) else []
+            pending.update({key: replies[k] if k < len(replies) else None for k, key in enumerate(keys)})
+        try:
+            # judged item by item, as one after another: a stop keeps the levels of the items before it
+            for item in items:
+                item["levels"][level] = yield from evaluate(item["design"], level, item["role"])
+        finally:
+            pending.clear()
+
+    def judge(key: tuple[str, int], reply: Any) -> dict[str, Any]:
         reply = reply if isinstance(reply, dict) else {"failed": "no answer for this design"}
         if reply.get("stop"):
             raise _Stop()
@@ -292,8 +363,7 @@ def check(block: dict[str, Any], search_record: dict[str, Any], rows: list[dict[
         # The baseline and the best designs at every finer level, coarse to fine; then the neighbourhood of the design
         # chosen at the finest level, at the finest level.
         for level in range(len(levels)):
-            for item in [base, *cands]:
-                item["levels"][level] = yield from evaluate(item["design"], level, item["role"])
+            yield from evaluate_level([base, *cands], level)
         chosen = _choose(cands, finest, limits, margin, sign)
         if chosen is not None:
             yield from _probe(space, chosen, finest, evaluate, probes)
@@ -348,11 +418,30 @@ def _probe(space: Any, chosen: dict[str, Any], level: int, evaluate: Callable, o
             out[name]["sides"][side] = {"value": space.flat(space.canonical(nudged))[k], "judged": judged}
 
 
+def _array_of(name: str) -> str:
+    """The array variable an element's name belongs to (``source[1,3]`` -> ``source``); a scalar's own name."""
+    return name.split("[", 1)[0] if name.endswith("]") and "[" in name else name
+
+
+def _by_array(items: list[tuple[str, str]]) -> dict[tuple[str, str], list[int]]:
+    """The positions of ``(name, side)`` items, grouped by the array the name belongs to and the side: the elements of
+    one array that share a finding are said once, with their count, not once each."""
+    out: dict[tuple[str, str], list[int]] = {}
+    for i, (name, side) in enumerate(items):
+        out.setdefault((_array_of(name), side), []).append(i)
+    return out
+
+
+def _probed_count(probes: dict[str, Any], array: str) -> int:
+    return sum(1 for name in probes if _array_of(name) == array)
+
+
 def _probed(space: Any) -> list[int]:
     """The coordinates the check nudges: every number of a scalar variable, and at most ``PROBE_ELEMENTS`` elements of an
     array variable, spread evenly over it (two evaluations per element would otherwise be the whole check)."""
     groups: dict[str, list[int]] = {}
-    for k, v in enumerate(space.scalars):
+    for k in getattr(space, "free", range(len(space.scalars))):  # an element held at its one value is not nudged
+        v = space.scalars[k]
         groups.setdefault(str(v.get("of") or v["name"]), []).append(k)
     out: list[int] = []
     for members in groups.values():
@@ -663,12 +752,17 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
             parts.append(f"moving {b['variable']} to {_fmt(b['value'])} gives a design {_fmt(b['gain'])}{u} better at the "
                          "finest settings, more than the numerical error: this is not the best design nearby (the search "
                          "had not finished, or its coarser settings misled it)")
-        for edge in at_bound:
-            parts.append(f"the best design sits at the {'lower' if edge['edge'] == 'low' else 'upper'} edge of the range "
-                         f"allowed for {edge['variable']} ({_fmt(edge['value'])}): a design outside the range may be "
-                         "better (widening the range is a change to the plan)")
+        for (variable, side), members in _by_array([(e["variable"], e["edge"]) for e in at_bound]).items():
+            where = (f"{variable} ({_fmt(at_bound[members[0]]['value'])})" if len(members) == 1 and variable in probes
+                     else f"{len(members)} of the {_probed_count(probes, variable)} elements of {variable} that were "
+                          "nudged")
+            parts.append(f"the best design sits at the {'lower' if side == 'low' else 'upper'} edge of the range allowed "
+                         f"for {where}: a design outside the range may be better (widening the range is a change to the "
+                         "plan)")
         if no_effect:
-            parts.append(f"nudging {', '.join(no_effect)} changes nothing the simulation returns: the simulation may not "
+            quiet = [v if len(m) == 1 and v in probes else f"{len(m)} of the {_probed_count(probes, v)} elements of {v} "
+                     "that were nudged" for (v, _), m in _by_array([(n, "") for n in no_effect]).items()]
+            parts.append(f"nudging {', '.join(quiet)} changes nothing the simulation returns: the simulation may not "
                          "use it")
         status = FAILED if parts else PASSED
         says = "; ".join(parts) if parts else "no nearby design is better, and every variable changes the result"
@@ -693,7 +787,16 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
                "share": "at least one starting point used its whole share of the budget before it converged",
                "time": "the search's time limit (execution.timeout_s) was reached before every starting point "
                        "converged",
-               "target": "the continued search stopped as soon as a design reached the target asked for"
+               "target": "the continued search stopped as soon as a design reached the target asked for",
+               "no_effect": "the search stopped early: its first designs, which between them changed every number of "
+                            "the design, all gave the baseline's results",
+               "stepped_objective": "the search stopped early: its objective was counted in whole steps of one of its "
+                                    "numerical settings",
+               "scan_unchanged": "the search stopped before it began: its coarse scan found settings it compares that "
+                                 "changed no result of the simulation",
+               "flat_objective": "the search stopped early: its first designs across the whole range, which between them "
+                                 "changed every number of the design, all gave the baseline's objective or one of a few "
+                                 "values"
                }.get(stopped, f"the search stopped because {stopped or 'of an unknown reason'}")
         checks["budget"] = {"status": FAILED, "says": (
             f"{why}: the design is the best of {ev.get('search')} evaluations, not shown to be the best the search "
@@ -734,7 +837,8 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
         says = ("The best design was checked at finer numerical settings, but not every part of the check could be "
                 f"done: {reason}.")
     else:
-        says = VERDICTS[verdict][0].upper() + VERDICTS[verdict][1:] + (f": {reason}." if reason else ".")
+        phrase = verdict_phrase(verdict, improvement if verdict == "verified" else None)
+        says = phrase[0].upper() + phrase[1:] + (f": {reason}." if reason else ".")
     if chosen is not None and first is not None and chosen is not first:
         # The one sentence a person reads must not let the search's own best pass for the one that was checked.
         j = at(first) or {}
@@ -791,20 +895,25 @@ def check_sync(block: dict[str, Any], search_record: dict[str, Any], rows: list[
     """Run the check here, calling ``evaluate(cell)`` for each design: a dict of numbers, or (with randomness) a list of
     such dicts, one per fresh run; an exception is a failed evaluation."""
     gen = check(block, search_record, rows, noisy=noisy, check_runs=check_runs)
+
+    def answer(cell: dict[str, Any]) -> dict[str, Any]:
+        try:
+            got = evaluate(dict(cell))
+            if isinstance(got, list):
+                names = set.intersection(*(set(t) for t in got)) if got else set()
+                return {"values": {n: sum(float(t[n]) for t in got) / len(got) for n in names},
+                        "trials": [dict(t) for t in got]}
+            return {"values": dict(got), "trials": [dict(got)]}
+        except Exception as exc:  # noqa: BLE001 -- a failed evaluation is recorded, not raised
+            return {"failed": f"{type(exc).__name__}: {exc}"[:300]}
+
     try:
         request = next(gen)
         while True:
-            try:
-                got = evaluate(dict(request["cell"]))
-                if isinstance(got, list):
-                    names = set.intersection(*(set(t) for t in got)) if got else set()
-                    reply = {"values": {n: sum(float(t[n]) for t in got) / len(got) for n in names},
-                             "trials": [dict(t) for t in got]}
-                else:
-                    reply = {"values": dict(got), "trials": [dict(got)]}
-            except Exception as exc:  # noqa: BLE001 -- a failed evaluation is recorded, not raised
-                reply = {"failed": f"{type(exc).__name__}: {exc}"[:300]}
-            request = gen.send(reply)
+            if request.get("kind") == "evaluate_many":
+                request = gen.send([answer(r["cell"]) for r in request["requests"]])
+            else:
+                request = gen.send(answer(request["cell"]))
     except StopIteration as done:
         return done.value
 
@@ -914,7 +1023,7 @@ def _clean(value: Any) -> Any:
 
 async def run_check(executor: Any, python: Any, quest_root: Path, module: str, protocol: dict[str, Any], search: Any,
                     *, base_seed: int, timeout_s: int, env: dict[str, str] | None = None,
-                    log: Any = None, fresh: bool = False) -> tuple[dict[str, Any], str, str]:
+                    log: Any = None, fresh: bool = False, at_once: int = 1) -> tuple[dict[str, Any], str, str]:
     """Check the search's best design (see the module docstring) and write ``needs/OPTIMUM_CHECK.json``:
     ``(the record, its text, the key it is kept under)``. ``search`` is the :class:`core.optimise.SearchRun`; ``timeout_s`` bounds the check alone.
     Never raises for a problem of the simulation: a check that cannot finish is ``unverified``. ``fresh``: never reuse
@@ -971,10 +1080,39 @@ async def run_check(executor: Any, python: Any, quest_root: Path, module: str, p
                      "simulation, apart from the search's budget)", planned)
         gen = check(block, record_in, rows, noisy=noisy, check_runs=runs)
         load_error = ""
+        done_runs, last_line = 0, time.monotonic()
+
+        def progress(answer: dict[str, Any]) -> None:
+            """One line in run.log as designs finish (at most one in ``PROGRESS_EVERY_S`` seconds): how many of the
+            runs the check planned are done, so a long check shows it is moving and how far it has come."""
+            nonlocal done_runs, last_line
+            if "values" not in answer and "failed" not in answer:
+                return
+            done_runs += runs
+            if log is not None and time.monotonic() - last_line >= PROGRESS_EVERY_S:
+                last_line = time.monotonic()
+                log.info("[optimise] checking at finer settings: %d of at most %s run(s) done", done_runs,
+                         _plan.budget(block)["check"])
+
         try:
             request = next(gen)
             while True:
                 left = deadline - time.monotonic()
+                if request.get("kind") == "evaluate_many" and left <= 0:
+                    request = gen.send([{"stop": "time"}] * len(request["requests"]))
+                    continue
+                if request.get("kind") == "evaluate_many":
+                    # Designs that do not depend on each other: up to ``at_once`` at the same time (execution.settings_at_once)
+                    answers = await _optimise.evaluate_many(
+                        executor, python, quest_root, module, entry, [r["cell"] for r in request["requests"]],
+                        at_once=at_once, runs=runs, base_seed=int(base_seed), deadline=deadline, env=env,
+                        thresholds=thresholds, seed_key=seed_key, log=log,
+                        in_each_run=_search.in_each_run(block) or None,
+                        on_done=lambda _k, answer, _loaded: progress(answer)) if not load_error else []
+                    load_error = load_error or next((le for _r, _e, le in answers if le), "")
+                    replies = [r for r, _e, _le in answers] or [{"failed": load_error}] * len(request["requests"])
+                    request = gen.send(replies)
+                    continue
                 if left <= 0:
                     reply: dict[str, Any] = {"stop": "time"}
                 elif load_error:
@@ -982,7 +1120,9 @@ async def run_check(executor: Any, python: Any, quest_root: Path, module: str, p
                 else:
                     reply, _err, load_error = await _optimise._evaluate(
                         executor, python, quest_root, module, entry, request["cell"], runs=runs,
-                        base_seed=int(base_seed), timeout_s=left, env=env, thresholds=thresholds, seed_key=seed_key)
+                        base_seed=int(base_seed), timeout_s=left, env=env, thresholds=thresholds, seed_key=seed_key,
+                        in_each_run=_search.in_each_run(block) or None)
+                    progress(reply)
                 request = gen.send(reply)
         except StopIteration as done:
             record = done.value
@@ -1105,13 +1245,14 @@ def evidence_gaps(quest_root: Path, protocol: dict[str, Any] | None) -> dict[str
                 rows.append(row)
         budget = _plan.evaluations(block)[0]
         counted = sum(1 for r in rows if r.get("counted", True))
-        # A person's request to search further adds to the plan's budget, by the amount FI recorded for it
+        # A round that continues the search (a person's request, or FI's own while it was still improving) adds to the
+        # plan's budget, by the amount FI recorded for it
         # (core/optimise_refine.py): the rounds in FI's own file, for this plan, not the search record's word for it.
         added = sum(int(r["added"]) for r in _optimise.read_rounds(quest_root, block))
         if budget is not None and counted > budget + added:
             out["protocol_runtime_matched"].append(
                 f"the search's record holds {counted} evaluations, more than the {budget + added} the plan allows"
-                + (f" ({budget} planned and {added} added at the person's request)" if added else ""))
+                + (f" ({budget} planned and {added} added by continuing the search)" if added else ""))
         space = _search.Space(block["design_variables"])
         outside = [r for r in rows if isinstance(r.get("design"), dict) and (
             set(r["design"]) != set(space.names) or not space.inside(r["design"]))]

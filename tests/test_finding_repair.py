@@ -462,6 +462,38 @@ def test_a_repair_of_a_method_that_alters_another_function_is_rejected_and_one_t
     assert "return k * 2" in text and "return c + 1" not in text
 
 
+def test_an_accepted_repair_is_a_commit_and_a_refused_one_is_kept_on_a_side_reference(tmp_path: Path) -> None:
+    import shutil
+    import subprocess
+
+    from core import code_project
+
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    test = "import spring\n\ndef test_s():\n    assert spring.Spring().stiffness(1) == 2, 'doubled'\n"
+    run = Run(tmp_path, [{"id": "F-1", "function": "Spring.stiffness", "quantity": "stiffness"}], {})
+    (run.code / "spring.py").write_text(METHODS, encoding="utf-8")
+    assert code_project.record_change(run.root, "code written")
+    both = METHODS.replace("return k\n", "return k * 2\n", 1).replace("return c\n", "return c + 1\n", 1)
+    only = METHODS.replace("return k\n", "return k * 2\n", 1)
+    run.replies = {"code:test": [_block(test)],
+                   "code:repair": [_block("# file: spring.py\n" + both), _block("# file: spring.py\n" + only)]}
+    assert run.go() == ["spring.py"]
+
+    def git(*args: str) -> str:
+        return subprocess.run(["git", *args], cwd=run.code, capture_output=True, text=True, encoding="utf-8").stdout
+
+    assert "finding repair accepted: F-1 (Spring.stiffness; stiffness)" in git("log", "--format=%s", "-1")
+    assert git("show", "HEAD:spring.py").rstrip() == only.rstrip()
+    refused = git("log", "--format=%s", "-1", "refs/fi/refused/F-1-1")
+    assert "finding repair refused: F-1" in refused and "not about" in refused
+    assert git("show", "refs/fi/refused/F-1-1:spring.py").rstrip() == both.rstrip()
+    # the side commit hangs off the history as it was; it is not on the branch
+    assert git("rev-parse", "refs/fi/refused/F-1-1^") == git("rev-parse", "HEAD~1")
+    assert "refs/fi/refused" not in git("branch", "-a")
+    assert git("status", "--porcelain").strip() == ""
+
+
 FRAMED = "import math\n\nTHRESHOLD = 0.5\n\n\n" + METHODS.replace("class Spring:\n", "class Spring:\n    LIMIT = 3\n\n")
 
 
@@ -612,6 +644,10 @@ def test_only_the_findings_own_quantity_entries_may_change_at_module_level() -> 
     assert changes(base, f'result = {{{q}: 0.1, "merged": 0.0, "extra": 1}}\n'), "a key of another name is not the finding's"
     assert changes(base, f'result = {{{q}: 0.1, "merged": 0.0, name: 1}}\n')
     assert changes(base, f'result = {{{q}: 0.1, "merged": 0.0, "new": 1, "new": 2}}\n')
+    # A repeated key is refused even when the dict already had it: which copy wins must not decide the repair. A key that
+    # is new is refused by the rule that no other key is added, so only this case reaches the repeated-key rule.
+    twice = f'result = {{{q}: 0.0, "merged": 0.0, "merged": 0.0}}\n'
+    assert changes(twice, twice.replace(f"{q}: 0.0", f"{q}: 0.1")), "a repeated key is not a plain result dict"
 
 
 def test_the_entries_a_module_level_dict_had_keep_their_order_and_a_spread_is_never_new() -> None:

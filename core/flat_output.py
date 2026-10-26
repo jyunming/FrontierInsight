@@ -181,13 +181,15 @@ class Observed:
                 "no effect elsewhere, so it must not be written up as proof of none.")
 
 
-def observed_flat_sweep(cells: list[Any]) -> Observed | None:
+def observed_flat_sweep(cells: list[Any], *, ignore: Iterable[str] = ()) -> Observed | None:
     """The observation behind :func:`flat_sweep`: ``cells`` are :class:`core.trial_runner.CellRun` objects (``cell`` and
     ``rows``, each row with ``status`` and ``values``). ``None`` for a study with one setting, one that varies nothing, or
     one in which some quantity does change from one setting to the next (or whose numbers cannot be told apart by their
     size). A run that compared values inside it (:mod:`core.in_run`) holds numbers per run and numbers per value: the first
     are judged over the settings, the others over the settings and values (a cell with a truthy ``level`` is a value's own
-    record), each over the cells that hold them, and the observation is made only when every one of them holds."""
+    record), each over the cells that hold them, and the observation is made only when every one of them holds.
+    ``ignore``: names of numbers that are no result of the setting (:func:`core.trial_runner.unsteady_names`)."""
+    left_out = {str(n) for n in ignore}
     run: list[tuple[dict[str, Any], dict[str, list[float]]]] = []
     value: list[tuple[dict[str, Any], dict[str, list[float]]]] = []
     for c in cells:
@@ -195,21 +197,22 @@ def observed_flat_sweep(cells: list[Any]) -> Observed | None:
         if not ok:
             continue
         cell = dict(getattr(c, "cell", {}) or {})
-        levels = {_in_run.level_key(lv): lv for lv in getattr(c, "levels", None) or []}
         own: dict[str, list[float]] = {}
         per_level: dict[str, dict[str, list[float]]] = {}
         for r in ok:
             per_run, by_level = _in_run.split(r.get("values") or {})
             for name, v in per_run.items():
-                if _is_number(v):
+                if _is_number(v) and str(name) not in left_out:
                     own.setdefault(str(name), []).append(float(v))
             for lk, named in by_level.items():
                 for name, v in named.items():
-                    if _is_number(v):
+                    if _is_number(v) and str(name) not in left_out:
                         per_level.setdefault(lk, {}).setdefault(str(name), []).append(float(v))
         if own or getattr(c, "level", None) or not per_level:
             # a run that gives numbers per value only has nothing per run to judge over the settings
             (value if getattr(c, "level", None) else run).append((cell, own))
+        # The combinations are listed only when the run returned numbers for them: a run's lists can cross into millions.
+        levels = {_in_run.level_key(lv): lv for lv in getattr(c, "levels", None) or []} if per_level else {}
         for lk, columns in per_level.items():
             value.append(({**cell, **(levels.get(lk) or _in_run.parse_level_key(lk))}, columns))
     seen = [o for o in (_observed_in(g) for g in (run, value) if g) if o is not None]
@@ -245,14 +248,212 @@ def _observed_in(by_cell: list[tuple[dict[str, Any], dict[str, list[float]]]]) -
     return Observed(names, {n: v[0] for n, v in pooled.items()}, varied, len(by_cell))
 
 
+#: An axis is read only once this many pairs of settings differ in it alone: one pair proves nothing.
+MIN_PAIRS = 2
+
+
+def declared_only(names: Iterable[str], present: Iterable[str]) -> set[str]:
+    """The names to leave out so that only the plan's declared results (``names``) are compared, given the names a run
+    returned (``present``): everything returned that the plan did not declare (a timing, a counter, a diagnostic the
+    simulation prints). ``set()`` (compare everything returned) when the run returned none of the declared names: FI cannot
+    tell which numbers are the results then, and judging nothing would hide a setting that changed nothing."""
+    declared = {str(n) for n in names}
+    returned = {str(n) for n in present}
+    if not declared & returned:
+        return set()
+    return returned - declared
+
+
+def returned_names(cells: list[Any]) -> set[str]:
+    """Every name a run of ``cells`` (:class:`core.trial_runner.CellRun` objects) returned a number under, an in-run value's
+    numbers under their plain name."""
+    out: set[str] = set()
+    for c in cells:
+        for r in getattr(c, "rows", []):
+            if r.get("status") != "ok":
+                continue
+            for _at, name, v in _in_run.flat("", r.get("values") or {}):
+                if _is_number(v):
+                    out.add(str(name))
+    return out
+
+
+def unchanged_axes(cells: list[Any], *, skip: Iterable[str] = (), ignore: Iterable[str] = (),
+                   declared: Iterable[str] | None = None) -> list[tuple[str, int]]:
+    """The settings of a study that changed no number the simulation returned, with how many pairs showed it:
+    ``[(axis, pairs)]``. ``cells`` are :class:`core.trial_runner.CellRun` objects. For each varied axis, the pairs are
+    the settings that differ in that axis alone; the axis is listed when there are at least :data:`MIN_PAIRS` of them and
+    in every pair each number both returned is the same (:func:`same`, trial by trial). That is what a simulation that
+    never lets the setting reach its results looks like, and also what a run that computes every value of the setting
+    itself looks like (the axis then repeats one run); either way a difference between the settings of that axis is not
+    a result of it. ``skip``: axes left out (numerical settings, which the check at finer settings judges). Each
+    value's numbers a run returns (``in_each_run``) are compared with its plain ones, under the value's name. A value's
+    own record of the per-setting summary (``level``) is not a setting of the study. ``ignore``: names of numbers that
+    are no result of the setting (a timing: :func:`core.trial_runner.unsteady_names`), never compared. ``declared``: the
+    names of the results the plan declares: when the run returned any of them, only those are compared (a timing or a
+    counter the simulation also returns moves with the machine, not with the setting, and used to hide a setting that
+    changed every declared result not at all); when it returned none of them, every number is compared as before."""
+    left_out = {str(n) for n in ignore}
+    if declared:
+        left_out |= declared_only(declared, returned_names(cells))
+    rows: list[tuple[dict[str, Any], dict[str, list[float]]]] = []
+    for c in cells:
+        if getattr(c, "level", None):
+            continue
+        ok = [r for r in getattr(c, "rows", []) if r.get("status") == "ok"]
+        values: dict[str, list[float]] = {}
+        for r in ok:
+            for at, name, v in _in_run.flat("", r.get("values") or {}):
+                if _is_number(v) and str(name) not in left_out:
+                    values.setdefault(f"{at}: {name}" if at else str(name), []).append(float(v))
+        if values:
+            rows.append((dict(getattr(c, "cell", {}) or {}), values))
+    if len(rows) < MIN_PAIRS + 1:
+        return []
+
+    def key(value: Any) -> str:
+        return repr(value)
+
+    skipped = set(skip)
+    axes = sorted({a for cell, _ in rows for a in cell})
+    varied = [a for a in axes if len({key(cell.get(a)) for cell, _ in rows}) > 1]
+    out: list[tuple[str, int]] = []
+    for axis in varied:
+        if axis in skipped:
+            continue
+        others = [b for b in varied if b != axis]
+        groups: dict[tuple[str, ...], list[tuple[dict[str, Any], dict[str, list[float]]]]] = {}
+        for cell, values in rows:
+            groups.setdefault(tuple(key(cell.get(b)) for b in others), []).append((cell, values))
+        pairs = 0
+        moved = False
+        for members in groups.values():
+            first_cell, first = members[0]
+            for cell, values in members[1:]:
+                if key(cell.get(axis)) == key(first_cell.get(axis)):
+                    continue
+                common = set(first) & set(values)
+                if not common:
+                    continue
+                pairs += 1
+                if not all(len(first[n]) == len(values[n]) and all(same(x, y) for x, y in zip(first[n], values[n]))
+                           for n in common):
+                    moved = True
+                    break
+            if moved:
+                break
+        if not moved and pairs >= MIN_PAIRS:
+            out.append((axis, pairs))
+    return out
+
+
+#: Two results are "identical" once they agree in at least this many trials (one agreeing trial proves nothing).
+MIN_IDENTICAL_TRIALS = 3
+
+
+def identical_results(cells: list[Any], *, declared: Iterable[str] | None = None,
+                      ignore: Iterable[str] = ()) -> list[tuple[str, str, int]]:
+    """Pairs of results the run returned that are the same number in every trial of every setting, while each of them
+    differs from one trial to another: ``[(a, b, trials)]``. Two estimators (or two arms of a comparison) that agree
+    trial by trial are not two findings: either the second is the first computed again, or they are equal by construction
+    (an identity of the model), and a paper must not present "no difference between them" as something the study found.
+    ``declared``: only the plan's declared results are compared (the whole run when none of them was returned);
+    ``ignore``: names that are no result (a timing). A result that is the same in every trial is not paired: that is a
+    constant, which :func:`observed_flat_sweep` judges."""
+    left_out = {str(n) for n in ignore}
+    if declared:
+        left_out |= declared_only(declared, returned_names(cells))
+    columns: dict[str, list[float]] = {}
+    complete = True
+    count = None
+    for c in cells:
+        if getattr(c, "level", None):
+            continue
+        for r in getattr(c, "rows", []):
+            if r.get("status") != "ok":
+                continue
+            row = {str(name) if not at else f"{at}: {name}": float(v) for at, name, v in _in_run.flat("", r.get("values") or {})
+                   if _is_number(v) and str(name) not in left_out}
+            for n, v in row.items():
+                columns.setdefault(n, []).append(v)
+            count = (count or 0) + 1
+    if not count:
+        return []
+    names = sorted(n for n, v in columns.items() if len(v) == count and _varies(v))
+    out: list[tuple[str, str, int]] = []
+    taken: set[str] = set()
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            if b in taken or count < MIN_IDENTICAL_TRIALS:
+                continue
+            if all(same(x, y) for x, y in zip(columns[a], columns[b])):
+                out.append((a, b, count))
+                taken.add(b)
+    return out
+
+
+def identical_results_note(pairs: list[tuple[str, str, int]]) -> str:
+    """The plain observation of :func:`identical_results`, for run.log, the analysis and the writer; ``""`` for none."""
+    if not pairs:
+        return ""
+    said = "; ".join(f"`{a}` and `{b}` (in all {n} trials)" for a, b, n in pairs[:4])
+    return (f"These results were the same number in every trial, while each changed from trial to trial: {said}. Two "
+            "results that agree trial by trial are one result written twice, or equal by construction of the model, so "
+            "'no difference between them' is not a finding of the study: report that they are identical by design (or "
+            "that one is computed from the other) and draw no conclusion about which is better.")
+
+
+def _short(value: Any, limit: int = 40) -> str:
+    text = str(value)
+    return text if len(text) <= limit else text[:limit - 3].rstrip() + "..."
+
+
+def no_effect_search(no_effect: dict[str, Any], block: dict[str, Any]) -> str:
+    """The plain description of a search the design changed nothing in (``no_effect`` in the search's record, from
+    :mod:`core.optimise_search`): its first designs, which between them moved every number of the design, all gave the
+    baseline's value of every result the plan names. Measured by FI, so no reading of the code overrules it."""
+    variables = [str(v.get("name")) for v in block.get("design_variables") or [] if isinstance(v, dict)]
+    fixed = block.get("fixed") if isinstance(block.get("fixed"), dict) else {}
+    # A setting that is a word (a mode, a family) picks a way of computing before a number does: those come first.
+    ordered = sorted(fixed.items(), key=lambda kv: _is_number(kv[1]))
+    # A held value can be a long list (hundreds of numbers): its first characters say which setting it is.
+    held = ", ".join(f"{k} = {_short(v)}" for k, v in ordered[:12]) + (", ..." if len(ordered) > 12 else "")
+    results = [str(r) for r in no_effect.get("results") or []]
+    one = len(variables) == 1
+    return (f"the result does not change when {_names(variables)} change{'s' if one else ''}"
+            f"{f' at the settings the search holds ({held})' if held else ''}: the first {no_effect.get('designs')} "
+            f"designs tried, which between them changed every number of {'it' if one else 'them'}, all gave the "
+            f"baseline's {_names(results, limit=8)}, so the simulation does not use {'it' if one else 'them'} there. "
+            f"Make the simulation compute its results from the design it is given at those settings; if one of those "
+            f"settings makes the simulation leave the design out, the plan and the simulation disagree on what that "
+            f"setting means, and the paper must say so.")
+
+
+def unchanged_axes_note(axes: list[tuple[str, int]]) -> str:
+    """The plain observation of :func:`unchanged_axes`, for run.log, the analysis and the writer; ``""`` for none."""
+    if not axes:
+        return ""
+    named = _names([a for a, _ in axes], limit=8)
+    pairs = min(p for _, p in axes)
+    one = len(axes) == 1
+    return (f"Changing {named} changed no number the simulation returned: in each of at least {pairs} pairs of "
+            f"settings that differ in {'it' if one else 'one of them'} alone, every result was the same. In the settings "
+            f"tried the results do not depend on {'it' if one else 'them'}, so the settings of the study that differ in "
+            f"{'it' if one else 'them'} are one result repeated, not a comparison: report no difference, trend or best "
+            f"value along {'it' if one else 'them'} from those settings. A comparison along {'it' if one else 'them'} "
+            "can only come from results a run reports for each value by name, and the paper says plainly which "
+            "comparison the study could not make.")
+
+
 def flat_sweep(cells: list[Any], *, source: str | None = None,
-               expected: set[str] | frozenset[str] = frozenset()) -> str | None:
+               expected: set[str] | frozenset[str] = frozenset(), ignore: Iterable[str] = ()) -> str | None:
     """The plain description of a measurement whose every returned number is the same in every setting AND whose simulation
     does not read the setting that was varied (evidence from its code, :func:`unread_settings`), else ``None``. Only that
     pair is a fault the simulation must be repaired for. Without ``source`` (or when the code does read the settings, or
     cannot be read with certainty) the same numbers are an observation, not a fault: :func:`observed_flat_sweep` has it.
-    ``expected``: names the plan itself expects to stay put (an invariant, a symmetry): they are never a fault."""
-    seen = observed_flat_sweep(cells)
+    ``expected``: names the plan itself expects to stay put (an invariant, a symmetry): they are never a fault.
+    ``ignore``: as :func:`observed_flat_sweep`."""
+    seen = observed_flat_sweep(cells, ignore=ignore)
     if seen is None:
         return None
     names = [n for n in seen.names if n not in expected]

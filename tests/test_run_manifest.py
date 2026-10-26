@@ -524,17 +524,20 @@ async def test_a_reply_without_both_scripts_runs_as_one_script_by_default_and_st
 
 
 @pytest.mark.asyncio
-async def test_scripts_that_break_the_contract_are_named_and_stop_a_strict_quest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_scripts_that_break_the_contract_are_named_and_recorded_in_a_strict_quest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     publishing = SIM_OK + "\nprint('RESULT_JSON: {}')\n"
     monkeypatch.setattr("core.engine.LLMClient.chat", _fake([], implement=_reply(publishing)))
     warned = Engine(_cfg(tmp_path / "warn"))
     await warned.run()
     assert "simulate.py prints or names RESULT_JSON" in (warned.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
 
+    # Under block the breach is still FI's reading of the scripts: repaired, recorded, said, and never the end of the
+    # quest (core/stop_power.py).
     strict = Engine(_cfg(tmp_path / "strict", execution={"split_failure": "block"}))
     await strict.run()
-    assert "simulate.py prints or names RESULT_JSON" in _stuck(strict)
-    assert not (strict.quest_root / "paper" / "paper.md").exists()
+    assert not (strict.quest_root / "needs" / "STUCK.json").exists()
+    said = " ".join(p["text"] for p in strict._cannot_repair_problems())
+    assert "simulate.py prints or names RESULT_JSON" in said
 
 
 @pytest.mark.asyncio

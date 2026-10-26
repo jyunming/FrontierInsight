@@ -3,9 +3,11 @@
 Each check is a small module that reads the code with ``ast`` and the plan's protocol, and finds a fault a person would
 find in a minute: a setting the code reads under a name the study does not have (:mod:`core.grid_keys`), numbers typed into
 the model's functions that the plan never gives (:mod:`core.typed_constants`), a "second implementation" that compares a
-value with itself (:mod:`core.independent_check`). A fault is sent back to be repaired, in plain words and with no expected
-value in the request, at most :data:`REPAIRS` times for the text of the code; what is still there afterwards is handled the
-way its module says (an honest stop, or a note the evidence and the paper carry). Nobody is asked to edit code.
+value with itself (:mod:`core.independent_check`), a name the code uses that nothing defines or imports
+(:mod:`core.undefined_names`). A fault is sent back to be repaired, in plain words and with no expected
+value in the request, at most :data:`REPAIRS` times for the text of the code; what is still there afterwards is a note the
+evidence and the paper carry. Every check here reads the code (each module's ``SOURCE``), and a reading never ends a quest
+(:mod:`core.stop_power`). Nobody is asked to edit code.
 
 They live here and not in ``engine.py`` so the node only calls :meth:`StaticChecksMixin._static_gate`. Every method uses
 the engine's own attributes (``quest_root``, ``fi_dir``, ``_log``, ``_chat`` ...).
@@ -22,11 +24,20 @@ from typing import Any
 from . import grid_keys as _grid_keys
 from . import independent_check as _independent
 from . import typed_constants as _constants
+from . import undefined_names as _undefined
 
 #: How many times, in all, one text of the code is sent back for the checks of this module.
 REPAIRS = 2
 _COUNTER = "static_checks.json"
 RECORD_DIR = "needs"
+
+
+def static_checks() -> list[tuple[str, Any, str]]:
+    """``(name, module, what a fault that stands after the repairs does)`` for each static check, in the order they run:
+    ``stop`` ends the quest without a paper, ``note`` is recorded for the evidence and the paper, ``headline`` stops only
+    when the module says a headline result rests on it (and is a note otherwise)."""
+    return [("undefined_names", _undefined, "stop"), ("grid_keys", _grid_keys, "stop"),
+            ("typed_constants", _constants, "headline"), ("independent_check", _independent, "note")]
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -44,8 +55,7 @@ class StaticChecksMixin:
     #: ``note`` is recorded for the evidence and the paper, ``headline`` stops only when the module says a headline
     #: result rests on it (and is a note otherwise).
     def _static_checks(self) -> list[tuple[str, Any, str]]:
-        return [("grid_keys", _grid_keys, "stop"), ("typed_constants", _constants, "headline"),
-                ("independent_check", _independent, "note")]
+        return static_checks()
 
     def _static_files(self) -> dict[str, str]:
         return _grid_keys.code_files(self.quest_root / "code")  # type: ignore[attr-defined]
@@ -103,7 +113,7 @@ class StaticChecksMixin:
                 used += 1
                 self._log.warning(  # type: ignore[attr-defined]
                     "[execute] %s; asking for it to be repaired (%d of %d)", module.plain_note(found, protocol), used, REPAIRS)
-                await self._repair_static(state, module, found, protocol, design)
+                await self._repair_static(state, module, found, protocol, design, used)
                 files = self._static_files()
                 sha = self._static_fingerprint(files)
                 self._save_static_counter(name, sha, used)
@@ -119,6 +129,7 @@ class StaticChecksMixin:
         path = self.quest_root / RECORD_DIR / f"{name}_check.json"  # type: ignore[attr-defined]
         path.unlink(missing_ok=True)
         if not found:
+            self._clear_cannot_repair(name)  # type: ignore[attr-defined]
             return
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -130,7 +141,9 @@ class StaticChecksMixin:
 
     def _static_standing(self, name: str, module: Any, on_standing: str, found: list[Any], files: dict[str, str],
                          protocol: Any, design: Any) -> dict[str, Any] | None:
-        """What a fault that stands after the repairs does: the honest stop, or (a note is already written) going on."""
+        """What a fault that stands after the repairs does: a ``note`` is already written and the quest goes on; a fault
+        that would stop is handed to the record of problems FI could not repair with what it rests on (the module's
+        ``SOURCE``, :mod:`core.stop_power`), which ends the quest only for a measured or agreed one."""
         stops = on_standing == "stop"
         if on_standing == "headline":
             hit = getattr(module, "headline_hit", None)
@@ -142,10 +155,12 @@ class StaticChecksMixin:
         self._record_cannot_repair(  # type: ignore[attr-defined]
             text, [f"read the code against the plan before running it ({name})", *[f.says([]) if hasattr(f, "says") else str(f)
                                                                                   for f in found[:2]],
-                   f"sent the code back to be repaired {REPAIRS} times; it still had this"])
+                   f"sent the code back to be repaired {REPAIRS} times; it still had this"], source=module.SOURCE,
+            check=name)
         return self._cannot_repair_stop()  # type: ignore[attr-defined]
 
-    async def _repair_static(self, state: Any, module: Any, found: list[Any], protocol: Any, design: Any) -> bool:
+    async def _repair_static(self, state: Any, module: Any, found: list[Any], protocol: Any, design: Any,
+                             number: int = 1) -> bool:
         """ONE repair of the file the first fault is in: kept only if it parses, keeps what FI reads from it, and has fewer
         faults of this kind in that file than before."""
         from . import engine as _e
@@ -197,13 +212,30 @@ class StaticChecksMixin:
         after = len([f for f in module.problems(self._static_files(), protocol, design) if f.script == script])
         if after >= before:
             path.write_text(code, encoding="utf-8")
+            await self._keep_unrun_try(f"static-{Path(script).stem}-{number}", {script: new_code},
+                                       f"static repair refused: the static faults were not fewer ({before} -> {after})")
             self._log.warning(  # type: ignore[attr-defined]
                 "[execute] the rewritten %s still has %d fault(s) of this kind; keeping it as written", script, after)
+            return False
+        if await self._simulation_kept_or_back(state, path, code, self._package_snapshot(), "execute"):  # type: ignore[attr-defined]
             return False
         self._log.info(  # type: ignore[attr-defined]
             "[execute] rewrote %s to repair the fault (%d left in it): %s", script, after,
             str(parsed.get("patch_summary") or "no summary")[:120])
         return True
+
+    async def _keep_unrun_try(self, ref: str, files: dict[str, str], message: str) -> None:
+        """Keep a version that was written into ``code/`` and taken back before any run, on a side reference of the
+        folder's git history. Best effort: never changes what the step does."""
+        try:
+            import asyncio
+
+            from . import code_project as _project
+
+            await asyncio.to_thread(_project.keep_refused, self.quest_root, ref, files, message,  # type: ignore[attr-defined]
+                                    log=self._log)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 -- the record is a convenience; the repair goes on whatever happens to it
+            pass
 
     # ---- what stood, for the paper and the evidence -------------------------------------------------------------------
 

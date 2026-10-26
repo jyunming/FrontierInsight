@@ -32,5 +32,6 @@ $signature
 $related_block
 
 $literature_block
+$return_block
 $example_block
 $rewrite_block

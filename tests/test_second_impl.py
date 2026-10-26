@@ -159,6 +159,49 @@ def test_judge_rows_exceptions_and_excluded():
     assert si.judge_rows([rows[1]], inputs[1:2], si.REL)["status"] == "unconfirmed"
 
 
+def test_a_different_return_shape_with_equal_shared_values_is_not_a_disagreement():
+    inputs = [{"x": 1.0}, {"x": 2.0}]
+    main = {"Ea": 49.6, "lnA": 15.3, "se_Ea": 0.69, "se_lnA": 0.26}
+    ref = {**main, "covariance": [[0.48, 0.18], [0.18, 0.07]]}
+    v = si.judge_rows([{"main": main, "ref": ref}, {"main": main, "ref": ref}], inputs, si.REL)
+    assert v["status"] == "agree" and not v["disagreements"] and v["compared"] == 2
+    assert "only the second version returns covariance" in v["shape_notes"][0]
+    assert "those were not compared" in v["shape_notes"][0] and "description" not in v["shape_notes"][0]
+
+
+def test_a_returned_key_the_second_version_lacks_is_unconfirmed_never_agree():
+    main, ref = {"answer": 999, "count": 1}, {"count": 1}
+    v = si.judge_rows([{"main": main, "ref": ref}], [{"x": 1.0}], si.REL)
+    assert v["status"] == "unconfirmed" and "answer" in v["why"] and not v["disagreements"]
+    # the s8 shape: the second version lacks one of the first version's keys
+    main = {"Ea": 49.6, "lnA": 15.3, "se_Ea": 0.69, "se_lnA": 0.26}
+    ref = {"Ea": 49.6, "lnA": 15.3, "covariance": [[1.0]], "se_Ea": 0.69}
+    assert si.judge_rows([{"main": main, "ref": ref}], [{"x": 1.0}], si.REL)["status"] == "unconfirmed"
+    assert si.judge_rows([{"main": main, "ref": {**main, "answer": 1}}], [{"x": 1.0}], si.REL)["status"] == "agree"
+
+
+def test_nothing_shared_is_not_compared_and_never_a_disagreement():
+    v = si.judge_rows([{"main": {"a": 1.0}, "ref": {"b": 2.0}}], [{"x": 1.0}], si.REL)
+    assert v["status"] == "unconfirmed" and "was not compared" in v["why"] and not v["disagreements"]
+
+
+def test_a_transformed_first_element_of_a_list_is_still_a_disagreement():
+    v = si.judge_rows([{"main": [-4.609, 0.000844], "ref": [0.00996, 0.000844]}], [{"x": 1.0}], si.REL)
+    assert v["status"] == "disagree"
+    assert si.compare_shared([1.0, 2.0], [1.0, 2.0, 3.0])[1]  # lists of another length still differ
+
+
+def test_a_step_whose_versions_return_different_shapes_with_equal_values_is_resolved_agree(tmp_path):
+    main = GOOD_MAIN.replace("return -slope * 8.314", 'return {"Ea": -slope * 8.314}')
+    ref = ("def activation_energy(slope):\n"
+           "    return {'Ea': -8.314 * slope, 'covariance': [[1.0]]}\n")
+    fake = Fake(write=[fenced(ref)])
+    root, s, rec = run_it(tmp_path, fake, main=main)
+    e = rec["functions"]["activation_energy"]
+    assert e["status"] == "agree" and rec["calls"] == 1
+    assert "only the second version returns covariance" in e["shape_note"] and "limitation" not in e
+
+
 def test_key_functions_order_and_random_skip():
     proto = protocol(example=True)
     proto["model"]["equations"] = [
@@ -636,3 +679,34 @@ def test_a_stale_entry_checked_again_starts_its_rounds_over(tmp_path):
     e = rec["functions"]["activation_energy"]
     assert fake.count("second_impl.adjudicate") == 1, "the rounds allowed start again for the changed code"
     assert e["rounds"] == 1 and e["status"] == "unresolved"
+
+
+def _write_request(tmp_path, record):
+    proto = protocol()
+    root = make_quest(tmp_path)
+    if record is not None:
+        (root / ".fi" / "second_impl").mkdir(parents=True)
+        (root / si.CAPTURED).write_text(json.dumps(record), encoding="utf-8")
+    s = build(root, Fake(), [spec_for(proto)], proto)
+    return si.write_prompt(spec_for(proto), template=PROMPTS["write"], protocol=proto, specs=s.specs, passages="",
+                           example=None, return_keys=s._return_keys(spec_for(proto)))
+
+
+def test_the_second_writer_is_told_every_key_the_first_version_returned(tmp_path):
+    text = _write_request(tmp_path, {"cases": {}, "returned": {"activation_energy": ["Ea", "ci_Ea", "cov"]}})
+    assert "the first version's dict results carried these keys: Ea, ci_Ea, cov. A key may appear only for some inputs" in text
+
+
+def test_the_second_writer_gets_no_key_list_without_a_record(tmp_path):
+    assert "What it must return" not in _write_request(tmp_path, None)
+
+
+def test_a_key_the_first_version_has_at_any_depth_that_the_second_lacks_is_unconfirmed_with_its_path():
+    one = [{"x": 1.0}]
+    nested = si.judge_rows([{"main": {"result": {"a": 1, "b": 2}}, "ref": {"result": {"a": 1}}}], one, si.REL)
+    assert nested["status"] == "unconfirmed" and "result.b" in nested["why"]
+    in_list = si.judge_rows([{"main": {"rows": [{"a": 1, "b": 2}]}, "ref": {"rows": [{"a": 1}]}}], one, si.REL)
+    assert in_list["status"] == "unconfirmed" and "rows[0].b" in in_list["why"]
+    # the second version may carry more at depth; a real difference at depth is still a disagreement
+    assert si.judge_rows([{"main": {"result": {"a": 1}}, "ref": {"result": {"a": 1, "c": 3}}}], one, si.REL)["status"] == "agree"
+    assert si.judge_rows([{"main": {"result": {"a": 1.0}}, "ref": {"result": {"a": 1.5}}}], one, si.REL)["status"] == "disagree"

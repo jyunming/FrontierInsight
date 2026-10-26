@@ -83,9 +83,9 @@ def test_every_offered_step_has_its_words_its_files_and_a_block() -> None:
         info = rerun_from.step_info(step, reached=True)
         assert set(info) == {"name", "group", "sentence", "needs_approval", "reached", "outputs"}
         assert info["group"] and info["outputs"] == rerun_from.outputs_of(step)
-    for step in ("ideas", "literature", "plan", "design"):
+    for step in ("ideas", "literature", "studies", "plan", "design"):
         assert rerun_from.needs_approval(step) and "experiment plan (frozen) is replaced" in rerun_from.REDOES[step]
-    assert not any(rerun_from.needs_approval(s) for s in rerun_from.STEPS if s not in ("ideas", "literature", "plan", "design"))
+    assert not any(rerun_from.needs_approval(s) for s in rerun_from.STEPS if s not in ("ideas", "literature", "studies", "plan", "design"))
 
 
 def test_every_graph_node_is_a_step_or_says_why_not(tmp_path: Path) -> None:

@@ -149,7 +149,7 @@ _SECRET_PROTOCOL = {
                  "expected_formula": "0.123456789 + 0.0000000001", "tolerance": 1e-9, "case": {"c": 0.5}, "measure": "w",
                  "reference": "derivation: by hand"}],
 }
-_SECRETS = ("7.3137", "4.2719", "1.0000001", "1.0000002", "0.0000000001", "expected_formula")
+_SECRETS = ("7.3137", "4.2719", "1.0000001", "1.0000002", "0.0000000001")
 
 
 @pytest.mark.asyncio

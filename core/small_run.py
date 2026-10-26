@@ -163,6 +163,9 @@ class SmallRun:
 
     def record(self) -> dict[str, Any]:
         return {"says": self.says(), "crashed": self.crashed, "load_error": self.load_error, "seconds": round(self.seconds, 2),
+                # The names the simulation's entry returned in the settings that ran: FI's record of what the entry itself
+                # gives (a headline metric listed here is one the entry returns, not one the analysis derives later).
+                "returned": sorted({name for s in self.settings for name in s.values}),
                 "settings": [{"key": s.key, "planned": s.planned, "ok": s.ok, "failed": s.failed, "timed_out": s.timed_out,
                               "reasons": [[r, n] for r, n in s.reasons[:3]]} for s in self.settings]}
 
@@ -176,11 +179,13 @@ def _short(v: Any) -> str:
     return f"{v:.4g}"
 
 
-def key_of(simulate: Path, grid: dict[str, Any], deterministic: bool, thresholds: dict[str, Any] | None) -> str:
-    """What the small run depends on: the simulation and its package (as FI keys its trials), the settings it uses and the
-    thresholds the trials are given."""
+def key_of(simulate: Path, grid: dict[str, Any], deterministic: bool, thresholds: dict[str, Any] | None,
+           in_each_run: dict[str, list[Any]] | None = None) -> str:
+    """What the small run depends on: the simulation and its package (as FI keys its trials), the settings it uses, the
+    thresholds the trials are given and the values each run is given to compare inside it."""
     base = _trials._run_key(Path(simulate), {"grid": grid, "thresholds": thresholds or {}}, TRIALS, 0, deterministic)
-    return hashlib.sha256(f"{base}|{json.dumps(settings(grid), sort_keys=True, default=str)}".encode()).hexdigest()[:20]
+    inside = f"|{json.dumps(in_each_run, sort_keys=True, default=str)}" if in_each_run else ""
+    return hashlib.sha256(f"{base}|{json.dumps(settings(grid), sort_keys=True, default=str)}{inside}".encode()).hexdigest()[:20]
 
 
 async def run(executor: Any, python: Path | str, quest_root: Path, module: str, grid: dict[str, Any], *, deterministic: bool,

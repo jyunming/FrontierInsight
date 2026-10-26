@@ -111,7 +111,10 @@ def test_kinetics_placeholders_are_filled_with_the_true_values(tmp_path: Path) -
     out = paper_facts.render(draft, root, topic=topic)
     plain = paper_facts.without_marks(out.text)
     assert "{{" not in out.text and not out.unfilled
-    assert ("took 223.2 s (about 3.7 minutes), over the topic's limit of 60 s" in plain), plain
+    # the record does not say whether the settings ran together and the trials' own times add up to 32.6 s: the least a
+    # one-after-another run takes is under the limit, so the limit is neither shown met nor shown missed
+    assert "took 223.2 s (about 3.7 minutes)" in plain and "at least 32.6 s" in plain, plain
+    assert "not shown to be within or over the topic's limit of 60 s" in plain, plain
     assert "derived from base seed 0" in plain
     assert "2.3 s" not in plain
 
@@ -121,7 +124,7 @@ def test_e1_placeholders_are_filled_with_the_code_s_seed_and_the_measured_time(t
     draft = "# FDR\n\n## Methods\nWe used {{seed}}. The run took {{run_time}}, {{time_limit_met}} the {{time_limit}} limit.\n"
     plain = paper_facts.without_marks(paper_facts.render(draft, root, topic=topic, fallback_s=7.4).text)
     assert "We used a seed fixed in the code (20261015, at code/simulate.py:106)." in plain
-    assert "The run took 121.3 s, over the 60 s limit." in plain
+    assert "The run took 121.3 s" in plain and "at least 78.9 s), over the 60 s limit." in plain
     assert "base seed" not in plain and "7.4" not in plain and "17" not in plain
 
 
@@ -296,7 +299,7 @@ def _items_quest(tmp_path: Path) -> Path:
     (root / ".fi" / "second_impl.json").write_text(json.dumps({"functions": {
         "fit_k": {"status": "unresolved", "limitation": "Two independently written versions of `fit_k` gave different "
                   "results on t = 1; the number depends on which is right."},
-        "weighted_arrhenius": {"status": "unconfirmed", "limitation": "could not be compared"}}}))
+        "weighted_temperature_law": {"status": "unconfirmed", "limitation": "could not be compared"}}}))
     (root / ".fi" / "equation_tests.json").write_text(json.dumps({"not_tested": [
         "equation E3 is not tested at all: the plan gives no example"]}))
     return root
@@ -308,14 +311,15 @@ def test_every_required_item_has_an_id_and_one_plain_sentence(tmp_path: Path) ->
     for i in paper_facts.required_items(root):
         items.setdefault(i.kind, i)
     assert items["not_done"].id == "topic-temperature"
-    assert items["not_done"].sentence == "The topic asks to vary temperature; this study did not vary it."
+    assert items["not_done"].sentence == ("The topic asks to vary temperature; FI's check did not find a setting of the "
+                                          "study's plan that varies it.")
     assert items["left_out"].id == "left-out-coverage-ea" and items["not_computed"].id == "not-computed-ea-sd-se"
     assert items["precision"].id == "precision-coverage-lna"
     assert items["second_version"].id == "second-version-fit-k" and "fit_k" in items["second_version"].sentence
     assert items["untested"].sentence == "Equation E3 was not tested at all before the run."
     kinds = [i.kind for i in paper_facts.required_items(root)]
     assert kinds.count("not_done") == 2, "a plain sentence of an older record is an item too"
-    assert "weighted_arrhenius" not in json.dumps([i.sentence for i in paper_facts.required_items(root)]), \
+    assert "weighted_temperature_law" not in json.dumps([i.sentence for i in paper_facts.required_items(root)]), \
         "a second version that could not be compared is in the quality report only"
     section = paper_facts.writer_section(root, topic="t")
     for i in paper_facts.required_items(root):
@@ -324,7 +328,8 @@ def test_every_required_item_has_an_id_and_one_plain_sentence(tmp_path: Path) ->
     # twice.
     older = [i for i in paper_facts.required_items(root) if i.kind == "not_done" and i.id != "topic-temperature"][0]
     assert older.id == "topic-the-topic-asks-for-a-sensitivity", older.id
-    assert older.sentence == "The topic asks for a sensitivity analysis; this study did not do it."
+    assert older.sentence == ("The topic asks for a sensitivity analysis; FI's check did not find it in the study's "
+                              "plan.")
 
 
 def test_an_open_code_finding_that_changes_a_result_is_an_item(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -434,7 +439,7 @@ def test_the_quality_report_holds_the_three_blocks_the_paper_no_longer_has(tmp_p
     assert "The seed FI gives each trial does not reach the simulation: run_trial takes `seed` but never uses it." \
         in records["run_record"], records["run_record"]
     assert records["run_record"].count("does not reach") == 1, "said once (the review's P2-7)"
-    assert "ran for 121.3 s" in records["run_record"] and "was over it" in records["run_record"]
+    assert "ran for 121.3 s" in records["run_record"] and "is over the topic" in records["run_record"]
     assert "27 settings" in records["run_record"]
     md = quality_report.render(report)
     assert "### What FI recorded about the run" in md and "121.3 s" in md
@@ -500,7 +505,8 @@ def test_the_paper_gets_none_of_the_three_blocks_and_holds_the_filled_values(tmp
     for marker in ("fi:attempts", "fi:run-record", "fi:code-findings", "What FI recorded about this run",
                    "How this result was reached", "Open points in the code that produced", "{{"):
         assert marker not in paper, marker
-    assert ("took 121.3 s, over the topic's limit of 60 s" in paper_facts.without_marks(paper))
+    plain_paper = paper_facts.without_marks(paper)
+    assert "took 121.3 s" in plain_paper and "at least 78.9 s), over the topic's limit of 60 s" in plain_paper
     assert "a seed fixed in the code (20261015, at code/simulate.py:106)" in paper
     assert any("FI'S RECORD OF THIS RUN" in s and "{{seed}}" in s and "121.3 s" in s for s in seen)
     assert run_facts.read(root)["seed"]["verdict"] == "does_not_reach", "the write step keeps the seed verdict on record"
@@ -633,7 +639,7 @@ async def test_the_speech_gets_fi_s_values_without_the_markers(tmp_path: Path, m
     monkeypatch.setattr("core.provider.LLMClient.chat", fake_chat)
     art = QuestArtifacts(quest_id="q", quest_root=root, paper_md=paper, figures_dir=None)
     await SpeechGenerator(_make_config(tmp_path, kinds=["speech"])).generate(art, root)
-    assert "The run took 121.3 s." in seen["prompt"] and "fi:fact" not in seen["prompt"]
+    assert "The run took 121.3 s" in seen["prompt"] and "fi:fact" not in seen["prompt"]
 
 
 # Second review (P1-6): the paper generator takes FI's markers out of every output; a paper written before placeholders in

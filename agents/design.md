@@ -42,7 +42,8 @@ Respond with a single JSON object, no prose, no markdown fence:
   "dependencies": ["<pip-installable>", ...],
   "result_assertions": [
     {"path": "<result_json key, e.g. cd_nm>", "min": <number>, "max": <number>,
-     "unit": "<nm | dimensionless | …>", "reason": "<why this range is physical>"}
+     "unit": "<nm | dimensionless | …>", "reason": "<why this range is physical>",
+     "may_equal_bound": <true only if the quantity can honestly be exactly at its min or max>}
   ],
   "rationale": {
     "assumptions": ["<what this design takes as given, e.g. trials are independent>", ...],
@@ -79,7 +80,11 @@ starting state, a sentinel, exactly 0 or 1 — and a range that still admits it
 cannot catch it. When a quantity cannot be 0 in any setting you run, give it a
 small positive `min` instead of 0. Where the guarantee holds only in part of the
 sweep, keep the general range: the same quantity landing exactly on one bound in
-two or more settings is sent back for repair anyway.
+two or more settings is sent back for repair anyway. The exception is a quantity
+whose true answer can be exactly its bound (a count of failures when none fail, a
+proportion of an event that may never happen in a small study, a weight that stops
+at its physical limit): add `"may_equal_bound": true` to that assertion and it is
+not sent back for sitting on the bound. Leave it out otherwise.
 
 ---
 

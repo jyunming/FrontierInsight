@@ -86,7 +86,7 @@ def _as_list(value: Any) -> list[str]:
 PROTOCOL_PARTS = (
     "optimisation", "grid", "sub_studies", "in_each_run", "runs_per_setting", "min_runs_per_setting", "numerical_axes",
     "thresholds", "constants", "metrics",
-    "oracles", "criteria", "precision", "seed_policy", "ci_method", "failure_policy", "acceptance", "topic_map", "model",
+    "oracles", "criteria", "precision", "seed_policy", "shared_draws", "ci_method", "failure_policy", "acceptance", "topic_map", "model",
 )
 
 
@@ -243,6 +243,69 @@ def _grid_values(axis: Any, values: Any, part: str = "grid") -> tuple[list[Any] 
     return None, f"{where} must be a non-empty list of numbers, of names (text), or of tuples (lists of numbers)"
 
 
+def _read_sub_study(number: int, sub: dict[str, Any], grid: dict[str, Any], inside: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    """``(the entry, None)`` or ``(None, why)`` for ONE entry of ``protocol.sub_studies`` read on its own: its ``vary`` and
+    ``hold`` against the grid. Whether the entries together run every value of every setting is not asked here
+    (:func:`_sub_studies`)."""
+    where = "`protocol.sub_studies`"
+    name = " ".join(str(sub.get("name") or "").split())
+    here = f"{where} entry {number}" + (f" (`{name}`)" if name else "")
+    vary = sub.get("vary")
+    if not isinstance(vary, list) or not vary or not all(isinstance(a, str) and a.strip() for a in vary):
+        return None, f"{here} needs `vary`: the list of settings of `protocol.grid` it varies"
+    vary = [a.strip() for a in vary]
+    if len(set(vary)) < len(vary):
+        return None, f"{here} lists a setting twice in `vary`"
+    for axis in vary:
+        if axis in inside:
+            return None, (f"{here} varies `{axis}`, which every run goes through together "
+                          "(`protocol.in_each_run`); it is not a setting of a sub-study")
+        if axis not in grid:
+            return None, (f"{here} varies `{axis}`, which is not a setting of `protocol.grid` "
+                          f"(it has: {', '.join(str(a) for a in grid)})")
+    hold = sub.get("hold")
+    if hold is not None and not isinstance(hold, dict):
+        return None, f"{here}: `hold` must map a setting of `protocol.grid` to the value it is held at"
+    held: dict[str, Any] = {}
+    for axis, value in (hold or {}).items():
+        if axis not in grid:
+            return None, f"{here} holds `{axis}`, which is not a setting of `protocol.grid`"
+        if axis in vary:
+            return None, f"{here} both varies and holds `{axis}`: it is one or the other"
+        match = [v for v in grid[axis] if v == value]
+        if not match:
+            return None, f"{here} holds `{axis}` at {value!r}, which is not one of its values in `protocol.grid`: {grid[axis]}"
+        held[str(axis)] = match[0]
+    unheld = [a for a, v in grid.items() if a not in vary and a not in held and len(v) > 1]
+    if unheld:
+        return None, (f"{here} does not say the value it holds {', '.join(f'`{a}`' for a in unheld)} at: add each to "
+                      "`hold` (a value it has in `protocol.grid`), or to `vary` if this part crosses it")
+    return {"name": name, "vary": vary, "hold": held}, None
+
+
+def readable_sub_studies(subs: Any, grid: Any, inside: Any) -> tuple[list[dict[str, Any]], list[str]]:
+    """``(the entries of ``protocol.sub_studies`` that read on their own, one reason per entry that does not)``. One entry
+    that cannot be read (it varies a setting the grid lacks, holds a value the setting does not have) used to cost the
+    whole list its answer; the entries that read are kept as the model wrote them, and the reasons go back to the model.
+    Whether the kept entries together run every value of the grid is still asked by :func:`normalize_protocol`: nothing
+    is loosened."""
+    if not isinstance(grid, dict) or not grid or not isinstance(subs, list):
+        return [], []
+    inside = inside if isinstance(inside, dict) else {}
+    kept: list[dict[str, Any]] = []
+    reasons: list[str] = []
+    for number, sub in enumerate(subs, start=1):
+        if not isinstance(sub, dict):
+            reasons.append(f"`protocol.sub_studies` entry {number} is not a mapping with a `name`, `vary` and `hold`")
+            continue
+        one, why = _read_sub_study(number, sub, grid, inside)
+        if one is None:
+            reasons.append(f"{why}; this entry was not used")
+        else:
+            kept.append(sub)
+    return kept, reasons
+
+
 def _sub_studies(subs: Any, grid: Any, inside: Any) -> tuple[list[dict[str, Any]] | None, str | None]:
     """``(the sub-studies, None)`` or ``(None, why)``, read from ``protocol.sub_studies``. Each sub-study names the settings of
     ``protocol.grid`` it varies (``vary``: all their values, crossed) and the value it holds each other setting
@@ -258,39 +321,10 @@ def _sub_studies(subs: Any, grid: Any, inside: Any) -> tuple[list[dict[str, Any]
     inside = inside if isinstance(inside, dict) else {}
     fixed: list[dict[str, Any]] = []
     for number, sub in enumerate(subs, start=1):
-        name = " ".join(str(sub.get("name") or "").split())
-        here = f"{where} entry {number}" + (f" (`{name}`)" if name else "")
-        vary = sub.get("vary")
-        if not isinstance(vary, list) or not vary or not all(isinstance(a, str) and a.strip() for a in vary):
-            return None, f"{here} needs `vary`: the list of settings of `protocol.grid` it varies"
-        vary = [a.strip() for a in vary]
-        if len(set(vary)) < len(vary):
-            return None, f"{here} lists a setting twice in `vary`"
-        for axis in vary:
-            if axis in inside:
-                return None, (f"{here} varies `{axis}`, which every run goes through together "
-                              "(`protocol.in_each_run`); it is not a setting of a sub-study")
-            if axis not in grid:
-                return None, (f"{here} varies `{axis}`, which is not a setting of `protocol.grid` "
-                              f"(it has: {', '.join(str(a) for a in grid)})")
-        hold = sub.get("hold")
-        if hold is not None and not isinstance(hold, dict):
-            return None, f"{here}: `hold` must map a setting of `protocol.grid` to the value it is held at"
-        held: dict[str, Any] = {}
-        for axis, value in (hold or {}).items():
-            if axis not in grid:
-                return None, f"{here} holds `{axis}`, which is not a setting of `protocol.grid`"
-            if axis in vary:
-                return None, f"{here} both varies and holds `{axis}`: it is one or the other"
-            match = [v for v in grid[axis] if v == value]
-            if not match:
-                return None, f"{here} holds `{axis}` at {value!r}, which is not one of its values in `protocol.grid`: {grid[axis]}"
-            held[str(axis)] = match[0]
-        unheld = [a for a, v in grid.items() if a not in vary and a not in held and len(v) > 1]
-        if unheld:
-            return None, (f"{here} does not say the value it holds {', '.join(f'`{a}`' for a in unheld)} at: add each to "
-                          "`hold` (a value it has in `protocol.grid`), or to `vary` if this part crosses it")
-        fixed.append({"name": name, "vary": vary, "hold": held})
+        one, why = _read_sub_study(number, sub, grid, inside)
+        if one is None:
+            return None, why
+        fixed.append(one)
     for axis, values in grid.items():
         if len(values) > 1 and not any(axis in sub["vary"] for sub in fixed):
             held_at = [sub["hold"][axis] for sub in fixed if axis in sub["hold"]]
@@ -300,6 +334,37 @@ def _sub_studies(subs: Any, grid: Any, inside: Any) -> tuple[list[dict[str, Any]
                               f"not hold it at {', '.join(repr(v) for v in missing)}, so those values would never be run: add "
                               "it to the `vary` of the sub-study it belongs to, or give a sub-study that value in its `hold`")
     return fixed, None
+
+
+def _numerical_settings(settings: Any, protocol: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    """``(the settings, None)`` or ``(None, why)``, read from a measurement's ``protocol.numerical_settings``: each numerical
+    resolution of the simulation (a sampling density, a step, a mesh size) with the one value the study uses (``search``)
+    and the finer values FI reruns the headline results at (``check``; FI's fixed rule when left out), as a search's
+    ``numerical_settings`` are read (:func:`core.optimisation_plan.normalize`). The study runs each at its one value."""
+    from . import optimisation_plan as _optim  # the reader of a search's numerical settings, the same rules
+
+    where = "`protocol.numerical_settings`"
+    if protocol.get("optimisation") is not None:
+        return None, (f"{where} cannot stand beside `protocol.optimisation`: a search's numerical settings are "
+                      "`protocol.optimisation.numerical_settings`")
+    if not isinstance(settings, dict) or not settings:
+        return None, f"{where} must map each numerical setting of the simulation (a mesh size, a step) to its values"
+    grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+    inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else {}
+    out: dict[str, Any] = {}
+    for name, item in settings.items():
+        setting, why = _optim._setting(str(name), item)
+        if setting is None:
+            return None, (why or "").replace("`protocol.optimisation.numerical_settings`", where).replace(
+                "the value the search uses", "the value the study uses")
+        if str(name) in inside:
+            return None, f"{where} `{name}` is also in `protocol.in_each_run`: a numerical setting has one value in a run"
+        if str(name) in grid and [v for v in grid[str(name)]] != [setting["search"]]:
+            return None, (f"{where} `{name}` is also a setting of `protocol.grid` with the values {grid[str(name)]}: a "
+                          f"numerical setting has one value in the study ({setting['search']}); its finer values are "
+                          "`check`, which FI reruns the results at")
+        out[str(name)] = setting
+    return out, None
 
 
 def lost_settings(before: Any, after: Any) -> list[str]:
@@ -391,11 +456,25 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
             fixed_inside[str(factor)] = fixed_values or []
         out["in_each_run"] = fixed_inside
     subs = out.get("sub_studies")
+    if subs is not None and out.get("optimisation") is not None and out.get("grid") is None:
+        from . import optimisation_plan as _optim_rule
+
+        return None, ("`protocol.sub_studies` cannot stand beside `protocol.optimisation`: "
+                      + _optim_rule.SCAN_PARTS_RULE + " (the settings of `protocol.optimisation.grid` each part varies, "
+                      "and the value it holds the others at)")
     if subs is not None:
         fixed_subs, why = _sub_studies(subs, out.get("grid"), out.get("in_each_run"))
         if why:
             return None, why
         out["sub_studies"] = fixed_subs
+    numerical = out.get("numerical_settings")
+    if numerical is not None:
+        fixed_numerical, why = _numerical_settings(numerical, out)
+        if fixed_numerical is None:
+            return None, why
+        out["numerical_settings"] = fixed_numerical
+        # Each is a setting of the study at its one value (every cell carries it); its finer values are FI's check.
+        out["grid"] = {**(out.get("grid") or {}), **{n: [s["search"]] for n, s in fixed_numerical.items()}}
     runs = out.get("runs_per_setting")
     if runs is not None and (not _number(runs) or runs < 1 or int(runs) != runs):
         return None, "`protocol.runs_per_setting` must be a whole number of at least 1"
@@ -403,6 +482,8 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
     if thresholds is not None:
         if not isinstance(thresholds, dict) or not all(_number(v) for v in thresholds.values()):
             return None, "`protocol.thresholds` must map each name to a number"
+    if out.get("shared_draws") is not None and not isinstance(out["shared_draws"], bool):
+        return None, "`protocol.shared_draws` must be true or false"
     for key in ("seed_policy", "ci_method", "failure_policy"):
         if out.get(key) is not None and not isinstance(out[key], str):
             return None, f"`protocol.{key}` must be text"
@@ -482,8 +563,8 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
         from . import optimisation_plan
 
         if out.get("in_each_run") is not None:
-            return None, ("`protocol.optimisation` and `protocol.in_each_run` cannot both be given: a search for the best "
-                          "design runs one design at a time")
+            return None, ("`protocol.in_each_run` cannot stand beside `protocol.optimisation`: the values every evaluation "
+                          "of a design goes through together go in `protocol.optimisation.in_each_run`")
         if out.get("grid") is not None:
             return None, ("`protocol.optimisation` and a top-level `protocol.grid` cannot both be given: a search for the "
                           "best design puts the settings it compares, and a coarse scan run before it, in "
@@ -691,9 +772,12 @@ PART_RULES = {
             "the method and the topic.",
     "sub_studies": "`protocol.sub_studies`: the separate parts of the study, a list; each entry has a `name` and `vary`, the "
                    "list of settings of `protocol.grid` that part crosses with one another (all their values), and "
-                   "optionally `hold`, a mapping from another setting of the grid to the value the part keeps it at (a "
-                   "setting it neither varies nor holds stays at its first value). Every setting of the grid with more than "
-                   "one value is varied by at least one part.",
+                   "`hold`, a mapping from EVERY other setting of the grid that has more than one value to the value the part "
+                   "keeps it at (one of that setting's values in `protocol.grid`); a setting a part neither varies nor "
+                   "holds is refused, it does not stay at its first value. Every value of every setting of the grid is run "
+                   "by some part: the setting is in the `vary` of at least one part, or the parts' `hold` values between "
+                   "them cover all of its values (a value that no part varies or holds is never run, and the answer is "
+                   "refused).",
     "in_each_run": "`protocol.in_each_run`: what every run goes through together, all its values in one run on the same "
                    "random numbers (one fit across all of them, every method applied to the same simulated data), as a "
                    "mapping from each such factor's name to the list of ALL its values: at least two, each listed once, "
@@ -841,6 +925,28 @@ def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
         key = match.group(1) if match else ""
         if key not in out:
             return None, notes + [f"the protocol could not be repaired and was left out ({why})"]
+        if key in ("sub_studies", "in_each_run", "numerical_settings") and isinstance(out.get("optimisation"), dict) \
+                and "cannot stand beside `protocol.optimisation`" in (why or ""):
+            # A search's scan parts, or what each of its evaluations goes through, written beside the block: moved into it.
+            if out["optimisation"].get(key) is None:
+                out["optimisation"] = {**out["optimisation"], key: out[key]}
+                notes.append(f"`protocol.{key}` was moved into `protocol.optimisation.{key}`: a search for the best design "
+                             "keeps it in its own block")
+            else:
+                notes.append(f"`protocol.{key}` was left out: the search's block has its own `{key}`")
+            del out[key]
+            continue
+        if key == "numerical_settings" and isinstance(out["numerical_settings"], dict):
+            # One numerical setting that cannot be read is left out, not every one of them.
+            kept_n = {n: item for n, item in out["numerical_settings"].items()
+                      if _numerical_settings({n: item}, out)[0] is not None}
+            if kept_n and len(kept_n) < len(out["numerical_settings"]):
+                for n in [n for n in out["numerical_settings"] if n not in kept_n]:
+                    notes.append(f"the numerical setting `{n}` was left out of `protocol.numerical_settings` because it "
+                                 f"could not be read ({_numerical_settings({n: out['numerical_settings'][n]}, out)[1]}); "
+                                 "the others are run again at their finer values")
+                out["numerical_settings"] = kept_n
+                continue
         if key == "metrics":
             # A reference value that cannot be used is left out, not the metric it belongs to.
             from . import reference_values
@@ -1085,7 +1191,7 @@ def _criteria_lines(protocol: Any) -> list[str]:
 
 def render(topic: str, extra: dict[str, Any] | None, design: dict[str, Any], audit: list[str] | None = None,
            sources: list[dict[str, str]] | None = None, code_layout: list[str] | None = None,
-           confirm: list[str] | None = None) -> str:
+           confirm: list[str] | None = None, held_back: list[str] | None = None) -> str:
     """The text of ``plan.md``: the prose the model wrote around ``design``, and ``design`` itself in the block
     that is used as written. ``code_layout``: the lines saying how the code will be laid out and what that costs
     (``core/code_layout.py``). ``confirm``: the lines saying whether and how the result will be confirmed once more on
@@ -1096,6 +1202,7 @@ def render(topic: str, extra: dict[str, Any] | None, design: dict[str, Any], aud
     block = yaml.safe_dump(design, sort_keys=False, allow_unicode=True, default_flow_style=False, width=100).rstrip()
     in_short = str(extra.get("in_short") or "").strip() or "(not written)"
     gap = str(extra.get("gap") or "").strip() or "(not written)"
+    held = [f"> {line}" for line in held_back or []]  # what FI did not apply of the audit's change, beside the design
     checks = _bullets(audit, "- (the methodology audit had nothing to add)")
     return "\n".join([
         f"# Plan: {topic.strip().splitlines()[0][:150] if topic.strip() else 'this quest'}",
@@ -1109,6 +1216,7 @@ def render(topic: str, extra: dict[str, Any] | None, design: dict[str, Any], aud
         "",
         in_short,
         "",
+        *([*held, ""] if held else []),
         "## What the literature says",
         "",
         _literature_lines(extra.get("literature")),
@@ -1141,6 +1249,7 @@ def render(topic: str, extra: dict[str, Any] | None, design: dict[str, Any], aud
         "",
         f"## {DESIGN_HEADING}",
         "",
+        *([*held, ""] if held else []),
         "```yaml",
         block,
         "```",
@@ -1481,6 +1590,22 @@ def block_fix_request(block: str, why: str) -> str:
     parts.append("Return ONLY the corrected block, as one fenced ```yaml block, and nothing else. Fix only what makes it "
                  "unusable: keep every key and every value as they are, add nothing and leave nothing out.")
     return "\n\n".join(parts)
+
+
+def audit_repair_request(parts: list[tuple[str, Any, str]]) -> str:
+    """The one request to the methodology audit's model to correct parts of its change that FI could not read: for each
+    protocol key, the value as the audit wrote it and FI's exact reason. Only those keys are asked for, in one JSON object."""
+    fence = "`" * 3
+    lines = ["Your amended design could not be used in full. For each protocol key below, the value you wrote and why part "
+             "of it could not be read:"]
+    for key, value, reason in parts:
+        lines.append(f"`protocol.{key}` as you wrote it:\n{fence}json\n{json.dumps(value, indent=1, default=str)}\n{fence}\n"
+                     f"Why part of it was left out: {reason}")
+    names = ", ".join(f'"{k}"' for k, _v, _r in parts)
+    lines.append('Return ONLY one JSON object of the form {"protocol": {...}} holding, for each of the keys ' + names
+                 + ", its whole corrected value. Fix only what the reason names; keep every other part exactly as you wrote it "
+                 "and add nothing.")
+    return "\n\n".join(lines)
 
 
 def block_from_reply(reply: str) -> str | None:

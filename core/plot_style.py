@@ -99,6 +99,10 @@ PAPER_ROW_MAX_IN = 2.9
 #: of panels at their least, when that is taller): the copy is placed at its own
 #: width, which bypasses the template's own cap of a third of the text height.
 PAPER_MAX_HEIGHT_IN = 3.2
+#: Each panel of a paper copy keeps at least this share of the size it had in the figure as drawn, the whole figure
+#: taken at the copy's width (a panel half as wide or half as tall as that is squeezed). A layout that leaves less is
+#: not kept.
+PAPER_PANEL_MIN_SHARE = 0.5
 #: A single panel at least this many times as wide as it is tall (a time series)
 #: prints at the full width.
 PAPER_WIDE_ASPECT = 2.0
@@ -118,7 +122,7 @@ def paper_profile() -> dict[str, object]:
         # scaled as the ticks are and kept between these sizes.
         "other_scale": round(PAPER_TICK_PT / HOUSE_TICK_PT, 4), "other_min_pt": 7.0, "other_max_pt": 9.0,
         "row_min_in": PAPER_ROW_MIN_IN, "row_max_in": PAPER_ROW_MAX_IN, "max_height_in": PAPER_MAX_HEIGHT_IN,
-        "wide_aspect": PAPER_WIDE_ASPECT, "dpi": PAPER_DPI,
+        "wide_aspect": PAPER_WIDE_ASPECT, "dpi": PAPER_DPI, "panel_min_share": PAPER_PANEL_MIN_SHARE,
         # A collection of more points or cells than this is an image inside the vector PDF.
         "raster_over": PAPER_RASTER_OVER,
         # A copy whose first layout failed tries another only within this many seconds of starting.
@@ -342,6 +346,7 @@ try:
         import json as _fi_json
         import math as _fi_math
         import time as _fi_time
+        import warnings as _fi_warnings
         import numpy as _fi_np
         from matplotlib.collections import LineCollection as _FiLineCollection
         from matplotlib.collections import PathCollection as _FiPathCollection
@@ -776,7 +781,65 @@ try:
                 points += count
             return line_px, points
 
-        def _fi_layout(fig):
+        def _fi_axis_texts(ax, axis):
+            # The tick labels of one axis that are drawn: only the ticks inside the
+            # visible range (matplotlib keeps spare tick objects beyond it), and only
+            # the labels that show text.
+            lo, hi = sorted(axis.get_view_interval())
+            texts = []
+            for tick in axis.get_major_ticks():
+                if lo <= tick.get_loc() <= hi:
+                    for label in (tick.label1, tick.label2):
+                        if label.get_visible() and label.get_text().strip():
+                            texts.append(label)
+            return texts
+
+        def _fi_label_findings(fig, renderer, cropped):
+            # Tick labels run into each other, an axis label is drawn over the tick
+            # labels, or a label runs past the edge of the figure. Measured on the drawn
+            # canvas, with the same share as a title: a little touching is not a clash.
+            # A label past the canvas edge only counts when the saved picture is that
+            # canvas: a tight crop widens to keep every label (see _fi_overflow_box).
+            found = []
+            figure_box = fig.bbox
+            for ax in fig.get_axes():
+                for axis_name, axis in (("x", ax.xaxis), ("y", ax.yaxis)):
+                    ticks = _fi_axis_texts(ax, axis)
+                    boxes = [(t, t.get_window_extent(renderer)) for t in ticks]
+                    for i, (first, a) in enumerate(boxes):
+                        for second, b in boxes[i + 1:]:
+                            share = _fi_share(a, b)
+                            if share >= _FI_TITLE_SHARE:
+                                found.append({"check": "tick_label_overlap", "axis": axis_name,
+                                              "text": first.get_text(), "over": second.get_text(),
+                                              "share": round(share, 2)})
+                    label = axis.label
+                    if not label.get_visible() or not label.get_text().strip():
+                        continue
+                    label_box = label.get_window_extent(renderer)
+                    all_ticks = _fi_axis_texts(ax, ax.xaxis) + _fi_axis_texts(ax, ax.yaxis)
+                    for tick in all_ticks:
+                        share = _fi_share(label_box, tick.get_window_extent(renderer))
+                        if share >= _FI_TITLE_SHARE:
+                            found.append({"check": "axis_label_overlap", "axis": axis_name,
+                                          "text": label.get_text(), "over": tick.get_text(),
+                                          "share": round(share, 2)})
+            # A label past the canvas edge, a pixel of rounding allowed.
+            edge = 1.0
+            for ax in ([] if cropped else fig.get_axes()):
+                texts = [ax.xaxis.label, ax.yaxis.label] + _fi_axis_texts(ax, ax.xaxis) + _fi_axis_texts(ax, ax.yaxis)
+                for text in texts:
+                    if not text.get_visible() or not text.get_text().strip():
+                        continue
+                    box = text.get_window_extent(renderer)
+                    if box.width <= 0 and box.height <= 0:
+                        continue
+                    if (box.x0 < figure_box.x0 - edge or box.x1 > figure_box.x1 + edge
+                            or box.y0 < figure_box.y0 - edge or box.y1 > figure_box.y1 + edge):
+                        found.append({"check": "label_clipped", "text": text.get_text()})
+            return found
+
+        def _fi_layout(fig, cropped=False):
             # Text drawn over text, and a legend drawn over the data, measured on the
             # canvas the figure was saved from. None when it could not be measured.
             found = []
@@ -807,6 +870,12 @@ try:
                                       "line_px": round(line_px, 1), "points": points})
             except Exception:
                 return None
+            # The label checks have their own guard: a defect in them must not drop the
+            # title and legend findings above.
+            try:
+                found.extend(_fi_label_findings(fig, renderer, cropped))
+            except Exception:
+                pass
             return found
 
         _fi_savefig = _FiFigure.savefig
@@ -815,6 +884,19 @@ try:
 
         def _fi_recording_savefig(self, fname, *args, **kwargs):
             started = _fi_time.perf_counter()
+            # Read before the crop below rewrites bbox_inches: a tight crop keeps every label.
+            cropped = kwargs.get("bbox_inches", _fi_mpl.rcParams["savefig.bbox"]) == "tight"
+            # A tight crop keeps an axis label that runs past the canvas edge: the crop is the widened box
+            # (see _fi_overflow_box), since savefig's own tight box leaves that label out.
+            if cropped:
+                try:
+                    pad = float(kwargs.get("pad_inches", _fi_mpl.rcParams["savefig.pad_inches"]))
+                    box = _fi_overflow_box(self, _fi_draw(self))
+                    kwargs["bbox_inches"] = _fi_mpl.transforms.Bbox.from_extents(
+                        box.x0 - pad, box.y0 - pad, box.x1 + pad, box.y1 + pad)
+                    kwargs["pad_inches"] = 0
+                except Exception:
+                    pass
             result = _fi_savefig(self, fname, *args, **kwargs)
             saved_in = _fi_time.perf_counter() - started
             record = plot = name = None
@@ -830,7 +912,7 @@ try:
                         pass
                     # Measuring draws the figure once more, so a figure that was slow to
                     # save is not measured.
-                    layout = _fi_layout(self) if saved_in < 10 else None
+                    layout = _fi_layout(self, cropped) if saved_in < 10 else None
                     if layout is not None:
                         record["layout"] = layout
                     # Each seed's lines, for the engine to redraw a figure as the
@@ -1056,6 +1138,34 @@ _PAPER_SOURCE = '''\
             except (AttributeError, TypeError):
                 fig.canvas.draw()
                 return fig.canvas.get_renderer()
+
+        def _fi_overflow_box(fig, renderer):
+            # The box a saved copy must keep, in inches. get_tightbbox leaves out an axis label that runs past
+            # the canvas edge (a long x label on the right panel), so the crop would cut it; the box is widened
+            # to every visible text's own extent, so a label that fits changes nothing.
+            box = fig.get_tightbbox(renderer)
+            x0, y0, x1, y1 = box.x0, box.y0, box.x1, box.y1
+            dpi = float(fig.dpi)
+            texts = list(fig.texts)
+            for ax in _fi_all_axes(fig):
+                texts += [ax.xaxis.label, ax.yaxis.label] + _fi_all_titles(ax) + list(ax.texts)
+                for axis in (ax.xaxis, ax.yaxis):
+                    # Only the ticks inside the axis range are drawn; matplotlib keeps spare tick objects beyond it.
+                    lo, hi = sorted(axis.get_view_interval())
+                    for tick in axis.get_major_ticks():
+                        if lo <= tick.get_loc() <= hi:
+                            texts += [tick.label1, tick.label2]
+            for text in texts:
+                if not text.get_visible() or not text.get_text().strip():
+                    continue
+                ext = text.get_window_extent(renderer)
+                if ext.width <= 0 and ext.height <= 0:
+                    continue
+                x0 = min(x0, ext.x0 / dpi)
+                y0 = min(y0, ext.y0 / dpi)
+                x1 = max(x1, ext.x1 / dpi)
+                y1 = max(y1, ext.y1 / dpi)
+            return _fi_mpl.transforms.Bbox.from_extents(x0, y0, x1, y1)
 
         def _fi_all_axes(fig):
             # Every Axes, an inset's (a child of its Axes) included.
@@ -1410,6 +1520,19 @@ _PAPER_SOURCE = '''\
             width, height, rule = _fi_paper_figure_size(drawn, rows, cols, p)
             info = {"file": p["dirname"] + "/" + stem + ".pdf", "png": p["dirname"] + "/" + stem + ".png",
                     "drawn_in": [round(v, 3) for v in drawn], "width": rule}
+            # The size of each panel's plotting area as the figure was drawn, in inches: what the copy is held to.
+            measure_failed = False
+            try:
+                first = _fi_draw(fig)
+                # Every visible Axes, a twin, an inset and a colorbar's included: the copy is made from this very
+                # figure, so each is the same object before and after.
+                measured_axes = [ax for ax in _fi_all_axes(fig) if ax.get_visible()]
+                drawn_panels = {id(ax): (ax.get_window_extent(first).width / fig.dpi,
+                                         ax.get_window_extent(first).height / fig.dpi) for ax in measured_axes}
+            except Exception:
+                drawn_panels = None
+                measured_axes = []
+                measure_failed = True
             fig.set_layout_engine(mode)
             constrained = mode == "constrained"
             fig.set_size_inches(width, height)
@@ -1475,7 +1598,7 @@ _PAPER_SOURCE = '''\
             # what the crop adds, so the saved copy is no wider than the paper width and no taller than the cap.
             pad = 0.02
             tight = not constrained
-            box = fig.get_tightbbox(renderer)
+            box = _fi_overflow_box(fig, renderer)
             if tight or box.x0 < -0.02 or box.x1 > width + 0.02 or box.y0 < -0.02 or box.y1 > height + 0.02:
                 tight = True
                 for _ in range(4):
@@ -1486,7 +1609,7 @@ _PAPER_SOURCE = '''\
                     w_now, h_now = (float(v) for v in fig.get_size_inches())
                     fig.set_size_inches(max(w_now - max(wide, 0.0), width * 0.5), max(h_now - max(tall, 0.0), cap * 0.3))
                     renderer = _fi_draw(fig)
-                    box = fig.get_tightbbox(renderer)
+                    box = _fi_overflow_box(fig, renderer)
                 if box.height + 2 * pad > cap + 0.05:
                     # Taller than a page allows even after shortening: no copy rather than one the page cannot hold.
                     raise ValueError("the copy is %.2f in tall, more than the %.2f in a paper figure may be"
@@ -1502,11 +1625,30 @@ _PAPER_SOURCE = '''\
                         layout.append({"check": "legend_over_data", "panel": index,
                                        "legend": [t.get_text() for t in leg.get_texts()],
                                        "line_px": round(line_px, 1), "points": points})
+            # How much of its drawn size each panel kept in the copy (both sizes taken from the drawn panels).
+            panels_in, panel_share = [], None
+            scale = width / drawn[0] if drawn[0] > 0 else 1.0
+            try:
+                for ax in (measured_axes if drawn_panels else []):
+                    box_now = ax.get_window_extent(renderer)
+                    now = (box_now.width / fig.dpi, box_now.height / fig.dpi)
+                    panels_in.append([round(now[0], 3), round(now[1], 3)])
+                    before = drawn_panels[id(ax)]
+                    if before[0] > 0 and before[1] > 0:
+                        share = min(now[0] / (before[0] * scale), now[1] / (before[1] * scale))
+                        panel_share = share if panel_share is None else min(panel_share, share)
+            except Exception:
+                measure_failed = True
+            if panel_share is not None and panel_share < p["panel_min_share"]:
+                raise ValueError("a panel is left %.0f%% of its drawn size, under the %.0f%% a copy keeps"
+                                 % (100 * panel_share, 100 * p["panel_min_share"]))
             ticks = _fi_tick_pt(fig)
             labels = [float(t.get_fontsize()) for ax in panels for t in (ax.xaxis.label, ax.yaxis.label)
                       if t.get_visible() and t.get_text().strip()]
             _fi_os.makedirs(_fi_os.path.dirname(outputs[0]), exist_ok=True)
-            kw = {"bbox_inches": "tight" if tight else None, "pad_inches": pad, "dpi": p["dpi"]}
+            # The crop is passed as the box itself: savefig's own "tight" would leave out the same label.
+            crop = _fi_mpl.transforms.Bbox.from_extents(box.x0 - pad, box.y0 - pad, box.x1 + pad, box.y1 + pad)
+            kw = {"bbox_inches": crop if tight else None, "pad_inches": 0 if tight else pad, "dpi": p["dpi"]}
             with _fi_mpl.rc_context({"pdf.fonttype": 42, "savefig.bbox": "standard"}):
                 _fi_savefig(fig, outputs[0], format="pdf", **kw)
                 _fi_savefig(fig, outputs[1], format="png", **kw)
@@ -1515,7 +1657,11 @@ _PAPER_SOURCE = '''\
                 "fit": mode + (", cropped" if tight else ""),
                 "tick_pt": ticks, "label_pt": min(labels) if labels else None,
                 "titles_dropped": dropped, "titles_kept": kept, "labels_wrapped": wrapped,
-                "legend_moved": moved, "layout": layout,
+                "legend_moved": moved, "layout": layout, "panels_in": panels_in,
+                "panel_share": None if panel_share is None else round(panel_share, 3),
+                # "ok" when every axes was measured; "failed" when a measurement was tried and not completed: the
+                # paper then does not use this copy.
+                "panel_measure": "failed" if measure_failed else "ok",
             })
             if rasterized:
                 info["rasterized"] = rasterized
@@ -1540,7 +1686,14 @@ _PAPER_SOURCE = '''\
                     failed.append("no time left for another layout")
                     break
                 try:
-                    info = _fi_paper_attempt(make(), mode, stem, outputs)
+                    # matplotlib itself says when a constrained layout gave up ("axes sizes collapsed to zero") and
+                    # drew the panels as slivers: a copy drawn that way is not kept; the next layout is tried, and
+                    # with none left the figure is placed from its PNG.
+                    with _fi_warnings.catch_warnings(record=True) as caught:
+                        _fi_warnings.simplefilter("always")
+                        info = _fi_paper_attempt(make(), mode, stem, outputs)
+                    if any("collapsed" in str(w.message) for w in caught):
+                        raise ValueError("the layout collapsed the panels")
                 except Exception as exc:
                     _fi_paper_clear(outputs)
                     failed.append(mode + ": " + repr(exc)[:200])

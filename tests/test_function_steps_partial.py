@@ -76,23 +76,6 @@ async def test_function_two_of_three_keeps_failing_functions_one_and_three_stay_
 
 
 @pytest.mark.asyncio
-async def test_a_repair_of_the_module_that_breaks_a_function_that_passed_is_undone(tmp_path: Path) -> None:
-    breaks_frequency = _module(frequency=BAD["frequency"])  # fixes nothing for quality either: it stays BAD
-    model = _ModuleModel({"frequency": [GOOD["frequency"]], "quality": [BAD["quality"]], "decay": [GOOD["decay"]]},
-                         module_replies=[breaks_frequency])
-    before_text = None
-    outcome = await _filler(tmp_path, model).run_all(_specs())
-    assert outcome.status == "partial" and outcome.failed == "quality"
-    assert len(model.module_prompts) == fs.MODULE_REPAIRS, "bounded, and both attempts were undone"
-    text = (tmp_path / "code" / "spring" / "model.py").read_text(encoding="utf-8")
-    assert "return math.sqrt(k / m)" in text and "return math.sqrt(m / k)" not in text, "the function that passed is as it was"
-    assert before_text is None
-    record = fs.load(tmp_path)
-    assert fs.counts(record) == (2, 3) and record["functions"]["quality"]["status"] == "failed"
-    assert record["functions"]["quality"]["error"], "what is still wrong with it is recorded"
-
-
-@pytest.mark.asyncio
 async def test_a_reply_of_the_module_that_loses_a_function_is_not_used(tmp_path: Path) -> None:
     only_two = "import math\n\n\n" + GOOD["frequency"].replace("import math\n\n\n", "")
     model = _ModuleModel({"frequency": [GOOD["frequency"]], "quality": [BAD["quality"]], "decay": [GOOD["decay"]]},

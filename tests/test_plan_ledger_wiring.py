@@ -38,7 +38,8 @@ LITERATURE = [{"content": SOURCE_TEXT, "metadata": {"title": "Heat sinks", "doi"
 def _draft(**protocol: Any) -> dict[str, Any]:
     draft = copy.deepcopy(HEAT_SINK)
     draft["study_type"] = "measure"
-    draft["protocol"] = {"oracles": copy.deepcopy(HEAT_SINK["protocol"]["oracles"]), "grid": GOOD_GRID, **protocol}
+    draft["protocol"] = {"oracles": copy.deepcopy(HEAT_SINK["protocol"]["oracles"]), "grid": GOOD_GRID,
+                         "topic_map": [{"item": "F1", "by": "setting:fin_spacing"}], **protocol}
     return draft
 
 
@@ -127,7 +128,7 @@ async def test_the_plan_is_shown_what_the_topic_asks_for_and_the_reading_is_made
     assert kinds.index("reading") < kinds.index("plan"), "the topic is read before the plan is asked for"
     plan_prompt = dict(model.prompts)["plan"]
     assert "What the topic asks for (each item must appear as a setting, a metric or an equation" in plan_prompt
-    assert "- vary or compare fin spacing: 2 to 4" in plan_prompt and "- report base temperature" in plan_prompt
+    assert "- F1: vary or compare fin spacing: 2 to 4" in plan_prompt and "- Q1: report base temperature" in plan_prompt
     assert plan_prompt.index("What the topic asks for (") < plan_prompt.index("Also write the plan")
     assert kinds.count("reading") == 1, "read once; the cover step reuses the kept reading"
 
@@ -150,7 +151,7 @@ async def test_the_design_prompt_has_the_list_only_when_the_quest_runs_code(tmp_
     eng = _engine(tmp_path, [])
     Model(eng, [], _draft())
     await eng._read_topic_before_the_prompt(_state())
-    assert "- vary or compare fin spacing" in eng._design_prompt(_state())
+    assert "- F1: vary or compare fin spacing" in eng._design_prompt(_state())
     assert "What the topic asks for (" not in eng._design_prompt(_state(no_simulation_resolved=True))
 
 
@@ -379,6 +380,17 @@ async def test_ledger_parts_are_asked_afresh_for_a_new_plan_or_round_and_not_for
     assert len(model.asked) == 3, "another design round is asked afresh"
 
 
+def test_a_ledger_record_whose_iteration_is_not_a_number_is_unreadable_and_does_not_crash(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    eng.fi_dir.mkdir(parents=True, exist_ok=True)
+    record = {"iteration": "x", "model": eng._plan_model_name(), "seen": {"base_temperature": "abc"}}
+    (eng.fi_dir / engine_mod._LEDGER_ASKED).write_text(json.dumps(record), encoding="utf-8")
+    assert eng._ledger_seen(0) == {}, "a record that cannot be read is treated as no record"
+    record["iteration"] = 0
+    (eng.fi_dir / engine_mod._LEDGER_ASKED).write_text(json.dumps(record), encoding="utf-8")
+    assert eng._ledger_seen(0) == {"base_temperature": "abc"}, "a valid record is still read as before"
+
+
 def test_the_plan_step_rerun_clears_the_ledger_and_the_parts_records() -> None:
     from core import rerun_from
     for name in (".fi/protocol_part_asked.json", ".fi/ledger.json", ".fi/ledger_asked.json"):
@@ -453,7 +465,7 @@ async def test_scripted_replies_with_the_topic_read_first_and_a_resume_that_read
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
     prompts = [c.args[0][-1]["content"] for c in eng._client.chat.await_args_list]
     assert prompts[0].lstrip().startswith("# What a Research Topic Asks For")
-    assert "What the topic asks for (" in prompts[1] and "- vary or compare fin spacing" in prompts[1]
+    assert "What the topic asks for (" in prompts[1] and "- F1: vary or compare fin spacing" in prompts[1]
     assert (eng.fi_dir / "topic_requirements.json").is_file()
     calls = eng._client.chat.await_count
     await eng._node_plan({"topic": TOPIC, "iteration": 0})  # a resume: plan.md is read, nothing is asked again
@@ -465,7 +477,7 @@ async def test_design_critique_style_replies_with_the_topic_read_first(tmp_path:
     from tests.test_design_self_critique import _AMENDED_DESIGN, _DRAFT_DESIGN, _mk_cfg
     eng = engine_mod.Engine(_mk_cfg(tmp_path))
     replies = [json.dumps(READING), json.dumps(_DRAFT_DESIGN),
-               json.dumps({"objections_addressed": [{"check": "other", "objection": "o", "fix": "f"}],
+               json.dumps({"objections_addressed": [{"check": "other", "where": "hypothesis and method", "objection": "o", "fix": "f"}],
                            "amended_design": _AMENDED_DESIGN})]
     eng._client = type("Stub", (), {"chat": AsyncMock(side_effect=replies)})()
     patch = await eng._node_design({"topic": "OPC", "iteration": 0})

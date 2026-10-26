@@ -159,6 +159,17 @@ def test_a_list_is_matched_by_its_values_when_no_name_says_which_axis_it_is() ->
     assert pc.check({"grid": {"R0": [0.9, 1.5, 3.0]}}, {"e.py": "vals = [10, 20, 30]\n"})[0].missing == [0.9, 1.5, 3.0]
 
 
+def test_an_axis_compared_inside_each_run_is_described_as_such_not_as_a_grid() -> None:
+    # The protocol fixes "load" under in_each_run (compared inside each run), not under grid: the message says so.
+    proto = {"grid": {"size": [1, 2]}, "in_each_run": {"load": [1.0, 2.0]}}
+    found = pc.check(proto, {"e.py": "load = [1.0, 3.0]\nsize = [1, 2]\n"})
+    assert [m.name for m in found] == ["load"] and found[0].kind == "grid"
+    assert found[0].part == "in_each_run"
+    assert "inside each run" in found[0].message() and "the protocol fixes load at" in found[0].message()
+    grid_found = pc.check({"grid": {"size": [1, 2, 3]}}, {"e.py": "size = [1, 2]\n"})
+    assert grid_found[0].part == "grid" and "inside each run" not in grid_found[0].message()
+
+
 def test_an_axis_the_script_never_names_is_missing_only_if_its_values_are_absent() -> None:
     assert pc.check({"grid": {"R0": [0.9, 1.5]}}, {"e.py": "def f(r0=0.9):\n    return r0 * 1.5\n"}) == []
 
@@ -330,11 +341,11 @@ async def test_warn_records_the_difference_and_the_quest_goes_on(
 
 
 @pytest.mark.asyncio
-async def test_a_script_that_still_differs_ends_in_the_honest_stop_and_asks_nobody_to_edit_it(
+async def test_a_script_that_still_differs_is_recorded_and_the_quest_goes_on_asking_nobody(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """After the repairs the script is not run and the quest ends without a paper, saying what differs; the stop is not
-    a pause, and nobody is told to edit the script or the plan."""
+    """After the repairs a difference that stands is recorded and said, and the quest goes on: the comparison reads the
+    script's text (core/stop_power.py). It is not a pause, and nobody is told to edit the script or the plan."""
     calls: list[str] = []
     monkeypatch.setattr("core.engine.LLMClient.chat", _fake(calls, implement=_BAD, repair=_BAD))
     cfg = _cfg(tmp_path)
@@ -345,15 +356,18 @@ async def test_a_script_that_still_differs_ends_in_the_honest_stop_and_asks_nobo
     assert calls.count("ProtocolRepair") == 2, "two repairs were asked for before stopping"
     assert "[protocol] paused" not in log and "paused for the protocol" not in log
     assert not (first.fi_dir / "pause.json").exists()
-    record = json.loads((first.quest_root / "needs" / "STUCK.json").read_text(encoding="utf-8"))
-    assert "adds [0.8, 1.2, 2] and leaves out [0.9, 1.5]" in record["problem"]
-    assert "edit" not in " ".join(record["tried"]).lower()
-    assert json.loads((first.quest_root / "needs" / "PROTOCOL_CHECK.json").read_text(encoding="utf-8"))["status"] == "stopped"
-    assert not (first.quest_root / "paper" / "paper.md").exists()
+    assert not (first.quest_root / "needs" / "STUCK.json").exists()
+    record = json.loads((first.quest_root / "needs" / "PROTOCOL_CHECK.json").read_text(encoding="utf-8"))
+    assert record["status"] == "warned"
+    assert any("adds [0.8, 1.2, 2] and leaves out [0.9, 1.5]" in d for d in record["differences"])
+    assert "reading of the code" in log
+    assert "differs from the protocol the plan fixed" in (first.quest_root / "QUALITY.md").read_text(encoding="utf-8")
+    assert first._cannot_repair_stop() is None and any(
+        p["check"] == "protocol" for p in first._cannot_repair_problems()), "recorded for the writer, and it goes on"
 
 
 @pytest.mark.asyncio
-async def test_running_the_code_step_again_writes_the_script_again_and_forgets_the_stop(
+async def test_running_the_code_step_again_writes_the_script_again_and_checks_it_afresh(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
@@ -361,7 +375,8 @@ async def test_running_the_code_step_again_writes_the_script_again_and_forgets_t
     cfg = _cfg(tmp_path)
     first = Engine(cfg)
     await first.run()
-    assert (first.fi_dir / "cannot_repair.json").is_file()
+    first_record = json.loads((first.quest_root / "needs" / "PROTOCOL_CHECK.json").read_text(encoding="utf-8"))
+    assert first_record["status"] == "warned"
     before = calls.count("Implementation")
 
     monkeypatch.setattr("core.engine.LLMClient.chat", _fake(calls, implement=_GOOD, repair=None))
@@ -370,7 +385,8 @@ async def test_running_the_code_step_again_writes_the_script_again_and_forgets_t
 
     assert artifacts.paper_md is not None
     assert calls.count("Implementation") > before, "the script is written again"
-    assert not (second.fi_dir / "cannot_repair.json").exists(), "a later pass must not stop on the old problem"
+    record = json.loads((second.quest_root / "needs" / "PROTOCOL_CHECK.json").read_text(encoding="utf-8"))
+    assert record["status"] == "ok", "the new script is checked afresh"
 
 
 @pytest.mark.asyncio
@@ -487,3 +503,15 @@ def test_a_threshold_that_is_not_one_number_is_left_out_alone_not_with_the_block
     # Nothing numeric at all: the block goes, as before.
     fixed, notes = plan.repair_protocol({"grid": {"R0": [0.9]}, "thresholds": {"major": "about a tenth"}})
     assert fixed is not None and "thresholds" not in fixed and "`protocol.thresholds` was left out" in notes[0]
+
+
+def test_the_plans_fewest_runs_in_the_analysis_is_not_a_different_run_count() -> None:
+    """A live analysis kept a setting only with at least the plan's fewest runs (`MIN_RUNS = 10`) beside a protocol of
+    200 runs per setting, and was read as setting 10 runs per setting."""
+    protocol = {"grid": {"c": [1.0, 2.0]}, "runs_per_setting": 200, "min_runs_per_setting": 10}
+    analysis = "C_VALUES = [1.0, 2.0]\nMIN_RUNS = 10\nrows = [r for r in rows if len(r) >= MIN_RUNS]\n"
+    assert pc.check(protocol, {"experiment.py": analysis}) == []
+    other = pc.check(protocol, {"experiment.py": "C_VALUES = [1.0, 2.0]\nN_RUNS = 50\n"})
+    assert [m.kind for m in other] == ["runs"], "a count the plan does not give is still a difference"
+    same = pc.check(protocol, {"experiment.py": "C_VALUES = [1.0, 2.0]\nN_RUNS = 10\n"})
+    assert [m.kind for m in same] == ["runs"], "only a floor on the runs may hold the plan's fewest runs"

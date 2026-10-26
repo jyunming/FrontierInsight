@@ -146,7 +146,7 @@ async def test_the_note_of_a_cut_with_an_unknown_spread_says_the_precision_was_n
 
 def _annotate(protocol: dict[str, Any], replicates: list[dict[str, Any]], kinds: dict[str, str]) -> tuple[str, dict[str, Any]]:
     aggregate = _aggregate_result_json_replicates(replicates, kinds=kinds)
-    fake = SimpleNamespace(_protocol_block=lambda state: protocol)
+    fake = SimpleNamespace(_protocol_block=lambda state: protocol, quest_root=Path("no_such_quest_root"))  # no trial record there
     return Engine._annotate_precision(fake, {}, aggregate), aggregate  # type: ignore[arg-type]
 
 

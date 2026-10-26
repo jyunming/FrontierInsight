@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from tests.plan_parts_helpers import checks_reply, is_scoped_ask, parts_of, plan_shown
 
 from core import equation_tests as eqt, function_steps as fs, plan
 from tests.test_equation_gate import _engine
@@ -43,18 +44,18 @@ class _Plan:
 
     async def chat(self, messages, **kw):  # noqa: ANN001
         prompt = messages[-1]["content"]
-        if "You are revising the plan" in prompt:
+        if is_scoped_ask(prompt):
             self.revisions.append(prompt)
-            current = prompt.split("# The plan as it stands", 1)[1].split("# What the person asked for", 1)[0].strip()
+            current = plan_shown(prompt)
             if self.reply_example is None:
-                return current
+                return checks_reply(current, prompt)
 
             def change(block: dict[str, Any]) -> dict[str, Any]:
                 model = block["protocol"]["model"]
                 eqs = [{**e, "example": self.reply_example} if e["id"] == "E7" else e for e in model["equations"]]
                 return {**block, "protocol": {**block["protocol"], "model": {**model, "equations": eqs}}}
 
-            return plan.edit_design_block(current, change) or current
+            return checks_reply(plan.edit_design_block(current, change) or current, prompt)
         self.other.append(prompt)
         return "```python\n" + CODE + "```"
 
@@ -88,7 +89,7 @@ async def test_a_wrong_example_is_given_back_to_the_plan_without_the_codes_numbe
     engine, model, state = _setup(tmp_path, BAD_EXAMPLE, GOOD_EXAMPLE)
     assert await engine._equation_gate(state, None, None) is None
     assert len(model.revisions) == 1, "one request to the plan"
-    asked = model.revisions[0].split("# What the person asked for", 1)[1]
+    asked = model.revisions[0].split("# What is asked", 1)[1]
     assert "E7" in asked and "1-exp(-exp(beta0 + beta1*dose_mj_cm2))" in asked
     assert "3*line_width_sd_nm" in asked and "line_width_sd_nm" in asked, "the example as the plan wrote it"
     for number in THE_CODES_NUMBER:

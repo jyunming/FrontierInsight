@@ -22,7 +22,7 @@ from core.config import Config
 from core.engine import Engine
 from core.provider import LAST_CALL
 from tests.test_engine_smoke import _FAKE_RESPONSES, _classify, _fake_response_for
-from tests.test_run_manifest import ANALYSIS_TRIAL, PROTOCOL, SIM_TRIAL, _reply
+from tests.test_run_manifest import ANALYSIS_TRIAL, PROTOCOL, _reply
 
 pytestmark = pytest.mark.slow
 
@@ -37,6 +37,15 @@ RESEARCH_PROTOCOL = {
         "tolerance": 0.01, "case": {"R0": 0.0}, "measure": "outbreak",
         "reference": "derivation: with R0 = 0 the infection rate beta = R0 * gamma is 0, so no susceptible is ever "
                      "infected and the outbreak indicator is 0 in every run",
+    }, {
+        # A passing check only validates the code when its expected value is not the plan's own derivation: a source the
+        # quest retrieved, or a second implementation that shares no code with the simulation (core/evidence.py). The
+        # simulation returns the outbreak twice, the second time by a hand count; the two must agree at every setting.
+        "name": "outbreak_by_hand", "kind": "second_implementation", "check": "the outbreak by a hand count agrees "
+        "with the simulation's", "expected": 0.0, "tolerance": 0.01, "case": {"R0": 0.9},
+        "measure": "outbreak - outbreak_by_hand",
+        "reference": "A second implementation that shares no code with the simulation: it counts the outbreak "
+                     "from the same draw by hand",
     }],
     "metrics": [METRIC],
     "contrasts": [{"metric": "final_size", "a": "R0=0.9", "b": "R0=3.0"}],
@@ -47,7 +56,15 @@ RESEARCH_PROTOCOL = {
     ],
 }
 ORACLE = '\n\ndef oracle():\n    return {"half": 0.5004}\n'
-SIM = SIM_TRIAL + ORACLE
+SIM_TRIAL_BY_HAND = """import random
+
+def run_trial(cell, trial_id, seed):
+    rng = random.Random(seed)
+    draw = rng.random()
+    return {"outbreak": 1.0 if draw < cell["R0"] / 4 else 0.0, "outbreak_by_hand": float(draw < cell["R0"] / 4),
+            "final_size": 100.0 * cell["R0"] + rng.random()}
+"""
+SIM = SIM_TRIAL_BY_HAND + ORACLE
 
 
 def _config(root: Path, **over: Any) -> Config:
@@ -103,7 +120,10 @@ def _with_package(reply: str, prompt: str) -> str:
     if not asked:
         return reply
     pkg = asked.group(1)
-    reply = reply.replace("# file: simulate.py\n", f"# file: simulate.py\nfrom {pkg} import model  # noqa: F401\n", 1)
+    reply = reply.replace("# file: simulate.py\n", f"# file: simulate.py\nfrom {pkg} import model\n", 1)
+    # The headline is computed through the package's function (gamma = 1, so the values are unchanged), as an honest
+    # simulation of the model does; one that never called the package would be a gap (core/step_coverage.py).
+    reply = reply.replace('100.0 * cell["R0"]', '100.0 * model.infection_rate(cell["R0"], 1.0)')
     return (reply + f"```python\n# file: {pkg}/__init__.py\n\"\"\"The epidemic model.\"\"\"\n```\n"
             f"```python\n# file: {pkg}/model.py\ndef infection_rate(r0, gamma):\n    return r0 * gamma\n```\n")
 
@@ -204,11 +224,12 @@ def test_a_research_quest_reaches_publication_ready_only_through_every_gate(base
     assert artifacts.paper_md is not None
     # The oracle passed before the main run; FI ran every trial and wrote the ledger itself.
     assert json.loads((root / "needs" / "ORACLE_CHECK.json").read_text(encoding="utf-8"))["status"] == "ok"
-    # A second model read the checks, and the record of the calls shows it was not the one that wrote them. The one
-    # check is a special case, which has no setting of FI's own (core/hidden_check.py), so no hidden check ran.
+    # A second model read the checks, and the record of the calls shows it was not the one that wrote them. The special
+    # case has no setting of FI's own (core/hidden_check.py); the second-implementation check does, and held there.
     review = json.loads((root / ".fi" / "oracle_review.json").read_text(encoding="utf-8"))
     assert review["verdicts"] and review.get("call_id") and "error" not in review
-    assert not (root / "needs" / "HIDDEN_CHECK.json").exists()
+    hidden = json.loads((root / "needs" / "HIDDEN_CHECK.json").read_text(encoding="utf-8"))
+    assert hidden["status"] == "passed" and [c["name"] for c in hidden["cases"]] == ["outbreak_by_hand"]
     trials = [json.loads(line) for line in (root / "raw" / "ledger.jsonl").read_text(encoding="utf-8").splitlines()]
     trials = [t for t in trials if t.get("event") == "trial"]
     assert len(trials) == 900 and len({t["seed"] for t in trials}) == 900
@@ -457,7 +478,8 @@ def test_a_clean_rerun_from_the_run_redoes_the_trials_and_keeps_the_old_outputs(
 
 # --- faults that need a quest of their own ----------------------------------------------------------------------------
 
-PAIRED = {**RESEARCH_PROTOCOL, "metrics": [{**METRIC, "paired": True}]}
+PAIRED = {**RESEARCH_PROTOCOL, "shared_draws": True,
+          "metrics": [{**METRIC, "paired": True}]}
 ANALYSIS_WITH_PAIR_IDS = ANALYSIS_TRIAL.replace(
     '"final_size_count": m["count"]}', '"final_size_count": m["count"], "final_size_pair_id": m["trials"]}')
 
@@ -492,7 +514,7 @@ def test_a_paired_metric_with_pair_ids_pairs_trials_that_share_a_seed(
     assert not any("by their position" in g for g in _all_gaps(record))
 
 
-SIM_SOME_FAIL = SIM_TRIAL.replace(
+SIM_SOME_FAIL = SIM_TRIAL_BY_HAND.replace(
     "    rng = random.Random(seed)\n",
     "    if trial_id % 50 == 7:\n        raise RuntimeError('this trial did not converge')\n    rng = random.Random(seed)\n",
 ) + ORACLE

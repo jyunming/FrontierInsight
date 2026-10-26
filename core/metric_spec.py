@@ -40,10 +40,12 @@ call the statistics adequate while there is one.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from . import stats as _stats
@@ -149,6 +151,28 @@ KNOWN_VALUE_HELP = (
     "multiple, or \"normal\" for the normal quantile; leave it out when the multiple changes between settings)")
 
 
+#: What the plan is told about declaring a known true value (spliced into the plan request by the engine, after the
+#: paragraph that describes the fields). Real plans left the field out, so the calibration and quantile checks never ran:
+#: the ask is therefore one per metric, with the reason each part is there.
+PLAN_RULE = (
+    "Go through EVERY metric in `metrics` and ask of each one: does the simulation know its true value because it "
+    "builds it in (a parameter the data are generated with and then recovered, a rate or probability the simulation "
+    "sets)? If so it gets a `known_value`, not only the headline metric; a metric without one is never checked against "
+    "the truth, and the paper has to say so. For an estimate that comes with an uncertainty, name both the standard "
+    "error and the interval's two ends, so that FI can count how often the interval covers the truth. When the "
+    "interval is the estimate plus and minus one multiplier times the standard error with the same multiplier in every "
+    "setting, ALWAYS give `degrees_of_freedom`: it is the multiplier you chose for the design, so choose it from the "
+    "error model and write it down (\"normal\" when the standard error rests on a known variance or on a large "
+    "sample; the whole number n-1, or whatever the estimator has, when the variance is estimated from n observations). "
+    "FI recovers the multiplier the code used from the trials' own intervals and sends the code back when it differs "
+    "from yours; a plan that leaves `degrees_of_freedom` out gets no such check. `true_value` is always a number the "
+    "study itself fixes (a constant, a threshold, a grid parameter, or a formula of them). Never put there a value you "
+    "worked out for a quantity that comes out of the simulation (a rate you derived, a limit you recalled): that is a "
+    "derivation, it belongs in `oracles` with a `derivation:` reference, and FI reports it as unverified without "
+    "gating the run on it."
+)
+
+
 def _known_value(ident: str, raw: Any) -> tuple[dict[str, Any] | None, str]:
     """A metric's declared known value, checked for its shape: ``(clean mapping, "")`` or ``(None, why)``. Which names
     resolve (a threshold, a grid parameter) is the protocol's to say (:func:`known_value_problems`)."""
@@ -238,6 +262,18 @@ def known_value_problems(protocol: dict[str, Any] | None) -> list[str]:
     return out
 
 
+def multiplier_unstated(protocol: dict[str, Any] | None) -> list[str]:
+    """The ids of the metrics that declare a standard error and an interval for a known true value but no
+    ``degrees_of_freedom``: FI counts their coverage, but it cannot hold the interval's multiplier (t or normal) to the
+    one the design chose, so a multiplier that does not match the error model passes. One id each, in the declared order."""
+    out = []
+    for spec in declared(protocol):
+        kv = spec.get("known_value") or {}
+        if kv and "standard_error" in kv and "interval" in kv and "degrees_of_freedom" not in kv:
+            out.append(str(spec["id"]))
+    return out
+
+
 def repair(metrics: Any) -> tuple[list[dict[str, Any]], list[str]]:
     """``(the specs that pass, a sentence per one left out)``: :func:`normalize` entry by entry, for a draft. A live
     plan declared one metric of a kind FI has no estimator for (`count`) beside valid ones, and the strict check threw
@@ -269,11 +305,40 @@ def repair(metrics: Any) -> tuple[list[dict[str, Any]], list[str]]:
     return kept, notes
 
 
-def declared(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """The valid metric specs of a protocol (an entry that is not a mapping with an id and a kind is left out)."""
+def shares_draws(protocol: dict[str, Any] | None, quest_root: Path | str | None = None) -> bool:
+    """Whether trial ``t`` of every setting runs on one seed (common random numbers): the plan says so with
+    ``protocol.shared_draws: true``. That alone decides it (the metric marked ``paired`` only says the analysis
+    compares the settings trial by trial, and that is read only when the draws are shared). A missing ``shared_draws``
+    is false, except for a quest begun before the field existed: its ``code/study.json`` was written with
+    ``paired: true`` and records the seeds it ran, which a resumed quest keeps (``quest_root`` names the quest)."""
+    if not isinstance(protocol, dict):
+        return False
+    if protocol.get("shared_draws") is not None:
+        return protocol["shared_draws"] is True
+    if quest_root is None:
+        return False
+    try:
+        study = json.loads((Path(quest_root) / "code" / "study.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(study, dict) and study.get("paired") is True
+
+
+def result_forms(ident: str) -> tuple[str, ...]:
+    """The names a run may return a metric under: the number itself, or the counts or values it is estimated from (the
+    forms :func:`_settings` reads)."""
+    return (ident, f"{ident}_count", f"{ident}_total", f"{ident}_values")
+
+
+def declared(protocol: dict[str, Any] | None, quest_root: Path | str | None = None) -> list[dict[str, Any]]:
+    """The valid metric specs of a protocol (an entry that is not a mapping with an id and a kind is left out). A spec is
+    ``paired`` (a contrast joins the settings' trials by number) only when the settings share their draws
+    (:func:`shares_draws`, the same answer the trial seeds follow); otherwise their trials are independent and are not
+    joined."""
     items = protocol.get("metrics") if isinstance(protocol, dict) else None
     clean, _why = normalize(items) if items is not None else ([], None)
-    return clean or []
+    shared = shares_draws(protocol, quest_root)
+    return [{**spec, "paired": bool(spec.get("paired")) and shared} for spec in clean or []]
 
 
 def _cluster_key(spec: dict[str, Any]) -> str | None:
@@ -328,7 +393,7 @@ def _settings(replicates: list[dict[str, Any]], spec: dict[str, Any]) -> dict[tu
     walked = [_walk(r) for r in replicates]
     parents: set[tuple[str, ...]] = set()
     for path in walked[0]:
-        if path[-1] in (ident, f"{ident}_count", f"{ident}_total", f"{ident}_values"):
+        if path[-1] in result_forms(ident):
             parents.add(path[:-1])
     out: dict[tuple[str, ...], dict[str, Any]] = {}
     for parent in sorted(parents):
@@ -461,13 +526,14 @@ _PROGRESS_EVERY_CONTRASTS = 50
 
 def statistics(
     replicates: list[dict[str, Any]], protocol: dict[str, Any] | None, *, progress: Callable[[str], None] | None = None,
+    quest_root: Path | str | None = None,
 ) -> dict[str, Any]:
     """What the declared metrics estimate, and every pairwise contrast between the settings of a factor, with the p-values of
     each family adjusted together. ``{}`` when the protocol declares no metric.
 
     ``progress`` receives one plain line ("[evidence] statistics: k of n contrasts") at most every ~30 seconds or 50
     contrasts, so a long run is not silent; without it the line goes to the ``frontier_insight.metric_spec`` logger."""
-    specs = declared(protocol)
+    specs = declared(protocol, quest_root)
     if not specs or not replicates or not all(isinstance(r, dict) for r in replicates):
         return {}
     say = progress or logging.getLogger("frontier_insight.metric_spec").info
@@ -617,11 +683,11 @@ def coverage_gaps(protocol: dict[str, Any] | None, replicates: list[dict[str, An
     return gaps
 
 
-def missing_pair_ids(protocol: dict[str, Any] | None, result_json: Any) -> list[str]:
+def missing_pair_ids(protocol: dict[str, Any] | None, result_json: Any, quest_root: Path | str | None = None) -> list[str]:
     """The paired metrics whose per-trial values the results print with no ``<id>_pair_id`` beside them: one sentence
     each. Without an id a paired comparison can only join trials by position (``rigor_profile: research`` stops for
     this; otherwise it is a gap in the evidence)."""
-    paired = [spec["id"] for spec in declared(protocol) if spec.get("paired")]
+    paired = [spec["id"] for spec in declared(protocol, quest_root) if spec.get("paired")]
     lacking: set[str] = set()
 
     def walk(node: Any) -> None:

@@ -131,12 +131,27 @@ def parse(obj: Any) -> dict[str, Any] | None:
     constraints = [_text(c) for c in (obj.get("constraints") if isinstance(obj.get("constraints"), list) else []) if _text(c)]
     results = [_text(r, 200) for r in (obj.get("stated_results") if isinstance(obj.get("stated_results"), list) else [])
                if _text(r, 200)]
-    if not (factors or quantities or formulas or comparisons):
+    searches: list[dict[str, Any]] = []
+    for item in obj.get("searches") if isinstance(obj.get("searches"), list) else []:
+        item = item if isinstance(item, dict) else {"what": item}
+        what = _text(item.get("what"), 160)
+        if what:
+            searches.append({"name": what, "objective": _text(item.get("objective"), 200),
+                             "stated": _text(item.get("stated")), "main": item.get("main") is True})
+    if not (factors or quantities or formulas or comparisons or searches):
         return None
     files = code_files(obj)
     return {"factors": factors[:20], "quantities": quantities[:30], "formulas": formulas[:12],
             "comparisons": comparisons[:12], "constraints": constraints[:30], "stated_results": results[:20],
-            **({"code_files": files} if files is not None else {})}
+            "searches": searches[:8], **({"code_files": files} if files is not None else {})}
+
+
+def searched(req: Any) -> list[dict[str, Any]]:
+    """The designs the topic asks the study itself to search for (the reader's ``searches``: a design whose values the topic
+    does not give, made as good as possible for a result), the ones the question cannot be answered without first. ``[]``
+    for a reading without any (or one made before FI read them)."""
+    items = [s for s in (req.get("searches") if isinstance(req, dict) else None) or [] if isinstance(s, dict) and s.get("name")]
+    return sorted(items, key=lambda s: not s.get("main"))
 
 
 def code_files(req: Any) -> int | None:
@@ -153,7 +168,7 @@ def code_files(req: Any) -> int | None:
 
 
 def is_empty(req: Any) -> bool:
-    return not (isinstance(req, dict) and any(req.get(k) for k in _SECTIONS))
+    return not (isinstance(req, dict) and any(req.get(k) for k in (*_SECTIONS, "searches")))
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -329,6 +344,9 @@ def view(design: Any, protocol: Any = None) -> dict[str, Any]:
     # are the settings the plan varies, whatever the plan's kind of study.
     for axis, values in (block.get("grid") if isinstance(block.get("grid"), dict) else {}).items():
         axes[str(axis)] = list(values) if isinstance(values, list) else [values]
+    # What every evaluation of a design goes through together is varied by the study as a measurement's `in_each_run` is.
+    for axis, values in (block.get("in_each_run") if isinstance(block.get("in_each_run"), dict) else {}).items():
+        axes[str(axis)] = list(values) if isinstance(values, list) else [values]
     metrics: list[tuple[str, str]] = []
     for metric in protocol.get("metrics") if isinstance(protocol.get("metrics"), list) else []:
         if isinstance(metric, dict) and metric.get("id"):
@@ -345,8 +363,12 @@ def view(design: Any, protocol: Any = None) -> dict[str, Any]:
     assumptions = " ".join(str(a) for a in (model.get("assumptions") if isinstance(model.get("assumptions"), list) else []))
     topic_map = [m for m in (protocol.get("topic_map") if isinstance(protocol.get("topic_map"), list) else [])
                  if isinstance(m, dict) and str(m.get("item") or "").strip() and str(m.get("by") or "").strip()]
+    # What FI's search changes (a design the topic asks to be searched for is one of these, never a value of a setting).
+    searched_for = {str(v["name"]).strip(): " ".join(str(v.get("meaning") or "").split())
+                    for v in (block.get("design_variables") if isinstance(block.get("design_variables"), list) else [])
+                    if isinstance(v, dict) and str(v.get("name") or "").strip()}
     return {"axes": axes, "metrics": metrics, "equations": equations, "assumptions": assumptions, "topic_map": topic_map,
-            "search": bool(block)}
+            "search": bool(block), "design_variables": searched_for}
 
 
 def _norm_formula(text: Any) -> str:
@@ -392,11 +414,32 @@ def _covers(values: list[Any], factor: dict[str, Any]) -> str | None:
 
 
 def _item_id(kind: str, index: int) -> str:
-    return {"factors": "F", "quantities": "Q", "formulas": "M"}[kind] + str(index + 1)
+    return {"factors": "F", "quantities": "Q", "formulas": "M", "searches": "S"}[kind] + str(index + 1)
 
 
 def _name_key(text: Any) -> str:
     return " ".join(re.sub(r"[^0-9a-zA-Z]+", " ", str(text or "")).lower().split())
+
+
+def searched_levels(req: Any, plan: dict[str, Any], factor: dict[str, Any]) -> list[str]:
+    """The levels of a factor that are a design the topic asks the study to search for (one of FI's reading's own
+    ``searches``, in the same words): with a search in the plan they are its part, not values of a setting (the search
+    item is checked on its own), so the factor is checked on its other levels."""
+    if not plan.get("design_variables"):
+        return []
+    names = [_tokens(s.get("name")) for s in (req or {}).get("searches") or [] if isinstance(s, dict)]
+    out = []
+    for level in factor.get("levels") or []:
+        mine = _tokens(level) if isinstance(level, str) else set()
+        if mine and any(n and (mine == n or n <= mine or (mine <= n and len(mine) >= 2)) for n in names):
+            out.append(level)
+    return out
+
+
+def _set_levels(req: Any, plan: dict[str, Any], factor: dict[str, Any]) -> dict[str, Any]:
+    """The factor as its settings must cover it: without the levels FI's search covers (:func:`searched_levels`)."""
+    searched = searched_levels(req, plan, factor)
+    return {**factor, "levels": [lv for lv in factor.get("levels") or [] if lv not in searched]} if searched else factor
 
 
 def _map_keys(req: dict[str, Any], kind: str, item: dict[str, Any]) -> set[str]:
@@ -424,6 +467,17 @@ def mapping_of(req: dict[str, Any], plan: dict[str, Any], kind: str, item: dict[
     for entry in entries:
         head, _sep, name = str(entry["by"]).partition(":")
         head, name = head.strip().lower(), name.strip()
+        if kind == "searches":
+            # Only what FI's search changes covers a design the topic asks to be searched for: a value of a setting, however
+            # it is worded ("optimised for ..."), is a design given in advance.
+            variables = plan.get("design_variables") or {}
+            if head in ("setting", "design_variable", "variable") and any(_name_key(v) == _name_key(name) for v in variables):
+                return "ok", name
+            if head in ("optimisation", "optimization", "search") and variables:
+                return "judge", "optimisation"
+            why = (f"{name or entry['by']} is not a design variable of the plan's search" if variables else
+                   "the plan has no search for the best design")
+            continue
         if kind == "factors" and head in ("optimisation", "optimization", "search") and plan.get("search"):
             # What the search for the best design itself finds (a free-form design, the best member of a family) is not a
             # setting with values to cover: the plan says its block covers it, and a reader confirms that it does.
@@ -433,8 +487,9 @@ def mapping_of(req: dict[str, Any], plan: dict[str, Any], kind: str, item: dict[
             if axis is None:
                 why = f"the setting {name} is not among the plan's settings"
                 continue
-            reach = _covers(plan["axes"][axis], item)
-            coded = reach is None and len(plan["axes"][axis]) >= len(item.get("levels") or [0])
+            levels = _set_levels(req, plan, item)
+            reach = _covers(plan["axes"][axis], levels)
+            coded = reach is None and len(plan["axes"][axis]) >= len(levels.get("levels") or [0])
             if reach and not coded:
                 why = f"{reach}"
                 continue
@@ -456,6 +511,21 @@ def mapping_of(req: dict[str, Any], plan: dict[str, Any], kind: str, item: dict[
     return "bad", why
 
 
+def mapped_axis(req: dict[str, Any], plan: dict[str, Any], item: dict[str, Any]) -> str:
+    """The setting of the plan its own topic map (``protocol.topic_map``) gives for a topic factor, when that setting is one
+    of the plan's: the plan's key itself, however the topic words the factor. ``""`` when the map names none."""
+    keys = _map_keys(req, "factors", item)
+    for entry in plan.get("topic_map") or []:
+        if not isinstance(entry, dict) or _name_key(entry.get("item")) not in keys:
+            continue
+        head, _sep, name = str(entry.get("by") or "").partition(":")
+        if head.strip().lower() in ("setting", "grid", "design_variable", "variable"):
+            axis = next((a for a in plan["axes"] if _name_key(a) == _name_key(name)), None)
+            if axis is not None:
+                return str(axis)
+    return ""
+
+
 def match(req: dict[str, Any], plan: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
     """``(gaps, unresolved)``: the gaps a name match settles (a factor named by a setting whose values do not cover what the
     topic states for it), and the ids (``F1``, ``Q2``, ``M1``) of the items it cannot settle either way. An item a name
@@ -472,8 +542,9 @@ def match(req: dict[str, Any], plan: dict[str, Any]) -> tuple[list[dict[str, Any
         if mapped is not None and mapped[0] == "judge":
             unresolved.append(_item_id("factors", i))
             continue
-        wanted = _tokens(factor["name"])
-        axis = next((a for a in plan["axes"] if wanted and (_tokens(a) <= wanted or wanted <= _tokens(a)) and _tokens(a)), None)
+        # The plan's own map is the only thing that says which setting a topic factor is: no setting is picked by comparing
+        # words (the first setting whose words fit named the wrong one). A factor the map does not place is left to the reader.
+        axis = mapped_axis(req, plan, factor) or None
         if axis is None and not compared(req, factor):
             # The topic uses its values (all of them in each run, a range every run covers) and compares no result across
             # them: it is not a setting the study must sweep. Asking for one put five values fitted together into the grid
@@ -482,11 +553,11 @@ def match(req: dict[str, Any], plan: dict[str, Any]) -> tuple[list[dict[str, Any
         if axis is None:
             unresolved.append(_item_id("factors", i))
             continue
-        why = _covers(plan["axes"][axis], factor)
+        why = _covers(plan["axes"][axis], _set_levels(req, plan, factor))
         if why is None:
             unresolved.append(_item_id("factors", i))
         elif why:
-            gaps.append(gap("level", factor, why=why, axis=axis))
+            gaps.append(gap("level", factor, why=why, axis=axis, ident=_item_id("factors", i)))
     for i, quantity in enumerate(req.get("quantities") or []):
         wanted = _tokens(quantity["name"])
         if not (wanted and any(wanted <= _tokens(text) for _id, text in plan["metrics"])):
@@ -503,18 +574,32 @@ def match(req: dict[str, Any], plan: dict[str, Any]) -> tuple[list[dict[str, Any
             if mapped is not None and mapped[0] == "ok":
                 continue
             unresolved.append(_item_id("formulas", i))
+    for i, wanted_search in enumerate(req.get("searches") or []):
+        variables = plan.get("design_variables") or {}
+        if not variables:
+            # No search at all: the design is given in advance (a setting's value, or nothing), whatever the plan's words.
+            gaps.append(gap("search", wanted_search))
+            continue
+        mapped = mapping_of(req, plan, "searches", wanted_search)
+        if mapped is not None and mapped[0] == "ok":
+            continue
+        wanted = _tokens(wanted_search["name"])
+        if mapped is None and any(wanted and _tokens(f"{v} {meaning}") and (_tokens(v) <= wanted or wanted <= _tokens(f"{v} {meaning}"))
+                                  for v, meaning in variables.items()):
+            continue
+        unresolved.append(_item_id("searches", i))
     return gaps, unresolved
 
 
 def item_of(req: dict[str, Any], ident: str) -> tuple[str, dict[str, Any]] | None:
-    kind = {"F": "factors", "Q": "quantities", "M": "formulas"}.get(ident[:1])
+    kind = {"F": "factors", "Q": "quantities", "M": "formulas", "S": "searches"}.get(ident[:1])
     try:
         return (kind, req[kind][int(ident[1:]) - 1]) if kind else None
     except (KeyError, ValueError, IndexError):
         return None
 
 
-def gap(kind: str, item: dict[str, Any], *, why: str = "", axis: str = "") -> dict[str, Any]:
+def gap(kind: str, item: dict[str, Any], *, why: str = "", axis: str = "", ident: str = "") -> dict[str, Any]:
     """One thing the topic asks for that the plan does not have, with the sentence a person reads."""
     name = item.get("name") or item.get("text") or ""
     stated = " ".join(str(item.get("stated") or "").split())
@@ -529,10 +614,19 @@ def gap(kind: str, item: dict[str, Any], *, why: str = "", axis: str = "") -> di
     elif kind == "quantity":
         sentence = (f"The topic asks to report {name}" + (f" (its words: “{stated}”)" if stated else "")
                     + ", but the plan does not measure it.")
+    elif kind == "search":
+        objective = " ".join(str(item.get("objective") or "").split())
+        sentence = (f"The topic asks the study to search for {name}" + (f" ({objective})" if objective else "")
+                    + (f" (its words: “{stated}”)" if stated else "")
+                    + ", but the plan does not search for it: it must be a design variable of the plan's `optimisation` "
+                    "block, so that FI runs the search, not a value of a setting or a search inside the simulation.")
     else:
         sentence = (f"The topic states the formula `{item.get('text')}`, but the plan's model does not use it and does not "
                     "say why it uses another.")
-    return {"kind": kind, "name": str(name), "main": bool(item.get("main")), "axis": axis, "sentence": sentence}
+    out = {"kind": kind, "name": str(name), "main": bool(item.get("main")), "axis": axis, "sentence": sentence}
+    if ident:
+        out["id"] = ident  # FI's id for the item: an answer's topic map may name the item by it
+    return out
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -547,8 +641,11 @@ def judge_parts(req: dict[str, Any], plan: dict[str, Any], unresolved: list[str]
         if found is None:
             continue
         kind, item = found
-        row = {"id": ident, "kind": kind[:-1] if kind != "quantities" else "quantity",
-               **{k: v for k, v in item.items() if k in ("name", "levels", "range", "text", "stated") and v}}
+        row = {"id": ident, "kind": {"quantities": "quantity", "searches": "search"}.get(kind, kind[:-1]),
+               **{k: v for k, v in item.items() if k in ("name", "levels", "range", "text", "stated", "objective") and v}}
+        if kind == "factors" and (searched := searched_levels(req, plan, item)):
+            row["levels"] = [lv for lv in item.get("levels") or [] if lv not in searched]
+            row["searched_by_fi"] = searched
         mapped = mapping_of(req, plan, kind, item)
         if mapped is not None and mapped[0] == "judge":
             row["plan_says_it_is_covered_by"] = mapped[1]
@@ -560,6 +657,7 @@ def judge_parts(req: dict[str, Any], plan: dict[str, Any], unresolved: list[str]
         "metrics": [{"id": i, "text": " ".join(t.split())} for i, t in plan["metrics"]],
         "equations": [{"id": e["id"], "formula": e["formula"], "source": e["source"]} for e in plan["equations"]],
         "assumptions": plan["assumptions"],
+        "searched_for": [{"name": v, "meaning": m} for v, m in (plan.get("design_variables") or {}).items()],
     }
     return json.dumps(items, indent=2, ensure_ascii=False), json.dumps(shown, indent=2, ensure_ascii=False, default=str)
 
@@ -592,15 +690,47 @@ def gaps_from(req: dict[str, Any], plan: dict[str, Any], verdicts: dict[str, str
         kind, item = found
         if ident not in verdicts:
             unjudged.append(str(item.get("name") or item.get("text") or ident))
-        elif verdicts[ident] == "missing":
-            gaps.append(gap({"factors": "factor", "quantities": "quantity", "formulas": "formula"}[kind], item))
+        elif verdicts[ident] == "missing" or (kind == "searches" and verdicts[ident] != "covered"):
+            found_gap = gap({"factors": "factor", "quantities": "quantity", "formulas": "formula",
+                             "searches": "search"}[kind], item, axis=mapped_axis(req, plan, item) if kind == "factors" else "",
+                             ident=ident)
+            named = mapping_of(req, plan, kind, item)
+            if named is not None and named[0] == "judge":
+                # The plan's own map names an element for the item and the reading did not accept it: both are said, so the
+                # plan's model is not asked as if it had named nothing, and the paper does not say the plan had nothing.
+                # ``map_keys`` / ``map_elements``: what an entry for the item may call it, and the elements the plan's own
+                # entries for it name, for telling an answer that only repeats them.
+                keys = _map_keys(req, kind, item)
+                elements = sorted({_map_element(m.get("by")) for m in plan.get("topic_map") or []
+                                   if isinstance(m, dict) and _name_key(m.get("item")) in keys} - {""})
+                found_gap = {**found_gap, "named": named[1], "map_keys": sorted(keys), "map_elements": elements,
+                             "sentence": found_gap["sentence"] + " " + named_sentence(kind, named[1])}
+            gaps.append(found_gap)
     return gaps, unjudged
+
+
+_ELEMENT_WORD = {"factors": "the setting", "quantities": "the metric", "formulas": "the equation", "searches": "the search",
+                 "factor": "the setting", "level": "the setting", "quantity": "the metric", "formula": "the equation",
+                 "search": "the search"}
+
+
+def _map_element(by: Any) -> str:
+    """The element a ``protocol.topic_map`` entry's ``by`` names (``metric:x`` and ``x`` alike), as a name key."""
+    text = str(by or "")
+    return _name_key(text.partition(":")[2] if ":" in text else text)
+
+
+def named_sentence(kind: str, element: str) -> str:
+    """What is said of a gap whose item the plan's own map names an element for, which one model's reading did not accept."""
+    what = "its search for the best design" if element == "optimisation" else f"{_ELEMENT_WORD.get(kind, 'the part')} `{element}`"
+    return (f"The plan names {what} for it, which FI's check (one model's reading of the plan) did not accept as covering "
+            "it.")
 
 
 def main_gaps(gaps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """The gaps the question cannot be answered without: a factor or a quantity the topic's reader marked as main (a formula
     is a specification the code is shown, so a missing one is said, not a stop)."""
-    return [g for g in gaps if g["main"] and g["kind"] in ("factor", "level", "quantity")]
+    return [g for g in gaps if g["main"] and g["kind"] in ("factor", "level", "quantity", "search")]
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -611,25 +741,60 @@ def mapped_items(req: dict[str, Any], plan: dict[str, Any]) -> dict[str, str]:
     """``{item name: the plan's element}`` for every topic item the plan's own mapping covers and a name match did not find
     (kept in the record: where the plan and a reader disagree, this is what overruled it)."""
     out: dict[str, str] = {}
-    for kind in _SECTIONS:
+    for kind in (*_SECTIONS, "searches"):
         for item in req.get(kind) or []:
-            by_name = {"factors": "factors", "quantities": "quantities", "formulas": "formulas"}[kind]
-            found = mapping_of(req, plan, by_name, item)
+            found = mapping_of(req, plan, kind, item)
             if found is not None and found[0] == "ok":
                 out[str(item.get("name") or item.get("text"))] = found[1]
     return out
 
 
+def restated(answer: Any, gaps: list[dict[str, Any]]) -> str:
+    """When an answer that :func:`merge` took nothing from names again, in its ``protocol.topic_map``, the element the plan's
+    own map already names for a gap (``gap["named"]``, which the reading did not accept): the reason sent back, in plain
+    words, so the next answer adds what covers the item instead of the same map. Empty otherwise."""
+    protocol = answer.get("protocol") if isinstance(answer, dict) and isinstance(answer.get("protocol"), dict) else {}
+    entries = [m for m in protocol.get("topic_map") or [] if isinstance(m, dict)] if isinstance(protocol.get("topic_map"), list) else []
+    given = {(_name_key(m.get("item")), _map_element(m.get("by"))) for m in entries}
+    again = [g for g in gaps if g.get("named") and any(i in (g.get("map_keys") or []) and e in (g.get("map_elements") or [])
+                                                       for i, e in given if i and e)]
+    if not again:
+        return ""
+    which = "; ".join(f"{g['name']} to `{g['named']}`" for g in again)
+    return (f"your answer gives again the plan's own map ({which}), which is already in the plan and which FI's check did not "
+            "accept as covering it. Add what covers it (a setting, a metric or an equation), or map it in "
+            "`protocol.topic_map` to another part of the plan that covers it")
+
+
 def _item_lines(req: dict[str, Any] | None) -> list[str]:
     """FI's list of what the topic asks for, one line per item with FI's id for it, as :func:`request` shows it."""
     lines = []
-    for kind in _SECTIONS:
+    for kind in (*_SECTIONS, "searches"):
         for index, item in enumerate((req or {}).get(kind) or []):
             if not isinstance(item, dict):
                 continue
             name = item.get("name") or item.get("text") or ""
             values = item.get("levels") or ([f"{item['range'][0]:g} to {item['range'][1]:g}"] if item.get("range") else [])
             lines.append(f"- {_item_id(kind, index)}: {name}" + (f" ({', '.join(str(v) for v in values[:8])})" if values else ""))
+    return lines
+
+
+def kept_when_smaller(req: dict[str, Any] | None) -> list[str]:
+    """What a study made smaller must still vary, from FI's record of the topic: one line per setting the topic names,
+    with every level it states, or the two ends of the range it states (the fewest values that still cover it, as
+    :func:`_covers` judges a setting)."""
+    lines = []
+    for item in (req or {}).get("factors") or []:
+        if not isinstance(item, dict) or not str(item.get("name") or "").strip():
+            continue
+        levels = [str(v) for v in item.get("levels") or []]
+        rng = item.get("range") or []
+        if levels:
+            lines.append(f"- {item['name']}: every level ({', '.join(levels[:12])})")
+        elif len(rng) == 2:
+            lines.append(f"- {item['name']}: at least {rng[0]:g} and {rng[1]:g}, the two ends of the range the topic states")
+        else:
+            lines.append(f"- {item['name']}: at least two values")
     return lines
 
 
@@ -646,7 +811,11 @@ def request(topic: str, gaps: list[dict[str, Any]], *, search: bool = False, req
         "a condition held fixed during the search, which you also list under `protocol.optimisation.fixed` with the value "
         "the search holds it at (a condition whose values are names, such as a family or a mode, needs no `fixed` entry: "
         "FI holds it at the first name listed). What the search itself finds (the best design) needs no setting: say in "
-        "`protocol.topic_map` that `optimisation` covers it. "
+        "`protocol.topic_map` that `optimisation` covers it. When every evaluation of one design goes through all of a "
+        "setting's values together (one result across all of them), it is a key of `protocol.optimisation.in_each_run` "
+        "with all its values instead. Every setting of the scan is crossed with every other, unless the block divides it "
+        "into parts in `protocol.optimisation.sub_studies` (each with a `name`, the `vary` list of the scan's settings it "
+        "varies, and `hold`: the value it holds each other setting of the scan at), as a measurement's sub-studies do. "
         if search else
         "A setting to vary or compare is a key of `protocol.grid` with every value the topic states (or, for a search for "
         "the best design, a design variable of `protocol.optimisation` with its range, and its value in `protocol.optimisation.baseline.values`). "
@@ -657,15 +826,21 @@ def request(topic: str, gaps: list[dict[str, Any]], *, search: bool = False, req
         "parts in `protocol.sub_studies` (each part lists, in `vary`, the settings it crosses; the others stay at one value). "
         "When a setting you add belongs to one part of the study only, do not cross it with the rest: write "
         "`protocol.sub_studies` with the part it belongs to (the parts the plan already has by their `name`, or a new part). ")
+    searching = (
+        "A design the topic asks the study to search for is a design variable of `protocol.optimisation.design_variables` "
+        "(a set of numbers, such as the cells of a grid, is one array variable with its `shape`), with its value in "
+        "`protocol.optimisation.baseline.values`; FI runs the search, and the simulation computes one given design per "
+        "call and never searches by itself. A value of a setting worded as already optimised is not a search. "
+        if any(g.get("kind") == "search" for g in gaps) else "")
     return (
         "The topic asks for things this plan does not yet include:\n" + "\n".join(lines)
         + f"\n\nThe topic: “{' '.join(str(topic or '').split())[:1500]}”\n\n"
-        "Write them into the design block. " + where + "A quantity "
+        "Write them into the design block. " + where + searching + "A quantity "
         "to report is an entry of `protocol.metrics` (an `id`, a `kind`, an `estimand` and a `unit`). A formula the topic "
         "states is an equation of `protocol.model.equations`, written as the topic writes it; if the plan needs another "
         "formula in its place, keep that one and say in its `source` that it replaces the topic's, and why. Also say, in "
         "`protocol.topic_map`, which element of the plan covers each thing the topic asks for (the ones above and the ones the "
-        "plan already has): a list of entries `item` ("
+        "plan already has), with an entry for EVERY setting the topic asks to vary or compare that names the key of that setting: a list of entries `item` ("
         + ("FI's id for it, exactly as in the list below, such as `F1`" if items else
            "the name of the factor or quantity, or the formula, as the topic words it")
         + ") and `by` (`setting:<the key in protocol.grid or protocol.optimisation.grid, or the design variable>`,`metric:<the metric id>` or "
@@ -742,12 +917,14 @@ def moved_holds(old_protocol: Any, new_protocol: Any) -> list[str]:
     return out
 
 
-def merge(old: dict[str, Any], new: dict[str, Any], gaps: list[dict[str, Any]]) -> dict[str, Any] | None:
+def merge(old: dict[str, Any], new: dict[str, Any], gaps: list[dict[str, Any]],
+          from_answer_map: list[str] | None = None) -> dict[str, Any] | None:
     """``old`` (a design block as written) with only what was asked taken from ``new``: settings of ``protocol.grid`` that
     are new, or that a gap names; what each run compares inside it (``protocol.in_each_run``) the same way, and a factor
     ``old`` compares inside each run stays there, whichever of the two places the answer wrote it in; metrics and equations
     whose id is new; design variables of a search that are new. Every check, threshold, tolerance and the rest are
-    ``old``'s. ``None`` when nothing was taken."""
+    ``old``'s. ``None`` when nothing was taken. ``from_answer_map``, when a list is given, gets each key that was named by
+    the answer's own topic map (for a gap that had no setting of its own), so the caller can say so."""
     if not isinstance(old, dict) or not isinstance(new, dict):
         return None
     o = old.get("protocol") if isinstance(old.get("protocol"), dict) else {}
@@ -755,6 +932,18 @@ def merge(old: dict[str, Any], new: dict[str, Any], gaps: list[dict[str, Any]]) 
     protocol = dict(o)
     taken = False
     named = {g.get("axis") for g in gaps if g.get("axis")}
+    # A setting the answer's own topic map gives for a gap's item is that gap's setting for this merge (a plan with no map
+    # of its own left the gap without one): the answer states which setting stands for the item, FI does not guess it.
+    # Only a gap that has no setting yet: a gap that has one is merged on that one, whatever the answer's map says.
+    gap_keys = [({_name_key(g.get("id")), _name_key(g.get("name"))} - {""}) for g in gaps if not g.get("axis")]
+    for entry in n.get("topic_map") if isinstance(n.get("topic_map"), list) else []:
+        if not isinstance(entry, dict) or not any(_name_key(entry.get("item")) in keys for keys in gap_keys):
+            continue
+        head, _sep, mapped = str(entry.get("by") or "").partition(":")
+        if head.strip().lower() in ("setting", "grid", "design_variable", "variable") and mapped.strip():
+            named.add(mapped.strip())
+            if from_answer_map is not None and mapped.strip() not in from_answer_map:
+                from_answer_map.append(mapped.strip())
     new_grid = n.get("grid") if isinstance(n.get("grid"), dict) else {}
     search = isinstance(o.get("optimisation"), dict)
     if search:
@@ -774,8 +963,22 @@ def merge(old: dict[str, Any], new: dict[str, Any], gaps: list[dict[str, Any]]) 
             if key not in held and key in scan:  # a condition the answer holds fixed so that the scan can compare it
                 held[key] = value
                 taken = True
+        # What every evaluation goes through together, and the parts the scan is divided into, read the same way as a
+        # measurement's: a setting the answer adds to one part does not multiply the others.
+        inside = dict(o["optimisation"].get("in_each_run") if isinstance(o["optimisation"].get("in_each_run"), dict) else {})
+        for axis, values in (nb.get("in_each_run") if isinstance(nb.get("in_each_run"), dict) else {}).items():
+            if (axis not in inside or axis in named) and isinstance(values, list) and inside.get(axis) != values \
+                    and axis not in scan:
+                inside[axis] = values
+                taken = True
+        old_scan = {"grid": o["optimisation"].get("grid"), "sub_studies": o["optimisation"].get("sub_studies")}
+        subs = joined_sub_studies(old_scan, scan, nb.get("sub_studies")) if scan else None
         if scan:
-            protocol["optimisation"] = {**o["optimisation"], "grid": scan, **({"fixed": held} if held else {})}
+            protocol["optimisation"] = {**o["optimisation"], "grid": scan, **({"fixed": held} if held else {}),
+                                        **({"in_each_run": inside} if inside else {}),
+                                        **({"sub_studies": subs} if subs is not None else {})}
+        elif inside:
+            protocol["optimisation"] = {**o["optimisation"], "in_each_run": inside}
         new_grid = {}
     old_inside = o.get("in_each_run") if isinstance(o.get("in_each_run"), dict) else {}
     new_inside = n.get("in_each_run") if isinstance(n.get("in_each_run"), dict) else {}
@@ -830,6 +1033,45 @@ def merge(old: dict[str, Any], new: dict[str, Any], gaps: list[dict[str, Any]]) 
     if block_old is not None and block_new is not None:
         have_vars = {str(v.get("name")) for v in block_old.get("design_variables") or [] if isinstance(v, dict)}
         extra = [v for v in block_new.get("design_variables") or [] if isinstance(v, dict) and str(v.get("name")) not in have_vars]
+        # A design variable the plan already has, which a gap (or the answer's own map) names: the answer's `values`, `low`
+        # and `high` for it are taken. The baseline design keeps its value when it is still inside the new range; when it
+        # is not, it takes the answer's baseline value for the variable if that is inside, else the nearest end of the range.
+        named_keys = {_name_key(a) for a in named}
+        answered = {_name_key(v.get("name")): v for v in block_new.get("design_variables") or [] if isinstance(v, dict)}
+        moved: dict[str, Any] = {}
+        variables = []
+        for v in block_old.get("design_variables") or []:
+            nv = answered.get(_name_key(v.get("name"))) if isinstance(v, dict) and _name_key(v.get("name")) in named_keys else None
+            update = {k: nv[k] for k in ("values", "low", "high") if nv is not None and k in nv and nv[k] != v.get(k)}
+            if update:
+                v = {**v, **update}
+                moved[str(v.get("name"))] = v
+                taken = True
+            variables.append(v)
+        if moved:
+            base = protocol.get("optimisation", block_old)
+            old_base = base.get("baseline") if isinstance(base.get("baseline"), dict) else {}
+            old_values = old_base.get("values") if isinstance(old_base.get("values"), dict) else {}
+            new_base = block_new.get("baseline") if isinstance(block_new.get("baseline"), dict) else {}
+            new_values = new_base.get("values") if isinstance(new_base.get("values"), dict) else {}
+            fixed_values = dict(old_values)
+            for name, v in moved.items():
+                held = old_values.get(name)
+                offered = new_values.get(name)
+                if isinstance(v.get("values"), list) and v["values"]:
+                    # A variable that takes one of a list of values: the baseline stays when it is one of them, else the
+                    # answer's baseline if that is one, else the first listed. Never a value between the ends.
+                    members = v["values"]
+                    if name in old_values and held not in members:
+                        fixed_values[name] = offered if offered in members else members[0]
+                    continue
+                ends = [x for x in (v.get("low"), v.get("high")) if isinstance(x, (int, float)) and not isinstance(x, bool)]
+                if len(ends) >= 2 and isinstance(held, (int, float)) and not isinstance(held, bool) \
+                        and not min(ends) <= held <= max(ends):
+                    fixed_values[name] = offered if isinstance(offered, (int, float)) and min(ends) <= offered <= max(ends) \
+                        else min(max(held, min(ends)), max(ends))
+            protocol["optimisation"] = {**base, "design_variables": variables,
+                                        **({"baseline": {**old_base, "values": fixed_values}} if old_base and fixed_values != old_values else {})}
         if extra:
             merged_block = {**protocol.get("optimisation", block_old),
                             "design_variables": [*(block_old.get("design_variables") or []), *extra]}
@@ -901,6 +1143,12 @@ def plan_lines(req: dict[str, Any], gaps: list[dict[str, Any]], *, reviewer: str
         lines.append(f"- Formula the topic states: `{formula['text']}`"
                      + (" - NOT in the plan's model" if formula["name"] in open_names else
                       " - could not be checked against the plan" if formula["name"] in unchecked else "") + ".")
+    for wanted in req.get("searches") or []:
+        lines.append(f"- To search for (FI runs the search): {wanted['name']}"
+                     + (f" (the topic's goal: {wanted['objective']})" if wanted.get("objective") else "")
+                     + (" - NOT searched for in the plan" if wanted["name"] in open_names else
+                        " - could not be checked against the plan" if wanted["name"] in unchecked else "")
+                     + "." + words(wanted))
     for comparison in req.get("comparisons") or []:
         said = quotable(topic, req, text=comparison["what"])
         lines.append(f"- To compare: {comparison['what']}" + (f" (the topic: “{said}”)" if said else ""))
@@ -931,9 +1179,9 @@ def write_note(quest_root: Any) -> str:
                      "formulas), so the plan was not held against it. Say plainly in the limitations that this was not checked.")
     if left:
         sentences = "; ".join(str(g.get("sentence") or "").rstrip(".") for g in left if isinstance(g, dict))
-        parts.append(f"The topic asked for more than this study did: {sentences}. Say in the limitations that the study did not "
-                     "do each of them, through the not_done placeholders listed under FI's record of this run (below); "
-                     "do not write a result for them.")
+        parts.append(f"FI's check of the plan against the topic did not find all it asks for: {sentences}. Say so in the "
+                     "limitations, through the not_done placeholders listed under FI's record of this run (below); do not "
+                     "write a result for them.")
     if unjudged:
         parts.append(f"FI could not check whether the plan includes what the topic asks for about {', '.join(unjudged)}. Say "
                      "plainly in the limitations that this was not checked.")
@@ -960,18 +1208,6 @@ def write_note(quest_root: Any) -> str:
                      "uncertainty of every number), say plainly in the limitations that it was not met and why; never leave "
                      "one out silently, and never claim one was met unless the record shows it.")
     return " ".join(parts)
-
-
-def stop_tried(gaps: list[dict[str, Any]], asked: int, problem: str = "") -> list[str]:
-    """What FI did before the plain stop (the card's "tried" lines): it asked the plan's model, and the plan still lacks
-    what the topic asks for. ``problem``: why the plan's model's last answer was not used."""
-    return [
-        (f"asked the plan's model {asked} time(s) to add it, each time quoting why the last answer was not used"
-         if asked else "had no model to ask for it (or the plan was already settled)"),
-        *([f"the last answer was not used: {' '.join(str(problem).split())[:400]}"] if problem else []),
-        *[g["sentence"] for g in gaps[:4]],
-        "did not run a study that leaves it out: it would not answer the topic's question",
-    ]
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -1048,9 +1284,10 @@ def checklist_block(req: Any, *, limit: int = CHECKLIST_LIMIT, topic: Any = "") 
         return f" — the topic {shown[words]}: “{words}”"
 
     lines: list[str] = []
-    for item in req.get("factors") or []:
+    for index, item in enumerate(req.get("factors") or []):
         if not isinstance(item, dict) or not item.get("name"):
             continue
+        mark = _item_id("factors", index)
         levels = item.get("levels") or []
         rng = item.get("range") or []
         if levels:
@@ -1059,18 +1296,18 @@ def checklist_block(req: Any, *, limit: int = CHECKLIST_LIMIT, topic: Any = "") 
         else:
             detail = f": {rng[0]:g} to {rng[1]:g}" if len(rng) == 2 else ""
         if compared(req, item):
-            lines.append(f"- vary or compare {item['name']}{detail}{said(item.get('stated'))}")
+            lines.append(f"- {mark}: vary or compare {item['name']}{detail}{said(item.get('stated'))}")
         else:
-            lines.append(f"- use {item['name']}{detail} as the topic states it, in every run; the topic compares no result "
+            lines.append(f"- {mark}: use {item['name']}{detail} as the topic states it, in every run; the topic compares no result "
                          "across it, so it is not a setting of `protocol.grid` (all its values together in each run go in "
                          f"`protocol.in_each_run`){said(item.get('stated'))}")
-    for item in req.get("quantities") or []:
+    for index, item in enumerate(req.get("quantities") or []):
         if isinstance(item, dict) and item.get("name"):
-            lines.append(f"- report {item['name']}{said(item.get('stated'))}")
-    for item in req.get("formulas") or []:
+            lines.append(f"- {_item_id('quantities', index)}: report {item['name']}{said(item.get('stated'))}")
+    for index, item in enumerate(req.get("formulas") or []):
         if isinstance(item, dict) and item.get("text"):
             name = str(item.get("name") or "").strip()
-            lines.append(f"- formula{' ' + name if name else ''}: {str(item['text'])[:160]}")
+            lines.append(f"- {_item_id('formulas', index)}: formula{' ' + name if name else ''}: {str(item['text'])[:160]}")
     for item in req.get("comparisons") or []:
         if isinstance(item, dict) and item.get("what"):
             lines.append(f"- compare: {str(item['what'])[:200]}{said(text=item['what'])}")
@@ -1085,7 +1322,9 @@ def checklist_block(req: Any, *, limit: int = CHECKLIST_LIMIT, topic: Any = "") 
         else:  # its sentence is quoted above already
             lines.append(f"- constraint: {str(text)[:160]} (the topic {shown[words]})")
     head = ("What the topic asks for (each item must appear as a setting, a metric or an equation of the plan, "
-            "or be named in `simplifications`). " + PRECEDENCE + ":")
+            "or be named in `simplifications`). Also write `protocol.topic_map`: an entry for every setting the topic asks to "
+            "vary or compare, with `item` (its id as listed below, such as `F1`) and `by` (`setting:<the key of that setting>`). "
+            + PRECEDENCE + ":")
     out = [head]
     used = len(head)
     for i, line in enumerate(lines):

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import ast
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -120,7 +121,8 @@ def _write(quest_root: Path | str, **changes: Any) -> None:
 
 
 def record_trials(quest_root: Path | str, *, key: str, wall_s: float | None, trials: int, cells: int,
-                  trial_sum_s: float | None, stage: str | None = None) -> None:
+                  trial_sum_s: float | None, stage: str | None = None, at_once: int | None = None,
+                  settings_s: float | None = None) -> None:
     """Keep the wall time of a run of the trials (``wall_s``: seconds from before the first setting to after the last;
     ``None`` when it is not known, as for a cluster job), how many trials and settings it ran, the sum of the per-trial
     times in the ledger, and the stage of a quest run in two stages (``explore`` / ``confirm``; ``None`` otherwise).
@@ -130,6 +132,10 @@ def record_trials(quest_root: Path | str, *, key: str, wall_s: float | None, tri
            "cells": int(cells), "trial_sum_s": None if trial_sum_s is None else round(float(trial_sum_s), 2)}
     if stage:
         run["stage"] = str(stage)
+    if at_once and int(at_once) >= 1:
+        run["at_once"] = int(at_once)  # the most settings that ran at the same time (absent: FI did not count)
+    if isinstance(settings_s, (int, float)) and not isinstance(settings_s, bool) and 0 <= settings_s < float("inf"):
+        run["settings_s"] = round(float(settings_s), 2)  # every setting's process, start to end, added up
     changes: dict[str, Any] = {"trials_run": run}
     if stage:
         by_stage = read(quest_root).get("by_stage")
@@ -151,6 +157,97 @@ def run_seconds(quest_root: Path | str, fallback: Any = None) -> float | None:
     return None
 
 
+def _recorded_seconds(path: Path) -> float:
+    """``time.seconds`` of one of FI's own records of the search (0 when it holds none)."""
+    try:
+        t = (json.loads(path.read_text(encoding="utf-8")) or {}).get("time")
+        v = t.get("seconds") if isinstance(t, dict) else None
+    except (OSError, ValueError, AttributeError):
+        return 0.0
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v < float("inf") else 0.0
+
+
+def search_seconds(quest_root: Path | str) -> float:
+    """How long FI's search for the best design and its check at finer settings took, from the two records FI wrote when
+    each finished (``results/best_design.json``, ``needs/OPTIMUM_CHECK.json``): the wall time of the search, 0 when there
+    was none."""
+    root = Path(quest_root)
+    return _recorded_seconds(root / "results" / "best_design.json") + _recorded_seconds(root / "needs" / "OPTIMUM_CHECK.json")
+
+
+def settings_at_once(quest_root: Path | str) -> int | None:
+    """The most settings that ran at the same time in the run whose trials are stored, as the runner counted them and kept
+    it in the run record (``at_once``). ``None`` when FI did not count: it is then not known whether the settings ran at the
+    same time. No other record holds it: the estimate's number is how many FI let run, not how many did."""
+    run = read(quest_root).get("trials_run")
+    n = run.get("at_once") if isinstance(run, dict) else None
+    return n if isinstance(n, int) and not isinstance(n, bool) and n >= 1 else None
+
+
+def _seconds(value: Any) -> float | None:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value < float("inf") else None
+
+
+def reader_run(quest_root: Path | str) -> dict[str, Any] | None:
+    """What a reader's run of the delivered code takes, when FI's wall time is not all of it: ``{"least", "most",
+    "at_once", "overlap"}``, else ``None`` (the settings ran one at a time, as counted, and there was no search: FI's wall
+    time is the run). The delivered ``code/run.py`` runs the settings one after another. ``least``: the trials' own times
+    added up. ``most``: every setting's process time added up, measured WHILE the settings ran at the same time, so an
+    upper bound (``None`` when FI did not record it). For a run counted as one setting at a time the wall time is both. The
+    search FI ran counts in every bound. ``at_once``: the most settings that ran together, or ``None`` when FI did not
+    count; ``overlap`` is then ``True`` only when the trials' own times add up to more than the wall time, which
+    one-at-a-time trials cannot. This is the one place the time is worked out; the paper's facts and the run record both
+    read it, and :func:`reader_verdict` judges it."""
+    run = read(quest_root).get("trials_run")
+    if not isinstance(run, dict):
+        return None
+    n = settings_at_once(quest_root)
+    least, most, wall = _seconds(run.get("trial_sum_s")), _seconds(run.get("settings_s")), _seconds(run.get("wall_s"))
+    search = search_seconds(quest_root)
+    if n == 1:
+        if wall is None or not search:
+            return None
+        return {"least": wall + search, "most": wall + search, "at_once": 1, "overlap": False}
+    overlap = n is not None or (least is not None and wall is not None and least > wall)
+    if least is None and most is None:
+        return None
+    return {"least": None if least is None else least + search, "most": None if most is None else most + search,
+            "at_once": n, "overlap": overlap}
+
+
+def reader_verdict(reader: dict[str, Any], limit: float) -> str:
+    """``"over"`` only when the least a reader's run takes is over ``limit``; ``"within"`` only when the most it takes is
+    at or under it; else ``"not shown to be within or over"``. FI's own wall time decides neither: the settings ran at the
+    same time, or FI does not know that they did not."""
+    if reader["least"] is not None and reader["least"] > limit:
+        return "over"
+    return "within" if reader["most"] is not None and reader["most"] <= limit else "not shown to be within or over"
+
+
+def reader_clause(reader: dict[str, Any]) -> str:
+    """How the settings ran, in words, for the run-time sentence."""
+    if reader["at_once"] == 1:
+        return "with the settings run one at a time"
+    if reader["at_once"] is not None:
+        return f"with {reader['at_once']} settings run at the same time"
+    if reader["overlap"]:
+        return "with an uncounted number of settings run at the same time"
+    return "FI did not record whether the settings ran at the same time"
+
+
+def reader_words(reader: dict[str, Any], plain: Any) -> str:
+    """The reader's run time in words (``plain`` writes a number of seconds): a single time, a least, or the range."""
+    least, most = reader["least"], reader["most"]
+    if least is not None and most is not None and most > least:
+        return (f"between {plain(least)} and {plain(most)}, the latter measured while the settings ran at the same time, "
+                "so a one-after-another run takes at most that")
+    if most is not None and least is None:
+        return f"at most {plain(most)} (measured while the settings ran at the same time)"
+    if most is not None:
+        return plain(most)
+    return f"at least {plain(least)}"
+
+
 def run_stage(quest_root: Path | str) -> tuple[str | None, dict[str, Any]]:
     """``(the stage of the run whose trials are stored, the other stages' runs)``: ``(None, {})`` outside a quest run in
     two stages."""
@@ -170,7 +267,8 @@ def _code_files(code_dir: Path) -> list[Path]:
     out = []
     for path in sorted(code_dir.rglob("*.py")):
         parts = path.relative_to(code_dir).parts
-        if any(p.startswith(".") or p in _SKIP_PARTS or p.startswith("test_") for p in parts):
+        # code/skills/: FI's copy of the selected skills' files (Engine._skill_files_to_code), not the study's code.
+        if any(p.startswith(".") or p in _SKIP_PARTS or p.startswith("test_") for p in parts) or parts[:1] == ("skills",):
             continue
         out.append(path)
     return out
@@ -771,3 +869,77 @@ def record_seed(quest_root: Path | str) -> dict[str, Any]:
     verdict = seed_verdict(quest_root)
     _write(quest_root, seed=verdict)
     return verdict
+
+
+#: Settings whose per-trial numbers move together this closely (Pearson r, over at least ``_MIN_TRIALS`` trials both
+#: ran) were not given independent random numbers: two independent noisy series of that length are almost never this alike.
+_SHARED_R = 0.9
+_MIN_TRIALS = 20
+
+
+def _pearson(xs: list[float], ys: list[float]) -> float | None:
+    n = len(xs)
+    if n < 2:
+        return None
+    mx, my = math.fsum(xs) / n, math.fsum(ys) / n
+    sxx = math.fsum((x - mx) ** 2 for x in xs)
+    syy = math.fsum((y - my) ** 2 for y in ys)
+    if sxx <= 0 or syy <= 0:
+        return None
+    return math.fsum((x - mx) * (y - my) for x, y in zip(xs, ys)) / math.sqrt(sxx * syy)
+
+
+def shared_stream_notes(cells: Any) -> list[str]:
+    """Which settings drew the same random numbers, MEASURED from FI's record of the trials (``raw/trials.json``): for each
+    number a setting reports per trial, the settings whose per-trial values (matched by trial number) move together
+    (:data:`_SHARED_R`). Reading the code for a generator built from something that does not depend on the setting cannot
+    tell a stream built once and cached, or a reseed on purpose, from a real reuse; the numbers the trials returned can.
+    Settings that share their random numbers on purpose (a plan that asks for common random numbers) are not a fault, so
+    this only tells: one plain sentence per number, never a stop or a repair. ``cells`` is the file's list of records
+    (or ``{"cells": [...]}``); a record without per-trial numbers is skipped."""
+    if isinstance(cells, dict):
+        cells = cells.get("cells")
+    if not isinstance(cells, list):
+        return []
+    series: dict[str, dict[str, dict[Any, float]]] = {}  # metric -> setting key -> trial -> value
+    for c in cells:
+        if not isinstance(c, dict) or c.get("level") or not isinstance(c.get("metrics"), dict):
+            continue
+        key = json.dumps(c.get("cell"), sort_keys=True, default=str)
+        for name, m in c["metrics"].items():
+            if not isinstance(m, dict) or not isinstance(m.get("values"), list) or not isinstance(m.get("trials"), list):
+                continue
+            by_trial = {t: v for t, v in zip(m["trials"], m["values"])
+                        if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)}
+            series.setdefault(str(name), {})[key] = by_trial
+    notes: list[str] = []
+    for name, per_setting in sorted(series.items()):
+        keys = sorted(per_setting)
+        pairs = 0
+        close = 0
+        for i, a in enumerate(keys):
+            for b in keys[i + 1:]:
+                shared = sorted(set(per_setting[a]) & set(per_setting[b]), key=str)
+                if len(shared) < _MIN_TRIALS:
+                    continue
+                r = _pearson([per_setting[a][t] for t in shared], [per_setting[b][t] for t in shared])
+                if r is None:
+                    continue
+                pairs += 1
+                close += r >= _SHARED_R
+        if pairs and close * 2 >= pairs:
+            notes.append(
+                f"In FI's record of the trials, `{name}` moves together between settings in {close} of {pairs} pairs "
+                f"(trial by trial): the settings appear to have drawn the same random numbers. If the plan asks for that "
+                f"(common random numbers) it is as planned; if not, differences between settings are smaller than "
+                f"independent runs would show.")
+    return notes
+
+
+def shared_stream_notes_for(quest_root: Path | str) -> list[str]:
+    """:func:`shared_stream_notes` over the quest's ``raw/trials.json``; empty when there is none or it cannot be read."""
+    try:
+        data = json.loads((Path(quest_root) / "raw" / "trials.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return shared_stream_notes(data)
