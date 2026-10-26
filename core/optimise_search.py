@@ -91,6 +91,10 @@ _LIMIT = re.compile(r"^\s*(<=|>=|<|>|≤|≥|=<|=>)\s*(\S+)\s*$")
 _OPS = {"<=": "<=", "<": "<=", "≤": "<=", "=<": "<=", ">=": ">=", ">": ">=", "≥": ">=", "=>": ">="}
 # After this many evaluations in a row that all failed, with none that worked, the simulation is broken, not the design.
 _FAILURES_BEFORE_GIVING_UP = 10
+#: The ``kind`` :func:`judge` gives a failed evaluation whose answer has results but not the objective: a fact about what
+#: the simulation returns, not about the design, so a search that failed every evaluation this way says the same of the
+#: alternatives it did not search (``every_failure``, :func:`compare`).
+NO_OBJECTIVE = "no_objective"
 #: Designs after the baseline that must all return the baseline's results before the search stops for ``no_effect``.
 #: In FI's records of searches that do use their design, the first design that differs from the baseline was the first
 #: or the third one tried; 50 leaves room for a design that does act but only past a threshold the first few miss.
@@ -519,8 +523,9 @@ def judge(block, values, reason=""):
         return failed
     quantity = block["objective"]["quantity"]
     if quantity not in values:
-        return {**failed, "reason": f"the simulation returned {', '.join(sorted(map(str, values))[:8]) or 'nothing'} "
-                                    f"but not the objective `{quantity}`"}
+        return {**failed, "kind": NO_OBJECTIVE,
+                "reason": f"the simulation returned {', '.join(sorted(map(str, values))[:8]) or 'nothing'} "
+                          f"but not the objective `{quantity}`"}
     objective = values[quantity]
     if not _number(objective):
         return {**failed, "reason": f"the objective `{quantity}` is not a finite number ({objective!r})"}
@@ -739,6 +744,8 @@ class _Search:
                "elapsed_s": elapsed if _number(elapsed) else None}
         if judged.get("reason"):
             row["reason"] = judged["reason"]
+        if judged.get("kind"):
+            row["failure"] = judged["kind"]
         named = {n: values[n] for n in self.named if n in values} if isinstance(values, dict) else {}
         if named:
             row["results"] = named
@@ -1207,12 +1214,36 @@ class _Search:
         if len(requests) == 1:
             return [(yield requests[0])]
         if together:
-            replies = yield {"kind": "evaluate_many", "requests": requests}
-            return list(replies) if isinstance(replies, list) else []
+            replies, todo = [], list(requests)
+            while todo:
+                # While no answer has worked, ask only for as many designs as it takes to give up if all of them fail,
+                # and look at the answers before asking for more: a broken simulation costs those, not the whole batch.
+                # Once one works (or one is known to), the rest are asked for together, as before.
+                step = len(todo)
+                if not self._worked(replies):
+                    step = min(step, max(1, _FAILURES_BEFORE_GIVING_UP - self.failures_in_a_row - len(replies)))
+                if step == 1:
+                    got = [(yield todo[0])]
+                else:
+                    got = yield {"kind": "evaluate_many", "requests": todo[:step]}
+                    got = list(got) if isinstance(got, list) else []
+                replies.extend(got)
+                todo = todo[len(got):] if got else []
+                if not self._worked(replies) and self.failures_in_a_row + len(replies) >= _FAILURES_BEFORE_GIVING_UP:
+                    break  # the search gives up on the answers so far: it asks for no more
+                if any(isinstance(r, dict) and r.get("stop") for r in got):
+                    break
+            return replies
         out = []
         for request in requests:
             out.append((yield request))
         return out
+
+    def _worked(self, replies):
+        """Whether the search has an answer that worked: one it judged already, or one of ``replies``."""
+        return self.any_ok or any(
+            judge(self.block, r.get("values") if isinstance(r, dict) else None,
+                  str(r.get("failed") or "") if isinstance(r, dict) else "")["status"] == "ok" for r in replies)
 
     def _cap(self, start, cap):
         """Where a local search's share of the budget ends: its ``cap``, or, while the starts run side by side, the share
@@ -1795,6 +1826,9 @@ class _Search:
             "notes": list(self.notes), "baseline": baseline, "start_log": self.start_log, "seed": self.seed,
             "failed": sum(1 for r in self.rows if r["status"] != "ok"),
             "infeasible": sum(1 for r in self.rows if r["status"] == "ok" and not r["feasible"]),
+            **({"every_failure": NO_OBJECTIVE}
+               if self.stopped == "failures" and self.rows and all(r.get("failure") == NO_OBJECTIVE for r in self.rows)
+               else {}),
             "best": ({"design": dict(best["design"]), "objective": best["objective"],
                       "constraints": dict(best["constraints"]), "feasible": True, "evaluation": best["n"],
                       "start": best["start"], "stage": best["stage"]} if best else None),
@@ -1944,7 +1978,24 @@ def compare(block, *, seed, method=None, rounds=None, results=None, batch=False,
                 request = gen.send(reply)
         except StopIteration as finished:
             outcomes.append(finished.value)
+        if outcomes[-1].get("every_failure"):
+            # Every evaluation failed because the simulation's answer had no objective (the outcome's own record of why,
+            # :data:`NO_OBJECTIVE`): what the simulation returns does not depend on the alternative, so the others
+            # would fail the same way and are not searched.
+            outcomes.extend(_not_searched_outcome(outcomes[0], "failures") for _ in levels[number + 1:])
+            break
     return merge_outcomes(outcomes, levels, block)
+
+
+def _not_searched_outcome(first, why):
+    """The outcome of an alternative whose search was not run because the one before it showed it cannot work."""
+    return {
+        "rows": [], "evaluations": 0, "scan_evaluations": 0, "budget": 0, "starts": first["starts"],
+        "per_start": first["per_start"], "stopped_because": why, "budget_ran_out": False,
+        "method_requested": first["method_requested"], "method_used": first["method_used"],
+        "method_why": first["method_why"], "notes": [], "baseline": first["baseline"], "start_log": [],
+        "seed": first["seed"], "failed": 0, "infeasible": 0, "best": None, "rounds": [],
+    }
 
 
 PROBE_DESIGNS = 8  # the designs an alternative is asked for before it is searched (see :func:`_probe_alternative`)
