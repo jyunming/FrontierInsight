@@ -17,6 +17,7 @@ Nothing here calls a model.
 from __future__ import annotations
 
 import copy
+import difflib
 import re
 from typing import Any
 
@@ -49,7 +50,10 @@ def invalid_reason(path: Any, design: dict[str, Any]) -> str:
     if segs[0] == "protocol" and len(segs) > 1:
         known = {*PROTOCOL_PARTS, *_NEW_PROTOCOL_PARTS, *(proto if isinstance(proto, dict) else {})}
         if segs[1] not in known:
-            return f"`protocol.{segs[1]}` is not a part of the protocol (a misspelt name?)"
+            near = difflib.get_close_matches(segs[1], sorted(known), n=1, cutoff=0.75)
+            return (f"`protocol.{segs[1]}` is not a part of the protocol (a misspelt name? `protocol.{near[0]}` is one)" if near
+                    else f"`protocol.{segs[1]}` is not a part of the protocol: it has no home there, so the change is kept as "
+                         "an open item")
     node: Any = design
     for i, x in enumerate(segs[:-1]):
         if i == 1 and segs[0] == "protocol" and not (isinstance(node, dict) and x in node):
@@ -171,7 +175,7 @@ def cited_parts(cited: Any, design: dict[str, Any]) -> list[str]:
         if not isinstance(c, str):
             continue
         c = c.strip().strip("`")
-        if invalid_reason(c, design) or not _get_part(design, c)[0]:
+        if invalid_reason(c, design) or not get_part(design, c)[0]:
             continue
         top = next((p for p in listed if c == p or c.startswith(p + ".")), None)
         if top and top not in out:
@@ -244,7 +248,7 @@ def merge_parts(
     return design, changed_parts(previous, design), refused
 
 
-def _get_part(design: dict[str, Any], path: str) -> tuple[bool, Any]:
+def get_part(design: dict[str, Any], path: str) -> tuple[bool, Any]:
     node: Any = design
     for s in path.split("."):
         if not isinstance(node, dict) or s not in node:
@@ -279,7 +283,7 @@ def amended_from_audit(
             if not covered(part, wheres, paths):
                 refused.append({"key": part, "reason": "no objection named it, so it was left as the draft has it"})
                 continue
-            found, value = _get_part(whole, part)
+            found, value = get_part(whole, part)
             if found:
                 amended, bad = apply_changes(amended, [(part, value)])
                 refused.extend(bad)
@@ -288,3 +292,4 @@ def amended_from_audit(
             else:
                 refused.append({"key": part, "reason": "the audit left it out; a design part is not removed this way"})
     return amended, refused, changed_parts(draft, amended)
+
