@@ -425,6 +425,10 @@ def test_a_search_studys_grid_is_a_requirement_like_the_protocols_own() -> None:
     assert _by_kind(reqs, "sweep", "of b")["defined_by"] == [["in_each_run", "b"]]
     sections = cr.plan_sections(_SPLIT_DESIGN, protocol)
     assert sections["grid"] == {"a": [1, 2]} and sections["in_each_run"] == {"b": [1, 2, 3]}
+    # a value of the protocol's own that is not a table does not hide the search's
+    odd = {**protocol, "in_each_run": "x", "grid": ["a"]}
+    assert cr.plan_sections(_SPLIT_DESIGN, odd)["in_each_run"] == {"b": [1, 2, 3]}
+    assert _by_kind(cr.requirements(_SPLIT_DESIGN, odd), "sweep", "of b")["defined_by"] == [["in_each_run", "b"]]
 
 
 def test_a_split_plan_says_which_items_each_part_holds() -> None:

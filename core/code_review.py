@@ -150,9 +150,11 @@ def _settings_of(protocol: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
     """``(grid, in_each_run)`` of the plan: the protocol's own, else those of its search (``optimisation``). The one place
     both the plan view (:func:`_raw_sections`) and the requirements (:func:`requirements`) take them from."""
     optimisation = protocol.get("optimisation") if isinstance(protocol.get("optimisation"), dict) else {}
-    grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) and protocol.get("grid") else optimisation.get("grid")
-    inside = protocol.get("in_each_run") if protocol.get("in_each_run") else optimisation.get("in_each_run")
-    return (grid if isinstance(grid, dict) else {}), (inside if isinstance(inside, dict) else {})
+    def own(key: str) -> dict[str, Any]:
+        value = protocol.get(key) if isinstance(protocol.get(key), dict) and protocol.get(key) else optimisation.get(key)
+        return value if isinstance(value, dict) else {}
+
+    return own("grid"), own("in_each_run")
 
 
 def _check_names(oracle: dict[str, Any]) -> tuple[str, str]:
