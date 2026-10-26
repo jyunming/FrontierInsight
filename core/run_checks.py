@@ -1186,7 +1186,7 @@ class RunChecksMixin:
                 probe, why = await _estimate._time_one(
                     self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(),  # type: ignore[attr-defined]
                     baseline, runs=runs, deterministic=deterministic, timeout_s=int(max(5, min(allowance, left))),
-                    env=env, thresholds=thresholds)
+                    env=env, thresholds=thresholds, in_each_run=inside or None)
                 if probe is None:
                     # The baseline is the first design the search evaluates: one it fails at is the same repair.
                     self._log.warning("[execute] the simulation failed while FI timed the search's baseline %s", why)  # type: ignore[attr-defined]
