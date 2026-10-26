@@ -678,3 +678,12 @@ def test_the_widening_is_in_the_run_record_the_paper_s_limitations_carry(tmp_pat
     assert "FI widened the tolerance to 5e-06." in disclosure.run_record(tmp_path)
     (tmp_path / ".fi" / "oracle_review.json").write_text("{}", encoding="utf-8")
     assert "widened" not in disclosure.run_record(tmp_path)
+
+
+def test_an_expected_value_typed_as_a_string_is_not_a_number_to_the_oracle_so_it_is_asked_for_a_number() -> None:
+    from core import oracle_check as oc
+    check = {"name": "level", "kind": "special_case", "expected": "0.04978", "tolerance": "1e-6", "case": {"dt": 0.1},
+             "measure": "y_end"}
+    assert oc.limit_of(check)[1] is None, "the oracle does not read a string as a number"
+    assert oc.unjudgeable([check]) and "numeric `expected`" in oc.unjudgeable([check])[0]
+    assert of.enforce({"oracles": [check]}).precision == [], "the precision rule has nothing to count; the numeric ask does"

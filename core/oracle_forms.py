@@ -578,14 +578,15 @@ def precision_gaps(text: str) -> list[str]:
     return [str(g["name"]) for g in enforce(protocol, typed=typed_numbers(text)).precision]
 
 
-def widen_to_precision(text: str, names: list[str]) -> tuple[str, list[str]]:
-    """``(text, sentences)``: ``text`` (a plan.md) with the tolerance of each named check that is still smaller than half a
+def widen_to_precision(text: str, names: list[str] | None = None) -> tuple[str, list[str]]:
+    """``(text, sentences)``: ``text`` (a plan.md) with the tolerance of each check (the named ones; every one when
+    ``names`` is ``None``, which is how the reply to the ask is read: a check it renamed or added counts) that is still smaller than half a
     unit of the last digit of its expected value, as typed, widened to exactly that (on the relative scale for a
     relative tolerance); a sentence per check widened. The expected value is never touched. ``text`` is returned as it
     is when nothing is widened."""
     from . import plan as _plan
 
-    wanted = {n.strip().lower() for n in names}
+    wanted = {n.strip().lower() for n in names} if names is not None else None
     told: list[str] = []
 
     def change(block: dict[str, Any]) -> dict[str, Any] | None:
@@ -593,7 +594,7 @@ def widen_to_precision(text: str, names: list[str]) -> tuple[str, list[str]]:
         if not isinstance(protocol, dict) or not isinstance(protocol.get("oracles"), list):
             return None
         gaps = {str(g["name"]).strip().lower(): g
-                for g in enforce(protocol, typed=typed_numbers(text)).precision if str(g["name"]).strip().lower() in wanted}
+                for g in enforce(protocol, typed=typed_numbers(text)).precision if wanted is None or str(g["name"]).strip().lower() in wanted}
         if not gaps:
             return None
         items = []

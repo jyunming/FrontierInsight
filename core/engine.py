@@ -17284,7 +17284,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._oracle_review_write({**progress, "answered": True})
             self._log.warning("[oracle] the request to the plan about its checks was not answered before the quest "
                               "stopped; it is not made again")
-            self._widen_to_precision(path, progress.get("precision_asked") or [])
+            if progress.get("precision_asked"):
+                self._widen_to_precision(path)
         elif (requests or findings or formula_asks or example_asks) and not progress.get("asked"):
             for r in requests:
                 self._log.warning("[oracle] asking the plan to change a check: %s", r)
@@ -17341,7 +17342,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             if again:
                 path.write_text(text, encoding="utf-8")
             # A tolerance the plan, asked once, left tighter than its expected value's own digits is widened by FI.
-            widened = self._widen_to_precision(path, too_tight)
+            widened = self._widen_to_precision(path)
             if widened:
                 again = [*again, *widened]
                 text, _more, left = _forms.apply_to_plan(path.read_text(encoding="utf-8"), fi_runs=fi_runs)
@@ -17372,14 +17373,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                    if formula_asks or formulas else {}),
                 **({"review": {k: v for k, v in review.items() if k != "lines"}} if review else {})}
 
-    def _widen_to_precision(self, path: Path, names: list[str]) -> list[str]:
-        """Widen, in plan.md, the tolerance of each named check that is still smaller than half a unit of the last digit
+    def _widen_to_precision(self, path: Path, names: list[str] | None = None) -> list[str]:
+        """Widen, in plan.md as it now stands (after the reply to the ask: a check the reply renamed or added counts, so
+        every check, not only those asked about), the tolerance of each check that is still smaller than half a unit of the last digit
         of its expected value (:func:`core.oracle_forms.widen_to_precision`) and say so: in the log, as a version of the
         plan by the engine, among the checks the engine changed (shown before the freeze) and in ``oracle_review.json``.
         The sentences, or ``[]`` when nothing was widened."""
-        if not names:
-            return []
-        text, told = _forms.widen_to_precision(path.read_text(encoding="utf-8"), [str(n) for n in names])
+        text, told = _forms.widen_to_precision(path.read_text(encoding="utf-8"), names)
         if not told:
             return []
         before = self._planned_oracles()
