@@ -58,7 +58,14 @@ from . import trial_table as _tt
 
 NOT_RECORDED = "not recorded"
 FORMS = ("mean", "mean_ci", "ci", "pm", "sd", "sd_ci", "se", "n", "count", "failed", "ref", "corr", "corr_ci")
+#: Which statistic of the quantity each form renders: ``mean`` is the quantity's own value (alone or with its interval), the
+#: others are a spread, a count, a reference or a correlation. The paper places a quantity when a key renders its ``mean``.
+FORM_STATISTIC = {"mean": "mean", "mean_ci": "mean", "ci": "mean", "pm": "mean", "sd": "sd", "sd_ci": "sd", "se": "se",
+                  "n": "count", "count": "count", "failed": "count", "ref": "reference", "corr": "corr", "corr_ci": "corr"}
 OPS = ("diff", "ratio", "rel_diff")
+#: The reducers whose result is a value of the quantity (its lowest, highest or widest); the others (``argmin``, ``argmax``,
+#: ``count_where``) give a setting or a count.
+VALUE_REDUCERS = ("min", "max", "range", "max_abs")
 REDUCERS = ("min", "max", "range", "max_abs", "argmin", "argmax", "count_where")
 VS = "vs"
 #: The forms ``vs`` can judge, and the interval form it judges them by (a comparison is decided by the interval, never by a
@@ -336,7 +343,25 @@ class Records:
     def fillable(self) -> set[str]:
         """The names a key can fill: the quantities the trials recorded and the analysis's single recorded values, never
         one FI left out. The one set the sheet, the keys and the review's check of what the paper places all use."""
-        return {m for m in (*self.metrics(), *self.answers) if m not in self.left_out}
+        return {m for m in (*self.metrics(), *self.answers) if m not in self.left_out and self._fills(m)}
+
+    def _fills(self, metric: str) -> bool:
+        """Whether at least one key for ``metric`` fills: the key is tried through :func:`resolve`, the one path that fills
+        keys (the quantity pooled over every setting first, then each setting a trial recorded), so a quantity whose every
+        value is missing or not a number is not one."""
+        if metric in self.answers:
+            return resolve(placeholder(metric), self).filled
+        axes = {a: vs for a, vs in self.axes().items()}
+        tries = [{a: Pick("all") for a in axes}]
+        seen: set[str] = set()
+        for c in self.carrying(metric):
+            where = {a: c["cell"][a] for a in axes if a in c["cell"]}
+            mark = json.dumps(where, default=str, sort_keys=True)
+            if mark not in seen and all(_addressable(v) for v in where.values()):
+                seen.add(mark)
+                tries.append(where)
+        short = self.aliases()
+        return any(resolve(_line_key(metric, "mean", where, short), self).filled for where in tries)
 
     def carrying(self, metric: str | None) -> list[dict[str, Any]]:
         """The cells that carry ``metric`` (every cell for ``None``), in the record's order."""
@@ -1260,12 +1285,12 @@ ANSWERS = Path(".fi") / "analysis_answers.json"
 
 
 def write_answers(quest_root: Path | str, result_json: Any, protocol: dict[str, Any] | None,
-                  runs: list[Any] | None = None) -> list[str]:
+                  runs: list[Any] | None = None, scheduled: int | None = None) -> list[str]:
     """Keep, from each run of the analysis (``runs``: one result per replicate seed, as :class:`core.engine.Engine` publishes
     them; ``result_json`` alone is one run), the number under each name the plan gives a quantity
     (``protocol.metrics[].id``): the exact name and nothing matched by its words, after FI took out the quantities it left
-    out. An empty or missing result leaves the earlier record as it was (a run that failed recorded nothing). Returns the
-    names kept."""
+    out. ``scheduled`` is how many runs FI scheduled (a run that failed is not among ``runs`` and counts as missing). An empty
+    or missing result leaves the earlier record as it was (a run that failed recorded nothing). Returns the names kept."""
     results = [r for r in (runs if runs and len(runs) > 1 else [result_json]) if isinstance(r, dict) and r]
     if not results:
         return []
@@ -1280,7 +1305,7 @@ def write_answers(quest_root: Path | str, result_json: Any, protocol: dict[str, 
     try:
         path = Path(quest_root) / ANSWERS
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"runs": rows}, indent=1) + "\n", encoding="utf-8")
+        path.write_text(json.dumps({"scheduled": max(int(scheduled or 0), len(rows)), "runs": rows}, indent=1) + "\n", encoding="utf-8")
     except OSError:
         return []
     return list(dict.fromkeys(k for row in rows for k in row["values"]))
@@ -1288,12 +1313,15 @@ def write_answers(quest_root: Path | str, result_json: Any, protocol: dict[str, 
 
 def _read_answers(quest_root: Path | str) -> tuple[dict[str, float], dict[str, list[tuple[str, float]]]]:
     """``(single, by_run)``: a name every run of the analysis gave the same value for (one run always does), and a name the
-    runs gave different values for, or not all gave, with each run's value. Nothing is picked among different values."""
+    runs gave different values for, or not all gave (a failed run counts as one that did not), with each run's value. The values are compared exactly, not within a tolerance: the conservative reading, so a difference in the last digit is a difference and no value is offered. Nothing is picked among different values."""
     try:
         data = json.loads((Path(quest_root) / ANSWERS).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}, {}
+    if isinstance(data, dict) and "runs" not in data and isinstance(data.get("values"), dict):
+        data = {"runs": [{"run": "0", "values": data["values"]}]}  # a record written before runs were kept: one run
     runs = [r for r in (data.get("runs") if isinstance(data, dict) else None) or [] if isinstance(r, dict)]
+    scheduled = max(len(runs), int(data.get("scheduled") or 0)) if isinstance(data, dict) and runs else 0
     per_name: dict[str, list[tuple[str, float]]] = {}
     for r in runs:
         for k, v in (r.get("values") if isinstance(r.get("values"), dict) else {}).items():
@@ -1302,7 +1330,9 @@ def _read_answers(quest_root: Path | str) -> tuple[dict[str, float], dict[str, l
     single: dict[str, float] = {}
     by_run: dict[str, list[tuple[str, float]]] = {}
     for name, found in per_name.items():
-        if len(found) == len(runs) and len({v for _, v in found}) == 1:
+        # Every run FI scheduled gave it, and the same number each time (compared exactly: the conservative reading, a
+        # difference in the last digit is a difference); a run that failed is missing, and then no value is offered.
+        if len(found) == scheduled and len({v for _, v in found}) == 1:
             single[name] = found[0][1]
         else:
             by_run[name] = found
@@ -1337,11 +1367,30 @@ def _by_run_text(found: list[tuple[str, float]]) -> str:
     return "; ".join(f"run {run}: {sig(v, 4)}" for run, v in found)
 
 
+def _places_value(key_text: str) -> str | None:
+    """The quantity a key renders the value of (its mean, with or without an interval, or the lowest, highest or widest of its
+    settings), else ``None``: a count, a spread, a reference, a correlation, a comparison or a setting is not the quantity."""
+    body = key_text.strip()
+    if body.startswith(CALC):
+        return None
+    segments = [x.strip() for x in body.split("|")]
+    if "@" not in segments[0]:  # the key of a value the analysis recorded: {{v:<name>}} or {{v:<name> | %}}
+        name = segments[0]
+        return name if name and ":" not in name and all(x == "%" for x in segments[1:]) else None
+    try:
+        key = parse(body)
+    except _Unfilled:
+        return None
+    if key.op or FORM_STATISTIC.get(key.form) != "mean" or (key.reducer and key.reducer not in VALUE_REDUCERS):
+        return None
+    return key.metric
+
+
 def placed_metrics(markdown: str) -> set[str]:
-    """The quantities the paper places with a key FI filled (a rendered key, or a key not yet rendered), by name."""
+    """The quantities the paper places with a key FI filled (a rendered key, or a key not yet rendered) that renders the
+    quantity's value (:func:`_places_value`, from the form table :data:`FORM_STATISTIC`), by name."""
     unfilled = set(unfilled_in(markdown))
-    return {k.partition("@")[0].partition("|")[0].partition(":")[0].strip()
-            for k in keys_in(markdown) if k not in unfilled and not k.startswith(CALC)}
+    return {m for k in keys_in(markdown) if k not in unfilled and (m := _places_value(k))}
 
 
 def to_placeholders(markdown: str) -> str:

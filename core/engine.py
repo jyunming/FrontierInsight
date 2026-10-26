@@ -18805,7 +18805,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         self._keep_analysis_answers(
             result_json, state,
             result_json_replicates if (len(result_json_replicates) > 1 and not seed_ignored and not searching
-                                       and not getattr(self, "_trial_mode", False)) else None)
+                                       and not getattr(self, "_trial_mode", False)) else None,
+            replicates_n if (replicates_ran and not seed_ignored and not searching
+                             and not getattr(self, "_trial_mode", False)) else 1)
         patch: dict[str, Any] = {
             "exec_result": {
                 "returncode": result.returncode,
@@ -23938,11 +23940,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             )
         return found
 
-    def _keep_analysis_answers(self, result_json: Any, state: QuestState, runs: list[Any] | None = None) -> None:
+    def _keep_analysis_answers(self, result_json: Any, state: QuestState, runs: list[Any] | None = None,
+                               scheduled: int | None = None) -> None:
         """Keep the value the run recorded under each name the plan gives a quantity, so the paper's key for a quantity no
         trial returns can be filled (core/paper_values.py::write_answers). Best-effort."""
         try:
-            _paper_values.write_answers(self.quest_root, result_json, self._protocol_block(state), runs)
+            _paper_values.write_answers(self.quest_root, result_json, self._protocol_block(state), runs, scheduled)
         except Exception as e:  # noqa: BLE001 -- the quantity then has no key; the paper is not held to place it
             self._log.warning("[execute] the run's recorded answers could not be kept for the paper's keys (%s: %s)",
                               type(e).__name__, str(e)[:200])

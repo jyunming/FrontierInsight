@@ -161,3 +161,48 @@ def test_the_engine_check_gives_no_hit_for_a_left_out_or_per_replicate_quantity(
     paper = "The decay rate is {{v:decay_rate @ dose=2}}."
     filled, _ = pv.fill_values(paper, me._paper_records(None))
     assert E.Engine._unplaced_topic_answers(me, filled, {}) == []  # the per-replicate quantity cannot be placed
+
+
+# --- a run that failed is missing; an old record is read; fillable fills; a count is not the value ----------------------
+
+
+def test_a_failed_replicate_counts_as_missing_so_no_key_is_offered(tmp_path):
+    _rec(tmp_path, None)
+    two_agree = [{"_seed": 0, "settling_limit": 1.5}, {"_seed": 1, "settling_limit": 1.5}]
+    pv.write_answers(tmp_path, two_agree[0], PROTOCOL, two_agree, scheduled=3)  # the third run failed
+    rec = pv.records_of(tmp_path, PROTOCOL)
+    assert "settling_limit" not in rec.answers and "settling_limit" in rec.by_run and "settling_limit" not in rec.fillable()
+    pv.write_answers(tmp_path, {"settling_limit": 1.5}, PROTOCOL, None, scheduled=3)  # one of three succeeded
+    assert "settling_limit" not in pv.records_of(tmp_path, PROTOCOL).answers
+    pv.write_answers(tmp_path, two_agree[0], PROTOCOL, two_agree, scheduled=2)  # every scheduled run agreed
+    assert pv.records_of(tmp_path, PROTOCOL).answers == {"settling_limit": 1.5}
+
+
+def test_a_record_written_before_runs_were_kept_is_read_as_one_run(tmp_path):
+    _rec(tmp_path, None)
+    (tmp_path / ".fi").mkdir(exist_ok=True)
+    (tmp_path / ".fi" / "analysis_answers.json").write_text(json.dumps({"values": {"settling_limit": 2.5}}), encoding="utf-8")
+    assert pv.records_of(tmp_path, PROTOCOL).answers == {"settling_limit": 2.5}
+
+
+def test_fillable_is_what_a_key_can_fill(tmp_path):
+    cells = _cells()
+    cells[0]["metrics"]["fit_slope"] = {"values": [float("nan")], "trials": [0], "count": 1, "total": 0.0, "non_finite": 1}
+    (tmp_path / "raw").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "raw" / "trials.json").write_text(json.dumps({"cells": cells}, allow_nan=True), encoding="utf-8")
+    rec = pv.records_of(tmp_path, PROTOCOL)
+    assert "decay_rate" in rec.fillable() and "fit_slope" not in rec.fillable()  # no finite value anywhere: no key fills
+    req = {"quantities": [{"name": "slope of the fit", "stated": "the slope", "main": True}]}
+    protocol = {**PROTOCOL, "topic_map": [{"item": "Q1", "by": "metric:fit_slope"}]}
+    assert gc.unplaced_answers(req, protocol, rec.fillable(), set()) == []  # nothing the writer could place is asked for
+    assert gc.unplaced_answers(req, protocol, set(rec.metrics()), set())  # the bare names would have asked for it
+
+
+def test_only_a_key_that_renders_the_value_places_the_quantity():
+    for placed in ("{{v:decay_rate @ dose=2}}", "{{v:decay_rate:mean_ci @ dose=all}}", "{{v:decay_rate:pm @ dose=1}}",
+                   "{{v:decay_rate @ dose=each | max}}", "{{v:settling_limit}}", "{{v:settling_limit | %}}"):
+        assert pv.placed_metrics(placed.join(["", ""])) in ({"decay_rate"}, {"settling_limit"}), placed
+    for not_placed in ("{{v:decay_rate:n @ dose=2}}", "{{v:decay_rate:failed @ dose=2}}", "{{v:decay_rate:sd @ dose=2}}",
+                       "{{v:decay_rate:ref @ dose=2}}", "{{v:decay_rate:count @ dose=2}}",
+                       "{{v:decay_rate @ dose=each | argmax}}", "{{v:decay_rate @ dose=2 | ratio ref}}"):
+        assert pv.placed_metrics(not_placed) == set(), not_placed
