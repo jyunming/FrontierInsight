@@ -436,6 +436,24 @@ def cell_of(block, design):
     return {**{str(k): v for k, v in fixed.items()}, **search_settings(block), **in_each_run(block), **design}
 
 
+def supplied_names(block):
+    """``(axes, names)`` the study's code is given, from the same pieces :func:`cell_of` and :func:`scan_grid` build a cell
+    from: the axes are what the study compares (the grid's settings, the design variables, what each run compares inside
+    it); the names are those and every fixed condition, search setting (and its finer checks), setting a sub-study varies
+    or holds. The check of the code's reads (core/grid_keys.py) takes its names from here, so it cannot disagree with the
+    cells FI hands the code."""
+    block = block if isinstance(block, dict) else {}
+    grid = block.get("grid") if isinstance(block.get("grid"), dict) else {}
+    designs = [str(v["name"]) for v in block.get("design_variables") or [] if isinstance(v, dict) and v.get("name")]
+    axes = list(dict.fromkeys([*map(str, grid), *designs, *in_each_run(block)]))
+    names = set(axes) | set(cell_of(block, {})) | set(check_settings(block))
+    for sub in block.get("sub_studies") or []:
+        if isinstance(sub, dict):
+            names.update(str(a) for a in sub.get("vary") or [])
+            names.update(str(a) for a in (sub.get("hold") or {}) if isinstance(sub.get("hold"), dict))
+    return axes, names
+
+
 def scan_grid(block):
     """The coarse scan as a grid of cells: every fixed condition and search setting at its one value, each design
     variable over the scan's values (or at the baseline's value when the scan leaves it out). A condition held fixed that

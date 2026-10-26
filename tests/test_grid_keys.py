@@ -398,3 +398,35 @@ def test_a_summary_dict_filled_by_item_assignment_is_not_trusted() -> None:
         for tail in ('    return [1 for cell in cells if cell["missing"]]\n',
                      '    for cell in cells:\n        print(cell["missing"])\n'):
             assert _names({"a.py": base + tail}) == [("a.py", ("missing",))], (body, tail)
+
+
+# A search for the best design keeps its fixed conditions, grid, search settings, sub-studies and design variables in
+# protocol.optimisation; the names the code may read are the ones its cells are built from.
+SEARCH_PROTOCOL = {"optimisation": {
+    "fixed": {"gain": 3.0, "mode": "a"},
+    "grid": {"mode": ["a", "b"], "width": [1, 2]},
+    "sub_studies": [{"name": "s", "vary": ["width"], "hold": {"mode": "a", "tilt": 1}}],
+    "design_variables": [{"name": "layout", "shape": [2, 2], "kind": "continuous", "low": 0, "high": 1}],
+    "baseline": {"values": {"layout": [[0, 1], [1, 0]]}},
+    "numerical_settings": {"steps": {"search": 4, "check": [8, 16], "finer": "larger"}},
+    "in_each_run": {"levels": [1, 2]},
+}}
+SEARCH_SIM = '''\
+def run_cell(cell):
+    return {"y": cell["gain"] * cell["width"] + cell["steps"] + sum(map(sum, cell["layout"])) + len(cell["levels"])
+            + cell["tilt"] + (1 if cell["mode"] == "a" else 0)}
+'''
+
+
+def test_names_a_search_for_the_best_design_supplies_are_not_faults() -> None:
+    assert gk.problems({"simulate.py": SEARCH_SIM}, SEARCH_PROTOCOL) == []
+
+
+def test_a_name_a_search_never_supplies_is_still_a_fault() -> None:
+    found = gk.problems({"simulate.py": SEARCH_SIM + "\ndef other(cell):\n    return cell['nothing_gives_this']\n"}, SEARCH_PROTOCOL)
+    assert [r.keys for r in found] == [("nothing_gives_this",)]
+
+
+def test_fis_own_scripts_read_its_trial_record_not_settings() -> None:
+    own = "def rows(cell):\n    return cell.get('reason'), cell['elapsed_s']\n"
+    assert gk.problems({"fi_search.py": own, "simulate.py": SEARCH_SIM}, SEARCH_PROTOCOL) == []

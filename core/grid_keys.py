@@ -56,6 +56,9 @@ RECORD_FIELDS = frozenset({"cell", "key", "planned", "ok", "failed", "metrics", 
 #: study has.
 IN_RUN_RECORD_FIELDS = frozenset({"level", "compared_in_each_run"})
 _GET = frozenset({"get", "pop", "setdefault"})
+#: FI's own scripts at the top of code/: they run the study (and read FI's own trial record, whose keys are not settings),
+#: they are not the study's code (a file of the same name in a package of the study is).
+FI_SCRIPTS = frozenset({"run.py", "fi_search.py"})
 
 
 @dataclass(frozen=True)
@@ -453,6 +456,17 @@ def supplied_names(protocol: dict[str, Any] | None, design: dict[str, Any] | Non
     from . import oracle_forms as _forms
 
     protocol = protocol if isinstance(protocol, dict) else {}
+    block = protocol.get("optimisation")
+    if isinstance(block, dict):
+        # A search for the best design: the names are those its cells are built from (core/optimise_search.py), the
+        # block's own grid, fixed conditions, search settings, sub-studies and design variables; not the protocol's top level.
+        from . import optimise_search as _search
+
+        axes, allowed = _search.supplied_names(block)
+        allowed = set(allowed) | (set(IN_RUN_RECORD_FIELDS) if _search.in_each_run(block) else set())
+        allowed.update(_forms.fixed_settings_of_design({**(design or {}), "protocol": protocol}))
+        _case_keys(protocol, allowed)
+        return axes, allowed
     grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
     inside = _in_run.of_study(protocol) or {}
     axes = [str(k) for k in grid] + [str(k) for k in inside if str(k) not in grid]
@@ -891,6 +905,8 @@ def problems(files: dict[str, str], protocol: dict[str, Any] | None, design: dic
 
     plan_text = _constants.plan_text_of(protocol, design)
     for script, text in files.items():
+        if script in FI_SCRIPTS:
+            continue
         for r in reads(text, script):
             if set(r.keys) & allowed:
                 continue
