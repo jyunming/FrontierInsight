@@ -183,7 +183,7 @@ def test_no_design_that_meets_every_limit_at_finer_settings_is_infeasible() -> N
 # --- (d) an optimum on the edge of its range ------------------------------------------------------------------------------
 
 
-def test_an_optimum_on_the_edge_of_its_range_is_flagged(tmp_path: Path) -> None:
+def test_an_optimum_on_the_edge_of_its_range_is_a_note_not_a_failure(tmp_path: Path) -> None:
     block = _block(design_variables=[{"name": "t", "low": 0.4, "high": 2.0}], baseline={"values": {"t": 1.0},
                                                                                         "source": "s"},
                    evaluation_budget={"starts": 2, "per_start": 40})
@@ -194,12 +194,15 @@ def test_an_optimum_on_the_edge_of_its_range_is_flagged(tmp_path: Path) -> None:
     check = _search_then_check(block, sim)
     hood = check["checks"]["neighbourhood"]
     assert check["best"]["design"]["t"] == pytest.approx(2.0)
-    assert hood["status"] == "failed" and hood["at_bound"][0]["edge"] == "high"
-    assert "upper edge of the range allowed for t" in hood["says"]
+    # the edge may be a bound no design can pass: only a better neighbour fails the check, the edge is a note
+    assert hood["status"] == "passed" and hood["at_bound"][0]["edge"] == "high"
+    assert "upper edge of the range allowed for t" in hood["says"] and "were not tried" in hood["says"]
+    assert "may be better" not in hood["says"]
     assert check["verdict"] == "verified", "the improvement itself holds"
-    assert check["passed"] is False
     gaps = _gaps(tmp_record=check, block=block, root=tmp_path / 'q')
-    assert any("upper edge" in g for g in gaps["publication_ready"])
+    assert not any("edge" in g for g in gaps.get("publication_ready", [])), "an edge alone is not a gap"
+    lines = "\n".join(oc.summary_lines(check))
+    assert "ok: no nearby design is better; note: the best design sits at the upper edge" in lines
 
 
 def test_a_variable_the_simulation_ignores_is_named() -> None:
