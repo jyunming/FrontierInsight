@@ -661,7 +661,7 @@ def test_figure_list_for_prompt_annotates_credits() -> None:
         }],
     }
     block = _figure_list_for_prompt(state)
-    assert "- figures/chart.png" in block            # plain chart unannotated
+    assert "- Figure 1: figures/chart.png" in block  # plain chart unannotated
     assert "ILLUSTRATIVE" in block and "Detection methods tree" in block
     assert "CC BY 4.0" in block and "arxiv.org/abs/x" in block
 

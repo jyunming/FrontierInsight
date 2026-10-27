@@ -455,17 +455,12 @@ def test_a_figure_drawn_from_typed_in_numbers_loses_its_copy(tmp_path: Path, mon
     assert not (root / "figures" / "paper" / "typed.pdf").exists() and (root / "figures" / "paper" / "ok.pdf").exists()
 
 
-def test_the_record_check_and_paper_pdf_do_not_see_a_copy_without_its_figure(tmp_path: Path) -> None:
-    from core import record_claims
-    from core.engine import _figure_files_on_disk
+def test_paper_pdf_does_not_see_a_copy_without_its_figure(tmp_path: Path) -> None:
     from generation._paper_figures import prefer_paper_figures
 
     root = _quest_with_copies(tmp_path)
     (root / "figures" / "typed.png").unlink()  # dropped by some path that left the copy
-    on_disk = _figure_files_on_disk(root)
-    assert "typed.png" not in on_disk and "ok.png" in on_disk
     md = "Results.\n\n![Power by method](figures/typed.png)\n\n![ok](figures/ok.png)\n"
-    assert record_claims.contradictions(md, figures_on_disk=on_disk), "the paper cites a figure that is not there"
     swapped, n = prefer_paper_figures(md, root)
     assert n == 1 and "](figures/typed.png)" in swapped and "](figures/paper/ok.pdf)" in swapped
 
@@ -508,7 +503,7 @@ def test_the_writer_is_told_which_titles_the_paper_copy_does_not_show(tmp_path: 
     assert "paper" not in read and read["paper_dropped"] == record["paper_dropped"]
     note = _figure_record_note(read)
     assert ('in a one-column paper.pdf this figure does not show its titles "All runs at T = 300 K"; '
-            '"sigma=0.02, n=12: observed r=0.9992": put in the caption') in note
+            '"sigma=0.02, n=12: observed r=0.9992": FI\'s caption carries it') in note
     assert "does not show" not in _figure_record_note({"axes": [{"title": "x", "series": []}]})
 
 

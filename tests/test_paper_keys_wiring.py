@@ -83,12 +83,11 @@ def test_the_passage_editor_takes_a_quoted_number_hit_and_not_an_unquoted_one() 
     paper = "# T\n\n## Results\nThe bias was 0.7777 at noise 0.01. Another sentence stands.\n\n## Discussion\nOk.\n"
     quoted = ("paper_record_mismatch: you typed 0.7777, which is not a number of the plan or the topic. "
               "— “The bias was 0.7777 at noise 0.01.”")
-    passages, reason = paper_patch.plan_passages(paper, len(paper), hits=[("paper_record_mismatch", quoted)], claims=[],
-                                                 captions=[])
+    passages, reason = paper_patch.plan_passages(paper, len(paper), hits=[("paper_record_mismatch", quoted)], claims=[])
     assert not reason and passages and passages[0].located
     _none, reason = paper_patch.plan_passages(
         paper, len(paper), hits=[("paper_record_mismatch", "paper_record_mismatch: a further 3 typed number(s) elsewhere.")],
-        claims=[], captions=[])
+        claims=[])
     assert reason
 
 

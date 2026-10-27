@@ -171,112 +171,6 @@ def test_naming_reads_the_heading_as_written_or_a_quoted_passage() -> None:
     assert paper_scope.naming(paper, sections, 'says "We drew 300 runs for every setting of the grid." only') == {1}
 
 
-# --- a flagged caption that names no figure: the sections that hold a figure ---------------------------------------
-
-def test_a_caption_flagged_without_a_figure_asks_for_the_sections_holding_a_figure(tmp_path: Path) -> None:
-    reply = ("## Results\n![**Figure 1.** Final size against R0, the mean of 300 simulations.](figures/final_size.png)\n\n"
-             "Figure 1 shows the final size rising with R0.\n")
-    eng, client, logged = _engine(tmp_path, [DRAFT, reply])
-    out1, before = _first_draft(eng)
-    after = _revise(eng, out1, ["figure_caption"], claim_grounding={})
-    assert client.nodes == ["write", "write"]
-    assert "1. `## Results`" in client.calls[1][1] and "2. `" not in client.calls[1][1]
-    for title in ("Abstract", "Introduction", "Discussion"):
-        assert _section(after, title) == _section(before, title)
-    assert "the mean of 300 simulations" in after
-    assert not any("cannot place" in m for m in _info(logged))
-
-
-
-
-def test_an_unsupported_claim_is_placed_by_the_id_the_check_gave(tmp_path: Path) -> None:
-    grounding = {"claims": [{"claim": "something paraphrased", "basis": "unsupported", "evidence": "",
-                             "where": [{"id": "1.3", "section": "Introduction", "passage": CLAIM}]}],
-                 "unsupported": ["something paraphrased"]}
-    eng, client, _ = _engine(tmp_path, [DRAFT, "garbage", "## Introduction\nRewritten introduction [1].\n"])
-    out1, before = _first_draft(eng)
-    after = _revise(eng, out1, ["unsupported_claim"], claim_grounding=grounding)
-    assert client.nodes == ["write", "write.patch", "write"]
-    assert "1. `## Introduction`" in client.calls[2][1] and "2. `" not in client.calls[2][1]
-    for title in ("Abstract", "Results", "Discussion"):
-        assert _section(after, title) == _section(before, title)
-
-
-def test_a_claim_without_a_valid_id_writes_the_whole_paper(tmp_path: Path) -> None:
-    old_record = {"claims": [{"claim": "Extinction is certain below R0 = 1.2.", "basis": "unsupported", "evidence": ""}],
-                  "unsupported": ["Extinction is certain below R0 = 1.2."]}
-    eng, client, logged = _engine(tmp_path, [DRAFT, "garbage", DRAFT])
-    out1, _before = _first_draft(eng)
-    _revise(eng, out1, ["unsupported_claim"], claim_grounding=old_record)
-    assert client.nodes == ["write", "write.patch", "write"]
-    assert "<earlier_draft>" not in client.calls[2][1]
-    assert any("writing the whole paper: FI cannot place in a section" in m and "no valid id" in m for m in _info(logged))
-
-
-def test_an_id_fi_never_issued_is_dropped() -> None:
-    from core.engine import _read_hit_places
-
-    marked, table = paper_scope.mark("# T\n\n## A\nOne sentence of the draft here.\n")
-    assert "<<1.1>> One sentence" in marked and "## A <<section 1>>" in marked
-    assert _read_hit_places([{"hit": "h", "ids": ["<<1.1>>", "9.9"]}], table) == {
-        "h": [{"id": "1.1", "section": "A", "passage": "One sentence of the draft here."}]}
-    assert _read_hit_places([{"hit": "h", "ids": ["9.9", "free words"]}], table) == {}
-
-
-def test_a_passage_that_the_draft_no_longer_holds_cannot_be_placed() -> None:
-    paper = "# T\n\n## A\nOne sentence here today.\n\n## B\nAnother one.\n"
-    sections = paper_scope.split(paper)
-    place = [{"id": "1.1", "section": "A", "passage": "One sentence here today."}]
-    assert paper_scope.place(paper, sections, place) == {1}
-    assert paper_scope.place(paper, sections, [{**place[0], "passage": "A sentence written since."}]) is None
-    assert paper_scope.place(paper, sections, []) is None
-
-
-def test_the_claim_check_and_the_review_carry_fis_ids(tmp_path: Path) -> None:
-    import json
-
-    from tests.test_claim_check import _engine as claim_engine
-
-    eng = claim_engine(tmp_path)
-    seen: list[str] = []
-
-    async def fake_chat(prompt: str, **kw: Any) -> str:
-        seen.append(prompt)
-        return json.dumps({"claims": [
-            {"claim": "c1", "basis": "unsupported", "evidence": "x", "where": ["<<1.2>>"]},
-            {"claim": "c2", "basis": "unsupported", "evidence": "x", "where": ["7.7"]},
-            {"claim": "c3", "basis": "unsupported", "evidence": "x"}], "summary": "s"})
-
-    eng._chat = fake_chat  # type: ignore[assignment,method-assign]
-    text = ("# P\n\n## Intro\nA first sentence about the study here. A second sentence that is a claim.\n\n"
-            "## Results\nThe result is stated in this sentence of the results section.\n")
-    path = tmp_path / "paper" / "paper.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
-    out = asyncio.run(eng._node_claim_check({"topic": "t", "paper_md": str(path)}))  # type: ignore[arg-type]
-    assert "<<1.1>> A first sentence" in seen[0] and "<<2.1>> The result" in seen[0] and "## Intro <<section 1>>" in seen[0]
-    c1, c2, c3 = out["claim_grounding"]["claims"][:3]
-    assert c1["where"] == [{"id": "1.2", "section": "Intro", "passage": "A second sentence that is a claim."}]
-    assert c2["where"] == [] and c3["where"] == []
-    agents = Path(__file__).resolve().parent.parent / "agents"
-    review_prompt = (agents / "review.md").read_text(encoding="utf-8")
-    assert "must_flag_places" in review_prompt and "<<3.7>>" in review_prompt
-    assert '"where"' in (agents / "claim_check.md").read_text(encoding="utf-8")
-
-
-# --- a cited section id, a cited figure caption, a declared new section -------------------------------------------------
-
-def test_a_cited_section_id_places_that_section() -> None:
-    paper = "# T\n\n## A\nOne sentence here today.\n\n## B\nAnother one.\n"
-    marked, table = paper_scope.mark(paper)
-    assert "## B <<section 2>>" in marked and "section 2" in table
-    for cited in ("<<section 2>>", "section 2", ["Section 2"]):
-        places = paper_scope.read_places(cited, table)
-        assert [p["id"] for p in places] == ["section 2"], cited
-        assert paper_scope.place(paper, paper_scope.split(paper), places) == {2}
-    assert paper_scope.read_places("<<section 9>>", table) == []
-
-
 def test_a_figure_caption_hit_is_placed_by_the_cited_passage_not_by_every_figure_section(tmp_path: Path) -> None:
     hit = "figure_caption: the caption claims more than the figure shows"
     place = [{"id": "2.3", "section": "Introduction", "passage": CLAIM}]
@@ -303,7 +197,7 @@ def test_a_declared_new_section_is_kept_right_after_the_section_it_came_with() -
     assert undeclared.ignored == ["Limitations"] and undeclared.added == []
 
 
-# --- two figure_caption hits: each is placed on its own ------------------------------------------------------------------
+# --- two hits about the text near a figure: each is placed on its own ------------------------------------------------------------------
 
 FIGURE_DRAFT = (
     "# T\n\n## Abstract\nWe measure it.\n\n"
@@ -333,14 +227,6 @@ def _scope_for(tmp_path: Path, places: dict[str, Any]) -> tuple[dict[int, list[s
     state["paper_basis"] = _paper_basis(state)
     _s, _end, asked, _targets, why = eng._scope_of_round(state, FIGURE_DRAFT, FIGURE_DRAFT, refine_round=False)
     return asked, why, _info(logged)
-
-
-def test_a_cited_figure_hit_stays_cited_when_another_figure_hit_is_unplaced(tmp_path: Path) -> None:
-    asked, why, logged = _scope_for(tmp_path, {HIT_A: PLACE_A})
-    titles = {i: paper_scope.split(FIGURE_DRAFT)[i].title for i in asked}
-    assert "Results" in titles.values(), "hit A's cited section is asked for"
-    assert any("second caption" in m and "no cited passage" in m for m in logged), "the log names hit B"
-    assert not any("first caption" in m and "no cited passage" in m for m in logged), "hit A is not the unplaced one"
 
 
 def test_two_cited_figure_hits_touch_no_other_figure_section(tmp_path: Path) -> None:

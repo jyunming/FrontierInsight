@@ -1251,13 +1251,10 @@ CHECKS: tuple[Check, ...] = (
           'review', 'own_record', 'strip',
           'paper calls a design optimised/best while the search record (best_design, OPTIMUM_CHECK) says no '
           'better design; rewrites capped, then the sentence is taken out'),
-    Check('record_claim_figure_not_drawn', 'core.record_claims', 'found',
-          'review', 'own_record', 'strip',
-          'paper embeds a figures/ file the run did not draw; rewritten, then the image line is taken out'),
     Check('record_claim_caption_optimised', 'core.record_claims', 'found',
           'review', 'own_record', 'strip',
-          'figure captioned as the optimised design when the record has no optimised design; rewritten, then '
-          'taken out'),
+          'a sentence names a figure as the optimised design when the record has no optimised design; rewritten, '
+          'then taken out'),
     Check('record_claim_validated_vs_oracle', 'core.record_claims', 'found',
           'review', 'own_record', 'strip',
           'paper says validated/confirmed against known answers while ORACLE_CHECK is unconfirmed or failed; '
@@ -1326,16 +1323,10 @@ CHECKS: tuple[Check, ...] = (
           'write', 'measured', 'repair',
           'a layout note the redraw could not carry out (ran but changed no figure, failed twice) goes back to '
           'the writer once and is shown at the review pause'),
-    Check('figure_caption_names_hidden_series', 'core.engine', 'Engine._figure_caption_hits',
-          'review', 'own_record', 'note',
-          'caption names a series its figure draws flat or not at all; advisory warning '
-          '(figure_caption_warnings), the reviewer prompt carries it'),
-    Check('figure_planned_missing_placed', 'core.engine', '_place_missing_figures',
+    Check('figure_placed_by_fi', 'core.engine', '_place_figures',
           'write', 'own_record', 'repair',
-          'a planned figure the run drew that the draft leaves out is put back before the review, no model call'),
-    Check('figure_planned_missing_hit', 'core.engine', '_missing_planned_figures',
-          'review', 'own_record', 'repair',
-          'forced figure_missing hit for a planned, drawn figure absent from the paper (text-only rewrite)'),
+          'every figure the run drew goes in under its number, with the caption FI writes from its record; the '
+          "draft's own images are taken out, no model call"),
     Check('figure_web_license_gate', 'core.figure_sources', '_is_free_license',
           'several', 'measured', 'strip',
           'web/arXiv illustrative figure used only with a free/open license (web_figures node, no-simulation or '

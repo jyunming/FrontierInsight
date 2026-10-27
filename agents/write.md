@@ -15,14 +15,11 @@ Produce a single Markdown paper. **Structure depends on the persona block in the
 
 Give 4–6 keywords in that one place, separated by commas, replacing every `<keyword>`. Take them from the paper you wrote, not from the search terms: its subject, system, method and the terms of its main result, each as the field's standard term (`symplectic integrator`, not `energy-keeping method`). They index the paper for later searches.
 
-**Hard rule on figures:** you may ONLY emit `![caption](figures/<filename>)` for filenames that appear in the figure list in the Inputs section. If a figure was planned but the experiment did not produce it, describe what it would have shown in prose ("The planned scatter plot of GDP vs. scores would have...") instead of emitting a broken image link. Pandoc treats a missing image as a placeholder, so a stale link both wastes space and yields a partial-success PDF.
+**Figures are FI's.** FI puts every figure of the run into the paper under the number the figure list in the Inputs section gives it (`- Figure N: figures/<filename>`), with a caption FI writes from its record of what the figure draws. Do not write an image link (`![...](...)`) or a caption of your own. For every figure in the list:
+1. Refer to it **by its number in the prose** where you discuss it, e.g. "Figure 1 shows that the error falls as the step size shrinks". FI puts the figure after the paragraph that first names it.
+2. State the concrete takeaway the figure supports (the number or trend the reader should take away), not just that it exists.
 
-**Figures must be numbered, referenced, and discussed — never dropped in silently.** For every figure you include:
-1. Caption it `![**Figure N.** <one-sentence description of what it shows and its source>](figures/<filename>)`, numbering sequentially (Figure 1, Figure 2, …) in the order they appear.
-2. Reference it **by number in the prose** at the point you discuss it — e.g. "Figure 1 shows that China accounted for roughly two-thirds of 2024 EV sales…". A figure that is shown but never mentioned in the text is a defect; either discuss it or remove it.
-3. State the concrete takeaway the figure supports (the number/trend the reader should take away), not just that it exists.
-
-Include all available figures this way.
+You have not seen the pictures: do not say where a panel sits or what style a line has unless the figure list gives it. A figure listed as ILLUSTRATIVE is from another source, and the text says so where it discusses it. A figure the design planned that the run did not draw is not in the list: describe in prose what it would have shown.
 
 **Length is determined by the `Study depth` slot in the clarifications block in the Inputs section.** Honor it:
 
@@ -129,7 +126,6 @@ Write every formula and symbol in LaTeX math between dollar signs, e.g. `$$\sigm
 When the review slot in the Inputs section is not `(none — first draft)`, an earlier draft of this paper was reviewed. Write the whole paper again and fix every point of that review that applies to it:
 
 - Tie each claim listed as unsupported to a result in the Analysis block or to a cited source that says it, or take the claim out.
-- Rewrite each caption listed as describing what its figure does not show, so that it describes what the figure shows.
 - Honour every round of the user's feedback.
 
 # Output format
@@ -166,7 +162,7 @@ $analysis_block
 ## Prior work
 $literature_block$foundational_block
 
-## Figures available (reference each by filename)
+## Figures available (refer to each by its number)
 $figure_list
 
 ## Pre-flight clarifications (user-supplied or auto-derived)

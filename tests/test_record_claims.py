@@ -21,7 +21,8 @@ CHECK_NOT_SHOWN = {"verdict": "improvement_not_shown", "says": "the improvement 
 CHECK_OK = {"verdict": "verified", "passed": True}
 
 OVERCLAIM = ("# A heat sink study\n\n## Results\n\nThe optimised design lowers the peak temperature of the heat sink.\n\n"
-             "![The optimised design of the heat sink](figures/optimised.png)\n")
+             "Figure 1 shows the optimised design of the heat sink.\n\n"
+             "![**Figure 1.** The optimised design of the heat sink.](figures/optimised.png)\n")
 HONEST = ("# A heat sink study\n\n## Results\n\nThe search found no design better than the baseline, so there is no "
           "optimised design to report. The best design found was the baseline itself.\n\n"
           "## Limitations\n\nThe known-answer checks did not pass, so the result is not validated against known answers.\n\n"
@@ -29,20 +30,21 @@ HONEST = ("# A heat sink study\n\n## Results\n\nThe search found no design bette
 
 
 def test_a_paper_that_calls_a_design_optimised_against_a_record_that_says_it_was_not_is_flagged() -> None:
-    hits = rc.contradictions(OVERCLAIM, best_design=NOT_BETTER, optimum_check=CHECK_NOT_SHOWN, figures_on_disk={"optimised.png"})
+    hits = rc.contradictions(OVERCLAIM, best_design=NOT_BETTER, optimum_check=CHECK_NOT_SHOWN)
     assert hits and all(h.startswith("record_contradiction:") for h in hits)
     assert any("The optimised design lowers the peak temperature" in h and "improvement not shown" in h for h in hits)
     assert any("captioned" in h and "no optimised design was computed" in h for h in hits), hits
+    # The image's own caption is FI's, written from the figure's record: it is not read as the writer's claim.
+    assert not any("**Figure 1.**" in h for h in hits), hits
 
 
 def test_the_same_paper_is_fine_when_the_record_says_the_design_is_better() -> None:
-    assert rc.contradictions(OVERCLAIM, best_design=BETTER, optimum_check=CHECK_OK, figures_on_disk={"optimised.png"}) == []
+    assert rc.contradictions(OVERCLAIM, best_design=BETTER, optimum_check=CHECK_OK) == []
 
 
 def test_an_honest_paper_gets_no_hit_whatever_the_record_says() -> None:
     for best, check in ((NOT_BETTER, CHECK_NOT_SHOWN), (NO_FEASIBLE, None), (BETTER, CHECK_OK), (None, None)):
-        assert rc.contradictions(HONEST, best_design=best, optimum_check=check, oracle={"status": "went_on_failing"},
-                                 figures_on_disk={"peak.png"}) == [], (best, check)
+        assert rc.contradictions(HONEST, best_design=best, optimum_check=check, oracle={"status": "went_on_failing"}) == [], (best, check)
 
 
 @pytest.mark.parametrize("sentence", [
@@ -74,14 +76,6 @@ def test_a_hedge_exempts_a_claim_only_in_its_own_clause() -> None:
 def test_no_feasible_design_means_there_is_no_best_design_to_call_best() -> None:
     hits = rc.contradictions("# T\n\nThe best design reduces the mass.\n", best_design=NO_FEASIBLE)
     assert hits and "no design that meets every limit" in hits[0]
-
-
-def test_a_figure_the_run_did_not_draw_is_flagged_and_one_it_drew_is_not() -> None:
-    paper = "# T\n\nSee the plot.\n\n![Cooling curve](figures/cooling.png)\n\n![Other](figures/other.png)\n"
-    hits = rc.contradictions(paper, figures_on_disk={"cooling.png"})
-    assert len(hits) == 1 and "figures/other.png" in hits[0] and "drew no figure of that name" in hits[0]
-    assert rc.contradictions(paper, figures_on_disk={"cooling.png", "other.png"}) == []
-    assert rc.contradictions(paper, figures_on_disk=None) == [], "figures not known: nothing judged"
 
 
 def test_validated_is_flagged_only_against_unconfirmed_or_failed_checks() -> None:
@@ -124,13 +118,11 @@ def _write_records(eng: Engine, best: dict[str, Any], check: dict[str, Any] | No
         (root / "needs" / "ORACLE_CHECK.json").write_text(json.dumps(oracle), encoding="utf-8")
 
 
-def test_the_engine_reads_the_records_and_the_figures_on_disk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_engine_reads_the_records(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     eng = _engine(tmp_path, monkeypatch)
     _write_records(eng, NOT_BETTER, CHECK_NOT_SHOWN, {"status": "went_on_failing"})
-    (eng.quest_root / "figures").mkdir()
-    (eng.quest_root / "figures" / "peak.png").write_bytes(b"x")
     hits = eng._record_contradiction_hits(OVERCLAIM, {})
-    assert len(hits) >= 3 and any("optimised.png" in h for h in hits)
+    assert len(hits) >= 2 and any("Figure 1 shows the optimised design" in h for h in hits)
     assert eng._record_contradiction_hits(HONEST, {}) == []
     # A quest with no search and no checks recorded flags nothing in a paper that says the same words.
     other = _engine(tmp_path / "other", monkeypatch)
@@ -173,24 +165,16 @@ async def test_the_stop_says_what_the_paper_claimed_and_keeps_no_paper(tmp_path:
     assert "No paper was written" in capsys.readouterr().out
 
 
-def test_a_run_that_drew_no_figure_does_not_judge_the_papers_figures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    eng = _engine(tmp_path, monkeypatch)
-    (eng.quest_root / "figures").mkdir(parents=True)
-    paper = "# T\n\nSee the plot.\n\n![Cooling curve](figures/cooling.png)\n"
-    assert eng._record_contradiction_hits(paper, {}) == []
-    (eng.quest_root / "figures" / "other.png").write_bytes(b"x")
-    assert len(eng._record_contradiction_hits(paper, {})) == 1
-
-
 # --- after the rewrites: taken out, never a stop ---------------------------------------------------------------------
 
 
-def test_take_out_removes_a_flagged_sentence_and_a_flagged_figure_and_nothing_else() -> None:
-    found = rc.found(OVERCLAIM, best_design=NOT_BETTER, optimum_check=CHECK_NOT_SHOWN, figures_on_disk={"peak.png"})
+def test_take_out_removes_the_flagged_sentences_and_nothing_else() -> None:
+    found = rc.found(OVERCLAIM, best_design=NOT_BETTER, optimum_check=CHECK_NOT_SHOWN)
     text, taken = rc.take_out(OVERCLAIM, [span for _hit, span in found])
-    assert "The optimised design lowers" not in text and "figures/optimised.png" not in text
+    assert "The optimised design lowers" not in text and "Figure 1 shows the optimised" not in text
+    assert "](figures/optimised.png)" in text, "FI's figure, with FI's caption, is not the writer's to take out"
     assert "# A heat sink study" in text and "## Results" in text
-    assert rc.found(text, best_design=NOT_BETTER, optimum_check=CHECK_NOT_SHOWN, figures_on_disk={"peak.png"}) == []
+    assert rc.found(text, best_design=NOT_BETTER, optimum_check=CHECK_NOT_SHOWN) == []
     assert rc.take_out(HONEST, ["a sentence the paper does not have."]) == (HONEST, [])
 
 

@@ -105,6 +105,7 @@ from . import run_manifest as _run_manifest
 from . import trial_runner as _trial_runner
 from . import goal_coverage
 from . import citation_support as _cs
+from . import figure_facts as _figure_facts
 from . import paper_patch
 from . import paper_sections as _paper_sections
 from . import paper_scope as _paper_scope
@@ -414,7 +415,7 @@ class QuestState(TypedDict, total=False):
     figures: list[str]
     # Attribution for license-clean illustrative figures pulled from the web
     # (knowledge.fetch_web_figures): one dict per figure with file / caption /
-    # source_url / license / attribution, so the writer captions them and the
+    # source_url / license / attribution, so FI's caption credits them and the
     # references record their provenance.
     figure_credits: list[dict[str, Any]]
     # What each experiment figure draws, by file name, as the plot-style
@@ -721,8 +722,8 @@ _SURVEY_WRITE_NOTE = (
     "accuracies, clustering, or any computed numbers; do NOT describe a "
     "'planned experiment', a 'dataset', or their absence as a gap or "
     "failure — this study was never meant to run one. Any figures present "
-    "are license-clean illustrative images; caption and attribute them "
-    "normally.\n"
+    "are license-clean illustrative images; FI places them with their "
+    "captions and credit, and the text refers to each by its number.\n"
 )
 
 
@@ -11759,14 +11760,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             recs = _best_report.records(self.quest_root)
             text = _paper_facts.without_blocks(
                 _best_report.strip_for_checks(paper_md, self._best_design_section(state, paper_md)))
-            figures: set[str] | None = None
-            if (self.quest_root / "figures").is_dir():  # no figures folder at all: which figures the run drew is not known
-                figures = _figure_files_on_disk(self.quest_root)
-                if not any(Path(n).suffix.lower() in _FIGURE_SUFFIXES for n in figures):
-                    figures = None  # the run drew none: a paper citing one is not judged here
             hits = _record_claims.found(
                 text, best_design=recs["best_design"], optimum_check=recs["optimum_check"],
-                oracle=self._oracle_record_read(), figures_on_disk=figures)
+                oracle=self._oracle_record_read())
         except Exception as exc:  # noqa: BLE001 -- a check that cannot be made flags nothing
             self._log.warning("[record_check] could not compare the paper with FI's records (%r)", exc)
             return []
@@ -22716,19 +22712,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 len(foundational), len(foundational) - len(left_out),
                 "; ".join(str(meta.get("title") or "") for _label, meta in left_out) or "-",
             )
-        # A figure the design planned and the run drew that this draft leaves
-        # out goes back in here, before the review reads it. The review checks
-        # for it too, but only by forcing a rewrite that spends one of
-        # ``engine.max_iterations`` — and on the last iteration it cannot spend
-        # one, so the figure is simply lost. Putting it back costs no LLM call
-        # and no iteration.
-        markdown, placed = _place_missing_figures(markdown, state)
-        if placed:
-            self._log.warning(
-                "[write] the draft left out %d figure(s) the design planned and the run "
-                "drew; placed %s in the paper before the review",
-                len(placed), ", ".join(placed),
-            )
+        # The figures are FI's: every figure of the run goes in under the number the writer was given, with the caption
+        # FI writes from its record of what the figure draws, and every image the draft wrote itself is taken out. No
+        # model call; the same on every write, so a rewrite gets the same figures back.
+        markdown, placed, written = _place_figures(markdown, state, facts=_figure_facts.facts(self.quest_root))
+        if placed or written:
+            self._log.info("[write] FI placed %d figure(s) with captions from its records (%s); the draft's own images "
+                           "taken out: %d", len(placed), ", ".join(placed) or "-", written)
         markdown = (_mark_preliminary(markdown) if self.config.effective_result_use == "explore"
                     else markdown.replace("\n" + PRELIMINARY_NOTE + "\n", "\n"))
         if _phased.enabled(self.config):
@@ -22978,7 +22968,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         hits = [str(h).strip() for h in review.get("must_flag_hits") or [] if str(h).strip()]
         grounding = state.get("claim_grounding") or {}
         unsupported = [c for c in grounding.get("claims") or [] if isinstance(c, dict) and c.get("basis") == "unsupported"]
-        captions = _review_items(review.get("figure_caption_warnings"))
         unplaced: list[str] = []
         names = {_hit_name(h) for h in hits}
         if "unsupported_claim" in names:
@@ -22990,42 +22979,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     unplaced.append(f"the claim \"{str(c.get('claim') or '')[:60]}\" (no valid id)")
                 for at in sorted(where or ()):
                     add(at, "the check found a claim in it unsupported")
-        if "figure_caption" in names:
-            if captions:
-                for finding in captions:
-                    m = paper_patch._FIGURE_FILE_RE.search(finding)
-                    caption = paper_patch.caption_in(previous, end, m.group(1)) if m else ""
-                    at = _paper_scope.holding(previous, sections, caption) if caption else None
-                    if at is None:
-                        unplaced.append(f"the caption \"{finding[:60]}\"")
-                    else:
-                        add(at, "the review flags a figure caption in it")
-            else:
-                # The passages the reviewer cited by id come first; only when it cited none (and FI has no finding) are
-                # all the sections that hold a figure asked for.
-                # Each figure_caption hit is placed on its own: by the passages the reviewer cited for it; only a hit with
-                # neither cited passages nor an FI finding asks for every section that holds a figure (logged by hit).
-                cited = review.get("hit_places") if isinstance(review.get("hit_places"), dict) else {}
-                for h in hits:
-                    if _hit_name(h) != "figure_caption":
-                        continue
-                    found = _paper_scope.place(previous, sections,
-                                               cited.get(h) or cited.get(re.sub(r"^\[[^\]]*\]\s*", "", h)))
-                    if found is not None:
-                        for index in sorted(found):
-                            add(index, "the review flags a figure caption in it")
-                        continue
-                    holders = _paper_scope.holds_figures(previous, sections)
-                    self._log.info("[write] the figure-caption hit \"%s\" has no cited passage and FI has no finding "
-                                   "naming a figure: asking for every section that holds a figure", h[:80])
-                    if not holders:
-                        unplaced.append(f"the figure caption \"{h[:60]}\" (no section holds a figure)")
-                    for index in sorted(holders):
-                        add(index, "the review flags a figure caption and names no figure; it holds a figure")
         quoted = [h for h in hits if _hit_name(h) in ("paper_record_mismatch", "mislabelled_statistic")]
         if quoted:
             passages, why = paper_patch.plan_passages(
-                previous, end, hits=[(_hit_name(h), h) for h in quoted], claims=[], captions=[])
+                previous, end, hits=[(_hit_name(h), h) for h in quoted], claims=[])
             if why:
                 unplaced.append(why)
             for q in passages:
@@ -23216,7 +23173,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 previous, end,
                 hits=[(_hit_name(h), h) for h in hits],
                 claims=claims,
-                captions=_review_items(review.get("figure_caption_warnings")),
             )
         if reason:
             self._log.info("[write] %s: %s", otherwise, reason)
@@ -23351,7 +23307,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             )
         # The paper as the checker is shown it carries FI's id before each sentence (core/paper_scope.py): a claim names the
         # passage it is about by that id, and FI reads the passage from its own table.
-        marked_paper, id_table = _paper_scope.mark(_disclosure.strip_for_checks(paper_raw))
+        # FI's figures are left out: their captions are FI's record of what each figure draws, not the writer's claims.
+        marked_paper, id_table = _paper_scope.mark(
+            _figure_facts.RUN_FIGURE_RE.sub("", _disclosure.strip_for_checks(paper_raw)))
         prompt = self._prompts["claim_check"].substitute(
             topic=state["topic"],
             evidence_block=evidence_block,
@@ -24649,15 +24607,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         except Exception:  # noqa: BLE001 -- a hint
             return ""
 
-    def _figure_caption_hits(self, paper_md: str, state: QuestState) -> list[str]:
-        """Captions naming a series their figure draws flat or not at all.
-        The review prompt carries the same list; this logs it and keeps it for
-        the human review."""
-        findings = _figure_caption_findings(paper_md, state.get("figure_records") or {})
-        for finding in findings:
-            self._log.warning("[figure_check] %s", finding)
-        return findings
-
     def _write_claims_ledger(self, grounding: dict[str, Any]) -> None:
         """Persist the claim-grounding result as a transparency ledger:
         ``paper/claims.json`` (structured) + ``paper/CLAIMS.md`` (readable).
@@ -25226,8 +25175,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             design_block=json.dumps(state.get("design") or {}, indent=2) + _design_parts_listing(state.get("design")),
             analysis_block=json.dumps(state.get("analysis") or {}, indent=2),
             claim_grounding_block=_format_claim_grounding(state),
-            figure_check_block=_format_figure_check(paper_md, state),
-            # Advisory, unlike the figure check: what the reviewer may ask for,
+            # Advisory: what the reviewer may ask for,
             # never a must-flag hit. Empty when the paper cites every foundational
             # work it has, or has none.
             foundational_check_block=_foundational_review_block(
@@ -25310,9 +25258,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             numeric_warnings = self._reference_check_hits(state)
             if numeric_warnings:
                 review["numeric_oracle_warnings"] = numeric_warnings
-            figure_warnings = self._figure_caption_hits(paper_md, state)
-            if figure_warnings:
-                review["figure_caption_warnings"] = figure_warnings
             # Advisory too: numbers and figures the topic asked for that the
             # experiment does not have. Shown to the human, never forced.
             goal_notes = self._goal_coverage_notes(state)
@@ -25323,13 +25268,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # paper mislabels is caught by recomputing it, so the finding can
             # name the contradiction instead of guessing at one.
             review["must_flag_hits"] += self._statistics_claim_hits(paper_md, state)
-            # A figure the design planned and the run drew that the paper
-            # leaves out is a set difference, not a reading of prose, so it
-            # cannot misfire the way the number check can: it is forced.
-            missing_figures = _missing_planned_figures(paper_md, state)
-            for hit in missing_figures:
-                self._log.warning("[figure_check] %s", hit)
-            review["must_flag_hits"] += missing_figures
             # Forced: a claim FI's own records contradict (core/record_claims.py).
             record_hits = self._record_contradiction_hits(paper_md, state)
             review["must_flag_hits"] += record_hits
@@ -25516,9 +25454,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         numeric_warnings = self._reference_check_hits(state)
         if numeric_warnings:
             review["numeric_oracle_warnings"] = numeric_warnings
-        figure_warnings = self._figure_caption_hits(paper_md, state)
-        if figure_warnings:
-            review["figure_caption_warnings"] = figure_warnings
         goal_notes = self._goal_coverage_notes(state)
         if goal_notes:
             review["goal_coverage_notes"] = goal_notes
@@ -25530,12 +25465,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         stat_hits = self._statistics_claim_hits(paper_md, state)
         if stat_hits:
             review["must_flag_hits"] = [*(review.get("must_flag_hits") or []), *stat_hits]
-        # Forced, as on the single-reviewer path.
-        missing_figures = _missing_planned_figures(paper_md, state)
-        for hit in missing_figures:
-            self._log.warning("[figure_check] %s", hit)
-        if missing_figures:
-            review["must_flag_hits"] = [*(review.get("must_flag_hits") or []), *missing_figures]
         record_hits = self._record_contradiction_hits(paper_md, state)
         if record_hits:
             review["must_flag_hits"] = [*(review.get("must_flag_hits") or []), *record_hits]
@@ -25636,9 +25565,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # every UI can label them differently -- a regex over prose is
             # not grounds for a forced rewrite, but a human should see it.
             "numeric_oracle_warnings": review.get("numeric_oracle_warnings") or [],
-            # Captions that name a series their figure does not show; the
-            # reviewer was asked to must-flag them.
-            "figure_caption_warnings": review.get("figure_caption_warnings") or [],
             # Advisory: numbers and figures the topic asked for that the
             # experiment does not have (core/goal_coverage.py).
             "goal_coverage_notes": review.get("goal_coverage_notes") or [],
@@ -32598,7 +32524,8 @@ def _grounding_after_trim(
 
 # Must-flag hits that are problems with the paper's text, not with the study:
 # fixing one means writing the paper again, not running the experiment again.
-# ``figure_missing`` is one: the figure exists, the paper left it out.
+# ``figure_caption`` and ``figure_missing`` stay here so a reviewer's hit of either still reads as text: FI places the
+# figures and writes their captions, so neither is a problem with the study.
 _TEXT_ONLY_HITS = frozenset({
     "unsupported_claim", "figure_caption", "figure_missing", "citations_unchecked", "over_page_limit",
     # A statistic the paper describes as something the run did not compute:
@@ -32853,10 +32780,9 @@ def _rerun_evidence(review: dict[str, Any], state: QuestState) -> str:
     quotes the paper's own calculation instead), and those findings
     are advisory precisely because a pattern match over prose misreads a DOI
     often enough that a forced re-run costs more than a flagged number. Nor are
-    the hits themselves: they are short identifiers, and the ones the engine
-    forces quote the figure they checked (``figure_caption: the caption of
-    figures/x.png names …``, ``figure_missing: figures/x.png``), which would
-    read as a problem with that figure's data when it is a problem with the
+    the hits themselves: they are short identifiers, and one can quote a
+    passage of the paper, which would read as a problem with the data
+    when it is a problem with the
     paper's words.
     """
     if not state.get("code"):
@@ -33036,9 +32962,9 @@ def _user_feedback_review_block(state: QuestState) -> str:
 
 def _format_review_for_writer(state: QuestState, *, refine_round: bool = False) -> str:
     """The write prompt's ``$review_feedback``: what the review of the previous
-    draft asks for (its must-fix hits, the captions that describe what their
-    figure does not show, its weaknesses and suggestions, and the claims the
-    claim check found unsupported), and every round of the user's feedback. A
+    draft asks for (its must-fix hits, its weaknesses and suggestions, and the
+    claims the claim check found unsupported), and every round of the user's
+    feedback. A
     first draft has none."""
     review = state.get("review") or {}
     lines: list[str] = []
@@ -33050,7 +32976,6 @@ def _format_review_for_writer(state: QuestState, *, refine_round: bool = False) 
         )
     for heading, key in (
         ("Must fix", "must_flag_hits"),
-        ("Captions that describe what their figure does not show", "figure_caption_warnings"),
         ("Weaknesses", "weaknesses"),
         ("Suggestions", "suggestions"),
     ):
@@ -33268,45 +33193,54 @@ def _figure_list_for_prompt(state: QuestState) -> str:
     credits = {c.get("file"): c for c in (state.get("figure_credits") or [])}
     records = state.get("figure_records") or {}
     n_seeds = _replicate_seed_count(state)
+    numbers = _figure_numbers(state)
+    shown = _figure_files_by_stem(state)
     lines: list[str] = []
     for f in figs:
         c = credits.get(f)
-        if c:
+        number = numbers.get(Path(str(f)).name)
+        other = shown.get(Path(str(f)).stem)
+        if number is None and other in numbers:
+            lines.append(f"- figures/{f} — the same drawing as Figure {numbers[other]} (figures/{other}), saved in "
+                         "another format")
+        elif number is None:
+            lines.append(f"- figures/{f} — draws nothing (FI's record): FI leaves it out of the paper")
+        elif c:
             lines.append(
-                f"- figures/{f} — ILLUSTRATIVE (a sourced figure, not your "
+                f"- Figure {number}: figures/{f} — ILLUSTRATIVE (a sourced figure, not your "
                 f"own data): {str(c.get('caption', ''))[:140]} "
-                f"[the caption MUST credit: Source {c.get('source_url', '')}, "
+                f"[FI's caption credits it: Source {c.get('source_url', '')}, "
                 f"{c.get('license', '')}]"
             )
         else:
-            lines.append(f"- figures/{f}" + _figure_record_note(records.get(f), n_seeds=n_seeds))
+            lines.append(f"- Figure {number}: figures/{f}" + _figure_record_note(records.get(f), n_seeds=n_seeds))
     if any(_panel_place(ax.get("grid")) for f in figs for ax in ((records.get(f) or {}).get("axes") or [])
            if isinstance(ax, dict)):
         lines.append(
-            "Where a panel sits (left, right, top, bottom) is FI's record of the saved figure: a caption or sentence "
+            "Where a panel sits (left, right, top, bottom) is FI's record of the saved figure: a sentence "
             "that points to a panel by place uses these words, and one that does not need them names the panel by "
             "what it shows."
         )
     if any((records.get(f) or {}).get("replicate_mean") for f in figs):
         lines.append(
             "A figure drawn as the mean of several seeds shows each line at its mean, "
-            "shaded with its 95% confidence interval, and its caption says so. FI drew that band: it is the "
+            "shaded with its 95% confidence interval, and FI's caption says so. FI drew that band: it is the "
             "interval over the seed means, not a Wilson, bootstrap or other interval the experiment's own "
-            "figure may have named, so the caption does not call it one."
+            "figure may have named, so the text does not call it one."
         )
     if any((records.get(f) or {}).get("single_seed") is not None for f in figs):
         lines.append(
             "A figure that shows replicate seed 0 only could not be drawn as the mean over "
             f"{_replicate_seeds(n_seeds)}. A replicate seed repeats the whole experiment, so the "
-            "figure draws every run seed 0 made: the text and caption about it quote seed 0's "
+            "figure draws every run seed 0 made: the text about it quotes seed 0's "
             f"values, or say it shows a single replicate ({_seed_label(0, n_seeds)}), not the "
             "means over the seeds."
         )
     if any(_hidden_series(records.get(f)) for f in figs):
         lines.append(
             "A series marked FLAT is drawn at one value on its axis, and one NOT SHOWN "
-            "is not visible at all: a caption must describe what its figure shows, so "
-            "it cannot describe how such a series changes."
+            "is not visible at all: the text describes what its figure shows, so "
+            "it does not describe how such a series changes."
         )
     return "\n".join(lines)
 
@@ -33344,22 +33278,6 @@ def _put_back_paper_copies(source: Path, figures_dir: Path, name: str) -> None:
             shutil.copy2(kept, target)
         else:
             target.unlink(missing_ok=True)
-
-
-def _figure_files_on_disk(quest_root: Path) -> set[str]:
-    """The names of the files in ``figures/`` and ``paper/``, the figures' paper copies (``figures/paper/``) left out: a
-    copy is not the figure, and a figure FI dropped must not count as drawn through the copy it left."""
-    from .plot_style import PAPER_DIRNAME
-
-    out: set[str] = set()
-    for sub in ("figures", "paper"):
-        root = Path(quest_root) / sub
-        if not root.is_dir():
-            continue
-        for p in root.rglob("*"):
-            if p.is_file() and not (p.parent.name == PAPER_DIRNAME and p.parent.parent.name == "figures"):
-                out.add(p.name)
-    return out
 
 
 def _paper_copies(figures_dir: Path, name: str) -> dict[str, bytes]:
@@ -33733,16 +33651,11 @@ def _figure_record_note(record: dict[str, Any] | None, *, n_seeds: int | None = 
     if gone:
         note += (" — in a one-column paper.pdf this figure does not show its title" + ("s " if len(gone) > 1 else " ")
                  + "; ".join(f'"{_one_line(t, 120)}"' for t in gone)
-                 + ": put in the caption whatever it says that a reader needs")
+                 + ": FI's caption carries it")
     return note
 
 
 _PAPER_IMAGE_RE = re.compile(r"!\[(?P<alt>(?:[^\[\]]|\[[^\[\]]*\])*)\]\((?P<src>[^)\s]+)")
-
-
-def _embedded_figure_names(paper_md: str) -> set[str]:
-    """The figure files ``paper_md`` embeds, by file name."""
-    return {Path(m.group("src")).name for m in _PAPER_IMAGE_RE.finditer(paper_md or "")}
 
 
 def _planned_figure_order(state: QuestState) -> list[str]:
@@ -33775,29 +33688,102 @@ def _figure_draws_nothing(record: dict[str, Any] | None) -> bool:
     return bool(axes) and all(_panel_draws_nothing(ax) for ax in axes)
 
 
-def _planned_figures_left_out(paper_md: str, state: QuestState) -> list[str]:
-    """Figures the design planned and the run drew that the paper leaves out,
-    by file name, in the order the design planned them.
-
-    The write prompt says to include every available figure, and nothing
-    checked it: 3 of 12 real papers left out at least one, and one of them
-    kept 1 of its 3. A planned figure the run did not produce is the writer's
-    to describe in prose, and a figure nobody planned may stay out, so
-    neither counts here.
-    """
-    embedded = _embedded_figure_names(paper_md)
-    return [name for name in _planned_figure_order(state) if name not in embedded]
+# Which file of a drawing saved in several formats the paper shows: one every output of the paper (PDF, HTML, slides)
+# can embed first.
+_FIGURE_FORMAT_ORDER = (".png", ".jpg", ".jpeg", ".svg", ".pdf")
 
 
-def _missing_planned_figures(paper_md: str, state: QuestState) -> list[str]:
-    """The review's forced hit for each figure the paper leaves out. The write
-    node puts these back before the review sees the draft, so a hit here means
-    the paper lost a figure some other way."""
-    return [
-        f"figure_missing: the paper leaves out figures/{name}, which the design planned and "
-        "the run drew; include it with a numbered caption and discuss it in the text"
-        for name in _planned_figures_left_out(paper_md, state)
-    ]
+def _figure_files_by_stem(state: QuestState) -> dict[str, str]:
+    """The file the paper shows of each drawing the run saved, by file stem: a drawing saved as ``fig.png`` and
+    ``fig.pdf`` is one figure."""
+    chosen: dict[str, tuple[int, str]] = {}
+    for name in dict.fromkeys(Path(str(f)).name for f in state.get("figures") or []):
+        suffix = Path(name).suffix.lower()
+        rank = _FIGURE_FORMAT_ORDER.index(suffix) if suffix in _FIGURE_FORMAT_ORDER else len(_FIGURE_FORMAT_ORDER)
+        stem = Path(name).stem
+        if stem not in chosen or rank < chosen[stem][0]:
+            chosen[stem] = (rank, name)
+    return {stem: name for stem, (_rank, name) in chosen.items()}
+
+
+def _figure_numbers(state: QuestState) -> dict[str, int]:
+    """The number of each figure FI puts in the paper, fixed before the paper is written so the prose refers to the
+    figures by FI's numbers (the writer is given them with the figure list): the figures the design planned, in the order
+    planned, then the run's other figures in the order drawn, one per drawing (:func:`_figure_files_by_stem`). A figure
+    whose own record says it draws nothing has none: it shows the reader nothing."""
+    records = state.get("figure_records") or {}
+    shown = _figure_files_by_stem(state)
+    order = [shown[Path(name).stem] for name in _planned_figure_order(state)]
+    order += [shown[Path(str(f)).stem] for f in state.get("figures") or []]
+    keep = [name for name in dict.fromkeys(order) if not _figure_draws_nothing(records.get(name))]
+    return {name: i + 1 for i, name in enumerate(keep)}
+
+
+_RUN_FIGURE_IMAGE_RE = _figure_facts.RUN_FIGURE_RE
+
+
+def _without_figure_embeds(markdown: str) -> tuple[str, int]:
+    """``markdown`` with every image of a run figure (``](figures/...)``) taken out, and how many there were: the
+    figures and their captions are FI's (:func:`_place_figures`). A line that held only images goes, and with it the
+    blank line after it when one stands before it too, so taking out the figures FI placed gives back the text it placed
+    them in; no other line changes. Code fences are left as they are."""
+    out: list[str] = []
+    fence: str | None = None
+    taken = 0
+    skip_blank = False
+    for line in (markdown or "").split("\n"):
+        fence_line = _MD_FENCE_LINE_RE.match(line)
+        if fence_line:
+            fence = None if fence == fence_line.group(1) else (fence or fence_line.group(1))
+        elif fence is None and _RUN_FIGURE_IMAGE_RE.search(line):
+            taken += len(_RUN_FIGURE_IMAGE_RE.findall(line))
+            rest = _RUN_FIGURE_IMAGE_RE.sub("", line).rstrip()
+            if not rest.strip():
+                skip_blank = not out or not out[-1].strip()
+                continue
+            line = rest
+        if skip_blank and not line.strip():
+            skip_blank = False
+            continue
+        skip_blank = False
+        out.append(line)
+    return "\n".join(out), taken
+
+
+def _place_figures(markdown: str, state: QuestState, *,
+                   facts: dict[str, str] | None = None) -> tuple[str, list[str], int]:
+    """``markdown`` with the run's figures in it, put there by FI: ``(markdown, names placed, images the draft wrote)``.
+
+    Every figure FI numbered (:func:`_figure_numbers`) goes in, under its number, with the caption FI writes from its
+    records (:func:`_figure_caption_text`); every image of a run figure the draft wrote itself is taken out first, caption
+    and all, so no caption in the paper is the writer's. Each figure goes after the paragraph whose prose first names it
+    by number, and never before the figure numbered one less, so the paper shows them in number order; one the prose
+    never names goes before the source lists. Idempotent: placing the figures of a paper FI placed them in gives the
+    same paper."""
+    numbers = _figure_numbers(state)
+    text, written = _without_figure_embeds(markdown)
+    if not numbers:
+        return text, [], written
+    records = state.get("figure_records") or {}
+    credits = {Path(str(c.get("file") or "")).name: c for c in state.get("figure_credits") or [] if isinstance(c, dict)}
+    n_seeds = _replicate_seed_count(state)
+    lines = text.split("\n")
+    placed: list[str] = []
+    last = -1
+    for name, number in sorted(numbers.items(), key=lambda kv: kv[1]):
+        caption = _figure_caption_text(name, records.get(name), n_seeds=n_seeds, facts=facts, credit=credits.get(name))
+        embed = f"![**Figure {number}.** {caption}](figures/{name})"
+        at = max(_figure_insertion_line(lines, number), last + 1)
+        if at >= len(lines):
+            if not lines or lines[-1].strip():
+                lines.append("")  # the paper ends in a line break, so placing its figures again gives the same paper
+            at = len(lines) - 1
+        before_sources = at < len(lines) and bool(_SOURCE_LIST_HEADING_RE.match(lines[at]))
+        block = [embed, ""] if before_sources else ["", embed]
+        lines[at:at] = block
+        last = at + block.index(embed)
+        placed.append(name)
+    return "\n".join(lines), placed, written
 
 
 # A figure the prose names: "Figure 2 shows", "Figures 1 and 2", "Fig. 3".
@@ -33805,73 +33791,109 @@ _FIGURE_MENTION_RE = re.compile(r"(?<![A-Za-z])(?:figures?|figs?\.?)\s*(\d+)", r
 _MD_FENCE_LINE_RE = re.compile(r"^\s*(```|~~~)")
 
 
-def _figure_caption_text(
-    name: str, record: dict[str, Any] | None, *, n_seeds: int | None,
-) -> str:
-    """The caption for a figure the engine places in the paper itself: what the
-    figure's own record says it draws.
+def _caption_words(text: Any, limit: int = 120) -> str:
+    """A label or title from FI's record, as a caption may quote it: one line, at most ``limit`` characters."""
+    words = " ".join(str(text or "").split())
+    return words if len(words) <= limit else words[:limit].rsplit(" ", 1)[0]
 
-    Written from the panel titles and never from the series labels, so a
-    caption the engine wrote cannot name a series its figure draws flat or not
-    at all. That is a forced ``figure_caption`` hit at review time, which would
-    spend the very iteration this repair exists to save. The record is checked
-    all the same: the first wording it does not flag is the one used.
-    """
-    titles: list[str] = []
-    for ax in (record or {}).get("axes") or []:
-        if not isinstance(ax, dict) or _panel_draws_nothing(ax):
-            continue  # a caption does not name a panel that draws nothing
-        title = " ".join(str(ax.get("title") or "").replace("[", "").replace("]", "").split())
-        if title and title not in titles:
-            titles.append(title)
-    stem = " ".join(Path(name).stem.replace("_", " ").replace("-", " ").split())
+
+def _caption_safe(text: str) -> str:
+    """``text`` as an image's caption can hold it: each square bracket as a parenthesis (a title's ``[0.1, 0.2]`` reads
+    ``(0.1, 0.2)``). Markdown ends a caption at an unpaired one, and the readers of the paper's images (the poster, the
+    slides) end it at the first closing one."""
+    return text.replace("[", "(").replace("]", ")")
+
+
+def _figure_caption_text(
+    name: str, record: dict[str, Any] | None, *, n_seeds: int | None, facts: dict[str, str] | None = None,
+    credit: dict[str, Any] | None = None,
+) -> str:
+    """The caption FI writes for a figure, from its own records only: what each panel is (its title, else its axes), the
+    series it draws when there are at most three (one drawn flat, or outside the plotted range, said so), its reference
+    lines, the panels' layout and the line styles (``facts``, :func:`core.figure_facts.facts`), and whether a line is a
+    mean over seeds. A sourced figure (``credit``) says where it is from. Never empty: with no record at all, the file's
+    own name describes it."""
+    stem = " ".join(Path(name).stem.replace("_", " ").replace("-", " ").split()) or "the figure"
+    if credit:
+        what = _caption_words(credit.get("caption"), 200) or stem
+        return _caption_safe(f"{what.rstrip(' .;,')}. Source: {credit.get('source_url') or 'not recorded'}, "
+                             f"{credit.get('license') or 'licence not recorded'}; an illustration from that source, not "
+                             "this study's data.")
+    # A panel keeps its place in the saved figure ("panel 3" is the third one drawn) when an empty one is left out.
+    numbered = [(k, ax) for k, ax in enumerate((record or {}).get("axes") or [], start=1)
+                if isinstance(ax, dict) and not _panel_draws_nothing(ax)]
+    axes = [ax for _, ax in numbered]
+    titles = list(dict.fromkeys(t for t in (_caption_words(ax.get("title")) for ax in axes) if t))
+    lead = next((t for t in (_caption_words(d) for d in (record or {}).get("paper_dropped") or []) if t and t not in titles), "")
+    shared = {(_caption_words(ax.get("ylabel")), _caption_words(ax.get("xlabel"))) for ax in axes}
+    y, x = next(iter(shared)) if len(shared) == 1 else ("", "")
+    against = f"{y} against {x}" if y and x else y
     if len(titles) > 3:
-        # A grid of panels: its titles are the settings each panel was drawn
-        # at, a list rather than a sentence about the figure, and the file's
-        # own name says what the grid shows.
-        joined = f"{stem} ({len(titles)} panels)"
+        # A grid of panels: its titles are the settings each panel was drawn at, a list rather than a sentence about
+        # the figure, and the file's own name says what the grid shows.
+        description = f"{stem} ({len(titles)} panels)"
     else:
-        joined = "; ".join(titles)
-        if len(joined) > 200:
-            joined = joined[:200].rsplit(" ", 1)[0]
-    tail = ""
+        description = "; ".join(titles) or against or stem
+        if titles and y and x and not lead:
+            # The panel titles name each panel; what every panel plots is its axes.
+            description = f"{against}: {description}"
+    # A title the paper copy does not show (core/plot_style.py drops a figure's own title there): the caption carries it.
+    if lead:
+        description = lead if description == stem else f"{lead.rstrip(' .;,:')}: {description}"
+    parts = [description.rstrip(" .;,") + "."]
+    appears: dict[str, list[str]] = {}
+    flat: dict[str, list[str]] = {}
+    outside: dict[str, list[str]] = {}
+    marks: list[str] = []
+    for k, ax in numbered:
+        title = _caption_words(ax.get("title")) or f"panel {k}"
+        for s in ax.get("series") or []:
+            if not isinstance(s, dict):
+                continue
+            label = _caption_words(s.get("label"), 60)
+            shows = s.get("shows")
+            if label.startswith("_"):
+                label = ""  # matplotlib's name for a line given no label
+            if shows == "reference line" and isinstance(s.get("y"), (int, float)):
+                marks.append(f"{label or 'a reference line'} at {s['y']:.3g}")
+            elif shows == "vertical line" and isinstance(s.get("x"), (int, float)):
+                marks.append(f"{label or 'a vertical line'} at {s['x']:.3g}")
+            elif label and shows != "no points":
+                appears.setdefault(label, []).append(title)
+                if shows == "flat":
+                    flat.setdefault(label, []).append(title)
+                elif shows == "outside the axis":
+                    outside.setdefault(label, []).append(title)
+    if 1 <= len(appears) <= 5:
+        hidden = [label for label, where in outside.items() if len(where) == len(appears[label])]
+        drawn = [label for label in appears if label not in hidden]
+        if drawn:
+            parts.append("It draws " + ", ".join(drawn) + ".")
+        for label in hidden:
+            parts.append(f"{label} is not visible: it lies outside the plotted range.")
+        for found, words in ((flat, "is flat at this scale"), (outside, "lies outside the plotted range")):
+            for label, where in found.items():
+                if found is outside and label in hidden:
+                    continue
+                if len(where) == len(appears[label]):
+                    parts.append(f"{label} {words}.")
+                else:
+                    parts.append(f"{label} {words} in " + "; ".join(dict.fromkeys(where)) + ".")
+    marks = list(dict.fromkeys(marks))
+    if marks:
+        parts.append("Marked: " + "; ".join(marks[:3]) + ".")
+    key = Path(name).stem
+    for kind in ("layout", "lines"):
+        sentence = (facts or {}).get(f"{key}:{kind}", "")
+        if sentence and (kind == "lines" or len(axes) > 1):
+            parts.append(sentence[0].upper() + sentence[1:].rstrip(" .") + ".")
     mean_of = ((record or {}).get("replicate_mean") or {}).get("n")
     single_seed = (record or {}).get("single_seed")
     if mean_of:
-        tail = f" Each line is the mean of {mean_of} seeds, shaded with its 95% confidence interval."
+        parts.append(f"Each line is the mean of {mean_of} seeds, shaded with its 95% confidence interval.")
     elif single_seed is not None:
-        tail = f" Shows {_single_seed_note(single_seed, n_seeds)}."
-    # A figure whose record the sandbox could not write has no panel title to
-    # use, so the file's own name describes it; the bare number is the last
-    # resort, when even that would name a series the figure hides.
-    for description in (*(d for d in (joined, stem) if d), ""):
-        caption = ((description.rstrip(" .;,") + "." if description else "") + tail).strip()
-        if not _figure_caption_findings(f"![{caption}](figures/{name})", {name: record}):
-            return caption
-    return ""
-
-
-def _figure_numbers_to_place(
-    paper_md: str, state: QuestState, missing: list[str],
-) -> dict[str, int]:
-    """The number each left-out figure takes: its place in the design's plan,
-    or the next free one when a figure the draft did embed already carries it."""
-    order = _planned_figure_order(state)
-    used = {
-        int(m.group(1))
-        for image in _PAPER_IMAGE_RE.finditer(paper_md or "")
-        for m in [_FIGURE_MENTION_RE.search(image.group("alt"))] if m
-    }
-    numbers: dict[str, int] = {}
-    nxt = max(used, default=0) + 1
-    for name in missing:
-        number = order.index(name) + 1 if name in order else 0
-        if number <= 0 or number in used:
-            number = nxt
-        used.add(number)
-        nxt = max(nxt, number + 1)
-        numbers[name] = number
-    return numbers
+        parts.append(f"Shows {_single_seed_note(single_seed, n_seeds)}.")
+    return _caption_safe(" ".join(parts))
 
 
 def _figure_insertion_line(lines: list[str], number: int) -> int:
@@ -33885,7 +33907,9 @@ def _figure_insertion_line(lines: list[str], number: int) -> int:
         if fence_line:
             fence = None if fence == fence_line.group(1) else (fence or fence_line.group(1))
             continue
-        if fence is not None or _PAPER_IMAGE_RE.search(line):
+        if fence is None and _SOURCE_LIST_HEADING_RE.match(line):
+            break  # the source lists are not the paper's prose
+        if fence is not None or _PAPER_IMAGE_RE.search(line) or _RUN_FIGURE_IMAGE_RE.search(line):
             continue
         if any(int(m.group(1)) == number for m in _FIGURE_MENTION_RE.finditer(line)):
             end = i
@@ -33896,324 +33920,6 @@ def _figure_insertion_line(lines: list[str], number: int) -> int:
         if _SOURCE_LIST_HEADING_RE.match(line):
             return i
     return len(lines)
-
-
-def _place_missing_figures(markdown: str, state: QuestState) -> tuple[str, list[str]]:
-    """``markdown`` with every figure the design planned and the run drew that
-    the draft left out put back, and the names of the ones put back.
-
-    The write prompt tells the writer to include every figure it is given, and
-    a draft that ignores it was caught only at review time — which costs one of
-    the two iterations, and catches nothing at all on the last one, so real
-    runs delivered papers that discuss "Figure 1" through "Figure 3" with no
-    figure in them while the images sat in ``figures/``. Which figures are
-    missing is a set difference rather than a reading of prose, so the engine
-    puts them back itself, the way it writes the source lists itself.
-
-    Each figure goes after the paragraph that already discusses it by number,
-    which is where the writer would have put it: the drafts that dropped every
-    figure still said "Figure 1 shows ..." of each one. A figure whose number
-    the prose never names goes before the source lists, so it is still in the
-    paper. Idempotent: a draft with every planned figure is returned unchanged.
-    """
-    missing = _planned_figures_left_out(markdown, state)
-    if not missing:
-        return markdown, []
-    records = state.get("figure_records") or {}
-    n_seeds = _replicate_seed_count(state)
-    numbers = _figure_numbers_to_place(markdown, state, missing)
-    lines = markdown.split("\n")
-    for name in missing:
-        caption = _figure_caption_text(name, records.get(name), n_seeds=n_seeds)
-        label = f"**Figure {numbers[name]}.**"
-        embed = f"![{label} {caption}](figures/{name})" if caption else f"![{label}](figures/{name})"
-        at = _figure_insertion_line(lines, numbers[name])
-        before_sources = at < len(lines) and bool(_SOURCE_LIST_HEADING_RE.match(lines[at]))
-        lines[at:at] = [embed, ""] if before_sources else ["", embed]
-    return "\n".join(lines), missing
-
-
-def _plain_words(text: str) -> str:
-    return " ".join(re.sub(r"[_\-*`]+", " ", text.lower()).split())
-
-
-# What a caption says of a series that lies flat, which is what its figure shows.
-_FLAT_WORDS_RE = re.compile(
-    r"\b(?:flat|constant|unchanged|negligible|indistinguishable|invisible|not visible|overlap\w*"
-    r"|at this scale|(?:at|near|around|close to) zero)\b"
-)
-# A caption's clauses: "Euler starts flat, while RK4 climbs" says nothing flat of RK4.
-_CAPTION_CLAUSE_RE = re.compile(r"[.;:,]\s|\s(?:while|whereas|but)\s")
-
-
-def _panels_where_flat_and_where_not(
-    record: dict[str, Any] | None, label: str,
-) -> tuple[list[str], list[str]]:
-    """For one series label: the panels of a multi-panel figure that draw it flat
-    (with its value) and the panels that draw it varying (with its range).
-
-    Both are empty for a one-panel figure, and for a series every panel draws flat,
-    because then "flat" is true of the whole figure and there is nothing to tell
-    the panels apart by."""
-    axes = [ax for ax in ((record or {}).get("axes") or []) if isinstance(ax, dict)]
-    if len(axes) < 2:
-        return [], []
-    flat: list[str] = []
-    varies: list[str] = []
-    for index, ax in enumerate(axes, start=1):
-        title = str(ax.get("title") or f"panel {index}")
-        for s in ax.get("series") or []:
-            if not isinstance(s, dict) or s.get("label") != label or "min" not in s:
-                continue
-            if s.get("shows") == "flat":
-                flat.append(f'"{title}" ({s["min"]:.3g})')
-            elif s.get("shows") == "yes":
-                varies.append(f'"{title}" ({s["min"]:.3g} to {s["max"]:.3g})')
-    return (flat, varies) if flat and varies else ([], [])
-
-
-# What a caption says when it calls a series flat: the reverse of ``_FLAT_WORDS_RE``,
-# which lists what excuses a caption for naming a series the figure draws flat. Only
-# claims of a constant value count here ("negligible", "overlap" and "at zero" do not),
-# and "horizontal" as an axis ("on the horizontal axis") is not a claim about a series.
-_SAYS_FLAT_RE = re.compile(
-    r"\b(?:flat|constant|unchanged"
-    r"|horizontal(?!\s+(?:axis|axes|scale|position|direction|extent|bars?|error)))\b"
-)
-# A claim that stops short of "flat" or denies it: "nearly flat", "approximately
-# constant", "not flat", "non-constant" ("-" reads as a space, as in ``_plain_words``).
-_SOFTENED_FLAT_RE = re.compile(
-    r"\b(?:nearly|almost|approximately|roughly|essentially|virtually|practically"
-    r"|effectively|quasi|not|non|never|hardly|barely|no longer)"
-    r"(?:\s+\w+){0,2}\s+(?:flat|constant|unchanged|horizontal)\b"
-    r"|n['’]t(?:\s+\w+){0,2}\s+(?:flat|constant|unchanged|horizontal)\b"
-    # "near flat", but not "near the flat line", which places a flat line and hedges nothing.
-    r"|\bnear\s+(?:flat|constant|unchanged|horizontal)\b"
-)
-# A clause that says a series is flat for a part of its run ("starts flat", "flat until
-# t = 5", "flat only at R0 = 3") is not calling the whole series flat.
-_PARTIAL_FLAT_RE = re.compile(
-    r"\b(?:starts?|started|starting|begins?|beginning|initially|at first|early|until|before"
-    r"|after|then|later|eventually|briefly|only|except|plateaus?|beyond)\b"
-)
-# The share of a y axis's span a series must cover for its figure to draw it varying.
-# The recorder calls a series "flat" under 1%; a caption that calls a line flat is
-# wrong once the eye can read a slope, which the sample put at about 5%.
-_VARYING_SHARE = 0.05
-
-
-def _share_of_axis(ax: dict[str, Any], s: dict[str, Any]) -> float:
-    """The share of ``ax``'s y span that series ``s`` covers: the recorder's own test
-    for "flat" (``core/plot_style.py``), clipped to the axis and measured in log
-    units on a log axis. 0.0 when the record cannot say (no limits, a malformed
-    range, a log axis reaching zero)."""
-    try:
-        lo, hi = (float(v) for v in ax["ylim"])
-        low, high = float(s["min"]), float(s["max"])
-    except (KeyError, TypeError, ValueError):
-        return 0.0
-    if not all(math.isfinite(v) for v in (lo, hi, low, high)):
-        return 0.0
-    bottom, top = min(lo, hi), max(lo, hi)
-    low, high = max(low, bottom), min(high, top)
-    pos: Callable[[float], float] = float
-    if ax.get("yscale") == "log":
-        if bottom <= 0:
-            return 0.0
-        pos = math.log10
-    span = pos(top) - pos(bottom)
-    return (pos(high) - pos(low)) / span if span > 0 and high > low else 0.0
-
-
-def _panels_drawn_varying(
-    axes: list[dict[str, Any]], label: str,
-) -> tuple[list[tuple[str, float, float]], list[str]]:
-    """For one series label: ``(title, min, max)`` of each panel that draws it varying
-    over more than ``_VARYING_SHARE`` of the axis, and the titles of the panels that
-    do not (flat there, or under 5%).
-
-    A series the recorder marks min = max = 0 "yes" has a range of 0 and is never
-    varying here. That is a measurement artefact and not a drawing: the recorder
-    reads ``ax.hlines`` and ``fill_between`` through ``get_offsets()`` and gives 18 of
-    918 series in the stored quests that range, so the rule must stay silent on them."""
-    varying: list[tuple[str, float, float]] = []
-    calm: list[str] = []
-    for index, ax in enumerate(axes, start=1):
-        title = str(ax.get("title") or f"panel {index}")
-        for s in ax.get("series") or []:
-            if not isinstance(s, dict) or str(s.get("label")) != label:
-                continue
-            if s.get("shows") == "yes" and _share_of_axis(ax, s) > _VARYING_SHARE:
-                varying.append((title, float(s["min"]), float(s["max"])))
-            else:
-                calm.append(title)
-    return varying, calm
-
-
-def _clause_names_a_panel(clause: str, titles: list[str]) -> bool:
-    """True when ``clause`` names one of the panels ``titles`` by its title, ignoring
-    case, spacing and punctuation ("R0 = 3" and "R₀=3" are the same panel).
-    Titles of fewer than two letters or digits ("A") would match anything."""
-    def squeeze(text: str) -> str:
-        return re.sub(r"[^a-z0-9]+", "", unicodedata.normalize("NFKC", text).lower())
-
-    body = squeeze(clause)
-    return any(len(t) >= 2 and t in body for t in map(squeeze, titles))
-
-
-def _flat_claim_findings(name: str, record: dict[str, Any] | None, caption: str) -> list[str]:
-    """Findings for a caption that calls a series flat when its figure draws it varying.
-
-    ``caption`` is the image's alt text as ``_plain_words`` leaves it. A clause counts
-    when it names the series by its exact label, says flat / constant / unchanged /
-    horizontal of it (the label's own words are not the claim: a series labelled
-    "constant N" is not called constant by being named), and does not hedge or deny
-    it ("nearly flat", "not flat") or confine it to part of the run ("starts flat"),
-    and the figure draws that series varying over more than 5% of an axis in at least
-    one panel. A clause that names a panel where the series is not varying is scoping
-    its claim to that panel, which is what the finding asks for, so it is left alone.
-
-    Exact labels only: a caption that names the series in other words ("flat
-    deterministic predictions" for a series labelled "Deterministic ODE") is not read."""
-    axes = [ax for ax in ((record or {}).get("axes") or []) if isinstance(ax, dict)]
-    findings: list[str] = []
-    seen: set[str] = set()
-    for ax in axes:
-        for s in ax.get("series") or []:
-            raw = str(s.get("label") or "") if isinstance(s, dict) else ""
-            if not raw or raw in seen:
-                continue
-            seen.add(raw)
-            label = _plain_words(raw)
-            named = rf"(?<![a-z0-9]){re.escape(label)}(?![a-z0-9])"
-            if not label or not re.search(named, caption):
-                continue
-            varying, calm = _panels_drawn_varying(axes, raw)
-            if not varying:
-                continue
-            for clause in _CAPTION_CLAUSE_RE.split(caption):
-                if not re.search(named, clause):
-                    continue
-                said = re.sub(named, " ", clause)
-                claim = _SOFTENED_FLAT_RE.sub(" ", said)
-                if (
-                    not _SAYS_FLAT_RE.search(claim) or _PARTIAL_FLAT_RE.search(said)
-                    or _clause_names_a_panel(clause, calm)
-                ):
-                    continue
-                head = f'figure_caption: the caption of figures/{name} calls "{raw}" flat, but the figure draws it varying'
-                if len(axes) < 2:
-                    ylabel = str(axes[0].get("ylabel") or "y")
-                    findings.append(
-                        f'{head} ({varying[0][1]:.3g} to {varying[0][2]:.3g}) on its axis "{ylabel}". '
-                        "Say that it varies"
-                    )
-                else:
-                    where = ", ".join(f'"{t}" ({lo:.3g} to {hi:.3g})' for t, lo, hi in varying)
-                    findings.append(
-                        f"{head} in {where}. Say that it varies there, or describe only the panels "
-                        "where it is flat"
-                    )
-                break
-    return findings
-
-
-def _figure_caption_findings(paper_md: str, records: dict[str, Any]) -> list[str]:
-    """Captions that name a series their figure does not show, or one it draws
-    flat without saying so, and captions that call a series flat when the figure
-    draws it varying (``_flat_claim_findings``).
-
-    A series a multi-panel figure draws flat in only some panels is flagged with
-    those panels named, and the panels where it varies listed. A finding that named
-    no panel got the caption rewritten to call the series flat in EVERY panel, and
-    the paper then said of the other panels what its figure does not show."""
-    findings: list[str] = []
-    for match in _PAPER_IMAGE_RE.finditer(paper_md or ""):
-        name = Path(match.group("src")).name
-        record = records.get(name)
-        caption = f" {_plain_words(match.group('alt'))} "
-        for ax, s in _hidden_series(record):
-            label = _plain_words(str(s.get("label") or ""))
-            named = rf"(?<![a-z0-9]){re.escape(label)}(?![a-z0-9])"
-            if not label or not re.search(named, caption):
-                continue
-            if s.get("shows") == "flat" and any(
-                re.search(named, clause) and _FLAT_WORDS_RE.search(clause)
-                for clause in _CAPTION_CLAUSE_RE.split(caption)
-            ):
-                continue
-            how = "draws it flat at one value" if s.get("shows") == "flat" else "does not show it"
-            # A shared y axis is labelled on one panel only: take the first label there is.
-            ylabel = next(
-                (str(a.get("ylabel")) for a in [ax, *((record or {}).get("axes") or [])]
-                 if isinstance(a, dict) and a.get("ylabel")),
-                "y",
-            )
-            finding = (
-                f'figure_caption: the caption of figures/{name} names "{s.get("label")}", but the '
-                f'figure {how} on its axis "{ylabel}"'
-            )
-            if s.get("shows") == "flat":
-                flat, varies = _panels_where_flat_and_where_not(record, str(s.get("label")))
-                if flat:
-                    finding += (
-                        f" in only some panels: flat in {', '.join(flat)}, but varying in "
-                        f"{', '.join(varies)}. Describe it as flat only where it is flat"
-                    )
-            if finding not in findings:
-                findings.append(finding)
-        for claim_finding in _flat_claim_findings(name, record, caption):
-            if claim_finding not in findings:
-                findings.append(claim_finding)
-    return findings
-
-
-_CAPTION_SOME_PANELS_PHRASE = " in only some panels: flat in "
-
-
-def _format_figure_check(paper_md: str, state: QuestState) -> str:
-    """The figure check for the review prompt's ``$figure_check_block``."""
-    records = state.get("figure_records") or {}
-    if not records:
-        return "(no record of what the figures draw)"
-    # The results are means over the seeds; these figures hold replicate seed 0 alone.
-    n_seeds = _replicate_seed_count(state)
-    seed_only = [
-        f"figures/{name} shows {_single_seed_note(record['single_seed'], n_seeds)}: its caption "
-        f"and the text about it must quote seed {record['single_seed']}'s values or say it shows "
-        f"a single replicate ({_seed_label(record['single_seed'], n_seeds)})."
-        for name, record in records.items()
-        if isinstance(record, dict) and record.get("single_seed") is not None
-    ]
-    findings = _figure_caption_findings(paper_md, records)
-    if not findings:
-        return "\n".join([*seed_only, "No caption names a series its figure does not show."])
-    # A caption that calls a series flat when its figure draws it varying, or names a series its figure does not show,
-    # says something the figure contradicts: the reviewer must flag it. A caption that only NAMES a series the figure
-    # draws flat in SOME panels (and varying in the others) says nothing false: the series is on the figure. FI reports it
-    # (the review's figure_caption_warnings) and does not make the reviewer's verdict depend on it: forcing it gave a
-    # revise verdict, and a rewrite, for a caption that was right.
-    advisory = [f for f in findings if _CAPTION_SOME_PANELS_PHRASE in f]
-    forced = [f for f in findings if f not in advisory]
-    lines = [*seed_only]
-    if forced:
-        lines += [
-            f"CAPTIONS THAT DESCRIBE WHAT THEIR FIGURE DOES NOT SHOW ({len(forced)}):",
-            *(f"  - {f}" for f in forced),
-            "",
-            "You MUST add a `figure_caption` entry to must_flag_hits and set verdict=revise, "
-            "asking for the caption to describe what the figure shows (or the figure to show "
-            "what the caption describes).",
-        ]
-    if advisory:
-        lines += [
-            f"CAPTIONS THAT NAME A SERIES THEIR FIGURE DRAWS FLAT IN SOME PANELS ({len(advisory)}), for your information:",
-            *(f"  - {f}" for f in advisory),
-            "",
-            "These do not say anything false. Do NOT add them to must_flag_hits and do not make them the reason for a "
-            "revise verdict; mention one under `suggestions` only if you think a reader would be misled.",
-        ]
-    return "\n".join(lines)
 
 
 def _parse_json_lenient(

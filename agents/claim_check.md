@@ -43,7 +43,7 @@ Respond with a single JSON object, no prose, no markdown fence:
 }
 ```
 
-The paper below carries FI's id (`<<3.7>>`: the 7th sentence of section 3) before each sentence, caption and table row, and `<<section 3>>` after each section heading. `where` gives, for every claim, the id(s) of the passage the claim is about, copied from the paper. FI places an unsupported claim by that id alone: a claim with no valid id cannot be placed, and the paper is then written again as a whole.
+The paper below carries FI's id (`<<3.7>>`: the 7th sentence of section 3) before each sentence and table row (FI's own figures and their captions carry none), and `<<section 3>>` after each section heading. `where` gives, for every claim, the id(s) of the passage the claim is about, copied from the paper. FI places an unsupported claim by that id alone: a claim with no valid id cannot be placed, and the paper is then written again as a whole.
 
 `basis` MUST be one of the three exact lowercase strings. Every claim with `basis: "citation"` MUST give a `citation_index` that names a source in the Inputs section (a References number or a Further reading label such as `"W2"`); otherwise use `basis: "unsupported"`.
 

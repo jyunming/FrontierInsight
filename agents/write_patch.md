@@ -5,7 +5,6 @@ The engine applies your edits to the draft exactly as it stands. Every word you 
 # What to do with each passage
 
 - **A claim that neither the study's results nor a cited source backs.** Either tie it to a result in the Analysis block or to a source in the Prior work block that says it (state only what that result or that source says, and cite the source by its label, `[3]`), or take the claim out. Do not add a new claim, a new number or a new citation to make up for it. A sentence taken out whole is a correct edit; so is a sentence made narrower, so that it says only what is backed.
-- **A caption that describes what its figure does not show.** Rewrite the caption so that it describes what the figure shows, as the reason says. Keep `**Figure N.**` and the figure's link exactly as they are.
 - **A number you typed that the check names.** A result is never typed: replace it with its key from the list of results (`{{v:...}}`; FI fills it in), or say it in words, or take it out. A number the plan or the topic states is written exactly as the plan writes it. A key the check says FI could not fill is fixed by changing the key to one that names a quantity and settings the study has, or by leaving the number out. Never write a new number of your own.
 - **A number of the method computed from the plan's numbers** (a quantile, a confidence level, a reference value, a count from the grid, a cutoff or bound from a formula of the plan's constants, also when it stands after an equals sign in a formula: `... = {{calc:a / (b * c) - 1}}` with the digits of the plan's a, b and c): write `{{calc:EXPR}}` and FI computes it and puts the value in. Build EXPR from the numbers as the plan or the topic writes them, never from a number you derived: if the plan's level is 0.1, a two-sided quantile level is 1 - 0.1 / 2 (not 0.95). EXPR may use only numbers the plan or the topic states, whole numbers from 0 to 10, + - * / ** and parentheses, floor, ceil, sqrt, exp, ln, ndtri(p) (the standard normal quantile) and t_quantile(p, df) (the Student-t quantile). Never put a result of the study in EXPR. A count of the run (settings, trials per setting) is FI's: use its placeholder from FI'S RECORD OF THIS RUN.
 - **A statistic the paper describes as something the run did not compute.** Use the value the Analysis block gives, or say what the number is (a setting, a threshold, a limit), or take the sentence out if it cannot be stated from the Analysis block.
@@ -22,9 +21,9 @@ Respond with one JSON array and nothing else: no prose, no markdown fence.
 
 Rules for `find`:
 - Copy it from the draft character for character: markdown, LaTeX, punctuation and citation brackets included. Where the passage list gives the draft's own words, copy them from there.
-- It must occur exactly once in the draft. Take enough of the sentence for that, and no more than the sentence (or the caption text): never a paragraph, never a heading.
+- It must occur exactly once in the draft. Take enough of the sentence for that, and no more than the sentence: never a paragraph, never a heading.
 - It must not be in the `## References` or `## Further reading` lists; the engine writes both from the citations in the text.
-- It must not include a figure link `(figures/...)`; to change a caption, `find` the words of the caption only.
+- It must not include a figure (`![...](figures/...)`): FI places the figures and writes their captions.
 - In JSON a backslash is written `\\` (the LaTeX `\(` is `"\\("`) and a double quote `\"`.
 
 Every passage the checks named needs an edit: a claim nothing backs can always be taken out. An empty array is not an answer.
