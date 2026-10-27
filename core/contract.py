@@ -29,6 +29,7 @@ by its file name.
 
 from __future__ import annotations
 
+import copy
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -42,9 +43,10 @@ MAX_PANELS = 3
 class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    def model_copy(self, *, update: dict[str, Any] | None = None, deep: bool = False) -> Any:  # noqa: ARG002
+    def model_copy(self, *, update: dict[str, Any] | None = None, deep: bool = False) -> Any:
         """A copy with ``update`` applied and checked again (pydantic's own copy skips the checks)."""
-        return type(self).model_validate({**dict(self), **(update or {})})
+        data = {**dict(self), **(update or {})}
+        return type(self).model_validate(copy.deepcopy(data) if deep else data)
 
 
 class Range(_Strict):
@@ -302,6 +304,8 @@ def from_design(design: dict[str, Any] | None) -> StudyContract:
     ranges = {}
     assertions = []
     declared_ids = {_ident(m.get("id")) for m in metrics} - {None}
+    derived_rows = _rows(p.get("derived"), gaps, "the derived quantities")
+    derived_ids = {_ident(d.get("id")) for d in derived_rows} - {None}
     for a in _rows(design.get("result_assertions"), gaps, "the result bounds"):
         if str(a.get("path")) in declared_ids:
             ranges[str(a.get("path"))] = {"min": a.get("min"), "max": a.get("max"), "reason": str(a.get("reason") or "")}
@@ -318,7 +322,7 @@ def from_design(design: dict[str, Any] | None) -> StudyContract:
         if rid in {r.id for r in results}:
             gaps.append(f"result `{rid}` is declared more than once; only the first is kept")
             continue
-        if "role" not in m:
+        if not m.get("role"):
             no_role.append(rid)
         depends = m.get("depends_on")
         if isinstance(depends, list):
@@ -328,7 +332,7 @@ def from_design(design: dict[str, Any] | None) -> StudyContract:
                             "settings; that is left out")
             depends = [str(s) for s in depends if str(s) in settings.varied()]
         given = m.get("given")
-        if given is not None and _ident(given) not in declared_ids:
+        if given is not None and _ident(given) not in declared_ids | derived_ids:
             gaps.append(f"result `{rid}` is given `{given}`, which is not a declared result; that is left out")
             given = None
         data = {"id": rid, "role": m.get("role") or "result", "kind": m.get("kind") or "mean",
@@ -348,14 +352,16 @@ def from_design(design: dict[str, Any] | None) -> StudyContract:
                     + "; each is read as a measured result")
 
     ids = {r.id for r in results}
-    derived = [d for d in (_first_valid(Derived, x, gaps, f"derived `{x.get('id')}`") for x in _rows(p.get("derived"), gaps, "the derived quantities"))
+    derived = [d for d in (_first_valid(Derived, x, gaps, f"derived `{x.get('id')}`") for x in derived_rows)
                if d is not None]
     ids |= {d.id for d in derived}
     comparisons = [c for c in (_first_valid(Comparison, x, gaps, f"comparison `{x.get('id')}`")
                                for x in _rows(p.get("comparisons"), gaps, "the comparisons")) if c is not None]
 
     figures = []
-    planned = p.get("figures") if isinstance(p.get("figures"), list) else design.get("figures_planned")
+    planned = p.get("figures") if "figures" in p else design.get("figures_planned")
+    if planned is not None and not isinstance(planned, list):
+        gaps.append("the figures are not a list, so they are left out")
     for i, f in enumerate(planned if isinstance(planned, list) else [], 1):
         if isinstance(f, dict):
             fig = _first_valid(Figure, {"id": f"fig{i}", **f}, gaps, f"figure {i}")
@@ -419,22 +425,22 @@ def _without_broken_links(base: dict[str, Any], parts: dict[str, Any], gaps: lis
     # take the good ones with it.
     built = {**parts, "comparisons": (), "derived": (), "figures": ()}
     for key in ("derived", "comparisons", "figures"):
-        waiting = list(parts[key])
+        waiting = list(range(len(parts[key])))  # by position: two equal entries are two entries
         while waiting:  # again until nothing more fits: a derived quantity may use one listed after it
             kept = []
-            for item in waiting:
-                trial = {**built, key: (*built[key], item)}
+            for n in waiting:
+                trial = {**built, key: (*built[key], parts[key][n])}
                 try:
                     StudyContract(**base, **trial)
                     built = trial
-                    kept.append(item)
+                    kept.append(n)
                 except ValueError:
                     pass
             if not kept:
                 break
-            waiting = [i for i in waiting if i not in kept]
-        gaps.extend(f"{_ONE[key]} `{item.id}` is left out: it refers to something the plan does not declare"
-                    for item in waiting)
+            waiting = [n for n in waiting if n not in kept]
+        gaps.extend(f"{_ONE[key]} `{parts[key][n].id}` is left out: it refers to something the plan does not declare"
+                    for n in waiting)
     try:
         return StudyContract(**{**base, "budget": budget}, **built, gaps=tuple(gaps))
     except ValueError:

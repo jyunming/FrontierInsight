@@ -176,3 +176,19 @@ def test_a_copy_with_changes_is_checked_again() -> None:
     with pytest.raises(ValueError, match="not a declared result"):
         c.model_copy(update={"comparisons": (C.Comparison(id="d", result="missing", across="load"),)})
     assert c.model_copy(update={"labels": {"x": "X"}}).labels == {"x": "X"}
+
+
+def test_the_last_review_round_figures_not_a_list_an_empty_role_a_condition_on_a_derived_and_equal_entries() -> None:
+    c = C.from_design({"protocol": {"metrics": [{"id": "x", "role": "result"}], "figures": {"id": "f"}}})
+    assert c.figures == () and any("figures are not a list" in g for g in c.gaps)
+    c = C.from_design({"protocol": {"metrics": [{"id": "curve", "role": "reference"}, {"id": "value", "role": None}]}})
+    assert any("no role for `value`" in g for g in c.gaps)
+    c = C.from_design({"protocol": {"metrics": [{"id": "x", "role": "result"},
+                                                {"id": "rate", "role": "result", "kind": "proportion", "given": "event"}],
+                                    "derived": [{"id": "event", "inputs": ["x"], "kind": "proportion"}]}})
+    assert c.result("rate").given == "event"
+    c = C.from_design({"protocol": {"grid": {"load": [1, 2]}, "metrics": [{"id": "x", "role": "result"}],
+                                    "derived": [{"id": "d", "inputs": ["x"]}, {"id": "d", "inputs": ["x"]}]}})
+    assert [d.id for d in c.derived] == ["d"] and any("derived `d` is left out" in g for g in c.gaps)
+    nested = C.Checks(oracles=({"case": {"load": 1}},))
+    assert nested.model_copy(deep=True).oracles[0] is not nested.oracles[0]
