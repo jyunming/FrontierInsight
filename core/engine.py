@@ -16967,7 +16967,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
     async def _referee_failing_checks(self, state: QuestState, oracles: list[dict[str, Any]],
                                       judged: list[dict[str, Any]], protocol: Any, attempt: dict[str, Any]) -> bool:
         """Each check still failing when FI is about to go on (no repair left, or none to spend) whose expected value is
-        the plan's own working and that nothing has objected to yet: the number computed numerically from the definitions
+        the plan's (worked out or typed; not a published value) and that nothing has objected to yet: the number computed
+        numerically from the definitions
         (:meth:`_numeric_reference`) decides which side is wrong (core/oracle_challenge.py::settle_referee). Once per check
         per run; each number kept in ``.fi/oracle_triage.json`` by the check's version, so a resume never asks again. A
         correction is only proposed here (``source`` ``numeric``) and made by :meth:`_correct_expected_values`, never once
@@ -16997,9 +16998,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     or name in self._oracle_challenges or name in self._oracle_refereed or name in self._oracle_noisy
                     or name in self._oracle_undecided or name in self._oracle_set_aside or name in challenged):
                 continue  # a check set aside for its method's error is not the script's, nor one already put to it
-            plan_value = _oracle_challenge.plan_working(oracle, protocol if isinstance(protocol, dict) else None)
+            plan_value = _oracle_challenge.referee_expected(oracle)
             if plan_value is None:
-                continue  # a number the plan typed, not worked out: nothing says which side to doubt
+                continue  # a published value, or a check FI cannot judge
             self._oracle_refereed.add(name)
             fp = _oracle_triage.fingerprint(oracle)
             # Kept by what the script is shown (the model's equations, the check's words, case and measure), so a
