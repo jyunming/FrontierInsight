@@ -165,11 +165,17 @@ def _shift_stated(text: str, stated: list[float]) -> str:
 
 
 def _within(oracle: dict[str, Any], a: float | None, b: float | None) -> bool:
-    """Whether two values lie within the check's own tolerance of each other (never widened): the one limit the check is
-    judged by, whichever value is named first."""
+    """Whether two values lie within the check's own tolerance of each other (never widened), whichever is named first.
+    A relative tolerance is taken at each value and the smaller limit used (two values far from the plan's are compared
+    at their own size); any other is the limit the check is judged by (an absolute tolerance as written, a tolerance of
+    0 as rounding at the check's own scale, so floating-point noise around 0 is not a difference)."""
     if a is None or b is None:
         return False
-    _expected, limit, _mode = _oracle.limit_of(oracle)
+    _expected, limit, mode = _oracle.limit_of(oracle)
+    tolerance = _triage_num(oracle.get("tolerance"))
+    if mode == "relative" and tolerance is not None and tolerance > 0:
+        limits = [_oracle.limit_of({**oracle, "expected": v})[1] for v in (a, b)]
+        return None not in limits and abs(a - b) <= min(limits)
     return limit is not None and abs(a - b) <= limit
 
 
@@ -432,6 +438,10 @@ def settle_referee(oracle: dict[str, Any], measured: float | None, plan_value: f
             f"the check '{name}' still fails and the numerical computation from the definitions gave no value ({how})")}
     said = f"an independent numerical computation from the definitions gives {_oracle.fmt_digits(numeric)} ({how})"
     with_code, with_plan = _within(oracle, numeric, measured), _within(oracle, numeric, plan_value)
+    if with_code and not with_plan and _oracle.kind_of(oracle) in _forms.VIOLATION_KINDS and plan_value == 0:
+        return {"outcome": "unsettled", "by": "", "text": (
+            f"the check '{name}' still fails and {said}, as the simulation does; the check measures how far a rule is "
+            "broken, which is 0 by its form, so FI does not correct it to the measured size: it goes on unconfirmed")}
     if with_code and not with_plan:
         return {"outcome": "corrected", "expected": numeric, "by": "a numerical computation",
                 "text": f"{said}, as the simulation does and not the plan's expected value "

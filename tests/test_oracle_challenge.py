@@ -304,6 +304,26 @@ async def test_a_check_the_plan_worked_out_wrongly_is_corrected_by_the_number_co
     assert triage and triage[0]["outcome"] == "corrected"
 
 
+def test_a_rule_s_worst_violation_is_never_corrected_to_the_size_the_simulation_measured() -> None:
+    """An invariant's expected 0 is 0 by its form: a referee that reproduces the simulation's drift with its own
+    integrator does not relax the rule to that drift (it may still find the code wrong)."""
+    rule = {"name": "drift", "kind": "invariant", "expected": 0.0, "tolerance": 1e-6, "tolerance_mode": "absolute",
+            "measure": "max_drift"}
+    kept = ch.settle_referee(rule, 3.0e-6, 0.0, 3.1e-6, "an integrator")
+    assert kept["outcome"] == "unsettled" and "expected" not in kept
+    assert ch.settle_referee(rule, 3.0e-6, 0.0, 0.0, "exact")["outcome"] == "code"
+    stated = {**rule, "expected": 0.0136, "tolerance": 1e-12}
+    assert ch.settle_referee(stated, 0.0, 0.0136, 0.0, "exact")["outcome"] == "corrected", \
+        "an invariant whose plan typed a nonzero value is not 0 by its form"
+
+
+def test_two_numbers_far_from_the_plan_s_value_are_compared_at_their_own_size() -> None:
+    """A relative tolerance taken at the plan's (wrong) 1e4 would let 1 and 100 agree; at their own size they do not."""
+    far = {**ORACLE, "expected": 1.0e4, "tolerance": 0.01, "tolerance_mode": "relative", "case": {"n": 4}}
+    assert not ch._within(far, 1.0, 100.0) and not ch._within(far, 100.0, 1.0)
+    assert ch._within(far, 100.0, 100.5) and ch._within(far, 100.5, 100.0)
+
+
 @pytest.mark.asyncio
 async def test_a_known_answer_the_plan_typed_is_put_to_the_referee_too(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -372,6 +392,8 @@ def test_both_comparisons_of_the_referee_use_the_check_s_own_limit() -> None:
     assert ch.settle_referee(exact, 1.1102230246251565e-16, 0.0, 2.220446049250313e-16, "a sum")["outcome"] == "unsettled"
     assert ch._within(exact, 1e-16, 2e-16) == ch._within(exact, 2e-16, 1e-16)
     assert ch.settle_referee(exact, 0.3, 0.0, 0.0, "a sum")["outcome"] == "code", "a real fault is still found"
+    noise = ch.settle_referee(exact, 1.1102230246251565e-16, 0.0, 0.0, "exact")
+    assert noise["outcome"] == "unsettled", "a referee's exact 0 against noise in the last place finds no fault"
 
 
 @pytest.mark.asyncio
