@@ -158,6 +158,20 @@ def core_lines(tree: Path) -> int:
     return total
 
 
+def check_count(tree: Path) -> int | None:
+    """The number of checks the tree's own registry (``core/checks.py``, ``CHECKS``) lists: it may only go down. ``None``
+    when the tree has no registry. The tree is read in a subprocess, so its ``core`` is the one counted."""
+    if not (tree / "core" / "checks.py").is_file():
+        return None
+    try:
+        done = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, sys.argv[1]); "
+                               "import core.checks as c; print(len(c.CHECKS))", str(tree)], capture_output=True,
+                              text=True, timeout=120, cwd=str(tree), creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return int(done.stdout.strip().splitlines()[-1])
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        return None
+
+
 def head(tree: Path) -> str:
     try:
         done = subprocess.run(["git", "-C", str(tree), "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
@@ -177,11 +191,13 @@ def score(tree: Path, cases_file: Path, out: Path, *, only: set[str] | None = No
         results = list(pool.map(lambda c: run_case(c, tree, root, probes, out), cases))
     report: dict[str, Any] = {"tree": str(tree), "head": head(tree), "cases_file": str(cases_file),
                               "when": time.strftime("%Y-%m-%d %H:%M:%S"), "core_lines": core_lines(tree),
+                              "check_count": check_count(tree),
                               "totals": totals(results), "results": [asdict(r) for r in results]}
     if against is not None:
         old = json.loads(against.read_text(encoding="utf-8"))
         report["against"] = {"score": str(against), "head": old.get("head"), "regressions": regressions(old, results),
-                             "core_lines_before": old.get("core_lines")}
+                             "core_lines_before": old.get("core_lines"),
+                             "check_count_before": old.get("check_count")}
     (out / "score.json").write_text(json.dumps(report, indent=1), encoding="utf-8")
     (out / "score.md").write_text(markdown(report), encoding="utf-8")
     return report
@@ -193,12 +209,13 @@ def markdown(report: dict[str, Any]) -> str:
              f"cases {t['cases']}, measured {t['measured']}, passed {t['passed']}; false stops {t['false_stop']}, "
              f"missed stops {t['missed_stop']}, faults caught {t['faults_caught']} of {t['faults']}, false flags "
              f"{t['false_flag']}, other failures {t['other_fail']}, not measured {t['not_measured']}, no probe yet "
-             f"{t['no_probe']}; core lines {report['core_lines']}", ""]
+             f"{t['no_probe']}; core lines {report['core_lines']}; checks {report.get('check_count')}", ""]
     if "against" in report:
         a = report["against"]
         lines += [f"Against {a.get('head')}: {len(a['regressions'])} case(s) passed before and do not now"
                   + (": " + ", ".join(a["regressions"]) if a["regressions"] else "")
-                  + f"; core lines {a.get('core_lines_before')} -> {report['core_lines']}", ""]
+                  + f"; core lines {a.get('core_lines_before')} -> {report['core_lines']}"
+                  + f"; checks {a.get('check_count_before')} -> {report.get('check_count')}", ""]
     lines += ["| case | group | expected | got | result | detail |", "|---|---|---|---|---|---|"]
     for r in report["results"]:
         detail = str(r["detail"]).replace("|", "/").replace("\n", " ")[:160]

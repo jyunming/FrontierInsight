@@ -49,6 +49,7 @@ def test_each_outcome_is_counted_by_what_was_expected(tmp_path: Path) -> None:
     assert (t["false_stop"], t["missed_stop"], t["missed_fault"], t["false_flag"], t["other_fail"]) == (1, 1, 1, 1, 1)
     assert (t["faults"], t["faults_caught"], t["not_measured"], t["no_probe"]) == (2, 1, 2, 1)
     assert report["core_lines"] == 2
+    assert report["check_count"] is None  # this tree has no core/checks.py
     by_id = {r["id"]: r for r in report["results"]}
     assert by_id["go-ok"]["detail"].endswith("q1")  # the quest path is given under the root
     assert "could not load the record" in by_id["crash"]["detail"]
@@ -68,6 +69,22 @@ def test_a_case_that_passed_before_and_fails_now_is_a_regression(tmp_path: Path)
                               {"id": "c", "expect": "go_on", "probe": "says.py", "args": ["stop"]}])
     report = runner.score(tmp_path / "tree", cases, tmp_path / "out", against=tmp_path / "old.json")
     assert report["against"]["regressions"] == ["a"]
+
+
+def test_the_checks_of_a_tree_are_counted_from_its_own_registry(tmp_path: Path) -> None:
+    core = tmp_path / "tree" / "core"
+    core.mkdir(parents=True)
+    (core / "__init__.py").write_text("", encoding="utf-8")
+    assert runner.check_count(tmp_path / "tree") is None
+    (core / "checks.py").write_text("CHECKS = (1, 2, 3)\n", encoding="utf-8")
+    assert runner.check_count(tmp_path / "tree") == 3
+    report = {"tree": "t", "head": "h", "when": "now", "core_lines": 5, "check_count": 3,
+              "totals": {k: 0 for k in ("cases", "measured", "passed", "false_stop", "missed_stop", "faults",
+                                        "faults_caught", "missed_fault", "false_flag", "other_fail", "not_measured",
+                                        "no_probe")},
+              "results": [], "against": {"head": "g", "regressions": [], "core_lines_before": 9, "check_count_before": 7}}
+    text = runner.markdown(report)
+    assert "checks 3" in text and "checks 7 -> 3" in text
 
 
 def test_only_the_last_outcome_line_counts_and_a_bad_one_is_not_measured() -> None:
