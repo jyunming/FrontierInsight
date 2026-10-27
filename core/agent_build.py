@@ -339,8 +339,12 @@ class AgentBuildMixin:
         # What a reader's extension added beyond the frozen protocol is the person's request (Engine._enforce_protocol
         # with ``extended``): sent back as a difference, the agent was told to take out what the person asked for.
         by_person = self._goes_beyond_protocol_by_request()  # type: ignore[attr-defined]
-        differences = [m.message() for m in _protocol_check.check(protocol, self._scripts_on_disk())  # type: ignore[attr-defined]
+        scripts = self._scripts_on_disk()  # type: ignore[attr-defined]
+        # The same reading as the chat writer's repair (Engine._enforce_protocol): a difference that rests only on a ``for``
+        # loop's literal values never sends the code back; it is a note.
+        differences = [m.message() for m in _protocol_check.check_repairable(protocol, scripts)
                        if m.message() not in set(by_person)]
+        notes = _protocol_check.loop_hints(protocol, scripts)
         checks["protocol"] = not differences
         if by_person and not differences:
             return False  # the record of the person's extension stays as it is
@@ -349,7 +353,7 @@ class AgentBuildMixin:
             "status": "ok" if not differences else ("stopped" if block else "warned"),
             "attempts": [{"attempt": 0, "differences": differences}], "differences": differences,
             "protocol": protocol, "written_by": "the coding agent",
-            **({"added_by_person": by_person} if by_person else {})})
+            **({"added_by_person": by_person} if by_person else {}), **({"notes": notes} if notes else {})})
         if not differences:
             return False
         found.append("The code differs from the plan's protocol: " + "; ".join(differences[:8])

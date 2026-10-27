@@ -1618,31 +1618,39 @@ def typed_hits(paper_md: str, protocol: dict[str, Any] | None, topic: str = "") 
     return _typed.hits(to_placeholders(_disclosure.without_block(paper_md)), _typed.plan_numbers(protocol, topic), HIT)
 
 
+def untraced_typed(paper_md: str, protocol: dict[str, Any] | None, topic: str = "") -> list[tuple[str, str]]:
+    """``(number, sentence)`` for each number the writer typed that FI cannot trace to the plan, the topic or its own records
+    (the numbers :func:`typed_hits` reports), the paper left as it is."""
+    return _typed.untraced(to_placeholders(_disclosure.without_block(paper_md)), _typed.plan_numbers(protocol, topic))
+
+
 def plan_protocol(quest_root: Path | str, protocol: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """The plan the typed numbers are held to: the one given, else the frozen protocol on disk."""
     return protocol if isinstance(protocol, dict) and protocol else _frozen.protocol_of(Path(quest_root))
 
 
 def check(paper_md: str, quest_root: Path | str, *, topic: str = "", fallback_s: Any = None, keyed: bool = False,
-          protocol: dict[str, Any] | None = None) -> list[str]:
+          protocol: dict[str, Any] | None = None, typed: bool = True) -> list[str]:
     """Every must-fix hit of the records check for ``paper_md``: a required placeholder missing or misplaced and, for a
     paper written under the rule that FI fills every result number (``keyed``), a result key FI could not fill and a number
-    typed that is not a number of the plan or the topic. Never raises."""
+    typed that is not a number of the plan or the topic (``typed=False`` leaves those out: with no round left to write the
+    paper again they are listed as not traced, :func:`keep_check`). Never raises."""
     try:
         hits = placement_hits(paper_md, quest_root, topic=topic, fallback_s=fallback_s)
         if keyed:
             hits += value_hits(paper_md, quest_root)
-            hits += typed_hits(paper_md, plan_protocol(quest_root, protocol), topic)
+            if typed:
+                hits += typed_hits(paper_md, plan_protocol(quest_root, protocol), topic)
         return hits
     except Exception:  # noqa: BLE001 -- a check that cannot be made flags nothing
         return []
 
 
-def keep_check(quest_root: Path | str, hits: list[str], paper_md: str, *, removed: list[tuple[str, str]] | None = None,
+def keep_check(quest_root: Path | str, hits: list[str], paper_md: str, *, untraced: list[tuple[str, str]] | None = None,
                not_filled: str = "", dropped: list[dict[str, str]] | None = None) -> None:
     """Keep what the last review found (``.fi/paper_record_check.json``): the hits, the required items the paper does
-    not hold, the placeholders that read "not recorded", the typed numbers FI took out when the rewrite rounds were used up
-    (``removed``: ``(number, sentence)``), the result keys FI could not fill that were taken out the same way (``dropped``:
+    not hold, the placeholders that read "not recorded", the typed numbers FI cannot trace that stay in the paper when the rewrite rounds are used
+    up (``untraced``: ``(number, sentence)``), the result keys FI could not fill that were taken out the same way (``dropped``:
     ``key``, ``sentence``, ``how``), and why the paper is not held to the rule that FI fills every result number
     (``not_filled``: ``no_records`` or ``older_paper``). The quality report prints it, so what is still unmet when the rounds are used up is on record."""
     path = Path(quest_root) / RECORD
@@ -1651,13 +1659,13 @@ def keep_check(quest_root: Path | str, hits: list[str], paper_md: str, *, remove
         unmet = [{"kind": i.kind, "id": i.id, "name": i.name, "text": i.sentence}
                  for i in required_items(quest_root) if not _item_placed(text, i)]
         unfilled = unfilled_in(paper_md)
-        if not hits and not unmet and not unfilled and not removed and not not_filled and not dropped:
+        if not hits and not unmet and not unfilled and not untraced and not not_filled and not dropped:
             path.unlink(missing_ok=True)
             return
         path.parent.mkdir(parents=True, exist_ok=True)
         record: dict[str, Any] = {"at": time.time(), "hits": list(hits), "unmet_items": unmet, "unfilled": unfilled}
-        if removed:
-            record["removed_numbers"] = [{"number": n, "sentence": sent} for n, sent in removed]
+        if untraced:
+            record["untraced_numbers"] = [{"number": n, "sentence": sent} for n, sent in untraced]
         if dropped:
             record["taken_out_values"] = [dict(d) for d in dropped]
         if not_filled:

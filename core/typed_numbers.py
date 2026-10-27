@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+#: What FI puts where a result key it cannot fill stood (:mod:`core.paper_facts`); a typed number is never replaced.
 REMOVED = "[number removed]"
 #: The most sentences one report names; the rest are counted in one more line.
 MAX_SENTENCES = 30
@@ -364,12 +365,7 @@ def hits(markdown: str, plan: frozenset[Decimal], name: str = "paper_record_mism
     return out
 
 
-def remove(markdown: str, plan: frozenset[Decimal]) -> tuple[str, list[tuple[str, str]]]:
-    """``markdown`` with each number R1 does not allow replaced by :data:`REMOVED`, and ``(number, sentence)`` for each one
-    taken out (the sentence as it read before)."""
-    bad = typed_outside_the_plan(markdown, plan)
-    taken = [(n.token, n.sentence) for n in bad]
-    text = markdown or ""
-    for n in sorted(bad, key=lambda x: -x.start):
-        text = text[:n.start] + REMOVED + text[n.end:]
-    return text, taken
+def untraced(markdown: str, plan: frozenset[Decimal]) -> list[tuple[str, str]]:
+    """``(number, sentence)`` for each number R1 does not allow, as written. The paper is not changed: when no round is left
+    to write it again, the number stays where the writer put it and is listed in the quality report as not traced."""
+    return [(n.token, n.sentence) for n in typed_outside_the_plan(markdown, plan)]

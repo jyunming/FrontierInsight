@@ -1357,7 +1357,7 @@ class RunChecksMixin:
         levels = _optimise_search.compared_levels(block)
         try:
             designs = _optimise_search.sizing_designs(block)
-            names = _optimise_search.compared_names(block, _optimise.watched_results(self._protocol_block(state) or {}))  # type: ignore[attr-defined]
+            names = _optimise_search.compared_names(block, _optimise.watched_results(self._protocol_block(state) or {}, state.get("design")))  # type: ignore[attr-defined]
             cells = [_optimise_search.cell_of(_optimise_search.level_block(block, lv), d) for lv in levels for d in designs]
         except (KeyError, TypeError, ValueError):
             return None
@@ -1420,7 +1420,7 @@ class RunChecksMixin:
                 self.executor, python, self.quest_root,  # type: ignore[attr-defined]
                 runner.simulate.relative_to(self.quest_root).as_posix(),  # type: ignore[attr-defined]
                 grid, probes, kinds, deterministic=runner.deterministic, budget_s=left,
-                allowance_s=allowance, env=env, thresholds=thresholds, exempt=_degenerate.expected_constants(protocol),
+                allowance_s=allowance, env=env, thresholds=thresholds, exempt=_degenerate.expected_constants(protocol, state.get("design")),
                 in_each_run=_in_run.of_study(protocol))
             self._pilot_spent += time.monotonic() - began
         base = {"trials": result.trials, "settings": result.settings, "metrics_read": result.checked,

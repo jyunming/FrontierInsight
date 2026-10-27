@@ -747,6 +747,7 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
         checks["neighbourhood"] = {"status": NOT_CHECKED, "says": "the design variables are all choices: nothing to nudge"}
     else:
         parts: list[str] = []
+        edges: list[str] = []  # a note only: whether an edge is a physical bound is not something this check can know
         if better:
             b = max(better, key=lambda x: x["gain"])
             parts.append(f"moving {b['variable']} to {_fmt(b['value'])} gives a design {_fmt(b['gain'])}{u} better at the "
@@ -756,9 +757,8 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
             where = (f"{variable} ({_fmt(at_bound[members[0]]['value'])})" if len(members) == 1 and variable in probes
                      else f"{len(members)} of the {_probed_count(probes, variable)} elements of {variable} that were "
                           "nudged")
-            parts.append(f"the best design sits at the {'lower' if side == 'low' else 'upper'} edge of the range allowed "
-                         f"for {where}: a design outside the range may be better (widening the range is a change to the "
-                         "plan)")
+            edges.append(f"the best design sits at the {'lower' if side == 'low' else 'upper'} edge of the range allowed "
+                         f"for {where}; designs outside the range were not tried")
         if no_effect:
             quiet = [v if len(m) == 1 and v in probes else f"{len(m)} of the {_probed_count(probes, v)} elements of {v} "
                      "that were nudged" for (v, _), m in _by_array([(n, "") for n in no_effect]).items()]
@@ -766,10 +766,12 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
                          "use it")
         status = FAILED if parts else PASSED
         says = "; ".join(parts) if parts else "no nearby design is better, and every variable changes the result"
+        if edges:
+            says = (says if parts else "no nearby design is better") + "; note: " + "; ".join(edges)
         if not finished:
             status = FAILED if better else NOT_CHECKED
             if not parts:
-                says = "no nudge evaluated so far gives a better design"
+                says = "no nudge evaluated so far gives a better design" + ("; note: " + "; ".join(edges) if edges else "")
             says += " (the check's time ran out before every nudge was evaluated)"
         checks["neighbourhood"] = {"status": status, "says": says, "at_bound": at_bound, "no_effect": no_effect,
                                    "better_neighbour": sorted(better, key=lambda x: -x["gain"])[:3],

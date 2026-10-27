@@ -56,9 +56,12 @@ def test_a_module_name_set_by_a_script_of_the_folder_or_at_run_time_is_defined()
     assert _names({"model.py": "def f():\n    return SCALE * 2\n"}) == ["SCALE"]
 
 
-def test_a_folder_that_sets_names_at_run_time_in_a_way_the_text_does_not_show_is_not_judged() -> None:
-    files = {"model.py": "def f():\n    return SCALE\n", "sim.py": "for k in KEYS:\n    setattr(model, k, 1)\n"}
-    assert _names(files) == []
+def test_a_script_that_sets_names_at_run_time_in_a_way_the_text_does_not_show_is_not_judged_but_the_others_are() -> None:
+    files = {"model.py": "def f():\n    return SCALE\n",
+             "sim.py": "for k in KEYS:\n    setattr(model, k, 1)\n    use(WIDTH)\n"}
+    assert _names(files) == ["SCALE"]  # sim.py may set WIDTH itself; model.py can only get SCALE by an import
+    files = {"pkg.py": "globals()[NAME] = 1\ndef g():\n    return DUR_KEYS\n", "run.py": "def h():\n    return DUR_KEYS\n"}
+    assert _names(files) == ["DUR_KEYS"]  # the other script is judged; the one that calls globals() is not
 
 
 def test_a_script_with_a_star_import_and_one_that_does_not_parse_are_not_judged() -> None:

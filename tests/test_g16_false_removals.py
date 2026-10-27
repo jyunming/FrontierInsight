@@ -23,8 +23,8 @@ def _quest(tmp_path, settings=12, trials=5):
 def test_a_typed_count_that_equals_the_ledger_is_still_flagged():
     """A bare "12 settings" is an unverified claim even when 12 is the ledger's count (no noun-based exemption)."""
     text = "All 12 settings support the proposed mechanism."
-    new, taken = tn.remove(text, PLAN)
-    assert tn.REMOVED in new and [t[0] for t in taken] == ["12"]
+    taken = tn.untraced(text, PLAN)
+    assert [t[0] for t in taken] == ["12"]
     assert tn.hits(text, PLAN)
 
 

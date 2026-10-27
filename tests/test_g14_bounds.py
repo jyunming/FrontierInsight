@@ -50,10 +50,15 @@ _SRC = "def run_trial(cell, rng):\n    return {'a_rate': 0.0, 'b_rate': 0.0}\n"
 def test_declared_metrics_are_exempt_from_the_pilot_stuck_rule() -> None:
     """Old code: two rare-event proportions that were 0 in a small pilot were sent back as stuck, with no way for the
     plan to say 0 is an honest answer."""
-    protocol = {"metrics": [{"id": "a_rate", "kind": "proportion", "may_equal_bound": True},
-                            {"id": "b_rate", "kind": "proportion", "may_equal_bound": True}]}
-    exempt = dg.expected_constants(protocol)
+    protocol = {"metrics": [{"id": "a_rate", "kind": "proportion"}, {"id": "b_rate", "kind": "proportion"}]}
+    design = {"protocol": protocol, "result_assertions": [
+        {"path": "a_rate", "min": 0, "max": 1, "may_equal_bound": True},
+        {"path": "b_rate", "min": 0, "max": 1, "may_equal_bound": True}]}
+    exempt = dg.expected_constants(protocol, design)
     assert {"a_rate", "b_rate"} <= exempt
+    assert not dg.expected_constants(protocol), "the mark is read from the design's result_assertions only"
+    unmarked = {"result_assertions": [{"path": "a_rate", "min": 0, "max": 1}]}
+    assert not dg.expected_constants(protocol, unmarked)
     pilot = est.pilot_problems(_OBS, _KINDS, source=_SRC, exempt=exempt)
     assert not [p for p in pilot.problems if p.kind == "stuck"]
 

@@ -594,21 +594,15 @@ async def check_and_redo(
     limit = min(int(getattr(config.output, "visual_check_max_redos", 0) or 0), _REDO_LIMITS.get(kind, 2))
     for attempt in range(1, limit + 1):
         fixable = redo_findings(kind, report)
-        unresolved: list[dict] = []
         if kind == "poster":
             # The poster is written again part by part, so a finding that names no part of it (no usable `block`) cannot
-            # be redone; it stays in the report as it is, unresolved.
-            unresolved = [f for f in fixable if not f.get("block")]
+            # be redone; it is left out of the redo and listed as unresolved after the loop.
             fixable = [f for f in fixable if f.get("block")]
         if not fixable or report.get("transport") == "none":
-            if unresolved:
-                attempts[-1]["unresolved"] = [f.get("problem") for f in unresolved]
             break
         saved = quest_root / ".fi" / "visual_check" / kind / f"before-redo-{attempt}"
         _copy_version(quest_root, saved, names)
         entry: dict[str, Any] = {"attempt": attempt, "redo_for": sorted({f["check"] for f in fixable})}
-        if unresolved:
-            entry["unresolved"] = [f.get("problem") for f in unresolved]
         attempts.append(entry)
         try:
             feedback = feedback_text(fixable)
@@ -644,6 +638,11 @@ async def check_and_redo(
         _copy_version(saved, quest_root, names)
         _screenshots(pdf, quest_root, kind)
         break
+    if kind == "poster":
+        # Whatever the kept version still shows that cannot be redone (no part named), whatever the redo limit was.
+        unresolved = [f.get("problem") for f in redo_findings(kind, report) if not f.get("block")]
+        if unresolved:
+            next(a for a in reversed(attempts) if a["kept"])["unresolved"] = unresolved
     report["attempts"] = attempts
     _write_report(quest_root, kind, report)
     return report

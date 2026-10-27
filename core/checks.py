@@ -1287,9 +1287,9 @@ CHECKS: tuple[Check, ...] = (
           'a {{v:...}} result key FI cannot fill from trials/plan; rewritten, and with no round left the '
           'sentence or key is taken out (take_out_unfilled); only when the paper was written under result keys'),
     Check('paper_typed_number_not_plan', 'core.typed_numbers', 'hits',
-          'review', 'own_record', 'strip',
+          'review', 'own_record', 'repair',
           'rule R1: a number the writer typed that is not a plan/topic number or a label; rewritten, with no '
-          'round left replaced by [number removed] (typed_numbers.remove)'),
+          'round left kept as written and listed in QUALITY.md as not traced (typed_numbers.untraced)'),
     Check('paper_typed_number_edit_once', 'core.engine', 'Engine._typed_pass_hits',
           'review', 'own_record', 'repair',
           'when no review round is left, the sentences with typed or unfilled numbers get one passage edit '
