@@ -18581,7 +18581,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             runner = _trial_runner.TrialsRunner(
                 self.executor, quest_root=self.quest_root, protocol=lambda: self._protocol_block(state) or {},
                 deterministic="run_trial" not in trial_entries, simulate=simulate_path, analysis=code_path,
-                log=self._log, leave_out=self._left_out_quantities,
+                log=self._log, leave_out=self._left_out_quantities, design=lambda: state.get("design"),
                 # FI's checks of the trials (core/trial_checks.py) send a fault back only while a repair is left.
                 repairs_left=lambda: (int(state.get("exec_reflect_iter", 0) or 0)
                                       < self.config.engine.exec_reflect_max_iterations
