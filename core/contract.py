@@ -42,6 +42,10 @@ MAX_PANELS = 3
 class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    def model_copy(self, *, update: dict[str, Any] | None = None, deep: bool = False) -> Any:  # noqa: ARG002
+        """A copy with ``update`` applied and checked again (pydantic's own copy skips the checks)."""
+        return type(self).model_validate({**dict(self), **(update or {})})
+
 
 class Range(_Strict):
     """The values a result may take; outside is a fault (see the module docstring for a value on the edge)."""
@@ -136,6 +140,10 @@ class Settings(_Strict):
     def names(self) -> set[str]:
         return set(self.compared) | set(self.in_each_run) | set(self.numerical) | set(self.fixed)
 
+    def varied(self) -> set[str]:
+        """The settings whose values change between the runs of the study (a constant does not)."""
+        return set(self.compared) | set(self.in_each_run)
+
 
 class Checks(_Strict):
     oracles: tuple[dict[str, Any], ...] = ()
@@ -166,11 +174,11 @@ class StudyContract(_Strict):
         if twice:
             raise ValueError("these ids are given more than once: " + ", ".join(twice))
         values = {r.id for r in self.results} | {d.id for d in self.derived}
-        settings = self.settings.names()
+        settings = self.settings.varied()
         for c in self.comparisons:
             if c.result not in values:
                 raise ValueError(f"comparison `{c.id}` compares `{c.result}`, which is not a declared result")
-            if c.across not in set(self.settings.compared) | set(self.settings.in_each_run):
+            if c.across not in settings:
                 raise ValueError(f"comparison `{c.id}` is across `{c.across}`, which is not a compared setting")
         for d in self.derived:
             missing = [i for i in d.inputs if i not in values]
@@ -179,14 +187,16 @@ class StudyContract(_Strict):
         for r in self.results:
             unknown = [s for s in (r.depends_on or ()) if s not in settings]
             if unknown:
-                raise ValueError(f"result `{r.id}` depends on {', '.join(unknown)}, which are not settings")
+                raise ValueError(f"result `{r.id}` depends on {', '.join(unknown)}, which are not varied settings")
+            if r.given is not None and r.given not in values:
+                raise ValueError(f"result `{r.id}` is given `{r.given}`, which is not a declared result")
         for f in self.figures:
             unknown = [s for s in f.shows if s not in set(ids)]
             if unknown:
                 raise ValueError(f"figure `{f.id}` shows {', '.join(unknown)}, which are not declared")
             for axis in (f.x, f.series):
                 if axis is not None and axis not in settings:
-                    raise ValueError(f"figure `{f.id}` uses `{axis}`, which is not a setting")
+                    raise ValueError(f"figure `{f.id}` uses `{axis}`, which is not a varied setting")
         p = self.budget.precision
         if p is not None and p.target not in set(ids):
             raise ValueError(f"the precision target `{p.target}` is not a declared result or comparison")
@@ -215,12 +225,33 @@ def _values(v: Any) -> tuple[Any, ...]:
     return tuple(v) if isinstance(v, (list, tuple)) else (v,)
 
 
-def _mapping(v: Any) -> dict[str, Any]:
-    return {str(k): x for k, x in v.items()} if isinstance(v, dict) else {}
+def _mapping(v: Any, gaps: list[str] | None = None, what: str = "") -> dict[str, Any]:
+    """``v`` as a table; a value that is there but not a table is left out (said in ``gaps`` when given)."""
+    if isinstance(v, dict):
+        return {str(k): x for k, x in v.items()}
+    if v is not None and gaps is not None:
+        gaps.append(f"{what} is not a table, so it is left out")
+    return {}
 
 
-def _rows(v: Any) -> tuple[dict[str, Any], ...]:
-    return tuple(x for x in v if isinstance(x, dict)) if isinstance(v, list) else ()
+def _rows(v: Any, gaps: list[str] | None = None, what: str = "") -> tuple[dict[str, Any], ...]:
+    """The table entries of the list ``v``; what is not a list, or an entry that is not a table, is left out (said)."""
+    if v is None:
+        return ()
+    if not isinstance(v, list):
+        if gaps is not None:
+            gaps.append(f"{what} is not a list, so it is left out")
+        return ()
+    rows = tuple(x for x in v if isinstance(x, dict))
+    lost = len(v) - len(rows)
+    if lost and gaps is not None:
+        gaps.append(f"{lost} entr{'y' if lost == 1 else 'ies'} of {what} are not tables, so they are left out")
+    return rows
+
+
+def _ident(v: Any) -> str | None:
+    """An id as a plan must give it: a non-empty text. A number or nothing is not an id."""
+    return v.strip() if isinstance(v, str) and v.strip() else None
 
 
 def _first_valid(cls: type[BaseModel], data: dict[str, Any], gaps: list[str], what: str) -> Any:
@@ -254,55 +285,74 @@ def _named_id(text: Any, ids: set[str]) -> str | None:
 def from_design(design: dict[str, Any] | None) -> StudyContract:
     """The contract a plan's design block gives, by fixed rules (no model, no guess); see the module docstring."""
     design = design if isinstance(design, dict) else {}
-    p = _mapping(design.get("protocol"))
     gaps: list[str] = []
-    labels = {str(k): str(v) for k, v in _mapping(p.get("labels")).items()}
+    p = _mapping(design.get("protocol"), gaps, "the protocol")
+    labels = {str(k): str(v) for k, v in _mapping(p.get("labels"), gaps, "the labels").items()}
 
-    fixed = {**_mapping(p.get("constants")), **_mapping(p.get("thresholds"))}
+    fixed = {**_mapping(p.get("constants"), gaps, "the constants"),
+             **_mapping(p.get("thresholds"), gaps, "the thresholds")}
     settings = _first_valid(Settings, {
-        "compared": {k: _values(v) for k, v in _mapping(p.get("grid")).items()},
-        "sub_studies": _rows(p.get("sub_studies")),
-        "in_each_run": {k: _values(v) for k, v in _mapping(p.get("in_each_run")).items()},
-        "numerical": _mapping(p.get("numerical_settings")), "fixed": fixed}, gaps, "the settings") or Settings()
+        "compared": {k: _values(v) for k, v in _mapping(p.get("grid"), gaps, "the grid").items()},
+        "sub_studies": _rows(p.get("sub_studies"), gaps, "the sub-studies"),
+        "in_each_run": {k: _values(v) for k, v in _mapping(p.get("in_each_run"), gaps, "in_each_run").items()},
+        "numerical": _mapping(p.get("numerical_settings"), gaps, "the numerical settings"), "fixed": fixed},
+        gaps, "the settings") or Settings()
 
+    metrics = _rows(p.get("metrics"), gaps, "the metrics")
     ranges = {}
     assertions = []
-    declared_ids = {str(m.get("id")) for m in _rows(p.get("metrics"))}
-    for a in _rows(design.get("result_assertions")):
+    declared_ids = {_ident(m.get("id")) for m in metrics} - {None}
+    for a in _rows(design.get("result_assertions"), gaps, "the result bounds"):
         if str(a.get("path")) in declared_ids:
             ranges[str(a.get("path"))] = {"min": a.get("min"), "max": a.get("max"), "reason": str(a.get("reason") or "")}
         else:
             assertions.append(a)
 
     results = []
-    for m in _rows(p.get("metrics")):
-        rid = str(m.get("id") or "")
+    no_role: list[str] = []
+    for m in metrics:
+        rid = _ident(m.get("id"))
+        if rid is None:
+            gaps.append(f"a result is declared with the id {m.get('id')!r}, which is not a name, so it is left out")
+            continue
+        if rid in {r.id for r in results}:
+            gaps.append(f"result `{rid}` is declared more than once; only the first is kept")
+            continue
+        if "role" not in m:
+            no_role.append(rid)
         depends = m.get("depends_on")
         if isinstance(depends, list):
-            unknown = [str(s) for s in depends if str(s) not in settings.names()]
+            unknown = [str(s) for s in depends if str(s) not in settings.varied()]
             if unknown:
-                gaps.append(f"result `{rid}` is said to depend on {', '.join(unknown)}, which are not settings; "
-                            "that is left out")
-            depends = [str(s) for s in depends if str(s) in settings.names()]
+                gaps.append(f"result `{rid}` is said to depend on {', '.join(unknown)}, which are not varied "
+                            "settings; that is left out")
+            depends = [str(s) for s in depends if str(s) in settings.varied()]
+        given = m.get("given")
+        if given is not None and _ident(given) not in declared_ids:
+            gaps.append(f"result `{rid}` is given `{given}`, which is not a declared result; that is left out")
+            given = None
         data = {"id": rid, "role": m.get("role") or "result", "kind": m.get("kind") or "mean",
                 "estimand": str(m.get("estimand") or ""), "observation": str(m.get("unit") or ""),
                 "unit": str(m.get("physical_unit") or ""), "label": str(m.get("label") or labels.get(rid, "")),
                 "depends_on": depends, "range": ranges.get(rid) or m.get("range"),
-                "known_value": m.get("known_value"), "reference": m.get("reference"), "given": m.get("given"),
+                "known_value": m.get("known_value"), "reference": m.get("reference"), "given": _ident(given),
                 "cluster": m.get("cluster"), "paired": bool(m.get("paired")), "family": str(m.get("family") or ""),
                 "undefined_when": _mapping(m.get("undefined_when"))}
         r = _first_valid(Result, {k: v for k, v in data.items() if v is not None}, gaps, f"result `{rid}`")
         if r is not None:
             results.append(r)
-    if results and not any("role" in m for m in _rows(p.get("metrics"))):
+    if results and len(no_role) == len(results):
         gaps.append("the plan gives no role for its results; each is read as a measured result")
+    elif no_role:
+        gaps.append("the plan gives no role for " + ", ".join(f"`{i}`" for i in no_role)
+                    + "; each is read as a measured result")
 
     ids = {r.id for r in results}
-    derived = [d for d in (_first_valid(Derived, x, gaps, f"derived `{x.get('id')}`") for x in _rows(p.get("derived")))
+    derived = [d for d in (_first_valid(Derived, x, gaps, f"derived `{x.get('id')}`") for x in _rows(p.get("derived"), gaps, "the derived quantities"))
                if d is not None]
     ids |= {d.id for d in derived}
     comparisons = [c for c in (_first_valid(Comparison, x, gaps, f"comparison `{x.get('id')}`")
-                               for x in _rows(p.get("comparisons"))) if c is not None]
+                               for x in _rows(p.get("comparisons"), gaps, "the comparisons")) if c is not None]
 
     figures = []
     planned = p.get("figures") if isinstance(p.get("figures"), list) else design.get("figures_planned")
@@ -340,8 +390,9 @@ def from_design(design: dict[str, Any] | None) -> StudyContract:
         gaps.append("these parts of the protocol are kept only as notes: " + ", ".join(other))
 
     base = {"settings": settings, "budget": budget, "labels": labels, "notes": notes,
-            "checks": Checks(oracles=_rows(p.get("oracles")), criteria=_rows(p.get("criteria")),
-                             assertions=tuple(assertions), topic_map=_rows(p.get("topic_map"))),
+            "checks": Checks(oracles=_rows(p.get("oracles"), gaps, "the known-answer checks"),
+                             criteria=_rows(p.get("criteria"), gaps, "the criteria"),
+                             assertions=tuple(assertions), topic_map=_rows(p.get("topic_map"), gaps, "the topic map")),
             "model": _mapping(p.get("model")) if isinstance(p.get("model"), dict) else
             ({"summary": p["model"]} if isinstance(p.get("model"), str) else {}),
             "search": _mapping(p.get("optimisation")) or None, "shared_draws": p.get("shared_draws") is True}
@@ -357,6 +408,9 @@ def from_design(design: dict[str, Any] | None) -> StudyContract:
         return _without_broken_links(base, parts, gaps, e)
 
 
+_ONE = {"derived": "derived", "comparisons": "comparison", "figures": "figure"}
+
+
 def _without_broken_links(base: dict[str, Any], parts: dict[str, Any], gaps: list[str], error: ValueError) -> StudyContract:
     gaps = [*gaps, f"a part of the plan refers to something it does not declare ({_first_error(error)})"]
     budget = base["budget"]
@@ -365,13 +419,22 @@ def _without_broken_links(base: dict[str, Any], parts: dict[str, Any], gaps: lis
     # take the good ones with it.
     built = {**parts, "comparisons": (), "derived": (), "figures": ()}
     for key in ("derived", "comparisons", "figures"):
-        for item in parts[key]:
-            trial = {**built, key: (*built[key], item)}
-            try:
-                StudyContract(**base, **trial)
-                built = trial
-            except ValueError:
-                gaps.append(f"{key[:-1]} `{item.id}` is left out: it refers to something the plan does not declare")
+        waiting = list(parts[key])
+        while waiting:  # again until nothing more fits: a derived quantity may use one listed after it
+            kept = []
+            for item in waiting:
+                trial = {**built, key: (*built[key], item)}
+                try:
+                    StudyContract(**base, **trial)
+                    built = trial
+                    kept.append(item)
+                except ValueError:
+                    pass
+            if not kept:
+                break
+            waiting = [i for i in waiting if i not in kept]
+        gaps.extend(f"{_ONE[key]} `{item.id}` is left out: it refers to something the plan does not declare"
+                    for item in waiting)
     try:
         return StudyContract(**{**base, "budget": budget}, **built, gaps=tuple(gaps))
     except ValueError:

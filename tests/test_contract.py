@@ -67,6 +67,7 @@ def test_a_plan_in_the_contract_form_is_read_with_its_roles_comparisons_derived_
     plan = _old_plan()
     p = plan["protocol"]
     p["metrics"][0].update(role="physical_bound", depends_on=["load"])
+    p["metrics"][1]["role"] = "result"
     p["metrics"].append({"id": "wall_s", "kind": "mean", "role": "timing", "estimand": "time of the solve"})
     p["comparisons"] = [{"id": "ratio_gain", "result": "ratio", "across": "method", "values": ["plain", "careful"]}]
     p["derived"] = [{"id": "covered", "inputs": ["spread"], "kind": "proportion"}]
@@ -119,3 +120,59 @@ def test_a_plan_of_any_shape_gives_a_contract_and_never_raises(design) -> None:
     assert isinstance(c, C.StudyContract)
     if design and isinstance(design.get("protocol"), dict) and design["protocol"].get("metrics"):
         assert any("result `x`" in g for g in c.gaps) and any("run budget" in g for g in c.gaps)
+
+
+def test_ids_that_are_not_names_and_ids_given_twice_are_left_out_and_said() -> None:
+    c = C.from_design({"protocol": {"metrics": [{"id": "x"}, {"id": "x"}, {"id": None}, {"id": 7}]}})
+    assert [r.id for r in c.results] == ["x"]
+    assert any("more than once" in g for g in c.gaps)
+    assert sum("which is not a name" in g for g in c.gaps) == 2
+
+
+def test_a_derived_quantity_that_uses_one_listed_after_it_is_kept_when_another_part_is_broken() -> None:
+    c = C.from_design({"protocol": {
+        "grid": {"load": [1, 2]}, "metrics": [{"id": "x", "role": "result"}],
+        "derived": [{"id": "a", "inputs": ["b"]}, {"id": "b", "inputs": ["x"]}, {"id": "c", "inputs": ["nowhere"]}],
+        "comparisons": [{"id": "bad", "result": "nowhere", "across": "load"}]}})
+    assert sorted(d.id for d in c.derived) == ["a", "b"] and c.comparisons == ()
+    assert any("derived `c`" in g for g in c.gaps) and any("comparison `bad`" in g for g in c.gaps)
+
+
+def test_a_part_that_is_not_a_table_or_a_list_is_said_not_silently_dropped() -> None:
+    c = C.from_design({"protocol": {"metrics": ["junk", {"id": "x"}], "grid": [1, 2], "oracles": "check it"}})
+    assert [r.id for r in c.results] == ["x"]
+    assert any("1 entry of the metrics" in g for g in c.gaps)
+    assert any("the grid is not a table" in g for g in c.gaps)
+    assert any("the known-answer checks is not a list" in g for g in c.gaps)
+
+
+def test_a_result_with_no_role_among_ones_with_a_role_is_named() -> None:
+    c = C.from_design({"protocol": {"metrics": [{"id": "curve", "role": "reference"}, {"id": "value"}]}})
+    assert c.role_of("curve") == "reference" and c.role_of("value") == "result"
+    assert any("no role for `value`" in g for g in c.gaps)
+
+
+def test_a_constant_is_not_a_setting_a_result_depends_on_or_a_figure_is_drawn_along() -> None:
+    settings = C.Settings(compared={"load": (1, 2)}, fixed={"limit": 0.5})
+    with pytest.raises(ValueError, match="not varied settings"):
+        C.StudyContract(settings=settings, results=(C.Result(id="x", depends_on=("limit",)),))
+    with pytest.raises(ValueError, match="not a varied setting"):
+        C.StudyContract(settings=settings, results=(C.Result(id="x"),),
+                        figures=(C.Figure(id="f", file="f.png", shows=("x",), x="limit"),))
+    c = C.from_design({"protocol": {"grid": {"load": [1, 2]}, "constants": {"limit": 0.5},
+                                    "metrics": [{"id": "x", "role": "result", "depends_on": ["load", "limit"]}]}})
+    assert c.result("x").depends_on == ("load",) and any("limit" in g for g in c.gaps)
+
+
+def test_a_condition_a_proportion_is_given_must_be_declared() -> None:
+    with pytest.raises(ValueError, match="is given"):
+        C.StudyContract(results=(C.Result(id="rate", kind="proportion", given="event"),))
+    c = C.from_design({"protocol": {"metrics": [{"id": "rate", "role": "result", "given": "event"}]}})
+    assert c.result("rate").given is None and any("is given `event`" in g for g in c.gaps)
+
+
+def test_a_copy_with_changes_is_checked_again() -> None:
+    c = C.StudyContract(settings=C.Settings(compared={"load": (1, 2)}), results=(C.Result(id="x"),))
+    with pytest.raises(ValueError, match="not a declared result"):
+        c.model_copy(update={"comparisons": (C.Comparison(id="d", result="missing", across="load"),)})
+    assert c.model_copy(update={"labels": {"x": "X"}}).labels == {"x": "X"}
