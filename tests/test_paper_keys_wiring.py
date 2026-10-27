@@ -1,4 +1,4 @@
-"""FI fills the writer's result keys, finds the numbers the writer typed, sends them back once and then takes them out.
+"""FI fills the writer's result keys, finds the numbers the writer typed, sends them back once and then keeps them listed as not traced.
 
 The engine test runs write -> review -> rewrite -> review with a fake model on the s2 kinetics trial record."""
 from __future__ import annotations
@@ -92,11 +92,11 @@ def test_the_passage_editor_takes_a_quoted_number_hit_and_not_an_unquoted_one() 
     assert reason
 
 
-def test_keep_check_records_what_was_removed_and_why_a_paper_is_not_held(tmp_path: Path) -> None:
+def test_keep_check_records_what_is_not_traced_and_why_a_paper_is_not_held(tmp_path: Path) -> None:
     root = _quest(tmp_path)
-    paper_facts.keep_check(root, [], "p", removed=[("0.7777", "The bias was 0.7777.")], not_filled="")
+    paper_facts.keep_check(root, [], "p", untraced=[("0.7777", "The bias was 0.7777.")], not_filled="")
     kept = paper_facts.kept_check(root)
-    assert kept["removed_numbers"]
+    assert kept["untraced_numbers"]
     paper_facts.keep_check(root, [], "p", not_filled="older_paper")
     assert paper_facts.kept_check(root)["not_filled_by_fi"] == "older_paper"
     (root / "QUALITY.md").unlink(missing_ok=True)
@@ -112,7 +112,7 @@ def test_the_writer_prompts_hold_the_sheet_and_the_rule(tmp_path: Path) -> None:
     assert "$values_sheet" in (agents / "write_patch.md").read_text(encoding="utf-8")
 
 
-def test_fi_fills_the_keys_sends_a_typed_result_back_once_and_then_takes_it_out(tmp_path: Path) -> None:
+def test_fi_fills_the_keys_sends_a_typed_result_back_once_and_then_keeps_it_listed(tmp_path: Path) -> None:
     root = _quest(tmp_path)
     eng = _engine(root, max_iterations=2)
     calls: list[tuple[str, str]] = []
@@ -145,16 +145,16 @@ def test_fi_fills_the_keys_sends_a_typed_result_back_once_and_then_takes_it_out(
     assert review["iteration"] == 1 and "[number removed]" not in Path(out["paper_md"]).read_text(encoding="utf-8")
     state.update(review)
     assert eng._route_after_review(state) == "rewrite"  # type: ignore[arg-type]
-    # Round 1: the rewrite is an edit of the sentence; the writer keeps the number; no round is left: FI takes it out.
+    # Round 1: the rewrite is an edit of the sentence; the writer keeps the number; no round is left: it stays, listed as not traced.
     state.update(asyncio.run(eng._node_write(state)))  # type: ignore[arg-type]
     assert any(n == "write.patch" and TYPED in p and "Results you can place" in p for n, p in calls)
     review = asyncio.run(eng._node_review(state))  # type: ignore[arg-type]
     final = Path(state["paper_md"]).read_text(encoding="utf-8")
-    assert "[number removed]" in final and TYPED not in final and "{{v:" not in paper_facts.without_marks(final)
+    assert "[number removed]" not in final and TYPED in final and "{{v:" not in paper_facts.without_marks(final)
     assert "0.824% (95% chi-square interval" in paper_facts.without_marks(final)
     kept = paper_facts.kept_check(root)
-    assert any(r["number"] == TYPED for r in kept["removed_numbers"])
+    assert any(r["number"] == TYPED for r in kept["untraced_numbers"])
     state.update(review)
     assert eng._route_after_review(state) not in ("re_execute", "stuck")  # type: ignore[arg-type]
     report = quality_report.render(quality_report.build(root))
-    assert "Numbers taken out of the paper" in report and TYPED in report
+    assert "Numbers not traced to the plan or FI's records" in report and TYPED in report

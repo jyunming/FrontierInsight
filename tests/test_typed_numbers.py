@@ -95,11 +95,12 @@ def test_many_sentences_give_a_further_hit_without_a_quote():
     assert "a further 3 typed number" in out[-1] and "“" not in out[-1]
 
 
-def test_remove_replaces_each_number_and_lists_it():
+def test_untraced_lists_each_number_with_its_sentence_and_changes_nothing():
     text = "The bias was 0.8244 at noise 0.05."
-    out, taken = tn.remove(text, _plan())
-    assert out == f"The bias was {tn.REMOVED} at noise 0.05."
-    assert taken == [("0.8244", text)]
+    assert tn.untraced(text, _plan()) == [("0.8244", text)]
+    assert not hasattr(tn, "remove")
+    # Known positive: a number of the plan is traced, so it is not listed.
+    assert tn.untraced("Noise 0.05 and n = 10.", _plan()) == []
 
 
 def test_a_paper_with_only_plan_numbers_has_no_hits():
@@ -134,8 +135,8 @@ def _typed_empty_plan(text: str) -> list[str]:
 def test_enumeration_labels_of_a_real_limitations_paragraph_are_not_numbers():
     left = _typed_empty_plan(LIMITATIONS)
     assert left == ["1", "1e-12"], left  # "1/T" and the tolerance are the paragraph's own numbers, the ten labels are not
-    out, taken = tn.remove(LIMITATIONS, frozenset())
-    assert all(f"({i})" in out for i in range(1, 11)), out
+    taken = tn.untraced(LIMITATIONS, frozenset())
+    assert not any(tok == str(i) and f"({i})" in sent for i in range(2, 11) for tok, sent in taken)
     assert "1e-12" in " ".join(tok for tok, _ in taken)  # a real number of the paragraph is still checked
 
 
@@ -216,10 +217,10 @@ def test_a_typed_result_in_plain_prose_is_still_found():
     assert _typed("The mean gain was 12.7 in the main grid.") == ["12.7"]
 
 
-def test_the_replacement_takes_only_the_number_not_its_operator_or_neighbour():
+def test_a_listed_number_is_the_number_not_its_operator_or_neighbour():
     """Old code took the operator and the space before the number with it ("a - 2.5", "7-13")."""
-    out, _taken = tn.remove("Value a - 2.5 and range 7-13 and 12 %.", _plan())
-    assert out == f"Value a - {tn.REMOVED} and range {tn.REMOVED}-{tn.REMOVED} and {tn.REMOVED}."
+    taken = tn.untraced("Value a - 2.5 and range 7-13 and 12 %.", _plan())
+    assert [t for t, _s in taken] == ["2.5", "7", "13", "12 %"]
 
 
 def test_a_quantile_level_named_in_the_method_is_not_a_typed_result():

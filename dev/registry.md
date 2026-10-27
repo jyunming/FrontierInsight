@@ -365,8 +365,9 @@ same PR that adds, splits or renames one.
 - `core/typed_numbers.py` — rule R1, the only check of the numbers the writer types: a number in the paper's own text must be a
   number of the frozen plan or the topic (written exactly as the plan writes it, no tolerance), a structural label (a section,
   figure or equation number, a year, a citation), or an integer 0-10 inside math; `plan_numbers(protocol, topic)` (the plan's
-  numbers, its `constants` field and the topic's), `typed_outside_the_plan`, `allowed`, `hits`, `report`, `remove` (a typed
-  number replaced by `[number removed]`; when no round is left, only after the one edit of a whole-paper draft that
+  numbers, its `constants` field and the topic's), `typed_outside_the_plan`, `allowed`, `hits`, `report`, `untraced` (`(number, sentence)`
+  of each typed number FI cannot trace; when no round is left the paper keeps them as written and QUALITY.md lists them
+  as not traced, only after the one edit of a whole-paper draft that
   `Engine._typed_pass_hits` asks for: `review["typed_pass_hits"]`, routed to `rewrite` by `_route_after_review` before every
   route that would deliver the draft, made by `_node_write` with the passage editor only, `QuestState.draft_edited`). It skips FI's own `fi:fact-*`, `fi:best-design`, `fi:phased` blocks and the `fi:v` marker.
 - `core/paper_values.py` — `write_answers` / `Records.answers` / `_answer`: a plan metric no trial returns, which the analysis recorded one value for, gets the key `{{v:<name>}}` (no settings), read from `.fi/analysis_answers.json` that `Engine._keep_analysis_answers` writes after each run. The result keys `{{v:<value>[:sd|mean_ci] @ axis=value, ... [| %|ratio @ ...]}}`: `records_of` A key is placed only when it renders the quantity's value (`placed_metrics`, `_places_value`); the answer is offered only when every run of the analysis gave the same value, otherwise the per-run values are listed (`_by_run_text`); a run that failed counts as missing (`write_answers(scheduled=)`) and an old record is still read (`_read_answers`). `_answers_block` lists the keys in the write prompt, and `Engine._unplaced_topic_answers` makes a main quantity of the topic that FI has a value for but the paper never gives a review hit.
