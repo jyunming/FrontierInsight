@@ -710,3 +710,33 @@ def test_a_key_the_first_version_has_at_any_depth_that_the_second_lacks_is_uncon
     # the second version may carry more at depth; a real difference at depth is still a disagreement
     assert si.judge_rows([{"main": {"result": {"a": 1}}, "ref": {"result": {"a": 1, "c": 3}}}], one, si.REL)["status"] == "agree"
     assert si.judge_rows([{"main": {"result": {"a": 1.0}}, "ref": {"result": {"a": 1.5}}}], one, si.REL)["status"] == "disagree"
+
+
+def test_the_comparison_calls_the_function_after_the_study_file_has_set_the_package_constants(tmp_path):
+    """The package's constant is set by simulate.py when the study runs; the comparison loads simulate.py the same way
+    before calling, so the first version returns a value instead of raising NameError."""
+    pkg = tmp_path / "code" / "pkg"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "model.py").write_text("def scaled(x):\n    return x * LIMIT\n", encoding="utf-8")
+    (tmp_path / "code" / "simulate.py").write_text("from pkg import model\nmodel.LIMIT = 4\n", encoding="utf-8")
+    (tmp_path / "ref.py").write_text("def scaled(x):\n    return x * 4\n", encoding="utf-8")
+    (tmp_path / "inputs.json").write_text(json.dumps([{"x": 1.0}, {"x": 2.0}]), encoding="utf-8")
+
+    def rows(study: str) -> dict:
+        script = si.compare_script(code_dir="code", module="pkg.model", name="scaled", reference="ref.py",
+                                   inputs="inputs.json", uses=[], study=study)
+        p = subprocess.run([sys.executable, "-B", "-c", script], cwd=tmp_path, capture_output=True, text=True, timeout=120)
+        return si.parse_output(p.stdout)
+
+    without = rows("")
+    assert "NameError" in without["rows"][0]["main_err"]  # what the comparison did before: it raised, the other did not
+    got = rows("code/simulate.py")
+    assert si.judge_rows(got["rows"], [{"x": 1.0}, {"x": 2.0}], si.REL)["status"] == si.AGREE
+    assert [r["main"] for r in got["rows"]] == [4.0, 8.0]
+
+
+def test_both_versions_raising_alike_is_a_comparison_that_could_not_run():
+    rows = [{"main_err": "NameError: LIMIT", "ref_err": "NameError: LIMIT"}]
+    res = si.judge_rows(rows, [{"x": 1.0}], si.REL)
+    assert res["status"] == si.UNCONFIRMED and not res["disagreements"]

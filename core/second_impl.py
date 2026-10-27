@@ -929,6 +929,12 @@ try:
     main_fn = getattr(main_mod, @NAME@)
 except BaseException:
     done({"main_import_error": traceback.format_exc()[-600:]})
+# The study's own file is loaded as the trial harness loads it, before anything is called: it sets the package's constants.
+try:
+    if @STUDY@:
+        _fi_load_study(@STUDY@)
+except BaseException:
+    done({"study_load_error": traceback.format_exc()[-600:]})
 try:
     sp = importlib.util.spec_from_file_location("second_impl_reference", @REF@)
     ref_mod = importlib.util.module_from_spec(sp)
@@ -966,11 +972,14 @@ done({"rows": rows})
 
 
 def compare_script(*, code_dir: str, module: str, name: str, reference: str, inputs: str, uses: list[str],
-                   own: dict[str, str] | None = None) -> str:
-    """The ``-c`` script that imports both versions and calls each on every input; it prints one ``SECOND_IMPL: {json}`` line."""
-    text = _SCRIPT
+                   own: dict[str, str] | None = None, study: str = "") -> str:
+    """The ``-c`` script that imports both versions and calls each on every input; it prints one ``SECOND_IMPL: {json}`` line.
+    ``study``: the study's own file (``code/simulate.py``), loaded first the way the trial harness loads it."""
+    from .trial_runner import LOAD_STUDY_SOURCE
+
+    text = LOAD_STUDY_SOURCE + _SCRIPT
     for token, value in (("@CODE@", code_dir), ("@MODULE@", module), ("@NAME@", name), ("@REF@", reference),
-                         ("@INPUTS@", inputs), ("@USES@", list(uses)), ("@OWN@", dict(own or {}))):
+                         ("@STUDY@", study), ("@INPUTS@", inputs), ("@USES@", list(uses)), ("@OWN@", dict(own or {}))):
         text = text.replace(token, repr(value))
     return text
 
@@ -1348,9 +1357,10 @@ class SecondImpl:
             entry["deps_from_first_version"] = shared
         else:
             entry.pop("deps_from_first_version", None)
+        study = "code/simulate.py" if (self.root / "code" / "simulate.py").is_file() else ""
         script = compare_script(code_dir="code", module=f"{self.package}.model", name=spec.name,
                                 reference=(DIR / f"{spec.name}.py").as_posix(), inputs=inputs_path.as_posix(), uses=uses,
-                                own=own)
+                                own=own, study=study)
         out = None
         err = ""
         for _try in range(2):  # a harness that printed nothing is run once more: it says nothing about the function
@@ -1367,6 +1377,8 @@ class SecondImpl:
                     "disagreements": [], "retry": True}
         if "main_import_error" in out:
             return {"status": UNCONFIRMED, "why": "the first version could not be imported", "disagreements": [], "retry": True}
+        if "study_load_error" in out:
+            return {"status": UNCONFIRMED, "why": "the study's own code could not be loaded for the comparison", "disagreements": [], "retry": False}
         if "ref_import_error" in out:
             return {"status": UNCONFIRMED, "why": "the second version could not be loaded", "disagreements": [], "retry": False}
         rows = out.get("rows") if isinstance(out.get("rows"), list) else []
@@ -1374,7 +1386,7 @@ class SecondImpl:
             return {"status": UNCONFIRMED, "why": "the comparison returned fewer results than inputs", "disagreements": [], "retry": True}
         verdict = judge_rows(rows, inputs, tolerance_for(spec, self.protocol))
         if verdict["status"] == UNCONFIRMED:
-            verdict.update(why=verdict.get("why") or "both versions raised on every input", retry=False)
+            verdict.update(why=verdict.get("why") or "the comparison could not run: both versions raised on every input", retry=False)
         return verdict
 
     def _return_keys(self, spec: _fs.Spec) -> list[str] | None:
