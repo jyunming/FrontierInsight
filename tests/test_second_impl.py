@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
 import string
 import subprocess
 import sys
@@ -710,3 +711,74 @@ def test_a_key_the_first_version_has_at_any_depth_that_the_second_lacks_is_uncon
     # the second version may carry more at depth; a real difference at depth is still a disagreement
     assert si.judge_rows([{"main": {"result": {"a": 1}}, "ref": {"result": {"a": 1, "c": 3}}}], one, si.REL)["status"] == "agree"
     assert si.judge_rows([{"main": {"result": {"a": 1.0}}, "ref": {"result": {"a": 1.5}}}], one, si.REL)["status"] == "disagree"
+
+
+def test_the_comparison_calls_the_function_after_the_study_file_has_set_the_package_constants(tmp_path):
+    """The package's constant is set by simulate.py when the study runs; the comparison loads simulate.py the same way
+    before calling, so the first version returns a value instead of raising NameError."""
+    pkg = tmp_path / "code" / "pkg"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "model.py").write_text("def scaled(x):\n    return x * LIMIT\n", encoding="utf-8")
+    (tmp_path / "code" / "simulate.py").write_text("from pkg import model\nmodel.LIMIT = 4\n", encoding="utf-8")
+    (tmp_path / "ref.py").write_text("def scaled(x):\n    return x * 4\n", encoding="utf-8")
+    (tmp_path / "inputs.json").write_text(json.dumps([{"x": 1.0}, {"x": 2.0}]), encoding="utf-8")
+
+    def rows(study: str) -> dict:
+        script = si.compare_script(code_dir="code", module="pkg.model", name="scaled", reference="ref.py",
+                                   inputs="inputs.json", uses=[], study=study)
+        p = subprocess.run([sys.executable, "-B", "-c", script], cwd=tmp_path, capture_output=True, text=True, timeout=120)
+        return si.parse_output(p.stdout)
+
+    without = rows("")
+    assert "NameError" in without["rows"][0]["main_err"]  # what the comparison did before: it raised, the other did not
+    got = rows("code/simulate.py")
+    assert si.judge_rows(got["rows"], [{"x": 1.0}, {"x": 2.0}], si.REL)["status"] == si.AGREE
+    assert [r["main"] for r in got["rows"]] == [4.0, 8.0]
+
+
+def test_both_versions_raising_alike_is_a_comparison_that_could_not_run():
+    rows = [{"main_err": "NameError: LIMIT", "ref_err": "NameError: LIMIT"}]
+    res = si.judge_rows(rows, [{"x": 1.0}], si.REL)
+    assert res["status"] == si.UNCONFIRMED and not res["disagreements"]
+
+
+def test_the_study_file_is_loaded_with_the_environment_the_trial_harness_gives_it(tmp_path):
+    """A study file that reads FI's thresholds when it loads gets them in the comparison too, as in a trial."""
+    pkg = tmp_path / "code" / "pkg"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "model.py").write_text("def scaled(x):\n    return x * LIMIT\n", encoding="utf-8")
+    (tmp_path / "code" / "simulate.py").write_text(
+        "import json, os\nfrom pkg import model\nTHRESHOLDS = json.loads(os.environ['FI_THRESHOLDS'])\n"
+        "KIND = os.environ['FI_CELL_KIND']\nmodel.LIMIT = 4\n", encoding="utf-8")
+    (tmp_path / "ref.py").write_text("def scaled(x):\n    return x * 4\n", encoding="utf-8")
+    (tmp_path / "inputs.json").write_text(json.dumps([{"x": 1.0}]), encoding="utf-8")
+    script = si.compare_script(code_dir="code", module="pkg.model", name="scaled", reference="ref.py",
+                               inputs="inputs.json", uses=[], study="code/simulate.py")
+    for inherited in ({}, {"FI_THRESHOLDS": '{"x": 1}', "FI_CELL_KIND": "search"}):
+        env = {k: v for k, v in os.environ.items() if k not in ("FI_THRESHOLDS", "FI_CELL_KIND")}
+        p = subprocess.run([sys.executable, "-B", "-c", script], cwd=tmp_path, capture_output=True, text=True,
+                           timeout=120, env={**env, **inherited})
+        got = si.parse_output(p.stdout)
+        assert "study_load_error" not in got, got
+        assert [r["main"] for r in got["rows"]] == [4.0]
+
+
+def test_the_study_file_never_sees_a_threshold_or_kind_inherited_from_the_process_that_started_the_comparison(tmp_path):
+    pkg = tmp_path / "code" / "pkg"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "model.py").write_text("def seen(x):\n    return [THRESHOLDS, KIND]\n", encoding="utf-8")
+    (tmp_path / "code" / "simulate.py").write_text(
+        "import json, os\nfrom pkg import model\nmodel.THRESHOLDS = json.loads(os.environ['FI_THRESHOLDS'])\n"
+        "model.KIND = os.environ['FI_CELL_KIND']\n", encoding="utf-8")
+    (tmp_path / "ref.py").write_text("def seen(x):\n    return [{}, 'check']\n", encoding="utf-8")
+    (tmp_path / "inputs.json").write_text(json.dumps([{"x": 1.0}]), encoding="utf-8")
+    script = si.compare_script(code_dir="code", module="pkg.model", name="seen", reference="ref.py",
+                               inputs="inputs.json", uses=[], study="code/simulate.py")
+    env = {**os.environ, "FI_THRESHOLDS": '{"x": 1}', "FI_CELL_KIND": "search"}
+    p = subprocess.run([sys.executable, "-B", "-c", script], cwd=tmp_path, capture_output=True, text=True, timeout=120,
+                       env=env)
+    got = si.parse_output(p.stdout)
+    assert si.judge_rows(got["rows"], [{"x": 1.0}], si.REL)["status"] == si.AGREE, got

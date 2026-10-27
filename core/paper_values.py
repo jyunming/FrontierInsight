@@ -129,7 +129,7 @@ class Measured:
     """A computed number as FI holds it, before it is written: ``kind`` says which rounding it gets."""
 
     value: float
-    kind: str = "plain"  # plain | ratio | int | count | interval | words
+    kind: str = "plain"  # plain | ratio | int | count | interval | words | over_settings (n = settings, one run each)
     lower: float | None = None
     upper: float | None = None
     method: str = ""  # "95% Wilson interval"
@@ -152,6 +152,8 @@ def fmt(m: Measured, form: str = "mean", percent: bool = False) -> str:
         return f"{m.successes} of {m.n}"
     scale = 100.0 if percent else 1.0
     tail = "%" if percent else ""
+    if m.kind == "over_settings":
+        return f"{sig(m.value * scale, 4)}{tail} (mean over {m.n} settings, one run each; no interval)"
     if m.kind == "interval":
         assert m.lower is not None and m.upper is not None
         v, lo, hi = interval_places(m.value * scale, m.lower * scale, m.upper * scale)
@@ -774,10 +776,22 @@ def _observations(rec: Records, cells: list[dict[str, Any]], metric: str) -> tup
     return _trials(cells, metric), False
 
 
+def _one_run_each(cells: list[dict[str, Any]], metric: str) -> int:
+    """How many settings gave ``metric`` when each gave at most one value and two or more gave one (FI's trial record
+    counts the values of each), else 0. Those values are of different settings, not repeated draws of one quantity, so
+    no interval or standard error of their mean is a statement the data can make. A setting with no value (it failed)
+    is not counted."""
+    counts = [len(_tt._values(c["metrics"][metric])) for c in cells]
+    ran = sum(1 for n in counts if n == 1)
+    return ran if ran > 1 and all(n <= 1 for n in counts) else 0
+
+
 def _interval(rec: Records, cells: list[dict[str, Any]], metric: str) -> tuple[float, float | None, float | None, str, int | None, bool, float | None]:
     """``(mean, lower, upper, method, n, symmetric, standard error)`` of ``metric`` over ``cells``, from
     :func:`_observations`. With shared draws it is a t interval over the different draws (also for a 0/1 value: the
     draws' proportions); with fewer than two draws there is no interval."""
+    if ran := _one_run_each(cells, metric):
+        raise _Unfilled(f"each of the {ran} settings ran once, so their values are not repeated draws and there is no interval")
     obs, shared = _observations(rec, cells, metric)
     summary = _tt.summary(obs)
     if shared:
@@ -964,6 +978,8 @@ def _measure(rec: Records, metric: str, form: str, arg: str, where: dict[str, Pi
         return Measured(summary["mean"], "count", n=summary["n"], successes=int(summary["successes"]))
     if form == "mean":
         return Measured(_tt.summary(_observations(rec, cells, metric)[0])["mean"])
+    if form == "mean_ci" and (ran := _one_run_each(cells, metric)):
+        return Measured(_tt.summary(values)["mean"], "over_settings", n=ran)
     if form in ("mean_ci", "ci", "pm"):
         mean, lo, hi, words, n, symmetric, _se = _interval(rec, cells, metric)
         if lo is None or hi is None:
@@ -998,6 +1014,8 @@ def _measure(rec: Records, metric: str, form: str, arg: str, where: dict[str, Pi
     r = _pearson(xs, ys)
     if form == "corr":
         return Measured(r)
+    if ran := _one_run_each(cells, metric):
+        raise _Unfilled(f"each of the {ran} settings ran once, so their values are not repeated draws and there is no interval")
     if len(xs) < 4:
         raise _Unfilled("too few paired " + ("draws" if shared else "trials") + " for an interval")
     z, half = math.atanh(r), 1.96 / math.sqrt(len(xs) - 3)
@@ -1143,9 +1161,10 @@ def _versus(rec: Records, key: Key) -> tuple[str, list[float]]:
                 if _setting_values(_matching(rec, fixed, key.operand_metric), key.operand_metric) is None:
                     raise _Unfilled(f"{key.operand_metric} is measured, not set by the setting, so it has no single value to "
                                     f"compare with")
+            if got.lower is None or got.upper is None:
+                raise _Unfilled("each setting ran once, so there is no interval to compare with")
         except _Unfilled as why:
             raise _Unfilled(f"not computable at {here}: {why}" + _versus_instead(rec, key, str(why))) from None
-        assert got.lower is not None and got.upper is not None
         verdicts.append("above" if got.lower > ref else "below" if got.upper < ref else "within")
         if ref != 0:
             ratios.append(got.value / ref)
