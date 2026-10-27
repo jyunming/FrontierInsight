@@ -2862,7 +2862,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if state.get("exec_patch_pending"):
             return "retry"
         # A run that ran to the end and only warned is repaired on the warnings' own budget or stopped for them by the
-        # reflect node, whatever is left of the crash repairs: it never goes on to the analysis with the warnings.
+        # reflect node, whatever is left of the crash repairs (a repair that gave up has gone on above, as before).
         if self._numeric_turn(state):
             return "retry"
         iters = state.get("exec_reflect_iter", 0)
@@ -20428,7 +20428,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                                 + str(history[-1].get("patch_summary") or ""))[:400]
                 return {**spent, "exec_reflect_iter": iters + bump, "exec_reflect_history": history}
         self._last_ledger_id = self._record(_attempts.LEDGER, lambda: {
-            "kind": "repair", "script": code_path.name, "attempt": iters + 1,
+            "kind": "repair", "script": code_path.name, "attempt": attempt_no,
             "parent_sha256": parent_sha, "sha256": _attempts._sha(new_code.encode("utf-8")),
             "summary": patch_summary[:300],
             # A fix in the model's package: the files it rewrote, by their new hash.

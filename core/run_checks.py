@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from . import frozen_protocol as _frozen
+from . import numeric_warnings as _numeric
 from . import in_run as _in_run
 from . import optimise_search as _optimise_search
 from . import oracle_forms as _forms
@@ -1783,7 +1784,7 @@ class RunChecksMixin:
             return {"exec_patch_pending": True, "exec_give_up_reason": "",
                     "exec_reflect_iter": max(int(state.get("exec_reflect_iter") or 0),
                                              int(self.config.engine.exec_reflect_max_iterations))}  # type: ignore[attr-defined]
-        repairs = int(state.get("exec_reflect_iter") or 0)
+        repairs = _numeric.repairs_made(state)
         return self._stop_before_run(
             str(fault["say"]), "cannot_repair",
             tried=[*[str(t) for t in fault.get("tried") or []],
