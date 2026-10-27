@@ -245,7 +245,7 @@ class ResultChecksMixin:
         drawn = _degenerate.figure_problems(self.fi_dir / "figure_records", figures)  # type: ignore[attr-defined]
         protocol = self._protocol_block(state)  # type: ignore[attr-defined]
         found = _degenerate.quantity_problems(
-            cells, reported, self._typed_result_exempt(state) | _degenerate.expected_constants(protocol))  # type: ignore[attr-defined]
+            cells, reported, self._typed_result_exempt(state) | _degenerate.expected_constants(protocol, state.get("design")))  # type: ignore[attr-defined]
         quantities, kept = _degenerate.split_flat(found, protocol)
         self._result_kept = [_degenerate.kept_note(kept)] if kept else []
         if not (drawn or quantities):

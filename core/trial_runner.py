@@ -1162,7 +1162,7 @@ class TrialsRunner:
 
     def __init__(self, executor: Any, *, quest_root: Path, protocol: Any, deterministic: bool,
                  simulate: Path, analysis: Path, log: Any = None, submit: Path | None = None,
-                 leave_out: Any = None, repairs_left: Any = None, at_once: int = 1) -> None:
+                 leave_out: Any = None, repairs_left: Any = None, at_once: int = 1, design: Any = None) -> None:
         self.executor = executor
         #: How many settings of the study run at the same time (:func:`settings_at_once`), and what each is expected to cost
         #: (``cost(cell)`` from FI's timing, set by the sizing step; ``None`` until then): the costliest start first.
@@ -1175,6 +1175,8 @@ class TrialsRunner:
         self.first_cells: int | None = None
         self.quest_root = Path(quest_root)
         self._protocol = protocol
+        #: The design (or a function giving it): its ``result_assertions`` say which results may honestly sit on a bound.
+        self._design = design
         self.deterministic = deterministic
         self.simulate = Path(simulate)
         self.analysis = Path(analysis)
@@ -1370,9 +1372,10 @@ class TrialsRunner:
             thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
             in_each_run=_in_run.of_study(protocol), log=self.log) if self.deterministic and self.submit is None else set()
         seen = _flat.observed_flat_sweep(run.cells, ignore=unsteady)
+        design = self._design() if callable(self._design) else self._design
         flat = _flat.flat_sweep(
             run.cells, source=self.simulate.read_text(encoding="utf-8", errors="replace"),
-            expected=_degenerate.expected_constants(protocol), ignore=unsteady) if seen is not None else None
+            expected=_degenerate.expected_constants(protocol, design), ignore=unsteady) if seen is not None else None
         if seen is not None and flat is None:
             self.no_difference = seen.note()
             if self.log is not None:

@@ -343,14 +343,14 @@ def _runs_on_fixed_inputs(oracle: dict[str, Any], protocol: dict[str, Any] | Non
     return False
 
 
-def expected_constants(protocol: dict[str, Any] | None) -> set[str]:
+def expected_constants(protocol: dict[str, Any] | None, design: dict[str, Any] | None = None) -> set[str]:
     """Names the plan itself expects to stay put: what a check of an invariant, a symmetry or a second implementation measures
     when the measure IS that one bare name (``bh_scipy_disagree``); what a special-case or published-value check measures when
     that is one bare name and the check runs on its own fixed inputs, a case that is no setting of the study
     (:func:`_runs_on_fixed_inputs`: ``bh_fixed_rejections`` at ``m = 4`` when the study runs ``m`` at 20, 200 and 2000), unless
     the plan lists the name as an estimate of its own; the keys of the plan's declared bounds or limits; and a metric the plan
-    says can honestly sit on its bound (``may_equal_bound: true``: a rare event that did not happen in a small pilot, no
-    failures). A name that is only
+    says can honestly sit on its bound (the design's ``result_assertions`` entry for it says ``may_equal_bound: true``: a
+    rare event that did not happen in a small pilot, no failures). A name that is only
     an operand of a measure's expression (``abs(Ea_hat - Ea_polyfit)``) is not exempt: what the check measures is the
     expression, and ``Ea_hat`` in it is still the plan's own estimate."""
     from . import oracle_check as _oracle
@@ -364,8 +364,11 @@ def expected_constants(protocol: dict[str, Any] | None) -> set[str]:
         kind = _oracle.kind_of(o)
         if kind in _EXPECTED_KINDS or (kind in _MEASURED_KINDS and measure not in own and _runs_on_fixed_inputs(o, protocol)):
             out.add(measure)
+    from . import plausibility as _plausibility
+
+    marked = [a.path for a in _plausibility.parse_assertions(design if isinstance(design, dict) else {}) if a.may_equal_bound]
     for m in (protocol or {}).get("metrics") or [] if isinstance(protocol, dict) else []:
-        if isinstance(m, dict) and m.get("id") and m.get("may_equal_bound") is True:
+        if isinstance(m, dict) and m.get("id") and any(_plausibility._matches(path, str(m["id"])) for path in marked):
             out.add(str(m["id"]))
     for key in ("bounds", "limits"):
         block = (protocol or {}).get(key) if isinstance(protocol, dict) else None
