@@ -650,7 +650,7 @@ def splice(source: str, reply: str, scope: set[str] | None = None,
     reply that holds a ``def`` is read: each function it defines that the file has AND that is in ``scope`` (the
     function(s) the finding is about) replaces it (the parameter names must be the same, in the same order; at most
     :data:`MAX_FUNCTIONS`); a definition of any other function the file already has is not spliced (its name is appended to
-    ``ignored``); a function the file has not is added at the end as a helper; imports it brings are added; anything else
+    ``ignored``); a function the file has not is added as a helper (above the script's ``if __name__`` block, else at the end); imports it brings are added; anything else
     in the block is ignored. ``(None, [], why)`` when nothing can be used. With no ``scope`` every function the file has
     may be replaced. ``limit`` is the most functions one reply may replace (``None``: no limit, for a repair of a script
     that is asked for functions, :mod:`core.script_reply`)."""
@@ -696,7 +696,9 @@ def splice(source: str, reply: str, scope: set[str] | None = None,
     out = "".join(lines)
     added = [n for n in new_funcs if n not in old_funcs]
     if added:
-        out = out.rstrip("\n") + "\n\n\n" + "\n\n".join(_steps._segment(block_lines, new_funcs[n]).rstrip("\n") + "\n" for n in added)
+        from .code_layout import insert_before_main_guard
+
+        out = insert_before_main_guard(out, "\n\n".join(_steps._segment(block_lines, new_funcs[n]).rstrip("\n") + "\n" for n in added))
     have = {ast.dump(n) for n in old_tree.body if isinstance(n, (ast.Import, ast.ImportFrom))}
     taken: set[str] = set()
     for n in old_tree.body:

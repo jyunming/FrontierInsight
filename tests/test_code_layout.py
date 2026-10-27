@@ -916,3 +916,13 @@ def test_the_generated_tests_hold_a_run_cell_that_only_mentions_run_trial_to_run
     assert run(builds) == 0
     assert run(mentions) == 1, "run_trial was called but its result is dropped for a formula of run_cell's own"
     assert run(never) == 1
+
+
+def test_insert_before_main_guard_places_text_above_the_first_guard_and_its_comments_else_at_the_end() -> None:
+    from core.code_layout import insert_before_main_guard as put
+
+    src = "def main():\n    pass\n\n\n# run it\nif __name__ == \"__main__\":\n    main()\n"
+    assert put(src, "def helper():\n    pass\n") == (
+        "def main():\n    pass\n\n\ndef helper():\n    pass\n\n\n# run it\nif __name__ == \"__main__\":\n    main()\n")
+    assert put("def main():\n    pass\n", "X = 1\n") == "def main():\n    pass\n\n\nX = 1\n"
+    assert put("def (:\n", "X = 1\n") == "def (:\n\n\nX = 1\n"

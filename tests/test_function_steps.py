@@ -265,3 +265,35 @@ def test_the_two_prompts_are_templates_with_their_parts() -> None:
                                           related_block="(none)", package="p", topic_block="t",
                                           literature_block="", example_block="")
     assert "repairing ONE function" in repair
+GUARDED_SCRIPT = """import math
+
+
+def main():
+    return math.sqrt(helper(4))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+def _runs_without_name_error(tmp_path: Path, code: str) -> None:
+    import runpy
+
+    path = tmp_path / "script_under_test.py"
+    path.write_text(code, encoding="utf-8")
+    runpy.run_path(str(path), run_name="__main__")  # a NameError here is the failure
+
+
+def test_a_helper_of_a_replaced_function_and_a_function_the_file_lacks_go_before_the_main_block(tmp_path: Path) -> None:
+    sig = "def main()"
+    reply = "def main():\n    return helper(4) + 1\n\n\ndef helper(x):\n    return x * 2\n"
+    new, why = fs.replace_function(GUARDED_SCRIPT, "main", reply, signature=sig, equation="E1")
+    assert why == "" and new is not None
+    assert new.index("def helper") < new.index('if __name__ == "__main__":')
+    _runs_without_name_error(tmp_path, new)
+    # the function the file lacks entirely
+    old = GUARDED_SCRIPT.replace("def main():\n    return math.sqrt(helper(4))\n", "def helper(x):\n    return x\n\n\ndef main():\n    return other(4)\n")
+    new2, why2 = fs.replace_function(old, "other", "def other(x):\n    return helper(x)\n", signature="def other(x)", equation="E1")
+    assert why2 == "" and new2 is not None
+    assert new2.index("def other") < new2.index('if __name__ == "__main__":')
+    _runs_without_name_error(tmp_path, new2)

@@ -1017,6 +1017,26 @@ def _is_main_guard(stmt: ast.AST) -> bool:
             and any(isinstance(x, ast.Constant) and x.value == "__main__" for x in sides))
 
 
+def insert_before_main_guard(source: str, text: str) -> str:
+    """``source`` with the top-level unit(s) ``text`` added where a script can still find them: just above the first
+    ``if __name__ == "__main__":`` block (and the comment lines directly above it), because the guarded call runs while the
+    module is being read and a ``def`` that comes after it does not exist yet. A file without such a block, or one that does
+    not parse, gets ``text`` at the end."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return source.rstrip("\n") + "\n\n\n" + text
+    guard = next((n for n in tree.body if _is_main_guard(n)), None)
+    if guard is None:
+        return source.rstrip("\n") + "\n\n\n" + text
+    lines = source.splitlines(keepends=True)
+    at = guard.lineno - 1
+    while at > 0 and lines[at - 1].lstrip().startswith("#"):
+        at -= 1
+    head = "".join(lines[:at]).rstrip("\n")
+    return (head + "\n\n\n" if head else "") + text.rstrip("\n") + "\n\n\n" + "".join(lines[at:])
+
+
 def _makes_rng(node: ast.AST) -> bool:
     if not isinstance(node, ast.Call):
         return False

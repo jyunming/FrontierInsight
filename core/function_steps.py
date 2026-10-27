@@ -718,13 +718,15 @@ def replace_function(source: str, name: str, reply: str, *, signature: str, equa
             if not any(t.id in taken for t in n.targets):  # type: ignore[attr-defined]
                 helpers.append(_segment(reply_lines, n))
                 taken.update(t.id for t in n.targets)  # type: ignore[attr-defined]
+    from .code_layout import insert_before_main_guard
+
     if old is None:
-        out = source.rstrip("\n") + "\n\n\n" + body
+        out = insert_before_main_guard(source, body)
     else:
         start = min([old.lineno, *[d.lineno for d in old.decorator_list]])
         out = "".join(src_lines[: start - 1]) + body + "".join(src_lines[old.end_lineno:])
     if helpers:
-        out = out.rstrip("\n") + "\n\n\n" + "\n\n".join(h.rstrip("\n") + "\n" for h in helpers)
+        out = insert_before_main_guard(out, "\n\n".join(h.rstrip("\n") + "\n" for h in helpers))
     if imports:
         out = _with_imports(out, imports)
     try:
