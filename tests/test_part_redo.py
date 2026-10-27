@@ -362,6 +362,42 @@ async def test_poster_findings_naming_no_part_are_listed_as_unresolved_not_dropp
     assert report["findings"] == [finding], "the finding stays in the report"
 
 
+@pytest.mark.asyncio
+async def test_unresolved_poster_findings_are_listed_whatever_the_redo_limit_is(tmp_path: Path, monkeypatch) -> None:
+    unplaced = {"check": "raw_markup", "severity": "high", "page": 1, "region": "body", "problem": "unplaced problem",
+                "quote": "some visible words"}
+    placed = {**unplaced, "problem": "fixed by the redo", "block": "b1"}
+    clean = {"transport": "images", "measured": {"findings": []}, "findings": []}
+    for limit, reports, expect in [
+        (0, [{**clean, "findings": [unplaced]}], ["unplaced problem"]),
+        (2, [{**clean, "findings": [unplaced, placed]}, {**clean, "findings": [unplaced]}], ["unplaced problem"]),
+        (2, [{**clean, "findings": [placed]}, clean], None),  # resolved inside the loop: not listed
+    ]:
+        it = iter(reports)
+
+        async def fake_check(config, kind, pdf, quest_root, *, supervisor=None):  # noqa: ANN001
+            return next(it)
+
+        async def regenerate(feedback: str) -> None:
+            return None
+
+        monkeypatch.setattr(vc, "check_pdf", fake_check)
+        (tmp_path / "poster.pdf").write_text("pdf", encoding="utf-8")
+        config = SimpleNamespace(output=SimpleNamespace(visual_check_max_redos=limit))
+        report = await vc.check_and_redo(config, "poster", tmp_path / "poster.pdf", tmp_path, regenerate)
+        assert [a.get("unresolved") for a in report["attempts"] if a["kept"]][-1] == expect
+
+
+def test_a_fence_closes_only_on_its_own_marker_alone() -> None:
+    deck = "# A\n\n```\ncode\n```python\n---\nmore\n```\n\n---\n\n# B\n"
+    _, segments, _ = split_deck(deck)
+    assert len(segments) == 2 and "more" in segments[0]
+    _, segments, _ = split_deck("# A\n\n````\n```\n---\n````  \n\n---\n\n# B\n")
+    assert len(segments) == 2, "a longer fence is not closed by a shorter marker, and trailing spaces still close"
+    _, segments, _ = split_deck("# A\n\n~~~\n```\n---\n~~~\n# B\n")
+    assert len(segments) == 1
+
+
 def test_a_value_cut_off_at_the_end_of_the_reply_is_not_trusted() -> None:
     readable, bad, _ = _readable_json_keys('{"unit": "m", "threshold": 0.12')
     assert readable == {"unit": "m"} and bad == [("threshold",)]
