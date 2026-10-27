@@ -395,7 +395,8 @@ class QuestState(TypedDict, total=False):
     paper_keys: bool
     #: The draft was made by editing passages of the earlier one (the passage editor, or the one edit of the sentences with
     #: numbers FI did not fill that a whole-paper draft gets when no round is left, ``Engine._typed_pass_hits``), not by the
-    #: whole-paper writer: the review takes out what is left in it.
+    #: whole-paper writer: a number FI cannot trace that is left in it stays and is recorded as untraced (QUALITY.md);
+    #: an unfilled result key is taken out.
     draft_edited: bool
     # Two-stage implement scaffold from ``_node_implement_outline``.
     # Carries ``{scaffold, functions, data_flow, constants,
@@ -22739,7 +22740,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         out: QuestState = {
             "paper_md": str(paper_path), "literature": literature,
             "paper_basis": _paper_basis(state), "paper_keys": keyed,
-            # An edited draft had its chance to fix the numbers FI did not fill; the review takes out what is left in it.
+            # An edited draft had its chance to fix the numbers FI did not fill; what is left stays and is recorded as
+            # untraced (an unfilled result key is taken out).
             "draft_edited": edited,
             "refine_needs_experiment": needs_experiment,
             "refine_extend": extend if not needs_experiment else [],
