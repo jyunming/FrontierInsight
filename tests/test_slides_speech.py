@@ -1153,3 +1153,19 @@ async def test_speech_diagnostic_escapes_backtick_fences_in_llm_preview(
     )
     # The full preview content still lands inside the longer fence.
     assert "print(1)" in body
+
+
+def test_a_closing_fence_may_have_trailing_tabs_and_a_longer_fence_is_not_closed_by_a_shorter_one() -> None:
+    from generation.slides import _math_as_dollars, _split_slides
+
+    body = "intro\n```\n---\n```\t\n---\nnext\n"
+    segments, breaks = _split_slides(body)
+    assert breaks == ["---"] and segments[1] == "\nnext\n", "the tab after the closing fence still closes it"
+
+    four = "a\n````\n```\n---\n```\n````\nb\n"
+    assert _split_slides(four)[1] == [], "a three-backtick line does not close a four-backtick fence"
+
+    code = "````\n```\n" + _paren("x") + "\n```\n````\nand " + _paren("y") + "\n"
+    assert _math_as_dollars(code) == "````\n```\n" + _paren("x") + "\n```\n````\nand $y$\n"
+    tabbed = "```\n" + _paren("x") + "\n```\t\n" + _paren("y") + "\n"
+    assert _math_as_dollars(tabbed) == "```\n" + _paren("x") + "\n```\t\n$y$\n"

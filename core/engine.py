@@ -3624,13 +3624,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             )
             return "rewrite"
         # No round is left and the draft has numbers FI did not fill: those sentences are edited once (outside
-        # engine.max_iterations) before any of them is taken out. The review held the take-out back for this edit, so
+        # engine.max_iterations) before any is recorded as untraced or taken out. The review held that back for this edit, so
         # every route below, each of which delivers the draft, waits for it; the routes above (a contradiction of FI's
         # records, the experiment run again) write or run again, and the next review asks for the edit again.
         if review.get("typed_pass_hits"):
             self._log.info(
                 "[route] no round is left and %d sentence(s) hold numbers FI did not fill — editing those sentences once "
-                "before any number is taken out (outside engine.max_iterations)", len(review["typed_pass_hits"]))
+                "before any number is recorded as untraced (outside engine.max_iterations)", len(review["typed_pass_hits"]))
             return "rewrite"
         if self.config.pauses.review == "ask":
             return "human_feedback"
@@ -11267,13 +11267,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         edited is left, and said). Never stops a quest: FI's own run reads the protocol, not this file."""
         try:
             protocol = self._protocol_block(state)
-            found = _code_project.study_differences(self.quest_root / "code", protocol, split=self._split_on(state))
+            found = _code_project.study_differences(self.quest_root / "code", protocol, split=self._split_on(state),
+                                                        design=state.get("design"))
             if not found:
                 return
             self._log.warning("[execute] code/study.json is not what the protocol says (%s); writing it again from the protocol",
                               "; ".join(found)[:400])
             await self._refresh_code_project(state, list(state.get("deps") or []))
-            if _code_project.study_differences(self.quest_root / "code", protocol, split=self._split_on(state)):
+            if _code_project.study_differences(self.quest_root / "code", protocol, split=self._split_on(state),
+                                                        design=state.get("design")):
                 self._log.warning("[execute] code/study.json still differs from the protocol (you edited it, so FI left it); "
                                   "the study FI runs follows the protocol, not that file")
         except Exception as exc:  # noqa: BLE001 -- a convenience file, never a reason to stop
@@ -11315,7 +11317,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 _code_project.refresh,
                 self.quest_root, deps=deps, protocol=protocol,
                 title=str(state.get("title") or ""), question=question, split=self._split_on(state),
-                log=self._log,
+                log=self._log, design=state.get("design"),
                 extra_files=(_code_layout.project_files(self.quest_root / "code", protocol, package,
                                                         self._outline_equation_names(state)) if package else None),
                 readme_files=_code_layout.readme_lines(package) if package else None,
@@ -18575,6 +18577,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 at_once=_trial_runner.settings_at_once(self.config.execution.settings_at_once),
                 # A search whose objective does not move stops early and its fact goes back to the plan, once per quest.
                 stop_flat=lambda: self._flat_redesign_allowed(state),
+                design=state.get("design"),
             )
         elif split and self._trial_mode:
             runner = _trial_runner.TrialsRunner(
@@ -22451,8 +22454,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         hits = _paper_facts.check(paper_md, self.quest_root, topic=topic, fallback_s=fallback, keyed=keyed,
                                   protocol=protocol)
         left = int(self.config.engine.max_iterations) - int(state.get("iteration", 0) or 0) - 1
-        # A draft the whole-paper writer wrote gets one edit of those passages first (_typed_pass_hits): nothing is taken out
-        # of it until that edit has been made and checked.
+        # A draft the whole-paper writer wrote gets one edit of those passages first (_typed_pass_hits): nothing is recorded
+        # as untraced or taken out until that edit has been made and checked.
         deferred = bool(self._typed_pass_hits(paper_md, state))
         untraced: list[tuple[str, str]] = []
         if keyed and left <= 0 and not deferred:
@@ -22464,8 +22467,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 self._log.warning("[record_check] no round is left to write the paper again, so %d number(s) the writer typed "
                                   "that FI cannot trace to the plan or its records stay as written and are listed in "
                                   "QUALITY.md", len(untraced))
-        # A result key FI could not fill is no better than a typed number once no round is left to fix it: it is taken out
-        # the same way (a sentence that carried only such keys goes, any other place reads the same marker) and listed.
+        # A typed number FI cannot trace stays in the paper and is listed above as untraced. A result key FI could not fill
+        # is different: once no round is left to fix it, it is the only thing taken out (a sentence that carried only such
+        # keys goes, any other place reads the same marker) and listed.
         dropped: list[dict[str, str]] = []
         if keyed and left <= 0 and not deferred and _paper_values.unfilled_in(paper_md):
             dropped = self._take_out_unfilled_keys(state)
@@ -22483,21 +22487,22 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._log.warning("[record_check] %s", hit)
         if hits and left <= 0 and deferred:
             self._log.info("[record_check] no review round is left, so the sentences with numbers FI did not fill are "
-                           "edited once more (outside engine.max_iterations) before any of them is taken out")
+                           "edited once more (outside engine.max_iterations) before any is recorded as untraced")
         elif hits and left <= 0:
             self._log.warning("[record_check] %d point(s) of FI's record are still wrong or missing in the paper and no review "
                               "round is left to rewrite it; they are in .fi/paper_record_check.json and QUALITY.md", len(hits))
         return hits
 
     def _typed_pass_hits(self, paper_md: str, state: QuestState) -> list[str]:
-        """The hits of the one edit a draft gets before FI takes anything out of it: when no review round is left, a draft
+        """The hits of the one edit a draft gets before FI records its untraced numbers or takes out unfilled keys: when no review round is left, a draft
         under the rule that FI fills every result number, written by the whole-paper writer (not by this edit), with a
         number the writer typed that R1 does not allow or a key FI could not fill. ``[]`` otherwise.
 
-        Every take-out in real quests followed a whole-paper rewrite in the last round (to shorten the paper, after the study
+        Every such case in real quests followed a whole-paper rewrite in the last round (to shorten the paper, after the study
         was run again, for a hit no passage holds): the new draft typed numbers and no round was left to fix them. Edited
         once, with FI's record of the run and ``{{calc:...}}`` at hand, almost all of them come back as FI's values or in
-        words; what is still there after the edit is taken out (:meth:`_paper_record_hits`). One edit per whole-paper draft,
+        words; a typed number still there after the edit stays in the paper and is recorded as untraced, and only an
+        unfilled result key is taken out (:meth:`_paper_record_hits`). One edit per whole-paper draft,
         and those are capped (engine.max_iterations, the shortening and record rewrites), so this always ends."""
         if not state.get("paper_keys") or state.get("draft_edited"):
             return []
@@ -22508,9 +22513,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             plan = _paper_facts.plan_protocol(self.quest_root, self._protocol_block(state))
             hits = _paper_facts.typed_hits(paper_md, plan, topic) + _paper_facts.value_hits(paper_md, self.quest_root)
             # Only a hit that quotes its sentence can be edited (the passage editor refuses a round with any other, such as
-            # the count of typed numbers past the first sentences); the numbers of the rest are taken out after the edit.
+            # the count of typed numbers past the first sentences); the numbers of the rest are recorded as untraced after the edit.
             return [h for h in hits if paper_patch._QUOTED in h]
-        except Exception as e:  # noqa: BLE001 -- no edit: the take-out runs as it did
+        except Exception as e:  # noqa: BLE001 -- no edit: the untraced numbers and unfilled keys are handled as before
             self._log.warning("[record_check] the sentences to edit once more could not be found (%s: %s)",
                               type(e).__name__, str(e)[:200])
             return []
@@ -22577,7 +22582,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # A person's notes are answered by the whole-paper writer, which reads them (the passage editor does not).
         # A request the run could not carry out is told to the whole-paper writer, which the passage editor is not.
         reported = bool(state.get("extend_missed") or state.get("layout_missed"))
-        # No round is left and the review held back the take-out of numbers FI did not fill (_typed_pass_hits): only those
+        # No round is left and the review held back the record of numbers FI did not fill (_typed_pass_hits): only those
         # sentences are edited, and a draft that cannot be edited stays as it was (a whole new paper would type new ones).
         # Not when the review sent the paper back for a contradiction of FI's records (that rewrite answers it, and the
         # review after it asks for this edit again), nor for a request the run could not carry out, nor on a draft that
@@ -22587,7 +22592,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             _hit_name(h) == _record_claims.HIT for h in review_now.get("must_flag_hits") or [])) \
             else list(review_now.get("typed_pass_hits") or [])
         if typed_pass:
-            self._log.info("[write] editing the %d sentence(s) with numbers FI did not fill, once, before any is taken out",
+            self._log.info("[write] editing the %d sentence(s) with numbers FI did not fill, once, before any is recorded as untraced",
                            len(typed_pass))
             markdown = await self._patch_flagged_passages(
                 {**state, "review": {**(state.get("review") or {}), "must_flag_hits": typed_pass}}, persona_block,

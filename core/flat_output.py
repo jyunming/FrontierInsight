@@ -118,11 +118,14 @@ def _ignores(source: str | None, keys: list[str], quantities: list[str] | None =
 
 
 def flat_search_check(check: dict[str, Any] | None, block: dict[str, Any] | None, *,
-                      source: str | None = None) -> str | None:
+                      source: str | None = None, expected: set[str] | frozenset[str] = frozenset()) -> str | None:
     """The same symptom as FI's own check of the best design found it: nudging every variable that can be nudged changed
     nothing the simulation returns. ``None`` when the check did not say so for all of them (one that does matter, a
-    check that did not finish, or a design with only choices)."""
+    check that did not finish, or a design with only choices). An objective the plan expects to stay put (``expected``)
+    is never a fault."""
     if not isinstance(check, dict) or not isinstance(block, dict) or check.get("finished") is False:
+        return None
+    if str((block.get("objective") or {}).get("quantity") or "") in expected:
         return None
     hood = (check.get("checks") or {}).get("neighbourhood")
     if not isinstance(hood, dict):

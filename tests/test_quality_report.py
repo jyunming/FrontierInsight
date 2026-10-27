@@ -453,3 +453,26 @@ def test_the_report_says_whether_the_pdf_is_typeset_and_which_characters_changed
 def test_a_quest_without_a_render_record_has_no_pdf_section(tmp_path: Path) -> None:
     report = qr.build(_finished(tmp_path / "q"), running=False)
     assert report["paper_pdf"] is None and "## The PDF" not in qr.render(report)
+
+
+_OLD_RECORD = {"hits": [], "removed_numbers": [{"number": "0.37", "sentence": "The rate was 0.37 at the highest load."}]}
+
+
+def test_an_older_record_of_removed_numbers_is_still_listed_as_taken_out(tmp_path: Path) -> None:
+    """Old code read only ``untraced_numbers``, so QUALITY.md written again for a quest an older FI recorded lost the
+    numbers that FI had replaced in that paper."""
+    root = _finished(tmp_path / "q-old")
+    _w(root / ".fi" / "paper_record_check.json", _OLD_RECORD)
+    r = qr.build(root)
+    text = qr.render(r)
+    assert "0.37" in text and "[number removed]" in text
+    assert "Numbers taken out of the paper" in text
+    assert "stays in the paper" not in text, "a number that was taken out is never described as kept"
+    assert "was not traced" in json.dumps(r) and "[number removed]" in json.dumps(r), "also among the paper problems"
+
+
+def test_a_current_record_of_untraced_numbers_is_listed_as_kept(tmp_path: Path) -> None:
+    root = _finished(tmp_path / "q-new")
+    _w(root / ".fi" / "paper_record_check.json", {"hits": [], "untraced_numbers": _OLD_RECORD["removed_numbers"]})
+    text = qr.render(qr.build(root))
+    assert "Numbers not traced to the plan" in text and "Numbers taken out of the paper" not in text

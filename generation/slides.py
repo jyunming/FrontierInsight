@@ -630,28 +630,37 @@ def split_deck(content: str) -> tuple[str, list[str], list[str]]:
 _CODE_FENCE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})(.*)")
 
 
+def _scan_lines(body: str):
+    """``(offset, line, in_code)`` for each line of ``body``; ``in_code`` is True for a fence's opening line, its content
+    and its closing line. CommonMark: a fence closes only on a line of the same character, at least as long, and nothing
+    but spaces or tabs after it; one never closed runs to the end. The one rule for every reader of the deck."""
+    fence = ""
+    offset = 0
+    for line in body.splitlines(keepends=True):
+        opened = _CODE_FENCE_RE.match(line.rstrip("\r\n"))
+        in_code = bool(fence)
+        if fence:
+            if opened and opened.group(1)[0] == fence[0] and len(opened.group(1)) >= len(fence) \
+                    and not opened.group(2).strip(" \t"):
+                fence = ""
+        elif opened:
+            fence = opened.group(1)
+            in_code = True
+        yield offset, line, in_code
+        offset += len(line)
+
+
 def _split_slides(body: str) -> tuple[list[str], list[str]]:
     """``body`` cut at its slide breaks. A ``---`` line inside a fenced code block is code, not a break."""
     segments: list[str] = []
     breaks: list[str] = []
     start = 0
-    fence = ""
-    offset = 0
-    for line in body.splitlines(keepends=True):
+    for offset, line, in_code in _scan_lines(body):
         text = line.rstrip("\r\n")
-        opened = _CODE_FENCE_RE.match(text)
-        if fence:
-            # CommonMark: a fence closes only on a line of the same character, at least as long, and nothing else.
-            if opened and opened.group(1)[0] == fence[0] and len(opened.group(1)) >= len(fence) \
-                    and not opened.group(2).strip(" "):
-                fence = ""
-        elif opened:
-            fence = opened.group(1)
-        elif _SLIDE_BREAK_RE.fullmatch(text):
+        if not in_code and _SLIDE_BREAK_RE.fullmatch(text):
             segments.append(body[start:offset])
             breaks.append(text)
             start = offset + len(text)
-        offset += len(line)
     segments.append(body[start:])
     return segments, breaks
 
@@ -694,7 +703,6 @@ _FIGURE_LINE_RE = re.compile(r"^\s*!\[(?P<alt>[^\]]*)\]\([^)]*\)\s*$")
 # as text. The paper already reads both spellings (``generation/_pandoc.py``).
 _PAREN_MATH_RE = re.compile(r"(?<!\\)\\\((.+?)(?<!\\)\\\)")
 _BRACKET_MATH_RE = re.compile(r"(?<!\\)\\\[(.+?)(?<!\\)\\\]", re.DOTALL)
-_CODE_FENCE_SPLIT_RE = re.compile(r"(^```.*?^```[ \t]*$)", re.DOTALL | re.MULTILINE)
 _CODE_SPAN_SPLIT_RE = re.compile(r"(`[^`\n]*`)")
 
 
@@ -711,9 +719,15 @@ def _math_as_dollars(content: str) -> str:
         text = _BRACKET_MATH_RE.sub(lambda m: "$$" + m.group(1).strip() + "$$", text)
         return _PAREN_MATH_RE.sub(lambda m: "$" + m.group(1).strip() + "$", text)
 
+    parts: list[tuple[bool, str]] = []          # (is fenced code, text), in order
+    for _offset, line, in_code in _scan_lines(content):
+        if parts and parts[-1][0] == in_code:
+            parts[-1] = (in_code, parts[-1][1] + line)
+        else:
+            parts.append((in_code, line))
     out: list[str] = []
-    for index, part in enumerate(_CODE_FENCE_SPLIT_RE.split(content)):
-        if index % 2:                       # a fenced code block
+    for in_code, part in parts:
+        if in_code:
             out.append(part)
             continue
         out.append("".join(

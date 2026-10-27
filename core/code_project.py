@@ -376,7 +376,8 @@ def simulation_left_out(code_dir: Path, split: bool) -> bool:
     return not split and (code_dir / _split_run.SIMULATE_NAME).is_file()
 
 
-def study_of(code_dir: Path, protocol: dict[str, Any] | None, *, split: bool = True) -> dict[str, Any] | None:
+def study_of(code_dir: Path, protocol: dict[str, Any] | None, *, split: bool = True,
+             design: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """The settings ``run.py`` needs to run FI's trial contract, or None when the simulation is not on that contract
     (or the two-script split is off, so FI itself does not run the simulation)."""
     simulate = code_dir / _split_run.SIMULATE_NAME
@@ -417,7 +418,7 @@ def study_of(code_dir: Path, protocol: dict[str, Any] | None, *, split: bool = T
         # and skips the same way.
         from . import optimise as _optimise
 
-        study["results"] = _optimise.watched_results(protocol)
+        study["results"] = _optimise.watched_results(protocol, design)
         if evaluations.get("stopped_because") == "time" and isinstance(evaluations.get("search"), int):
             study["max_evaluations"] = evaluations["search"]
         # The rounds the search was continued with (a person's, core/optimise_refine.py, or FI's own while it was still
@@ -442,13 +443,14 @@ def study_of(code_dir: Path, protocol: dict[str, Any] | None, *, split: bool = T
     }
 
 
-def study_differences(code_dir: Path, protocol: dict[str, Any] | None, *, split: bool = True) -> list[str]:
+def study_differences(code_dir: Path, protocol: dict[str, Any] | None, *, split: bool = True,
+                      design: dict[str, Any] | None = None) -> list[str]:
     """One plain sentence per setting of ``code/study.json`` (what ``run.py`` runs) that is not what the protocol says: the
     runs per setting and each setting to vary. The protocol is the source of truth. Nothing when there is no
     ``study.json``, the study is a search for the best design, or the protocol says nothing about the setting (a protocol
     without a run count leaves ``study.json`` its own)."""
     path = Path(code_dir) / STUDY
-    wanted = study_of(Path(code_dir), protocol, split=split)
+    wanted = study_of(Path(code_dir), protocol, split=split, design=design)
     try:
         have = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -587,7 +589,8 @@ def mark_asked(quest_root: Path, names: list[str]) -> None:
 
 def refresh(quest_root: Path, *, deps: list[str] | None = None, protocol: dict[str, Any] | None = None,
             title: str = "", question: str = "", split: bool = True, log: Any = None,
-            extra_files: dict[str, str] | None = None, readme_files: list[str] | None = None) -> list[str]:
+            extra_files: dict[str, str] | None = None, readme_files: list[str] | None = None,
+            design: dict[str, Any] | None = None) -> list[str]:
     """Write or update the project files in ``code/``; return the names written. Best effort: a quest never stops
     for these files. A file a person edited is not replaced; it is listed for :func:`unasked_conflicts`.
     ``extra_files`` (``{path in code/: text}``) and ``readme_files`` (README lines for them) are the research-tool
@@ -596,7 +599,7 @@ def refresh(quest_root: Path, *, deps: list[str] | None = None, protocol: dict[s
     code_dir = quest_root / "code"
     if not (code_dir / "experiment.py").is_file():
         return []
-    study = study_of(code_dir, protocol, split=split)
+    study = study_of(code_dir, protocol, split=split, design=design)
     installed = _installed(quest_root)
     wanted = {
         README: _readme(code_dir, title=title, question=question, study=study, split=split, layout=readme_files),

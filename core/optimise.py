@@ -758,7 +758,8 @@ async def _drive(executor: Any, python: Any, quest_root: Path, spec: dict[str, A
 async def run_search(executor: Any, python: Any, quest_root: Path, module: str, protocol: dict[str, Any], *,
                      base_seed: int, timeout_s: int, env: dict[str, str] | None = None, log: Any = None,
                      frozen: bool = False, at_once: int = 1, stop_flat: bool = True,
-                     stop_stepped: bool = True, stop_unchanged: bool = True, run_id: str = "") -> SearchRun:
+                     stop_stepped: bool = True, stop_unchanged: bool = True, run_id: str = "",
+                     design: dict[str, Any] | None = None) -> SearchRun:
     """Run the search for the best design (see the module docstring) and write its record. ``module`` is the simulation
     file relative to ``quest_root``; ``timeout_s`` bounds the whole search, the coarse scan included.
 
@@ -1005,7 +1006,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                          "in the search's budget", len(rows), worked)
         return rows
 
-    results = watched_results(protocol)
+    results = watched_results(protocol, design)
     gen = _search.compare(block, seed=int(base_seed), method=method, rounds=rounds, results=results, batch=at_once > 1,
                           stop_flat=stop_flat, stop_stepped=stop_stepped, stream=at_once > 1)
     replay_space = _search.Space(block["design_variables"]) if replay else None
@@ -1477,13 +1478,14 @@ def trial_cells(run: SearchRun, quest_root: Path) -> tuple[list[dict[str, Any]],
     return cells, reasons
 
 
-def watched_results(protocol: dict[str, Any]) -> list[str]:
+def watched_results(protocol: dict[str, Any], design: dict[str, Any] | None = None) -> list[str]:
     """The plan's results, watched for a design that changes none of them (core/optimise_search.py, ``no_effect``) and
     for a compared alternative that gives the same results as the first. Not a result the plan itself expects to stay
-    put (an invariant, a fixed-input check): its staying put says nothing about the design."""
+    put (an invariant, a fixed-input check, a result the design marks ``may_equal_bound``): its staying put says nothing
+    about the design."""
     from . import degenerate_results as _degenerate
 
-    constant = _degenerate.expected_constants(protocol)
+    constant = _degenerate.expected_constants(protocol, design)
     return [str(s["id"]) for s in _metric_spec.declared(protocol) if s.get("id") and str(s["id"]) not in constant]
 
 
@@ -1496,8 +1498,11 @@ class OptimisationRunner:
 
     def __init__(self, executor: Any, *, quest_root: Path, protocol: Any, simulate: Path, analysis: Path,
                  log: Any = None, frozen: Any = False, repairs_left: Any = None, at_once: int = 1,
-                 stop_flat: Any = True) -> None:
+                 stop_flat: Any = True, design: Any = None) -> None:
         self.executor = executor
+        #: The plan's design (a dict, or a callable asked at each run): its ``result_assertions`` say which results may
+        #: honestly sit on their bound (``may_equal_bound``), so a search is not sent back for them.
+        self._design = design
         #: How many evaluations that do not depend on each other run at the same time (the coarse scan's settings, the
         #: check's designs at each finer level): ``execution.settings_at_once``.
         self.at_once = max(1, int(at_once or 1))
@@ -1537,6 +1542,10 @@ class OptimisationRunner:
         #: The rounds a person asked for (``.fi/optimisation/continue.json``) as FI wrote them, before any script ran.
         self._rounds: bytes | None = None
         self._rounds_read = False
+
+    def _design_now(self) -> dict[str, Any] | None:
+        design = self._design() if callable(self._design) else self._design
+        return design if isinstance(design, dict) else None
 
     def _put_back_rounds(self) -> bool:
         """Put back the rounds file FI wrote, wherever a script changed or removed it (its budget is the evidence
@@ -1613,7 +1622,8 @@ class OptimisationRunner:
                                     frozen=self._is_frozen(), at_once=self.at_once,
                                     stop_flat=bool(self._stop_flat() if callable(self._stop_flat) else self._stop_flat),
                                     stop_stepped=self._stepped_repair_left(),
-                                    stop_unchanged=self._unchanged_repair_left(), run_id=self.run_id)
+                                    stop_unchanged=self._unchanged_repair_left(), run_id=self.run_id,
+                                    design=self._design_now())
 
         search_s = int(timeout_s - self.check_reserve_s)
         if search_s < 1:
@@ -1689,7 +1699,7 @@ class OptimisationRunner:
         except OSError:
             sim_text = None
         flat = _flat.flat_search(run.rows, str((norm_block.get("objective") or {}).get("quantity") or "the objective"),
-                                 source=sim_text, expected=_degenerate.expected_constants(protocol))
+                                 source=sim_text, expected=_degenerate.expected_constants(protocol, self._design_now()))
         if flat is not None:
             return self._flat_result(flat, run, started)
         # FI checks the best design at finer settings (core/optimum_check.py), within the same time limit as the search. A check that
@@ -1704,7 +1714,8 @@ class OptimisationRunner:
             checked = json.loads(check_text) if check_text else None
         except ValueError:
             checked = None
-        flat = _flat.flat_search_check(checked, norm_block, source=sim_text)
+        flat = _flat.flat_search_check(checked, norm_block, source=sim_text,
+                                       expected=_degenerate.expected_constants(protocol, self._design_now()))
         if flat is not None:
             return self._flat_result(flat, run, started)
         analysis_env = {**(env or {}), LEDGER_ENV: LEDGER_PATH.as_posix(), BEST_ENV: BEST_PATH.as_posix(),
