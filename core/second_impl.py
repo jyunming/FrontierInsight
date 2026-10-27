@@ -933,8 +933,9 @@ except BaseException:
 try:
     if @STUDY@:
         import os as _os
-        _os.environ.setdefault("FI_THRESHOLDS", "{}")
-        _os.environ.setdefault("FI_CELL_KIND", "check")
+        # Set as the harness sets them for a check call, never inherited from the process that started this script.
+        _os.environ["FI_THRESHOLDS"] = "{}"
+        _os.environ["FI_CELL_KIND"] = "check"
         _fi_load_study(@STUDY@)
 except BaseException:
     done({"study_load_error": traceback.format_exc()[-600:]})

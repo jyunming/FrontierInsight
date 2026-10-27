@@ -756,9 +756,29 @@ def test_the_study_file_is_loaded_with_the_environment_the_trial_harness_gives_i
     (tmp_path / "inputs.json").write_text(json.dumps([{"x": 1.0}]), encoding="utf-8")
     script = si.compare_script(code_dir="code", module="pkg.model", name="scaled", reference="ref.py",
                                inputs="inputs.json", uses=[], study="code/simulate.py")
-    env = {k: v for k, v in os.environ.items() if k not in ("FI_THRESHOLDS", "FI_CELL_KIND")}
+    for inherited in ({}, {"FI_THRESHOLDS": '{"x": 1}', "FI_CELL_KIND": "search"}):
+        env = {k: v for k, v in os.environ.items() if k not in ("FI_THRESHOLDS", "FI_CELL_KIND")}
+        p = subprocess.run([sys.executable, "-B", "-c", script], cwd=tmp_path, capture_output=True, text=True,
+                           timeout=120, env={**env, **inherited})
+        got = si.parse_output(p.stdout)
+        assert "study_load_error" not in got, got
+        assert [r["main"] for r in got["rows"]] == [4.0]
+
+
+def test_the_study_file_never_sees_a_threshold_or_kind_inherited_from_the_process_that_started_the_comparison(tmp_path):
+    pkg = tmp_path / "code" / "pkg"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "model.py").write_text("def seen(x):\n    return [THRESHOLDS, KIND]\n", encoding="utf-8")
+    (tmp_path / "code" / "simulate.py").write_text(
+        "import json, os\nfrom pkg import model\nmodel.THRESHOLDS = json.loads(os.environ['FI_THRESHOLDS'])\n"
+        "model.KIND = os.environ['FI_CELL_KIND']\n", encoding="utf-8")
+    (tmp_path / "ref.py").write_text("def seen(x):\n    return [{}, 'check']\n", encoding="utf-8")
+    (tmp_path / "inputs.json").write_text(json.dumps([{"x": 1.0}]), encoding="utf-8")
+    script = si.compare_script(code_dir="code", module="pkg.model", name="seen", reference="ref.py",
+                               inputs="inputs.json", uses=[], study="code/simulate.py")
+    env = {**os.environ, "FI_THRESHOLDS": '{"x": 1}', "FI_CELL_KIND": "search"}
     p = subprocess.run([sys.executable, "-B", "-c", script], cwd=tmp_path, capture_output=True, text=True, timeout=120,
                        env=env)
     got = si.parse_output(p.stdout)
-    assert "study_load_error" not in got, got
-    assert [r["main"] for r in got["rows"]] == [4.0]
+    assert si.judge_rows(got["rows"], [{"x": 1.0}], si.REL)["status"] == si.AGREE, got
