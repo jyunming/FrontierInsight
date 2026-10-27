@@ -73,6 +73,18 @@ SUBMIT_NAME = "submit.py"
 # each trial it is given, and writes one JSON line per trial to the results file the parent named. The simulation's own
 # prints go to stderr, so nothing it prints can pass for a result line. It carries the text of core/in_run.py, so what a
 # run returned is read the same way here, in code/run.py and in FI.
+#: How the study's own file is loaded before any of its functions is called: executed as a module of its own, which is
+#: where it sets the constants of the package it imports. The trial harness and the second-version comparison
+#: (core/second_impl.py) both carry this text, so a function is called in the same context in both.
+LOAD_STUDY_SOURCE = r'''
+def _fi_load_study(path):
+    import importlib.util
+    loader = importlib.util.spec_from_file_location("fi_experiment", path)
+    mod = importlib.util.module_from_spec(loader)
+    loader.loader.exec_module(mod)
+    return mod
+'''
+
 HARNESS_BODY = r'''
 import importlib.util, json, math, re, sys, time, traceback, warnings
 
@@ -238,9 +250,7 @@ def main():
     real_stdout = sys.stdout
     sys.stdout = sys.stderr
     try:
-        loader = importlib.util.spec_from_file_location("fi_experiment", spec["module"])
-        mod = importlib.util.module_from_spec(loader)
-        loader.loader.exec_module(mod)
+        mod = _fi_load_study(spec["module"])
         fn = getattr(mod, spec["entry"], None)
         if not callable(fn):
             raise AttributeError(f"{spec['module']} has no function {spec['entry']}()")
@@ -350,7 +360,7 @@ def main():
 
 main()
 '''
-HARNESS_SOURCE = Path(_in_run.__file__).read_text(encoding="utf-8") + "\n" + HARNESS_BODY
+HARNESS_SOURCE = Path(_in_run.__file__).read_text(encoding="utf-8") + "\n" + LOAD_STUDY_SOURCE + "\n" + HARNESS_BODY
 
 
 #: Written when the simulation was sent back once because settings of the study changed none of the plan's declared
