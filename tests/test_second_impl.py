@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
 import string
 import subprocess
 import sys
@@ -740,3 +741,24 @@ def test_both_versions_raising_alike_is_a_comparison_that_could_not_run():
     rows = [{"main_err": "NameError: LIMIT", "ref_err": "NameError: LIMIT"}]
     res = si.judge_rows(rows, [{"x": 1.0}], si.REL)
     assert res["status"] == si.UNCONFIRMED and not res["disagreements"]
+
+
+def test_the_study_file_is_loaded_with_the_environment_the_trial_harness_gives_it(tmp_path):
+    """A study file that reads FI's thresholds when it loads gets them in the comparison too, as in a trial."""
+    pkg = tmp_path / "code" / "pkg"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "model.py").write_text("def scaled(x):\n    return x * LIMIT\n", encoding="utf-8")
+    (tmp_path / "code" / "simulate.py").write_text(
+        "import json, os\nfrom pkg import model\nTHRESHOLDS = json.loads(os.environ['FI_THRESHOLDS'])\n"
+        "KIND = os.environ['FI_CELL_KIND']\nmodel.LIMIT = 4\n", encoding="utf-8")
+    (tmp_path / "ref.py").write_text("def scaled(x):\n    return x * 4\n", encoding="utf-8")
+    (tmp_path / "inputs.json").write_text(json.dumps([{"x": 1.0}]), encoding="utf-8")
+    script = si.compare_script(code_dir="code", module="pkg.model", name="scaled", reference="ref.py",
+                               inputs="inputs.json", uses=[], study="code/simulate.py")
+    env = {k: v for k, v in os.environ.items() if k not in ("FI_THRESHOLDS", "FI_CELL_KIND")}
+    p = subprocess.run([sys.executable, "-B", "-c", script], cwd=tmp_path, capture_output=True, text=True, timeout=120,
+                       env=env)
+    got = si.parse_output(p.stdout)
+    assert "study_load_error" not in got, got
+    assert [r["main"] for r in got["rows"]] == [4.0]

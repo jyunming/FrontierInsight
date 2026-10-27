@@ -932,6 +932,9 @@ except BaseException:
 # The study's own file is loaded as the trial harness loads it, before anything is called: it sets the package's constants.
 try:
     if @STUDY@:
+        import os as _os
+        _os.environ.setdefault("FI_THRESHOLDS", "{}")
+        _os.environ.setdefault("FI_CELL_KIND", "check")
         _fi_load_study(@STUDY@)
 except BaseException:
     done({"study_load_error": traceback.format_exc()[-600:]})

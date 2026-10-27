@@ -220,7 +220,7 @@ def test_the_writer_and_the_reader_agree(tmp_path: Path) -> None:
 
 def test_the_harness_sets_the_thresholds_before_loading_the_simulation() -> None:
     assert 'os.environ["FI_THRESHOLDS"]' in tr.HARNESS_SOURCE
-    assert tr.HARNESS_SOURCE.index("FI_THRESHOLDS") < tr.HARNESS_SOURCE.index("exec_module")
+    assert tr.HARNESS_SOURCE.index("FI_THRESHOLDS") < tr.HARNESS_SOURCE.index("_fi_load_study(spec")
 
 
 def test_a_row_without_a_trial_id_is_never_read_as_trial_0() -> None:
