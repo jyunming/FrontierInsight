@@ -1167,5 +1167,5 @@ def test_a_closing_fence_may_have_trailing_tabs_and_a_longer_fence_is_not_closed
 
     code = "````\n```\n" + _paren("x") + "\n```\n````\nand " + _paren("y") + "\n"
     assert _math_as_dollars(code) == "````\n```\n" + _paren("x") + "\n```\n````\nand $y$\n"
-    tabbed = "```\n" + _paren("x") + "\n```\t\n" + _paren("y") + "\n"
-    assert _math_as_dollars(tabbed) == "```\n" + _paren("x") + "\n```\t\n$y$\n"
+    with_tab = "```\n" + _paren("x") + "\n```\t\n" + _paren("y") + "\n"
+    assert _math_as_dollars(with_tab) == "```\n" + _paren("x") + "\n```\t\n$y$\n"
