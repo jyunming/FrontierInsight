@@ -269,8 +269,9 @@ def test_the_referee_corrects_only_towards_its_own_number_and_only_when_it_sides
     assert ch.settle_referee(wide, 0.5, 0.95, 0.72, "a sum")["outcome"] == "unsettled", "near both decides nothing"
 
 
-def _referee_fake(calls: list[str], value: float, prompts: dict[str, list[str]] | None = None):
-    base = _fake(calls, implement=_MEASURES_HALF, protocol={**_PROTOCOL, "oracles": [_WORKED]})
+def _referee_fake(calls: list[str], value: float, prompts: dict[str, list[str]] | None = None,
+                  oracle: dict[str, Any] | None = None):
+    base = _fake(calls, implement=_MEASURES_HALF, protocol={**_PROTOCOL, "oracles": [oracle or _WORKED]})
 
     async def fake_chat(self, messages, **kw):  # noqa: ANN001
         prompt = messages[-1]["content"]
@@ -301,6 +302,59 @@ async def test_a_check_the_plan_worked_out_wrongly_is_corrected_by_the_number_co
     assert "n / 4" not in plan_text.split("FI corrected", 1)[0], "the wrong working is taken out of the plan"
     triage = [t for a in record["attempts"] for t in a.get("triage") or [] if t.get("kind") == "referee"]
     assert triage and triage[0]["outcome"] == "corrected"
+
+
+def test_a_rule_s_worst_violation_is_never_corrected_to_the_size_the_simulation_measured() -> None:
+    """An invariant's expected 0 is 0 by its form: a referee that reproduces the simulation's drift with its own
+    integrator does not relax the rule to that drift (it may still find the code wrong)."""
+    rule = {"name": "drift", "kind": "invariant", "expected": 0.0, "tolerance": 1e-6, "tolerance_mode": "absolute",
+            "measure": "max_drift"}
+    kept = ch.settle_referee(rule, 3.0e-6, 0.0, 3.1e-6, "an integrator")
+    assert kept["outcome"] == "unsettled" and "expected" not in kept
+    assert ch.settle_referee(rule, 3.0e-6, 0.0, 0.0, "exact")["outcome"] == "code"
+    stated = {**rule, "expected": 0.0136, "tolerance": 1e-12}
+    assert ch.settle_referee(stated, 0.0, 0.0136, 0.0, "exact")["outcome"] == "corrected", \
+        "an invariant whose plan typed a nonzero value is not 0 by its form"
+
+
+def test_a_repair_cannot_dispute_a_rule_s_zero_by_the_challenge_either() -> None:
+    """The exchange (challenge, concession, judge, numerical computation) never relaxes a rule's 0 to the measured drift."""
+    rule = {"name": "drift", "kind": "invariant", "expected": 0.0, "tolerance": 1e-6, "tolerance_mode": "absolute",
+            "expected_formula": "0", "case": {"n": 4}, "measure": "max_drift"}
+    proposal = {"name": "drift", "disputed_step": "the drift of the scheme is not zero at this step",
+                "expected_formula": "n * 0.75e-6", "expected": 3e-6}
+    refused, why = ch.challenge_of(rule, proposal, measured=3e-6)
+    assert refused is None and "0 by its form" in why
+    assert ch.challenge_of({**rule, "kind": "special_case"}, proposal, measured=3e-6)[0] is not None
+
+
+def test_equal_values_agree_under_a_relative_tolerance_even_at_zero() -> None:
+    rel = {**ORACLE, "expected": 1.0, "tolerance": 0.01, "tolerance_mode": "relative", "case": {"n": 4}}
+    assert ch._within(rel, 0.0, 0.0)
+    assert ch.settle_referee(rel, 0.0, 1.0, 0.0, "a sum")["outcome"] == "corrected"
+
+
+def test_two_numbers_far_from_the_plan_s_value_are_compared_at_their_own_size() -> None:
+    """A relative tolerance taken at the plan's (wrong) 1e4 would let 1 and 100 agree; at their own size they do not."""
+    far = {**ORACLE, "expected": 1.0e4, "tolerance": 0.01, "tolerance_mode": "relative", "case": {"n": 4}}
+    assert not ch._within(far, 1.0, 100.0) and not ch._within(far, 100.0, 1.0)
+    assert ch._within(far, 100.0, 100.5) and ch._within(far, 100.5, 100.0)
+
+
+@pytest.mark.asyncio
+async def test_a_known_answer_the_plan_typed_is_put_to_the_referee_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    typed = {k: v for k, v in _WORKED.items() if k != "expected_formula"}
+    monkeypatch.setattr("core.engine.LLMClient.chat", _referee_fake(calls, 0.5, oracle=typed))
+    engine = Engine(_referee_cfg(tmp_path, oracle_repair_attempts=1))
+    await engine.run()
+    record = _record(engine)
+    assert calls.count("Numeric") == 1
+    triage = [t for a in record["attempts"] for t in a.get("triage") or [] if t.get("kind") == "referee"]
+    assert triage and triage[0]["outcome"] == "corrected"
+    assert record["status"] == "ok", record.get("status")
 
 
 @pytest.mark.asyncio
@@ -335,18 +389,28 @@ async def test_the_referee_s_number_is_kept_so_a_resume_never_asks_again(
     assert calls.count("Numeric") == 1 and attempt["triage"][0]["outcome"] == "unsettled"
 
 
-def test_a_working_that_uses_the_plan_s_fixed_settings_counts_and_a_typed_number_does_not() -> None:
-    protocol = {"fixed": {"scale": 2.0}}
-    working = {**ORACLE, "expected": 1.0, "tolerance": 0.01, "expected_formula": "n / (2 * scale)", "case": {"n": 4}}
+def test_the_referee_judges_against_the_plan_s_value_whether_worked_out_or_typed_and_never_a_published_one() -> None:
+    """A number the plan typed is as much the plan model's claim as one it worked out (a typed known answer once failed
+    correct code and was never put to the referee, L615)."""
+    working = {**ORACLE, "expected": 1.0, "tolerance": 0.01, "expected_formula": "n / 4", "case": {"n": 4}}
     typed = {k: v for k, v in working.items() if k != "expected_formula"}
-    elsewhere = {**working, "expected": 3.0}
-    assert ch.plan_working(working, protocol) == pytest.approx(1.0)
-    assert ch.plan_working(typed, protocol) is None, "a typed number is not the plan's working"
-    assert ch.plan_working(elsewhere, protocol) is None, "a formula the check's number does not use is not its working"
-    for restated in ("1.0 * 1", "0.5 + 0.5", "scale", "scale * 0 + 1.0", "sqrt(1.0)"):
-        assert ch.plan_working({**working, "expected_formula": restated, "case": {}}, protocol) is None, restated
-    published = {**working, "kind": "published_value"}
-    assert ch.plan_working(published, protocol) is None, "a published value is never the plan's working"
+    assert ch.referee_expected(working) == pytest.approx(1.0)
+    assert ch.referee_expected(typed) == pytest.approx(1.0), "a typed number is the plan's value too"
+    assert ch.referee_expected({**working, "kind": "published_value"}) is None, "a published value is a measured fact"
+    assert ch.referee_expected({**typed, "tolerance": None}) is None, "a check FI cannot judge"
+
+
+def test_both_comparisons_of_the_referee_use_the_check_s_own_limit() -> None:
+    """The recorded case: a p-value check expecting 0 exactly; the simulation measured 1.1e-16 and the referee's
+    script 2.2e-16. With the limit taken from the second number, noise of one unit in the last place read as 'the code
+    is wrong'; at the check's own limit the referee's number agrees with both and decides nothing."""
+    exact = {"name": "p values", "kind": "special_case", "expected": 0.0, "tolerance": 0.0,
+             "tolerance_mode": "absolute", "measure": "p_error"}
+    assert ch.settle_referee(exact, 1.1102230246251565e-16, 0.0, 2.220446049250313e-16, "a sum")["outcome"] == "unsettled"
+    assert ch._within(exact, 1e-16, 2e-16) == ch._within(exact, 2e-16, 1e-16)
+    assert ch.settle_referee(exact, 0.3, 0.0, 0.0, "a sum")["outcome"] == "code", "a real fault is still found"
+    noise = ch.settle_referee(exact, 1.1102230246251565e-16, 0.0, 0.0, "exact")
+    assert noise["outcome"] == "unsettled", "a referee's exact 0 against noise in the last place finds no fault"
 
 
 @pytest.mark.asyncio

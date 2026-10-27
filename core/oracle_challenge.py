@@ -88,8 +88,6 @@ def computes(oracle: dict[str, Any], formula: Any, measured: float | None = None
         return None
     if value is None or unset or _triage.num(value) is None:
         return None
-    import ast
-
     text = used or formula
     if _triage.ambiguous(text) or _triage._degrees_unconverted(text):
         return None
@@ -167,11 +165,26 @@ def _shift_stated(text: str, stated: list[float]) -> str:
 
 
 def _within(oracle: dict[str, Any], a: float | None, b: float | None) -> bool:
-    """Whether two values lie within the check's own tolerance of each other (never widened)."""
+    """Whether two values lie within the check's own tolerance of each other (never widened), whichever is named first.
+    A relative tolerance is taken at each value and the smaller limit used (two values far from the plan's are compared
+    at their own size); any other is the limit the check is judged by (an absolute tolerance as written, a tolerance of
+    0 as rounding at the check's own scale, so floating-point noise around 0 is not a difference)."""
     if a is None or b is None:
         return False
-    _expected, limit, _mode = _oracle.limit_of({**oracle, "expected": b})
+    if a == b:
+        return True  # equal values agree at any tolerance (a relative one has no limit at 0)
+    _expected, limit, mode = _oracle.limit_of(oracle)
+    tolerance = _triage_num(oracle.get("tolerance"))
+    if mode == "relative" and tolerance is not None and tolerance > 0:
+        limits = [_oracle.limit_of({**oracle, "expected": v})[1] for v in (a, b)]
+        return None not in limits and abs(a - b) <= min(limits)
     return limit is not None and abs(a - b) <= limit
+
+
+def zero_by_form(oracle: dict[str, Any]) -> bool:
+    """Whether the check measures how far a rule is broken and expects 0, which is 0 by its form: its expected value is
+    never disputed or corrected to a measured size (core/oracle_triage.py rules the same)."""
+    return _oracle.kind_of(oracle) in _forms.VIOLATION_KINDS and _oracle.limit_of(oracle)[0] == 0
 
 
 def challenge_of(oracle: dict[str, Any], proposal: dict[str, Any], measured: float | None = None,
@@ -180,6 +193,9 @@ def challenge_of(oracle: dict[str, Any], proposal: dict[str, Any], measured: flo
     ``(None, why)`` when it cannot be taken (no step named, no formula FI computes, a formula that restates the measured
     value, or one that does not give the value claimed). ``measured``: what the simulation measured on the check's case;
     kept with the challenge for FI's own use, and taken out of the step a blind model is shown."""
+    if zero_by_form(oracle):
+        return None, ("the check measures how far a rule is broken, which is 0 by its form: its expected value is not "
+                      "disputed, the code is what a repair changes")
     step = without_measured(proposal.get("disputed_step"), measured)[:600]
     formula = str(proposal.get("expected_formula") or "").strip()
     if not step or not formula:
@@ -418,8 +434,8 @@ REFEREE_KEY = "referee"
 
 def settle_referee(oracle: dict[str, Any], measured: float | None, plan_value: float | None, numeric: float | None,
                    how: str) -> dict[str, Any]:
-    """A failing check whose expected value is the plan's own working (``plan_value``), decided by the number computed
-    numerically from the definitions (``numeric``), never shown the plan's working or the measurement:
+    """A failing check whose expected value is the plan's (``plan_value``, :func:`referee_expected`), decided by the
+    number computed numerically from the definitions (``numeric``), never shown the plan's value or the measurement:
     ``{"outcome", "expected"?, "by", "text"}``.
 
     - it agrees with the simulation and not with the plan: ``corrected`` to the numerical value (two workings
@@ -433,57 +449,32 @@ def settle_referee(oracle: dict[str, Any], measured: float | None, plan_value: f
             f"the check '{name}' still fails and the numerical computation from the definitions gave no value ({how})")}
     said = f"an independent numerical computation from the definitions gives {_oracle.fmt_digits(numeric)} ({how})"
     with_code, with_plan = _within(oracle, numeric, measured), _within(oracle, numeric, plan_value)
+    if with_code and not with_plan and zero_by_form(oracle):
+        return {"outcome": "unsettled", "by": "", "text": (
+            f"the check '{name}' still fails and {said}, as the simulation does; the check measures how far a rule is "
+            "broken, which is 0 by its form, so FI does not correct it to the measured size: it goes on unconfirmed")}
     if with_code and not with_plan:
         return {"outcome": "corrected", "expected": numeric, "by": "a numerical computation",
-                "text": f"{said}, as the simulation does and not the plan's working "
-                        f"{_oracle.fmt_digits(plan_value)}: the plan's working was wrong"}
+                "text": f"{said}, as the simulation does and not the plan's expected value "
+                        f"{_oracle.fmt_digits(plan_value)}: the plan's value was wrong"}
     if with_plan and not with_code:
         return {"outcome": "code", "by": "a numerical computation",
-                "text": f"{said}, as the plan's working does: the code is wrong"}
+                "text": f"{said}, as the plan's expected value does: the code is wrong"}
     return {"outcome": "unsettled", "by": "", "text": (
         f"the check '{name}' still fails and {said}, which "
-        + ("agrees with both the simulation and the plan's working within the check's tolerance" if with_code
-           else "agrees with neither the simulation nor the plan's working"))}
+        + ("agrees with both the simulation and the plan's expected value within the check's tolerance" if with_code
+           else "agrees with neither the simulation nor the plan's expected value"))}
 
 
-def plan_working(oracle: dict[str, Any], protocol: dict[str, Any] | None) -> float | None:
-    """The check's expected value when it is the plan's own working: its ``expected_formula``, computed by FI with the
-    check's case and the plan's fixed settings, gives the ``expected`` the check uses (one reading only). ``None`` for a
-    number the plan typed or took from elsewhere (a measured fact is never corrected by a computation from the model's
-    own definitions). Looser than :func:`core.oracle_triage.formula_value`, which also asks every name to be the case's:
-    the referee only needs to know the number is a working, since it never trusts it."""
-    from . import oracle_triage as _triage
-
+def referee_expected(oracle: dict[str, Any]) -> float | None:
+    """The plan's expected value the referee judges a failing check against: the number the check uses, whether the
+    plan worked it out or typed it (either is the plan model's claim, never ground truth). ``None`` for a published
+    value (a measured fact is never corrected by a computation from the model's own definitions) and for a check FI
+    cannot judge (no number or tolerance)."""
     if _oracle.kind_of(oracle) == "published_value":
-        return None  # a number taken from elsewhere, whatever formula the plan wrote beside it
+        return None
     expected, limit, _mode = _oracle.limit_of(oracle)
-    if expected is None or limit is None or not _triage.correctable(oracle):
-        return None
-    try:
-        value, _why, unset, used = _forms._formula_result(oracle, _forms.fixed_settings(protocol))
-        text = used or str(oracle.get("expected_formula") or "")
-        if (value is None or unset or not math.isfinite(value) or _triage.ambiguous(text)
-                or _triage._degrees_unconverted(text) or _forms.disagrees(value, expected, limit)):
-            return None
-        tree, _ = _forms._tree(text, {**_forms.FUNCTIONS, **_forms.SPECIAL_FUNCTIONS})
-        named = set(_forms.fixed_settings(protocol)) | set(_forms.case_numbers(oracle))
-        if (tree is None or not any(isinstance(n, (ast.BinOp, ast.Call)) for n in ast.walk(tree))
-                or not any(isinstance(n, ast.Name) and n.id in named for n in ast.walk(tree))):
-            return None  # a number restated ("0.5*1"), or a setting alone: no working
-
-        # A working moves with what it is worked from ("n*0 + 0.5" names a setting and does not). The case and the
-        # fixed settings are moved together, each by a factor of its own.
-        case = oracle.get("case") if isinstance(oracle.get("case"), dict) else {}
-        fixed = _forms.fixed_settings(protocol)
-        both = _moved({**{f"fixed:{k}": v for k, v in fixed.items()}, **{f"case:{k}": v for k, v in case.items()}})
-        again, _w, _u, _t = _forms._formula_result(
-            {**oracle, "case": {k[5:]: v for k, v in both.items() if k.startswith("case:")}},
-            {k[6:]: v for k, v in both.items() if k.startswith("fixed:")})
-        if again is not None and abs(float(again) - value) <= 1e-9 * max(abs(value), 1e-12):
-            return None
-    except Exception:  # noqa: BLE001 -- a formula FI cannot compute decides nothing
-        return None
-    return value
+    return expected if limit is not None and math.isfinite(expected) else None
 
 
 def _triage_num(value: Any) -> float | None:
