@@ -97,7 +97,6 @@ from . import phased_isolation as _phased_isolation
 from . import disclosure as _disclosure
 from . import paper_facts as _paper_facts
 from . import paper_values as _paper_values
-from . import typed_numbers as _typed_numbers
 from . import run_facts as _run_facts
 from . import thinking_capture as _thinking
 from . import metric_spec as _metric_spec
@@ -11729,7 +11728,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             text, taken = _record_claims.take_out(before.decode("utf-8"), [span for _hit, span in found])
             if not taken:
                 return []
-            Path(path).write_bytes(text.encode("utf-8"))  # bytes back as bytes (see _take_out_typed_numbers)
+            Path(path).write_bytes(text.encode("utf-8"))  # bytes back as bytes (bytes back as bytes: text mode writes the draft's CRLF as CR CR LF on Windows)
             _receipts.carry_over(self.quest_root, "claim_check", "paper", before, Path(path).read_bytes(),
                                  "FI took out sentences its records contradict and added no claim")
             record = self.quest_root / _record_claims.TAKEN_OUT
@@ -22441,9 +22440,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         the writer typed that is not a number of the plan or the topic (core/typed_numbers.py). Text-only: the paper is
         written again, the design is not touched and the quest is not stopped.
 
-        When no review round is left to write the paper again, each typed number still in it is taken out and replaced by
-        "[number removed]", and listed in ``.fi/paper_record_check.json`` (QUALITY.md prints it): FI does not deliver a
-        number it did not fill and no record backs. What else is still unmet is kept there too, and said in the run log."""
+        When no review round is left to write the paper again, each typed number still in it stays as the writer wrote it and
+        is listed in ``.fi/paper_record_check.json`` (QUALITY.md prints it) as not traced to the plan or FI's records: a number
+        may be right though FI cannot trace it, so it is never deleted. What else is still unmet is kept there too, and said
+        in the run log."""
         keyed = bool(state.get("paper_keys"))
         topic = str(self.config.topic or "")
         fallback = (state.get("exec_result") or {}).get("duration_s")
@@ -22454,15 +22454,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # A draft the whole-paper writer wrote gets one edit of those passages first (_typed_pass_hits): nothing is taken out
         # of it until that edit has been made and checked.
         deferred = bool(self._typed_pass_hits(paper_md, state))
-        removed: list[tuple[str, str]] = []
-        if keyed and left <= 0 and not deferred and _paper_facts.typed_hits(
-                paper_md, _paper_facts.plan_protocol(self.quest_root, protocol), topic):
-            removed = self._take_out_typed_numbers(state, protocol)
-            if removed:
-                path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
-                paper_md = Path(path).read_text(encoding="utf-8")
+        untraced: list[tuple[str, str]] = []
+        if keyed and left <= 0 and not deferred:
+            untraced = _paper_facts.untraced_typed(
+                paper_md, _paper_facts.plan_protocol(self.quest_root, protocol), topic)
+            if untraced:
                 hits = _paper_facts.check(paper_md, self.quest_root, topic=topic, fallback_s=fallback, keyed=keyed,
-                                          protocol=protocol)
+                                          protocol=protocol, typed=False)
+                self._log.warning("[record_check] no round is left to write the paper again, so %d number(s) the writer typed "
+                                  "that FI cannot trace to the plan or its records stay as written and are listed in "
+                                  "QUALITY.md", len(untraced))
         # A result key FI could not fill is no better than a typed number once no round is left to fix it: it is taken out
         # the same way (a sentence that carried only such keys goes, any other place reads the same marker) and listed.
         dropped: list[dict[str, str]] = []
@@ -22477,7 +22478,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # was written before FI filled result numbers.
         not_filled = "" if keyed else (
             "older_paper" if (self.quest_root / "raw" / "trials.json").is_file() else "no_records")
-        _paper_facts.keep_check(self.quest_root, hits, paper_md, removed=removed, not_filled=not_filled, dropped=dropped)
+        _paper_facts.keep_check(self.quest_root, hits, paper_md, untraced=untraced, not_filled=not_filled, dropped=dropped)
         for hit in hits:
             self._log.warning("[record_check] %s", hit)
         if hits and left <= 0 and deferred:
@@ -22514,33 +22515,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                               type(e).__name__, str(e)[:200])
             return []
 
-    def _take_out_typed_numbers(self, state: QuestState, protocol: dict[str, Any] | None) -> list[tuple[str, str]]:
-        """The paper with each number the writer typed that is not a number of the plan or the topic replaced by
-        "[number removed]" (core/typed_numbers.py), written to disk: ``(number, sentence)`` for each. The claim check's
-        receipt moves to the new draft, which only lost numbers and added no claim."""
-        path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
-        if not path or not Path(path).is_file():
-            return []
-        try:
-            before = Path(path).read_bytes()
-            plan = _typed_numbers.plan_numbers(_paper_facts.plan_protocol(self.quest_root, protocol),
-                                               str(self.config.topic or ""))
-            text, taken = _typed_numbers.remove(before.decode("utf-8"), plan)
-            if not taken:
-                return []
-            # Bytes back as bytes: text mode would write the draft's own CRLF as CR CR LF on Windows, which every later
-            # read takes for a blank line more, so the next step rewrites the paper and the receipt moved here is stale.
-            Path(path).write_bytes(text.encode("utf-8"))
-            _receipts.carry_over(self.quest_root, "claim_check", "paper", before, Path(path).read_bytes(),
-                                 "FI took numbers the writer typed out of the checked draft and added no claim")
-        except (OSError, UnicodeDecodeError) as e:
-            self._log.warning("[record_check] the typed numbers could not be taken out of the paper (%s)", e)
-            return []
-        self._log.warning("[record_check] no round is left to write the paper again, so %d number(s) the writer typed that FI "
-                          "did not fill and the plan does not state were replaced by \"%s\" and are listed in QUALITY.md",
-                          len(taken), _typed_numbers.REMOVED)
-        return taken
-
     def _take_out_unfilled_keys(self, state: QuestState) -> list[dict[str, str]]:
         """The paper with each result key FI could not fill taken out (core/paper_facts.py::take_out_unfilled), written to
         disk: ``key``, ``sentence`` and ``how`` for each. Nothing is put in their place, so no number is invented, and the
@@ -22553,7 +22527,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             text, taken = _paper_facts.take_out_unfilled(before.decode("utf-8"))
             if not taken:
                 return []
-            Path(path).write_bytes(text.encode("utf-8"))  # bytes back as bytes (see _take_out_typed_numbers)
+            Path(path).write_bytes(text.encode("utf-8"))  # bytes back as bytes (bytes back as bytes: text mode writes the draft's CRLF as CR CR LF on Windows)
             _receipts.carry_over(self.quest_root, "claim_check", "paper", before, Path(path).read_bytes(),
                                  "FI took out values it could not fill and added no claim")
         except (OSError, UnicodeDecodeError) as e:

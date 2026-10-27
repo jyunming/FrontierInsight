@@ -45,15 +45,6 @@ def test_taking_out_values_fi_could_not_fill_keeps_the_line_endings_and_moves_th
     assert _receipt_names(eng, paper)
 
 
-def test_taking_out_typed_numbers_keeps_the_line_endings_and_moves_the_receipt(tmp_path: Path) -> None:
-    eng, paper = _quest(tmp_path, "# T\n\n## Results\n\nThe headline score was 0.987 across the settings.\n")
-    taken = eng._take_out_typed_numbers({"paper_md": str(paper)}, {"grid": {"m": [20, 200]}})
-    assert [n for n, _sentence in taken] == ["0.987"]
-    assert "[number removed]" in paper.read_text(encoding="utf-8")
-    assert _one_line_ending(paper)
-    assert _receipt_names(eng, paper)
-
-
 async def test_the_page_limit_sentence_after_the_checks_moves_their_receipts(tmp_path: Path) -> None:
     eng, paper = _quest(tmp_path, "# T\n\n## Methods\nM.\n\n## Limitations\nFew.\n\n## References\n1. A.\n",
                         checks=("claim_check", "citation_check"))
