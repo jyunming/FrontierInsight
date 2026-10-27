@@ -718,13 +718,15 @@ def replace_function(source: str, name: str, reply: str, *, signature: str, equa
             if not any(t.id in taken for t in n.targets):  # type: ignore[attr-defined]
                 helpers.append(_segment(reply_lines, n))
                 taken.update(t.id for t in n.targets)  # type: ignore[attr-defined]
+    from .code_layout import insert_before_main_guard
+
     if old is None:
-        out = source.rstrip("\n") + "\n\n\n" + body
+        out = insert_before_main_guard(source, body)
     else:
         start = min([old.lineno, *[d.lineno for d in old.decorator_list]])
         out = "".join(src_lines[: start - 1]) + body + "".join(src_lines[old.end_lineno:])
     if helpers:
-        out = out.rstrip("\n") + "\n\n\n" + "\n\n".join(h.rstrip("\n") + "\n" for h in helpers)
+        out = insert_before_main_guard(out, "\n\n".join(h.rstrip("\n") + "\n" for h in helpers))
     if imports:
         out = _with_imports(out, imports)
     try:
@@ -1390,7 +1392,9 @@ class FunctionFiller:
                 if record["functions"][s.name]["status"] == DONE and is_stub(on_disk, s.name):
                     record["functions"][s.name]["status"] = PENDING
                 if _find(on_disk, s.name) is None:
-                    self.model_path.write_text(on_disk.rstrip("\n") + "\n\n\n" + stub(s), encoding="utf-8")
+                    from .code_layout import insert_before_main_guard
+
+                    self.model_path.write_text(insert_before_main_guard(on_disk, stub(s)), encoding="utf-8")
                     on_disk = self.model_path.read_text(encoding="utf-8")
         save(self.root, record)
         for _pass in range(3):  # a function sent back to its placeholder while another was written is written in the next pass

@@ -14,6 +14,7 @@ import ast
 from dataclasses import dataclass, field
 
 from . import finding_repair as _finding
+from .code_layout import insert_before_main_guard
 
 
 @dataclass
@@ -131,7 +132,7 @@ def _carry_units(old: str, made: Resolved, sources: tuple) -> Resolved:
                 cur[start - 1:same[0].end_lineno] = [body]
                 current = "".join(cur)
             else:
-                current = current.rstrip("\n") + "\n\n\n" + body
+                current = insert_before_main_guard(current, body)
     try:
         ast.parse(current)
     except SyntaxError as e:

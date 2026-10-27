@@ -123,3 +123,29 @@ def test_a_dropped_helper_is_judged_by_pythons_own_scopes() -> None:
     assert "helper" in tr.repair_breaks_contract(old, shadowed, "simulate.py"), "a comprehension's variable binds only inside it"
     in_class = "class K:\n    value = helper(1)\n\n\ndef run_cell(cell, seed):\n    return 0\n"
     assert "helper" in tr.repair_breaks_contract(old, in_class, "simulate.py")
+GUARDED_SCRIPT = """import math
+
+
+def main():
+    return math.sqrt(helper(4))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+def _runs_without_name_error(tmp_path: Path, code: str) -> None:
+    import runpy
+
+    path = tmp_path / "script_under_test.py"
+    path.write_text(code, encoding="utf-8")
+    runpy.run_path(str(path), run_name="__main__")  # a NameError here is the failure
+
+
+def test_a_constant_the_reply_adds_goes_before_the_main_block(tmp_path: Path) -> None:
+    script = "SCALE = 3\n\n\ndef main():\n    return SCALE * 2\n\n\nif __name__ == \"__main__\":\n    main()\n"
+    old = GUARDED_SCRIPT.replace("math.sqrt(helper(4))", "math.sqrt(4)")
+    made = sr.resolve(old, script, "def main():\n    return SCALE * 2\n")
+    assert made.why == "" and "SCALE = 3" in made.code
+    assert made.code.index("SCALE = 3") < made.code.index('if __name__ == "__main__":')
+    _runs_without_name_error(tmp_path, made.code)

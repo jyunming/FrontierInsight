@@ -808,3 +808,34 @@ def test_a_script_that_runs_its_analysis_when_imported_gets_no_run_files(tmp_pat
     assert fr.run_environment(tmp_path, stand_ins=False)["FI_TRIALS"] == "raw/trials.json"
     (tmp_path / "code" / "experiment.py").write_text("def f(:\n", encoding="utf-8")
     assert fr.run_environment(tmp_path) == {}, "a file that does not parse is not known to run nothing"
+GUARDED_SCRIPT = """import math
+
+
+def main():
+    return math.sqrt(helper(4))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+def _runs_without_name_error(tmp_path: Path, code: str) -> None:
+    import runpy
+
+    path = tmp_path / "script_under_test.py"
+    path.write_text(code, encoding="utf-8")
+    runpy.run_path(str(path), run_name="__main__")  # a NameError here is the failure
+
+
+def test_a_helper_a_reply_adds_goes_before_the_main_block_so_running_the_script_finds_it(tmp_path: Path) -> None:
+    reply = "```python\ndef main():\n    return helper(4) + 1\n\n\ndef helper(x):\n    return x * 2\n```"
+    new, replaced, why = fr.splice(GUARDED_SCRIPT, reply, scope={"main"})
+    assert why == "" and new is not None and replaced == ["main", "helper"]
+    assert new.index("def helper") < new.index('if __name__ == "__main__":')
+    _runs_without_name_error(tmp_path, new)
+
+
+def test_a_file_without_a_main_block_still_gets_the_helper_at_the_end() -> None:
+    old = "def main():\n    return 1\n"
+    new, _, why = fr.splice(old, "def main():\n    return helper()\n\n\ndef helper():\n    return 2\n", scope={"main"})
+    assert why == "" and new == "def main():\n    return helper()\n\n\ndef helper():\n    return 2\n"
