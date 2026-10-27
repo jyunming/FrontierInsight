@@ -85,7 +85,7 @@ def _unbound_uses(top: symtable.SymbolTable, defined: set[str], script: str, lin
 def _run_time_names(tree: ast.AST) -> tuple[set[str], bool]:
     """The names a script sets on a module at run time (``module.NAME = ...``, ``setattr(module, "NAME", ...)``), and
     whether it does so in a way the text does not show (a ``setattr`` with a computed name, ``exec``, ``globals()``): then
-    the names the code may use are not all in the text, and nothing is judged."""
+    the names that script uses may be set by itself and are not all in the text."""
     names: set[str] = set()
     opaque = False
     for node in ast.walk(tree):
@@ -123,17 +123,20 @@ def problems(files: dict[str, str], protocol: dict[str, Any] | None = None,
     """The names used but never defined, in the scripts of ``files`` (``{script name: text}``). A name counts as defined when
     any script of the folder binds it at module level, or sets it on a module at run time (scripts import one another, and
     a package's constants are often set by the script that calls it). A script that does not parse, that holds a
-    ``from ... import *``, or that sets names at run time in a way the text does not show is not judged."""
+    ``from ... import *``, or that sets names at run time in a way the text does not show (``globals()``, ``exec``, a
+    computed ``setattr``) is not judged itself: a name it uses may be one it sets. The other scripts are judged as usual,
+    since a name they use reaches them only by an import, which binds it."""
     read = {script: r for script, text in files.items() if (r := _read(script, text)) is not None}
     defined: set[str] = set()
-    for tree, top in read.values():
+    opaque_scripts: set[str] = set()
+    for script, (tree, top) in read.items():
         names, opaque = _run_time_names(tree)
-        if opaque:  # a name set at run time that the text does not show may be any of the names used: nothing is judged
-            return []
+        if opaque:  # the names this script sets at run time are not in its text, so its own uses are not judged
+            opaque_scripts.add(script)
         defined |= names | _defined(top)
     out: list[Undefined] = []
     for script, (tree, top) in read.items():
-        if _star_import(tree):
+        if script in opaque_scripts or _star_import(tree):
             continue
         out.extend(_unbound_uses(top, defined | _MODULE_NAMES, script, _lines(tree)))
     return out
