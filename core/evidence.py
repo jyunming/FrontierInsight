@@ -463,8 +463,15 @@ def assess(
         matched_gaps.append("the run's numeric warnings were accepted as they were (see needs/NUMERIC_WARNINGS.json)")
     elif settings.get("numeric_warnings") == "off":
         matched_gaps.append("the numeric-warning check was turned off")
-    elif isinstance(warnings, list) and warnings and settings.get("numeric_warnings") == "warn":
+    elif (isinstance(warnings, list) and any(isinstance(w, dict) and w.get("warnings") for w in warnings)
+          and settings.get("numeric_warnings") == "warn"):
         matched_gaps.append("the run's numerics warned and the check only recorded it (engine.numeric_warnings: warn)")
+    if isinstance(last_warning_entry, dict) and last_warning_entry.get("disclosed"):
+        shown = "; ".join(str(d) for d in last_warning_entry["disclosed"][:4])
+        matched_gaps.append(
+            f"a number the run printed is not finite ({shown}): it is not stored under the name of one of the plan's "
+            "results, so the run was not repaired for it, and FI fills no such number into the paper (see "
+            "needs/NUMERIC_WARNINGS.json)")
     environment = _json(needs / "ENVIRONMENT.json")
     if isinstance(environment, dict) and environment.get("packages_error"):
         # Not "no packages": which packages the run had is unknown, so it cannot be set up again as it ran.
