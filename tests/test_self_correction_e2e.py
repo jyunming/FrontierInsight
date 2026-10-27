@@ -253,8 +253,12 @@ async def test_full_dag_with_analyze_re_experiment_reroute(
     assert artifacts.paper_md is not None and artifacts.paper_md.exists()
     # Analyze fired twice (re_experiment → re-run → publish).
     assert state_flags["analyze_calls"] == 2
-    # Design fired twice — the re-route DID send us back through design.
-    assert state_flags["design_calls"] == 2
+    # The re-route DID send us back through design, once: FI's own record of the design has two revisions. (The count
+    # of design prompts is not that fact: a redesign first asks only for the parts its reason names and asks for the
+    # whole design when none comes back changed, as here, where the fixture's design has no protocol to size.)
+    history = json.loads((engine.quest_root / "needs" / "DESIGN_HISTORY.json").read_text(encoding="utf-8"))
+    assert [h["iteration"] for h in history] == [0, 1]
+    assert state_flags["design_calls"] >= 2
     # Final iteration counter was bumped by cross_check on the re-route.
     assert (artifacts.raw_state.get("iteration") or 0) >= 1
 
