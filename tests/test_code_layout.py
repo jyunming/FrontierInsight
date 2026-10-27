@@ -926,3 +926,14 @@ def test_insert_before_main_guard_places_text_above_the_first_guard_and_its_comm
         "def main():\n    pass\n\n\ndef helper():\n    pass\n\n\n# run it\nif __name__ == \"__main__\":\n    main()\n")
     assert put("def main():\n    pass\n", "X = 1\n") == "def main():\n    pass\n\n\nX = 1\n"
     assert put("def (:\n", "X = 1\n") == "def (:\n\n\nX = 1\n"
+
+
+def test_a_hash_line_that_ends_a_string_is_not_a_comment_to_insert_above() -> None:
+    from core.code_layout import insert_before_main_guard as put
+
+    src = 'def main():\n    helper()\n\n\nBANNER = """x\n# end"""\nif __name__ == "__main__":\n    main()\n'
+    out = put(src, "def helper():\n    pass\n")
+    assert 'BANNER = """x\n# end"""\n\n\ndef helper():' in out
+    namespace: dict = {"__name__": "__main__"}
+    exec(compile(out, "<script>", "exec"), namespace)  # the guarded call finds helper; no NameError
+    assert namespace["BANNER"] == "x\n# end"

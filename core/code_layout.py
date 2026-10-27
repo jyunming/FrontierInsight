@@ -1026,12 +1026,13 @@ def insert_before_main_guard(source: str, text: str) -> str:
         tree = ast.parse(source)
     except SyntaxError:
         return source.rstrip("\n") + "\n\n\n" + text
-    guard = next((n for n in tree.body if _is_main_guard(n)), None)
-    if guard is None:
+    index = next((i for i, n in enumerate(tree.body) if _is_main_guard(n)), None)
+    if index is None:
         return source.rstrip("\n") + "\n\n\n" + text
     lines = source.splitlines(keepends=True)
-    at = guard.lineno - 1
-    while at > 0 and lines[at - 1].lstrip().startswith("#"):
+    at = tree.body[index].lineno - 1
+    floor = (tree.body[index - 1].end_lineno or 0) if index else 0  # a '#' line inside the statement before is not a comment
+    while at > floor and lines[at - 1].lstrip().startswith("#"):
         at -= 1
     head = "".join(lines[:at]).rstrip("\n")
     return (head + "\n\n\n" if head else "") + text.rstrip("\n") + "\n\n\n" + "".join(lines[at:])

@@ -1392,7 +1392,9 @@ class FunctionFiller:
                 if record["functions"][s.name]["status"] == DONE and is_stub(on_disk, s.name):
                     record["functions"][s.name]["status"] = PENDING
                 if _find(on_disk, s.name) is None:
-                    self.model_path.write_text(on_disk.rstrip("\n") + "\n\n\n" + stub(s), encoding="utf-8")
+                    from .code_layout import insert_before_main_guard
+
+                    self.model_path.write_text(insert_before_main_guard(on_disk, stub(s)), encoding="utf-8")
                     on_disk = self.model_path.read_text(encoding="utf-8")
         save(self.root, record)
         for _pass in range(3):  # a function sent back to its placeholder while another was written is written in the next pass
