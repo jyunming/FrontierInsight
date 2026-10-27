@@ -81,7 +81,6 @@ _BLOCK_FILES = {"results_table": Path(".fi") / "results_table.md"}  # = core.res
 #: ``{{figure:<file stem>:layout}}`` and ``{{figure:<file stem>:lines}}``: what a saved figure draws, from the recorder's
 #: files (:mod:`core.figure_facts`), not from the writer. The marker key is ``figure-<kind>-<stem>``.
 _FIGURE_KEY = "figure-"
-_FIGURE_WORDS = {"layout": "how the figure's panels are arranged", "lines": "which line styles the figure draws"}
 _ALIASES = {"runtime": "run_time", "wall_time": "run_time", "run_seconds": "run_time", "limit": "time_limit",
             "runtime_limit": "time_limit", "limit_met": "time_limit_met", "within_limit": "time_limit_met",
             "trials_each_setting": "trials_per_setting", "failed_trials": "trials_failed", "random_seed": "seed"}
@@ -1381,14 +1380,8 @@ def writer_section(quest_root: Path | str, *, topic: str = "", fallback_s: Any =
         if needed:
             lines.append(f"Required: the paper must hold {', '.join(needed)} (in the Methods, or where the run is described).")
     if figure_known:
-        lines.append("What each figure draws, from FI's record of the saved picture. Do not describe a figure's panel "
-                     "layout (upper, lower, left, right, side by side) or its line styles (dotted, dashed, solid) in your "
-                     "own words: you have not seen the picture, and a caption that places a panel or a line style the "
-                     "figure does not have is sent back to you. Write the placeholder where the layout or the line styles "
-                     "belong (in the caption or the text), and FI puts the plain sentence in:")
-        for fact_key, value in figure_known.items():
-            stem, _, kind = fact_key.rpartition(":")
-            lines.append(f"- {{{{figure:{stem}:{kind}}}}} ({_FIGURE_WORDS[kind]}): \"{value}\"")
+        lines.append("A figure's panel layout and its line styles are in the caption FI writes under it, from FI's "
+                     "record of the saved picture. You have not seen the picture: do not describe them in your own words.")
     if reduced_note:
         lines.append(f"Reduced size: {reduced_note} Say this in the paper, with the numbers.")
     if has_table:

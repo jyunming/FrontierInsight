@@ -38,13 +38,13 @@ Respond with a single JSON object, no prose, no markdown fence:
   "blocking": "<one sentence — only if verdict is 'revise'; otherwise empty string>",
   "why": "<one short sentence: the main reason for your verdict, accept or revise>",
   "design_parts": ["<only when the verdict is revise and a weakness or suggestion is about the design itself: the path(s), from the list under the design in the Inputs, of the part(s) it is about; otherwise an empty list>"],
-  "must_flag_hits": ["<short identifier of any non-negotiable failure detected: 'figure_caption' when the Figures block lists captions that describe what their figure does not show, plus any methodology failure your persona's MUST-FLAG checks detected, e.g. 'circular_evaluation', 'single_point_eval', 'weak_baseline_no_rerun', 'pseudo_units' — empty list when none apply>"],
+  "must_flag_hits": ["<short identifier of any non-negotiable failure detected: any methodology failure your persona's MUST-FLAG checks detected, e.g. 'circular_evaluation', 'single_point_eval', 'weak_baseline_no_rerun', 'pseudo_units' — empty list when none apply>"],
   "must_flag_places": [{"hit": "<one item of must_flag_hits, copied exactly>", "ids": ["<the id(s) FI printed before the sentence(s) of the paper draft that the hit is about, such as \"3.7\">"]}]
 }
 
-The paper draft below carries FI's id (`<<3.7>>`: the 7th sentence of section 3) before each sentence, caption and table row, and `<<section 3>>` after each section heading. In `must_flag_places`, give for each item of `must_flag_hits` that is about a passage of the paper the id(s) of that passage, copied from the draft; an item about the paper as a whole has no entry. FI places the item by the id alone: an item with no valid id cannot be placed, and the paper is then written again as a whole.
+The paper draft below carries FI's id (`<<3.7>>`: the 7th sentence of section 3) before each sentence and table row (FI's own figures and their captions carry none), and `<<section 3>>` after each section heading. In `must_flag_places`, give for each item of `must_flag_hits` that is about a passage of the paper the id(s) of that passage, copied from the draft; an item about the paper as a whole has no entry. FI places the item by the id alone: an item with no valid id cannot be placed, and the paper is then written again as a whole.
 
-The ``must_flag_hits`` field is non-negotiable: any item in this list overrides ``engine.review_loop = false`` and has the paper written again. An objection to the design itself (such as the methodology identifiers above) does not change the design: the paper is written again with your objection in hand and FI keeps it in its quality report, so name only what you can point to in the inputs. Personas without their own MUST-FLAG rules return ``[]``, except for the shared one above (`figure_caption`) and `user_feedback_unaddressed` when the person's refine notes are shown below and the paper does not answer one.
+The ``must_flag_hits`` field is non-negotiable: any item in this list overrides ``engine.review_loop = false`` and has the paper written again. An objection to the design itself (such as the methodology identifiers above) does not change the design: the paper is written again with your objection in hand and FI keeps it in its quality report, so name only what you can point to in the inputs. Personas without their own MUST-FLAG rules return ``[]``, except for `user_feedback_unaddressed` when the person's refine notes are shown below and the paper does not answer one.
 
 ---
 
@@ -62,12 +62,9 @@ $design_block
 $analysis_block
 
 ## Claim grounding (which paper claims trace to evidence)
-$claim_grounding_block
-
-## Figures (what each figure draws, recorded when the experiment saved it)
-$figure_check_block$foundational_check_block$user_feedback_block$code_findings_block
+$claim_grounding_block$foundational_check_block$user_feedback_block$code_findings_block
 
 ## Paper draft
-(The seed the code used, the measured run time, the topic's time limit and whether it was kept, the trial counts and the sentences saying what the study did not do are filled in by FI from its own records, between `<!-- fi:fact-... -->` markers; FI checks them after you, so do not judge them from memory and never ask for them to be changed. How the design was revised, how many runs were made, FI's record of the run and what a second reading of the code left open are in FI's quality report, not in the paper; the open points in the code are listed under "Open points in the code" in the Inputs above when there are any. A block between `<!-- fi:... -->` markers, such as the best design section, is written by FI and no revision can change it, so never ask for it to be edited or removed.)
+(The seed the code used, the measured run time, the topic's time limit and whether it was kept, the trial counts and the sentences saying what the study did not do are filled in by FI from its own records, between `<!-- fi:fact-... -->` markers; FI checks them after you, so do not judge them from memory and never ask for them to be changed. How the design was revised, how many runs were made, FI's record of the run and what a second reading of the code left open are in FI's quality report, not in the paper; the open points in the code are listed under "Open points in the code" in the Inputs above when there are any. A block between `<!-- fi:... -->` markers, such as the best design section, is written by FI and no revision can change it, so never ask for it to be edited or removed. The figures and their captions are FI's too, placed and written from its record of what each figure draws: never ask for a figure or a caption to be changed.)
 
 $paper_md

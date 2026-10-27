@@ -18,13 +18,13 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from .figure_facts import RUN_FIGURE_RE as _RUN_FIGURE_RE
 from . import paper_patch
 
 _HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(\S.*?)[ \t#]*$")
 _FENCE_RE = re.compile(r"^[ \t]*(```|~~~)")
 _QUOTE_RES = (re.compile("“([^”]{25,})”"), re.compile(r'"([^"\n]{25,})"'), re.compile(r"`([^`\n]{25,})`"))
 _WORDS_RE = re.compile(r"\S+")
-_FIGURE_LINK_RE = re.compile(r"!\[[^\n]*\]\(figures/")
 # A section the writer shortens gives up at most this share of its words (the rest of the cut comes from the next section).
 _MAX_CUT_SHARE = 0.4
 _CUT_WORDS_RE = re.compile(r"\bCut about (\d+) words", re.IGNORECASE)
@@ -112,8 +112,8 @@ def mark(markdown: str) -> tuple[str, dict[str, "Place"]]:
     count: dict[int, int] = {}
     for start, stop, _block in units:
         text = markdown[start:stop]
-        if text.lstrip().startswith("#") or any(a <= start < b for a, b in fenced):
-            continue
+        if text.lstrip().startswith("#") or any(a <= start < b for a, b in fenced) or _RUN_FIGURE_RE.match(text.strip()):
+            continue  # a heading, code, or one of FI's figures (placed and captioned from FI's records)
         owner = next((s.index for s in sections if s.start <= start < s.end), 0)
         count[owner] = count.get(owner, 0) + 1
         key = f"{owner}.{count[owner]}"
@@ -230,12 +230,6 @@ def to_shorten(markdown: str, sections: list[Section], cut: int) -> dict[int, in
             out[index] = words - take
             left -= take
     return out if left <= 0 else {}
-
-
-def holds_figures(markdown: str, sections: list[Section]) -> set[int]:
-    """The sections that hold a figure link (``![caption](figures/...)``): where a caption flagged without a figure's name
-    can be, read from the draft's structure."""
-    return {s.index for s in sections if s.index and _FIGURE_LINK_RE.search(text_of(markdown, s))}
 
 
 def holds_values(markdown: str, sections: list[Section]) -> set[int]:

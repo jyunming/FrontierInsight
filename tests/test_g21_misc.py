@@ -12,7 +12,7 @@ from core.config import (
     Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig,
     PausesConfig, ProviderConfig,
 )
-from core.engine import Engine, _format_figure_check
+from core.engine import Engine
 
 
 def _engine(tmp_path: Path, *, max_iterations: int = 3) -> Engine:
@@ -104,38 +104,6 @@ def test_reason_key_reads_two_wordings_of_one_sentence_alike() -> None:
     assert disclosure.reason_key(" Too FEW  trials. ") == disclosure.reason_key("too few trials")
     assert disclosure.reason_key("too few trials") != disclosure.reason_key("too many trials")
     assert disclosure.reason_key(None) == ""
-
-
-# --- L46: a caption that only names a series flat in some panels is not a must-fix -------------------------------------
-
-_SOME_PANELS = {
-    "file": "sizes.png",
-    "axes": [
-        {"title": "a=1", "ylabel": "settle_time", "ylim": [0, 1],
-         "series": [{"label": "reference", "min": 0.1, "max": 0.7, "shows": "yes"}]},
-        {"title": "a=3", "ylabel": "", "ylim": [0, 1],
-         "series": [{"label": "reference", "min": 0.9, "max": 0.9, "shows": "flat"}]},
-    ],
-}
-
-
-def test_a_series_flat_in_some_panels_is_not_made_a_must_fix_for_the_reviewer() -> None:
-    """Old code told the reviewer 'You MUST add a figure_caption entry ... and set verdict=revise' for a caption that
-    names a series drawn flat in one panel and varying in the other (the caption said nothing false); the model obeyed and
-    the review's must-fix was false."""
-    block = _format_figure_check("![Settling time against the reference.](figures/sizes.png)",
-                                 {"figure_records": {"sizes.png": _SOME_PANELS}})
-    assert "in only some panels" in block
-    assert "You MUST" not in block and "Do NOT add them to must_flag_hits" in block
-
-
-def test_a_caption_that_names_a_series_not_drawn_at_all_is_still_a_must_fix() -> None:
-    """Known positive: a series the figure does not show at all is something the caption says falsely."""
-    record = {"file": "g.png", "axes": [{"title": "", "ylabel": "gain", "ylim": [0, 1],
-                                         "series": [{"label": "ghost", "min": 0.0, "max": 0.0, "shows": "no"}]}]}
-    block = _format_figure_check("![The ghost curve.](figures/g.png)", {"figure_records": {"g.png": record}})
-    assert block.startswith("CAPTIONS THAT DESCRIBE WHAT THEIR FIGURE DOES NOT SHOW (1):")
-    assert "You MUST add a `figure_caption` entry" in block
 
 
 # --- L293: the power limit of the standard-error check is said in the paper --------------------------------------------

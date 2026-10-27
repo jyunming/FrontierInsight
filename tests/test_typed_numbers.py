@@ -70,6 +70,13 @@ def test_the_fi_marker_is_not_the_writers_text():
     assert "0.9312" not in tn.writers_text(text)
 
 
+def test_a_run_figure_and_the_caption_fi_wrote_for_it_are_not_the_writers_text():
+    text = ("Text.\n\n![**Figure 1.** Marked: limit at 0.4375.](figures/a.png){width=80%}\n\n"
+            "![An image of 0.8125 elsewhere](other/b.png)\n")
+    assert "0.4375" not in tn.writers_text(text)
+    assert _typed(text) == ["0.8125"], "an image that is not one of the run's figures is still read"
+
+
 def test_code_urls_references_and_html_comments_are_left_out():
     text = "See https://x.org/9876. <!-- 5555 -->\n\n## References\n\n1. Smith 2019, vol 3456."
     assert _typed(text) == []

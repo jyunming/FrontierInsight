@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from core.figure_facts import RUN_FIGURE_RE
+
 #: What FI puts where a result key it cannot fill stood (:mod:`core.paper_facts`); a typed number is never replaced.
 REMOVED = "[number removed]"
 #: The most sentences one report names; the rest are counted in one more line.
@@ -53,6 +55,7 @@ _TAIL_HEAD = re.compile(r"^(#{1,6})[ \t]+(?:\d+\.?[ \t]*)?(?:references|further 
                         re.I | re.M)
 _ANY_HEAD = re.compile(r"^(#{1,6})[ \t]+\S", re.M)
 _IMG_TARGET = re.compile(r"\]\([^)]*\)")
+_RUN_FIGURE = RUN_FIGURE_RE  # a figure of the run with the caption FI wrote for it
 _URL = re.compile(r"https?://\S+")
 _HEADING_NUMBER = re.compile(r"^(#{1,6}[ \t]+)(?:\d+(?:\.\d+)*\.?[ \t]|[IVXLC]+\.[ \t])", re.M)
 _LIST_NUMBER = re.compile(r"^([ \t]*(?:[-*+][ \t]+)?)\d+[.)][ \t]", re.M)
@@ -115,14 +118,15 @@ def _enumeration_labels(text: str, maths: list[tuple[int, int]]) -> list[tuple[i
 
 def writers_text(markdown: str) -> str:
     """``markdown`` with everything that is not the writer's own words blanked out (same length, so offsets hold): FI's value
-    markers and blocks, other HTML comments, double-brace placeholders, fenced code, URLs, image targets, a heading's or list's
+    markers and blocks, other HTML comments, double-brace placeholders, fenced code, the run's figures with the captions FI
+    wrote for them, URLs, other image targets, a heading's or list's
     number, an inline enumeration's labels "(1) ... (2) ...", and the sources under a ``References`` / ``Further reading``
     heading. A closed fenced block is left out, an unclosed fence only to the end of its paragraph; inline code is kept."""
     t = markdown or ""
     for pattern in (_FI_V, _FI_PAIR, _COMMENT, _FENCE):
         t = pattern.sub(_blank, t)
     t = _blank_sources(t)
-    for pattern in (_PLACEHOLDER, _IMG_TARGET, _URL):
+    for pattern in (_PLACEHOLDER, _RUN_FIGURE, _IMG_TARGET, _URL):
         t = pattern.sub(_blank, t)
     t = _HEADING_NUMBER.sub(lambda m: m.group(1) + re.sub(r"[^\n]", " ", m.group(0)[len(m.group(1)):]), t)
     t = _LIST_NUMBER.sub(lambda m: m.group(1) + " " * (len(m.group(0)) - len(m.group(1))), t)

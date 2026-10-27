@@ -25,6 +25,11 @@ import re
 from pathlib import Path
 from typing import Any
 
+#: A figure of the run in a paper, its caption and any attribute block pandoc reads after it (``{width=...}``). FI places
+#: these and writes their captions from its records (``core/engine.py:_place_figures``), so a check of the writer's own
+#: words leaves them out. The caption may hold any bracket; it never holds ``](``, which ends it.
+RUN_FIGURE_RE = re.compile(r"!\[(?:(?!\]\()[^\n])*\]\((?:\./)?figures/[^)\s]+\)(?:\{[^}\n]*\})?")
+
 #: Where the recorder leaves its files, under the quest's ``.fi`` folder (= ``core.plot_style.RECORDS_DIRNAME``).
 RECORDS_DIR = Path(".fi") / "figure_records"
 KINDS = ("layout", "lines")

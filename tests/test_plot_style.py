@@ -555,15 +555,15 @@ def test_a_vertical_reference_line_is_recorded_as_one_not_as_a_flat_series(tmp_p
 
 
 def test_the_engine_does_not_call_a_vertical_line_hidden_or_flat() -> None:
-    from core.engine import _figure_caption_findings, _figure_record_note, _hidden_series
+    from core.engine import _figure_caption_text, _figure_record_note, _hidden_series
 
     record = {"axes": [{"title": "N = 1000", "ylabel": "Count", "ylim": [0, 255.0], "series": [
         {"label": "Deterministic", "x": 0.583, "shows": "vertical line"}]}]}
     assert _hidden_series(record) == []
     note = _figure_record_note(record)
     assert "Deterministic a vertical line at x = 0.583" in note and "FLAT" not in note
-    paper = "![Final sizes with the Deterministic reference](figures/hist.png)\n"
-    assert _figure_caption_findings(paper, {"hist.png": record}) == []
+    caption = _figure_caption_text("hist.png", record, n_seeds=None)
+    assert "Marked: Deterministic at 0.583" in caption and "flat" not in caption
 
 
 def test_a_reference_line_and_a_family_of_runs_are_not_called_flat(tmp_path) -> None:

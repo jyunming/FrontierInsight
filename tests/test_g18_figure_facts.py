@@ -69,5 +69,6 @@ def test_placeholder_of_an_unknown_figure_reads_not_recorded(tmp_path):
 def test_writer_is_given_the_figure_facts(tmp_path):
     root = _quest(tmp_path, _record(SIDE, SIDE_RIGHT), _lines("-", "--"))
     section = paper_facts.writer_section(root)
-    assert "{{figure:fig_a:layout}}" in section and "{{figure:fig_a:lines}}" in section
-    assert "dashed lines" in section
+    # The layout and the line styles are in FI's caption of the figure now, not placeholders the writer types.
+    assert "{{figure:" not in section
+    assert "in the caption FI writes under it" in section

@@ -88,7 +88,6 @@ interface HumanReviewRequest {
         suggestions?: string[];
         must_flag_hits?: string[];
         numeric_oracle_warnings?: string[];
-        figure_caption_warnings?: string[];
         goal_coverage_notes?: string[];
         layout_not_redrawn?: string[];
         /** A search for the best design: a refine FI did not carry out (a new study, or unclear), and how to ask for more. */
@@ -496,13 +495,6 @@ export class Bridge {
         const nw = snap.numeric_oracle_warnings || [];
         if (nw.length) {
             md += `- **Numeric checks (advisory, not blocking):** ${nw
-                .map((w) => `\`${escapeMd(w)}\``)
-                .join(", ")}\n`;
-        }
-        // Captions naming a series their figure draws flat or not at all.
-        const fw = snap.figure_caption_warnings || [];
-        if (fw.length) {
-            md += `- **Figure captions (sent to the reviewer):** ${fw
                 .map((w) => `\`${escapeMd(w)}\``)
                 .join(", ")}\n`;
         }
