@@ -731,3 +731,25 @@ def test_a_round_that_fixes_one_shown_fault_while_another_is_shown_is_progress_a
     assert "the interval of F-b is the wrong one" in told and "def test_F_b" in told and "F-a" not in told
     rounds = ac.AgentCoder(eng.quest_root, agent).load()["rounds"]
     assert rounds[1]["newly_passed"] == ["finding F-a"]
+
+
+def test_a_for_loop_over_literals_in_the_agents_code_is_a_note_not_a_difference_sent_back(tmp_path: Path,
+                                                                                         monkeypatch) -> None:  # noqa: ANN001
+    """A loop over fixed values is read as the grid only by guessing from code; the chat writer's repair already leaves it
+    out (check_repairable), and the agent's code is held to the same reading: it is noted, never sent back."""
+    def loop_only(code: Path) -> None:
+        _write(2)(code)
+        text = (code / "experiment.py").read_text(encoding="utf-8")
+        (code / "experiment.py").write_text("for c in (1.0, 3.0):\n    pass\n" + text, encoding="utf-8")
+
+    agent = _Agent([loop_only])
+    eng = _engine(tmp_path, agent=agent)
+    monkeypatch.setattr(eng, "_protocol_of", lambda _state: {"grid": {"c": [1.0, 2.0]}})
+    _no_code_checks(monkeypatch)
+    monkeypatch.setattr(eng, "_gate_pass", _gate_wanting(eng, 2))
+    coder = asyncio.run(eng._code_agent())
+    asyncio.run(coder.write("write the study"))
+    out = asyncio.run(eng._agent_build({}, "python", {}, eng.quest_root / "code" / "experiment.py"))
+    assert out == (None, None, False) and len(agent.prompts) == 1, "the loop's values sent the code back"
+    record = json.loads((eng.quest_root / "needs" / "PROTOCOL_CHECK.json").read_text(encoding="utf-8"))
+    assert record["status"] == "ok" and record["differences"] == [] and record["notes"]
