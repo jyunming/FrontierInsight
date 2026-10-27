@@ -142,7 +142,9 @@ async def test_numeric_warnings_the_repairs_did_not_remove_end_in_the_honest_sto
     eng = _engine(tmp_path, numeric_warnings="block", exec_reflect_max_iterations=1)
     state = {
         "exec_result": {"returncode": 0, "numeric_warnings": [{"kind": "convergence", "text": "the solver did not converge"}]},
-        "result_json": {"x": 1.5}, "exec_reflect_iter": 1, "iteration": 1,
+        "result_json": {"x": 1.5}, "exec_reflect_iter": 0, "iteration": 1,
+        # the one repair the warnings have was made for them (a budget of their own) and they stood
+        "exec_reflect_history": [{"for": "numeric_warnings", "iter": 1, "returncode": 0}],
     }
     patch = await eng._node_execute_reflect(state)  # type: ignore[arg-type]
     assert patch and "the solver did not converge" in patch["exec_result"]["cannot_repair"]

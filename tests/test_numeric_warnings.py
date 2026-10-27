@@ -352,3 +352,26 @@ async def test_a_stop_for_warnings_counts_only_the_repairs_made_for_them(
     assert any("repaired 1 time(s) for these warnings; they stood" in t for t in record["tried"]), record["tried"]
     assert not (engine.quest_root / "paper" / "paper.md").exists()
 
+
+@pytest.mark.asyncio
+async def test_a_refused_repair_for_the_warnings_after_the_crash_repairs_are_spent_never_goes_on_to_the_analysis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The repair for the warnings is not Python, so it is not used: the run is not taken on to a paper with its warnings
+    standing because the crash repairs are spent; the warnings' own budget ends in the stop."""
+    calls: list[str] = []
+    monkeypatch.setattr("core.engine.LLMClient.chat",
+                        _fake_crash_then(calls, after_crash=_WARNS, numeric_repair="def broken(:\n"))
+    engine = Engine(_cfg(tmp_path, exec_reflect_max_iterations=1))
+    artifacts = await engine.run()
+    assert calls.count("CrashRepair") == 1 and calls.count("NumericRepair") == 1
+    assert artifacts.paper_md is None and (engine.quest_root / "needs" / "STUCK.json").is_file()
+
+
+def test_every_repair_made_is_counted_whichever_budget_it_is_on() -> None:
+    history = [{"iter": 1, "returncode": 1}, {"for": nw.REPAIR_FOR, "iter": 2, "returncode": 0},
+               {"for": nw.REPAIR_FOR, "iter": 3, "returncode": 0}]
+    assert nw.repairs_for_warnings(history) == 2
+    assert nw.repairs_made({"exec_reflect_iter": 1, "exec_reflect_history": history}) == 3
+    assert nw.repairs_made({}) == 0 and nw.repairs_for_warnings(None) == 0
+

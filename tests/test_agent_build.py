@@ -298,6 +298,18 @@ def test_a_check_after_the_checks_before_the_run_sends_a_failed_run_to_the_repai
     assert "figure … draws numbers typed into the code (…, …)" in result["stderr_tail"]
 
 
+def test_an_agent_round_for_the_runs_numeric_warnings_says_so_in_the_history(tmp_path: Path) -> None:
+    """The warnings' own repair budget counts the agent's rounds for them too; the round is numbered in the one sequence."""
+    agent = _Agent([_write(1), _write(2)])
+    eng = _engine(tmp_path, agent=agent)
+    _first_write(eng, agent)
+    warned = {"returncode": 0, "stderr_tail": "RuntimeWarning: overflow encountered in exp", "stdout_tail": ""}
+    patch = asyncio.run(eng._reflect_by_agent({"exec_reflect_history": []}, 0, 0, "0", "", warned, {},
+                                              tag="numeric_warnings", attempt=3))
+    assert patch["exec_reflect_history"][-1]["for"] == "numeric_warnings"
+    assert patch["exec_reflect_history"][-1]["iter"] == 3 and patch["exec_reflect_iter"] == 0
+
+
 def test_after_the_freeze_the_agent_gets_one_round_then_the_failure_stands(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
     agent = _Agent([_write(1), _write(2), _write(3)])
     eng = _engine(tmp_path, agent=agent)
