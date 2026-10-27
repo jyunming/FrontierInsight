@@ -297,3 +297,58 @@ async def test_the_stop_offers_the_setting_and_running_again_with_it_goes_on_wit
     artifacts = await second.run(from_step="run")
     assert artifacts.paper_md is not None and artifacts.paper_md.exists()
     assert _recorded(second)[-1]["mode"] == "warn", "the warnings are on record"
+
+
+# --- the warnings' own repair budget: repairs spent on crashes never leave them with none ------------------------------
+
+_CRASHES = _BODY + "raise RuntimeError('the first version crashes')\n"
+
+
+def _fake_crash_then(calls: list[str], *, after_crash: str, numeric_repair: str):
+    """The first script crashes; its crash repair gives ``after_crash``; a repair for the warnings gives ``numeric_repair``."""
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        kind = _classify(prompt)
+        calls.append(kind)
+        if kind == "Implementation":
+            return json.dumps({"code": _CRASHES, "deps": ["matplotlib"]})
+        if kind == "ExecuteReflect" and "its numerics reported problems" in prompt:
+            calls.append("NumericRepair")
+            return json.dumps({"code": numeric_repair, "deps": [], "patch_summary": "used atol and rtol"})
+        if kind == "ExecuteReflect":
+            calls.append("CrashRepair")
+            return json.dumps({"code": after_crash, "deps": [], "patch_summary": "removed the raise"})
+        return _fake_response_for(prompt)
+
+    return fake_chat
+
+
+@pytest.mark.asyncio
+async def test_warnings_after_the_crash_repairs_are_spent_get_a_repair_of_their_own_and_the_quest_goes_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The recorded case: a crash repair used the last repair, the repaired run then warned, and the quest stopped saying
+    the repairs did not remove the warnings, though none was made for them."""
+    calls: list[str] = []
+    monkeypatch.setattr("core.engine.LLMClient.chat", _fake_crash_then(calls, after_crash=_WARNS, numeric_repair=_QUIET))
+    engine = Engine(_cfg(tmp_path, exec_reflect_max_iterations=1))
+    artifacts = await engine.run()
+    assert calls.count("CrashRepair") == 1 and calls.count("NumericRepair") == 1
+    assert not (engine.quest_root / "needs" / "STUCK.json").exists()
+    assert artifacts.paper_md is not None and artifacts.paper_md.exists()
+
+
+@pytest.mark.asyncio
+async def test_a_stop_for_warnings_counts_only_the_repairs_made_for_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr("core.engine.LLMClient.chat", _fake_crash_then(calls, after_crash=_WARNS, numeric_repair=_WARNS))
+    engine = Engine(_cfg(tmp_path, exec_reflect_max_iterations=1))
+    await engine.run()
+    assert calls.count("CrashRepair") == 1 and calls.count("NumericRepair") == 1
+    record = json.loads((engine.quest_root / "needs" / "STUCK.json").read_text(encoding="utf-8"))
+    assert "an argument had no effect" in record["problem"]
+    assert any("repaired 1 time(s) for these warnings; they stood" in t for t in record["tried"]), record["tried"]
+    assert not (engine.quest_root / "paper" / "paper.md").exists()
+

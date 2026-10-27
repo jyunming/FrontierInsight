@@ -20083,8 +20083,31 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # three): it neither waits for a crash repair to be left nor spends one.
         manifest_turn = (rc != 0 and bool(state.get("run_manifest_failures")) and bool(state.get("run_manifest_analysis_only"))
                          and self.config.engine.run_manifest_check != "off")
-        bump = 0 if manifest_turn else 1
-        if iters >= self.config.engine.exec_reflect_max_iterations and not manifest_turn:
+        # A run that ran to the end and only warned has a budget of its own too (exec_reflect_max_iterations repairs for
+        # its warnings, counted from the repairs the history records as made for them): repairs spent on crashes never
+        # leave the warnings with none, and a stop for them says how many repairs were made for them.
+        numeric_turn = rc == 0 and has_result_json and bool(findings) and not degenerate and not implausible
+        numeric_made = sum(1 for h in state.get("exec_reflect_history") or [] if h.get("for") == _NUMERIC_REPAIR)
+        bump = 0 if manifest_turn or numeric_turn else 1
+        if numeric_turn and numeric_made >= self.config.engine.exec_reflect_max_iterations:
+            stop = self._manifest_repair_gave_up(state) or self._result_check_gave_up(state)
+            if stop is not None:
+                return stop
+            # Numeric warnings the repairs made for them did not remove: not something to write a paper over.
+            research = getattr(self.config, "rigor_profile", "default") == "research"
+            return self._stop_before_run(
+                "the run's numerics warned: " + "; ".join(w.describe() for w in findings),
+                "cannot_repair",
+                tried=["ran the experiment and read the numerical warnings it raised",
+                       *[_one_line(w.describe(), 300) for w in findings[:3]],
+                       f"sent the script back to be repaired {numeric_made} time(s) for these warnings; they stood"
+                       if numeric_made else "no repair is allowed (engine.exec_reflect_max_iterations is 0)"],
+                # A setting the person may choose (not a code edit); a research quest holds it fixed.
+                advice=None if research else (
+                    f"To go on with the warnings noted in the evidence instead, set `engine.numeric_warnings: warn` in "
+                    f"the quest's config.yaml, approve it with `python launch.py --update {self.quest_id}`, and run it "
+                    f"again from the run step (`--resume {self.quest_id} --from run`)."))
+        if iters >= self.config.engine.exec_reflect_max_iterations and not manifest_turn and not numeric_turn:
             # A run the run-manifest check sent back, with no repair left (earlier crashes spent them, or none are
             # allowed): the difference stands, and the quest stops and names it, never going on with no results.
             stop = self._manifest_repair_gave_up(state) or self._result_check_gave_up(state)
@@ -20092,20 +20115,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 return stop
             # Proceed regardless; analyze owns the authoritative degenerate
             # flag against the final result (covers max_iterations=0 too).
-            if rc == 0 and has_result_json and findings and not degenerate and not implausible:
-                # Numeric warnings the repairs did not remove: not something to write a paper over.
-                research = getattr(self.config, "rigor_profile", "default") == "research"
-                return self._stop_before_run(
-                    "the run's numerics warned: " + "; ".join(w.describe() for w in findings),
-                    "cannot_repair",
-                    tried=["ran the experiment and read the numerical warnings it raised",
-                           *[_one_line(w.describe(), 300) for w in findings[:3]],
-                           f"sent the script back to be repaired {iters} time(s); the warnings stood"],
-                    # A setting the person may choose (not a code edit); a research quest holds it fixed.
-                    advice=None if research else (
-                        f"To go on with the warnings noted in the evidence instead, set `engine.numeric_warnings: warn` in "
-                        f"the quest's config.yaml, approve it with `python launch.py --update {self.quest_id}`, and run it "
-                        f"again from the run step (`--resume {self.quest_id} --from run`)."))
             self._log.warning(
                 "[execute_reflect] %s after %d attempt(s); proceeding to analyze",
                 "result still degenerate (all metrics ~0)" if degenerate
@@ -20191,7 +20200,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             )
             returncode_for_prompt = "0 (ran, but values break the declared bounds)"
             result_json_note = "yes (rejected — see stdout)"
-        elif findings:
+        elif numeric_turn:
             self._log.warning(
                 "[execute_reflect] rc=0 but the run's numerics warned (%d) — attempting repair (iter %d): %s",
                 len(findings), iters + 1, "; ".join(w.describe() for w in findings[:4]),
@@ -20296,6 +20305,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             if overlaps:
                 return spent
             history.append({
+                **({"for": _NUMERIC_REPAIR} if numeric_turn else {}),
                 "iter": iters + 1,
                 "returncode": rc,
                 "stderr_tail": exec_result.get("stderr_tail", "")[-400:],
@@ -20355,6 +20365,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "returncode": rc, "stderr_tail": str(exec_result.get("stderr_tail", ""))[-1500:],
                 "result_json": exec_result.get("result_json")})
             history.append({
+                **({"for": _NUMERIC_REPAIR} if numeric_turn else {}),
                 "iter": iters + 1, "returncode": rc, "stderr_tail": exec_result.get("stderr_tail", "")[-400:],
                 "patch_summary": (f"[the repair was not used and {script_name} is as it was: {broken}. Give the "
                                   f"functions to change, each one whole.] " + patch_summary)[:400],
@@ -20363,6 +20374,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if refused:
             patch_summary = ("[the package change was not used: " + "; ".join(refused) + "] " + patch_summary)
         history.append({
+            **({"for": _NUMERIC_REPAIR} if numeric_turn else {}),
             "iter": iters + 1,
             "returncode": rc,
             "stderr_tail": exec_result.get("stderr_tail", "")[-400:],
@@ -29231,6 +29243,8 @@ _FILL_MARKER = "plan_sources_asked.json"
 # ``cannot_repair``: FI's repairs of the code ended and the problem stands (the run record differs from the protocol, the
 # numerics still warn, the code still lacks what the plan requires ...): the quest ends without a paper, nobody debugs.
 _STOPPED_BEFORE_THE_STUDY = ("too_long", "not_run", "cannot_repair", "no_search")
+#: What a repair history entry says it was for when it was made for the run's numeric warnings (their own budget).
+_NUMERIC_REPAIR = "numeric_warnings"
 
 
 def _fit_request(why: str, fit: dict[str, Any], kept: list[str] | None = None) -> str:
