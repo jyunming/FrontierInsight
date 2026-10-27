@@ -317,6 +317,23 @@ def test_a_rule_s_worst_violation_is_never_corrected_to_the_size_the_simulation_
         "an invariant whose plan typed a nonzero value is not 0 by its form"
 
 
+def test_a_repair_cannot_dispute_a_rule_s_zero_by_the_challenge_either() -> None:
+    """The exchange (challenge, concession, judge, numerical computation) never relaxes a rule's 0 to the measured drift."""
+    rule = {"name": "drift", "kind": "invariant", "expected": 0.0, "tolerance": 1e-6, "tolerance_mode": "absolute",
+            "expected_formula": "0", "case": {"n": 4}, "measure": "max_drift"}
+    proposal = {"name": "drift", "disputed_step": "the drift of the scheme is not zero at this step",
+                "expected_formula": "n * 0.75e-6", "expected": 3e-6}
+    refused, why = ch.challenge_of(rule, proposal, measured=3e-6)
+    assert refused is None and "0 by its form" in why
+    assert ch.challenge_of({**rule, "kind": "special_case"}, proposal, measured=3e-6)[0] is not None
+
+
+def test_equal_values_agree_under_a_relative_tolerance_even_at_zero() -> None:
+    rel = {**ORACLE, "expected": 1.0, "tolerance": 0.01, "tolerance_mode": "relative", "case": {"n": 4}}
+    assert ch._within(rel, 0.0, 0.0)
+    assert ch.settle_referee(rel, 0.0, 1.0, 0.0, "a sum")["outcome"] == "corrected"
+
+
 def test_two_numbers_far_from_the_plan_s_value_are_compared_at_their_own_size() -> None:
     """A relative tolerance taken at the plan's (wrong) 1e4 would let 1 and 100 agree; at their own size they do not."""
     far = {**ORACLE, "expected": 1.0e4, "tolerance": 0.01, "tolerance_mode": "relative", "case": {"n": 4}}

@@ -171,6 +171,8 @@ def _within(oracle: dict[str, Any], a: float | None, b: float | None) -> bool:
     0 as rounding at the check's own scale, so floating-point noise around 0 is not a difference)."""
     if a is None or b is None:
         return False
+    if a == b:
+        return True  # equal values agree at any tolerance (a relative one has no limit at 0)
     _expected, limit, mode = _oracle.limit_of(oracle)
     tolerance = _triage_num(oracle.get("tolerance"))
     if mode == "relative" and tolerance is not None and tolerance > 0:
@@ -179,12 +181,21 @@ def _within(oracle: dict[str, Any], a: float | None, b: float | None) -> bool:
     return limit is not None and abs(a - b) <= limit
 
 
+def zero_by_form(oracle: dict[str, Any]) -> bool:
+    """Whether the check measures how far a rule is broken and expects 0, which is 0 by its form: its expected value is
+    never disputed or corrected to a measured size (core/oracle_triage.py rules the same)."""
+    return _oracle.kind_of(oracle) in _forms.VIOLATION_KINDS and _oracle.limit_of(oracle)[0] == 0
+
+
 def challenge_of(oracle: dict[str, Any], proposal: dict[str, Any], measured: float | None = None,
                  constants: dict[str, float] | None = None) -> tuple[dict[str, Any] | None, str]:
     """The repair's question to the plan, as FI takes it: ``({step, formula, value, reason, measured}, "")``, or
     ``(None, why)`` when it cannot be taken (no step named, no formula FI computes, a formula that restates the measured
     value, or one that does not give the value claimed). ``measured``: what the simulation measured on the check's case;
     kept with the challenge for FI's own use, and taken out of the step a blind model is shown."""
+    if zero_by_form(oracle):
+        return None, ("the check measures how far a rule is broken, which is 0 by its form: its expected value is not "
+                      "disputed, the code is what a repair changes")
     step = without_measured(proposal.get("disputed_step"), measured)[:600]
     formula = str(proposal.get("expected_formula") or "").strip()
     if not step or not formula:
@@ -438,7 +449,7 @@ def settle_referee(oracle: dict[str, Any], measured: float | None, plan_value: f
             f"the check '{name}' still fails and the numerical computation from the definitions gave no value ({how})")}
     said = f"an independent numerical computation from the definitions gives {_oracle.fmt_digits(numeric)} ({how})"
     with_code, with_plan = _within(oracle, numeric, measured), _within(oracle, numeric, plan_value)
-    if with_code and not with_plan and _oracle.kind_of(oracle) in _forms.VIOLATION_KINDS and plan_value == 0:
+    if with_code and not with_plan and zero_by_form(oracle):
         return {"outcome": "unsettled", "by": "", "text": (
             f"the check '{name}' still fails and {said}, as the simulation does; the check measures how far a rule is "
             "broken, which is 0 by its form, so FI does not correct it to the measured size: it goes on unconfirmed")}
