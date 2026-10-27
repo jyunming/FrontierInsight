@@ -15050,7 +15050,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         ):
             return []
         try:
-            found = _numeric.scan(stderr, result_json)
+            # The protocol the run is held to: the frozen one, as the evidence reads it (core/evidence.py).
+            frozen = _frozen.load(self.quest_root)
+            results = _numeric.declared_results(
+                frozen.get("protocol") if frozen is not None else (state.get("design") or {}).get("protocol"))
+            found = _numeric.scan(stderr, result_json, results=results)
+            disclosed = _numeric.disclosed_non_finite(result_json, results)
         except Exception as e:  # noqa: BLE001 -- a defect in the scan must never stall a quest
             self._log.warning("[numeric] the warning scan failed (%r); skipping", e)
             # A scanner that crashed is not the same as one that ran and found nothing: the first means the run's
@@ -15066,7 +15071,21 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             except (OSError, ValueError):
                 pass
             return []
+        if disclosed:
+            # None of the plan's results: disclosed in the evidence, not repaired for (a NaN in a number nobody reports
+            # must not stop every result).
+            self._log.info("[numeric] not finite, not one of the plan's results (disclosed): %s", "; ".join(disclosed[:8]))
         if not found:
+            if disclosed:
+                try:
+                    path = self.quest_root / "needs" / "NUMERIC_WARNINGS.json"
+                    history = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
+                    history.append({"warnings": [], "disclosed": disclosed[:20], "mode": self.config.engine.numeric_warnings})
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(json.dumps(history[-20:], indent=2) + "\n", encoding="utf-8")
+                except (OSError, ValueError):
+                    pass
+                return []
             # A clean scan writes nothing when there is no history yet (a run with nothing to report leaves no
             # trace file at all). But when the file already ends on a scanner crash, this clean scan is itself
             # news: without it, that stale ``{"error": ...}`` would stay the last entry forever, and
@@ -15078,7 +15097,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             if path.is_file():
                 try:
                     history = json.loads(path.read_text(encoding="utf-8"))
-                    if history and isinstance(history[-1], dict) and "error" in history[-1]:
+                    # The same holds for an entry that disclosed a number the run no longer prints as NaN.
+                    if history and isinstance(history[-1], dict) and ("error" in history[-1] or history[-1].get("disclosed")):
                         history.append({"warnings": [], "mode": self.config.engine.numeric_warnings})
                         path.write_text(json.dumps(history[-20:], indent=2) + "\n", encoding="utf-8")
                 except (OSError, ValueError, IndexError):
@@ -15089,7 +15109,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         try:
             path = self.quest_root / "needs" / "NUMERIC_WARNINGS.json"
             history = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
-            history.append({"warnings": [{"kind": w.kind, "text": w.text} for w in found], "mode": self.config.engine.numeric_warnings})
+            history.append({"warnings": [{"kind": w.kind, "text": w.text} for w in found],
+                            **({"disclosed": disclosed[:20]} if disclosed else {}), "mode": self.config.engine.numeric_warnings})
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(history[-20:], indent=2) + "\n", encoding="utf-8")
             self._audit_check(

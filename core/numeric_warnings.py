@@ -17,7 +17,13 @@ What counts, and only this, so that a warning about a font or a deprecation neve
 * an argument that had no effect: "have no effect for a chosen solver", an unexpected or unrecognised keyword or option,
   "will be ignored", "is ignored";
 * ``ComplexWarning`` (an imaginary part silently discarded);
-* a ``NaN`` or an infinity in the results the script printed.
+* a ``NaN`` or an infinity in the results the script printed, when it is a result the plan declares
+  (``design.protocol.metrics``). Any other non-finite number (a diagnostic the plan does not report) is disclosed
+  (:func:`disclosed_non_finite`), not repaired: a NaN in a number nobody reports must not stop every result. Which
+  printed number is a declared result is told by its name (a key on its path equal to a result's id), so a NaN in a
+  number named otherwise (``rate_se`` beside the declared ``rate``) is disclosed too; the study contract's result roles
+  replace that link. FI fills no non-finite number into the paper (:mod:`core.paper_values`). A plan that declares no
+  result keeps every non-finite number.
 """
 
 from __future__ import annotations
@@ -59,21 +65,47 @@ class NumericWarning:
         }.get(self.kind, self.kind) + f": {self.text}"
 
 
-def _non_finite(result: Any, prefix: str = "") -> list[str]:
-    found: list[str] = []
+def _non_finite_leaves(result: Any, prefix: str = "", keys: tuple[str, ...] = ()) -> list[tuple[str, tuple[str, ...], float]]:
+    """Every non-finite number in ``result``: its path as written in a warning, the dict keys on that path (verbatim, so a
+    key holding a dot or a bracket is one key), and the value."""
+    found: list[tuple[str, tuple[str, ...], float]] = []
     if isinstance(result, dict):
         for key, value in result.items():
-            found += _non_finite(value, f"{prefix}.{key}" if prefix else str(key))
+            found += _non_finite_leaves(value, f"{prefix}.{key}" if prefix else str(key), keys + (str(key),))
     elif isinstance(result, list):
         for index, value in enumerate(result[:200]):
-            found += _non_finite(value, f"{prefix}[{index}]")
+            found += _non_finite_leaves(value, f"{prefix}[{index}]", keys)
     elif isinstance(result, float) and not math.isfinite(result):
-        found.append(f"{prefix} is {result}")
+        found.append((prefix, keys, result))
     return found
 
 
-def scan(stderr: str, result_json: Any = None, *, limit: int = 8) -> list[NumericWarning]:
-    """The numeric warnings in ``stderr`` and non-finite numbers in ``result_json``, each once, at most ``limit``."""
+def _non_finite(result: Any, prefix: str = "") -> list[str]:
+    return [f"{path} is {value}" for path, _keys, value in _non_finite_leaves(result, prefix)]
+
+
+def declared_results(protocol: Any) -> set[str]:
+    """The ids of the results the plan declares (``design.protocol.metrics``)."""
+    metrics = protocol.get("metrics") if isinstance(protocol, dict) else None
+    return {str(m["id"]) for m in metrics or [] if isinstance(m, dict) and m.get("id")}
+
+
+def _names_result(keys: tuple[str, ...], results: set[str]) -> bool:
+    return any(key in results for key in keys)
+
+
+def disclosed_non_finite(result_json: Any, results: set[str]) -> list[str]:
+    """The non-finite numbers of ``result_json`` that are none of the plan's declared ``results``: disclosed, never
+    repaired for (none when the plan declares no result)."""
+    if not results:
+        return []
+    return [f"{path} is {value}" for path, keys, value in _non_finite_leaves(result_json) if not _names_result(keys, results)]
+
+
+def scan(stderr: str, result_json: Any = None, *, limit: int = 8, results: set[str] | None = None) -> list[NumericWarning]:
+    """The numeric warnings in ``stderr`` and non-finite numbers in ``result_json``, each once, at most ``limit``. With
+    ``results`` (the plan's declared results, not empty) a non-finite number counts only when it is one of them;
+    without, every one counts."""
     seen: set[tuple[str, str]] = set()
     out: list[NumericWarning] = []
 
@@ -99,8 +131,9 @@ def scan(stderr: str, result_json: Any = None, *, limit: int = 8) -> list[Numeri
             add("complex", text)
         elif cls in ("UserWarning", "RuntimeWarning") and _IGNORED_ARG.search(text):
             add("ignored_argument", text)
-    for path in _non_finite(result_json):
-        add("non_finite", path)
+    for path, keys, value in _non_finite_leaves(result_json):
+        if not results or _names_result(keys, results):
+            add("non_finite", f"{path} is {value}")
     return out
 
 

@@ -375,3 +375,104 @@ def test_every_repair_made_is_counted_whichever_budget_it_is_on() -> None:
     assert nw.repairs_made({"exec_reflect_iter": 1, "exec_reflect_history": history}) == 3
     assert nw.repairs_made({}) == 0 and nw.repairs_for_warnings(None) == 0
 
+
+
+# ---- a NaN in a number the plan does not report is disclosed, not repaired for (-172 part b, option B) ----------------
+
+_PROTOCOL = {"metrics": [{"id": "rate"}, {"id": "spread"}]}
+
+
+def test_a_nan_in_a_declared_result_counts_and_one_in_a_diagnostic_does_not() -> None:
+    result = {"by_setting": {"low": {"rate": math.nan, "spread": 0.2}}, "debug_ratio": math.nan, "timing": [math.inf]}
+    found = nw.scan("", result, results=nw.declared_results(_PROTOCOL))
+    assert [(w.kind, w.text) for w in found] == [("non_finite", "by_setting.low.rate is nan")]
+    assert nw.disclosed_non_finite(result, nw.declared_results(_PROTOCOL)) == ["debug_ratio is nan", "timing[0] is inf"]
+
+
+def test_a_plan_that_declares_no_result_keeps_every_non_finite_number() -> None:
+    result = {"debug_ratio": math.nan}
+    assert [w.text for w in nw.scan("", result, results=nw.declared_results({}))] == ["debug_ratio is nan"]
+    assert nw.disclosed_non_finite(result, set()) == []
+
+
+def test_a_nan_only_in_a_diagnostic_asks_for_no_repair_and_is_disclosed_in_the_evidence(tmp_path: Path) -> None:
+    from core import evidence
+
+    engine = Engine(_cfg(tmp_path))
+    state: dict[str, Any] = {"design": {"protocol": _PROTOCOL}}
+    assert engine._scan_numeric_warnings(state, "", {"rate": 0.5, "debug_ratio": math.nan}) == []  # type: ignore[arg-type]
+    assert _recorded(engine)[-1]["disclosed"] == ["debug_ratio is nan"]
+    got = evidence.assess(engine.quest_root, {}, settings={"numeric_warnings": "block"})
+    assert any("debug_ratio is nan" in g and "not stored under the name of one of the plan's results" in g
+               for g in got["all_gaps"]["protocol_runtime_matched"])
+    # The next run prints it finite: the disclosure is no longer the last word.
+    assert engine._scan_numeric_warnings(state, "", {"rate": 0.5, "debug_ratio": 1.0}) == []  # type: ignore[arg-type]
+    assert _recorded(engine)[-1] == {"warnings": [], "mode": "block"}
+    got = evidence.assess(engine.quest_root, {}, settings={"numeric_warnings": "block"})
+    assert not any("debug_ratio" in g for g in got["all_gaps"]["protocol_runtime_matched"])
+
+
+def test_a_nan_in_a_declared_result_still_asks_for_the_repair(tmp_path: Path) -> None:
+    engine = Engine(_cfg(tmp_path))
+    state: dict[str, Any] = {"design": {"protocol": _PROTOCOL}}
+    got = engine._scan_numeric_warnings(state, "", {"rate": math.nan, "debug_ratio": math.nan})  # type: ignore[arg-type]
+    assert got == [{"kind": "non_finite", "text": "rate is nan"}]
+    assert _recorded(engine)[-1]["disclosed"] == ["debug_ratio is nan"]
+
+
+def test_a_key_is_matched_whole_even_when_it_holds_a_dot_or_a_bracket() -> None:
+    results = nw.declared_results({"metrics": [{"id": "a.b"}, {"id": "rate"}]})
+    found = nw.scan("", {"a.b": math.nan, "rate[nm]": math.nan, "x": {"rate": [1.0, math.inf]}}, results=results)
+    assert [w.text for w in found] == ["a.b is nan", "x.rate[1] is inf"]
+    assert nw.disclosed_non_finite({"rate[nm]": math.nan}, results) == ["rate[nm] is nan"]
+
+
+def test_a_top_level_list_of_results_is_read_by_its_keys() -> None:
+    found = nw.scan("", [{"rate": math.nan}, {"other": math.nan}], results={"rate"})
+    assert [w.text for w in found] == ["[0].rate is nan"]
+
+
+def test_a_clean_scan_after_a_warning_with_a_disclosure_ends_the_disclosure(tmp_path: Path) -> None:
+    engine = Engine(_cfg(tmp_path))
+    state: dict[str, Any] = {"design": {"protocol": _PROTOCOL}}
+    assert engine._scan_numeric_warnings(state, "", {"rate": math.nan, "debug_ratio": math.nan})  # type: ignore[arg-type]
+    assert engine._scan_numeric_warnings(state, "", {"rate": 0.5, "debug_ratio": 1.0}) == []  # type: ignore[arg-type]
+    record = _recorded(engine)
+    assert record[0]["warnings"] and record[0]["disclosed"] == ["debug_ratio is nan"]
+    assert record[-1] == {"warnings": [], "mode": "block"}
+
+
+def test_the_frozen_protocol_names_the_results_when_there_is_one(tmp_path: Path) -> None:
+    from core import frozen_protocol
+
+    engine = Engine(_cfg(tmp_path))
+    frozen_path = frozen_protocol.frozen_path(engine.quest_root)
+    frozen_path.parent.mkdir(parents=True, exist_ok=True)
+    protocol = {"metrics": [{"id": "debug_ratio"}]}
+    frozen_path.write_text(json.dumps({"schema": frozen_protocol.FROZEN_SCHEMA, "protocol": protocol,
+                                       "sha256": frozen_protocol.sha256(protocol)}), encoding="utf-8")
+    assert frozen_protocol.load(engine.quest_root) is not None
+    state: dict[str, Any] = {"design": {"protocol": _PROTOCOL}}
+    got = engine._scan_numeric_warnings(state, "", {"rate": math.nan, "debug_ratio": math.nan})  # type: ignore[arg-type]
+    assert got == [{"kind": "non_finite", "text": "debug_ratio is nan"}]
+
+
+def test_the_uncertainty_a_script_prints_beside_a_declared_result_is_disclosed_not_repaired_for() -> None:
+    """The maintainer's decision (2026-10-27): only a key equal to a declared result's id counts; rate_se beside the
+    declared rate is disclosed (FI's own intervals come from its records, and FI fills no non-finite number)."""
+    results = nw.declared_results(_PROTOCOL)
+    assert nw.scan("", {"rate": 0.4, "rate_se": math.nan}, results=results) == []
+    assert nw.disclosed_non_finite({"rate": 0.4, "rate_se": math.nan}, results) == ["rate_se is nan"]
+
+
+def test_a_frozen_protocol_with_no_results_keeps_every_non_finite_number(tmp_path: Path) -> None:
+    from core import frozen_protocol
+
+    engine = Engine(_cfg(tmp_path))
+    frozen_path = frozen_protocol.frozen_path(engine.quest_root)
+    frozen_path.parent.mkdir(parents=True, exist_ok=True)
+    frozen_path.write_text(json.dumps({"schema": frozen_protocol.FROZEN_SCHEMA, "protocol": {},
+                                       "sha256": frozen_protocol.sha256({})}), encoding="utf-8")
+    state: dict[str, Any] = {"design": {"protocol": _PROTOCOL}}
+    got = engine._scan_numeric_warnings(state, "", {"debug_ratio": math.nan})  # type: ignore[arg-type]
+    assert got == [{"kind": "non_finite", "text": "debug_ratio is nan"}]
