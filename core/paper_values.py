@@ -129,7 +129,7 @@ class Measured:
     """A computed number as FI holds it, before it is written: ``kind`` says which rounding it gets."""
 
     value: float
-    kind: str = "plain"  # plain | ratio | int | count | interval | words
+    kind: str = "plain"  # plain | ratio | int | count | interval | words | over_settings (n = settings, one run each)
     lower: float | None = None
     upper: float | None = None
     method: str = ""  # "95% Wilson interval"
@@ -152,6 +152,8 @@ def fmt(m: Measured, form: str = "mean", percent: bool = False) -> str:
         return f"{m.successes} of {m.n}"
     scale = 100.0 if percent else 1.0
     tail = "%" if percent else ""
+    if m.kind == "over_settings":
+        return f"{sig(m.value * scale, 4)}{tail} (mean over {m.n} settings, one run each; no interval)"
     if m.kind == "interval":
         assert m.lower is not None and m.upper is not None
         v, lo, hi = interval_places(m.value * scale, m.lower * scale, m.upper * scale)
@@ -774,10 +776,19 @@ def _observations(rec: Records, cells: list[dict[str, Any]], metric: str) -> tup
     return _trials(cells, metric), False
 
 
+def _one_run_each(cells: list[dict[str, Any]], metric: str) -> bool:
+    """Whether ``metric`` over ``cells`` is one run per setting, in two or more settings (FI's trial record counts the
+    values of each). Its values are then those of different settings, not repeated draws of one quantity, so no
+    interval or standard error of their mean is a statement the data can make."""
+    return len(cells) > 1 and all(len(_tt._values(c["metrics"][metric])) <= 1 for c in cells)
+
+
 def _interval(rec: Records, cells: list[dict[str, Any]], metric: str) -> tuple[float, float | None, float | None, str, int | None, bool, float | None]:
     """``(mean, lower, upper, method, n, symmetric, standard error)`` of ``metric`` over ``cells``, from
     :func:`_observations`. With shared draws it is a t interval over the different draws (also for a 0/1 value: the
     draws' proportions); with fewer than two draws there is no interval."""
+    if _one_run_each(cells, metric):
+        raise _Unfilled(f"each of the {len(cells)} settings ran once, so their values are not repeated draws and there is no interval")
     obs, shared = _observations(rec, cells, metric)
     summary = _tt.summary(obs)
     if shared:
@@ -964,6 +975,8 @@ def _measure(rec: Records, metric: str, form: str, arg: str, where: dict[str, Pi
         return Measured(summary["mean"], "count", n=summary["n"], successes=int(summary["successes"]))
     if form == "mean":
         return Measured(_tt.summary(_observations(rec, cells, metric)[0])["mean"])
+    if form == "mean_ci" and _one_run_each(cells, metric):
+        return Measured(_tt.summary(values)["mean"], "over_settings", n=len(cells))
     if form in ("mean_ci", "ci", "pm"):
         mean, lo, hi, words, n, symmetric, _se = _interval(rec, cells, metric)
         if lo is None or hi is None:
@@ -998,6 +1011,8 @@ def _measure(rec: Records, metric: str, form: str, arg: str, where: dict[str, Pi
     r = _pearson(xs, ys)
     if form == "corr":
         return Measured(r)
+    if _one_run_each(cells, metric):
+        raise _Unfilled(f"each of the {len(cells)} settings ran once, so their values are not repeated draws and there is no interval")
     if len(xs) < 4:
         raise _Unfilled("too few paired " + ("draws" if shared else "trials") + " for an interval")
     z, half = math.atanh(r), 1.96 / math.sqrt(len(xs) - 3)
