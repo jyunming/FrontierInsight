@@ -1797,12 +1797,13 @@ async def run_oracle(executor: Any, python: Path | str, quest_root: Path, module
 
 
 def is_per_trial(oracle: dict[str, Any] | None) -> bool:
-    """A check that holds in every single trial: kind ``invariant``, or declared ``per_trial: true``."""
+    """A check that holds in every single trial: what its ``per_trial`` says (:func:`core.mc_error.per_trial_flag`), and
+    only when the plan says nothing, its kind's default (``invariant`` holds in every trial)."""
     if oracle is None:
         return False
-    flag = oracle.get("per_trial")
-    if flag is True or (isinstance(flag, str) and flag.strip().lower() in ("true", "yes", "1")):
-        return True
+    flag = _mc.per_trial_flag(oracle)
+    if flag is not None:
+        return flag
     return _oracle.kind_of(oracle) == "invariant"
 
 
