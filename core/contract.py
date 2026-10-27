@@ -155,6 +155,12 @@ class Checks(_Strict):
 
 
 class StudyContract(_Strict):
+    #: ``contract``: a plan written in this form (``protocol.form: contract``), whose results are what the simulation
+    #: returns for each trial and whose derived quantities are declared apart. ``older``: a plan from before, whose
+    #: results mix values returned per trial with quantities its analysis computed afterwards (measured 2026-10-27: 315
+    #: of 472 declared results in 51 recorded quests were returned per trial), so a result missing from a trial does not
+    #: make that trial a failure.
+    form: Literal["contract", "older"] = "contract"
     settings: Settings = Field(default_factory=Settings)
     results: tuple[Result, ...] = ()
     comparisons: tuple[Comparison, ...] = ()
@@ -220,7 +226,7 @@ _DESIGN_NOTES = ("hypothesis", "method", "expected_outcome", "rationale", "varia
 #: Protocol keys the reader places; any other key goes to the notes and is named in the gaps.
 _PLACED = {"grid", "sub_studies", "in_each_run", "numerical_settings", "constants", "thresholds", "runs_per_setting",
            "min_runs_per_setting", "precision", "metrics", "oracles", "criteria", "topic_map", "optimisation", "model",
-           "labels", "comparisons", "derived", "figures", "steps", "shared_draws", *_NOTE_KEYS}
+           "labels", "comparisons", "derived", "figures", "steps", "shared_draws", "form", *_NOTE_KEYS}
 
 
 def _values(v: Any) -> tuple[Any, ...]:
@@ -395,7 +401,10 @@ def from_design(design: dict[str, Any] | None) -> StudyContract:
         notes.update({k: p[k] for k in other})
         gaps.append("these parts of the protocol are kept only as notes: " + ", ".join(other))
 
-    base = {"settings": settings, "budget": budget, "labels": labels, "notes": notes,
+    form = "contract" if p.get("form") == "contract" else "older"
+    if form == "older":
+        gaps.append("an older plan: its results may be computed by its analysis, not returned by each trial")
+    base = {"form": form, "settings": settings, "budget": budget, "labels": labels, "notes": notes,
             "checks": Checks(oracles=_rows(p.get("oracles"), gaps, "the known-answer checks"),
                              criteria=_rows(p.get("criteria"), gaps, "the criteria"),
                              assertions=tuple(assertions), topic_map=_rows(p.get("topic_map"), gaps, "the topic map")),

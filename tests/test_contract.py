@@ -192,3 +192,13 @@ def test_the_last_review_round_figures_not_a_list_an_empty_role_a_condition_on_a
     assert [d.id for d in c.derived] == ["d"] and any("derived `d` is left out" in g for g in c.gaps)
     nested = C.Checks(oracles=({"case": {"load": 1}},))
     assert nested.model_copy(deep=True).oracles[0] is not nested.oracles[0]
+
+
+def test_a_plan_says_it_is_in_the_contract_form_and_any_other_is_an_older_plan() -> None:
+    older = C.from_design(_old_plan())
+    assert older.form == "older" and any("an older plan" in g for g in older.gaps)
+    plan = _old_plan()
+    plan["protocol"]["form"] = "contract"
+    new = C.from_design(plan)
+    assert new.form == "contract" and not any("an older plan" in g for g in new.gaps)
+    assert C.StudyContract().form == "contract"
