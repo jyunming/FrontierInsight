@@ -2241,9 +2241,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # never recorded as the model's words. A give-up the run-record check turned into a stop is only in the
             # history, as "(gave up: <the model's reason>)".
             give_up = str(out.get("exec_give_up_reason") or "")
-            attempt = out.get("exec_reflect_iter")
-            entry = next((h for h in out.get("exec_reflect_history") or []
-                          if isinstance(h, dict) and h.get("iter") == attempt), None)
+            written = out.get("exec_reflect_history") or []
+            entry = written[-1] if written and isinstance(written[-1], dict) else None
+            attempt = (entry or {}).get("iter", out.get("exec_reflect_iter"))
             summary = str((entry or {}).get("patch_summary") or "")
             if give_up and not give_up.startswith("("):
                 self._claim(node, "execute_reflect", "repair", give_up, decision="gave up")
@@ -2372,7 +2372,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             },
             "execute_reflect": {
                 "returncode": result.get("returncode", 0), "has_result_json": bool(state.get("result_json")),
-                "attempt": state.get("exec_reflect_iter", 0), "gave_up": state.get("exec_give_up_reason") or "",
+                "attempt": _numeric.repairs_made(state), "gave_up": state.get("exec_give_up_reason") or "",
                 "patch_pending": bool(state.get("exec_patch_pending")),
             },
             "cross_check": {
@@ -2861,6 +2861,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # are spent, so this cannot loop.
         if state.get("exec_patch_pending"):
             return "retry"
+        # A run that ran to the end and only warned is repaired on the warnings' own budget or stopped for them by the
+        # reflect node, whatever is left of the crash repairs (a repair that gave up has gone on above, as before).
+        if self._numeric_turn(state):
+            return "retry"
         iters = state.get("exec_reflect_iter", 0)
         if iters >= self.config.engine.exec_reflect_max_iterations:
             return "proceed"
@@ -2878,9 +2882,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # design declared what its outputs may legally be; enforce it
             # here, before a paper gets written from them.
             if _assertion_violations(state, self._walk_memo()):
-                return "retry"
-            # Warnings from the run's own numerics, until the repairs are spent.
-            if self._numeric_findings(state):
                 return "retry"
             # Figures with a legend or a title drawn over what a reader needs go
             # back once: the reflect node writes the redraw, and the flag it sets
@@ -13221,7 +13222,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 continue
             if record.get("version") == version and record.get("skipped"):
                 break  # the reader is the model that wrote the code (or FI cannot tell): nothing to read again
-            after_run_repair = final and int(state.get("exec_reflect_iter") or 0) > 0
+            after_run_repair = final and _numeric.repairs_made(state) > 0
             if not _code_review.may_read(record, final=final, after_run_repair=after_run_repair):
                 if final:
                     cap = _code_review.read_cap(final=True, after_run_repair=after_run_repair)
@@ -15119,6 +15120,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             _numeric.NumericWarning(str(r.get("kind") or ""), str(r.get("text") or ""))
             for r in recorded if isinstance(r, dict)
         ]
+
+    def _numeric_turn(self, state: QuestState) -> bool:
+        """Whether the last run ran to the end, its results stand on their own (not all zero, inside their bounds) and
+        its numerics warned: the repair is then for the warnings, on their own budget."""
+        if (state.get("exec_result") or {}).get("returncode", 0) != 0 or not state.get("result_json"):
+            return False
+        if not self._numeric_findings(state):
+            return False
+        if self.config.engine.degenerate_run_guard and _is_degenerate_result(state.get("result_json") or {}):
+            return False
+        return not _assertion_violations(state, self._walk_memo())
 
     def _scripts_sha(self) -> str:
         import hashlib
@@ -19421,7 +19433,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             patch["code"] = code_path.read_text(encoding="utf-8")  # the plotting code was rewritten to use the results
         await self._record_criteria(
             state, attempt=run_record_id, result=patch["result_json"] if run_accepted else None,
-            repaired=gate_repaired or int(state.get("exec_reflect_iter", 0) or 0) > 0)
+            repaired=gate_repaired or _numeric.repairs_made(state) > 0)
         # Only populate ``result_json_replicates`` when replication
         # actually ran AND produced more than the primary entry. This
         # keeps the field absent on default single-seed quests so
@@ -20083,8 +20095,33 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # three): it neither waits for a crash repair to be left nor spends one.
         manifest_turn = (rc != 0 and bool(state.get("run_manifest_failures")) and bool(state.get("run_manifest_analysis_only"))
                          and self.config.engine.run_manifest_check != "off")
-        bump = 0 if manifest_turn else 1
-        if iters >= self.config.engine.exec_reflect_max_iterations and not manifest_turn:
+        # A run that ran to the end and only warned has a budget of its own too (exec_reflect_max_iterations repairs for
+        # its warnings, counted from the repairs the history records as made for them): repairs spent on crashes never
+        # leave the warnings with none, and a stop for them says how many repairs were made for them.
+        numeric_turn = self._numeric_turn(state)
+        numeric_made = _numeric.repairs_for_warnings(state.get("exec_reflect_history"))
+        # Every repair is numbered in one sequence, whichever budget it is on.
+        attempt_no = iters + numeric_made + 1
+        bump = 0 if manifest_turn or numeric_turn else 1
+        if numeric_turn and numeric_made >= self.config.engine.exec_reflect_max_iterations:
+            stop = self._manifest_repair_gave_up(state) or self._result_check_gave_up(state)
+            if stop is not None:
+                return stop
+            # Numeric warnings the repairs made for them did not remove: not something to write a paper over.
+            research = getattr(self.config, "rigor_profile", "default") == "research"
+            return self._stop_before_run(
+                "the run's numerics warned: " + "; ".join(w.describe() for w in findings),
+                "cannot_repair",
+                tried=["ran the experiment and read the numerical warnings it raised",
+                       *[_one_line(w.describe(), 300) for w in findings[:3]],
+                       f"sent the script back to be repaired {numeric_made} time(s) for these warnings; they stood"
+                       if numeric_made else "no repair is allowed (engine.exec_reflect_max_iterations is 0)"],
+                # A setting the person may choose (not a code edit); a research quest holds it fixed.
+                advice=None if research else (
+                    f"To go on with the warnings noted in the evidence instead, set `engine.numeric_warnings: warn` in "
+                    f"the quest's config.yaml, approve it with `python launch.py --update {self.quest_id}`, and run it "
+                    f"again from the run step (`--resume {self.quest_id} --from run`)."))
+        if iters >= self.config.engine.exec_reflect_max_iterations and not manifest_turn and not numeric_turn:
             # A run the run-manifest check sent back, with no repair left (earlier crashes spent them, or none are
             # allowed): the difference stands, and the quest stops and names it, never going on with no results.
             stop = self._manifest_repair_gave_up(state) or self._result_check_gave_up(state)
@@ -20092,20 +20129,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 return stop
             # Proceed regardless; analyze owns the authoritative degenerate
             # flag against the final result (covers max_iterations=0 too).
-            if rc == 0 and has_result_json and findings and not degenerate and not implausible:
-                # Numeric warnings the repairs did not remove: not something to write a paper over.
-                research = getattr(self.config, "rigor_profile", "default") == "research"
-                return self._stop_before_run(
-                    "the run's numerics warned: " + "; ".join(w.describe() for w in findings),
-                    "cannot_repair",
-                    tried=["ran the experiment and read the numerical warnings it raised",
-                           *[_one_line(w.describe(), 300) for w in findings[:3]],
-                           f"sent the script back to be repaired {iters} time(s); the warnings stood"],
-                    # A setting the person may choose (not a code edit); a research quest holds it fixed.
-                    advice=None if research else (
-                        f"To go on with the warnings noted in the evidence instead, set `engine.numeric_warnings: warn` in "
-                        f"the quest's config.yaml, approve it with `python launch.py --update {self.quest_id}`, and run it "
-                        f"again from the run step (`--resume {self.quest_id} --from run`)."))
             self._log.warning(
                 "[execute_reflect] %s after %d attempt(s); proceeding to analyze",
                 "result still degenerate (all metrics ~0)" if degenerate
@@ -20191,7 +20214,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             )
             returncode_for_prompt = "0 (ran, but values break the declared bounds)"
             result_json_note = "yes (rejected — see stdout)"
-        elif findings:
+        elif numeric_turn:
             self._log.warning(
                 "[execute_reflect] rc=0 but the run's numerics warned (%d) — attempting repair (iter %d): %s",
                 len(findings), iters + 1, "; ".join(w.describe() for w in findings[:4]),
@@ -20255,7 +20278,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if self._agent_mode():
             # The coding agent fixes its own code (core/agent_build.py): one round, with what the run said.
             return await self._reflect_by_agent(state, iters, bump, returncode_for_prompt, stdout_for_prompt,
-                                                exec_result, spent)
+                                                exec_result, spent,
+                                                tag=_numeric.REPAIR_FOR if numeric_turn else "", attempt=attempt_no)
         prompt = self._prompts["execute_reflect"].substitute(
             topic_block=self._topic_block(),
             # Whole, always: the reply is the full corrected script, and a model shown only the first 8000 characters
@@ -20296,7 +20320,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             if overlaps:
                 return spent
             history.append({
-                "iter": iters + 1,
+                **({"for": _numeric.REPAIR_FOR} if numeric_turn else {}),
+                "iter": attempt_no,
                 "returncode": rc,
                 "stderr_tail": exec_result.get("stderr_tail", "")[-400:],
                 "patch_summary": f"(gave up: {give_up[:120]})",
@@ -20355,7 +20380,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "returncode": rc, "stderr_tail": str(exec_result.get("stderr_tail", ""))[-1500:],
                 "result_json": exec_result.get("result_json")})
             history.append({
-                "iter": iters + 1, "returncode": rc, "stderr_tail": exec_result.get("stderr_tail", "")[-400:],
+                **({"for": _numeric.REPAIR_FOR} if numeric_turn else {}),
+                "iter": attempt_no, "returncode": rc, "stderr_tail": exec_result.get("stderr_tail", "")[-400:],
                 "patch_summary": (f"[the repair was not used and {script_name} is as it was: {broken}. Give the "
                                   f"functions to change, each one whole.] " + patch_summary)[:400],
             })
@@ -20363,7 +20389,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if refused:
             patch_summary = ("[the package change was not used: " + "; ".join(refused) + "] " + patch_summary)
         history.append({
-            "iter": iters + 1,
+            **({"for": _numeric.REPAIR_FOR} if numeric_turn else {}),
+            "iter": attempt_no,
             "returncode": rc,
             "stderr_tail": exec_result.get("stderr_tail", "")[-400:],
             "patch_summary": patch_summary[:400 if refused else 200],
@@ -20401,7 +20428,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                                 + str(history[-1].get("patch_summary") or ""))[:400]
                 return {**spent, "exec_reflect_iter": iters + bump, "exec_reflect_history": history}
         self._last_ledger_id = self._record(_attempts.LEDGER, lambda: {
-            "kind": "repair", "script": code_path.name, "attempt": iters + 1,
+            "kind": "repair", "script": code_path.name, "attempt": attempt_no,
             "parent_sha256": parent_sha, "sha256": _attempts._sha(new_code.encode("utf-8")),
             "summary": patch_summary[:300],
             # A fix in the model's package: the files it rewrote, by their new hash.
@@ -21600,7 +21627,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         headline_missing = reason == "headline_missing"
         claims = [str(h) for h in (state.get("review") or {}).get("must_flag_hits") or []
                   if _hit_name(h) == _record_claims.HIT]
-        repairs = int(state.get("exec_reflect_iter") or 0)
+        repairs = _numeric.repairs_made(state)
         # Said only when it happened: a quest with no iteration left stops on the first pass, with no second design.
         redesigned = int(state.get("evidence_no_result_retries") or 0) >= 1
         rewritten = state.get("evidence_code_rewritten_at") is not None  # its own try, counted apart from the design's

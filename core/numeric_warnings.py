@@ -104,6 +104,23 @@ def scan(stderr: str, result_json: Any = None, *, limit: int = 8) -> list[Numeri
     return out
 
 
+#: What a repair history entry (``exec_reflect_history``) says it was for when it was made for the run's numeric
+#: warnings: those repairs have a budget of their own and do not move the repair counter (core/engine.py, execute_reflect).
+REPAIR_FOR = "numeric_warnings"
+
+
+def repairs_for_warnings(history: Any) -> int:
+    """How many repairs in an ``exec_reflect_history`` were made for the run's numeric warnings."""
+    return sum(1 for h in history or [] if isinstance(h, dict) and h.get("for") == REPAIR_FOR)
+
+
+def repairs_made(state: Any) -> int:
+    """Every repair of the run's scripts made so far: those the repair counter (``exec_reflect_iter``) counts and those
+    made for the numeric warnings, which have a budget of their own."""
+    state = state or {}
+    return int(state.get("exec_reflect_iter", 0) or 0) + repairs_for_warnings(state.get("exec_reflect_history"))
+
+
 def directive(found: list[NumericWarning]) -> str:
     """What stands where a traceback would in the repair request."""
     return (

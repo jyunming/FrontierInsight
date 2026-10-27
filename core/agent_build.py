@@ -559,9 +559,12 @@ class AgentBuildMixin:
     # -- after the freeze ------------------------------------------------------------------------------------------------
 
     async def _reflect_by_agent(self, state: Any, iters: int, bump: int, returncode: str, stdout: str,
-                                exec_result: dict[str, Any], spent: dict[str, Any]) -> dict[str, Any]:
+                                exec_result: dict[str, Any], spent: dict[str, Any], *, tag: str = "",
+                                attempt: int | None = None) -> dict[str, Any]:
         """A failed run in agent mode: one round of the agent with what the run said, in place of the chat repair. After
-        the freeze the agent has :data:`AFTER_FREEZE_ROUNDS` round(s); then the failure stands, as in chat mode."""
+        the freeze the agent has :data:`AFTER_FREEZE_ROUNDS` round(s); then the failure stands, as in chat mode. ``tag``:
+        what the repair is for when it has a budget of its own (the history entry says so); ``attempt``: its number in
+        the one sequence of repairs (default ``iters + 1``)."""
         frozen = _frozen.load(self.quest_root) is not None  # type: ignore[attr-defined]
         if frozen and after_freeze_rounds(self.quest_root) >= AFTER_FREEZE_ROUNDS:  # type: ignore[attr-defined]
             kept = self._result_check_gave_up(state)  # type: ignore[attr-defined]
@@ -591,7 +594,8 @@ class AgentBuildMixin:
         note_judgement(self.quest_root, claimed=result.message, found=[feedback.splitlines()[0]], passed=False,  # type: ignore[attr-defined]
                        after_freeze=frozen)
         history = list(state.get("exec_reflect_history") or [])
-        history.append({"iter": iters + 1, "returncode": exec_result.get("returncode"),
+        history.append({**({"for": tag} if tag else {}), "iter": attempt if attempt is not None else iters + 1,
+                        "returncode": exec_result.get("returncode"),
                         "stderr_tail": str(exec_result.get("stderr_tail") or "")[-400:],
                         "patch_summary": "the coding agent fixed the code"})
         code_path = self.quest_root / "code" / "experiment.py"  # type: ignore[attr-defined]
