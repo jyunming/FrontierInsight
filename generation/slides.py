@@ -627,7 +627,7 @@ def split_deck(content: str) -> tuple[str, list[str], list[str]]:
     return head, segments, breaks
 
 
-_CODE_FENCE_RE = re.compile(r"^[ \t]*(```|~~~)")
+_CODE_FENCE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})(.*)")
 
 
 def _split_slides(body: str) -> tuple[list[str], list[str]]:
@@ -641,7 +641,9 @@ def _split_slides(body: str) -> tuple[list[str], list[str]]:
         text = line.rstrip("\r\n")
         opened = _CODE_FENCE_RE.match(text)
         if fence:
-            if opened and opened.group(1) == fence:
+            # CommonMark: a fence closes only on a line of the same character, at least as long, and nothing else.
+            if opened and opened.group(1)[0] == fence[0] and len(opened.group(1)) >= len(fence) \
+                    and not opened.group(2).strip(" "):
                 fence = ""
         elif opened:
             fence = opened.group(1)
