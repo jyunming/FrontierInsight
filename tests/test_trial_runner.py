@@ -797,3 +797,19 @@ def test_a_load_error_place_comes_from_the_traceback_not_the_message(tmp_path: P
                                                     cell={"a": 1}, timeout_s=60))
     assert values is None
     assert "(at code/simulate.py line 1)" in why and "elsewhere.py line 987)" not in why
+
+
+def test_a_plans_per_trial_flag_beats_the_kind_default() -> None:
+    """An invariant that says ``per_trial: false`` is measured on run_cell; one that says nothing keeps the kind default
+    (run_trial); ``per_trial: true`` stays per trial. The same flag is read by core.mc_error."""
+    from core import mc_error
+
+    both = {"run_trial", "run_cell"}
+    inv = {"name": "c", "kind": "invariant", "measure": "x", "expected": 0}
+    said_false = {**inv, "per_trial": False}
+    assert trial_runner.is_per_trial(inv), "nothing said: the invariant default"
+    assert not trial_runner.is_per_trial(said_false) and not trial_runner.is_per_trial({**inv, "per_trial": "no"})
+    assert trial_runner.is_per_trial({**inv, "per_trial": True})
+    assert trial_runner.oracle_entry(both, said_false, cell_runs_trials=True) == "run_cell"
+    assert trial_runner.oracle_entry(both, inv, cell_runs_trials=True) == "run_trial"
+    assert mc_error.reads_a_mean(said_false) and trial_runner.is_per_trial(said_false) is False
