@@ -1072,11 +1072,11 @@ def _counts_sentences(root: Path) -> list[str]:
     each, settings, failed = _trial_counts(root)
     out: list[str] = []
     if settings and each:
-        out.append(f"The study ran {settings} settings, {each} trials in each.")
+        out.append(f"The study ran {settings} settings, {each} trial{'' if each == '1' else 's'} in each.")
     elif settings:
         out.append(f"The study ran {settings} settings.")
     elif each:
-        out.append(f"Each setting ran {each} trials.")
+        out.append(f"Each setting ran {each} trial{'' if each == '1' else 's'}.")
     if failed:
         out.append("No trial failed." if failed == "0" else f"{failed} trial{'' if failed == '1' else 's'} failed.")
     return out

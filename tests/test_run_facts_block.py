@@ -159,3 +159,11 @@ def test_the_old_placeholders_of_a_resumed_draft_are_still_filled(tmp_path: Path
     root = _quest(tmp_path, AT_ONCE)
     out = pf.render("# T\n\n## Methods\nIt took {{run_time}}.\n", root, topic=TOPIC)
     assert not out.unfilled and "611.1 s" in out.text
+
+
+def test_one_trial_in_each_setting_reads_singular(tmp_path: Path) -> None:
+    """A deterministic study runs one trial per setting: the count reads "1 trial", not "1 trials"."""
+    root = _quest(tmp_path, None, settings=3, per=1)
+    text = pf.run_facts_text(root, topic=TOPIC)
+    assert "The study ran 3 settings, 1 trial in each." in text
+    assert "1 trials" not in text
