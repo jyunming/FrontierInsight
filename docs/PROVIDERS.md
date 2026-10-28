@@ -67,7 +67,7 @@ The same applies to the figures FI reads from the papers (`knowledge.read_figure
 - **`vscode_extension`** hands them to `vscode.lm` as image data. This needs a VS Code build that has `LanguageModelDataPart.image` and a chat model with image input. VS Code does not say in advance whether a model takes images: `@fi /probe image` sends the selected model one small test image the same way and says whether it read it, and, if the request fails, whether FI would recognise the error as *cannot read images*.
 - **`codex_cli`** passes each screenshot as a temporary file with `codex exec -i`. Checked with `gpt-5.6-luna` under the answer-only flags below: it named the colour of a test image.
 - **`antigravity_cli`** (agy) takes only text in its input, so each image is saved to a temporary folder that agy is given access to (`--add-dir`) and the prompt names each file, in order; agy opens them with its own file viewer. Checked with `gemini-3.8-flash-high`: it named the shapes and colours of a test image.
-- **`copilot_cli`** passes each screenshot with `--attachment <file>`. Checked with every tool off: the model named the colour and text of a test image, and a quest read its figures this way.
+- **`copilot_cli`** passes each screenshot with `--attachment <file>`. Checked with every tool off: in a single call the model named the colour and text of a test image, and in one measured quest the paper placed 3 figures with FI's captions.
 - **`gemini_cli`:** measurements only for now; a quest that must read figures with it stops and asks for a model that can.
 
 ## Answer-only CLI calls
@@ -147,7 +147,7 @@ Copilot subscription's quota. The models it offers depend on the subscription:
 `copilot help config` lists them (one account was offered `claude-haiku-4.5`,
 `claude-sonnet-4.6`, `claude-opus-4.8`, `gpt-5.3-codex` and `mai-code-1.1-flash`).
 
-Not restricted yet — this one runs in the empty directory, but its tools are on:
+Not restricted yet — these run in the empty directory, but their tools are on:
 
 - **`gemini_cli`** keeps `--yolo`. The Gemini CLI no longer signs in
   individual Google accounts, so it could not be checked either.
@@ -308,7 +308,7 @@ returns nothing for it.
 | `vscode_extension` | Copilot's `_enableThinking` (and `includeEncryptedThinking` for GPT), see above | Thinking parts of the reply | Checked live: Claude (`claude-haiku-4.5`, Opus, Sonnet) and `kimi-k3` return a summary; every OpenAI model returns none; a model from another extension (Ollama) returns none |
 | `gemini_cli` | Cannot | Its output has no reasoning in it (the `stream-json` events are init, message, tool use and result) | `run.log` says so once |
 | `antigravity_cli` (agy) | Cannot | Its stream reports only how many tokens the model spent thinking (329 in one check), not the text | `run.log` says so once |
-| `copilot_cli` | Not read | Its `--output-format json` events were not mapped for reasoning, and the Copilot CLI's events were not mapped | `run.log` says so once |
+| `copilot_cli` | Not read | The CLI is called for its answer only, and its output carries no reasoning | `run.log` says so once |
 | `claude_code`, `github_copilot_cli`, `github_copilot_vscode` (proxies) | Not asked | The proxy returns only the answer, as far as FI reads it | Not probed here (none installed). `reasoning_content` from a proxy would be kept |
 
 Where a connection cannot return reasoning, `run.log` says so once in plain

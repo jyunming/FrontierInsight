@@ -682,3 +682,82 @@ def test_agys_log_note_is_only_a_line_saying_its_run_failed(tmp_path: Path) -> N
         assert _cli_home_errors(str(tmp_path)) == line, mark
     log.write_text("\n".join([ended, auth]) + "\n", encoding="utf-8")
     assert _cli_home_errors(str(tmp_path)) == auth
+
+
+# ---------------------------------------------------------------------------
+# copilot_cli: a fake copilot process
+# ---------------------------------------------------------------------------
+
+
+def _fake_copilot(tmp_path: Path, body: str) -> _CliSpec:
+    script = _script(tmp_path, "fake_copilot.py", body)
+    copilot = _CLI_SPECS["copilot_cli"]
+    return dataclasses.replace(copilot, argv=(sys.executable, str(script), *copilot.argv[1:]))
+
+
+@pytest.mark.asyncio
+async def test_copilot_gets_a_non_ascii_prompt_as_exact_utf8_on_stdin(tmp_path: Path) -> None:
+    prompt = "\u03b1\u03b2\u03b3 at 25\u00b0C, \u6e29\u5ea6 \u30c6\u30b9\u30c8 \u03a9"
+    out = tmp_path / "stdin.bin"
+    spec = _fake_copilot(tmp_path, (
+        "import sys\n"
+        f"open({str(out)!r}, 'wb').write(sys.stdin.buffer.read())\n"
+        "print('ok')\n"
+    ))
+    assert (await _run_cli(spec, prompt, timeout_s=60)).strip() == "ok"
+    assert out.read_bytes() == prompt.encode("utf-8")
+
+
+@pytest.mark.asyncio
+async def test_copilot_two_images_give_two_attachment_arguments_and_the_files_are_removed(tmp_path: Path) -> None:
+    out = tmp_path / "argv.json"
+    spec = _fake_copilot(tmp_path, (
+        "import json, os, sys\n"
+        "a = sys.argv\n"
+        "files = [a[i + 1] for i in range(len(a) - 1) if a[i] == '--attachment']\n"
+        "data = [open(f, 'rb').read().hex() for f in files]\n"
+        f"open({str(out)!r}, 'w').write(json.dumps({{'files': files, 'data': data}}))\n"
+        "sys.stdin.read()\n"
+        "print('ok')\n"
+    ))
+    await _run_cli(spec, "see", timeout_s=60, images=[("image/png", b"AAA"), ("image/jpeg", b"BBB")])
+    seen = json.loads(out.read_text())
+    assert len(seen["files"]) == 2
+    assert seen["files"][0].endswith(".png") and seen["files"][1].endswith((".jpg", ".jpeg"))
+    assert seen["data"] == [b"AAA".hex(), b"BBB".hex()]
+    assert not any(os.path.exists(f) for f in seen["files"])
+
+
+@pytest.mark.asyncio
+async def test_copilot_failure_shows_the_tail_of_its_stderr(tmp_path: Path) -> None:
+    spec = _fake_copilot(tmp_path, (
+        "import sys\n"
+        "sys.stdin.read()\n"
+        "sys.stderr.write('x' * 2000 + 'Error: the model rejected this request')\n"
+        "sys.exit(1)\n"
+    ))
+    with pytest.raises(_CliTransientError) as info:
+        await _run_cli(spec, "hi", timeout_s=60)
+    assert "exited rc=1" in str(info.value) and "the model rejected this request" in str(info.value)
+
+
+@pytest.mark.asyncio
+async def test_copilot_failure_with_empty_stderr_shows_stdout(tmp_path: Path) -> None:
+    spec = _fake_copilot(tmp_path, (
+        "import sys\n"
+        "sys.stdin.read()\n"
+        "print('Error: prompt is too long for this model')\n"
+        "sys.exit(1)\n"
+    ))
+    with pytest.raises(_CliTransientError) as info:
+        await _run_cli(spec, "hi", timeout_s=60)
+    assert "prompt is too long for this model" in str(info.value)
+
+
+def test_a_too_long_input_is_not_retried_but_other_failures_are() -> None:
+    from core.provider import _retry_cli_error
+
+    for text in ("copilot exited rc=1: Error: prompt is too long", "x exited rc=1: input_too_large",
+                 "copilot exited rc=1: exceeds the context window of the model"):
+        assert not _retry_cli_error(_CliTransientError(text)), text
+    assert _retry_cli_error(_CliTransientError("copilot exited rc=1: connection reset"))
