@@ -33957,7 +33957,8 @@ def _parse_json_lenient(
     of them is returned. A real Haiku audit reply held two fenced objects (the amended design alone, then the asked-for
     object with its objections); the first-``{``-to-last-``}`` slice spanned both and the audit was called unreadable."""
     if want:
-        parsed = _parse_json_lenient_once(text, node=node, _log_truncate_chars=_log_truncate_chars, _quiet=True)
+        parsed = _parse_json_lenient_once(text, node=node, _log_truncate_chars=_log_truncate_chars, _quiet=True,
+                                         _prose=False)
         if isinstance(parsed, dict) and all(k in parsed for k in want):
             return parsed
         found = [o for o in _top_level_json_objects(text or "") if all(k in o for k in want)]
@@ -34156,27 +34157,65 @@ def _matching_brace_end(text: str, start: int) -> int:
 _FENCED_BLOCK_RE = re.compile(r"```[A-Za-z0-9_-]*[ \t]*\n(.*?)```", re.DOTALL)
 
 
+def _object_spans(text: str) -> tuple[list[tuple[int, int, dict[str, Any]]], bool]:
+    """``(spans, cut)``: ``(start, end, object)`` of every non-empty JSON object that parses at the top level of ``text``,
+    in order, and whether an object was opened that never closes (a reply cut short). An object that does not parse is
+    skipped whole, so one inside it is never taken for the reply's own."""
+    decoder = json.JSONDecoder()
+    out: list[tuple[int, int, dict[str, Any]]] = []
+    cut = False
+    i = text.find("{")
+    while i >= 0:
+        try:
+            obj, end = decoder.raw_decode(text, i)
+        except (ValueError, RecursionError):
+            if text[i + 1:].lstrip()[:1] in ('"', "}"):
+                cut = cut or _depth_change(text[i:]) > 0
+                i = text.find("{", _matching_brace_end(text, i))
+            else:
+                i = text.find("{", i + 1)
+            continue
+        if isinstance(obj, dict) and obj:
+            out.append((i, end, _read_latex_object(text[i:end], strict=True) or obj))
+        i = text.find("{", end)
+    return out, cut
+
+
 def _object_among_prose(text: str) -> dict[str, Any] | None:
-    """The JSON object a reply means when prose around it holds braces of its own, or ``None`` when it holds no
-    non-empty object. The one object written inside a fenced block is taken; otherwise the last object written at
-    the top level (a reply states its answer after the reasoning). Only called where the whole-text parse and the
-    first-``{``-to-last-``}`` slice both failed, so a reply that parsed before is read exactly as it was."""
-    objects = [o for o in _top_level_json_objects(text) if o]
-    if not objects:
+    """The JSON object a reply means when prose around it holds braces of its own, taken only where the reply leaves no
+    doubt which object that is, else ``None``. Called only where the whole-text parse and the first-``{``-to-last-``}``
+    slice both failed, so a reply that parsed before is read exactly as it was. Refused: a reply cut short (an odd number
+    of fences, or an object opened that never closes). Taken: the one object that is the whole content of a fenced block;
+    else the one object the whole reply holds (not one inside a list). Never "the last of several"."""
+    log = logging.getLogger("frontier_insight.engine")
+    if text.count("```") % 2:
         return None
-    fenced = [o for m in _FENCED_BLOCK_RE.finditer(text) for o in _top_level_json_objects(m.group(1)) if o]
-    if len(fenced) == 1:
-        chosen, how = fenced[0], "the one object in a fenced block"
+    spans, cut = _object_spans(text)
+    if cut or not spans:
+        return None
+    whole = []
+    for m in _FENCED_BLOCK_RE.finditer(text):
+        body = m.group(1).strip()
+        objs, _ = _object_spans(body)
+        if len(objs) == 1 and objs[0][0] == 0 and objs[0][1] == len(body):
+            whole.append(objs[0][2])
+    if len(whole) == 1:
+        chosen, how = whole[0], "the one object that is a whole fenced block"
+    elif len(whole) == 0 and len(spans) == 1:
+        start, end, chosen = spans[0]
+        if text[:start].rstrip()[-1:] in ("[", ",") or text[end:].lstrip()[:1] == "]":
+            return None
+        how = "the one object the reply holds"
     else:
-        chosen, how = objects[-1], "the last object written at the top level"
-    logging.getLogger("frontier_insight.engine").info(
-        "a model's JSON reply held prose with braces around its object; read %s (keys: %s)",
-        how, ", ".join(list(chosen)[:6]))
+        return None
+    log.info("a model's JSON reply held prose with braces around its object; read %s (keys: %s)",
+             how, ", ".join(list(chosen)[:6]))
     return chosen
 
 
 def _parse_json_lenient_once(
     text: str, *, node: str = "", _log_truncate_chars: int = 500, _quiet: bool = False,
+    _prose: bool = True,
 ) -> dict[str, Any] | None:
     """Find and parse a JSON object inside arbitrary LLM output.
 
@@ -34236,7 +34275,7 @@ def _parse_json_lenient_once(
                 return repaired
             # Prose around the object that quotes braces of its own (`a case such as {"threshold": 0.01}`) makes the
             # first-to-last slice span the prose too: read the objects written at the top level instead.
-            chosen = _object_among_prose(candidate)
+            chosen = _object_among_prose(candidate) if _prose else None
             if chosen is not None:
                 return chosen
             if not _quiet:

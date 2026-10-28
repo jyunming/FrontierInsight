@@ -327,7 +327,7 @@ def _engine(tmp_path: Path, replies: list[str], *, research: bool = False) -> tu
 
 
 def test_the_asked_for_object_is_found_among_two() -> None:
-    assert _parse_json_lenient(TWO_OBJECTS) == json.loads(GOOD), "the plain parse takes the last of two objects"
+    assert _parse_json_lenient(TWO_OBJECTS) is None, "the plain parse still gives up on two objects"
     parsed = _parse_json_lenient(TWO_OBJECTS, want=("objections_addressed",))
     assert parsed["objections_addressed"] == [OBJECTION]
 
