@@ -230,3 +230,11 @@ def test_a_paper_resumed_straight_into_review_gets_the_run_paragraph(tmp_path: P
     assert first.count("**Run.**") == 1 and first.index("We ran it.") < first.index("**Run.**") < first.index("## Results")
     eng._refresh_paper_facts(state)  # type: ignore[arg-type]
     assert paper.read_text(encoding="utf-8") == first
+
+
+def test_a_stale_or_writer_typed_run_line_is_replaced_by_fis_current_paragraph(tmp_path: Path) -> None:
+    root = _quest(tmp_path, AT_ONCE)
+    stale = PAPER.replace("We ran it.\n", "We ran it.\n\n**Run.** The run took 3.0 s.\n")
+    out = pf.render(_at(stale, root), root, topic=TOPIC).text
+    assert out.count("**Run.**") == 1
+    assert "3.0 s" not in out and "611.1 s" in out

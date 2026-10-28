@@ -1276,7 +1276,9 @@ def place_blocks(markdown: str, quest_root: Path | str, *, topic: str = "", fall
     on a line of its own. The tables go before the discussion that follows the results (else the conclusions, the
     limitations, the references; else at the end); the run's facts go at the end of the Methods (else before the
     Results, else after the abstract, else at the top). A block already in the draft, as a placeholder or filled in
-    (the review sends FI's own text back), is not put in twice. :func:`render` then fills it."""
+    (the review sends FI's own text back), is not put in twice; a line that opens like FI's run paragraph
+    (``**Run.** ``) but has lost its markers is replaced by the placeholder, so the paragraph is always FI's current
+    one. :func:`render` then fills it."""
     text = markdown or ""
     for name in BLOCK_NAMES:
         if not block_text(quest_root, name, topic=topic, fallback_s=fallback_s):
@@ -1285,7 +1287,9 @@ def place_blocks(markdown: str, quest_root: Path | str, *, topic: str = "", fall
                 m.group(1) == name for m in _MARK.finditer(text)):
             continue
         if name == "run_facts" and re.search(r"(?m)^\*\*Run\.\*\* ", text):
-            continue  # FI's own paragraph is in the draft with its markers gone
+            # FI's paragraph with its markers gone (or a run line of the writer's own): FI's current one takes its place
+            text = re.sub(r"(?m)^\*\*Run\.\*\* .*$", "{{run_facts}}", text, count=1)
+            continue
         if name == "run_facts":
             lines = text.split("\n")
             at = _disclosure._insert_at(lines)

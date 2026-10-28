@@ -19,7 +19,7 @@ Two facts the paper states about the run were wrong when they were read from the
   without a seed (``engine.unseeded_rng_calls``, minus the ``rng or default_rng()`` fallback of
   ``code_layout.fallback_rng_lines``) and one made when a module is loaded (``code_layout.module_level_randomness``), each
   only where the trial's code can reach it. The paper's statement of the seed is held to it (``core/stat_claims.py``), and
-  the paper's ``{{seed}}`` is filled from it (``core/paper_facts.py``).
+  the seed sentence of FI's run paragraph in the paper is written from it (``core/paper_facts.py``).
 
 Nothing here asks a model.
 """
