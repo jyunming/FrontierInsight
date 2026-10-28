@@ -343,7 +343,9 @@ def test_repair_is_dropped_when_the_function_no_longer_passes_its_tests(tmp_path
     assert e["status"] == "unresolved"
     assert (root / "code" / "pkg" / "model.py").read_text(encoding="utf-8") == MUTANT_MAIN  # restored
     assert e["limitation"].startswith("Two independently written versions of step S1")
-    assert "gave different results on slope = " in e["limitation"] and e["limitation"].endswith("the number depends on which is right.")
+    assert "gave different results (given the inputs slope = " in e["limitation"]
+    assert ", version 1 returned " in e["limitation"] and " and version 2 returned " in e["limitation"]
+    assert e["limitation"].endswith("the number depends on which is right.")
     assert si.limitations(rec) == [e["limitation"]]
 
 
@@ -352,7 +354,7 @@ def test_card_ambiguous_is_unresolved_with_the_plain_sentence(tmp_path):
     root, s, rec = run_it(tmp_path, fake)
     e = rec["functions"]["activation_energy"]
     assert e["status"] == "unresolved" and rec["calls"] == 2
-    assert "Two independently written versions of step S1 (activation energy) gave different results on" in e["limitation"]
+    assert "Two independently written versions of step S1 (activation energy) gave different results (given the inputs" in e["limitation"]
 
 
 @pytest.mark.parametrize("main", [MUTANT_MAIN, UNITS_MAIN])
@@ -782,3 +784,111 @@ def test_the_study_file_never_sees_a_threshold_or_kind_inherited_from_the_proces
                        env=env)
     got = si.parse_output(p.stdout)
     assert si.judge_rows(got["rows"], [{"x": 1.0}], si.REL)["status"] == si.AGREE, got
+
+
+# --- a version that could not run is not a disagreement; the study is set up as a trial sets it up -------------------------
+
+
+def test_a_version_that_raised_on_every_input_was_not_compared():
+    inputs = [{"x": 1.0}, {"x": 2.0}, {"x": 3.0}]
+    first = [{"main_err": "NameError: name 'LIMIT' is not defined", "ref": 4.0} for _ in inputs]
+    res = si.judge_rows(first, inputs, si.REL)
+    assert res["status"] == si.UNCONFIRMED and not res["disagreements"] and res["compared"] == 0
+    assert res["why"] == "the first version could not be run in the comparison: NameError"
+    second = [{"main": 4.0, "ref_err": "AttributeError: no such name"} for _ in inputs]
+    assert si.judge_rows(second, inputs, si.REL)["why"] == "the second version could not be run in the comparison: AttributeError"
+    # a domain error on every input is a result of the function, not a version that could not run
+    domain = [{"main": 4.0, "ref_err": "ValueError: math domain error"} for _ in inputs]
+    assert si.judge_rows(domain, inputs, si.REL)["status"] == si.DISAGREE
+    # raising on only some inputs is still a disagreement about where the versions differ (a known positive)
+    some = [{"main_err": "NameError: x", "ref": 4.0}, {"main": 4.0, "ref": 4.0}, {"main": 4.0, "ref": 4.0}]
+    assert si.judge_rows(some, inputs, si.REL)["status"] == si.DISAGREE
+
+
+def _study_quest(tmp_path: Path, main: str, simulate: str) -> Path:
+    pkg = tmp_path / "code" / "pkg"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "model.py").write_text(main, encoding="utf-8")
+    (tmp_path / "code" / "simulate.py").write_text(simulate, encoding="utf-8")
+    (tmp_path / "ref.py").write_text("def scaled(x):\n    return x * 4\n", encoding="utf-8")
+    (tmp_path / "inputs.json").write_text(json.dumps([{"x": 1.0}, {"x": 2.0}]), encoding="utf-8")
+    return tmp_path
+
+
+CONFIGURED_BY_THE_ENTRY = (
+    "from pkg import model\n\n\ndef _configure(limit):\n    model.LIMIT = limit\n\n\n"
+    "def run_trial(cell, trial_id, seed):\n    _configure(cell['limit'])\n    return {'y': 1.0}\n")
+
+
+def _compare_rows(root: Path, setup) -> dict:
+    script = si.compare_script(code_dir="code", module="pkg.model", name="scaled", reference="ref.py",
+                               inputs="inputs.json", uses=[], study="code/simulate.py", setup=setup)
+    p = subprocess.run([sys.executable, "-B", "-c", script], cwd=root, capture_output=True, text=True, timeout=120)
+    return si.parse_output(p.stdout)
+
+
+def test_a_constant_the_entry_sets_is_set_before_the_versions_are_called(tmp_path):
+    """The study's entry sets the package's constant when a trial runs (not when the file loads). Calling the entry once on
+    a setting that ran puts the comparison in the same state; without it the first version raises NameError."""
+    root = _study_quest(tmp_path, "def scaled(x):\n    return x * LIMIT\n", CONFIGURED_BY_THE_ENTRY)
+    inputs = [{"x": 1.0}, {"x": 2.0}]
+    bare = _compare_rows(root, None)
+    assert "NameError" in bare["rows"][0]["main_err"]
+    assert si.judge_rows(bare["rows"], inputs, si.REL)["status"] == si.UNCONFIRMED
+    got = _compare_rows(root, {"entry": "run_trial", "cell": {"limit": 4}, "kind": "scan"})
+    assert [r["main"] for r in got["rows"]] == [4.0, 8.0]
+    assert si.judge_rows(got["rows"], inputs, si.REL)["status"] == si.AGREE
+    # a known positive: with the constant set, a first version that really differs is still a disagreement
+    (root / "code" / "pkg" / "model.py").write_text("def scaled(x):\n    return x * LIMIT * 2\n", encoding="utf-8")
+    off = _compare_rows(root, {"entry": "run_trial", "cell": {"limit": 4}, "kind": "scan"})
+    res = si.judge_rows(off["rows"], inputs, si.REL)
+    assert res["status"] == si.DISAGREE and res["disagreements"][0]["kind"] == "value"
+
+
+def test_a_setup_trial_that_fails_leaves_the_comparison_to_say_which_version_could_not_run(tmp_path):
+    root = _study_quest(tmp_path, "def scaled(x):\n    return x * LIMIT\n",
+                        "def run_trial(cell, trial_id, seed):\n    raise RuntimeError('no')\n")
+    got = _compare_rows(root, {"entry": "run_trial", "cell": {}, "kind": "scan"})
+    assert "study_load_error" not in got
+    assert si.judge_rows(got["rows"], [{"x": 1.0}, {"x": 2.0}], si.REL)["why"].startswith("the first version could not be run")
+
+
+def test_the_run_fi_made_gives_the_setting_the_comparison_sets_the_study_up_with(tmp_path):
+    root = _study_quest(tmp_path, "def scaled(x):\n    return x * LIMIT\n",
+                        "from pkg import model\n\n\ndef run_cell(cell):\n    model.LIMIT = cell['limit']\n    "
+                        "return {'y': model.scaled(1.0)}\n")
+    asyncio.run(si.capture_inputs(make_run(root), root, "pkg", ["scaled"], [{"limit": 4}, {"limit": 5}], deterministic=True,
+                                  in_each_run={"t": [1, 2]}))
+    assert si.read_captured(root)["setup"] == {"entry": "run_cell", "cell": {"limit": 4, "t": [1, 2]}, "kind": "scan"}
+
+
+def test_a_comparison_where_the_first_version_cannot_run_is_not_sent_to_the_judge(tmp_path):
+    """The recorded fault: the first version raised on every input, the judge was asked, and the paper said the two
+    versions disagree. Now the step is unconfirmed, nothing is asked and no sentence says they disagree."""
+    main = GOOD_MAIN.replace("-slope * 8.314", "-slope * MISSING_CONSTANT")
+    fake = Fake(write=[fenced(GOOD_REF)])
+    root, s, rec = run_it(tmp_path, fake, main=main)
+    e = rec["functions"]["activation_energy"]
+    assert e["status"] == "unconfirmed" and not e["disagreements"]
+    assert fake.count("second_impl.adjudicate") == 0
+    assert "the first version could not be run in the comparison: NameError" in e["limitation"]
+    assert "different results" not in e["limitation"]
+
+
+def test_the_judge_is_shown_the_values_the_plan_fixes():
+    proto = protocol()
+    proto["constants"] = {"gas_constant": 8.314, "true_energy": 60}
+    proto["numerical_settings"] = {"tol": 1e-10}
+    block = si._spec_block(spec_for(proto), proto)
+    assert '"gas_constant": 8.314' in block and '"true_energy": 60' in block and '"tol"' in block
+    assert "not results" in block
+    assert "the plan fixes" not in si._spec_block(spec_for(protocol()), protocol())
+
+
+def test_the_sentence_gives_each_versions_result_and_labels_the_inputs():
+    cases = [{"inputs": {"slope": -5000.0}, "kind": "value", "main": "41570", "other": "20785"}]
+    sentence = si.limitation_unresolved(spec_for(protocol()), cases)
+    assert "given the inputs slope = -5000" in sentence
+    assert "version 1 returned 41570 and version 2 returned 20785" in sentence
+    assert si.cases_text(cases).startswith("- given the inputs slope = ")
