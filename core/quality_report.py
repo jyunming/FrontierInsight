@@ -61,7 +61,7 @@ _READERS = {"plan": ("oracle_review.topic",), "checks": ("oracle_review", "oracl
 _KEY = {"plan": "plan", "checks": "oracle_review", "design": "design", "code": "implement", "run": "execute_reflect",
         "analysis": "analyze", "paper": "write", "review": "review"}
 _RECORD_FILES = ("model_calls.jsonl", "audit.jsonl", "oracle_review.json", "code_review.json", "equation_tests.json",
-                 "function_steps.json", "second_impl.json")
+                 "function_steps.json", "second_impl.json", "oracle_corrections.json")
 
 
 def _is_choice(text: str) -> bool:
@@ -170,6 +170,7 @@ class _Quest:
         self.equation_tests = _dict(_json(fi / "equation_tests.json"))
         self.function_steps = _dict(_json(fi / "function_steps.json"))
         self.second_impl = _dict(_json(fi / "second_impl.json"))
+        self.oracle_corrections = _dict(_json(fi / "oracle_corrections.json"))
         self.search_asked = _dict(_json(fi / "search_block_asked.json"))
         self.protocol_asked = _dict(_json(fi / "protocol_part_asked.json"))
         self.pilot = _dict(_json(fi / "pilot_check.json"))
@@ -281,6 +282,67 @@ def _oracle_problems(q: _Quest) -> list[dict[str, str]]:
     return out
 
 
+def _original_reference(root: Path, name: str, old: Any) -> str:
+    """The ``reference`` the plan gave check ``name`` while its expected value was still ``old``, read from the kept plan
+    versions (newest first). Empty when no kept version has that row: it is never guessed."""
+    from . import plan as _plan
+
+    versions = sorted((root / ".fi" / "plan_versions").glob("plan.v*.md"),
+                      key=lambda p: _int(re.sub(r"\D", "", p.stem)), reverse=True)
+    for path in versions:
+        try:
+            block = _plan.raw_design_block(path.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        protocol = _dict(block.get("protocol")) if isinstance(block, dict) else {}
+        for row in _list(protocol.get("oracles")):
+            row = _dict(row)
+            if str(row.get("name") or "").strip() == name and row.get("expected") == old:
+                return str(row.get("reference") or "")
+    return ""
+
+
+def _correction_proposer(rec: dict[str, Any]) -> str:
+    """Who worked the new value out, in plain words (from the record's ``source`` and ``confirmed_by``)."""
+    second = _dict(rec.get("confirmed_by"))
+    model = str(second.get("model") or "")
+    if rec.get("source") == "numeric":
+        return "a script that computed it from the definitions alone, never shown the plan's working or the measurement"
+    if rec.get("source") == "challenge":
+        return "FI's own computation of the code's formula and of the corrected formula"
+    if rec.get("source") == "arithmetic":
+        return ("FI's own recomputation of the plan's formula, confirmed by another model"
+                + (f" ({model})" if model else "") + " that was not shown the measured value")
+    return "FI's recheck of the plan's value"
+
+
+def _num(value: Any) -> str:
+    try:
+        return f"{float(value):.6g}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _correction_problems(q: _Quest) -> list[dict[str, str]]:
+    """Each known answer FI changed in the plan before the protocol was frozen (``.fi/oracle_corrections.json``): the
+    new value is never counted as independently validated, so a reader is told."""
+    out: list[dict[str, str]] = []
+    for name, rec in q.oracle_corrections.items():
+        rec = _dict(rec)
+        if not rec:
+            continue
+        ref = _original_reference(q.root, str(name), rec.get("from"))
+        # The lead sentence is what the short QUALITY.md table shows: keep it short, numbers to 6 digits.
+        text = (f"FI changed the known answer of '{name}' from {_num(rec.get('from'))} to {_num(rec.get('to'))} "
+                f"({_correction_proposer(rec)}: {_one(rec.get('why'), 120)})"
+                + (f"; the plan's original source was: {_one(ref, 160)}" if ref else "")
+                + "; the new value was not independently validated")
+        row = _problem("checks", text, "FI's known-answer check", "fixed", ".fi/oracle_corrections.json")
+        row["text"] = _one(text, 480)  # the row names who, why and the original source: longer than a usual row
+        out.append(row)
+    return out
+
+
 def _checks_problems(q: _Quest) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
     orv = q.oracle_review
@@ -316,6 +378,7 @@ def _checks_problems(q: _Quest) -> list[dict[str, str]]:
     for note in _list(q.protocol_check.get("notes")):
         out.append(_problem("checks", str(note), "FI's reading of the code (a note, not a stop)", "left out",
                             "needs/PROTOCOL_CHECK.json"))
+    out.extend(_correction_problems(q))
     return out
 
 
