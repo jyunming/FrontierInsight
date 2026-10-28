@@ -686,6 +686,25 @@ def _objections_sentence(rows: Any) -> str:
             f"changed for them: {'; '.join(said[:_SHOWN])}{more}.")
 
 
+def _contract_sentence(record: Any) -> str:
+    """What FI could not place when it read the plan into the study contract (``.fi/contract.json``, its ``shown`` list:
+    the gaps every older plan has are kept in the file and not shown), in one line."""
+    shown = record.get("shown") if isinstance(record, dict) else None
+    gaps = [g.strip().rstrip(".") for g in shown if isinstance(g, str) and g.strip()] if isinstance(shown, list) else []
+    if not gaps:
+        return ""
+    more = f"; and {len(gaps) - _SHOWN} more" if len(gaps) > _SHOWN else ""
+    return "In reading the plan, FI noted: " + "; ".join(gaps[:_SHOWN]) + more + "."
+
+
+def _edge_sentence(record: Any) -> str:
+    """The results of the last run that sit on their physical bound in every setting (``.fi/edge_everywhere.json``), one
+    sentence each."""
+    rows = record.get("results") if isinstance(record, dict) else None
+    said = [r.strip().rstrip(".") + "." for r in rows if isinstance(r, str) and r.strip()] if isinstance(rows, list) else []
+    return " ".join(said[:_SHOWN]) + (f" And {len(said) - _SHOWN} more." if len(said) > _SHOWN else "")
+
+
 def _precision_sentence(missed: Any) -> str:
     """The plan's precision target and the quantities that missed it, with the half-width each reached."""
     rows = [m for m in missed if isinstance(m, dict) and m.get("name")] if isinstance(missed, list) else []
@@ -865,6 +884,8 @@ def run_record(quest_root: Path, *, topic: str = "", duration_s: float | None = 
     if untested:
         parts.append(_untested_sentence(untested))
     parts.append(_precision_sentence(_read_json(quest_root / PRECISION_RECORD)))
+    parts.append(_contract_sentence(_read_json(quest_root / ".fi" / "contract.json")))
+    parts.append(_edge_sentence(_read_json(quest_root / ".fi" / "edge_everywhere.json")))
     parts.append(_widened_sentence(_read_json(quest_root / ".fi" / "oracle_review.json")))
     parts.append(_objections_sentence(_read_json(quest_root / OBJECTIONS_RECORD)))
     parts.append(unresolved_sentence(_read_json(quest_root / OBJECTIONS_RECORD)))

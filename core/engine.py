@@ -89,6 +89,7 @@ from . import oracle_challenge as _oracle_challenge
 from . import code_layout as _code_layout
 from . import changelog as _changelog
 from . import code_project as _code_project
+from . import contract as _contract
 from . import rerun_from as _rerun_from
 from . import attempt_records as _attempts
 from . import attempt_memory as _memory
@@ -2885,7 +2886,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # physically wrong (unit error, factor of two, sign flip). The
             # design declared what its outputs may legally be; enforce it
             # here, before a paper gets written from them.
-            if _assertion_violations(state, self._walk_memo()):
+            if _assertion_violations(self._in_force(state), self._walk_memo()):
                 return "retry"
             # Figures with a legend or a title drawn over what a reader needs go
             # back once: the reflect node writes the redraw, and the flag it sets
@@ -7196,7 +7197,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         frozen = _frozen.load(self.quest_root) is not None
 
         def running(now: dict[str, Any]) -> Any:
-            return self._protocol_block({**state, "design": now})
+            return self._protocol_block({**state, "design": now}, adopted=False)
 
         gaps, unjudged = await self._topic_gaps(req, design, running(design))
         if gaps and not frozen:
@@ -11365,7 +11366,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
 
     # ---- the protocol gate ---------------------------------------------------
 
-    def _protocol_block(self, state: QuestState) -> dict[str, Any] | None:
+    def _protocol_block(self, state: QuestState, *, adopted: bool = True) -> dict[str, Any] | None:
         """The protocol to hold the experiment to, when there is an experiment.
 
         Once the protocol has been frozen (right before the first full run, ``core/frozen_protocol.py``) it is the frozen
@@ -11380,8 +11381,59 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         frozen = self._resolved_frozen()
         if frozen is not None:
             protocol = frozen.get("protocol")
-            return protocol if isinstance(protocol, dict) and protocol else None
-        return self._draft_protocol(state)
+            protocol = protocol if isinstance(protocol, dict) and protocol else None
+        else:
+            protocol = self._draft_protocol(state)
+        self._note_contract(state, protocol, frozen, adopted)
+        return protocol
+
+    def _note_contract(self, state: QuestState, protocol: dict[str, Any] | None, frozen: dict[str, Any] | None,
+                       adopted: bool) -> "_contract.StudyContract | None":
+        """The study contract the protocol being read gives (:func:`core.contract.from_design`), built once for the
+        design in force; what the plan left out is written to ``.fi/contract.json`` (``gaps``, and in ``shown`` the ones
+        the run record says) for the quality report. It is built when the protocol is read and never written back into
+        it (the frozen protocol's hash would change). A candidate design (``adopted`` false) is built but never written."""
+        if not isinstance(protocol, dict):
+            return None
+        design = state.get("design")
+        if not isinstance(design, dict) or not design:
+            return None
+        try:
+            plan_file = self.quest_root / "plan.md"
+            stat = plan_file.stat() if plan_file.is_file() else None
+            # Cheap to look up on every call: the frozen record's own hash, else the plan file's stamp, and the design
+            # object (every part of it that from_design reads: the assertions, the notes, the planned figures).
+            key = (frozen.get("sha256") if frozen is not None else None, stat.st_mtime_ns if stat else None,
+                   stat.st_size if stat else None, id(design), len(protocol))
+            cache = self.__dict__.setdefault("_contract_cache", {})
+            if key in cache and cache[key][0] is design and (cache[key][2] or not adopted):
+                return cache[key][1]
+            contract = cache[key][1] if key in cache and cache[key][0] is design else _contract.from_design(
+                {**design, "protocol": protocol})
+            if len(cache) > 8:
+                cache.clear()
+            cache[key] = (design, contract, adopted)
+            if adopted:
+                path = self.fi_dir / "contract.json"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                sha = frozen.get("sha256") if frozen is not None else hashlib.sha256(
+                    json.dumps(protocol, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+                path.write_text(json.dumps({
+                    "protocol_sha": sha, "form": contract.form, "gaps": list(contract.gaps),
+                    "shown": [g for g in contract.gaps if not _contract.is_routine_gap(g)]}, indent=2) + "\n",
+                    encoding="utf-8")
+            return contract
+        except Exception as e:  # noqa: BLE001 -- the contract is read for disclosure; it never stops a quest
+            self._log.warning("[contract] could not read the plan's contract (%r)", e)
+            return None
+
+    def _in_force(self, state: dict[str, Any]) -> Any:
+        """``state`` with the protocol in force (the frozen one once there is one) as its design's protocol, for the
+        checks of the results that read the design (:func:`_assertion_violations`)."""
+        protocol = self._protocol_block(state)  # type: ignore[arg-type]
+        if not isinstance(protocol, dict):
+            return state
+        return {**state, "design": {**(state.get("design") or {}), "protocol": protocol}}
 
     def _draft_protocol(self, state: QuestState) -> dict[str, Any] | None:
         """The protocol before it is frozen (:meth:`_draft_protocol_base`), with the worked examples the plan worked out again
@@ -15069,10 +15121,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         try:
             # The protocol the run is held to: the frozen one, as the evidence reads it (core/evidence.py).
             frozen = _frozen.load(self.quest_root)
-            results = _numeric.declared_results(
-                frozen.get("protocol") if frozen is not None else (state.get("design") or {}).get("protocol"))
+            protocol = frozen.get("protocol") if frozen is not None else (state.get("design") or {}).get("protocol")
+            results = _numeric.declared_results(protocol)
             found = _numeric.scan(stderr, result_json, results=results)
-            disclosed = _numeric.disclosed_non_finite(result_json, results)
+            try:
+                own = _numeric.own_measurements(protocol, self._oracle_record_read())
+            except Exception:  # noqa: BLE001 -- FI's value beside a disclosed number is a convenience
+                own = {}
+            disclosed = _numeric.disclosed_non_finite(result_json, results, own)
         except Exception as e:  # noqa: BLE001 -- a defect in the scan must never stall a quest
             self._log.warning("[numeric] the warning scan failed (%r); skipping", e)
             # A scanner that crashed is not the same as one that ran and found nothing: the first means the run's
@@ -15089,9 +15145,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 pass
             return []
         if disclosed:
-            # None of the plan's results: disclosed in the evidence, not repaired for (a NaN in a number nobody reports
-            # must not stop every result).
-            self._log.info("[numeric] not finite, not one of the plan's results (disclosed): %s", "; ".join(disclosed[:8]))
+            # Not a number the paper stands on (a diagnostic, a timing, a name the plan does not declare): disclosed in
+            # the evidence, not repaired for (a NaN in a number nobody reports must not stop every result).
+            self._log.info("[numeric] not finite, not a result the paper stands on (disclosed): %s", "; ".join(disclosed[:8]))
         if not found:
             if disclosed:
                 try:
@@ -15164,7 +15220,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return False
         if self.config.engine.degenerate_run_guard and _is_degenerate_result(state.get("result_json") or {}):
             return False
-        return not _assertion_violations(state, self._walk_memo())
+        return not _assertion_violations(self._in_force(state), self._walk_memo())
 
     def _scripts_sha(self) -> str:
         import hashlib
@@ -18876,7 +18932,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     # state, so hand it the PILOT's numbers rather than the
                     # real ones (which don't exist yet) via a shallow copy.
                     violations = _assertion_violations(
-                        {**state, "result_json": pilot_rj},
+                        self._in_force({**state, "result_json": pilot_rj}),
                     )
                     if violations:
                         self._log.warning(
@@ -19151,10 +19207,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # left, though, nothing regenerates the result: it is the one the paper
         # is written from, so it still gets its error bars.
         gate_violations = (
-            _assertion_violations({
+            _assertion_violations(self._in_force({
                 **state, "result_json": result_json,
                 "manifest_failed_trials": getattr(self, "_manifest_failed_trials", None),
-            }, self._walk_memo())
+            }), self._walk_memo())
             if result.returncode == 0 and result_json is not None
             else []
         )
@@ -19409,10 +19465,22 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             patch["selected_skills"] = [n for n in state.get("selected_skills") or [] if n not in gone]
             patch["skill_selection"] = selection
         patch["numeric_warnings_accepted"] = False
-        for w in _assertion_warnings({**state, **patch}, self._walk_memo()):
+        said_edges = []
+        for w in _assertion_warnings(self._in_force({**state, **patch}), self._walk_memo()):
             self._log.warning("[plausibility] warning, not a stop: %s", w.describe())
+            if getattr(w, "kind", "") == "edge_everywhere":
+                said_edges.append(w.describe())
             self._audit("check_result", check="plausibility_unproven_cap", status="warn",
                         summary=w.describe()[:300], path=getattr(w, "path", ""), value=getattr(w, "value", None))
+        try:  # what the run record says of this run's results that sit on their bound everywhere
+            edge_path = self.fi_dir / "edge_everywhere.json"
+            if said_edges:
+                edge_path.parent.mkdir(parents=True, exist_ok=True)
+                edge_path.write_text(json.dumps({"results": said_edges}, indent=2) + "\n", encoding="utf-8")
+            else:
+                edge_path.unlink(missing_ok=True)
+        except OSError:
+            pass
         patch["run_manifest_failures"] = manifest_attempts_next
         patch["run_manifest_analysis_only"] = manifest_analysis_only
         run_context = await self._attempt_context({**state, **patch}, kind="after_run")
@@ -20099,7 +20167,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             and self.config.engine.degenerate_run_guard
             and _is_degenerate_result(state.get("result_json") or {})
         )
-        implausible = _assertion_violations(state, self._walk_memo())
+        implausible = _assertion_violations(self._in_force(state), self._walk_memo())
         # A legend drawn over its data, or a figure title over a panel title, is
         # sent back for a redraw once, and only when nothing else is wrong with
         # the run: a repair of a crash, an all-zero result or a broken bound
@@ -34696,10 +34764,12 @@ def _assertion_violations(state: "QuestState", memo: Any = None) -> list:
         found = plausibility.check_design(
             rj, _asserting_design(state), code=state.get("code") or "",
             seen=state.get("bounded_seen") or (), zero_expected=_zero_expected_paths(state),
+            edge_ok=_physical_bound_paths(state),
             walk=memo.get(rj) if memo is not None else None,
         )
-        # A cap whose place in the result cannot be shown is a warning (_assertion_warnings), not a violation.
-        return [v for v in found if getattr(v, "kind", "") != "clamped_unproven"]
+        # A cap whose place in the result cannot be shown, and a physical_bound result on its edge in every setting, are
+        # warnings (_assertion_warnings), not violations.
+        return [v for v in found if getattr(v, "kind", "") not in ("clamped_unproven", "edge_everywhere")]
     except Exception:  # noqa: BLE001 - a checker bug must not block a quest
         return []
 
@@ -34715,9 +34785,10 @@ def _assertion_warnings(state: "QuestState", memo: Any = None) -> list:
         found = plausibility.check_design(
             rj, _asserting_design(state), code=state.get("code") or "",
             seen=state.get("bounded_seen") or (), zero_expected=_zero_expected_paths(state),
+            edge_ok=_physical_bound_paths(state),
             walk=memo.get(rj) if memo is not None else None,
         )
-        return [v for v in found if getattr(v, "kind", "") == "clamped_unproven"]
+        return [v for v in found if getattr(v, "kind", "") in ("clamped_unproven", "edge_everywhere")]
     except Exception:  # noqa: BLE001
         return []
 
@@ -34729,6 +34800,10 @@ def _zero_expected_paths(state: "QuestState") -> set[str]:
     at-bound rule sent a correct script back twice, until the repair replaced the zeros with nulls."""
     protocol = (state.get("design") or {}).get("protocol")
     policy = str((protocol or {}).get("failure_policy") or "") if isinstance(protocol, dict) else ""
+    metrics = (protocol or {}).get("metrics") if isinstance(protocol, dict) else None
+    # A result that declares a role says it there (physical_bound), not in the prose of the failure policy.
+    roled = {str(m["id"]) for m in metrics if isinstance(m, dict) and m.get("role") and m.get("id")} \
+        if isinstance(metrics, list) else set()
     failed = state.get("manifest_failed_trials")
     # The zero must be corroborated: a manifest was read and it lists no failed trial.
     if not policy.strip() or failed != 0 or isinstance(failed, bool):
@@ -34738,7 +34813,7 @@ def _zero_expected_paths(state: "QuestState") -> set[str]:
     out: set[str] = set()
     for a in plausibility.parse_assertions(_asserting_design(state)):
         leaf = a.path.rsplit(".", 1)[-1]
-        if not leaf:
+        if not leaf or leaf in roled:
             continue
         # The policy names the quantity as a name: an identifier (`failed_run_count`) as a whole word, or any name in
         # quotes. A bare word ("rate", "count") in the policy's prose names nothing.
@@ -34747,6 +34822,19 @@ def _zero_expected_paths(state: "QuestState") -> set[str]:
         if quoted or identifier:
             out.add(a.path)
     return out
+
+
+def _physical_bound_paths(state: "QuestState") -> set[str]:
+    """The asserted quantities whose result the plan declares with the role ``physical_bound`` (:mod:`core.contract`): such
+    a value may sit exactly on the edge of its range, which is its physics and not a fault."""
+    design = _asserting_design(state)
+    protocol = design.get("protocol")
+    if not isinstance(protocol, dict):
+        return set()
+    from core import plausibility
+
+    physical = {i for i, role in _contract.raw_roles(protocol).items() if role == "physical_bound"}
+    return {a.path for a in plausibility.parse_assertions(design) if any(plausibility._matches(i, a.path) for i in physical)}
 
 
 def _asserting_design(state: "QuestState") -> dict[str, Any]:

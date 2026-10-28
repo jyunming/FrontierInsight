@@ -17,13 +17,15 @@ What counts, and only this, so that a warning about a font or a deprecation neve
 * an argument that had no effect: "have no effect for a chosen solver", an unexpected or unrecognised keyword or option,
   "will be ignored", "is ignored";
 * ``ComplexWarning`` (an imaginary part silently discarded);
-* a ``NaN`` or an infinity in the results the script printed, when it is a result the plan declares
-  (``design.protocol.metrics``). Any other non-finite number (a diagnostic the plan does not report) is disclosed
-  (:func:`disclosed_non_finite`), not repaired: a NaN in a number nobody reports must not stop every result. Which
-  printed number is a declared result is told by its name (a key on its path equal to a result's id), so a NaN in a
-  number named otherwise (``rate_se`` beside the declared ``rate``) is disclosed too; the study contract's result roles
-  replace that link. FI fills no non-finite number into the paper (:mod:`core.paper_values`). A plan that declares no
-  result keeps every non-finite number.
+* a ``NaN`` or an infinity in the results the script printed, when its role is one the paper stands on: a ``result``,
+  a ``reference`` or a ``physical_bound`` (:mod:`core.contract`, the role the plan gives or its structure says). Any
+  other non-finite number (a ``diagnostic``, a ``timing``, a number the plan does not declare) is disclosed
+  (:func:`disclosed_non_finite`), not repaired: a NaN in a number nobody reports must not stop every result. A
+  diagnostic that is the measure of a known-answer check is disclosed with FI's own measurement of that check beside it
+  (:func:`own_measurements`). Which printed number is a declared result is told by its name (a key on its path equal
+  to a result's id), so a NaN in a number named otherwise (``rate_se`` beside the declared ``rate``) is disclosed too.
+  FI fills no non-finite number into the paper (:mod:`core.paper_values`). A plan that declares no result keeps every
+  non-finite number.
 """
 
 from __future__ import annotations
@@ -84,27 +86,65 @@ def _non_finite(result: Any, prefix: str = "") -> list[str]:
     return [f"{path} is {value}" for path, _keys, value in _non_finite_leaves(result, prefix)]
 
 
-def declared_results(protocol: Any) -> set[str]:
-    """The ids of the results the plan declares (``design.protocol.metrics``)."""
-    metrics = protocol.get("metrics") if isinstance(protocol, dict) else None
-    return {str(m["id"]) for m in metrics or [] if isinstance(m, dict) and m.get("id")}
+#: The roles whose numbers the paper stands on: a non-finite one of these asks for a repair. Any other is disclosed.
+COUNTING_ROLES = ("result", "reference", "physical_bound")
+
+
+def declared_results(protocol: Any) -> set[str] | None:
+    """The ids of the declared results (``design.protocol.metrics``) whose role is one a non-finite number stops for
+    (:data:`COUNTING_ROLES`); ``None`` when the plan declares no result (every non-finite number then counts). An empty
+    set is a plan whose declared results are all of another role. Every declared id is judged, also one the study
+    contract could not place: it counts as a result."""
+    from . import contract as _contract
+
+    roles = _contract.raw_roles(protocol)
+    if not roles:
+        return None
+    return {i for i, role in roles.items() if role in COUNTING_ROLES}
+
+
+def own_measurements(protocol: Any, oracle_check: Any) -> dict[str, str]:
+    """For each declared result that is the measure of a known-answer check, FI's own measurement of that check from
+    the last attempt of ``needs/ORACLE_CHECK.json`` (``oracle_check``), as a short sentence."""
+    from . import contract as _contract
+
+    attempts = oracle_check.get("attempts") if isinstance(oracle_check, dict) else None
+    checks = attempts[-1].get("checks") if isinstance(attempts, list) and attempts and isinstance(attempts[-1], dict) else None
+    measured = {str(c["name"]): c["value"] for c in checks or []
+                if isinstance(c, dict) and c.get("measured_by") == "engine" and c.get("name")
+                and isinstance(c.get("value"), (int, float)) and not isinstance(c.get("value"), bool)
+                and math.isfinite(c["value"])}
+    out: dict[str, str] = {}
+    by_id, _violation = _contract.oracle_measures(protocol)
+    for rid, names in by_id.items():
+        got = [(n, measured[n]) for n in names if n in measured]
+        if got:
+            out[rid] = "; ".join(f"FI's own run of the check `{n}` measured {v:.3g}" for n, v in got)
+    return out
 
 
 def _names_result(keys: tuple[str, ...], results: set[str]) -> bool:
     return any(key in results for key in keys)
 
 
-def disclosed_non_finite(result_json: Any, results: set[str]) -> list[str]:
-    """The non-finite numbers of ``result_json`` that are none of the plan's declared ``results``: disclosed, never
-    repaired for (none when the plan declares no result)."""
-    if not results:
+def disclosed_non_finite(result_json: Any, results: set[str] | None, own: dict[str, str] | None = None) -> list[str]:
+    """The non-finite numbers of ``result_json`` that are none of the counting ``results``: disclosed, never repaired for
+    (none when the plan declares no result, ``results`` is ``None``). ``own`` (:func:`own_measurements`) puts FI's own
+    value of a check beside a number that is that check's measure."""
+    if results is None:
         return []
-    return [f"{path} is {value}" for path, keys, value in _non_finite_leaves(result_json) if not _names_result(keys, results)]
+    out = []
+    for path, keys, value in _non_finite_leaves(result_json):
+        if _names_result(keys, results):
+            continue
+        beside = next((own[k] for k in keys if own and k in own), "")
+        out.append(f"{path} is {value}" + (f" ({beside})" if beside else ""))
+    return out
 
 
 def scan(stderr: str, result_json: Any = None, *, limit: int = 8, results: set[str] | None = None) -> list[NumericWarning]:
     """The numeric warnings in ``stderr`` and non-finite numbers in ``result_json``, each once, at most ``limit``. With
-    ``results`` (the plan's declared results, not empty) a non-finite number counts only when it is one of them;
+    ``results`` (:func:`declared_results`, not ``None``) a non-finite number counts only when it is one of them;
     without, every one counts."""
     seen: set[tuple[str, str]] = set()
     out: list[NumericWarning] = []
@@ -132,7 +172,7 @@ def scan(stderr: str, result_json: Any = None, *, limit: int = 8, results: set[s
         elif cls in ("UserWarning", "RuntimeWarning") and _IGNORED_ARG.search(text):
             add("ignored_argument", text)
     for path, keys, value in _non_finite_leaves(result_json):
-        if not results or _names_result(keys, results):
+        if results is None or _names_result(keys, results):
             add("non_finite", f"{path} is {value}")
     return out
 

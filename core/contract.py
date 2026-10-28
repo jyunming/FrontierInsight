@@ -15,8 +15,16 @@ Roles of a result (:data:`ROLES`):
 * ``physical_bound``: a result that by its physics may sit exactly on the edge of its declared ``range`` (a value that
   is 0 or 1 by construction): sitting there is not a fault. For any other role a value on the edge is said, and a value
   outside the range is a fault.
-* ``diagnostic``: everything the simulation returns that the contract does not declare. Kept in the record, readable by
-  the study's own derive functions, never reported and never checked.
+* ``diagnostic``: everything the simulation returns that the contract does not declare, and a declared result that is
+  the measure of a check of a violation kind (an invariant, a symmetry or a second implementation: FI measures that
+  check itself and the quantity is a size of disagreement, not a finding). Kept in the record, readable by the study's
+  own derive functions, never reported and never checked.
+
+Where a plan gives no ``role``, :func:`from_design` sets one from the plan's structure alone: a result with a
+``reference.formula`` is a ``reference``; a result that is the ``measure`` (or ``metric``) of a check of a violation
+kind is a ``diagnostic`` (the quantity of a special case, a published value or a convergence rate is the result itself,
+measured on a small case, so it stays a ``result``); any other is a ``result``, said in ``gaps``. ``measured_by`` names
+every check that measures a result, whatever its kind. No word of an estimand or a label is read.
 
 This is not :class:`core.protocol.ResearchProtocol`, which says what *kind* of quest this is (a simulation, a literature
 review); the contract says what one simulation study does.
@@ -33,6 +41,8 @@ import copy
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from .oracle_forms import VIOLATION_KINDS
 
 ROLES = ("result", "reference", "timing", "physical_bound", "diagnostic")
 Role = Literal["result", "reference", "timing", "physical_bound", "diagnostic"]
@@ -68,6 +78,9 @@ class Result(_Strict):
 
     id: str
     role: Role = "result"
+    #: The names of the known-answer checks whose measure is this result (whatever its role): FI's own measurement of
+    #: each is in its record, beside what the simulation returned.
+    measured_by: tuple[str, ...] = ()
     kind: Literal["mean", "proportion"] = "mean"
     estimand: str = ""
     observation: str = ""  # what one independent observation is (one trial, one cluster)
@@ -229,6 +242,56 @@ _PLACED = {"grid", "sub_studies", "in_each_run", "numerical_settings", "constant
            "labels", "comparisons", "derived", "figures", "steps", "shared_draws", "form", *_NOTE_KEYS}
 
 
+def oracle_measures(protocol: Any) -> tuple[dict[str, list[str]], set[str]]:
+    """The names of the plan's checks by the id each measures (its ``measure`` or ``metric``), and the ids measured by a
+    check of a violation kind (``oracle_forms.VIOLATION_KINDS``). Reads the ``oracles`` as written, with no validation."""
+    by_id: dict[str, list[str]] = {}
+    violation: set[str] = set()
+    oracles = protocol.get("oracles") if isinstance(protocol, dict) else None
+    for o in oracles if isinstance(oracles, list) else []:
+        if not isinstance(o, dict):
+            continue
+        for key in ("measure", "metric"):
+            target, name = _ident(o.get(key)), _ident(o.get("name"))
+            if target is None:
+                continue
+            if name is not None and name not in by_id.setdefault(target, []):
+                by_id[target].append(name)
+            if o.get("kind") in VIOLATION_KINDS:
+                violation.add(target)
+    return by_id, violation
+
+
+def structural_role(metric: dict[str, Any], violation_ids: set[str]) -> str | None:
+    """The role the plan's structure gives a declared result that writes none: ``reference`` for a reference formula,
+    ``diagnostic`` for the measure of a check of a violation kind; ``None`` when the structure says nothing."""
+    ref = metric.get("reference")
+    if isinstance(ref, dict) and str(ref.get("formula") or "").strip():
+        return "reference"
+    return "diagnostic" if str(metric.get("id")) in violation_ids else None
+
+
+def raw_roles(protocol: Any) -> dict[str, str]:
+    """The role of every declared result of a protocol, read without validating the entries: the role written, else the
+    structural one, else ``result``. An entry the contract would leave out (a kind or a reference it cannot place) keeps
+    the role it would have, so a check that must count it still does."""
+    metrics = protocol.get("metrics") if isinstance(protocol, dict) else None
+    _by_id, violation = oracle_measures(protocol)
+    out: dict[str, str] = {}
+    for m in metrics if isinstance(metrics, list) else []:
+        if not isinstance(m, dict) or not m.get("id"):
+            continue
+        written = m.get("role")
+        out.setdefault(str(m["id"]), written if written in ROLES else structural_role(m, violation) or "result")
+    return out
+
+
+def is_routine_gap(gap: str) -> bool:
+    """A gap every older plan has today (it names no role, it is in the older form): kept in ``.fi/contract.json``, not
+    shown in the run record."""
+    return gap.startswith(("the plan gives no role", "an older plan"))
+
+
 def _values(v: Any) -> tuple[Any, ...]:
     return tuple(v) if isinstance(v, (list, tuple)) else (v,)
 
@@ -318,6 +381,8 @@ def from_design(design: dict[str, Any] | None) -> StudyContract:
         else:
             assertions.append(a)
 
+    measures, violation_ids = oracle_measures(p)
+
     results = []
     no_role: list[str] = []
     for m in metrics:
@@ -328,8 +393,12 @@ def from_design(design: dict[str, Any] | None) -> StudyContract:
         if rid in {r.id for r in results}:
             gaps.append(f"result `{rid}` is declared more than once; only the first is kept")
             continue
-        if not m.get("role"):
+        structural = structural_role({**m, "id": rid}, violation_ids)
+        if not m.get("role") and structural is None:
             no_role.append(rid)
+        if not m.get("role") and structural == "diagnostic":
+            gaps.append(f"result `{rid}` is the measure of the check {', '.join('`' + n + '`' for n in measures[rid])}, "
+                        "so a non-finite value of it is disclosed, not stopped")
         depends = m.get("depends_on")
         if isinstance(depends, list):
             unknown = [str(s) for s in depends if str(s) not in settings.varied()]
@@ -341,7 +410,8 @@ def from_design(design: dict[str, Any] | None) -> StudyContract:
         if given is not None and _ident(given) not in declared_ids | derived_ids:
             gaps.append(f"result `{rid}` is given `{given}`, which is not a declared result; that is left out")
             given = None
-        data = {"id": rid, "role": m.get("role") or "result", "kind": m.get("kind") or "mean",
+        data = {"id": rid, "role": m.get("role") or structural or "result", "measured_by": tuple(measures.get(rid, ())),
+                "kind": m.get("kind") or "mean",
                 "estimand": str(m.get("estimand") or ""), "observation": str(m.get("unit") or ""),
                 "unit": str(m.get("physical_unit") or ""), "label": str(m.get("label") or labels.get(rid, "")),
                 "depends_on": depends, "range": ranges.get(rid) or m.get("range"),

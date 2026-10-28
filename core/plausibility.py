@@ -161,6 +161,9 @@ protocol can. A quantity the protocol's ``failure_policy`` names, whose 0 the
 run's own manifest does not contradict, is exempt (the engine passes it as
 ``zero_expected``). Any other 0 is held to the rule as before.
 
+A plan can also say it in the result's role: a result declared with the role ``physical_bound`` may sit on its range
+edge (the engine passes those assertion paths as ``edge_ok``), whatever its value and wherever the failure policy is silent.
+
 Why the design can say a bound is an honest value
 =================================================
 The failure policy only covers a count of failures, and only at 0. A proportion that is exactly 0 or 1 because the event
@@ -255,6 +258,8 @@ class Violation:
                 f"results exactly on a bound are what a computation returning a "
                 f"trivial answer looks like{note}"
             )
+        if self.kind == "edge_everywhere":
+            return f"{self.path} is on its bound in every setting; the result may carry no information"
         if self.kind == "missing":
             return (
                 f"{self.path} is no longer in the results, though an earlier run reported it and the design bounds it "
@@ -1284,7 +1289,7 @@ def _confined_position(
 
 def violations(
     result_json: Any, assertions: list[Assertion], *, code: str = "", zero_expected: Any = (),
-    walk: LeafWalk | None = None,
+    walk: LeafWalk | None = None, edge_ok: Any = (),
 ) -> list[Violation]:
     """Every declared bound the result actually breaks.
 
@@ -1336,9 +1341,16 @@ def violations(
             elif bound != 0 or value == 0:
                 # On a bound of 0 only an exact 0 is the trivial answer; see "Why a tiny value is not on 0".
                 on_bound.setdefault(bound, []).append((tokens, path))
+        if a.path in edge_ok and not a.may_equal_bound and on_bound:
+            # Its role is physical_bound: on its edge in some settings is its physics. On the edge in every setting
+            # it may be a result that carries no information, which is said (never a stop).
+            on_edge = {_setting_key(t) for entries in on_bound.values() for t, _p in entries}
+            every = {_setting_key(t) for t, _p, _v in matched}
+            if len(every) >= AT_BOUND_MIN_SETTINGS and on_edge >= every:
+                out.append(Violation(a.path, matched[0][2], a, kind="edge_everywhere"))
         for bound, entries in on_bound.items():
-            if a.may_equal_bound:
-                continue  # the design says this quantity can honestly sit on its bound: see "Why the design can say a bound..."
+            if a.may_equal_bound or a.path in edge_ok:
+                continue  # the design says this quantity can honestly sit on its bound, or its role is physical_bound
             if bound == 0 and a.path in zero_expected:
                 continue  # 0 is this quantity's answer: see "Why a count of failures may sit at 0"
             v = _at_bound(a, bound, entries, matched, result_json, literals)
@@ -1425,7 +1437,7 @@ def bounded_paths(result_json: Any, design: Any, *, walk: LeafWalk | None = None
 
 def check_design(
     result_json: Any, design: Any, *, code: str = "", seen: Any = (), zero_expected: Any = (),
-    walk: LeafWalk | None = None,
+    walk: LeafWalk | None = None, edge_ok: Any = (),
 ) -> list[Violation]:
     """Parse a design's assertions and apply them.
 
@@ -1436,7 +1448,8 @@ def check_design(
     """
     assertions = parse_assertions(design)
     walk = walk if walk is not None and walk.root is result_json else LeafWalk(result_json)
-    out = violations(result_json, assertions, code=code, zero_expected={str(p) for p in zero_expected or ()}, walk=walk)
+    out = violations(result_json, assertions, code=code, zero_expected={str(p) for p in zero_expected or ()},
+                     edge_ok={str(p) for p in edge_ok or ()}, walk=walk)
     earlier = {str(p) for p in seen or ()}
     if earlier:
         present = walk.present_index()
