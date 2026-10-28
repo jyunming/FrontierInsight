@@ -13711,6 +13711,20 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return -1, "", repr(e)
         return ran.returncode, ran.stdout or "", (ran.stderr or "") + ("\n(timed out)" if ran.timed_out else "")
 
+    def _run_apart_from_study(self, exec_env: dict[str, str] | None) -> Any:
+        """The run of a check that calls the study's own code (what the tested functions are called with, what depends on
+        them, the second version of a function): apart from the study, so it neither reads the values the study kept
+        (data/results/cache/) nor leaves its own there, and with the environment a trial gets. ``extra_s``: time FI
+        measured for something the call does first (the study's own trial), added to the limit."""
+        from .small_run import budget as _small_run_budget
+
+        async def run(argv: list[str], extra_s: float = 0.0) -> Any:
+            return await self._run_in_env(
+                argv, timeout_s=_small_run_budget(self.config.execution.timeout_s) + int(math.ceil(max(0.0, extra_s))),
+                env=dict(exec_env or {}), apart=True)
+
+        return run
+
     async def _run_outside(self, argv: list[str], **kwargs: Any) -> tuple[int, str, str]:
         """:meth:`_run_in_env` from a copy of ``code/`` outside the quest folder (core/outside_run.py)."""
         return await self._run_in_env(argv, outside=True, **kwargs)
@@ -13885,7 +13899,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 verify_package=verify_package, captured=captured,
                 quest_root=self.quest_root, package=package, specs=specs, protocol=protocol,
                 prompts={"write": self._prompts["second_impl_write"], "adjudicate": self._prompts["second_impl_adjudicate"]},
-                chat=chat, run=self._run_in_env, repair_main=repair_main, still_passes=still_passes, passages=passages,
+                chat=chat, run=self._run_apart_from_study(exec_env), repair_main=repair_main, still_passes=still_passes, passages=passages,
                 family_of=self._family_of_node, topic_block=self._topic_block(), log=self._log)
             for name, e in (result.get("functions") or {}).items():
                 if not isinstance(e, dict):
@@ -13956,11 +13970,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
 
             from .small_run import budget as _small_run_budget
 
-            async def run(argv: list[str]) -> Any:
-                # Apart from the study: a run with a function's result changed must neither read the values the study
-                # kept (data/results/cache/) nor leave its own there.
-                return await self._run_in_env(argv, timeout_s=_small_run_budget(self.config.execution.timeout_s),
-                                              env=dict(exec_env or {}), apart=True)
+            run = self._run_apart_from_study(exec_env)
 
             budget = 2 * _small_run_budget(self.config.execution.timeout_s)  # each of the two checks, in all
             got = await self._await_with_heartbeat(

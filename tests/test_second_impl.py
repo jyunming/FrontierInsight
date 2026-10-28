@@ -343,8 +343,7 @@ def test_repair_is_dropped_when_the_function_no_longer_passes_its_tests(tmp_path
     assert e["status"] == "unresolved"
     assert (root / "code" / "pkg" / "model.py").read_text(encoding="utf-8") == MUTANT_MAIN  # restored
     assert e["limitation"].startswith("Two independently written versions of step S1")
-    assert "gave different results (given the inputs slope = " in e["limitation"]
-    assert ", version 1 returned " in e["limitation"] and " and version 2 returned " in e["limitation"]
+    assert "gave different results" in e["limitation"] and "slope = " in e["limitation"]
     assert e["limitation"].endswith("the number depends on which is right.")
     assert si.limitations(rec) == [e["limitation"]]
 
@@ -354,7 +353,7 @@ def test_card_ambiguous_is_unresolved_with_the_plain_sentence(tmp_path):
     root, s, rec = run_it(tmp_path, fake)
     e = rec["functions"]["activation_energy"]
     assert e["status"] == "unresolved" and rec["calls"] == 2
-    assert "Two independently written versions of step S1 (activation energy) gave different results (given the inputs" in e["limitation"]
+    assert "Two independently written versions of step S1 (activation energy) gave different results" in e["limitation"]
 
 
 @pytest.mark.parametrize("main", [MUTANT_MAIN, UNITS_MAIN])
@@ -794,9 +793,19 @@ def test_a_version_that_raised_on_every_input_was_not_compared():
     first = [{"main_err": "NameError: name 'LIMIT' is not defined", "ref": 4.0} for _ in inputs]
     res = si.judge_rows(first, inputs, si.REL)
     assert res["status"] == si.UNCONFIRMED and not res["disagreements"] and res["compared"] == 0
-    assert res["why"] == "the first version could not be run in the comparison: NameError"
-    second = [{"main": 4.0, "ref_err": "AttributeError: no such name"} for _ in inputs]
-    assert si.judge_rows(second, inputs, si.REL)["why"] == "the second version could not be run in the comparison: AttributeError"
+    assert res["why"] == "the first version could not be run in the comparison: NameError (the study's setup trial was not run)"
+    assert "did not run to the end" in si.judge_rows(first, inputs, si.REL, setup="failed")["why"]
+    assert "ran to the end" in si.judge_rows(first, inputs, si.REL, setup="ran")["why"]
+    second = [{"main": 4.0, "ref_err": "ModuleNotFoundError: no module named q"} for _ in inputs]
+    assert si.judge_rows(second, inputs, si.REL)["why"].startswith("the second version could not be run in the comparison: Mod")
+    # an error that can be the version's own fault, on every input, is a disagreement the judge can settle
+    for fault in ("AttributeError: 'float' object has no attribute 'sum'", "UnboundLocalError: local variable 'a'"):
+        own = [{"main_err": fault, "ref": 4.0} for _ in inputs]
+        assert si.judge_rows(own, inputs, si.REL)["status"] == si.DISAGREE
+    # every error must be a missing name: a missing name on one input and another error on the rest is a disagreement
+    mixed = [{"main_err": "NameError: x", "ref": 4.0}, {"main_err": "ZeroDivisionError: y", "ref": 4.0},
+             {"main_err": "ZeroDivisionError: y", "ref": 4.0}]
+    assert si.judge_rows(mixed, inputs, si.REL)["status"] == si.DISAGREE
     # a domain error on every input is a result of the function, not a version that could not run
     domain = [{"main": 4.0, "ref_err": "ValueError: math domain error"} for _ in inputs]
     assert si.judge_rows(domain, inputs, si.REL)["status"] == si.DISAGREE
@@ -860,7 +869,9 @@ def test_the_run_fi_made_gives_the_setting_the_comparison_sets_the_study_up_with
                         "return {'y': model.scaled(1.0)}\n")
     asyncio.run(si.capture_inputs(make_run(root), root, "pkg", ["scaled"], [{"limit": 4}, {"limit": 5}], deterministic=True,
                                   in_each_run={"t": [1, 2]}))
-    assert si.read_captured(root)["setup"] == {"entry": "run_cell", "cell": {"limit": 4, "t": [1, 2]}, "kind": "scan"}
+    setup = si.read_captured(root)["setup"]
+    assert setup["entry"] == "run_cell" and setup["kind"] == "scan" and setup["cell"]["t"] == [1, 2]
+    assert setup["cell"]["limit"] in (4, 5) and setup["thresholds"] == {} and setup["duration_s"] > 0
 
 
 def test_a_comparison_where_the_first_version_cannot_run_is_not_sent_to_the_judge(tmp_path):
@@ -873,6 +884,7 @@ def test_a_comparison_where_the_first_version_cannot_run_is_not_sent_to_the_judg
     assert e["status"] == "unconfirmed" and not e["disagreements"]
     assert fake.count("second_impl.adjudicate") == 0
     assert "the first version could not be run in the comparison: NameError" in e["limitation"]
+    assert "setup trial was not run" in e["limitation"]  # no study file here: nothing was set up
     assert "different results" not in e["limitation"]
 
 
@@ -881,14 +893,103 @@ def test_the_judge_is_shown_the_values_the_plan_fixes():
     proto["constants"] = {"gas_constant": 8.314, "true_energy": 60}
     proto["numerical_settings"] = {"tol": 1e-10}
     block = si._spec_block(spec_for(proto), proto)
-    assert '"gas_constant": 8.314' in block and '"true_energy": 60' in block and '"tol"' in block
+    assert "gas_constant = 8.314" in block and "true_energy = 60" in block and "tol = " in block
     assert "not results" in block
     assert "the plan fixes" not in si._spec_block(spec_for(protocol()), protocol())
+
+
+def test_fixed_values_are_never_cut_inside_an_entry_and_never_hold_a_result_field():
+    proto = protocol()
+    proto["constants"] = {f"c{i}": 0.123456789012 + i for i in range(80)}
+    proto["metrics"] = [{"id": "m", "known_value": 987654.321, "reference": "R-REF"}]
+    proto["oracles"] = [{"name": "o", "expected": 424242.5}]
+    proto["acceptance"] = {"rule": "ACCEPT-RULE"}
+    text = si._fixed_values(proto)
+    assert "more not shown" in text and len(text) < si.FIXED_VALUES_CHARS + 300
+    shown = [e for e in text.split(": ", 1)[1].split("; ")]
+    assert all(e.rsplit(" = ", 1)[-1].replace(" (", " ").split(" ")[0].count(".") <= 1 for e in shown)  # a number, whole
+    assert shown[0].startswith("constant c0 = 0.123456789012")
+    for held_result in ("987654", "R-REF", "424242", "ACCEPT-RULE"):
+        assert held_result not in text
 
 
 def test_the_sentence_gives_each_versions_result_and_labels_the_inputs():
     cases = [{"inputs": {"slope": -5000.0}, "kind": "value", "main": "41570", "other": "20785"}]
     sentence = si.limitation_unresolved(spec_for(protocol()), cases)
-    assert "given the inputs slope = -5000" in sentence
-    assert "version 1 returned 41570 and version 2 returned 20785" in sentence
-    assert si.cases_text(cases).startswith("- given the inputs slope = ")
+    inputs_at, results_at = sentence.index("slope = -5000"), sentence.index("41570")
+    assert "inputs" in sentence[:inputs_at] and inputs_at < results_at < sentence.index("20785")
+    assert "41570" not in sentence[:inputs_at] and "slope" not in sentence[results_at:]
+    assert "41570" in si.cases_text(cases) and "20785" in si.cases_text(cases)
+
+
+def test_the_setup_is_the_fastest_setting_that_ran_with_its_thresholds_and_seed(tmp_path):
+    root = _study_quest(tmp_path, "def scaled(x):\n    return x * LIMIT\n",
+                        "import os, time, json\nfrom pkg import model\n\n\ndef run_cell(cell):\n"
+                        "    model.LIMIT = cell['limit']\n    time.sleep(cell['wait'])\n    return {'y': 1.0}\n")
+    cells = [{"limit": 4, "wait": 1.5}, {"limit": 5, "wait": 0.0}, {"limit": 6, "wait": 0.7}]
+    asyncio.run(si.capture_inputs(make_run(root), root, "pkg", ["scaled"], cells, deterministic=True,
+                                  thresholds={"cut": 3}))
+    rec = si.read_captured(root)
+    setup = rec["setup"]
+    assert setup["cell"]["limit"] == 5 and setup["thresholds"] == {"cut": 3}
+    assert setup["duration_s"] == rec["took"]["1"] == min(rec["took"].values())
+    assert set(rec["took"]) == {"0", "1", "2"}
+
+
+def test_a_setup_trial_gets_the_thresholds_of_the_trials_and_the_versions_calls_do_not(tmp_path):
+    study = ("import os, json\nfrom pkg import model\n\n\ndef run_trial(cell, trial_id, seed):\n"
+             "    model.CUT = json.loads(os.environ['FI_THRESHOLDS'])['cut']\n    model.SEED = seed\n    return {'y': 1.0}\n")
+    root = _study_quest(tmp_path, "import os\n\n\ndef scaled(x):\n    return [x * CUT, SEED, os.environ['FI_THRESHOLDS'], "
+                                  "os.environ['FI_CELL_KIND']]\n", study)
+    got = _compare_rows(root, {"entry": "run_trial", "cell": {}, "kind": "scan", "thresholds": {"cut": 3}, "seed": 17})
+    assert got["setup"] == "ran"
+    assert got["rows"][0]["main"] == [3.0, 17, "{}", "check"]
+
+
+def test_a_comparison_with_a_setup_trial_runs_apart_from_the_quest_and_leaves_its_outputs_alone(tmp_path):
+    """The comparison now runs a real trial: it must run from a copy (as FI's capture run does), neither reading nor
+    leaving the study's kept values, and the study's outputs stay as they were."""
+    from core.execution import ExecutionResult
+    from core.outside_run import OutsideExecutor
+
+    class Inner:
+        async def execute(self, cmd, *, cwd, timeout_s, env=None):
+            done = await asyncio.to_thread(subprocess.run, cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout_s,
+                                           env=env)
+            return ExecutionResult(done.returncode, done.stdout, done.stderr, 0.0)
+
+    study = ("import os\nfrom pkg import model\n\n\ndef run_trial(cell, trial_id, seed):\n"
+             "    os.makedirs('data/results/cache', exist_ok=True)\n"
+             "    model.KEPT = os.path.isfile('data/results/cache/kept.txt')\n"
+             "    open('data/results/cache/kept.txt', 'w').write('x')\n    open('data/results/x.txt', 'w').write('x')\n"
+             "    open('figure.png', 'w').write('x')\n    model.LIMIT = 4\n    return {'y': 1.0}\n")
+    proto = protocol(example=False)
+    root = make_quest(tmp_path, "def activation_energy(slope):\n    return [slope * LIMIT, KEPT]\n")
+    (root / "code" / "simulate.py").write_text(study, encoding="utf-8")
+    (root / "data" / "results" / "cache").mkdir(parents=True)
+    (root / "data" / "results" / "cache" / "kept.txt").write_text("the study's own", encoding="utf-8")
+    record = {"cases": {"activation_energy": [{"slope": 2.0}]}, "ran": [0],
+              "setup": {"entry": "run_trial", "cell": {}, "kind": "scan", "thresholds": {}, "seed": 1, "duration_s": 0.1}}
+    (root / ".fi" / "second_impl").mkdir(parents=True)
+    (root / si.CAPTURED).write_text(json.dumps(record), encoding="utf-8")
+    before = {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file() and ".fi" not in p.parts
+              and "__pycache__" not in p.parts}
+    executor = OutsideExecutor(Inner(), root, base=tmp_path / "scratch", share=False, only_named=True)
+    seen_extra = []
+
+    async def run(argv, extra_s=0.0):
+        seen_extra.append(extra_s)
+        ran = await executor.execute([sys.executable, "-B", *argv], cwd=root, timeout_s=300)
+        return ran.returncode, ran.stdout, ran.stderr
+
+    fake = Fake(write=[fenced("def activation_energy(slope):\n    return [slope * 4, False]\n")])
+    s = si.SecondImpl(quest_root=root, package="pkg", specs=[spec_for(proto)], protocol=proto, prompts=PROMPTS,
+                      chat=fake.chat, run=run, repair_main=None, still_passes=None,
+                      captured=record["cases"])
+    rec = asyncio.run(s.run_all())
+    e = rec["functions"]["activation_energy"]
+    assert e["status"] == "agree", e  # the cached value the study kept was not read: KEPT is False in the trial
+    assert seen_extra and seen_extra[0] == 0.1  # the time FI measured for the setup trial is added to the limit
+    after = {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file() and ".fi" not in p.parts
+             and "__pycache__" not in p.parts}
+    assert after == before, set(after) ^ set(before)

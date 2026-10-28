@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import inspect
 import json
 import logging
 import math
@@ -385,6 +386,8 @@ async def capture_inputs(run: Callable[[list[str]], Awaitable[Any]], quest_root:
     out: dict[str, list[dict[str, Any]]] = {}
     called_at: dict[str, list[int]] = {}
     ran: list[int] = []
+    took: dict[int, float] = {}
+    seeds: dict[int, Any] = {}
     returned: dict[str, set[str]] = {}
     deadline = time.monotonic() + budget_s if budget_s else None
     for index, cell in enumerate(cells):
@@ -399,6 +402,9 @@ async def capture_inputs(run: Callable[[list[str]], Awaitable[Any]], quest_root:
             continue
         if (got.get("row") or {}).get("status") == "ok":
             ran.append(index)
+            if isinstance(got["row"].get("duration_s"), (int, float)):
+                took[index] = float(got["row"]["duration_s"])
+            seeds[index] = got["row"].get("seed")
         for n, count in (got.get("counts") or {}).items():
             if str(n) in names and isinstance(count, int) and count > 0:
                 called_at.setdefault(str(n), []).append(index)
@@ -413,12 +419,17 @@ async def capture_inputs(run: Callable[[list[str]], Awaitable[Any]], quest_root:
                 if isinstance(c, dict) and c and c not in kept and len(kept) < CAPTURE_CALLS:
                     kept.append(c)
     out = {n: calls for n, calls in out.items() if calls}
-    # The first setting that ran to the end: a comparison of two versions of a function calls the study's entry on it once,
-    # so the study has set what a trial sets before the versions are called.
+    # The setting that ran to the end in the least time (the first that ran when no time was recorded): a comparison of two
+    # versions of a function calls the study's entry on it once, so the study has set what a trial sets before the versions
+    # are called. It is run as the study's trials are: the same kind, the same thresholds, the seed FI gave it.
     inside = {str(k): list(v) for k, v in (in_each_run or {}).items()}
-    setup = ({"entry": "run_cell" if deterministic else "run_trial", "cell": {**cells[ran[0]], **inside},
-              "kind": (kinds or [])[ran[0]] if ran[0] < len(kinds or []) else "scan"} if ran else {})
-    (root / CAPTURED).write_text(json.dumps({"cases": out, "called_at": called_at, "ran": ran, "setup": setup,
+    at = min(took, key=lambda i: (took[i], i)) if took else (ran[0] if ran else None)
+    setup = {}
+    if at is not None:
+        setup = {"entry": "run_cell" if deterministic else "run_trial", "cell": {**cells[at], **inside},
+                 "kind": (kinds or [])[at] if at < len(kinds or []) else "scan",
+                 "thresholds": dict(thresholds or {}), "seed": seeds.get(at), "duration_s": took.get(at)}
+    (root / CAPTURED).write_text(json.dumps({"cases": out, "called_at": called_at, "ran": ran, "took": {str(i): s for i, s in took.items()}, "setup": setup,
                                              "returned": {n: sorted(k) for n, k in returned.items()},
                                              "cells": [dict(c) for c in cells],
                                              "kinds": [(kinds or [])[i] if i < len(kinds or []) else "scan"
@@ -840,15 +851,21 @@ def short(value: Any, limit: int = 120) -> str:
     return str(value)[:limit]
 
 
-#: The exceptions that mean a version was not given what it needs to run (not what it computes).
-NOT_RUN_ERRORS = ("NameError", "UnboundLocalError", "ImportError", "ModuleNotFoundError", "AttributeError")
+#: The exceptions that mean a version was not given a name or module it needs to run (not what it computes). An
+#: AttributeError or an UnboundLocalError can be the version's own fault and stays a reported disagreement.
+NOT_RUN_ERRORS = ("NameError", "ImportError", "ModuleNotFoundError")
+_SETUP_SAID = {"ran": "the study's setup trial ran to the end", "failed": "the study's setup trial did not run to the end",
+               "none": "the study's setup trial was not run"}
 
 
-def judge_rows(rows: list[dict[str, Any]], inputs: list[dict[str, Any]], rel: float) -> dict[str, Any]:
+def judge_rows(rows: list[dict[str, Any]], inputs: list[dict[str, Any]], rel: float, setup: str = "none") -> dict[str, Any]:
     """The verdict on the rows the script returned (one per input: ``main`` / ``ref`` results, or ``main_err`` /
     ``ref_err``). Both raising excludes the input; one raising is a ``domain`` disagreement; otherwise the values are
     compared. ``{"status": agree|disagree|unconfirmed, "compared", "excluded", "disagreements": [{inputs, main, other, kind}]}``."""
-    compared = excluded = unshared = main_raised = ref_raised = 0
+    compared = excluded = unshared = 0
+    # For each version: how many compared inputs it raised on, and how many of those raised a missing name or module.
+    raised = {"main": 0, "ref": 0}
+    not_run = {"main": 0, "ref": 0}
     first_error = {"main": "", "ref": ""}
     missing: list[str] = []
     bad: list[dict[str, Any]] = []
@@ -859,12 +876,12 @@ def judge_rows(rows: list[dict[str, Any]], inputs: list[dict[str, Any]], rel: fl
             excluded += 1
             continue
         compared += 1
-        if m_err:
-            main_raised += 1
-            first_error["main"] = first_error["main"] or str(m_err)
-        if r_err:
-            ref_raised += 1
-            first_error["ref"] = first_error["ref"] or str(r_err)
+        for tag, err in (("main", m_err), ("ref", r_err)):
+            if err:
+                raised[tag] += 1
+                kind = str(err).split(":")[0].strip()
+                not_run[tag] += kind in NOT_RUN_ERRORS
+                first_error[tag] = first_error[tag] or kind
         if m_err or r_err:
             bad.append({"inputs": case, "kind": "domain",
                         "main": f"raised {m_err}" if m_err else short(decode(row.get("main"))),
@@ -878,14 +895,13 @@ def judge_rows(rows: list[dict[str, Any]], inputs: list[dict[str, Any]], rel: fl
                             "other": short(decode(row.get("ref")))})
             elif shared == 0:
                 unshared += 1
-    # A version that raised on every input it was given for want of a name, a module or an attribute (the code was not
-    # given what it needs to run) has not been compared: that is no disagreement about the step. A domain error on every
-    # input (a root of a negative number) is a result of the function and stays a disagreement.
-    for tag, count, name in (("main", main_raised, "first"), ("ref", ref_raised, "second")):
-        kind = first_error[tag].split(":")[0].strip()
-        if compared and count == compared and kind in NOT_RUN_ERRORS:
+    # A version whose every error, on every input it was given, is a missing name or module was not given what it needs to
+    # run: that is no disagreement about the step. Any other error stays a result of the function.
+    for tag, name in (("main", "first"), ("ref", "second")):
+        if compared and raised[tag] == compared and not_run[tag] == compared:
+            said = _SETUP_SAID.get(setup, _SETUP_SAID["none"])
             return {"status": UNCONFIRMED, "compared": 0, "excluded": excluded, "disagreements": [],
-                    "why": f"the {name} version could not be run in the comparison: {kind}"}
+                    "why": f"the {name} version could not be run in the comparison: {first_error[tag]} ({said})"}
     if bad:
         status = DISAGREE
     elif compared == 0 or unshared == compared or missing:
@@ -948,26 +964,33 @@ def done(obj):
     sys.exit(0)
 
 
+SETUP_STATE = ["none"]
+
+
 def _fi_setup(study, setup):
     # The study sets its own constants when a trial runs: one trial at a setting that already ran to the end puts this
-    # process in the state a trial's own calls find. What the trial returns is not read; if it cannot run, the
-    # functions are called as they are and a function that cannot run says so.
+    # process in the state a trial's own calls find, with the thresholds a trial gets (for this call only). What the
+    # trial returns is not read; whether it ran to the end is said in the output.
     import os
     os.environ["FI_CELL_KIND"] = setup.get("kind") or "check"
+    os.environ["FI_THRESHOLDS"] = json.dumps(setup.get("thresholds") or {})
     real = sys.stdout
     sys.stdout = sys.stderr
+    SETUP_STATE[0] = "failed"
     try:
         fn = getattr(study, setup["entry"])
         cell = dict(setup["cell"])
         if setup["entry"] == "run_trial":
-            fn(cell, 0, 0)
+            fn(cell, 0, int(setup.get("seed") or 0))
         else:
             fn(cell)
-    except BaseException:
+        SETUP_STATE[0] = "ran"
+    except (Exception, SystemExit):
         pass
     finally:
         sys.stdout = real
         os.environ["FI_CELL_KIND"] = "check"
+        os.environ["FI_THRESHOLDS"] = "{}"
 
 
 try:
@@ -1019,7 +1042,7 @@ for case in cases:
         except BaseException as e:
             row[tag + "_err"] = type(e).__name__ + ": " + str(e)[:160]
     rows.append(row)
-done({"rows": rows})
+done({"rows": rows, "setup": SETUP_STATE[0]})
 '''
 
 
@@ -1082,22 +1105,31 @@ def label(spec: _fs.Spec) -> str:
     return f"equation {spec.equation} ({spec.name})"
 
 
+FIXED_VALUES_CHARS = 900
+
+
 def _fixed_values(protocol: dict[str, Any] | None) -> str:
     """The values the plan fixes (its constants, thresholds and numerical settings, and the fixed values of the settings),
-    for a reader who would otherwise have to guess them; ``""`` when the plan fixes none."""
+    for a reader who would otherwise have to guess them; ``""`` when the plan fixes none. Only these parts: never a metric's
+    known value, an oracle's expected value, the acceptance rule or an equation's example, which hold results. An entry is
+    shown whole or not at all; the ones left out are counted."""
     p = protocol if isinstance(protocol, dict) else {}
-    parts = []
-    for key, title in (("constants", "constants"), ("thresholds", "thresholds"), ("numerical_settings", "numerical settings")):
-        v = p.get(key)
-        if isinstance(v, dict) and v:
-            parts.append(f"{title}: " + json.dumps(v, default=str)[:500])
+    parts = [(p.get("constants"), "constant"), (p.get("thresholds"), "threshold"),
+             (p.get("numerical_settings"), "numerical setting")]
     optimisation = p.get("optimisation")
-    fixed = optimisation.get("fixed") if isinstance(optimisation, dict) else None
-    if isinstance(fixed, dict) and fixed:
-        parts.append("fixed values of the settings: " + json.dumps(fixed, default=str)[:300])
-    if not parts:
+    parts.append((optimisation.get("fixed") if isinstance(optimisation, dict) else None, "fixed value of the settings"))
+    entries = [f"{title} {key} = {json.dumps(v, default=str)}" for group, title in parts if isinstance(group, dict)
+               for key, v in group.items()]
+    shown, used = [], 0
+    for entry in entries:
+        if used + len(entry) > FIXED_VALUES_CHARS and shown:
+            break
+        shown.append(entry)
+        used += len(entry) + 2
+    if not shown:
         return ""
-    return "the plan fixes these values (inputs of the study, not results): " + "; ".join(parts)
+    more = f" ({len(entries) - len(shown)} more not shown)" if len(shown) < len(entries) else ""
+    return "the plan fixes these values (inputs of the study, not results): " + "; ".join(shown) + more
 
 
 def _spec_block(spec: _fs.Spec, protocol: dict[str, Any] | None) -> str:
@@ -1416,6 +1448,14 @@ class SecondImpl:
             return "the example inputs do not cover the function's parameters"
         return ""
 
+    async def _run_script(self, script: str, named: list[str], setup_s: float) -> tuple[int, str, str]:
+        """``python -c script`` through the injected ``run``; ``named`` (files the script reads) follow it on the command
+        line, which a run kept apart from the quest copies in. A ``run`` that takes ``extra_s`` is told how long the study's
+        setup trial took in FI's own run, which the limit then includes."""
+        if "extra_s" in inspect.signature(self.run).parameters:
+            return await self.run(["-c", script, *named], extra_s=setup_s)  # type: ignore[call-arg]
+        return await self.run(["-c", script, *named])
+
     async def _compare(self, spec: _fs.Spec, entry: dict[str, Any]) -> dict[str, Any]:
         """One subprocess runs both versions on every input. ``status`` unconfirmed with ``why`` when it cannot be judged."""
         why = self._inputs_problem(spec)
@@ -1441,20 +1481,26 @@ class SecondImpl:
             entry.pop("deps_from_first_version", None)
         study = "code/simulate.py" if (self.root / "code" / "simulate.py").is_file() else ""
         setup = read_captured(self.root).get("setup") if study else None
+        setup = setup if isinstance(setup, dict) and setup else None
+        # The paths the script reads, named on the command line so a run kept apart from the quest is given them.
+        named = [inputs_path.as_posix(), (DIR / f"{spec.name}.py").as_posix(), *[p for p in own.values()]]
         script = compare_script(code_dir="code", module=f"{self.package}.model", name=spec.name,
                                 reference=(DIR / f"{spec.name}.py").as_posix(), inputs=inputs_path.as_posix(), uses=uses,
-                                own=own, study=study, setup=setup if isinstance(setup, dict) else None)
+                                own=own, study=study, setup=setup)
         out = None
         err = ""
         for _try in range(2):  # a harness that printed nothing is run once more: it says nothing about the function
             try:
-                rc, text, err = await self.run(["-c", script])
+                rc, text, err = await self._run_script(script, named, float((setup or {}).get("duration_s") or 0.0))
             except Exception as e:  # noqa: BLE001
                 rc, text, err = -1, "", repr(e)
             out = parse_output(text)
             if out is not None:
                 break
         entry["inputs_tried"] = len(inputs)
+        if out is None and setup and "timed out" in err:
+            return {"status": UNCONFIRMED, "why": "the comparison did not finish in time, with the study's setup trial in it",
+                    "disagreements": [], "retry": True}
         if out is None:
             return {"status": UNCONFIRMED, "why": f"the comparison could not be run here ({_text(err, 120) or 'no output'})",
                     "disagreements": [], "retry": True}
@@ -1467,7 +1513,8 @@ class SecondImpl:
         rows = out.get("rows") if isinstance(out.get("rows"), list) else []
         if len(rows) != len(inputs):
             return {"status": UNCONFIRMED, "why": "the comparison returned fewer results than inputs", "disagreements": [], "retry": True}
-        verdict = judge_rows(rows, inputs, tolerance_for(spec, self.protocol))
+        verdict = judge_rows(rows, inputs, tolerance_for(spec, self.protocol),
+                             setup=str(out.get("setup") or "none") if setup else "none")
         if verdict["status"] == UNCONFIRMED:
             verdict.update(why=verdict.get("why") or "the comparison could not run: both versions raised on every input", retry=False)
         return verdict
