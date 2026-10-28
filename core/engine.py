@@ -145,6 +145,7 @@ from . import code_review as _code_review
 from . import review_pairs as _pairs
 from . import quality_report as _quality_report
 from . import code_findings as _code_findings
+from . import write_personas as _write_personas
 from . import grid_keys as _grid_keys
 from . import code_delta as _code_delta
 from . import finding_repair as _finding_repair
@@ -2121,7 +2122,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             for w in review.get("weaknesses") or []:
                 self._audit("model_claim", node=node, provenance=_audit_log.MODEL_CLAIM, topic="review_weakness", claim=w, **prov)
             # What this round said, kept apart from the trace: when no round is left after it, the paper states its points.
-            _disclosure.write_last_review(self.quest_root, review)
+            try:
+                paper_file = self.quest_root / "paper" / "paper.md"
+                sha = hashlib.sha256(paper_file.read_bytes()).hexdigest() if paper_file.is_file() else ""
+            except OSError:
+                sha = ""
+            _disclosure.write_last_review(self.quest_root, review, sha)
             # A review panel's moderator says why the panel's verdict stands, given how the reviewers disagreed.
             if isinstance(review.get("rationale"), str):
                 self._claim(node, "review_moderator", "review_moderator", review["rationale"],
@@ -21308,18 +21314,24 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
            (Pydantic-validated against ``PaperFormat`` so case is
            already canonical).
         """
-        venue = ""
-        answers = state.get("clarify_answers") or {}
-        if isinstance(answers, dict):
-            venue = str(answers.get("paper_venue") or "").strip().lower()
-        if not venue:
-            venue = self.config.output.paper_format or ""
-
+        venue = self._write_venue(state)
         if venue in SCIENTIFIC_PAPER_FORMATS:
             return ""
         if venue not in NON_SCIENTIFIC_PAPER_FORMATS:
             return ""
         return _load_persona_prefix(venue, category="write")
+
+    def _write_venue(self, state: QuestState) -> str:
+        """The paper format the write persona is chosen by (see :meth:`_resolve_write_persona`)."""
+        venue = ""
+        answers = state.get("clarify_answers") or {}
+        if isinstance(answers, dict):
+            venue = str(answers.get("paper_venue") or "").strip().lower()
+        return venue or self.config.output.paper_format or ""
+
+    def _limitations_heading(self, state: QuestState) -> bool:
+        """Whether FI may put a ``## Limitations`` heading in this paper: not in a format whose persona forbids it."""
+        return not _write_personas.forbids_limitations(self._write_venue(state))
 
     async def _node_evidence_gate(self, state: QuestState) -> QuestState:
         """Weigh the assembled evidence against the research question
@@ -22455,7 +22467,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             after = self._render_paper_facts(
                 _paper_facts.place_blocks(_disclosure.without_block(before), self.quest_root,
                                           topic=str(self.config.topic or ""),
-                                          fallback_s=(state.get("exec_result") or {}).get("duration_s")), state)
+                                          fallback_s=(state.get("exec_result") or {}).get("duration_s"),
+                                          limitations_heading=self._limitations_heading(state)), state)
             if after == before:
                 return False
             checked = Path(path).read_bytes()
@@ -22478,7 +22491,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             before = Path(path).read_text(encoding="utf-8")
             placed = _paper_facts.place_blocks(
                 _disclosure.without_block(before), self.quest_root, topic=str(self.config.topic or ""),
-                fallback_s=(state.get("exec_result") or {}).get("duration_s"))
+                fallback_s=(state.get("exec_result") or {}).get("duration_s"),
+                limitations_heading=self._limitations_heading(state))
             after = self._render_paper_facts(placed, state)
             if before.rstrip() != after.rstrip() and (
                     _disclosure.without_block(before) != before or "{{" in before or "fi:fact-" in before
@@ -22760,7 +22774,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # the discussion; filled from FI's records with the facts below, so no number of them is typed by a model.
         markdown = _paper_facts.place_blocks(
             markdown, self.quest_root, topic=str(self.config.topic or ""),
-            fallback_s=(state.get("exec_result") or {}).get("duration_s"))
+            fallback_s=(state.get("exec_result") or {}).get("duration_s"),
+            limitations_heading=self._limitations_heading(state))
         # A new draft is not yet measured against the page limit: an earlier draft's measurement is not this one's.
         (self.quest_root / _paper_facts.PAGE_RECORD).unlink(missing_ok=True)
         # The facts of the run go in last, from FI's records, so every check after this reads the values, never a
@@ -23496,7 +23511,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         out = await self._check_citations(state)
         # The paper goes out as the last review saw it when no round follows (the graph reaches this step only from the
         # review): the points that review raised and nothing answered are stated in the Limitations and listed in QUALITY.md.
-        if out.get("citation_next") == "done" and _disclosure.mark_last_review_final(self.quest_root):
+        if out.get("citation_next") == "done" and _disclosure.mark_last_review_final(self.quest_root, state.get("review")):
             self._log.info("[review] the last review's points that no later round addressed are stated in the paper's "
                            "Limitations and listed in QUALITY.md")
         # The Limitations are FI's block, from the records as they stand now (the claim check may have been off, so the
@@ -30793,7 +30808,7 @@ def _load_persona_prefix(name: str, *, category: str = "review") -> str:
         )
     persona_path = PROMPTS_DIR / f"{category}_persona_{name}.md"
     if persona_path.exists():
-        return persona_path.read_text(encoding="utf-8").strip()
+        return _write_personas.fill(name, persona_path.read_text(encoding="utf-8").strip())
     if category != "review":
         # Write personas don't have a generic-fallback prompt — return
         # empty so callers fall back to the prompt's default voice.

@@ -91,7 +91,7 @@ def test_the_delivered_paper_carries_the_unresolved_reason(tmp_path: Path) -> No
     asyncio.run(eng._node_citation_check(state))  # the last step before delivery writes the Limitations from the records
     text = paper.read_text(encoding="utf-8")
     assert "one damping value" in text and "not resolved" in text and "{{" not in text
-    assert "One limit." not in text  # the Limitations are FI's
+    assert text.index("One limit.") < text.index("one damping value")  # the writer's words stay, FI's point follows
 
 
 def test_a_new_reason_or_a_measured_hit_still_costs_a_rewrite(tmp_path: Path) -> None:

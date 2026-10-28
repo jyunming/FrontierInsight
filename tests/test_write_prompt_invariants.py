@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from core.write_personas import fill
+
 AGENTS_DIR = Path(__file__).resolve().parent.parent / "agents"
 WRITE_MD = AGENTS_DIR / "write.md"
 ESSAY_PERSONA = AGENTS_DIR / "write_persona_essay.md"
@@ -130,7 +132,8 @@ def test_essay_persona_forbids_imrad_heading(forbidden_heading: str) -> None:
     """The essay persona must explicitly forbid IMRAD headings — a
     fleet run with gemini-3.1-flash-lite-preview otherwise defaults
     to IMRAD on any experimental topic and ignores the essay shape."""
-    txt = ESSAY_PERSONA.read_text(encoding="utf-8")
+    # the forbidden list is filled in from core/write_personas.py, as the writer is shown it
+    txt = fill("essay", ESSAY_PERSONA.read_text(encoding="utf-8"))
     assert "Forbidden headings" in txt, (
         "write_persona_essay.md must have an explicit 'Forbidden headings' "
         "section so the LLM can't bury IMRAD inside an essay"
@@ -155,7 +158,8 @@ def test_policy_brief_persona_forbids_imrad_and_summary_headings(
 ) -> None:
     """policy_brief is strictly Issue / Context / Recommendation; every
     other H2 (IMRAD or Exec Summary / Findings) is forbidden."""
-    txt = POLICY_PERSONA.read_text(encoding="utf-8")
+    # the forbidden list is filled in from core/write_personas.py, as the writer is shown it
+    txt = fill("policy_brief", POLICY_PERSONA.read_text(encoding="utf-8"))
     assert "Forbidden headings" in txt
     assert forbidden_heading in txt, (
         f"write_persona_policy_brief.md must name {forbidden_heading!r} as forbidden"

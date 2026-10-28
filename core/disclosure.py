@@ -566,16 +566,23 @@ def _line(text: Any) -> str:
     return " ".join(str(text or "").split())
 
 
-def write_last_review(quest_root: Path, review: Any) -> None:
+def _review_said(review: Any) -> dict[str, Any]:
+    """What a review said, in the form the record keeps it: the verdict, the weaknesses and the reason it blocked on."""
+    review = review if isinstance(review, dict) else {}
+    weaknesses = review.get("weaknesses")
+    return {"verdict": _line(review.get("verdict")).lower(),
+            "weaknesses": [_line(w) for w in (weaknesses if isinstance(weaknesses, list) else []) if _line(w)],
+            "blocking": _line(review.get("blocking"))}
+
+
+def write_last_review(quest_root: Path, review: Any, paper_sha256: str = "") -> None:
     """Keep what the review just said (``.fi/last_review.json``): its verdict, its weaknesses and the reason it blocked on,
-    each round, so the last one is on record when no round is left to answer it. ``final`` stays false until
-    :func:`mark_last_review_final`. Best-effort: a record that cannot be written is not a reason to stop."""
+    each round, with the hash of the paper it read when known, so the last one is on record when no round is left to
+    answer it. ``final`` stays false until :func:`mark_last_review_final`. Best-effort: a record that cannot be written is
+    not a reason to stop."""
     if not isinstance(review, dict):
         return
-    weaknesses = review.get("weaknesses")
-    record = {"verdict": _line(review.get("verdict")).lower(),
-              "weaknesses": [_line(w) for w in (weaknesses if isinstance(weaknesses, list) else []) if _line(w)],
-              "blocking": _line(review.get("blocking")), "final": False}
+    record = {**_review_said(review), "paper_sha256": paper_sha256, "final": False}
     path = Path(quest_root) / LAST_REVIEW_RECORD
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -605,11 +612,15 @@ def last_review_points(quest_root: Path, *, final_only: bool = True) -> list[str
     return [p for i, p in enumerate(points) if p and p not in held and p not in points[:i]]
 
 
-def mark_last_review_final(quest_root: Path) -> bool:
+def mark_last_review_final(quest_root: Path, review: Any) -> bool:
     """The paper goes out as the last review saw it, with no round left: its points that nothing answered are now
-    disclosed (:func:`last_review_points`). Returns whether there are any."""
+    disclosed (:func:`last_review_points`). ``review`` is the review the quest holds now: the record is used only when it
+    says the same (a record of another round or another run of the quest is not this paper's). Returns whether there are
+    any points."""
     record = _last_review(quest_root)
-    if not record or record.get("verdict", "accept") == "accept":
+    said = _review_said(review)
+    if (not record or record.get("verdict", "accept") == "accept"
+            or any(record.get(k) != said[k] for k in ("verdict", "weaknesses", "blocking"))):
         return False
     if not record.get("final"):
         record["final"] = True
@@ -621,12 +632,25 @@ def mark_last_review_final(quest_root: Path) -> bool:
     return bool(last_review_points(quest_root))
 
 
+POINT_CHARS = 300
+
+
+def _quoted_point(point: str, cap: int | None) -> str:
+    """One point of a review as it is quoted: no double quotes, no comment or placeholder marks (they would break FI's
+    own markers), cut after a whole word at ``cap`` characters when given."""
+    one = _line(point.replace(chr(34), "'").replace("<!--", "").replace("-->", "").replace("{{", "").replace("}}", ""))
+    if cap is not None and len(one) > cap:
+        one = one[:cap].rsplit(" ", 1)[0].rstrip(" ,;:.") + "\u2026"
+    return chr(34) + one + chr(34)
+
+
 def last_review_sentence(points: list[str], shown: int | None = None) -> str:
-    """The sentence for the quality report (every point) and the paper's Limitations (``shown`` of them, the rest counted):
-    the points are the reviewer's, quoted; FI does not say they are right."""
+    """The sentence for the quality report (every point, whole) and the paper's Limitations (``shown`` of them, each cut to
+    :data:`POINT_CHARS` characters, the rest counted): the points are the reviewer's, quoted; FI does not say they are
+    right."""
     if not points:
         return ""
-    quoted = [chr(34) + p.replace(chr(34), "'").replace("{{", "").replace("}}", "") + chr(34) for p in points]
+    quoted = [_quoted_point(p, POINT_CHARS if shown is not None else None) for p in points]
     more = len(points) - shown if shown is not None and len(points) > shown else 0
     return ("The final review raised these points, which no later round addressed: "
             + "; ".join(quoted[:len(points) - more])

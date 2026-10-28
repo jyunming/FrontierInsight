@@ -59,7 +59,7 @@ def test_a_paper_over_its_page_limit_after_the_rewrites_says_so_with_the_measure
     paper = "# T\n\n## Methods\nM.\n\n## Discussion\n**Limitations.** Few.\n\n## References\n1. A.\n"
     out = paper_facts.render(paper_facts.place_blocks(paper, root), root).text
     assert "This paper is 7 pages, over the 4-page limit set for it" in out
-    assert out.index("## Limitations") < out.index("This paper is 7 pages") < out.index("## References")
+    assert out.index("**Limitations.** Few.") < out.index("This paper is 7 pages") < out.index("## References")
 
 
 async def test_the_review_puts_the_page_overrun_in_the_paper_and_measures_the_paper_that_carries_it(tmp_path: Path) -> None:

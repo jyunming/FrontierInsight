@@ -68,8 +68,6 @@ FACT_NAMES = ("seed", "run_time", "time_limit", "time_limit_met", "trials_per_se
 #: Not a fact: its numbers are accounted for setting by setting (core/results_by_setting.py), never as FI's record.
 #: ``run_facts`` has no file: its paragraph is composed from :func:`facts` (:func:`run_facts_text`).
 BLOCK_NAMES = ("results_table", "run_facts", "limitations")
-#: What the Limitations block says when FI's records hold nothing the study left undone.
-NO_LIMITS_SENTENCE = "FI's checks recorded no unfinished step, unmet target or open review point."
 _BLOCK_FILES = {"results_table": Path(".fi") / "results_table.md"}  # = core.results_by_setting.PAPER_BLOCK
 #: ``{{figure:<file stem>:layout}}`` and ``{{figure:<file stem>:lines}}``: what a saved figure draws, from the recorder's
 #: files (:mod:`core.figure_facts`), not from the writer. The marker key is ``figure-<kind>-<stem>``.
@@ -480,7 +478,7 @@ def unsupported_claims_text(record: Any) -> str:
 
 def write_unsupported_record(quest_root: Path | str, claims: list[dict[str, Any]]) -> bool:
     """Keep the claims the last claim check judged unsupported, with its evidence words (:data:`UNSUPPORTED_RECORD`); an
-    empty list empties the record, so a sentence an earlier pass placed is taken out by :func:`drop_item`. Returns whether
+    empty list empties the record, so a sentence an earlier pass stated is gone when the Limitations block is written again. Returns whether
     the record could be written."""
     path = Path(quest_root) / UNSUPPORTED_RECORD
     rows = [{"claim": _one(c.get("claim")), "evidence": _one(c.get("evidence"))} for c in claims if _one(c.get("claim"))]
@@ -1130,10 +1128,9 @@ def _verdict_sentence(met: str, limit: float, subject: str) -> str:
 
 def limitations_text(quest_root: Path | str) -> str:
     """The Limitations section ``{{limitations}}`` stands for, written from FI's records: one bullet for each thing the study
-    did not do (:func:`required_items`; an open problem in the code is in QUALITY.md only), or one sentence that FI recorded
-    none. Never empty: a paper always has a Limitations section, and it is FI's."""
+    did not do (:func:`required_items`; an open problem in the code is in QUALITY.md only). ``""`` when there is none."""
     sentences = [i.sentence for i in required_items(quest_root) if i.kind != CODE_FINDING]
-    return "\n".join(f"- {s}" for s in sentences) if sentences else NO_LIMITS_SENTENCE
+    return "\n".join(f"- {s}" for s in sentences)
 
 
 def run_facts_text(quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) -> str:
@@ -1255,76 +1252,125 @@ def block_text(quest_root: Path | str, name: str, *, topic: str = "", fallback_s
         return ""
 
 
-#: A heading with the word Limitations in it (any level, any numbering, any case).
-_LIMITATIONS_HEADING = re.compile(r"^#{1,6}[ \t]+" + _disclosure._SECTION_NUMBER + r".*\blimitations?\b", re.I)
-_CONCLUSION_HEADING = re.compile(r"^#{1,6}[ \t]+" + _disclosure._SECTION_NUMBER + r"conclusions?\b", re.I)
+_NUM = _disclosure._SECTION_NUMBER
+#: A paragraph that opens with a bold run-in ``**Limitations.**`` or ``**Limitations:**``.
+_LIMITATIONS_RUN_IN = re.compile(r"^[ \t]*\*\*Limitations?(?:[.:]\*\*|\*\*[.:])", re.I)
+_CONCLUSION_HEADING = re.compile(r"^#{1,6}[ \t]+" + _NUM + r"conclusions?\b", re.I)
+RUN_IN = "**Limitations.**"
 
 
-def _without_limitations_block(text: str) -> str:
-    """``text`` without FI's Limitations block as it stands in it: the marked block, or the placeholder on its own."""
+def _title(line: str) -> str:
+    """The words of a heading line, numbering and emphasis taken off, lower case."""
+    m = re.match(r"^#{1,6}[ \t]+" + _NUM + r"(.*)$", line)
+    return re.sub(r"[*_`]+", "", m.group(1) if m else "").strip().rstrip(".:").strip().lower()
+
+
+def _is_limitations_title(title: str) -> bool:
+    return title.startswith("limitations") or title.endswith("and limitations")
+
+
+def _limitations_in(text: str) -> bool:
+    """Whether FI's Limitations block is in ``text``: its marked block, or its placeholder outside code."""
+    if any(m.group(1) == "limitations" for m in _MARK.finditer(text)):
+        return True
+    hidden = _hidden_spans(text)
+    return any(_norm_name(m.group(1)) == "limitations" and m.group(2) is None and not _inside(m.start(), hidden)
+               for m in _PLACEHOLDER.finditer(text))
+
+
+def _drop_limitations(text: str) -> str:
+    """``text`` without FI's Limitations block (marked, or the placeholder on its own), and without the heading or the
+    run-in line FI put above it when nothing else is under it."""
     text = _MARK.sub(lambda m: "" if m.group(1) == "limitations" else m.group(0), text)
     hidden = _hidden_spans(text)
-    cuts = [m.span() for m in _PLACEHOLDER.finditer(text)
-            if _norm_name(m.group(1)) == "limitations" and m.group(2) is None and not _inside(m.start(), hidden)]
-    for a, b in reversed(cuts):
+    for a, b in reversed([m.span() for m in _PLACEHOLDER.finditer(text)
+                          if _norm_name(m.group(1)) == "limitations" and m.group(2) is None
+                          and not _inside(m.start(), hidden)]):
         text = text[:a] + text[b:]
-    return text
+    lines = text.split("\n")
+    out: list[str] = []
+    for i, line in enumerate(lines):
+        nxt = next((x for x in lines[i + 1:] if x.strip()), None)
+        bare = line.strip() == RUN_IN or (re.match(r"^#{1,6}[ \t]", line) and _title(line) == "limitations")
+        if bare and (nxt is None or re.match(r"^#{1,6}[ \t]", nxt) or nxt.strip() == "---"):
+            continue
+        out.append(line)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out))
 
 
-def _place_limitations(text: str) -> str:
-    """``text`` with the placeholder ``{{limitations}}`` as the whole body of the paper's Limitations section: under the
-    last heading with the word Limitations in it (the shallowest such level; the body runs to the next heading of that
-    level or a higher one, a rule line before the references stays), the heading itself kept. A paper with no such heading
-    gets ``## Limitations`` before its Conclusion, else before its References, else at the end. Whatever FI's block was
-    in the draft before (marked, or the placeholder, or the writer's own text under that heading) is replaced, so the
-    paper has one Limitations section and it is FI's."""
-    text = _without_limitations_block(text)
+def _place_limitations(text: str, quest_root: Path | str, *, heading: bool = True) -> str:
+    """``text`` with FI's Limitations block (the placeholder ``{{limitations}}``, on a line of its own) added to the paper,
+    the writer's own text kept whole. Where the writer put the placeholder it stays. Else it goes at the end of the
+    writer's Limitations section (its own words before the first sub-heading, or at its end); that section is a heading
+    at the paper's main section level whose title, numbering taken off, begins "Limitations" or ends "and Limitations", or
+    a heading of any level that is just "Limitations"; with none, the paragraph that opens with a bold run-in
+    ``**Limitations.**``. A paper with none gets ``## Limitations`` before its Conclusion, else its References, else at
+    the end (``heading=False``, for a paper whose format forbids that heading: a ``**Limitations.**`` paragraph there).
+    With nothing to state there is no block, and no heading for it."""
+    if not limitations_text(quest_root):
+        return _drop_limitations(text) if _limitations_in(text) else text
+    if _limitations_in(text):
+        return text
     lines = text.split("\n")
     heads = _disclosure._headings(lines, 0)
     title = next((i for i, lv, _t in heads if lv == 1), None)
-    own = [h for h in heads if h[0] != title and _LIMITATIONS_HEADING.match(h[2])]
+    rest = [h for h in heads if h[0] != title]
+    top = min((h[1] for h in rest), default=2)
+    own = [h for h in rest if (h[1] == top and _is_limitations_title(_title(h[2]))) or _title(h[2]) == "limitations"]
+    block = ["{{limitations}}"]
     lead: list[str] = []
     if own:
-        top = min(h[1] for h in own)
-        at, lv, _t = [h for h in own if h[1] == top][-1]
-        start, end = at + 1, _disclosure._section_end(heads, at, lv, len(lines))
+        at, lv, _t = own[-1]
+        end = _disclosure._section_end(heads, at, lv, len(lines))
+        inner = next((i for i, _lv, _t2 in rest if at < i < end), None)
+        place = inner if inner is not None else end
     else:
-        levels = [lv for i, lv, _t in heads if i != title]
-        level = min(levels) if levels else 2
-        top_heads = [h for h in heads if h[0] != title and h[1] <= level]
-        anchor = (next((h for h in top_heads if _CONCLUSION_HEADING.match(h[2])), None)
-                  or next((h for h in top_heads if _disclosure._BEFORE_END.match(h[2])), None))
-        start = end = anchor[0] if anchor else len(lines)
-        lead = ["#" * level + " Limitations", ""]
-    stop = end
-    if stop < len(lines):
-        while stop > (start if own else 0) and not lines[stop - 1].strip():
-            stop -= 1
-        if stop > (start if own else 0) and lines[stop - 1].strip() == "---":  # the engine's references follow a rule line
-            stop -= 1
-    head = lines[:start if own else stop]
+        run_in, fenced = None, False
+        for i, line in enumerate(lines):
+            if line.lstrip().startswith(("```", "~~~")):
+                fenced = not fenced
+            elif not fenced and _LIMITATIONS_RUN_IN.match(line):
+                run_in = i
+                break
+        if run_in is not None:
+            place = next((j for j in range(run_in + 1, len(lines)) if not lines[j].strip()
+                          or re.match(r"^#{1,6}[ \t]", lines[j])), len(lines))
+        else:
+            level = min((lv for i, lv, _t in rest), default=2)
+            top_heads = [h for h in rest if h[1] <= level]
+            anchor = (next((h for h in top_heads if _CONCLUSION_HEADING.match(h[2])), None)
+                      or next((h for h in top_heads if _disclosure._BEFORE_END.match(h[2])), None))
+            place = anchor[0] if anchor else len(lines)
+            lead = [("#" * level + " Limitations") if heading else RUN_IN, ""]
+    if place < len(lines):
+        while place > 0 and not lines[place - 1].strip():
+            place -= 1
+        if place > 0 and lines[place - 1].strip() == "---":  # the engine's references follow a rule line
+            place -= 1
+    head = lines[:place]
     while head and not head[-1].strip():
         head.pop()
-    tail = lines[stop:]
+    tail = lines[place:]
     while tail and not tail[0].strip():
         tail.pop(0)
-    return "\n".join([*head, *([""] if head else []), *lead, "{{limitations}}", *([""] if tail else []), *tail]) + (
+    return "\n".join([*head, *([""] if head else []), *lead, *block, *([""] if tail else []), *tail]) + (
         "" if tail else "\n")
 
 
-def place_blocks(markdown: str, quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) -> str:
+def place_blocks(markdown: str, quest_root: Path | str, *, topic: str = "", fallback_s: Any = None,
+                 limitations_heading: bool = True) -> str:
     """``markdown`` with the placeholder of each of FI's blocks that has text and that the writer did not place put in
     on a line of its own. The tables go before the discussion that follows the results (else the conclusions, the
     limitations, the references; else at the end); the run's facts go at the end of the Methods (else before the
     Results, else after the abstract, else at the top). A block already in the draft, as a placeholder or filled in
     (the review sends FI's own text back), is not put in twice; a line that opens like FI's run paragraph
     (``**Run.** ``) but has lost its markers is replaced by the placeholder, so the paragraph is always FI's current
-    one. The Limitations block is always put in, and it replaces the body of the writer's own Limitations section
-    (:func:`_place_limitations`). :func:`render` then fills it."""
+    one. The Limitations block, when FI has items to state, is added to the writer's own Limitations section after its
+    text (:func:`_place_limitations`). :func:`render` then fills it."""
     text = markdown or ""
     for name in BLOCK_NAMES:
         if name == "limitations":
-            text = _place_limitations(text)
+            text = _place_limitations(text, quest_root, heading=limitations_heading)
             continue
         if not block_text(quest_root, name, topic=topic, fallback_s=fallback_s):
             continue
@@ -1432,6 +1478,8 @@ def render(markdown: str, quest_root: Path | str, *, topic: str = "", fallback_s
             if plain:
                 return m.group(0)
             block = block_text(root, name, topic=topic, fallback_s=fallback_s)
+            if not block and name == "limitations":
+                return ""  # nothing to state: no block, and no "not recorded"
             if not block:
                 unfilled.append(name)
                 return f"<!-- fi:fact-{name} -->{NOT_RECORDED}<!-- /fi:fact-{name} -->"
@@ -1509,11 +1557,13 @@ def writer_section(quest_root: Path | str, *, topic: str = "", fallback_s: Any =
                      "the tables, but do not copy them into a table of your own.")
     if over_note:
         lines.append(f"Time limit: {over_note} Say this in the paper.")
-    lines.append("Limitations: FI writes the paper's Limitations section itself, from its records, and puts it into the "
-                 "paper when the paper is saved. It reads now:")
-    lines += [f"- {i.sentence}" for i in real] or [NO_LIMITS_SENTENCE]
-    lines.append("Do not write a Limitations section of your own or restate these points; where your text needs them, say "
-                 "\"see Limitations\".")
+    if real:
+        lines.append("Limitations: FI adds the list below to the end of your Limitations section when the paper is saved "
+                     "(or where you put {{limitations}} on a line of its own), from its records. It reads now:")
+        lines += [f"- {i.sentence}" for i in real]
+        lines.append("Do not restate these points. You may write a Limitations section about the method's scope and "
+                     "assumptions (what the method cannot show, what it assumes); say \"see Limitations\" where your text "
+                     "needs the list.")
     lines.append("A placeholder FI cannot fill is printed as \"not recorded\", so use only the ones listed here.")
     return "\n".join(lines)
 

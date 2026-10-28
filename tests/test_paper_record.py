@@ -357,12 +357,12 @@ def test_a_required_fact_must_be_placed_and_fi_places_the_items_itself(tmp_path:
 
     item = "- The topic asks to vary temperature"
     assert hits(LIMITS_OK) == []
-    # FI writes the whole section: the writer's own text under the heading is replaced by FI's block.
+    # FI adds its block at the end of the writer's own Limitations section: the writer's words stay.
     named = ("# Temperature dependence\n\n## Methods\n{{seed}} {{run_time}} {{time_limit_met}}\n\n"
              "## Limitations\nWe varied the temperature.\n")
     out = placed(named)
     assert out.index("## Limitations") < out.index(item) and hits(out) == []
-    assert "We varied the temperature" not in out and out.count("## Limitations") == 1
+    assert out.index("We varied the temperature") < out.index(item) and out.count("## Limitations") == 1
     # A placeholder the writer put in the Results is still filled (an older draft); the Limitations are FI's all the same.
     elsewhere = LIMITS_OK.replace("## Limitations\n{{not_done:topic-temperature}}", "## Results\n{{not_done:topic-temperature}}")
     assert placed(elsewhere).count("fi:fact-not_done-topic-temperature -->") == 2 and hits(elsewhere) == []
@@ -374,10 +374,10 @@ def test_a_required_fact_must_be_placed_and_fi_places_the_items_itself(tmp_path:
     no_section = "# T\n\n## Methods\n{{seed}} {{run_time}} {{time_limit_met}}\n\n## References\n1. A.\n"
     out = placed(no_section)
     assert out.index("## Limitations") < out.index(item) < out.index("## References")
-    # A Limitations that is a bold paragraph inside the Discussion (s3 fdr) is not a section: FI adds its own.
+    # A Limitations that is a bold run-in paragraph inside the Discussion (a graded run): FI's block follows that paragraph.
     bold = "# T\n\n## Methods\n{{seed}}\n\n## Discussion\n**Limitations.** Few settings.\n\n## References\n1. A.\n"
     out = placed(bold)
-    assert out.count("## Limitations") == 1 and out.index("## Discussion") < out.index("## Limitations") < out.index("## References")
+    assert "## Limitations" not in out and out.index("**Limitations.** Few settings.") < out.index(item) < out.index("## References")
     assert placed(out) == out  # a second pass adds nothing
     no_time = LIMITS_OK.replace("{{run_time}}", "223 s")
     assert hits(no_time) == [], "a run time typed in place of the placeholder is the typed-number check's, not this one's"

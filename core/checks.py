@@ -1290,9 +1290,9 @@ CHECKS: tuple[Check, ...] = (
           'before anything is taken out'),
     Check('paper_limitations_block', 'core.paper_facts', 'limitations_text',
           'write', 'own_record', 'note',
-          "FI writes the paper's whole Limitations section from its records (what the study did not do, an unmet "
-          "target, a page overrun, claims found unsupported, the last review's open points); the writer's own "
-          "Limitations text is replaced, and with nothing to state the section says FI recorded none"),
+          "FI adds a list to the end of the paper's Limitations section from its records (what the study did not "
+          "do, an unmet target, a page overrun, claims found unsupported, the last review's open points); the "
+          "writer's own Limitations text is kept, and with nothing to state nothing is added"),
     Check('extension_result_unreported', 'core.number_provenance', 'unreported_results',
           'write', 'own_record', 'repair',
           "a result a refine's extension added that the paper does not report: writer asked once more, then "

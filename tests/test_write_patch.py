@@ -18,7 +18,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Any
 
@@ -38,11 +37,6 @@ from core.engine import (
 )
 
 TOPIC = "How fast do stochastic epidemics die out?"
-
-def _without_limits(text: str) -> str:
-    """``text`` without the Limitations section FI adds to every paper (core/paper_facts.py ``{{limitations}}``)."""
-    return re.sub(r"\n+## Limitations\n+<!-- fi:fact-limitations -->.*?<!-- /fi:fact-limitations -->\n", "\n", text,
-                  flags=re.S)
 
 
 
@@ -508,8 +502,8 @@ def test_through_the_graph_the_second_write_edits_the_first(tmp_path: Path) -> N
     # The config does not say what the result is for, so the paper is an exploration's: marked preliminary once.
     written = Path(final["paper_md"]).read_text(encoding="utf-8")
     # FI's figure, with FI's caption, in place of the writer's image.
-    assert _without_limits(written) == _mark_preliminary(_place_figures(first.replace(CLAIM, NEW_CLAIM), _study())[0])  # type: ignore[arg-type]
-    assert written.count("<!-- fi:fact-limitations -->") == 1
+    assert written == _mark_preliminary(_place_figures(first.replace(CLAIM, NEW_CLAIM), _study())[0])  # type: ignore[arg-type]
+    assert "fi:fact-limitations" not in written  # no item to state: FI adds no block
     assert written.count(PRELIMINARY_NOTE) == 1
     assert final["paper_basis"] == _paper_basis(_study())  # type: ignore[arg-type]
 

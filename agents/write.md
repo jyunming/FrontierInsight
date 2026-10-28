@@ -24,7 +24,7 @@ You have not seen the pictures: do not say where a panel sits or what style a li
 **Length is determined by the `Study depth` slot in the clarifications block in the Inputs section.** Honor it:
 
 - `brief preprint` — 1–2 pages, terse opening (1 paragraph), focus on novel findings only. Citations OK to be few; don't pad.
-- `journal-length` (default) — 4–8 pages. IMRAD for scientific formats with a proper Methods section (data, procedure, validation), Discussion that engages with **at least 3** sources from References or Further reading **by content** (not just listed), and no Limitations section of your own (FI writes that one from its records and puts it into the paper; where your text needs it, say "see Limitations"). Prose-shaped equivalent for non-scientific formats — same depth of evidence engagement, just persona-appropriate structure. Aim for ~1500–2500 words.
+- `journal-length` (default) — 4–8 pages. IMRAD for scientific formats with a proper Methods section (data, procedure, validation), Discussion that engages with **at least 3** sources from References or Further reading **by content** (not just listed), and an explicit Limitations section about the method's scope and assumptions (FI adds its own list of what the study did not do to the end of that section, from its records: do not restate that list). Prose-shaped equivalent for non-scientific formats — same depth of evidence engagement, just persona-appropriate structure. Aim for ~1500–2500 words.
 - `comprehensive review` — 10–15 pages with a Background / Context section near the start, a Comparison or Synthesis section in the middle, and a closing section that integrates every listed source by content. Aim for 4000+ words and at least 10 sources from References or Further reading actually discussed.
 
 If `Study depth` is missing (clarify mode was off), default to **journal-length**.$page_limit_note
@@ -91,7 +91,7 @@ Recognize this from the topic + analysis. If you're writing about a survey-shape
 - **Background** (replaces Methods) — what each side of the comparison is.
 - **Comparison** (replaces Results) — a table of the axes that differ, citing prior work for each cell, and the experimental finding (if any) for the one cell the experiment actually addressed.
 - **Discussion** — what the literature broadly says about the comparison, where consensus exists, where it doesn't.
-- **Limitations** — FI writes this section from its records and puts it into the paper when the paper is saved; do not write it, and say "see Limitations" where your text needs it. That the experimental section addressed one narrow aspect, not the whole comparative question, belongs in the Discussion.
+- **Limitations** — explicitly note that the experimental section addressed one narrow aspect, not the whole comparative question. FI adds its own list of what the study did not do to the end of this section, from its records: do not restate that list.
 
 ## Citing sources
 

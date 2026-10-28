@@ -44,11 +44,6 @@ from generation.paper import PaperGenerator, small_source_lists
 from tests.paper_fakes import fake_pandoc
 
 
-def _without_limits(text: str) -> str:
-    """``text`` without the Limitations section FI adds to every paper (core/paper_facts.py ``{{limitations}}``)."""
-    return re.sub(r"\n+## Limitations\n+<!-- fi:fact-limitations -->.*?<!-- /fi:fact-limitations -->\n", "\n", text,
-                  flags=re.S)
-
 REPO = Path(__file__).resolve().parent.parent
 TEMPLATES = REPO / "templates" / "paper"
 FORMATS = sorted(p.parent.name for p in TEMPLATES.glob("*/template.tex"))
@@ -486,7 +481,7 @@ def test_a_draft_over_the_limit_is_sent_back_without_using_an_iteration(
     # The paper lists a Further reading entry, so it is tried once without it;
     # still 5 pages, the body is what is over and the paper stays as written.
     assert calls == [tmp_path / "paper" / "paper.md", tmp_path / ".fi" / "page_check_trial.md"]
-    assert _without_limits((tmp_path / "paper" / "paper.md").read_text(encoding="utf-8")) == PAPER
+    assert (tmp_path / "paper" / "paper.md").read_text(encoding="utf-8") == PAPER
     assert not (tmp_path / ".fi" / "page_check_trial.md").exists()
     hits = patch["review"]["must_flag_hits"]
     assert hits == [_page_limit_hit(5, 4, 250)]

@@ -59,7 +59,7 @@ def test_a_hit_on_one_section_asks_for_that_section_and_shows_the_old_draft(tmp_
         assert _section(after, title) == _section(before, title), f"{title} is as it was"
     assert "early extinction matters less" in _section(after, "Discussion")
     assert "A larger population would shrink" not in after
-    assert any("writing 1 of 5 section(s) again (Discussion)" in m for m in _info(logged))
+    assert any("writing 1 of 4 section(s) again (Discussion)" in m for m in _info(logged))
 
 
 def test_a_reply_that_returns_a_section_not_asked_for_has_it_dropped(tmp_path: Path) -> None:
