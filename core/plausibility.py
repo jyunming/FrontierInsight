@@ -258,6 +258,8 @@ class Violation:
                 f"results exactly on a bound are what a computation returning a "
                 f"trivial answer looks like{note}"
             )
+        if self.kind == "edge_everywhere":
+            return f"{self.path} is on its bound in every setting; the result may carry no information"
         if self.kind == "missing":
             return (
                 f"{self.path} is no longer in the results, though an earlier run reported it and the design bounds it "
@@ -1339,6 +1341,13 @@ def violations(
             elif bound != 0 or value == 0:
                 # On a bound of 0 only an exact 0 is the trivial answer; see "Why a tiny value is not on 0".
                 on_bound.setdefault(bound, []).append((tokens, path))
+        if a.path in edge_ok and not a.may_equal_bound and on_bound:
+            # Its role is physical_bound: on its edge in some settings is its physics. On the edge in every setting
+            # it may be a result that carries no information, which is said (never a stop).
+            on_edge = {_setting_key(t) for entries in on_bound.values() for t, _p in entries}
+            every = {_setting_key(t) for t, _p, _v in matched}
+            if len(every) >= AT_BOUND_MIN_SETTINGS and on_edge >= every:
+                out.append(Violation(a.path, matched[0][2], a, kind="edge_everywhere"))
         for bound, entries in on_bound.items():
             if a.may_equal_bound or a.path in edge_ok:
                 continue  # the design says this quantity can honestly sit on its bound, or its role is physical_bound

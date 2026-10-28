@@ -93,15 +93,14 @@ COUNTING_ROLES = ("result", "reference", "physical_bound")
 def declared_results(protocol: Any) -> set[str] | None:
     """The ids of the declared results (``design.protocol.metrics``) whose role is one a non-finite number stops for
     (:data:`COUNTING_ROLES`); ``None`` when the plan declares no result (every non-finite number then counts). An empty
-    set is a plan whose declared results are all of another role."""
+    set is a plan whose declared results are all of another role. Every declared id is judged, also one the study
+    contract could not place: it counts as a result."""
     from . import contract as _contract
 
-    if not isinstance(protocol, dict):
+    roles = _contract.raw_roles(protocol)
+    if not roles:
         return None
-    contract = _contract.from_design({"protocol": protocol})
-    if not contract.results:
-        return None
-    return {r.id for r in contract.results if r.role in COUNTING_ROLES}
+    return {i for i, role in roles.items() if role in COUNTING_ROLES}
 
 
 def own_measurements(protocol: Any, oracle_check: Any) -> dict[str, str]:
@@ -116,12 +115,11 @@ def own_measurements(protocol: Any, oracle_check: Any) -> dict[str, str]:
                 and isinstance(c.get("value"), (int, float)) and not isinstance(c.get("value"), bool)
                 and math.isfinite(c["value"])}
     out: dict[str, str] = {}
-    if not isinstance(protocol, dict):
-        return out
-    for r in _contract.from_design({"protocol": protocol}).results:
-        got = [(n, measured[n]) for n in r.measured_by if n in measured]
+    by_id, _violation = _contract.oracle_measures(protocol)
+    for rid, names in by_id.items():
+        got = [(n, measured[n]) for n in names if n in measured]
         if got:
-            out[r.id] = "; ".join(f"FI's own run of the check `{n}` measured {v:.3g}" for n, v in got)
+            out[rid] = "; ".join(f"FI's own run of the check `{n}` measured {v:.3g}" for n, v in got)
     return out
 
 

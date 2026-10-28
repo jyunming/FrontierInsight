@@ -687,8 +687,10 @@ def _objections_sentence(rows: Any) -> str:
 
 
 def _contract_sentence(record: Any) -> str:
-    """What FI could not place when it read the plan into the study contract (``.fi/contract.json``), in one line."""
-    gaps = [g.strip().rstrip(".") for g in record.get("gaps", []) if isinstance(g, str) and g.strip()]         if isinstance(record, dict) and isinstance(record.get("gaps"), list) else []
+    """What FI could not place when it read the plan into the study contract (``.fi/contract.json``, its ``shown`` list:
+    the gaps every older plan has are kept in the file and not shown), in one line."""
+    shown = record.get("shown") if isinstance(record, dict) else None
+    gaps = [g.strip().rstrip(".") for g in shown if isinstance(g, str) and g.strip()] if isinstance(shown, list) else []
     if not gaps:
         return ""
     more = f"; and {len(gaps) - _SHOWN} more" if len(gaps) > _SHOWN else ""

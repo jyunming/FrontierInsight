@@ -482,7 +482,8 @@ def test_a_frozen_protocol_with_no_results_keeps_every_non_finite_number(tmp_pat
 
 _ROLES = {"metrics": [{"id": "gain"}, {"id": "ideal", "reference": {"formula": "2 * x"}},
                       {"id": "agreement"}, {"id": "wall", "role": "timing"}, {"id": "edge", "role": "physical_bound"}],
-          "oracles": [{"name": "agree_a", "measure": "agreement"}, {"name": "agree_b", "metric": "agreement"}]}
+          "oracles": [{"name": "agree_a", "kind": "second_implementation", "measure": "agreement"},
+                      {"name": "agree_b", "kind": "invariant", "metric": "agreement"}]}
 
 
 def test_only_a_result_a_reference_and_a_physical_bound_ask_for_a_repair() -> None:
@@ -494,7 +495,7 @@ def test_only_a_result_a_reference_and_a_physical_bound_ask_for_a_repair() -> No
 
 
 def test_a_plan_whose_results_are_all_diagnostics_stops_for_none_of_them() -> None:
-    protocol = {"metrics": [{"id": "agreement"}], "oracles": [{"name": "agree", "measure": "agreement"}]}
+    protocol = {"metrics": [{"id": "agreement"}], "oracles": [{"name": "agree", "kind": "symmetry", "measure": "agreement"}]}
     results = nw.declared_results(protocol)
     assert results == set()
     assert nw.scan("", {"agreement": math.nan, "other": math.nan}, results=results) == []
@@ -516,10 +517,49 @@ def test_the_contract_is_built_when_the_protocol_is_read_and_its_gaps_are_kept(t
     from core import disclosure
 
     engine = Engine(_cfg(tmp_path))
-    design = {"protocol": {"metrics": [{"id": "gain"}]}}
+    design = {"protocol": {"metrics": [{"id": "gain"}, {"id": "gap"}],
+                           "oracles": [{"name": "agree", "kind": "invariant", "measure": "gap"}]}}
     state: dict[str, Any] = {"design": design, "iteration": 1}
     protocol = engine._protocol_block(state)  # type: ignore[arg-type]
-    assert protocol == {"metrics": [{"id": "gain"}]} and "role" not in protocol["metrics"][0]  # never written back
+    assert "role" not in protocol["metrics"][0]  # never written back
     record = json.loads((engine.quest_root / ".fi" / "contract.json").read_text(encoding="utf-8"))
     assert any("no role for" in g for g in record["gaps"])
-    assert "In reading the plan, FI noted: " in disclosure.run_record(engine.quest_root)
+    assert all("no role" not in g and "older plan" not in g for g in record["shown"]) and len(record["shown"]) == 1
+    text = disclosure.run_record(engine.quest_root)
+    assert "In reading the plan, FI noted: result `gap` is the measure of the check `agree`" in text
+    assert "no role" not in text and "older plan" not in text
+
+
+def test_a_plan_with_only_the_default_gaps_adds_nothing_to_the_run_record(tmp_path: Path) -> None:
+    from core import disclosure
+
+    engine = Engine(_cfg(tmp_path))
+    engine._protocol_block({"design": {"protocol": {"metrics": [{"id": "gain"}]}}, "iteration": 1})  # type: ignore[arg-type]
+    record = json.loads((engine.quest_root / ".fi" / "contract.json").read_text(encoding="utf-8"))
+    assert record["gaps"] and record["shown"] == []
+    assert "In reading the plan" not in disclosure.run_record(engine.quest_root)
+
+
+def test_a_candidate_design_does_not_write_the_contract_file(tmp_path: Path) -> None:
+    engine = Engine(_cfg(tmp_path))
+    state: dict[str, Any] = {"design": {"protocol": {"metrics": [{"id": "gain"}]}}, "iteration": 1}
+    engine._protocol_block(state, adopted=False)  # type: ignore[arg-type]
+    assert not (engine.quest_root / ".fi" / "contract.json").exists()
+    engine._protocol_block(state)  # type: ignore[arg-type]
+    assert (engine.quest_root / ".fi" / "contract.json").is_file()
+
+
+def test_a_headline_result_that_a_special_case_check_measures_still_stops_on_a_nan() -> None:
+    protocol = {"metrics": [{"id": "gain"}, {"id": "other"}],
+                "oracles": [{"name": "limit", "kind": "special_case", "measure": "gain", "case": {"x": 0}}]}
+    results = nw.declared_results(protocol)
+    assert results == {"gain", "other"}
+    assert [w.text for w in nw.scan("", {"gain": math.nan}, results=results)] == ["gain is nan"]
+
+
+def test_a_declared_result_the_contract_cannot_place_still_counts_as_a_result() -> None:
+    protocol = {"metrics": [{"id": "gain"}, {"id": "rate", "kind": "ratio"}, {"id": "ideal", "reference": "theory"}]}
+    assert nw.declared_results(protocol) == {"gain", "rate", "ideal"}
+    only_odd = {"metrics": [{"id": "rate", "kind": "ratio"}]}
+    assert nw.declared_results(only_odd) == {"rate"}
+    assert [w.text for w in nw.scan("", {"rate": math.nan}, results=nw.declared_results(only_odd))] == ["rate is nan"]

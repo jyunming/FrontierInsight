@@ -208,10 +208,23 @@ def test_a_role_the_plan_does_not_write_is_set_from_its_structure() -> None:
     c = C.from_design({"protocol": {"metrics": [
         {"id": "plain"}, {"id": "curve", "reference": {"formula": "2 * x"}}, {"id": "check_value"},
         {"id": "both", "reference": {"formula": "x"}}, {"id": "said", "role": "timing"},
-        {"id": "worded", "estimand": "theory closed-form"}],
-        "oracles": [{"name": "first", "measure": "check_value"}, {"name": "second", "metric": "check_value"},
-                    {"name": "third", "measure": "both"}]}})
+        {"id": "worded", "estimand": "theory closed-form"}, {"id": "headline"}],
+        "oracles": [{"name": "first", "kind": "second_implementation", "measure": "check_value"},
+                    {"name": "second", "kind": "invariant", "metric": "check_value"},
+                    {"name": "third", "kind": "symmetry", "measure": "both"},
+                    {"name": "limit", "kind": "special_case", "measure": "headline"}]}})
     assert [(r.id, r.role, r.measured_by) for r in c.results] == [
         ("plain", "result", ()), ("curve", "reference", ()), ("check_value", "diagnostic", ("first", "second")),
-        ("both", "reference", ("third",)), ("said", "timing", ()), ("worded", "result", ())]
-    assert any("no role for `plain`, `worded`" in g for g in c.gaps) and not any("`curve`" in g for g in c.gaps)
+        ("both", "reference", ("third",)), ("said", "timing", ()), ("worded", "result", ()),
+        ("headline", "result", ("limit",))]
+    assert any("no role for `plain`, `worded`, `headline`" in g for g in c.gaps) and not any("`curve`" in g for g in c.gaps)
+    assert any("`check_value` is the measure of the check `first`, `second`" in g for g in c.gaps)
+    assert not C.is_routine_gap([g for g in c.gaps if "`check_value`" in g][0])
+    assert all(C.is_routine_gap(g) for g in c.gaps if "no role" in g or "older plan" in g)
+
+
+def test_the_quantity_of_a_special_case_check_is_still_the_result_but_a_violation_check_makes_a_diagnostic() -> None:
+    roles = C.raw_roles({"metrics": [{"id": "gain"}, {"id": "gap"}, {"id": "rate", "kind": "ratio"}],
+                         "oracles": [{"name": "limit", "kind": "special_case", "measure": "gain"},
+                                     {"name": "agree", "kind": "second_implementation", "measure": "gap"}]})
+    assert roles == {"gain": "result", "gap": "diagnostic", "rate": "result"}

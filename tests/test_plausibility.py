@@ -603,3 +603,36 @@ def test_the_same_edge_without_the_role_is_still_sent_back_and_a_value_outside_t
     outside = _edge_state("physical_bound")
     outside["result_json"]["by_setting"]["s6"]["share"] = 1.5
     assert [v.kind for v in _assertion_violations(outside)] == ["out_of_range"]
+
+
+def test_a_physical_bound_result_on_its_edge_in_every_setting_is_said_not_stopped() -> None:
+    from core.engine import _assertion_violations, _assertion_warnings
+
+    state = _edge_state("physical_bound")
+    state["result_json"] = {"by_setting": {f"s{i}": {"share": 0.0} for i in range(1, 7)}}
+    assert _assertion_violations(state) == []
+    said = _assertion_warnings(state)
+    assert [v.kind for v in said] == ["edge_everywhere"]
+    assert said[0].describe() == "share is on its bound in every setting; the result may carry no information"
+    assert _assertion_warnings(_edge_state("physical_bound")) == []  # on the edge in some settings only: silent
+
+
+def test_the_prose_of_the_failure_policy_is_read_only_when_no_result_declares_a_role() -> None:
+    from core.engine import _zero_expected_paths
+
+    design = {"result_assertions": [{"path": "failed_run_count", "min": 0, "max": 100}],
+              "protocol": {"failure_policy": "A trial that fails is counted in `failed_run_count`.",
+                           "metrics": [{"id": "failed_run_count"}]}}
+    state = {"design": design, "manifest_failed_trials": 0}
+    assert _zero_expected_paths(state) == {"failed_run_count"}
+    with_role = {"design": {**design, "protocol": {**design["protocol"], "metrics": [
+        {"id": "failed_run_count"}, {"id": "other", "role": "result"}]}}, "manifest_failed_trials": 0}
+    assert _zero_expected_paths(with_role) == set()
+
+
+def test_a_physical_bound_result_exempts_only_the_assertion_paths_that_name_it() -> None:
+    from core.engine import _physical_bound_paths
+
+    design = {"result_assertions": [{"path": "share", "min": 0, "max": 1}, {"path": "other_group.share", "min": 0, "max": 1}],
+              "protocol": {"metrics": [{"id": "share", "role": "physical_bound"}]}}
+    assert _physical_bound_paths({"design": design}) == {"share"}
