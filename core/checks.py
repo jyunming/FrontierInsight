@@ -1272,10 +1272,6 @@ CHECKS: tuple[Check, ...] = (
           'review', 'own_record', 'repair',
           'outbreak probability described as the chance the disease vanishes (the complement); forced text-only '
           'rewrite'),
-    Check('paper_required_placeholder_missing', 'core.paper_facts', 'placement_hits',
-          'review', 'own_record', 'repair',
-          'a required fact placeholder ({{seed}}, {{run_time}}, {{time_limit}}, ...) is absent from the paper; '
-          'hit paper_record_mismatch sends the paper back to write'),
     Check('paper_unknown_placeholder', 'core.paper_facts', '_unknown_hits',
           'review', 'own_record', 'repair',
           "a {{...}} name that is not FI's placeholder, an unknown {{not_done:id}} or {{figure:..}}; paper "

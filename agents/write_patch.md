@@ -51,7 +51,7 @@ $passages_block
 $values_sheet
 
 ## The draft
-(A block between `<!-- fi:... -->` markers, such as the best design section, is written by FI from its records. Never edit it or its markers: any change to it is undone. A placeholder or key in double braces, such as `{{seed}}`, `{{run_time}}`, `{{time_limit_met}}`, `{{not_done:topic-temperature}}` or `{{v:coverage @ noise=0.05, n=all}}`, stands for a value FI fills in from its records: keep each one exactly as it is written, in its sentence; never replace one with a number or a sentence of your own, and never type the seed or the run time yourself.)
+(A block between `<!-- fi:... -->` markers, such as the best design section, is written by FI from its records. Never edit it or its markers: any change to it is undone. A placeholder or key in double braces, such as `{{run_facts}}`, `{{not_done:topic-temperature}}` or `{{v:coverage @ noise=0.05, n=all}}`, stands for a value FI fills in from its records: keep each one exactly as it is written, in its sentence; never replace one with a number or a sentence of your own, and never type the seed or the run time yourself.)
 
 <draft>
 $paper_block

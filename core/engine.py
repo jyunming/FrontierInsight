@@ -22751,7 +22751,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         markdown = self._mark_best_design(state, markdown)
         # FI's tables of every setting (core/results_by_setting.py): where the writer put {{results_table}}, else before
         # the discussion; filled from FI's records with the facts below, so no number of them is typed by a model.
-        markdown = _paper_facts.place_blocks(markdown, self.quest_root)
+        markdown = _paper_facts.place_blocks(
+            markdown, self.quest_root, topic=str(self.config.topic or ""),
+            fallback_s=(state.get("exec_result") or {}).get("duration_s"))
         # A new draft is not yet measured against the page limit: an earlier draft's measurement is not this one's.
         (self.quest_root / _paper_facts.PAGE_RECORD).unlink(missing_ok=True)
         # What the study did not do (core/paper_facts.py): each item the writer did not place is put in the Limitations by FI.
