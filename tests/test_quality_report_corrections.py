@@ -38,7 +38,7 @@ def test_a_changed_known_answer_is_listed_with_its_original_source(tmp_path: Pat
     root = _quest(tmp_path / "q")
     rows = _texts(root)
     assert len(rows) == 1
-    assert "changed the known answer of 'spring_period' from 1.5 to 2.5" in rows[0]
+    assert "known answer 'spring_period' changed by FI: 1.5 -> 2.5, not validated" in rows[0]
     assert "another model (m2)" in rows[0]
     assert "handbook table 3" in rows[0]
     assert "not independently validated" in rows[0]
@@ -53,3 +53,14 @@ def test_without_kept_plan_versions_the_source_is_left_out_not_guessed(tmp_path:
 
 def test_no_corrections_file_no_row(tmp_path: Path) -> None:
     assert _texts(_quest(tmp_path / "q", with_record=False)) == []
+
+
+def test_the_visible_table_cell_says_not_validated_even_for_a_long_name(tmp_path: Path) -> None:
+    root = _quest(tmp_path / "q")
+    rec = json.loads((root / ".fi" / "oracle_corrections.json").read_text(encoding="utf-8"))
+    long_name = "a_very_long_check_name_" * 4
+    rec[long_name] = {**rec.pop("spring_period"), "from": 1.23456789e-05, "to": 98765.4321}
+    (root / ".fi" / "oracle_corrections.json").write_text(json.dumps(rec), encoding="utf-8")
+    qr.write(root)
+    line = next(ln for ln in (root / "QUALITY.md").read_text(encoding="utf-8").splitlines() if "known answer" in ln)
+    assert "not validated" in line and "1.23457e-05" in line and "98765.4" in line

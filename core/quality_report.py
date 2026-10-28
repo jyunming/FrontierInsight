@@ -332,11 +332,15 @@ def _correction_problems(q: _Quest) -> list[dict[str, str]]:
         if not rec:
             continue
         ref = _original_reference(q.root, str(name), rec.get("from"))
-        # The lead sentence is what the short QUALITY.md table shows: keep it short, numbers to 6 digits.
-        text = (f"FI changed the known answer of '{name}' from {_num(rec.get('from'))} to {_num(rec.get('to'))} "
-                f"({_correction_proposer(rec)}: {_one(rec.get('why'), 120)})"
-                + (f"; the plan's original source was: {_one(ref, 160)}" if ref else "")
-                + "; the new value was not independently validated")
+        # The QUALITY.md table shows about 90 characters of a row: the check (cut when long), both values and "not
+        # validated" come first; who proposed it, why and the plan's original source follow.
+        change = f"{_num(rec.get('from'))} -> {_num(rec.get('to'))}"
+        tail = f"' changed by FI: {change}, not validated"
+        short = _one(name, max(8, 85 - len("known answer '") - len(tail)))
+        text = (f"known answer '{short}{tail}; the new value was not independently validated; "
+                f"{_correction_proposer(rec)}: {_one(rec.get('why'), 120)}"
+                + (f"; the plan's original source was: {_one(ref, 160)}" if ref else ""))
+        # "fixed": the change is disclosed in this row, and the quest did not fail at this stage.
         row = _problem("checks", text, "FI's known-answer check", "fixed", ".fi/oracle_corrections.json")
         row["text"] = _one(text, 480)  # the row names who, why and the original source: longer than a usual row
         out.append(row)
