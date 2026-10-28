@@ -282,24 +282,38 @@ def _oracle_problems(q: _Quest) -> list[dict[str, str]]:
     return out
 
 
-def _original_reference(root: Path, name: str, old: Any) -> str:
-    """The ``reference`` the plan gave check ``name`` while its expected value was still ``old``, read from the kept plan
-    versions (newest first). Empty when no kept version has that row: it is never guessed."""
+def _plan_oracle_rows(root: Path) -> list[list[dict[str, Any]]]:
+    """The oracle rows of each kept plan version (``.fi/plan_versions``), oldest first. A version that cannot be read is
+    skipped; the report is never stopped by it."""
     from . import plan as _plan
 
     versions = sorted((root / ".fi" / "plan_versions").glob("plan.v*.md"),
-                      key=lambda p: _int(re.sub(r"\D", "", p.stem)), reverse=True)
+                      key=lambda p: _int(re.sub(r"\D", "", p.stem)))
+    out: list[list[dict[str, Any]]] = []
     for path in versions:
         try:
             block = _plan.raw_design_block(path.read_text(encoding="utf-8"))
-        except OSError:
+            protocol = _dict(block.get("protocol")) if isinstance(block, dict) else {}
+            out.append([_dict(r) for r in _list(protocol.get("oracles"))])
+        except (OSError, ValueError):
             continue
-        protocol = _dict(block.get("protocol")) if isinstance(block, dict) else {}
-        for row in _list(protocol.get("oracles")):
-            row = _dict(row)
-            if str(row.get("name") or "").strip() == name and row.get("expected") == old:
-                return str(row.get("reference") or "")
-    return ""
+    return out
+
+
+def _original_reference(versions: list[list[dict[str, Any]]], name: str, old: Any, new: Any) -> str:
+    """The ``reference`` the plan gave check ``name`` before FI changed its expected value: from the last version before the
+    first one that holds the new value, the last version that holds the old one. Empty when the kept versions do not
+    show it; it is never guessed."""
+    found = ""
+    for rows in versions:
+        row = next((r for r in rows if str(r.get("name") or "").strip() == name), None)
+        if row is None:
+            continue
+        if row.get("expected") == new and row.get("expected") != old:
+            break
+        if row.get("expected") == old:
+            found = str(row.get("reference") or "")
+    return found
 
 
 def _correction_proposer(rec: dict[str, Any]) -> str:
@@ -320,18 +334,19 @@ def _num(value: Any) -> str:
     try:
         return f"{float(value):.6g}"
     except (TypeError, ValueError):
-        return str(value)
+        return _one(value, 12)
 
 
 def _correction_problems(q: _Quest) -> list[dict[str, str]]:
     """Each known answer FI changed in the plan before the protocol was frozen (``.fi/oracle_corrections.json``): the
     new value is never counted as independently validated, so a reader is told."""
     out: list[dict[str, str]] = []
+    versions = _plan_oracle_rows(q.root) if q.oracle_corrections else []
     for name, rec in q.oracle_corrections.items():
         rec = _dict(rec)
         if not rec:
             continue
-        ref = _original_reference(q.root, str(name), rec.get("from"))
+        ref = _original_reference(versions, str(name), rec.get("from"), rec.get("to"))
         # The QUALITY.md table shows about 90 characters of a row: the check (cut when long), both values and "not
         # validated" come first; who proposed it, why and the plan's original source follow.
         change = f"{_num(rec.get('from'))} -> {_num(rec.get('to'))}"
@@ -339,16 +354,19 @@ def _correction_problems(q: _Quest) -> list[dict[str, str]]:
         short = _one(name, max(8, 85 - len("known answer '") - len(tail)))
         text = (f"known answer '{short}{tail}; the new value was not independently validated; "
                 f"{_correction_proposer(rec)}: {_one(rec.get('why'), 120)}"
+                + ("; the check now passes because its expected value was set to what was measured"
+                   if rec.get("agrees_with_measurement") else "")
                 + (f"; the plan's original source was: {_one(ref, 160)}" if ref else ""))
-        # "fixed": the change is disclosed in this row, and the quest did not fail at this stage.
-        row = _problem("checks", text, "FI's known-answer check", "fixed", ".fi/oracle_corrections.json")
+        # "disclosed": neither fixed (it must not raise the fixed rate) nor a failure (the quest did not fail here).
+        row = _problem("checks", text, "FI's known-answer check", "disclosed", ".fi/oracle_corrections.json")
         row["text"] = _one(text, 480)  # the row names who, why and the original source: longer than a usual row
         out.append(row)
     return out
 
 
 def _checks_problems(q: _Quest) -> list[dict[str, str]]:
-    out: list[dict[str, str]] = []
+    # First: QUALITY.md shows only the first three items of a stage, and a changed known answer must be among them.
+    out: list[dict[str, str]] = _correction_problems(q)
     orv = q.oracle_review
     reviewer = str(orv.get("reviewer") or "a second model")
     for f in _list(orv.get("findings")):
@@ -382,7 +400,6 @@ def _checks_problems(q: _Quest) -> list[dict[str, str]]:
     for note in _list(q.protocol_check.get("notes")):
         out.append(_problem("checks", str(note), "FI's reading of the code (a note, not a stop)", "left out",
                             "needs/PROTOCOL_CHECK.json"))
-    out.extend(_correction_problems(q))
     return out
 
 
@@ -1254,7 +1271,7 @@ def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, A
         stages[stage] = {
             "stage": stage, "wrote": wrote, "reviewed_by": reader, "same_model": same, "review_note": note,
             "problems": {"total": len(mine), "fixed": count["fixed"], "not_fixed": count["not_fixed"],
-                         "left_out": count["left_out"], "items": mine},
+                         "left_out": count["left_out"], "disclosed": count["disclosed"], "items": mine},
             "calls": len(calls), "failed_calls": sum(1 for r in calls if r.get("outcome") not in (None, "ok")),
             "prompt_tokens": sum(_int(_dict(r.get("usage")).get("prompt_tokens")) for r in calls),
             "completion_tokens": sum(_int(_dict(r.get("usage")).get("completion_tokens")) for r in calls),
@@ -1270,7 +1287,7 @@ def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, A
                    + (f" The QUALITY.md in the quest folder is from the previous run of {_day(previous)}." if previous else "")}
     failure = None if running else _failure(q, outcome, problems)
     totals = Counter(p["status"].replace(" ", "_") for p in problems)
-    total = len(problems)
+    total = len(problems) - totals["disclosed"]  # a disclosure is neither fixed nor failed: it is not in the rate
     quest_id = str(q.summary.get("quest_id") or (q.audit[0].get("quest_id") if q.audit else "") or root.name)
     return {
         "schema": SCHEMA, "written_at": _stamp(time.time()), "run_started_at": _stamp(started), "running": bool(running),
@@ -1287,6 +1304,7 @@ def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, A
         "suggestions": _suggestions(q, stages, outcome, failure), "cost": _cost(q), "config": _config(q, stages),
         "problems": {"total": total, "fixed": totals["fixed"], "not_fixed": totals["not_fixed"],
                      "left_out": totals["left_out"],
+                     "disclosed": totals["disclosed"],
                      "fixed_rate": round(totals["fixed"] / total, 3) if total else None},
         "seconds": sum(seconds.values()) if seconds else None,
     }
