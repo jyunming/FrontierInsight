@@ -81,7 +81,7 @@ def test_it_is_among_the_first_three_items_and_counts_neither_fixed_nor_failed(t
         "failed": [{"id": f"E{i}", "function": "f"} for i in range(4)], "equations": {}}), encoding="utf-8")
     rep = qr.build(root)
     checks = next(s for s in rep["stages"] if s["stage"] == "checks")
-    assert checks["problems"]["total"] == 5 and checks["problems"]["items"][0]["status"] == "disclosed"
+    assert checks["problems"]["total"] == 4 and checks["problems"]["disclosed"] == 1 and checks["problems"]["items"][0]["status"] == "disclosed"
     qr.write(root)
     line = next(ln for ln in (root / "QUALITY.md").read_text(encoding="utf-8").splitlines() if ln.startswith("| Checks |"))
     assert "spring_period" in line and "not validated" in line
@@ -128,3 +128,22 @@ def test_the_other_sources_are_worded(tmp_path: Path) -> None:
         (root / ".fi" / "oracle_corrections.json").write_text(json.dumps({"c": {
             "from": 1, "to": 2, "source": source, "why": "w"}}), encoding="utf-8")
         assert words in _row(root)["text"]
+
+
+def test_stage_counts_add_up_and_the_cell_shows_the_disclosure(tmp_path: Path) -> None:
+    root = _quest(tmp_path / "q")
+    rep = qr.build(root)
+    assert sum(s["problems"]["total"] for s in rep["stages"]) == rep["problems"]["total"] == 0
+    row = qr._row(root, rep)
+    assert sum(row[f"problems_{s}"] for s in qr.STAGES) == row["problems_total"] == 0
+    qr.write(root)
+    line = next(ln for ln in (root / "QUALITY.md").read_text(encoding="utf-8").splitlines() if ln.startswith("| Checks |"))
+    assert "0 (1 disclosed): known answer 'spring_period' changed by FI: 1.5 -> 2.5, not validated" in line
+
+
+def test_a_disclosure_alone_gives_no_same_model_advice(tmp_path: Path) -> None:
+    root = _quest(tmp_path / "q")
+    (root / ".fi" / "oracle_review.json").write_text(json.dumps({
+        "reviewer": "m", "planner": "m", "same_model": True, "written": True, "findings": []}), encoding="utf-8")
+    sug = " ".join(str(x) for x in qr.build(root)["suggestions"])
+    assert "another provider's model" not in sug

@@ -1270,7 +1270,7 @@ def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, A
         count = Counter(p["status"].replace(" ", "_") for p in mine)
         stages[stage] = {
             "stage": stage, "wrote": wrote, "reviewed_by": reader, "same_model": same, "review_note": note,
-            "problems": {"total": len(mine), "fixed": count["fixed"], "not_fixed": count["not_fixed"],
+            "problems": {"total": len(mine) - count["disclosed"], "fixed": count["fixed"], "not_fixed": count["not_fixed"],
                          "left_out": count["left_out"], "disclosed": count["disclosed"], "items": mine},
             "calls": len(calls), "failed_calls": sum(1 for r in calls if r.get("outcome") not in (None, "ok")),
             "prompt_tokens": sum(_int(_dict(r.get("usage")).get("prompt_tokens")) for r in calls),
@@ -1474,13 +1474,14 @@ def render(report: dict[str, Any]) -> str:
         elif s["review_note"] and not s["reviewed_by"]:
             reader = _one(s["review_note"], 60)
         first = "; ".join(f"{_one(i['text'], 90)} [{i['found_by']}]" for i in p["items"][:3])
-        more = f" (+{p['total'] - 3} more)" if p["total"] > 3 else ""
+        more = f" (+{len(p['items']) - 3} more)" if len(p["items"]) > 3 else ""
+        shown = f"{p['total']}" + (f" ({p['disclosed']} disclosed)" if p.get("disclosed") else "")
         rc = s.get("review_cost")
         cost = "-" if not rc or not rc["calls"] else (
             f"{rc['calls']} call{'s' if rc['calls'] != 1 else ''}, {_n(rc['prompt_tokens'])} / {_n(rc['completion_tokens'])} tokens"
             + (f", ${rc['usd']:.2f}" if rc.get("usd") is not None else ""))
         lines.append(f"| {STAGE_NAME[s['stage']]} | {_cell(', '.join(s['wrote']) or '-')} | {_cell(reader)} | {_cell(cost)} | "
-                     f"{p['total']}{(': ' + _cell(first) + more) if first else ''} | "
+                     f"{shown}{(': ' + _cell(first) + more) if first else ''} | "
                      f"{p['fixed']} / {p['not_fixed']} / {p['left_out']} | {s['calls']}"
                      f"{(' (' + str(s['failed_calls']) + ' failed)') if s['failed_calls'] else ''} | "
                      f"{_n(s['prompt_tokens'])} / {_n(s['completion_tokens'])} | {_span(s['seconds'])} |")
