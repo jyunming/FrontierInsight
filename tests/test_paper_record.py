@@ -254,10 +254,10 @@ def test_an_item_hidden_in_the_limitations_is_put_in_by_fi(tmp_path: Path, lim: 
     root, topic = _quest(tmp_path, "kinetics_s1")
     (root / ".fi" / "topic_covered.json").write_text(json.dumps({"left": [{"kind": "factor", "name": "temperature"}]}))
     draft = LIMITS_OK.replace("{{not_done:topic-temperature}} We could not.", lim)
-    out = paper_facts.render(paper_facts.place_items(draft, root), root, topic=topic).text
+    out = paper_facts.render(paper_facts.place_blocks(draft, root), root, topic=topic).text
     assert paper_facts.placement_hits(out, root, topic=topic) == []
-    visible = out.replace(lim, "")
-    assert "<!-- fi:fact-not_done-topic-temperature -->" in visible or "temperature" in visible
+    # FI writes the whole section: what the writer hid in it is gone, and the item is in FI's block
+    assert lim not in out and "- The topic asks to vary temperature" in out
 
 
 # ---- what the writer is given --------------------------------------------------------------------------------------------
@@ -315,7 +315,10 @@ def test_every_required_item_has_an_id_and_one_plain_sentence(tmp_path: Path) ->
         "a second version that could not be compared is in the quality report only"
     section = paper_facts.writer_section(root, topic="t")
     for i in paper_facts.required_items(root):
-        assert f"{{{{not_done:{i.id}}}}}" in section
+        # the writer is shown the Limitations FI writes (the sentences, no placeholder to place); an open problem in the
+        # code is in QUALITY.md only
+        assert (i.sentence in section) == (i.kind != paper_facts.CODE_FINDING)
+    assert "{{not_done:" not in section and "see Limitations" in section
     # A plain sentence of an older record: its id is cut after a whole word, and its sentence does not say "the topic"
     # twice.
     older = [i for i in paper_facts.required_items(root) if i.kind == "not_done" and i.id != "topic-temperature"][0]
@@ -350,30 +353,32 @@ def test_a_required_fact_must_be_placed_and_fi_places_the_items_itself(tmp_path:
         return paper_facts.placement_hits(paper_facts.render(draft, root, topic=topic).text, root, topic=topic)
 
     def placed(draft: str) -> str:
-        return paper_facts.render(paper_facts.place_items(draft, root), root, topic=topic).text
+        return paper_facts.render(paper_facts.place_blocks(draft, root, topic=topic), root, topic=topic).text
 
-    mark = "fi:fact-not_done-topic-temperature -->"
+    item = "- The topic asks to vary temperature"
     assert hits(LIMITS_OK) == []
-    # An item the paper does not hold is put at the end of its Limitations by FI (the item's NAME in the text does not count).
+    # FI writes the whole section: the writer's own text under the heading is replaced by FI's block.
     named = ("# Temperature dependence\n\n## Methods\n{{seed}} {{run_time}} {{time_limit_met}}\n\n"
              "## Limitations\nWe varied the temperature.\n")
     out = placed(named)
-    assert out.index("## Limitations") < out.index(mark) and hits(out) == []
-    # Wherever the writer put it, it stays there (no second copy, no hit): FI does not check the place.
+    assert out.index("## Limitations") < out.index(item) and hits(out) == []
+    assert "We varied the temperature" not in out and out.count("## Limitations") == 1
+    # A placeholder the writer put in the Results is still filled (an older draft); the Limitations are FI's all the same.
     elsewhere = LIMITS_OK.replace("## Limitations\n{{not_done:topic-temperature}}", "## Results\n{{not_done:topic-temperature}}")
-    assert placed(elsewhere).count(mark) == 2 and hits(elsewhere) == []  # the opening and the closing marker
+    assert placed(elsewhere).count("fi:fact-not_done-topic-temperature -->") == 2 and hits(elsewhere) == []
+    assert item in placed(elsewhere)
     # Not in the title, though: the title does not hold it.
     title = "# {{not_done:topic-temperature}}\n\n## Methods\n{{seed}} {{run_time}} {{time_limit_met}}\n"
     assert "## Limitations" in placed(title)
     # A paper with no Limitations section gets one, before the sources.
     no_section = "# T\n\n## Methods\n{{seed}} {{run_time}} {{time_limit_met}}\n\n## References\n1. A.\n"
     out = placed(no_section)
-    assert out.index("## Limitations") < out.index(mark) < out.index("## References")
+    assert out.index("## Limitations") < out.index(item) < out.index("## References")
     # A Limitations that is a bold paragraph inside the Discussion (s3 fdr) is not a section: FI adds its own.
     bold = "# T\n\n## Methods\n{{seed}}\n\n## Discussion\n**Limitations.** Few settings.\n\n## References\n1. A.\n"
     out = placed(bold)
     assert out.count("## Limitations") == 1 and out.index("## Discussion") < out.index("## Limitations") < out.index("## References")
-    assert paper_facts.place_items(out, root) == out  # a second pass adds nothing
+    assert placed(out) == out  # a second pass adds nothing
     no_time = LIMITS_OK.replace("{{run_time}}", "223 s")
     assert hits(no_time) == [], "a run time typed in place of the placeholder is the typed-number check's, not this one's"
 
@@ -409,11 +414,12 @@ def test_the_check_is_kept_for_the_quality_report(tmp_path: Path) -> None:
     text = quality_report.render(quality_report.build(root, running=False))
     assert "## What FI recorded that the paper does not carry" in text
     assert "Where the paper still disagrees with these records" in text and "temperature" in text
-    good = paper_facts.render("# P\n\n## Methods\n{{seed}} {{run_time}} {{time_limit_met}}\n\n## Limitations\n"
-                              + " ".join(f"{{{{not_done:{i.id}}}}}" for i in paper_facts.required_items(root)) + "\n",
-                              root).text
+    good = paper_facts.render(paper_facts.place_blocks(
+        "# P\n\n## Methods\n{{seed}} {{run_time}} {{time_limit_met}}\n\n## Limitations\nThe grid is coarse.\n", root),
+        root).text
     paper_facts.keep_check(root, paper_facts.check(good, root), good)
-    assert paper_facts.kept_check(root) == {}
+    # with FI's block in the paper nothing is missing from it (an open problem in the code is in QUALITY.md only)
+    assert {i["kind"] for i in paper_facts.kept_check(root).get("unmet_items", [])} <= {paper_facts.CODE_FINDING}
 
 
 def test_the_quality_report_lists_a_placeholder_that_reads_not_recorded(tmp_path: Path) -> None:

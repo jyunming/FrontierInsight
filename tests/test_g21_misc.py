@@ -3,6 +3,7 @@ figure-caption instruction to the reviewer, and the power limit of the standard-
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -82,8 +83,15 @@ def test_the_delivered_paper_carries_the_unresolved_reason(tmp_path: Path) -> No
     eng._note_design_objections(state, {"verdict": "revise", "must_flag_hits": [], "blocking": reason})
     assert "damping value" not in paper.read_text(encoding="utf-8")
     eng._note_design_objections(state, {"verdict": "revise", "must_flag_hits": [], "blocking": reason})
+
+    async def citations(_state: Any) -> Any:
+        return {"citation_next": "done"}
+
+    eng._check_citations = citations  # type: ignore[method-assign]
+    asyncio.run(eng._node_citation_check(state))  # the last step before delivery writes the Limitations from the records
     text = paper.read_text(encoding="utf-8")
     assert "one damping value" in text and "not resolved" in text and "{{" not in text
+    assert "One limit." not in text  # the Limitations are FI's
 
 
 def test_a_new_reason_or_a_measured_hit_still_costs_a_rewrite(tmp_path: Path) -> None:

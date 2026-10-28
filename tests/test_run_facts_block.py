@@ -69,7 +69,8 @@ def test_no_record_gives_no_block_and_a_limit_alone_gives_one_sentence(tmp_path:
     root = _quest(tmp_path, None)
     assert pf.run_facts_text(root, topic="Compare two filters.") == ""
     assert pf.block_text(root, "run_facts", topic="Compare two filters.") == ""
-    assert pf.place_blocks(PAPER, root, topic="Compare two filters.") == PAPER, "nothing to place"
+    assert pf.place_blocks(PAPER, root, topic="Compare two filters.").replace("\n\n{{limitations}}", "\nFew.") == PAPER, \
+        "nothing to place (but FI's Limitations, which every paper has)"
     only_limit = pf.run_facts_text(root, topic=TOPIC)
     assert only_limit == "**Run.** Whether the run keeps to the topic's limit of 60 s is not shown."
 
@@ -103,7 +104,7 @@ def test_without_a_methods_heading_it_goes_before_the_results_or_after_the_abstr
 def test_the_writers_own_place_is_kept_and_a_second_pass_adds_nothing(tmp_path: Path) -> None:
     root = _quest(tmp_path, AT_ONCE)
     own = PAPER.replace("It agrees.", "It agrees.\n\n{{run_facts}}")
-    assert _at(own, root) == own, "the writer put it in the Results; FI leaves it there"
+    assert _at(own, root).replace("\n\n{{limitations}}", "\nFew.") == own, "the writer put it in the Results; FI leaves it there"
     placed = _at(PAPER, root)
     filled = pf.render(placed, root, topic=TOPIC).text
     assert filled.count("**Run.**") == 1 and "{{" not in filled

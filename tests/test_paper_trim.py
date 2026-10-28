@@ -71,6 +71,14 @@ def _paper(*, discussion: str = "", with_lists: bool = True) -> str:
     )
 
 
+def _delivered(paper: str) -> str:
+    """``paper`` as the write step delivers it: FI's Limitations in place of the writer's own (core/paper_facts.py)."""
+    from core import paper_facts
+
+    root = Path("no_quest_here")
+    return paper_facts.render(paper_facts.place_blocks(paper, root), root).text
+
+
 def _cands(paper: str) -> list[paper_trim.Sentence]:
     return paper_trim.candidates(paper, paper.index("## References"))
 
@@ -327,7 +335,7 @@ def test_a_draft_a_few_sentences_over_the_limit_loses_them_and_is_not_sent_back(
     tmp_path: Path, monkeypatch, panel: bool,
 ) -> None:
     eng = _engine(tmp_path, panel=panel)
-    written = _paper(with_lists=False)
+    written = _delivered(_paper(with_lists=False))
     paper = _put(tmp_path, written)
     cands = _cands(written)
     total = len(written.split())
@@ -369,7 +377,7 @@ def test_a_draft_a_few_sentences_over_the_limit_loses_them_and_is_not_sent_back(
 
 def test_the_trim_is_tried_after_the_shortening_rewrites_are_used_up(tmp_path: Path, monkeypatch) -> None:
     eng = _engine(tmp_path)
-    written = _paper(with_lists=False)
+    written = _delivered(_paper(with_lists=False))
     _put(tmp_path, written)
     _render_by_words(monkeypatch, fits_at=len(written.split()) - 100)
     _with_chat(eng, json.dumps({"delete": [c.n for c in _cands(written)]}))
@@ -385,7 +393,7 @@ def test_a_list_that_falls_short_is_asked_for_again_on_the_paper_as_it_now_stand
     """The model lists two short sentences (about 30 words) for a hundred: the engine takes them and asks
     again for the rest, on the paper without them, and only then renders."""
     eng = _engine(tmp_path)
-    written = _paper(with_lists=False)
+    written = _delivered(_paper(with_lists=False))
     paper = _put(tmp_path, written)
     first = [c.n for c in _cands(written)][:2]
     rendered = _render_by_words(monkeypatch, fits_at=len(written.split()) - 100)
@@ -413,7 +421,14 @@ def test_a_list_that_falls_short_is_asked_for_again_on_the_paper_as_it_now_stand
 
 def test_a_draft_still_over_after_the_first_round_is_trimmed_again(tmp_path: Path, monkeypatch) -> None:
     eng = _engine(tmp_path)
-    written = _paper(with_lists=False)
+    # A longer Discussion than the others: FI writes the Limitations now, so fewer sentences of the paper may go.
+    more = ("Many decisions are taken long before the final numbers of an epidemic are known to anyone. "
+            "Assumptions that look harmless in a small model often decide what the planners finally do. "
+            "A reader should therefore ask first which assumption would change the answer if it were relaxed. "
+            "Good practice is to state the main assumptions next to every result that depends on them.")
+    base = _paper(with_lists=False)
+    discussion = base.split("## Discussion\n\n")[1].split("\n\n### Limitations")[0] + " " + more
+    written = _delivered(_paper(with_lists=False, discussion=discussion))
     paper = _put(tmp_path, written)
     total = len(written.split())
     # The first hundred words are not enough: the draft fits only once 150 are gone.
@@ -438,7 +453,7 @@ def test_a_reply_that_cannot_be_used_leaves_the_paper_and_the_rewrite_as_before(
     tmp_path: Path, monkeypatch, reply: str | None,
 ) -> None:
     eng = _engine(tmp_path)
-    written = _paper(with_lists=False)
+    written = _delivered(_paper(with_lists=False))
     paper = _put(tmp_path, written)
     _render_by_words(monkeypatch, fits_at=len(written.split()) - 100)
     _with_chat(eng, reply)
@@ -455,7 +470,7 @@ def test_a_trim_that_does_not_bring_the_draft_within_the_limit_leaves_it_as_writ
     tmp_path: Path, monkeypatch,
 ) -> None:
     eng = _engine(tmp_path)
-    written = _paper(with_lists=False)
+    written = _delivered(_paper(with_lists=False))
     paper = _put(tmp_path, written)
     rendered = _render_by_words(monkeypatch, fits_at=10)  # nothing the trim can take out is enough
     _with_chat(eng, json.dumps({"delete": [c.n for c in _cands(written)]}))
@@ -468,7 +483,7 @@ def test_a_trim_that_does_not_bring_the_draft_within_the_limit_leaves_it_as_writ
 
 def test_a_draft_far_over_the_limit_is_not_trimmed_and_the_model_is_not_asked(tmp_path: Path, monkeypatch) -> None:
     eng = _engine(tmp_path)
-    written = _paper(with_lists=False)
+    written = _delivered(_paper(with_lists=False))
     paper = _put(tmp_path, written)
     _render_by_words(monkeypatch, fits_at=10, over=6, last_page_empty=0.0)  # a page and a half over
     calls = _with_chat(eng, json.dumps({"delete": [1]}))
@@ -523,7 +538,7 @@ def test_a_claim_the_paper_still_says_elsewhere_stays_and_nothing_changes_withou
 @pytest.mark.parametrize("panel", [False, True])
 def test_the_review_reads_the_grounding_of_the_paper_it_reads(tmp_path: Path, monkeypatch, panel: bool) -> None:
     eng = _engine(tmp_path, panel=panel)
-    written = _paper(with_lists=False)
+    written = _delivered(_paper(with_lists=False))
     _put(tmp_path, written)
     cands = _cands(written)
     target = next(c for c in cands if c.text.startswith("Small populations may still"))

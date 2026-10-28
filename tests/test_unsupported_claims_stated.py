@@ -92,9 +92,10 @@ def test_a_later_clean_check_removes_the_sentence_an_earlier_pass_placed(tmp_pat
     assert "not found supported" in path.read_text(encoding="utf-8")
     eng._state_unsupported_claims({"paper_md": str(path), "claim_grounding": _grounding()})  # type: ignore[arg-type]
     text = path.read_text(encoding="utf-8")
-    assert "not found supported" not in text and "not recorded" not in text and "fi:fact" not in text
+    assert "not found supported" not in text and "not recorded" not in text and "fi:fact-not_done" not in text
     assert json.loads((eng.quest_root / ".fi" / "unsupported_claims.json").read_text()) == {"claims": []}
-    assert "Few settings were run." in text
+    # the Limitations are FI's block, written again from the records: the writer's own line is gone, FI's one-liner stands
+    assert "Few settings were run." not in text and "recorded no unfinished step" in text
 
 
 def test_a_claim_check_that_gave_no_answer_leaves_the_record_as_it_was(tmp_path: Path) -> None:

@@ -1288,10 +1288,11 @@ CHECKS: tuple[Check, ...] = (
           'review', 'own_record', 'repair',
           'when no review round is left, the sentences with typed or unfilled numbers get one passage edit '
           'before anything is taken out'),
-    Check('paper_limitations_items_placed', 'core.paper_facts', 'place_items',
+    Check('paper_limitations_block', 'core.paper_facts', 'limitations_text',
           'write', 'own_record', 'note',
-          'each thing the study did not do (required_items from FI records) that the writer did not place is '
-          'put in the Limitations by FI'),
+          "FI writes the paper's whole Limitations section from its records (what the study did not do, an unmet "
+          "target, a page overrun, claims found unsupported, the last review's open points); the writer's own "
+          "Limitations text is replaced, and with nothing to state the section says FI recorded none"),
     Check('extension_result_unreported', 'core.number_provenance', 'unreported_results',
           'write', 'own_record', 'repair',
           "a result a refine's extension added that the paper does not report: writer asked once more, then "
@@ -1353,9 +1354,6 @@ CHECKS: tuple[Check, ...] = (
           'review', 'model_judge', 'strip',
           'a model ranks sentences, FI cuts background/discussion sentences (never the last citation of a '
           'source or last statement of a number; paper_trim.choose) to fit'),
-    Check('page_overrun_stated', 'core.engine', 'Engine._state_page_overrun',
-          'citation_check', 'measured', 'note',
-          'paper still over the page limit after rewrites: its Limitations state the measured page count'),
     Check('claim_grounding_unsupported', 'core.engine', 'Engine._node_claim_check',
           'claim_check', 'model_judge', 'repair',
           'a model grounds each paper claim in run results or one cited source, else unsupported; forces '
@@ -1382,10 +1380,6 @@ CHECKS: tuple[Check, ...] = (
           'claim_check', 'model_judge', 'stop',
           '0 claims extracted from a paper body over 2000 chars is treated as a failed check (same one-time '
           'research-profile stop)'),
-    Check('unsupported_claims_stated', 'core.engine', 'Engine._state_unsupported_claims',
-          'citation_check', 'own_record', 'note',
-          'claims found unsupported and still in the delivered paper are listed in .fi/unsupported_claims.json '
-          'and stated in the Limitations'),
     Check('review_unsupported_claim_hit', 'core.engine', '_unsupported_claim_hit',
           'review', 'own_record', 'repair',
           'FI adds unsupported_claim to the must-fix hits when the claim check found unbacked claims, even if '
@@ -1431,9 +1425,6 @@ CHECKS: tuple[Check, ...] = (
     Check('review_reviewer_page_limit_dropped', 'core.engine', '_without_reviewer_page_limit_hits',
           'review', 'own_record', 'note',
           'over_page_limit hits written by a reviewer are dropped; only the measured page count may force it'),
-    Check('review_unresolved_reason_stated', 'core.engine', 'Engine._state_unresolved_review',
-          'review', 'own_record', 'note',
-          "a reviewer reason the rewrite did not answer is stated in the paper's Limitations"),
     Check('review_sends_experiment_back', 'core.engine', '_review_sends_the_experiment_back',
           'review', 'model_text', 'repair',
           'review prose names a result_json key, figure file or experiment.py: route re_execute (implement '

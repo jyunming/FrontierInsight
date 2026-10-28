@@ -2120,6 +2120,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 )
             for w in review.get("weaknesses") or []:
                 self._audit("model_claim", node=node, provenance=_audit_log.MODEL_CLAIM, topic="review_weakness", claim=w, **prov)
+            # What this round said, kept apart from the trace: when no round is left after it, the paper states its points.
+            _disclosure.write_last_review(self.quest_root, review)
             # A review panel's moderator says why the panel's verdict stands, given how the reviewers disagreed.
             if isinstance(review.get("rationale"), str):
                 self._claim(node, "review_moderator", "review_moderator", review["rationale"],
@@ -22440,27 +22442,30 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 self._log.warning("[write] %s", v.hit.text())
         return out.text
 
-    def _state_unresolved_review(self, state: QuestState) -> None:
-        """The review ends on a reason it gave before and the paper written again did not answer: FI's sentence about it
-        goes into the paper that is delivered (its Limitations), since nothing writes or places items after this review.
-        FI's own sentence, no model call; best-effort."""
+    def _restate_limitations(self, state: QuestState, why: str) -> bool:
+        """The paper's Limitations are FI's block (``{{limitations}}``, core/paper_facts.py), written from its records as
+        they are now: called after a step that changed one of them, so the paper that is delivered says what the records
+        say. FI's own text and no claim of its own, so the claim check's and the citation check's receipts move to the
+        paper that carries it (``why`` is the reason they keep). No model call; best-effort. Returns whether the paper changed."""
         path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
         if not path or not Path(path).is_file():
-            return
+            return False
         try:
             before = Path(path).read_text(encoding="utf-8")
             after = self._render_paper_facts(
-                _paper_facts.place_items(_disclosure.without_block(before), self.quest_root), state)
-            if after != before:
-                checked = Path(path).read_bytes()
-                Path(path).write_text(after, encoding="utf-8")
-                for check in ("claim_check", "citation_check"):
-                    _receipts.carry_over(self.quest_root, check, "paper", checked, Path(path).read_bytes(),
-                                         "FI stated the reviewer's unresolved reason in the Limitations and added no claim")
-                self._log.info("[review] the reviewer's reason that the rewrite did not answer is stated in the paper's "
-                               "Limitations")
+                _paper_facts.place_blocks(_disclosure.without_block(before), self.quest_root,
+                                          topic=str(self.config.topic or ""),
+                                          fallback_s=(state.get("exec_result") or {}).get("duration_s")), state)
+            if after == before:
+                return False
+            checked = Path(path).read_bytes()
+            Path(path).write_text(after, encoding="utf-8")
+            for check in ("claim_check", "citation_check"):
+                _receipts.carry_over(self.quest_root, check, "paper", checked, Path(path).read_bytes(), why)
+            return True
         except (OSError, UnicodeDecodeError) as e:
-            self._log.warning("[review] the paper could not be given its sentence on the unresolved review reason (%s)", e)
+            self._log.warning("[review] the paper's Limitations could not be written again from FI's records (%s)", e)
+            return False
 
     def _refresh_paper_facts(self, state: QuestState) -> None:
         """Before a paper is checked: a paper on disk that still carries FI's old blocks (a quest resumed from before they
@@ -22474,7 +22479,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             placed = _paper_facts.place_blocks(
                 _disclosure.without_block(before), self.quest_root, topic=str(self.config.topic or ""),
                 fallback_s=(state.get("exec_result") or {}).get("duration_s"))
-            after = self._render_paper_facts(_paper_facts.place_items(placed, self.quest_root), state)
+            after = self._render_paper_facts(placed, state)
             if before.rstrip() != after.rstrip() and (
                     _disclosure.without_block(before) != before or "{{" in before or "fi:fact-" in before
                     or "fi:fact-" in after or "fi:v " in before or "fi:v " in after):
@@ -22758,8 +22763,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             fallback_s=(state.get("exec_result") or {}).get("duration_s"))
         # A new draft is not yet measured against the page limit: an earlier draft's measurement is not this one's.
         (self.quest_root / _paper_facts.PAGE_RECORD).unlink(missing_ok=True)
-        # What the study did not do (core/paper_facts.py): each item the writer did not place is put in the Limitations by FI.
-        markdown = _paper_facts.place_items(markdown, self.quest_root)
         # The facts of the run go in last, from FI's records, so every check after this reads the values, never a
         # placeholder (core/paper_facts.py).
         markdown = self._render_paper_facts(markdown, state)
@@ -23491,6 +23494,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         when it has used up its shortening rewrites, and a paper can also leave the review loop earlier (its other
         findings out of rounds), so the delivered paper is measured here, whatever route brought it."""
         out = await self._check_citations(state)
+        # The paper goes out as the last review saw it when no round follows (the graph reaches this step only from the
+        # review): the points that review raised and nothing answered are stated in the Limitations and listed in QUALITY.md.
+        if out.get("citation_next") == "done" and _disclosure.mark_last_review_final(self.quest_root):
+            self._log.info("[review] the last review's points that no later round addressed are stated in the paper's "
+                           "Limitations and listed in QUALITY.md")
+        # The Limitations are FI's block, from the records as they stand now (the claim check may have been off, so the
+        # refresh above may not have run): the paper that is delivered says what they say.
+        self._restate_limitations(state, "FI wrote the Limitations from its records again and added no claim")
         # Before the page count is measured: its sentence is a few lines of the paper's own.
         self._state_unsupported_claims({**state, **out})  # type: ignore[arg-type]
         limit = resolve_page_limit(self.config)
@@ -24919,7 +24930,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return 0
         try:
             before = Path(paper_path).read_text(encoding="utf-8")
-            flat = " ".join(before.split())
+            # FI's own blocks quote claims too (the Limitations block does): only the writer's text says what the paper holds
+            flat = " ".join(_paper_facts.without_blocks(before).split())
             sentences = re.split(r"(?<=[.!?])\s+", flat)
             standing = [c for c in grounding.get("claims") or []
                         if isinstance(c, dict) and c.get("basis") == "unsupported" and str(c.get("claim") or "").strip()
@@ -24927,17 +24939,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                              or any(_same_statement(str(c["claim"]), s) for s in sentences))]
             if not _paper_facts.write_unsupported_record(self.quest_root, standing):
                 return 0
-            clean = _disclosure.without_block(before)
-            if not standing:
-                clean = _paper_facts.drop_item(clean, _paper_facts.UNSUPPORTED_CLAIMS)
-            after = self._render_paper_facts(_paper_facts.place_items(clean, self.quest_root), state)
-            if after != before:
-                checked = Path(paper_path).read_bytes()
-                Path(paper_path).write_text(after, encoding="utf-8")
-                for check in ("claim_check", "citation_check"):
-                    _receipts.carry_over(self.quest_root, check, "paper", checked, Path(paper_path).read_bytes(),
-                                         "FI stated the claims its own check found unsupported in the Limitations and "
-                                         "added no claim")
+            # A record with none empties: the Limitations block is written again from it, so a sentence an earlier pass
+            # stated is gone.
+            self._restate_limitations(state, "FI stated the claims its own check found unsupported in the Limitations and "
+                                             "added no claim")
         except (OSError, UnicodeDecodeError) as e:
             self._log.warning("[claim_check] the paper could not be given its sentence on unsupported claims (%s)", e)
             return 0
@@ -24954,20 +24959,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         with that page)."""
         for _ in range(2):
             _paper_facts.write_page_record(self.quest_root, pages, limit, final=True)
-            try:
-                before = paper_path.read_text(encoding="utf-8")
-                after = self._render_paper_facts(
-                    _paper_facts.place_items(_disclosure.without_block(before), self.quest_root), state)
-                if after != before:
-                    checked = paper_path.read_bytes()
-                    paper_path.write_text(after, encoding="utf-8")
-                    # The sentence is FI's own measurement: it adds no claim and no citation, so both checks' receipts move.
-                    for check in ("claim_check", "citation_check"):
-                        _receipts.carry_over(self.quest_root, check, "paper", checked, paper_path.read_bytes(),
-                                             "FI stated its own page count in the Limitations and added no claim")
-            except (OSError, UnicodeDecodeError) as e:
-                self._log.warning("[page_limit] the paper could not be given its sentence on the page limit (%s)", e)
-                break
+            # The sentence is FI's own measurement: it adds no claim and no citation, so both checks' receipts move.
+            self._restate_limitations({**state, "paper_md": str(paper_path)},
+                                      "FI stated its own page count in the Limitations and added no claim")
             again = await self._measure_draft_pages(paper_path, state)
             if again is None or int(again["pages"]) == pages:
                 break
@@ -25119,7 +25113,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 # The verdict stays revise: no more rewrites are spent, but the reason is not answered, and the record
                 # (QUALITY.md) and the paper's Limitations say so.
                 _disclosure.mark_unresolved(self.quest_root, said)
-                self._state_unresolved_review(state)
                 self._log.info("[review] the reviewer's reason repeats one FI's record already keeps (QUALITY.md) and no "
                                "check of FI's backs it — not writing the paper again for it")
             # Kept whether or not the paper is written again after this review: an objection raised only in the last

@@ -57,7 +57,7 @@ def test_a_paper_over_its_page_limit_after_the_rewrites_says_so_with_the_measure
     (item,) = [i for i in paper_facts.required_items(root) if i.kind == paper_facts.PAGE_LIMIT]
     assert "7 pages" in item.sentence and "4-page limit" in item.sentence
     paper = "# T\n\n## Methods\nM.\n\n## Discussion\n**Limitations.** Few.\n\n## References\n1. A.\n"
-    out = paper_facts.render(paper_facts.place_items(paper, root), root).text
+    out = paper_facts.render(paper_facts.place_blocks(paper, root), root).text
     assert "This paper is 7 pages, over the 4-page limit set for it" in out
     assert out.index("## Limitations") < out.index("This paper is 7 pages") < out.index("## References")
 
@@ -123,4 +123,4 @@ async def test_a_paper_that_leaves_the_review_over_its_page_limit_says_so_whatev
     (root / ".fi" / "page_limit.json").unlink()
     pages["n"] = 4
     await eng._node_citation_check({"paper_md": str(paper)})  # type: ignore[arg-type]
-    assert paper.read_text(encoding="utf-8") == body and not (root / ".fi" / "page_limit.json").exists()
+    assert "limit set for it" not in paper.read_text(encoding="utf-8") and not (root / ".fi" / "page_limit.json").exists()

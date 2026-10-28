@@ -14,8 +14,8 @@ flagged. So the writer no longer types these facts at all:
   writer does not state these facts. The single placeholders of older drafts (:data:`FACT_NAMES`: ``{{seed}}``,
   ``{{run_time}}``, ``{{time_limit}}``, ``{{time_limit_met}}``, ``{{trials_per_setting}}``, ``{{settings}}``,
   ``{{trials_failed}}``) are still filled, but no longer offered or asked for.
-* **Placeholders.** Each thing the study did not do is placed with
-  ``{{not_done:<id>}}`` (:func:`required_items`), which FI turns into one plain sentence from its record.
+* **Placeholders.** Each thing the study did not do is one item (:func:`required_items`) with one plain sentence from
+  FI's record; they are the bullets of the Limitations block. A ``{{not_done:<id>}}`` of an older draft is still filled.
 * **Blocks.** ``{{results_table}}`` (:data:`BLOCK_NAMES`) is a whole block FI writes: its tables of every setting with
   each value's interval and reference (core/results_by_setting.py, saved in ``.fi/results_table.md``). The writer puts
   it on a line of its own in the Results; when it does not, FI places it before the discussion (:func:`place_blocks`).
@@ -26,10 +26,12 @@ flagged. So the writer no longer types these facts at all:
   editor gets placeholders again, :func:`to_placeholders`; the page trim never offers a sentence holding one; a resumed
   quest re-renders), and they are dropped wherever text leaves FI (:func:`without_marks`). A placeholder FI cannot fill
   reads "not recorded", is said in the run log and is listed in the quality report; it is never left raw and never guessed.
-* **Placing.** FI puts each ``not_done`` item the paper does not hold at the end of its Limitations section (a paper
-  with none gets one before the sources) itself (:func:`place_items`); where the writer put one is left as it is. The
-  paper's page count against the topic's limit is one of the items: FI states it from its own measurement of the
-  finished paper (:data:`PAGE_RECORD`, written by the review), never from the writer.
+* **The Limitations section** is a block FI writes itself, ``{{limitations}}`` (:func:`limitations_text`): one bullet for
+  each thing the study did not do (:func:`required_items`), or one sentence saying FI recorded none. It takes the place of
+  the body of the writer's own Limitations section, or becomes a section of its own (:func:`place_blocks`); the writer does
+  not write that section. The paper's page count against the topic's limit is one of the items: FI states it from its own
+  measurement of the finished paper (:data:`PAGE_RECORD`, written by the review), never from the writer. So are the points
+  of the last review when no round is left to answer them (:func:`core.disclosure.last_review_points`).
 * **The check** (:func:`check`, no model) is then simple: no name between double braces is unknown to FI
   (:func:`placement_hits`); a run time typed as a number or a claim that the run kept to the topic's limit when it did
   not is left to the typed-number rule and the claim check, which receive FI's record (the seed in it comes from
@@ -65,7 +67,9 @@ FACT_NAMES = ("seed", "run_time", "time_limit", "time_limit_met", "trials_per_se
 #: FI's blocks a placeholder can name: a whole block of the paper FI writes from its records, on a line of its own.
 #: Not a fact: its numbers are accounted for setting by setting (core/results_by_setting.py), never as FI's record.
 #: ``run_facts`` has no file: its paragraph is composed from :func:`facts` (:func:`run_facts_text`).
-BLOCK_NAMES = ("results_table", "run_facts")
+BLOCK_NAMES = ("results_table", "run_facts", "limitations")
+#: What the Limitations block says when FI's records hold nothing the study left undone.
+NO_LIMITS_SENTENCE = "FI's checks recorded no unfinished step, unmet target or open review point."
 _BLOCK_FILES = {"results_table": Path(".fi") / "results_table.md"}  # = core.results_by_setting.PAPER_BLOCK
 #: ``{{figure:<file stem>:layout}}`` and ``{{figure:<file stem>:lines}}``: what a saved figure draws, from the recorder's
 #: files (:mod:`core.figure_facts`), not from the writer. The marker key is ``figure-<kind>-<stem>``.
@@ -85,6 +89,7 @@ PAGE_LIMIT = "page_limit"
 SHARED_SEEDS = "shared_seeds"
 UNSUPPORTED_CLAIMS = "unsupported_claims"
 UNRESOLVED_REVIEW = "unresolved_review"
+LAST_REVIEW = "last_review"
 #: The sentences of the delivered paper the last claim check found supported by neither the run's results nor a cited
 #: source (``Engine._state_unsupported_claims``): ``{"claims": [{"claim", "evidence"}]}``. Empty when the last check found none.
 UNSUPPORTED_RECORD = Path(".fi") / "unsupported_claims.json"
@@ -98,33 +103,12 @@ RUN_DIFFERENCE_NAME = "difference from the run record"
 FEWER_RUNS_NAME = "fewer runs than the plan asked for"
 #: The name of the item the paper must place when FI ran the plan's settings only up to the time limit.
 CUT_SHORT_NAME = "study cut at the time limit"
-_KIND_WORDS = {
-    NOT_DONE: "a part of the topic the study did not do",
-    LEFT_OUT: "a quantity left out of the results because a test showed the code computes it wrongly",
-    NOT_COMPUTED: "a quantity the plan asks for that the code does not compute",
-    PRECISION: "a precision target that was not reached",
-    SECOND_VERSION: "a key function whose second, independently written version still gives different results",
-    UNTESTED: "an equation not tested against a worked example before the run",
-    CODE_FINDING: "an open problem in the code that can change a reported result",
-    FAILED_TRIALS: "trials that failed",
-    SETTING_LEFT_OUT: "a setting left out of the results because most of its trials failed",
-    CALIBRATION: "reported intervals or standard errors that were not measured against the true values, or are off",
-    TRIALS_UNCHECKED: "trials FI did not run itself, so it did not check them",
-    UNDEFINED: "a value of the plan that has no number in some trials of a setting",
-    FEWER_RUNS: "a part of the plan not fully done, to fit the time allowed",
-    CUT_SHORT: "a study run only up to the time limit: part of the plan's settings or evaluations did not run",
-    RUN_DIFFERENCE: "a difference between what the analysis reports and FI's record of the trials that ran",
-    PAGE_LIMIT: "that the paper is longer than the topic's page limit",
-    SHARED_SEEDS: "that trial t has the same random seed in every setting, so the settings' results are not independent",
-    UNSUPPORTED_CLAIMS: "sentences of the paper that were not found supported by the run's results or a cited source",
-    UNRESOLVED_REVIEW: "a reason the reviewer gave for a revision again after the paper was written again for it",
-}
 _ID_PREFIX = {NOT_DONE: "topic", LEFT_OUT: "left-out", NOT_COMPUTED: "not-computed", PRECISION: "precision",
               SECOND_VERSION: "second-version", UNTESTED: "equation", CODE_FINDING: "finding", FAILED_TRIALS: "failed-trials",
               SETTING_LEFT_OUT: "setting-left-out", CALIBRATION: "calibration", TRIALS_UNCHECKED: "trials-unchecked",
               UNDEFINED: "undefined",
               FEWER_RUNS: "fewer", CUT_SHORT: "cut-short", RUN_DIFFERENCE: "difference", PAGE_LIMIT: "pages", SHARED_SEEDS: "shared-seeds",
-              UNSUPPORTED_CLAIMS: "unsupported", UNRESOLVED_REVIEW: "review"}
+              UNSUPPORTED_CLAIMS: "unsupported", UNRESOLVED_REVIEW: "review", LAST_REVIEW: "last-review"}
 #: More settings left out than this are placed as one item.
 _MAX_SETTING_ITEMS = 6
 
@@ -424,6 +408,9 @@ def required_items(quest_root: Path | str) -> list[Item]:
     said = unsupported_claims_text(_read(root, str(UNSUPPORTED_RECORD)))
     if said:
         add(UNSUPPORTED_CLAIMS, "unsupported sentences", _sentence(said), key="claims")
+    points = _disclosure.last_review_points(root)
+    if points:
+        add(LAST_REVIEW, "final review points", _disclosure.last_review_sentence(points, _MAX_LAST_REVIEW_LISTED), key="points")
     return items
 
 
@@ -458,6 +445,7 @@ def shared_seeds_text(root: Path) -> str:
 
 
 _MAX_UNSUPPORTED_LISTED = 8
+_MAX_LAST_REVIEW_LISTED = 8
 _MAX_UNSUPPORTED_CHARS = 300
 _CITE_MARK = re.compile(r"\s*\[(?:W?\d+(?:\s*[,;–-]\s*W?\d+)*)\]")
 
@@ -502,17 +490,6 @@ def write_unsupported_record(quest_root: Path | str, claims: list[dict[str, Any]
     except OSError:
         return False
     return True
-
-
-def drop_item(markdown: str, kind: str) -> str:
-    """``markdown`` without the sentence FI placed for an item of ``kind`` (its marked span, and the list line or the
-    placeholder around it): used when the record that required it is empty now, so it does not stay in the paper (or turn
-    into "not recorded")."""
-    ident = re.escape(f"{_ID_PREFIX[kind]}-")
-    mark = rf"<!-- fi:fact-{re.escape(_ITEM_KEY)}{ident}[\w-]* -->.*?<!-- /fi:fact-{re.escape(_ITEM_KEY)}{ident}[\w-]* -->"
-    line = rf"^[ \t]*[-*][ \t]+(?:{mark}|\{{\{{not_done:{ident}[\w-]*\}}\}})[ \t]*\n?"
-    text = re.sub(line, "", markdown or "", flags=re.S | re.M)
-    return re.sub(mark, "", text, flags=re.S)
 
 
 _MAX_DIFFERENCE_CHARS = 500
@@ -1151,6 +1128,14 @@ def _verdict_sentence(met: str, limit: float, subject: str) -> str:
     return f"Whether {subject[:1].lower()}{subject[1:]} keeps to the topic's limit of {said} is not shown."
 
 
+def limitations_text(quest_root: Path | str) -> str:
+    """The Limitations section ``{{limitations}}`` stands for, written from FI's records: one bullet for each thing the study
+    did not do (:func:`required_items`; an open problem in the code is in QUALITY.md only), or one sentence that FI recorded
+    none. Never empty: a paper always has a Limitations section, and it is FI's."""
+    sentences = [i.sentence for i in required_items(quest_root) if i.kind != CODE_FINDING]
+    return "\n".join(f"- {s}" for s in sentences) if sentences else NO_LIMITS_SENTENCE
+
+
 def run_facts_text(quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) -> str:
     """The paragraph ``{{run_facts}}`` stands for, composed from FI's records: how many settings and trials, the seed, the
     run time, and the topic's time limit with the verdict, each only when FI holds it. ``""`` when it holds none."""
@@ -1193,9 +1178,6 @@ _LATEX_BEFORE = re.compile(r"(?:\\[A-Za-z]+\*?\s*|[}^_])$")
 #: ...but a name that is FI's own right after ``}``, ``^`` or ``_`` (``{{seed}}`` after ``snake_case`` or after another
 #: placeholder) is still FI's: only a command makes it LaTeX there.
 _LATEX_COMMAND_BEFORE = re.compile(r"\\[A-Za-z]+\*?\s*$")
-#: The sections that list sources: a placeholder there is not where a reader looks for the run's facts.
-_SOURCES = re.compile(r"^#{1,6}[ \t]+" + _disclosure._SECTION_NUMBER
-                      + r"(?:references|bibliography|further[ \t]+reading|works[ \t]+cited|sources)\b", re.I)
 
 
 def _figure_key(key: str) -> str | None:
@@ -1262,6 +1244,8 @@ def block_text(quest_root: Path | str, name: str, *, topic: str = "", fallback_s
     FI's records, :func:`run_facts_text`); ``""`` when there is none."""
     if name == "run_facts":
         return run_facts_text(quest_root, topic=topic, fallback_s=fallback_s)
+    if name == "limitations":
+        return limitations_text(quest_root)
     rel = _BLOCK_FILES.get(name)
     if rel is None:
         return ""
@@ -1271,6 +1255,63 @@ def block_text(quest_root: Path | str, name: str, *, topic: str = "", fallback_s
         return ""
 
 
+#: A heading with the word Limitations in it (any level, any numbering, any case).
+_LIMITATIONS_HEADING = re.compile(r"^#{1,6}[ \t]+" + _disclosure._SECTION_NUMBER + r".*\blimitations?\b", re.I)
+_CONCLUSION_HEADING = re.compile(r"^#{1,6}[ \t]+" + _disclosure._SECTION_NUMBER + r"conclusions?\b", re.I)
+
+
+def _without_limitations_block(text: str) -> str:
+    """``text`` without FI's Limitations block as it stands in it: the marked block, or the placeholder on its own."""
+    text = _MARK.sub(lambda m: "" if m.group(1) == "limitations" else m.group(0), text)
+    hidden = _hidden_spans(text)
+    cuts = [m.span() for m in _PLACEHOLDER.finditer(text)
+            if _norm_name(m.group(1)) == "limitations" and m.group(2) is None and not _inside(m.start(), hidden)]
+    for a, b in reversed(cuts):
+        text = text[:a] + text[b:]
+    return text
+
+
+def _place_limitations(text: str) -> str:
+    """``text`` with the placeholder ``{{limitations}}`` as the whole body of the paper's Limitations section: under the
+    last heading with the word Limitations in it (the shallowest such level; the body runs to the next heading of that
+    level or a higher one, a rule line before the references stays), the heading itself kept. A paper with no such heading
+    gets ``## Limitations`` before its Conclusion, else before its References, else at the end. Whatever FI's block was
+    in the draft before (marked, or the placeholder, or the writer's own text under that heading) is replaced, so the
+    paper has one Limitations section and it is FI's."""
+    text = _without_limitations_block(text)
+    lines = text.split("\n")
+    heads = _disclosure._headings(lines, 0)
+    title = next((i for i, lv, _t in heads if lv == 1), None)
+    own = [h for h in heads if h[0] != title and _LIMITATIONS_HEADING.match(h[2])]
+    lead: list[str] = []
+    if own:
+        top = min(h[1] for h in own)
+        at, lv, _t = [h for h in own if h[1] == top][-1]
+        start, end = at + 1, _disclosure._section_end(heads, at, lv, len(lines))
+    else:
+        levels = [lv for i, lv, _t in heads if i != title]
+        level = min(levels) if levels else 2
+        top_heads = [h for h in heads if h[0] != title and h[1] <= level]
+        anchor = (next((h for h in top_heads if _CONCLUSION_HEADING.match(h[2])), None)
+                  or next((h for h in top_heads if _disclosure._BEFORE_END.match(h[2])), None))
+        start = end = anchor[0] if anchor else len(lines)
+        lead = ["#" * level + " Limitations", ""]
+    stop = end
+    if stop < len(lines):
+        while stop > (start if own else 0) and not lines[stop - 1].strip():
+            stop -= 1
+        if stop > (start if own else 0) and lines[stop - 1].strip() == "---":  # the engine's references follow a rule line
+            stop -= 1
+    head = lines[:start if own else stop]
+    while head and not head[-1].strip():
+        head.pop()
+    tail = lines[stop:]
+    while tail and not tail[0].strip():
+        tail.pop(0)
+    return "\n".join([*head, *([""] if head else []), *lead, "{{limitations}}", *([""] if tail else []), *tail]) + (
+        "" if tail else "\n")
+
+
 def place_blocks(markdown: str, quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) -> str:
     """``markdown`` with the placeholder of each of FI's blocks that has text and that the writer did not place put in
     on a line of its own. The tables go before the discussion that follows the results (else the conclusions, the
@@ -1278,9 +1319,13 @@ def place_blocks(markdown: str, quest_root: Path | str, *, topic: str = "", fall
     Results, else after the abstract, else at the top). A block already in the draft, as a placeholder or filled in
     (the review sends FI's own text back), is not put in twice; a line that opens like FI's run paragraph
     (``**Run.** ``) but has lost its markers is replaced by the placeholder, so the paragraph is always FI's current
-    one. :func:`render` then fills it."""
+    one. The Limitations block is always put in, and it replaces the body of the writer's own Limitations section
+    (:func:`_place_limitations`). :func:`render` then fills it."""
     text = markdown or ""
     for name in BLOCK_NAMES:
+        if name == "limitations":
+            text = _place_limitations(text)
+            continue
         if not block_text(quest_root, name, topic=topic, fallback_s=fallback_s):
             continue
         if any(_norm_name(m.group(1)) == name for m in _PLACEHOLDER.finditer(text)) or any(
@@ -1317,61 +1362,6 @@ def write_page_record(quest_root: Path | str, pages: int, limit: int, *, final: 
                         encoding="utf-8")
     except OSError:
         pass
-
-
-def _item_placed(markdown: str, item: Item) -> bool:
-    """Whether the paper holds ``item`` where a reader sees it: its filled sentence (not in the title, a comment, code,
-    math or the list of sources) or the writer's placeholder for it, not yet filled."""
-    t0, t1 = _title_span(markdown)
-    if any(not t0 <= p < t1 for p in _placed(markdown, _ITEM_KEY + item.id)):
-        return True
-    away = _hidden_spans(markdown) + _sources_spans(markdown)
-    return any(
-        _is_item(_norm_name(m.group(1))) or m.group(2) is not None and _norm_name(m.group(1)).startswith("not")
-        for m in _PLACEHOLDER.finditer(markdown)
-        if (m.group(2) or "").strip().lower() == item.id.lower() and not _inside(m.start(), away)
-        and not t0 <= m.start() < t1)
-
-
-def place_items(markdown: str, quest_root: Path | str, heading: str = "Limitations") -> str:
-    """``markdown`` with the placeholder of each item the study must state (:func:`required_items`) that the paper does
-    not hold put in by FI, as a list at the end of the paper's Limitations section; a paper with no such section gets
-    one of its own, before the sources. An item the writer placed itself stays where it is, wherever that is: FI places
-    what is missing instead of checking where the writer put it. :func:`render` then fills it."""
-    text = markdown or ""
-    # A problem the second reading of the code left open is the writer's to state or not (the check of the draft asks for
-    # it); FI does not put it in the paper itself: left alone it is in QUALITY.md only (core/code_review.py findings_block).
-    todo = [i for i in required_items(quest_root) if i.kind != CODE_FINDING and not _item_placed(text, i)]
-    if not todo:
-        return text
-    lines = text.split("\n")
-    heads = _disclosure._headings(lines, 0)
-    title = next((i for i, lv, _t in heads if lv == 1), None)
-    levels = [lv for i, lv, _t in heads if i != title]
-    level = min(levels) if levels else 2
-    own = [h for h in heads if h[0] != title and _disclosure._LIMITS.match(h[2])]
-    block = [f"- {{{{not_done:{i.id}}}}}" for i in todo]
-    if own:
-        at, lv, _t = own[-1]
-        place = _disclosure._section_end(heads, at, lv, len(lines))
-        lead: list[str] = []
-    else:
-        refs = next((h for h in heads if h[0] != title and h[1] <= level and _disclosure._BEFORE_END.match(h[2])), None)
-        place = refs[0] if refs else len(lines)
-        lead = ["#" * level + f" {heading}", ""]
-    if place < len(lines):
-        while place > 0 and not lines[place - 1].strip():
-            place -= 1
-        if place > 0 and lines[place - 1].strip() == "---":  # the engine's references follow a rule line
-            place -= 1
-    head = lines[:place]
-    while head and not head[-1].strip():
-        head.pop()
-    tail = lines[place:]
-    while tail and not tail[0].strip():
-        tail.pop(0)
-    return "\n".join([*head, *([""] if head else []), *lead, *block, *([""] if tail else []), *tail]) + (
-        "" if tail else "\n")
 
 
 def without_blocks(markdown: str) -> str:
@@ -1483,7 +1473,7 @@ def unfilled_in(markdown: str) -> list[str]:
 
 def writer_section(quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) -> str:
     """The record section of the write prompt: the paragraph of the run's facts FI puts into the Methods (what it reads
-    now), and the ``not_done`` placeholders the Limitations must hold. ``""`` when FI holds nothing."""
+    now), and the Limitations section FI writes (what it reads now). ``""`` when FI holds nothing."""
     root = Path(quest_root)
     run_text = run_facts_text(root, topic=topic, fallback_s=fallback_s)
     items = required_items(root)
@@ -1496,7 +1486,8 @@ def writer_section(quest_root: Path | str, *, topic: str = "", fallback_s: Any =
     over = estimate.get("over_topic_limit") if isinstance(estimate, dict) else None
     over_note = _one(over["note"]) if isinstance(over, dict) and isinstance(over.get("note"), str) and over["note"].strip() else ""
     figure_known = _figure_facts(root)
-    if not run_text and not items and not reduced_note and not over_note and not has_table and not figure_known:
+    real = [i for i in items if i.kind != CODE_FINDING]
+    if not run_text and not real and not reduced_note and not over_note and not has_table and not figure_known:
         return ""
     lines.append("FI'S RECORD OF THIS RUN. The facts below come from FI's own records. FI fills them in; do not type "
                  "them yourself.")
@@ -1518,64 +1509,16 @@ def writer_section(quest_root: Path | str, *, topic: str = "", fallback_s: Any =
                      "the tables, but do not copy them into a table of your own.")
     if over_note:
         lines.append(f"Time limit: {over_note} Say this in the paper.")
-    if items:
-        lines.append("FI adds each of these to the paper's Limitations from its record, so you need not write them. If you "
-                     "want one in a particular place (the Limitations, or a sentence of your own that leads to it), put its "
-                     "placeholder there, on its own, as a sentence; FI replaces it with the plain sentence shown. Do not "
-                     "change it or word it differently. A paper that leaves out a part of the topic without saying so is "
-                     "not trusted:")
-        lines += [f"- {{{{not_done:{i.id}}}}} ({_KIND_WORDS[i.kind]}): \"{i.sentence}\"" for i in items]
+    lines.append("Limitations: FI writes the paper's Limitations section itself, from its records, and puts it into the "
+                 "paper when the paper is saved. It reads now:")
+    lines += [f"- {i.sentence}" for i in real] or [NO_LIMITS_SENTENCE]
+    lines.append("Do not write a Limitations section of your own or restate these points; where your text needs them, say "
+                 "\"see Limitations\".")
     lines.append("A placeholder FI cannot fill is printed as \"not recorded\", so use only the ones listed here.")
     return "\n".join(lines)
 
 
 # ---- the check ------------------------------------------------------------------------------------------------------
-
-
-def _title_span(markdown: str) -> tuple[int, int]:
-    m = re.search(r"^#[ \t]+[^\n]*$", markdown, re.M)
-    return (m.start(), m.end()) if m else (0, 0)
-
-
-def _limitations_spans(markdown: str) -> list[tuple[int, int]]:
-    """The character spans of the paper's Limitations sections (a heading that names limitations or threats to validity,
-    to the next heading of its level or higher)."""
-    lines = markdown.split("\n")
-    offsets, pos = [], 0
-    for line in lines:
-        offsets.append(pos)
-        pos += len(line) + 1
-    heads = _disclosure._headings(lines, 0)
-    title = next((i for i, lv, _t in heads if lv == 1), None)
-    spans = []
-    for i, lv, text in heads:
-        if i != title and _disclosure._LIMITS.match(text):
-            end = _disclosure._section_end(heads, i, lv, len(lines))
-            spans.append((offsets[i], offsets[end] if end < len(lines) else len(markdown)))
-    return spans
-
-
-def _sources_spans(markdown: str) -> list[tuple[int, int]]:
-    """The character spans of the sections that list sources (References, Bibliography, Further reading)."""
-    lines = markdown.split("\n")
-    offsets, pos = [], 0
-    for line in lines:
-        offsets.append(pos)
-        pos += len(line) + 1
-    heads = _disclosure._headings(lines, 0)
-    spans = []
-    for i, lv, text in heads:
-        if _SOURCES.match(text):
-            end = _disclosure._section_end(heads, i, lv, len(lines))
-            spans.append((offsets[i], offsets[end] if end < len(lines) else len(markdown)))
-    return spans
-
-
-def _placed(markdown: str, key: str) -> list[int]:
-    """Where FI's value for ``key`` is in text a reader sees: not inside an HTML comment, code or math, and not in the
-    list of sources."""
-    away = _hidden_spans(markdown) + _sources_spans(markdown)
-    return [m.start() for m in _MARK.finditer(markdown) if m.group(1) == key and not _inside(m.start(), away)]
 
 
 def _unknown_hits(markdown: str, quest_root: Path | str) -> list[str]:
@@ -1760,9 +1703,11 @@ def keep_check(quest_root: Path | str, hits: list[str], paper_md: str, *, untrac
     (``not_filled``: ``no_records`` or ``older_paper``). The quality report prints it, so what is still unmet when the rounds are used up is on record."""
     path = Path(quest_root) / RECORD
     try:
-        text = _disclosure.without_block(paper_md)
+        # FI writes the Limitations block itself: an item is missing from the paper only when the block is not in it (an
+        # open problem in the code is never in the block, it is in QUALITY.md only)
+        in_paper = any(m.group(1) == "limitations" for m in _MARK.finditer(paper_md or ""))
         unmet = [{"kind": i.kind, "id": i.id, "name": i.name, "text": i.sentence}
-                 for i in required_items(quest_root) if not _item_placed(text, i)]
+                 for i in required_items(quest_root) if i.kind == CODE_FINDING or not in_paper]
         unfilled = unfilled_in(paper_md)
         if not hits and not unmet and not unfilled and not untraced and not not_filled and not dropped:
             path.unlink(missing_ok=True)
