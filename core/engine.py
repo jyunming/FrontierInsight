@@ -22376,7 +22376,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 self._log.warning("[write] the seed FI gives each trial %s: %s",
                                   "does not reach the simulation" if verdict["verdict"] == _run_facts.DOES_NOT_REACH
                                   else "may not reach the simulation (FI cannot tell)", verdict.get("why"))
-        except Exception as e:  # noqa: BLE001 -- the paper's {{seed}} reads the code again when it is filled
+        except Exception as e:  # noqa: BLE001 -- the paper's run paragraph reads the code again when it is filled
             self._log.warning("[write] the code's seed could not be put on record (%s: %s)", type(e).__name__, str(e)[:200])
         try:
             for note in _run_facts.shared_stream_notes_for(self.quest_root):  # measured from the trials; a note only
@@ -22471,8 +22471,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return
         try:
             before = Path(path).read_text(encoding="utf-8")
-            after = self._render_paper_facts(
-                _paper_facts.place_items(_disclosure.without_block(before), self.quest_root), state)
+            placed = _paper_facts.place_blocks(
+                _disclosure.without_block(before), self.quest_root, topic=str(self.config.topic or ""),
+                fallback_s=(state.get("exec_result") or {}).get("duration_s"))
+            after = self._render_paper_facts(_paper_facts.place_items(placed, self.quest_root), state)
             if before.rstrip() != after.rstrip() and (
                     _disclosure.without_block(before) != before or "{{" in before or "fi:fact-" in before
                     or "fi:fact-" in after or "fi:v " in before or "fi:v " in after):
@@ -22751,7 +22753,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         markdown = self._mark_best_design(state, markdown)
         # FI's tables of every setting (core/results_by_setting.py): where the writer put {{results_table}}, else before
         # the discussion; filled from FI's records with the facts below, so no number of them is typed by a model.
-        markdown = _paper_facts.place_blocks(markdown, self.quest_root)
+        markdown = _paper_facts.place_blocks(
+            markdown, self.quest_root, topic=str(self.config.topic or ""),
+            fallback_s=(state.get("exec_result") or {}).get("duration_s"))
         # A new draft is not yet measured against the page limit: an earlier draft's measurement is not this one's.
         (self.quest_root / _paper_facts.PAGE_RECORD).unlink(missing_ok=True)
         # What the study did not do (core/paper_facts.py): each item the writer did not place is put in the Limitations by FI.

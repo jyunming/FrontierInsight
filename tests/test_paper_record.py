@@ -181,7 +181,7 @@ def test_no_raw_double_braces_reach_the_paper(tmp_path: Path, label: str) -> Non
         name = paper_facts._norm_name(sentence.split("{{")[1].split("}}")[0])
         assert name in paper_facts.unfilled_in(out), "an unknown name is listed in QUALITY.md"
         hits = paper_facts.placement_hits(out, root, topic=topic)
-        assert any(f"{{{{{name}}}}}" in h and "{{run_time}}" in h for h in hits), hits
+        assert any(f"{{{{{name}}}}}" in h for h in hits), hits
     # Re-rendering keeps it the same.
     assert paper_facts.render(out, root, topic=topic).text == out
 
@@ -227,15 +227,16 @@ def test_a_placeholder_in_math_code_or_a_comment_gets_the_plain_value(tmp_path: 
     assert paper_facts.facts(root, topic=topic)[name].text in body
 
 
-# Second review (P2-2): a required placeholder counts only where a reader sees it.
+# Second review (P2-2) asked that a required placeholder count only where a reader sees it. Nothing is required of the
+# writer any more (FI writes the run's facts, tests/test_run_facts_block.py), so a fact placeholder hidden in code or a
+# comment is no fault.
 @pytest.mark.parametrize("where", ["```\n{{seed}} {{run_time}} {{time_limit_met}}\n```",
                                    "<!-- {{seed}} {{run_time}} {{time_limit_met}} -->",
                                    "`{{seed}} {{run_time}} {{time_limit_met}}`"])
-def test_a_required_fact_hidden_in_code_or_a_comment_is_not_placed(tmp_path: Path, where: str) -> None:
+def test_a_fact_placeholder_hidden_in_code_or_a_comment_is_no_fault(tmp_path: Path, where: str) -> None:
     root, topic = _quest(tmp_path, "kinetics_s1")
     out = paper_facts.render(f"# S\n\n## Methods\n{where}\n\n## Limitations\nNone.\n", root, topic=topic).text
-    hits = paper_facts.placement_hits(out, root, topic=topic)
-    assert any("does not state {{run_time}}" in h for h in hits), hits
+    assert paper_facts.placement_hits(out, root, topic=topic) == []
 
 
 def test_a_placeholder_between_two_dollar_amounts_is_prose(tmp_path: Path) -> None:
@@ -245,15 +246,6 @@ def test_a_placeholder_between_two_dollar_amounts_is_prose(tmp_path: Path) -> No
                              "{{run_time}}, {{time_limit_met}} the limit.\n", root, topic=topic).text
     assert "<!-- fi:fact-seed -->" in out
     assert paper_facts.placement_hits(out, root, topic=topic) == []
-
-
-@pytest.mark.parametrize("heading", ["References", "Further reading", "Bibliography"])
-def test_a_required_fact_in_the_source_list_is_not_placed(tmp_path: Path, heading: str) -> None:
-    root, topic = _quest(tmp_path, "kinetics_s1")
-    out = paper_facts.render(f"# S\n\n## Methods\nM.\n\n## {heading}\n{{{{seed}}}} {{{{run_time}}}} "
-                             "{{time_limit_met}}\n", root, topic=topic).text
-    hits = paper_facts.placement_hits(out, root, topic=topic)
-    assert any("does not state {{seed}}" in h for h in hits), hits
 
 
 @pytest.mark.parametrize("lim", ["<!-- {{not_done:topic-temperature}} -->",
@@ -271,15 +263,15 @@ def test_an_item_hidden_in_the_limitations_is_put_in_by_fi(tmp_path: Path, lim: 
 # ---- what the writer is given --------------------------------------------------------------------------------------------
 
 
-def test_the_writer_gets_placeholders_with_their_values_and_one_example(tmp_path: Path) -> None:
+def test_the_writer_gets_the_run_facts_paragraph_and_no_placeholders_for_them(tmp_path: Path) -> None:
     root, topic = _quest(tmp_path, "fdr_e1")
     text = paper_facts.writer_section(root, topic=topic, fallback_s=7.4)
+    assert "20261015, at code/simulate.py:106" in text and "121.3 s" in text
+    assert "Do not state these facts yourself" in text and "the run facts in the Methods" in text
     for name in ("{{seed}}", "{{run_time}}", "{{time_limit}}", "{{time_limit_met}}", "{{trials_per_setting}}",
                  "{{settings}}", "{{trials_failed}}"):
-        assert name in text, name
-    assert "20261015, at code/simulate.py:106" in text and "121.3 s" in text and '"over"' in text
-    assert "Example (in the Methods)" in text and "Do not type them" in text
-    assert "Required: the paper must hold {{seed}}, {{run_time}}, {{time_limit_met}}" in text
+        assert name not in text, name
+    assert "Required" not in text and "Example (in the Methods)" not in text
     assert "reviewer" not in text.lower() and "another model" not in text.lower()
 
 
@@ -383,7 +375,7 @@ def test_a_required_fact_must_be_placed_and_fi_places_the_items_itself(tmp_path:
     assert out.count("## Limitations") == 1 and out.index("## Discussion") < out.index("## Limitations") < out.index("## References")
     assert paper_facts.place_items(out, root) == out  # a second pass adds nothing
     no_time = LIMITS_OK.replace("{{run_time}}", "223 s")
-    assert any("does not state {{run_time}}" in h for h in hits(no_time))
+    assert hits(no_time) == [], "a run time typed in place of the placeholder is the typed-number check's, not this one's"
 
 
 # ---- (b) a run time typed outside a placeholder ---------------------------------------------------------------------------
@@ -508,7 +500,7 @@ def test_the_paper_gets_none_of_the_three_blocks_and_holds_the_filled_values(tmp
     plain_paper = paper_facts.without_marks(paper)
     assert "took 121.3 s" in plain_paper and "at least 78.9 s), over the topic's limit of 60 s" in plain_paper
     assert "a seed fixed in the code (20261015, at code/simulate.py:106)" in paper
-    assert any("FI'S RECORD OF THIS RUN" in s and "{{seed}}" in s and "121.3 s" in s for s in seen)
+    assert any("FI'S RECORD OF THIS RUN" in s and "Run facts:" in s and "121.3 s" in s for s in seen)
     assert run_facts.read(root)["seed"]["verdict"] == "does_not_reach", "the write step keeps the seed verdict on record"
 
 
@@ -525,16 +517,16 @@ def test_the_review_adds_the_records_check_and_rewrites_the_text(tmp_path: Path,
         return json.dumps({"verdict": "accept", "score": 5, "suggestions": [], "must_flag_hits": []})
 
     eng._chat = accepting  # type: ignore[assignment]
-    # The sentence shape the writer is asked for, with the false values typed instead of the placeholders.
+    # A name that is none of FI's placeholders; the old single placeholders ({{seed}}) are still filled.
     paper = root / "paper" / "paper.md"
     paper.parent.mkdir(exist_ok=True)
-    paper.write_text("# T\n\n## Methods\nRandom numbers were drawn from {{seed}}; the run had 27 settings with 4,096 trials "
-                     "per setting and took 7.4 s, within the 60 s limit.\n", encoding="utf-8")
+    paper.write_text("# T\n\n## Methods\nRandom numbers were drawn from {{seed}}; the run took {{bogus_time}}.\n",
+                     encoding="utf-8")
     patch = asyncio.run(eng._node_review({  # type: ignore[arg-type]
         "topic": topic, "iteration": 0, "review": {}, "paper_md": str(paper),
         "exec_result": {"returncode": 0, "duration_s": 7.4}}))
     hits = [h for h in patch["review"]["must_flag_hits"] if str(h).startswith("paper_record_mismatch")]
-    assert hits and any("{{run_time}}" in h for h in hits), hits
+    assert hits and any("{{bogus_time}}" in h for h in hits), hits
     assert patch["iteration"] == 1
     route = eng._route_after_review({"review": patch["review"], "iteration": 1, "code": "x"})  # type: ignore[arg-type]
     assert route == "rewrite"
@@ -544,7 +536,7 @@ def test_the_review_adds_the_records_check_and_rewrites_the_text(tmp_path: Path,
 def test_a_failed_records_check_never_goes_to_the_design_or_a_stop(tmp_path: Path) -> None:
     root, topic = _quest(tmp_path, "fdr_e1")
     eng = _engine(root, max_iterations=3)
-    paper = "# P\n\n## Methods\nThe experiment ran for 7.4 s.\n"
+    paper = paper_facts.render("# P\n\n## Methods\nThe experiment ran for {{bogus_time}}.\n", root, topic=topic).text
     hits = eng._paper_record_hits(paper, {"iteration": 0, "exec_result": {"duration_s": 7.4}})
     assert hits and all(h.startswith("paper_record_mismatch:") for h in hits)
     review = {"verdict": "accept", "must_flag_hits": hits}
@@ -553,7 +545,7 @@ def test_a_failed_records_check_never_goes_to_the_design_or_a_stop(tmp_path: Pat
         assert eng._route_after_review(state) == "rewrite"  # type: ignore[arg-type]
     assert eng._route_after_review({"review": review, "iteration": 3}) in ("done", "human_feedback")  # type: ignore[arg-type]
     kept = paper_facts.kept_check(root)
-    assert kept["hits"] and any("{{run_time}}" in h for h in kept["hits"])
+    assert kept["hits"] and any("{{bogus_time}}" in h for h in kept["hits"])
 
 
 def test_a_resume_at_the_review_takes_old_blocks_out_and_fills_placeholders(tmp_path: Path) -> None:
@@ -582,10 +574,10 @@ def test_the_passage_editor_gets_placeholders_and_fi_fills_them_again(tmp_path: 
                                                                    replace="The grid is coarse in m.")]).text
     again = paper_facts.render(edited, root, topic=topic).text
     assert "121.3 s" in again and "{{" not in again and "coarse in m." in again
-    # An edit that types the value over the placeholder is caught by the placement check.
+    # A value typed over the placeholder is no longer the placement check's (nothing is required of the writer); the
+    # typed-number check reads it, and the paper keeps no raw placeholder.
     typed = given.replace("{{run_time}}", "7.4 s")
-    hits = paper_facts.check(paper_facts.render(typed, root, topic=topic).text, root, topic=topic)
-    assert any("{{run_time}}" in h for h in hits)
+    assert "{{" not in paper_facts.render(typed, root, topic=topic).text
 
 
 def test_the_page_trim_never_offers_a_sentence_holding_fi_s_value(tmp_path: Path) -> None:

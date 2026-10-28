@@ -8,10 +8,13 @@ state the facts in its own words and parsed the prose to check them; any sentenc
 "per setting" or a "failed" elsewhere in the sentence switched the check off), and real sentences about simulated time were
 flagged. So the writer no longer types these facts at all:
 
-* **Placeholders.** The writer writes the sentences and puts a placeholder where a fact goes (:data:`FACT_NAMES`):
-  ``{{seed}}`` (the seed the code actually used, from :func:`core.run_facts.seed_verdict`), ``{{run_time}}`` (the measured
-  wall time of the run whose trials are reported), ``{{time_limit}}`` and ``{{time_limit_met}}`` ("within" / "over"),
-  ``{{trials_per_setting}}``, ``{{settings}}`` and ``{{trials_failed}}``. Each thing the study did not do is placed with
+* **The run's facts** are one paragraph FI writes and places itself, ``{{run_facts}}`` (:func:`run_facts_text`): the
+  number of settings and trials, the seed the code actually used (:func:`core.run_facts.seed_verdict`), the measured
+  run time and the topic's time limit with the verdict. FI puts it at the end of the Methods (:func:`place_blocks`); the
+  writer does not state these facts. The single placeholders of older drafts (:data:`FACT_NAMES`: ``{{seed}}``,
+  ``{{run_time}}``, ``{{time_limit}}``, ``{{time_limit_met}}``, ``{{trials_per_setting}}``, ``{{settings}}``,
+  ``{{trials_failed}}``) are still filled, but no longer offered or asked for.
+* **Placeholders.** Each thing the study did not do is placed with
   ``{{not_done:<id>}}`` (:func:`required_items`), which FI turns into one plain sentence from its record.
 * **Blocks.** ``{{results_table}}`` (:data:`BLOCK_NAMES`) is a whole block FI writes: its tables of every setting with
   each value's interval and reference (core/results_by_setting.py, saved in ``.fi/results_table.md``). The writer puts
@@ -27,13 +30,10 @@ flagged. So the writer no longer types these facts at all:
   with none gets one before the sources) itself (:func:`place_items`); where the writer put one is left as it is. The
   paper's page count against the topic's limit is one of the items: FI states it from its own measurement of the
   finished paper (:data:`PAGE_RECORD`, written by the review), never from the writer.
-* **The check** (:func:`check`, no model) is then simple: every required fact placeholder is in the paper
-  (:func:`placement_hits`); and a run time typed as a number outside a placeholder that
-  disagrees with the measurement, or a claim that the run kept to the topic's limit when it did not, is a mismatch to
-  rewrite (:func:`stated_hits`). That second part is kept narrow: simulated or physical time, a time per trial or per
-  setting, the analysis's time and another run's are left alone, and anything it is unsure of is left to the claim check,
-  which receives FI's record. A seed typed outside ``{{seed}}`` is not checked here; the claim check reads FI's record instead (the
-  seed in it comes from :func:`core.run_facts.seed_verdict`).
+* **The check** (:func:`check`, no model) is then simple: no name between double braces is unknown to FI
+  (:func:`placement_hits`); a run time typed as a number or a claim that the run kept to the topic's limit when it did
+  not is left to the typed-number rule and the claim check, which receive FI's record (the seed in it comes from
+  :func:`core.run_facts.seed_verdict`).
   A failure is a must-fix hit named :data:`HIT`; it sends the paper back to be written again (the text route; never the
   design, never a stop). What is still unmet when the review rounds are used up is kept in ``.fi/paper_record_check.json``,
   which the quality report prints, and is said in the run log.
@@ -60,23 +60,12 @@ HIT = "paper_record_mismatch"
 RECORD = Path(".fi") / "paper_record_check.json"
 NOT_RECORDED = "not recorded"
 
-#: The run's facts a placeholder can name, with what each is, for the writer.
+#: The single placeholders of older drafts: still filled, no longer offered (the paragraph ``{{run_facts}}`` replaces them).
 FACT_NAMES = ("seed", "run_time", "time_limit", "time_limit_met", "trials_per_setting", "settings", "trials_failed")
-_FACT_WORDS = {
-    "seed": "the seed the code used to draw the trials' random numbers",
-    "run_time": "the measured wall time of the experiment (the run whose trials are reported)",
-    "time_limit": "the run-time limit the topic sets",
-    "time_limit_met": ("\"within\", \"over\" or \"not shown to be within or over\" (the settings ran at the same time, or FI "
-                       "does not know that they did not, and the least a one-after-another run takes is at or under the "
-                       "limit or not known while the most it takes is over it or not known): whether the run kept to the "
-                       "topic's limit"),
-    "trials_per_setting": "how many trials each setting ran",
-    "settings": "how many settings (combinations of the plan's parameters) were run",
-    "trials_failed": "how many trials failed",
-}
 #: FI's blocks a placeholder can name: a whole block of the paper FI writes from its records, on a line of its own.
 #: Not a fact: its numbers are accounted for setting by setting (core/results_by_setting.py), never as FI's record.
-BLOCK_NAMES = ("results_table",)
+#: ``run_facts`` has no file: its paragraph is composed from :func:`facts` (:func:`run_facts_text`).
+BLOCK_NAMES = ("results_table", "run_facts")
 _BLOCK_FILES = {"results_table": Path(".fi") / "results_table.md"}  # = core.results_by_setting.PAPER_BLOCK
 #: ``{{figure:<file stem>:layout}}`` and ``{{figure:<file stem>:lines}}``: what a saved figure draws, from the recorder's
 #: files (:mod:`core.figure_facts`), not from the writer. The marker key is ``figure-<kind>-<stem>``.
@@ -157,11 +146,10 @@ class Item:
 
 @dataclass(frozen=True)
 class Fact:
-    """One fact of the run: ``text`` is what FI puts where ``{{name}}`` is; ``required`` when the paper must state it."""
+    """One fact of the run: ``text`` is what FI puts where ``{{name}}`` is."""
 
     name: str
     text: str
-    required: bool = False
 
 
 @dataclass(frozen=True)
@@ -1008,14 +996,30 @@ def _out_of_time(root: Path) -> int:
     return sum(int(r.get("trials") or 0) for r in rows if isinstance(r, dict))
 
 
+def _limit_and_met(root: Path, topic: str, wall: float | None, least: float | None,
+                   reader: dict[str, Any] | None) -> tuple[float | None, str]:
+    """``(the topic's run-time limit, whether the run kept to it)``. The delivered code runs the settings one after
+    another: when FI ran them at the same time, that run's time (a lower bound) is judged, and "within" is said only when
+    no lower bound is in question. ``""`` when FI cannot say."""
+    limit = _disclosure.topic_limit(root, topic)
+    if limit is None:
+        return None, ""
+    if reader is not None:
+        return limit, _run_facts.reader_verdict(reader, limit)  # the same verdict the run record gives
+    if wall is not None:
+        return limit, "within" if wall <= limit else "over"
+    return limit, "over" if least is not None and least > limit else ""
+
+
 def facts(quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) -> dict[str, Fact]:
-    """The run's facts FI holds, by placeholder name (a fact FI does not hold is not in it). ``required`` marks the ones
-    the paper must state: the seed, the run time, and whether the run kept to the topic's limit when it sets one."""
+    """The run's facts FI holds, by placeholder name (a fact FI does not hold is not in it). The paper gets them as one
+    paragraph FI writes itself (:func:`run_facts_text`); these are what an older draft's ``{{seed}}`` and the like are
+    filled with."""
     root = Path(quest_root)
     out: dict[str, Fact] = {}
     seed = _seed_text(root)
     if seed:
-        out["seed"] = Fact("seed", seed, required=True)
+        out["seed"] = Fact("seed", seed)
     wall, least = measured_run_time(root, fallback_s)
     reader_known = _run_facts.reader_run(root)
     stage, others = _run_facts.run_stage(root)
@@ -1032,29 +1036,140 @@ def facts(quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) ->
             reader = reader_known
             said += (f", {_run_facts.reader_clause(reader)} (run one after another, as the delivered "
                      f"code does, the settings take {_run_facts.reader_words(reader, _plain)})")
-        out["run_time"] = Fact("run_time", said, required=True)
+        out["run_time"] = Fact("run_time", said)
     elif least is not None:
         what = ("the settings run, the search and its check at finer settings; FI did not time the rest"
                 if _search_seconds(root) else "the trials alone; FI did not time the whole run")
-        out["run_time"] = Fact("run_time", f"at least {_plain(least)} ({what})", required=True)
-    limit = _disclosure.topic_limit(root, topic)
+        out["run_time"] = Fact("run_time", f"at least {_plain(least)} ({what})")
+    limit, met = _limit_and_met(root, topic, wall, least, reader_known)
     if limit is not None:
         out["time_limit"] = Fact("time_limit", _plain(limit))
-        # The delivered code runs the settings one after another: when FI ran them at the same time, that time (a lower
-        # bound) is judged, and "within" is said only when no lower bound is in question.
-        if reader_known is not None:
-            met = _run_facts.reader_verdict(reader_known, limit)  # the same verdict the run record gives
-        elif wall is not None:
-            met = "within" if wall <= limit else "over"
-        else:
-            met = "over" if least is not None and least > limit else ""
         if met:
-            out["time_limit_met"] = Fact("time_limit_met", met, required=True)
+            out["time_limit_met"] = Fact("time_limit_met", met)
     each, settings, failed = _trial_counts(root)
     for name, value in (("trials_per_setting", each), ("settings", settings), ("trials_failed", failed)):
         if value:
             out[name] = Fact(name, value)
     return out
+
+
+# ---- the paragraph of the run's facts ---------------------------------------------------------------------------------
+
+
+def _plural(n: str, word: str) -> str:
+    """``n`` (a formatted count) with ``word`` in the right number: ``1 setting``, ``3 settings``."""
+    return f"{n} {word}{'' if n == '1' else 's'}"
+
+
+def _counts_sentences(root: Path) -> list[str]:
+    each, settings, failed = _trial_counts(root)
+    out: list[str] = []
+    if settings and each:
+        out.append(f"The study ran {_plural(settings, 'setting')}, {_plural(each, 'trial')} in each.")
+    elif settings:
+        out.append(f"The study ran {_plural(settings, 'setting')}.")
+    elif each:
+        out.append(f"Each setting ran {_plural(each, 'trial')}.")
+    late = _out_of_time(root)
+    cut = f"{late:,} {'was' if late == 1 else 'were'} cut off by the time limit" if late else ""
+    if failed:
+        said = "No trial failed" if failed == "0" else f"{_plural(failed, 'trial')} failed"
+        out.append(f"{said}{'; ' + cut if cut else ''}.")
+    return out
+
+
+def _cells_run(root: Path) -> str:
+    """How many settings FI's run record counts (``trials_run.cells``), else ``""``."""
+    run = _run_facts.read(root).get("trials_run")
+    n = run.get("cells") if isinstance(run, dict) else None
+    return f"{n:,}" if isinstance(n, int) and not isinstance(n, bool) and n > 0 else ""
+
+
+def _delivered_sentence(reader: dict[str, Any]) -> str:
+    """What a run of the delivered code, which runs the settings one after another, takes by FI's measurements."""
+    least, most, at_once = reader["least"], reader["most"], reader["at_once"]
+    plain = _disclosure._plain_seconds
+    together = (f"while {at_once} ran at once" if at_once else "while the settings ran at the same time")
+    if least is not None and most is not None and most > least:
+        said = f"at least {plain(least)} and at most {plain(most)} (each setting's time {together}, added up)"
+    elif most is not None and least is None:
+        said = f"at most {plain(most)} (each setting's time {together}, added up)"
+    else:  # the trials' own time is a true lower bound whatever the timing noise of the other
+        said = f"at least {plain(least)}"
+    return f"FI did not time the delivered code, which runs the settings one after another: by FI's measurements such a run takes {said}."
+
+
+def _run_time_sentences(root: Path, wall: float | None, least: float | None,
+                        reader: dict[str, Any] | None, settings: str) -> list[str]:
+    """The run time as whole short sentences, from the same records as the ``{{run_time}}`` fact."""
+    stage, others = _run_facts.run_stage(root)
+    plain = _disclosure._plain_seconds
+    if wall is None:
+        if least is None:
+            return []
+        if _search_seconds(root):
+            return [f"The settings run, the search and its check at finer settings took at least {_plain(least)}.",
+                    "FI did not time the rest."]
+        return [f"The trials alone took at least {_plain(least)}.", "FI did not time the whole run."]
+    took = {"confirm": "the confirming run, whose results are reported, took",
+            "explore": "the exploring run, whose results are reported, took"}.get(stage or "", "the run took")
+    n = settings or _cells_run(root)
+    sets = f"the {_plural(n, 'setting')}" if n else "the settings"
+    if reader is None:
+        lead = f"{took[:1].upper()}{took[1:]} {_plain(wall)}."
+    elif reader["at_once"] == 1:
+        lead = f"FI ran {sets} one at a time; {took} {_plain(wall)}."
+    elif reader["at_once"] is not None:
+        lead = f"FI ran {sets} {reader['at_once']} at a time; {took} {_plain(wall)}."
+    elif reader["overlap"]:
+        lead = f"FI ran several of {sets} at the same time (it did not count how many); {took} {_plain(wall)}."
+    else:
+        lead = f"FI did not record whether {sets} ran at the same time; {took} {_plain(wall)}."
+    out = [lead]
+    if stage == "confirm":
+        explore = (others.get("explore") or {}).get("wall_s")
+        if isinstance(explore, (int, float)) and not isinstance(explore, bool):
+            out.append(f"The exploring run took {_plain(float(explore))}.")
+    if reader is not None and reader["at_once"] == 1:
+        out.append(f"Run one after another, as the delivered code does, the settings and the search take "
+                   f"{plain(reader['most'])}.")
+    elif reader is not None:
+        if reader["least"] is not None:
+            sum_said = ("The trials and the search add up to" if _search_seconds(root)
+                        else "The trials' own computation adds up to")
+            out.append(f"{sum_said} {plain(reader['least'])}.")
+        out.append(_delivered_sentence(reader))
+    return out
+
+
+def _verdict_sentence(met: str, limit: float, subject: str) -> str:
+    said = _plain(limit)
+    if met == "within":
+        return f"{subject} keeps to the topic's limit of {said}."
+    if met == "over":
+        return f"{subject} goes over the topic's limit of {said}."
+    return f"Whether {subject[:1].lower()}{subject[1:]} keeps to the topic's limit of {said} is not shown."
+
+
+def run_facts_text(quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) -> str:
+    """The paragraph ``{{run_facts}}`` stands for, composed from FI's records: how many settings and trials, the seed, the
+    run time, and the topic's time limit with the verdict, each only when FI holds it. ``""`` when it holds none."""
+    root = Path(quest_root)
+    parts = _counts_sentences(root)
+    seed = _seed_text(root)
+    if seed:
+        parts.append(f"Seed: {seed}.")
+    wall, least = measured_run_time(root, fallback_s)
+    reader = _run_facts.reader_run(root)
+    _each, settings, _failed = _trial_counts(root)
+    parts += _run_time_sentences(root, wall, least, reader, settings)
+    limit, met = _limit_and_met(root, topic, wall, least, reader)
+    if limit is not None:
+        met = met if met in ("within", "over") else ""
+        # "It" is the delivered code, only when the sentence just before is the one about it
+        delivered = wall is not None and reader is not None and reader["at_once"] != 1
+        parts.append(_verdict_sentence(met, limit, "It" if delivered else "The run"))
+    return "**Run.** " + " ".join(parts) if parts else ""
 
 
 # ---- the placeholders and their markers ------------------------------------------------------------------------------
@@ -1142,8 +1257,11 @@ def without_marks(markdown: str) -> str:
     return _TAG.sub("", _values.without_marks(markdown or ""))
 
 
-def block_text(quest_root: Path | str, name: str) -> str:
-    """FI's block ``name`` (:data:`BLOCK_NAMES`) as it goes into the paper, from its file; ``""`` when there is none."""
+def block_text(quest_root: Path | str, name: str, *, topic: str = "", fallback_s: Any = None) -> str:
+    """FI's block ``name`` (:data:`BLOCK_NAMES`) as it goes into the paper, from its file (``run_facts``: composed from
+    FI's records, :func:`run_facts_text`); ``""`` when there is none."""
+    if name == "run_facts":
+        return run_facts_text(quest_root, topic=topic, fallback_s=fallback_s)
     rel = _BLOCK_FILES.get(name)
     if rel is None:
         return ""
@@ -1153,16 +1271,36 @@ def block_text(quest_root: Path | str, name: str) -> str:
         return ""
 
 
-def place_blocks(markdown: str, quest_root: Path | str) -> str:
-    """``markdown`` with the placeholder of each of FI's blocks that has a file and that the writer did not place put in
-    on a line of its own, before the discussion that follows the results (else the conclusions, the limitations, the
-    references; else at the end). :func:`render` then fills it."""
+def place_blocks(markdown: str, quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) -> str:
+    """``markdown`` with the placeholder of each of FI's blocks that has text and that the writer did not place put in
+    on a line of its own. The tables go before the discussion that follows the results (else the conclusions, the
+    limitations, the references; else at the end); the run's facts go at the end of the Methods (else before the
+    Results, else after the abstract, else at the top). A block already in the draft, as a placeholder or filled in
+    (the review sends FI's own text back), is not put in twice; a line that opens like FI's run paragraph
+    (``**Run.** ``) but has lost its markers is replaced by the placeholder, so the paragraph is always FI's current
+    one. :func:`render` then fills it."""
     text = markdown or ""
     for name in BLOCK_NAMES:
-        if not block_text(quest_root, name):
+        if not block_text(quest_root, name, topic=topic, fallback_s=fallback_s):
             continue
         if any(_norm_name(m.group(1)) == name for m in _PLACEHOLDER.finditer(text)) or any(
                 m.group(1) == name for m in _MARK.finditer(text)):
+            continue
+        if name == "run_facts" and re.search(r"(?m)^\*\*Run\.\*\* ", text):
+            # FI's paragraph with its markers gone (or a run line of the writer's own): FI's current one takes its place
+            text = re.sub(r"(?m)^\*\*Run\.\*\* .*$", "{{run_facts}}", text, count=1)
+            continue
+        if name == "run_facts":
+            lines = text.split("\n")
+            at = _disclosure._insert_at(lines)
+            head = lines[:at]
+            while head and not head[-1].strip():
+                head.pop()
+            tail = lines[at:]
+            while tail and not tail[0].strip():
+                tail.pop(0)
+            text = "\n".join([*head, *([""] if head else []), "{{run_facts}}", *([""] if tail else []), *tail]) + (
+                "" if tail else "\n")
             continue
         from . import best_design_report as _best
 
@@ -1303,7 +1441,7 @@ def render(markdown: str, quest_root: Path | str, *, topic: str = "", fallback_s
         if name in BLOCK_NAMES:
             if plain:
                 return m.group(0)
-            block = block_text(root, name)
+            block = block_text(root, name, topic=topic, fallback_s=fallback_s)
             if not block:
                 unfilled.append(name)
                 return f"<!-- fi:fact-{name} -->{NOT_RECORDED}<!-- /fi:fact-{name} -->"
@@ -1344,10 +1482,10 @@ def unfilled_in(markdown: str) -> list[str]:
 
 
 def writer_section(quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) -> str:
-    """The record section of the write prompt: the placeholders the paper's facts go through, what each will say now, one
-    example sentence, and the ``not_done`` placeholders the Limitations must hold. ``""`` when FI holds nothing."""
+    """The record section of the write prompt: the paragraph of the run's facts FI puts into the Methods (what it reads
+    now), and the ``not_done`` placeholders the Limitations must hold. ``""`` when FI holds nothing."""
     root = Path(quest_root)
-    known = facts(root, topic=topic, fallback_s=fallback_s)
+    run_text = run_facts_text(root, topic=topic, fallback_s=fallback_s)
     items = required_items(root)
     lines: list[str] = []
     estimate = _read(root, ".fi/run_estimate.json")
@@ -1358,27 +1496,16 @@ def writer_section(quest_root: Path | str, *, topic: str = "", fallback_s: Any =
     over = estimate.get("over_topic_limit") if isinstance(estimate, dict) else None
     over_note = _one(over["note"]) if isinstance(over, dict) and isinstance(over.get("note"), str) and over["note"].strip() else ""
     figure_known = _figure_facts(root)
-    if not known and not items and not reduced_note and not over_note and not has_table and not figure_known:
+    if not run_text and not items and not reduced_note and not over_note and not has_table and not figure_known:
         return ""
-    lines.append("FI'S RECORD OF THIS RUN. The facts below come from FI's own records. Do not type them: write the "
-                 "placeholder (double braces, exactly as shown) where the fact goes, and FI puts the value in from its "
-                 "records when the paper is saved. A seed, a run time or a count of settings or trials typed as a number is sent back to "
-                 "you, and so is a claim about the topic's time limit that the record contradicts.")
-    if known:
-        lines.append("Placeholders (with what FI will put in for each, as the records stand now):")
-        lines += [f"- {{{{{f.name}}}}}: {_FACT_WORDS[f.name]}. Now: \"{f.text}\"" for f in known.values()]
-        needed = [f"{{{{{f.name}}}}}" for f in known.values() if f.required]
-        example = [p for p in ("Random numbers were drawn from {{seed}}" if "seed" in known else "",
-                               "the experiment ran {{trials_per_setting}} trials in each of {{settings}} settings"
-                               if "settings" in known and "trials_per_setting" in known else "",
-                               "and took {{run_time}}" if "run_time" in known else "") if p]
-        if example:
-            sentence = "; ".join(example[:2]) + (" " + example[2] if len(example) > 2 else "")
-            if "time_limit_met" in known and "time_limit" in known:
-                sentence += ", {{time_limit_met}} the topic's limit of {{time_limit}}"
-            lines.append(f"Example (in the Methods): \"{sentence}.\"")
-        if needed:
-            lines.append(f"Required: the paper must hold {', '.join(needed)} (in the Methods, or where the run is described).")
+    lines.append("FI'S RECORD OF THIS RUN. The facts below come from FI's own records. FI fills them in; do not type "
+                 "them yourself.")
+    if run_text:
+        lines.append("Run facts: FI puts a paragraph of the run's facts into the Methods when the paper is saved. It "
+                     f"reads now: \"{run_text}\" Do not state these facts yourself (the number of settings and trials, "
+                     "the seed, the run time, the topic's time limit); if you need to refer to them, say \"the run facts "
+                     "in the Methods\". A seed, a run time or a count of settings or trials typed as a number is sent "
+                     "back to you, and so is a claim about the topic's time limit that the record contradicts.")
     if figure_known:
         lines.append("A figure's panel layout and its line styles are in the caption FI writes under it, from FI's "
                      "record of the saved picture. You have not seen the picture: do not describe them in your own words.")
@@ -1451,10 +1578,9 @@ def _placed(markdown: str, key: str) -> list[int]:
     return [m.start() for m in _MARK.finditer(markdown) if m.group(1) == key and not _inside(m.start(), away)]
 
 
-def _unknown_hits(markdown: str, quest_root: Path | str, known: dict[str, Fact]) -> list[str]:
+def _unknown_hits(markdown: str, quest_root: Path | str) -> list[str]:
     """A hit for each name between double braces that is no placeholder of FI's (it reads "not recorded")."""
     ids = {i.id for i in required_items(quest_root)}
-    names = ", ".join("{{" + n + "}}" for n in (known or dict.fromkeys(FACT_NAMES)))
     hits: list[str] = []
     for key in dict.fromkeys(m.group(1) for m in _MARK.finditer(markdown)):
         if key.startswith(_ITEM_KEY):
@@ -1471,29 +1597,15 @@ def _unknown_hits(markdown: str, quest_root: Path | str, known: dict[str, Fact])
                             "the figure without a placeholder.")
         elif key not in FACT_NAMES and key not in BLOCK_NAMES:
             hits.append(f"{HIT}: {{{{{key}}}}} is not one of FI's placeholders, so the paper reads \"not recorded\" there. "
-                        f"Use one of {names}, or write it in your own words without double braces.")
+                        "Write it in your own words without double braces.")
     return hits
 
 
 def placement_hits(paper_md: str, quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) -> list[str]:
-    """Must-fix hits for a required placeholder the paper does not hold: a required fact of the run anywhere but the
-    title, and a name between double braces that is none of FI's."""
-    text = _disclosure.without_block(paper_md)
-    t0, t1 = _title_span(text)
-    known = facts(quest_root, topic=topic, fallback_s=fallback_s)
-    hits: list[str] = _unknown_hits(text, quest_root, known)
-    for fact in known.values():
-        if not fact.required:
-            continue
-        where = [p for p in _placed(text, fact.name) if not t0 <= p < t1]
-        if not where:
-            # The hit names the placeholder, not its value: the value (a measured time) differs from run to run, and the
-            # writer is given it in FI's record section anyway.
-            hits.append(f"{HIT}: the paper does not state {{{{{fact.name}}}}} ({_FACT_WORDS[fact.name]}). Put the "
-                        f"placeholder {{{{{fact.name}}}}} in the Methods; do not type the value.")
-    # The items the study must state are not checked here: FI places each one that the paper does not hold
-    # (:func:`place_items`), so where the writer put it is not a fault of the paper.
-    return hits
+    """Must-fix hits for a name between double braces that is none of FI's. The run's facts are not asked of the writer
+    any more: FI writes them as one paragraph in the Methods (:func:`run_facts_text`), so a missing ``{{seed}}`` is no
+    fault of the paper."""
+    return _unknown_hits(_disclosure.without_block(paper_md), quest_root)
 
 
 def value_hits(paper_md: str, quest_root: Path | str) -> list[str]:

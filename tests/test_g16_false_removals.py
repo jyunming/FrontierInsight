@@ -35,9 +35,10 @@ def test_the_placeholders_fill_to_the_ledger_values(tmp_path):
     assert "trials_failed" in facts
 
 
-def test_the_writer_is_told_to_use_the_count_placeholders(tmp_path):
+def test_the_writer_is_told_the_counts_are_in_the_run_facts_paragraph(tmp_path):
     section = paper_facts.writer_section(_quest(tmp_path))
-    assert "{{settings}}" in section and "{{trials_per_setting}}" in section
+    assert "The study ran 12 settings, 5 trials in each." in section and "Do not state these facts yourself" in section
+    assert "{{settings}}" not in section and "{{trials_per_setting}}" not in section
 
 
 GRID_PLAN = {"grid": {"a": [1, 2, 3, 4], "b": [10, 20, 30]}, "runs_per_setting": 20, "constants": {"z": 1.96}}
