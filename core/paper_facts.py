@@ -1159,7 +1159,7 @@ def run_facts_text(quest_root: Path | str, *, topic: str = "", fallback_s: Any =
 #: Any name between double braces, with extra braces around it taken in (``{{{{seed}}}}``, ``{{ {seed} }}``).
 _PLACEHOLDER = re.compile(r"\{\{[\s{]*(?!v:)([A-Za-z][^{}\n:]{0,59}?)\s*(?::\s*([^{}\n]{1,80}?)\s*)?[\s}]*\}\}")
 _MARK = re.compile(r"<!-- fi:fact-([\w-]+) -->(.*?)<!-- /fi:fact-\1 -->", re.S)
-_TAG = re.compile(r"<!-- /?fi:fact-[\w-]+ -->")
+_TAG = re.compile(r"<!-- /?fi:fact-[\w-]+ -->|<!-- fi:limitations-heading -->[ \t]*\n?")
 _ITEM_KEY = "not_done-"
 #: Where no reader sees a placeholder as text: a code block or inline code, math, an HTML comment (not FI's own markers).
 _HIDDEN = re.compile(
@@ -1257,6 +1257,9 @@ _NUM = _disclosure._SECTION_NUMBER
 _LIMITATIONS_RUN_IN = re.compile(r"^[ \t]*\*\*Limitations?(?:[.:]\*\*|\*\*[.:])", re.I)
 _CONCLUSION_HEADING = re.compile(r"^#{1,6}[ \t]+" + _NUM + r"conclusions?\b", re.I)
 RUN_IN = "**Limitations.**"
+#: A line above the heading (or run-in line) FI itself adds for its Limitations, so FI never has to guess which is its own.
+HEADING_MARK = "<!-- fi:limitations-heading -->"
+_CUT = "\x00cut\x00"
 
 
 def _title(line: str) -> str:
@@ -1281,21 +1284,53 @@ def _limitations_in(text: str) -> bool:
 def _drop_limitations(text: str) -> str:
     """``text`` without FI's Limitations block (marked, or the placeholder on its own), and without the heading or the
     run-in line FI put above it when nothing else is under it."""
-    text = _MARK.sub(lambda m: "" if m.group(1) == "limitations" else m.group(0), text)
+    text = _MARK.sub(lambda m: _CUT if m.group(1) == "limitations" else m.group(0), text)
     hidden = _hidden_spans(text)
     for a, b in reversed([m.span() for m in _PLACEHOLDER.finditer(text)
                           if _norm_name(m.group(1)) == "limitations" and m.group(2) is None
                           and not _inside(m.start(), hidden)]):
-        text = text[:a] + text[b:]
+        text = text[:a] + _CUT + text[b:]
     lines = text.split("\n")
     out: list[str] = []
-    for i, line in enumerate(lines):
-        nxt = next((x for x in lines[i + 1:] if x.strip()), None)
-        bare = line.strip() == RUN_IN or (re.match(r"^#{1,6}[ \t]", line) and _title(line) == "limitations")
-        if bare and (nxt is None or re.match(r"^#{1,6}[ \t]", nxt) or nxt.strip() == "---"):
+    i = 0
+    while i < len(lines):
+        if lines[i].strip() == HEADING_MARK:
+            # FI's own heading: it goes with the block when nothing else is under it; else the writer has put words
+            # there and it is the writer's heading now, so only the mark goes
+            nxt = next((x for x in lines[i + 2:] if x.replace(_CUT, "").strip()), None)
+            if nxt is None or re.match(r"^#{1,6}[ \t]", nxt) or nxt.strip() == "---":
+                i += 2
+            else:
+                i += 1
+            out.append(_CUT)
             continue
-        out.append(line)
-    return re.sub(r"\n{3,}", "\n\n", "\n".join(out))
+        out.append(lines[i])
+        i += 1
+    return _tidy_cuts(out)
+
+
+def _tidy_cuts(lines: list[str]) -> str:
+    """The lines joined, with each run of blank lines that touches a cut made to one blank line (none at the top): the
+    rest of the paper, code blocks and tables included, is not touched."""
+    lines = [ln.replace(_CUT, "") if ln.replace(_CUT, "").strip() else ln for ln in lines]
+    done: list[str] = []
+    i = 0
+    while i < len(lines):
+        if lines[i].strip() and _CUT not in lines[i]:
+            done.append(lines[i])
+            i += 1
+            continue
+        j = i
+        while j < len(lines) and (not lines[j].strip() or _CUT in lines[j]):
+            j += 1
+        group = lines[i:j]
+        if any(_CUT in g for g in group):
+            if done:
+                done.append("")
+        else:
+            done.extend(group)
+        i = j
+    return "\n".join(done)
 
 
 def _place_limitations(text: str, quest_root: Path | str, *, heading: bool = True) -> str:
@@ -1316,7 +1351,9 @@ def _place_limitations(text: str, quest_root: Path | str, *, heading: bool = Tru
     title = next((i for i, lv, _t in heads if lv == 1), None)
     rest = [h for h in heads if h[0] != title]
     top = min((h[1] for h in rest), default=2)
-    own = [h for h in rest if (h[1] == top and _is_limitations_title(_title(h[2]))) or _title(h[2]) == "limitations"]
+    own = [h for h in rest if h[1] == top and _is_limitations_title(_title(h[2]))]
+    if not own:  # a deeper heading that is just "Limitations", only when no main-level one is
+        own = [h for h in rest if _title(h[2]) == "limitations"]
     block = ["{{limitations}}"]
     lead: list[str] = []
     if own:
@@ -1341,7 +1378,7 @@ def _place_limitations(text: str, quest_root: Path | str, *, heading: bool = Tru
             anchor = (next((h for h in top_heads if _CONCLUSION_HEADING.match(h[2])), None)
                       or next((h for h in top_heads if _disclosure._BEFORE_END.match(h[2])), None))
             place = anchor[0] if anchor else len(lines)
-            lead = [("#" * level + " Limitations") if heading else RUN_IN, ""]
+            lead = [HEADING_MARK, ("#" * level + " Limitations") if heading else RUN_IN, ""]
     if place < len(lines):
         while place > 0 and not lines[place - 1].strip():
             place -= 1

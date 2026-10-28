@@ -575,14 +575,13 @@ def _review_said(review: Any) -> dict[str, Any]:
             "blocking": _line(review.get("blocking"))}
 
 
-def write_last_review(quest_root: Path, review: Any, paper_sha256: str = "") -> None:
+def write_last_review(quest_root: Path, review: Any) -> None:
     """Keep what the review just said (``.fi/last_review.json``): its verdict, its weaknesses and the reason it blocked on,
-    each round, with the hash of the paper it read when known, so the last one is on record when no round is left to
-    answer it. ``final`` stays false until :func:`mark_last_review_final`. Best-effort: a record that cannot be written is
-    not a reason to stop."""
+    each round, so the last one is on record when no round is left to answer it. ``final`` stays false until
+    :func:`mark_last_review_final`. Best-effort: a record that cannot be written is not a reason to stop."""
     if not isinstance(review, dict):
         return
-    record = {**_review_said(review), "paper_sha256": paper_sha256, "final": False}
+    record = {**_review_said(review), "final": False}
     path = Path(quest_root) / LAST_REVIEW_RECORD
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -619,8 +618,16 @@ def mark_last_review_final(quest_root: Path, review: Any) -> bool:
     any points."""
     record = _last_review(quest_root)
     said = _review_said(review)
-    if (not record or record.get("verdict", "accept") == "accept"
-            or any(record.get(k) != said[k] for k in ("verdict", "weaknesses", "blocking"))):
+    if record and any(record.get(k) != said[k] for k in ("verdict", "weaknesses", "blocking")):
+        if record.get("final"):  # another round's record that was final: it must not come back for a later paper
+            record["final"] = False
+            try:
+                (Path(quest_root) / LAST_REVIEW_RECORD).write_text(
+                    json.dumps(record, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+            except OSError:
+                pass
+        return False
+    if not record or record.get("verdict", "accept") == "accept":
         return False
     if not record.get("final"):
         record["final"] = True

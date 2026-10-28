@@ -2122,12 +2122,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             for w in review.get("weaknesses") or []:
                 self._audit("model_claim", node=node, provenance=_audit_log.MODEL_CLAIM, topic="review_weakness", claim=w, **prov)
             # What this round said, kept apart from the trace: when no round is left after it, the paper states its points.
-            try:
-                paper_file = self.quest_root / "paper" / "paper.md"
-                sha = hashlib.sha256(paper_file.read_bytes()).hexdigest() if paper_file.is_file() else ""
-            except OSError:
-                sha = ""
-            _disclosure.write_last_review(self.quest_root, review, sha)
+            _disclosure.write_last_review(self.quest_root, review)
             # A review panel's moderator says why the panel's verdict stands, given how the reviewers disagreed.
             if isinstance(review.get("rationale"), str):
                 self._claim(node, "review_moderator", "review_moderator", review["rationale"],

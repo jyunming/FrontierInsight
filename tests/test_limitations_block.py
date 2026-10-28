@@ -160,6 +160,78 @@ def test_with_nothing_to_state_there_is_no_block_and_no_heading_and_an_old_one_g
     assert "{{" not in _filled("# T\n\n## Limitations\n{{limitations}}\n\n## References\n1. A.\n", root)
 
 
+def test_with_nothing_to_state_only_the_heading_fi_made_goes_never_a_writers_own(tmp_path: Path) -> None:
+    """A writer's ``## Limitations`` holding only sub-sections (or a lead of its own) survives the no-items path; the heading
+    FI added itself, marked as FI's, goes with its block."""
+    root = _quest(tmp_path)
+    topic_covered = root / ".fi" / "topic_covered.json"
+    items = topic_covered.read_text(encoding="utf-8")
+    only_subs = ("# T\n\n## Methods\nM.\n\n## Limitations\n\n### Scope\nOnly small angles.\n\n"
+                 "### Assumptions\nNo drag.\n\n## References\n1. A.\n")
+    with_block = _filled(only_subs, root)
+    assert _one_block(with_block) and with_block.index("## Limitations") < with_block.index(ITEM) < with_block.index("### Scope")
+    topic_covered.unlink()
+    assert _filled(with_block, root) == only_subs  # the writer's heading and both sub-sections are all still there
+    # the same for a run-in line the writer wrote, and for a writer's heading with a lead
+    run_in = "# T\n\n## Methods\nM.\n\n**Limitations.** Own words.\n\n## References\n1. A.\n"
+    topic_covered.write_text(items, encoding="utf-8")
+    block = _filled(run_in, root)
+    topic_covered.unlink()
+    assert _filled(block, root) == run_in
+    # FI's own heading is marked and goes with its block; the mark is not shown to a reader
+    plain = "# T\n\n## Methods\nM.\n\n## References\n1. A.\n"
+    topic_covered.write_text(items, encoding="utf-8")
+    added = _filled(plain, root)
+    assert paper_facts.HEADING_MARK in added and paper_facts.HEADING_MARK not in paper_facts.without_marks(added)
+    topic_covered.unlink()
+    assert _filled(added, root) == plain
+    # a writer who typed under FI's heading while its block was there keeps the words and the heading
+    topic_covered.write_text(items, encoding="utf-8")
+    added = _filled(plain, root)
+    typed = added.replace("<!-- /fi:fact-limitations -->", "<!-- /fi:fact-limitations -->\n\nThe writer's own sentence.")
+    topic_covered.unlink()
+    out = _filled(typed, root)
+    assert "The writer's own sentence." in out and "## Limitations" in out and ITEM not in out
+    assert paper_facts.HEADING_MARK not in out
+
+
+def test_only_the_place_a_block_was_cut_is_tidied_not_the_rest_of_the_paper(tmp_path: Path) -> None:
+    root = _quest(tmp_path)
+    topic_covered = root / ".fi" / "topic_covered.json"
+    items = topic_covered.read_text(encoding="utf-8")
+    draft = "# T\n\n## Methods\nM.\n\n```\na\n\n\n\nb\n```\n\n## Limitations\nOwn.\n\n## References\n1. A.\n"
+    with_block = _filled(draft, root)
+    topic_covered.unlink()
+    assert _filled(with_block, root) == draft  # the three blank lines inside the code block stay
+    topic_covered.write_text(items, encoding="utf-8")
+
+
+def test_a_main_level_limitations_wins_over_a_deeper_one_that_comes_later(tmp_path: Path) -> None:
+    root = _quest(tmp_path)
+    draft = ("# T\n\n## Limitations\nMain words.\n\n## Appendix\n\n### Limitations\nA note in the appendix.\n\n"
+             "## References\n1. A.\n")
+    out = _filled(draft, root)
+    assert _kept(draft, out) and _one_block(out)
+    assert out.index("Main words.") < out.index(ITEM) < out.index("## Appendix")
+    # with no main-level one, a deeper heading that is just "Limitations" is used
+    deeper = "# T\n\n## Discussion\nIt agrees.\n\n### Limitations\nOwn.\n\n## References\n1. A.\n"
+    out = _filled(deeper, root)
+    assert _kept(deeper, out) and _one_block(out) and out.count("imitations" + chr(10)) == 1
+    assert out.index("Own.") < out.index(ITEM) < out.index("## References")
+
+
+def test_a_final_record_of_another_round_is_cleared_and_cannot_come_back(tmp_path: Path) -> None:
+    root = _quest(tmp_path, item=False)
+    old = _review(root, weaknesses=["Old point."])
+    assert disclosure.mark_last_review_final(root, old) is True
+    now = {"verdict": "revise", "weaknesses": ["New point."], "blocking": ""}
+    assert disclosure.mark_last_review_final(root, now) is False  # the quest's review now is not the one on record
+    assert json.loads((root / ".fi" / "last_review.json").read_text(encoding="utf-8"))["final"] is False
+    assert disclosure.last_review_points(root) == []
+    # and when the record is later brought back to the old review, it is not final any more
+    assert disclosure.mark_last_review_final(root, old) is True  # a fresh mark of a matching record is what makes it final
+
+
 def test_a_second_pass_adds_nothing_and_the_passage_editor_gets_the_placeholder(tmp_path: Path) -> None:
     root = _quest(tmp_path)
     draft = "# T\n\n## Methods\nM.\n\n## Limitations\nOld.\n\n## References\n1. A.\n"
@@ -263,7 +335,7 @@ def test_the_review_keeps_what_it_said_each_round_with_the_paper_it_read(tmp_pat
                                             "why": "short"}})
     record = json.loads((eng.quest_root / ".fi" / "last_review.json").read_text(encoding="utf-8"))
     assert record["verdict"] == "revise" and record["weaknesses"] == ["thin"] and record["blocking"] == "no oracle"
-    assert record["final"] is False and len(record["paper_sha256"]) == 64
+    assert record["final"] is False and "paper_sha256" not in record
 
 
 @pytest.mark.parametrize("citation_next, verdict, same_round, stated", [
