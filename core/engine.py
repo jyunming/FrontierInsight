@@ -34726,6 +34726,7 @@ def _assertion_violations(state: "QuestState", memo: Any = None) -> list:
         found = plausibility.check_design(
             rj, _asserting_design(state), code=state.get("code") or "",
             seen=state.get("bounded_seen") or (), zero_expected=_zero_expected_paths(state),
+            edge_ok=_physical_bound_paths(state),
             walk=memo.get(rj) if memo is not None else None,
         )
         # A cap whose place in the result cannot be shown is a warning (_assertion_warnings), not a violation.
@@ -34745,6 +34746,7 @@ def _assertion_warnings(state: "QuestState", memo: Any = None) -> list:
         found = plausibility.check_design(
             rj, _asserting_design(state), code=state.get("code") or "",
             seen=state.get("bounded_seen") or (), zero_expected=_zero_expected_paths(state),
+            edge_ok=_physical_bound_paths(state),
             walk=memo.get(rj) if memo is not None else None,
         )
         return [v for v in found if getattr(v, "kind", "") == "clamped_unproven"]
@@ -34777,6 +34779,19 @@ def _zero_expected_paths(state: "QuestState") -> set[str]:
         if quoted or identifier:
             out.add(a.path)
     return out
+
+
+def _physical_bound_paths(state: "QuestState") -> set[str]:
+    """The asserted quantities whose result the plan declares with the role ``physical_bound`` (:mod:`core.contract`): such
+    a value may sit exactly on the edge of its range, which is its physics and not a fault."""
+    design = _asserting_design(state)
+    protocol = design.get("protocol")
+    if not isinstance(protocol, dict):
+        return set()
+    from core import plausibility
+
+    physical = {r.id for r in _contract.from_design({"protocol": protocol}).results if r.role == "physical_bound"}
+    return {a.path for a in plausibility.parse_assertions(design) if a.path in physical or a.path.rsplit(".", 1)[-1] in physical}
 
 
 def _asserting_design(state: "QuestState") -> dict[str, Any]:

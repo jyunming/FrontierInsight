@@ -575,3 +575,31 @@ def test_two_million_values_are_walked_once_and_quickly() -> None:
         check_design(result, design, seen=["gone"], walk=walk)
     assert time.monotonic() - started < max(first, 1.0)  # a repeat reads the kept walk instead of walking again
     assert first < 30
+
+
+# ---- a result the plan declares as physical_bound may sit on its range edge --------------------------------------------
+
+def _edge_state(role: str | None) -> dict:
+    metric = {"id": "share", **({"role": role} if role else {})}
+    result = {"by_setting": {f"s{i}": {"share": 0.0 if i < 4 else 0.1 * i} for i in range(1, 7)}}
+    design = {"result_assertions": [{"path": "share", "min": 0, "max": 1}], "protocol": {"metrics": [metric]}}
+    return {"design": design, "result_json": result, "code": ""}
+
+
+def test_a_physical_bound_result_on_its_edge_in_several_settings_is_kept() -> None:
+    from core.engine import _assertion_violations, _physical_bound_paths
+
+    state = _edge_state("physical_bound")
+    assert _physical_bound_paths(state) == {"share"}
+    assert _assertion_violations(state) == []
+
+
+def test_the_same_edge_without_the_role_is_still_sent_back_and_a_value_outside_the_range_never_passes() -> None:
+    from core.engine import _assertion_violations, _physical_bound_paths
+
+    state = _edge_state(None)
+    assert _physical_bound_paths(state) == set()
+    assert [v.kind for v in _assertion_violations(state)] == ["at_bound"]
+    outside = _edge_state("physical_bound")
+    outside["result_json"]["by_setting"]["s6"]["share"] = 1.5
+    assert [v.kind for v in _assertion_violations(outside)] == ["out_of_range"]
