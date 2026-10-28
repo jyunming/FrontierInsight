@@ -83,7 +83,7 @@ The picture is simplified: it leaves out the literature pause, skill selection, 
    │ ├─ CLI exec (one subprocess per call)│           │
    │ │   ├─ claude_cli                    │           │
    │ │   ├─ codex_cli                     │           │
-   │ │   ├─ copilot_cli (agentic — warn)  │           │
+   │ │   ├─ copilot_cli                   │           │
    │ │   └─ gemini_cli                    │           │
    │ └─ VSCode bridge                     │           │
    │     └─ vscode_extension              │           │

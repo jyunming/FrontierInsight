@@ -4,7 +4,7 @@ _Generated 2026-05-15T21:38:23+00:00_
 
 **Topic:** `Compare three numerical integrators (RK4, Velocity-Verlet, forward Euler) on a damped harmonic oscillator. Report energy drift over 10^4 periods.`
 
-Excluded by policy: `copilot_cli` (agentic, broken as a chat backend) and `github_copilot_cli` (third-party proxy). VSCode extension parity is covered by `tests/test_vscode_extension_typescript.py`.
+Excluded by policy: `copilot_cli` (slow; billed to a subscription quota) and `github_copilot_cli` (third-party proxy). VSCode extension parity is covered by `tests/test_vscode_extension_typescript.py`.
 
 ## Summary
 

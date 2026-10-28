@@ -45,7 +45,7 @@ codex login                                 # → provider.name: codex_cli
 
 Then change `provider.name` in your YAML accordingly. (`gemini_cli` is also wired in but currently unreliable for individual Google accounts — Google has been redirecting its OAuth sign-in to Antigravity, verified live: the CLI now exits `rc=1` with `Code Assist for individuals... migrate to the Antigravity suite` before it ever reaches FI. If your account still works, it's still a valid `provider.name`; `antigravity_cli` or the direct `gemini` API-key provider are the current alternatives.)
 
-**Note:** the `copilot_cli` provider is also wired in the codebase but **does not work** as an FI backend — GitHub's standalone Copilot CLI is an *agentic* tool that interprets node prompts as user coding tasks and replies conversationally instead of running stateless LLM inference. FI emits a loud warning at engine init when you select it. For headless Copilot, there isn't currently a clean path; use `vscode_extension` (Option A) when you can, or switch to one of the other CLIs / Option C above.
+**Note:** for headless Copilot runs, use the `copilot_cli` provider. It works answer-only: FI sends the prompt on stdin, turns every tool off and attaches images as files. It is slower than an HTTP model (about 3x in one measured quest), its use is billed to your Copilot subscription's quota, and the models it offers depend on your subscription (`copilot help config` lists them). Use `vscode_extension` (Option A) when you are inside VS Code.
 
 #### Option C — OpenAI / Gemini API key (direct HTTP)
 

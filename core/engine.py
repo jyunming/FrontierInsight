@@ -34830,38 +34830,21 @@ _UNSANCTIONED_PROXY_PROVIDERS = frozenset({
     "github_copilot_vscode",
 })
 
-# Agentic CLIs that interpret prompts as user tasks (engage their own
-# tool-using agent loop) instead of running stateless LLM inference.
-# Their outputs include conversational replies like "Are you trying
-# to debug X?" rather than the structured prompt-driven output FI's
-# nodes expect. Empirically broken as chat backends for FI's pipeline.
-_AGENTIC_CLI_PROVIDERS = frozenset({"copilot_cli"})
-
 _PROXY_WARN_SHOWN: set[str] = set()
 
 
 def _warn_if_unsanctioned_provider(name: str) -> None:
     """Print a one-time warning (per process) when the user picks a
-    provider that's known-broken or risky for FI's pipeline. Two
-    categories trigger:
+    provider that is risky for FI's pipeline: `github_copilot_cli` and
+    `github_copilot_vscode` (`_UNSANCTIONED_PROXY_PROVIDERS`) route through
+    a third-party reverse-engineered `copilot-api` proxy. The proxy's own
+    README warns: "Excessive automated or scripted use of Copilot ... may
+    trigger GitHub's abuse-detection systems." Premium-request volume from
+    an automated research loop is exactly the pattern that trips that
+    detector. (`copilot_cli` does not warn: FI calls it answer-only, with
+    every tool off and the prompt on stdin.)
 
-    1. **`_UNSANCTIONED_PROXY_PROVIDERS`** — `github_copilot_cli` and
-       `github_copilot_vscode` route through a third-party
-       reverse-engineered `copilot-api` proxy. The proxy's own README
-       warns: "Excessive automated or scripted use of Copilot ... may
-       trigger GitHub's abuse-detection systems." Premium-request
-       volume from an automated research loop is exactly the pattern
-       that trips that detector.
-
-    2. **`_AGENTIC_CLI_PROVIDERS`** — `copilot_cli`. The standalone
-       Copilot CLI is an agentic tool: it interprets FI's node prompts
-       as user coding tasks and replies conversationally (real symptom
-       seen: paper.md filled with "Are you trying to debug X?",
-       experiment.py reduced to the empty stub). Use `vscode_extension`,
-       `claude_cli`, `codex_cli`, `gemini_cli`, or an HTTP-direct
-       provider (`openai`, `gemini`, `ollama`, `vllm`) instead.
-
-    Suppression: each category warns once per process; set the
+    Suppression: each provider warns once per process; set the
     ``FI_SUPPRESS_PROXY_WARN`` env var to silence entirely.
     """
     import os
@@ -34887,34 +34870,6 @@ def _warn_if_unsanctioned_provider(name: str) -> None:
             "  Sanctioned alternatives for Copilot in FI:\n"
             "    - provider.name: vscode_extension  (in-VSCode via vscode.lm.*)\n"
             "    - provider.name: claude_cli / codex_cli / gemini_cli (OAuth CLIs)\n"
-            "\n"
-            "  Set FI_SUPPRESS_PROXY_WARN=1 to silence this warning.\n"
-            "%s",
-            "─" * 72, name, "─" * 72,
-        )
-        return
-
-    if name in _AGENTIC_CLI_PROVIDERS:
-        _PROXY_WARN_SHOWN.add(name)
-        logging.getLogger("frontier_insight").warning(
-            "\n%s\n"
-            "  provider=%r is an AGENTIC CLI, not a stateless chat backend.\n"
-            "  It interprets FI's node prompts (\"You are the Implementation\n"
-            "  node, output JSON ...\") as user tasks and replies\n"
-            "  conversationally — e.g. asking which file you want edited,\n"
-            "  or outputting a chat-style answer instead of the structured\n"
-            "  payload FI's nodes need. Real symptoms observed in the wild:\n"
-            "  paper.md filled with \"Are you trying to debug X?\",\n"
-            "  experiment.py reduced to the empty stub.\n"
-            "\n"
-            "  Recommended provider for Copilot users:\n"
-            "    - provider.name: vscode_extension  (uses vscode.lm.* via\n"
-            "                                        the FI VSCode extension)\n"
-            "  Other working chat-style CLIs:\n"
-            "    - provider.name: claude_cli  (Claude --print --output-format text)\n"
-            "    - provider.name: codex_cli   (codex exec --output-last-message)\n"
-            "    - provider.name: gemini_cli  (gemini --yolo -o json)\n"
-            "  Or HTTP-direct: openai, gemini, ollama, vllm.\n"
             "\n"
             "  Set FI_SUPPRESS_PROXY_WARN=1 to silence this warning.\n"
             "%s",

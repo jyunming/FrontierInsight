@@ -74,9 +74,8 @@ for the layered design see [`architecture.md`](architecture.md).
 ### Provider transports
 - **HTTP direct** — `openai` / `codex` / `gemini` / `ollama` / `vllm`.
 - **CLI exec** — `claude_cli`, `codex_cli`, `gemini_cli` for headless
-  OAuth-based use. (`copilot_cli` is wired but emits a loud warning:
-  it's an agent loop, not a stateless chat API, and produces
-  conversational replies instead of structured node output.)
+  OAuth-based use, and `copilot_cli` (answer-only: every tool off, prompt
+  on stdin).
 - **HTTP via proxy** — `claude_code`, `github_copilot_*` (kept for
   backwards compatibility; emit ToS warnings at engine init).
 - **VSCode-extension bridge** (`vscode_extension`) — routes chat

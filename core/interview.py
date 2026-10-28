@@ -490,10 +490,12 @@ PROVIDER_MODEL_OPTIONS: dict[str, tuple[Choice, ...]] = {
         Choice("gpt-4o", "gpt-4o", "Previous-generation default."),
     ),
     "copilot_cli": (
-        Choice("gpt-5", "gpt-5", "Copilot Pro/Business default since 2025."),
-        Choice("claude-opus-4-7", "claude-opus-4-7", "Available to Copilot Business+."),
-        Choice("claude-sonnet-4-6", "claude-sonnet-4-6", "Cheaper Anthropic option."),
-        Choice("gemini-2.5-pro", "gemini-2.5-pro", "Available when Copilot federates Gemini."),
+        Choice("claude-sonnet-4.6", "claude-sonnet-4.6",
+               "Balanced. The models offered depend on your Copilot subscription; `copilot help config` lists them."),
+        Choice("claude-haiku-4.5", "claude-haiku-4.5", "Cheapest and fastest Claude."),
+        Choice("claude-opus-4.8", "claude-opus-4.8", "Strongest Claude."),
+        Choice("gpt-5.3-codex", "gpt-5.3-codex", "OpenAI Codex model."),
+        Choice("mai-code-1.1-flash", "mai-code-1.1-flash", "Fast coding model."),
     ),
     "gemini_cli": (
         Choice("gemini-2.5-pro", "gemini-2.5-pro", "Latest Pro; long context."),

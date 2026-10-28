@@ -19,12 +19,10 @@ but resolves to one of three transports:
   - `claude_cli` — `claude --print --output-format text` reusing the
     user's `claude auth login` Claude Pro/Max OAuth (no `ANTHROPIC_API_KEY`
     needed; OAuth from the CLI's keychain is honored). Prompt on stdin.
-  - `copilot_cli` — `copilot -s --allow-all-tools -p <prompt>` reusing
-    the user's `gh auth login` Copilot Pro/Business credentials.
-    `-s/--silent` strips the trailing stats block; `--allow-all-tools`
-    is required for non-interactive mode. **Prompt is on argv** because
-    the CLI doesn't document a stdin path — prefer `claude_cli`,
-    `codex_cli`, or `gemini_cli` for sensitive prompts.
+  - `copilot_cli` — `copilot -s --available-tools= --disable-builtin-mcps
+    --no-custom-instructions` reusing the user's Copilot login. Answer-only:
+    every tool is off, the prompt is on stdin and images go as
+    `--attachment <file>`. `-s/--silent` strips the trailing stats block.
   - `gemini_cli` — `gemini --yolo -o json -p ""` (from
     `@google/gemini-cli`) with the prompt on stdin. `--yolo` auto-
     approves tool calls (else stdin deadlocks on confirmation prompts).
@@ -394,10 +392,8 @@ def _encode_antigravity_stdin(prompt: str) -> str:
     unmarshal.
 
     This matters more than it looks. The alternative is passing the prompt in
-    argv like ``copilot_cli`` does, and on Windows that puts the whole prompt
-    under the ~8 KB command-line ceiling — which is why ``copilot_cli`` has to
-    trim heavily and is documented as a poor fit for FI's long nodes. Going
-    through stdin removes the ceiling entirely.
+    argv, and on Windows that puts the whole prompt under the ~8 KB
+    command-line ceiling. Going through stdin removes the ceiling entirely.
     """
     return json.dumps({
         "event": "user",
@@ -921,39 +917,27 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         effort_args=lambda level: ["-c", f'model_reasoning_effort="{level}"'],
     ),
     "copilot_cli": _CliSpec(
-        # GitHub Copilot CLI (`copilot --prompt`). WARNING — this is an
-        # AGENTIC CLI: it interprets prompts as user coding tasks and
-        # may reply conversationally instead of running stateless LLM
-        # inference. Empirically broken as a chat backend for FI's
-        # pipeline (paper.md fills with "Are you trying to X?", code
-        # node returns the empty stub). engine._warn_if_unsanctioned_provider
-        # prints a loud warning when this provider is selected. Kept
-        # in _CLI_SPECS so the configuration shape remains stable for
-        # users who set it via the interview before reading docs.
-        #
-        # `-s/--silent` strips the trailing stats block. `--allow-all-tools`
-        # is needed to avoid interactive permission prompts; removing it
-        # would make the CLI hang on confirmation. The fundamental issue
-        # is the agent loop, not this flag — switch to vscode_extension /
-        # claude_cli / codex_cli / gemini_cli / openai for FI use.
-        argv=("copilot", "-s", "--allow-all-tools", "-p"),
-        pass_prompt_via="arg",
+        # GitHub Copilot CLI (`copilot`), asked for an answer only. Checked
+        # against CLI 1.0.95: with no `-p`, the prompt piped on stdin is read
+        # whole (a 53,000-character prompt came through to its last line),
+        # and `--available-tools=` leaves the model no tool, so it cannot run
+        # commands or edit files and no permission prompt can stall the call
+        # (`--allow-all-tools` is not passed). `--disable-builtin-mcps` drops
+        # the GitHub MCP servers; `--no-custom-instructions` keeps any
+        # AGENTS.md / copilot-instructions out of the prompt. `-s` prints the
+        # answer alone, without the usage block.
+        argv=("copilot", "-s", "--available-tools=", "--disable-builtin-mcps", "--no-custom-instructions"),
+        pass_prompt_via="stdin",
         output_via="stdout",
-        model_flag="--model",   # provider.model = "gpt-5.2"
+        model_flag="--model",   # provider.model = "claude-sonnet-4.6"
+        # `--attachment <file>` attaches an image to the prompt; checked with a
+        # test image and every tool off: the model named its colour and text.
+        image_input="file_flag",
+        image_flag="--attachment",
         # See _CliSpec.env_unset: an ambient GITHUB_TOKEN outranks the
         # copilot login and 401s if it lacks "Copilot Requests".
         env_unset=("GITHUB_TOKEN", "GH_TOKEN"),
         env_unset_override="COPILOT_GITHUB_TOKEN",
-        # Prompt is passed as a command-line ARG, so on Windows the whole
-        # command line is subject to the cmd.exe limit (~8191 chars) — copilot
-        # ships as `copilot.BAT` and a long design/write prompt (with
-        # accumulated feedback_history) fails with `rc=1: The command line is
-        # too long`. Cap under that so the shared prompt-trimmer (see
-        # `_truncate_prompt_to_fit`) kicks in first. NOTE: 7 KB is small for a
-        # rich node prompt, so copilot_cli trims heavily on long-context nodes
-        # — a stdin/temp-file transport (like codex/gemini) is the real fix;
-        # prefer codex_cli / openai for long prompts on Windows.
-        max_input_chars=7000,
     ),
     "gemini_cli": _CliSpec(
         # `@google/gemini-cli` non-interactive. `--yolo` auto-approves
@@ -977,8 +961,8 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         # ``-p ""`` is rejected outright. Its stdin path is the stream-json
         # input format, which takes one NDJSON envelope per turn; see
         # ``_encode_antigravity_stdin``. That is worth the extra encoding
-        # step because the alternative (prompt in argv, as ``copilot_cli``
-        # does) caps the prompt at the Windows ~8 KB command-line limit.
+        # step because the alternative (prompt in argv) caps the prompt at
+        # the Windows ~8 KB command-line limit.
         #
         # ``--dangerously-skip-permissions`` is deliberately NOT passed. FI
         # asks this CLI for text completion, not for agentic work. Not passing
@@ -3076,6 +3060,10 @@ async def _collect_via_communicate(
                     f"(stderr: {stderr_tail.strip()})"
                 )
             else:
+                # The CLI's own words are the only clue to why it failed, so
+                # when stderr is empty the tail of stdout is shown instead.
+                if not stderr_tail.strip():
+                    stderr_tail = (stdout_b or b"").decode("utf-8", "replace")[-500:]
                 message = f"{argv[0]} exited rc={proc.returncode}: {stderr_tail}"
             # "Selected model is at capacity" clears on its own after a while,
             # so it gets the capacity wait, not the short one.
