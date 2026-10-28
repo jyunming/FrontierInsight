@@ -1157,7 +1157,7 @@ CHECKS: tuple[Check, ...] = (
           '.fi/source_failures.json'),
     Check('seed_reaches_code', 'core.run_facts', 'seed_verdict',
           'write', 'model_code', 'note',
-          "Reads the code to say whether FI's per-trial seed reaches the simulation; the paper's {{seed}} and a "
+          "Reads the code to say whether FI's per-trial seed reaches the simulation; the paper's run paragraph ({{run_facts}}) and a "
           'log warning use it'),
     Check('shared_random_streams', 'core.run_facts', 'shared_stream_notes',
           'write', 'measured', 'note',

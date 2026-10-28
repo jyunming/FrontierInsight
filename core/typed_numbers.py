@@ -14,8 +14,7 @@ value" and no pool of candidates anywhere here: a typed result is wrong because 
 happens to be right. A number in a sentence that cites a source is left to the claim check, which reads the source.
 
 The numbers of the plan are read from the plan as it is frozen, never from prose (``plan.md``) and never from a run fact the
-paper gets as a placeholder (the runs per setting and the seeds): those are FI's, filled by ``{{trials_per_setting}}`` and
-``{{seed}}``.
+paper gets from FI (the runs per setting and the seeds): those are FI's, written in the paragraph ``{{run_facts}}``.
 """
 
 from __future__ import annotations

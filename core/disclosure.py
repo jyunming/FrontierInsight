@@ -901,17 +901,22 @@ def _insert_at(lines: list[str]) -> int:
     # Never the title (the first level-1 heading), never a heading that is another section; a heading that is the
     # methods by name alone comes before one that only mentions them, then the shallowest, then the first.
     title_line = next((i for i, lv, _t in headings if lv == 1), None)
+    # A heading inside the abstract (a structured abstract's "Methods") is never where the paragraph goes.
+    abstract_at = next((h for h in headings if h[0] != title_line and _ABSTRACT.match(h[2])), None)
+    inside = (set(range(abstract_at[0] + 1, _section_end(headings, abstract_at[0], abstract_at[1], len(lines))))
+              if abstract_at else set())
+    all_headings, headings = headings, [h for h in headings if h[0] not in inside]
     methods = [h for h in headings
                if h[0] != title_line and _METHODS.match(h[2]) and not _NOT_METHODS.search(h[2])]
     if methods:
         at, level, _text = min(methods, key=lambda h: (not _EXACT_METHODS.match(h[2]), h[1], h[0]))
-        return _section_end(headings, at, level, len(lines))
+        return _section_end(all_headings, at, level, len(lines))
     results = next((h for h in headings if _RESULTS.match(h[2])), None)
     if results:
         return results[0]
     abstract = next((h for h in headings if _ABSTRACT.match(h[2])), None)
     if abstract:
-        return _section_end(headings, abstract[0], abstract[1], len(lines))
+        return _section_end(all_headings, abstract[0], abstract[1], len(lines))
     title = next((h for h in headings if h[1] == 1), None)
     return title[0] + 1 if title else start
 

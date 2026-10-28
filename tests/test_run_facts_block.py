@@ -167,3 +167,66 @@ def test_one_trial_in_each_setting_reads_singular(tmp_path: Path) -> None:
     text = pf.run_facts_text(root, topic=TOPIC)
     assert "The study ran 3 settings, 1 trial in each." in text
     assert "1 trials" not in text
+
+
+def test_a_draft_holding_fis_paragraph_without_its_markers_gets_no_second_one(tmp_path: Path) -> None:
+    root = _quest(tmp_path, AT_ONCE)
+    filled = pf.render(_at(PAPER, root), root, topic=TOPIC).text
+    bare = pf.without_marks(filled)
+    again = pf.render(_at(bare, root), root, topic=TOPIC).text
+    assert again.count("**Run.**") == 1
+
+
+def test_a_heading_inside_a_structured_abstract_is_never_where_the_paragraph_goes(tmp_path: Path) -> None:
+    root = _quest(tmp_path, AT_ONCE)
+    paper = ("# T\n\n## Abstract\n\n### Background\nb\n\n### Methods\nm\n\n### Results\nr\n\n"
+             "## 2 Study design\nWe ran it.\n\n## 3 Results\nIt agrees.\n")
+    out = _at(paper, root)
+    assert out.index("We ran it.") < out.index("{{run_facts}}") < out.index("## 3 Results")
+    assert out.index("### Results") < out.index("{{run_facts}}")
+
+
+def test_singular_settings(tmp_path: Path) -> None:
+    root = _quest(tmp_path, {"wall_s": 5.0, "trials": 3, "cells": 1, "trial_sum_s": 4.0, "at_once": 4,
+                             "settings_s": 20.0}, settings=1, per=3)
+    text = pf.run_facts_text(root, topic=TOPIC)
+    assert "The study ran 1 setting, 3 trials in each." in text and "FI ran the 1 setting 4 at a time" in text
+    assert "1 settings" not in text
+
+
+def test_the_trials_own_time_stays_a_lower_bound_when_the_other_measure_is_smaller() -> None:
+    said = pf._delivered_sentence({"least": 50.0, "most": 40.0, "at_once": 4, "overlap": True})
+    assert "takes at least 50 s." in said and "40" not in said
+
+
+def test_trials_cut_off_by_the_time_limit_are_said_beside_no_failure(tmp_path: Path) -> None:
+    root = _quest(tmp_path, None, settings=2, per=3, failed=3)
+    (root / ".fi" / "trial_checks.json").write_text(json.dumps({"out_of_time": [{"key": "gain=0", "planned": 3, "trials": 3}]}),
+                                                    encoding="utf-8")
+    text = pf.run_facts_text(root, topic="Compare two filters.")
+    assert "No trial failed; 3 were cut off by the time limit." in text
+
+
+def test_it_is_the_run_unless_the_delivered_code_was_just_described(tmp_path: Path) -> None:
+    root = _quest(tmp_path, None)
+    (root / "raw").mkdir()
+    rows = [{"event": "trial", "cell": "a", "trial": 0, "seed": 1, "status": "ok", "duration_s": 100.0}]
+    (root / "raw" / "ledger.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    text = pf.run_facts_text(root, topic=TOPIC)  # only the trials' least time is known
+    assert "FI did not time the whole run." in text and text.endswith("The run goes over the topic's limit of 60 s.")
+
+
+def test_a_paper_resumed_straight_into_review_gets_the_run_paragraph(tmp_path: Path) -> None:
+    from tests.test_disclosure import _engine
+
+    root = _quest(tmp_path, AT_ONCE)
+    eng = _engine(root)
+    eng.config.topic = TOPIC
+    paper = root / "paper" / "paper.md"
+    paper.write_text(PAPER, encoding="utf-8")
+    state = {"topic": TOPIC, "paper_md": str(paper), "exec_result": {"duration_s": 5.0}}
+    eng._refresh_paper_facts(state)  # type: ignore[arg-type]
+    first = paper.read_text(encoding="utf-8")
+    assert first.count("**Run.**") == 1 and first.index("We ran it.") < first.index("**Run.**") < first.index("## Results")
+    eng._refresh_paper_facts(state)  # type: ignore[arg-type]
+    assert paper.read_text(encoding="utf-8") == first

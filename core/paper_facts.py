@@ -32,8 +32,8 @@ flagged. So the writer no longer types these facts at all:
   finished paper (:data:`PAGE_RECORD`, written by the review), never from the writer.
 * **The check** (:func:`check`, no model) is then simple: no name between double braces is unknown to FI
   (:func:`placement_hits`); a run time typed as a number or a claim that the run kept to the topic's limit when it did
-  not is left to the typed-number rule and the claim check, which receive FI's record. A seed typed outside ``{{seed}}`` is not checked here; the claim check reads FI's record instead (the
-  seed in it comes from :func:`core.run_facts.seed_verdict`).
+  not is left to the typed-number rule and the claim check, which receive FI's record (the seed in it comes from
+  :func:`core.run_facts.seed_verdict`).
   A failure is a must-fix hit named :data:`HIT`; it sends the paper back to be written again (the text route; never the
   design, never a stop). What is still unmet when the review rounds are used up is kept in ``.fi/paper_record_check.json``,
   which the quality report prints, and is said in the run log.
@@ -60,20 +60,8 @@ HIT = "paper_record_mismatch"
 RECORD = Path(".fi") / "paper_record_check.json"
 NOT_RECORDED = "not recorded"
 
-#: The run's facts a placeholder can name, with what each is, for the writer.
+#: The single placeholders of older drafts: still filled, no longer offered (the paragraph ``{{run_facts}}`` replaces them).
 FACT_NAMES = ("seed", "run_time", "time_limit", "time_limit_met", "trials_per_setting", "settings", "trials_failed")
-_FACT_WORDS = {
-    "seed": "the seed the code used to draw the trials' random numbers",
-    "run_time": "the measured wall time of the experiment (the run whose trials are reported)",
-    "time_limit": "the run-time limit the topic sets",
-    "time_limit_met": ("\"within\", \"over\" or \"not shown to be within or over\" (the settings ran at the same time, or FI "
-                       "does not know that they did not, and the least a one-after-another run takes is at or under the "
-                       "limit or not known while the most it takes is over it or not known): whether the run kept to the "
-                       "topic's limit"),
-    "trials_per_setting": "how many trials each setting ran",
-    "settings": "how many settings (combinations of the plan's parameters) were run",
-    "trials_failed": "how many trials failed",
-}
 #: FI's blocks a placeholder can name: a whole block of the paper FI writes from its records, on a line of its own.
 #: Not a fact: its numbers are accounted for setting by setting (core/results_by_setting.py), never as FI's record.
 #: ``run_facts`` has no file: its paragraph is composed from :func:`facts` (:func:`run_facts_text`).
@@ -1068,17 +1056,25 @@ def facts(quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) ->
 # ---- the paragraph of the run's facts ---------------------------------------------------------------------------------
 
 
+def _plural(n: str, word: str) -> str:
+    """``n`` (a formatted count) with ``word`` in the right number: ``1 setting``, ``3 settings``."""
+    return f"{n} {word}{'' if n == '1' else 's'}"
+
+
 def _counts_sentences(root: Path) -> list[str]:
     each, settings, failed = _trial_counts(root)
     out: list[str] = []
     if settings and each:
-        out.append(f"The study ran {settings} settings, {each} trial{'' if each == '1' else 's'} in each.")
+        out.append(f"The study ran {_plural(settings, 'setting')}, {_plural(each, 'trial')} in each.")
     elif settings:
-        out.append(f"The study ran {settings} settings.")
+        out.append(f"The study ran {_plural(settings, 'setting')}.")
     elif each:
-        out.append(f"Each setting ran {each} trial{'' if each == '1' else 's'}.")
+        out.append(f"Each setting ran {_plural(each, 'trial')}.")
+    late = _out_of_time(root)
+    cut = f"{late:,} {'was' if late == 1 else 'were'} cut off by the time limit" if late else ""
     if failed:
-        out.append("No trial failed." if failed == "0" else f"{failed} trial{'' if failed == '1' else 's'} failed.")
+        said = "No trial failed" if failed == "0" else f"{_plural(failed, 'trial')} failed"
+        out.append(f"{said}{'; ' + cut if cut else ''}.")
     return out
 
 
@@ -1098,9 +1094,7 @@ def _delivered_sentence(reader: dict[str, Any]) -> str:
         said = f"at least {plain(least)} and at most {plain(most)} (each setting's time {together}, added up)"
     elif most is not None and least is None:
         said = f"at most {plain(most)} (each setting's time {together}, added up)"
-    elif most is not None:
-        said = plain(most)
-    else:
+    else:  # the trials' own time is a true lower bound whatever the timing noise of the other
         said = f"at least {plain(least)}"
     return f"FI did not time the delivered code, which runs the settings one after another: by FI's measurements such a run takes {said}."
 
@@ -1120,7 +1114,7 @@ def _run_time_sentences(root: Path, wall: float | None, least: float | None,
     took = {"confirm": "the confirming run, whose results are reported, took",
             "explore": "the exploring run, whose results are reported, took"}.get(stage or "", "the run took")
     n = settings or _cells_run(root)
-    sets = f"the {n} settings" if n else "the settings"
+    sets = f"the {_plural(n, 'setting')}" if n else "the settings"
     if reader is None:
         lead = f"{took[:1].upper()}{took[1:]} {_plain(wall)}."
     elif reader["at_once"] == 1:
@@ -1172,7 +1166,8 @@ def run_facts_text(quest_root: Path | str, *, topic: str = "", fallback_s: Any =
     limit, met = _limit_and_met(root, topic, wall, least, reader)
     if limit is not None:
         met = met if met in ("within", "over") else ""
-        delivered = reader is not None and reader["at_once"] != 1
+        # "It" is the delivered code, only when the sentence just before is the one about it
+        delivered = wall is not None and reader is not None and reader["at_once"] != 1
         parts.append(_verdict_sentence(met, limit, "It" if delivered else "The run"))
     return "**Run.** " + " ".join(parts) if parts else ""
 
@@ -1289,6 +1284,8 @@ def place_blocks(markdown: str, quest_root: Path | str, *, topic: str = "", fall
         if any(_norm_name(m.group(1)) == name for m in _PLACEHOLDER.finditer(text)) or any(
                 m.group(1) == name for m in _MARK.finditer(text)):
             continue
+        if name == "run_facts" and re.search(r"(?m)^\*\*Run\.\*\* ", text):
+            continue  # FI's own paragraph is in the draft with its markers gone
         if name == "run_facts":
             lines = text.split("\n")
             at = _disclosure._insert_at(lines)
@@ -1577,7 +1574,7 @@ def _placed(markdown: str, key: str) -> list[int]:
     return [m.start() for m in _MARK.finditer(markdown) if m.group(1) == key and not _inside(m.start(), away)]
 
 
-def _unknown_hits(markdown: str, quest_root: Path | str, known: dict[str, Fact]) -> list[str]:
+def _unknown_hits(markdown: str, quest_root: Path | str) -> list[str]:
     """A hit for each name between double braces that is no placeholder of FI's (it reads "not recorded")."""
     ids = {i.id for i in required_items(quest_root)}
     hits: list[str] = []
@@ -1604,8 +1601,7 @@ def placement_hits(paper_md: str, quest_root: Path | str, *, topic: str = "", fa
     """Must-fix hits for a name between double braces that is none of FI's. The run's facts are not asked of the writer
     any more: FI writes them as one paragraph in the Methods (:func:`run_facts_text`), so a missing ``{{seed}}`` is no
     fault of the paper."""
-    return _unknown_hits(_disclosure.without_block(paper_md), quest_root,
-                         facts(quest_root, topic=topic, fallback_s=fallback_s))
+    return _unknown_hits(_disclosure.without_block(paper_md), quest_root)
 
 
 def value_hits(paper_md: str, quest_root: Path | str) -> list[str]:
