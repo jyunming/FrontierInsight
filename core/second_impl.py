@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import inspect
 import json
 import logging
 import math
@@ -78,6 +79,11 @@ _RANDOM_PARAMS = {*_eqt.RNG_PARAMS, _eqt.SEED_PARAM}
 
 Message = dict[str, str]
 ChatFn = Callable[[str, list[Message]], Awaitable[str]]
+#: What the engine's run appends to a command's stderr when the command ran out of time.
+TIMED_OUT = "(timed out)"
+#: The comparison's time limit never starts below this (it was a fixed limit before it ran apart); the study's own
+#: setup trial's measured duration is added to it.
+COMPARE_BASE_S = 180
 RunFn = Callable[[list[str]], Awaitable[tuple[int, str, str]]]
 #: ``repair_main(name, problem, cases)``: try once to repair the main function in ``code/``; ``True`` when a new version
 #: was written there. ``problem`` is plain text for the repairing prompt; ``cases`` are the disagreeing inputs.
@@ -385,6 +391,8 @@ async def capture_inputs(run: Callable[[list[str]], Awaitable[Any]], quest_root:
     out: dict[str, list[dict[str, Any]]] = {}
     called_at: dict[str, list[int]] = {}
     ran: list[int] = []
+    took: dict[int, float] = {}
+    seeds: dict[int, Any] = {}
     returned: dict[str, set[str]] = {}
     deadline = time.monotonic() + budget_s if budget_s else None
     for index, cell in enumerate(cells):
@@ -399,6 +407,9 @@ async def capture_inputs(run: Callable[[list[str]], Awaitable[Any]], quest_root:
             continue
         if (got.get("row") or {}).get("status") == "ok":
             ran.append(index)
+            if isinstance(got["row"].get("duration_s"), (int, float)):
+                took[index] = float(got["row"]["duration_s"])
+            seeds[index] = got["row"].get("seed")
         for n, count in (got.get("counts") or {}).items():
             if str(n) in names and isinstance(count, int) and count > 0:
                 called_at.setdefault(str(n), []).append(index)
@@ -413,7 +424,17 @@ async def capture_inputs(run: Callable[[list[str]], Awaitable[Any]], quest_root:
                 if isinstance(c, dict) and c and c not in kept and len(kept) < CAPTURE_CALLS:
                     kept.append(c)
     out = {n: calls for n, calls in out.items() if calls}
-    (root / CAPTURED).write_text(json.dumps({"cases": out, "called_at": called_at, "ran": ran,
+    # The setting that ran to the end in the least time (the first that ran when no time was recorded): a comparison of two
+    # versions of a function calls the study's entry on it once, so the study has set what a trial sets before the versions
+    # are called. It is run as the study's trials are: the same kind, the same thresholds, the seed FI gave it.
+    inside = {str(k): list(v) for k, v in (in_each_run or {}).items()}
+    at = min(took, key=lambda i: (took[i], i)) if took else (ran[0] if ran else None)
+    setup = {}
+    if at is not None:
+        setup = {"entry": "run_cell" if deterministic else "run_trial", "cell": {**cells[at], **inside},
+                 "kind": (kinds or [])[at] if at < len(kinds or []) else "scan",
+                 "thresholds": dict(thresholds or {}), "seed": seeds.get(at), "duration_s": took.get(at)}
+    (root / CAPTURED).write_text(json.dumps({"cases": out, "called_at": called_at, "ran": ran, "took": {str(i): s for i, s in took.items()}, "setup": setup,
                                              "returned": {n: sorted(k) for n, k in returned.items()},
                                              "cells": [dict(c) for c in cells],
                                              "kinds": [(kinds or [])[i] if i < len(kinds or []) else "scan"
@@ -835,11 +856,22 @@ def short(value: Any, limit: int = 120) -> str:
     return str(value)[:limit]
 
 
-def judge_rows(rows: list[dict[str, Any]], inputs: list[dict[str, Any]], rel: float) -> dict[str, Any]:
+#: The exceptions that mean a version was not given a name or module it needs to run (not what it computes). An
+#: AttributeError or an UnboundLocalError can be the version's own fault and stays a reported disagreement.
+NOT_RUN_ERRORS = ("NameError", "ImportError", "ModuleNotFoundError")
+_SETUP_SAID = {"ran": "the study's setup trial ran to the end", "failed": "the study's setup trial did not run to the end",
+               "none": "the study's setup trial was not run"}
+
+
+def judge_rows(rows: list[dict[str, Any]], inputs: list[dict[str, Any]], rel: float, setup: str = "none") -> dict[str, Any]:
     """The verdict on the rows the script returned (one per input: ``main`` / ``ref`` results, or ``main_err`` /
     ``ref_err``). Both raising excludes the input; one raising is a ``domain`` disagreement; otherwise the values are
     compared. ``{"status": agree|disagree|unconfirmed, "compared", "excluded", "disagreements": [{inputs, main, other, kind}]}``."""
     compared = excluded = unshared = 0
+    # For each version: how many compared inputs it raised on, and how many of those raised a missing name or module.
+    raised = {"main": 0, "ref": 0}
+    not_run = {"main": 0, "ref": 0}
+    first_error = {"main": "", "ref": ""}
     missing: list[str] = []
     bad: list[dict[str, Any]] = []
     notes: list[str] = []
@@ -849,6 +881,12 @@ def judge_rows(rows: list[dict[str, Any]], inputs: list[dict[str, Any]], rel: fl
             excluded += 1
             continue
         compared += 1
+        for tag, err in (("main", m_err), ("ref", r_err)):
+            if err:
+                raised[tag] += 1
+                kind = str(err).split(":")[0].strip()
+                not_run[tag] += kind in NOT_RUN_ERRORS
+                first_error[tag] = first_error[tag] or kind
         if m_err or r_err:
             bad.append({"inputs": case, "kind": "domain",
                         "main": f"raised {m_err}" if m_err else short(decode(row.get("main"))),
@@ -862,6 +900,13 @@ def judge_rows(rows: list[dict[str, Any]], inputs: list[dict[str, Any]], rel: fl
                             "other": short(decode(row.get("ref")))})
             elif shared == 0:
                 unshared += 1
+    # A version whose every error, on every input it was given, is a missing name or module was not given what it needs to
+    # run: that is no disagreement about the step. Any other error stays a result of the function.
+    for tag, name in (("main", "first"), ("ref", "second")):
+        if compared and raised[tag] == compared and not_run[tag] == compared:
+            said = _SETUP_SAID.get(setup, _SETUP_SAID["none"])
+            return {"status": UNCONFIRMED, "compared": 0, "excluded": excluded, "disagreements": [],
+                    "why": f"the {name} version could not be run in the comparison: {first_error[tag]} ({said})"}
     if bad:
         status = DISAGREE
     elif compared == 0 or unshared == compared or missing:
@@ -924,6 +969,35 @@ def done(obj):
     sys.exit(0)
 
 
+SETUP_STATE = ["none"]
+
+
+def _fi_setup(study, setup):
+    # The study sets its own constants when a trial runs: one trial at a setting that already ran to the end puts this
+    # process in the state a trial's own calls find, with the thresholds a trial gets (for this call only). What the
+    # trial returns is not read; whether it ran to the end is said in the output.
+    import os
+    os.environ["FI_CELL_KIND"] = setup.get("kind") or "check"
+    os.environ["FI_THRESHOLDS"] = json.dumps(setup.get("thresholds") or {})
+    real = sys.stdout
+    sys.stdout = sys.stderr
+    SETUP_STATE[0] = "failed"
+    try:
+        fn = getattr(study, setup["entry"])
+        cell = dict(setup["cell"])
+        if setup["entry"] == "run_trial":
+            fn(cell, 0, int(setup.get("seed") or 0))
+        else:
+            fn(cell)
+        SETUP_STATE[0] = "ran"
+    except (Exception, SystemExit):
+        pass
+    finally:
+        sys.stdout = real
+        os.environ["FI_CELL_KIND"] = "check"
+        os.environ["FI_THRESHOLDS"] = "{}"
+
+
 try:
     main_mod = importlib.import_module(@MODULE@)
     main_fn = getattr(main_mod, @NAME@)
@@ -936,7 +1010,9 @@ try:
         # Set as the harness sets them for a check call, never inherited from the process that started this script.
         _os.environ["FI_THRESHOLDS"] = "{}"
         _os.environ["FI_CELL_KIND"] = "check"
-        _fi_load_study(@STUDY@)
+        _study = _fi_load_study(@STUDY@)
+        if @SETUP@:
+            _fi_setup(_study, @SETUP@)
 except BaseException:
     done({"study_load_error": traceback.format_exc()[-600:]})
 try:
@@ -971,19 +1047,22 @@ for case in cases:
         except BaseException as e:
             row[tag + "_err"] = type(e).__name__ + ": " + str(e)[:160]
     rows.append(row)
-done({"rows": rows})
+done({"rows": rows, "setup": SETUP_STATE[0]})
 '''
 
 
 def compare_script(*, code_dir: str, module: str, name: str, reference: str, inputs: str, uses: list[str],
-                   own: dict[str, str] | None = None, study: str = "") -> str:
+                   own: dict[str, str] | None = None, study: str = "", setup: dict[str, Any] | None = None) -> str:
     """The ``-c`` script that imports both versions and calls each on every input; it prints one ``SECOND_IMPL: {json}`` line.
-    ``study``: the study's own file (``code/simulate.py``), loaded first the way the trial harness loads it."""
+    ``study``: the study's own file (``code/simulate.py``), loaded first the way the trial harness loads it. ``setup``:
+    ``{"entry", "cell", "kind"}`` of a setting FI's own run of the study completed; the study's entry is called once on it
+    (as a trial is) so the study has set its constants, the same way, before either version is called."""
     from .trial_runner import LOAD_STUDY_SOURCE
 
     text = LOAD_STUDY_SOURCE + _SCRIPT
     for token, value in (("@CODE@", code_dir), ("@MODULE@", module), ("@NAME@", name), ("@REF@", reference),
-                         ("@STUDY@", study), ("@INPUTS@", inputs), ("@USES@", list(uses)), ("@OWN@", dict(own or {}))):
+                         ("@STUDY@", study), ("@SETUP@", dict(setup or {})), ("@INPUTS@", inputs), ("@USES@", list(uses)),
+                         ("@OWN@", dict(own or {}))):
         text = text.replace(token, repr(value))
     return text
 
@@ -1031,8 +1110,42 @@ def label(spec: _fs.Spec) -> str:
     return f"equation {spec.equation} ({spec.name})"
 
 
+FIXED_VALUES_CHARS = 900
+
+
+def _fixed_values(protocol: dict[str, Any] | None) -> str:
+    """The values the plan fixes (its constants, thresholds and numerical settings, and the fixed values of the settings),
+    for a reader who would otherwise have to guess them; ``""`` when the plan fixes none. Only these parts: never a metric's
+    known value, an oracle's expected value, the acceptance rule or an equation's example, which hold results. An entry is
+    shown whole or not at all; the ones left out are counted."""
+    p = protocol if isinstance(protocol, dict) else {}
+    parts = [(p.get("constants"), "constant"), (p.get("thresholds"), "threshold"),
+             (p.get("numerical_settings"), "numerical setting")]
+    optimisation = p.get("optimisation")
+    parts.append((optimisation.get("fixed") if isinstance(optimisation, dict) else None, "fixed value of the settings"))
+    entries = [f"{title} {key} = {json.dumps(v, default=str)}" for group, title in parts if isinstance(group, dict)
+               for key, v in group.items()]
+    shown, used = [], 0
+    for entry in entries:
+        if used + len(entry) > FIXED_VALUES_CHARS and shown:
+            break
+        shown.append(entry)
+        used += len(entry) + 2
+    if not shown:
+        return ""
+    more = f" ({len(entries) - len(shown)} more not shown)" if len(shown) < len(entries) else ""
+    return "the plan fixes these values (inputs of the study, not results): " + "; ".join(shown) + more
+
+
 def _spec_block(spec: _fs.Spec, protocol: dict[str, Any] | None) -> str:
-    """What the function is, for the writer and the judge: the card or the equation (never an expected value)."""
+    """What the function is, for the writer and the judge: the card or the equation, and the values the plan fixes (never
+    an expected result)."""
+    block = _spec_block_of(spec, protocol)
+    fixed = _fixed_values(protocol)
+    return f"{block}\n{fixed}" if fixed else block
+
+
+def _spec_block_of(spec: _fs.Spec, protocol: dict[str, Any] | None) -> str:
     if spec.kind == _fs.STEP and spec.card:
         c = spec.card
         lines = [f"{c['id']} (a step of the method): {c.get('name') or ''}".rstrip(), f"what it does: {c.get('does') or '(not stated)'}"]
@@ -1112,7 +1225,7 @@ def parse_verdict(reply: str) -> tuple[str, str]:
 
 
 def cases_text(cases: list[dict[str, Any]]) -> str:
-    return "\n".join("- " + ", ".join(f"{k} = {short(v)}" for k, v in c["inputs"].items())
+    return "\n".join("- given the inputs " + ", ".join(f"{k} = {short(v)}" for k, v in c["inputs"].items())
                      + f": version 1 returned {c['main']}; version 2 returned {c['other']}" for c in cases)
 
 
@@ -1127,9 +1240,11 @@ def repair_problem(reason: str, cases: list[dict[str, Any]]) -> str:
 
 
 def limitation_unresolved(spec: _fs.Spec, cases: list[dict[str, Any]]) -> str:
-    where = "; ".join(", ".join(f"{k} = {short(v, 30)}" for k, v in c["inputs"].items()) for c in cases[:2]) or "some inputs"
-    return (f"Two independently written versions of {label(spec)} gave different results on {where}; "
-            "the number depends on which is right.")
+    seen = "; ".join(
+        "given the inputs " + ", ".join(f"{k} = {short(v, 30)}" for k, v in c["inputs"].items())
+        + f", version 1 returned {c.get('main')} and version 2 returned {c.get('other')}" for c in cases[:2])
+    return (f"Two independently written versions of {label(spec)} gave different results"
+            + (f" ({seen})" if seen else "") + "; the number depends on which is right.")
 
 
 def limitation_unconfirmed(spec: _fs.Spec, why: str) -> str:
@@ -1338,6 +1453,14 @@ class SecondImpl:
             return "the example inputs do not cover the function's parameters"
         return ""
 
+    async def _run_script(self, script: str, named: list[str], setup_s: float) -> tuple[int, str, str]:
+        """``python -c script`` through the injected ``run``; ``named`` (files the script reads) follow it on the command
+        line, which a run kept apart from the quest copies in. A ``run`` that takes ``extra_s`` is told how long the study's
+        setup trial took in FI's own run, which the limit then includes."""
+        if "extra_s" in inspect.signature(self.run).parameters:
+            return await self.run(["-c", script, *named], extra_s=setup_s)  # type: ignore[call-arg]
+        return await self.run(["-c", script, *named])
+
     async def _compare(self, spec: _fs.Spec, entry: dict[str, Any]) -> dict[str, Any]:
         """One subprocess runs both versions on every input. ``status`` unconfirmed with ``why`` when it cannot be judged."""
         why = self._inputs_problem(spec)
@@ -1362,20 +1485,27 @@ class SecondImpl:
         else:
             entry.pop("deps_from_first_version", None)
         study = "code/simulate.py" if (self.root / "code" / "simulate.py").is_file() else ""
+        setup = read_captured(self.root).get("setup") if study else None
+        setup = setup if isinstance(setup, dict) and setup else None
+        # The paths the script reads, named on the command line so a run kept apart from the quest is given them.
+        named = [inputs_path.as_posix(), (DIR / f"{spec.name}.py").as_posix(), *[p for p in own.values()]]
         script = compare_script(code_dir="code", module=f"{self.package}.model", name=spec.name,
                                 reference=(DIR / f"{spec.name}.py").as_posix(), inputs=inputs_path.as_posix(), uses=uses,
-                                own=own, study=study)
+                                own=own, study=study, setup=setup)
         out = None
         err = ""
         for _try in range(2):  # a harness that printed nothing is run once more: it says nothing about the function
             try:
-                rc, text, err = await self.run(["-c", script])
+                rc, text, err = await self._run_script(script, named, float((setup or {}).get("duration_s") or 0.0))
             except Exception as e:  # noqa: BLE001
                 rc, text, err = -1, "", repr(e)
             out = parse_output(text)
-            if out is not None:
-                break
+            if out is not None or err.rstrip().endswith(TIMED_OUT):
+                break  # a run that ran out of time is not run again: the retry is for a harness that printed nothing
         entry["inputs_tried"] = len(inputs)
+        if out is None and setup and err.rstrip().endswith(TIMED_OUT):
+            return {"status": UNCONFIRMED, "why": "the comparison did not finish in time, with the study's setup trial in it",
+                    "disagreements": [], "retry": True}
         if out is None:
             return {"status": UNCONFIRMED, "why": f"the comparison could not be run here ({_text(err, 120) or 'no output'})",
                     "disagreements": [], "retry": True}
@@ -1388,7 +1518,9 @@ class SecondImpl:
         rows = out.get("rows") if isinstance(out.get("rows"), list) else []
         if len(rows) != len(inputs):
             return {"status": UNCONFIRMED, "why": "the comparison returned fewer results than inputs", "disagreements": [], "retry": True}
-        verdict = judge_rows(rows, inputs, tolerance_for(spec, self.protocol))
+        state = str(out.get("setup") or "none") if setup else "none"
+        verdict = judge_rows(rows, inputs, tolerance_for(spec, self.protocol), setup=state)
+        verdict["setup"] = state
         if verdict["status"] == UNCONFIRMED:
             verdict.update(why=verdict.get("why") or "the comparison could not run: both versions raised on every input", retry=False)
         return verdict
@@ -1431,13 +1563,21 @@ class SecondImpl:
             entry["disagreements"] = res["disagreements"][:3]
             entry["compared"] = res.get("compared", 0)
             entry["excluded"] = res.get("excluded", 0)
+            if res.get("setup"):  # whatever the verdict: what the versions were compared on
+                entry["setup"] = res["setup"]
+                if res["setup"] == "failed":
+                    entry["setup_note"] = ("the study's setup trial did not run to the end, so the versions were compared on "
+                                           "a study that had not been set up as a trial sets it up")
+                else:
+                    entry.pop("setup_note", None)
             if res.get("shape_notes"):
                 entry["shape_note"] = "; ".join(res["shape_notes"])
             else:
                 entry.pop("shape_note", None)
             if res["status"] == AGREE:
                 self._finish(spec, entry, AGREE, f"{res.get('compared', 0)} input(s) compared"
-                             + (f"; {entry['shape_note']}" if entry.get("shape_note") else ""))
+                             + (f"; {entry['shape_note']}" if entry.get("shape_note") else "")
+                             + (f"; {entry['setup_note']}" if entry.get("setup_note") else ""))
                 return
             if res["status"] == UNCONFIRMED:
                 self._finish(spec, entry, UNCONFIRMED, res.get("why", ""), recheck=bool(res.get("retry")))
