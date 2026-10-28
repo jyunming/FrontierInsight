@@ -697,6 +697,14 @@ def _contract_sentence(record: Any) -> str:
     return "In reading the plan, FI noted: " + "; ".join(gaps[:_SHOWN]) + more + "."
 
 
+def _edge_sentence(record: Any) -> str:
+    """The results of the last run that sit on their physical bound in every setting (``.fi/edge_everywhere.json``), one
+    sentence each."""
+    rows = record.get("results") if isinstance(record, dict) else None
+    said = [r.strip().rstrip(".") + "." for r in rows if isinstance(r, str) and r.strip()] if isinstance(rows, list) else []
+    return " ".join(said[:_SHOWN]) + (f" And {len(said) - _SHOWN} more." if len(said) > _SHOWN else "")
+
+
 def _precision_sentence(missed: Any) -> str:
     """The plan's precision target and the quantities that missed it, with the half-width each reached."""
     rows = [m for m in missed if isinstance(m, dict) and m.get("name")] if isinstance(missed, list) else []
@@ -877,6 +885,7 @@ def run_record(quest_root: Path, *, topic: str = "", duration_s: float | None = 
         parts.append(_untested_sentence(untested))
     parts.append(_precision_sentence(_read_json(quest_root / PRECISION_RECORD)))
     parts.append(_contract_sentence(_read_json(quest_root / ".fi" / "contract.json")))
+    parts.append(_edge_sentence(_read_json(quest_root / ".fi" / "edge_everywhere.json")))
     parts.append(_widened_sentence(_read_json(quest_root / ".fi" / "oracle_review.json")))
     parts.append(_objections_sentence(_read_json(quest_root / OBJECTIONS_RECORD)))
     parts.append(unresolved_sentence(_read_json(quest_root / OBJECTIONS_RECORD)))

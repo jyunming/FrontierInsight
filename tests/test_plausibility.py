@@ -626,13 +626,36 @@ def test_the_prose_of_the_failure_policy_is_read_only_when_no_result_declares_a_
     state = {"design": design, "manifest_failed_trials": 0}
     assert _zero_expected_paths(state) == {"failed_run_count"}
     with_role = {"design": {**design, "protocol": {**design["protocol"], "metrics": [
-        {"id": "failed_run_count"}, {"id": "other", "role": "result"}]}}, "manifest_failed_trials": 0}
+        {"id": "failed_run_count", "role": "result"}]}}, "manifest_failed_trials": 0}
     assert _zero_expected_paths(with_role) == set()
 
 
-def test_a_physical_bound_result_exempts_only_the_assertion_paths_that_name_it() -> None:
+def test_a_physical_bound_result_exempts_the_assertion_paths_that_end_in_its_whole_name() -> None:
     from core.engine import _physical_bound_paths
 
-    design = {"result_assertions": [{"path": "share", "min": 0, "max": 1}, {"path": "other_group.share", "min": 0, "max": 1}],
+    design = {"result_assertions": [{"path": "share", "min": 0, "max": 1}, {"path": "other_group.share", "min": 0, "max": 1},
+                                    {"path": "vote_share", "min": 0, "max": 1}],
               "protocol": {"metrics": [{"id": "share", "role": "physical_bound"}]}}
-    assert _physical_bound_paths({"design": design}) == {"share"}
+    assert _physical_bound_paths({"design": design}) == {"share", "other_group.share"}
+
+
+def test_a_dotted_assertion_path_that_ends_in_the_physical_bound_result_is_exempt() -> None:
+    from core.engine import _assertion_violations, _physical_bound_paths
+
+    design = {"result_assertions": [{"path": "by_setting.share", "min": 0, "max": 1},
+                                    {"path": "vote_share", "min": 0, "max": 1}],
+              "protocol": {"metrics": [{"id": "share", "role": "physical_bound"}]}}
+    assert _physical_bound_paths({"design": design}) == {"by_setting.share"}
+    state = _edge_state("physical_bound")
+    state["design"]["result_assertions"] = [{"path": "by_setting.share", "min": 0, "max": 1}]
+    state["result_json"] = {"by_setting": {"share": 0.0, "s2": {"share": 0.0}, "s3": {"share": 0.0}, "s4": {"share": 0.5}}}
+    assert _assertion_violations(state) == []
+
+
+def test_a_role_on_one_result_keeps_the_failure_policy_exemption_of_the_others() -> None:
+    from core.engine import _zero_expected_paths
+
+    design = {"result_assertions": [{"path": "failed_run_count", "min": 0, "max": 100}, {"path": "wall", "min": 0, "max": 9e9}],
+              "protocol": {"failure_policy": "A trial that fails is counted in `failed_run_count` and in `wall`.",
+                           "metrics": [{"id": "wall", "role": "timing"}, {"id": "failed_run_count"}]}}
+    assert _zero_expected_paths({"design": design, "manifest_failed_trials": 0}) == {"failed_run_count"}

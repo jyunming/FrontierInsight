@@ -563,3 +563,13 @@ def test_a_declared_result_the_contract_cannot_place_still_counts_as_a_result() 
     only_odd = {"metrics": [{"id": "rate", "kind": "ratio"}]}
     assert nw.declared_results(only_odd) == {"rate"}
     assert [w.text for w in nw.scan("", {"rate": math.nan}, results=nw.declared_results(only_odd))] == ["rate is nan"]
+
+
+def test_a_result_on_its_bound_in_every_setting_reaches_the_run_record(tmp_path: Path) -> None:
+    from core import disclosure
+
+    engine = Engine(_cfg(tmp_path))
+    (engine.quest_root / ".fi").mkdir(parents=True, exist_ok=True)
+    text = "share is on its bound in every setting; the result may carry no information"
+    (engine.quest_root / ".fi" / "edge_everywhere.json").write_text(json.dumps({"results": [text]}), encoding="utf-8")
+    assert text + "." in disclosure.run_record(engine.quest_root)

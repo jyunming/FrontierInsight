@@ -11395,7 +11395,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         it (the frozen protocol's hash would change). A candidate design (``adopted`` false) is built but never written."""
         if not isinstance(protocol, dict):
             return None
-        design = state.get("design") or {}
+        design = state.get("design")
+        if not isinstance(design, dict) or not design:
+            return None
         try:
             plan_file = self.quest_root / "plan.md"
             stat = plan_file.stat() if plan_file.is_file() else None
@@ -19463,10 +19465,22 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             patch["selected_skills"] = [n for n in state.get("selected_skills") or [] if n not in gone]
             patch["skill_selection"] = selection
         patch["numeric_warnings_accepted"] = False
+        said_edges = []
         for w in _assertion_warnings(self._in_force({**state, **patch}), self._walk_memo()):
             self._log.warning("[plausibility] warning, not a stop: %s", w.describe())
+            if getattr(w, "kind", "") == "edge_everywhere":
+                said_edges.append(w.describe())
             self._audit("check_result", check="plausibility_unproven_cap", status="warn",
                         summary=w.describe()[:300], path=getattr(w, "path", ""), value=getattr(w, "value", None))
+        try:  # what the run record says of this run's results that sit on their bound everywhere
+            edge_path = self.fi_dir / "edge_everywhere.json"
+            if said_edges:
+                edge_path.parent.mkdir(parents=True, exist_ok=True)
+                edge_path.write_text(json.dumps({"results": said_edges}, indent=2) + "\n", encoding="utf-8")
+            else:
+                edge_path.unlink(missing_ok=True)
+        except OSError:
+            pass
         patch["run_manifest_failures"] = manifest_attempts_next
         patch["run_manifest_analysis_only"] = manifest_analysis_only
         run_context = await self._attempt_context({**state, **patch}, kind="after_run")
@@ -34787,8 +34801,9 @@ def _zero_expected_paths(state: "QuestState") -> set[str]:
     protocol = (state.get("design") or {}).get("protocol")
     policy = str((protocol or {}).get("failure_policy") or "") if isinstance(protocol, dict) else ""
     metrics = (protocol or {}).get("metrics") if isinstance(protocol, dict) else None
-    if isinstance(metrics, list) and any(isinstance(m, dict) and m.get("role") for m in metrics):
-        return set()  # a plan that gives roles says it there (physical_bound), not in the prose of its failure policy
+    # A result that declares a role says it there (physical_bound), not in the prose of the failure policy.
+    roled = {str(m["id"]) for m in metrics if isinstance(m, dict) and m.get("role") and m.get("id")} \
+        if isinstance(metrics, list) else set()
     failed = state.get("manifest_failed_trials")
     # The zero must be corroborated: a manifest was read and it lists no failed trial.
     if not policy.strip() or failed != 0 or isinstance(failed, bool):
@@ -34798,7 +34813,7 @@ def _zero_expected_paths(state: "QuestState") -> set[str]:
     out: set[str] = set()
     for a in plausibility.parse_assertions(_asserting_design(state)):
         leaf = a.path.rsplit(".", 1)[-1]
-        if not leaf:
+        if not leaf or leaf in roled:
             continue
         # The policy names the quantity as a name: an identifier (`failed_run_count`) as a whole word, or any name in
         # quotes. A bare word ("rate", "count") in the policy's prose names nothing.
@@ -34819,7 +34834,7 @@ def _physical_bound_paths(state: "QuestState") -> set[str]:
     from core import plausibility
 
     physical = {i for i, role in _contract.raw_roles(protocol).items() if role == "physical_bound"}
-    return {a.path for a in plausibility.parse_assertions(design) if any(plausibility._matches(a.path, i) for i in physical)}
+    return {a.path for a in plausibility.parse_assertions(design) if any(plausibility._matches(i, a.path) for i in physical)}
 
 
 def _asserting_design(state: "QuestState") -> dict[str, Any]:
