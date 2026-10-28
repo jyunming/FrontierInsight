@@ -184,6 +184,14 @@ def test_copilot_is_asked_for_an_answer_only_with_the_prompt_on_stdin() -> None:
     assert spec.max_input_chars is None
 
 
+@pytest.mark.asyncio
+async def test_copilot_attaches_each_image_as_a_file_with_the_tools_still_off() -> None:
+    argv, _, _ = await _spawn_record("copilot_cli", images=[("image/png", b"\x89PNG-fake")])
+    at = argv.index("--attachment")
+    assert argv[at + 1].endswith(".png")
+    assert "--available-tools=" in argv and "--allow-all-tools" not in argv
+
+
 def test_unverified_clis_keep_their_argv() -> None:
     """gemini_cli could not be checked against the real CLI (quota, account tier), so its argv is unchanged; only the
     empty working directory applies to it. antigravity_cli has no flag that turns its tools off: its answer-only

@@ -934,6 +934,10 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         pass_prompt_via="stdin",
         output_via="stdout",
         model_flag="--model",   # provider.model = "claude-sonnet-4.6"
+        # `--attachment <file>` attaches an image to the prompt; checked with a
+        # test image and every tool off: the model named its colour and text.
+        image_input="file_flag",
+        image_flag="--attachment",
         # See _CliSpec.env_unset: an ambient GITHUB_TOKEN outranks the
         # copilot login and 401s if it lacks "Copilot Requests".
         env_unset=("GITHUB_TOKEN", "GH_TOKEN"),
