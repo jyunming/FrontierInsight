@@ -921,39 +921,23 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         effort_args=lambda level: ["-c", f'model_reasoning_effort="{level}"'],
     ),
     "copilot_cli": _CliSpec(
-        # GitHub Copilot CLI (`copilot --prompt`). WARNING — this is an
-        # AGENTIC CLI: it interprets prompts as user coding tasks and
-        # may reply conversationally instead of running stateless LLM
-        # inference. Empirically broken as a chat backend for FI's
-        # pipeline (paper.md fills with "Are you trying to X?", code
-        # node returns the empty stub). engine._warn_if_unsanctioned_provider
-        # prints a loud warning when this provider is selected. Kept
-        # in _CLI_SPECS so the configuration shape remains stable for
-        # users who set it via the interview before reading docs.
-        #
-        # `-s/--silent` strips the trailing stats block. `--allow-all-tools`
-        # is needed to avoid interactive permission prompts; removing it
-        # would make the CLI hang on confirmation. The fundamental issue
-        # is the agent loop, not this flag — switch to vscode_extension /
-        # claude_cli / codex_cli / gemini_cli / openai for FI use.
-        argv=("copilot", "-s", "--allow-all-tools", "-p"),
-        pass_prompt_via="arg",
+        # GitHub Copilot CLI (`copilot`), asked for an answer only. Checked
+        # against CLI 1.0.95: with no `-p`, the prompt piped on stdin is read
+        # whole (a 53,000-character prompt came through to its last line),
+        # and `--available-tools=` leaves the model no tool, so it cannot run
+        # commands or edit files and no permission prompt can stall the call
+        # (`--allow-all-tools` is not passed). `--disable-builtin-mcps` drops
+        # the GitHub MCP servers; `--no-custom-instructions` keeps any
+        # AGENTS.md / copilot-instructions out of the prompt. `-s` prints the
+        # answer alone, without the usage block.
+        argv=("copilot", "-s", "--available-tools=", "--disable-builtin-mcps", "--no-custom-instructions"),
+        pass_prompt_via="stdin",
         output_via="stdout",
-        model_flag="--model",   # provider.model = "gpt-5.2"
+        model_flag="--model",   # provider.model = "claude-sonnet-4.6"
         # See _CliSpec.env_unset: an ambient GITHUB_TOKEN outranks the
         # copilot login and 401s if it lacks "Copilot Requests".
         env_unset=("GITHUB_TOKEN", "GH_TOKEN"),
         env_unset_override="COPILOT_GITHUB_TOKEN",
-        # Prompt is passed as a command-line ARG, so on Windows the whole
-        # command line is subject to the cmd.exe limit (~8191 chars) — copilot
-        # ships as `copilot.BAT` and a long design/write prompt (with
-        # accumulated feedback_history) fails with `rc=1: The command line is
-        # too long`. Cap under that so the shared prompt-trimmer (see
-        # `_truncate_prompt_to_fit`) kicks in first. NOTE: 7 KB is small for a
-        # rich node prompt, so copilot_cli trims heavily on long-context nodes
-        # — a stdin/temp-file transport (like codex/gemini) is the real fix;
-        # prefer codex_cli / openai for long prompts on Windows.
-        max_input_chars=7000,
     ),
     "gemini_cli": _CliSpec(
         # `@google/gemini-cli` non-interactive. `--yolo` auto-approves

@@ -173,11 +173,21 @@ async def test_claude_images_and_effort_keep_the_answer_only_flags() -> None:
     assert "--safe-mode" in argv
 
 
+def test_copilot_is_asked_for_an_answer_only_with_the_prompt_on_stdin() -> None:
+    """Checked against copilot CLI 1.0.95: the prompt piped on stdin is read whole and ``--available-tools=`` leaves the
+    model no tool, so the old ``--allow-all-tools`` (tools that run commands) and the 7,000-character cap of a prompt
+    passed in argv are gone."""
+    spec = _CLI_SPECS["copilot_cli"]
+    assert spec.argv == ("copilot", "-s", "--available-tools=", "--disable-builtin-mcps", "--no-custom-instructions")
+    assert "--allow-all-tools" not in spec.argv and "-p" not in spec.argv
+    assert spec.pass_prompt_via == "stdin"
+    assert spec.max_input_chars is None
+
+
 def test_unverified_clis_keep_their_argv() -> None:
-    """copilot_cli and gemini_cli could not be checked against the real CLI (quota, account tier), so their argv is
-    unchanged; only the empty working directory applies to them. antigravity_cli has no flag that turns its tools off:
-    its answer-only settings go through a home of the call's own (see the agy tests below)."""
-    assert _CLI_SPECS["copilot_cli"].argv == ("copilot", "-s", "--allow-all-tools", "-p")
+    """gemini_cli could not be checked against the real CLI (quota, account tier), so its argv is unchanged; only the
+    empty working directory applies to it. antigravity_cli has no flag that turns its tools off: its answer-only
+    settings go through a home of the call's own (see the agy tests below)."""
     assert _CLI_SPECS["gemini_cli"].argv == ("gemini", "--yolo", "-o", "json", "-p", "")
     assert _CLI_SPECS["antigravity_cli"].argv == (
         "agy", "--print", "", "--input-format", "stream-json",
