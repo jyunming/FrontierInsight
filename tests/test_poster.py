@@ -1271,9 +1271,63 @@ async def test_a_failing_xelatex_is_retried_once_with_pdflatex(
 def test_the_glyphs_xelatex_left_off_are_read_from_its_log(tmp_path: Path) -> None:
     log = tmp_path / "poster.log"
     log.write_text("Missing character: There is no \u0e01 in font [x.otf]:mapping=tex-text!\n"
-                   "Missing character: There is no \u0e01 in font [y.otf]!\n", encoding="utf-8")
-    assert poster_mod._glyphs_left_off(log) == ["\u0e01"]
+                   "Missing character: There is no \u0e01 in font [y.otf]!\n"
+                   "Missing character: There is no ^^80 in font [x.otf]:mapping=tex-text!\n"
+                   "Missing character: There is no ^^M in font [x.otf]!\n"
+                   "Missing character: There is no ^^^^20ac in font [x.otf]!\n"
+                   "Missing character: There is no \u00a0 in font [x.otf]!\n"
+                   "Missing character: There is no oddtoken in font [x.otf]!\n", encoding="utf-8")
+    assert poster_mod._glyphs_left_off(log) == [
+        "U+0E01", "U+0080", "U+000D", "U+20AC", "U+00A0", "oddtoken"]
     assert poster_mod._glyphs_left_off(tmp_path / "none.log") == []
+
+
+def test_a_marker_replaces_the_glyph_in_prose_but_not_in_an_address_or_a_path() -> None:
+    marker = "\\textbf{[U+FFFD]}"
+    text = ("prose \ufffd here \\qrcode[height=3cm]{https://x.example/\ufffd} and "
+            "\\includegraphics[width=2cm]{figures/a\ufffd.png} see https://y.example/\ufffd.")
+    out = poster_mod._mark_outside_kept_spans(text, "\ufffd", marker)
+    assert out.startswith("prose " + marker + " here ")
+    assert "{https://x.example/\ufffd}" in out and "{figures/a\ufffd.png}" in out
+    assert "https://y.example/\ufffd." in out
+    assert out.count(marker) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_is_not_retried_and_a_retry_starts_from_clean_build_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(poster_mod, "find_pdf_engine", lambda: ("pdflatex", "/fake/pdflatex"))
+    monkeypatch.setattr(_cjk, "find_xelatex", lambda e: ("xelatex", "/fake/xelatex"))
+    monkeypatch.setattr(poster_mod, "find_fonts", lambda path, files=None: _fake_fonts())
+    monkeypatch.setattr(poster_mod, "measure_pdf", lambda path: None)
+    calls: list[str] = []
+    seen_scratch: list[bool] = []
+    real_run = subprocess.run
+    mode = {"fail": "timeout"}
+
+    def fake_run(cmd, **kwargs):  # type: ignore[no-untyped-def]
+        if not isinstance(cmd, (list, tuple)) or not any(str(part).endswith("poster.tex") for part in cmd):
+            return real_run(cmd, **kwargs)
+        calls.append(str(cmd[0]))
+        cwd = Path(kwargs.get("cwd") or ".")
+        if cmd[0] == "/fake/xelatex":
+            (cwd / "poster.aux").write_text("half-written", encoding="utf-8")
+            if mode["fail"] == "timeout":
+                raise subprocess.TimeoutExpired(cmd, 1)
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        seen_scratch.append((cwd / "poster.aux").exists())
+        (cwd / "poster.pdf").write_bytes(b"%PDF-fake\n")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    fake_poster_run(monkeypatch, fake_run)
+    result, art = await _generate(tmp_path, monkeypatch, _reply())
+    assert calls == ["/fake/xelatex"] and "poster_pdf_skipped" in result
+    assert "xelatex_timeout" in (art.quest_root / "poster_pdf_skipped.md").read_text(encoding="utf-8")
+    calls.clear()
+    mode["fail"] = "rc"
+    result, art = await _generate(tmp_path / "again", monkeypatch, _reply())
+    assert calls == ["/fake/xelatex", "/fake/pdflatex"] and seen_scratch == [False]
 
 
 def _web(title: str, url: str) -> dict:

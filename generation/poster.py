@@ -69,7 +69,7 @@ from generation._figure_captions import without_number
 from generation._pdf_engine import find_pdf_engine
 from generation._pdf_measure import measure_pdf, poster_report
 from generation._unicode_fonts import find_fonts
-from generation.paper import _prepare_unicode, listed_further_reading
+from generation.paper import _NO_WRAP_RE, _prepare_unicode, listed_further_reading
 
 _log = logging.getLogger("frontier_insight.poster")
 
@@ -908,21 +908,57 @@ def _measured_columns(doc, report: dict, sheet: _Sheet) -> tuple[list[float] | N
 # deliverables (poster.pdf + poster.tex), not a pile of poster.aux/.out/…
 # The text fonts the template sets under XeLaTeX (templates/poster/poster.tex): the headline's and the body's.
 _POSTER_TEXT_FILES = ("texgyrepagella-regular.otf", "texgyreheros-regular.otf")
-# XeTeX's own log line for a character the font lacks (the paper reads pandoc's version of it).
-_LEFT_OFF_RE = _re.compile(r"Missing character: There is no (\S+?) in font")
+# XeTeX's own log line for a character the font lacks (the paper reads pandoc's version of it). The character is
+# printed as itself, or in caret form for a control character (``^^80``, ``^^M``, ``^^^^20ac``).
+_LEFT_OFF_RE = _re.compile(r"Missing character: There is no (.+?) in font")
+_CARET_RE = _re.compile(r"^\^\^(?:\^\^([0-9a-f]{4})|([0-9a-f]{2})|(.))$")
+
+
+def _left_off_label(token: str) -> str:
+    """``U+XXXX`` for a character as the log prints it; the raw token when it cannot be read. Never raises."""
+    try:
+        m = _CARET_RE.match(token)
+        if m:
+            code = int(m.group(1) or m.group(2), 16) if (m.group(1) or m.group(2)) else ord(m.group(3)) ^ 64
+        elif len(token) == 1:
+            code = ord(token)
+        else:
+            return token
+        return f"U+{code:04X}"
+    except (ValueError, TypeError):
+        return token
 
 
 def _glyphs_left_off(log_path: Path) -> list[str]:
-    """The characters the Unicode engine left off the page, once each, from the compile's log (for the disclosure)."""
+    """The characters the Unicode engine left off the page, once each as ``U+XXXX`` (or the raw token when it cannot
+    be read), from the compile's log. For the disclosure only: it never raises."""
     try:
         log = log_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+        found: list[str] = []
+        for m in _LEFT_OFF_RE.finditer(log):
+            label = _left_off_label(m.group(1))
+            if label not in found:
+                found.append(label)
+        return found
+    except Exception as exc:  # noqa: BLE001 -- a disclosure must not fail the poster
+        _log.info("poster.pdf: could not read %s (%r)", log_path, exc)
         return []
-    found: list[str] = []
-    for m in _LEFT_OFF_RE.finditer(log):
-        if m.group(1) not in found:
-            found.append(m.group(1))
-    return found
+
+
+# Where a marker must not go: the spans the paper never wraps (addresses), and a figure path or a QR code's address.
+_KEEP_RE = _re.compile(_NO_WRAP_RE.pattern + r"|\\qrcode(?:\[[^\]]*\])?\{[^}]*\}", _re.DOTALL)
+
+
+def _mark_outside_kept_spans(text: str, glyph: str, marker: str) -> str:
+    """``text`` with ``glyph`` replaced by ``marker`` except inside the spans of :data:`_KEEP_RE`."""
+    out: list[str] = []
+    pos = 0
+    for m in _KEEP_RE.finditer(text):
+        out.append(text[pos:m.start()].replace(glyph, marker))
+        out.append(m.group(0))
+        pos = m.end()
+    out.append(text[pos:].replace(glyph, marker))
+    return "".join(out)
 
 
 _POSTER_AUX_EXTS = (
@@ -1151,7 +1187,7 @@ class PosterGenerator:
                 at = body.find(glyph)
                 near = " ".join(body[max(0, at - 30):at + 30].split()) if at >= 0 else ""
                 not_set_info.append({"glyph": glyph, "code_point": code, "near": near})
-                text = text.replace(glyph, "\\textbf{[" + code + "]}")
+                text = _mark_outside_kept_spans(text, glyph, "\\textbf{[" + code + "]}")
             if prepared.header:
                 unicode_file.write_text(prepared.header, encoding="utf-8")
             elif unicode_file.is_file():
@@ -1200,6 +1236,8 @@ class PosterGenerator:
                 write_tex()
             compiles += 1
             failure = self._compile(engine, poster_tex, out_dir, out_pdf)
+            if failure is not None and failure[0] == f"{engine_name}_timeout":
+                retry_with = None  # a timeout is not an engine failure: no second compile, and it is recorded as one
             if failure is not None and retry_with is not None:
                 # The Unicode engine could not make the poster (a TeX install without its fonts, say): the engine
                 # the poster was made with before, once. Decided on the compile's result only.
@@ -1207,6 +1245,7 @@ class PosterGenerator:
                              engine_name, failure[0], retry_with[0])
                 engine, engine_name, state["fonts"] = retry_with, retry_with[0], None
                 retry_with = None
+                _cleanup_poster_artifacts(out_dir, keep_log=False)  # the failed run's aux/out/log
                 write_tex()
                 failure = self._compile(engine, poster_tex, out_dir, out_pdf)
             if failure is not None:
@@ -1271,7 +1310,7 @@ class PosterGenerator:
             _log.warning("poster.pdf: %s left %s off the page", engine_name, ", ".join(left_off))
         self._write_fit_report(out_dir, {
             "glyphs_not_set": not_set_info,
-            "glyphs_left_off": [f"U+{ord(g):04X}" for g in left_off],
+            "glyphs_left_off": left_off,
             "sheet": output.poster_size,
             "engine": engine_name,
             "compiles": compiles,
