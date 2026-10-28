@@ -115,7 +115,7 @@ _ALIASES = {
 
 # What each step and every step after it write, relative to the quest folder. A step's own inputs are not here: a
 # rerun from the writing keeps the figures the run drew. An entry with ``*`` matches several files.
-_DELIVERED = ["slides.md", "slides.html", "slides.pdf", "slides.pptx", "poster.tex", "poster.pdf", "poster.pptx",
+_DELIVERED = ["slides.md", "slides.html", "slides.pdf", "slides.pptx", "poster.tex", "poster_unicode.tex", "poster.pdf", "poster.pptx",
               "poster.html", "speech.md", "frontier_insight_summary.json", "NEXT_STEP.md"]
 _PAPER = ["paper", "paper.md", "paper.pdf", "paper.html", "paper_html_body.md", "paper_html_source.html",
           "paper_html_theme.css", "paper_pdf_source.md", ".fi/paper_record_check.json",

@@ -52,7 +52,7 @@ from core.engine import (
     QuestArtifacts,
     _latex_esc,
     build_further_reading,
-    build_references,
+    cited_references,
 )
 from core.proc_tree import run_tree
 from core.provider import (
@@ -68,7 +68,8 @@ from generation import _cjk
 from generation._figure_captions import without_number
 from generation._pdf_engine import find_pdf_engine
 from generation._pdf_measure import measure_pdf, poster_report
-from generation.paper import _sanitize_unicode_for_latex
+from generation._unicode_fonts import find_fonts
+from generation.paper import _NO_WRAP_RE, _prepare_unicode, listed_further_reading
 
 _log = logging.getLogger("frontier_insight.poster")
 
@@ -186,11 +187,15 @@ _EMOJI_RE = _re.compile(
 )
 
 
-def _latex_safe_body(body: str) -> str:
-    """Make a fully-substituted poster.tex safe for pdflatex: map common
-    Unicode typography to LaTeX equivalents (shared with the paper
-    generator) and strip emoji/pictographs that have no LaTeX mapping."""
-    return _EMOJI_RE.sub("", _sanitize_unicode_for_latex(body))
+def _latex_safe_source(body: str, *, fonts=None, cjk: bool = False):
+    """The fully-substituted poster.tex made ready for its TeX engine by the
+    paper's own glyph handling (``generation.paper._prepare_unicode``): exact
+    LaTeX forms, and under XeLaTeX a fallback font for each glyph the text
+    fonts lack (``fonts`` is that engine's ``FontPlan``; None for pdflatex).
+    Returns the ``_UnicodeSource``: ``.text``, ``.header`` (the fonts, for
+    ``poster_unicode.tex``) and ``.not_set`` (glyphs no font here sets).
+    Emoji/pictographs that have no LaTeX mapping are stripped first."""
+    return _prepare_unicode(_EMOJI_RE.sub("", body), fonts=fonts, cjk=cjk, rewrite_code=True)
 
 
 # Bare LaTeX specials that hard-error pdflatex when an LLM writes them as
@@ -901,6 +906,61 @@ def _measured_columns(doc, report: dict, sheet: _Sheet) -> tuple[list[float] | N
 # LaTeX scratch pdflatex/tectonic leave next to poster.pdf — pure compile
 # byproducts. We delete them once we have the PDF so the quest dir holds the
 # deliverables (poster.pdf + poster.tex), not a pile of poster.aux/.out/…
+# The text fonts the template sets under XeLaTeX (templates/poster/poster.tex): the headline's and the body's.
+_POSTER_TEXT_FILES = ("texgyrepagella-regular.otf", "texgyreheros-regular.otf")
+# XeTeX's own log line for a character the font lacks (the paper reads pandoc's version of it). The character is
+# printed as itself, or in caret form for a control character (``^^80``, ``^^M``, ``^^^^20ac``).
+_LEFT_OFF_RE = _re.compile(r"Missing character: There is no (.+?) in font")
+_CARET_RE = _re.compile(r"^\^\^(?:\^\^([0-9a-f]{4})|([0-9a-f]{2})|(.))$")
+
+
+def _left_off_label(token: str) -> str:
+    """``U+XXXX`` for a character as the log prints it; the raw token when it cannot be read. Never raises."""
+    try:
+        m = _CARET_RE.match(token)
+        if m:
+            code = int(m.group(1) or m.group(2), 16) if (m.group(1) or m.group(2)) else ord(m.group(3)) ^ 64
+        elif len(token) == 1:
+            code = ord(token)
+        else:
+            return token
+        return f"U+{code:04X}"
+    except (ValueError, TypeError):
+        return token
+
+
+def _glyphs_left_off(log_path: Path) -> list[str]:
+    """The characters the Unicode engine left off the page, once each as ``U+XXXX`` (or the raw token when it cannot
+    be read), from the compile's log. For the disclosure only: it never raises."""
+    try:
+        log = log_path.read_text(encoding="utf-8", errors="replace")
+        found: list[str] = []
+        for m in _LEFT_OFF_RE.finditer(log):
+            label = _left_off_label(m.group(1))
+            if label not in found:
+                found.append(label)
+        return found
+    except Exception as exc:  # noqa: BLE001 -- a disclosure must not fail the poster
+        _log.info("poster.pdf: could not read %s (%r)", log_path, exc)
+        return []
+
+
+# Where a marker must not go: the spans the paper never wraps (addresses), and a figure path or a QR code's address.
+_KEEP_RE = _re.compile(_NO_WRAP_RE.pattern + r"|\\qrcode(?:\[[^\]]*\])?\{[^}]*\}", _re.DOTALL)
+
+
+def _mark_outside_kept_spans(text: str, glyph: str, marker: str) -> str:
+    """``text`` with ``glyph`` replaced by ``marker`` except inside the spans of :data:`_KEEP_RE`."""
+    out: list[str] = []
+    pos = 0
+    for m in _KEEP_RE.finditer(text):
+        out.append(text[pos:m.start()].replace(glyph, marker))
+        out.append(m.group(0))
+        pos = m.end()
+    out.append(text[pos:].replace(glyph, marker))
+    return "".join(out)
+
+
 _POSTER_AUX_EXTS = (
     ".aux", ".out", ".nav", ".snm", ".toc", ".vrb",
     ".fls", ".fdb_latexmk", ".synctex.gz",
@@ -978,11 +1038,14 @@ class PosterGenerator:
         figures = _figure_files(art.figures_dir)
         captions = _paper_captions(paper_md)
         literature = art.raw_state.get("literature") or []
-        sources: dict[str, dict] = {
-            str(r["n"]): r for r in build_references(literature, audience=output.audience)
-        }
+        # Only the references the paper ends with (what its citation check kept), numbered as the paper numbers
+        # them: the model is shown no other source, so the poster cannot cite one the paper dropped.
+        paper_refs = cited_references(literature, paper_md, audience=output.audience)
+        sources: dict[str, dict] = {str(r["n"]): r for r in paper_refs}
+        # Web pages the same way: only those the paper's own Further reading lists.
         sources.update({
-            str(w["label"]): w for w in build_further_reading(literature, audience=output.audience)
+            str(w["label"]): w for w in listed_further_reading(
+                build_further_reading(literature, audience=output.audience), paper_md, art.raw_state)
         })
 
         # safe_substitute: paper_md is model-written prose that may carry
@@ -1061,24 +1124,36 @@ class PosterGenerator:
         blocks = [_with_citations(b, set(cited)) for b in blocks]
         if cited:
             band_heading, entries = "References", [_band_entry(sources[label], label) for label in cited]
-        else:
+        elif paper_refs:
             picks = list(sources.items())[:_SELECTED_SOURCES]
             band_heading, entries = "Selected sources", [_band_entry(src, label) for label, src in picks]
+        else:
+            band_heading, entries = "", []  # the paper cites nothing, so the poster lists no source
 
         author_terms = tuple(t for t in (output.author, output.affiliation, output.contact_email) if t)
         engine = find_pdf_engine()
+        latin_engine = engine  # what the poster was typeset with before the Unicode engine: the way back
         content = "\n".join([headline, subtitle, *author_terms, *entries, *(t for b in blocks for t in b.texts())])
         cjk_font: str | None = None
         cjk_problem: str | None = None
+        # As for the paper: a Unicode engine (XeLaTeX) whenever one is installed, so a glyph is set as itself or from
+        # a fallback font; pdflatex only when there is none. Chinese, Japanese or Korean text also needs a font.
+        xelatex = _cjk.find_xelatex(engine) if engine is not None else None
         if engine is not None and _cjk.has_cjk(content):
-            xelatex = _cjk.find_xelatex(engine)
             cjk_font = _cjk.find_cjk_font(content) if xelatex is not None else None
             if xelatex is None:
                 cjk_problem = "cjk_no_xelatex"
             elif cjk_font is None:
                 cjk_problem = "cjk_no_font"
-            else:
-                engine = xelatex
+        if xelatex is not None and not cjk_problem:
+            engine = xelatex
+        # The planned text fonts are the ones this template sets (the headline's Pagella, the body's Heros).
+        state = {"fonts": find_fonts(engine[1], _POSTER_TEXT_FILES)
+                 if engine is not None and xelatex is not None and engine == xelatex else None}
+        retry_with = (
+            latin_engine if (xelatex is not None and engine == xelatex and cjk_font is None and latin_engine is not None
+                             and latin_engine != engine and latin_engine[0] != "tectonic") else None
+        )
 
         icon_ok = _copy_poster_icon(out_dir)
         template = TEMPLATE_PATH.read_text(encoding="utf-8")
@@ -1097,9 +1172,27 @@ class PosterGenerator:
         diag_path = out_dir / "poster_pdf_skipped.md"
         result: dict[str, Path] = {"poster_tex": poster_tex}
 
+        unicode_file = out_dir / "poster_unicode.tex"
+        not_set_info: list[dict] = []
+
         def write_tex() -> None:
+            # The fallback fonts go in poster_unicode.tex (the paper's fi_unicode.tex is the paper's own).
             body = string.Template(template).safe_substitute(values, columns=layout.columns_latex())
-            poster_tex.write_text(_latex_safe_body(body), encoding="utf-8")
+            prepared = _latex_safe_source(body, fonts=state["fonts"], cjk=cjk_font is not None)
+            text = prepared.text
+            not_set_info[:] = []
+            for glyph in prepared.not_set:
+                # No font here sets it: the poster is made with a visible marker in its place, and says so.
+                code = "+".join(f"U+{ord(c):04X}" for c in glyph)
+                at = body.find(glyph)
+                near = " ".join(body[max(0, at - 30):at + 30].split()) if at >= 0 else ""
+                not_set_info.append({"glyph": glyph, "code_point": code, "near": near})
+                text = _mark_outside_kept_spans(text, glyph, "\\textbf{[" + code + "]}")
+            if prepared.header:
+                unicode_file.write_text(prepared.header, encoding="utf-8")
+            elif unicode_file.is_file():
+                unicode_file.unlink()
+            poster_tex.write_text(text, encoding="utf-8")
 
         write_tex()
         if engine is None or cjk_problem:
@@ -1143,6 +1236,18 @@ class PosterGenerator:
                 write_tex()
             compiles += 1
             failure = self._compile(engine, poster_tex, out_dir, out_pdf)
+            if failure is not None and failure[0] == f"{engine_name}_timeout":
+                retry_with = None  # a timeout is not an engine failure: no second compile, and it is recorded as one
+            if failure is not None and retry_with is not None:
+                # The Unicode engine could not make the poster (a TeX install without its fonts, say): the engine
+                # the poster was made with before, once. Decided on the compile's result only.
+                _log.warning("poster.pdf: %s could not make the poster (%s); trying %s once",
+                             engine_name, failure[0], retry_with[0])
+                engine, engine_name, state["fonts"] = retry_with, retry_with[0], None
+                retry_with = None
+                _cleanup_poster_artifacts(out_dir, keep_log=False)  # the failed run's aux/out/log
+                write_tex()
+                failure = self._compile(engine, poster_tex, out_dir, out_pdf)
             if failure is not None:
                 code, summary, how_to_fix = failure
                 _log.warning(summary)
@@ -1197,7 +1302,15 @@ class PosterGenerator:
             )
 
         result["poster_pdf"] = out_pdf
+        left_off = _glyphs_left_off(out_dir / "poster.log") if engine_name != "pdflatex" else []
+        for item in not_set_info:
+            _log.warning("poster.pdf: no font here sets %s; it is marked %s in the poster (near: %s)",
+                         item["code_point"], "[" + item["code_point"] + "]", item["near"])
+        if left_off:
+            _log.warning("poster.pdf: %s left %s off the page", engine_name, ", ".join(left_off))
         self._write_fit_report(out_dir, {
+            "glyphs_not_set": not_set_info,
+            "glyphs_left_off": left_off,
             "sheet": output.poster_size,
             "engine": engine_name,
             "compiles": compiles,

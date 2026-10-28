@@ -594,7 +594,7 @@ def _sanitize_unicode_for_latex(markdown: str, *, rewrite_code: bool = True) -> 
 
 # Where a URL or an HTML comment sits in the text: a glyph there is never wrapped in a
 # font command, which would change the address.
-_NO_WRAP_RE = re.compile(r"\]\([^)\s]*|<https?://[^>]*>|https?://[^\s)>\]]+|<!--.*?-->", re.DOTALL)
+_NO_WRAP_RE = re.compile(r"\\includegraphics(?:\[[^\]]*\])?\{[^}]*\}|\]\([^)\s]*|<https?://[^>]*>|https?://[^\s)>\]]+|<!--.*?-->", re.DOTALL)
 _FONT_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 _BRACE_AFTER_GLYPH_RE = re.compile(r"(?<=[^\x00-\x7f])\{")
 
@@ -735,7 +735,7 @@ def _prepare_unicode(
                     # braces of ``𝟙{X>0}`` vanished. Escaped, it is the same literal brace.
                     piece = _BRACE_AFTER_GLYPH_RE.sub(r"\\{", piece)
                 piece = _translate_counted(piece, text_table, counts, where)
-            if unicode_engine and not is_code:
+            if unicode_engine and (not is_code or rewrite_code):
                 piece = _wrap_for_fonts(piece, fonts, cjk, used, not_set, counts, where)
             out.append(piece)
     text = "".join(out)
@@ -1073,6 +1073,21 @@ _STOPPED_GLYPH_RE = re.compile(r"Unicode char(?:acter)?[^\n]*?\(U\+([0-9A-Fa-f]{
 _MISSING_GLYPH_RE = re.compile(r"Missing character: There is no .*?\(U\+([0-9A-Fa-f]{4,6})\)")
 
 
+def listed_further_reading(further: list[dict], paper_md: str, raw_state: dict | None) -> list[dict]:
+    """The web pages the paper's Further reading lists (a page dropped to keep the paper within its page limit is not
+    one). With the whole list dropped the paper has no such section, and the review's record of what was dropped says
+    which pages. Used by the bib export and the poster, so both list what the paper lists."""
+    listed = further_reading_listed(paper_md)
+    if listed is not None:
+        return [w for w in further if w["label"] in listed]
+    review = (raw_state or {}).get("review")
+    record = review.get("page_limit") if isinstance(review, dict) else None
+    gone = record.get("further_reading_dropped") if isinstance(record, dict) else None
+    if gone:
+        return [w for w in further if w["label"] not in gone]
+    return further
+
+
 def _glyphs_named(log: str, pattern: "re.Pattern[str]") -> list[str]:
     found: list[str] = []
     for m in pattern.finditer(log):
@@ -1259,15 +1274,7 @@ class PaperGenerator:
         # within its page limit is not in the export either. With the whole
         # list dropped the paper has no such section, and the review's record
         # of what was dropped says which pages.
-        listed = further_reading_listed(cited_md)
-        if listed is not None:
-            further = [w for w in further if w["label"] in listed]
-        else:
-            review = (art.raw_state or {}).get("review")
-            record = review.get("page_limit") if isinstance(review, dict) else None
-            gone = record.get("further_reading_dropped") if isinstance(record, dict) else None
-            if gone:
-                further = [w for w in further if w["label"] not in gone]
+        further = listed_further_reading(further, cited_md, art.raw_state)
         for stem, entries in (
             # The sources the paper's References list: the ones its text cites.
             ("references", cited_references(literature, cited_md, audience=audience)),

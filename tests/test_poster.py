@@ -140,7 +140,7 @@ async def _generate(
 
     _patch_endpoint(monkeypatch)
     monkeypatch.setattr("generation.poster.LLMClient.chat", fake_chat)
-    monkeypatch.setattr(poster_mod, "build_references", lambda lit, audience=None: list(refs))
+    monkeypatch.setattr(poster_mod, "cited_references", lambda lit, md, audience=None: list(refs))
     monkeypatch.setattr(poster_mod, "build_further_reading", lambda lit, audience=None: list(further))
     result = await PosterGenerator(cfg).generate(art, art.quest_root)
     return result, art
@@ -245,7 +245,7 @@ async def test_the_prompt_carries_the_sheet_budget_figures_and_citable_sources(
 
     _patch_endpoint(monkeypatch)
     monkeypatch.setattr("generation.poster.LLMClient.chat", fake_chat)
-    monkeypatch.setattr(poster_mod, "build_references", lambda lit, audience=None: list(REFS))
+    monkeypatch.setattr(poster_mod, "cited_references", lambda lit, md, audience=None: list(REFS))
     monkeypatch.setattr(poster_mod, "build_further_reading", lambda lit, audience=None: list(FURTHER))
     _no_engine(monkeypatch)
     await PosterGenerator(cfg).generate(art, art.quest_root)
@@ -881,14 +881,28 @@ async def test_chinese_text_without_a_font_skips_with_a_diagnostic(
 
 
 @pytest.mark.asyncio
-async def test_a_latin_poster_keeps_pdflatex(
+async def test_a_latin_poster_uses_pdflatex_when_there_is_no_unicode_engine(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runs = _fake_compile(monkeypatch)
+    monkeypatch.setattr(_cjk, "find_xelatex", lambda engine: None)
     monkeypatch.setattr(poster_mod, "measure_pdf", lambda path: None)
     await _generate(tmp_path, monkeypatch, _reply(), output={"author": "Jane Chen"})
     (run,) = runs
     assert run["cmd"][0] == "/fake/pdflatex"
+    assert "xeCJK" not in run["tex"]
+
+
+@pytest.mark.asyncio
+async def test_a_latin_poster_uses_xelatex_when_installed_as_the_paper_does(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = _fake_compile(monkeypatch)
+    monkeypatch.setattr(_cjk, "find_xelatex", lambda engine: ("xelatex", "/fake/xelatex"))
+    monkeypatch.setattr(poster_mod, "measure_pdf", lambda path: None)
+    await _generate(tmp_path, monkeypatch, _reply(), output={"author": "Jane Chen"})
+    (run,) = runs
+    assert run["cmd"][0] == "/fake/xelatex"
     assert "xeCJK" not in run["tex"]
 
 
@@ -1095,3 +1109,296 @@ async def test_a_real_poster_prints_a_range_inside_math_as_a_dash(
     text = " ".join(line.text for page in measure_pdf(result["poster_pdf"]).pages for line in page.lines)
     assert "0.322–0.338" in text and "10–20 runs" in text
     assert "−" not in text        # two minus signs would print as U+2212
+
+
+# ---------------------------------------------------------------------------
+# The poster takes its references from the paper, and is typeset as the paper is
+
+
+def _source(title: str, doi: str) -> dict:
+    return {"content": f"{title} body text.", "metadata": {"title": title, "authors": ["A. Author"], "year": 2020,
+                                                          "venue": "J. Tests", "doi": doi}}
+
+
+@pytest.mark.asyncio
+async def test_the_poster_cites_only_the_references_the_paper_ends_with(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The literature holds three papers; the paper cites the first and its citation check dropped the other two.
+    The model is shown only the first, and a citation of another one that it still writes is taken out."""
+    _no_engine(monkeypatch)
+    cfg = _make_config(tmp_path, kinds=["poster"])
+    art = _make_artifacts(tmp_path)
+    art.paper_md.write_text(
+        "# Toy Paper\n\nWe build on Alpha work [1].\n\n## References\n\n1. A. Author (2020). Alpha work. J. Tests.\n",
+        encoding="utf-8",
+    )
+    art.raw_state = {"literature": [_source("Alpha work", "10.1/a"), _source("Beta dropped", "10.1/b"),
+                                    _source("Gamma dropped", "10.1/c")]}
+    prompts: list[str] = []
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompts.append(messages[0]["content"])
+        return json.dumps({"headline": "A finding", "blocks": [
+            {"type": "text", "text": "We build on Alpha [1]. Beta says more [2] and Gamma too [3]."}]})
+
+    _patch_endpoint(monkeypatch)
+    monkeypatch.setattr("generation.poster.LLMClient.chat", fake_chat)
+    result = await PosterGenerator(cfg).generate(art, art.quest_root)
+    tex = result["poster_tex"].read_text(encoding="utf-8")
+    assert "Alpha work" in prompts[0] and "Beta dropped" not in prompts[0] and "Gamma dropped" not in prompts[0]
+    assert "Beta dropped" not in tex and "Gamma dropped" not in tex
+    assert "We build on Alpha [1]. Beta says more and Gamma too." in tex
+
+
+def _fake_fonts(*, fallback_has_glyph: bool = True):
+    from generation._unicode_fonts import Font, FontPlan
+
+    ascii_codes = frozenset(range(0x20, 0x7F))
+    return FontPlan(
+        text=(Font("text.otf", Path("/fonts/text.otf"), ascii_codes),),
+        fallbacks=(Font("Fallback Sans", Path("/fonts/fallback.ttf"),
+                        ascii_codes | ({0xFFFD} if fallback_has_glyph else set())),),
+    )
+
+
+def _use_unicode_engine(monkeypatch: pytest.MonkeyPatch, fonts, compiled: list) -> None:
+    engine = ("xelatex", "/fake/xelatex")
+    monkeypatch.setattr(poster_mod, "find_pdf_engine", lambda: engine)
+    monkeypatch.setattr(_cjk, "find_xelatex", lambda e: engine)
+    monkeypatch.setattr(poster_mod, "find_fonts", lambda path, files=None: fonts)
+
+    def fake_compile(self, eng, tex, out_dir, out_pdf):  # noqa: ANN001
+        compiled.append(eng)
+        return ("stop_here", "stopped for the test", "none")
+
+    monkeypatch.setattr(PosterGenerator, "_compile", fake_compile)
+
+
+_GLYPH_REPLY = {"headline": "A finding", "blocks": [{"type": "text", "text": "A broken title \ufffd in the data."}]}
+
+
+@pytest.mark.asyncio
+async def test_a_glyph_the_text_fonts_lack_is_set_from_a_fallback_font_as_in_the_paper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    compiled: list = []
+    _use_unicode_engine(monkeypatch, _fake_fonts(), compiled)
+    result, art = await _generate(tmp_path, monkeypatch, _GLYPH_REPLY)
+    tex = result["poster_tex"].read_text(encoding="utf-8")
+    assert compiled == [("xelatex", "/fake/xelatex")], "the poster is typeset with the Unicode engine, as the paper is"
+    assert "\\FIfontA{\ufffd}" in tex
+    header = (art.quest_root / "poster_unicode.tex").read_text(encoding="utf-8")
+    assert "\\newfontfamily\\FIfamilyA{fallback.ttf}" in header
+    assert "poster_unicode.tex" in Path(poster_mod.TEMPLATE_PATH).read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_a_glyph_no_font_sets_is_marked_and_disclosed_and_the_poster_is_still_made(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = _fake_compile(monkeypatch)
+    monkeypatch.setattr(poster_mod, "measure_pdf", lambda path: None)
+    engine = ("xelatex", "/fake/xelatex")
+    monkeypatch.setattr(_cjk, "find_xelatex", lambda e: engine)
+    monkeypatch.setattr(poster_mod, "find_fonts", lambda path, files=None: _fake_fonts(fallback_has_glyph=False))
+    result, art = await _generate(tmp_path, monkeypatch, _GLYPH_REPLY)
+    (run,) = runs
+    assert "\ufffd" not in run["tex"] and "\\textbf{[U+FFFD]}" in run["tex"]
+    assert "poster_pdf" in result and "poster_pdf_skipped" not in result
+    assert not (art.quest_root / "poster_pdf_skipped.md").exists()
+    fit = json.loads((art.quest_root / ".fi" / "poster_fit.json").read_text(encoding="utf-8"))
+    (item,) = fit["glyphs_not_set"]
+    assert item["code_point"] == "U+FFFD" and "A broken title" in item["near"]
+    assert fit["engine"] == "xelatex"
+
+
+@pytest.mark.asyncio
+async def test_a_glyph_inside_a_backtick_span_is_wrapped_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    compiled: list = []
+    _use_unicode_engine(monkeypatch, _fake_fonts(), compiled)
+    reply = {"headline": "A finding", "blocks": [{"type": "text", "text": "The name `a \ufffd b` is odd."}]}
+    result, _art = await _generate(tmp_path, monkeypatch, reply)
+    assert "\\FIfontA{\ufffd}" in result["poster_tex"].read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_a_figure_file_name_is_never_wrapped_in_a_font_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    compiled: list = []
+    _use_unicode_engine(monkeypatch, _fake_fonts(), compiled)
+    result, _art = await _generate(tmp_path, monkeypatch, _GLYPH_REPLY)
+    tex = result["poster_tex"].read_text(encoding="utf-8")
+    from generation.paper import _NO_WRAP_RE
+
+    assert _NO_WRAP_RE.search("\\includegraphics[width=3cm]{\u03c3_plot.png}")
+    assert re.search(r"includegraphics\[[^\]]*\]\{figures/result\.png\}", tex)
+
+
+@pytest.mark.asyncio
+async def test_a_failing_xelatex_is_retried_once_with_pdflatex(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(poster_mod, "find_pdf_engine", lambda: ("pdflatex", "/fake/pdflatex"))
+    monkeypatch.setattr(_cjk, "find_xelatex", lambda e: ("xelatex", "/fake/xelatex"))
+    monkeypatch.setattr(poster_mod, "find_fonts", lambda path, files=None: _fake_fonts())
+    monkeypatch.setattr(poster_mod, "measure_pdf", lambda path: None)
+    calls: list[str] = []
+    real_run = subprocess.run
+
+    def fake_run(cmd, **kwargs):  # type: ignore[no-untyped-def]
+        if not isinstance(cmd, (list, tuple)) or not any(str(part).endswith("poster.tex") for part in cmd):
+            return real_run(cmd, **kwargs)
+        calls.append(str(cmd[0]))
+        cwd = Path(kwargs.get("cwd") or ".")
+        if cmd[0] == "/fake/xelatex":
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        (cwd / "poster.pdf").write_bytes(b"%PDF-fake\n")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    fake_poster_run(monkeypatch, fake_run)
+    result, art = await _generate(tmp_path, monkeypatch, _reply())
+    assert calls == ["/fake/xelatex", "/fake/pdflatex"]
+    assert "poster_pdf" in result and "poster_pdf_skipped" not in result
+    fit = json.loads((art.quest_root / ".fi" / "poster_fit.json").read_text(encoding="utf-8"))
+    assert fit["engine"] == "pdflatex"
+    assert not (art.quest_root / "poster_unicode.tex").exists(), "the pdflatex source has no fallback-font file"
+
+
+def test_the_glyphs_xelatex_left_off_are_read_from_its_log(tmp_path: Path) -> None:
+    log = tmp_path / "poster.log"
+    log.write_text("Missing character: There is no \u0e01 in font [x.otf]:mapping=tex-text!\n"
+                   "Missing character: There is no \u0e01 in font [y.otf]!\n"
+                   "Missing character: There is no ^^80 in font [x.otf]:mapping=tex-text!\n"
+                   "Missing character: There is no ^^M in font [x.otf]!\n"
+                   "Missing character: There is no ^^^^20ac in font [x.otf]!\n"
+                   "Missing character: There is no \u00a0 in font [x.otf]!\n"
+                   "Missing character: There is no oddtoken in font [x.otf]!\n", encoding="utf-8")
+    assert poster_mod._glyphs_left_off(log) == [
+        "U+0E01", "U+0080", "U+000D", "U+20AC", "U+00A0", "oddtoken"]
+    assert poster_mod._glyphs_left_off(tmp_path / "none.log") == []
+
+
+def test_a_marker_replaces_the_glyph_in_prose_but_not_in_an_address_or_a_path() -> None:
+    marker = "\\textbf{[U+FFFD]}"
+    text = ("prose \ufffd here \\qrcode[height=3cm]{https://x.example/\ufffd} and "
+            "\\includegraphics[width=2cm]{figures/a\ufffd.png} see https://y.example/\ufffd.")
+    out = poster_mod._mark_outside_kept_spans(text, "\ufffd", marker)
+    assert out.startswith("prose " + marker + " here ")
+    assert "{https://x.example/\ufffd}" in out and "{figures/a\ufffd.png}" in out
+    assert "https://y.example/\ufffd." in out
+    assert out.count(marker) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_is_not_retried_and_a_retry_starts_from_clean_build_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(poster_mod, "find_pdf_engine", lambda: ("pdflatex", "/fake/pdflatex"))
+    monkeypatch.setattr(_cjk, "find_xelatex", lambda e: ("xelatex", "/fake/xelatex"))
+    monkeypatch.setattr(poster_mod, "find_fonts", lambda path, files=None: _fake_fonts())
+    monkeypatch.setattr(poster_mod, "measure_pdf", lambda path: None)
+    calls: list[str] = []
+    seen_scratch: list[bool] = []
+    real_run = subprocess.run
+    mode = {"fail": "timeout"}
+
+    def fake_run(cmd, **kwargs):  # type: ignore[no-untyped-def]
+        if not isinstance(cmd, (list, tuple)) or not any(str(part).endswith("poster.tex") for part in cmd):
+            return real_run(cmd, **kwargs)
+        calls.append(str(cmd[0]))
+        cwd = Path(kwargs.get("cwd") or ".")
+        if cmd[0] == "/fake/xelatex":
+            (cwd / "poster.aux").write_text("half-written", encoding="utf-8")
+            if mode["fail"] == "timeout":
+                raise subprocess.TimeoutExpired(cmd, 1)
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        seen_scratch.append((cwd / "poster.aux").exists())
+        (cwd / "poster.pdf").write_bytes(b"%PDF-fake\n")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    fake_poster_run(monkeypatch, fake_run)
+    result, art = await _generate(tmp_path, monkeypatch, _reply())
+    assert calls == ["/fake/xelatex"] and "poster_pdf_skipped" in result
+    assert "xelatex_timeout" in (art.quest_root / "poster_pdf_skipped.md").read_text(encoding="utf-8")
+    calls.clear()
+    mode["fail"] = "rc"
+    result, art = await _generate(tmp_path / "again", monkeypatch, _reply())
+    assert calls == ["/fake/xelatex", "/fake/pdflatex"] and seen_scratch == [False]
+
+
+def _web(title: str, url: str) -> dict:
+    return {"content": f"{title} text.", "metadata": {"title": title, "url": url, "site": "example.org",
+                                                      "source": "web"}}
+
+
+@pytest.mark.asyncio
+async def test_the_poster_lists_only_web_pages_the_paper_lists_and_nothing_when_it_cites_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_engine(monkeypatch)
+    cfg = _make_config(tmp_path, kinds=["poster"])
+    art = _make_artifacts(tmp_path)
+    art.raw_state = {"literature": [_web("Page one", "https://one.example.org/a"),
+                                    _web("Page two dropped", "https://two.example.org/b")]}
+    prompts: list[str] = []
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompts.append(messages[0]["content"])
+        return json.dumps({"headline": "A finding", "blocks": [{"type": "text", "text": "No citations here."}]})
+
+    _patch_endpoint(monkeypatch)
+    monkeypatch.setattr("generation.poster.LLMClient.chat", fake_chat)
+    art.paper_md.write_text(
+        "# Toy Paper\n\nPlain text, no citation.\n\n## Further reading\n\n- [W1] Page one. https://one.example.org/a\n",
+        encoding="utf-8")
+    result = await PosterGenerator(cfg).generate(art, art.quest_root)
+    assert "Page one" in prompts[0] and "Page two dropped" not in prompts[0]
+    tex = result["poster_tex"].read_text(encoding="utf-8")
+    assert "Selected sources" not in tex and "Page one" not in tex and "Page two" not in tex
+
+
+def test_a_redo_that_checks_worse_puts_back_the_fallback_font_file(tmp_path: Path) -> None:
+    from generation import _visual_check as vc
+
+    saved, quest = tmp_path / "saved", tmp_path / "quest"
+    saved.mkdir()
+    quest.mkdir()
+    (saved / "poster_unicode.tex").write_text("first", encoding="utf-8")
+    (quest / "poster_unicode.tex").write_text("redo", encoding="utf-8")
+    vc._copy_version(saved, quest, vc._VERSION_FILES["poster"])
+    assert (quest / "poster_unicode.tex").read_text(encoding="utf-8") == "first"
+    (saved / "poster_unicode.tex").unlink()
+    vc._copy_version(saved, quest, vc._VERSION_FILES["poster"])
+    assert not (quest / "poster_unicode.tex").exists()
+
+
+def test_the_poster_plans_the_fonts_its_template_sets() -> None:
+    from generation._unicode_fonts import find_fonts
+
+    plan = find_fonts(None, ("no-such-font-a.otf",))
+    assert plan.text == (), "text fonts follow the names given, not the paper's"
+
+
+@pytest.mark.slow
+@pytest.mark.asyncio
+async def test_a_real_poster_with_a_glyph_pdflatex_cannot_set_is_typeset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from generation._pdf_engine import find_pdf_engine as real_find
+    from generation._pdf_measure import measure_pdf
+
+    engine = real_find()
+    if engine is None or _cjk.find_xelatex(engine) is None:
+        pytest.skip("needs XeLaTeX")
+    result, art = await _generate(tmp_path, monkeypatch, _GLYPH_REPLY, real_figure=True)
+    if "poster_pdf" not in result:
+        pytest.skip("no font here holds the test glyph")
+    fit = json.loads((art.quest_root / ".fi" / "poster_fit.json").read_text(encoding="utf-8"))
+    assert not fit["glyphs_left_off"], "the glyph is on the page"
+    doc = measure_pdf(result["poster_pdf"])
+    text = " ".join(line.text for page in doc.pages for line in page.lines)
+    assert "\ufffd" in text or fit["glyphs_not_set"]
