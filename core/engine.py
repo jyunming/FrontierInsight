@@ -34158,9 +34158,9 @@ _FENCED_BLOCK_RE = re.compile(r"```[A-Za-z0-9_-]*[ \t]*\n(.*?)```", re.DOTALL)
 
 
 def _object_spans(text: str) -> tuple[list[tuple[int, int, dict[str, Any]]], bool]:
-    """``(spans, cut)``: ``(start, end, object)`` of every non-empty JSON object that parses at the top level of ``text``,
-    in order, and whether an object was opened that never closes (a reply cut short). An object that does not parse is
-    skipped whole, so one inside it is never taken for the reply's own."""
+    """``(spans, doubt)``: ``(start, end, object)`` of every non-empty JSON object that parses at the top level of ``text``,
+    in order, and whether an object-like ``{`` failed to parse (a reply cut short, a raw newline in a string). An object
+    that does not parse is skipped whole, so one inside it is never taken for the reply's own."""
     decoder = json.JSONDecoder()
     out: list[tuple[int, int, dict[str, Any]]] = []
     cut = False
@@ -34170,8 +34170,13 @@ def _object_spans(text: str) -> tuple[list[tuple[int, int, dict[str, Any]]], boo
             obj, end = decoder.raw_decode(text, i)
         except (ValueError, RecursionError):
             if text[i + 1:].lstrip()[:1] in ('"', "}"):
-                cut = cut or _depth_change(text[i:]) > 0
-                i = text.find("{", _matching_brace_end(text, i))
+                closes = _matching_brace_end(text, i)
+                repaired = _read_latex_object(text[i:closes])
+                if repaired:
+                    out.append((i, closes, repaired))
+                else:
+                    cut = True  # an object that does not parse, closed or not: which one the reply means is in doubt
+                i = text.find("{", closes)
             else:
                 i = text.find("{", i + 1)
             continue

@@ -80,3 +80,11 @@ def test_want_with_no_match_gives_none_and_warns(caplog) -> None:
         assert _parse_json_lenient(PROSE_THEN_FENCE, node="n", want=("missing_key",)) is None
     assert any("JSON parse failed" in r.getMessage() for r in caplog.records)
     assert not any("braces around its object" in r.getMessage() for r in caplog.records)
+
+
+def test_an_answer_that_does_not_parse_is_not_replaced_by_a_quoted_object() -> None:
+    head = 'The failing case is {"threshold": 0.01} here.\n\n```json\n'
+    raw = head + '{"functions": "def f():' + chr(10) + '    return 1' + chr(10) + '"}\n```\n'
+    assert _parse_json_lenient(raw) is None
+    escaped = head + '{"functions": "def f():' + chr(92) + 'n    return 1' + chr(92) + 'n"}\n```\n'
+    assert list(_parse_json_lenient(escaped)) == ["functions"]
