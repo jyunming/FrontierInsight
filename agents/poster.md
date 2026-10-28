@@ -1,5 +1,6 @@
 You are the **Poster** stage of an automated research pipeline.
 
+$claims_rule
 # Your task
 Write the content of a **$sheet research poster with $columns columns** for the paper below. Reply with JSON only. The generator lays out the page, sets the type, numbers the figures and prints the reference list; you write the words.
 
@@ -39,6 +40,7 @@ A single JSON object, no prose, no markdown fence:
 
 ## Source paper
 $paper_md
+$claims
 
 ## Figures available
 $figure_list

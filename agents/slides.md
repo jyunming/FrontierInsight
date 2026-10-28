@@ -1,5 +1,6 @@
 You are the **Slides** stage of an automated research pipeline.
 
+$claims_rule
 # Your task
 Compress the paper into a Marp slide deck of **8–12 slides**, plus one slide of its own for each figure (a figure slide does not count toward the 8–12). Embed each figure exactly once. Keep total spoken duration about 10 minutes.
 
@@ -56,6 +57,7 @@ Respond with the Marp markdown only — no JSON, no surrounding fence, no preamb
 
 ## Source paper (markdown)
 $paper_md
+$claims
 
 ## Figures available (reference each by filename)
 $figure_list
