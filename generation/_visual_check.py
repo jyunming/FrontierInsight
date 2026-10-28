@@ -496,7 +496,7 @@ _WEIGHTS = {"high": 3, "medium": 2, "low": 1}
 # so a version that checks worse can be put back.
 _VERSION_FILES = {
     "slides": ("slides.md", "slides.html", "slides.pdf", "slides.pptx"),
-    "poster": ("poster.pdf", "poster.tex", ".fi/poster_fit.json", ".fi/poster_reply.txt"),
+    "poster": ("poster.pdf", "poster.tex", "poster_unicode.tex", ".fi/poster_fit.json", ".fi/poster_reply.txt"),
     # The render record says how paper.pdf was made (typeset or not, its pages), so it
     # goes back with the PDF it describes.
     "paper": ("paper.pdf", ".fi/paper_render.json"),
