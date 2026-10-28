@@ -993,3 +993,78 @@ def test_a_comparison_with_a_setup_trial_runs_apart_from_the_quest_and_leaves_it
     after = {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file() and ".fi" not in p.parts
              and "__pycache__" not in p.parts}
     assert after == before, set(after) ^ set(before)
+
+
+def _apart_runner(exec_env, *, comparison, timeout_s=600):
+    from types import SimpleNamespace
+
+    from core.engine import Engine
+
+    seen = {}
+
+    async def run_in_env(argv, **kw):
+        seen.update(kw)
+        return 0, "", ""
+
+    me = SimpleNamespace(_run_in_env=run_in_env, config=SimpleNamespace(execution=SimpleNamespace(timeout_s=timeout_s)))
+    return Engine._run_apart_from_study(me, exec_env, comparison=comparison), seen
+
+
+def test_the_comparison_keeps_an_unset_environment_and_the_captures_runs_keep_an_empty_one():
+    run, seen = _apart_runner(None, comparison=True)
+    asyncio.run(run(["-c", "x"]))
+    assert seen["env"] is None and seen["apart"] is True
+    run, seen = _apart_runner(None, comparison=False)
+    asyncio.run(run(["x"]))
+    assert seen["env"] == {} and seen["apart"] is True
+    run, seen = _apart_runner({"A": "1"}, comparison=True)
+    asyncio.run(run(["x"]))
+    assert seen["env"] == {"A": "1"}
+
+
+def test_the_comparisons_base_limit_is_never_under_what_it_had_before_and_adds_the_setup_time():
+    run, seen = _apart_runner({}, comparison=True, timeout_s=600)  # the capture budget of a 600 s limit is under 180 s
+    asyncio.run(run(["x"]))
+    assert seen["timeout_s"] == si.COMPARE_BASE_S
+    asyncio.run(run(["x"], extra_s=41.2))
+    assert seen["timeout_s"] == si.COMPARE_BASE_S + 42
+    run, seen = _apart_runner({}, comparison=False, timeout_s=600)
+    asyncio.run(run(["x"]))
+    assert seen["timeout_s"] < si.COMPARE_BASE_S  # the capture's own limit is unchanged
+
+
+def test_the_setup_state_is_in_the_record_and_an_agreement_on_an_unset_study_says_so(tmp_path):
+    study = "def run_trial(cell, trial_id, seed):\n    raise RuntimeError('no')\n"
+    proto = protocol(example=False)
+    root = make_quest(tmp_path, "def activation_energy(slope):\n    return -slope * 8.314\n")
+    (root / "code" / "simulate.py").write_text(study, encoding="utf-8")
+    (root / ".fi" / "second_impl").mkdir(parents=True)
+    record = {"cases": {"activation_energy": [{"slope": 2.0}]}, "ran": [0],
+              "setup": {"entry": "run_trial", "cell": {}, "kind": "scan", "thresholds": {}, "seed": 1, "duration_s": 0.1}}
+    (root / si.CAPTURED).write_text(json.dumps(record), encoding="utf-8")
+    fake = Fake(write=[fenced(GOOD_REF)])
+    s = build(root, fake, [spec_for(proto)], proto, captured=record["cases"])
+    e = asyncio.run(s.run_all())["functions"]["activation_energy"]
+    assert e["status"] == "agree" and e["setup"] == "failed"  # the verdict is unchanged
+    assert "setup trial did not run to the end" in e["setup_note"] and e["setup_note"] in e["why"]
+
+
+def test_a_run_that_ran_out_of_time_is_not_run_again(tmp_path):
+    proto = protocol()
+    root = make_quest(tmp_path, GOOD_MAIN)
+    (root / "code" / "simulate.py").write_text("def run_cell(cell):\n    return {}\n", encoding="utf-8")
+    (root / ".fi" / "second_impl").mkdir(parents=True)
+    record = {"cases": {}, "ran": [0], "setup": {"entry": "run_cell", "cell": {}, "kind": "scan", "thresholds": {},
+                                                  "duration_s": 5.0}}
+    (root / si.CAPTURED).write_text(json.dumps(record), encoding="utf-8")
+    calls = []
+
+    async def run(argv, extra_s=0.0):
+        calls.append(extra_s)
+        return -1, "", "partial\n" + si.TIMED_OUT
+
+    s = build(root, Fake(write=[fenced(GOOD_REF)]), [spec_for(proto)], proto)
+    s.run = run
+    e = asyncio.run(s.run_all())["functions"]["activation_energy"]
+    assert calls == [5.0], calls
+    assert e["status"] == "unconfirmed" and "did not finish in time" in e["why"]

@@ -79,6 +79,11 @@ _RANDOM_PARAMS = {*_eqt.RNG_PARAMS, _eqt.SEED_PARAM}
 
 Message = dict[str, str]
 ChatFn = Callable[[str, list[Message]], Awaitable[str]]
+#: What the engine's run appends to a command's stderr when the command ran out of time.
+TIMED_OUT = "(timed out)"
+#: The comparison's time limit never starts below this (it was a fixed limit before it ran apart); the study's own
+#: setup trial's measured duration is added to it.
+COMPARE_BASE_S = 180
 RunFn = Callable[[list[str]], Awaitable[tuple[int, str, str]]]
 #: ``repair_main(name, problem, cases)``: try once to repair the main function in ``code/``; ``True`` when a new version
 #: was written there. ``problem`` is plain text for the repairing prompt; ``cases`` are the disagreeing inputs.
@@ -1495,10 +1500,10 @@ class SecondImpl:
             except Exception as e:  # noqa: BLE001
                 rc, text, err = -1, "", repr(e)
             out = parse_output(text)
-            if out is not None:
-                break
+            if out is not None or err.rstrip().endswith(TIMED_OUT):
+                break  # a run that ran out of time is not run again: the retry is for a harness that printed nothing
         entry["inputs_tried"] = len(inputs)
-        if out is None and setup and "timed out" in err:
+        if out is None and setup and err.rstrip().endswith(TIMED_OUT):
             return {"status": UNCONFIRMED, "why": "the comparison did not finish in time, with the study's setup trial in it",
                     "disagreements": [], "retry": True}
         if out is None:
@@ -1513,8 +1518,9 @@ class SecondImpl:
         rows = out.get("rows") if isinstance(out.get("rows"), list) else []
         if len(rows) != len(inputs):
             return {"status": UNCONFIRMED, "why": "the comparison returned fewer results than inputs", "disagreements": [], "retry": True}
-        verdict = judge_rows(rows, inputs, tolerance_for(spec, self.protocol),
-                             setup=str(out.get("setup") or "none") if setup else "none")
+        state = str(out.get("setup") or "none") if setup else "none"
+        verdict = judge_rows(rows, inputs, tolerance_for(spec, self.protocol), setup=state)
+        verdict["setup"] = state
         if verdict["status"] == UNCONFIRMED:
             verdict.update(why=verdict.get("why") or "the comparison could not run: both versions raised on every input", retry=False)
         return verdict
@@ -1557,13 +1563,21 @@ class SecondImpl:
             entry["disagreements"] = res["disagreements"][:3]
             entry["compared"] = res.get("compared", 0)
             entry["excluded"] = res.get("excluded", 0)
+            if res.get("setup"):  # whatever the verdict: what the versions were compared on
+                entry["setup"] = res["setup"]
+                if res["setup"] == "failed":
+                    entry["setup_note"] = ("the study's setup trial did not run to the end, so the versions were compared on "
+                                           "a study that had not been set up as a trial sets it up")
+                else:
+                    entry.pop("setup_note", None)
             if res.get("shape_notes"):
                 entry["shape_note"] = "; ".join(res["shape_notes"])
             else:
                 entry.pop("shape_note", None)
             if res["status"] == AGREE:
                 self._finish(spec, entry, AGREE, f"{res.get('compared', 0)} input(s) compared"
-                             + (f"; {entry['shape_note']}" if entry.get("shape_note") else ""))
+                             + (f"; {entry['shape_note']}" if entry.get("shape_note") else "")
+                             + (f"; {entry['setup_note']}" if entry.get("setup_note") else ""))
                 return
             if res["status"] == UNCONFIRMED:
                 self._finish(spec, entry, UNCONFIRMED, res.get("why", ""), recheck=bool(res.get("retry")))

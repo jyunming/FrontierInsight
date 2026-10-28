@@ -13711,17 +13711,21 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return -1, "", repr(e)
         return ran.returncode, ran.stdout or "", (ran.stderr or "") + ("\n(timed out)" if ran.timed_out else "")
 
-    def _run_apart_from_study(self, exec_env: dict[str, str] | None) -> Any:
+    def _run_apart_from_study(self, exec_env: dict[str, str] | None, *, comparison: bool = False) -> Any:
         """The run of a check that calls the study's own code (what the tested functions are called with, what depends on
         them, the second version of a function): apart from the study, so it neither reads the values the study kept
         (data/results/cache/) nor leaves its own there, and with the environment a trial gets. ``extra_s``: time FI
-        measured for something the call does first (the study's own trial), added to the limit."""
+        measured for something the call does first (the study's own trial), added to the limit, ``comparison``: the run of the
+        second-version comparison, which had a fixed 180 s and an environment of ``None`` (the process's own) before it ran
+        apart: its base limit is never under :data:`core.second_impl.COMPARE_BASE_S` and a ``None`` stays ``None``; the
+        capture's runs have always been given an empty dict."""
         from .small_run import budget as _small_run_budget
 
         async def run(argv: list[str], extra_s: float = 0.0) -> Any:
             return await self._run_in_env(
-                argv, timeout_s=_small_run_budget(self.config.execution.timeout_s) + int(math.ceil(max(0.0, extra_s))),
-                env=dict(exec_env or {}), apart=True)
+                argv, timeout_s=max(_second_impl.COMPARE_BASE_S if comparison else 0,
+                                    _small_run_budget(self.config.execution.timeout_s)) + int(math.ceil(max(0.0, extra_s))),
+                env=(None if exec_env is None and comparison else dict(exec_env or {})), apart=True)
 
         return run
 
@@ -13899,7 +13903,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 verify_package=verify_package, captured=captured,
                 quest_root=self.quest_root, package=package, specs=specs, protocol=protocol,
                 prompts={"write": self._prompts["second_impl_write"], "adjudicate": self._prompts["second_impl_adjudicate"]},
-                chat=chat, run=self._run_apart_from_study(exec_env), repair_main=repair_main, still_passes=still_passes, passages=passages,
+                chat=chat, run=self._run_apart_from_study(exec_env, comparison=True), repair_main=repair_main, still_passes=still_passes, passages=passages,
                 family_of=self._family_of_node, topic_block=self._topic_block(), log=self._log)
             for name, e in (result.get("functions") or {}).items():
                 if not isinstance(e, dict):
