@@ -38,6 +38,7 @@ by its file name.
 from __future__ import annotations
 
 import copy
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -239,7 +240,7 @@ _DESIGN_NOTES = ("hypothesis", "method", "expected_outcome", "rationale", "varia
 #: Protocol keys the reader places; any other key goes to the notes and is named in the gaps.
 _PLACED = {"grid", "sub_studies", "in_each_run", "numerical_settings", "constants", "thresholds", "runs_per_setting",
            "min_runs_per_setting", "precision", "metrics", "oracles", "criteria", "topic_map", "optimisation", "model",
-           "labels", "comparisons", "derived", "figures", "steps", "shared_draws", "form", *_NOTE_KEYS}
+           "labels", "comparisons", "derived", "figures", "steps", "shared_draws", "form", "parts_left_out", *_NOTE_KEYS}
 
 
 def oracle_measures(protocol: Any) -> tuple[dict[str, list[str]], set[str]]:
@@ -472,6 +473,10 @@ def from_design(design: dict[str, Any] | None) -> StudyContract:
         gaps.append("these parts of the protocol are kept only as notes: " + ", ".join(other))
 
     form = "contract" if p.get("form") == "contract" else "older"
+    left_out = p.get("parts_left_out")
+    if isinstance(left_out, list) and left_out:
+        gaps.append("the plan's model did not give, in a form that could be used, " + ", ".join(str(x) for x in left_out)
+                    + "; the plan stays in the older form")
     if form == "older":
         gaps.append("an older plan: its results may be computed by its analysis, not returned by each trial")
     base = {"form": form, "settings": settings, "budget": budget, "labels": labels, "notes": notes,
@@ -525,3 +530,165 @@ def _without_broken_links(base: dict[str, Any], parts: dict[str, Any], gaps: lis
     except ValueError:
         gaps.append("the precision target is left out: it refers to something the plan does not declare")
         return StudyContract(**base, **built, gaps=tuple(gaps))
+
+
+# --- asking the plan for the parts the contract needs ----------------------------------------------------------------------
+
+#: The four answers for a name the plan relies on but does not declare as a result.
+NAME_ANSWERS = ("result", "reference", "diagnostic", "derived")
+#: The most undeclared names asked about in one question.
+MAX_NAMES = 15
+_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_KNOWN_WORDS = {"pi", "e", "inf", "nan", "true", "false", "none", "and", "or", "not", "if", "else", "for", "in"}
+
+
+def varied_settings(protocol: Any) -> list[str]:
+    """The settings whose values change between the runs of a study: the grid and what each run goes through."""
+    p = protocol if isinstance(protocol, dict) else {}
+    out: list[str] = []
+    for key in ("grid", "in_each_run"):
+        block = p.get(key)
+        out += [str(k) for k in block if str(k) not in out] if isinstance(block, dict) else []
+    return out
+
+
+def _declared_names(protocol: dict[str, Any]) -> set[str]:
+    from . import metric_spec
+
+    names: set[str] = set()
+    for key in ("metrics", "derived"):
+        for m in protocol.get(key) if isinstance(protocol.get(key), list) else []:
+            if isinstance(m, dict) and _ident(m.get("id")):
+                names.update(metric_spec.result_forms(str(m["id"]).strip()))
+    for key in ("grid", "in_each_run", "numerical_settings", "constants", "thresholds"):
+        if isinstance(protocol.get(key), dict):
+            names.update(str(k) for k in protocol[key])
+    for sub in protocol.get("sub_studies") if isinstance(protocol.get("sub_studies"), list) else []:
+        if isinstance(sub, dict) and _ident(sub.get("name")):
+            names.add(str(sub["name"]).strip())
+    for o in protocol.get("oracles") if isinstance(protocol.get("oracles"), list) else []:
+        if isinstance(o, dict) and isinstance(o.get("case"), dict):
+            names.update(str(k) for k in o["case"])
+    return names
+
+
+def undeclared_names(design: Any) -> dict[str, str]:
+    """The names the plan relies on without declaring them as results, each with where the plan uses it: a name in the
+    formula of a check's ``measure``, a key of ``labels``, the path of a ``result_assertions`` bound, or a name in
+    backticks in the method. FI finds them by shape; a model's answer is then asked about each. In the order the plan
+    uses them, at most :data:`MAX_NAMES`."""
+    design = design if isinstance(design, dict) else {}
+    p = design.get("protocol") if isinstance(design.get("protocol"), dict) else {}
+    known = {n.lower() for n in _declared_names(p)} | _KNOWN_WORDS
+    found: dict[str, str] = {}
+
+    def take(name: str, where: str) -> None:
+        if name.lower() not in known and name not in found and len(name) > 1:
+            found[name] = where
+
+    for o in p.get("oracles") if isinstance(p.get("oracles"), list) else []:
+        if not isinstance(o, dict):
+            continue
+        for key in ("measure", "metric"):
+            text = str(o.get(key) or "")
+            for m in _WORD.finditer(text):
+                if text[m.end():m.end() + 1] != "(" and not text[max(0, m.start() - 1):m.start()].isdigit():
+                    take(m.group(0), f"the measure of the check `{o.get('name')}`")
+    for name in p.get("labels") if isinstance(p.get("labels"), dict) else []:
+        take(str(name), "the labels")
+    for a in design.get("result_assertions") if isinstance(design.get("result_assertions"), list) else []:
+        if isinstance(a, dict) and isinstance(a.get("path"), str) and _WORD.fullmatch(a["path"].strip()):
+            take(a["path"].strip(), "a bound on its value")
+    for m in re.finditer(r"`([A-Za-z_][A-Za-z0-9_]*)`", str(design.get("method") or "")):
+        take(m.group(1), "the method")
+    return dict(list(found.items())[:MAX_NAMES])
+
+
+def _model_equation_ids(protocol: dict[str, Any]) -> set[str]:
+    model = protocol.get("model")
+    eqs = model.get("equations") if isinstance(model, dict) else None
+    return {str(e.get("id")).strip() for e in eqs if isinstance(e, dict) and e.get("id")} if isinstance(eqs, list) else set()
+
+
+def check_part(part: str, value: Any, design: Any) -> list[str]:
+    """Why ``value``, a model's answer for ``part``, cannot be used; empty when it can. Structural only: every name is
+    held to the ids and settings FI already has in ``design`` (nothing is judged by its words).
+
+    ``roles``: ``{result id: {"role", "depends_on"}}`` for every declared result. ``names``: ``{name: {"answer", ...}}`` for
+    every undeclared name :func:`undeclared_names` found, with ``formula`` or ``equation`` for a ``reference`` and
+    ``inputs`` (declared results) for a ``derived``. ``comparisons``: ``{"comparisons": [{"result", "across", "values",
+    "how"}]}``, a result being a declared result or a name answered ``derived``."""
+    design = design if isinstance(design, dict) else {}
+    p = design.get("protocol") if isinstance(design.get("protocol"), dict) else {}
+    varied = varied_settings(p)
+    declared = [str(m["id"]).strip() for m in p.get("metrics") or [] if isinstance(m, dict) and _ident(m.get("id"))]
+    if not isinstance(value, dict):
+        return [f"the answer for `{part}` must be a mapping"]
+    out: list[str] = []
+    if part == "roles":
+        for rid in declared:
+            row = value.get(rid)
+            if not isinstance(row, dict):
+                out.append(f"`{rid}` is not answered")
+                continue
+            if row.get("role") not in ROLES:
+                out.append(f"`{rid}`: role must be one of {', '.join(ROLES)}")
+            dep = row.get("depends_on")
+            if not isinstance(dep, list) or not all(isinstance(s, str) for s in dep):
+                out.append(f"`{rid}`: depends_on must be a list of settings (empty when it changes with none)")
+            else:
+                bad = [s for s in dep if s not in varied]
+                if bad:
+                    out.append(f"`{rid}`: {', '.join(bad)} is not a setting that varies (the settings are "
+                               f"{', '.join(varied) or 'none'})")
+        out += [f"`{k}` is not a declared result" for k in value if k not in declared]
+    elif part == "names":
+        wanted = undeclared_names(design)
+        for name in wanted:
+            row = value.get(name)
+            if not isinstance(row, dict):
+                out.append(f"`{name}` is not answered")
+                continue
+            answer = row.get("answer")
+            if answer not in NAME_ANSWERS:
+                out.append(f"`{name}`: answer must be one of {', '.join(NAME_ANSWERS)}")
+            elif answer == "reference":
+                eq, formula = row.get("equation"), row.get("formula")
+                if not (isinstance(formula, str) and formula.strip()) and not (
+                        isinstance(eq, str) and eq.strip() in _model_equation_ids(p)):
+                    out.append(f"`{name}`: a reference needs a `formula` of the settings, or an `equation` that is in the "
+                               f"plan's model ({', '.join(sorted(_model_equation_ids(p))) or 'it has none'})")
+            elif answer == "derived":
+                inputs = row.get("inputs")
+                if not isinstance(inputs, list) or not inputs or not all(i in declared for i in inputs):
+                    out.append(f"`{name}`: a quantity computed afterwards needs `inputs`, the declared results it is computed "
+                               f"from ({', '.join(declared)})")
+        out += [f"`{k}` was not asked about" for k in value if k not in wanted]
+    elif part == "comparisons":
+        items = value.get("comparisons")
+        if not isinstance(items, list):
+            return ["`comparisons` must be a list (empty when the study compares nothing between settings)"]
+        names = set(declared) | {str(x) for x in value.get("_derived", ())}
+        grid = p.get("grid") if isinstance(p.get("grid"), dict) else {}
+        seen: set[tuple[str, str]] = set()
+        for i, c in enumerate(items, 1):
+            if not isinstance(c, dict):
+                out.append(f"comparison {i} is not a mapping")
+                continue
+            if c.get("result") not in names:
+                out.append(f"comparison {i}: `result` must be a declared result")
+            if c.get("across") not in varied:
+                out.append(f"comparison {i}: `across` must be a setting that varies ({', '.join(varied) or 'none'})")
+            if c.get("how", "difference") not in ("difference", "ratio"):
+                out.append(f"comparison {i}: `how` must be difference or ratio")
+            vals = c.get("values", [])
+            if not isinstance(vals, list) or (vals and c.get("across") in grid
+                                              and any(v not in list(grid[c["across"]]) for v in vals)):
+                out.append(f"comparison {i}: `values` must be values of `{c.get('across')}` in the grid")
+            key = (str(c.get("result")), str(c.get("across")))
+            if key in seen:
+                out.append(f"comparison {i} repeats {key[0]} across {key[1]}")
+            seen.add(key)
+    else:
+        out.append(f"unknown part `{part}`")
+    return out

@@ -90,6 +90,7 @@ from . import code_layout as _code_layout
 from . import changelog as _changelog
 from . import code_project as _code_project
 from . import contract as _contract
+from . import contract_parts as _contract_parts
 from . import rerun_from as _rerun_from
 from . import attempt_records as _attempts
 from . import attempt_memory as _memory
@@ -5792,6 +5793,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 if not ask:
                     print("[FI] The plan has no way to judge whether the code got better (no check of correctness FI can "
                           "compute); going on without one. See plan.md and .fi/run.log")
+        # The plan's model is asked, one part at a time, what the study contract needs (core/contract_parts.py): the kind of
+        # each result and what it changes with, what the names the plan uses but does not declare are, and what is compared.
+        if self._runs_code(state) and self._client is not None and isinstance(normalized.get("protocol"), dict):
+            normalized, contract_notes = await self._ask_contract_parts(normalized)
+            repaired_notes += contract_notes
         # The plan writes the audited design in its own canonical form: the audit's verdict covers it.
         _receipts.carry_output(self.quest_root, "design_audit", _receipts.design_core(design),
                                _receipts.design_core(normalized), "the plan wrote the audited design in its own form")
@@ -5853,6 +5859,27 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if ask:
             self._pause_for_plan(no_criteria=no_criteria)
         return {"design_objections": objections} if isinstance(objections, list) else {}
+
+    async def _ask_contract_parts(self, design: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+        """``(design, notes)``: ``design`` with the contract parts the plan's model gave in a form that could be used
+        (:func:`core.contract_parts.ask_parts`), and a sentence for the parts it did not. What was asked and answered is kept
+        in ``.fi/contract_parts.json``. Never a stop: a failed call leaves the design as it was."""
+        async def ask(prompt: str) -> str:
+            return await self._chat(prompt, node="plan_contract")
+
+        try:
+            out = await _contract_parts.ask_parts(design, ask, lambda t: _parse_json_lenient(t, node="plan_contract"), self._prompts)
+        except Exception as e:  # noqa: BLE001 -- the plan goes on without the parts
+            self._log.warning("[plan] the contract parts could not be asked (%r); the plan stays in the older form", e)
+            return design, []
+        try:
+            (self.fi_dir / "contract_parts.json").write_text(json.dumps(
+                {"form": out.form, "parts": out.parts}, indent=1, default=str) + "\n", encoding="utf-8")
+        except OSError as e:
+            self._log.warning("[plan] couldn't write .fi/contract_parts.json: %r", e)
+        self._log.info("[plan] contract parts: %s", "; ".join(
+            f"{k} {'ok' if v['valid'] else 'left out'} after {v['asks']} ask(s)" for k, v in out.parts.items()) or "none asked")
+        return out.design, out.notes
 
     def _criteria_follow_checks(self, made: list[str]) -> None:
         """The criteria FI made from the plan's own checks (``made``, their names), made again from the checks as FI's look
@@ -28128,6 +28155,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "plan_revise",                      # --revise-plan: rewrite plan.md as the person asked
         "plan_parts",                       # FI asks for ONLY the missing parts of the plan, as JSON (never the whole file)
         "plan_criteria",                    # the plan named no check of correctness: ask once more
+        "plan_roles", "plan_names", "plan_comparisons",  # the contract's parts, asked one at a time (core/contract_parts.py)
         "json_reanswer",                    # a required check's reply could not be read: one short JSON re-answer
         "json_reanswer_part",               # ... when part of it could be read: only the unreadable keys are asked again
         "oracle_review",                    # a second model reads the plan's checks against known answers

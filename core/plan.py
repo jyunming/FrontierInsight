@@ -1189,6 +1189,35 @@ def _criteria_lines(protocol: Any) -> list[str]:
     return lines + [""]
 
 
+RETURNS_HEADING = "What the study returns"
+_RESULT_ROLE_WORDS = {"result": "a measured result", "reference": "a theory or reference value", "timing": "a measured time",
+               "physical_bound": "a number that may sit exactly at the end of its range",
+               "diagnostic": "kept for checking, not reported as a finding"}
+
+
+def _returns_lines(protocol: Any) -> list[str]:
+    """What each result is and what it changes with, in plain words, from the roles the plan carries
+    (``core/contract_parts.py``). Not read back: the block below is what runs. Nothing for a plan that names no role."""
+    if not isinstance(protocol, dict):
+        return []
+    metrics = [m for m in protocol.get("metrics") or [] if isinstance(m, dict) and m.get("role")]
+    if not metrics:
+        return []
+    lines = [f"## {RETURNS_HEADING}", ""]
+    for m in metrics:
+        dep = m.get("depends_on")
+        lines.append(f"- `{m['id']}`: {_RESULT_ROLE_WORDS.get(str(m['role']), str(m['role']))}"
+                     + ("; changes with " + ", ".join(f"`{s}`" for s in dep) if isinstance(dep, list) and dep else
+                        "; changes with none of the settings" if isinstance(dep, list) else ""))
+    for d in protocol.get("derived") or []:
+        if isinstance(d, dict) and d.get("id"):
+            lines.append(f"- `{d['id']}`: computed afterwards from " + ", ".join(f"`{i}`" for i in d.get("inputs") or []))
+    for c in protocol.get("comparisons") or []:
+        if isinstance(c, dict) and c.get("result"):
+            lines.append(f"- compared: `{c['result']}` between values of `{c.get('across')}` ({c.get('how', 'difference')})")
+    return lines + [""]
+
+
 def render(topic: str, extra: dict[str, Any] | None, design: dict[str, Any], audit: list[str] | None = None,
            sources: list[dict[str, str]] | None = None, code_layout: list[str] | None = None,
            confirm: list[str] | None = None, held_back: list[str] | None = None) -> str:
@@ -1228,6 +1257,7 @@ def render(topic: str, extra: dict[str, Any] | None, design: dict[str, Any], aud
         "",
         *optimisation_plan.plan_lines(design),
         *_model_lines(design.get("protocol") if isinstance(design, dict) else None),
+        *_returns_lines(design.get("protocol") if isinstance(design, dict) else None),
         *_criteria_lines(design.get("protocol") if isinstance(design, dict) else None),
         *(code_layout or []),
         *(confirm or []),
@@ -1690,6 +1720,18 @@ def refresh_model_section(text: str) -> str:
         after = re.search(r"^##\s+", text[found.end():], re.MULTILINE)
         end = found.end() + after.start() if after else len(text)
         text = text[:found.start()] + "\n".join(lines).rstrip("\n") + "\n\n" + text[end:]
+    # What the study returns is shown from the block too (the roles and what each result changes with).
+    returns = re.search(rf"^##\s+{re.escape(RETURNS_HEADING)}\s*$", text, re.MULTILINE)
+    ret_lines = _returns_lines(parsed.design.get("protocol"))
+    if ret_lines:
+        if returns:
+            after = re.search(r"^##\s+", text[returns.end():], re.MULTILINE)
+            end = returns.end() + after.start() if after else len(text)
+            text = text[:returns.start()] + "\n".join(ret_lines).rstrip("\n") + "\n\n" + text[end:]
+        else:
+            at = re.search(rf"^##\s+{re.escape(CRITERIA_HEADING)}\s*$", text, re.MULTILINE) or _HEADING_RE.search(text)
+            if at is not None:
+                text = text[:at.start()] + "\n".join(ret_lines).rstrip("\n") + "\n\n" + text[at.start():]
     # The criteria are shown from the block too, and read the checks: shown again with them.
     criteria = re.search(rf"^##\s+{re.escape(CRITERIA_HEADING)}\s*$", text, re.MULTILINE)
     crit_lines = _criteria_lines(parsed.design.get("protocol"))
