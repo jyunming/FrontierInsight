@@ -202,3 +202,16 @@ def test_a_plan_says_it_is_in_the_contract_form_and_any_other_is_an_older_plan()
     new = C.from_design(plan)
     assert new.form == "contract" and not any("an older plan" in g for g in new.gaps)
     assert C.StudyContract().form == "contract"
+
+
+def test_a_role_the_plan_does_not_write_is_set_from_its_structure() -> None:
+    c = C.from_design({"protocol": {"metrics": [
+        {"id": "plain"}, {"id": "curve", "reference": {"formula": "2 * x"}}, {"id": "check_value"},
+        {"id": "both", "reference": {"formula": "x"}}, {"id": "said", "role": "timing"},
+        {"id": "worded", "estimand": "theory closed-form"}],
+        "oracles": [{"name": "first", "measure": "check_value"}, {"name": "second", "metric": "check_value"},
+                    {"name": "third", "measure": "both"}]}})
+    assert [(r.id, r.role, r.measured_by) for r in c.results] == [
+        ("plain", "result", ()), ("curve", "reference", ()), ("check_value", "diagnostic", ("first", "second")),
+        ("both", "reference", ("third",)), ("said", "timing", ()), ("worded", "result", ())]
+    assert any("no role for `plain`, `worded`" in g for g in c.gaps) and not any("`curve`" in g for g in c.gaps)

@@ -1095,7 +1095,7 @@ CHECKS: tuple[Check, ...] = (
     Check('numeric_warnings_scan', 'core.numeric_warnings', 'scan',
           'execute', 'measured', 'stop',
           'Reads stderr and results for overflow, non-convergence, ignored arguments, complex discard, NaN/inf; '
-          'repaired then stops; a NaN or infinity only for a result the plan declares, any other disclosed; '
+          'repaired then stops; a NaN or infinity only for a result, reference or physical_bound the plan declares (its role), any other disclosed; '
           'engine.numeric_warnings block (default) / warn records / off'),
     Check('degenerate_run_guard', 'core.engine', '_is_degenerate_result',
           'execute_reflect', 'own_record', 'repair',

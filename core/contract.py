@@ -15,8 +15,14 @@ Roles of a result (:data:`ROLES`):
 * ``physical_bound``: a result that by its physics may sit exactly on the edge of its declared ``range`` (a value that
   is 0 or 1 by construction): sitting there is not a fault. For any other role a value on the edge is said, and a value
   outside the range is a fault.
-* ``diagnostic``: everything the simulation returns that the contract does not declare. Kept in the record, readable by
+* ``diagnostic``: everything the simulation returns that the contract does not declare, and a declared result that is
+  the measure of one of the plan's known-answer checks (FI measures that check itself). Kept in the record, readable by
   the study's own derive functions, never reported and never checked.
+
+Where a plan gives no ``role``, :func:`from_design` sets one from the plan's structure alone: a result with a
+``reference.formula`` is a ``reference``; a result that is the ``measure`` (or ``metric``) of a known-answer check is a
+``diagnostic`` (the check's name is in ``measured_by``); any other is a ``result``, said in ``gaps``. No word of an
+estimand or a label is read.
 
 This is not :class:`core.protocol.ResearchProtocol`, which says what *kind* of quest this is (a simulation, a literature
 review); the contract says what one simulation study does.
@@ -68,6 +74,9 @@ class Result(_Strict):
 
     id: str
     role: Role = "result"
+    #: The names of the known-answer checks whose measure is this result (whatever its role): FI's own measurement of
+    #: each is in its record, beside what the simulation returned.
+    measured_by: tuple[str, ...] = ()
     kind: Literal["mean", "proportion"] = "mean"
     estimand: str = ""
     observation: str = ""  # what one independent observation is (one trial, one cluster)
@@ -318,6 +327,13 @@ def from_design(design: dict[str, Any] | None) -> StudyContract:
         else:
             assertions.append(a)
 
+    measures: dict[str, list[str]] = {}
+    for o in _rows(p.get("oracles")):
+        for key in ("measure", "metric"):
+            if _ident(o.get(key)) and _ident(o.get("name")) and _ident(o.get("name")) not in measures.setdefault(
+                    _ident(o.get(key)), []):
+                measures[_ident(o.get(key))].append(_ident(o.get("name")))
+
     results = []
     no_role: list[str] = []
     for m in metrics:
@@ -328,7 +344,10 @@ def from_design(design: dict[str, Any] | None) -> StudyContract:
         if rid in {r.id for r in results}:
             gaps.append(f"result `{rid}` is declared more than once; only the first is kept")
             continue
-        if not m.get("role"):
+        ref = m.get("reference")
+        structural = ("reference" if isinstance(ref, dict) and str(ref.get("formula") or "").strip()
+                      else "diagnostic" if rid in measures else None)
+        if not m.get("role") and structural is None:
             no_role.append(rid)
         depends = m.get("depends_on")
         if isinstance(depends, list):
@@ -341,7 +360,8 @@ def from_design(design: dict[str, Any] | None) -> StudyContract:
         if given is not None and _ident(given) not in declared_ids | derived_ids:
             gaps.append(f"result `{rid}` is given `{given}`, which is not a declared result; that is left out")
             given = None
-        data = {"id": rid, "role": m.get("role") or "result", "kind": m.get("kind") or "mean",
+        data = {"id": rid, "role": m.get("role") or structural or "result", "measured_by": tuple(measures.get(rid, ())),
+                "kind": m.get("kind") or "mean",
                 "estimand": str(m.get("estimand") or ""), "observation": str(m.get("unit") or ""),
                 "unit": str(m.get("physical_unit") or ""), "label": str(m.get("label") or labels.get(rid, "")),
                 "depends_on": depends, "range": ranges.get(rid) or m.get("range"),

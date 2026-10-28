@@ -686,6 +686,15 @@ def _objections_sentence(rows: Any) -> str:
             f"changed for them: {'; '.join(said[:_SHOWN])}{more}.")
 
 
+def _contract_sentence(record: Any) -> str:
+    """What FI could not place when it read the plan into the study contract (``.fi/contract.json``), in one line."""
+    gaps = [g.strip().rstrip(".") for g in record.get("gaps", []) if isinstance(g, str) and g.strip()]         if isinstance(record, dict) and isinstance(record.get("gaps"), list) else []
+    if not gaps:
+        return ""
+    more = f"; and {len(gaps) - _SHOWN} more" if len(gaps) > _SHOWN else ""
+    return "In reading the plan, FI noted: " + "; ".join(gaps[:_SHOWN]) + more + "."
+
+
 def _precision_sentence(missed: Any) -> str:
     """The plan's precision target and the quantities that missed it, with the half-width each reached."""
     rows = [m for m in missed if isinstance(m, dict) and m.get("name")] if isinstance(missed, list) else []
@@ -865,6 +874,7 @@ def run_record(quest_root: Path, *, topic: str = "", duration_s: float | None = 
     if untested:
         parts.append(_untested_sentence(untested))
     parts.append(_precision_sentence(_read_json(quest_root / PRECISION_RECORD)))
+    parts.append(_contract_sentence(_read_json(quest_root / ".fi" / "contract.json")))
     parts.append(_widened_sentence(_read_json(quest_root / ".fi" / "oracle_review.json")))
     parts.append(_objections_sentence(_read_json(quest_root / OBJECTIONS_RECORD)))
     parts.append(unresolved_sentence(_read_json(quest_root / OBJECTIONS_RECORD)))

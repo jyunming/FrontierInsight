@@ -392,7 +392,7 @@ def test_a_nan_in_a_declared_result_counts_and_one_in_a_diagnostic_does_not() ->
 def test_a_plan_that_declares_no_result_keeps_every_non_finite_number() -> None:
     result = {"debug_ratio": math.nan}
     assert [w.text for w in nw.scan("", result, results=nw.declared_results({}))] == ["debug_ratio is nan"]
-    assert nw.disclosed_non_finite(result, set()) == []
+    assert nw.disclosed_non_finite(result, nw.declared_results({})) == []
 
 
 def test_a_nan_only_in_a_diagnostic_asks_for_no_repair_and_is_disclosed_in_the_evidence(tmp_path: Path) -> None:
@@ -476,3 +476,50 @@ def test_a_frozen_protocol_with_no_results_keeps_every_non_finite_number(tmp_pat
     state: dict[str, Any] = {"design": {"protocol": _PROTOCOL}}
     got = engine._scan_numeric_warnings(state, "", {"debug_ratio": math.nan})  # type: ignore[arg-type]
     assert got == [{"kind": "non_finite", "text": "debug_ratio is nan"}]
+
+
+# ---- the role of a result decides which non-finite number stops (contract roles) ---------------------------------------
+
+_ROLES = {"metrics": [{"id": "gain"}, {"id": "ideal", "reference": {"formula": "2 * x"}},
+                      {"id": "agreement"}, {"id": "wall", "role": "timing"}, {"id": "edge", "role": "physical_bound"}],
+          "oracles": [{"name": "agree_a", "measure": "agreement"}, {"name": "agree_b", "metric": "agreement"}]}
+
+
+def test_only_a_result_a_reference_and_a_physical_bound_ask_for_a_repair() -> None:
+    assert nw.declared_results(_ROLES) == {"gain", "ideal", "edge"}
+    result = {"gain": math.nan, "ideal": math.inf, "edge": math.nan, "agreement": math.nan, "wall": math.nan}
+    found = nw.scan("", result, results=nw.declared_results(_ROLES))
+    assert [w.text for w in found] == ["gain is nan", "ideal is inf", "edge is nan"]
+    assert nw.disclosed_non_finite(result, nw.declared_results(_ROLES)) == ["agreement is nan", "wall is nan"]
+
+
+def test_a_plan_whose_results_are_all_diagnostics_stops_for_none_of_them() -> None:
+    protocol = {"metrics": [{"id": "agreement"}], "oracles": [{"name": "agree", "measure": "agreement"}]}
+    results = nw.declared_results(protocol)
+    assert results == set()
+    assert nw.scan("", {"agreement": math.nan, "other": math.nan}, results=results) == []
+
+
+def test_a_check_s_measure_printed_as_nan_is_disclosed_with_fi_s_own_value(tmp_path: Path) -> None:
+    engine = Engine(_cfg(tmp_path))
+    record = {"attempts": [{"checks": [{"name": "agree_a", "value": 2.3e-15, "measured_by": "engine"},
+                                       {"name": "agree_b", "value": 9.0, "measured_by": "script"}]}]}
+    (engine.quest_root / "needs").mkdir(parents=True, exist_ok=True)
+    (engine.quest_root / "needs" / "ORACLE_CHECK.json").write_text(json.dumps(record), encoding="utf-8")
+    state: dict[str, Any] = {"design": {"protocol": _ROLES}}
+    assert engine._scan_numeric_warnings(state, "", {"gain": 0.5, "agreement": math.nan}) == []  # type: ignore[arg-type]
+    assert _recorded(engine)[-1]["disclosed"] == [
+        "agreement is nan (FI's own run of the check `agree_a` measured 2.3e-15)"]
+
+
+def test_the_contract_is_built_when_the_protocol_is_read_and_its_gaps_are_kept(tmp_path: Path) -> None:
+    from core import disclosure
+
+    engine = Engine(_cfg(tmp_path))
+    design = {"protocol": {"metrics": [{"id": "gain"}]}}
+    state: dict[str, Any] = {"design": design, "iteration": 1}
+    protocol = engine._protocol_block(state)  # type: ignore[arg-type]
+    assert protocol == {"metrics": [{"id": "gain"}]} and "role" not in protocol["metrics"][0]  # never written back
+    record = json.loads((engine.quest_root / ".fi" / "contract.json").read_text(encoding="utf-8"))
+    assert any("no role for" in g for g in record["gaps"])
+    assert "In reading the plan, FI noted: " in disclosure.run_record(engine.quest_root)

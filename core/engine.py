@@ -89,6 +89,7 @@ from . import oracle_challenge as _oracle_challenge
 from . import code_layout as _code_layout
 from . import changelog as _changelog
 from . import code_project as _code_project
+from . import contract as _contract
 from . import rerun_from as _rerun_from
 from . import attempt_records as _attempts
 from . import attempt_memory as _memory
@@ -11380,8 +11381,36 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         frozen = self._resolved_frozen()
         if frozen is not None:
             protocol = frozen.get("protocol")
-            return protocol if isinstance(protocol, dict) and protocol else None
-        return self._draft_protocol(state)
+            protocol = protocol if isinstance(protocol, dict) and protocol else None
+        else:
+            protocol = self._draft_protocol(state)
+        self._note_contract(state, protocol)
+        return protocol
+
+    def _note_contract(self, state: QuestState, protocol: dict[str, Any] | None) -> "_contract.StudyContract | None":
+        """The study contract the protocol being read gives (:func:`core.contract.from_design`), kept for the protocol's
+        hash; what the plan left out is written to ``.fi/contract.json`` for the quality report. It is built when the
+        protocol is read and never written back into it (the frozen protocol's hash would change)."""
+        if not isinstance(protocol, dict):
+            return None
+        design = {**(state.get("design") or {}), "protocol": protocol}
+        try:
+            key = hashlib.sha256(json.dumps([protocol, design.get("result_assertions")], sort_keys=True,
+                                            default=str).encode("utf-8")).hexdigest()
+            cache = self.__dict__.setdefault("_contract_cache", {})
+            if key in cache:
+                return cache[key]
+            contract = _contract.from_design(design)
+            cache.clear()
+            cache[key] = contract
+            path = self.fi_dir / "contract.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"protocol_sha": key, "form": contract.form, "gaps": list(contract.gaps)},
+                                       indent=2) + "\n", encoding="utf-8")
+            return contract
+        except Exception as e:  # noqa: BLE001 -- the contract is read for disclosure; it never stops a quest
+            self._log.warning("[contract] could not read the plan's contract (%r)", e)
+            return None
 
     def _draft_protocol(self, state: QuestState) -> dict[str, Any] | None:
         """The protocol before it is frozen (:meth:`_draft_protocol_base`), with the worked examples the plan worked out again
@@ -15069,10 +15098,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         try:
             # The protocol the run is held to: the frozen one, as the evidence reads it (core/evidence.py).
             frozen = _frozen.load(self.quest_root)
-            results = _numeric.declared_results(
-                frozen.get("protocol") if frozen is not None else (state.get("design") or {}).get("protocol"))
+            protocol = frozen.get("protocol") if frozen is not None else (state.get("design") or {}).get("protocol")
+            results = _numeric.declared_results(protocol)
             found = _numeric.scan(stderr, result_json, results=results)
-            disclosed = _numeric.disclosed_non_finite(result_json, results)
+            disclosed = _numeric.disclosed_non_finite(
+                result_json, results, _numeric.own_measurements(protocol, self._oracle_record_read()))
         except Exception as e:  # noqa: BLE001 -- a defect in the scan must never stall a quest
             self._log.warning("[numeric] the warning scan failed (%r); skipping", e)
             # A scanner that crashed is not the same as one that ran and found nothing: the first means the run's
@@ -15089,9 +15119,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 pass
             return []
         if disclosed:
-            # None of the plan's results: disclosed in the evidence, not repaired for (a NaN in a number nobody reports
-            # must not stop every result).
-            self._log.info("[numeric] not finite, not one of the plan's results (disclosed): %s", "; ".join(disclosed[:8]))
+            # Not a number the paper stands on (a diagnostic, a timing, a name the plan does not declare): disclosed in
+            # the evidence, not repaired for (a NaN in a number nobody reports must not stop every result).
+            self._log.info("[numeric] not finite, not a result the paper stands on (disclosed): %s", "; ".join(disclosed[:8]))
         if not found:
             if disclosed:
                 try:
