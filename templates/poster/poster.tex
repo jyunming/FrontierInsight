@@ -25,6 +25,8 @@
   \setmainfont{TeX Gyre Pagella}
   \setsansfont{TeX Gyre Heros}
 ${cjksetup}
+  % Fallback fonts for the glyphs the text fonts lack (generation/poster.py, the paper's glyph handling).
+  \IfFileExists{poster_unicode.tex}{\input{poster_unicode.tex}}{}
 \else
   \usepackage[utf8]{inputenc}
   \usepackage[T1]{fontenc}

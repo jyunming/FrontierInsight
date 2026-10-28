@@ -52,7 +52,7 @@ from core.engine import (
     QuestArtifacts,
     _latex_esc,
     build_further_reading,
-    build_references,
+    cited_references,
 )
 from core.proc_tree import run_tree
 from core.provider import (
@@ -68,7 +68,8 @@ from generation import _cjk
 from generation._figure_captions import without_number
 from generation._pdf_engine import find_pdf_engine
 from generation._pdf_measure import measure_pdf, poster_report
-from generation.paper import _sanitize_unicode_for_latex
+from generation._unicode_fonts import find_fonts
+from generation.paper import _prepare_unicode
 
 _log = logging.getLogger("frontier_insight.poster")
 
@@ -186,11 +187,15 @@ _EMOJI_RE = _re.compile(
 )
 
 
-def _latex_safe_body(body: str) -> str:
-    """Make a fully-substituted poster.tex safe for pdflatex: map common
-    Unicode typography to LaTeX equivalents (shared with the paper
-    generator) and strip emoji/pictographs that have no LaTeX mapping."""
-    return _EMOJI_RE.sub("", _sanitize_unicode_for_latex(body))
+def _latex_safe_source(body: str, *, fonts=None, cjk: bool = False):
+    """The fully-substituted poster.tex made ready for its TeX engine by the
+    paper's own glyph handling (``generation.paper._prepare_unicode``): exact
+    LaTeX forms, and under XeLaTeX a fallback font for each glyph the text
+    fonts lack (``fonts`` is that engine's ``FontPlan``; None for pdflatex).
+    Returns the ``_UnicodeSource``: ``.text``, ``.header`` (the fonts, for
+    ``poster_unicode.tex``) and ``.not_set`` (glyphs no font here sets).
+    Emoji/pictographs that have no LaTeX mapping are stripped first."""
+    return _prepare_unicode(_EMOJI_RE.sub("", body), fonts=fonts, cjk=cjk, rewrite_code=True)
 
 
 # Bare LaTeX specials that hard-error pdflatex when an LLM writes them as
@@ -978,8 +983,10 @@ class PosterGenerator:
         figures = _figure_files(art.figures_dir)
         captions = _paper_captions(paper_md)
         literature = art.raw_state.get("literature") or []
+        # Only the references the paper ends with (what its citation check kept), numbered as the paper numbers
+        # them: the model is shown no other source, so the poster cannot cite one the paper dropped.
         sources: dict[str, dict] = {
-            str(r["n"]): r for r in build_references(literature, audience=output.audience)
+            str(r["n"]): r for r in cited_references(literature, paper_md, audience=output.audience)
         }
         sources.update({
             str(w["label"]): w for w in build_further_reading(literature, audience=output.audience)
@@ -1070,15 +1077,18 @@ class PosterGenerator:
         content = "\n".join([headline, subtitle, *author_terms, *entries, *(t for b in blocks for t in b.texts())])
         cjk_font: str | None = None
         cjk_problem: str | None = None
+        # As for the paper: a Unicode engine (XeLaTeX) whenever one is installed, so a glyph is set as itself or from
+        # a fallback font; pdflatex only when there is none. Chinese, Japanese or Korean text also needs a font.
+        xelatex = _cjk.find_xelatex(engine) if engine is not None else None
         if engine is not None and _cjk.has_cjk(content):
-            xelatex = _cjk.find_xelatex(engine)
             cjk_font = _cjk.find_cjk_font(content) if xelatex is not None else None
             if xelatex is None:
                 cjk_problem = "cjk_no_xelatex"
             elif cjk_font is None:
                 cjk_problem = "cjk_no_font"
-            else:
-                engine = xelatex
+        if xelatex is not None and not cjk_problem:
+            engine = xelatex
+        fonts = find_fonts(engine[1]) if engine is not None and xelatex is not None and engine == xelatex else None
 
         icon_ok = _copy_poster_icon(out_dir)
         template = TEMPLATE_PATH.read_text(encoding="utf-8")
@@ -1097,11 +1107,34 @@ class PosterGenerator:
         diag_path = out_dir / "poster_pdf_skipped.md"
         result: dict[str, Path] = {"poster_tex": poster_tex}
 
+        unicode_file = out_dir / "poster_unicode.tex"
+        not_set: list[str] = []
+
         def write_tex() -> None:
+            # The fallback fonts go in poster_unicode.tex (the paper's fi_unicode.tex is the paper's own).
             body = string.Template(template).safe_substitute(values, columns=layout.columns_latex())
-            poster_tex.write_text(_latex_safe_body(body), encoding="utf-8")
+            prepared = _latex_safe_source(body, fonts=fonts, cjk=cjk_font is not None)
+            not_set[:] = prepared.not_set
+            if prepared.header:
+                unicode_file.write_text(prepared.header, encoding="utf-8")
+            elif unicode_file.is_file():
+                unicode_file.unlink()
+            poster_tex.write_text(prepared.text, encoding="utf-8")
 
         write_tex()
+        if not_set and engine is not None and not cjk_problem:
+            names = ", ".join(f"U+{ord(c[0]):04X}" for c in not_set[:5])
+            _log.warning("poster.pdf: no font here sets %s; poster.pdf skipped", names)
+            diag_path.write_text(_render_poster_skip_md(
+                code="glyph_not_set",
+                summary=f"no font here sets {names}, and LaTeX has no exact form for it; poster.pdf skipped.",
+                how_to_fix=(
+                    "Install a font that has these characters (DejaVu and Noto cover most scripts and "
+                    "symbols); `poster.tex` is kept."
+                ),
+            ), encoding="utf-8")
+            result["poster_pdf_skipped"] = diag_path
+            return result
         if engine is None or cjk_problem:
             if engine is None:
                 code = "no_latex_engine"
