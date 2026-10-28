@@ -752,12 +752,3 @@ async def test_copilot_failure_with_empty_stderr_shows_stdout(tmp_path: Path) ->
     with pytest.raises(_CliTransientError) as info:
         await _run_cli(spec, "hi", timeout_s=60)
     assert "prompt is too long for this model" in str(info.value)
-
-
-def test_a_too_long_input_is_not_retried_but_other_failures_are() -> None:
-    from core.provider import _retry_cli_error
-
-    for text in ("copilot exited rc=1: Error: prompt is too long", "x exited rc=1: input_too_large",
-                 "copilot exited rc=1: exceeds the context window of the model"):
-        assert not _retry_cli_error(_CliTransientError(text)), text
-    assert _retry_cli_error(_CliTransientError("copilot exited rc=1: connection reset"))

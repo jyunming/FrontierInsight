@@ -2155,28 +2155,6 @@ _CLI_FATAL_MARKERS: tuple[str, ...] = (
 _CLI_AUTH_STATUS = re.compile(r"\b(?:http|status)[ :=]*401\b")
 
 
-# A CLI failure whose text says the input was too long for the model. The same input fails the same way, so it is
-# not retried; the message (with the CLI's own words) reaches the user at once.
-_CLI_INPUT_TOO_LONG_MARKERS: tuple[str, ...] = (
-    "input_too_large",
-    "input is too long",
-    "prompt is too long",
-    "prompt too long",
-    "too many tokens",
-    "context length",
-    "context window",
-    "context_length_exceeded",
-    "maximum context",
-    "exceeds the limit of",
-)
-
-
-def _cli_input_too_long(text: str) -> bool:
-    """Whether a CLI failure's text says the prompt was over the model's input or context limit."""
-    text = text.lower()
-    return any(m in text for m in _CLI_INPUT_TOO_LONG_MARKERS)
-
-
 def _cli_fatal(text: str) -> bool:
     """Whether a CLI failure's text names a limit or a refused sign-in that does not clear within the run."""
     text = text.lower()
@@ -2439,7 +2417,7 @@ def _retry_cli_error(exc: BaseException) -> bool:
     if isinstance(exc, OSError):
         return True
     if isinstance(exc, _CliTransientError):
-        return not _cli_fatal(str(exc)) and not _cli_input_too_long(str(exc))
+        return not _cli_fatal(str(exc))
     return False
 
 
