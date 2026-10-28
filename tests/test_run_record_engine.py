@@ -44,7 +44,8 @@ def test_the_paper_has_no_run_record_and_the_writer_gets_the_facts(tmp_path: Pat
     out = asyncio.run(eng._node_write(state))  # type: ignore[arg-type]
     paper = Path(out["paper_md"]).read_text(encoding="utf-8")
     assert "seed 42" not in paper and "fi:run-record" not in paper and "What FI recorded about this run" not in paper
-    assert "The grid is coarse." in paper
+    # the writer's own Limitations stay and FI's block follows them
+    assert paper.index("The grid is coarse.") < paper.index("<!-- fi:fact-limitations -->")
     # The writer is given the facts as placeholders FI fills; this fixture has no simulation code, so FI names no seed
     # (it cannot tell from the code whether the seeds it passed were used) and never claims a base seed.
     assert any("FI'S RECORD OF THIS RUN" in p and "Run facts:" in p for p in prompts), "the writer is given the facts"

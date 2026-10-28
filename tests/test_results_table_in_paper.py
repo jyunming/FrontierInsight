@@ -93,7 +93,8 @@ def test_fi_places_the_table_before_the_discussion_when_the_writer_did_not(tmp_p
     assert placed.count("{{results_table}}") == 1
     assert placed.index("The estimates agree.") < placed.index("{{results_table}}") < placed.index("## Discussion")
     assert pf.place_blocks(placed, root) == placed  # once
-    assert pf.place_blocks(PAPER, tmp_path / "no_quest") == PAPER  # no table, nothing placed
+    # no table, nothing placed (but FI's Limitations, which every paper has)
+    assert pf.place_blocks(PAPER, tmp_path / "no_quest").replace("{{limitations}}", "Few.") == PAPER
 
 
 def test_the_writer_is_told_about_the_table_only_when_there_is_one(tmp_path: Path) -> None:

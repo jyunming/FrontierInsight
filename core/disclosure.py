@@ -559,6 +559,111 @@ def unresolved_sentence(rows: Any) -> str:
             f"{more}.")
 
 
+LAST_REVIEW_RECORD = Path(".fi") / "last_review.json"
+
+
+def _line(text: Any) -> str:
+    return " ".join(str(text or "").split())
+
+
+def _review_said(review: Any) -> dict[str, Any]:
+    """What a review said, in the form the record keeps it: the verdict, the weaknesses and the reason it blocked on."""
+    review = review if isinstance(review, dict) else {}
+    weaknesses = review.get("weaknesses")
+    return {"verdict": _line(review.get("verdict")).lower(),
+            "weaknesses": [_line(w) for w in (weaknesses if isinstance(weaknesses, list) else []) if _line(w)],
+            "blocking": _line(review.get("blocking"))}
+
+
+def write_last_review(quest_root: Path, review: Any) -> None:
+    """Keep what the review just said (``.fi/last_review.json``): its verdict, its weaknesses and the reason it blocked on,
+    each round, so the last one is on record when no round is left to answer it. ``final`` stays false until
+    :func:`mark_last_review_final`. Best-effort: a record that cannot be written is not a reason to stop."""
+    if not isinstance(review, dict):
+        return
+    record = {**_review_said(review), "final": False}
+    path = Path(quest_root) / LAST_REVIEW_RECORD
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(record, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _last_review(quest_root: Path) -> dict[str, Any]:
+    record = _read_json(Path(quest_root) / LAST_REVIEW_RECORD)
+    return record if isinstance(record, dict) else {}
+
+
+def last_review_points(quest_root: Path, *, final_only: bool = True) -> list[str]:
+    """The points of the last review that nothing answered: its reason for revising and its weaknesses, one line each, when
+    that review saw the paper as delivered (``final``) and did not accept it. A point FI's record of the reviewer's
+    objections already holds (:data:`OBJECTIONS_RECORD`, the same text) is left out: it is stated from there."""
+    record = _last_review(quest_root)
+    if (final_only and not record.get("final")) or record.get("verdict", "accept") == "accept":
+        return []
+    held: set[str] = set()
+    for row in _objection_rows(quest_root):
+        held.add(_line(row.get("said")))
+        held.update(_line(h) for h in row.get("hits") or [])
+    weaknesses = record.get("weaknesses")
+    points = [_line(record.get("blocking")), *[_line(w) for w in (weaknesses if isinstance(weaknesses, list) else [])]]
+    return [p for i, p in enumerate(points) if p and p not in held and p not in points[:i]]
+
+
+def mark_last_review_final(quest_root: Path, review: Any) -> bool:
+    """The paper goes out as the last review saw it, with no round left: its points that nothing answered are now
+    disclosed (:func:`last_review_points`). ``review`` is the review the quest holds now: the record is used only when it
+    says the same (a record of another round or another run of the quest is not this paper's). Returns whether there are
+    any points."""
+    record = _last_review(quest_root)
+    said = _review_said(review)
+    if record and any(record.get(k) != said[k] for k in ("verdict", "weaknesses", "blocking")):
+        if record.get("final"):  # another round's record that was final: it must not come back for a later paper
+            record["final"] = False
+            try:
+                (Path(quest_root) / LAST_REVIEW_RECORD).write_text(
+                    json.dumps(record, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+            except OSError:
+                pass
+        return False
+    if not record or record.get("verdict", "accept") == "accept":
+        return False
+    if not record.get("final"):
+        record["final"] = True
+        try:
+            (Path(quest_root) / LAST_REVIEW_RECORD).write_text(
+                json.dumps(record, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+        except OSError:
+            return False
+    return bool(last_review_points(quest_root))
+
+
+POINT_CHARS = 300
+
+
+def _quoted_point(point: str, cap: int | None) -> str:
+    """One point of a review as it is quoted: no double quotes, no comment or placeholder marks (they would break FI's
+    own markers), cut after a whole word at ``cap`` characters when given."""
+    one = _line(point.replace(chr(34), "'").replace("<!--", "").replace("-->", "").replace("{{", "").replace("}}", ""))
+    if cap is not None and len(one) > cap:
+        one = one[:cap].rsplit(" ", 1)[0].rstrip(" ,;:.") + "\u2026"
+    return chr(34) + one + chr(34)
+
+
+def last_review_sentence(points: list[str], shown: int | None = None) -> str:
+    """The sentence for the quality report (every point, whole) and the paper's Limitations (``shown`` of them, each cut to
+    :data:`POINT_CHARS` characters, the rest counted): the points are the reviewer's, quoted; FI does not say they are
+    right."""
+    if not points:
+        return ""
+    quoted = [_quoted_point(p, POINT_CHARS if shown is not None else None) for p in points]
+    more = len(points) - shown if shown is not None and len(points) > shown else 0
+    return ("The final review raised these points, which no later round addressed: "
+            + "; ".join(quoted[:len(points) - more])
+            + (f"; and {more} more, listed in QUALITY.md." if more else "."))
+
+
 def clear_objections(quest_root: Path) -> None:
     (Path(quest_root) / OBJECTIONS_RECORD).unlink(missing_ok=True)
 
@@ -763,6 +868,7 @@ def run_record(quest_root: Path, *, topic: str = "", duration_s: float | None = 
     parts.append(_widened_sentence(_read_json(quest_root / ".fi" / "oracle_review.json")))
     parts.append(_objections_sentence(_read_json(quest_root / OBJECTIONS_RECORD)))
     parts.append(unresolved_sentence(_read_json(quest_root / OBJECTIONS_RECORD)))
+    parts.append(last_review_sentence(last_review_points(quest_root)))
     parts = [p for p in parts if p]
     return f"{_RECORD_LEAD} " + " ".join(parts) if parts else ""
 

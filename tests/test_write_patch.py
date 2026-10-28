@@ -25,6 +25,7 @@ import pytest
 from langgraph.checkpoint.memory import MemorySaver
 
 from core import paper_patch
+from core.paper_facts import to_placeholders
 from core.config import (
     Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig,
 )
@@ -36,6 +37,7 @@ from core.engine import (
 )
 
 TOPIC = "How fast do stochastic epidemics die out?"
+
 
 
 def _paper(title: str, doi: str) -> dict[str, Any]:
@@ -195,7 +197,7 @@ def test_the_writer_gets_the_draft_and_the_passages_and_not_the_whole_study(tmp_
     out1, before = _first_draft(eng)
     _revise(eng, out1, ["unsupported_claim"])
     prompt = client.calls[1][1]
-    assert before in prompt, "the whole earlier draft, exactly as it is"
+    assert to_placeholders(before) in prompt, "the whole earlier draft, exactly as it is (FI's blocks as placeholders)"
     assert "Extinction is certain below R0 = 1.2." in prompt, "the claim the check flagged"
     assert json.dumps(CLAIM) in prompt, "and the draft's own words for it, escaped as `find` needs"
     assert "Neither the results nor [3] say so." in prompt, "with the check's reason"
@@ -301,6 +303,7 @@ def test_a_reply_that_is_not_usable_edits_falls_back_and_says_why(tmp_path: Path
 def test_edits_that_replace_most_of_the_paper_are_a_rewrite_in_disguise(tmp_path: Path) -> None:
     eng, client, logged = _engine(tmp_path, [DRAFT, "placeholder", DRAFT])
     out1, before = _first_draft(eng)
+    before = to_placeholders(before)
     body = before[:before.index("## References") - 2]
     client.replies[0] = _edits((body, "A short paper."))
     _revise(eng, out1, ["unsupported_claim"])
@@ -500,6 +503,7 @@ def test_through_the_graph_the_second_write_edits_the_first(tmp_path: Path) -> N
     written = Path(final["paper_md"]).read_text(encoding="utf-8")
     # FI's figure, with FI's caption, in place of the writer's image.
     assert written == _mark_preliminary(_place_figures(first.replace(CLAIM, NEW_CLAIM), _study())[0])  # type: ignore[arg-type]
+    assert "fi:fact-limitations" not in written  # no item to state: FI adds no block
     assert written.count(PRELIMINARY_NOTE) == 1
     assert final["paper_basis"] == _paper_basis(_study())  # type: ignore[arg-type]
 

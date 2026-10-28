@@ -39,7 +39,10 @@ from core.engine import (
 )
 from generation import paper as paper_mod
 from generation.paper import PaperGenerator, small_source_lists
+
+
 from tests.paper_fakes import fake_pandoc
+
 
 REPO = Path(__file__).resolve().parent.parent
 TEMPLATES = REPO / "templates" / "paper"
