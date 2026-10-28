@@ -34153,6 +34153,28 @@ def _matching_brace_end(text: str, start: int) -> int:
     return len(text)
 
 
+_FENCED_BLOCK_RE = re.compile(r"```[A-Za-z0-9_-]*[ \t]*\n(.*?)```", re.DOTALL)
+
+
+def _object_among_prose(text: str) -> dict[str, Any] | None:
+    """The JSON object a reply means when prose around it holds braces of its own, or ``None`` when it holds no
+    non-empty object. The one object written inside a fenced block is taken; otherwise the last object written at
+    the top level (a reply states its answer after the reasoning). Only called where the whole-text parse and the
+    first-``{``-to-last-``}`` slice both failed, so a reply that parsed before is read exactly as it was."""
+    objects = [o for o in _top_level_json_objects(text) if o]
+    if not objects:
+        return None
+    fenced = [o for m in _FENCED_BLOCK_RE.finditer(text) for o in _top_level_json_objects(m.group(1)) if o]
+    if len(fenced) == 1:
+        chosen, how = fenced[0], "the one object in a fenced block"
+    else:
+        chosen, how = objects[-1], "the last object written at the top level"
+    logging.getLogger("frontier_insight.engine").info(
+        "a model's JSON reply held prose with braces around its object; read %s (keys: %s)",
+        how, ", ".join(list(chosen)[:6]))
+    return chosen
+
+
 def _parse_json_lenient_once(
     text: str, *, node: str = "", _log_truncate_chars: int = 500, _quiet: bool = False,
 ) -> dict[str, Any] | None:
@@ -34212,6 +34234,11 @@ def _parse_json_lenient_once(
             repaired = _read_latex_object(candidate[start : end + 1])
             if repaired is not None:
                 return repaired
+            # Prose around the object that quotes braces of its own (`a case such as {"threshold": 0.01}`) makes the
+            # first-to-last slice span the prose too: read the objects written at the top level instead.
+            chosen = _object_among_prose(candidate)
+            if chosen is not None:
+                return chosen
             if not _quiet:
                 _log_parse_failure(candidate, node, _log_truncate_chars)
             return None
