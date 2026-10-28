@@ -750,10 +750,11 @@ VSCode, the command line and the web UI:
 - `codex_cli` does not read `~/.codex/config.toml`: custom model providers,
   profiles and MCP servers defined there are not used. The model comes from
   `provider.model` and the effort from `provider.reasoning_effort`.
-- `antigravity_cli`, `copilot_cli` and `gemini_cli` still have their tools on:
+- `copilot_cli` runs with every tool off, the prompt on stdin and images
+  attached as files. Its use is billed to your Copilot subscription's quota.
+- `antigravity_cli` and `gemini_cli` still have their tools on:
   `agy` has no option to turn them off and works in its own fixed workspace,
-  `copilot_cli` could not be checked while its quota was used up, and the
-  Gemini CLI no longer signs in individual Google accounts.
+  and the Gemini CLI no longer signs in individual Google accounts.
 
 `vscode_extension` is not a CLI provider and is unaffected. The flags and the
 measurements behind them are in `docs/PROVIDERS.md` ("Answer-only CLI calls").
@@ -790,7 +791,7 @@ The Frontier Insight repo ships **three** Copilot integration paths:
 | Provider | ToS standing | When to use |
 |---|---|---|
 | `vscode_extension` (this) | ✅ Sanctioned — `vscode.lm` API | Interactive use, you have VSCode open |
-| `copilot_cli` | ⚠️ Agentic — replies conversationally to FI's prompts instead of running stateless inference; FI emits a loud warning at engine init. Use `claude_cli`, `codex_cli`, `gemini_cli`, or `openai` for headless runs instead. | n/a — broken as a chat backend |
+| `copilot_cli` | ✅ Answer-only (every tool off, prompt on stdin, images attached as files); slower than an HTTP model (about 3x in one measured quest); use is billed to the Copilot subscription's quota; the models offered depend on the subscription (`copilot help config` lists them). | Headless runs, outside VS Code |
 | `github_copilot_cli` / `github_copilot_vscode` | ⚠️ Third-party proxy, against ToS spirit | Don't use these for anything you care about |
 
 If you're inside VSCode anyway, **this is the right path**. The Python
@@ -809,10 +810,9 @@ abuse-detection risk from scraped tokens.
   these "will be expanded as we learn more." Very long quests (e.g.
   full panel + cross_check + many literature hits) can theoretically
   hit them. For fleet runs that need to be robust, use a chat-style
-  CLI provider (`claude_cli` / `codex_cli` / `gemini_cli`) or an
-  HTTP-direct provider (`openai` / `gemini` with API keys).
-  `copilot_cli` is NOT a good fallback — it's agentic and replies
-  conversationally to FI's node prompts.
+  CLI provider (`claude_cli` / `codex_cli` / `gemini_cli` / `copilot_cli`)
+  or an HTTP-direct provider (`openai` / `gemini` with API keys).
+  `copilot_cli` works but is slower (about 3x in one measured quest).
 - **Model availability depends on your subscription.** Run
   `vscode.lm.selectChatModels({vendor: 'copilot'})` to see what you
   have access to; copy model names from there into your `node_models`.

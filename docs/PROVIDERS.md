@@ -53,7 +53,7 @@ config YAML, and runs the quest. Every LLM call streams through the
 | `claude_cli` | CLI exec | `claude auth login` (Pro/Max OAuth) | Claude family via Anthropic's CLI | ✅ Sanctioned |
 | `codex_cli` | CLI exec | `codex login` (ChatGPT Plus/Pro OAuth) | OpenAI Codex CLI's model selection | ✅ Sanctioned |
 | `gemini_cli` | CLI exec | `gemini` OAuth / Google AI key | Gemini via `@google/gemini-cli` | ⚠️ Google has been migrating individual-account OAuth sign-in to Antigravity; verified live this session — a previously-working individual account now gets `Code Assist for individuals... migrate to the Antigravity suite` and the CLI exits rc=1 before ever reaching FI. A Workspace/enterprise account or an `AI_STUDIO`/`GEMINI_API_KEY` login may still work; use `antigravity_cli` or the direct `gemini` (API-key) provider instead if yours doesn't. |
-| `copilot_cli` | CLI exec | `gh auth login` (Copilot sub) | n/a — see warning | ⚠️ Agentic. Replies conversationally to FI's structured prompts; not usable as an FI backend. Loud warning at engine init. |
+| `copilot_cli` | CLI exec | `gh auth login` (Copilot sub) | Copilot subscription models; `copilot help config` lists the ones your subscription offers | Answer-only: every tool off, prompt on stdin, images attached as files. Slower than an HTTP model (about 3x in one measured quest); token counts are FI's estimates, use is billed to the Copilot subscription's quota. |
 | `claude_code` | HTTP via proxy | `claude auth login` + spawned wrapper | Anthropic via `claude-code-openai-wrapper` | ⚠️ Third-party wrapper |
 | `github_copilot_cli` | HTTP via proxy | `gh auth login` + spawned `copilot-api` | Copilot models via reverse-engineered proxy | ⚠️ Against ToS spirit (use `vscode_extension` instead) |
 | `github_copilot_vscode` | HTTP via proxy | VSCode Copilot extension + spawned `copilot-api` | Copilot models via reverse-engineered proxy | ⚠️ Against ToS spirit (use `vscode_extension` instead) |
@@ -67,7 +67,8 @@ The same applies to the figures FI reads from the papers (`knowledge.read_figure
 - **`vscode_extension`** hands them to `vscode.lm` as image data. This needs a VS Code build that has `LanguageModelDataPart.image` and a chat model with image input. VS Code does not say in advance whether a model takes images: `@fi /probe image` sends the selected model one small test image the same way and says whether it read it, and, if the request fails, whether FI would recognise the error as *cannot read images*.
 - **`codex_cli`** passes each screenshot as a temporary file with `codex exec -i`. Checked with `gpt-5.6-luna` under the answer-only flags below: it named the colour of a test image.
 - **`antigravity_cli`** (agy) takes only text in its input, so each image is saved to a temporary folder that agy is given access to (`--add-dir`) and the prompt names each file, in order; agy opens them with its own file viewer. Checked with `gemini-3.8-flash-high`: it named the shapes and colours of a test image.
-- **`copilot_cli`, `gemini_cli`:** measurements only for now; a quest that must read figures with one of them stops and asks for a model that can.
+- **`copilot_cli`** passes each screenshot with `--attachment <file>`. Checked with every tool off: the model named the colour and text of a test image, and a quest read its figures this way.
+- **`gemini_cli`:** measurements only for now; a quest that must read figures with it stops and asks for a model that can.
 
 ## Answer-only CLI calls
 
@@ -132,11 +133,22 @@ no web search or fetch. Its start-up event still names the installed plugins
 and the built-in agents, but lists no tool, skill or MCP server from them, and
 with no tools there is no way to start an agent.
 
-Not restricted yet — these run in the empty directory, but their tools are on:
+**`copilot_cli`** runs with no tool at all (`--available-tools=` with nothing
+listed), without the built-in GitHub MCP servers (`--disable-builtin-mcps`) and
+without `AGENTS.md` or other custom instructions (`--no-custom-instructions`);
+`-s` prints the answer alone. The prompt goes on stdin, so there is no
+command-line length limit and no input cap (a 60,112-character prompt was
+answered correctly). Copilot CLI 1.0.95 was used for the checks. In one full
+quest on `claude-sonnet-4.6` it made 105 model calls and wrote a correct
+paper, about 3x slower than an HTTP model (single calls took 10 seconds to 17
+minutes; the slowest were code-change calls). The CLI does not report token
+use, so the counts FI shows are its own estimates; use is billed to your
+Copilot subscription's quota. The models it offers depend on the subscription:
+`copilot help config` lists them (one account was offered `claude-haiku-4.5`,
+`claude-sonnet-4.6`, `claude-opus-4.8`, `gpt-5.3-codex` and `mai-code-1.1-flash`).
 
-- **`copilot_cli`** keeps `--allow-all-tools`. Restricting it needs a check
-  against the real CLI, which could not be made while the account's Copilot
-  premium-request quota was used up.
+Not restricted yet — this one runs in the empty directory, but its tools are on:
+
 - **`gemini_cli`** keeps `--yolo`. The Gemini CLI no longer signs in
   individual Google accounts, so it could not be checked either.
 
@@ -296,7 +308,7 @@ returns nothing for it.
 | `vscode_extension` | Copilot's `_enableThinking` (and `includeEncryptedThinking` for GPT), see above | Thinking parts of the reply | Checked live: Claude (`claude-haiku-4.5`, Opus, Sonnet) and `kimi-k3` return a summary; every OpenAI model returns none; a model from another extension (Ollama) returns none |
 | `gemini_cli` | Cannot | Its output has no reasoning in it (the `stream-json` events are init, message, tool use and result) | `run.log` says so once |
 | `antigravity_cli` (agy) | Cannot | Its stream reports only how many tokens the model spent thinking (329 in one check), not the text | `run.log` says so once |
-| `copilot_cli` | Not read | Its `--output-format json` events were not mapped for reasoning, and the CLI is agentic and not recommended | `run.log` says so once |
+| `copilot_cli` | Not read | Its `--output-format json` events were not mapped for reasoning, and the Copilot CLI's events were not mapped | `run.log` says so once |
 | `claude_code`, `github_copilot_cli`, `github_copilot_vscode` (proxies) | Not asked | The proxy returns only the answer, as far as FI reads it | Not probed here (none installed). `reasoning_content` from a proxy would be kept |
 
 Where a connection cannot return reasoning, `run.log` says so once in plain
@@ -562,13 +574,8 @@ a rewrite. With Copilot Pro (~300 premium requests/month) that is about
 
 ## Provider warnings at engine init
 
-Two warning classes fire automatically:
+One warning fires automatically:
 
-- **`copilot_cli`** — explicit warning that the standalone Copilot CLI
-  is an agentic tool and not a chat backend; it replies
-  conversationally to FI's structured node prompts and produces
-  garbage output (paper.md filled with "Are you trying to debug X?",
-  experiment.py reduced to a stub). Use `vscode_extension` instead.
 - **`github_copilot_cli`** and **`github_copilot_vscode`** — third-party
   reverse-engineered proxy (`copilot-api`). GitHub explicitly warns
   about abuse-detection systems triggering on automated Copilot

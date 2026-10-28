@@ -19,12 +19,10 @@ but resolves to one of three transports:
   - `claude_cli` — `claude --print --output-format text` reusing the
     user's `claude auth login` Claude Pro/Max OAuth (no `ANTHROPIC_API_KEY`
     needed; OAuth from the CLI's keychain is honored). Prompt on stdin.
-  - `copilot_cli` — `copilot -s --allow-all-tools -p <prompt>` reusing
-    the user's `gh auth login` Copilot Pro/Business credentials.
-    `-s/--silent` strips the trailing stats block; `--allow-all-tools`
-    is required for non-interactive mode. **Prompt is on argv** because
-    the CLI doesn't document a stdin path — prefer `claude_cli`,
-    `codex_cli`, or `gemini_cli` for sensitive prompts.
+  - `copilot_cli` — `copilot -s --available-tools= --disable-builtin-mcps
+    --no-custom-instructions` reusing the user's Copilot login. Answer-only:
+    every tool is off, the prompt is on stdin and images go as
+    `--attachment <file>`. `-s/--silent` strips the trailing stats block.
   - `gemini_cli` — `gemini --yolo -o json -p ""` (from
     `@google/gemini-cli`) with the prompt on stdin. `--yolo` auto-
     approves tool calls (else stdin deadlocks on confirmation prompts).
@@ -394,10 +392,8 @@ def _encode_antigravity_stdin(prompt: str) -> str:
     unmarshal.
 
     This matters more than it looks. The alternative is passing the prompt in
-    argv like ``copilot_cli`` does, and on Windows that puts the whole prompt
-    under the ~8 KB command-line ceiling — which is why ``copilot_cli`` has to
-    trim heavily and is documented as a poor fit for FI's long nodes. Going
-    through stdin removes the ceiling entirely.
+    argv, and on Windows that puts the whole prompt under the ~8 KB
+    command-line ceiling. Going through stdin removes the ceiling entirely.
     """
     return json.dumps({
         "event": "user",
@@ -965,8 +961,8 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         # ``-p ""`` is rejected outright. Its stdin path is the stream-json
         # input format, which takes one NDJSON envelope per turn; see
         # ``_encode_antigravity_stdin``. That is worth the extra encoding
-        # step because the alternative (prompt in argv, as ``copilot_cli``
-        # does) caps the prompt at the Windows ~8 KB command-line limit.
+        # step because the alternative (prompt in argv) caps the prompt at
+        # the Windows ~8 KB command-line limit.
         #
         # ``--dangerously-skip-permissions`` is deliberately NOT passed. FI
         # asks this CLI for text completion, not for agentic work. Not passing

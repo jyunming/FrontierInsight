@@ -186,17 +186,15 @@ async def test_engine_run_passes_initial_when_no_checkpoint(
     assert seen_payloads[0]["topic"] == "resume unit"
 
 
-# ---- copilot_cli agentic-CLI warning -------------------------------------
+# ---- provider warnings ---------------------------------------------------
 
 
-def test_warn_when_copilot_cli_selected(
+def test_copilot_cli_does_not_warn_but_proxy_providers_do(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """`copilot_cli` is an agent loop, not a chat API. Real symptom seen
-    in production: paper.md filled with conversational "Are you trying
-    to debug X?" replies, experiment.py reduced to the empty stub. The
-    engine must warn loudly so users don't lose hours chasing a phantom
-    bug that's actually 'wrong provider'."""
+    """`copilot_cli` is called answer-only (every tool off, prompt on stdin),
+    so it has no warning; the third-party `copilot-api` proxy providers still
+    do (the known positive that shows the warning path works)."""
     from core.engine import _PROXY_WARN_SHOWN, _warn_if_unsanctioned_provider
 
     # Reset the dedup set so this test is order-independent.
@@ -204,17 +202,16 @@ def test_warn_when_copilot_cli_selected(
     monkeypatch.delenv("FI_SUPPRESS_PROXY_WARN", raising=False)
 
     with caplog.at_level("WARNING", logger="frontier_insight"):
-        _warn_if_unsanctioned_provider("copilot_cli")
-
+        _warn_if_unsanctioned_provider("github_copilot_cli")
     msg = "\n".join(r.getMessage() for r in caplog.records)
-    assert "agentic" in msg.lower() or "AGENTIC" in msg
+    assert "copilot-api" in msg
     assert "vscode_extension" in msg
-    # Sanity: known-good providers do NOT trigger any warning.
+
     caplog.clear()
     _PROXY_WARN_SHOWN.clear()
     with caplog.at_level("WARNING", logger="frontier_insight"):
         for ok in ("openai", "claude_cli", "codex_cli", "gemini_cli",
-                   "vscode_extension"):
+                   "copilot_cli", "vscode_extension"):
             _warn_if_unsanctioned_provider(ok)
     assert not caplog.records, (
         f"clean providers should not warn; got {caplog.records!r}"
