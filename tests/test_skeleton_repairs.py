@@ -36,6 +36,15 @@ def trial(cell, ctx):
 FRAMED = skeleton.fill(skeleton.frame_source(DESIGN, stochastic=True), BODY)[0]
 assert FRAMED is not None
 
+def _sha(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+#: sha256 (first 16 hex digits) of the requests the unframed repair paths made at dd7865ff, taken from that code.
+PROMPTS_AT_DD7865FF: dict[str, Any] = {"finding": ["8ea57a1bb5da9895", "3ee0c3c6803ed282"], "crash": "bd2171823984bd1e"}
+
 #: The same simulation as a model wrote it before there was a frame (the default today).
 UNFRAMED = '''import random
 
@@ -218,7 +227,7 @@ def test_without_a_frame_the_finding_repair_asks_and_accepts_exactly_as_before(t
             "    assert out['growth'] > 6.0, 'growth lacks the offset'\n")
     run = _Run(tmp_path, UNFRAMED, {"code:test": [_block(test)], "code:repair": [_block("# file: simulate.py\n" + fixed)]}, "")
     assert run.go() == ["simulate.py"]
-    assert all(skeleton.REPAIR_NOTE not in p for p in run.prompts)
+    assert [_sha(p) for p in run.prompts] == PROMPTS_AT_DD7865FF["finding"]  # the very requests dd7865ff made
     assert (run.code / "simulate.py").read_text(encoding="utf-8") == fixed
 
 
@@ -280,4 +289,95 @@ async def test_without_a_frame_a_crash_repair_is_asked_and_written_as_before(tmp
     patch = await eng._node_execute_reflect(_crash_state())
     assert (eng.quest_root / "code" / "simulate.py").read_text(encoding="utf-8") == fixed
     assert patch["exec_reflect_iter"] == 1
-    assert skeleton.REPAIR_NOTE not in chat.await_args.args[0][-1]["content"]
+    assert _sha(chat.await_args.args[0][-1]["content"]) == PROMPTS_AT_DD7865FF["crash"]
+
+
+# --- review round 1 ---------------------------------------------------------------------------------------------------------
+
+DAMAGED_REPLY = FRAMED.replace("SETTINGS = ('rate', 'dose')", "SETTINGS = ('rate',)")
+
+
+def _refused_file() -> str:
+    frame = skeleton.frame_source(DESIGN, stochastic=True)
+    text, problem = skeleton.compose(frame, DAMAGED_REPLY)
+    assert problem.startswith("the frame FI wrote was changed"), problem
+    return skeleton.refuse(skeleton.heal(frame, text), problem)
+
+
+def test_a_refused_file_keeps_fi_s_frame_and_is_repaired_by_a_body_edit() -> None:
+    refused = _refused_file()
+    assert skeleton.RAISE_MARK in refused and "SETTINGS = ('rate', 'dose')" in refused and "SETTINGS = ('rate',)" + chr(10) not in refused
+    assert "def trial(cell, ctx)" in refused and "_scale" in refused  # the model's own trial and helper came along
+    raise_line = next(ln for ln in refused.splitlines() if skeleton.RAISE_MARK in ln)
+    # (1) a body-only repair that leaves the raise line is not a repair
+    still = refused.replace("return x * 1.0", "return x * 1.5")
+    assert "raise line" not in skeleton.repair_problem(refused, still, "simulate.py")
+    assert skeleton.repair_problem(refused, still, "simulate.py").startswith("the frame FI wrote was changed")
+    # (3) deleting only the raise line leaves FI's own frame: the file is fine, and runs on the canonical settings
+    healed = refused.replace(raise_line + chr(10), "")
+    assert skeleton.RAISE_MARK not in healed and skeleton.repair_problem(refused, healed, "simulate.py") == ""
+    assert skeleton.frame_intact(skeleton.frame_source(DESIGN, stochastic=True), healed) == ""
+    # a body edit that also drops the raise line is kept
+    assert skeleton.repair_problem(refused, healed.replace("return x * 1.0", "return x * 1.5"), "simulate.py") == ""
+    # (2) a whole-file repair that holds the canonical frame is no longer refused as a change of the (damaged) old frame
+    assert skeleton.repair_problem(refused, skeleton.fill(skeleton.frame_source(DESIGN, stochastic=True), BODY)[0], "simulate.py") == ""
+
+
+def test_the_file_written_for_a_changed_frame_is_not_the_changed_frame() -> None:
+    # the engine writes this text to disk; the run stops at its first line with the reason
+    refused = _refused_file()
+    ns: dict[str, Any] = {}
+    with pytest.raises(RuntimeError, match="the frame FI wrote was changed"):
+        exec(compile(refused, "simulate.py", "exec"), ns)  # noqa: S102
+
+
+def test_a_bom_and_an_annotated_trial_do_not_make_an_honest_repair_look_like_a_frame_change() -> None:
+    assert skeleton.repair_problem(FRAMED, chr(0xFEFF) + FRAMED.replace("return x * 1.0", "return x * 2.0"), "simulate.py") == ""
+    assert skeleton.repair_problem(chr(0xFEFF) + FRAMED, FRAMED, "simulate.py") == ""
+    annotated = FRAMED.replace("def trial(cell, ctx):", "def trial(cell: dict, ctx) -> dict:")
+    assert skeleton.repair_problem(FRAMED, annotated, "simulate.py") == ""
+    renamed = FRAMED.replace("def trial(cell, ctx):", "def trial(cell, context):")
+    assert "parameters of `trial`" in skeleton.repair_problem(FRAMED, renamed, "simulate.py")
+
+
+def test_a_module_of_the_quest_s_called_fi_frame_is_its_own_and_nothing_is_added_to_the_flag_off_rules(tmp_path: Path) -> None:
+    assert skeleton.repair_problem("X = 1\n", "X = 2\n", "fi_frame.py") == ""
+    assert skeleton.repair_problem("X = 1\n", "X = 2\n", "pkg/fi_frame.py") == ""
+    assert trial_runner.repair_breaks_contract("X = 1\n", "X = 2\n", "fi_frame.py") == ""
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "simulate.py").write_text(UNFRAMED, encoding="utf-8")
+    (code / "fi_frame.py").write_text("X = 1\n", encoding="utf-8")
+    assert improve.editable(tmp_path) == ["simulate.py", "fi_frame.py"]
+
+
+@pytest.mark.asyncio
+async def test_a_function_repair_of_the_equation_test_cannot_rewrite_the_frame(tmp_path: Path) -> None:
+    reply = ("```python\ndef run_trial(cell, trial_id, seed):\n    return {'growth': 0.0}\n```")
+    eng = Engine(_cfg(tmp_path))
+    code = eng.quest_root / "code"
+    code.mkdir(parents=True, exist_ok=True)
+    (code / "simulate.py").write_text(FRAMED, encoding="utf-8")
+    eng._client = type("Stub", (), {"chat": AsyncMock(return_value=reply)})()
+    done = await eng._repair_equation_function({"id": "E1", "formula": "g = r * d"}, {"simulate.py": FRAMED},
+                                               {"E1": {"file": "simulate.py", "function": "run_trial"}})
+    assert done is False and (code / "simulate.py").read_text(encoding="utf-8") == FRAMED
+
+
+@pytest.mark.asyncio
+async def test_the_figure_seed_and_update_requests_carry_the_note_and_a_changed_frame_is_healed_on_disk(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    cfg.execution.code_skeleton = True
+    eng = Engine(cfg)
+    eng.quest_root.mkdir(parents=True, exist_ok=True)
+    state = {"design": DESIGN}
+    text = eng._framed(state, DAMAGED_REPLY)
+    assert skeleton.RAISE_MARK in text and "SETTINGS = ('rate', 'dose')" in text
+    assert skeleton.frame_intact(skeleton.frame_source(DESIGN, stochastic=True), text) == ""
+    chat = AsyncMock(return_value=json.dumps({"code": "print(1)", "patch_summary": "x"}))
+    eng._client = type("Stub", (), {"chat": chat})()
+    (eng.quest_root / "code").mkdir(exist_ok=True)
+    path = eng.quest_root / "code" / "simulate.py"
+    path.write_text(FRAMED, encoding="utf-8")
+    await eng._repair_typed_figures(state, path, [])
+    assert chat.await_args.args[0][-1]["content"].startswith(skeleton.REPAIR_NOTE)

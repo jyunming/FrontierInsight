@@ -6620,6 +6620,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             package_block=_package_block_text(shown[1] if shown else {}) or "(none)",
             simulate_code=kept["simulate"], analysis_code=kept["analysis"], design_block=self._code_design_block(state),
             clarify_block=_format_clarify(state))
+        prompt = _skeleton.repair_note(kept["simulate"]) + prompt
         try:
             text = await self._chat(prompt, node="implement")
         except Exception as exc:  # noqa: BLE001 -- the scripts are then written whole
@@ -11691,6 +11692,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             reflect_history_block=_format_reflect_history([]),
             design_block=self._code_design_block(state), clarify_block=_format_clarify(state),
         )
+        prompt = _skeleton.repair_note(code) + prompt
         try:
             text = await self._chat(prompt, node="implement_figures")
         except Exception as exc:  # noqa: BLE001 -- a repair is best-effort
@@ -14701,6 +14703,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return False
         if new is None:
             self._log.warning("[equations] the repair of %s was not used: %s", failure.get("function"), why)
+            return False
+        framed = _skeleton.repair_problem(source, new, where["file"])  # a framed simulate.py keeps FI's frame
+        if framed:
+            self._log.warning("[equations] the repair of %s is not used: %s", failure.get("function"), framed)
             return False
         path.write_text(new, encoding="utf-8")
         self._log.info("[equations] rewrote the function %s alone (equation %s)", failure.get("function"), failure.get("id"))
@@ -18409,6 +18415,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             clarify_block=_format_clarify(state),
         )
         why = ""
+        prompt = _skeleton.repair_note(code if code_path.name == _split_run.SIMULATE_NAME else "") + prompt
         try:
             text = await self._chat(prompt, node="implement_seed")
         except Exception as exc:  # noqa: BLE001 -- a repair is best-effort

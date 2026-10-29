@@ -694,7 +694,8 @@ class RunChecksMixin:
             (code_dir / _skeleton.RUNTIME_FILE).write_text(_skeleton.RUNTIME, encoding="utf-8")
             problem = _skeleton.frame_intact(frame, text)
             if problem:
-                text = _skeleton.refuse(text, problem)  # the run then says what changed, and the simulation is repaired
+                # the run then says what changed and the simulation is repaired; the file keeps FI's frame, never the damaged one
+                text = _skeleton.refuse(_skeleton.heal(frame, text), problem)
             else:
                 self._log.info("[implement] simulate.py is FI's frame with the model's trial function")  # type: ignore[attr-defined]
         return text

@@ -51,7 +51,7 @@ SNAPSHOTS = Path(".fi") / "improve"
 #: Scripts in ``code/`` that are not the simulation: the analysis (it does not touch a criterion), FI's own runner and
 #: the scripts of other steps. An edit to one is refused.
 NOT_EDITABLE = frozenset({"experiment.py", "run.py", "submit.py", "replot_layout.py", "replot_figures.py",
-                          "web_plots.py", "fi_search.py", "fi_frame.py"})
+                          "web_plots.py", "fi_search.py"})
 #: FI's own code that computes the criteria: a round's run that changed one of these files is aborted.
 _ENGINE_FILES = ("criteria.py", "oracle_check.py", "trial_runner.py", "improve.py")
 #: The quest's records a round's run must not change.
@@ -166,11 +166,22 @@ def _package_files(code: Path) -> list[str]:
     return out
 
 
+def _is_frame_runtime(path: Path) -> bool:
+    """FI's own ``fi_frame.py`` (core/skeleton.py): never edited by a round. A module of the quest's with that name is its own."""
+    if path.name != "fi_frame.py":
+        return False
+    try:
+        return path.read_text(encoding="utf-8").startswith('"""FI\'s frame of simulate.py')
+    except OSError:
+        return False
+
+
 def editable(quest_root: Path) -> list[str]:
     """The files of ``code/`` an edit may change: the simulation (``simulate.py``), the helper modules beside it and the
     modules of the model's package (``<package>/model.py``), by their path in ``code/``."""
     code = Path(quest_root) / "code"
-    names = sorted(p.name for p in code.glob("*.py") if p.is_file() and p.name not in NOT_EDITABLE) if code.is_dir() else []
+    names = sorted(p.name for p in code.glob("*.py") if p.is_file() and p.name not in NOT_EDITABLE
+                   and not _is_frame_runtime(p)) if code.is_dir() else []
     names += _package_files(code)
     return sorted(names, key=lambda n: (n != "simulate.py", "/" not in n, n))
 
