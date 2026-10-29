@@ -486,3 +486,75 @@ def test_a_batch_of_results_the_model_built_itself_is_refused_because_their_orde
     body = "def trial_batch(cell, ctx):\n    return [TrialResult() for _ in ctx.seeds]\n"
     rows = _rows(_quest(tmp_path, _framed(COLONY, body)), {"rate": 0.1, "dose": 1}, TRIALS)
     assert [r["status"] for r in rows] == ["failed"] * 3 and "ctx.results()" in rows[0]["reason"], rows[0]["reason"]
+
+
+# ---- a name the study varies is never one written number ---------------------------------------------------------------------------------
+
+class _Log:
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+
+    def info(self, text: str, *args: Any) -> None:
+        self.lines.append(text % args)
+
+    warning = info
+
+
+def test_a_plan_number_named_like_a_setting_the_study_varies_is_not_written_and_each_cell_sets_its_own(tmp_path: Path) -> None:
+    protocol = {**COLONY["protocol"], "grid": {"rate": [0.1, 0.2]}, "constants": {"rate": 0.15, "cap": 9}}
+    root = _quest(tmp_path, _framed({"protocol": protocol}, "from colony.model import growth\n\n\ndef trial(cell, ctx):\n"
+                                    "    out = TrialResult()\n    out['growth'] = growth(1.0)\n    return out\n"))
+    package = root / "code" / "colony"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "model.py").write_text("def growth(x):\n    return x * rate\n\n\ndef limit():\n    return cap\n", encoding="utf-8")
+    log = _Log()
+    values = function_steps.plan_constants({}, protocol, log)
+    assert values == {"cap": 9}, "`rate` is a setting of the cell, `cap` is a number of the plan"
+    assert any("rate" in line and "varies" in line for line in log.lines), log.lines
+    function_steps.write_package_constants(package, values, log)
+    text = (package / "model.py").read_text(encoding="utf-8")
+    assert "cap = 9" in text and "rate =" not in text
+    rows = _rows(root, {"rate": 0.1}, [{"trial": 0, "seed": 1}]) + _rows(root, {"rate": 0.2}, [{"trial": 0, "seed": 1}])
+    assert [r["status"] for r in rows] == ["failed", "failed"] and "rate" in rows[0]["reason"], \
+        "the package's global read of a setting is the code check's to name (as before), never the plan's one number"
+
+
+def test_every_name_a_study_varies_is_listed_from_the_plans_own_lists() -> None:
+    plan = {"grid": {"a": [1, 2]}, "sub_studies": [{"vary": {"b": [1, 2]}}], "in_each_run": {"c": [1, 2]}}
+    assert {"a", "c"} <= function_steps.varied_names(plan)
+    search = SEARCH["protocol"]
+    assert {"width", "speed", "mesh"} <= function_steps.varied_names(search)
+    assert function_steps.varied_names(None) == set()
+
+
+def test_a_plan_that_drops_its_last_number_takes_the_block_out_of_the_package(tmp_path: Path) -> None:
+    package = tmp_path / "beam"
+    package.mkdir()
+    (package / "model.py").write_text("def f():\n    return LENGTH\n", encoding="utf-8")
+    function_steps.write_package_constants(package, {"LENGTH": 2.5})
+    assert "LENGTH = 2.5" in (package / "model.py").read_text(encoding="utf-8")
+    function_steps.write_package_constants(package, {})
+    assert "LENGTH" in (package / "model.py").read_text(encoding="utf-8") and "= 2.5" not in (package / "model.py").read_text(encoding="utf-8")
+    assert "FI: the numbers" not in (package / "model.py").read_text(encoding="utf-8")
+
+
+def test_a_block_that_lost_its_closing_line_is_a_fault_the_check_reports_not_a_stale_number_that_binds() -> None:
+    first, _ = function_steps.with_constants("def f():\n    return LENGTH\n", {"LENGTH": 2.5})
+    damaged = first.replace(function_steps.PLAN_BLOCK_END, "")
+    with pytest.raises(function_steps.DamagedPlanBlock, match="closing line"):
+        function_steps.with_constants(damaged, {"LENGTH": 3.0})
+
+
+def test_the_filler_reports_a_damaged_block_as_the_problem_of_the_module(tmp_path: Path) -> None:
+    from tests.test_function_steps import _Model, _filler, _specs
+
+    reply = "import math\n\n\n# E1\ndef frequency(k, m):\n    return math.sqrt(k / m) * UNIT\n"
+    model = _Model({"frequency": [reply]})
+    filler = _filler(tmp_path, model, values={"UNIT": 1.0})
+    path = tmp_path / "code" / "spring" / "model.py"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    first, _ = function_steps.with_constants(reply, {"UNIT": 1.0})
+    path.write_text(first.replace(function_steps.PLAN_BLOCK_END, ""), encoding="utf-8")
+    problem, who, _trace = asyncio.run(filler._check(_specs()[0], {"functions": {}}))
+    assert "closing line" in problem and who == function_steps.MODULE_LEVEL
