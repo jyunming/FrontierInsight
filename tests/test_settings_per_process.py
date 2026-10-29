@@ -9,7 +9,7 @@ import math
 import sys
 from pathlib import Path
 
-from core import cost_model, trial_runner
+from core import cost_model, run_checks, trial_runner
 from core.execution import SharedInterpreterExecutor
 
 MARK = '''
@@ -80,28 +80,31 @@ def _rows(run) -> list[tuple]:
             for c in run.cells for r in c.rows]
 
 
-def test_group_size_follows_start_and_trial_time() -> None:
-    # a process costs 2 s, a setting 0.01 s: share; a setting of 30 s: do not
-    many = cost_model.settings_per_process(680, 0.01, 2.0, 16, 3.0)
+def test_group_size_comes_from_the_estimate_less_the_starts() -> None:
+    # 680 settings of 2.0 s of which 1.95 s is the start: sharing saves almost all of it
+    work = 680 * 2.0
+    many = cost_model.settings_per_process(work, 680, 1.95, 16, 3.0)
     assert many > 1
-    assert cost_model.settings_per_process(22, 30.0, 2.0, 8, 2.4) == 1
-    assert cost_model.settings_per_process(1, 0.01, 2.0, 1) == 1
-    # sharing is used only when it saves enough: a small start against slow settings stays at 1
-    assert cost_model.settings_per_process(100, 1.0, 0.05, 1) == 1
-    one = cost_model.grouped_seconds(680, 0.01, 2.0, 16, 1, 3.0)
-    assert cost_model.grouped_seconds(680, 0.01, 2.0, 16, many, 3.0) < 0.8 * one
+    alone = cost_model.grouped_wall(work, 680, 680, 1.95, 16, 3.0)
+    assert cost_model.grouped_wall(work, 680, math.ceil(680 / many), 1.95, 16, 3.0) < 0.8 * alone
+    # the same settings when the settings themselves take the time: nothing to save, so 1
+    assert cost_model.settings_per_process(680 * 60.0, 680, 1.95, 16, 3.0) == 1
+    assert cost_model.settings_per_process(24.0, 1, 1.95, 1) == 1
+    assert cost_model.settings_per_process(22 * 30.0, 22, 2.0, 8, 2.4) == 1
 
 
-def test_start_and_trial_from_a_sample() -> None:
-    start, trial = cost_model.start_and_trial([2.5, 2.2, 2.4], [0.3, 0.31, 0.29], 1)
-    assert math.isclose(trial, 0.3) and math.isclose(start, 1.9)
+def test_cost_that_grows_along_an_axis_is_not_averaged() -> None:
+    # twelve settings: eleven cost 0.5 s, one costs 100 s; the estimate knows it (a median of three settings would not)
+    work = 11 * 0.5 + 100.0
+    assert cost_model.grouped_wall(work, 12, 3, 0.2, 4) > 100.0 / 4  # the costly setting is still paid in full
+    assert cost_model.settings_per_process(work, 12, 0.2, 4) == 1
 
 
 def test_fewer_processes_than_at_once_are_not_priced_at_the_full_slowdown() -> None:
-    # one process runs alone: no slowdown from others beside it
-    assert math.isclose(cost_model.grouped_seconds(55, 0.22, 1.8, 16, 55, 4.5), 1.8 + 55 * 0.22)
-    # the full number of processes at once: the full slowdown
-    assert math.isclose(cost_model.grouped_seconds(16, 1.0, 2.0, 16, 1, 3.0), 3.0 * 3.0)
+    one = cost_model.grouped_wall(100.0, 50, 1, 1.0, 16, 4.5)
+    assert math.isclose(one, 100.0 - 49 * 1.0)  # one process runs alone: no slowdown
+    full = cost_model.grouped_wall(160.0, 16, 16, 1.0, 16, 3.0)
+    assert math.isclose(full, 160.0 / 16 * 3.0)  # all sixteen at once: the full slowdown
 
 
 def test_shared_processes_give_the_very_same_rows_with_fewer_processes(tmp_path: Path) -> None:
@@ -139,35 +142,153 @@ def _measure(root: Path, tmp_path: Path, grid=None):
         deterministic=True, timeout_s=120, env={"FI_TEST_MARK": str(tmp_path / "check_marks.txt")}))
 
 
-def test_the_sample_shows_a_pure_study_gives_the_same_numbers(tmp_path: Path) -> None:
+def test_a_pure_study_gives_the_same_numbers_on_every_setting(tmp_path: Path) -> None:
     root = _quest(tmp_path, PURE)
-    grid = {"rate": list(range(1, 41)), "size": [2]}
-    got = _measure(root, tmp_path, grid)
-    assert got.same and got.differences == [] and got.start_s is not None
-    assert got.per_process >= 1
-    assert not (root / ".fi" / "trials" / "group_check").exists()  # nothing of the sample stays in the quest
+    got = _measure(root, tmp_path, {"rate": list(range(1, 41)), "size": [2]})
+    assert got.same and got.differences == [] and got.start_s is not None and got.settings == 40
+    assert not (root / ".fi" / "trials" / "group_check").exists()  # nothing of the check stays in the quest
 
 
-def test_state_kept_between_settings_fails_the_sample_and_stays_one_per_process(tmp_path: Path) -> None:
+def test_state_kept_between_settings_fails_the_check_and_stays_one_per_process(tmp_path: Path) -> None:
     root = _quest(tmp_path, COUNTER)
     got = _measure(root, tmp_path)
-    assert not got.same and got.per_process == 1
+    assert not got.same
     assert got.differences and "level" in got.differences[0]
-    assert "one per process" in got.says and "different numbers" in got.says
+    assert "one per process" in got.says and "differed" in got.says
     # the planted study really does change its numbers when settings share a process
     alone, _ = _run(root, tmp_path, per_process=1)
     shared, _ = _run(root, tmp_path, per_process=3)
     assert _rows(alone) != _rows(shared)
 
 
-def test_slow_trials_keep_one_setting_per_process(tmp_path: Path) -> None:
-    slow = MARK + '''
+# a memo keyed on part of the setting: settings with different rates agree, later ones with a rate seen before do not
+MEMO = MARK + '''
+_memo = {}
+
+def run_cell(cell):
+    if cell["rate"] not in _memo:
+        _memo[cell["rate"]] = cell["rate"] * 10.0 + cell["size"]
+    return {"level": _memo[cell["rate"]]}
+'''
+
+
+def test_state_that_shows_only_between_later_settings_is_found(tmp_path: Path) -> None:
+    root = _quest(tmp_path, MEMO)
+    grid = {"rate": list(range(1, 11)), "size": [1, 2, 3]}
+    got = _measure(root, tmp_path, grid)  # a check on three spread settings shares no rate and sees nothing
+    assert not got.same and got.differences
+    alone, _ = _run(root, tmp_path, per_process=1, grid=grid)
+    shared, _ = _run(root, tmp_path, per_process=30, grid=grid)
+    assert _rows(alone) != _rows(shared)
+
+
+# a number changes from the fourth call on in one process
+FLAG = MARK + '''
+_seen = []
+
+def run_cell(cell):
+    _seen.append(cell["rate"])
+    return {"level": cell["rate"] * 1.0 + (0.5 if len(_seen) > 3 else 0.0)}
+'''
+
+
+def test_state_that_appears_after_the_third_setting_is_found(tmp_path: Path) -> None:
+    root = _quest(tmp_path, FLAG)
+    got = _measure(root, tmp_path, {"rate": list(range(1, 9)), "size": [2]})
+    assert not got.same
+
+
+def test_a_hung_setting_costs_only_itself(tmp_path: Path) -> None:
+    hang = MARK + '''
 import time
 
 def run_cell(cell):
-    time.sleep(3.0)
-    return {"level": cell["rate"] * 1.0}
+    if cell["rate"] == 2:
+        time.sleep(300)
+    return {"level": cell["rate"] * 2.0}
 '''
-    root = _quest(tmp_path, slow)
-    got = _measure(root, tmp_path, {"rate": [1, 2, 3], "size": [2]})
-    assert got.same and got.per_process == 1 and "one per process" in got.says
+    root = _quest(tmp_path, hang)
+    mark = tmp_path / "m.txt"
+
+    def go(per_process: int):
+        return asyncio.run(trial_runner.run_trials(
+            _executor(), sys.executable, root, "code/simulate.py", {"rate": [1, 2, 3, 4, 5, 6], "size": [2]},
+            runs_per_setting=1, base_seed=7, deterministic=True, timeout_s=30, env={"FI_TEST_MARK": str(mark)},
+            run_id="r1", per_process=per_process, at_once=6))
+
+    alone, shared = go(1), go(3)
+
+    def failed(run) -> list[str]:
+        return sorted(c.key for c in run.cells for r in c.rows if r["status"] != "ok")
+
+    assert failed(alone) == ["rate=2,size=2"] == failed(shared)
+    # a setting that finished is never marked out of time
+    assert [c.timed_out for c in shared.cells if c.key != "rate=2,size=2"] == [False] * 5
+    assert _rows(alone) == _rows(shared)
+
+
+def test_each_setting_keeps_its_own_warnings(tmp_path: Path) -> None:
+    warn = MARK + '''
+import warnings
+
+def run_cell(cell):
+    warnings.warn("careful %s" % cell["rate"], RuntimeWarning)
+    return {"level": cell["rate"] * 2.0}
+'''
+    root = _quest(tmp_path, warn)
+    shared, _ = _run(root, tmp_path, per_process=6)
+    for c in shared.cells:
+        assert f"careful {c.cell['rate']}" in c.stderr and c.stderr.count("careful") == 1 and "[fi-setting]" not in c.stderr
+
+
+# ---- the over-limit step in the sizing (core/run_checks.py) -------------------------------------------------------------
+
+
+class _Log:
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+
+    def info(self, msg, *args) -> None:
+        self.lines.append(msg % args if args else msg)
+
+    warning = info
+
+
+def _sizing(tmp_path: Path, source: str, *, work_s: float, settings: int, fixed_s: float, limit_s: float):
+    from types import SimpleNamespace
+
+    from core import run_estimate
+
+    root = _quest(tmp_path, source)
+    cost_model.write(root, cost_model.CostModel(terms={"fixed": cost_model.Term(fixed_s, cost_model.MEASURED)}))
+    me = SimpleNamespace(
+        _log=_Log(), quest_root=root, executor=_executor(), _pilot_spent=0.0, _protocol_block=lambda state: {},
+        config=SimpleNamespace(execution=SimpleNamespace(timeout_s=120)))
+    runner = SimpleNamespace(simulate=root / "code" / "simulate.py", deterministic=True, per_process=1)
+    est = run_estimate.Estimate(seconds=work_s / 4, at_least=False, complete=True, cells=settings, trials=settings,
+                                at_once=4, slowdown=1.0, work_seconds=work_s)
+    got = asyncio.run(run_checks.RunChecksMixin._group_settings(
+        me, None, runner, sys.executable, {"FI_TEST_MARK": str(tmp_path / "s.txt")},
+        {"rate": list(range(1, settings + 1)), "size": [2]}, 1, {}, {}, est, limit_s, budget_s=120))
+    return got, runner, me
+
+
+def test_sizing_shares_processes_when_starts_are_the_time(tmp_path: Path) -> None:
+    got, runner, me = _sizing(tmp_path, PURE, work_s=12 * 2.0, settings=12, fixed_s=1.9, limit_s=10.0)
+    assert got is not None and runner.per_process > 1
+    said, seconds, est = got
+    assert "several settings together" in said and "process" not in said and seconds * 1.5 <= 10.0
+    assert est.seconds == seconds and me._pilot_spent > 0
+
+
+def test_sizing_leaves_a_study_whose_cost_grows_to_the_cut(tmp_path: Path) -> None:
+    # the estimate knows one setting costs 100 s: starts are a small part, so the study is still over and nothing is shared
+    got, runner, me = _sizing(tmp_path, PURE, work_s=11 * 0.5 + 100.0, settings=12, fixed_s=0.2, limit_s=10.0)
+    assert got is None and runner.per_process == 1
+    assert any("one per process" in line for line in me._log.lines)
+
+
+def test_sizing_does_not_share_a_study_that_keeps_state(tmp_path: Path) -> None:
+    got, runner, me = _sizing(tmp_path, COUNTER, work_s=12 * 2.0, settings=12, fixed_s=1.9, limit_s=10.0)
+    assert got is None and runner.per_process == 1
+    assert any("differed" in line for line in me._log.lines)

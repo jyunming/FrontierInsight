@@ -122,7 +122,7 @@ def _write(quest_root: Path | str, **changes: Any) -> None:
 
 def record_trials(quest_root: Path | str, *, key: str, wall_s: float | None, trials: int, cells: int,
                   trial_sum_s: float | None, stage: str | None = None, at_once: int | None = None,
-                  settings_s: float | None = None) -> None:
+                  settings_s: float | None = None, per_process: int | None = None) -> None:
     """Keep the wall time of a run of the trials (``wall_s``: seconds from before the first setting to after the last;
     ``None`` when it is not known, as for a cluster job), how many trials and settings it ran, the sum of the per-trial
     times in the ledger, and the stage of a quest run in two stages (``explore`` / ``confirm``; ``None`` otherwise).
@@ -136,11 +136,21 @@ def record_trials(quest_root: Path | str, *, key: str, wall_s: float | None, tri
         run["at_once"] = int(at_once)  # the most settings that ran at the same time (absent: FI did not count)
     if isinstance(settings_s, (int, float)) and not isinstance(settings_s, bool) and 0 <= settings_s < float("inf"):
         run["settings_s"] = round(float(settings_s), 2)  # every setting's process, start to end, added up
+    if per_process and int(per_process) > 1:
+        run["per_process"] = int(per_process)  # settings shared a process (checked to give the same numbers)
     changes: dict[str, Any] = {"trials_run": run}
     if stage:
         by_stage = read(quest_root).get("by_stage")
         changes["by_stage"] = {**(by_stage if isinstance(by_stage, dict) else {}), str(stage): run}
     _write(quest_root, **changes)
+
+
+def settings_shared(quest_root: Path | str) -> int | None:
+    """How many settings shared a process in the run whose trials are stored (only after FI's check showed the same numbers
+    both ways), or ``None`` when each had a process of its own."""
+    run = read(quest_root).get("trials_run")
+    n = run.get("per_process") if isinstance(run, dict) else None
+    return n if isinstance(n, int) and not isinstance(n, bool) and n > 1 else None
 
 
 def run_seconds(quest_root: Path | str, fallback: Any = None) -> float | None:
