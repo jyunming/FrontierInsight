@@ -1157,9 +1157,11 @@ def answers_text(quest_root: Path | str) -> str:
         if not name:
             continue
         mapped = _topic_req.mapping_of(req, plan, "quantities", item)
-        metric = mapped[1] if mapped is not None and mapped[0] in ("ok", "judge") else ""
+        metric = mapped[1] if mapped is not None and mapped[0] == "ok" else ""
         if not metric:
             why = (f"the plan's own map for it does not hold: {mapped[1]}" if mapped is not None and mapped[0] == "bad"
+                   else f"the plan's map of it to {mapped[1]} is not confirmed: the name does not say it is that quantity"
+                   if mapped is not None and mapped[0] == "judge"
                    else "the plan maps it to no result of the study")
             lines.append(f"- {name}: not answered ({why})")
             continue
@@ -1175,7 +1177,8 @@ def answers_text(quest_root: Path | str) -> str:
         elif varied:
             where = ", ".join(f"{rec.short(a)}=each" for a in varied)
             tries = [(f"{{{{v:{metric} @ {where} | range}}}}",
-                      f" (the mean in each setting, lowest to highest over the settings of {', '.join(rec.short(a) for a in varied)})")]
+                      f" (no single value: it differs with {', '.join(rec.short(a) for a in varied)}; this is the mean in each "
+                      "setting, lowest to highest, and the tables give every setting)")]
         else:
             tries = [(f"{{{{v:{metric}:mean_ci @ }}}}", ""), (f"{{{{v:{metric} @ }}}}", " (no interval: the trials give none)")]
         got = [(k, note, _values.resolve(k, rec)) for k, note in tries]
@@ -1654,7 +1657,7 @@ def writer_section(quest_root: Path | str, *, topic: str = "", fallback_s: Any =
     if has_answers:
         lines.append("{{answers}}: FI's list of the quantities the topic asks for, each with its value from FI's records "
                      "(and its interval where one exists) or said as not answered. FI puts it before the discussion when the "
-                     "paper is saved. Do not type these values; refer to them by placing the same key or say \"see the answers\".")
+                     "paper is saved. Do not type these values; refer to them as \"the answers\" (for example \"see the answers\").")
     if real:
         lines.append("Limitations: FI adds the list below to the end of your Limitations section when the paper is saved "
                      "(or where you put {{limitations}} on a line of its own), from its records. It reads now:")

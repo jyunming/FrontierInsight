@@ -56,11 +56,17 @@ class _Change:
     lower: float | None
     upper: float | None
     how: str
+    #: The settings' trials are identical (no spread on either side), so the difference is exact and has no interval.
+    exact: bool = False
+    #: Said after the interval when it is over fewer trials than the means printed beside it.
+    note: str = ""
 
     @property
     def word(self) -> str:
         if self.lower is None or self.upper is None:
             return "point"
+        if self.exact:
+            return "rises" if self.diff > 0 else "falls" if self.diff < 0 else "none"
         if self.lower > 0:
             return "rises"
         if self.upper < 0:
@@ -154,14 +160,17 @@ def _change(rec: _pv.Records, metric: str, a: _Point, b: _Point) -> _Change:
         diffs = [db[k] - da[k] for k in common]
         s = _tt.summary(diffs)
         half = _stats.t_quantile(0.975, len(diffs) - 1) * s["sd"] / math.sqrt(len(diffs))
-        return _Change(s["mean"], s["mean"] - half, s["mean"] + half, f"paired over {len(diffs)} shared random draws")
+        note = (f"; the means are over all {a.n} and {b.n} trials, the change and its interval over the {len(diffs)} paired draws"
+                if len(diffs) < a.n or len(diffs) < b.n else "")
+        return _Change(s["mean"], s["mean"] - half, s["mean"] + half, f"paired over {len(diffs)} shared random draws",
+                       exact=half == 0, note=note)
     diff = b.mean - a.mean
     if a.n < 2 or b.n < 2:
         return _Change(diff, None, None, "each setting ran once" if a.n < 2 and b.n < 2 else "one setting ran once")
     va, vb = a.sd ** 2 / a.n, b.sd ** 2 / b.n
     se = math.sqrt(va + vb)
     if se == 0:
-        return _Change(diff, diff, diff, "two samples, no spread")
+        return _Change(diff, diff, diff, "two samples, no spread", exact=True)
     df = (va + vb) ** 2 / ((va ** 2 / (a.n - 1)) + (vb ** 2 / (b.n - 1)))
     half = _stats.t_quantile(0.975, df) * se
     return _Change(diff, diff - half, diff + half, "two independent samples (Welch)")
@@ -174,7 +183,8 @@ def _signed(ch: _Change) -> str:
 
 
 def _ratio(first: float, last: float) -> str:
-    return f"; the last is {_pv.sig(last / first, 3)} times the first" if first != 0 else ""
+    """The last over the first, only when both are above 0 (a ratio of a signed or zero value says nothing)."""
+    return f"; the last is {_pv.sig(last / first, 3)} times the first" if first > 0 and last > 0 else ""
 
 
 def _series(rec: _pv.Records, metric: str, axis: str, where: dict[str, Pick], scope: dict[str, Any],
@@ -193,16 +203,16 @@ def _shape(rec: _pv.Records, axis: str, points: list[_Point]) -> str:
     if len(points) < 3:
         return ""
     steps = [b.mean - a.mean for a, b in zip(points, points[1:])]
-    if all(s < 0 for s in steps):
-        return ", the means decrease at every step"
-    if all(s > 0 for s in steps):
-        return ", the means increase at every step"
+    if all(s <= 0 for s in steps) and any(s < 0 for s in steps):
+        return ", the means decrease at every step" if all(s < 0 for s in steps) else ", the means never rise (some steps are level)"
+    if all(s >= 0 for s in steps) and any(s > 0 for s in steps):
+        return ", the means increase at every step" if all(s > 0 for s in steps) else ", the means never fall (some steps are level)"
     return _not_monotone(rec, axis, points)
 
 
 def _not_monotone(rec: _pv.Records, axis: str, points: list[_Point]) -> str:
     steps = [b.mean - a.mean for a, b in zip(points, points[1:])]
-    if len(points) < 3 or all(s < 0 for s in steps) or all(s > 0 for s in steps):
+    if len(points) < 3 or all(s <= 0 for s in steps) or all(s >= 0 for s in steps):
         return ""
     lo, hi = min(points, key=lambda p: p.mean), max(points, key=lambda p: p.mean)
     return f", the means are not monotone (lowest at {rec.short(axis)} = {lo.x}, highest at {rec.short(axis)} = {hi.x})"
@@ -212,7 +222,7 @@ def _direction(rec: _pv.Records, metric: str, axis: str, points: list[_Point]) -
     """``(word, the scope's sentence, the last-over-first ratio)``."""
     first, last = points[0], points[-1]
     ch = _change(rec, metric, first, last)
-    ratio = last.mean / first.mean if first.mean != 0 else None
+    ratio = last.mean / first.mean if first.mean > 0 and last.mean > 0 else None
     ends = f"from {_pv.sig(first.mean)} at {rec.short(axis)} = {first.x} to {_pv.sig(last.mean)} at {rec.short(axis)} = {last.x}"
     if ch.word == "point":
         lead = "changes"
@@ -220,7 +230,12 @@ def _direction(rec: _pv.Records, metric: str, axis: str, points: list[_Point]) -
                   "interval and FI does not say whether the change is more than noise")
         return "point", lead + detail, ratio
     lead = {"rises": "rises", "falls": "falls", "none": "no change beyond its 95% interval"}[ch.word]
-    detail = f", {ends} (change {_signed(ch)}, 95% interval{_ratio(first.mean, last.mean)})"
+    if ch.exact:  # no spread on either side: the values are exact, a zero-width interval is not an interval
+        lead = "no change" if ch.word == "none" else lead
+        detail = (f", {ends} (change {_pv.sig(ch.diff)}{_ratio(first.mean, last.mean)}; the trials of both settings are "
+                  "identical, so the values are exact and there is no 95% interval)")
+        return ch.word, lead + detail + _shape(rec, axis, points), ratio
+    detail = f", {ends} (change {_signed(ch)}, 95% interval{_ratio(first.mean, last.mean)}{ch.note})"
     return ch.word, lead + detail + _shape(rec, axis, points), ratio
 
 
@@ -356,7 +371,7 @@ _SPREAD = ("sd", "rms")
 def _form_value(rec: _pv.Records, metric: str, form: str, cells: list[dict[str, Any]]) -> float:
     values = _pv._trials(cells, metric)
     if not values:
-        raise _Unfilled(f"{metric} has no numeric trials at that setting")
+        raise _pv._NoNumbers(f"{metric} has no numeric trials at that setting")
     if form == "mean":
         return sum(values) / len(values)
     if form == "rms":

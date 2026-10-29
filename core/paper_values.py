@@ -95,6 +95,10 @@ class _Unfilled(Exception):
     """A key the records cannot support; the message is the reason."""
 
 
+class _NoNumbers(_Unfilled):
+    """A setting whose every trial gave no number (undefined, crashed): a key over several settings may leave it out."""
+
+
 # --- rounding: one function ---------------------------------------------------------------------------------------
 
 
@@ -967,7 +971,7 @@ def _measure(rec: Records, metric: str, form: str, arg: str, where: dict[str, Pi
     cells = _matching(rec, where, metric)
     values = _trials(cells, metric)
     if not values and form not in ("failed",):
-        raise _Unfilled(f"{metric} has no numeric trials at that setting")
+        raise _NoNumbers(f"{metric} has no numeric trials at that setting")
     if form not in ("ref", "n", "failed", "count") and _differs_between_settings(cells, metric):
         raise _Unfilled(
             f"{metric} is a value each setting sets, and it differs between the settings pooled here, so it has no single "
@@ -1096,10 +1100,12 @@ def _reduce(rec: Records, key: Key) -> tuple[Measured, str]:
         here = _setting_words(dict(zip(each, combo)))
         try:
             results.append(_one(rec, key, fixed))
+        except _NoNumbers as why:
+            if key.reducer != "range":  # a largest, smallest or count over fewer settings than the sentence says is wrong, not partial
+                raise _Unfilled(f"not computable at {here}: {why}") from None
+            empty.append(here)  # a range names the settings that gave a number and says which gave none
+            continue
         except _Unfilled as why:
-            if "has no numeric trials" in str(why):  # every trial there gave no number (undefined): said, not a reason to fail
-                empty.append(here)
-                continue
             raise _Unfilled(f"not computable at {here}: {why}") from None
         kept.append(combo)
         settings.append(dict(zip(each, combo)))
@@ -1334,6 +1340,8 @@ def _series_value(shown: str, rec: Records | None) -> Value:
         return Value(shown, text, numbers=numbers, inputs=inputs)
     except _Unfilled as why:
         return Value(shown, NOT_RECORDED, Hit(shown, str(why)))
+    except Exception as why:  # noqa: BLE001 -- a statistic that cannot be worked out is a value FI does not hold, never a broken write
+        return Value(shown, NOT_RECORDED, Hit(shown, f"the series could not be worked out ({type(why).__name__}: {why})"))
 
 
 def resolve(text: str, rec: Records | None) -> Value:

@@ -260,3 +260,89 @@ def test_a_range_over_settings_leaves_out_a_setting_without_a_number_and_says_so
     value = pv.resolve("{{v:score @ size=each, group=each | range}}", pv.from_cells(cells))
     assert value.filled, value.hit
     assert value.text == "1.500 to 4.000 (no number at size = 10, group = b)"
+
+
+# --- review fixes: ratio of a signed value, plateau, exact values, paired subset, kept failures ---------------------------
+
+
+def test_a_ratio_is_printed_only_when_both_ends_are_above_zero() -> None:
+    """Before: with a negative first value 'the last is 0.3 times the first' was printed, which means nothing."""
+    negative = _say(_grid(lambda s, g: -0.2 - 0.4 * (s - 10) / 30, groups=("a",)), "score over size @ group=a")
+    assert negative.filled and "falls" in negative.text and "times the first" not in negative.text
+    crossing = _say(_grid(lambda s, g: 0.5 - 1.0 * (s - 10) / 30, groups=("a",)), "score over size @ group=a")
+    assert "falls" in crossing.text and "times the first" not in crossing.text
+    assert crossing.numbers == []
+    one_trial = _say(pv.from_cells([_cell({"size": s}, score=[v]) for s, v in ((10, -1.0), (20, -2.0))]), "score over size @ ")
+    assert "times the first" not in one_trial.text
+    positive = _say(_grid(lambda s, g: 1.0 - 0.4 * (s - 10) / 30, groups=("a",)), "score over size @ group=a")
+    assert "the last is 0.6" in positive.text  # a known positive: both above zero keeps the ratio
+
+
+def test_equal_neighbouring_means_are_a_plateau_not_non_monotone() -> None:
+    cells = [_cell({"size": 10}, score=[0.9, 1.1] * 20), _cell({"size": 20}, score=[0.4, 0.6] * 20),
+             _cell({"size": 40}, score=[0.4, 0.6] * 20)]
+    text = _say(pv.from_cells(cells), "score over size @ ").text
+    assert "not monotone" not in text and "never rise" in text
+    bumpy = [_cell({"size": s}, score=[v - 0.1, v + 0.1] * 20) for s, v in ((10, 1.0), (20, 0.5), (40, 0.8))]
+    assert "not monotone" in _say(pv.from_cells(bumpy), "score over size @ ").text  # a real bump is still named
+
+
+def test_trials_with_no_spread_on_both_sides_are_exact_not_a_zero_width_interval() -> None:
+    cells = [_cell({"size": 10}, score=[1.0, 1.0, 1.0]), _cell({"size": 20}, score=[0.5, 0.5, 0.5])]
+    text = _say(pv.from_cells(cells), "score over size @ ").text
+    assert "falls" in text and "identical, so the values are exact" in text
+    assert "95% interval, " not in text and "(change -0.5000, 95%" not in text
+    same = [_cell({"size": 10}, score=[1.0, 1.0]), _cell({"size": 20}, score=[1.0, 1.0])]
+    assert "no change" in _say(pv.from_cells(same), "score over size @ ").text
+
+
+def test_a_paired_interval_over_fewer_draws_says_how_many_were_paired() -> None:
+    """Before: the means printed were over every trial and the change over the paired draws, with no word of it."""
+    rng = np.random.default_rng(5)
+    draw = rng.standard_normal(100)
+    cells = [_cell({"size": 10}, score=list(draw)), _cell({"size": 20}, score=list(draw[:60] + 0.5 + 0.01 * rng.standard_normal(60)))]
+    rec = pv.from_cells(cells)
+    rec.seeds = {cells[0]["key"]: {i: i for i in range(100)}, cells[1]["key"]: {i: i for i in range(60)}}
+    text = _say(rec, "score over size @ ").text
+    assert "the means are over all 100 and 60 trials, the change and its interval over the 60 paired draws" in text
+
+
+def test_a_refinement_ratio_of_three_gives_the_order_from_the_real_ratio() -> None:
+    errs = [1e-2 / 9 ** i for i in range(4)]  # second order, the step shrinks by 3 each time
+    value = _say(_errors(errs, [9, 27, 81, 243]), "error over steps @ | order")
+    assert value.text.count(": 2.00") == 3 and "does not fall" not in value.text
+
+
+def test_a_diverged_setting_makes_a_largest_value_fail_but_a_range_names_it() -> None:
+    """Before: ``max_abs`` over the settings that survived read as the largest over all of them."""
+    cells = [_cell({"size": 10, "group": "a"}, score=[1.0, 2.0]), _cell({"size": 20, "group": "a"}, score=[3.0, -5.0]),
+             _cell({"size": 10, "group": "b"}, score=[NAN, NAN])]
+    rec = pv.from_cells(cells)
+    for reducer in ("max_abs", "max", "min"):
+        value = pv.resolve("{{v:score @ size=each, group=each | %s}}" % reducer, rec)
+        assert not value.filled and "not computable at size = 10, group = b" in value.hit.reason, reducer
+    assert pv.resolve("{{v:score @ size=each, group=each | range}}", rec).filled
+
+
+def test_a_setting_without_a_number_is_told_by_its_exception_not_by_its_wording(monkeypatch) -> None:
+    cells = [_cell({"size": 10}, score=[1.0, 2.0]), _cell({"size": 20}, score=[3.0, 5.0])]
+    rec = pv.from_cells(cells)
+    real = pv._one
+
+    def one(r, key, fixed):
+        if fixed["size"].value == 10:
+            raise pv._NoNumbers("a reworded reason")
+        return real(r, key, fixed)
+
+    monkeypatch.setattr(pv, "_one", one)
+    value = pv.resolve("{{v:score @ size=each | range}}", rec)
+    assert value.filled and "no number at size = 10" in value.text
+
+
+def test_a_statistic_that_cannot_be_worked_out_is_not_recorded_not_a_broken_write(monkeypatch) -> None:
+    def boom(rec, body):
+        raise ZeroDivisionError("float division by zero")
+
+    monkeypatch.setattr(tr, "trend_text", boom)
+    value = _say(_grid(lambda s, g: 1.0), "score over size @ group=a")
+    assert not value.filled and "ZeroDivisionError" in value.hit.reason
