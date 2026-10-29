@@ -50,8 +50,8 @@ def _quest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, settling: float | No
 def test_each_main_quantity_gets_its_value_or_is_said_as_not_answered(tmp_path, monkeypatch) -> None:
     text = pf.answers_text(_quest(tmp_path, monkeypatch))
     assert text.startswith("**Answers to the questions asked.**")
-    assert "- decay rate (decay_rate): {{v:decay_rate @ dose=each | range}} (no single value: it differs with dose; this is the mean in each setting, lowest to highest" in text
-    assert "- settling limit (settling_limit): {{v:settling_limit}} (one value worked out by the analysis; no interval" in text
+    assert "- decay rate (the plan's map: `decay_rate`): {{v:decay_rate @ dose=each | range}} (no single value: it differs with dose; this is the mean in each setting, lowest to highest" in text
+    assert "- settling limit (the plan's map: `settling_limit`): {{v:settling_limit}} (one value worked out by the analysis; no interval" in text
     assert "- colour of the sample: not answered (the plan maps it to no result of the study)" in text
     assert "- mapped to nothing real: not answered" in text
     assert "side quantity" not in text  # only a quantity the topic marks main
@@ -97,16 +97,15 @@ def test_the_writer_is_told_about_the_block(tmp_path, monkeypatch) -> None:
     assert "{{answers}}" in pf.writer_section(root)
 
 
-def test_a_map_the_name_does_not_confirm_is_not_an_answer(tmp_path, monkeypatch) -> None:
-    """Before: a ``judge`` map (the metric exists but its name is unrelated to the quantity) put a wrong metric in under the
-    quantity's name."""
+def test_an_explicit_map_to_an_existing_metric_is_placed_and_named_whatever_the_name(tmp_path, monkeypatch) -> None:
+    """The plan's explicit map is the fact even when the metric's name does not resemble the quantity's (``judge``): the line
+    names the metric, so a wrong map is disclosed. A map to a missing metric is not answered."""
     root = _quest(tmp_path, monkeypatch)
     wrong = {**PROTOCOL, "topic_map": PROTOCOL["topic_map"] + [{"item": "Q3", "by": "metric:decay_rate"}]}
     monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: wrong)
     text = pf.answers_text(root)
-    assert "- colour of the sample: not answered (the plan's map of it to decay_rate is not confirmed" in text
-    assert "colour of the sample (decay_rate)" not in text
-    assert "- decay rate (decay_rate): {{v:decay_rate" in text  # an ok map is still answered
+    assert "- colour of the sample (the plan's map: `decay_rate`): {{v:decay_rate" in text
+    assert "- mapped to nothing real: not answered (the plan's own map for it does not hold" in text
 
 
 def test_a_varied_study_has_no_single_value_and_the_block_says_so(tmp_path, monkeypatch) -> None:

@@ -1157,11 +1157,11 @@ def answers_text(quest_root: Path | str) -> str:
         if not name:
             continue
         mapped = _topic_req.mapping_of(req, plan, "quantities", item)
-        metric = mapped[1] if mapped is not None and mapped[0] == "ok" else ""
+        # The plan's explicit map to a metric that exists is the fact; the line names that metric, so a wrong map is
+        # disclosed, never hidden. Whether the metric's name resembles the quantity's is not asked here.
+        metric = mapped[1] if mapped is not None and mapped[0] in ("ok", "judge") else ""
         if not metric:
             why = (f"the plan's own map for it does not hold: {mapped[1]}" if mapped is not None and mapped[0] == "bad"
-                   else f"the plan's map of it to {mapped[1]} is not confirmed: the name does not say it is that quantity"
-                   if mapped is not None and mapped[0] == "judge"
                    else "the plan maps it to no result of the study")
             lines.append(f"- {name}: not answered ({why})")
             continue
@@ -1186,7 +1186,7 @@ def answers_text(quest_root: Path | str) -> str:
         if done is None:
             lines.append(f"- {name}: not answered (FI cannot state {metric}: {got[-1][2].hit.reason if got[-1][2].hit else 'no record'})")
         else:
-            lines.append(f"- {name} ({metric}): {done[0]}{done[1]}")
+            lines.append(f"- {name} (the plan's map: `{metric}`): {done[0]}{done[1]}")
     return ("**Answers to the questions asked.**" + chr(10) * 2 + chr(10).join(lines)) if lines else ""
 
 
