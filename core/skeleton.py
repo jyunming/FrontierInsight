@@ -30,11 +30,12 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from . import frame_table as _frame_table
 from . import function_steps as _steps
 from . import metric_spec as _metric_spec
 
 #: Written into the frame; a quest keeps the frame it was written with (a resume reads the files, never writes them again).
-VERSION = 2
+VERSION = 3
 RUNTIME_FILE = "fi_frame.py"
 TOP_BEGIN = f"# >>> FI frame, version {VERSION}: written by FI from the plan; a repair does not change it"
 TOP_END = "# <<< FI frame"
@@ -49,6 +50,10 @@ RAISE_MARK = "# FI: the frame was changed"
 #: The first words of :data:`RUNTIME`; a file called fi_frame.py is FI's only when it starts so.
 RUNTIME_HEAD = '"""FI\'s frame of simulate.py'
 SLOT_SIGNATURE = "def trial(cell, ctx)"
+#: The record-reading half of the analysis frame (``Table`` in :data:`RUNTIME` imports it): the text of ``core/frame_table.py``,
+#: written to ``code/fi_table.py`` beside the runtime. Standard library only, so it needs nothing of FI's on the path.
+TABLE_FILE = "fi_table.py"
+TABLE_SOURCE = Path(_frame_table.__file__).read_text(encoding="utf-8")
 
 #: The runtime the frame imports. Standard library only (the study's own interpreter may have nothing else).
 RUNTIME = '''"""FI's frame of simulate.py: the trial's context and its result record. Written by FI, never edited."""
@@ -248,6 +253,174 @@ def batch_of_cells(fn, cell, ctx):
         raise BatchError("`cells_batch` must return a list with one result for each cell it is given (1); it returned %s"
                          % (("%d result(s)" % len(out)) if isinstance(out, (list, tuple)) else type(out).__name__))
     return out[0]
+
+
+# ---- the analysis: the record of the trials, read-only (version 3) ----------------------------------------------------------
+class NotYet(Exception):
+    """A body FI wrote as a stub: the study has not written it yet."""
+
+
+class Missing:
+    """What a body returns for "this does not exist here" (``Table.missing(why)``): the reason goes with it."""
+
+    def __init__(self, why):
+        self.why = str(why)
+
+    def __repr__(self):
+        return "Missing(%r)" % self.why
+
+
+class Figure:
+    """What a ``figure_<id>`` body is given: ``axes`` (one per panel of the declared figure), and what the plan says it draws,
+    ``x``, ``series`` and ``shows``. FI creates it, saves it as ``file`` and closes it."""
+
+    def __init__(self, axes, x=None, series=None, shows=None, file=None):
+        self.axes = list(axes)
+        self.x = x
+        self.series = series
+        self.shows = shows
+        self.file = file
+
+
+class Table:
+    """FI's own record of the trials (``raw/trials.json``), read-only, held to the results the plan declares. Reading an id the
+    plan does not declare raises ``UnknownResult`` naming the declared ones; ``served`` lists the ids that were read. A setting
+    is named by ``keys()`` (FI's names, ``a=1,b=2``). The numbers come from ``fi_table`` (``core/frame_table.py``, carried
+    beside this file)."""
+
+    def __init__(self, cells, declared, references=None, parts=None):
+        self._cells = [c for c in cells if isinstance(c, dict) and isinstance(c.get("metrics"), dict)]
+        self.declared = list(declared)
+        self._references = dict(references or {})
+        self._parts = dict(parts or {})
+        self.served = []
+        self._settings = {}
+        for c in self._cells:
+            if not c.get("level"):
+                self._settings.setdefault(self._key_of(c), c)
+
+    @classmethod
+    def read(cls, path, declared, references=None, parts=None):
+        """The table of the record at ``path`` (``raw/trials.json``, or the quest folder)."""
+        import fi_table
+
+        return cls(fi_table.load(path), declared, references, parts)
+
+    @staticmethod
+    def _key_of(cell):
+        import fi_table
+
+        return str(cell.get("key") or fi_table.cell_key(cell.get("cell") or {}))
+
+    def _check(self, name):
+        if name not in self.declared:
+            raise UnknownResult("`%s` is not a result the plan declares; the declared results are: %s"
+                                % (name, ", ".join(sorted(self.declared)) or "(none)"))
+        if name not in self.served:
+            self.served.append(name)
+
+    def _cell(self, key):
+        if key not in self._settings:
+            raise KeyError("`%s` is not a setting of the study; the settings are: %s" % (key, ", ".join(self.keys())))
+        return self._settings[key]
+
+    def keys(self):
+        """The settings of the study, FI's names, in the record's order."""
+        return [k for k, c in self._settings.items() if c["metrics"] or c.get("planned")]
+
+    def setting(self, key):
+        """The setting named ``key``: ``{axis: value}``."""
+        return dict(self._cell(key).get("cell") or {})
+
+    def _metric(self, name, key):
+        return self._cell(key)["metrics"].get(name)
+
+    def values(self, name, key):
+        """Every finite value the trials of setting ``key`` gave for result ``name``, in the order the trials gave them."""
+        import fi_table
+
+        self._check(name)
+        return fi_table.values_of(self._metric(name, key))
+
+    def trials(self, name, key):
+        """The trial number of each value ``values`` gives (``[]`` when the record does not say them)."""
+        import fi_table
+
+        self._check(name)
+        return fi_table.trials_of(self._metric(name, key))
+
+    def _summary(self, name, key):
+        import fi_table
+
+        self._check(name)
+        return fi_table.summary(fi_table.values_of(self._metric(name, key)))
+
+    def n(self, name, key):
+        """How many trials of setting ``key`` gave a finite value for ``name``."""
+        return self._summary(name, key)["n"]
+
+    def mean(self, name, key):
+        """The mean of those values; ``None`` when no trial gave one."""
+        s = self._summary(name, key)
+        return s["mean"] if s["n"] else None
+
+    def interval(self, name, key):
+        """``(lower, upper)`` of the 95% interval of the mean (Wilson when every trial gave 0 or 1, else a t interval);
+        ``(None, None)`` when the trials give none."""
+        import fi_table
+
+        return fi_table.interval(self._summary(name, key))[:2]
+
+    def failed(self, key):
+        """How many planned trials of setting ``key`` did not end well, as the record says; ``None`` if it does not."""
+        got = self._cell(key).get("failed")
+        return got if isinstance(got, int) and not isinstance(got, bool) else None
+
+    def at(self, **settings):
+        """The keys of the settings that hold every value given (``table.at(N=100)``), in the record's order."""
+        return [k for k in self.keys()
+                if all(a in self._settings[k].get("cell", {}) and self._settings[k]["cell"][a] == v for a, v in settings.items())]
+
+    def across(self, axis, **fixed):
+        """``(value, key)`` for every setting that has ``axis`` and holds the values in ``fixed``, ordered by the value when
+        they are all numbers, else in the record's order."""
+        pairs = [(self._settings[k]["cell"][axis], k) for k in self.at(**fixed) if axis in self._settings[k].get("cell", {})]
+        if pairs and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v, _k in pairs):
+            pairs.sort(key=lambda p: p[0])
+        return pairs
+
+    def levels(self, name, factor, key):
+        """The mean of ``name`` for each value of ``factor`` that each run of setting ``key`` compared inside it:
+        ``{value: mean or None}``, in the record's order."""
+        import fi_table
+
+        self._check(name)
+        base = self.setting(key)
+        out = {}
+        for c in self._cells:
+            level = c.get("level")
+            if not isinstance(level, dict) or factor not in level:
+                continue
+            if {a: v for a, v in (c.get("cell") or {}).items() if a != factor} != base:
+                continue
+            s = fi_table.summary(fi_table.values_of(c["metrics"].get(name)))
+            out[level[factor]] = s["mean"] if s["n"] else None
+        return out
+
+    def part(self, name):
+        """The keys of the settings of the part ``name`` of a study made of parts."""
+        if name not in self._parts:
+            raise UnknownResult("`%s` is not a part of the study; the parts are: %s" % (name, ", ".join(sorted(self._parts)) or "(none)"))
+        return list(self._parts[name])
+
+    def reference(self, name, key):
+        """The reference value of ``name`` at setting ``key`` that FI worked out from the plan; ``None`` when it has none."""
+        self._check(name)
+        return (self._references.get(name) or {}).get(key)
+
+    def missing(self, why):
+        """What to return where the value does not exist; ``why`` says so in plain words."""
+        return Missing(why)
 '''.replace("@VERSION@", str(VERSION))
 
 # What a made-up trial body looks like, shown to the model with the frame.
@@ -854,6 +1027,23 @@ def ensure_runtime(code_dir: Path | str, simulate_source: str) -> bool:
             return False  # the runtime of an older frame stays with it
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(RUNTIME, encoding="utf-8")
+    return True
+
+
+def ensure_table(code_dir: Path | str, simulate_source: str) -> bool:
+    """Write ``fi_table.py`` beside ``fi_frame.py`` when the frame is of this version (or there is no frame yet). A quest whose
+    frame an older FI wrote keeps the files it was written with: its runtime has no ``Table``. Returns whether it was written."""
+    path = Path(code_dir) / TABLE_FILE
+    framed = frame_version(simulate_source)
+    if framed is not None and framed != VERSION:
+        return False
+    try:
+        if path.read_text(encoding="utf-8").lstrip("\ufeff") == TABLE_SOURCE:
+            return False
+    except OSError:
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(TABLE_SOURCE, encoding="utf-8")
     return True
 
 

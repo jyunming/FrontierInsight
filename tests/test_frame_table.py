@@ -1,0 +1,256 @@
+"""FI's table of the trials for the analysis it frames (core/frame_table.py, ``Table`` in core/skeleton.py's runtime): the numbers
+equal FI's own (trial_table, paper_values) to 12 digits, a result the plan does not declare is refused with the declared list, and
+the carried text runs with nothing of FI's on the path. Made-up topic (a colony); the recorded scratch quests are used when present."""
+
+from __future__ import annotations
+
+import json
+import math
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from core import frame_table, paper_values, skeleton, stats, trial_runner, trial_table
+
+SCRATCH = Path("C:/fi_runs/c1/skeleton/s4_inputs/scratch")
+RECORDED = sorted(p for p in SCRATCH.iterdir() if (p / "raw" / "trials.json").is_file()) if SCRATCH.is_dir() else []
+DIGITS = 12
+
+
+def _cell(rate: float, dose: int, growth: list[float], *, failed: int = 0, **extra: Any) -> dict[str, Any]:
+    cell = {"rate": rate, "dose": dose}
+    return {"cell": cell, "key": trial_runner.cell_key(cell), "planned": len(growth) + failed, "ok": len(growth), "failed": failed,
+            "metrics": {"growth": {"values": growth, "trials": list(range(len(growth)))},
+                        "alive": {"values": [1.0 if v > 2 else 0.0 for v in growth]}}, **extra}
+
+
+def _colony() -> list[dict[str, Any]]:
+    return [_cell(0.1, 1, [1.0, 1.5, 2.5, 2.0]), _cell(0.1, 2, [3.0, 3.5, float("nan"), 4.5], failed=1),
+            _cell(0.2, 1, [1.25, 1.75, 2.25, 2.75, 3.25]), _cell(0.2, 2, [5.0])]
+
+
+def _table(cells: list[dict[str, Any]] | None = None, declared: tuple[str, ...] = ("growth", "alive"), **kw: Any) -> Any:
+    ns: dict[str, Any] = {"fi_table": frame_table}
+    sys.modules["fi_table"] = frame_table  # the runtime imports the carried module by this name
+    exec(compile(skeleton.RUNTIME, "fi_frame.py", "exec"), ns)  # noqa: S102 -- FI's own runtime text
+    return ns["Table"](cells if cells is not None else _colony(), list(declared), **kw)
+
+
+def test_the_table_serves_the_settings_values_and_numbers_of_the_record() -> None:
+    t = _table()
+    assert t.keys() == ["rate=0.1,dose=1", "rate=0.1,dose=2", "rate=0.2,dose=1", "rate=0.2,dose=2"]
+    assert t.setting("rate=0.2,dose=1") == {"rate": 0.2, "dose": 1}
+    assert t.values("growth", "rate=0.1,dose=2") == [3.0, 3.5, 4.5], "a value that is not a finite number is not served"
+    assert t.trials("growth", "rate=0.1,dose=2") == [0, 1, 3]
+    assert t.n("growth", "rate=0.1,dose=2") == 3 and t.failed("rate=0.1,dose=2") == 1
+    assert t.mean("growth", "rate=0.1,dose=1") == pytest.approx(1.75)
+    lo, hi = t.interval("growth", "rate=0.1,dose=1")
+    assert lo < 1.75 < hi
+    assert t.interval("growth", "rate=0.2,dose=2") == (None, None), "one trial gives no interval"
+    assert t.at(rate=0.2) == ["rate=0.2,dose=1", "rate=0.2,dose=2"]
+    assert t.across("dose", rate=0.1) == [(1, "rate=0.1,dose=1"), (2, "rate=0.1,dose=2")]
+    assert t.across("rate", dose=2) == [(0.1, "rate=0.1,dose=2"), (0.2, "rate=0.2,dose=2")]
+    why = t.missing("no colony survived")
+    assert why.why == "no colony survived"
+
+
+def test_a_proportion_has_a_wilson_interval_and_a_mean_a_t_interval() -> None:
+    t = _table()
+    key = "rate=0.2,dose=1"
+    assert t.mean("alive", key) == pytest.approx(0.6)
+    lo, hi = t.interval("alive", key)
+    assert (lo, hi) == stats.wilson_interval(3, 5)
+    lo, hi = t.interval("growth", key)
+    half = stats._t95(4) * stats.mean_std(t.values("growth", key))[1] / math.sqrt(5)
+    assert lo == pytest.approx(2.25 - half, abs=0, rel=1e-12) and hi == pytest.approx(2.25 + half, abs=0, rel=1e-12)
+
+
+def test_an_id_the_plan_does_not_declare_raises_with_the_declared_list() -> None:
+    t = _table(declared=("growth",))
+    for read in (lambda: t.mean("decay", "rate=0.1,dose=1"), lambda: t.values("alive", "rate=0.1,dose=1"),
+                 lambda: t.interval("decay", "rate=0.1,dose=1"), lambda: t.levels("decay", "dose", "rate=0.1,dose=1"),
+                 lambda: t.reference("decay", "rate=0.1,dose=1")):
+        with pytest.raises(type(t).__init__.__globals__["UnknownResult"]) as e:
+            read()
+        assert "`" in str(e.value) and "growth" in str(e.value) and "declared" in str(e.value)
+    assert t.mean("growth", "rate=0.1,dose=1") is not None
+    assert t.served == ["growth"], "only an id that was read, and declared, is an observed input"
+
+
+def test_a_setting_that_is_not_in_the_record_names_the_settings() -> None:
+    with pytest.raises(KeyError) as e:
+        _table().mean("growth", "rate=9,dose=9")
+    assert "rate=0.1,dose=1" in str(e.value)
+
+
+def test_the_means_of_what_each_run_compares_inside_it_come_from_the_value_records() -> None:
+    cells = _colony()
+    for level, vals in (("dry", [1.0, 3.0]), ("wet", [2.0, 4.0])):
+        cell = {"rate": 0.1, "dose": 1, "soil": level}
+        cells.append({"cell": cell, "key": trial_runner.cell_key(cell), "level": {"soil": level}, "planned": 4, "ok": 4, "failed": 0,
+                      "metrics": {"growth": {"values": vals}}})
+    t = _table(cells)
+    assert t.levels("growth", "soil", "rate=0.1,dose=1") == {"dry": 2.0, "wet": 3.0}
+    assert t.levels("growth", "soil", "rate=0.2,dose=1") == {}
+    assert "rate=0.1,dose=1,soil=dry" not in t.keys(), "a value record is not a setting"
+
+
+def test_parts_and_references_come_from_what_fi_gives_the_table() -> None:
+    t = _table(references={"growth": {"rate=0.1,dose=1": 1.5}}, parts={"low dose": ["rate=0.1,dose=1"]})
+    assert t.part("low dose") == ["rate=0.1,dose=1"]
+    assert t.reference("growth", "rate=0.1,dose=1") == 1.5 and t.reference("growth", "rate=0.2,dose=1") is None
+    with pytest.raises(Exception) as e:
+        t.part("high dose")
+    assert "low dose" in str(e.value)
+
+
+# ---- the numbers are FI's own ---------------------------------------------------------------------------------------------
+
+def _same(a: float | None, b: float | None) -> bool:
+    if a is None or b is None:
+        return a is b
+    return math.isclose(a, b, rel_tol=10.0 ** -DIGITS, abs_tol=0.0) or a == b
+
+
+def _check_against_trial_table(cells: list[dict[str, Any]]) -> int:
+    t = _table(cells, declared=tuple(sorted({m for c in cells for m in c["metrics"]})))
+    plain = [c for c in cells if not c.get("level")]
+    summarised = {c["key"]: c for c in trial_table.summaries(plain)}
+    checked = 0
+    for key in t.keys():
+        for name, s in summarised[key]["metrics"].items():
+            lo, hi, _how = trial_table.interval(s)
+            assert t.n(name, key) == s["n"]
+            assert _same(t.mean(name, key), s["mean"] if s["n"] else None), (key, name)
+            assert _same(t.interval(name, key)[0], lo) and _same(t.interval(name, key)[1], hi), (key, name)
+            checked += 1
+    return checked
+
+
+def test_the_table_equals_trial_table_on_the_made_up_record() -> None:
+    assert _check_against_trial_table(_colony()) == 8
+
+
+@pytest.mark.skipif(not RECORDED, reason="the recorded scratch quests are not here")
+@pytest.mark.parametrize("quest", RECORDED, ids=lambda p: p.name)
+def test_the_table_equals_trial_table_and_paper_values_on_a_recorded_raw(quest: Path) -> None:
+    cells = frame_table.load(quest)
+    assert cells and _check_against_trial_table(cells) > 0
+    plain = [c for c in cells if not c.get("level")]
+    assert all(c["key"] == trial_runner.cell_key(c["cell"]) for c in plain), "FI's names of the settings"
+    t = _table(cells, declared=tuple(sorted({m for c in cells for m in c["metrics"]})))
+    assert t.keys() == [c["key"] for c in plain if c["metrics"] or c.get("planned")]
+    rec = paper_values.Records(cells=cells)
+    compared = 0
+    for c in plain[:6]:
+        for name in list(c["metrics"])[:4]:
+            found = rec.at_setting(name, c["cell"])
+            if not found or len(found) != 1:
+                continue
+            try:
+                mean, lo, hi, *_rest = paper_values._interval(rec, found, name)
+            except paper_values._Unfilled:
+                continue
+            assert _same(t.mean(name, c["key"]), mean), (c["key"], name)
+            assert _same(t.interval(name, c["key"])[0], lo) and _same(t.interval(name, c["key"])[1], hi), (c["key"], name)
+            compared += 1
+    assert compared, "at least one number was compared with paper_values"
+
+
+def test_the_carried_numbers_are_the_ones_of_core_stats_and_trial_runner() -> None:
+    assert frame_table._T95 == stats._T95 and frame_table._Z95 == stats._Z95
+    for df in (0, 1, 7, 30, 35, 59, 120, 500):
+        assert frame_table._t95(df) == stats._t95(df)
+    for vals in ([], [2.0], [1.0, 2.5, 4.0], [0.1] * 7 + [3.5]):
+        assert frame_table.mean_std(vals) == stats.mean_std(vals)
+    for k, n in ((0, 5), (5, 5), (3, 10), (7, 0), (-1, 4), (6, 4)):
+        assert frame_table.wilson_interval(k, n) == stats.wilson_interval(k, n)
+    for cell in ({"a": 1, "b": 0.5}, {"x": 2.0, "y": [1, 2.0]}, {"name": "rk4"}, {}):
+        assert frame_table.cell_key(cell) == trial_runner.cell_key(cell)
+
+
+# ---- carried by text ------------------------------------------------------------------------------------------------------
+
+def test_the_carried_text_imports_nothing_of_fis() -> None:
+    for text in (skeleton.TABLE_SOURCE, skeleton.RUNTIME):
+        assert "from core" not in text and "import core" not in text and "from ." not in text
+    assert skeleton.TABLE_SOURCE == Path(frame_table.__file__).read_text(encoding="utf-8")
+
+
+def test_the_carried_text_runs_with_only_the_quests_code_folder_on_the_path(tmp_path: Path) -> None:
+    quest = tmp_path / "quest"
+    code = quest / "code"
+    (quest / "raw").mkdir(parents=True)
+    code.mkdir()
+    (quest / "raw" / "trials.json").write_text(json.dumps({"schema": "fi.trials/v1", "cells": [
+        {**c, "metrics": {k: {"values": [v for v in m["values"] if v == v]} for k, m in c["metrics"].items()}} for c in _colony()]}),
+        encoding="utf-8")
+    assert skeleton.ensure_runtime(code, "") and skeleton.ensure_table(code, "")
+    (code / "probe.py").write_text(textwrap.dedent("""
+        import importlib.util, json, sys
+        assert importlib.util.find_spec("core") is None, "FI's own modules must not be on the path"
+        from fi_frame import Table, UnknownResult, NotYet, Figure
+        t = Table.read(sys.argv[1], ["growth"])
+        try:
+            t.mean("alive", t.keys()[0])
+            refused = ""
+        except UnknownResult as e:
+            refused = str(e)
+        print(json.dumps({"keys": t.keys(), "mean": t.mean("growth", t.keys()[0]), "refused": refused,
+                          "interval": t.interval("growth", t.keys()[0]), "version": sys.modules["fi_frame"].FRAME_RUNTIME_VERSION}))
+    """), encoding="utf-8")
+    run = subprocess.run([sys.executable, "-E", "-s", str(code / "probe.py"), str(quest)], cwd=tmp_path, capture_output=True, text=True,
+                         timeout=120, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    assert run.returncode == 0, run.stderr
+    out = json.loads(run.stdout.strip().splitlines()[-1])
+    assert out["keys"][0] == "rate=0.1,dose=1" and out["mean"] == 1.75 and out["version"] == skeleton.VERSION
+    assert "declared" in out["refused"] and "growth" in out["refused"]
+    here = _table(declared=("growth",))
+    assert tuple(out["interval"]) == here.interval("growth", "rate=0.1,dose=1"), "one implementation, the host's numbers"
+
+
+def test_the_analysis_copy_of_the_record_is_read_when_there_is_one(tmp_path: Path) -> None:
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    (raw / "trials.json").write_text(json.dumps({"cells": _colony()}), encoding="utf-8")
+    assert len(frame_table.load(tmp_path)) == 4
+    (raw / "trials.analysis.json").write_text(json.dumps({"cells": _colony()[:2]}), encoding="utf-8")
+    assert len(frame_table.load(tmp_path)) == 2 and len(frame_table.load(raw / "trials.json")) == 2
+    assert frame_table.load(tmp_path / "nothing") == []
+
+
+# ---- the runtime: version 3 for a new frame, a version 2 one kept ---------------------------------------------------------------
+
+DESIGN: dict[str, Any] = {"protocol": {"grid": {"rate": [0.1, 0.2]}, "runs_per_setting": 3, "metrics": [{"id": "growth", "kind": "mean"}]}}
+
+
+def _older(text: str) -> str:
+    return text.replace(f"version {skeleton.VERSION}", "version 2").replace(f"FRAME_VERSION = {skeleton.VERSION}", "FRAME_VERSION = 2")
+
+
+def test_a_new_frame_gets_the_version_3_runtime_and_the_table() -> None:
+    assert skeleton.VERSION == 3 and skeleton.runtime_version(skeleton.RUNTIME) == 3
+    for name in ("Table", "Figure", "NotYet", "UnknownResult"):
+        assert f"class {name}" in skeleton.RUNTIME
+
+
+def test_a_version_2_runtime_and_table_are_kept_on_resume_and_a_new_frame_writes_version_3(tmp_path: Path) -> None:
+    frame = skeleton.frame_source(DESIGN, stochastic=True)
+    old = _older(frame)
+    assert skeleton.frame_version(old) == 2
+    code = tmp_path / "code"
+    code.mkdir()
+    v2 = skeleton.RUNTIME.replace(f"FRAME_RUNTIME_VERSION = {skeleton.VERSION}", "FRAME_RUNTIME_VERSION = 2")
+    (code / skeleton.RUNTIME_FILE).write_text(v2, encoding="utf-8")
+    assert skeleton.ensure_runtime(code, old) is False and skeleton.ensure_table(code, old) is False
+    assert skeleton.runtime_version((code / skeleton.RUNTIME_FILE).read_text(encoding="utf-8")) == 2
+    assert not (code / skeleton.TABLE_FILE).exists(), "a version 2 frame never reads the table"
+    assert skeleton.frame_version(skeleton.frame_for(DESIGN, stochastic=True, existing=old)) == 2, "a resume keeps the frame"
+    assert skeleton.ensure_runtime(code, frame) is True and skeleton.ensure_table(code, frame) is True
+    assert skeleton.runtime_version((code / skeleton.RUNTIME_FILE).read_text(encoding="utf-8")) == 3
+    assert (code / skeleton.TABLE_FILE).read_text(encoding="utf-8") == skeleton.TABLE_SOURCE
+    assert skeleton.ensure_table(code, frame) is False, "already written"

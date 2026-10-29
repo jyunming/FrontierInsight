@@ -1,0 +1,140 @@
+"""FI's table of what every trial gave, for the analysis FI frames: read from FI's own trial record (``raw/trials.json``).
+
+This file is carried by text into the quest's code folder as ``fi_table.py`` (``skeleton.TABLE_SOURCE``), the way the frame's
+runtime is carried as ``fi_frame.py``, so the quest's interpreter, ``code/run.py`` and the host read the record with one
+implementation. It therefore uses the standard library only and imports nothing of FI's: the few numbers it needs from
+``core/stats.py`` (the t table, the Wilson interval, the mean and SD) are written out here, and ``tests/test_frame_table.py``
+holds them equal to ``stats`` and to ``trial_table``'s numbers on recorded raws, so the copies cannot drift apart.
+
+What it holds is the record and nothing derived from it: per setting and per value the trials gave, the values, the trials
+they came from, ``n``, the mean and a 95% interval of the mean (Wilson when every trial gave 0 or 1, otherwise a t interval).
+The class that serves it to a body is ``Table`` in the frame's runtime (``skeleton.RUNTIME``)."""
+
+from __future__ import annotations
+
+import json
+import math
+import os
+
+#: Two-sided 95% t critical values by degrees of freedom (the same table as ``core.stats``).
+_T95 = {
+    1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447, 7: 2.365,
+    8: 2.306, 9: 2.262, 10: 2.228, 11: 2.201, 12: 2.179, 13: 2.160, 14: 2.145,
+    15: 2.131, 16: 2.120, 17: 2.110, 18: 2.101, 19: 2.093, 20: 2.086,
+    21: 2.080, 22: 2.074, 23: 2.069, 24: 2.064, 25: 2.060, 26: 2.056,
+    27: 2.052, 28: 2.048, 29: 2.045, 30: 2.042, 40: 2.021, 60: 2.000,
+    120: 1.980,
+}
+_Z95 = 1.960
+_T95_ANCHORS = sorted(_T95)
+
+
+def _t95(df):
+    """Two-sided 95% t critical value: the largest table entry at or below ``df`` (never narrower than the exact one), the
+    normal 1.96 above the table."""
+    if df < 1:
+        return _Z95
+    if df in _T95:
+        return _T95[df]
+    below = [a for a in _T95_ANCHORS if a <= df]
+    return _T95[below[-1]] if below else _Z95
+
+
+def mean_std(vals):
+    """``(mean, sample SD, n)``; the SD of fewer than two values is 0.0."""
+    n = len(vals)
+    if n == 0:
+        return 0.0, 0.0, 0
+    mean = sum(vals) / n
+    if n < 2:
+        return mean, 0.0, n
+    var = sum((v - mean) ** 2 for v in vals) / (n - 1)
+    return mean, math.sqrt(var), n
+
+
+def wilson_interval(successes, trials, z=_Z95):
+    """Wilson 95% interval of a proportion from ``successes`` of ``trials``; ``None`` for impossible counts."""
+    if trials is None or successes is None or trials <= 0 or successes < 0 or successes > trials:
+        return None
+    n = float(trials)
+    p_hat = float(successes) / n
+    denom = 1.0 + z * z / n
+    centre = (p_hat + z * z / (2.0 * n)) / denom
+    half = z * math.sqrt(p_hat * (1.0 - p_hat) / n + z * z / (4.0 * n * n)) / denom
+    return max(0.0, centre - half), min(1.0, centre + half)
+
+
+def _fmt(value):
+    if isinstance(value, float) and value.is_integer():
+        return repr(value)
+    if isinstance(value, list):  # an array setting: no comma, a key is split on them
+        return "[" + ";".join(_fmt(x) for x in value) + "]"
+    return str(value)
+
+
+def cell_key(cell):
+    """``"R0=0.9,N=100"``: FI's name of a setting (``trial_runner.cell_key``)."""
+    return ",".join(f"{axis}={_fmt(value)}" for axis, value in cell.items())
+
+
+def finite(value):
+    """Whether ``value`` is a number a trial can have given (not a bool, not NaN or an infinity)."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
+
+
+def values_of(metric):
+    """The finite values of one metric record of a setting, as floats, in the order the trials gave them."""
+    raw = metric.get("values") if isinstance(metric, dict) else metric
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [float(v) for v in raw if finite(v)]
+
+
+def trials_of(metric):
+    """The trial number of each value :func:`values_of` returns, when the record says them (else ``[]``)."""
+    raw = metric.get("values") if isinstance(metric, dict) else metric
+    given = metric.get("trials") if isinstance(metric, dict) else None
+    if not isinstance(raw, (list, tuple)) or not isinstance(given, (list, tuple)) or len(given) != len(raw):
+        return []
+    return [t for v, t in zip(raw, given) if finite(v)]
+
+
+def summary(values):
+    """``{"n", "mean", "sd", "binary", "successes"}`` of one value's trials in one setting (``binary``: every trial gave 0 or 1)."""
+    mean, sd, n = mean_std(values)
+    binary = bool(values) and all(v in (0.0, 1.0) for v in values)
+    return {"n": n, "mean": mean, "sd": sd, "binary": binary, "successes": sum(values) if binary else None}
+
+
+def interval(s):
+    """``(lower, upper, method)`` of the 95% interval of the mean from a :func:`summary`; ``(None, None, "")`` without one."""
+    n = int(s.get("n") or 0)
+    if n <= 0:
+        return None, None, ""
+    if s.get("binary"):
+        ci = wilson_interval(s["successes"], n)
+        return (ci[0], ci[1], "Wilson") if ci else (None, None, "")
+    if n < 2:
+        return None, None, ""
+    half = _t95(n - 1) * (s["sd"] / math.sqrt(n))
+    return s["mean"] - half, s["mean"] + half, "t interval of the mean"
+
+
+def load(path):
+    """The cells of FI's trial record that carry metrics. ``path`` is the record (``raw/trials.json``) or the quest folder;
+    the analysis copy beside the record (``trials.analysis.json``, without the settings FI left out) is read when there is one.
+    ``[]`` when there is no record."""
+    path = str(path)
+    if os.path.isdir(path):
+        path = os.path.join(path, "raw", "trials.json")
+    alt = os.path.join(os.path.dirname(path), "trials.analysis.json")
+    for candidate in (alt, path):
+        try:
+            with open(candidate, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            continue
+        cells = data.get("cells") if isinstance(data, dict) else None
+        if isinstance(cells, list):
+            return [c for c in cells if isinstance(c, dict) and isinstance(c.get("metrics"), dict)]
+    return []
