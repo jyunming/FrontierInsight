@@ -1100,16 +1100,16 @@ def place(who: str, line: int) -> str:
 # --- the record -------------------------------------------------------------------------------------------------------
 
 
-def load(quest_root: Path) -> dict[str, Any]:
+def load(quest_root: Path, file: Path = RECORD) -> dict[str, Any]:
     try:
-        data = json.loads((Path(quest_root) / RECORD).read_text(encoding="utf-8"))
+        data = json.loads((Path(quest_root) / file).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
 
 
-def save(quest_root: Path, record: dict[str, Any]) -> None:
-    path = Path(quest_root) / RECORD
+def save(quest_root: Path, record: dict[str, Any], file: Path = RECORD) -> None:
+    path = Path(quest_root) / file
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(record, indent=1, default=str) + "\n", encoding="utf-8")
@@ -1174,6 +1174,22 @@ def _text_block(items: list[str]) -> str:
     return "\n".join(items) if items else "(none)"
 
 
+@dataclass
+class Target:
+    """A file other than the package's ``model.py`` that :class:`FunctionFiller` writes one function of (the frame's ``trial``
+    in ``simulate.py``). ``module``: its import name from ``code/``; ``record``: the file (under the quest folder) holding its
+    request count, apart from the package's; ``wide``: carry the reply's imports and helpers into the file; ``adapt``: a
+    reply's text turned into the text to splice (``(reply) -> (reply, why not)``); ``verify``: a problem with the whole file
+    after the splice, or ``""``; ``blocks``: the text the request templates take beyond their usual keys."""
+    path: Path
+    module: str
+    record: Path
+    wide: bool = False
+    adapt: Callable[[str], tuple[str, str]] | None = None
+    verify: Callable[[str], str] | None = None
+    blocks: dict[str, str] = field(default_factory=dict)
+
+
 class FunctionFiller:
     """Fills ``specs`` into ``code/<package>/model.py`` one at a time. ``chat(prompt)`` asks the model; ``run(argv)``
     runs a command in the quest's environment from ``code/`` and returns ``(returncode, stdout, stderr)``; ``log`` is
@@ -1184,7 +1200,8 @@ class FunctionFiller:
                  max_calls: int = 30, constants: str = "", install: InstallFn | None = None,
                  module_repairs: int = MODULE_REPAIRS, declared: list[str] | None = None,
                  topic_block: str = "", passages: dict[str, str] | None = None,
-                 values: dict[str, Any] | None = None) -> None:
+                 values: dict[str, Any] | None = None, target: Target | None = None) -> None:
+        self.target = target
         self.topic_block = topic_block or "(the topic is not available)"
         #: The numbers the plan fixes (:func:`plan_constants`): FI writes each one the package reads and does not bind.
         self.values = dict(values or {})
@@ -1200,7 +1217,7 @@ class FunctionFiller:
         self.declared = [str(d) for d in declared or []]
         self.repairs, self.max_calls, self.constants = max(0, int(repairs)), int(max_calls), constants
         self.code = self.root / "code"
-        self.model_path = self.code / package / "model.py"
+        self.model_path = target.path if target is not None else self.code / package / "model.py"
 
     # -- bookkeeping --
 
@@ -1209,7 +1226,7 @@ class FunctionFiller:
             return False
         record["calls_total"] = int(record.get("calls_total") or 0) + 1
         record["calls"] = int(record.get("calls") or 0) + 1
-        save(self.root, record)
+        save(self.root, record, self.target.record if self.target is not None else RECORD)
         return True
 
     def _equation(self, eid: str) -> dict[str, Any]:
@@ -1283,12 +1300,36 @@ class FunctionFiller:
 
     # -- one function --
 
+    async def _check_target(self, spec: Spec) -> tuple[str, str, str]:
+        """:meth:`_check` for a :class:`Target`: the file parses, imports in the quest's environment and holds the function,
+        and the caller's own check of the whole file (the frame is intact) passes. The function is always the one at fault."""
+        assert self.target is not None
+        text = self.model_path.read_text(encoding="utf-8")
+        try:
+            ast.parse(text)
+        except SyntaxError as e:
+            return f"{self.model_path.name} is not valid Python ({e.msg}, line {e.lineno})", spec.name, f"SyntaxError: {e.msg}"
+        for _try in range(2):
+            rc, _out, err = await self.run(["-c", import_script("code", self.target.module, spec.name)])
+            if rc == 0:
+                break
+            if harness_trouble(rc, err) and _try == 0:
+                continue
+            if harness_trouble(rc, err):
+                return "", "", ""  # the check could not be run here; it says nothing about the function
+            end = traceback_end(err, 1500)
+            return "importing it failed:\n" + end, spec.name, end
+        problem = self.target.verify(text) if self.target.verify is not None else ""
+        return (problem, spec.name, "") if problem else ("", "", "")
+
     async def _check(self, spec: Spec, record: dict[str, Any], known: set[str] | None = None) -> tuple[str, str, str]:
         """``(problem, who, trace)``. ``problem`` is ``""`` when the function passes its checks, else what is wrong (never
         the expected value). ``who`` says whose fault it is: ``spec.name`` (the function being written, or what this
         attempt added to the module), another function's name, ``MODULE_LEVEL`` or ``ELSEWHERE``. ``trace`` is the end of
         the traceback when the import failed. ``known``: the fingerprints of the module's statements before this attempt."""
         known = known if known is not None else set()
+        if self.target is not None:
+            return await self._check_target(spec)
         try:
             write_constants(self.model_path, self.values, self.log)  # before the file is read: the check sees the plan's numbers
         except DamagedPlanBlock as e:
@@ -1507,13 +1548,14 @@ class FunctionFiller:
             if not self._spend(record):
                 return "the most requests the step may make in this quest are spent"
             entry["attempts"] = int(entry.get("attempts") or 0) + 1
+            extra = self.target.blocks if self.target is not None else {}
             if attempt == 0:
                 prompt = self.prompts["fill"].substitute(
                     model_block=self.summary or "(not stated)", equation_block=self._equation_block(spec.equation),
                     function_block=f"{spec.signature}\n    # {spec.purpose}", related_block=_text_block(related),
                     constants_block=self.constants or "(none)", package=self.package,
                     topic_block=self.topic_block, literature_block=self._literature_block(spec),
-                    example_block=self._example_block(spec))
+                    example_block=self._example_block(spec), **extra)
             else:
                 current = _find(source, spec.name)
                 prompt = self.prompts["repair"].substitute(
@@ -1521,14 +1563,23 @@ class FunctionFiller:
                     function_block=ast.get_source_segment(source, current) if current is not None else spec.signature,
                     problem=problem, related_block=_text_block(related), package=self.package,
                     topic_block=self.topic_block, literature_block=self._literature_block(spec),
-                    example_block=self._example_block(spec, failed=spec.equation in self._example_failed))
+                    example_block=self._example_block(spec, failed=spec.equation in self._example_failed), **extra)
             try:
                 reply = await self.chat(prompt)
             except Exception as e:  # noqa: BLE001 -- a call that failed is a failed attempt
                 problem = f"the request to the model failed ({type(e).__name__}: {str(e)[:120]})"
                 continue
-            new, why = replace_function(source, spec.name, reply_code(reply), signature=spec.signature,
-                                        equation=spec.equation)
+            if self.target is None:
+                new, why = replace_function(source, spec.name, reply_code(reply), signature=spec.signature,
+                                            equation=spec.equation)
+            else:
+                code, why = reply_code(reply), ""
+                if self.target.adapt is not None and code:
+                    code, why = self.target.adapt(code)
+                new = None
+                if not why:
+                    new, why, _left = replace_function_ex(source, spec.name, code, signature=spec.signature,
+                                                          equation=spec.equation, wide=self.target.wide)
             if new is None:
                 problem = why
                 continue
@@ -1557,6 +1608,18 @@ class FunctionFiller:
             stubbed = _with_stub(self.model_path.read_text(encoding="utf-8"), spec)
             if stubbed is not None:
                 self.model_path.write_text(stubbed, encoding="utf-8")
+        return problem
+
+    async def fill_one(self, spec: Spec) -> str:
+        """Write the one function ``spec`` of the :class:`Target` file (a fill and up to ``repairs`` repairs, each checked by
+        :meth:`_check_target`); ``""`` when it passes, else why not. Its request count is in the target's own record."""
+        assert self.target is not None
+        record = load(self.root, self.target.record)
+        record["calls_total"] = 0  # each fill has its own budget: a fill and its repairs
+        record.setdefault("functions", {}).setdefault(spec.name, {"equation": spec.equation, "status": PENDING, "attempts": 0})
+        problem = await self._fill(spec, record, [spec])
+        record["functions"][spec.name].update(status=FAILED if problem else DONE, error=traceback_end(problem, 800))
+        save(self.root, record, self.target.record)
         return problem
 
     async def run_all(self, specs: list[Spec]) -> Outcome:

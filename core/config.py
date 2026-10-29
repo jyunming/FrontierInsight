@@ -1275,6 +1275,10 @@ class ExecutionConfig(BaseModel):
     # study that declares a result (a sweep, sub-studies, values compared inside each run, a search for the best design, a
     # check against a known answer, a cluster job) and for ``split_analysis``; a quest keeps the frame it was written with.
     code_skeleton: bool = False
+    # Temporary, for an A/B of how the model is asked for ``trial`` when ``code_skeleton`` is on: ``prompt`` (the code request
+    # asks for ``trial`` beside experiment.py, with the frame shown first) or ``filler`` (the request asks for experiment.py
+    # alone and FI asks for ``trial`` in a request of its own, through the function-by-function step). One is deleted after the A/B.
+    code_skeleton_ask: Literal["prompt", "filler"] = "prompt"
     # Where ``split_analysis`` keeps the raw files: a folder relative to the quest folder,
     # or an absolute path (a big disk, an HPC scratch area). Empty means ``raw/`` in the
     # quest folder. FI records the path and each file's size and hash; it does not copy

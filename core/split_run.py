@@ -182,9 +182,10 @@ def same_script(a: str, b: str) -> bool:
     return lines(a) == lines(b)
 
 
-def parse_split_response(text: str, fence: re.Pattern[str]) -> dict[str, str] | None:
+def parse_split_response(text: str, fence: re.Pattern[str], simulate_optional: bool = False) -> dict[str, str] | None:
     """The two scripts of a code-writing reply: ``{"simulate": ..., "analysis": ...}``, or
-    ``None`` when the reply does not hold both.
+    ``None`` when the reply does not hold both. ``simulate_optional``: FI writes simulate.py itself, so a reply with the
+    analysis alone is read (``simulate`` is then ``""``), and so is a single block with no name.
 
     Each fenced block names its script on its first line (``# file: simulate.py`` and
     ``# file: experiment.py``); with no such line, two blocks are read in that order. ``fence``
@@ -218,6 +219,10 @@ def parse_split_response(text: str, fence: re.Pattern[str]) -> dict[str, str] | 
             named["submit"] = body  # a cluster quest's third script (core/trial_runner.py)
     if "simulate" in named and "analysis" in named:
         return named
+    if simulate_optional and "analysis" in named:
+        return {"simulate": "", **named}
+    if simulate_optional and len(blocks) == 1 and not named:
+        return {"simulate": "", "analysis": blocks[0]}
     if len(blocks) == 2 and not named:
         return {"simulate": blocks[0], "analysis": blocks[1]}
     return None

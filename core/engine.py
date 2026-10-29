@@ -11075,11 +11075,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # The model's package, one function at a time (core/function_steps.py): when it is written and checked, the
             # request below asks for the two scripts only.
             await self._fill_model_functions(state, outline)
-            prompt = body_prompt.substitute(
+            prompt = self._frame_template(state, body_prompt).substitute(
                 topic_block=self._topic_block(),
                 design_block=self._code_design_block(state),
                 clarify_block=_format_clarify(state),
-                outline_block=json.dumps(outline, indent=2),
+                outline_block=json.dumps(self._frame_outline(state, outline), indent=2),
                 timeout_s=self._planning_limit(state),
                 skills_block=(self._skills_block(state) + self._dropped_skills_note(state)) or "(no skills selected for this quest)",
                 inputs_block=self._inputs_block(),
@@ -11103,7 +11103,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 )
             else:
                 self._log.info("[implement] generating experiment code (legacy one-shot)")
-            prompt = self._prompts["implement"].substitute(
+            prompt = self._frame_template(state, self._prompts["implement"]).substitute(
                 topic_block=self._topic_block(),
                 design_block=self._code_design_block(state),
                 timeout_s=self._planning_limit(state),
@@ -11112,6 +11112,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 job_block=self._job_block(state),
                 split_block=self._split_block(state),
             )
+        prompt = self._frame_note(state) + prompt  # FI writes the frame of simulate.py: said first (core/run_checks.py)
         # A review that named something this run computed sent the experiment
         # back here (``re_execute``). Both prompts above carry the design and
         # the outline but no review, so without this the model would regenerate
@@ -11151,23 +11152,27 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         package_files: dict[str, str] = {}
         if self._split_on(state):
             scripts = ({"simulate": incremental["simulate"], "analysis": incremental["analysis"]} if incremental is not None
-                       else _split_run.parse_split_response(text, _PY_FENCE_RE))
+                       else self._parse_scripts(text, state))
             if scripts is None:
                 self._log.warning(
                     "[implement] execution.split_analysis is on but the reply did not hold both "
                     "scripts (`# file: simulate.py` and `# file: experiment.py`); asking once more",
                 )
-                text = await self._chat(prompt + _SPLIT_REPLY_REMINDER, node="implement")
-                scripts = _split_run.parse_split_response(text, _PY_FENCE_RE)
+                text = await self._chat(prompt + self._reply_reminder(state), node="implement")
+                scripts = self._parse_scripts(text, state)
             if (scripts is not None and incremental is None and self.config.execution.background_jobs
                     and "submit" not in scripts):
                 self._log.warning("[implement] a cluster quest's reply did not hold submit.py; asking once more")
-                text = await self._chat(prompt + _SPLIT_REPLY_REMINDER + _CLUSTER_REPLY_REMINDER, node="implement")
-                scripts = _split_run.parse_split_response(text, _PY_FENCE_RE) or scripts
+                text = await self._chat(prompt + self._reply_reminder(state) + _CLUSTER_REPLY_REMINDER, node="implement")
+                scripts = self._parse_scripts(text, state) or scripts
             if scripts is not None:
                 # The research-tool layout (core/code_layout.py): the model's package, asked for once more when missing.
                 scripts, text, package_files = await self._code_package_reply(state, prompt, text, scripts,
                                                                               extend=bool(extend))
+                if self._frame_variant(state) == "filler" and not scripts.get("simulate", "").strip():
+                    # FI asks for the function `trial` in a request of its own (an extension keeps the simulation it has)
+                    scripts["simulate"] = (self._scripts_on_disk().get(_split_run.SIMULATE_NAME, "") if extend
+                                           else await self._fill_trial(state, outline))
                 simulate_code, code = self._framed(state, scripts["simulate"]), scripts["analysis"]
                 submit_code = scripts.get("submit", "")
                 deps = incremental["deps"] if incremental is not None else _parse_split_deps(text)
@@ -13215,11 +13220,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                   package)
                 _code_layout.spend_call(self.quest_root)
                 try:
-                    again = await self._chat(prompt + _code_layout.reminder(package), node="implement")
+                    again = await self._chat(prompt + _code_layout.reminder(package, self._frame_variant(state)), node="implement")
                 except Exception as e:  # noqa: BLE001 -- the package is asked for as a help; the code that came stays
                     self._log.warning("[implement] asking again for the model's package failed: %r", e)
                     again = ""
-                again_scripts = _split_run.parse_split_response(again, _PY_FENCE_RE)
+                again_scripts = self._parse_scripts(again, state)
                 again_files = _code_layout.reply_files(again, _PY_FENCE_RE, package)
                 if again_scripts is not None and _code_layout.complete(again_files, package):
                     scripts, text, files = again_scripts, again, again_files
@@ -27581,7 +27586,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return ""
         search = _optim.has_block(state.get("design")) and not self.config.execution.background_jobs
         inside = _in_run.of_study(self._protocol_block(state))
-        block = (self._frame_note(state) + _SPLIT_PROTOCOL + (_CLUSTER_PROTOCOL if self.config.execution.background_jobs else "")
+        block = self._frame_protocols(state, search, inside) or (
+                 _SPLIT_PROTOCOL + (_CLUSTER_PROTOCOL if self.config.execution.background_jobs else "")
                  + (_SEARCH_PROTOCOL if search else "")
                  + (_IN_EACH_RUN_PROTOCOL.replace("$factors", ", ".join(f"`{k}`" for k in inside))
                     .replace("$key_rule", "Key a mapping " + _in_run.key_forms(_in_run.level_cells(inside)) + ".") if inside else ""))
@@ -27594,10 +27600,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 # FI wrote and checked the package function by function: only the two scripts are asked for.
                 block += _code_layout.prefilled_block(
                     package, (self.quest_root / "code" / package / _code_layout.MODEL_NAME).read_text(encoding="utf-8"),
-                    steps=self._written_steps(state))
+                    steps=self._written_steps(state), frame=self._frame_variant(state))
                 block += self._function_steps_partial_note()
             else:
-                block += _code_layout.prompt_block(package, _oracle.generating_equations(self._protocol_block(state)))
+                block += _code_layout.prompt_block(package, _oracle.generating_equations(self._protocol_block(state)),
+                                                   frame=self._frame_variant(state))
                 block += self._function_steps_note(package)
         return block
 
@@ -28233,6 +28240,8 @@ def _load_prompts() -> dict[str, string.Template]:
         "implement_agent",                  # engine.code_writer: agent -- the coding agent's task (core/agent_build.py)
         "implement_function",               # the model's package: ONE function body for ONE equation
         "implement_function_repair",        # ONE function repaired alone (never the whole script)
+        "implement_trial",                  # the frame's function `trial`, written alone (execution.code_skeleton_ask: filler)
+        "implement_trial_repair",           # ... and repaired alone
         "implement_module_repair",          # the failing functions of the model's package, with the passing ones named
         "code_review_repair",               # the code has not crashed: a second model's finding, to be fixed
         "code_finding_test",                # a small test that fails on the current code because of one finding
