@@ -13575,6 +13575,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             _code_review.save(self.quest_root, record)
             if Path(rel).name == "experiment.py":
                 self._review_experiment_changed = True
+            self._gate_commit(state)  # the analysis gate's baseline is the code that is kept (nothing with the switch off)
             self._record(_attempts.LEDGER, lambda: {
                 "kind": "repair", "script": Path(rel).name, "attempt": int(record.get("repair_calls") or 0),
                 "parent_sha256": _attempts._sha(old.encode("utf-8")), "sha256": _attempts._sha(new.encode("utf-8")),
@@ -13591,9 +13592,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             equations=_code_review.equations_view(protocol if isinstance(protocol, dict) else None, values),
             scrub=lambda text: _pairs.scrub(text, values), log=self._log, package=package,
             other=(reader if same is False else ""), code_model=self._model_for_node("implement") or self.config.provider.model or "",
-            on_accept=on_accept, small_run=self._small_run_again,
+            on_accept=on_accept, small_run=self._small_run_again, gate=lambda: self._finding_gate(state),
             known_answers=lambda: self._finding_known_answers(protocol, notes),
             design_response=lambda: self._finding_design_response(protocol, notes), notes=notes)
+        await self._gate_baseline(state)
         with self._hold_code_runs():  # each try is its own commit or side reference (finding_repair.keep_try)
             changed = await _finding_repair.repair_issues(env)
         record["repaired"] = bool(changed)
@@ -14168,7 +14170,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return None
 
     async def _simulation_repair_fault(self, state: QuestState, new_code: str) -> str:
-        """After a repair of simulate.py is written to disk: why it cannot stay, or ``""``. Two facts, both from FI's own calls
+        """After a repair of simulate.py is written to disk: why it cannot stay, or ``""``: the checks of
+        :meth:`_simulation_entry_fault`, then the analysis gate (core/pipeline_gate.py; nothing with the switch off)."""
+        return await self._simulation_entry_fault(state, new_code) or await self._gate_refusal(state)
+
+    async def _simulation_entry_fault(self, state: QuestState, new_code: str) -> str:
+        """The checks of the study's entry (without the analysis gate). Two facts, both from FI's own calls
         of the code: a ``run_trial`` that its code shows reaching ``run_cell`` is kept when FI called it with two seeds on
         the plan's first setting and the numbers were the same (one trial is the setting's number); and the function FI
         calls for the study, called once on that setting within the small run's time, must return at least one of the
@@ -14188,13 +14195,19 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         """For every place that adopts a changed simulation: the check of :meth:`_simulation_repair_fault` on the file now on
         disk (``path``: simulate.py; any other file is not this check's). On a fault the old text and package are put back and
         the sentence is returned; ``""`` keeps the change."""
+        # The baseline is the gate's result for the code as it was just before this write (nothing with the switch off).
+        await self._gate_baseline_before(state, path, old_code, package_before)
         if path.name != _split_run.SIMULATE_NAME:
-            return ""
-        fault = await self._simulation_repair_fault(state, path.read_text(encoding="utf-8"))
+            # not the entry check's, but the analysis runs this file (experiment.py, a helper): the analysis gate
+            fault = await self._gate_refusal(state)
+        else:
+            fault = await self._simulation_repair_fault(state, path.read_text(encoding="utf-8"))
         if fault:
             path.write_text(old_code, encoding="utf-8")
             self._restore_package(package_before)
             self._log.warning("[%s] the change to %s is not kept: %s", node, path.name, fault)
+        else:
+            self._gate_commit(state)
         return fault
 
     async def _simulation_repair_fault_uncached(self, state: QuestState, new_code: str) -> str:
@@ -16502,6 +16515,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
     async def _improve_loop(self, state: QuestState, protocol: dict[str, Any], baseline: list[dict[str, Any]], *,
                             baseline_n: Any = None, earlier: dict[str, Any] | None = None) -> QuestState:
         root = self.quest_root
+        await self._gate_baseline(state)
         limit = int(self.config.engine.improve_rounds)
         used = int(state.get("improve_rounds_used") or 0)
         research = getattr(self.config, "rigor_profile", "default") == "research"
@@ -16672,6 +16686,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                              "better": verdict["better"], "worse": verdict["worse"], "broken": verdict["broken"]},
                 )
                 if kept:
+                    self._gate_commit(state)
                     best = {"round": used, "rows": rows, "files": candidate}
                     _improve.save_snapshot(root, "best", candidate, fi_real=getattr(self, "_fi_real", None))
                     record["best_round"] = used
@@ -18320,6 +18335,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 self._log.warning("[oracle] the repair of %s is not used: %s; keeping it as written", path.name, fault)
                 await self._keep_refused_repair("oracle", path.name, new_code, fault)
                 return None, False, "not_usable"
+        elif fault := await self._gate_refusal(state):  # the analysis script: the analysis gate is its check
+            path.write_text(code, encoding="utf-8")
+            self._log.warning("[oracle] the repair of %s is not used: %s; keeping it as written", path.name, fault)
+            await self._keep_refused_repair("oracle", path.name, new_code, fault)
+            return None, False, "not_usable"
+        self._gate_commit(state)
         self._log.info(
             "[oracle] rewrote %s (%d bytes): %s", path.name, len(new_code),
             str(parsed.get("patch_summary") or "no summary")[:160],
@@ -18492,6 +18513,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         the checks before it. ``(a stop for the quest or None, the script as the oracle gate repaired it or None, whether FI
         rewrote the code)``. Run once before the sizing and the freeze, and again by :meth:`_verify_gated_code` when the code
         was changed afterwards."""
+        await self._gate_baseline(state)  # the analysis gate's baseline: the code as it is (nothing with the switch off)
         await self._results_from_computation(state)
         # Cheap faults a person finds in a minute, read before anything runs (core/static_checks.py).
         if (static_stop := await self._static_gate(state)) is not None:
@@ -18507,6 +18529,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # with what the run gave (core/small_run.py).
         if (small := await self._small_run_gate(state, py, exec_env)) is not None:
             return small, None, False
+        if (gated := await self._gate_first(state)) is not None:  # the analysis on the recorded results (switch off: None)
+            return gated, None, False
         await self._code_review_gate(state)
         # A finding's test that crashed inside the code showed a crash, not the finding: the crash repair takes it.
         if (crashed := await self._review_crash_run(state)) is not None:
@@ -20581,11 +20605,20 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             _trial_runner.SUBMIT_NAME if repair_submit
             else _split_run.SIMULATE_NAME if repair_simulation else "experiment.py"
         )
+        await self._gate_baseline(state)
         code_path.parent.mkdir(parents=True, exist_ok=True)
         parent_sha = _attempts._file_sha(code_path)
         package_before = self._package_snapshot() if repair_simulation else {}
         code_path.write_text(new_code, encoding="utf-8")
         package_fixed: dict[str, str] = {}
+        if not repair_simulation and not repair_submit and (fault := await self._gate_refusal(state)):
+            # experiment.py alone does not reach the simulation's checks below: the analysis gate is its check.
+            code_path.write_text(script_code, encoding="utf-8")
+            self._log.warning("[execute_reflect] the repair of %s is not used: %s; keeping it as written", script_name, fault)
+            await self._keep_refused_repair("execute_reflect", script_name, new_code, fault)
+            history[-1]["patch_summary"] = (f"[the repair was not used and {script_name} is as it was: {fault}] "
+                                            + str(history[-1].get("patch_summary") or ""))[:400]
+            return {**spent, "exec_reflect_iter": iters + bump, "exec_reflect_history": history}
         if repair_simulation:
             code_dir = self.quest_root / "code"
             package_fixed = {rel: _attempts._sha((code_dir / rel).read_bytes())
@@ -20602,6 +20635,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 history[-1]["patch_summary"] = (f"[the repair was not used and {script_name} is as it was: {fault}] "
                                                 + str(history[-1].get("patch_summary") or ""))[:400]
                 return {**spent, "exec_reflect_iter": iters + bump, "exec_reflect_history": history}
+        self._gate_commit(state)  # kept: the analysis gate's baseline
         self._last_ledger_id = self._record(_attempts.LEDGER, lambda: {
             "kind": "repair", "script": code_path.name, "attempt": attempt_no,
             "parent_sha256": parent_sha, "sha256": _attempts._sha(new_code.encode("utf-8")),
@@ -28096,9 +28130,13 @@ def write_cost_summary(fi_dir: Path) -> None:
                 rows.append(json.loads(line))
             except json.JSONDecodeError:
                 continue
-        (fi_dir / "cost.summary.json").write_text(
-            json.dumps(_aggregate_cost_rows(rows), indent=2) + "\n", encoding="utf-8",
-        )
+        summary = _aggregate_cost_rows(rows)
+        try:  # the analysis gate's time in this quest (only a quest that ran it has the file)
+            gate = json.loads((fi_dir / "pipeline_gate.json").read_text(encoding="utf-8"))
+            summary["gate_runs"], summary["gate_seconds"] = int(gate.get("runs") or 0), float(gate.get("seconds_total") or 0.0)
+        except (OSError, ValueError, TypeError):
+            pass
+        (fi_dir / "cost.summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     except OSError as e:
         logging.getLogger("frontier_insight.engine").debug("[cost] failed to write cost.summary.json: %r", e)
 

@@ -796,6 +796,13 @@ class EngineConfig(BaseModel):
     # this many times. Default 3 — covers typo / import-error / shape
     # mismatch / NaN bugs without runaway looping.
     exec_reflect_max_iterations: int = Field(default=3, ge=0)
+    # Analysis gate (off by default). When True, a change to the study's code (a repair of a reader's finding, a crash
+    # repair, a speed-up) is kept only if the analysis still runs from start to end on a small copy of the results the
+    # quest already recorded, and the first version is run the same way before the long run. It protects only a quest
+    # that already has recorded results (a redesign, a resume, a re-implementation after the evidence check), not a
+    # first design, which has no recorded results yet. The result of the last check is not kept in the checkpoint, so a
+    # resumed quest compares with nothing until its first check has run again.
+    pipeline_gate: bool = False
     # Degenerate-run guard. When True (default), a script that exits 0
     # but emits a RESULT_JSON whose numeric metrics are ALL ~0 is treated
     # as a soft failure: the execute-repair loop gets a chance to fix the
