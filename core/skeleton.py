@@ -24,6 +24,7 @@ no trial set, is recorded and said, never a failed trial. The stdlib-only runtim
 from __future__ import annotations
 
 import ast
+import importlib
 import itertools
 import re
 from collections import Counter
@@ -769,8 +770,10 @@ BODY_PARAMS = {"derive": "table", "reference": "setting", "figure": "fig, table"
 
 def _analysis_problem(old: str, new: str, name: str) -> str:
     try:
-        from . import analysis_frame as _analysis
-    except ImportError:  # a checkout without the analysis frame has nothing to check
+        _analysis = importlib.import_module(f"{__package__}.analysis_frame")
+    except ModuleNotFoundError as exc:  # a checkout without the analysis frame has nothing to check
+        if exc.name != f"{__package__}.analysis_frame":
+            raise  # an import that fails inside the module is a fault to see, not a reason to check nothing
         return ""
     return _analysis.analysis_problem(old, new, name)
 
@@ -798,19 +801,27 @@ REFLECT_INTRO_DERIVE = ("Produce a corrected function of derive.py (and the help
                         "the available CPU venv and returns what the plan declares through FI's analysis. The fix must address "
                         "the actual bug shown in the traceback.")
 
+#: The one rule for a function that gives a number for each value the plan compares inside each run.
+DERIVE_LEVEL_RULE = (
+    "When the plan compares values inside each run, a function that gives one number for each compared value returns a mapping "
+    "with EVERY compared value as a key, written the way `table.levels` shows it; where the result does not exist for a value "
+    "its number is `None` (a left-out key is refused).")
+
 _BODY_RETURNS = {
     "derive": ("It returns one number for the study, a mapping of setting keys to numbers, or `table.missing(\"why\")` where "
-               "the number does not exist (never a stand-in such as 0, -1 or a bound). It reads the results only through "
-               "`table`."),
-    "reference": ("It takes one setting (`{axis: value}`) and returns the reference value there, or `None` where there is none."),
+               "the number does not exist (never a stand-in such as 0, -1 or a bound, and never a bare `None`). It reads the "
+               "results only through `table`."),
+    "reference": ("It takes one setting (`{axis: value}`), is called once for each setting, and returns the reference value "
+                  "there, or `None` where there is none."),
     "figure": ("It draws on `fig.axes` from `table` and returns nothing: FI makes the figure, saves it and closes it, so it never "
-               "calls `savefig`, `show`, `close`, `figure` or `subplots`."),
+               "calls `savefig`, `show`, `close`, `figure` or `subplots`. It draws only values read from `table`."),
 }
 
 
-def reflect_derive(body: str = "") -> str:
+def reflect_derive(body: str = "", compared: bool = False) -> str:
     """The text of a repair when the function ``body`` of derive.py failed (the analysis is FI's: it calls the bodies, keeps
-    their record and prints the results itself). It replaces the text of the repair of an experiment.py the model wrote."""
+    their record and prints the results itself). It replaces the text of the repair of an experiment.py the model wrote.
+    ``compared``: the plan compares values inside each run (:data:`DERIVE_LEVEL_RULE` is then added)."""
     sig = body_signature(body)
     kind = str(body).split("_", 1)[0]
     which = (f"The function `{body}` failed, or FI refused what it returned (the reason is below). Repair `{body}` (and the "
@@ -818,18 +829,38 @@ def reflect_derive(body: str = "") -> str:
              "A function of derive.py failed, or FI refused what it returned (the reason is below). Repair that function (and "
              "the helpers it uses), each given whole with its own parameters. ")
     return ("THE ANALYSIS IS FI'S: FI wrote experiment.py, which reads its own record of the trials, calls the functions of "
-            "derive.py once each, keeps what they return and prints the results. " + which
-            + _BODY_RETURNS.get(kind, "")
+            "derive.py, keeps what they return and prints the results. " + which
+            + _BODY_RETURNS.get(kind, "") + (" " + DERIVE_LEVEL_RULE if compared and kind == "derive" else "")
             + " Leave every other function and every line of FI's as they are, and give no experiment.py.\n")
+
+
+#: The sentences of agents/execute_reflect.md that are about a script that prints its results, and what they say for a repair
+#: of a function of derive.py (where FI prints the results and a value that does not exist is `table.missing`).
+_REFLECT_SWAPS = (
+    ("produce a patched script that fixes it.", "produce a patched function of derive.py that fixes it."),
+    (REFLECT_INTRO, REFLECT_INTRO_DERIVE),
+    ("If the method genuinely diverges or a value is undefined, that is a finding: emit `null` for that value and say why under "
+     "`\"why_missing\"` (`\"why_missing\": {\"<name>\": \"<a few words>\"}`); never a stand-in number.",
+     "If the method genuinely diverges or a value is undefined, that is a finding: return `table.missing(\"<a few words why>\")` "
+     "for it; never a stand-in number."),
+    ("REQUIRED (or `code`) unless", "REQUIRED unless"),
+    ("<leave empty. Only if the fix changes a module-level statement (an import, a constant) that no function can carry, give the "
+     "whole corrected script here, with every function it has now>", "<leave empty: give the functions only>"),
+    ("- RESULT_JSON parsed: $result_json_present\n", ""),
+    ("- figures produced: $figures_count\n", ""),
+)
 
 
 def derive_prompt(source: str, prompt: str) -> str:
     """The repair request ``prompt`` (made from agents/execute_reflect.md) for a function of a derive.py with text ``source``:
-    the note on what may change first and the intro that speaks of a whole script replaced, when ``source`` has FI's frame;
-    ``prompt`` unchanged otherwise."""
+    the note on what may change first, then the text with every sentence about a whole script that prints its results (the
+    intro, the rule for a value that does not exist, the whole-script ``code`` key, the lines about ``RESULT_JSON``) replaced
+    by what is true for a function of derive.py; ``prompt`` unchanged when ``source`` has no FI frame."""
     if not has_analysis_frame(source):
         return prompt
-    return DERIVE_REPAIR_NOTE + prompt.replace(REFLECT_INTRO, REFLECT_INTRO_DERIVE)
+    for old, new in _REFLECT_SWAPS:
+        prompt = prompt.replace(old, new)
+    return DERIVE_REPAIR_NOTE + prompt
 
 
 RERUN_NOTE_ANALYSIS = (

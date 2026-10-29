@@ -6,6 +6,7 @@ was (sha256 at df4ff1ad). Made-up topic: a colony's growth. No real model is cal
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import sys
 import types
@@ -69,9 +70,9 @@ def test_the_code_template_asks_for_the_bodies_and_drops_the_rules_of_the_analys
 def test_the_outline_request_lists_the_bodies_and_not_the_analysis() -> None:
     text = _agent("implement_outline")
     on = run_checks.frame_outline_text(text, BODIES)
-    assert "`derive_doubling_time`" in on and "FI writes experiment.py" in on
+    assert "`derive_doubling_time`" in on and "all of experiment.py" in on
     assert "for experiment.py, the functions of the analysis" not in on and "and experiment.py, constrained to" not in on
-    assert "(none: FI works out" in run_checks.frame_outline_text(text, [])
+    assert "needs no function of derive.py" in run_checks.frame_outline_text(text, [])
     assert on != run_checks.frame_outline_text(text)
 
 
@@ -103,6 +104,12 @@ def test_the_cluster_text_still_comes_with_the_bodies(tmp_path: Path) -> None:
     assert "# file: submit.py" in engine._frame_protocols({"design": DESIGN}, False, {}, BODIES)
 
 
+def test_the_repair_notes_carry_the_level_rule_and_the_reference_rule() -> None:
+    assert "once for each setting" in skeleton.reflect_derive("reference_growth")
+    assert skeleton.DERIVE_LEVEL_RULE in skeleton.reflect_derive("derive_doubling_time", compared=True)
+    assert skeleton.DERIVE_LEVEL_RULE not in skeleton.reflect_derive("derive_doubling_time")
+
+
 def test_the_package_layout_names_derive_py_and_not_experiment_py() -> None:
     for text in (code_layout.prompt_block("colony", ["E1"], frame="prompt", analysis=True),
                  code_layout.prefilled_block("colony", "def g(): pass", frame="prompt", analysis=True)):
@@ -119,6 +126,7 @@ def _fake_analysis_frame(monkeypatch: pytest.MonkeyPatch, applies: str = "") -> 
     mod.applies = lambda design: applies  # type: ignore[attr-defined]
     mod.plan_of = lambda design: {"names": BODIES}  # type: ignore[attr-defined]
     mod.body_names = lambda plan: list(plan["names"])  # type: ignore[attr-defined]
+    mod.frame_problem = lambda src: ""  # type: ignore[attr-defined]
     mod.analysis_problem = lambda old, new, name: ("the function `x` is missing" if "missing" in new else "")  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "core.analysis_frame", mod)
     import core
@@ -191,6 +199,103 @@ def test_repair_problem_without_the_analysis_frame_checks_nothing_of_these_files
     assert skeleton.repair_problem("x = 1\n", "x = 2\n", "derive.py") == ""
 
 
+# ---- no text of the new path speaks of a script the model no longer writes ---------------------------------------------------------
+
+#: Phrases FI itself wrote for the single-script path; none may reach the model when FI writes the analysis.
+FORBIDDEN = ("# file: experiment.py", "FI_TRIALS", "FI_BEST_DESIGN", "FI_OPTIMISATION", "FI_OPTIMUM_CHECK", "RESULT_JSON", "figures/",
+             "figures-dir", "plt.subplots(", "why_missing", "emit `null`", "run_grid", "THIRD fenced", "after the other two",
+             "give the whole corrected script", "Save figures to", "Stratify when", "matplotlib.use", "os.makedirs",
+             "raw results files", "the analysis holds", "single-file", "Single Python file", "Honour `FI_PILOT`",
+             "Honour `FI_REPLICATE_SEED`")
+
+
+def _new_path_texts(tmp_path: Path) -> dict[str, str]:
+    texts: dict[str, str] = {}
+    both = {"protocol": {**INSIDE["protocol"], "optimisation": SEARCH["protocol"]["optimisation"]}}
+    inside = {"method": ["slow", "fast"]}
+    for name in ("implement", "implement_body"):
+        for cluster in (False, True):
+            texts[f"{name}/{cluster}"] = run_checks.frame_template_text(_agent(name), cluster, BODIES)
+        texts[f"{name}/empty"] = run_checks.frame_template_text(_agent(name), False, [])
+    texts["outline"] = run_checks.frame_outline_text(_agent("implement_outline"), BODIES)
+    texts["outline/empty"] = run_checks.frame_outline_text(_agent("implement_outline"), [])
+    engine = _engine(tmp_path, skeleton_on=True)
+    for label, design, search, comp in (("plain", DESIGN, False, {}), ("search", SEARCH, True, {}), ("inside", INSIDE, False, inside),
+                                        ("search+inside", both, True, inside)):
+        texts["protocols/" + label] = engine._frame_protocols({"design": design}, search, comp, BODIES)
+    texts["protocols/empty"] = engine._frame_protocols({"design": DESIGN}, False, {}, [])
+    engine.config.execution.background_jobs = True
+    texts["protocols/cluster"] = engine._frame_protocols({"design": DESIGN}, False, {}, BODIES)
+    texts["protocols/cluster+empty"] = engine._frame_protocols({"design": DESIGN}, False, {}, [])
+    for body in BODIES:
+        texts["repair/" + body] = skeleton.reflect_derive(body, compared=True)
+    texts["repair/request"] = skeleton.derive_prompt(DERIVE, _agent("execute_reflect"))
+    texts["rerun"] = skeleton.RERUN_NOTE_ANALYSIS
+    texts["extend"] = skeleton.EXTEND_REPLY_ANALYSIS
+    texts["layout"] = (code_layout.prompt_block("colony", ["E1"], frame="prompt", analysis=True)
+                       + code_layout.prefilled_block("colony", "def g(): pass", frame="prompt", analysis=True))
+    return texts
+
+
+def test_no_text_of_the_new_path_speaks_of_a_script_the_model_no_longer_writes(tmp_path: Path) -> None:
+    texts = _new_path_texts(tmp_path)
+    # submit.py's own pending/done lines are `RESULT_JSON` lines of the job (the cluster section is checked by its other phrases)
+    cluster = run_checks._cluster_bodies()
+    bad = [(name, phrase) for name, text in texts.items() for phrase in FORBIDDEN
+           if phrase in (text.replace(cluster, "") if phrase == "RESULT_JSON" else text)]
+    assert not bad, bad
+    # the replaced rules are there instead
+    assert "table.missing(" in texts["implement_body/False"] and "plt.subplots" not in texts["implement_body/False"]
+    assert "one more fenced block" in texts["protocols/cluster+empty"] and "experiment.py" not in cluster and "FI_TRIALS" not in texts["protocols/cluster"]
+
+
+def test_the_repair_request_of_a_body_has_no_rule_of_a_script_that_prints_its_results() -> None:
+    on = skeleton.derive_prompt(DERIVE, _agent("execute_reflect"))
+    assert "patched function of derive.py" in on and "table.missing(" in on and "<leave empty: give the functions only>" in on
+    assert "$result_json_present" not in on and "$figures_count" not in on
+
+
+def test_body_params_are_the_signatures_of_the_analysis_frame() -> None:
+    try:
+        analysis_frame = importlib.import_module("core.analysis_frame")
+    except ModuleNotFoundError:
+        pytest.skip("core.analysis_frame is not in this branch")
+    assert {k: [x.strip() for x in v.split(",")] for k, v in skeleton.BODY_PARAMS.items()} == analysis_frame.SIGNATURES
+
+
+def test_a_quest_with_an_older_frame_keeps_the_analysis_the_model_writes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_analysis_frame(monkeypatch)
+    sys.modules["core.analysis_frame"].frame_problem = lambda src: "the frame is version 2" if "version 2" in src else ""  # type: ignore[attr-defined]
+    engine = _engine(tmp_path, skeleton_on=True)
+    assert engine._analysis_bodies({"design": DESIGN}) == BODIES
+    code = engine.quest_root / "code"
+    code.mkdir(parents=True, exist_ok=True)
+    (code / "simulate.py").write_text("# version 2\n", encoding="utf-8")
+    assert engine._analysis_bodies({"design": DESIGN}) is None
+
+
+def test_a_fault_inside_the_analysis_frame_is_not_taken_for_its_absence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Broken:
+        def find_spec(self, name, path=None, target=None):  # noqa: ANN001
+            if name == "core.analysis_frame":
+                raise ModuleNotFoundError("No module named 'a_package_it_needs'", name="a_package_it_needs")
+            return None
+
+    monkeypatch.delitem(sys.modules, "core.analysis_frame", raising=False)
+    import core
+
+    monkeypatch.delattr(core, "analysis_frame", raising=False)
+    finder = _Broken()
+    sys.meta_path.insert(0, finder)
+    try:
+        with pytest.raises(ModuleNotFoundError):
+            _engine(tmp_path, skeleton_on=True)._analysis_bodies({"design": DESIGN})
+        with pytest.raises(ModuleNotFoundError):
+            skeleton.repair_problem("x = 1\n", "x = 2\n", "derive.py")
+    finally:
+        sys.meta_path.remove(finder)
+
+
 # ---- flag off, and a plan in an older form: every text is what it was (sha256 at df4ff1ad) -------------------------------------
 
 
@@ -227,3 +332,28 @@ PINS_AT_DF4FF1AD = {
     "reply_cluster": "f1e703776014745e", "protocols_plain": "dad3557413701e1d", "protocols_search": "4713448bfebdf253",
     "protocols_inside": "2659fc6972c46c6c", "note": "a617e362566b77f2", "protocols_cluster": "4a61049737d99ef8",
     "layout_prompt": "a8e42eea942bd234", "layout_prefilled": "3222bc6d76f04d56", "repair_problem": "75789d950a008886"}
+
+
+def test_with_no_analysis_by_fi_the_methods_and_the_unpinned_texts_are_what_they_were(tmp_path: Path) -> None:
+    import string
+
+    engine = _engine(tmp_path, skeleton_on=True)
+    engine.config.execution.background_jobs = False
+    both = {"protocol": {**INSIDE["protocol"], "optimisation": SEARCH["protocol"]["optimisation"]}}
+    state = {"design": DESIGN}
+    pins = {
+        "protocols_search_inside": _sha(engine._frame_protocols({"design": both}, True, {"method": ["slow", "fast"]})),
+        "template_implement": _sha(engine._frame_template(state, string.Template(_agent("implement"))).template),
+        "template_implement_body": _sha(engine._frame_template(state, string.Template(_agent("implement_body"))).template),
+        "outline_template": _sha(engine._frame_outline_template(state, string.Template(_agent("implement_outline"))).template),
+        "repair_fi_frame": _sha(json.dumps([skeleton.repair_problem("x", "y", "fi_frame.py"),
+                                            skeleton.repair_problem(skeleton.RUNTIME_HEAD + "a", "y", "fi_frame.py")])),
+        "reflect_prompt": _sha(skeleton.framed_prompt(FRAMED, _agent("execute_reflect"))),
+    }
+    assert pins == MORE_PINS_AT_DF4FF1AD, json.dumps(pins, indent=1)
+
+
+MORE_PINS_AT_DF4FF1AD = {
+    "protocols_search_inside": "224963aed9fe2a67", "template_implement": "a70893e8a2235784",
+    "template_implement_body": "d02bdddb32e99d50", "outline_template": "fa01183231dce8c8",
+    "repair_fi_frame": "2aca732a1c3b9c74", "reflect_prompt": "40e6696c66d0e48e"}

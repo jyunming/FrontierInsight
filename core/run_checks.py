@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib
 import json
 import math
 import re
@@ -260,6 +261,81 @@ _ANALYSIS_DROP_BULLETS = ("- Save figures to", "- Save the tables and arrays", "
                           "- The last line of stdout MUST", "- **Keep `RESULT_JSON`")
 
 
+_ANALYSIS_SWAPS = (
+    ("- **Figure styling is automatic",
+     "- **Figure styling is automatic - don't fight it.** FI applies a house style to every figure. Do NOT call "
+     "`plt.style.use(...)`, touch `rcParams`/`rcdefaults()`, call `seaborn.set_*`, or hard-code colors/colormaps. Make a figure "
+     "read well instead: label every axis in words with its unit (the plan's `label` for the quantity when `protocol.labels` or "
+     "the metric gives one), never with a variable name from the code, give it a short descriptive title, prefer direct series "
+     "labels over a boxed legend, and annotate the single number that matters. A figure with several panels draws one on each "
+     "of `fig.axes`."),
+    ("- **Draw every figure from the run's results",
+     "- **Draw every figure from `table`, never from numbers typed into the plotting code.** A plotting call (`plot`, "
+     "`scatter`, `bar`, `errorbar`, ...) is given values read from `table` (`table.mean`, `table.across`, ...), not a list written "
+     "out in the function such as `ax.plot(xs, [4, 5, 6, 8])`. FI reads the function before it runs and sends such a figure back. "
+     "Axis limits, ticks and reference lines (a limit, a target) may be written in the code."),
+    ("- **Report what the method produced",
+     "- **Report what the method produced, even when it is bad.** Never clamp, cap or clip a result into the range the design "
+     "expects. A quantity that is undefined at a setting is `table.missing(\"<a few words why>\")` in a function of derive.py "
+     "(and `None` with its reason in `trial`, as said above); never a stand-in number (0, -1, a bound, a marker value) - a "
+     "result pinned to a bound is rejected."),
+)
+
+_OUTLINE_SWAPS = (
+    ("- FI writes the frame of simulate.py", None),
+    ("- Your scaffold MUST already include",
+     "- Your scaffold holds the imports and a STUB for `trial` and for each function you list. It sets up no figures, prints no "
+     "results and has no main: FI writes those. The body stage only fills in function bodies; it does NOT rewrite the contract."),
+    ("- Plan every figure as at most 3 panels",
+     "- A figure is a function `figure_<id>(fig, table)` that draws on the axes FI made for it, at most 3 panels side by side. A "
+     "comparison that needs more panels (a grid over two factors, more than three strata) becomes SEVERAL figures of at most 3 "
+     "panels each, one function per figure, because a figure is shown at a fixed width and every extra panel shrinks the text of "
+     "all of them."),
+    ("- Stratification:", ""),
+    ('  "scaffold":',
+     '  "scaffold": "<Python source: the imports and the function STUBS that raise NotImplementedError, with no figure setup and no '
+     'printed results. ~10-40 lines.>",'),
+    ('  "data_flow":',
+     '  "data_flow": "<one-paragraph plan: input variables, function order, what each function returns. The body stage uses this to '
+     'keep the code linear.>",'),
+    ('  "result_json_template":', '  "result_json_template": "{}",'),
+)
+
+
+def _swap_lines(text: str, swaps: Sequence[tuple[str, str | None]]) -> str:
+    """``text`` with each line that starts with a swap's first words replaced by its text (``""``: the line goes; a bullet's
+    continuation lines go with it)."""
+    out, skipping = [], False
+    for line in text.split("\n"):
+        hit = next((s for s in swaps if line.startswith(s[0]) and s[1] is not None), None)
+        if hit is not None:
+            skipping = line.startswith("- ")
+            if hit[1]:
+                out.append(hit[1])
+            continue
+        if skipping and line.startswith(("  ", "\t")):
+            continue
+        skipping = False
+        out.append(line)
+    return "\n".join(out)
+
+
+def _cluster_bodies() -> str:
+    """The cluster section of the request when FI writes the analysis (the engine's text, for the reply of that request)."""
+    from . import engine as _e
+
+    text = _e._CLUSTER_PROTOCOL
+    for old, new in (
+            ("Reply with a THIRD fenced block, starting with the line `# file: submit.py`, after the other two.",
+             "Reply with one more fenced block, starting with the line `# file: submit.py`, after the other blocks."),
+            ("FI then reads every task's results itself, writes the record and runs experiment.py.",
+             "FI then reads every task's results itself, writes the record and runs the analysis."),
+            ("submit.py never reads or writes the tasks' results, and experiment.py does not submit anything: it reads FI_TRIALS as\n"
+             "above.", "submit.py never reads or writes the tasks' results.")):
+        text = text.replace(old, new)
+    return text
+
+
 def _bodies_reply(bodies: Sequence[str], cluster: bool) -> str:
     """The reply format when FI writes the analysis as well (experiment.py is FI's): ``trial``, then the bodies of derive.py
     that the plan needs (none: no block), then the driver of a cluster, then the dependencies."""
@@ -293,6 +369,11 @@ def _frame_reply(cluster: bool = False, bodies: Sequence[str] | None = None) -> 
                "the section on the cluster says.\n4." if cluster else "3.")
             + " A single line `DEPS:` followed by a comma-separated list of pip-installable package names. Use the outline's "
             "`deps` as the baseline; add only if you genuinely needed something more.\n\n")
+_FRAME_BODY_INTRO_BODIES = (
+    "You are the **Implementation Body** stage of an automated research pipeline.\n\n"
+    "A prior stage produced a structural outline for the experiment. Your job: write the code the output format below asks for. "
+    "You do NOT change the signatures of the outline's functions that you keep, and you write nothing of FI's frame or of "
+    "FI's analysis. The outline locked those decisions.\n\n")
 _FRAME_BODY_INTRO = (
     "You are the **Implementation Body** stage of an automated research pipeline.\n\n"
     "A prior stage produced a structural outline for the experiment. Your job: write the code the output format below asks for. "
@@ -308,6 +389,11 @@ def frame_template_text(text: str, cluster: bool = False, bodies: Sequence[str] 
     drop = _FRAME_DROP_BULLETS if bodies is None else _FRAME_DROP_BULLETS + _ANALYSIS_DROP_BULLETS
     out, skipping = [], False
     for line in text.split("\n"):
+        swap = next((s for s in _ANALYSIS_SWAPS if line.startswith(s[0])), None) if bodies is not None else None
+        if swap is not None:
+            out.append(swap[1])
+            skipping = True
+            continue
         if line.startswith("- "):
             skipping = line.startswith(drop)
         elif skipping and (not line.strip() or line.startswith("#")):
@@ -322,7 +408,7 @@ def frame_template_text(text: str, cluster: bool = False, bodies: Sequence[str] 
         text = text[:a] + _frame_reply(cluster, bodies) + text[b:]
     c = text.find("# The topic, as the person wrote it")
     if c > 0 and text.startswith("You are the **Implementation Body**"):
-        text = _FRAME_BODY_INTRO + text[c:]
+        text = (_FRAME_BODY_INTRO if bodies is None else _FRAME_BODY_INTRO_BODIES) + text[c:]
     return text
 
 
@@ -339,14 +425,18 @@ def frame_outline_text(text: str, bodies: Sequence[str] | None = None) -> str:
     text = text.replace("(those belong to the scenario, in the other functions)",
                         "(those belong to FI's frame, or to the analysis)")
     if bodies is not None:
-        text = text.replace(
-            "and, for experiment.py, the functions of the analysis (statistics, figures, `RESULT_JSON`). It lists no entry point",
-            "and, for derive.py, the functions " + (", ".join(f"`{b}`" for b in bodies) if bodies else "of the analysis (none: FI works "
-            "out every number and figure of the plan itself)") + ". FI writes experiment.py (the statistics, the figures' "
-            "files and `RESULT_JSON`); the outline lists none of it. It lists no entry point")
-        text = text.replace("The next stage writes `trial` and its helpers, and experiment.py, constrained to:",
-                            "The next stage writes `trial` and its helpers" + (" and the functions of derive.py" if bodies else "")
-                            + ", constrained to:")
+        first = ("- FI writes the frame of simulate.py (its entry points, the loop over settings and trials, the seeds and the "
+                 "main) and all of experiment.py (the statistics, the figure files and the printed results). The outline lists the "
+                 "function `trial` (ONE trial: it takes the settings and returns the plan's results) and the helper functions it "
+                 "uses, which are the equation and step functions below"
+                 + (", and the functions of derive.py: " + ", ".join(f"`{b}`" for b in bodies)
+                    + " (each reads only the table of FI's record)" if bodies else "; the plan needs no function of derive.py")
+                 + ". It lists no entry point, no loop over settings or trials, no main and nothing of the analysis. The next "
+                 "stage writes these functions, constrained to: standard library + dependencies you list, no network access, no "
+                 "reads outside the working directory, wall-time under the limit given in the Inputs section.")
+        text = _swap_lines(text, [(s[0], first if s[1] is None else s[1]) for s in _OUTLINE_SWAPS])
+        text = text.replace("; the single-file constraint still applies, since an import is not a second file you author",
+                            "; an import is not a second file you author")
     return text
 
 
@@ -360,7 +450,8 @@ runs on the table of FI's record and can change nothing in it:
 - `derive_<id>(table)` works out the number `<id>` of the plan. It returns one number for the study, or a mapping of setting
   keys to numbers (a key is one of `table.keys()`), or `table.missing("why")` where the number does not exist (never a stand-in
   such as 0, -1 or a bound). It never returns a text, a list or True/False.
-- `reference_<id>(setting)` returns the reference value of `<id>` at one setting (`{axis: value}`), or `None` where there is none.
+- `reference_<id>(setting)` returns the reference value of `<id>` at one setting (`{axis: value}`), or `None` where there is none;
+  FI calls it once for each setting.
 - `figure_<id>(fig, table)` draws what the plan says the figure shows on `fig.axes` (one axes for each panel of the plan), from
   `table`. FI makes the figure, saves it and closes it: never call `savefig`, `show`, `close`, `figure` or `subplots`.
 - The table gives, for a result `id` at a setting `key`: `table.mean(id, key)`, `table.interval(id, key)`, `table.n(id, key)`,
@@ -380,8 +471,8 @@ works out every number and figure the plan declares and prints the results. Ther
 """
 _IN_EACH_RUN_BODIES = (
     "FI keeps each value's own results: `table.levels(id, factor, key)` gives the number of the value of the compared setting "
-    "`factor`, and a function that gives one number for each compared value returns a mapping from every one of the values to "
-    "its number (null where it does not exist, with the reason). A number the run gives once is one number.")
+    "`factor`. "
+    "its number. " + _skeleton.DERIVE_LEVEL_RULE + " A number the run gives once is one number.")
 
 
 class RunChecksMixin:
@@ -816,11 +907,19 @@ class RunChecksMixin:
         if not self._skeleton_frame(state):
             return None
         try:
-            from . import analysis_frame as _analysis
-        except ImportError:
+            _analysis = importlib.import_module(f"{__package__}.analysis_frame")
+        except ModuleNotFoundError as exc:
+            if exc.name != f"{__package__}.analysis_frame":
+                raise  # an import that fails inside the module must show in the run's log, not give the old texts
             return None
         design = state.get("design")
         if _analysis.applies(design):
+            return None
+        try:  # a quest whose frame an older FI wrote keeps the analysis the model writes (the frame is not rewritten under a run)
+            existing = (self.quest_root / "code" / _split_run.SIMULATE_NAME).read_text(encoding="utf-8")  # type: ignore[attr-defined]
+        except (OSError, UnicodeDecodeError):
+            existing = ""
+        if _analysis.frame_problem(existing):
             return None
         return _analysis.body_names(_analysis.plan_of(design))
 
@@ -950,7 +1049,7 @@ class RunChecksMixin:
                   "settings or trials and no main: the frame has them, so leave out whatever of the outline does that. FI "
                   "writes experiment.py, so leave out the statistics, the figures' files and the printed results too.\n")
         if self.config.execution.background_jobs:  # type: ignore[attr-defined]
-            block += _e._CLUSTER_PROTOCOL
+            block += _cluster_bodies()
         if search:
             block += ("\n## This study is a search for the best design, and FI runs the search (the plan's `optimisation` block)\n\n"
                       "FI, not the scripts, searches for the design that makes the objective as low or as high as possible: it "
