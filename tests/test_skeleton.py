@@ -186,3 +186,152 @@ def test_values_compared_inside_each_run_pass_through_the_frame(tmp_path: Path) 
                                     {"rate": [0.1, 0.2]}, deterministic=False, timeout_s=120, in_each_run={"t": [1, 2]}))
     assert not got.crashed, got.says()
     assert any(name.startswith("growth") for name in got.record()["returned"])
+
+
+# ---- what the model's reply brings besides its function -----------------------------------------------------------------
+
+CARRY = '''
+import math
+from dataclasses import dataclass
+
+try:
+    import numpy as np
+except ImportError:
+    np = None
+
+TWO_PI = 2 * math.pi
+SCALE = math.sqrt(4.0)
+
+@dataclass
+class Tally:
+    n: int = 0
+
+    def add(self) -> "Tally":
+        return Tally(self.n + 1)
+
+def trial(cell, ctx):
+    out = TrialResult()
+    out["growth"] = cell["rate"] * TWO_PI * SCALE + Tally().add().n
+    out["survival_count"] = 1
+    out["survival_total"] = 1
+    return out
+'''
+
+
+def test_a_class_a_computed_constant_and_an_import_block_come_with_the_function(tmp_path: Path) -> None:
+    frame = _frame()
+    text, why = skeleton.fill(frame, CARRY)
+    assert text is not None, why
+    for kept in ("class Tally", "@dataclass", "TWO_PI = 2 * math.pi", "SCALE = math.sqrt(4.0)", "except ImportError"):
+        assert kept in text, kept
+    got = _small(_quest(tmp_path, text))
+    assert not got.crashed, got.directive()
+    assert any(abs(got.settings[0].values["growth"][0] - (r * 4 * 3.141592653589793 + 1)) < 1e-9 for r in (0.1, 0.2, 0.3))
+
+
+def test_what_the_file_cannot_carry_is_said_plainly() -> None:
+    reply = BODY + "\nfor i in range(3):\n    print(i)\n\ndef trial_helper():\n    return 1\n\nTrialResult2 = 1\n"
+    frame = _frame()
+    text, note = skeleton.compose(frame, reply)
+    assert skeleton.has_frame(text) and "left out" in note and "for i in range(3)" in note
+    clash = BODY.replace("def _noise(ctx)", "def trial_x(ctx)") + "\ndef run_trial(cell, trial_id, seed):\n    return {}\n"
+    kept, note = skeleton.compose(frame, clash)
+    assert skeleton.frame_intact(frame, kept) == "" and "return {}" not in kept, "the reply's own entry point never lands"
+    assert "`run_trial`" in note and "already has that name" in note
+    steps_reply = "def f(x):\n    return x\n\nclass K:\n    pass\n\nGRID = list(range(3))\n\ndef trial(cell, ctx):\n    return {}\n"
+    source = "def f(x):\n    return x + 1\n\nclass K:\n    v = 1\n\ndef trial(cell, ctx):\n    raise NotImplementedError\n"
+    out, why, left = function_steps.replace_function_ex(source, "trial", steps_reply, signature="def trial(cell, ctx)", equation="t")
+    assert out is not None, why
+    assert "GRID = list(range(3))" in out and out.count("class K") == 1
+    assert any("`f`" in x for x in left) and any("`K`" in x for x in left)
+
+
+# ---- the frame is the frame FI wrote ----------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("extra, said", [
+    ("\ndef run_trial(cell, trial_id, seed):\n    return {'growth': 1.0}\n", "run_trial"),
+    ("\ndef run_cell(cell):\n    return {'growth': 1.0}\n", "run_cell"),
+    ("\nTrialResult.strict = False\n", "TrialResult.strict"),
+    ("\nTrialResult.declare(('anything',))\n", "TrialResult.declare"),
+    ("\nclass TrialResult(dict):\n    pass\n", "TrialResult"),
+    ("\nTrialResult = dict\n", "TrialResult"),
+    ("\nclass Ctx:\n    pass\n", "Ctx"),
+    ("\nsetattr(TrialResult, 'strict', False)\n", "TrialResult"),
+    ("\nfrom fi_frame import TrialResult as T\nT.strict = False\n", "fi_frame"),
+])
+def test_a_reply_that_defines_the_entry_or_rebinds_the_frame_is_refused(extra: str, said: str) -> None:
+    frame = _frame(strict=True)
+    ok, _ = skeleton.fill(frame, BODY)
+    assert ok is not None and skeleton.frame_intact(frame, ok) == ""
+    bad = ok + extra
+    problem = skeleton.frame_intact(frame, bad)
+    assert problem.startswith("the frame FI wrote was changed") and said in problem, problem
+    filled, _why = skeleton.fill(frame, BODY + extra)
+    assert filled is None or skeleton.frame_intact(frame, filled) == "", "refused, or left out of the file; never carried in"
+    inside = (ok or "").replace("    out = TrialResult()" + chr(10), "    TrialResult.strict = False" + chr(10) + "    out = TrialResult()" + chr(10))
+    assert "TrialResult.strict" in skeleton.frame_intact(frame, inside), "also inside the trial"
+
+
+def test_a_changed_frame_says_what_changed() -> None:
+    frame = _frame()
+    ok, _ = skeleton.fill(frame, BODY)
+    problem = skeleton.frame_intact(frame, (ok or "").replace("RESULTS = (", "RESULTS = ('mine', "))
+    assert problem.startswith("the frame FI wrote was changed") and "RESULTS" in problem and "mine" in problem
+
+
+def test_a_damaged_frame_is_met_as_a_changed_frame_not_as_a_missing_module(tmp_path: Path) -> None:
+    eng = _engine_with(tmp_path, True)
+    state = {"design": DESIGN}
+    good = eng._framed(state, BODY)
+    damaged = good.replace("seed=seed", "seed=1")
+    text = eng._framed(state, damaged)
+    assert (tmp_path / "code" / skeleton.RUNTIME_FILE).read_text(encoding="utf-8") == skeleton.RUNTIME, "written whenever the frame is used"
+    got = _small(_quest(tmp_path / "again", text))
+    assert got.crashed
+    said = got.directive()
+    assert "the frame FI wrote was changed" in said and "seed" in said and "ModuleNotFoundError" not in said
+    assert "ModuleNotFoundError" not in got.says()
+
+
+def test_the_runtime_is_written_even_when_the_models_reply_carries_its_own_frame(tmp_path: Path) -> None:
+    eng = _engine_with(tmp_path, True)
+    state = {"design": DESIGN}
+    whole = skeleton.fill(_frame(), BODY)[0] or ""
+    (tmp_path / "code").mkdir(exist_ok=True)
+    (tmp_path / "code" / skeleton.RUNTIME_FILE).unlink(missing_ok=True)
+    eng._framed(state, whole + "\nTrialResult.strict = False\n")
+    assert (tmp_path / "code" / skeleton.RUNTIME_FILE).is_file()
+
+
+# ---- a small run with the frame, through the gate ---------------------------------------------------------------------
+
+def _gate_engine(tmp_path: Path, design: dict[str, Any]) -> Any:
+    eng = _engine_with(tmp_path, True)
+    eng._draft_protocol = lambda state: design["protocol"]  # type: ignore[assignment]
+    eng._protocol_block = lambda state: design["protocol"]  # type: ignore[assignment]
+    eng._trial_mode, eng._trial_entries = True, {"run_trial"}
+    eng.executor = SharedInterpreterExecutor(python_version="3.11")
+    (tmp_path / "plan.md").write_text("# Plan\n\n## Method\nx\n", encoding="utf-8")
+    return eng
+
+
+def _framed_trial(tmp_path: Path, design: dict[str, Any], body: str) -> Any:
+    eng = _gate_engine(tmp_path, design)
+    state = {"design": design, "iteration": 0, "exec_reflect_iter": 0}
+    text = eng._framed(state, body)
+    assert skeleton.has_frame(text)
+    (tmp_path / "code" / "simulate.py").write_text(text, encoding="utf-8")
+    return eng, state
+
+
+def test_the_small_run_of_a_framed_simulation_sends_back_a_compared_setting_it_never_read(tmp_path: Path) -> None:
+    design = {"comparisons": ["dose"], "protocol": DESIGN["protocol"]}
+    ignoring = BODY.replace('cell["dose"]', "2")
+    eng, state = _framed_trial(tmp_path, design, ignoring)
+    sent = asyncio.run(eng._small_run_gate(state, sys.executable, {}))
+    assert sent is not None and "`dose`" in sent["exec_result"]["stderr_tail"]
+    honest = tmp_path / "honest"
+    honest.mkdir()
+    eng2, state2 = _framed_trial(honest, design, BODY)
+    assert asyncio.run(eng2._small_run_gate(state2, sys.executable, {})) is None
+    assert eng2._small_run_note and "never asked for" not in eng2._small_run_note

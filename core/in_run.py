@@ -14,6 +14,7 @@ This file is standard library only and holds nothing but top-level definitions: 
 
 import itertools
 import math
+import sys
 
 
 #: What FI is asking for in a call of the simulation, told to the code in the environment variable ``FI_CELL_KIND``
@@ -34,15 +35,36 @@ class Cell(dict):
 
     ``read``: names asked for that the cell has (``cell[n]``, ``cell.get(n)``, ``n in cell``). ``unknown``: names asked for
     that it has not (a misspelt key, a default for a setting the plan does not give). ``whole``: the code took the cell
-    as a whole (iterated it, ``dict(cell)``, ``**cell``, ``.items()``, copied, pickled or serialised it): which keys it
+    as a whole (iterated it, ``dict(cell)``, ``**cell``, ``.items()``, copied, pickled, printed or serialised it): which keys it
     used cannot then be told, and a record that says so makes no claim about unread settings. A C extension that reads
     the mapping directly is not seen at all, which shows as a trial that read nothing."""
+
+    _yaml_taught = False
 
     def __init__(self, *args, **kwargs):
         dict.__init__(self, *args, **kwargs)
         self._asked = set()
         self._unknown = set()
         self._whole = False
+        if not Cell._yaml_taught and "yaml" in sys.modules:
+            Cell._teach_yaml()
+
+    @staticmethod
+    def _represent(dumper, data):
+        data._whole = True
+        return dumper.represent_dict(list(dict.items(data)))
+
+    @staticmethod
+    def _teach_yaml():
+        """``yaml.safe_dump(cell)`` looks the class up exactly, so the study's own copy of PyYAML (when it has imported it) is
+        told to write a ``Cell`` as the mapping it is."""
+        Cell._yaml_taught = True
+        try:
+            yaml = sys.modules["yaml"]
+            for dumper in (yaml.SafeDumper, yaml.Dumper):
+                dumper.add_representer(Cell, Cell._represent)
+        except Exception:  # noqa: BLE001 - a yaml module that is not PyYAML: nothing to teach
+            pass
 
     def _note(self, key):
         try:
@@ -89,6 +111,18 @@ class Cell(dict):
     def copy(self):
         self._whole = True
         return dict.copy(self)
+
+    def __repr__(self):
+        self._whole = True
+        return dict.__repr__(self)
+
+    def __str__(self):
+        self._whole = True
+        return dict.__repr__(self)
+
+    def __reversed__(self):
+        self._whole = True
+        return dict.__reversed__(self)
 
     def __or__(self, other):
         self._whole = True

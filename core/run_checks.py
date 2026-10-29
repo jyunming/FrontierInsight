@@ -675,11 +675,16 @@ class RunChecksMixin:
         text, note = _skeleton.compose(frame, simulate_code)
         if note:
             self._log.warning("[implement] simulate.py: %s", note)  # type: ignore[attr-defined]
-        if _skeleton.has_frame(text) and not _skeleton.frame_intact(frame, text):
+        if _skeleton.has_frame(text):
+            # The runtime is written whenever the file imports it, so a changed frame is never met as a missing module.
             code_dir = self.quest_root / "code"  # type: ignore[attr-defined]
             code_dir.mkdir(parents=True, exist_ok=True)
             (code_dir / _skeleton.RUNTIME_FILE).write_text(_skeleton.RUNTIME, encoding="utf-8")
-            self._log.info("[implement] simulate.py is FI's frame with the model's trial function")  # type: ignore[attr-defined]
+            problem = _skeleton.frame_intact(frame, text)
+            if problem:
+                text = _skeleton.refuse(text, problem)  # the run then says what changed, and the simulation is repaired
+            else:
+                self._log.info("[implement] simulate.py is FI's frame with the model's trial function")  # type: ignore[attr-defined]
         return text
 
     # ---- a setting of the grid the code never reads ----------------------------------------------------------------------

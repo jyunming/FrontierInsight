@@ -167,3 +167,41 @@ def test_a_setting_the_code_reads_under_a_condition_is_a_note_not_a_repair(tmp_p
     assert sent is None, "the code looks `rate` up: the small run did not reach the branch that reads it"
     plan = (tmp_path / "plan.md").read_text(encoding="utf-8")
     assert "never asked for `rate`" in plan and "under a condition the small run did not reach" in plan
+
+
+# ---- more ways to take the cell as a whole; a key built at run time ----------------------------------------------------
+
+@pytest.mark.parametrize("take", [repr, str, lambda c: list(reversed(c))])
+def test_a_printed_or_reversed_cell_counts_as_the_whole_cell(take: Any) -> None:
+    cell = in_run.Cell({"rate": 0.1, "dose": 2})
+    take(cell)
+    assert in_run.cell_reads(cell)["read_all"] is True
+
+
+def test_a_cell_can_be_dumped_as_yaml() -> None:
+    yaml = pytest.importorskip("yaml")
+    cell = in_run.Cell({"rate": 0.1, "dose": 2})
+    assert yaml.safe_load(yaml.safe_dump(cell)) == {"rate": 0.1, "dose": 2}
+    assert in_run.cell_reads(cell)["read_all"] is True
+
+
+DYNAMIC = '''
+def run_trial(cell, trial, seed):
+    out = 0.0
+    for name in ("rate", "dose"):
+        out += cell[name + ""] * 1.0
+    return {"growth": out}
+'''
+
+
+def test_a_key_built_at_run_time_is_seen_when_the_small_run_reaches_it(tmp_path: Path) -> None:
+    got = _small(tmp_path, DYNAMIC)
+    assert not got.crashed and got.reads["never"] == [] and got.reads["measurable"], "the text names no key; the run saw both"
+
+
+def test_a_key_built_at_run_time_that_the_small_run_missed_is_a_known_gap(tmp_path: Path) -> None:
+    """Known gap, kept on purpose (bench in the commit message of the hold-back): the hold-back reads literal keys only, so a
+    compared setting read through a key built at run time, on a branch the small run did not reach, is sent back once."""
+    source = ("def run_trial(cell, t, seed):\n    if cell['dose'] > 2:\n        return {'x': cell['ra' + 'te']}\n    return {}\n")
+    _eng, sent = _gate(tmp_path, {"comparisons": ["rate"]}, ["rate"], source=source)
+    assert sent is not None

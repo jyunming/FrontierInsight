@@ -18,6 +18,8 @@ no trial set, is recorded and said, never a failed trial. The stdlib-only runtim
 from __future__ import annotations
 
 import ast
+import itertools
+from collections import Counter
 from typing import Any
 
 from . import function_steps as _steps
@@ -201,13 +203,19 @@ def frame_source(design: dict[str, Any], *, stochastic: bool, strict: bool = Fal
 
 def fill(frame: str, reply: str) -> tuple[str | None, str]:
     """``(simulate.py, "")`` with the model's ``trial`` (its helpers and imports too) put into ``frame``, or ``(None, why)``.
-    The model's function must take exactly ``(cell, ctx)``. Goes through :func:`core.function_steps.replace_function`, the
+    The model's function must take exactly ``(cell, ctx)``. Goes through :func:`core.function_steps.replace_function_ex`, the
     path that fills the functions of the model's package. The result is checked with :func:`frame_intact`."""
-    text, why = _steps.replace_function(frame, SLOT, reply, signature=SLOT_SIGNATURE, equation="trial")
+    text, why, _left = _fill(frame, reply)
+    return text, why
+
+
+def _fill(frame: str, reply: str) -> tuple[str | None, str, list[str]]:
+    """:func:`fill` and, as the third value, what of the reply could not be carried into the file (plain phrases)."""
+    text, why, left = _steps.replace_function_ex(frame, SLOT, reply, signature=SLOT_SIGNATURE, equation="trial")
     if text is None:
-        return None, why
+        return None, why, []
     problem = frame_intact(frame, text)
-    return (None, problem) if problem else (text, "")
+    return (None, problem, []) if problem else (text, "", left)
 
 
 def _regions(source: str) -> list[str] | None:
@@ -223,18 +231,99 @@ def _regions(source: str) -> list[str] | None:
     return out
 
 
+#: Names the frame binds once. A second binding outside the marked parts (a reply that defines its own ``run_trial``, or
+#: ``TrialResult``) or a change to their attributes (``TrialResult.strict = False``) changes what the harness runs.
+_PROTECTED = frozenset({"run_trial", "run_cell", "Ctx", "TrialResult", "UnknownResult", "fi_frame"})
+
+
+def _targets(node: ast.AST) -> list[str]:
+    if isinstance(node, ast.Name):
+        return [node.id]
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return [n for e in node.elts for n in _targets(e)]
+    if isinstance(node, ast.Starred):
+        return _targets(node.value)
+    return []
+
+
+def _module_level(body: list[ast.stmt]) -> list[ast.stmt]:
+    """The statements that run when the module is loaded, through its ``if`` / ``try`` / ``with`` / loops (not into a
+    function or a class)."""
+    out: list[ast.stmt] = []
+    for n in body:
+        out.append(n)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        for field in ("body", "orelse", "finalbody"):
+            inner = getattr(n, field, None)
+            if isinstance(inner, list):
+                out.extend(_module_level(inner))
+        for h in getattr(n, "handlers", []) or []:
+            out.extend(_module_level(h.body))
+    return out
+
+
+def _base(node: ast.AST) -> str:
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else ""
+
+
+def _pinned(tree: ast.Module) -> Counter:
+    """What binds or changes the frame's own names, read as syntax: ``{what: how many}``. The frame's text has each once."""
+    out: Counter = Counter()
+    for n in _module_level(tree.body):
+        names: list[str] = []
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names = [n.name]
+        elif isinstance(n, ast.Assign):
+            names = [x for t in n.targets for x in _targets(t)]
+        elif isinstance(n, (ast.AugAssign, ast.AnnAssign)):
+            names = _targets(n.target)
+        elif isinstance(n, ast.Delete):
+            names = [x for t in n.targets for x in _targets(t)]
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            names = [(a.asname or a.name).split(".")[0] for a in n.names]
+            if (isinstance(n, ast.ImportFrom) and n.module == "fi_frame") or any(a.name == "fi_frame" for a in n.names):
+                out["an import of fi_frame"] += 1
+        for name in names:
+            if name in _PROTECTED:
+                out[f"a binding of `{name}`"] += 1
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Attribute) and isinstance(n.ctx, (ast.Store, ast.Del)) and _base(n) in _PROTECTED:
+            out[f"a change to `{_base(n)}.{n.attr}`"] += 1
+        elif isinstance(n, ast.Call):
+            f = n.func
+            if isinstance(f, ast.Attribute) and f.attr == "declare" and _base(f) in _PROTECTED:
+                out["a call of `TrialResult.declare`"] += 1
+            elif isinstance(f, ast.Name) and f.id in ("setattr", "delattr") and n.args and _base(n.args[0]) in _PROTECTED:
+                out[f"a change to `{_base(n.args[0])}`"] += 1
+    return out
+
+
+def _short(node: ast.AST | None) -> str:
+    if node is None:
+        return "nothing"
+    text = ast.unparse(node).splitlines()[0]
+    return text if len(text) <= 70 else text[:67] + "..."
+
+
 def frame_intact(old: str, new: str) -> str:
     """``""`` when ``new`` has exactly the frame ``old`` has (both regions, compared as syntax, so a change of spacing does not
-    count) and the slot ``trial`` with the same parameters; else a plain sentence naming what changed."""
+    count), the slot ``trial`` with the same parameters, and nothing outside the regions that binds or changes the frame's
+    own names (a ``run_trial`` or ``TrialResult`` of the reply's own, ``TrialResult.strict = False``); else a plain sentence
+    saying what changed. All of it is read as syntax."""
     before, after = _regions(old), _regions(new)
     if before is None:
         return ""
     if after is None:
         return "the frame FI wrote (the marked parts of simulate.py) is missing"
     try:
-        for a, b in zip(before, after):
-            if ast.dump(ast.parse(a)) != ast.dump(ast.parse(b)):
-                return "the frame FI wrote (the marked parts of simulate.py) was changed"
+        for label, a, b in zip(("first", "second"), before, after):
+            for x, y in itertools.zip_longest(ast.parse(a).body, ast.parse(b).body):
+                if x is None or y is None or ast.dump(x) != ast.dump(y):
+                    return (f"the frame FI wrote was changed: in the {label} marked part of simulate.py, `{_short(x)}` "
+                            f"is now `{_short(y)}`")
     except SyntaxError as e:
         return f"the frame is not valid Python ({e.msg}, line {e.lineno})"
     slot_old, slot_new = _steps._find(old, SLOT), _steps._find(new, SLOT)
@@ -242,7 +331,35 @@ def frame_intact(old: str, new: str) -> str:
         return f"the function `{SLOT}` is missing"
     if slot_old is not None and ast.dump(slot_old.args) != ast.dump(slot_new.args):
         return f"the parameters of `{SLOT}` were changed; they must be (cell, ctx)"
+    try:
+        was, now = _pinned(ast.parse(old)), _pinned(ast.parse(new))
+    except SyntaxError as e:
+        return f"the file is not valid Python ({e.msg}, line {e.lineno})"
+    if was != now:
+        more, less = sorted((now - was).keys()), sorted((was - now).keys())
+        return ("the frame FI wrote was changed: the reply adds " + ", ".join(more) if more
+                else "the frame FI wrote was changed: the reply removes " + ", ".join(less)) + " outside the marked parts of simulate.py"
     return ""
+
+
+def refuse(text: str, problem: str) -> str:
+    """``text`` with a first statement that stops the load with ``problem`` (after the docstring and ``__future__`` imports),
+    so a file whose frame was changed is never run as it stands: the small run says so, in the words of ``problem``, and the
+    simulation goes back to be repaired."""
+    line = f"raise RuntimeError({problem!r})  # FI: the frame was changed\n"
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return line + text
+    after = 0
+    for n in tree.body:
+        doc = isinstance(n, ast.Expr) and isinstance(getattr(n, "value", None), ast.Constant) and isinstance(n.value.value, str)
+        if doc or (isinstance(n, ast.ImportFrom) and n.module == "__future__"):
+            after = n.end_lineno or after
+        else:
+            break
+    lines = text.splitlines(keepends=True)
+    return "".join(lines[:after]) + line + "".join(lines[after:])
 
 
 def has_frame(source: str) -> bool:
@@ -267,8 +384,10 @@ def compose(frame: str, simulate_reply: str) -> tuple[str, str]:
         if names & {"run_trial", "run_cell"}:
             return simulate_reply, "the reply is a whole simulation without the function `trial`: kept as written, without the frame"
         return simulate_reply, "the reply holds no function `trial`"
-    text, why = fill(frame, simulate_reply)
-    return (text, "") if text is not None else (simulate_reply, why)
+    text, why, left = _fill(frame, simulate_reply)
+    if text is None:
+        return simulate_reply, why
+    return text, (("left out of the model's reply, which the file cannot carry: " + "; ".join(left)) if left else "")
 
 
 # ---- what the small run shows ----------------------------------------------------------------------------------------
