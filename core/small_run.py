@@ -160,8 +160,7 @@ class SmallRun:
             why = "; ".join(f"{n}x {r}" for r, n in s.reasons[:2])
             lines.append(f"- {s.key or 'the one setting'}: {s.failed} of {s.planned} trials failed - {why}")
         tb = next((s.traceback for s in self.faults if s.traceback), "")
-        from . import in_run as _in_run
-        rule = (" " + level_rule) if level_rule and any(_in_run.is_level_fault(r) for s in self.faults for r, _ in s.reasons) else ""
+        rule = (" " + level_rule) if level_rule and any(_checks.is_level_fault(r) for s in self.faults for r, _ in s.reasons) else ""
         return ("FI ran the simulation on a small case before the study (a few trials at the middle of the plan's settings "
                 "and at its corners), and most trials failed in these settings:\n" + "\n".join(lines)
                 + (f"\n\nThe last traceback:\n{tb[-1500:]}" if tb else "")

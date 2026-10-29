@@ -222,7 +222,7 @@ def _failed(reason: str) -> small_run.SmallRun:
 
 def test_a_failed_small_run_that_lacks_a_compared_value_gets_one_rule_that_names_the_keys() -> None:
     reason = _missing_key_reason()
-    assert in_run.is_level_fault(reason) and not in_run.is_level_fault("NameError: name 'x' is not defined")
+    assert trial_checks.is_level_fault(reason) and not trial_checks.is_level_fault("NameError: name 'x' is not defined")
     rule = skeleton.level_rule(INSIDE["protocol"], FRAMED)
     assert "method=slow" in rule and "out.each(" in rule and "NaN (or None)" in rule
     text = _failed(reason).directive(rule)

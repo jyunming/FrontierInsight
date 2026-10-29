@@ -326,11 +326,16 @@ def failures(cells: list[dict[str, Any]], reasons: dict[str, Counter] | None = N
     return out
 
 
+def is_level_fault(reason):
+    """True when ``reason`` is FI's own message about a run's result per compared value (``read_returned`` writes it as
+    ``"{entry}() returned `{name}` ..."``): a value given for some of the compared values and not for all."""
+    return "() returned `" in str(reason)
+
+
 def failures_directive(bad: list[SettingFailures], level_rule: str = "") -> str:
     """The plain message the simulation's repair is given for settings where most trials failed. ``level_rule``: FI's one
     rule for a result compared inside each run, said only when a failure is of that kind."""
-    from . import in_run as _in_run
-    rule = (" " + level_rule) if level_rule and any(_in_run.is_level_fault(r) for s in bad for r, _ in s.reasons) else ""
+    rule = (" " + level_rule) if level_rule and any(is_level_fault(r) for s in bad for r, _ in s.reasons) else ""
     shown = "\n".join(f"- {s.says()}" for s in bad[:8]) + (f"\n- and {len(bad) - 8} more setting(s)" if len(bad) > 8 else "")
     return ("FI ran the study's trials, and in these settings more than half of the trials failed, so their numbers would "
             "rest on the few trials that happened to survive:\n" + shown + "\n\nRepair the simulation so that a trial "
