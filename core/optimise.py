@@ -1509,6 +1509,9 @@ class OptimisationRunner:
         #: Seconds of the time limit kept for FI's check of the best design when the study was too long to finish (set by
         #: the run's sizing, core/run_checks.py): the coarse scan and the search stop that much sooner.
         self.check_reserve_s = 0.0
+        #: Seconds from the start of the run at which the search must stop, from FI's cost model (core/cost_model.py): the
+        #: time left for the check and for the analysis is kept. ``None``: only ``check_reserve_s`` is kept.
+        self.search_deadline_s: float | None = None
         #: The id of a cut study (set by the run's sizing): written into the scan's ledger and the search's record, so the
         #: disclosure reads only this run's files.
         self.run_id = ""
@@ -1626,6 +1629,8 @@ class OptimisationRunner:
                                     design=self._design_now())
 
         search_s = int(timeout_s - self.check_reserve_s)
+        if self.search_deadline_s is not None:
+            search_s = min(search_s, int(self.search_deadline_s))
         if search_s < 1:
             # Nothing is left for the scan and the search once the check's time is kept: they do not start, and the check
             # does not lose its time to a search given a second it does not have.
