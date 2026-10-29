@@ -255,12 +255,20 @@ def save(quest_root: Path, decision: dict[str, Any]) -> None:
 # --- what the code-writing step is asked for, and what it returns ------------------------------------------------------
 
 
-def prompt_block(package: str, equations: list[str], frame: str = "") -> str:
+def _others(analysis: bool) -> str:
+    """The sentence that keeps the model's other file apart from the package."""
+    if analysis:
+        return "The functions of derive.py never import the package: they read only the table FI hands them, as the contract above says."
+    return "experiment.py never imports the package: it reads only the records FI hands it, as the contract above says."
+
+
+def prompt_block(package: str, equations: list[str], frame: str = "", analysis: bool = False) -> str:
     """The layout the code-writing prompts ask for, after the two-script contract. ``frame``: ``"prompt"`` when
-    FI writes the frame of simulate.py (core/skeleton.py): the request then names no entry point of simulate.py."""
+    FI writes the frame of simulate.py (core/skeleton.py): the request then names no entry point of simulate.py.
+    ``analysis``: FI writes experiment.py too (core/analysis_frame.py), and the model's other file is derive.py."""
     labels = ", ".join(equations) if equations else "each equation of the plan's model"
     if frame:
-        beside = "the function `trial` and experiment.py"
+        beside = "the function `trial` and the functions of derive.py" if analysis else "the function `trial` and experiment.py"
         sim = ("- `trial` reads the setting from `cell` and computes it by calling the package (`from {package} import model`).\n"
                "  The mathematics is in the package.\n").format(package=package)
         return f"""
@@ -272,7 +280,7 @@ fenced Python block whose first line is `# file: <path>`:
   and no loop over settings, no random generator created at module level (a function that draws random numbers takes
   the generator or the seed as an argument). Put each equation's id in a comment (`# E1`) on or above the function that
   computes it: {labels}.
-{sim}- experiment.py never imports the package: it reads only the records FI hands it, as the contract above says.
+{sim}- {_others(analysis)}
 Do not write tests, a README or a command-line entry: FI writes the unit tests from the plan's checks
 (`tests/{TEST_NAME}`), the equation list (`{METHODS_NAME}`) and `run.py` itself.
 """
@@ -306,16 +314,19 @@ def steps_block(steps: list[tuple[str, str, str]] | None) -> str:
             "simpler version of a step into simulate.py:\n" + lines + "\n")
 
 
-def prefilled_block(package: str, model_source: str, steps: list[tuple[str, str, str]] | None = None, frame: str = "") -> str:
+def prefilled_block(package: str, model_source: str, steps: list[tuple[str, str, str]] | None = None, frame: str = "",
+                    analysis: bool = False) -> str:
     """The layout the code-writing prompts ask for when FI has already written and checked the package, function by
     function (:mod:`core.function_steps`): only the two scripts are asked for. ``steps``: the package's functions that are
     steps of the method, which the scripts call and do not write again. ``frame``: ``"prompt"`` when FI writes
-    the frame of simulate.py (what is asked for is then ``trial`` and experiment.py)."""
+    the frame of simulate.py (what is asked for is then ``trial`` and experiment.py). ``analysis``: FI writes experiment.py
+    too, and the other file is derive.py."""
     if frame:
-        only = "Write only the function `trial` (with the helpers it needs) and experiment.py."
+        only = ("Write only the function `trial` (with the helpers it needs) and the functions of derive.py." if analysis else
+                "Write only the function `trial` (with the helpers it needs) and experiment.py.")
         sim = (f"- `trial` reads the setting from `cell` and computes it by calling the package (`from {package} import model`, "
                "then `model.<function>(...)`, with the signatures\n  below). The mathematics is in the package.\n")
-        exp = "- experiment.py never imports the package: it reads only the records FI hands it, as the contract above says.\n"
+        exp = f"- {_others(analysis)}\n"
         return f"""
 THE CODE AS A SMALL RESEARCH TOOL. The model's package `{package}/` is ALREADY WRITTEN AND TESTED: FI wrote it one function
 at a time, one function per equation, and checked each function against the plan's equation. Do NOT write any file of the

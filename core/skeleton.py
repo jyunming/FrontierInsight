@@ -24,6 +24,7 @@ no trial set, is recorded and said, never a failed trial. The stdlib-only runtim
 from __future__ import annotations
 
 import ast
+import importlib
 import itertools
 import re
 from collections import Counter
@@ -864,10 +865,13 @@ def repair_note(source: str, whole: bool = False) -> str:
 
 def repair_problem(old: str, new: str, name: str) -> str:
     """Why ``new`` cannot replace the file ``name`` whose text is ``old``, as far as FI's frame is concerned, else ``""``.
-    ``simulate.py`` with a frame: :func:`frame_intact`. ``fi_frame.py``: FI's runtime, which a repair never changes. Any
-    other file, and a ``simulate.py`` without a frame, is not this check's (so nothing changes when the frame is off)."""
+    ``simulate.py`` with a frame: :func:`frame_intact`. ``fi_frame.py``: FI's runtime, which a repair never changes.
+    ``experiment.py`` and ``derive.py`` when FI wrote them (the analysis, core/analysis_frame.py): :func:`analysis_problem`.
+    Any other file, and a ``simulate.py`` without a frame, is not this check's (so nothing changes when the frame is off)."""
     name = str(name).replace("\\", "/").rsplit("/", 1)[-1]
     old, new = (old or "").lstrip("\ufeff"), (new or "").lstrip("\ufeff")
+    if name in ANALYSIS_FILES:
+        return _analysis_problem(old, new, name)
     if name == RUNTIME_FILE:  # only FI's own runtime; a module of the quest's that happens to share the name is not
         return "" if new == old or not old.startswith(RUNTIME_HEAD) else (
             "the frame FI wrote was changed: fi_frame.py is FI's own file and a repair does not edit it")
@@ -983,6 +987,126 @@ RERUN_NOTE = (
 
 EXTEND_REPLY = ("Return what the reply format above asks for: in the `# file: simulate.py` block only `trial` and the helpers "
                 "it uses (FI keeps the frame), and experiment.py whole.")
+
+
+# ---- a repair of the analysis FI wrote (derive.py: the model's bodies in FI's frame; experiment.py is all FI's) -------------
+
+#: The files of the analysis, when FI writes it (core/analysis_frame.py): a repair of either goes through that module's check.
+ANALYSIS_FILES = ("derive.py", "experiment.py")
+#: The first line of the part of derive.py that is FI's.
+ANALYSIS_MARK = "# >>> FI analysis frame"
+#: The parameters of each kind of body (the same as core/analysis_frame.py: SIGNATURES).
+BODY_PARAMS = {"derive": "table", "reference": "setting", "figure": "fig, table"}
+
+
+def _analysis_problem(old: str, new: str, name: str) -> str:
+    try:
+        _analysis = importlib.import_module(f"{__package__}.analysis_frame")
+    except ModuleNotFoundError as exc:  # a checkout without the analysis frame has nothing to check
+        if exc.name != f"{__package__}.analysis_frame":
+            raise  # an import that fails inside the module is a fault to see, not a reason to check nothing
+        return ""
+    return _analysis.analysis_problem(old, new, name)
+
+
+def body_signature(body: str) -> str:
+    """``def derive_x(table)`` for the body ``derive_x`` (``reference_x(setting)``, ``figure_x(fig, table)``), else ``""``."""
+    kind = str(body).split("_", 1)[0]
+    return f"def {body}({BODY_PARAMS[kind]})" if kind in BODY_PARAMS and "_" in str(body) else ""
+
+
+def has_analysis_frame(source: str) -> bool:
+    """Whether ``source`` (the text of derive.py) has FI's frame."""
+    return ANALYSIS_MARK in (source or "")
+
+
+DERIVE_REPAIR_NOTE = (
+    "FIRST, what you may change: FI wrote experiment.py, which runs the analysis, and the frame of derive.py (the lines "
+    "between its `# >>> FI analysis frame` and `# <<< FI analysis frame` lines). Only the functions named `derive_...`, "
+    "`reference_...` and `figure_...` of derive.py, the helper functions and the imports they use may change. Give each "
+    "function you change whole, with its own parameters (in `functions`); do not give the whole file, and do not give "
+    "experiment.py or touch fi_frame.py. A change to FI's lines is refused before anything runs and the repair counts as "
+    "not made.\n\n")
+
+REFLECT_INTRO_DERIVE = ("Produce a corrected function of derive.py (and the helper functions it uses) that runs to completion on "
+                        "the available CPU venv and returns what the plan declares through FI's analysis. The fix must address "
+                        "the actual bug shown in the traceback.")
+
+#: The one rule for a function that gives a number for each value the plan compares inside each run.
+DERIVE_LEVEL_RULE = (
+    "When the plan compares values inside each run, a function that gives one number for each value of one compared setting "
+    "returns a mapping whose keys are those values written as text (`\"bh\"`, `0.5`: the value alone, not `method=bh`), with "
+    "EVERY value of that setting as a key; where the result does not exist for a value its number is `None` (a left-out key is "
+    "refused).")
+
+_BODY_RETURNS = {
+    "derive": ("It returns one number for the study, a mapping of setting keys to numbers, or `table.missing(\"why\")` where "
+               "the number does not exist (never a stand-in such as 0, -1 or a bound, and never a bare `None`). It reads the "
+               "results only through `table`."),
+    "reference": ("It takes one setting (`{axis: value}`), is called once for each setting, and returns the reference value "
+                  "there, or `None` where there is none."),
+    "figure": ("It draws on `fig.axes` from `table` and returns nothing: FI makes the figure, saves it and closes it, so it never "
+               "calls `savefig`, `show`, `close`, `figure` or `subplots`. It draws only values read from `table`."),
+}
+
+
+def reflect_derive(body: str = "", compared: bool = False) -> str:
+    """The text of a repair when the function ``body`` of derive.py failed (the analysis is FI's: it calls the bodies, keeps
+    their record and prints the results itself). It replaces the text of the repair of an experiment.py the model wrote.
+    ``compared``: the plan compares values inside each run (:data:`DERIVE_LEVEL_RULE` is then added)."""
+    sig = body_signature(body)
+    kind = str(body).split("_", 1)[0]
+    which = (f"The function `{body}` failed, or FI refused what it returned (the reason is below). Repair `{body}` (and the "
+             f"helpers it uses) and give it whole with exactly its parameters, `{sig}`. " if sig else
+             "A function of derive.py failed, or FI refused what it returned (the reason is below). Repair that function (and "
+             "the helpers it uses), each given whole with its own parameters. ")
+    return ("THE ANALYSIS IS FI'S: FI wrote experiment.py, which reads its own record of the trials, calls the functions of "
+            "derive.py, keeps what they return and prints the results. " + which
+            + _BODY_RETURNS.get(kind, "") + (" " + DERIVE_LEVEL_RULE if compared and kind == "derive" else "")
+            + " Leave every other function and every line of FI's as they are, and give no experiment.py.\n")
+
+
+#: The sentences of agents/execute_reflect.md that are about a script that prints its results, and what they say for a repair
+#: of a function of derive.py (where FI prints the results and a value that does not exist is `table.missing`).
+_REFLECT_SWAPS = (
+    ("produce a patched script that fixes it.", "produce a patched function of derive.py that fixes it."),
+    (REFLECT_INTRO, REFLECT_INTRO_DERIVE),
+    ("If the method genuinely diverges or a value is undefined, that is a finding: emit `null` for that value and say why under "
+     "`\"why_missing\"` (`\"why_missing\": {\"<name>\": \"<a few words>\"}`); never a stand-in number.",
+     "If the method genuinely diverges or a value is undefined, that is a finding: return `table.missing(\"<a few words why>\")` "
+     "for it; never a stand-in number."),
+    ("REQUIRED (or `code`) unless", "REQUIRED unless"),
+    ("<leave empty. Only if the fix changes a module-level statement (an import, a constant) that no function can carry, give the "
+     "whole corrected script here, with every function it has now>", "<leave empty: give the functions only>"),
+    ("- RESULT_JSON parsed: $result_json_present\n", ""),
+    ("- figures produced: $figures_count\n", ""),
+)
+
+
+def derive_prompt(source: str, prompt: str, body: str = "") -> str:
+    """The repair request ``prompt`` (made from agents/execute_reflect.md) for a function of a derive.py with text ``source``:
+    the note on what may change first, then the text with every sentence about a whole script that prints its results (the
+    intro, the rule for a value that does not exist, the whole-script ``code`` key, the lines about ``RESULT_JSON``) replaced
+    by what is true for a function of derive.py; ``prompt`` unchanged when ``source`` has no FI frame. ``body``: the function
+    that failed, named in the opening."""
+    if not has_analysis_frame(source):
+        return prompt
+    for old, new in _REFLECT_SWAPS:
+        prompt = prompt.replace(old, new)
+    failed = f"The function `{body}` of derive.py" if body else "A function of derive.py"
+    prompt = prompt.replace("The agent-generated experiment script just failed", f"{failed} just failed")
+    return DERIVE_REPAIR_NOTE + prompt
+
+
+RERUN_NOTE_ANALYSIS = (
+    "\nThe experiment is a simulation and an analysis. In the `# file: simulate.py` block give `trial` and its helpers back "
+    "exactly as they are unless the problem the review found is IN the simulation: the trials FI already ran are then used as "
+    "they are, and only the analysis runs again. FI writes experiment.py; if the problem is in a number or a figure the "
+    "analysis gives, give the function of derive.py that works it out, whole, in the `# file: derive.py` block.\n")
+
+EXTEND_REPLY_ANALYSIS = ("Return what the reply format above asks for: in the `# file: simulate.py` block only `trial` and the "
+                         "helpers it uses (FI keeps the frame), and in the `# file: derive.py` block only the functions that "
+                         "work out the new numbers or figures (FI writes experiment.py).")
 
 
 def compose(frame: str, simulate_reply: str, previous: str = "") -> tuple[str, str]:
