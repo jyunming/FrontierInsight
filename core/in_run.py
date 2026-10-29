@@ -14,6 +14,7 @@ This file is standard library only and holds nothing but top-level definitions: 
 
 import itertools
 import math
+import sys
 
 
 #: What FI is asking for in a call of the simulation, told to the code in the environment variable ``FI_CELL_KIND``
@@ -25,6 +26,117 @@ import math
 #: that expands it into a function's arguments is not broken by an added key).
 KIND_ENV = "FI_CELL_KIND"
 CELL_KINDS = ("search", "scan", "check")
+
+
+class Cell(dict):
+    """The settings of one call of the simulation: a plain ``dict`` (every way the code reads it keeps working) that
+    remembers which settings the code asked for. FI's harness hands it to ``run_trial`` / ``run_cell`` and writes what it
+    recorded into the trial's row (:func:`cell_reads`).
+
+    ``read``: names asked for that the cell has (``cell[n]``, ``cell.get(n)``, ``n in cell``). ``unknown``: names asked for
+    that it has not (a misspelt key, a default for a setting the plan does not give). ``whole``: the code took the cell
+    as a whole (iterated it, ``dict(cell)``, ``**cell``, ``.items()``, copied, pickled, printed or serialised it): which keys it
+    used cannot then be told, and a record that says so makes no claim about unread settings. A C extension that reads
+    the mapping directly is not seen at all, which shows as a trial that read nothing."""
+
+    _yaml_taught = False
+
+    def __init__(self, *args, **kwargs):
+        dict.__init__(self, *args, **kwargs)
+        self._asked = set()
+        self._unknown = set()
+        self._whole = False
+        if not Cell._yaml_taught and "yaml" in sys.modules:
+            Cell._teach_yaml()
+
+    @staticmethod
+    def _represent(dumper, data):
+        data._whole = True
+        return dumper.represent_dict(dict.copy(data))
+
+    @staticmethod
+    def _teach_yaml():
+        """``yaml.safe_dump(cell)`` looks the class up exactly, so the study's own copy of PyYAML (when it has imported it) is
+        told to write a ``Cell`` as the mapping it is."""
+        Cell._yaml_taught = True
+        try:
+            yaml = sys.modules["yaml"]
+            for dumper in (yaml.SafeDumper, yaml.Dumper):
+                dumper.add_representer(Cell, Cell._represent)
+        except Exception:  # noqa: BLE001 - a yaml module that is not PyYAML: nothing to teach
+            pass
+
+    def _note(self, key):
+        try:
+            (self._asked if dict.__contains__(self, key) else self._unknown).add(str(key))
+        except TypeError:  # an unhashable key
+            pass
+
+    def __getitem__(self, key):
+        self._note(key)
+        return dict.__getitem__(self, key)
+
+    def get(self, key, default=None):
+        self._note(key)
+        return dict.get(self, key, default)
+
+    def __contains__(self, key):
+        self._note(key)
+        return dict.__contains__(self, key)
+
+    def setdefault(self, key, default=None):
+        self._note(key)
+        return dict.setdefault(self, key, default)
+
+    def pop(self, key, *default):
+        self._note(key)
+        return dict.pop(self, key, *default)
+
+    def __iter__(self):
+        self._whole = True
+        return dict.__iter__(self)
+
+    def keys(self):
+        self._whole = True
+        return dict.keys(self)
+
+    def items(self):
+        self._whole = True
+        return dict.items(self)
+
+    def values(self):
+        self._whole = True
+        return dict.values(self)
+
+    def copy(self):
+        self._whole = True
+        return dict.copy(self)
+
+    def __repr__(self):
+        self._whole = True
+        return dict.__repr__(self)
+
+    def __str__(self):
+        self._whole = True
+        return dict.__repr__(self)
+
+    def __reversed__(self):
+        self._whole = True
+        return dict.__reversed__(self)
+
+    def __or__(self, other):
+        self._whole = True
+        return dict.copy(self) | other
+
+    def __reduce__(self):  # copy.copy, deepcopy and pickle give a plain dict: the class is not importable elsewhere
+        self._whole = True
+        return (dict, (dict.copy(self),))
+
+
+def cell_reads(cell):
+    """What the code asked of a :class:`Cell`, as the fields of a trial's row."""
+    return {"read": sorted(getattr(cell, "_asked", ())), "unknown_reads": sorted(getattr(cell, "_unknown", ())),
+            "read_all": bool(getattr(cell, "_whole", False))}
 
 
 def fmt(value):

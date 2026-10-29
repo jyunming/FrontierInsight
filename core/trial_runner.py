@@ -304,15 +304,17 @@ def main():
         # When the trial started (seconds into this process): from one start to the next is what a trial costs with the
         # harness's own writing, which a timing run counts.
         row = {"nonce": nonce, "trial": trial["trial"], "seed": trial.get("seed"), "at_s": round(t0 - clock0, 6)}
+        # The cell remembers which settings the code asks for (``Cell``); the row says (core/trial_runner.py ``read_facts``).
+        cell = Cell(spec["cell"])
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             try:
                 if profiler is not None:
                     profiler.enable()
                 if spec["entry"] == "run_trial":
-                    value = fn(dict(spec["cell"]), trial["trial"], trial["seed"])
+                    value = fn(cell, trial["trial"], trial["seed"])
                 elif spec["entry"] == "run_cell":
-                    value = fn(dict(spec["cell"]))
+                    value = fn(cell)
                 else:
                     value = fn()
                 if profiler is not None:
@@ -333,6 +335,8 @@ def main():
         if profiler is not None:
             profiler.disable()
         row["duration_s"] = round(time.perf_counter() - t0, 6)
+        if spec["entry"] != "oracle":
+            row.update(cell_reads(cell))
         if spec.get("spy_trial"):
             row["trial_calls"] = trial_calls[0]
             row["trial_means"] = {k: t / n for k, (t, n) in trial_sums.items() if n}
@@ -390,6 +394,28 @@ def cells(grid: dict[str, list[Any]], first: int | None = None) -> list[dict[str
     if first is not None:
         return _search.first_grid_cells(grid, first)
     return _search.grid_cells(grid)
+
+
+def read_facts(rows: Any, axes: Any) -> dict[str, Any]:
+    """Which settings the code asked for, from the rows of trials that ran (the ``Cell`` record of FI's harness,
+    :class:`core.in_run.Cell`): ``{"measurable", "read", "unknown", "never", "why"}``. ``never``: the ``axes`` no trial asked
+    for. That is a fact only on positive evidence: at least one trial succeeded and asked for some setting, and none took
+    the cell as a whole (``dict(cell)``, ``**cell``, iterating it) or was cut short. A trial that asked for nothing at all
+    may have read the cell where the record cannot see (a C extension): the record then makes no claim, ``never`` is empty
+    and ``why`` says so. Rows without the record (an older run) make no claim either."""
+    ok = [r for r in rows if isinstance(r, dict) and r.get("status") == "ok"]
+    seen = [r for r in ok if "read" in r]
+    read = sorted({str(k) for r in seen for k in r.get("read") or []})
+    unknown = sorted({str(k) for r in seen for k in r.get("unknown_reads") or []})
+    why = ""
+    if not ok or len(seen) < len(ok):
+        why = "no trial ran, or the trials carry no record of the settings they asked for"
+    elif any(r.get("read_all") for r in seen):
+        why = "the code takes the settings as a whole (a copy, a loop over them, `**cell`), so which one it uses cannot be told"
+    elif not read:
+        why = "no trial asked for any setting by name, so the code may read them where FI cannot see"
+    never = [] if why else [str(a) for a in axes if str(a) not in read]
+    return {"measurable": not why, "read": read, "unknown": unknown, "never": never, "why": why}
 
 
 def _fmt(value: Any) -> str:

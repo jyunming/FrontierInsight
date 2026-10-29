@@ -663,19 +663,56 @@ def _segment(lines: list[str], node: ast.AST) -> str:
 
 
 def replace_function(source: str, name: str, reply: str, *, signature: str, equation: str) -> tuple[str | None, str]:
-    """``(new module text, "")`` with the function ``name`` of ``source`` replaced by the one in ``reply`` (a block of
-    Python), or ``(None, why not)``. The reply's imports are added, and so are its helper functions and plain constants
-    (a name the module does not have); anything else in it is dropped. The reply's function must have the outline's
-    parameters, exactly; and the equation's label (``# E1``) is kept on it."""
+    """:func:`replace_function_ex` without the list of what was left out."""
+    out, why, _left = replace_function_ex(source, name, reply, signature=signature, equation=equation)
+    return out, why
+
+
+def _carried(node: ast.AST) -> bool:
+    """A top-level statement a reply may bring besides its function: a try/except block that only imports or assigns."""
+    if isinstance(node, ast.Try):
+        parts = [*node.body, *[s for h in node.handlers for s in h.body], *node.orelse, *node.finalbody]
+        return bool(parts) and all(isinstance(s, (ast.Import, ast.ImportFrom, ast.Assign, ast.Pass)) for s in parts)
+    return False
+
+
+def _bound(node: ast.AST) -> set[str]:
+    """The names a top-level definition, assignment, import or try block binds at module level (a function's or a class's
+    own insides are not module names)."""
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return {node.name}
+    if isinstance(node, ast.Assign):
+        return {t.id for t in node.targets if isinstance(t, ast.Name)}
+    if isinstance(node, ast.AnnAssign):
+        return {node.target.id} if isinstance(node.target, ast.Name) else set()
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        return {(a.asname or a.name).split(".")[0] for a in node.names}
+    if isinstance(node, ast.Try):
+        out: set[str] = set()
+        for sub in [*node.body, *[s for h in node.handlers for s in h.body], *node.orelse, *node.finalbody]:
+            out |= _bound(sub)
+        return out
+    return set()
+
+
+def replace_function_ex(source: str, name: str, reply: str, *, signature: str, equation: str,
+                        wide: bool = False) -> tuple[str | None, str, list[str]]:
+    """``(new module text, "", left out)`` with the function ``name`` of ``source`` replaced by the one in ``reply`` (a block
+    of Python), or ``(None, why not, [])``. The reply's imports are added, and so are its other functions, its classes (a
+    dataclass too), its module constants (whatever they are computed from) and its try/except import blocks, when the module
+    has no such name. What cannot be carried (a name the module already has, a loop or a call at module level) is left out and
+    listed, one plain phrase each, in ``left out``. The reply's function must have the outline's parameters, exactly; and the
+    equation's label (``# E1``) is kept on it. Without ``wide`` only imports, helper functions and literal constants are
+    carried, exactly as :func:`replace_function` always did; ``wide`` (the frame of simulate.py) carries the rest."""
     if not reply.strip():
-        return None, "the reply held no code"
+        return None, "the reply held no code", []
     try:
         new_tree = ast.parse(reply)
     except SyntaxError as e:
-        return None, f"the reply is not valid Python ({e.msg}, line {e.lineno})"
+        return None, f"the reply is not valid Python ({e.msg}, line {e.lineno})", []
     node = next((n for n in new_tree.body if isinstance(n, ast.FunctionDef) and n.name == name), None)
     if node is None:
-        return None, f"the reply holds no function named `{name}`"
+        return None, f"the reply holds no function named `{name}`", []
     want = _param_names(ast.parse(signature.rstrip().rstrip(":") + ":\n    pass").body[0])  # type: ignore[arg-type]
     if _param_names(node) != want:
         # A reply that only names a parameter otherwise (``width_max`` for ``width``) is the function with its names put
@@ -687,7 +724,7 @@ def replace_function(source: str, name: str, reply: str, *, signature: str, equa
             node = next(n for n in new_tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
     if _param_names(node) != want:
         return None, ("the function's parameters must be exactly (" + ", ".join(want) + "), as the outline fixed them; "
-                      "the reply has (" + ", ".join(_param_names(node)) + ")")
+                      "the reply has (" + ", ".join(_param_names(node)) + ")"), []
     reply_lines = reply.splitlines(keepends=True)
     if reply_lines and not reply_lines[-1].endswith("\n"):
         reply_lines[-1] += "\n"
@@ -702,22 +739,50 @@ def replace_function(source: str, name: str, reply: str, *, signature: str, equa
     taken = {getattr(n, "name", None) for n in old_tree.body} | {t.id for n in old_tree.body if isinstance(n, ast.Assign)
                                                                 for t in n.targets if isinstance(t, ast.Name)}
     have_imports = {ast.dump(n) for n in old_tree.body if isinstance(n, (ast.Import, ast.ImportFrom))}
-    imports, helpers = [], []
+    if wide:  # a name the file imports is taken too: a carried class or constant must not rebind it
+        for n in old_tree.body:
+            if isinstance(n, (ast.Import, ast.ImportFrom, ast.Try)):
+                taken |= _bound(n)
+    imports, helpers, left = [], [], []
     for n in new_tree.body:
+        if n is node:
+            continue
         if isinstance(n, (ast.Import, ast.ImportFrom)):
             if ast.dump(n) not in have_imports:
-                imports.append(_segment(reply_lines, n).rstrip("\n"))
-        elif isinstance(n, ast.FunctionDef) and n is not node and n.name not in taken:
-            helpers.append(_segment(reply_lines, n))
-            taken.add(n.name)
-        elif isinstance(n, ast.Assign) and all(isinstance(t, ast.Name) for t in n.targets):
-            try:
-                ast.literal_eval(n.value)
-            except (ValueError, SyntaxError):
-                continue
-            if not any(t.id in taken for t in n.targets):  # type: ignore[attr-defined]
+                imports.append(_segment(reply_lines, n).rstrip(chr(10)))
+            continue
+        if not wide:
+            if isinstance(n, ast.FunctionDef) and n.name not in taken:
                 helpers.append(_segment(reply_lines, n))
-                taken.update(t.id for t in n.targets)  # type: ignore[attr-defined]
+                taken.add(n.name)
+            elif isinstance(n, ast.Assign) and all(isinstance(t, ast.Name) for t in n.targets):
+                try:
+                    ast.literal_eval(n.value)
+                except (ValueError, SyntaxError):
+                    continue
+                if not any(t.id in taken for t in n.targets):  # type: ignore[attr-defined]
+                    helpers.append(_segment(reply_lines, n))
+                    taken.update(t.id for t in n.targets)  # type: ignore[attr-defined]
+            continue
+        if isinstance(n, ast.Expr) and isinstance(getattr(n, "value", None), ast.Constant):
+            continue  # a docstring or a bare string: nothing to carry
+        if isinstance(n, ast.If) and ast.unparse(n.test).replace("'", '"') == '__name__ == "__main__"':
+            continue  # the reply's own entry point: the module has its own
+        carry = isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Assign, ast.AnnAssign)) or _carried(n)
+        if isinstance(n, ast.Assign):
+            carry = all(isinstance(t, ast.Name) for t in n.targets)
+        elif isinstance(n, ast.AnnAssign):
+            carry = isinstance(n.target, ast.Name) and n.value is not None
+        names = _bound(n) if carry else set()
+        if not carry:
+            left.append(f"a statement at the top of the reply (`{ast.unparse(n).splitlines()[0][:60]}`)")
+        elif names & taken:
+            kind = ("a function" if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) else "a class" if isinstance(n, ast.ClassDef)
+                    else "a constant" if isinstance(n, (ast.Assign, ast.AnnAssign)) else "an import block")
+            left.append(f"{kind} " + ", ".join(f"`{x}`" for x in sorted(names & taken)) + " (the file already has that name)")
+        else:
+            helpers.append(_segment(reply_lines, n))
+            taken.update(names)
     from .code_layout import insert_before_main_guard
 
     if old is None:
@@ -732,8 +797,8 @@ def replace_function(source: str, name: str, reply: str, *, signature: str, equa
     try:
         ast.parse(out)
     except SyntaxError as e:
-        return None, f"the module would not be valid Python ({e.msg}, line {e.lineno})"
-    return out, ""
+        return None, f"the module would not be valid Python ({e.msg}, line {e.lineno})", []
+    return out, "", left
 
 
 def _with_imports(source: str, imports: list[str]) -> str:

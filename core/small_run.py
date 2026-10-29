@@ -86,6 +86,7 @@ class Setting:
     reasons: list[tuple[str, int]] = field(default_factory=list)
     values: dict[str, list[Any]] = field(default_factory=dict)
     traceback: str = ""
+    rows: list[dict[str, Any]] = field(default_factory=list)  # the rows of the trials, for what the code asked of its cell
 
     @property
     def fault(self) -> bool:
@@ -98,6 +99,7 @@ class SmallRun:
     settings: list[Setting]
     load_error: str = ""
     seconds: float = 0.0
+    axes: list[str] = field(default_factory=list)  # the grid's settings that take two values or more: the ones compared
 
     @property
     def faults(self) -> list[Setting]:
@@ -110,6 +112,26 @@ class SmallRun:
     @property
     def timed_out(self) -> bool:
         return any(s.timed_out for s in self.settings)
+
+    @property
+    def reads(self) -> dict[str, Any]:
+        """Which settings the code asked for over the whole small run (:func:`core.trial_runner.read_facts`). A run that
+        crashed, that timed out in a setting, or in which a setting had no trial that ran makes no claim about what was
+        never read: only a whole run is positive evidence."""
+        facts = _trials.read_facts([r for s in self.settings for r in s.rows], self.axes)
+        if facts["never"] and (self.crashed or self.timed_out or any(s.ok < 1 for s in self.settings)):
+            return {**facts, "measurable": False, "never": [],
+                    "why": "the small run did not run every setting to the end"}
+        return facts
+
+    def unread_note(self) -> str:
+        """One plain sentence when a setting of the study was never asked for by the code in the small run, else ``""``."""
+        never = self.reads["never"]
+        if not never:
+            return ""
+        names = ", ".join(f"`{a}`" for a in never)
+        return (f"FI's small run: the simulation never asked for {names}, a setting of the plan's grid; "
+                "every run gets the same value of it, whatever the grid gives.")
 
     def says(self) -> str:
         """One plain line for run.log and the record."""
@@ -149,6 +171,8 @@ class SmallRun:
         if self.load_error:
             return f"FI could not load the simulation to run it: {self.load_error}"
         parts = [f"FI ran the simulation with its own harness before this reading: {self.says()}."]
+        if self.unread_note():
+            parts.append(self.unread_note())
         for s in self.settings:
             head = f"Setting {s.key or '(the one setting)'}: {s.ok} of {s.planned} trial(s) ran"
             if s.failed:
@@ -166,6 +190,9 @@ class SmallRun:
                 # The names the simulation's entry returned in the settings that ran: FI's record of what the entry itself
                 # gives (a headline metric listed here is one the entry returns, not one the analysis derives later).
                 "returned": sorted({name for s in self.settings for name in s.values}),
+                # Which settings of the grid the code asked for (a trial's ``Cell`` record): ``never`` is a fact only when
+                # ``measurable``; ``why`` says what stopped the claim.
+                "reads": self.reads,
                 "settings": [{"key": s.key, "planned": s.planned, "ok": s.ok, "failed": s.failed, "timed_out": s.timed_out,
                               "reasons": [[r, n] for r, n in s.reasons[:3]]} for s in self.settings]}
 
@@ -205,6 +232,7 @@ async def run(executor: Any, python: Path | str, quest_root: Path, module: str, 
     # From a copy of code/ outside the quest folder (core/outside_run.py), as every cell of the study runs.
     executor = _trials._outside_executor(executor, quest_root)
     chosen = settings(grid)
+    axes = [str(k) for k, v in (grid or {}).items() if isinstance(v, (list, tuple)) and len(v) >= 2]
     parts_run = bool(getattr(grid, "sub_studies", None)) and len(chosen) > 1
     total = len(chosen)
     for i, cell in enumerate(chosen):
@@ -245,6 +273,7 @@ async def run(executor: Any, python: Path | str, quest_root: Path, module: str, 
                 if not isinstance(trial, int) or trial in seen:
                     continue
                 seen.add(trial)
+                setting.rows.append(row)
                 if row.get("status") == "ok":
                     setting.ok += 1
                     for name, value in (row.get("values") or {}).items():
@@ -266,7 +295,7 @@ async def run(executor: Any, python: Path | str, quest_root: Path, module: str, 
             setting.reasons = reasons.most_common()
         if load_error:
             break
-    return SmallRun(out, load_error, time.monotonic() - started)
+    return SmallRun(out, load_error, time.monotonic() - started, axes)
 
 
 def write_record(quest_root: Path | str, key: str, run_: SmallRun) -> None:

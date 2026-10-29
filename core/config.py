@@ -1266,6 +1266,14 @@ class ExecutionConfig(BaseModel):
     # most 10 model functions, at most 40 requests in a whole quest); ``false`` writes the code whole. Only for a quest
     # laid out as a package (``code_package``).
     code_function_steps: bool = True
+    # FI writes the fixed parts of simulate.py itself (the seed, the thresholds, the names of the results) and the model
+    # writes only the function that does one trial. Experimental and off by default: a repair of the code still rewrites
+    # the whole file, and the frame has not yet been compared with the model writing the whole script. In the code
+    # (core/skeleton.py) FI writes the entry point, the seed, the thresholds and the list of results the plan declares, and
+    # the model gives ``trial(cell, ctx)``, so a result under another name is seen at the first trial. Only for a plan the
+    # frame fits (one that declares results and has no search, no check without a case) and for ``split_analysis``
+    # without ``background_jobs``.
+    code_skeleton: bool = False
     # Where ``split_analysis`` keeps the raw files: a folder relative to the quest folder,
     # or an absolute path (a big disk, an HPC scratch area). Empty means ``raw/`` in the
     # quest folder. FI records the path and each file's size and hash; it does not copy
