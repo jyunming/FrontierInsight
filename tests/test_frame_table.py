@@ -213,14 +213,91 @@ def test_the_carried_text_runs_with_only_the_quests_code_folder_on_the_path(tmp_
     assert tuple(out["interval"]) == here.interval("growth", "rate=0.1,dose=1"), "one implementation, the host's numbers"
 
 
-def test_the_analysis_copy_of_the_record_is_read_when_there_is_one(tmp_path: Path) -> None:
+def test_the_record_read_is_the_one_the_run_names_never_a_copy_left_from_an_earlier_run(tmp_path: Path) -> None:
     raw = tmp_path / "raw"
     raw.mkdir()
     (raw / "trials.json").write_text(json.dumps({"cells": _colony()}), encoding="utf-8")
-    assert len(frame_table.load(tmp_path)) == 4
-    (raw / "trials.analysis.json").write_text(json.dumps({"cells": _colony()[:2]}), encoding="utf-8")
-    assert len(frame_table.load(tmp_path)) == 2 and len(frame_table.load(raw / "trials.json")) == 2
+    (raw / "trials.analysis.json").write_text(json.dumps({"cells": _colony()[:2]}), encoding="utf-8")  # left by an earlier run
+    assert len(frame_table.load(tmp_path)) == 4 and len(frame_table.load(raw / "trials.json")) == 4
+    assert frame_table.record_path(tmp_path, {}) == str(tmp_path / "raw" / "trials.json"), "nothing named: FI's own record"
+    named = frame_table.record_path(tmp_path, {"FI_TRIALS": "raw/trials.analysis.json"})
+    assert len(frame_table.load(named)) == 2, "the file the harness names is the one read"
     assert frame_table.load(tmp_path / "nothing") == []
+    assert frame_table.RESULTS_ENV == trial_runner.RESULTS_ENV
+
+
+# ---- values compared inside each run ------------------------------------------------------------------------------------------
+
+def _level_cell(base: dict[str, Any], level: dict[str, Any], values: list[float]) -> dict[str, Any]:
+    cell = {**base, **level}
+    return {"cell": cell, "key": trial_runner.cell_key(cell), "level": level, "planned": 4, "ok": 4, "failed": 0,
+            "metrics": {"growth": {"values": values}}}
+
+
+def test_levels_of_a_run_that_compares_two_factors_are_asked_for_one_factor_at_the_others_values() -> None:
+    base = {"rate": 0.1, "dose": 1}
+    cells = _colony()
+    for soil, light, vals in (("dry", 1, [1.0, 3.0]), ("dry", 2, [5.0, 7.0]), ("wet", 1, [2.0, 4.0]), ("wet", 2, [6.0, 8.0])):
+        cells.append(_level_cell(base, {"soil": soil, "light": light}, vals))
+    pairs_only = list(cells)
+    cells.append(_level_cell(base, {"soil": "dry"}, [10.0, 12.0]))  # a number that varies over soil alone
+    cells.append(_level_cell(base, {"soil": "wet"}, [20.0, 22.0]))
+    t = _table(cells)
+    key = "rate=0.1,dose=1"
+    assert t.levels("growth", "soil", key) == {"dry": 11.0, "wet": 21.0}, "the record kept per soil alone"
+    assert t.levels("growth", "soil", key, light=2) == {"dry": 6.0, "wet": 7.0}
+    assert t.levels("growth", "light", key, soil="wet") == {1: 3.0, 2: 7.0}
+    assert t.levels("growth", "soil", "rate=0.2,dose=1") == {}
+    assert t.levels("growth", "colour", key) == {}, "a factor the run does not compare"
+    only_pairs = _table(pairs_only)
+    with pytest.raises(ValueError) as e:
+        only_pairs.levels("growth", "soil", key)
+    assert "light" in str(e.value) and "growth" in str(e.value), "no silent empty answer"
+    assert len(only_pairs.keys()) == 4, "value records are not settings"
+
+
+# ---- edge cases of the numbers ----------------------------------------------------------------------------------------------
+
+def test_edge_cases_give_what_trial_table_gives() -> None:
+    nan = float("nan")
+    cells = [_cell(0.1, 1, [nan, nan]), _cell(0.1, 2, [1.0, True, 0.0]), _cell(0.2, 1, [0.0, 1.0, 0.5, 1.0]), _cell(0.2, 2, [1.0]),
+             _cell(0.3, 1, [0.0, 0.0, 0.0])]
+    t = _table(cells)
+    assert t.n("growth", "rate=0.1,dose=1") == 0 and t.mean("growth", "rate=0.1,dose=1") is None
+    assert t.interval("growth", "rate=0.1,dose=1") == (None, None) and t.values("growth", "rate=0.1,dose=1") == []
+    assert t.values("growth", "rate=0.1,dose=2") == [1.0, 0.0], "a bool is not a value"
+    assert t.interval("growth", "rate=0.1,dose=2") == stats.wilson_interval(1, 2), "every value 0 or 1: Wilson"
+    mixed = t.interval("growth", "rate=0.2,dose=1")
+    assert mixed != stats.wilson_interval(3, 4) and mixed[0] < 0.625 < mixed[1], "a 0.5 among them: a t interval"
+    assert t.interval("growth", "rate=0.2,dose=2") == stats.wilson_interval(1, 1), "one trial of a proportion, as trial_table"
+    assert t.interval("growth", "rate=0.3,dose=1") == stats.wilson_interval(0, 3)
+    assert _check_against_trial_table(cells) == 10
+
+
+# ---- speed ------------------------------------------------------------------------------------------------------------------
+
+@pytest.mark.skipif(not RECORDED, reason="the recorded scratch quests are not here")
+def test_the_largest_recorded_record_is_served_quickly() -> None:
+    import time
+
+    biggest = max(RECORDED, key=lambda p: (p / "raw" / "trials.json").stat().st_size)
+    cells = frame_table.load(biggest)
+    names = tuple(sorted({m for c in cells for m in c["metrics"]}))
+    started = time.monotonic()
+    t = _table(cells, declared=names)
+    factors = sorted({a for c in cells if c.get("level") for a in c["level"]})
+    for key in t.keys():
+        for name in names[:3]:
+            t.mean(name, key)
+            t.interval(name, key)
+        for factor in factors:
+            try:
+                t.levels(names[0], factor, key)
+            except ValueError:
+                pass
+    seconds = time.monotonic() - started
+    print(f"{biggest.name}: {len(cells)} records, {len(t.keys())} settings, {seconds:.2f} s")
+    assert seconds < 60
 
 
 # ---- the runtime: version 3 for a new frame, a version 2 one kept ---------------------------------------------------------------
@@ -254,3 +331,37 @@ def test_a_version_2_runtime_and_table_are_kept_on_resume_and_a_new_frame_writes
     assert skeleton.runtime_version((code / skeleton.RUNTIME_FILE).read_text(encoding="utf-8")) == 3
     assert (code / skeleton.TABLE_FILE).read_text(encoding="utf-8") == skeleton.TABLE_SOURCE
     assert skeleton.ensure_table(code, frame) is False, "already written"
+
+
+# ---- run.py carries the runtime the quest has; fi_table.py is not part of the trials' key ---------------------------------------
+
+def test_run_py_of_a_version_2_quest_carries_its_own_runtime_so_its_trials_are_not_run_again(tmp_path: Path) -> None:
+    from core import code_project
+
+    code = tmp_path / "code"
+    code.mkdir()
+    body = "def trial(cell, ctx):\n    return TrialResult()\n"
+    (code / "simulate.py").write_text(_older(skeleton.fill(skeleton.frame_source(DESIGN, stochastic=True), body)[0] or ""), encoding="utf-8")
+    v2 = skeleton.RUNTIME.replace(f"FRAME_RUNTIME_VERSION = {skeleton.VERSION}", "FRAME_RUNTIME_VERSION = 2")
+    (code / skeleton.RUNTIME_FILE).write_text(v2, encoding="utf-8")
+    text = code_project.run_source(code)
+    assert repr(v2) in text, "the quest's runtime, not today's"
+    assert code_project.run_source(code) == text, "writing it again changes nothing"
+    # a quest whose runtime file is not FI's gets the current one
+    (code / skeleton.RUNTIME_FILE).write_text("# mine\n", encoding="utf-8")
+    assert repr(skeleton.RUNTIME) in code_project.run_source(code)
+    (code / skeleton.RUNTIME_FILE).unlink()
+    assert repr(skeleton.RUNTIME) in code_project.run_source(code)
+
+
+def test_the_reader_of_the_record_is_not_an_input_of_the_trials(tmp_path: Path) -> None:
+    from core import code_layout
+
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "simulate.py").write_text("x = 1\n", encoding="utf-8")
+    (code / skeleton.RUNTIME_FILE).write_text(skeleton.RUNTIME, encoding="utf-8")
+    (code / skeleton.TABLE_FILE).write_text(skeleton.TABLE_SOURCE, encoding="utf-8")
+    names = [p.name for p in code_layout.simulation_inputs(tmp_path)]
+    assert skeleton.TABLE_FILE == code_layout.TABLE_SCRIPT
+    assert skeleton.TABLE_FILE not in names and skeleton.RUNTIME_FILE in names and "simulate.py" in names

@@ -551,6 +551,8 @@ def package_sources(code_dir: Path) -> dict[str, str]:
 GENERATED_FOLDERS = ("cache", "results", "figures", "raw", "__pycache__")
 #: The analysis script, which reads what the simulation wrote and changes nothing the simulation computes.
 ANALYSIS_SCRIPT = "experiment.py"
+#: FI's reader of the trial record (core/frame_table.py, written beside the frame's runtime): the analysis uses it, the trials do not.
+TABLE_SCRIPT = "fi_table.py"
 #: FI's own copies of its helpers under ``code/``, not the quest's code.
 SKILLS_FOLDER = "skills"
 
@@ -560,7 +562,7 @@ def simulation_inputs(quest_root: Path | str, code: Path | None = None) -> list[
 
     Under ``code/`` (or ``code``, when given): every file, whatever its suffix (a helper module beside ``simulate.py``,
     a model package, a parameter table, a pickled lookup, a binary array: the simulation may read any of them), except
-    the analysis script (:data:`ANALYSIS_SCRIPT`), the tests (``tests/``, ``test_*.py``), FI's copies under ``skills/``,
+    the analysis script (:data:`ANALYSIS_SCRIPT`), FI's reader of the record (:data:`TABLE_SCRIPT`), the tests (``tests/``, ``test_*.py``), FI's copies under ``skills/``,
     notes (``.md``), caches (``__pycache__``), hidden files and folders, and what a run writes (:data:`GENERATED_FOLDERS`).
     Under ``<quest_root>/inputs/``: every file, since a simulation may read any of the person's files there. A change to
     any listed file is a change to the simulation, so a cached result of the old version must not be reused (:func:`core.outside_run.code_version`,
@@ -577,7 +579,7 @@ def simulation_inputs(quest_root: Path | str, code: Path | None = None) -> list[
                 continue
             if parts[0] in (TESTS_DIR, SKILLS_FOLDER) or (path.name.startswith("test_") and path.suffix == ".py"):
                 continue
-            if parts == (ANALYSIS_SCRIPT,) or path.suffix.lower() == ".md":
+            if parts in ((ANALYSIS_SCRIPT,), (TABLE_SCRIPT,)) or path.suffix.lower() == ".md":
                 continue
             out.append(path)
     inputs = root / "inputs"

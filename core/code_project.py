@@ -335,7 +335,20 @@ def run_source(code_dir: Path | str | None = None) -> str:
             raise RuntimeError("FI's run.py template changed and its edit for a framed simulation no longer applies: "
                                + old.strip().splitlines()[0][:80])
         text = text.replace(old, new)
-    return text.replace("@FI_FRAME_RUNTIME@", repr(_skeleton.RUNTIME), 1)
+    return text.replace("@FI_FRAME_RUNTIME@", repr(_quest_runtime(code_dir)), 1)
+
+
+def _quest_runtime(code_dir: Path | str) -> str:
+    """The frame runtime the quest has (its own ``fi_frame.py`` when that is FI's), else the current one. A quest made by an older
+    FI keeps its runtime (:func:`core.skeleton.ensure_runtime`), and ``run.py`` is part of what the trials' cache key hashes, so
+    it must carry that text, not today's: a newer FI would otherwise run the trials of an unchanged quest again."""
+    from . import skeleton as _skeleton
+
+    try:
+        have = (Path(code_dir) / _skeleton.RUNTIME_FILE).read_text(encoding="utf-8").lstrip("\ufeff")
+    except (OSError, UnicodeDecodeError):
+        return _skeleton.RUNTIME
+    return have if have.startswith(_skeleton.RUNTIME_HEAD) else _skeleton.RUNTIME
 
 
 #: What a ``run.py`` for a framed simulation adds: the runtime's text, written beside ``simulate.py`` when it is missing, and the

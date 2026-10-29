@@ -120,21 +120,30 @@ def interval(s):
     return s["mean"] - half, s["mean"] + half, "t interval of the mean"
 
 
+#: The environment variable FI's harness gives the analysis, naming (relative to the quest folder) the record it is to read: FI's
+#: own ``raw/trials.json``, or the copy beside it without the quantities and settings FI left out (``core.trial_runner.RESULTS_ENV``).
+RESULTS_ENV = "FI_TRIALS"
+
+
+def record_path(quest_root, environ=None):
+    """The record the analysis reads in the quest folder ``quest_root``: the file ``FI_TRIALS`` names, else FI's
+    ``raw/trials.json``. Never a guess between the two files: a copy left from an earlier run is not what this run names."""
+    named = (os.environ if environ is None else environ).get(RESULTS_ENV)
+    return os.path.join(str(quest_root), named) if named else os.path.join(str(quest_root), "raw", "trials.json")
+
+
 def load(path):
-    """The cells of FI's trial record that carry metrics. ``path`` is the record (``raw/trials.json``) or the quest folder;
-    the analysis copy beside the record (``trials.analysis.json``, without the settings FI left out) is read when there is one.
-    ``[]`` when there is no record."""
+    """The cells of the trial record at ``path`` (the file itself, or a quest folder for its ``raw/trials.json``) that carry
+    metrics; ``[]`` when there is no readable record."""
     path = str(path)
     if os.path.isdir(path):
         path = os.path.join(path, "raw", "trials.json")
-    alt = os.path.join(os.path.dirname(path), "trials.analysis.json")
-    for candidate in (alt, path):
-        try:
-            with open(candidate, encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, ValueError):
-            continue
-        cells = data.get("cells") if isinstance(data, dict) else None
-        if isinstance(cells, list):
-            return [c for c in cells if isinstance(c, dict) and isinstance(c.get("metrics"), dict)]
-    return []
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return []
+    cells = data.get("cells") if isinstance(data, dict) else None
+    if not isinstance(cells, list):
+        return []
+    return [c for c in cells if isinstance(c, dict) and isinstance(c.get("metrics"), dict)]

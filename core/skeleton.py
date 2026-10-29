@@ -301,10 +301,17 @@ class Table:
 
     @classmethod
     def read(cls, path, declared, references=None, parts=None):
-        """The table of the record at ``path`` (``raw/trials.json``, or the quest folder)."""
+        """The table of the record file at ``path``."""
         import fi_table
 
         return cls(fi_table.load(path), declared, references, parts)
+
+    @classmethod
+    def from_run(cls, quest_root, declared, references=None, parts=None):
+        """The table of the record this run names (``FI_TRIALS``, else ``raw/trials.json``) in the quest folder."""
+        import fi_table
+
+        return cls(fi_table.load(fi_table.record_path(quest_root)), declared, references, parts)
 
     @staticmethod
     def _key_of(cell):
@@ -389,22 +396,32 @@ class Table:
             pairs.sort(key=lambda p: p[0])
         return pairs
 
-    def levels(self, name, factor, key):
+    def levels(self, name, factor, key, **fixed):
         """The mean of ``name`` for each value of ``factor`` that each run of setting ``key`` compared inside it:
-        ``{value: mean or None}``, in the record's order."""
+        ``{value: mean or None}``, in the record's order. When a run compares more than one factor and ``name`` is given for
+        every combination, say the values of the other factors (``table.levels("x", "a", key, b=2)``); without them there is
+        no one number for a value of ``factor`` and this says so."""
         import fi_table
 
         self._check(name)
         base = self.setting(key)
-        out = {}
+        wanted = set(fixed) | {factor}
+        out, seen = {}, set()
         for c in self._cells:
             level = c.get("level")
             if not isinstance(level, dict) or factor not in level:
                 continue
-            if {a: v for a, v in (c.get("cell") or {}).items() if a != factor} != base:
+            if {a: v for a, v in (c.get("cell") or {}).items() if a not in level} != base:
+                continue
+            seen.add(tuple(sorted(level)))
+            if set(level) != wanted or any(level[a] != v for a, v in fixed.items()):
                 continue
             s = fi_table.summary(fi_table.values_of(c["metrics"].get(name)))
             out[level[factor]] = s["mean"] if s["n"] else None
+        if not out and seen:
+            have = sorted({a for axes in seen for a in axes} - {factor})
+            raise ValueError("`%s` is not recorded for each value of `%s` alone at %s; the run also compares %s: give their values "
+                             "(levels(%r, %r, %r, %s=...))" % (name, factor, key, ", ".join(have), name, factor, key, have[0]))
         return out
 
     def part(self, name):
