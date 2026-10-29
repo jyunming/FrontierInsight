@@ -384,6 +384,18 @@ def topic_limit(quest_root: Path, topic: str) -> float | None:
 def _time_sentence(quest_root: Path, topic: str, duration_s: float | None) -> str:
     from . import run_facts as _run_facts
 
+    said = _time_sentence_alone(quest_root, topic, duration_s)
+    if _run_facts.settings_shared(quest_root):
+        check = _run_facts.shared_check(quest_root)
+        sample = (f" and that a sample of {check['alone']} settings matched running alone" if check and check["alone"] else "")
+        said = (said + " " if said else "") + ("Settings shared a process to save start-up time; FI checked that every setting "
+                                               f"gave the same numbers in either order{sample}.")
+    return said
+
+
+def _time_sentence_alone(quest_root: Path, topic: str, duration_s: float | None) -> str:
+    from . import run_facts as _run_facts
+
     if isinstance(duration_s, bool) or not isinstance(duration_s, (int, float)) or not 0 <= duration_s < float("inf"):
         # No wall time (FI did not time the whole run): the trials' own times can still show the limit missed or kept.
         limit, reader = topic_limit(quest_root, topic), _run_facts.reader_run(quest_root)

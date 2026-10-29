@@ -301,16 +301,23 @@ class _Counting(SharedInterpreterExecutor):
 
 
 async def _sizing(tmp_path: Path, *, timeout_s: int, grid: dict[str, list[int]] | None = None,
-                  runs: int = 40, **protocol: Any) -> tuple[Engine, Model, Any, _Counting]:
+                  runs: int = 40, sharing: bool = False, source: str = "",
+                  **protocol: Any) -> tuple[Engine, Model, Any, _Counting]:
     eng = _plan_engine(tmp_path, [])
     eng.config.execution.timeout_s = timeout_s
     model = Model(eng, _draft(grid or {"n": [1, 2, 4]}, runs, **protocol))
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
     code = eng.quest_root / "code"
     code.mkdir(parents=True, exist_ok=True)
-    (code / "simulate.py").write_text(SLOW_SIM, encoding="utf-8")
+    (code / "simulate.py").write_text(source or SLOW_SIM, encoding="utf-8")
     (code / "experiment.py").write_text("print('RESULT_JSON: {}')\n", encoding="utf-8")
     eng.executor = _Counting()  # type: ignore[assignment]
+
+    async def _no_sharing(*_a: Any, **_k: Any) -> None:
+        return None  # most tests here cover the sizing and the cut; sharing processes has its own tests (test_settings_per_process.py)
+
+    if not sharing:
+        eng._group_settings = _no_sharing  # type: ignore[method-assign]
     state: dict[str, Any] = {"topic": TOPIC, "iteration": 0}
     runner = trial_runner.TrialsRunner(
         eng.executor, quest_root=eng.quest_root, protocol=lambda: eng._protocol_block(state) or {}, deterministic=False,
@@ -405,6 +412,49 @@ async def test_a_run_that_cannot_fit_at_the_fewest_runs_stops_plainly_and_a_resu
     calls = ex.calls
     again = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
     assert again is not None and again["exec_result"]["too_long"] == text and ex.calls == calls
+
+
+# a count kept between settings: a number depends on how many ran before it in the same process
+STATE_SIM = VIRTUAL_CLOCK + '''
+_calls = 0
+
+def run_trial(cell, trial, seed):
+    global _calls
+    _calls += 1
+    time.sleep(0.05 * cell["n"])
+    return {"y": float(cell["n"]) * 2.0 + (seed % 3) + _calls}
+'''
+
+
+@pytest.mark.asyncio
+async def test_a_study_that_keeps_state_is_refused_sharing_by_the_real_check_and_still_gets_its_runs_lowered(
+        tmp_path: Path) -> None:
+    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=8, min_runs_per_setting=8, sharing=True, source=STATE_SIM)
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    protocol = plan.load_design(eng.quest_root)[0]["protocol"]
+    assert 8 <= protocol["runs_per_setting"] < 40, "the usual lowering still happens"
+    assert runner.per_process == 1 and runner.shared_groups is None and runner.group_allowance_s is None
+    record = run_estimate.read_record(eng.quest_root)
+    assert not record.get("shared_groups") and int(record.get("per_process") or 1) == 1
+    assert "differed" in _log(eng) and "FI made the experiment smaller" in _log(eng)
+
+
+@pytest.mark.asyncio
+async def test_the_groups_of_a_checked_study_are_kept_in_the_record_and_restored_on_a_resume(tmp_path: Path) -> None:
+    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=12, min_runs_per_setting=8, sharing=True)
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    assert runner.per_process > 1 and runner.shared_groups and runner.group_allowance_s, _log(eng)
+    assert plan.load_design(eng.quest_root)[0]["protocol"]["runs_per_setting"] == 40, "shared, not lowered"
+    record = run_estimate.read_record(eng.quest_root)
+    assert record["fits"] is True and record["shared_groups"] == runner.shared_groups
+    assert record["per_process"] == runner.per_process and record["group_allowance_s"] == runner.group_allowance_s
+    # A resume: a fresh runner is given the kept groups, with nothing timed again.
+    kept = (runner.per_process, [list(g) for g in runner.shared_groups], runner.group_allowance_s)
+    runner.per_process, runner.shared_groups, runner.group_allowance_s = 1, None, None
+    calls = ex.calls
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    assert ex.calls == calls and "timed before" in _log(eng)
+    assert (runner.per_process, runner.shared_groups, runner.group_allowance_s) == kept
 
 
 @pytest.mark.asyncio

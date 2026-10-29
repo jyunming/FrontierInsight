@@ -941,6 +941,9 @@ class RunChecksMixin:
         if isinstance(runner, _trial_runner.TrialsRunner):
             runner.first_cells = None
             runner.run_id = ""
+            runner.per_process = 1
+            runner.shared_groups = None
+            runner.group_allowance_s = None
         # A run_trial that returns the mean of many trials (it calls run_cell) is a fault of the code, not of the plan's size:
         # it goes back to the code step, never to the plan to shrink the grid (which dropped settings the topic required).
         if isinstance(runner, _trial_runner.TrialsRunner):
@@ -988,6 +991,7 @@ class RunChecksMixin:
         # FI lowers the runs once; the lowered run is timed again, and a resume after the cut does not cut a second time.
         cut_done = bool(reduced) and prior.get("fits") is False
         speed_done = False
+        grouping_done = False
         at_once = int(getattr(runner, "at_once", 1) or 1)
         slowdown: float | None = None  # measured once, only when the settings one after another would not fit
         # The timing with the most paid once: a later timing runs on the cache the earlier one filled (run_estimate.with_once).
@@ -1003,6 +1007,11 @@ class RunChecksMixin:
             if record.get("key") == key and record.get("fits"):
                 self._log.info("[execute] %s (timed before; nothing in the experiment has changed)",  # type: ignore[attr-defined]
                                record.get("says") or "the experiment fits")
+                if int(record.get("per_process") or 1) > 1 and record.get("shared_groups"):
+                    # the groups the check ran are kept: a resumed run shares processes the same way, with no new timing
+                    runner.per_process = int(record["per_process"])  # type: ignore[attr-defined]
+                    runner.shared_groups = [list(g) for g in record["shared_groups"]]  # type: ignore[attr-defined]
+                    runner.group_allowance_s = record.get("group_allowance_s")  # type: ignore[attr-defined]
                 return None
             if record.get("key") == key and record.get("truncated"):
                 self._log.info("[execute] %s (timed before; nothing in the experiment has changed)",  # type: ignore[attr-defined]
@@ -1078,6 +1087,22 @@ class RunChecksMixin:
                 _estimate.write_record(self.quest_root, {**base, "fits": False, "stopped": text, "fit": fits_in})  # type: ignore[attr-defined]
                 return self._stop_too_long(text, fit=fits_in)
             self._log.warning("[execute] %s, so it would not finish within it", line)  # type: ignore[attr-defined]
+            if not grouping_done and isinstance(runner, _trial_runner.TrialsRunner):
+                # Over the time allowed: before anything is cut, settings may share processes when a sample shows the
+                # very same numbers (core/trial_runner.py ``measure_grouping``); below the limit nothing here runs.
+                grouping_done = True
+                shared = await self._group_settings(state, runner, python, env, grid, runs, thresholds, inside, est, limit_s,
+                                                    budget_s=max(0.0, budget_s - self._pilot_spent))
+                if shared is not None:
+                    said, grouped_s, grouped_est = shared
+                    line += f" {said}"
+                    base.update(says=line, ungrouped_estimate_s=base["estimate_s"], estimate_s=grouped_s * _estimate.SAFETY)
+                    print(f"[FI] {said}")
+                    self._say_headroom(grouped_est, hard_s)
+                    _estimate.write_record(self.quest_root, {  # type: ignore[attr-defined]
+                        **base, "fits": True, "per_process": runner.per_process, "shared_groups": runner.shared_groups,
+                        "group_allowance_s": runner.group_allowance_s})
+                    return None
             if (not speed_done and not cut_done and int(self.config.engine.improve_rounds or 0) > 0  # type: ignore[attr-defined]
                     and isinstance(runner, _trial_runner.TrialsRunner)):
                 # Before the runs are cut or the quest stops: try to make the simulation itself faster, same numbers.
@@ -2149,6 +2174,70 @@ class RunChecksMixin:
             tried=[*[str(t) for t in fault.get("tried") or []],
                    f"sent the simulation back to be repaired with these numbers ({repairs} repair"
                    f"{'s' if repairs != 1 else ''}); the fault stood"])
+
+    async def _group_settings(self, state: Any, runner: Any, python: Any, env: Any, grid: dict[str, list[Any]], runs: int,
+                              thresholds: dict[str, Any], inside: dict[str, list[Any]], est: Any, limit_s: float,
+                              budget_s: float = 300.0) -> tuple[str, float, Any] | None:
+        """The study is over the time allowed: can settings share processes? The settings are spread over the slots the run
+        uses at once (``ceil(settings / at_once)`` to a process, so the parallelism stays) and the study is run that way,
+        with the runs per setting it will have (at most 3), in the order the run would use and in the opposite order, and
+        the numbers are compared on every setting (core/trial_runner.py ``measure_grouping``). The time is the measured
+        time of the first run, scaled to the runs per setting and padded by the sizing's margin: no term of the estimate
+        decides it. That run stops, and the check with it, when it passes a quarter of the limit. Sets
+        ``runner.per_process`` and the groups, and returns ``(the console sentence, the expected seconds, the estimate for
+        the run)`` when the study then fits the time allowed; else says why not in the log, leaves one process per setting,
+        and returns ``None`` (the cut and the disclosure go on as before)."""
+        import dataclasses
+        import math
+
+        from . import mc_error as _mc_error
+        from . import run_facts as _run_facts
+
+        log = self._log  # type: ignore[attr-defined]
+        settings = int(est.cells or 0)
+        at_once = max(1, int(est.at_once or 1))
+        n = math.ceil(settings / at_once) if settings else 0
+        if n < 2:
+            return None  # every setting already has a slot of its own: there is no start-up to share
+        timeout_s = int(max(30.0, min(budget_s, float(self.config.execution.timeout_s))))  # type: ignore[attr-defined]
+        module = runner.simulate.relative_to(self.quest_root).as_posix()  # type: ignore[attr-defined]
+        try:
+            protocol = self._protocol_block(state) or {}  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            protocol = {}
+        began = time.monotonic()
+        try:
+            grouping = await _trial_runner.measure_grouping(
+                self.executor, python, self.quest_root, module, grid,  # type: ignore[attr-defined]
+                runs_per_setting=runs, base_seed=int((env or {}).get("FI_REPLICATE_SEED") or 0),
+                deterministic=runner.deterministic, timeout_s=timeout_s, per_process=n, cost=getattr(runner, "cost", None),
+                max_pass_s=0.25 * limit_s, env=env, thresholds=thresholds, paired=_mc_error.paired(protocol, self.quest_root),
+                in_each_run=inside, log=log, at_once=at_once)
+        except Exception as e:  # noqa: BLE001 -- a check that cannot run leaves the run as it is
+            log.warning("[execute] Settings run one per process: the check of sharing processes could not be run (%r).", e)
+            return None
+        finally:
+            self._pilot_spent += time.monotonic() - began  # type: ignore[attr-defined]  # the check's time counts however it ends
+        if not grouping.same:
+            log.warning("[execute] %s", grouping.says)
+            return None
+        wanted = 1 if runner.deterministic else max(1, int(runs))
+        seconds = grouping.forward_s * wanted / max(1, grouping.runs_checked)
+        padded = seconds * _estimate.SAFETY
+        if padded > limit_s:
+            log.warning("[execute] %s Even with %d settings to a process, timed that way, FI expects about %s, over the limit "
+                        "of %s, so the usual cut applies.", grouping.says, n, _estimate.plain_duration(padded),
+                        _estimate.plain_duration(limit_s))
+            return None
+        runner.per_process = n
+        runner.shared_groups = grouping.groups
+        runner.group_allowance_s = padded
+        _run_facts.record_shared_check(self.quest_root, settings=grouping.settings, alone=grouping.alone)  # type: ignore[attr-defined]
+        log.info("[execute] %s Settings run %d to a process (%d processes); timed that way, FI expects about %s, within the "
+                 "limit.", grouping.says, n, len(grouping.groups), _estimate.plain_duration(padded))
+        said = ("FI runs several settings together to save start-up time; their numbers matched when they were run in either "
+                f"order. Timed that way, it expects about {_estimate.plain_duration(padded)}, within the limit.")
+        return said, seconds, dataclasses.replace(est, seconds=seconds)
 
     async def _speed_up(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         """:meth:`_speed_up_rounds`, which commits each version it keeps with its own words (code_project.CodeRuns)."""
