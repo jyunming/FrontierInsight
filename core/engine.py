@@ -11125,7 +11125,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 # The research-tool layout (core/code_layout.py): the model's package, asked for once more when missing.
                 scripts, text, package_files = await self._code_package_reply(state, prompt, text, scripts,
                                                                               extend=bool(extend))
-                simulate_code, code = scripts["simulate"], scripts["analysis"]
+                simulate_code, code = self._framed(state, scripts["simulate"]), scripts["analysis"]
                 submit_code = scripts.get("submit", "")
                 deps = incremental["deps"] if incremental is not None else _parse_split_deps(text)
                 broken = list(_run_manifest.split_lint({_split_run.SIMULATE_NAME: simulate_code, "experiment.py": code}))
@@ -27496,7 +27496,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return ""
         search = _optim.has_block(state.get("design")) and not self.config.execution.background_jobs
         inside = _in_run.of_study(self._protocol_block(state))
-        block = (_SPLIT_PROTOCOL + (_CLUSTER_PROTOCOL if self.config.execution.background_jobs else "")
+        block = (self._frame_note(state) + _SPLIT_PROTOCOL + (_CLUSTER_PROTOCOL if self.config.execution.background_jobs else "")
                  + (_SEARCH_PROTOCOL if search else "")
                  + (_IN_EACH_RUN_PROTOCOL.replace("$factors", ", ".join(f"`{k}`" for k in inside))
                     .replace("$key_rule", "Key a mapping " + _in_run.key_forms(_in_run.level_cells(inside)) + ".") if inside else ""))

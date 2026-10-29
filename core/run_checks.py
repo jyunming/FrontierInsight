@@ -626,6 +626,62 @@ class RunChecksMixin:
         return "\n".join(f"The person chose a study that names {x}; the plan does not cover it and gives no reason. "
                          "Say so in the limitations." for x in names)
 
+    # ---- the frame of simulate.py (core/skeleton.py) ----------------------------------------------------------------------
+
+    def _skeleton_frame(self, state: Any) -> str:
+        """FI's frame of ``simulate.py`` for this plan, or ``""`` when the frame is off (``execution.code_skeleton``) or does not
+        fit the plan (the reason is said in run.log): the model then writes the whole script as before."""
+        from . import contract as _contract
+        from . import skeleton as _skeleton
+
+        ex = self.config.execution  # type: ignore[attr-defined]
+        if not ex.code_skeleton or not ex.split_analysis or ex.background_jobs or self._agent_mode():  # type: ignore[attr-defined]
+            return ""
+        design = state.get("design")
+        why = _skeleton.applies(design)
+        if why:
+            self._log.info("[implement] FI writes no frame of simulate.py: %s", why)  # type: ignore[attr-defined]
+            return ""
+        return _skeleton.frame_source(design, stochastic=_split_run.design_is_stochastic(design),
+                                      strict=_contract.from_design(design).form == "contract")
+
+    def _frame_note(self, state: Any) -> str:
+        """What the code-writing request says about simulate.py when FI writes the frame, else ``""``."""
+        from . import skeleton as _skeleton
+
+        if not self._skeleton_frame(state):
+            return ""
+        names = ", ".join(f"`{i}`" for i in _skeleton.declared_ids((state.get("design") or {}).get("protocol")))
+        return (
+            "FI writes the frame of simulate.py (the entry point, the seed, the thresholds). In the `# file: simulate.py` block "
+            "give ONLY the function `trial(cell, ctx)` and the imports and helper functions it needs; no `run_trial`, no "
+            "`run_cell`, no seeding. This replaces the rules below about those in simulate.py; everything else below stays.\n"
+            "- `cell[\"name\"]`: the settings, read by name.\n"
+            "- `ctx.rng`: the random generator FI seeded for this trial. Draw every random number from it. `ctx.seed` is the "
+            "same seed as an integer for a library that wants one; `ctx.trial` is the trial's number; `ctx.thresholds` holds the "
+            "plan's thresholds.\n"
+            f"- Return the results the plan declares, by name ({names}; a proportion may be returned as `<name>_count` and "
+            "`<name>_total`): `out = TrialResult()`, `out[\"name\"] = value`, `return out`. A result under another name is "
+            "kept as a diagnostic, not as a result of the plan.\n\n")
+
+    def _framed(self, state: Any, simulate_code: str) -> str:
+        """The text of ``simulate.py`` once the model's reply is put into FI's frame (and ``fi_frame.py`` written beside it);
+        the reply itself when there is no frame or the reply is a whole simulation of its own."""
+        from . import skeleton as _skeleton
+
+        frame = self._skeleton_frame(state)
+        if not frame or not simulate_code.strip():
+            return simulate_code
+        text, note = _skeleton.compose(frame, simulate_code)
+        if note:
+            self._log.warning("[implement] simulate.py: %s", note)  # type: ignore[attr-defined]
+        if _skeleton.has_frame(text) and not _skeleton.frame_intact(frame, text):
+            code_dir = self.quest_root / "code"  # type: ignore[attr-defined]
+            code_dir.mkdir(parents=True, exist_ok=True)
+            (code_dir / _skeleton.RUNTIME_FILE).write_text(_skeleton.RUNTIME, encoding="utf-8")
+            self._log.info("[implement] simulate.py is FI's frame with the model's trial function")  # type: ignore[attr-defined]
+        return text
+
     # ---- a setting of the grid the code never reads ----------------------------------------------------------------------
 
     def _check_unread_settings(self, state: Any, simulate: Path) -> dict[str, Any] | None:
