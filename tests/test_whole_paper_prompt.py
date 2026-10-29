@@ -174,3 +174,17 @@ async def test_the_redo_prompts_carry_the_rule_and_the_claims(tmp_path, monkeypa
     assert "$claims_rule" in poster_redo and "$claims" in poster_redo
     string.Template(poster_redo).substitute(
         poster="P", figure_list="F", source_list="S", feedback="X", targets="T", claims_rule="R", claims="C")
+
+
+def test_the_rule_fits_the_redo_prompts_that_hold_no_paper() -> None:
+    rule = (Path(__file__).resolve().parent.parent / "agents" / "claims_rule.md").read_text(encoding="utf-8")
+    assert "in the inputs below" not in rule and "stays out of your text" not in rule
+    assert "keep it" in rule  # a redo keeps what was right
+    assert "The paper is background" not in rule
+
+
+def test_the_claim_list_is_set_off_from_the_paper(tmp_path: Path) -> None:
+    art = _make_artifacts(tmp_path, with_figure=False)
+    _write_paper(art, "ok")
+    section = paper_and_claims("w", art.quest_root, art.paper_md).claims
+    assert section.endswith("\n\n")
