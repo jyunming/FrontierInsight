@@ -315,6 +315,66 @@ RUN_SOURCE = RUN_SOURCE.replace(
     (Path(__file__).with_name("in_run.py")).read_text(encoding="utf-8"), 1)
 
 
+def run_source(code_dir: Path | str | None = None) -> str:
+    """The text of ``run.py``. For a simulation whose ``simulate.py`` has FI's frame (core/skeleton.py) it also carries the
+    frame's runtime (``fi_frame.py``): ``run.py`` writes it beside ``simulate.py`` when a copy of ``code/`` has lost it, and tells
+    the simulation which seeds its setting has, as FI's harness does. Any other simulation gets ``RUN_SOURCE`` as it is."""
+    from . import skeleton as _skeleton
+
+    try:
+        framed = code_dir is not None and _skeleton.has_frame((Path(code_dir) / _split_run.SIMULATE_NAME).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        framed = False
+    if not framed:
+        return RUN_SOURCE
+    text = RUN_SOURCE
+    for old, new in _FRAMED_EDITS:
+        if text.count(old) != 1:
+            # The template moved on and this edit did not: a run.py without the frame's runtime would fail at the first trial,
+            # so this is a fault of FI's (a test of the framed run.py fails), never a silent fall back.
+            raise RuntimeError("FI's run.py template changed and its edit for a framed simulation no longer applies: "
+                               + old.strip().splitlines()[0][:80])
+        text = text.replace(old, new)
+    return text.replace("@FI_FRAME_RUNTIME@", repr(_skeleton.RUNTIME), 1)
+
+
+#: What a ``run.py`` for a framed simulation adds: the runtime's text, written beside ``simulate.py`` when it is missing, and the
+#: seeds of the setting (the harness's ``FI_TRIAL_SEEDS``) in the process that runs its trials.
+_FRAMED_EDITS = (
+    ("""def load_simulation():
+    import importlib.util
+
+    sys.path.insert(0, str(HERE))
+""", """FI_FRAME_RUNTIME = @FI_FRAME_RUNTIME@  # FI's frame of simulate.py (fi_frame.py), for a copy of this folder that lost it
+
+
+def load_simulation():
+    import importlib.util
+
+    if not (HERE / "fi_frame.py").is_file():
+        (HERE / "fi_frame.py").write_text(FI_FRAME_RUNTIME, encoding="utf-8")
+    sys.path.insert(0, str(HERE))
+"""),
+    ("""    runs = 1 if entry == "run_cell" else int(study.get("runs_per_setting") or 1)
+    rows = []
+    for trial in range(runs):
+        seed = trial_seed(int(study.get("base_seed") or 0), "" if study.get("paired") else key, trial)
+""", """    runs = 1 if entry == "run_cell" else int(study.get("runs_per_setting") or 1)
+    rows = []
+    os.environ["FI_TRIAL_SEEDS"] = json.dumps([[t, None if entry == "run_cell" else trial_seed(
+        int(study.get("base_seed") or 0), "" if study.get("paired") else key, t)] for t in range(runs)])
+    for trial in range(runs):
+        seed = trial_seed(int(study.get("base_seed") or 0), "" if study.get("paired") else key, trial)
+"""),
+    ("""    levels = levels_of(spec.get("levels"))  # as the harness reads its spec (FI's evaluation names none)
+    rows = []
+""", """    levels = levels_of(spec.get("levels"))  # as the harness reads its spec (FI's evaluation names none)
+    rows = []
+    os.environ["FI_TRIAL_SEEDS"] = json.dumps([[t["trial"], t.get("seed")] for t in spec["trials"]])
+"""),
+)
+
+
 def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -606,7 +666,7 @@ def refresh(quest_root: Path, *, deps: list[str] | None = None, protocol: dict[s
         REQUIREMENTS: "\n".join(
             requirements_for(code_dir, installed if installed is not None else list(deps or []),
                              installed=installed is not None)) + "\n",
-        RUN: RUN_SOURCE,
+        RUN: run_source(code_dir),
     }
     wanted.update(extra_files or {})
     if study:

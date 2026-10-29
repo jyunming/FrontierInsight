@@ -85,9 +85,10 @@ def test_a_reply_that_is_a_whole_simulation_stays_as_written() -> None:
 @pytest.mark.parametrize("change, why", [
     ({}, ""),
     ({"protocol": {"grid": {"a": [1, 2]}}}, "the plan declares no result"),
-    ({"protocol": {**DESIGN["protocol"], "optimisation": {"design_variables": []}}}, "the plan searches for a best design"),
+    ({"protocol": {**DESIGN["protocol"], "optimisation": {"design_variables": []}}}, ""),
+    ({"protocol": {"optimisation": {"objective": {"quantity": "cost"}}}}, ""),
     ({"protocol": {**DESIGN["protocol"], "in_each_run": {"t": [1, 2]}}}, ""),
-    ({"protocol": {**DESIGN["protocol"], "oracles": [{"name": "known"}]}}, "the check `known` names no case"),
+    ({"protocol": {**DESIGN["protocol"], "oracles": [{"name": "known"}]}}, ""),
 ])
 def test_where_the_frame_applies(change: dict[str, Any], why: str) -> None:
     assert skeleton.applies({**DESIGN, **change}) == why
@@ -171,8 +172,8 @@ def test_the_code_step_puts_the_models_trial_into_the_frame_and_writes_the_runti
 
 def test_a_plan_the_frame_does_not_fit_is_written_as_before(tmp_path: Path) -> None:
     eng = _engine_with(tmp_path, True)
-    search = {"protocol": {**DESIGN["protocol"], "optimisation": {"design_variables": []}}}
-    assert eng._frame_note({"design": search}) == "" and eng._framed({"design": search}, BODY) == BODY
+    nothing = {"protocol": {"grid": {"a": [1, 2]}}}
+    assert eng._frame_note({"design": nothing}) == "" and eng._framed({"design": nothing}, BODY) == BODY
     whole = "def run_trial(cell, trial_id, seed):\n    return {'growth': 1.0}\n"
     assert eng._framed({"design": DESIGN}, whole) == whole, "a reply that is a whole simulation is kept"
 

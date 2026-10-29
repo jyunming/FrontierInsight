@@ -1271,9 +1271,9 @@ class ExecutionConfig(BaseModel):
     # that function and its helpers (a change to the frame is refused before it runs), and the frame has not yet been compared
     # with the model writing the whole script. In the code
     # (core/skeleton.py) FI writes the entry point, the seed, the thresholds and the list of results the plan declares, and
-    # the model gives ``trial(cell, ctx)``, so a result under another name is seen at the first trial. Only for a plan the
-    # frame fits (one that declares results and has no search, no check without a case) and for ``split_analysis``
-    # without ``background_jobs``.
+    # the model gives ``trial(cell, ctx)``, so a result under another name is seen at the first trial. For every form of
+    # study that declares a result (a sweep, sub-studies, values compared inside each run, a search for the best design, a
+    # check against a known answer, a cluster job) and for ``split_analysis``; a quest keeps the frame it was written with.
     code_skeleton: bool = False
     # Where ``split_analysis`` keeps the raw files: a folder relative to the quest folder,
     # or an absolute path (a big disk, an HPC scratch area). Empty means ``raw/`` in the
