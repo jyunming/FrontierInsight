@@ -363,3 +363,24 @@ def test_the_filler_writes_the_plan_numbers_before_it_checks_a_function_and_need
     without = _filler(tmp_path / "w", _Model({"frequency": [reply], "quality": ["# E2\ndef quality(m, w, c):\n    return m * w / c\n"],
                                               "decay": ["import math\n\n\n# E3\ndef decay(x0, g, t):\n    return x0 * math.exp(-g * t)\n"]}))
     assert asyncio.run(without.run_all(_specs())).status != "done", "without the numbers the same function fails its check"
+
+
+@pytest.mark.asyncio
+async def test_the_engine_writes_the_outlines_numbers_into_the_package_and_into_a_package_kept_from_before(tmp_path: Path) -> None:
+    from tests.test_equation_gate import GOOD, OUTLINE as GATE_OUTLINE, STATE, _engine as gate_engine, _plan_md, _Writer
+
+    engine = gate_engine(tmp_path)
+    _plan_md(engine)
+    outline = {**GATE_OUTLINE, "constants": [{"name": "UNIT", "value": "1.0", "source": "design"}]}
+    scaled = "import math\n\n\n# E1\ndef frequency(k, m):\n    return math.sqrt(k / m) * UNIT\n"
+    writer = _Writer({"frequency": [scaled], "quality": [GOOD["quality"]]})
+    engine._client = writer
+    assert await engine._fill_model_functions({**STATE, "implement_outline": outline}, outline) is True
+    assert writer.seen == {"frequency": 1, "quality": 1}, "UNIT was in the module when frequency was checked: no repair"
+    model_path = engine.quest_root / "code" / "spring" / "model.py"
+    assert "UNIT = 1.0" in model_path.read_text(encoding="utf-8")
+    # A package kept from an earlier pass that lacks the line gets it.
+    model_path.write_text(model_path.read_text(encoding="utf-8").replace("UNIT = 1.0\n", ""), encoding="utf-8")
+    assert "UNIT = 1.0" not in model_path.read_text(encoding="utf-8")
+    engine._write_plan_constants({**STATE, "implement_outline": outline}, "spring")
+    assert "UNIT = 1.0" in model_path.read_text(encoding="utf-8")

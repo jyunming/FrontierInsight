@@ -13176,6 +13176,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # An extension changes as little as it can: code kept as two scripts is not restructured for it.
             return scripts, text, {}
         if not extend and _function_steps.is_ready(self.quest_root, package):
+            self._write_plan_constants(state, package)
             if _code_layout.reply_files(text, _PY_FENCE_RE, package):
                 self._log.info("[implement] the reply also wrote the model's package; FI keeps the package it wrote and "
                                "checked function by function")
@@ -13883,7 +13884,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                      "module": self._prompts["implement_module_repair"]},
             chat=chat, run=self._run_outside, log=self._log, repairs=_function_steps.REPAIRS,
             max_calls=_function_steps.max_calls_for(len(specs)), constants=constants, install=self._install_packages,
-            declared=deps, topic_block=self._topic_block(), passages=passages)
+            declared=deps, topic_block=self._topic_block(), passages=passages,
+            values=_function_steps.plan_constants(outline, protocol if isinstance(protocol, dict) else None))
+
+    def _write_plan_constants(self, state: QuestState, package: str) -> None:
+        """The numbers the plan fixes that the model's package (kept from an earlier pass) reads and nothing in it binds are
+        written into it by FI (:func:`core.function_steps.write_constants`), so a newly written simulate.py need not set them."""
+        protocol = self._protocol_block(state)
+        values = _function_steps.plan_constants(state.get("implement_outline"), protocol if isinstance(protocol, dict) else None)
+        _function_steps.write_constants(self.quest_root / "code" / package / _code_layout.MODEL_NAME, values, self._log)
 
     async def _step_passages(self, protocol: dict[str, Any] | None, specs: list[Any]) -> dict[str, str]:
         """``{step or equation id: passages}`` for the functions of ``specs`` (core/step_passages.py): the best hits of the
