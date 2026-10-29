@@ -832,6 +832,10 @@ def cut_short_text(quest_root: Path) -> str:
         what = "scan settings" if cut.get("kind") == "search" else "settings"
         parts.append(f"of {total:,} {what}, {whole:,} ran all their trials, {partly:,} ran some and {none:,} ran none "
                      f"({late:,} trial{'' if late == 1 else 's'} {'was' if late == 1 else 'were'} not run)")
+    if cut.get("kind") == "search" and _whole(cut.get("evaluations")) and _whole(cut.get("evaluations_lowered_to")):
+        parts.append(f"the plan asked for {cut['evaluations']:,} search evaluations; FI lowered them to {cut['evaluations_lowered_to']:,}, "
+                     "what its measured cost of one evaluation leaves after the coarse scan, FI's check of the best design "
+                     "at finer settings and the analysis")
     if cut.get("kind") == "search":
         best = _read_json(root / "results" / "best_design.json")
         if not (isinstance(best, dict) and run_id and best.get("run_id") == run_id):
