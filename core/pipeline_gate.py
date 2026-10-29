@@ -55,8 +55,10 @@ SEARCH_ROWS = 200
 #: costs at most this much more, so a gate run adds well under a minute.
 CONFIRM_TRIALS = 10
 CONFIRM_TIMEOUT_S = 40
-#: The most a copied folder of the quest may weigh (bytes); a larger one is left out of the scratch copy.
-COPY_CAP = 50 * 1024 * 1024
+#: The most the copied folders of the quest may weigh (bytes) in all, and ``data/`` alone; a folder over what is left
+#: is left out of the scratch copy (the gate then does not call a missing-input error a fault).
+COPY_CAP = 1024 * 1024 * 1024  # the whole copy of the quest's folders
+DATA_CAP = 500 * 1024 * 1024  # ``data/`` alone
 FAULT, SMALL_DATA, TIME, NOT_CHECKED = "fault", "small_data", "time", "not_checked"
 #: The exceptions that say the code is wrong whatever the data.
 _HARD_FAULTS = frozenset({"NameError", "UnboundLocalError", "ImportError", "ModuleNotFoundError",
@@ -332,8 +334,8 @@ def _copy_code(code_dir: Path, dst: Path) -> None:
     shutil.copytree(code_dir, dst, ignore=shutil.ignore_patterns(".git", "__pycache__", "tests", ".venv"))
 
 
-def _within(path: Path, cap: int) -> bool:
-    """Whether the files under ``path`` weigh at most ``cap`` bytes (stops counting once over)."""
+def _size_within(path: Path, cap: int) -> int | None:
+    """The bytes of the files under ``path``, or ``None`` when they weigh more than ``cap`` (stops counting once over)."""
     total = 0
     for f in path.rglob("*"):
         try:
@@ -342,28 +344,30 @@ def _within(path: Path, cap: int) -> bool:
         except OSError:
             continue
         if total > cap:
-            return False
-    return True
+            return None
+    return total
 
 
 def _copy_quest_folders(quest_root: Path, scratch: Path) -> list[str]:
     """The quest's inputs, needs, results and data folders, and the subfolders of ``raw/`` (a check's own record, such as
-    ``raw/oracle_check/``), each left out when it weighs more than :data:`COPY_CAP` (``data/``: 20 MB); the names left out are returned."""
+    ``raw/oracle_check/``), at most :data:`COPY_CAP` bytes in all (``data/``: :data:`DATA_CAP`); a folder that does not
+    fit is left out and its name returned."""
     left: list[str] = []
-    for name, cap in (("inputs", COPY_CAP), ("needs", COPY_CAP), ("results", COPY_CAP), ("data", 20 * 1024 * 1024)):
-        src = quest_root / name
-        if src.is_dir():
-            if _within(src, cap):
-                shutil.copytree(src, scratch / name, dirs_exist_ok=True)
-            else:
-                left.append(name)
+    budget = COPY_CAP
+    todo = [(n, quest_root / n, scratch / n, DATA_CAP if n == "data" else COPY_CAP)
+            for n in ("inputs", "needs", "results", "data")]
     raw = quest_root / "raw"
     if raw.is_dir():
-        for sub in sorted(p for p in raw.iterdir() if p.is_dir()):
-            if _within(sub, COPY_CAP):
-                shutil.copytree(sub, scratch / "raw" / sub.name, dirs_exist_ok=True)
-            else:
-                left.append(f"raw/{sub.name}")
+        todo += [(f"raw/{p.name}", p, scratch / "raw" / p.name, COPY_CAP) for p in sorted(raw.iterdir()) if p.is_dir()]
+    for name, src, dst, cap in todo:
+        if not src.is_dir():
+            continue
+        size = _size_within(src, min(cap, budget))
+        if size is None:
+            left.append(name)
+            continue
+        budget -= size
+        shutil.copytree(src, dst, dirs_exist_ok=True)
     return left
 
 

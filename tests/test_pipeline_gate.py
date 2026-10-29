@@ -264,6 +264,7 @@ def test_raw_subfolders_are_copied_and_a_huge_folder_is_left_out(tmp_path, monke
     (quest / "needs").mkdir()
     (quest / "needs" / "n.json").write_text("{}", encoding="utf-8")
     monkeypatch.setattr(gate, "COPY_CAP", 1024)
+    monkeypatch.setattr(gate, "DATA_CAP", 1024)
     scratch = tmp_path / "scratch"
     (scratch / "raw").mkdir(parents=True)
     gate._copy_quest_folders(quest, scratch)
@@ -278,6 +279,7 @@ def test_what_a_person_reads_has_no_internal_ids():
 
 async def test_a_folder_too_large_to_copy_makes_an_attribute_error_small_data_not_a_fault(tmp_path, monkeypatch):
     monkeypatch.setattr(gate, "COPY_CAP", 1024)
+    monkeypatch.setattr(gate, "DATA_CAP", 1024)
     quest = make_quest(tmp_path / "q")
     (quest / "inputs").mkdir()
     (quest / "inputs" / "big.bin").write_bytes(b"0" * 4096)
