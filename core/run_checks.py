@@ -28,6 +28,7 @@ import math
 import re
 import time
 import uuid
+from collections.abc import Sequence
 from dataclasses import replace as _replace
 from pathlib import Path
 from typing import Any
@@ -252,9 +253,38 @@ def _whole_number(value: Any) -> bool:
 # Rules of the single-script request that a frame written by FI makes untrue (see :meth:`_frame_template`).
 _FRAME_DROP_BULLETS = ("- Single Python file.", "- **Honour `FI_PILOT`", "- **Honour `FI_REPLICATE_SEED`",
                        "- **Answer the design's oracles when asked.**")
-def _frame_reply(cluster: bool = False) -> str:
+#: Bullets of the single-script request that are the analysis's, when FI writes the analysis too (``bodies`` below): FI makes and
+#: saves the figures and prints the results, so the model is not told how.
+_ANALYSIS_DROP_BULLETS = ("- Save figures to", "- Save the tables and arrays", "- **A figure holds at most 3 panels",
+                          "- Write a one-line JSON", "- **Report the trials behind a probability", "- **Stratify when",
+                          "- The last line of stdout MUST", "- **Keep `RESULT_JSON`")
+
+
+def _bodies_reply(bodies: Sequence[str], cluster: bool) -> str:
+    """The reply format when FI writes the analysis as well (experiment.py is FI's): ``trial``, then the bodies of derive.py
+    that the plan needs (none: no block), then the driver of a cluster, then the dependencies."""
+    blocks = ["A fenced Python block starting with the line `# file: simulate.py`: the function `trial` and the imports and "
+              "helper functions it needs (nothing of FI's frame)."]
+    if bodies:
+        listed = "\n".join(f"   - `{_skeleton.body_signature(b) or 'def ' + b + '(...)'}`" for b in bodies)
+        blocks.append("A fenced Python block starting with the line `# file: derive.py`: ONLY these functions, each given "
+                      "whole with exactly the parameters shown, and the imports and helper functions they need (nothing of "
+                      "FI's frame; FI writes experiment.py, you do not):\n" + listed)
+    if cluster:
+        blocks.append("A fenced Python block starting with the line `# file: submit.py`: the driver that submits the job array, "
+                      "as the section on the cluster says.")
+    blocks.append("A single line `DEPS:` followed by a comma-separated list of pip-installable package names. Use the outline's "
+                  "`deps` as the baseline; add only if you genuinely needed something more.")
+    return ("# Output format\nRespond with EXACTLY these, in this order, and nothing else:\n\n"
+            + "\n".join(f"{i}. {b}" for i, b in enumerate(blocks, 1)) + "\n\n")
+
+
+def _frame_reply(cluster: bool = False, bodies: Sequence[str] | None = None) -> str:
     """The reply format of a request where FI writes the frame of simulate.py; with ``cluster`` (the trials run as a job
-    array) the driver `submit.py` the cluster section asks for is a block of the format too."""
+    array) the driver `submit.py` the cluster section asks for is a block of the format too. With ``bodies`` (the functions
+    of derive.py the plan needs, possibly none) FI writes experiment.py too and it is not asked for."""
+    if bodies is not None:
+        return _bodies_reply(bodies, cluster)
     return ("# Output format\nRespond with EXACTLY these, in this order, and nothing else:\n\n"
             "1. A fenced Python block starting with the line `# file: simulate.py`: the function `trial` and the imports and "
             "helper functions it needs (nothing of FI's frame).\n"
@@ -270,14 +300,16 @@ _FRAME_BODY_INTRO = (
     "you do NOT alter the imports or the figures-dir setup of the scaffold. The outline locked those decisions.\n\n")
 
 
-def frame_template_text(text: str, cluster: bool = False) -> str:
+def frame_template_text(text: str, cluster: bool = False, bodies: Sequence[str] | None = None) -> str:
     """``text`` (a code-writing template) for a request where FI writes the frame of simulate.py: the bullets about a single
     script, the pilot, the seed and the oracle run are taken out, the reply format is the frame's, and the template does not
-    say the whole scaffold is filled."""
+    say the whole scaffold is filled. ``bodies``: FI writes the analysis too (see :func:`_frame_reply`); the bullets about
+    figures and ``RESULT_JSON`` are then taken out as well."""
+    drop = _FRAME_DROP_BULLETS if bodies is None else _FRAME_DROP_BULLETS + _ANALYSIS_DROP_BULLETS
     out, skipping = [], False
     for line in text.split("\n"):
         if line.startswith("- "):
-            skipping = line.startswith(_FRAME_DROP_BULLETS)
+            skipping = line.startswith(drop)
         elif skipping and (not line.strip() or line.startswith("#")):
             skipping = False
         if not skipping:
@@ -287,15 +319,16 @@ def frame_template_text(text: str, cluster: bool = False) -> str:
                         "; an import is not a second file you author")
     a, b = text.find("# Output format"), text.find("# Inputs")
     if 0 <= a < b:
-        text = text[:a] + _frame_reply(cluster) + text[b:]
+        text = text[:a] + _frame_reply(cluster, bodies) + text[b:]
     c = text.find("# The topic, as the person wrote it")
     if c > 0 and text.startswith("You are the **Implementation Body**"):
         text = _FRAME_BODY_INTRO + text[c:]
     return text
 
 
-def frame_outline_text(text: str) -> str:
-    """``text`` (the outline template) for a request where FI writes the frame of simulate.py."""
+def frame_outline_text(text: str, bodies: Sequence[str] | None = None) -> str:
+    """``text`` (the outline template) for a request where FI writes the frame of simulate.py. ``bodies``: FI writes the
+    analysis (experiment.py) too, so the outline lists the functions of derive.py instead of the analysis."""
     text = text.replace(
         "- The next stage will write a single Python file constrained to:",
         "- FI writes the frame of simulate.py (its entry points, the loop over settings and trials, the seeds and the main). "
@@ -305,7 +338,50 @@ def frame_outline_text(text: str) -> str:
         "main for the simulation. The next stage writes `trial` and its helpers, and experiment.py, constrained to:")
     text = text.replace("(those belong to the scenario, in the other functions)",
                         "(those belong to FI's frame, or to the analysis)")
+    if bodies is not None:
+        text = text.replace(
+            "and, for experiment.py, the functions of the analysis (statistics, figures, `RESULT_JSON`). It lists no entry point",
+            "and, for derive.py, the functions " + (", ".join(f"`{b}`" for b in bodies) if bodies else "of the analysis (none: FI works "
+            "out every number and figure of the plan itself)") + ". FI writes experiment.py (the statistics, the figures' "
+            "files and `RESULT_JSON`); the outline lists none of it. It lists no entry point")
+        text = text.replace("The next stage writes `trial` and its helpers, and experiment.py, constrained to:",
+                            "The next stage writes `trial` and its helpers" + (" and the functions of derive.py" if bodies else "")
+                            + ", constrained to:")
     return text
+
+
+# What the request says of the analysis when FI writes it (execution.code_skeleton, a plan in the contract form): the model writes
+# only the functions of derive.py that FI cannot work out from its own record. The names are those of core/frame_table.py.
+_ANALYSIS_BODIES_RULES = """\
+**The analysis is FI's.** FI writes experiment.py and runs it once, after all the trials. It reads its own record of the trials,
+works out each setting's count, mean, 95% interval and failed trials, computes every quantity the plan gives a formula for,
+draws the figures, and prints the results. You write only the functions of derive.py that the output format lists. A function
+runs on the table of FI's record and can change nothing in it:
+- `derive_<id>(table)` works out the number `<id>` of the plan. It returns one number for the study, or a mapping of setting
+  keys to numbers (a key is one of `table.keys()`), or `table.missing("why")` where the number does not exist (never a stand-in
+  such as 0, -1 or a bound). It never returns a text, a list or True/False.
+- `reference_<id>(setting)` returns the reference value of `<id>` at one setting (`{axis: value}`), or `None` where there is none.
+- `figure_<id>(fig, table)` draws what the plan says the figure shows on `fig.axes` (one axes for each panel of the plan), from
+  `table`. FI makes the figure, saves it and closes it: never call `savefig`, `show`, `close`, `figure` or `subplots`.
+- The table gives, for a result `id` at a setting `key`: `table.mean(id, key)`, `table.interval(id, key)`, `table.n(id, key)`,
+  `table.values(id, key)` (one number for each trial that ran), `table.failed(key)`; and `table.keys()`, `table.setting(key)`,
+  `table.at(**settings)` (the key of one setting), `table.across(axis, **fixed)` (the values of one setting with their keys),
+  `table.reference(id, key)` and, for a sub-study, `table.part(name)`. Name only ids the plan declares: any other id raises an error
+  that lists the ones FI holds.
+- Take no number from your own head: a value a function returns comes from `table`, from the plan's thresholds or from a formula
+  written out in the function. A function reads no file, prints nothing and keeps nothing between calls.
+- If you cannot work a function out, leave it as FI wrote it (it raises `NotYet`): FI then says that number is not computed.
+
+"""
+_NO_ANALYSIS_BODIES = """\
+**The analysis is FI's.** FI writes experiment.py and runs it once, after all the trials: it reads its own record of the trials,
+works out every number and figure the plan declares and prints the results. There is nothing of it for you to write.
+
+"""
+_IN_EACH_RUN_BODIES = (
+    "FI keeps each value's own results: `table.levels(id, factor, key)` gives the number of the value of the compared setting "
+    "`factor`, and a function that gives one number for each compared value returns a mapping from every one of the values to "
+    "its number (null where it does not exist, with the reason). A number the run gives once is one number.")
 
 
 class RunChecksMixin:
@@ -733,6 +809,21 @@ class RunChecksMixin:
         beside experiment.py), else ``""``."""
         return "prompt" if self._skeleton_frame(state) else ""
 
+    def _analysis_bodies(self, state: Any) -> list[str] | None:
+        """The functions of derive.py the model is asked for when FI writes the analysis too (core/analysis_frame.py), possibly
+        none; ``None`` when it does not (no frame of simulate.py, or a plan that is not in the contract form): the model then
+        writes experiment.py as before. The requests below take this as their ``bodies``."""
+        if not self._skeleton_frame(state):
+            return None
+        try:
+            from . import analysis_frame as _analysis
+        except ImportError:
+            return None
+        design = state.get("design")
+        if _analysis.applies(design):
+            return None
+        return _analysis.body_names(_analysis.plan_of(design))
+
     def _frame_rules(self, state: Any) -> str:
         """What the code request says about the function ``trial`` when FI writes the frame, else ``""``."""
         if not self._skeleton_frame(state):
@@ -805,13 +896,17 @@ class RunChecksMixin:
                 + "FI's frame of simulate.py, as FI writes it around your function (you write none of it and change none of it):\n\n"
                 + "```python\n" + self._skeleton_frame(state).rstrip("\n") + "\n```\n\n")
 
-    def _frame_protocols(self, state: Any, search: bool, inside: dict[str, Any]) -> str:
+    def _frame_protocols(self, state: Any, search: bool, inside: dict[str, Any], bodies: Sequence[str] | None = None) -> str:
         """The two-script contract of the code request when FI writes the frame, else ``""``: the experiment.py parts of the
-        protocol texts, with nothing that asks simulate.py for an entry point, a seed or a loop (those are the frame's)."""
+        protocol texts, with nothing that asks simulate.py for an entry point, a seed or a loop (those are the frame's).
+        ``bodies`` (see :meth:`_analysis_bodies`): FI writes experiment.py too; the request then has the rules of the
+        functions of derive.py in place of the rules of the analysis."""
         if not self._frame_variant(state):
             return ""
         from . import engine as _e
 
+        if bodies is not None:
+            return self._frame_protocols_bodies(state, search, inside, bodies)
         split = _e._SPLIT_PROTOCOL
         analysis = split[split.index("**experiment.py is the analysis.**"):split.index("If an outline is given")]
         head = ("## The experiment is two scripts, and FI runs the trials (execution.split_analysis is on)\n\n"
@@ -838,16 +933,48 @@ class RunChecksMixin:
                       + _e._IN_EACH_RUN_PROTOCOL[_e._IN_EACH_RUN_PROTOCOL.index("In FI_TRIALS each setting is followed"):])
         return block
 
-    def _frame_template(self, state: Any, tmpl: Any) -> Any:
+    def _frame_protocols_bodies(self, state: Any, search: bool, inside: dict[str, Any], bodies: Sequence[str]) -> str:
+        """:meth:`_frame_protocols` when FI writes the analysis: the functions of derive.py are the model's only other task."""
+        from . import engine as _e
+
+        names = ", ".join(f"`{b}`" for b in bodies)
+        asked = (f"then `# file: derive.py` (only {names}), " if bodies else "")
+        head = ("## The experiment is a simulation and an analysis, and FI writes both around your code (execution.split_analysis is on)\n\n"
+                "FI itself runs every trial and keeps their record, so the record of what ran is never the simulation's own "
+                "statement. Reply with the fenced Python blocks the output format names: `# file: simulate.py` (the function "
+                f"`trial`, as the start of this request says), {asked}then the `DEPS:` line.\n\n")
+        block = head + (_ANALYSIS_BODIES_RULES if bodies else _NO_ANALYSIS_BODIES)
+        block += ("If an outline is given, it describes the experiment as one program: put the code of one trial in `trial`"
+                  + (" and the code of the quantities and figures in the functions of derive.py" if bodies else "")
+                  + ", keeping every name and signature of the outline's functions that you keep. simulate.py holds no loop over "
+                  "settings or trials and no main: the frame has them, so leave out whatever of the outline does that. FI "
+                  "writes experiment.py, so leave out the statistics, the figures' files and the printed results too.\n")
+        if self.config.execution.background_jobs:  # type: ignore[attr-defined]
+            block += _e._CLUSTER_PROTOCOL
+        if search:
+            block += ("\n## This study is a search for the best design, and FI runs the search (the plan's `optimisation` block)\n\n"
+                      "FI, not the scripts, searches for the design that makes the objective as low or as high as possible: it "
+                      "decides which design to try next, runs one trial of the simulation for each, counts every call against the "
+                      "plan's evaluation budget and keeps the record. FI also draws the search's own figures (the best objective "
+                      "found so far against the evaluation number, the baseline against the best design, the coarse scan) and "
+                      "reports the best design, the baseline, the improvement and FI's check of the best design at finer "
+                      "settings from its own record, so you write none of that.\n")
+        if inside:
+            block += ("\n**What each run compares inside it** (`protocol.in_each_run`: "
+                      + ", ".join(f"`{k}`" for k in inside) + "). These are not settings of their own: every run goes through ALL "
+                      "their values together, on the same random numbers. " + _IN_EACH_RUN_BODIES + "\n")
+        return block
+
+    def _frame_template(self, state: Any, tmpl: Any, bodies: Sequence[str] | None = None) -> Any:
         """The code-writing template with what contradicts the frame taken out (``tmpl`` itself when there is no frame): the
         rules of the single script about seeding, pilots, the oracle run and the one-block reply, and the reply format."""
         import string as _string
 
         if not self._frame_variant(state):
             return tmpl
-        return _string.Template(frame_template_text(tmpl.template, bool(self.config.execution.background_jobs)))  # type: ignore[attr-defined]
+        return _string.Template(frame_template_text(tmpl.template, bool(self.config.execution.background_jobs), bodies))  # type: ignore[attr-defined]
 
-    def _frame_outline_template(self, state: Any, tmpl: Any) -> Any:
+    def _frame_outline_template(self, state: Any, tmpl: Any, bodies: Sequence[str] | None = None) -> Any:
         """The outline request with what contradicts the frame taken out (``tmpl`` itself when there is no frame): the outline
         lists `trial` and its helpers for simulate.py (and the analysis for experiment.py), never an entry point, a loop over
         settings or trials, or a main of the simulation, which are the frame's."""
@@ -855,7 +982,7 @@ class RunChecksMixin:
 
         if not self._frame_variant(state):
             return tmpl
-        return _string.Template(frame_outline_text(tmpl.template))
+        return _string.Template(frame_outline_text(tmpl.template, bodies))
     def _frame_outline(self, state: Any, outline: dict[str, Any]) -> dict[str, Any]:
         """The outline without the entry points of simulate.py (``run_trial``, ``run_cell``, ``oracle``): their signatures are
         the frame's, not the model's. ``outline`` itself when there is no frame."""
