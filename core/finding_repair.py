@@ -1170,6 +1170,9 @@ class Env:
     #: FI's small run of the simulation on the code as it is: ``""`` when it ran, else why not (a repair that breaks it is
     #: not kept); ``None`` when there is none to make.
     small_run: Callable[[], Awaitable[str]] | None = None
+    #: The analysis gate on the code as it is (core/pipeline_gate.py): ``""`` when the analysis still runs from start to end on
+    #: the recorded results, else why not (the repair is not kept); ``None`` when there is no gate.
+    gate: Callable[[], Awaitable[str]] | None = None
     #: FI's own run of the plan's known-answer checks on the code as it is: ``{check: {"passed": True/False/None, "value":
     #: number or None}}``; ``None`` when they cannot be run here (see :func:`answers_lost`).
     known_answers: Callable[[], Awaitable[dict[str, dict[str, Any]] | None]] | None = None
@@ -1656,6 +1659,9 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
             stopped = await env.small_run()
             if stopped:
                 raise _Rejected("FI's small run of the simulation no longer runs: " + stopped)
+        if env.gate is not None:
+            if refused := await env.gate():
+                raise _Rejected(refused)
         began = time.monotonic()
         answers = await _measure_behaviour(env, "known_answers")
         response = await _measure_behaviour(env, "design_response")

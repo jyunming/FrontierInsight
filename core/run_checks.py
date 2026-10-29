@@ -1998,6 +1998,10 @@ class RunChecksMixin:
         return self._code_review_failed_run(message, script=_split_run.SIMULATE_NAME)  # type: ignore[attr-defined]
 
     # --- the analysis gate (core/pipeline_gate.py; ``engine.pipeline_gate``, off by default) -------------------------------
+    # The baseline of a change is the gate's result for the code that is KEPT (``_gate_kept``: the key of that code and its
+    # result), never for a change that is being judged: it is set where a change is kept (``_gate_commit``) and by
+    # ``_gate_first``, and re-derived from the code on disk (``_gate_baseline``) where a repair loop starts and the key of
+    # the code on disk is not the kept one (new code, a person's edit, a resume). Nothing is checkpointed.
 
     def _gate_key(self, code: Path, raw: Path) -> str:
         """What the gate's outcome depends on: the study's inputs and simulate.py (as :func:`trial_runner.code_inputs_sha`),
@@ -2015,17 +2019,22 @@ class RunChecksMixin:
         h.update(f"{stat.st_size}:{stat.st_mtime_ns}".encode())
         return h.hexdigest()
 
+    def _gate_applies(self, state: Any) -> bool:
+        """The switch is on, the quest simulates, and a raw has been recorded for the gate to run on."""
+        if not self.config.engine.pipeline_gate:  # type: ignore[attr-defined]
+            return False
+        if state.get("no_simulation_resolved"):
+            return False
+        return (self.quest_root / "raw" / "trials.json").is_file()  # type: ignore[attr-defined]
+
     async def _analysis_gate(self, state: Any, code_dir: Path | str | None = None) -> Any:
         """The analysis gate's result for the code as it is now (``None`` when the switch is off, the quest is a
         no-simulation quest, no raw has been recorded yet, or the gate could not run: it never turns into a fault). The
-        result is kept for the same code and raw, written to ``.fi/pipeline_gate.json`` and logged in one line."""
-        if not self.config.engine.pipeline_gate:  # type: ignore[attr-defined]
-            return None
-        if state.get("no_simulation_resolved"):
+        result is kept for the same code and raw, written to ``.fi/pipeline_gate.json`` (with the runs and seconds spent
+        in the quest so far) and logged in one line with its seconds."""
+        if not self._gate_applies(state):
             return None
         raw = self.quest_root / "raw" / "trials.json"  # type: ignore[attr-defined]
-        if not raw.is_file():
-            return None
         code = Path(code_dir) if code_dir else self.quest_root / "code"  # type: ignore[attr-defined]
         try:
             from . import pipeline_gate as _gate
@@ -2034,36 +2043,79 @@ class RunChecksMixin:
             key = self._gate_key(code, raw)
             cache = self.__dict__.setdefault("_gate_cache", {})
             if key in cache:
+                self._gate_seen = (key, cache[key])
                 return cache[key]
             protocol = self._protocol_block(state)  # type: ignore[attr-defined]
+            began = time.monotonic()
             got = await _gate.analysis_gate(
                 self.quest_root, code, protocol if isinstance(protocol, dict) else None,  # type: ignore[attr-defined]
                 sandbox=self.config.execution.sandbox,  # type: ignore[attr-defined]
                 timeout_s=_budget(self.config.execution.timeout_s))  # type: ignore[attr-defined]
+            spent = round(time.monotonic() - began, 1)
         except Exception as exc:  # noqa: BLE001 -- a gate that could not run is not a fault
             self._log.warning("[gate] the analysis could not be checked: %s", exc)  # type: ignore[attr-defined]
             return None
         cache[key] = got
+        self._gate_seen = (key, got)
+        path = self.fi_dir / "pipeline_gate.json"  # type: ignore[attr-defined]
         try:
-            (self.fi_dir / "pipeline_gate.json").write_text(  # type: ignore[attr-defined]
-                json.dumps(got.record(), indent=2), encoding="utf-8")
-        except OSError:
+            if "_gate_totals" not in self.__dict__:
+                before = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+                self._gate_totals = {"runs": int(before.get("runs") or 0), "seconds": float(before.get("seconds_total") or 0.0)}
+            self._gate_totals["runs"] += 1
+            self._gate_totals["seconds"] = round(self._gate_totals["seconds"] + spent, 1)
+            path.write_text(json.dumps({**got.record(), "runs": self._gate_totals["runs"],
+                                        "seconds_total": self._gate_totals["seconds"]}, indent=2), encoding="utf-8")
+        except (OSError, ValueError):
             pass
-        self._log.info("[gate] %s", got.says())  # type: ignore[attr-defined]
+        self._log.info("[gate] %s (%.1f s; %d run(s), %.1f s in this quest)", got.says(), spent,  # type: ignore[attr-defined]
+                       self.__dict__.get("_gate_totals", {}).get("runs", 1), self.__dict__.get("_gate_totals", {}).get("seconds", spent))
         return got
 
-    def _gate_disclose(self, text: str) -> None:
-        """What the gate found that is not a reason to refuse: the log, and the notes of the repair in progress."""
-        notes = self.__dict__.get("_gate_notes")
-        if isinstance(notes, list) and text in notes:
+    async def _gate_baseline(self, state: Any) -> None:
+        """Where a repair loop starts (the code on disk is the kept code): the baseline is the gate's result for the code
+        on disk, taken from the cache when it was seen, else from one gate run, whenever the kept key is not the disk's."""
+        if not self._gate_applies(state):
             return
-        self._log.warning("[gate] %s", text)  # type: ignore[attr-defined]
-        if isinstance(notes, list):
-            notes.append(text)
+        try:
+            key = self._gate_key(self.quest_root / "code", self.quest_root / "raw" / "trials.json")  # type: ignore[attr-defined]
+        except OSError:
+            return
+        kept = self.__dict__.get("_gate_kept")
+        if kept and kept[0] == key:
+            return
+        got = await self._analysis_gate(state)
+        self._gate_kept = (key, got) if got is not None else None
+
+    def _gate_commit(self, state: Any) -> None:
+        """A change was kept: the code on disk is the new baseline when the gate saw exactly this code (otherwise the next
+        loop derives it), and what stands about it is recorded."""
+        if not self._gate_applies(state):
+            return
+        seen = self.__dict__.get("_gate_seen")
+        try:
+            key = self._gate_key(self.quest_root / "code", self.quest_root / "raw" / "trials.json")  # type: ignore[attr-defined]
+        except OSError:
+            return
+        if seen and seen[0] == key:
+            self._gate_kept = seen
+            self._gate_standing(seen[1])
+
+    def _gate_standing(self, result: Any) -> None:
+        """What the gate found in the code that stays: ok clears the record, anything else (a fault no repair is left for,
+        too few trials to tell, the time, a Docker quest) goes to the problems FI could not repair as FI's reading, so
+        QUALITY.md and the paper's limitations say it and the quest goes on (core/stop_power.py)."""
+        self._clear_cannot_repair("gate")  # type: ignore[attr-defined]
+        if result.ok:
+            return
+        self._log.warning("[gate] %s", result.says())  # type: ignore[attr-defined]
+        self._record_cannot_repair(  # type: ignore[attr-defined]
+            result.says(), ["ran the analysis from start to end on a small copy of the recorded results"],
+            source=_stop_power.READ, check="gate")
 
     async def _gate_refusal(self, state: Any) -> str:
         """After a change to the code was written: why it cannot stay (the analysis, which ran before, no longer runs), or
-        ``""``. Nothing at all happens with the switch off."""
+        ``""``. Nothing at all happens with the switch off. The change is compared with the kept code's result."""
         if not self.config.engine.pipeline_gate:  # type: ignore[attr-defined]
             return ""
         from . import pipeline_gate as _gate
@@ -2071,30 +2123,28 @@ class RunChecksMixin:
         after = await self._analysis_gate(state)
         if after is None:
             return ""
-        verdict = _gate.gate_verdict(self.__dict__.get("_gate_last"), after)
+        kept = self.__dict__.get("_gate_kept")
+        verdict = _gate.gate_verdict(kept[1] if kept else None, after)
         if verdict.reject:
-            return "the analysis no longer runs: " + verdict.why
-        if verdict.disclose:
-            self._gate_disclose(verdict.disclose)
-        if after.ok:
-            self._gate_last = after
+            return "the analysis no longer runs from start to end on the recorded trials: " + verdict.why
         return ""
 
+    async def _finding_gate(self, state: Any) -> str:
+        """The gate for a repair of a reader's finding (``finding_repair.Env.gate``), after the small run."""
+        return await self._gate_refusal(state)
+
     async def _gate_first(self, state: Any) -> dict[str, Any] | None:
-        """Before the long run, once the small run has passed: the analysis is run on the recorded results. A fault goes to
-        the repair of a failed run (while one is left) with the gate's sentence; anything else is only shown. ``None`` to go on."""
+        """Before the long run, once the small run has passed: the analysis is run on the recorded results and its result
+        is the baseline. A fault goes to the repair of a failed run (while one is left) with the gate's sentence; anything
+        that stands is recorded. ``None`` to go on."""
         after = await self._analysis_gate(state)
         if after is None:
             return None
-        self._gate_last = after
-        if after.kind == "fault":
-            if int(state.get("exec_reflect_iter") or 0) >= self.config.engine.exec_reflect_max_iterations:  # type: ignore[attr-defined]
-                self._gate_disclose(after.says() + " (no repair is left)")
-                return None
+        self._gate_kept = self.__dict__.get("_gate_seen")
+        if after.kind == "fault" and int(state.get("exec_reflect_iter") or 0) < self.config.engine.exec_reflect_max_iterations:  # type: ignore[attr-defined]
             self._log.warning("[gate] the analysis does not run on the recorded results; sending it to be repaired")  # type: ignore[attr-defined]
             return self._code_review_failed_run(after.says(), script="experiment.py")  # type: ignore[attr-defined]
-        if not after.ok:
-            self._gate_disclose(after.says())
+        self._gate_standing(after)
         return None
 
     async def _small_run_again(self) -> str:
@@ -2112,9 +2162,7 @@ class RunChecksMixin:
             fault = await self._simulation_repair_fault(ctx[0], simulate.read_text(encoding="utf-8")) if simulate.is_file() else ""  # type: ignore[attr-defined]
         except OSError:
             return ""
-        # FI's frame and the small run are checked above (cheaper); then the analysis is run from start to end on the
-        # recorded results (core/pipeline_gate.py; nothing happens with the switch off).
-        return fault or await self._gate_refusal(ctx[0])
+        return fault  # the analysis gate follows as ``Env.gate`` (one call for each change)
 
     async def _review_crash_run(self, state: Any) -> dict[str, Any] | None:
         """A test written for a reader's finding that crashed inside the code (not in the test) showed a crash, not the
