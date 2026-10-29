@@ -374,6 +374,6 @@ def test_a_reply_the_frame_refuses_stops_the_run_with_the_reason() -> None:
         exec(compile(bad_params, "simulate.py", "exec"), {})
     clash = "import fi_frame" + chr(10) + BODY
     refused, note2 = skeleton.compose(_frame(), clash)
-    assert not skeleton.has_frame(refused) and "fi_frame" in note2
+    assert skeleton.has_frame(refused) and "fi_frame" in note2  # FI's frame, not the reply: a later repair is checked against it
     with pytest.raises(RuntimeError, match="fi_frame"):
         exec(compile(refused, "simulate.py", "exec"), {})

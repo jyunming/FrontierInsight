@@ -698,7 +698,11 @@ class RunChecksMixin:
             (code_dir / _skeleton.RUNTIME_FILE).write_text(_skeleton.RUNTIME, encoding="utf-8")
             problem = _skeleton.frame_intact(frame, text)
             if problem:
-                text = _skeleton.refuse(text, problem)  # the run then says what changed, and the simulation is repaired
+                # the run then says what changed and the simulation is repaired; the file keeps FI's frame, never the damaged one
+                healed, lost = _skeleton.heal_ex(frame, text)
+                if lost:  # the reply's own function could not be kept either: say that too
+                    problem += f"; the reply's function `trial` could not be used either: {lost}"
+                text = _skeleton.refuse(healed, problem)
             else:
                 self._log.info("[implement] simulate.py is FI's frame with the model's trial function")  # type: ignore[attr-defined]
         return text
@@ -2241,6 +2245,9 @@ class RunChecksMixin:
                 topic_block=self._topic_block(), speed_block=block,  # type: ignore[attr-defined]
                 history_block=_improve.history_block(record["rounds"]), editable=", ".join(allowed) or "(none)",
                 code_block=_improve.code_block(files, allowed), rounds_left=f"This is round {used} of {limit}.")
+            from . import skeleton as _skeleton
+
+            prompt = _skeleton.repair_note(files.get("simulate.py", "")) + prompt  # what may change, first
             entry: dict[str, Any] = {"round": used}
             record["rounds"].append(entry)
             try:

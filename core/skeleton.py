@@ -33,6 +33,10 @@ TOP_END = "# <<< FI frame"
 BOTTOM_BEGIN = f"# >>> FI frame, version {VERSION}: the functions FI's trial harness calls"
 BOTTOM_END = "# <<< FI frame"
 SLOT = "trial"
+#: Ends the one line :func:`refuse` puts into a file whose frame was changed; a repair result that still holds it is refused.
+RAISE_MARK = "# FI: the frame was changed"
+#: The first words of :data:`RUNTIME`; a file called fi_frame.py is FI's only when it starts so.
+RUNTIME_HEAD = '"""FI\'s frame of simulate.py'
 SLOT_SIGNATURE = "def trial(cell, ctx)"
 
 #: The runtime the frame imports. Standard library only (the study's own interpreter may have nothing else).
@@ -300,11 +304,26 @@ def _pinned(tree: ast.Module) -> Counter:
     return out
 
 
-def _short(node: ast.AST | None) -> str:
+def _short(node: ast.AST | None, other: ast.AST | None = None) -> str:
+    """The first line of ``node``; when ``other`` starts with the same line (a function whose body changed), the first line
+    where they differ."""
     if node is None:
         return "nothing"
-    text = ast.unparse(node).splitlines()[0]
+    lines = ast.unparse(node).splitlines()
+    text = lines[0]
+    if other is not None:
+        theirs = ast.unparse(other).splitlines()
+        if theirs and theirs[0] == text:
+            text = next((a.strip() for a, b in itertools.zip_longest(lines, theirs, fillvalue="") if a != b and a.strip()),
+                        text)
     return text if len(text) <= 70 else text[:67] + "..."
+
+
+def _param_shape(args: ast.arguments) -> tuple:
+    """The names (and how many have defaults) of a parameter list; an annotation is not a different parameter."""
+    return ([a.arg for a in args.posonlyargs], [a.arg for a in args.args], args.vararg.arg if args.vararg else None,
+            [a.arg for a in args.kwonlyargs], args.kwarg.arg if args.kwarg else None, len(args.defaults),
+            len(args.kw_defaults))
 
 
 def frame_intact(old: str, new: str) -> str:
@@ -312,23 +331,24 @@ def frame_intact(old: str, new: str) -> str:
     count), the slot ``trial`` with the same parameters, and nothing outside the regions that binds or changes the frame's
     own names (a ``run_trial`` or ``TrialResult`` of the reply's own, ``TrialResult.strict = False``); else a plain sentence
     saying what changed. All of it is read as syntax."""
+    old, new = old.lstrip("\ufeff"), new.lstrip("\ufeff")
     before, after = _regions(old), _regions(new)
     if before is None:
         return ""
     if after is None:
-        return "the frame FI wrote (the marked parts of simulate.py) is missing"
+        return "the frame FI wrote was changed: the marked parts of simulate.py are missing"
     try:
         for label, a, b in zip(("first", "second"), before, after):
             for x, y in itertools.zip_longest(ast.parse(a).body, ast.parse(b).body):
                 if x is None or y is None or ast.dump(x) != ast.dump(y):
-                    return (f"the frame FI wrote was changed: in the {label} marked part of simulate.py, `{_short(x)}` "
-                            f"is now `{_short(y)}`")
+                    return (f"the frame FI wrote was changed: in the {label} marked part of simulate.py, `{_short(x, y)}` "
+                            f"is now `{_short(y, x)}`")
     except SyntaxError as e:
         return f"the frame is not valid Python ({e.msg}, line {e.lineno})"
     slot_old, slot_new = _steps._find(old, SLOT), _steps._find(new, SLOT)
     if slot_new is None:
         return f"the function `{SLOT}` is missing"
-    if slot_old is not None and ast.dump(slot_old.args) != ast.dump(slot_new.args):
+    if slot_old is not None and _param_shape(slot_old.args) != _param_shape(slot_new.args):
         return f"the parameters of `{SLOT}` were changed; they must be (cell, ctx)"
     try:
         was, now = _pinned(ast.parse(old)), _pinned(ast.parse(new))
@@ -341,11 +361,76 @@ def frame_intact(old: str, new: str) -> str:
     return ""
 
 
+# ---- a repair of a framed simulate.py ---------------------------------------------------------------------------------
+
+#: Put first in every request to change the code of a study whose ``simulate.py`` has FI's frame.
+REPAIR_NOTE = (
+    "FIRST, what you may change: FI wrote the frame of simulate.py, the parts between its `# >>> FI frame` and "
+    "`# <<< FI frame` lines (the `fi_frame` import, SETTINGS, RESULTS and the function `run_trial` or `run_cell`), and the file "
+    "fi_frame.py. Only the function `trial(cell, ctx)` and the helper functions and imports it uses may change. Give each "
+    "function you change whole, with its own parameters (in `functions` when the reply has that key); do not give the whole "
+    "file, and do not seed, redefine `run_trial`/`run_cell`/`TrialResult` or touch fi_frame.py. A change to the frame is "
+    "refused before anything runs and the repair counts as not made. This replaces any instruction below to return the "
+    "whole of simulate.py.\n\n")
+
+
+def repair_note(source: str) -> str:
+    """:data:`REPAIR_NOTE` when ``source`` (the text of simulate.py) has FI's frame, else ``""`` (a study without a frame is
+    asked exactly as before)."""
+    return REPAIR_NOTE if has_frame(source or "") else ""
+
+
+def repair_problem(old: str, new: str, name: str) -> str:
+    """Why ``new`` cannot replace the file ``name`` whose text is ``old``, as far as FI's frame is concerned, else ``""``.
+    ``simulate.py`` with a frame: :func:`frame_intact`. ``fi_frame.py``: FI's runtime, which a repair never changes. Any
+    other file, and a ``simulate.py`` without a frame, is not this check's (so nothing changes when the frame is off)."""
+    name = str(name).replace("\\", "/").rsplit("/", 1)[-1]
+    old, new = (old or "").lstrip("\ufeff"), (new or "").lstrip("\ufeff")
+    if name == RUNTIME_FILE:  # only FI's own runtime; a module of the quest's that happens to share the name is not
+        return "" if new == old or not old.startswith(RUNTIME_HEAD) else (
+            "the frame FI wrote was changed: fi_frame.py is FI's own file and a repair does not edit it")
+    if name != "simulate.py" or not has_frame(old):
+        return ""
+    if RAISE_MARK in new:
+        return ("the frame FI wrote was changed: the line that stops the run because of that is still in simulate.py "
+                "(remove it; the frame itself is FI's)")
+    return frame_intact(old, new)
+
+
+def without_raise(text: str) -> str:
+    """``text`` without the line :func:`refuse` put in: it is FI's own line, so a repair of the file never has to remove it and
+    never keeps it."""
+    if not text or RAISE_MARK not in text:
+        return text
+    return "".join(ln for ln in text.splitlines(keepends=True) if RAISE_MARK not in ln)
+
+
+def heal(frame: str, text: str) -> str:
+    """The canonical frame with what :func:`heal_ex` could keep of ``text``."""
+    return heal_ex(frame, text)[0]
+
+
+def heal_ex(frame: str, text: str) -> tuple[str, str]:
+    """``(the canonical frame with the function trial, the helpers and the imports of text put into it, "")``, or ``(the bare
+    frame, why they could not be)``. The damaged frame is never kept: a repair is compared with the frame FI wrote, whatever
+    the model's reply did to it."""
+    kept = text.lstrip("\ufeff")
+    for begin in (TOP_BEGIN, BOTTOM_BEGIN):
+        i = kept.find(begin)
+        j = kept.find(TOP_END, i) if i >= 0 else -1
+        if i >= 0 and j >= 0:
+            k = kept.find("\n", j)
+            kept = kept[:i] + kept[k + 1:] if k >= 0 else kept[:i]
+    kept = without_raise(kept)
+    made, why, _left = _fill(frame, kept)
+    return (made, "") if made is not None else (frame, why)
+
+
 def refuse(text: str, problem: str) -> str:
     """``text`` with a first statement that stops the load with ``problem`` (after the docstring and ``__future__`` imports),
     so a file whose frame was changed is never run as it stands: the small run says so, in the words of ``problem``, and the
     simulation goes back to be repaired."""
-    line = f"raise RuntimeError({problem!r})  # FI: the frame was changed\n"
+    line = f"raise RuntimeError({problem!r})  {RAISE_MARK}\n"
     try:
         tree = ast.parse(text)
     except SyntaxError:
@@ -373,7 +458,7 @@ def compose(frame: str, simulate_reply: str) -> tuple[str, str]:
     harness, say what is wrong with it)."""
     if has_frame(simulate_reply):
         problem = frame_intact(frame, simulate_reply)
-        return simulate_reply, problem
+        return (without_raise(simulate_reply) if not problem else simulate_reply), problem
     try:
         tree = ast.parse(simulate_reply)
     except SyntaxError:
@@ -385,7 +470,8 @@ def compose(frame: str, simulate_reply: str) -> tuple[str, str]:
         return simulate_reply, "the reply holds no function `trial`"
     text, why, left = _fill(frame, simulate_reply)
     if text is None:
-        return refuse(simulate_reply, why), why  # the run then stops with the reason, never with a NameError
+        # The file keeps FI's frame (a later repair is checked against it); the run then stops with the reason.
+        return refuse(heal(frame, simulate_reply), why), why
     return text, (("left out of the model's reply, which the file cannot carry: " + "; ".join(left)) if left else "")
 
 

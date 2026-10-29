@@ -885,6 +885,12 @@ def repair_breaks_contract(old: str, new: str, name: str, *, oracles: list[dict[
         return f"it is not Python that parses ({type(exc).__name__})"
     if not any(not (isinstance(n, ast.Expr) and isinstance(n.value, (ast.Name, ast.Constant))) for n in tree.body):
         return "it holds no code (only a name or a value), so it is not the whole of the script"
+    if name in ("simulate.py", "fi_frame.py"):  # FI's frame (core/skeleton.py), when the file has one; else nothing here
+        from . import skeleton as _skeleton
+
+        framed = _skeleton.repair_problem(old, new, name)
+        if framed:
+            return framed
     if oracles is not None:
         if trial and not ("def oracle" in new or all(_oracle.case_of(o) for o in oracles)):
             return "it defines no oracle() and some check has no case FI can run"

@@ -166,11 +166,22 @@ def _package_files(code: Path) -> list[str]:
     return out
 
 
+def _is_frame_runtime(path: Path) -> bool:
+    """FI's own ``fi_frame.py`` (core/skeleton.py): never edited by a round. A module of the quest's with that name is its own."""
+    if path.name != "fi_frame.py":
+        return False
+    try:
+        return path.read_text(encoding="utf-8").startswith('"""FI\'s frame of simulate.py')
+    except OSError:
+        return False
+
+
 def editable(quest_root: Path) -> list[str]:
     """The files of ``code/`` an edit may change: the simulation (``simulate.py``), the helper modules beside it and the
     modules of the model's package (``<package>/model.py``), by their path in ``code/``."""
     code = Path(quest_root) / "code"
-    names = sorted(p.name for p in code.glob("*.py") if p.is_file() and p.name not in NOT_EDITABLE) if code.is_dir() else []
+    names = sorted(p.name for p in code.glob("*.py") if p.is_file() and p.name not in NOT_EDITABLE
+                   and not _is_frame_runtime(p)) if code.is_dir() else []
     names += _package_files(code)
     return sorted(names, key=lambda n: (n != "simulate.py", "/" not in n, n))
 
@@ -581,6 +592,12 @@ def check_edit(files: dict[str, str], edit: Edit, allowed: list[str], *, tried: 
     new = old.replace(edit.find, edit.replace, 1)
     if new == old:
         return None, "it changes nothing"
+    from . import skeleton as _skeleton
+
+    new = _skeleton.without_raise(new)
+    framed = _skeleton.repair_problem(old, new, name)  # FI's frame of simulate.py stays as it is (nothing when it has none)
+    if framed:
+        return None, framed
     after = normalized(new)
     if after is None:
         return None, f"{name} would no longer be valid Python"
