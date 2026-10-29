@@ -83,10 +83,13 @@ class GateResult:
     #: ``file:name`` of each definition after the main guard that the guard reaches (the static stage).
     late: list[str] = field(default_factory=list)
     seconds: dict[str, float] = field(default_factory=dict)
+    #: Folders of the quest left out of the scratch copy because they were over the size cap.
+    left_out: list[str] = field(default_factory=list)
 
     def record(self) -> dict[str, Any]:
         return {"ok": self.ok, "stage": self.stage, "kind": self.kind, "where": self.where, "detail": self.detail,
-                "exception": self.exception, "unfilled": self.unfilled, "late": self.late, "seconds": self.seconds}
+                "exception": self.exception, "unfilled": self.unfilled, "late": self.late, "seconds": self.seconds,
+                "left_out": self.left_out}
 
     def says(self) -> str:
         if self.ok:
@@ -239,15 +242,19 @@ def _shrink(entry: dict[str, Any], n: int, failed: int = 0) -> dict[str, Any]:
     for m in (e.get("metrics") or {}).values():
         if not isinstance(m, dict) or not isinstance(m.get("values"), list):
             continue
-        m["values"] = m["values"][:n]
-        if isinstance(m.get("trials"), list):
-            m["trials"] = m["trials"][:n]
+        if isinstance(m.get("trials"), list) and len(m["trials"]) == len(m["values"]):
+            keep = [i for i, t in enumerate(m["trials"]) if not (isinstance(t, int) and t >= n)]
+            m["values"], m["trials"] = [m["values"][i] for i in keep], [m["trials"][i] for i in keep]
+        else:  # the values are the good trials: the window holds n - failed of them
+            m["values"] = m["values"][:max(n - failed, 0)]
+            if isinstance(m.get("trials"), list):
+                m["trials"] = m["trials"][:len(m["values"])]
         fin = [v for v in m["values"] if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)]
         m["count"], m["total"], m["non_finite"] = len(m["values"]), float(sum(fin)), len(m["values"]) - len(fin)
         if isinstance(m.get("why_missing"), dict):
             m["why_missing"] = ({k: min(v, m["non_finite"]) for k, v in m["why_missing"].items()}
                                 if m["non_finite"] else {})
-    ok = min(int(e.get("ok") or 0), max(n - failed, 0))
+    ok = min(int(e["ok"] if e.get("ok") is not None else n), max(n - failed, 0))
     e["ok"], e["failed"] = ok, failed
     e["planned"] = ok + failed
     return e
@@ -339,18 +346,25 @@ def _within(path: Path, cap: int) -> bool:
     return True
 
 
-def _copy_quest_folders(quest_root: Path, scratch: Path) -> None:
+def _copy_quest_folders(quest_root: Path, scratch: Path) -> list[str]:
     """The quest's inputs, needs, results and data folders, and the subfolders of ``raw/`` (a check's own record, such as
-    ``raw/oracle_check/``), each left out when it weighs more than :data:`COPY_CAP` (``data/``: 20 MB)."""
+    ``raw/oracle_check/``), each left out when it weighs more than :data:`COPY_CAP` (``data/``: 20 MB); the names left out are returned."""
+    left: list[str] = []
     for name, cap in (("inputs", COPY_CAP), ("needs", COPY_CAP), ("results", COPY_CAP), ("data", 20 * 1024 * 1024)):
         src = quest_root / name
-        if src.is_dir() and _within(src, cap):
-            shutil.copytree(src, scratch / name, dirs_exist_ok=True)
+        if src.is_dir():
+            if _within(src, cap):
+                shutil.copytree(src, scratch / name, dirs_exist_ok=True)
+            else:
+                left.append(name)
     raw = quest_root / "raw"
     if raw.is_dir():
         for sub in sorted(p for p in raw.iterdir() if p.is_dir()):
             if _within(sub, COPY_CAP):
                 shutil.copytree(sub, scratch / "raw" / sub.name, dirs_exist_ok=True)
+            else:
+                left.append(f"raw/{sub.name}")
+    return left
 
 
 def _draws(code_dir: Path) -> bool:
@@ -438,7 +452,7 @@ async def _run_gate(quest_root: Path, code_dir: Path, protocol: dict[str, Any] |
         _copy_code(code_dir, scratch / "code")
         for name in ("figures", "results", "raw", "needs"):
             (scratch / name).mkdir(exist_ok=True)
-        await asyncio.to_thread(_copy_quest_folders, quest_root, scratch)
+        left_out = await asyncio.to_thread(_copy_quest_folders, quest_root, scratch)
         if not await asyncio.to_thread(small_raw, quest_root, scratch, trials):
             return GateResult(False, "static", SMALL_DATA, "", "the quest has no recorded raw/trials.json to copy",
                               seconds=seconds)
@@ -470,8 +484,13 @@ async def _run_gate(quest_root: Path, code_dir: Path, protocol: dict[str, Any] |
         exc = last_exception(err)
         if run.returncode != 0:
             tail = [ln for ln in err.strip().splitlines() if ln.strip()][-1:] or [f"exit code {run.returncode}"]
-            return GateResult(False, "derive", kind_of(exc) if exc else SMALL_DATA, where, tail[0][:300], exc,
-                              seconds=seconds)
+            kind, detail = (kind_of(exc) if exc else SMALL_DATA), tail[0][:300]
+            if kind == FAULT and exc in _MAYBE_FAULTS and left_out:
+                # A folder the analysis reads was too large to copy: a missing input can raise these, so it is not
+                # shown to be the code's fault.
+                kind = SMALL_DATA
+                detail += f" (a folder too large to copy was left out of the check: {', '.join(left_out)})"
+            return GateResult(False, "derive", kind, where, detail, exc, seconds=seconds, left_out=left_out)
         if "RESULT_JSON:" not in (run.stdout or ""):
             return GateResult(False, "derive", FAULT, where, "the analysis ended without its RESULT_JSON line",
                               seconds=seconds)

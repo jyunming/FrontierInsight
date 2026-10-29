@@ -274,3 +274,31 @@ def test_raw_subfolders_are_copied_and_a_huge_folder_is_left_out(tmp_path, monke
 def test_what_a_person_reads_has_no_internal_ids():
     r = gate.GateResult(False, "derive", gate.SMALL_DATA, "code/experiment.py line 9", "ValueError: x", "ValueError")
     assert "small_data" not in r.says() and "too few trials" in r.says() and "derive" not in r.says()
+
+
+async def test_a_folder_too_large_to_copy_makes_an_attribute_error_small_data_not_a_fault(tmp_path, monkeypatch):
+    monkeypatch.setattr(gate, "COPY_CAP", 1024)
+    quest = make_quest(tmp_path / "q")
+    (quest / "inputs").mkdir()
+    (quest / "inputs" / "big.bin").write_bytes(b"0" * 4096)
+    script = ("import os\n\ndef load():\n    return open('inputs/big.bin', 'rb').read() if os.path.exists("
+              "'inputs/big.bin') else None\n\nb = load()\nprint(b.hex())\n")
+    code = make_code(tmp_path / "c", script)
+    got = await gate.analysis_gate(quest, code, None, timeout_s=60)
+    assert got.kind == gate.SMALL_DATA and got.exception == "AttributeError" and got.left_out == ["inputs"]
+    assert "too large to copy" in got.detail
+    assert not gate.gate_verdict(gate.GateResult(True), got).reject
+
+
+def test_failed_trials_among_the_first_three_keep_ok_and_count_consistent(tmp_path):
+    quest = make_quest(tmp_path / "q", trials=6, settings=1)
+    path = quest / "raw" / "trials.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["cells"][0].update(ok=4, failed=2)
+    path.write_text(json.dumps(data), encoding="utf-8")
+    rows = [{"event": "trial", "cell": "rate=1", "trial": t, "status": "failed" if t == 1 else "ok"} for t in range(6)]
+    (quest / "raw" / "ledger.jsonl").write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+    assert gate.small_raw(quest, tmp_path / "s")
+    cell = json.loads((tmp_path / "s" / "raw" / "trials.json").read_text(encoding="utf-8"))["cells"][0]
+    assert (cell["ok"], cell["failed"], cell["planned"]) == (2, 1, 3)
+    assert cell["metrics"]["fill_s"]["count"] == cell["ok"] == len(cell["metrics"]["fill_s"]["values"])
