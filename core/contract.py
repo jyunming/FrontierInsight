@@ -109,6 +109,7 @@ class Comparison(_Strict):
     across: str  # a compared setting or a value compared inside each run
     values: tuple[Any, ...] = ()  # the values compared; empty: every value against the first
     how: Literal["difference", "ratio"] = "difference"
+    asked: bool = False  # the model's answer to FI's question after the plan (core/contract_parts.py): read by no check
 
 
 class Derived(_Strict):
@@ -121,6 +122,7 @@ class Derived(_Strict):
     role: Role = "result"
     kind: Literal["mean", "proportion"] = "mean"
     label: str = ""
+    asked: bool = False  # the model's answer to FI's question after the plan (core/contract_parts.py): read by no check
 
 
 class Figure(_Strict):

@@ -117,10 +117,10 @@ def _apply_names(p: dict[str, Any], answer: dict[str, Any]) -> tuple[dict[str, A
     for name, row in answer.items():
         what = _short(row.get("what") or name, 300)
         if row["answer"] == "derived":
-            derived.append({"id": name, "inputs": list(row["inputs"]), "role": "result", "label": what})
+            derived.append({"id": name, "inputs": list(row["inputs"]), "role": "result", "label": what, "asked": True})
         elif row["answer"] == "reference" and isinstance(row.get("formula"), str) and row["formula"].strip():
             formula = row["formula"].strip()
-            derived.append({"id": name, "inputs": [], "role": "reference", "formula": formula, "label": what})
+            derived.append({"id": name, "inputs": [], "role": "reference", "formula": formula, "label": what, "asked": True})
             temp.append({"id": name, "kind": "mean", "estimand": what, "unit": "one setting",
                          "reference": {"formula": formula, "kind": "value"}})
         elif row["answer"] in ("result", "reference"):
@@ -142,20 +142,47 @@ def _apply_comparisons(p: dict[str, Any], items: list[dict[str, Any]]) -> dict[s
         have.add(key)
         cid = f"{c['result']}_by_{c['across']}"
         rows.append({"id": cid if cid not in ids else f"{cid}_{len(rows) + 1}", "result": c["result"], "across": c["across"],
-                     **({"values": list(c["values"])} if c.get("values") else {}), "how": c.get("how", "difference")})
+                     **({"values": list(c["values"])} if c.get("values") else {}), "how": c.get("how", "difference"),
+                     "asked": True})
     return {**p, **({"comparisons": rows} if rows else {})}
 
 
 def strip_fi_keys(design: Any) -> Any:
-    """``design`` without the keys only FI writes (``form``, ``parts_left_out``, ``names_not_asked``): a model's own
-    word for them is never believed."""
+    """``design`` without the keys only FI writes (``form``, ``parts_left_out``, ``names_not_asked``, and the ``asked``
+    mark on a comparison or derived quantity): a model's own word for them is never believed."""
     if not isinstance(design, dict) or not isinstance(design.get("protocol"), dict):
         return design
     protocol = {k: v for k, v in design["protocol"].items() if k not in _FI_KEYS}
-    return design if len(protocol) == len(design["protocol"]) else {**design, "protocol": protocol}
+    for key in _ASKED_ROWS:
+        if isinstance(protocol.get(key), list):
+            protocol[key] = [{k: v for k, v in r.items() if k != "asked"} if isinstance(r, dict) else r
+                             for r in protocol[key]]
+    return design if protocol == design["protocol"] else {**design, "protocol": protocol}
+
+
+def without_answers(design: Any) -> Any:
+    """``design`` without what FI wrote into it from the answers to its questions after the plan: each metric's
+    ``role``, ``depends_on`` and ``returned``, the comparisons and derived quantities marked ``asked``, the named
+    results and the keys only FI writes. The methodology audit's verdict is on the rest (core/receipts.design_core)."""
+    if not isinstance(design, dict) or not isinstance(design.get("protocol"), dict):
+        return design
+    protocol = {k: v for k, v in design["protocol"].items() if k not in (*_FI_KEYS, "named_results")}
+    if isinstance(protocol.get("metrics"), list):
+        protocol["metrics"] = [{k: v for k, v in m.items() if k not in _ANSWER_KEYS} if isinstance(m, dict) else m
+                               for m in protocol["metrics"]]
+    for key in _ASKED_ROWS:
+        if isinstance(protocol.get(key), list):
+            rows = [r for r in protocol[key] if not (isinstance(r, dict) and r.get("asked"))]
+            if rows:
+                protocol[key] = rows
+            else:
+                del protocol[key]
+    return {**design, "protocol": protocol}
 
 
 _FI_KEYS = ("form", "parts_left_out", "names_not_asked")
+_ANSWER_KEYS = ("role", "depends_on", "returned")
+_ASKED_ROWS = ("comparisons", "derived")
 
 
 def settle_form(protocol: dict[str, Any], planned: dict[str, Any] | None = None) -> dict[str, Any]:

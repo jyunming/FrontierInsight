@@ -66,7 +66,10 @@ def design_core(design: Any) -> Any:
     criteria are checked by :func:`core.criteria.normalize`, and the plan step may add them after the audit ran."""
     if not isinstance(design, dict):
         return design
-    out = {k: v for k, v in design.items() if k != "rationale"}
+    from . import contract_parts as _contract_parts
+
+    # What FI wrote from the answers to its questions after the plan is not what the audit judged.
+    out = {k: v for k, v in _contract_parts.without_answers(design).items() if k != "rationale"}
     if isinstance(out.get("protocol"), dict) and "criteria" in out["protocol"]:
         out["protocol"] = {k: v for k, v in out["protocol"].items() if k != "criteria"}
     return out

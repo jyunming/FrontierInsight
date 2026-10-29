@@ -265,6 +265,42 @@ def test_a_models_guess_of_what_a_result_may_change_with_decides_no_check() -> N
     assert before == {} and after == {}
 
 
+def test_an_asked_comparison_decides_no_check_but_the_plans_own_does() -> None:
+    """The second review's input: a comparison the model gave in answer to FI's question made ``temp`` a setting the
+    study compares, so a code that never reads ``temp`` became a fault to repair. The plan's own comparison still does."""
+    protocol = json.loads(json.dumps(DESIGN["protocol"]))
+    protocol["oracles"] = []
+    axes = ["nutrient", "temp"]
+    asked = cp._apply_comparisons({**protocol}, COMPARE["comparisons"])
+    assert asked["comparisons"][0]["asked"] is True
+    assert run_checks.settings_the_study_compares(Path("no-such-fi-dir"), DESIGN, asked, axes) == {}
+    own = {**protocol, "comparisons": [{"id": "c", "result": "algae_peak", "across": "temp"}]}
+    assert set(run_checks.settings_the_study_compares(Path("no-such-fi-dir"), DESIGN, own, axes)) == {"temp"}
+
+
+def test_the_audits_verdict_still_covers_the_design_after_the_answers() -> None:
+    """The second review's input: the answers changed the design after the audit's receipt was carried, so the design
+    that runs no longer matched it and a second audit ran on every quest. What FI writes from the answers is not what
+    the audit judged; a change to the study itself still breaks the match."""
+    from core import receipts
+
+    before = json.loads(json.dumps(DESIGN))
+    p = cp._apply_roles(before["protocol"], ROLES["results"])
+    p, _ = cp._apply_names(p, NAMES["names"])
+    p = cp._apply_comparisons(p, COMPARE["comparisons"])
+    after = {**before, "protocol": cp.settle_form(p, before["protocol"])}
+    assert after != before
+    assert receipts.design_core(after) == receipts.design_core(before)
+    changed = {**after, "protocol": {**after["protocol"], "grid": {"nutrient": [1, 2], "temp": [10, 20]}}}
+    assert receipts.design_core(changed) != receipts.design_core(before)
+
+
+def test_a_models_own_asked_mark_is_dropped() -> None:
+    d = json.loads(json.dumps(DESIGN))
+    d["protocol"]["comparisons"] = [{"id": "c", "result": "algae_peak", "across": "temp", "asked": True}]
+    assert "asked" not in cp.strip_fi_keys(d)["protocol"]["comparisons"][0]
+
+
 def test_the_plan_shows_what_the_study_returns_in_plain_words() -> None:
     d = json.loads(json.dumps(DESIGN))
     d["protocol"]["metrics"][0].update({"role": "reference", "depends_on": ["nutrient"], "returned": "afterwards"})

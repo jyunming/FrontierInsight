@@ -139,7 +139,10 @@ def settings_the_study_compares(fi_dir: Path, design: Any, protocol: dict[str, A
         for axis in names({k: v for k, v in metric.items() if k not in ("id", "description", "kind", *_CONTRACT_ANSWERS)}
                           if isinstance(metric, dict) else {}):
             out.setdefault(axis, f"the metric `{metric.get('id')}` is given per value of it")
-    for axis in names(protocol.get("comparisons")) | names(design.get("comparisons")):
+    # A comparison marked `asked` is the model's answer to FI's question after the plan, read by no check.
+    planned = [c for v in (protocol.get("comparisons"), design.get("comparisons"))
+               for c in (v if isinstance(v, list) else [v]) if not (isinstance(c, dict) and c.get("asked"))]
+    for axis in names(planned):
         out.setdefault(axis, "the plan compares its values")
     return {axis: why for axis, why in out.items() if axis in axes}
 
