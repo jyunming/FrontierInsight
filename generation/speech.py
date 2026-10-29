@@ -147,14 +147,14 @@ class SpeechGenerator:
         if slides_path.exists():
             slides_outline = slides_path.read_text(encoding="utf-8")[:4000]
 
-        ctx = paper_and_claims(paper_md, art.quest_root)
+        ctx = paper_and_claims(paper_md, art.quest_root, art.paper_md)
         prompt = string.Template(PROMPT_PATH.read_text(encoding="utf-8")).substitute(
             paper_md=ctx.paper,
             claims_rule=ctx.claims_rule,
             claims=ctx.claims,
             slides_outline=slides_outline or "(no slide deck available)",
         )
-        note_prompt_fit(prompt, self.config.provider.max_prompt_chars, "speech", art.quest_root)
+        note_prompt_fit(prompt, "speech", art.quest_root, ctx)
         own_supervisor = supervisor is None
         sup = supervisor or ProxySupervisor()
         endpoint = await resolve_endpoint_async(self.config.provider, sup)

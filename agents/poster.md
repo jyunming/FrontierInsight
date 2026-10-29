@@ -38,9 +38,9 @@ A single JSON object, no prose, no markdown fence:
 
 # Inputs
 
+$claims
 ## Source paper
 $paper_md
-$claims
 
 ## Figures available
 $figure_list

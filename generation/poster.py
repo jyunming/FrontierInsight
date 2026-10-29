@@ -1051,7 +1051,7 @@ class PosterGenerator:
 
         # safe_substitute: paper_md is model-written prose that may carry
         # stray dollar signs, which substitute() would reject.
-        ctx = paper_and_claims(paper_md, art.quest_root)
+        ctx = paper_and_claims(paper_md, art.quest_root, art.paper_md)
         prompt = string.Template(PROMPT_PATH.read_text(encoding="utf-8")).safe_substitute(
             paper_md=ctx.paper,
             claims_rule=ctx.claims_rule,
@@ -1065,7 +1065,7 @@ class PosterGenerator:
             columns=str(sheet.columns),
             word_budget=str(sheet.words),
         )
-        note_prompt_fit(prompt, self.config.provider.max_prompt_chars, "poster", art.quest_root)
+        note_prompt_fit(prompt, "poster", art.quest_root, ctx)
         # A redo with the check's findings writes again only the panels they name (the headline counts as one); every
         # other block of the previous reply is kept as it was.
         flagged = self._flagged_parts(out_dir, feedback)
@@ -1082,6 +1082,7 @@ class PosterGenerator:
                 ) or "(none)",
                 source_list="\n".join(_band_entry(src, label) for label, src in sources.items()) or "(none)",
                 feedback=str(feedback).strip(), targets=targets,
+                claims_rule=ctx.claims_rule, claims=ctx.claims,
             )
         elif feedback:
             prompt = prompt.rstrip() + "\n\n" + feedback.strip() + "\n"

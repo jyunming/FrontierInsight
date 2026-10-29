@@ -286,10 +286,12 @@ class SlideGenerator:
         if art.figures_dir and art.figures_dir.is_dir():
             figures = sorted(p.name for p in art.figures_dir.iterdir() if p.is_file())
         numbers = ", ".join(str(p) for p in pages)
+        redo_paper = _paper_facts.without_marks(art.paper_md.read_text(encoding="utf-8")) if art.paper_md else ""
+        ctx = paper_and_claims(redo_paper, art.quest_root, art.paper_md)
         prompt = string.Template(REDO_PROMPT_PATH.read_text(encoding="utf-8")).safe_substitute(
             slide_numbers=numbers, count=str(len(pages)), deck=deck,
             figure_list="\n".join(f"- figures/{f}" for f in figures) or "(none)",
-            feedback=str(feedback).strip(),
+            feedback=str(feedback).strip(), claims_rule=ctx.claims_rule, claims=ctx.claims,
         )
         text = await self._ask(art, prompt, supervisor=supervisor)
         reply = _math_as_dollars(_figures_as_own_paragraphs(_fences_as_slide_breaks(_strip_outer_fence(text))))
@@ -339,14 +341,14 @@ class SlideGenerator:
         figures = []
         if art.figures_dir and art.figures_dir.is_dir():
             figures = sorted(p.name for p in art.figures_dir.iterdir() if p.is_file())
-        ctx = paper_and_claims(paper_md, art.quest_root)
+        ctx = paper_and_claims(paper_md, art.quest_root, art.paper_md)
         prompt = string.Template(PROMPT_PATH.read_text(encoding="utf-8")).substitute(
             paper_md=ctx.paper,
             claims_rule=ctx.claims_rule,
             claims=ctx.claims,
             figure_list="\n".join(f"- figures/{f}" for f in figures) or "(none)",
         )
-        note_prompt_fit(prompt, self.config.provider.max_prompt_chars, "slides", art.quest_root)
+        note_prompt_fit(prompt, "slides", art.quest_root, ctx)
         if feedback:
             prompt = prompt.rstrip() + "\n\n" + feedback.strip() + "\n"
         own_supervisor = supervisor is None

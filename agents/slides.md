@@ -55,9 +55,9 @@ Respond with the Marp markdown only — no JSON, no surrounding fence, no preamb
 
 # Inputs
 
+$claims
 ## Source paper (markdown)
 $paper_md
-$claims
 
 ## Figures available (reference each by filename)
 $figure_list

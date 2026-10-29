@@ -14,9 +14,9 @@ Respond with the spoken script as plain markdown — no JSON, no fence. Begin wi
 
 # Inputs
 
+$claims
 ## Source paper
 $paper_md
-$claims
 
 ## Slide outline (if available)
 $slides_outline
