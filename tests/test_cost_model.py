@@ -351,3 +351,34 @@ def test_the_analysis_of_a_search_is_timed_from_the_end_of_its_check(tmp_path: P
     assert row["check_s"] == 312.0 and row["analysis_s"] == 12.0  # not 312: the check is not analysis
     model = cm.from_legacy_record(root)
     assert model is not None and model.seconds("analysis") == 12.0
+
+
+def test_a_slowdown_measured_with_one_design_at_a_time_shares_nothing() -> None:
+    """The second review's input: the live sizing counts a slowdown only when designs run at the same time; the record
+    kept a slowdown from an earlier sizing while this one ran one at a time, and the reserve was priced at 2 x."""
+    model = _search_model(per_evaluation=8.0, finer_check_unit=40.0)
+    model.slowdown, model.at_once = 2.0, 1
+    assert cm.search_plan(model, 10_000.0).check_reserve_s == 400.0
+
+
+def test_a_measurement_that_is_not_a_number_counts_as_not_measured() -> None:
+    model = _search_model(per_evaluation=2.0, finer_check_unit=5.0)
+    model.plan["scan"] = 100
+    model.terms["scan"] = cm.Term(float("nan"), cm.MEASURED)
+    got = cm.search_plan(model, 10_000.0)
+    assert got.evaluations is None and "coarse scan was not measured" in got.why
+
+
+def test_a_design_key_reads_the_helpers_beside_the_simulation_but_not_the_analysis_or_line_endings(tmp_path: Path) -> None:
+    sim = tmp_path / "simulate.py"
+    sim.write_bytes(b"a = 1\n")
+    helper = tmp_path / "pkg" / "helper.py"
+    helper.parent.mkdir()
+    helper.write_bytes(b"b = 1\n")
+    (tmp_path / "experiment.py").write_bytes(b"c = 1\n")
+    one = cm.design_key({"grid": {"x": [1, 2]}}, sim)
+    sim.write_bytes(b"a = 1\r\n")
+    (tmp_path / "experiment.py").write_bytes(b"c = 2\n")
+    assert cm.design_key({"grid": {"x": [1, 2]}}, sim) == one
+    helper.write_bytes(b"b = 2\n")
+    assert cm.design_key({"grid": {"x": [1, 2]}}, sim) != one

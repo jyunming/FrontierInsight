@@ -73,7 +73,9 @@ class CostModel:
         return self.terms.get(name) or Term()
 
     def seconds(self, name: str) -> float | None:
-        return self.term(name).seconds
+        """The term's seconds; ``None`` when it was not measured or the measurement is not a finite number."""
+        value = self.term(name).seconds
+        return value if value is not None and math.isfinite(value) else None
 
 
 # ---- the record -------------------------------------------------------------------------------------------------------
@@ -117,11 +119,15 @@ _SEARCH_TERMS = ("per_evaluation", "check_unit", "finer_check_unit", "scan", "wa
 
 
 def design_key(block: Any, simulate: Path | str | None = None) -> str:
-    """Which design a search timing belongs to: the plan's search block and the simulation's code. A redesign changes it."""
+    """Which design a search timing belongs to: the plan's search block and the simulation's code (``simulate`` and the
+    other Python files beside it, the analysis script ``experiment.py`` aside, line endings ignored). A redesign changes it."""
     try:
         h = hashlib.sha256(json.dumps(block, sort_keys=True, default=str).encode("utf-8"))
         if simulate:
-            h.update(Path(simulate).read_bytes())
+            sim = Path(simulate)
+            for f in [sim, *sorted(q for q in sim.parent.rglob("*.py") if q != sim and q.name != "experiment.py")]:
+                h.update(f.relative_to(sim.parent).as_posix().encode("utf-8") + b"\0")
+                h.update(f.read_bytes().replace(b"\r\n", b"\n"))
         return h.hexdigest()[:16]
     except Exception:  # noqa: BLE001 -- a key that cannot be made leaves the terms unkeyed, never changes a run
         return ""
@@ -407,7 +413,10 @@ def search_plan(model: CostModel, limit_s: float, *, planned_evaluations: int | 
     scan_planned = int(model.plan.get("scan") or 0)
     wall = model.seconds("wall_per_evaluation")
     basis = "observed on the search itself"
-    share = (model.slowdown or 1.0) / max(1, model.at_once) if model.slowdown else 1.0
+    # Designs share the time only when they run at the same time (as core/run_checks.py `_size_the_scan` prices it) and
+    # the slowdown beside each other was measured: an unmeasured slowdown is not assumed, so the check runs one after another.
+    at_once = int(model.at_once or 1)
+    share = model.slowdown / at_once if model.slowdown is not None and at_once > 1 else 1.0
 
     def nothing(why: str) -> SearchPlan:
         return SearchPlan(None, None, 0.0, runs, analysis_s, float(scan or 0.0), None, UNKNOWN, why)
