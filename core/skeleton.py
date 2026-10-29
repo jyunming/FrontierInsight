@@ -420,6 +420,9 @@ class Table:
             out[level[factor]] = s["mean"] if s["n"] else None
         if not out and seen:
             have = sorted({a for axes in seen for a in axes} - {factor})
+            if not have:
+                raise ValueError("`%s` has no recorded value for each value of `%s` at %s with %s" % (name, factor, key, ", ".join(
+                    "%s=%r" % kv for kv in sorted(fixed.items())) or "those settings"))
             raise ValueError("`%s` is not recorded for each value of `%s` alone at %s; the run also compares %s: give their values "
                              "(levels(%r, %r, %r, %s=...))" % (name, factor, key, ", ".join(have), name, factor, key, have[0]))
         return out
