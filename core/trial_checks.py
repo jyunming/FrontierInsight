@@ -326,15 +326,18 @@ def failures(cells: list[dict[str, Any]], reasons: dict[str, Counter] | None = N
     return out
 
 
-def failures_directive(bad: list[SettingFailures]) -> str:
-    """The plain message the simulation's repair is given for settings where most trials failed."""
+def failures_directive(bad: list[SettingFailures], level_rule: str = "") -> str:
+    """The plain message the simulation's repair is given for settings where most trials failed. ``level_rule``: FI's one
+    rule for a result compared inside each run, said only when a failure is of that kind."""
+    from . import in_run as _in_run
+    rule = (" " + level_rule) if level_rule and any(_in_run.is_level_fault(r) for s in bad for r, _ in s.reasons) else ""
     shown = "\n".join(f"- {s.says()}" for s in bad[:8]) + (f"\n- and {len(bad) - 8} more setting(s)" if len(bad) > 8 else "")
     return ("FI ran the study's trials, and in these settings more than half of the trials failed, so their numbers would "
             "rest on the few trials that happened to survive:\n" + shown + "\n\nRepair the simulation so that a trial "
             "at these settings runs to the end and gives its numbers (the reasons and places above say where it stops). "
             "Never return NaN, an infinity or a made-up value in place of a trial that failed: let the trial raise, so FI "
-            "counts it as failed. A number the plan says has no value at some settings is the plan's to declare, not the code's. Keep "
-            "everything else as it is.")
+            "counts it as failed. A number the plan says has no value at some settings is the plan's to declare, not the code's." + rule
+            + " Keep everything else as it is.")
 
 
 # ---- calibration against the truth -----------------------------------------------------------------------------------
@@ -1000,7 +1003,7 @@ class Verdict:
 
 def judge(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = None, thresholds: dict[str, Any] | None = None,
           reasons: dict[str, Counter] | None = None, *, repairs_left: bool, no_calibration: str = "",
-          quest_root: Path | str | None = None) -> Verdict:
+          quest_root: Path | str | None = None, level_rule: str = "") -> Verdict:
     """Both checks on a run's per-setting summary, and what follows from them. A setting where most trials failed is judged
     by the failure check alone (its numbers rest on the trials that survived), so the calibration reads the other settings.
     While a repair is left, any fault is sent back; once they are spent, a calibration fault or a failure in more than half
@@ -1021,7 +1024,7 @@ def judge(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = None, t
     if not bad and not cal.faults:
         return out
     if cal.faults or most or repairs_left:
-        parts = ([failures_directive(bad)] if bad else []) + ([calibration_directive(cal.faults)] if cal.faults else [])
+        parts = ([failures_directive(bad, level_rule)] if bad else []) + ([calibration_directive(cal.faults)] if cal.faults else [])
         out.directive = "\n\n".join(parts)
         out.action = REPAIR if repairs_left else STOP
         # Only some settings (at most half) fail and nothing else is wrong: once the repairs are spent, those settings

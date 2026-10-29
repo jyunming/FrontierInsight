@@ -41,6 +41,7 @@ from . import oracle_forms as _forms
 from . import plan as _plan
 from . import run_estimate as _estimate
 from .result_checks import TYPED_RECORD
+from . import skeleton as _skeleton
 from . import split_run as _split_run
 from . import step_coverage as _step_coverage
 from . import stop_power as _stop_power
@@ -245,6 +246,66 @@ def _search_sample(block: dict[str, Any], grid: Any) -> list[dict[str, Any]]:
 
 def _whole_number(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+
+# Rules of the single-script request that a frame written by FI makes untrue (see :meth:`_frame_template`).
+_FRAME_DROP_BULLETS = ("- Single Python file.", "- **Honour `FI_PILOT`", "- **Honour `FI_REPLICATE_SEED`",
+                       "- **Answer the design's oracles when asked.**")
+def _frame_reply(cluster: bool = False) -> str:
+    """The reply format of a request where FI writes the frame of simulate.py; with ``cluster`` (the trials run as a job
+    array) the driver `submit.py` the cluster section asks for is a block of the format too."""
+    return ("# Output format\nRespond with EXACTLY these, in this order, and nothing else:\n\n"
+            "1. A fenced Python block starting with the line `# file: simulate.py`: the function `trial` and the imports and "
+            "helper functions it needs (nothing of FI's frame).\n"
+            "2. A fenced Python block starting with the line `# file: experiment.py`: the analysis.\n"
+            + ("3. A fenced Python block starting with the line `# file: submit.py`: the driver that submits the job array, as "
+               "the section on the cluster says.\n4." if cluster else "3.")
+            + " A single line `DEPS:` followed by a comma-separated list of pip-installable package names. Use the outline's "
+            "`deps` as the baseline; add only if you genuinely needed something more.\n\n")
+_FRAME_BODY_INTRO = (
+    "You are the **Implementation Body** stage of an automated research pipeline.\n\n"
+    "A prior stage produced a structural outline for the experiment. Your job: write the code the output format below asks for. "
+    "You do NOT change the signatures of the outline's functions that you keep, you do NOT rewrite the RESULT_JSON contract, "
+    "you do NOT alter the imports or the figures-dir setup of the scaffold. The outline locked those decisions.\n\n")
+
+
+def frame_template_text(text: str, cluster: bool = False) -> str:
+    """``text`` (a code-writing template) for a request where FI writes the frame of simulate.py: the bullets about a single
+    script, the pilot, the seed and the oracle run are taken out, the reply format is the frame's, and the template does not
+    say the whole scaffold is filled."""
+    out, skipping = [], False
+    for line in text.split("\n"):
+        if line.startswith("- "):
+            skipping = line.startswith(_FRAME_DROP_BULLETS)
+        elif skipping and (not line.strip() or line.startswith("#")):
+            skipping = False
+        if not skipping:
+            out.append(line)
+    text = "\n".join(out)
+    text = text.replace("; the single-file constraint still applies, since an import is not a second file you author",
+                        "; an import is not a second file you author")
+    a, b = text.find("# Output format"), text.find("# Inputs")
+    if 0 <= a < b:
+        text = text[:a] + _frame_reply(cluster) + text[b:]
+    c = text.find("# The topic, as the person wrote it")
+    if c > 0 and text.startswith("You are the **Implementation Body**"):
+        text = _FRAME_BODY_INTRO + text[c:]
+    return text
+
+
+def frame_outline_text(text: str) -> str:
+    """``text`` (the outline template) for a request where FI writes the frame of simulate.py."""
+    text = text.replace(
+        "- The next stage will write a single Python file constrained to:",
+        "- FI writes the frame of simulate.py (its entry points, the loop over settings and trials, the seeds and the main). "
+        "The outline lists the function `trial` (ONE trial: it takes the settings and returns the plan's results) and the "
+        "helper functions it uses, which are the equation and step functions below, and, for experiment.py, the functions of "
+        "the analysis (statistics, figures, `RESULT_JSON`). It lists no entry point, no loop over settings or trials and no "
+        "main for the simulation. The next stage writes `trial` and its helpers, and experiment.py, constrained to:")
+    text = text.replace("(those belong to the scenario, in the other functions)",
+                        "(those belong to FI's frame, or to the analysis)")
+    return text
 
 
 class RunChecksMixin:
@@ -654,7 +715,9 @@ class RunChecksMixin:
         design = state.get("design")
         why = _skeleton.applies(design)
         if why:
-            self._log.info("[implement] FI writes no frame of simulate.py: %s", why)  # type: ignore[attr-defined]
+            if getattr(self, "_frame_why_logged", None) != why:  # one line, not one for every request that asks
+                self._frame_why_logged = why
+                self._log.info("[implement] FI writes no frame of simulate.py: %s", why)  # type: ignore[attr-defined]
             return ""
         # A quest keeps the frame it was written with (a resume, an update of FI): the frame on disk is the one used while the
         # plan has not changed; a plan that changed gets a new one.
@@ -665,10 +728,13 @@ class RunChecksMixin:
         return _skeleton.frame_for(design, stochastic=_split_run.design_is_stochastic(design),
                                    strict=_contract.from_design(design).form == "contract", existing=existing)
 
-    def _frame_note(self, state: Any) -> str:
-        """What the code-writing request says about simulate.py when FI writes the frame, else ``""``."""
-        from . import skeleton as _skeleton
+    def _frame_variant(self, state: Any) -> str:
+        """``"prompt"`` when FI writes the frame of simulate.py (the code request shows the frame first and asks for ``trial``
+        beside experiment.py), else ``""``."""
+        return "prompt" if self._skeleton_frame(state) else ""
 
+    def _frame_rules(self, state: Any) -> str:
+        """What the code request says about the function ``trial`` when FI writes the frame, else ``""``."""
         if not self._skeleton_frame(state):
             return ""
         protocol = (state.get("design") or {}).get("protocol")
@@ -678,33 +744,141 @@ class RunChecksMixin:
             more += ("- This study searches for the best design: `cell` is ONE design (every setting by name), and `ctx.kind` says "
                      "what FI asks for (`\"search\"`: a design the search tries; `\"scan\"`: a row of the coarse scan; "
                      "`\"check\"`: a case of a check). The objective and every constrained quantity are results: return them by "
-                     "name.\n")
-        inside = list(_in_run.of_study(protocol) or {})
+                     "name. `trial` never searches, optimises or loops over designs: one call computes one design.\n")
+        inside_map = _in_run.of_study(protocol) or {}
+        inside = list(inside_map)
         if inside:
             more += (f"- `cell[\"{inside[0]}\"]`" + (" and the others of " + ", ".join(f"`{n}`" for n in inside[1:]) if inside[1:] else "")
-                     + " compared inside each run are the LIST of their values, not one value. Give a result per value with "
-                     "`out.each(\"name\", {value: number})` (or a list in the order of the values when one thing is compared).\n")
+                     + " compared inside each run are the LIST of their values, not one value: use every value of it. Give a "
+                     "result per value with `out.each(\"name\", {value: number})` (or a list in the order of the values when one "
+                     "thing is compared), a number for EVERY value (NaN or None where the result does not exist for one). A "
+                     "number the run gives once (fitted across all the values) is returned as a number. "
+                     + "Key a mapping " + _in_run.key_forms(_in_run.level_cells(inside_map)) + ".\n")
         if getattr(_optimise_search.study_grid(protocol), "sub_studies", None):
             more += ("- The study has sub-studies: a `cell` holds every setting; those the sub-study does not vary are at the value "
                      "it holds.\n")
         silent = _skeleton.case_less_checks(protocol)
         if silent:
             more += ("- The plan's check(s) " + ", ".join(f"`{n}`" for n in silent) + " name no case FI can run: also give the "
-                     "function `oracle()` (no arguments) that returns the numbers those checks measure, by name.\n")
+                     "function `oracle()` (no arguments) that returns the numbers those checks measure, by name, computed with the "
+                     "same simulation code.\n")
         more += ("- Only when one call can compute every trial of a setting at once (vectorised code): give `trial_batch(cell, ctx)` "
                  "instead of `trial`. It returns a list with one result for each seed in `ctx.seeds`, in that order "
                  "(`ctx.results()` gives them ready, `ctx.rngs()` one generator per seed); FI checks the length and the order.\n")
+        lead = ("FI writes the frame of simulate.py (the entry point, the seed, the thresholds). In the `# file: simulate.py` block "
+                "give ONLY the function `trial(cell, ctx)` and the imports and helper functions it needs.\n")
         return (
-            "FI writes the frame of simulate.py (the entry point, the seed, the thresholds). In the `# file: simulate.py` block "
-            "give ONLY the function `trial(cell, ctx)` and the imports and helper functions it needs; no `run_trial`, no "
-            "`run_cell`, no seeding. This replaces the rules below about those in simulate.py; everything else below stays.\n"
+            lead +
+            "- The frame already imports `TrialResult` and `Ctx`: add no import of `fi_frame`.\n"
             "- `cell[\"name\"]`: the settings, read by name.\n"
             "- `ctx.rng`: the random generator FI seeded for this trial. Draw every random number from it. `ctx.seed` is the "
             "same seed as an integer for a library that wants one; `ctx.trial` is the trial's number; `ctx.thresholds` holds the "
             "plan's thresholds.\n"
             f"- Return the results the plan declares, by name ({names}; a proportion may be returned as `<name>_count` and "
             "`<name>_total`): `out = TrialResult()`, `out[\"name\"] = value`, `return out`. A result under another name is "
-            "kept as a diagnostic, not as a result of the plan.\n" + more + "\n")
+            "kept as a diagnostic, not as a result of the plan.\n"
+            "- A quantity the method cannot give at this setting (it diverged, there is no crossing in the range) is `None`, with "
+            "the reason in `out[\"why_missing\"] = {\"name\": \"reason\"}`, never a stand-in number (0, -1, a bound). A trial whose "
+            "code fails raises an exception with the reason instead of returning a made-up value. `trial` writes no files, "
+            "prints no results and keeps no state between calls.\n"
+            "- A cut-off that decides something (what counts as an outbreak, a success) is read from `ctx.thresholds`, never "
+            "written into the code as a number of its own.\n"
+            "- When a protocol metric is a mean over the trials a proportion counts (`\"given\": \"p_outbreak\"`), also set, under "
+            "that proportion's own id, 1 (this trial is in the subset) or 0 for EVERY trial, and the value being averaged under "
+            "the mean metric's own id: FI picks the subset trial by trial from its own record.\n"
+            "- When a protocol metric has a `known_value`, set, under EXACTLY the names it gives (`estimate`, `standard_error`, "
+            "the two ends of `interval`), the trial's own estimate and its own uncertainty, computed from that trial's data, on "
+            "the scale of the true value; never whether the interval covered the truth (FI counts that itself). Where a trial has "
+            "no estimate it raises with the reason, unless the metric's `undefined_when` names that setting.\n"
+            "- A check of the plan that names a `case` and a `measure` is run by FI: it calls `trial` on that case and computes "
+            "the `measure` (one returned name, or a formula of them) from the result, so `trial` must return every name a "
+            "`measure` uses, computed by the real simulation (never a check's number already worked out in another form).\n"
+            "- Each equation of the design's `model` whose `role` is `generates` carries its id in a comment (`# E1`) on or above "
+            "the code that computes it (in simulate.py, or in the model's package when the code has one).\n" + more + "\n")
+
+    def _frame_note(self, state: Any) -> str:
+        """The start of the code request when FI writes the frame, else ``""``: what to give for simulate.py, and the frame FI
+        writes around it."""
+        if not self._frame_variant(state):
+            return ""
+        return (self._frame_rules(state)
+                + "FI's frame of simulate.py, as FI writes it around your function (you write none of it and change none of it):\n\n"
+                + "```python\n" + self._skeleton_frame(state).rstrip("\n") + "\n```\n\n")
+
+    def _frame_protocols(self, state: Any, search: bool, inside: dict[str, Any]) -> str:
+        """The two-script contract of the code request when FI writes the frame, else ``""``: the experiment.py parts of the
+        protocol texts, with nothing that asks simulate.py for an entry point, a seed or a loop (those are the frame's)."""
+        if not self._frame_variant(state):
+            return ""
+        from . import engine as _e
+
+        split = _e._SPLIT_PROTOCOL
+        analysis = split[split.index("**experiment.py is the analysis.**"):split.index("If an outline is given")]
+        head = ("## The experiment is two scripts, and FI runs the trials (execution.split_analysis is on)\n\n"
+                "FI itself runs every trial and keeps their record, so the record of what ran is never the simulation's own "
+                "statement. Reply with the fenced Python blocks the output format names: `# file: simulate.py` (the function "
+                "`trial`, as the start of this request says), then `# file: experiment.py`, then the `DEPS:` line.\n\n")
+        outline = ("If an outline is given, it describes the whole experiment as one program: put the code of one trial in "
+                   "`trial` and the statistics, figure and `RESULT_JSON` code in experiment.py, keeping every name and "
+                   "signature of the outline's functions that you keep. simulate.py holds no loop over settings or trials and no "
+                   "main: the frame has them, so leave out whatever of the outline does that.\n")
+        block = head + analysis + outline
+        if self.config.execution.background_jobs:  # type: ignore[attr-defined]
+            block += _e._CLUSTER_PROTOCOL
+        if search:
+            block += ("\n## This study is a search for the best design, and FI runs the search (the plan's `optimisation` block)\n\n"
+                      "FI, not the scripts, searches for the design that makes the objective as low or as high as possible: it "
+                      "decides which design to try next, runs one trial of the simulation for each, counts every call against the "
+                      "plan's evaluation budget and keeps the record. The rules above still hold, with these differences:\n"
+                      + _e._SEARCH_PROTOCOL[_e._SEARCH_PROTOCOL.index("- experiment.py does not read `FI_TRIALS` for the search."):])
+        if inside:
+            block += ("\n**What each run compares inside it** (`protocol.in_each_run`: "
+                      + ", ".join(f"`{k}`" for k in inside) + "). These are not settings of their own: every run goes through ALL "
+                      "their values together, on the same random numbers.\n"
+                      + _e._IN_EACH_RUN_PROTOCOL[_e._IN_EACH_RUN_PROTOCOL.index("In FI_TRIALS each setting is followed"):])
+        return block
+
+    def _frame_template(self, state: Any, tmpl: Any) -> Any:
+        """The code-writing template with what contradicts the frame taken out (``tmpl`` itself when there is no frame): the
+        rules of the single script about seeding, pilots, the oracle run and the one-block reply, and the reply format."""
+        import string as _string
+
+        if not self._frame_variant(state):
+            return tmpl
+        return _string.Template(frame_template_text(tmpl.template, bool(self.config.execution.background_jobs)))  # type: ignore[attr-defined]
+
+    def _frame_outline_template(self, state: Any, tmpl: Any) -> Any:
+        """The outline request with what contradicts the frame taken out (``tmpl`` itself when there is no frame): the outline
+        lists `trial` and its helpers for simulate.py (and the analysis for experiment.py), never an entry point, a loop over
+        settings or trials, or a main of the simulation, which are the frame's."""
+        import string as _string
+
+        if not self._frame_variant(state):
+            return tmpl
+        return _string.Template(frame_outline_text(tmpl.template))
+    def _frame_outline(self, state: Any, outline: dict[str, Any]) -> dict[str, Any]:
+        """The outline without the entry points of simulate.py (``run_trial``, ``run_cell``, ``oracle``): their signatures are
+        the frame's, not the model's. ``outline`` itself when there is no frame."""
+        import ast as _ast
+
+        if not self._frame_variant(state) or not isinstance(outline, dict):
+            return outline
+        out = dict(outline)
+        gone = {"run_trial", "run_cell", "oracle"}
+        if isinstance(out.get("functions"), list):
+            out["functions"] = [f for f in out["functions"] if not (isinstance(f, dict) and f.get("name") in gone)]
+        scaffold = out.get("scaffold")
+        if isinstance(scaffold, str):
+            try:
+                tree = _ast.parse(scaffold)
+            except SyntaxError:
+                return out
+            lines = scaffold.splitlines(keepends=True)
+            drop = [n for n in tree.body if isinstance(n, _ast.FunctionDef) and n.name in gone]
+            for n in sorted(drop, key=lambda n: -n.lineno):
+                del lines[n.lineno - 1:n.end_lineno]
+            out["scaffold"] = "".join(lines)
+        return out
 
     def _framed(self, state: Any, simulate_code: str) -> str:
         """The text of ``simulate.py`` once the model's reply is put into FI's frame (and ``fi_frame.py`` written beside it);
@@ -739,6 +913,17 @@ class RunChecksMixin:
             else:
                 self._log.info("[implement] simulate.py is FI's frame with the model's trial function")  # type: ignore[attr-defined]
         return text
+
+    def _level_rule(self, state: Any, simulate: Any) -> str:
+        """FI's one rule for a result compared inside each run (:func:`core.skeleton.level_rule`) when simulate.py has FI's
+        frame, else ``""``; a repair of a failed run says it only when a failure is of that kind."""
+        from . import skeleton as _skeleton
+
+        try:
+            source = Path(simulate).read_text(encoding="utf-8")
+        except (OSError, TypeError, ValueError, UnicodeDecodeError):
+            return ""
+        return _skeleton.level_rule(self._protocol_block(state), source)  # type: ignore[attr-defined]
 
     # ---- a setting of the grid the code never reads ----------------------------------------------------------------------
 
@@ -2017,7 +2202,7 @@ class RunChecksMixin:
             if s.fault and not s.traceback:
                 s.traceback = tb
                 break
-        message = _small.SmallRun(settings, str(record.get("load_error") or "")).directive()
+        message = _small.SmallRun(settings, str(record.get("load_error") or "")).directive(self._level_rule(state, self.quest_root / "code" / _split_run.SIMULATE_NAME))  # type: ignore[attr-defined]
         self._log.warning("[execute] FI's small run of the simulation failed before the code is read (%s); sending it "  # type: ignore[attr-defined]
                           "to be repaired", record.get("says"))
         return self._code_review_failed_run(message, script=_split_run.SIMULATE_NAME)  # type: ignore[attr-defined]

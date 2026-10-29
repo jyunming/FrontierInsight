@@ -10982,7 +10982,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._log.info("[implement_outline] the design changed since the outline was written; writing it again")
         self._log.info("[implement_outline] drafting scaffold + signatures")
         try:
-            prompt = self._prompts["implement_outline"].substitute(
+            prompt = self._frame_outline_template(state, self._prompts["implement_outline"]).substitute(
                 topic_block=self._topic_block(),
                 design_block=self._code_design_block(state, names_only=True),
                 clarify_block=_format_clarify(state),
@@ -11075,11 +11075,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # The model's package, one function at a time (core/function_steps.py): when it is written and checked, the
             # request below asks for the two scripts only.
             await self._fill_model_functions(state, outline)
-            prompt = body_prompt.substitute(
+            prompt = self._frame_template(state, body_prompt).substitute(
                 topic_block=self._topic_block(),
                 design_block=self._code_design_block(state),
                 clarify_block=_format_clarify(state),
-                outline_block=json.dumps(outline, indent=2),
+                outline_block=json.dumps(self._frame_outline(state, outline), indent=2),
                 timeout_s=self._planning_limit(state),
                 skills_block=(self._skills_block(state) + self._dropped_skills_note(state)) or "(no skills selected for this quest)",
                 inputs_block=self._inputs_block(),
@@ -11103,7 +11103,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 )
             else:
                 self._log.info("[implement] generating experiment code (legacy one-shot)")
-            prompt = self._prompts["implement"].substitute(
+            prompt = self._frame_template(state, self._prompts["implement"]).substitute(
                 topic_block=self._topic_block(),
                 design_block=self._code_design_block(state),
                 timeout_s=self._planning_limit(state),
@@ -11112,6 +11112,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 job_block=self._job_block(state),
                 split_block=self._split_block(state),
             )
+        prompt = self._frame_note(state) + prompt  # FI writes the frame of simulate.py: said first (core/run_checks.py)
         # A review that named something this run computed sent the experiment
         # back here (``re_execute``). Both prompts above carry the design and
         # the outline but no review, so without this the model would regenerate
@@ -11123,7 +11124,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             )
             prompt += _rerun_directive(state.get("review") or {}, rerun_for)
             if self._split_on(state) and (self.quest_root / "code" / _split_run.SIMULATE_NAME).is_file():
-                prompt += _SPLIT_RERUN_NOTE
+                prompt += _skeleton.RERUN_NOTE if self._frame_variant(state) else _SPLIT_RERUN_NOTE
             kept_asks = [str(p) for p in (state.get("extend_check") or {}).get("asked") or [] if str(p).strip()]
             if kept_asks and not extend:
                 # The script was extended for a person's request; this rerun must not drop what was added for it.
@@ -11133,9 +11134,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if extend:
             self._log.info("[implement] extending the existing script for: %s", "; ".join(p[:80] for p in extend))
             prompt += _extend_directive(self._scripts_on_disk(), extend, self._submit_on_disk(),
-                                        package=self._package_shown(state))
+                                        package=self._package_shown(state), frame=bool(self._frame_variant(state)))
             if self._split_on(state) and (self.quest_root / "code" / _split_run.SIMULATE_NAME).is_file():
-                prompt += _SPLIT_RERUN_NOTE
+                prompt += _skeleton.RERUN_NOTE if self._frame_variant(state) else _SPLIT_RERUN_NOTE
         # A revised plan: the scripts that exist are changed only where the revision touched what they read (the model's
         # functions, written above, were kept or written again by their own record).
         incremental = None
@@ -11697,7 +11698,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             reflect_history_block=_format_reflect_history([]),
             design_block=self._code_design_block(state), clarify_block=_format_clarify(state),
         )
-        prompt = _skeleton.repair_note(code) + prompt
+        prompt = _skeleton.framed_prompt(code, prompt)
         try:
             text = await self._chat(prompt, node="implement_figures")
         except Exception as exc:  # noqa: BLE001 -- a repair is best-effort
@@ -12539,7 +12540,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             topic_block=self._topic_block(),
             previous_code=code,
             returncode="(not run yet)",
-            stdout_tail=_protocol_directive(protocol, mismatches),
+            stdout_tail=_protocol_directive(protocol, mismatches, frame=path.name == _split_run.SIMULATE_NAME and _skeleton.has_frame(code)),
             stderr_tail="",
             duration_s="0.00",
             figures_count="0",
@@ -12548,7 +12549,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             design_block=self._code_design_block(state),
             clarify_block=_format_clarify(state),
         )
-        prompt = _skeleton.repair_note(code if path.name == _split_run.SIMULATE_NAME else "") + prompt
+        prompt = _skeleton.framed_prompt(code if path.name == _split_run.SIMULATE_NAME else "", prompt)
         try:
             text = await self._chat(prompt, node="implement_protocol")
         except Exception as exc:  # noqa: BLE001 -- a repair is best-effort
@@ -18228,8 +18229,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             returncode="(the oracle run did not pass)",
             # The contract of the layout this quest has: a two-script quest's simulation is a function FI calls, with
             # no FI_ORACLE run and no ORACLE_JSON line (saying both contracts sent repairs to write a branch nothing reads).
-            stdout_tail=_oracle.directive(oracles, found, disputed=disputed, trial=bool(getattr(self, "_trial_mode", False)))
-            + (_TRIAL_ORACLE_NOTE if getattr(self, "_trial_mode", False) else "")
+            stdout_tail=_oracle.directive(oracles, found, disputed=disputed, trial=bool(getattr(self, "_trial_mode", False)),
+                                          frame=path.name == _split_run.SIMULATE_NAME and _skeleton.has_frame(code))
+            + ((_skeleton.ORACLE_NOTE if path.name == _split_run.SIMULATE_NAME and _skeleton.has_frame(code)
+                else _TRIAL_ORACLE_NOTE) if getattr(self, "_trial_mode", False) else "")
             # A check against a known answer tests the equations, which may be in the model's package.
             + (self._package_repair_note(state) if path.name == _split_run.SIMULATE_NAME else ""),
             stderr_tail=stderr_tail,
@@ -18240,7 +18243,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             design_block=self._code_design_block(state),
             clarify_block=_format_clarify(state),
         )
-        prompt = _skeleton.repair_note(code if path.name == _split_run.SIMULATE_NAME else "") + prompt
+        prompt = _skeleton.framed_prompt(code if path.name == _split_run.SIMULATE_NAME else "", prompt)
         try:
             text = await self._chat(prompt, node="implement_oracle")
         except Exception as exc:  # noqa: BLE001 -- a repair is best-effort
@@ -18453,7 +18456,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             clarify_block=_format_clarify(state),
         )
         why = ""
-        prompt = _skeleton.repair_note(code if code_path.name == _split_run.SIMULATE_NAME else "") + prompt
+        prompt = _skeleton.framed_prompt(code if code_path.name == _split_run.SIMULATE_NAME else "", prompt)
         try:
             text = await self._chat(prompt, node="implement_seed")
         except Exception as exc:  # noqa: BLE001 -- a repair is best-effort
@@ -20458,8 +20461,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             elif repair_simulation:
                 script_code = simulate_path.read_text(encoding="utf-8")
                 # The crash may be in the model's package simulate.py calls: shown, and fixable there.
-                split_note = (_SPLIT_REFLECT_SIMULATE + (_SEARCH_REFLECT_SIMULATE if _optim.has_block(state.get("design"))
-                                                         else "")
+                framed = _skeleton.has_frame(script_code)
+                split_note = ((_skeleton.REFLECT_SIMULATE if framed else _SPLIT_REFLECT_SIMULATE)
+                              + ((_skeleton.REFLECT_SEARCH if framed else _SEARCH_REFLECT_SIMULATE)
+                                 if _optim.has_block(state.get("design")) else "")
                               + self._package_repair_note(state))
             elif _optim.has_block(state.get("design")):
                 split_note = _SEARCH_REFLECT_ANALYSIS
@@ -20495,7 +20500,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             clarify_block=_format_clarify(state),
         )
         if repair_simulation:
-            prompt = _skeleton.repair_note(script_code) + prompt  # what may change, first (nothing when there is no frame)
+            prompt = _skeleton.framed_prompt(script_code, prompt)  # what may change, first (nothing when there is no frame)
         try:
             text = await self._chat(prompt, node="execute_reflect")
         except Exception as exc:  # noqa: BLE001
@@ -27615,7 +27620,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return ""
         search = _optim.has_block(state.get("design")) and not self.config.execution.background_jobs
         inside = _in_run.of_study(self._protocol_block(state))
-        block = (self._frame_note(state) + _SPLIT_PROTOCOL + (_CLUSTER_PROTOCOL if self.config.execution.background_jobs else "")
+        block = self._frame_protocols(state, search, inside) or (
+                 _SPLIT_PROTOCOL + (_CLUSTER_PROTOCOL if self.config.execution.background_jobs else "")
                  + (_SEARCH_PROTOCOL if search else "")
                  + (_IN_EACH_RUN_PROTOCOL.replace("$factors", ", ".join(f"`{k}`" for k in inside))
                     .replace("$key_rule", "Key a mapping " + _in_run.key_forms(_in_run.level_cells(inside)) + ".") if inside else ""))
@@ -27628,10 +27634,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 # FI wrote and checked the package function by function: only the two scripts are asked for.
                 block += _code_layout.prefilled_block(
                     package, (self.quest_root / "code" / package / _code_layout.MODEL_NAME).read_text(encoding="utf-8"),
-                    steps=self._written_steps(state))
+                    steps=self._written_steps(state), frame=self._frame_variant(state))
                 block += self._function_steps_partial_note()
             else:
-                block += _code_layout.prompt_block(package, _oracle.generating_equations(self._protocol_block(state)))
+                block += _code_layout.prompt_block(package, _oracle.generating_equations(self._protocol_block(state)),
+                                                   frame=self._frame_variant(state))
                 block += self._function_steps_note(package)
         return block
 
@@ -31762,7 +31769,7 @@ def _without_numbers(text: str, hidden: list[Any]) -> str:
     return _PROSE_NUMBER.sub(swap, text)
 
 
-def _protocol_directive(protocol: dict[str, Any], mismatches: list[Any]) -> str:
+def _protocol_directive(protocol: dict[str, Any], mismatches: list[Any], frame: bool = False) -> str:
     """What stands where a traceback would in the repair request: the protocol the plan fixed and how the script differs."""
     return (
         "This script has NOT been run, and it has not failed: the account of a crash above does not apply. It "
@@ -31771,8 +31778,9 @@ def _protocol_directive(protocol: dict[str, Any], mismatches: list[Any]) -> str:
         "The protocol:\n" + json.dumps(_stripped(protocol), indent=2) + "\n\n"
         "How the script differs from it:\n" + "\n".join(f"- {m.message()}" for m in mismatches) + "\n\n"
         "Change exactly this: make the script use the protocol's values, every one of them, and none the protocol does "
-        "not name. Keep everything else unchanged: the same functions, outputs and figures, the handling of FI_PILOT "
-        "and FI_REPLICATE_SEED, and the same final RESULT_JSON line. Do not shorten or simplify anything. If the "
+        "not name. Keep everything else unchanged: the same functions, outputs and figures, "
+        + ("and the frame FI wrote" if frame else "the handling of FI_PILOT and FI_REPLICATE_SEED, and the same final RESULT_JSON line")
+        + ". Do not shorten or simplify anything. If the "
         "timeout makes the full protocol impossible, keep the protocol's values anyway and say so in `patch_summary`: "
         "the person reading it decides, not this script.\n\n"
         "Return only the functions you change in `functions` (each one whole; FI keeps every other line), one sentence in `patch_summary`, and leave `give_up_reason` empty."
@@ -33073,7 +33081,7 @@ def _rerun_directive(review: dict[str, Any], named: str) -> str:
 
 
 def _extend_directive(scripts: dict[str, str], points: list[str], submit: str = "",
-                      package: tuple[str, dict[str, str]] | None = None) -> str:
+                      package: tuple[str, dict[str, str]] | None = None, frame: bool = False) -> str:
     """What the implement prompt is told when a person's refine asked for a number the study lacks: the scripts that
     exist are the base, and only what the number needs is changed. ``package``: the model's package the simulation
     computes with (``core/code_layout.py``), shown too so the extension sees the equations it calls."""
@@ -33089,7 +33097,8 @@ def _extend_directive(scripts: dict[str, str], points: list[str], submit: str = 
         "experiment: start from the script(s) below and change as little as you can so that they also produce what is "
         "asked. Keep the protocol, the design, every setting, the seeds, the RESULT_JSON keys that exist and every figure "
         "that exists exactly as they are (same file names, same content); only add the measurement, the setting or the "
-        "figure the ask needs, and report it in RESULT_JSON. Return the whole script(s), in the reply format above.",
+        "figure the ask needs, and report it in RESULT_JSON. "
+        + (_skeleton.EXTEND_REPLY if frame else "Return the whole script(s), in the reply format above."),
         "What the person asked for:",
         *(f"  - {p}" for p in points),
         "",

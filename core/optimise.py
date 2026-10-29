@@ -1816,7 +1816,14 @@ class OptimisationRunner:
         if not cells:
             return None
         left = self._repairs_left() if callable(self._repairs_left) else bool(self._repairs_left)
-        verdict = _checks.judge(cells, reasons=reasons, repairs_left=bool(left), no_calibration=NO_CALIBRATION)
+        from . import skeleton as _skeleton
+
+        try:
+            level_rule = _skeleton.level_rule(self._protocol, self.simulate.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            level_rule = ""
+        verdict = _checks.judge(cells, reasons=reasons, repairs_left=bool(left), no_calibration=NO_CALIBRATION,
+                                level_rule=level_rule)
         if verdict.action == _checks.LEAVE_OUT:
             # the search never chooses a design whose evaluation failed: nothing to leave out, the failures are stated
             verdict.action, verdict.left_out = _checks.OK, []

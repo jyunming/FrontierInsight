@@ -580,6 +580,12 @@ def of(protocol):
     return inside if isinstance(inside, dict) and inside else None
 
 
+def is_level_fault(reason):
+    """True when ``reason`` is FI's own message about a run's result per compared value (``read_returned`` writes it as
+    ``"{entry}() returned `{name}` ..."``): a value given for some of the compared values and not for all."""
+    return "() returned `" in str(reason)
+
+
 def of_study(protocol):
     """What each run of the study compares inside it, wherever the plan wrote it: a search for the best design
     (``protocol.optimisation``) holds its own ``in_each_run`` in that block, any other study in the protocol. Everything that
