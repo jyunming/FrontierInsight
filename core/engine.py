@@ -11791,6 +11791,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             Path(path).write_bytes(text.encode("utf-8"))  # bytes back as bytes (bytes back as bytes: text mode writes the draft's CRLF as CR CR LF on Windows)
             _receipts.carry_over(self.quest_root, "claim_check", "paper", before, Path(path).read_bytes(),
                                  "FI took out sentences its records contradict and added no claim")
+            self._prune_ledger_after_take_out(list(taken), text)
             record = self.quest_root / _record_claims.TAKEN_OUT
             record.parent.mkdir(parents=True, exist_ok=True)
             # Added to what earlier passes took out (a later review's pass, the next sentence of a kind): never replaced.
@@ -22679,6 +22680,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             Path(path).write_bytes(text.encode("utf-8"))  # bytes back as bytes (bytes back as bytes: text mode writes the draft's CRLF as CR CR LF on Windows)
             _receipts.carry_over(self.quest_root, "claim_check", "paper", before, Path(path).read_bytes(),
                                  "FI took out values it could not fill and added no claim")
+            self._prune_ledger_after_take_out([str(t.get("sentence") or "") for t in taken], text)
         except (OSError, UnicodeDecodeError) as e:
             self._log.warning("[record_check] the values FI could not fill could not be taken out of the paper (%s)", e)
             return []
@@ -24734,6 +24736,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return _optimise_refine.hint(block)
         except Exception:  # noqa: BLE001 -- a hint
             return ""
+
+    def _prune_ledger_after_take_out(self, taken: list[str], paper_md: str) -> None:
+        """A claim whose sentence FI took out of the paper leaves ``paper/claims.json`` with it, as with the page-limit
+        trim: the slides, poster and talk read that list, and must not state what the paper no longer says. A claim
+        another sentence still says stays. Best-effort."""
+        try:
+            ledger = _read_json_or_none_path(self.quest_root / "paper" / "claims.json")
+            pruned = _grounding_after_trim(ledger, [t for t in taken if t], paper_md) if isinstance(ledger, dict) else None
+            if pruned is not None:
+                self._write_claims_ledger(pruned)
+        except Exception as e:  # noqa: BLE001 -- the ledger is a transparency record, never a reason to stop
+            self._log.warning("[claims] the claim list could not be pruned after a take-out (%s)", e)
 
     def _write_claims_ledger(self, grounding: dict[str, Any]) -> None:
         """Persist the claim-grounding result as a transparency ledger:

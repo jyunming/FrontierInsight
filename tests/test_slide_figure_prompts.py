@@ -50,5 +50,5 @@ def test_the_slides_prompt_gives_every_figure_a_slide_of_its_own_and_the_discuss
 
 def test_the_slides_prompt_still_fills_in_as_a_template() -> None:
     """It is a string.Template: a stray ``$`` in the new text would break every deck."""
-    filled = string.Template(_prompt("slides.md")).substitute(paper_md="PAPER", figure_list="FIGURES")
+    filled = string.Template(_prompt("slides.md")).substitute(paper_md="PAPER", figure_list="FIGURES", claims_rule="", claims="")
     assert "PAPER" in filled and "FIGURES" in filled

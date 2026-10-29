@@ -1,5 +1,6 @@
 You are fixing slide(s) $slide_numbers of a Marp slide deck. A check of the rendered pages found the problems listed below. Every other slide is final and stays exactly as it is: do not rewrite, reorder, merge or repeat them.
 
+$claims_rule
 # The deck as it is (read-only)
 
 $deck
@@ -8,6 +9,7 @@ $deck
 
 $figure_list
 
+$claims
 $feedback
 
 # Your answer
