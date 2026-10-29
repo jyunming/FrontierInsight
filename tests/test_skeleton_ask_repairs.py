@@ -171,7 +171,7 @@ def test_the_code_review_repair_of_a_framed_simulation_keeps_no_handling_of_the_
     framed.env.prompts["code_review_repair"] = real
     framed.go()
     prompt = [p for p in framed.prompts if "# How to answer" in p][-1]
-    assert "FI_PILOT" not in prompt and "FI_REPLICATE_SEED" not in prompt and "and the final `RESULT_JSON" in prompt
+    assert "FI_PILOT" not in prompt and "FI_REPLICATE_SEED" not in prompt and "RESULT_JSON" not in prompt and "and the frame." in prompt
     assert prompt.startswith(skeleton.REPAIR_NOTE if function else skeleton.REPAIR_NOTE_WHOLE)
     plain_test = ("import simulate\n\ndef test_growth():\n    out = simulate.run_trial({'rate': 2.0, 'dose': 3.0}, 0, 1)\n"
                   "    assert out['growth'] > 6.0, 'growth lacks the offset'\n")
@@ -269,3 +269,60 @@ def test_with_no_frame_every_changed_message_is_what_it_was() -> None:
 PINS_AT_6AD6C160 = {
     "small_run": "c46af295127b2217", "small_run_other": "7ad3e4770282781c", "failures": "a447049a7fe88a5e",
     "oracle": "c8b1dcea470a2f8e", "oracle_script": "89cff3048184af42", "extend": "8503839e96ba908c", "repair_note": "e3b0c44298fc1c14"}
+
+
+# ---- round 4: the search path, the frame's own business, the outline's replace targets ---------------------------------------------
+
+
+def test_a_search_that_compares_values_inside_each_run_gets_the_same_rule_for_a_missing_key(tmp_path: Path) -> None:
+    import time
+
+    from core import optimise
+
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "simulate.py").write_text(FRAMED, encoding="utf-8")
+    protocol = {"optimisation": {"in_each_run": {"method": ["slow", "fast"]}}}
+    reason = _missing_key_reason()
+    rows = ([{"event": "evaluation", "stage": "start", "status": "ok", "design": {"x": n}} for n in range(3)]
+            + [{"event": "evaluation", "stage": "start", "status": "failed", "design": {"x": 100 + n}, "reason": reason}
+               for n in range(7)])
+    runner = optimise.OptimisationRunner(None, quest_root=tmp_path, protocol=protocol, simulate=code / "simulate.py",
+                                         analysis=code / "experiment.py", repairs_left=lambda: True)
+    sent = runner._check_trials(optimise.SearchRun(record={}, rows=rows), time.monotonic())
+    rule = skeleton.level_rule(protocol, FRAMED)
+    assert sent is not None and sent.stderr.count(rule) == 1 and sent.stderr.count("Never return NaN") == 1
+    # a failure of another kind, or a simulation without a frame: no rule
+    other = [dict(r, reason="ZeroDivisionError: x") if r["status"] == "failed" else r for r in rows]
+    assert rule not in runner._check_trials(optimise.SearchRun(record={}, rows=other), time.monotonic()).stderr
+    (code / "simulate.py").write_text(UNFRAMED, encoding="utf-8")
+    assert rule not in runner._check_trials(optimise.SearchRun(record={}, rows=rows), time.monotonic()).stderr
+
+
+def test_with_the_frame_on_the_repairs_do_not_ask_to_keep_the_pilot_the_seed_or_the_final_result_line() -> None:
+    from core.engine import _protocol_directive
+
+    protocol = {"grid": {"a": [1]}}
+    framed = _protocol_directive(protocol, [], frame=True)
+    assert "FI_PILOT" not in framed and "FI_REPLICATE_SEED" not in framed and "RESULT_JSON" not in framed
+    assert "and the frame FI wrote" in framed
+    assert _sha(_protocol_directive(protocol, [])) == "c5a91f7539d93fb0", "no frame: what it was at 6ad6c160"
+    intro = Path(__file__).parent.parent / "agents" / "execute_reflect.md"
+    text = intro.read_text(encoding="utf-8")
+    assert skeleton.REFLECT_INTRO in text, "the sentence the frame replaces is still in the prompt"
+    on = skeleton.framed_prompt(FRAMED, text)
+    assert "emits `RESULT_JSON" not in on and skeleton.REFLECT_INTRO_FRAME in on and on.startswith(skeleton.REPAIR_NOTE)
+    assert skeleton.framed_prompt(UNFRAMED, text) is text and skeleton.framed_prompt("", text) is text
+
+
+def test_the_replacements_of_the_frame_requests_find_their_text_in_the_prompt_files() -> None:
+    from core import run_checks
+
+    agents = Path(__file__).parent.parent / "agents"
+    outline = (agents / "implement_outline.md").read_text(encoding="utf-8")
+    changed = run_checks.frame_outline_text(outline)
+    assert changed != outline
+    assert "FI writes the frame of simulate.py" in changed and "belong to FI's frame" in changed
+    assert "single Python file" not in changed and "belong to the scenario" not in changed
+    review = (agents / "code_review_repair.md").read_text(encoding="utf-8")
+    assert ", the handling of `FI_PILOT` and `FI_REPLICATE_SEED`, and the final `RESULT_JSON: {...}` line." in review

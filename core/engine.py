@@ -11698,7 +11698,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             reflect_history_block=_format_reflect_history([]),
             design_block=self._code_design_block(state), clarify_block=_format_clarify(state),
         )
-        prompt = _skeleton.repair_note(code) + prompt
+        prompt = _skeleton.framed_prompt(code, prompt)
         try:
             text = await self._chat(prompt, node="implement_figures")
         except Exception as exc:  # noqa: BLE001 -- a repair is best-effort
@@ -12540,7 +12540,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             topic_block=self._topic_block(),
             previous_code=code,
             returncode="(not run yet)",
-            stdout_tail=_protocol_directive(protocol, mismatches),
+            stdout_tail=_protocol_directive(protocol, mismatches, frame=path.name == _split_run.SIMULATE_NAME and _skeleton.has_frame(code)),
             stderr_tail="",
             duration_s="0.00",
             figures_count="0",
@@ -12549,7 +12549,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             design_block=self._code_design_block(state),
             clarify_block=_format_clarify(state),
         )
-        prompt = _skeleton.repair_note(code if path.name == _split_run.SIMULATE_NAME else "") + prompt
+        prompt = _skeleton.framed_prompt(code if path.name == _split_run.SIMULATE_NAME else "", prompt)
         try:
             text = await self._chat(prompt, node="implement_protocol")
         except Exception as exc:  # noqa: BLE001 -- a repair is best-effort
@@ -18228,7 +18228,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             design_block=self._code_design_block(state),
             clarify_block=_format_clarify(state),
         )
-        prompt = _skeleton.repair_note(code if path.name == _split_run.SIMULATE_NAME else "") + prompt
+        prompt = _skeleton.framed_prompt(code if path.name == _split_run.SIMULATE_NAME else "", prompt)
         try:
             text = await self._chat(prompt, node="implement_oracle")
         except Exception as exc:  # noqa: BLE001 -- a repair is best-effort
@@ -18435,7 +18435,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             clarify_block=_format_clarify(state),
         )
         why = ""
-        prompt = _skeleton.repair_note(code if code_path.name == _split_run.SIMULATE_NAME else "") + prompt
+        prompt = _skeleton.framed_prompt(code if code_path.name == _split_run.SIMULATE_NAME else "", prompt)
         try:
             text = await self._chat(prompt, node="implement_seed")
         except Exception as exc:  # noqa: BLE001 -- a repair is best-effort
@@ -20476,7 +20476,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             clarify_block=_format_clarify(state),
         )
         if repair_simulation:
-            prompt = _skeleton.repair_note(script_code) + prompt  # what may change, first (nothing when there is no frame)
+            prompt = _skeleton.framed_prompt(script_code, prompt)  # what may change, first (nothing when there is no frame)
         try:
             text = await self._chat(prompt, node="execute_reflect")
         except Exception as exc:  # noqa: BLE001
@@ -31731,7 +31731,7 @@ def _without_numbers(text: str, hidden: list[Any]) -> str:
     return _PROSE_NUMBER.sub(swap, text)
 
 
-def _protocol_directive(protocol: dict[str, Any], mismatches: list[Any]) -> str:
+def _protocol_directive(protocol: dict[str, Any], mismatches: list[Any], frame: bool = False) -> str:
     """What stands where a traceback would in the repair request: the protocol the plan fixed and how the script differs."""
     return (
         "This script has NOT been run, and it has not failed: the account of a crash above does not apply. It "
@@ -31740,8 +31740,9 @@ def _protocol_directive(protocol: dict[str, Any], mismatches: list[Any]) -> str:
         "The protocol:\n" + json.dumps(_stripped(protocol), indent=2) + "\n\n"
         "How the script differs from it:\n" + "\n".join(f"- {m.message()}" for m in mismatches) + "\n\n"
         "Change exactly this: make the script use the protocol's values, every one of them, and none the protocol does "
-        "not name. Keep everything else unchanged: the same functions, outputs and figures, the handling of FI_PILOT "
-        "and FI_REPLICATE_SEED, and the same final RESULT_JSON line. Do not shorten or simplify anything. If the "
+        "not name. Keep everything else unchanged: the same functions, outputs and figures, "
+        + ("and the frame FI wrote" if frame else "the handling of FI_PILOT and FI_REPLICATE_SEED, and the same final RESULT_JSON line")
+        + ". Do not shorten or simplify anything. If the "
         "timeout makes the full protocol impossible, keep the protocol's values anyway and say so in `patch_summary`: "
         "the person reading it decides, not this script.\n\n"
         "Return only the functions you change in `functions` (each one whole; FI keeps every other line), one sentence in `patch_summary`, and leave `give_up_reason` empty."

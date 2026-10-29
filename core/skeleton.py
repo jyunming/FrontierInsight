@@ -599,6 +599,24 @@ REPAIR_NOTE = (
     "refused before anything runs and the repair counts as not made.\n\n")
 
 
+#: The first sentences of agents/execute_reflect.md and what they say when FI wrote the frame (the frame owns the entry, the
+#: seeds, the pilot and what the script prints).
+REFLECT_INTRO = ("Produce a corrected script that runs to completion on the available CPU venv and emits `RESULT_JSON: {...}` as "
+                 "the final line of stdout. The fix must address the actual bug shown in the traceback.")
+REFLECT_INTRO_FRAME = ("Produce a corrected `trial` (and the helper functions it uses) that runs to completion on the available "
+                       "CPU venv and returns the plan's results through FI's frame. The fix must address the actual bug shown in "
+                       "the traceback.")
+
+
+def framed_prompt(source: str, prompt: str) -> str:
+    """The repair request ``prompt`` (made from agents/execute_reflect.md) for a simulate.py with text ``source``: the repair
+    note first and the intro that speaks of the frame's own business replaced, when ``source`` has FI's frame; ``prompt``
+    unchanged otherwise."""
+    if not has_frame(source or ""):
+        return prompt
+    return repair_note(source) + prompt.replace(REFLECT_INTRO, REFLECT_INTRO_FRAME)
+
+
 REPAIR_NOTE_WHOLE = (
     "FIRST, what you may change: FI wrote the frame of simulate.py, the parts between its `# >>> FI frame` and "
     "`# <<< FI frame` lines (the `fi_frame` import, SETTINGS, RESULTS and the function `run_trial` or `run_cell`), and the file "

@@ -1534,7 +1534,8 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
         package=env.package or "(none)", how=how, problem=detail or "(none: this is the first try)")
     framed = _skeleton.has_frame(old)
     if framed:  # the handling of the pilot and the seed is in FI's frame, which a repair keeps as it is
-        prompt = prompt.replace(", the handling of `FI_PILOT` and `FI_REPLICATE_SEED`, and the final", ", and the final")
+        prompt = prompt.replace(", the handling of `FI_PILOT` and `FI_REPLICATE_SEED`, and the final `RESULT_JSON: {...}` line.",
+                                " and the frame.")
     reply = await _ask(env, _skeleton.repair_note(old, whole=not scope) + prompt, who, "repair")
     dotted = str(issue.get("function") or "")
     edits: dict[str, tuple[str, str]] = {}  # file -> (old text, new text)
