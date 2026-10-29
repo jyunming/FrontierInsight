@@ -235,7 +235,7 @@ def to_shorten(markdown: str, sections: list[Section], cut: int) -> dict[int, in
 def holds_values(markdown: str, sections: list[Section]) -> set[int]:
     """The sections that carry a result key of FI's (``{{v:...}}``) or a table of its records: where the results of a run
     are reported, read from the structure and not from any heading's wording."""
-    return {s.index for s in sections if s.index and re.search(r"\{\{(?:v:|calc:|results_table)", text_of(markdown, s))}
+    return {s.index for s in sections if s.index and re.search(r"\{\{(?:v:|calc:|trend:|comparison:|results_table)", text_of(markdown, s))}
 
 
 def changed(before: str, after: str) -> set[int] | None:
