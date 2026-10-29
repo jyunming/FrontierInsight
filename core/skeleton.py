@@ -300,10 +300,18 @@ def _pinned(tree: ast.Module) -> Counter:
     return out
 
 
-def _short(node: ast.AST | None) -> str:
+def _short(node: ast.AST | None, other: ast.AST | None = None) -> str:
+    """The first line of ``node``; when ``other`` starts with the same line (a function whose body changed), the first line
+    where they differ."""
     if node is None:
         return "nothing"
-    text = ast.unparse(node).splitlines()[0]
+    lines = ast.unparse(node).splitlines()
+    text = lines[0]
+    if other is not None:
+        theirs = ast.unparse(other).splitlines()
+        if theirs and theirs[0] == text:
+            text = next((a.strip() for a, b in itertools.zip_longest(lines, theirs, fillvalue="") if a != b and a.strip()),
+                        text)
     return text if len(text) <= 70 else text[:67] + "..."
 
 
@@ -316,13 +324,13 @@ def frame_intact(old: str, new: str) -> str:
     if before is None:
         return ""
     if after is None:
-        return "the frame FI wrote (the marked parts of simulate.py) is missing"
+        return "the frame FI wrote was changed: the marked parts of simulate.py are missing"
     try:
         for label, a, b in zip(("first", "second"), before, after):
             for x, y in itertools.zip_longest(ast.parse(a).body, ast.parse(b).body):
                 if x is None or y is None or ast.dump(x) != ast.dump(y):
-                    return (f"the frame FI wrote was changed: in the {label} marked part of simulate.py, `{_short(x)}` "
-                            f"is now `{_short(y)}`")
+                    return (f"the frame FI wrote was changed: in the {label} marked part of simulate.py, `{_short(x, y)}` "
+                            f"is now `{_short(y, x)}`")
     except SyntaxError as e:
         return f"the frame is not valid Python ({e.msg}, line {e.lineno})"
     slot_old, slot_new = _steps._find(old, SLOT), _steps._find(new, SLOT)
@@ -339,6 +347,37 @@ def frame_intact(old: str, new: str) -> str:
         return ("the frame FI wrote was changed: the reply adds " + ", ".join(more) if more
                 else "the frame FI wrote was changed: the reply removes " + ", ".join(less)) + " outside the marked parts of simulate.py"
     return ""
+
+
+# ---- a repair of a framed simulate.py ---------------------------------------------------------------------------------
+
+#: Put first in every request to change the code of a study whose ``simulate.py`` has FI's frame.
+REPAIR_NOTE = (
+    "FIRST, what you may change: FI wrote the frame of simulate.py, the parts between its `# >>> FI frame` and "
+    "`# <<< FI frame` lines (the `fi_frame` import, SETTINGS, RESULTS and the function `run_trial` or `run_cell`), and the file "
+    "fi_frame.py. Only the function `trial(cell, ctx)` and the helper functions and imports it uses may change. Give each "
+    "function you change whole, with its own parameters (in `functions` when the reply has that key); do not give the whole "
+    "file, and do not seed, redefine `run_trial`/`run_cell`/`TrialResult` or touch fi_frame.py. A change to the frame is "
+    "refused before anything runs and the repair counts as not made. This replaces any instruction below to return the "
+    "whole of simulate.py.\n\n")
+
+
+def repair_note(source: str) -> str:
+    """:data:`REPAIR_NOTE` when ``source`` (the text of simulate.py) has FI's frame, else ``""`` (a study without a frame is
+    asked exactly as before)."""
+    return REPAIR_NOTE if has_frame(source or "") else ""
+
+
+def repair_problem(old: str, new: str, name: str) -> str:
+    """Why ``new`` cannot replace the file ``name`` whose text is ``old``, as far as FI's frame is concerned, else ``""``.
+    ``simulate.py`` with a frame: :func:`frame_intact`. ``fi_frame.py``: FI's runtime, which a repair never changes. Any
+    other file, and a ``simulate.py`` without a frame, is not this check's (so nothing changes when the frame is off)."""
+    name = str(name).replace("\\", "/").rsplit("/", 1)[-1]
+    if name == RUNTIME_FILE:
+        return "" if new == old else "the frame FI wrote was changed: fi_frame.py is FI's own file and a repair does not edit it"
+    if name != "simulate.py" or not has_frame(old or ""):
+        return ""
+    return frame_intact(old, new or "")
 
 
 def refuse(text: str, problem: str) -> str:

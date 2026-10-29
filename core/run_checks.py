@@ -2071,6 +2071,9 @@ class RunChecksMixin:
                 topic_block=self._topic_block(), speed_block=block,  # type: ignore[attr-defined]
                 history_block=_improve.history_block(record["rounds"]), editable=", ".join(allowed) or "(none)",
                 code_block=_improve.code_block(files, allowed), rounds_left=f"This is round {used} of {limit}.")
+            from . import skeleton as _skeleton
+
+            prompt = _skeleton.repair_note(files.get("simulate.py", "")) + prompt  # what may change, first
             entry: dict[str, Any] = {"round": used}
             record["rounds"].append(entry)
             try:

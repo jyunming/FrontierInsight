@@ -1267,8 +1267,9 @@ class ExecutionConfig(BaseModel):
     # laid out as a package (``code_package``).
     code_function_steps: bool = True
     # FI writes the fixed parts of simulate.py itself (the seed, the thresholds, the names of the results) and the model
-    # writes only the function that does one trial. Experimental and off by default: a repair of the code still rewrites
-    # the whole file, and the frame has not yet been compared with the model writing the whole script. In the code
+    # writes only the function that does one trial. Experimental and off by default: a repair of the code may change only
+    # that function and its helpers (a change to the frame is refused before it runs), and the frame has not yet been compared
+    # with the model writing the whole script. In the code
     # (core/skeleton.py) FI writes the entry point, the seed, the thresholds and the list of results the plan declares, and
     # the model gives ``trial(cell, ctx)``, so a result under another name is seen at the first trial. Only for a plan the
     # frame fits (one that declares results and has no search, no check without a case) and for ``split_analysis``

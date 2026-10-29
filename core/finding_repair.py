@@ -40,6 +40,7 @@ from . import code_findings as _issues
 from . import function_steps as _steps
 from . import step_coverage as _sc
 from . import optimise as _optimise
+from . import skeleton as _skeleton
 from . import trial_runner as _trials
 
 #: Where a test written for an issue is kept (under the quest root).
@@ -1531,7 +1532,7 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
         topic=env.topic or "(not stated)", equations=env.equations, finding=finding_block(issue, env.scrub),
         test=_read(env.root / test) if test else "(none)", failure=failure or "(none)", code=code_block,
         package=env.package or "(none)", how=how, problem=detail or "(none: this is the first try)")
-    reply = await _ask(env, prompt, who, "repair")
+    reply = await _ask(env, _skeleton.repair_note(old) + prompt, who, "repair")
     dotted = str(issue.get("function") or "")
     edits: dict[str, tuple[str, str]] = {}  # file -> (old text, new text)
     if scope:
@@ -1619,7 +1620,7 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
             if unpassed:
                 return False, unpassed
     for target, (before, after_text) in edits.items():
-        problem = env.keeps(before, after_text, target)
+        problem = _skeleton.repair_problem(before, after_text, target) or env.keeps(before, after_text, target)
         if problem:
             return False, problem if target == rel else f"its change to {target}: {problem}"
 

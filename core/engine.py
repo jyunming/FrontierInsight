@@ -166,6 +166,7 @@ from . import best_design_report as _best_report
 from . import protocol_check as _protocol
 from . import retractions as _retractions
 from . import script_reply as _script_reply
+from . import skeleton as _skeleton
 from . import split_run as _split_run
 from . import stop_power as _stop_power
 from . import stats as _stats
@@ -12540,6 +12541,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             design_block=self._code_design_block(state),
             clarify_block=_format_clarify(state),
         )
+        prompt = _skeleton.repair_note(code if path.name == _split_run.SIMULATE_NAME else "") + prompt
         try:
             text = await self._chat(prompt, node="implement_protocol")
         except Exception as exc:  # noqa: BLE001 -- a repair is best-effort
@@ -16531,6 +16533,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     code_block=_improve.code_block(files, allowed),
                     rounds_left=f"This is round {used} of {limit}.",
                 )
+                prompt = _skeleton.repair_note(files.get(_split_run.SIMULATE_NAME, "")) + prompt
                 entry: dict[str, Any] = {"round": used, "at": _improve._now()}
                 record["rounds"].append(entry)
                 self._improve_save(record)  # counted before the model is asked: a stop now still spends it
@@ -18199,6 +18202,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             design_block=self._code_design_block(state),
             clarify_block=_format_clarify(state),
         )
+        prompt = _skeleton.repair_note(code if path.name == _split_run.SIMULATE_NAME else "") + prompt
         try:
             text = await self._chat(prompt, node="implement_oracle")
         except Exception as exc:  # noqa: BLE001 -- a repair is best-effort
@@ -20442,6 +20446,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             design_block=self._code_design_block(state),
             clarify_block=_format_clarify(state),
         )
+        if repair_simulation:
+            prompt = _skeleton.repair_note(script_code) + prompt  # what may change, first (nothing when there is no frame)
         try:
             text = await self._chat(prompt, node="execute_reflect")
         except Exception as exc:  # noqa: BLE001

@@ -51,7 +51,7 @@ SNAPSHOTS = Path(".fi") / "improve"
 #: Scripts in ``code/`` that are not the simulation: the analysis (it does not touch a criterion), FI's own runner and
 #: the scripts of other steps. An edit to one is refused.
 NOT_EDITABLE = frozenset({"experiment.py", "run.py", "submit.py", "replot_layout.py", "replot_figures.py",
-                          "web_plots.py", "fi_search.py"})
+                          "web_plots.py", "fi_search.py", "fi_frame.py"})
 #: FI's own code that computes the criteria: a round's run that changed one of these files is aborted.
 _ENGINE_FILES = ("criteria.py", "oracle_check.py", "trial_runner.py", "improve.py")
 #: The quest's records a round's run must not change.
@@ -581,6 +581,11 @@ def check_edit(files: dict[str, str], edit: Edit, allowed: list[str], *, tried: 
     new = old.replace(edit.find, edit.replace, 1)
     if new == old:
         return None, "it changes nothing"
+    from . import skeleton as _skeleton
+
+    framed = _skeleton.repair_problem(old, new, name)  # FI's frame of simulate.py stays as it is (nothing when it has none)
+    if framed:
+        return None, framed
     after = normalized(new)
     if after is None:
         return None, f"{name} would no longer be valid Python"
