@@ -22,7 +22,6 @@ import hashlib
 import math
 import os
 import re
-import statistics
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -377,41 +376,6 @@ def seconds_with_settings_per_process(model: CostModel, settings: int, per_proce
     processes = math.ceil(settings / max(1, int(per_process)))
     return settings * per_trial + processes * fixed
 
-
-def grouped_wall(work_s: float, settings: int, groups: int, start_s: float, at_once: int,
-                 slowdown: float | None = None) -> float:
-    """The time of a study when its ``settings`` share ``groups`` processes. ``work_s`` is what the sizing's own estimate says
-    the settings take one after another (``Estimate.work_seconds``: each setting's cost as the sizing timed it, starts
-    included); sharing saves only the starts, ``(settings - groups) * start_s``, and never goes below one start per process.
-    ``groups`` processes run ``at_once`` at a time; the measured ``slowdown`` (how many times longer a process takes beside
-    ``at_once - 1`` others) applies in full when ``at_once`` run and grows from 1 in step with how many run."""
-    groups = max(1, min(int(groups), int(settings)))
-    at_once = max(1, int(at_once))
-    work = max(groups * start_s, work_s - (settings - groups) * start_s)
-    running = min(at_once, groups)
-    share = 1.0 + (slowdown - 1.0) * (running - 1) / (at_once - 1) if slowdown and at_once > 1 and slowdown > 1.0 else 1.0
-    return work / running * share
-
-
-#: A group size is used only when it takes at most this share of the time one process per setting takes.
-GROUPING_MUST_TAKE = 0.8
-
-
-def settings_per_process(work_s: float, settings: int, start_s: float, at_once: int, slowdown: float | None = None) -> int:
-    """How many settings should share a process: the smallest number whose time (:func:`grouped_wall`) is within 5% of the
-    best, and only when that takes at most :data:`GROUPING_MUST_TAKE` of the time with one process per setting; else 1.
-    Computed from the sizing's own estimate and the measured start of a process, never guessed: when the settings
-    themselves are what takes the time, sharing saves little and the answer is 1."""
-    if settings < 2 or start_s <= 0:
-        return 1
-    alone = grouped_wall(work_s, settings, settings, start_s, at_once, slowdown)
-    tried: dict[int, float] = {}
-    for groups in range(1, min(settings, 4096) + 1):
-        n = math.ceil(settings / groups)
-        tried.setdefault(n, grouped_wall(work_s, settings, math.ceil(settings / n), start_s, at_once, slowdown))
-    best = min(tried.values())
-    n = min(k for k, v in tried.items() if v <= best * 1.05)
-    return n if n > 1 and tried[n] <= GROUPING_MUST_TAKE * alone else 1
 
 # ---- the size of a search ---------------------------------------------------------------------------------------------
 

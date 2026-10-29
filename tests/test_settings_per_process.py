@@ -1,15 +1,15 @@
-"""Several settings of a study share one process (core/trial_runner.py ``per_process``, ``measure_grouping``; the size is
-computed in core/cost_model.py). Neutral made-up studies only."""
+"""Several settings of a study share one process (core/trial_runner.py ``per_process``, ``groups``, ``measure_grouping``; the
+decision in core/run_checks.py ``_group_settings`` is made from the measured time of the grouped run). Neutral made-up
+studies only."""
 
 from __future__ import annotations
 
 import asyncio
 import json
-import math
 import sys
 from pathlib import Path
 
-from core import cost_model, run_checks, trial_runner
+from core import run_checks, trial_runner
 from core.execution import SharedInterpreterExecutor
 
 MARK = '''
@@ -79,33 +79,6 @@ def _run(root: Path, tmp_path: Path, *, per_process: int, deterministic: bool = 
 def _rows(run) -> list[tuple]:
     return [(c.key, r["trial"], r.get("seed"), r["status"], json.dumps(r.get("values"), sort_keys=True))
             for c in run.cells for r in c.rows]
-
-
-def test_group_size_comes_from_the_estimate_less_the_starts() -> None:
-    # 680 settings of 2.0 s of which 1.95 s is the start: sharing saves almost all of it
-    work = 680 * 2.0
-    many = cost_model.settings_per_process(work, 680, 1.95, 16, 3.0)
-    assert many > 1
-    alone = cost_model.grouped_wall(work, 680, 680, 1.95, 16, 3.0)
-    assert cost_model.grouped_wall(work, 680, math.ceil(680 / many), 1.95, 16, 3.0) < 0.8 * alone
-    # the same settings when the settings themselves take the time: nothing to save, so 1
-    assert cost_model.settings_per_process(680 * 60.0, 680, 1.95, 16, 3.0) == 1
-    assert cost_model.settings_per_process(24.0, 1, 1.95, 1) == 1
-    assert cost_model.settings_per_process(22 * 30.0, 22, 2.0, 8, 2.4) == 1
-
-
-def test_cost_that_grows_along_an_axis_is_not_averaged() -> None:
-    # twelve settings: eleven cost 0.5 s, one costs 100 s; the estimate knows it (a median of three settings would not)
-    work = 11 * 0.5 + 100.0
-    assert cost_model.grouped_wall(work, 12, 3, 0.2, 4) > 100.0 / 4  # the costly setting is still paid in full
-    assert cost_model.settings_per_process(work, 12, 0.2, 4) == 1
-
-
-def test_fewer_processes_than_at_once_are_not_priced_at_the_full_slowdown() -> None:
-    one = cost_model.grouped_wall(100.0, 50, 1, 1.0, 16, 4.5)
-    assert math.isclose(one, 100.0 - 49 * 1.0)  # one process runs alone: no slowdown
-    full = cost_model.grouped_wall(160.0, 16, 16, 1.0, 16, 3.0)
-    assert math.isclose(full, 160.0 / 16 * 3.0)  # all sixteen at once: the full slowdown
 
 
 def test_shared_processes_give_the_very_same_rows_with_fewer_processes(tmp_path: Path) -> None:
@@ -256,50 +229,99 @@ class _Log:
     warning = info
 
 
-def _sizing(tmp_path: Path, source: str, monkeypatch, *, work_s: float, settings: int, fixed_s: float, limit_s: float):
+def _sizing(tmp_path: Path, source: str, *, settings: int, at_once: int, limit_s: float, deterministic: bool = True,
+            runs: int = 1):
     from types import SimpleNamespace
 
     from core import run_estimate
 
     root = _quest(tmp_path, source)
-    started = {"n": 0}
-
-    async def fake_start(*args, **kwargs):
-        started["n"] += 1
-        return fixed_s
-
-    monkeypatch.setattr(trial_runner, "measure_start", fake_start)
     me = SimpleNamespace(
         _log=_Log(), quest_root=root, executor=_executor(), _pilot_spent=0.0, _protocol_block=lambda state: {},
         config=SimpleNamespace(execution=SimpleNamespace(timeout_s=120)))
-    runner = SimpleNamespace(simulate=root / "code" / "simulate.py", deterministic=True, per_process=1, cost=lambda cell: 2.0)
-    est = run_estimate.Estimate(seconds=work_s / 4, at_least=False, complete=True, cells=settings, trials=settings,
-                                at_once=4, slowdown=1.0, work_seconds=work_s)
+    runner = SimpleNamespace(simulate=root / "code" / "simulate.py", deterministic=deterministic, per_process=1,
+                             shared_groups=None, group_allowance_s=None, cost=lambda cell: 2.0)
+    # the estimate's own terms are made wrong on purpose (work_seconds 100x too high): nothing here may read them
+    est = run_estimate.Estimate(seconds=9999.0, at_least=False, complete=True, cells=settings, trials=settings,
+                                at_once=at_once, slowdown=4.5, work_seconds=99999.0)
     got = asyncio.run(run_checks.RunChecksMixin._group_settings(
         me, None, runner, sys.executable, {"FI_TEST_MARK": str(tmp_path / "s.txt")},
-        {"rate": list(range(1, settings + 1)), "size": [2]}, 1, {}, {}, est, limit_s, budget_s=120))
+        {"rate": list(range(1, settings + 1)), "size": [2]}, runs, {}, {}, est, limit_s, budget_s=120))
     return got, runner, me
 
 
-def test_sizing_shares_processes_when_starts_are_the_time(tmp_path: Path, monkeypatch) -> None:
-    got, runner, me = _sizing(tmp_path, PURE, monkeypatch, work_s=12 * 2.0, settings=12, fixed_s=1.9, limit_s=10.0)
-    assert got is not None and runner.per_process > 1
+def test_sizing_shares_processes_by_the_measured_time_of_the_grouped_run(tmp_path: Path) -> None:
+    got, runner, me = _sizing(tmp_path, PURE, settings=12, at_once=4, limit_s=60.0)
+    assert got is not None
     said, seconds, est = got
-    assert "several settings together" in said and "process" not in said and seconds * 1.5 <= 10.0
-    assert est.seconds == seconds and me._pilot_spent > 0
+    assert runner.per_process == 3 and len(runner.shared_groups) == 4  # ceil(12 / 4) to a process, 4 processes at once
+    assert sorted(k for g in runner.shared_groups for k in g) == sorted(
+        trial_runner.cell_key(c) for c in trial_runner.cells({"rate": list(range(1, 13)), "size": [2]}))
+    assert "several settings together" in said and "process" not in said
+    assert 0 < seconds * 1.5 <= 60.0 and runner.group_allowance_s == seconds * 1.5 and est.seconds == seconds
+    assert me._pilot_spent > 0
 
 
-def test_sizing_leaves_a_study_whose_cost_grows_to_the_cut(tmp_path: Path, monkeypatch) -> None:
-    # the estimate knows one setting costs 100 s: starts are a small part, so the study is still over and nothing is shared
-    got, runner, me = _sizing(tmp_path, PURE, monkeypatch, work_s=11 * 0.5 + 100.0, settings=12, fixed_s=0.2, limit_s=10.0)
-    assert got is None and runner.per_process == 1
-    assert any("one per process" in line for line in me._log.lines)
+def test_the_settings_are_spread_over_the_slots_the_run_uses_at_once(tmp_path: Path) -> None:
+    got, runner, _ = _sizing(tmp_path, PURE, settings=20, at_once=8, limit_s=60.0)
+    assert got is not None and runner.per_process == 3 and len(runner.shared_groups) == 7  # ceil(20 / 8) = 3 to a process, 7 processes: no more than the 8 at once
+    assert max(len(g) for g in runner.shared_groups) == 3
+    # a run with a slot to every setting has nothing to share
+    none, runner, _ = _sizing(tmp_path / "b", PURE, settings=4, at_once=8, limit_s=60.0)
+    assert none is None and runner.per_process == 1 and runner.shared_groups is None
 
 
-def test_sizing_does_not_share_a_study_that_keeps_state(tmp_path: Path, monkeypatch) -> None:
-    got, runner, me = _sizing(tmp_path, COUNTER, monkeypatch, work_s=12 * 2.0, settings=12, fixed_s=1.9, limit_s=10.0)
-    assert got is None and runner.per_process == 1
+def test_the_time_is_scaled_to_the_runs_per_setting_and_padded(tmp_path: Path) -> None:
+    # a study with random draws and 30 runs per setting: the check runs 3 and the time is scaled ten times, so the
+    # padded time passes the limit although the check itself was short
+    slow = STOCHASTIC.replace("rng = random.Random(seed)", "import time; time.sleep(0.2); rng = random.Random(seed)")
+    got, runner, me = _sizing(tmp_path, slow, settings=12, at_once=4, limit_s=20.0, deterministic=False, runs=30)
+    assert got is None and runner.per_process == 1 and runner.shared_groups is None
+    assert any("over the limit" in line for line in me._log.lines)
+
+
+def test_a_group_that_passes_a_quarter_of_the_limit_stops_the_check(tmp_path: Path) -> None:
+    # one setting is far costlier than the rest (a cost that grows along an axis): the group holding it passes the bound
+    grows = MARK + '''
+import time
+
+def run_cell(cell):
+    time.sleep(6.0 if cell["rate"] == 12 else 0.05)
+    return {"level": cell["rate"] * 2.0}
+'''
+    got, runner, me = _sizing(tmp_path, grows, settings=12, at_once=4, limit_s=8.0)
+    assert got is None and runner.per_process == 1 and runner.shared_groups is None
+    assert any("had not finished" in line for line in me._log.lines)
+    assert not (runner.simulate.parents[1] / ".fi" / "trials" / "group_check").exists()
+
+
+def test_sizing_does_not_share_a_study_that_keeps_state(tmp_path: Path) -> None:
+    got, runner, me = _sizing(tmp_path, COUNTER, settings=12, at_once=4, limit_s=60.0)
+    assert got is None and runner.per_process == 1 and runner.shared_groups is None
     assert any("differed" in line for line in me._log.lines)
+
+
+def test_a_resumed_run_shares_processes_again_from_the_kept_groups_without_a_cost(tmp_path: Path) -> None:
+    got, runner, _ = _sizing(tmp_path, PURE, settings=12, at_once=4, limit_s=60.0)
+    assert got is not None
+    kept = json.loads(json.dumps({"per_process": runner.per_process, "shared_groups": runner.shared_groups,
+                                  "group_allowance_s": runner.group_allowance_s}))  # as run_estimate.json keeps them
+    root = runner.simulate.parents[1]
+    mark = tmp_path / "resume_marks.txt"
+    grid = {"rate": list(range(1, 13)), "size": [2]}
+
+    def go(**extra):
+        mark.unlink(missing_ok=True)
+        run = asyncio.run(trial_runner.run_trials(
+            _executor(), sys.executable, root, "code/simulate.py", grid, runs_per_setting=1, base_seed=7, deterministic=True,
+            timeout_s=120, env={"FI_TEST_MARK": str(mark)}, run_id="r1", at_once=4, cost=None, **extra))
+        return run, len(mark.read_text().splitlines())
+
+    alone, alone_starts = go()
+    resumed, starts = go(per_process=kept["per_process"], groups=kept["shared_groups"],
+                         group_allowance_s=kept["group_allowance_s"])
+    assert alone_starts == 12 and starts == 4
+    assert _rows(alone) == _rows(resumed) and resumed.ok_trials == 12
 
 
 def test_the_one_setting_worker_is_the_text_it_was_before_sharing_existed() -> None:
@@ -340,18 +362,3 @@ def run_cell(cell):
     for c in shared.cells:
         assert c.stderr.strip() == f"working on {c.cell['rate']}"
     assert "[fi-setting]" not in shared.stderr()
-
-
-def test_a_study_of_one_second_settings_is_refused_before_any_shared_run(tmp_path: Path, monkeypatch) -> None:
-    # twenty settings of one second each, a process starts in 0.6 s: the estimate is 26 s, the limit 10 s. The time is
-    # the settings', not their starts, so sharing cannot fit it and no shared run is made to find out.
-    called = []
-
-    async def never(*args, **kwargs):
-        called.append(1)
-        raise AssertionError("a shared run was made")
-
-    monkeypatch.setattr(trial_runner, "measure_grouping", never)
-    got, runner, me = _sizing(tmp_path, PURE, monkeypatch, work_s=26.0, settings=20, fixed_s=0.6, limit_s=10.0)
-    assert got is None and runner.per_process == 1 and not called
-    assert any("settings themselves take" in line for line in me._log.lines)

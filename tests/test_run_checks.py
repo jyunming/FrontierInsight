@@ -311,6 +311,11 @@ async def _sizing(tmp_path: Path, *, timeout_s: int, grid: dict[str, list[int]] 
     (code / "simulate.py").write_text(SLOW_SIM, encoding="utf-8")
     (code / "experiment.py").write_text("print('RESULT_JSON: {}')\n", encoding="utf-8")
     eng.executor = _Counting()  # type: ignore[assignment]
+
+    async def _no_sharing(*_a: Any, **_k: Any) -> None:
+        return None  # these tests cover the sizing and the cut; sharing processes has its own tests (test_settings_per_process.py)
+
+    eng._group_settings = _no_sharing  # type: ignore[method-assign]
     state: dict[str, Any] = {"topic": TOPIC, "iteration": 0}
     runner = trial_runner.TrialsRunner(
         eng.executor, quest_root=eng.quest_root, protocol=lambda: eng._protocol_block(state) or {}, deterministic=False,
