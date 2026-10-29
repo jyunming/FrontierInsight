@@ -192,3 +192,29 @@ def test_the_paper_says_the_search_was_made_smaller_from_fis_record(tmp_path: Pa
            "evaluations_lowered_to": 216}
     (tmp_path / ".fi" / "run_estimate.json").write_text(json.dumps({"truncated": cut}), encoding="utf-8")
     assert "asked for 20,000 search evaluations; FI lowered them to 216" in disclosure.cut_short_text(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_a_tiny_limit_that_leaves_the_measured_deadline_nothing_keeps_the_usual_cut(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    eng, runner, block = await _engine(tmp_path)
+    eng.config.execution.timeout_s = 100
+    cut, _ = await _size(eng, runner, block, monkeypatch, per_eval=3.0, finer=3.0)
+    assert runner.search_deadline_s is None and "search_deadline_s" not in cut and "evaluations_lowered_to" not in cut
+    assert runner.check_reserve_s == pytest.approx(10 * 3.0 * run_estimate.SAFETY)  # the usual cut: the search keeps 55 s
+    assert _plan_budget(eng) == (8, 2500)
+
+
+@pytest.mark.asyncio
+async def test_a_person_who_approved_after_fis_edit_stays_human_and_a_lowered_grid_keeps_its_label(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    eng, runner, cut, _ = await _sized(tmp_path, monkeypatch)
+    assert eng._size_edit_after_read()
+    text = (eng.quest_root / "plan.md").read_text(encoding="utf-8")
+    plan.record_version(eng.quest_root, text, by="user", note="edited on disk before the quest went on")
+    assert not eng._size_edit_after_read()  # the person read it after FI's edit
+    grid = tmp_path / "grid"
+    grid.mkdir()
+    eng2, _r, _b = await _engine(grid)
+    plan.record_version(eng2.quest_root, "x", by="engine", note="fewer runs per setting, so the experiment fits the time allowed, set by FI")
+    assert not eng2._size_edit_after_read()

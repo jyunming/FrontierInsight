@@ -1375,6 +1375,11 @@ class RunChecksMixin:
             planned_search = planned_check = 0
         one_s = per_eval or first_s or _estimate.cheapest_setting_s(probes)
         timed = sized is not None and sized.evaluations is not None  # FI's size was worked out from what was measured
+        if timed and (sized.deadline_s or 0.0) < 1.0 <= limit_s - min(check_s * _estimate.SAFETY, limit_s / 2.0):
+            # The measured time leaves the search none (a tiny limit), where FI's usual cut would give it some: that stands.
+            self._log.info("[execute] the time allowed is too short to keep the measured time for the check and the "  # type: ignore[attr-defined]
+                           "analysis and still search; the search keeps FI's usual cut")
+            timed = False
         # A resume or a repair sizes the study again from the plan FI already lowered: what it asked for stays in the record.
         asked, kept_to = planned_search, 0
         if (_whole_number(earlier.get("evaluations_lowered_to")) and _whole_number(earlier.get("evaluations"))
@@ -1615,9 +1620,6 @@ class RunChecksMixin:
             self._log.info("[execute] FI could not time one run of its check at finer settings (%s); the check is counted "  # type: ignore[attr-defined]
                            "at the cost of one search design, at least", str(why)[:200])
             return none
-        per_trial = getattr(probe, "per_trial_s", None)
-        if isinstance(per_trial, (int, float)) and per_trial > 0:
-            return float(per_trial), _cost_model.MEASURED, bool(probe.at_least)
         return float(probe.seconds), "measured, includes the start of the process", bool(probe.at_least)
 
     def _size_the_search(self, block: dict[str, Any], limit_s: float, check_runs: int, scan_s: float, design: str,
@@ -1705,11 +1707,16 @@ class RunChecksMixin:
         return new_total
 
     def _size_edit_after_read(self) -> bool:
-        """Whether FI made the study smaller in plan.md (fewer runs per setting, fewer search evaluations): a person who
-        read the plan before then did not read the protocol that runs (the record of who approved it says so)."""
+        """Whether FI made the search smaller in plan.md from its cost model (the grid's lowered runs keep their own label):
+        a person who read the plan before then did not read the protocol that runs (the record of who approved it says so)."""
         try:
-            return any(str(row.get("by")) == "engine" and str(row.get("note") or "").startswith("fewer ")
-                       for row in _plan.history(self.quest_root))  # type: ignore[attr-defined]
+            after = False  # an FI edit of the search's size counts only if no person approved the plan later
+            for row in _plan.history(self.quest_root):  # type: ignore[attr-defined]
+                if str(row.get("by")) == "user":
+                    after = False
+                elif str(row.get("by")) == "engine" and str(row.get("note") or "").startswith("fewer search evaluations"):
+                    after = True
+            return after
         except Exception:  # noqa: BLE001
             return False
 
