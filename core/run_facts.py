@@ -153,6 +153,19 @@ def settings_shared(quest_root: Path | str) -> int | None:
     return n if isinstance(n, int) and not isinstance(n, bool) and n > 1 else None
 
 
+def record_shared_check(quest_root: Path | str, *, settings: int, alone: int) -> None:
+    """Keep what FI checked before settings shared a process: every one of ``settings`` settings gave the same numbers in
+    either order, and ``alone`` of them also matched a process of their own."""
+    _write(quest_root, shared_check={"settings": int(settings), "alone": int(alone)})
+
+
+def shared_check(quest_root: Path | str) -> dict[str, int] | None:
+    check = read(quest_root).get("shared_check")
+    if isinstance(check, dict) and all(isinstance(check.get(k), int) for k in ("settings", "alone")):
+        return {"settings": check["settings"], "alone": check["alone"]}
+    return None
+
+
 def run_seconds(quest_root: Path | str, fallback: Any = None) -> float | None:
     """The measured wall time of the run that produced the stored trials, in seconds. With no record of one (a study
     that does not run FI's trials: one script, run once) ``fallback``, the time of the last execution, if it is a number."""

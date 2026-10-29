@@ -386,8 +386,10 @@ def _time_sentence(quest_root: Path, topic: str, duration_s: float | None) -> st
 
     said = _time_sentence_alone(quest_root, topic, duration_s)
     if _run_facts.settings_shared(quest_root):
-        said = (said + " " if said else "") + ("FI ran several settings together in one process to save start-up time, after a "
-                                               "check that every setting gave the same numbers run that way as on its own.")
+        check = _run_facts.shared_check(quest_root)
+        sample = (f" and that a sample of {check['alone']} settings matched running alone" if check and check["alone"] else "")
+        said = (said + " " if said else "") + ("Settings shared a process to save start-up time; FI checked that every setting "
+                                               f"gave the same numbers in either order{sample}.")
     return said
 
 

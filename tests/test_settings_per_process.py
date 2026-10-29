@@ -70,7 +70,8 @@ def _run(root: Path, tmp_path: Path, *, per_process: int, deterministic: bool = 
     mark.unlink(missing_ok=True)
     run = asyncio.run(trial_runner.run_trials(
         _executor(), sys.executable, root, "code/simulate.py", grid or GRID, runs_per_setting=runs, base_seed=7,
-        deterministic=deterministic, timeout_s=120, env={"FI_TEST_MARK": str(mark)}, run_id="r1", per_process=per_process))
+        deterministic=deterministic, timeout_s=120, env={"FI_TEST_MARK": str(mark)}, run_id="r1", per_process=per_process,
+        cost=lambda cell: 5.0))
     starts = len(mark.read_text().splitlines()) if mark.exists() else 0
     return run, starts
 
@@ -136,16 +137,17 @@ def test_a_setting_that_kills_its_process_costs_only_itself(tmp_path: Path) -> N
     assert [json.dumps(r.get("values")) for c in alone.cells for r in c.rows] == [json.dumps(r.get("values")) for c in shared.cells for r in c.rows]
 
 
-def _measure(root: Path, tmp_path: Path, grid=None):
+def _measure(root: Path, tmp_path: Path, grid=None, per_process: int = 3):
     return asyncio.run(trial_runner.measure_grouping(
         _executor(), sys.executable, root, "code/simulate.py", grid or GRID, runs_per_setting=1, base_seed=7,
-        deterministic=True, timeout_s=120, env={"FI_TEST_MARK": str(tmp_path / "check_marks.txt")}))
+        deterministic=True, timeout_s=120, per_process=per_process, cost=lambda cell: 5.0,
+        env={"FI_TEST_MARK": str(tmp_path / "check_marks.txt")}))
 
 
 def test_a_pure_study_gives_the_same_numbers_on_every_setting(tmp_path: Path) -> None:
     root = _quest(tmp_path, PURE)
-    got = _measure(root, tmp_path, {"rate": list(range(1, 41)), "size": [2]})
-    assert got.same and got.differences == [] and got.start_s is not None and got.settings == 40
+    got = _measure(root, tmp_path, {"rate": list(range(1, 41)), "size": [2]}, per_process=10)
+    assert got.same and got.differences == [] and got.settings == 40 and got.alone == 6
     assert not (root / ".fi" / "trials" / "group_check").exists()  # nothing of the check stays in the quest
 
 
@@ -175,7 +177,7 @@ def run_cell(cell):
 def test_state_that_shows_only_between_later_settings_is_found(tmp_path: Path) -> None:
     root = _quest(tmp_path, MEMO)
     grid = {"rate": list(range(1, 11)), "size": [1, 2, 3]}
-    got = _measure(root, tmp_path, grid)  # a check on three spread settings shares no rate and sees nothing
+    got = _measure(root, tmp_path, grid, per_process=30)  # a check on three spread settings shares no rate and sees nothing
     assert not got.same and got.differences
     alone, _ = _run(root, tmp_path, per_process=1, grid=grid)
     shared, _ = _run(root, tmp_path, per_process=30, grid=grid)
@@ -194,7 +196,7 @@ def run_cell(cell):
 
 def test_state_that_appears_after_the_third_setting_is_found(tmp_path: Path) -> None:
     root = _quest(tmp_path, FLAG)
-    got = _measure(root, tmp_path, {"rate": list(range(1, 9)), "size": [2]})
+    got = _measure(root, tmp_path, {"rate": list(range(1, 9)), "size": [2]}, per_process=8)
     assert not got.same
 
 
@@ -214,7 +216,7 @@ def run_cell(cell):
         return asyncio.run(trial_runner.run_trials(
             _executor(), sys.executable, root, "code/simulate.py", {"rate": [1, 2, 3, 4, 5, 6], "size": [2]},
             runs_per_setting=1, base_seed=7, deterministic=True, timeout_s=30, env={"FI_TEST_MARK": str(mark)},
-            run_id="r1", per_process=per_process, at_once=6))
+            run_id="r1", per_process=per_process, at_once=6, cost=lambda cell: 1.0))
 
     alone, shared = go(1), go(3)
 
@@ -254,17 +256,23 @@ class _Log:
     warning = info
 
 
-def _sizing(tmp_path: Path, source: str, *, work_s: float, settings: int, fixed_s: float, limit_s: float):
+def _sizing(tmp_path: Path, source: str, monkeypatch, *, work_s: float, settings: int, fixed_s: float, limit_s: float):
     from types import SimpleNamespace
 
     from core import run_estimate
 
     root = _quest(tmp_path, source)
-    cost_model.write(root, cost_model.CostModel(terms={"fixed": cost_model.Term(fixed_s, cost_model.MEASURED)}))
+    started = {"n": 0}
+
+    async def fake_start(*args, **kwargs):
+        started["n"] += 1
+        return fixed_s
+
+    monkeypatch.setattr(trial_runner, "measure_start", fake_start)
     me = SimpleNamespace(
         _log=_Log(), quest_root=root, executor=_executor(), _pilot_spent=0.0, _protocol_block=lambda state: {},
         config=SimpleNamespace(execution=SimpleNamespace(timeout_s=120)))
-    runner = SimpleNamespace(simulate=root / "code" / "simulate.py", deterministic=True, per_process=1)
+    runner = SimpleNamespace(simulate=root / "code" / "simulate.py", deterministic=True, per_process=1, cost=lambda cell: 2.0)
     est = run_estimate.Estimate(seconds=work_s / 4, at_least=False, complete=True, cells=settings, trials=settings,
                                 at_once=4, slowdown=1.0, work_seconds=work_s)
     got = asyncio.run(run_checks.RunChecksMixin._group_settings(
@@ -273,22 +281,77 @@ def _sizing(tmp_path: Path, source: str, *, work_s: float, settings: int, fixed_
     return got, runner, me
 
 
-def test_sizing_shares_processes_when_starts_are_the_time(tmp_path: Path) -> None:
-    got, runner, me = _sizing(tmp_path, PURE, work_s=12 * 2.0, settings=12, fixed_s=1.9, limit_s=10.0)
+def test_sizing_shares_processes_when_starts_are_the_time(tmp_path: Path, monkeypatch) -> None:
+    got, runner, me = _sizing(tmp_path, PURE, monkeypatch, work_s=12 * 2.0, settings=12, fixed_s=1.9, limit_s=10.0)
     assert got is not None and runner.per_process > 1
     said, seconds, est = got
     assert "several settings together" in said and "process" not in said and seconds * 1.5 <= 10.0
     assert est.seconds == seconds and me._pilot_spent > 0
 
 
-def test_sizing_leaves_a_study_whose_cost_grows_to_the_cut(tmp_path: Path) -> None:
+def test_sizing_leaves_a_study_whose_cost_grows_to_the_cut(tmp_path: Path, monkeypatch) -> None:
     # the estimate knows one setting costs 100 s: starts are a small part, so the study is still over and nothing is shared
-    got, runner, me = _sizing(tmp_path, PURE, work_s=11 * 0.5 + 100.0, settings=12, fixed_s=0.2, limit_s=10.0)
+    got, runner, me = _sizing(tmp_path, PURE, monkeypatch, work_s=11 * 0.5 + 100.0, settings=12, fixed_s=0.2, limit_s=10.0)
     assert got is None and runner.per_process == 1
     assert any("one per process" in line for line in me._log.lines)
 
 
-def test_sizing_does_not_share_a_study_that_keeps_state(tmp_path: Path) -> None:
-    got, runner, me = _sizing(tmp_path, COUNTER, work_s=12 * 2.0, settings=12, fixed_s=1.9, limit_s=10.0)
+def test_sizing_does_not_share_a_study_that_keeps_state(tmp_path: Path, monkeypatch) -> None:
+    got, runner, me = _sizing(tmp_path, COUNTER, monkeypatch, work_s=12 * 2.0, settings=12, fixed_s=1.9, limit_s=10.0)
     assert got is None and runner.per_process == 1
     assert any("differed" in line for line in me._log.lines)
+
+
+def test_the_one_setting_worker_is_the_text_it_was_before_sharing_existed() -> None:
+    import hashlib
+
+    # sha256 of HARNESS_SOURCE on 894a9265 (it is part of the keys of FI's search records)
+    assert hashlib.sha256(trial_runner.HARNESS_SOURCE.encode("utf-8")).hexdigest() == (
+        "a0cea43ced006871470b56c4f502ad392df7697413175b224db8b880c748dfc1")
+    assert trial_runner.GROUP_HARNESS_SOURCE != trial_runner.HARNESS_SOURCE and "members" in trial_runner.GROUP_HARNESS_SOURCE
+
+
+def test_a_group_is_given_the_time_of_its_settings_not_half_of_what_is_left(tmp_path: Path) -> None:
+    slow = MARK + '''
+import time
+
+def run_cell(cell):
+    time.sleep(2.0)
+    return {"level": cell["rate"] * 2.0}
+'''
+    root = _quest(tmp_path, slow)
+    run = asyncio.run(trial_runner.run_trials(
+        _executor(), sys.executable, root, "code/simulate.py", {"rate": list(range(1, 9)), "size": [2]},
+        runs_per_setting=1, base_seed=7, deterministic=True, timeout_s=14, env={"FI_TEST_MARK": str(tmp_path / "m.txt")},
+        run_id="r1", per_process=4, at_once=2, cost=lambda cell: 2.0))
+    assert run.ok_trials == 8 and run.failed_trials == 0
+
+
+def test_what_a_setting_prints_without_a_newline_is_not_joined_to_the_marker(tmp_path: Path) -> None:
+    chatty = MARK + '''
+import sys
+
+def run_cell(cell):
+    sys.stderr.write("working on %s" % cell["rate"])
+    return {"level": cell["rate"] * 2.0}
+'''
+    root = _quest(tmp_path, chatty)
+    shared, _ = _run(root, tmp_path, per_process=4)
+    for c in shared.cells:
+        assert c.stderr.strip() == f"working on {c.cell['rate']}"
+    assert "[fi-setting]" not in shared.stderr()
+
+
+def test_a_study_of_one_second_settings_is_refused_before_any_shared_run(tmp_path: Path, monkeypatch) -> None:
+    # twenty settings of one second each, a process starts in 0.6 s: the estimate is 26 s, the limit 10 s. The time is
+    # the settings', not their starts, so sharing cannot fit it and no shared run is made to find out.
+    called = []
+
+    async def never(*args, **kwargs):
+        called.append(1)
+        raise AssertionError("a shared run was made")
+
+    monkeypatch.setattr(trial_runner, "measure_grouping", never)
+    got, runner, me = _sizing(tmp_path, PURE, monkeypatch, work_s=26.0, settings=20, fixed_s=0.6, limit_s=10.0)
+    assert got is None and runner.per_process == 1 and not called
+    assert any("settings themselves take" in line for line in me._log.lines)

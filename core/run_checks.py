@@ -1966,45 +1966,58 @@ class RunChecksMixin:
                               budget_s: float = 300.0) -> tuple[str, float, Any] | None:
         """The study is over the time allowed: can settings share processes? The time is worked out from the sizing's own
         estimate (each setting's cost as it timed it) less the starts that sharing saves, ``(settings - processes)`` times
-        the measured start of a process (core/cost_model.py); the numbers are checked on every setting
-        (core/trial_runner.py ``measure_grouping``), which is done only when the study's time is mostly starts, where it is
-        cheap. Sets ``runner.per_process`` and returns ``(the console sentence, the expected seconds, the estimate for the
-        run)`` when the study then fits the time allowed; else says why not in the log, leaves one process per setting, and
-        returns ``None`` (the cut and the disclosure go on as before)."""
+        the start of a process, measured here (core/trial_runner.py ``measure_start``; the sizing's ``fixed`` term of a study
+        without randomness is a whole setting, not a start). The numbers are checked on every setting, in the groups the
+        run would make and in the opposite order (``measure_grouping``), which is done only when the study's time is mostly
+        starts, where it is cheap. Sets ``runner.per_process`` and returns ``(the console sentence, the expected seconds,
+        the estimate for the run)`` when the study then fits the time allowed; else says why not in the log, leaves one
+        process per setting, and returns ``None`` (the cut and the disclosure go on as before)."""
         import dataclasses
         import math
 
         from . import mc_error as _mc_error
+        from . import run_facts as _run_facts
 
         log = self._log  # type: ignore[attr-defined]
         settings = int(est.cells or 0)
         at_once = int(est.at_once or 1)
         slowdown = est.slowdown if at_once > 1 else None
         work = float(est.work_seconds or 0.0)
-        if settings < 2 or work <= 0:
+        cost = getattr(runner, "cost", None)
+        if settings < 2 or work <= 0 or cost is None:
             return None
-        model = _cost_model.read(self.quest_root)  # type: ignore[attr-defined]
-        fixed = model.seconds("fixed") if model is not None else None
-        if fixed is not None:
-            if _cost_model.settings_per_process(work, settings, fixed, at_once, slowdown) <= 1:
-                log.warning("[execute] Settings run one per process: starting a process takes about %s and the settings "
-                            "themselves most of the time, so sharing processes would not save enough.",
-                            _estimate.plain_duration(fixed))
-                return None
-            if work - settings * fixed > 0.25 * limit_s:
-                log.warning("[execute] Settings run one per process: the settings themselves take about %s, too long to "
-                            "check cheaply that sharing processes gives the same numbers.",
-                            _estimate.plain_duration(work - settings * fixed))
-                return None
+        timeout_s = int(max(30.0, min(budget_s, float(self.config.execution.timeout_s))))  # type: ignore[attr-defined]
+        module = runner.simulate.relative_to(self.quest_root).as_posix()  # type: ignore[attr-defined]
+        began = time.monotonic()
+        try:
+            start = await _trial_runner.measure_start(self.executor, python, self.quest_root, module,  # type: ignore[attr-defined]
+                                                      deterministic=runner.deterministic, env=env, timeout_s=timeout_s, log=log)
+        except Exception as e:  # noqa: BLE001 -- a check that cannot run leaves the run as it is
+            log.warning("[execute] Settings run one per process: the start of a process could not be measured (%r).", e)
+            return None
+        self._pilot_spent += time.monotonic() - began  # type: ignore[attr-defined]
+        if start is None:
+            log.warning("[execute] Settings run one per process: the start of a process could not be measured.")
+            return None
+        n = _cost_model.settings_per_process(work, settings, start, at_once, slowdown)
+        if n <= 1:
+            log.warning("[execute] Settings run one per process: starting a process takes about %s, too little of the time "
+                        "for sharing processes to matter.", _estimate.plain_duration(start))
+            return None
+        if work - settings * start > 0.25 * limit_s:
+            log.warning("[execute] Settings run one per process: the settings themselves take about %s, too long to check "
+                        "cheaply that sharing processes gives the same numbers.",
+                        _estimate.plain_duration(work - settings * start))
+            return None
         try:
             protocol = self._protocol_block(state) or {}  # type: ignore[attr-defined]
         except Exception:  # noqa: BLE001
             protocol = {}
         try:
             grouping = await _trial_runner.measure_grouping(
-                self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(), grid,  # type: ignore[attr-defined]
+                self.executor, python, self.quest_root, module, grid,  # type: ignore[attr-defined]
                 runs_per_setting=runs, base_seed=int((env or {}).get("FI_REPLICATE_SEED") or 0),
-                deterministic=runner.deterministic, timeout_s=int(max(30.0, min(budget_s, float(self.config.execution.timeout_s)))),  # type: ignore[attr-defined]
+                deterministic=runner.deterministic, timeout_s=timeout_s, per_process=n, cost=cost,
                 env=env, thresholds=thresholds, paired=_mc_error.paired(protocol, self.quest_root), in_each_run=inside,
                 log=log, at_once=at_once)
         except Exception as e:  # noqa: BLE001 -- a check that cannot run leaves the run as it is
@@ -2015,14 +2028,8 @@ class RunChecksMixin:
             log.warning("[execute] %s", grouping.says)
             return None
         if grouping.pass_s > 0.25 * limit_s:
-            log.warning("[execute] Settings run one per process: all of them in one process took %s, too long to share processes.",
+            log.warning("[execute] Settings run one per process: a group of settings in one process took %s, too long to share processes.",
                         _estimate.plain_duration(grouping.pass_s))
-            return None
-        start = fixed if fixed is not None else (grouping.start_s or 0.0)
-        n = _cost_model.settings_per_process(work, settings, start, at_once, slowdown)
-        if n <= 1:
-            log.warning("[execute] Settings run one per process: starting a process takes about %s, too little of the "
-                        "time for sharing processes to matter.", _estimate.plain_duration(start))
             return None
         groups = math.ceil(settings / n)
         seconds = _cost_model.grouped_wall(work, settings, groups, start, at_once, slowdown)
@@ -2032,11 +2039,12 @@ class RunChecksMixin:
                         "usual cut applies.", grouping.says, n, _estimate.plain_duration(padded), _estimate.plain_duration(limit_s))
             return None
         runner.per_process = n
+        _run_facts.record_shared_check(self.quest_root, settings=grouping.settings, alone=grouping.alone)  # type: ignore[attr-defined]
         log.info("[execute] %s Settings run %d to a process (%d processes): starting a process takes about %s; FI expects "
                  "about %s, within the limit.", grouping.says, n, groups, _estimate.plain_duration(start),
                  _estimate.plain_duration(padded))
-        said = ("FI runs several settings together to save start-up time; their numbers matched running them one at a time. "
-                f"It expects about {_estimate.plain_duration(padded)}, within the limit.")
+        said = ("FI runs several settings together to save start-up time; their numbers matched when they were run in either "
+                f"order. It expects about {_estimate.plain_duration(padded)}, within the limit.")
         return said, seconds, dataclasses.replace(est, seconds=seconds)
 
     async def _speed_up(self, *args: Any, **kwargs: Any) -> dict[str, Any]:

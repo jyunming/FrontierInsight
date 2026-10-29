@@ -226,9 +226,6 @@ def main():
         spec = json.load(f)
     out = open(sys.argv[2], "w", encoding="utf-8")
     nonce = spec.pop("nonce")
-    # Several settings in one process (core/trial_runner.py ``run_trials`` with ``per_process``): each member has its own
-    # cell, trials and nonce, and its rows go to the one results file under its own nonce.
-    members = spec.pop("members", None) or []
     # The frozen protocol's thresholds (what counts as an outbreak, a success): run_trial reads them from here, never
     # from a number of its own.
     os.environ["FI_THRESHOLDS"] = json.dumps(spec.pop("thresholds", None) or {})
@@ -284,8 +281,7 @@ def main():
                 rel = path[path.rfind("/code/") + 1:]
                 if "site-packages" not in rel and "/.venv/" not in "/" + rel:
                     place = f" (at {rel} line {frame.lineno})"
-        for each in [nonce] + [m["nonce"] for m in members]:
-            out.write(json.dumps({"nonce": each, "load_error": f"{type(e).__name__}: {e}"[:max(0, 500 - len(place))] + place}) + "\n")
+        out.write(json.dumps({"nonce": nonce, "load_error": f"{type(e).__name__}: {e}"[:max(0, 500 - len(place))] + place}) + "\n")
         out.close()
         sys.exit(3)
     # A check's trials stop when the next one would not fit in the time it is given (``budget_s``): the first always runs.
@@ -299,70 +295,65 @@ def main():
     if profile_to:
         import cProfile
         profiler = cProfile.Profile()
-    for member in (members or [None]):
-        if member is not None:
-            nonce, spec["cell"], spec["levels"], spec["trials"] = (
-                member["nonce"], member["cell"], member.get("levels"), member["trials"])
-            sys.stderr.write("[fi-setting] " + nonce + "\n")  # what the setting prints after this line is the setting's own
-        later = 0.0
-        for index, trial in enumerate(spec["trials"]):
-            if budget is not None and index:
-                spent = time.perf_counter() - started
-                if spent + spent / index > budget:
-                    break
-            # perf_counter, not monotonic: on Windows monotonic moves in steps of about 16 ms, so a trial of a few
-            # milliseconds was recorded as 0 or 0.016 s, and a run timed from one such trial was off by a factor of ten.
-            t0 = time.perf_counter()
-            # When the trial started (seconds into this process): from one start to the next is what a trial costs with the
-            # harness's own writing, which a timing run counts.
-            row = {"nonce": nonce, "trial": trial["trial"], "seed": trial.get("seed"), "at_s": round(t0 - clock0, 6)}
-            # The cell remembers which settings the code asks for (``Cell``); the row says (core/trial_runner.py ``read_facts``).
-            cell = Cell(spec["cell"])
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
-                try:
-                    if profiler is not None:
-                        profiler.enable()
-                    if spec["entry"] == "run_trial":
-                        value = fn(cell, trial["trial"], trial["seed"])
-                    elif spec["entry"] == "run_cell":
-                        value = fn(cell)
-                    else:
-                        value = fn()
-                    if profiler is not None:
-                        profiler.disable()
-                    # A number per run, or (for what each run compares inside it) one per value it was given.
-                    kept, why = read_returned(value, levels_of(spec.get("levels")), spec["entry"])
-                    if kept is None:
-                        raise TypeError(why)
-                    row.update(status="ok", values=kept)
-                    reasons = missing_reasons(value, kept)
-                    if reasons:
-                        row[WHY_MISSING] = reasons
-                except BaseException as e:
-                    if isinstance(e, KeyboardInterrupt):
-                        raise
-                    row.update(status="failed", reason=f"{type(e).__name__}: {e}"[:300],
-                               traceback=traceback.format_exc()[-1500:])
-            if profiler is not None:
-                profiler.disable()
-            row["duration_s"] = round(time.perf_counter() - t0, 6)
-            if spec["entry"] != "oracle":
-                row.update(cell_reads(cell))
-            if spec.get("spy_trial"):
-                row["trial_calls"] = trial_calls[0]
-                row["trial_means"] = {k: t / n for k, (t, n) in trial_sums.items() if n}
-                trial_calls[0] = 0
-                trial_sums.clear()
-            row["warnings"] = [f"{w.category.__name__}: {w.message}"[:300] for w in caught][:20]
-            for w in caught:  # printed as Python prints them, so the numeric-warning check reads them from stderr
-                sys.stderr.write(f"{w.filename}:{w.lineno}: {w.category.__name__}: {w.message}\n")
-            out.write(json.dumps(row, allow_nan=True) + "\n")
-            out.flush()
-            if stop_after and index > 0:
-                later += row["duration_s"]
-                if later >= float(stop_after):
-                    break
+    later = 0.0
+    for index, trial in enumerate(spec["trials"]):
+        if budget is not None and index:
+            spent = time.perf_counter() - started
+            if spent + spent / index > budget:
+                break
+        # perf_counter, not monotonic: on Windows monotonic moves in steps of about 16 ms, so a trial of a few
+        # milliseconds was recorded as 0 or 0.016 s, and a run timed from one such trial was off by a factor of ten.
+        t0 = time.perf_counter()
+        # When the trial started (seconds into this process): from one start to the next is what a trial costs with the
+        # harness's own writing, which a timing run counts.
+        row = {"nonce": nonce, "trial": trial["trial"], "seed": trial.get("seed"), "at_s": round(t0 - clock0, 6)}
+        # The cell remembers which settings the code asks for (``Cell``); the row says (core/trial_runner.py ``read_facts``).
+        cell = Cell(spec["cell"])
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            try:
+                if profiler is not None:
+                    profiler.enable()
+                if spec["entry"] == "run_trial":
+                    value = fn(cell, trial["trial"], trial["seed"])
+                elif spec["entry"] == "run_cell":
+                    value = fn(cell)
+                else:
+                    value = fn()
+                if profiler is not None:
+                    profiler.disable()
+                # A number per run, or (for what each run compares inside it) one per value it was given.
+                kept, why = read_returned(value, levels_of(spec.get("levels")), spec["entry"])
+                if kept is None:
+                    raise TypeError(why)
+                row.update(status="ok", values=kept)
+                reasons = missing_reasons(value, kept)
+                if reasons:
+                    row[WHY_MISSING] = reasons
+            except BaseException as e:
+                if isinstance(e, KeyboardInterrupt):
+                    raise
+                row.update(status="failed", reason=f"{type(e).__name__}: {e}"[:300],
+                           traceback=traceback.format_exc()[-1500:])
+        if profiler is not None:
+            profiler.disable()
+        row["duration_s"] = round(time.perf_counter() - t0, 6)
+        if spec["entry"] != "oracle":
+            row.update(cell_reads(cell))
+        if spec.get("spy_trial"):
+            row["trial_calls"] = trial_calls[0]
+            row["trial_means"] = {k: t / n for k, (t, n) in trial_sums.items() if n}
+            trial_calls[0] = 0
+            trial_sums.clear()
+        row["warnings"] = [f"{w.category.__name__}: {w.message}"[:300] for w in caught][:20]
+        for w in caught:  # printed as Python prints them, so the numeric-warning check reads them from stderr
+            sys.stderr.write(f"{w.filename}:{w.lineno}: {w.category.__name__}: {w.message}\n")
+        out.write(json.dumps(row, allow_nan=True) + "\n")
+        out.flush()
+        if stop_after and index > 0:
+            later += row["duration_s"]
+            if later >= float(stop_after):
+                break
     out.close()
     if profiler is not None:
         profiler.dump_stats(profile_to)
@@ -377,6 +368,42 @@ def main():
 main()
 '''
 HARNESS_SOURCE = Path(_in_run.__file__).read_text(encoding="utf-8") + "\n" + LOAD_STUDY_SOURCE + "\n" + HARNESS_BODY
+
+
+def _grouped_harness(body: str) -> str:
+    """The worker for a process that runs several settings (``per_process`` above 1): the one-setting harness, with the loop
+    over a setting's trials run for each ``member`` of the spec. The one-setting text above is not changed by it (it is
+    part of the keys of FI's search records, so a quest begun before the grouped worker existed keeps its records)."""
+
+    def swap(text: str, old: str, new: str) -> str:
+        if text.count(old) != 1:
+            raise ValueError("the harness text changed: the grouped worker cannot be derived from it")
+        return text.replace(old, new)
+
+    body = swap(body, '    nonce = spec.pop("nonce")\n',
+                '    nonce = spec.pop("nonce")\n'
+                '    # Several settings in one process: each member has its own cell, trials and nonce; its rows go to the one\n'
+                '    # results file under its own nonce.\n'
+                '    members = spec.pop("members", None) or []\n')
+    body = swap(body, '        out.write(json.dumps({"nonce": nonce, "load_error": f"{type(e).__name__}: {e}"[:max(0, 500 - len(place))] + place}) + "\\n")\n',
+                '        for each in [nonce] + [m["nonce"] for m in members]:\n'
+                '            out.write(json.dumps({"nonce": each, "load_error": f"{type(e).__name__}: {e}"[:max(0, 500 - len(place))] + place}) + "\\n")\n')
+    start = body.index('    later = 0.0\n    for index, trial in enumerate(spec["trials"]):\n')
+    end = body.index("    out.close()\n    if profiler is not None:\n        profiler.dump_stats(profile_to)")
+    inner = "".join(("    " + ln if ln.strip() else ln) for ln in body[start:end].splitlines(True))
+    head = ('    for member in (members or [None]):\n'
+            '        if member is not None:\n'
+            '            nonce, spec["cell"], spec["levels"], spec["trials"] = (\n'
+            '                member["nonce"], member["cell"], member.get("levels"), member["trials"])\n'
+            '            # a line of its own, so that what the setting prints without a final newline is not joined to it\n'
+            '            sys.stderr.write("\\n[fi-setting] " + nonce + "\\n")\n')
+    return body[:start] + head + inner + body[end:]
+
+
+GROUP_HARNESS_SOURCE = (Path(_in_run.__file__).read_text(encoding="utf-8") + "\n" + LOAD_STUDY_SOURCE + "\n"
+                        + _grouped_harness(HARNESS_BODY))
+#: Where FI writes it (only for a run that shares processes).
+GROUP_HARNESS_PATH = Path(".fi") / "trial_group_harness.py"
 
 
 #: Written when the simulation was sent back once because settings of the study changed none of the plan's declared
@@ -692,10 +719,18 @@ async def run_trials(
     process (default 1, one process per setting; more only after :func:`measure_grouping` showed the same numbers).
     The ledger and the summary are the same whatever the settings per process are."""
     quest_root = Path(quest_root)
+    if int(per_process or 1) > 1 and cost is None:
+        # A group's time is the sum of its settings' allowances, which come from FI's timing of them: with none, one process
+        # per setting (the settings of a group behind a hung one would have no time left).
+        per_process = 1
+        if log is not None:
+            log.info("[execute] Settings run one per process: FI has no timing of them to give a group its time.")
     work = quest_root / ".fi" / "trials"
     work.mkdir(parents=True, exist_ok=True)
     harness = quest_root / HARNESS_PATH
     harness.write_text(HARNESS_SOURCE, encoding="utf-8")  # fresh every run: nothing the experiment wrote is run
+    if int(per_process or 1) > 1:
+        (quest_root / GROUP_HARNESS_PATH).write_text(GROUP_HARNESS_SOURCE, encoding="utf-8")
     (quest_root / RUN_RECORD).unlink(missing_ok=True)  # an earlier run's record never stands beside this run's ledger
     lazy = first_cells is not None
     plan: list[dict[str, Any]] = []
@@ -716,9 +751,9 @@ async def run_trials(
     executor.meter = gate.note
     env = _execution.threads_beside(env, int(at_once or 1))  # each process its share of the cores
 
-    async def start(task: dict[str, Any], share: float = 1.0) -> tuple[Any, float]:
-        """One process for ``task`` (a setting, or a group of settings): its result and its time. ``share``: the part of the
-        study's time left that it may take."""
+    async def start(task: dict[str, Any]) -> tuple[Any, float]:
+        """One process for ``task`` (a setting, or a group of settings): its result and its time. A group may take the sum of
+        its settings' allowances (at most what is left of the study's time)."""
         left = int(timeout_s - (time.monotonic() - started))
         if left <= 0:
             return type("NotRun", (), {"returncode": -1, "timed_out": True, "stderr": ""})(), 0.0
@@ -727,8 +762,9 @@ async def run_trials(
         running[1] = max(running[1], running[0])
         try:
             result = await executor.execute(
-                [str(python), HARNESS_PATH.as_posix(), task["spec"], task["out"]],
-                cwd=quest_root, timeout_s=max(1, int(left * share)), env=env,
+                [str(python), (GROUP_HARNESS_PATH if task.get("members") else HARNESS_PATH).as_posix(), task["spec"], task["out"]],
+                cwd=quest_root, timeout_s=max(1, min(left, math.ceil(task["allowance_s"])) if task.get("allowance_s") else left),
+                env=env,
             )
         finally:
             running[0] -= 1
@@ -747,8 +783,7 @@ async def run_trials(
         members = task.get("members")
         unfinished: list[dict[str, Any]] = []
         async with gate.slot():
-            # A group may take half of the time left: a setting that hangs must leave the settings behind it time to run again.
-            result, took = await start(task, 0.5 if members else 1.0)
+            result, took = await start(task)
             if not members:
                 results[task["index"]] = result
                 if took:
@@ -759,6 +794,7 @@ async def run_trials(
             timed_out = bool(getattr(result, "timed_out", False))
             bad = timed_out or getattr(result, "returncode", 0) not in (0, None)
             hung = False
+            last_end = _last_end(quest_root, task) if timed_out else 0.0
             for number, member in enumerate(members):
                 if took:
                     walls[member["index"]] = took / len(members)
@@ -767,8 +803,12 @@ async def run_trials(
                     # a setting that reported everything ends as a process of its own would end
                     results[member["index"]] = _ProcessEnd(result, clean=True, stderr=parts[number])
                 elif timed_out and not hung and took:
-                    hung = True  # the setting that was running when the time ran out: only it is out of time
-                    results[member["index"]] = _ProcessEnd(result, stderr=parts[number])
+                    hung = True  # the setting that was running when the group's time ran out
+                    if member.get("allowance") is not None and took - last_end >= member["allowance"]:
+                        # it used the time its own setting is allowed: only it is out of time
+                        results[member["index"]] = _ProcessEnd(result, stderr=parts[number])
+                    else:
+                        unfinished.append(member)  # it was cut by the group's end, not by its own: it runs again alone
                 elif timed_out and not took:
                     results[member["index"]] = _ProcessEnd(result, stderr=parts[number])  # nothing was started
                 else:
@@ -819,11 +859,17 @@ class _ProcessEnd:
         self.stderr = stderr
 
 
-def _units(quest_root: Path, part: list[dict[str, Any]], per_process: int, cost: Any, folder: Path) -> list[dict[str, Any]]:
+def _units(quest_root: Path, part: list[dict[str, Any]], per_process: int, cost: Any, folder: Path,
+           reverse: bool = False) -> list[dict[str, Any]]:
     """What starts a process: each setting of ``part`` (the costliest first when ``cost`` can tell), or, with
     ``per_process`` above 1, groups of settings that share one process. The settings are dealt out round the groups in
     that order, so every group holds some of the costly ones. A group has one spec (the members' own cells, trials and
-    nonces) and one results file; each member's ``out`` is that file, and its rows are told apart by its nonce."""
+    nonces) and one results file; each member's ``out`` is that file, and its rows are told apart by its nonce. Each member
+    gets the time its setting is allowed (``allowance``: the sizing's margin times the setting's expected cost) and a group the
+    sum of its members' (``allowance_s``), when ``cost`` can tell. ``reverse``: each group runs its settings in the opposite
+    order (the check of the numbers runs the groups both ways)."""
+    from .run_estimate import SAFETY
+
     ordered = _costliest_first(part, cost)
     if int(per_process or 1) <= 1 or len(ordered) < 2:
         return ordered
@@ -831,12 +877,15 @@ def _units(quest_root: Path, part: list[dict[str, Any]], per_process: int, cost:
     units: list[dict[str, Any]] = []
     for g in range(groups):
         members = ordered[g::groups]
+        if reverse:
+            members = members[::-1]
         specs = []
         for m in members:
             path = quest_root / m["spec"]
             specs.append(json.loads(path.read_text(encoding="utf-8")))
             path.unlink(missing_ok=True)
             m["alone"] = (m["spec"], m["out"], specs[-1])
+            m["allowance"] = _allowance(cost, m["cell"], SAFETY)
         first, gid = specs[0], members[0]["index"]
         spec_path, out_path = folder / f"group{gid}.json", folder / f"group{gid}.out.jsonl"
         out_path.unlink(missing_ok=True)
@@ -848,23 +897,55 @@ def _units(quest_root: Path, part: list[dict[str, Any]], per_process: int, cost:
         rel_out = out_path.relative_to(quest_root).as_posix()
         for m in members:
             m["out"] = rel_out
-        units.append({"index": gid, "spec": spec_path.relative_to(quest_root).as_posix(), "out": rel_out, "members": members})
+        allowed = [m["allowance"] for m in members]
+        units.append({"index": gid, "spec": spec_path.relative_to(quest_root).as_posix(), "out": rel_out, "members": members,
+                      "allowance_s": sum(allowed) if all(a is not None for a in allowed) else None})
     return units
 
 
+def _allowance(cost: Any, cell: dict[str, Any], margin: float) -> float | None:
+    """The seconds a setting is allowed in a shared process: the sizing's margin times what FI timed it to cost; ``None``
+    when FI has no cost for it."""
+    if cost is None:
+        return None
+    try:
+        value = float(cost(cell)) * margin
+    except Exception:  # noqa: BLE001 -- a cost that cannot be worked out leaves the setting without an allowance
+        return None
+    return value if math.isfinite(value) and value > 0 else None
+
+
+def _last_end(quest_root: Path, task: dict[str, Any]) -> float:
+    """When the last trial a shared process reported ended, in seconds into that process (the setting running when it was
+    stopped began then); 0 when it reported none."""
+    end = 0.0
+    try:
+        lines = (quest_root / task["out"]).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return end
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict) and isinstance(row.get("at_s"), (int, float)) and isinstance(row.get("duration_s"), (int, float)):
+            end = max(end, float(row["at_s"]) + float(row["duration_s"]))
+    return end
+
+
 def _stderr_parts(result: Any, members: list[dict[str, Any]]) -> list[str]:
-    """A shared process's stderr cut into each setting's own lines (the harness writes a marker line before each setting);
-    what comes before the first marker is the first setting's."""
+    """A shared process's stderr cut into each setting's own lines. The harness writes a line holding a marker and the
+    setting's nonce before each setting, after a newline of its own, so what a setting printed without a final newline is not
+    joined to it; the markers do not reach the text. What comes before the first marker is the first setting's."""
     text = getattr(result, "stderr", "") or ""
     index = {m["nonce"]: i for i, m in enumerate(members)}
-    parts: list[list[str]] = [[] for _ in members]
-    current = 0
-    for line in text.splitlines():
-        if line.startswith(STDERR_MARK):
-            current = index.get(line[len(STDERR_MARK):].strip(), current)
-            continue
-        parts[current].append(line)
-    return ["\n".join(p) + ("\n" if p else "") for p in parts]
+    parts: list[str] = ["" for _ in members]
+    current, at = 0, 0
+    for found in re.finditer(r"(?:\r?\n)?" + re.escape(STDERR_MARK) + r"([0-9a-f]+)\r?\n", text):
+        parts[current] += text[at:found.start()]
+        current, at = index.get(found.group(1), current), found.end()
+    parts[current] += text[at:]
+    return [p if not p or p.endswith("\n") else p + "\n" for p in parts]
 
 
 def _reported_trials(quest_root: Path, task: dict[str, Any]) -> int:
@@ -896,12 +977,12 @@ def _alone(quest_root: Path, task: dict[str, Any]) -> None:
 class Grouping:
     """What :func:`measure_grouping` found: whether settings may share a process."""
 
-    #: Every number of every setting was the same in the shared runs (and the sample run alone).
+    #: Every number of every setting was the same in the two shared runs (and the sample run alone).
     same: bool = False
-    #: Seconds to start a process, as the sample measured it (``None``: not measured).
-    start_s: float | None = None
     settings: int = 0
-    #: Seconds the longest shared run of all the settings took, and the whole check.
+    #: How many settings were also run in a process of their own.
+    alone: int = 0
+    #: Seconds the longest shared run took, and the whole check.
     pass_s: float = 0.0
     elapsed_s: float = 0.0
     #: Where the numbers differed, as ``(setting, trial, name)`` text.
@@ -941,6 +1022,17 @@ def _rows_by_nonce(quest_root: Path, out: str) -> dict[str, dict[Any, dict[str, 
     return rows
 
 
+def _rows_of_plan(quest_root: Path, plan: list[dict[str, Any]]) -> dict[str, dict[Any, dict[str, Any]]]:
+    """``{setting: {trial: row}}`` for a planned run, each results file read once."""
+    files: dict[str, dict[str, dict[Any, dict[str, Any]]]] = {}
+    out: dict[str, dict[Any, dict[str, Any]]] = {}
+    for task in plan:
+        if task["out"] not in files:
+            files[task["out"]] = _rows_by_nonce(quest_root, task["out"])
+        out[task["key"]] = files[task["out"]].get(task["nonce"], {})
+    return out
+
+
 def _row_differences(key: str, trial: Any, a: dict[str, Any] | None, b: dict[str, Any] | None) -> list[str]:
     """Where two rows of the same trial differ (the numbers and what was read from the cell; timings and warnings aside)."""
     if a is None or b is None or a.get("status") != "ok" or b.get("status") != "ok":
@@ -957,90 +1049,124 @@ def _row_differences(key: str, trial: Any, a: dict[str, Any] | None, b: dict[str
     return found
 
 
+async def measure_start(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, deterministic: bool,
+                        env: dict[str, str] | None = None, timeout_s: int = 60, log: Any = None, repeats: int = 2) -> float | None:
+    """Seconds a process of the study takes before its first trial, measured: the worker starts, loads the simulation and
+    returns without calling it (the fastest of ``repeats``, the way a setting's process is started in a run). ``None`` when
+    the simulation cannot be loaded."""
+    quest_root = Path(quest_root)
+    work = quest_root / ".fi" / "trials" / "start_check"
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    worker = quest_root / GROUP_HARNESS_PATH
+    worker.parent.mkdir(parents=True, exist_ok=True)
+    worker.write_text(GROUP_HARNESS_SOURCE, encoding="utf-8")
+    box = _outside.OutsideExecutor(executor, quest_root, log=log)
+    env = _execution.threads_beside(env, 1)
+    best: float | None = None
+    try:
+        for i in range(max(1, int(repeats))):
+            spec, out = work / f"start{i}.json", work / f"start{i}.out.jsonl"
+            spec.write_text(json.dumps({
+                "module": str(module).replace("\\", "/"), "entry": "run_cell" if deterministic else "run_trial", "kind": "check",
+                "thresholds": {}, "keep_spec": False, "nonce": "",
+                "members": [{"cell": {}, "levels": None, "trials": [], "nonce": "start"}]}), encoding="utf-8")
+            began = time.monotonic()
+            result = await box.execute([str(python), GROUP_HARNESS_PATH.as_posix(), spec.relative_to(quest_root).as_posix(),
+                                        out.relative_to(quest_root).as_posix()], cwd=quest_root, timeout_s=max(5, int(timeout_s)), env=env)
+            took = time.monotonic() - began
+            if getattr(result, "returncode", 1) != 0 or getattr(result, "timed_out", False):
+                return None
+            best = took if best is None else min(best, took)
+    finally:
+        await box.settle()
+        shutil.rmtree(work, ignore_errors=True)
+    return best
+
+
 async def measure_grouping(
     executor: Any, python: Path | str, quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *,
-    runs_per_setting: int, base_seed: int, deterministic: bool, timeout_s: int, env: dict[str, str] | None = None,
-    thresholds: dict[str, Any] | None = None, paired: bool = False, in_each_run: dict[str, list[Any]] | None = None,
-    log: Any = None, at_once: int = 1, sample: int = 6,
+    runs_per_setting: int, base_seed: int, deterministic: bool, timeout_s: int, per_process: int, cost: Any,
+    env: dict[str, str] | None = None, thresholds: dict[str, Any] | None = None, paired: bool = False,
+    in_each_run: dict[str, list[Any]] | None = None, log: Any = None, at_once: int = 1, sample: int = 6,
 ) -> Grouping:
-    """Whether settings may share a process, by measuring on EVERY setting of the study (one trial each, FI's seeds): all of
-    them in one process in the plan's order, all of them in one process in the reverse order, and a sample of settings
-    (``sample``, the first, the last and settings between) each in a process of its own. Settings may share a process
-    only when every number of every setting is the same in the two shared runs, and the sample's numbers are the same as
-    in its own processes (``==``, two NaNs the same). State kept between settings (a counter, a memo keyed on part of
-    a setting, a flag one branch sets) changes a number in one order or the other. The caller keeps this check for studies
-    whose time is mostly starts of processes, where it costs little. Nothing the check writes stays in the quest."""
+    """Whether settings may share a process, by measuring on EVERY setting of the study, the way the run will share them:
+    the groups of ``per_process`` settings that :func:`run_trials` would make (the same order, ``cost`` deciding it), each
+    run in one process; then the same groups with their settings in the opposite order; and ``sample`` settings (the first,
+    the last and settings between) each in a process of their own. The study's own runs per setting are used when they are
+    at most 3 (else 3), so that state kept from call to call is reached as in the run. Settings may share a process only
+    when every number of every setting is the same in the two orders and the sample's numbers are the same as in its own
+    processes (``==``, two NaNs the same). State kept between settings (a counter, a memo keyed on part of a setting, a flag
+    one branch sets) changes a number in one order or the other. The caller keeps this check for studies whose time is mostly
+    starts of processes, where it costs little. Nothing the check writes stays in the quest."""
     began = time.monotonic()
     quest_root = Path(quest_root)
     every = cells(grid)
     total = len(every)
-    if total < 2:
+    if total < 2 or int(per_process) < 2:
         return Grouping(settings=total, says="a single setting has no process to share")
+    runs = 1 if deterministic else min(3, max(1, int(runs_per_setting)))
     work = quest_root / ".fi" / "trials" / "group_check"
     shutil.rmtree(work, ignore_errors=True)
     for name in ("alone", "forward", "reverse"):
         (work / name).mkdir(parents=True)
-    harness = quest_root / HARNESS_PATH
-    harness.parent.mkdir(parents=True, exist_ok=True)
-    harness.write_text(HARNESS_SOURCE, encoding="utf-8")
+    for path, source in ((HARNESS_PATH, HARNESS_SOURCE), (GROUP_HARNESS_PATH, GROUP_HARNESS_SOURCE)):
+        (quest_root / path).parent.mkdir(parents=True, exist_ok=True)
+        (quest_root / path).write_text(source, encoding="utf-8")
     box = _outside.OutsideExecutor(executor, quest_root, log=log)
     env = _execution.threads_beside(env, 2)
-    kw: dict[str, Any] = dict(runs_per_setting=1, base_seed=base_seed, deterministic=deterministic, paired=paired,
+    kw: dict[str, Any] = dict(runs_per_setting=runs, base_seed=base_seed, deterministic=deterministic, paired=paired,
                               thresholds=thresholds, in_each_run=in_each_run)
-    picks = sorted({round(i * (total - 1) / (max(2, min(int(sample), total)) - 1)) for i in range(max(2, min(int(sample), total)))})
+    count = max(2, min(int(sample), total))
+    picks = sorted({round(i * (total - 1) / (count - 1)) for i in range(count)})
     singles = _plan(quest_root, module, grid, folder=work / "alone", out_name="cell{index}.out.jsonl",
                     cell_list=[every[i] for i in picks], **kw)
     forward = _plan(quest_root, module, grid, folder=work / "forward", out_name="cell{index}.out.jsonl", cell_list=every, **kw)
-    reverse = _plan(quest_root, module, grid, folder=work / "reverse", out_name="cell{index}.out.jsonl",
-                    cell_list=list(reversed(every)), **kw)
-    group_f = _units(quest_root, forward, total, None, work / "forward")[0]
-    group_r = _units(quest_root, reverse, total, None, work / "reverse")[0]
+    reverse = _plan(quest_root, module, grid, folder=work / "reverse", out_name="cell{index}.out.jsonl", cell_list=every, **kw)
+    units = [("forward", u) for u in _units(quest_root, forward, per_process, cost, work / "forward")]
+    units += [("reverse", u) for u in _units(quest_root, reverse, per_process, cost, work / "reverse", reverse=True)]
     limit = max(30, int(timeout_s))
     gate = asyncio.Semaphore(max(2, min(int(at_once or 1), 8)))
-    ended: dict[str, Any] = {}
-    walls: dict[str, float] = {}
+    ended: list[Any] = []
+    walls: list[float] = []
 
-    async def run(label: str, task: dict[str, Any]) -> None:
+    async def run(task: dict[str, Any], shared: bool) -> None:
         async with gate:
             t = time.monotonic()
-            ended[label] = await box.execute([str(python), HARNESS_PATH.as_posix(), task["spec"], task["out"]],
-                                             cwd=quest_root, timeout_s=limit, env=env)
-            walls[label] = time.monotonic() - t
+            harness = GROUP_HARNESS_PATH if shared else HARNESS_PATH
+            ended.append(await box.execute([str(python), harness.as_posix(), task["spec"], task["out"]],
+                                           cwd=quest_root, timeout_s=limit, env=env))
+            if shared:
+                walls.append(time.monotonic() - t)
 
     differences: list[str] = []
     try:
-        await asyncio.gather(run("forward", group_f), run("reverse", group_r),
-                             *(run(f"alone{i}", t) for i, t in enumerate(singles)))
-        if any(getattr(r, "returncode", 1) != 0 or getattr(r, "timed_out", False) for r in ended.values()):
+        await asyncio.gather(*(run(u, True) for _label, u in units), *(run(t, False) for t in singles))
+        if any(getattr(r, "returncode", 1) != 0 or getattr(r, "timed_out", False) for r in ended):
             differences.append("a process of the check did not end normally")
         else:
-            fwd = _rows_by_nonce(quest_root, group_f["out"])
-            rev = _rows_by_nonce(quest_root, group_r["out"])
-            rows_f = {t["key"]: fwd.get(t["nonce"], {}) for t in forward}
-            rows_r = {t["key"]: rev.get(t["nonce"], {}) for t in reverse}
+            rows_f, rows_r = _rows_of_plan(quest_root, forward), _rows_of_plan(quest_root, reverse)
+            rows_s = _rows_of_plan(quest_root, singles)
             for task in forward:
                 for t in task["trials"]:
                     differences += _row_differences(task["key"], t["trial"], rows_f[task["key"]].get(t["trial"]),
                                                     rows_r.get(task["key"], {}).get(t["trial"]))
             for task in singles:
-                own = _rows_by_nonce(quest_root, task["out"]).get(task["nonce"], {})
                 for t in task["trials"]:
-                    differences += _row_differences(task["key"], t["trial"], own.get(t["trial"]),
+                    differences += _row_differences(task["key"], t["trial"], rows_s[task["key"]].get(t["trial"]),
                                                     rows_f.get(task["key"], {}).get(t["trial"]))
     finally:
         await box.settle()
         shutil.rmtree(work, ignore_errors=True)
     elapsed = time.monotonic() - began
-    pass_s = max(walls.get("forward", 0.0), walls.get("reverse", 0.0))
+    pass_s = max(walls) if walls else 0.0
     if differences:
-        return Grouping(settings=total, pass_s=pass_s, elapsed_s=elapsed, differences=differences[:20], says=(
-            f"Settings run one per process: with all {total} settings in one process the numbers differed "
-            f"({differences[0]}), so the processes are not shared."))
-    singles_walls = [w for k, w in walls.items() if k.startswith("alone")]
-    start = min(singles_walls) if singles_walls else None
-    return Grouping(True, start, total, pass_s, elapsed, [], (
-        f"All {total} settings gave the same numbers in one process, in the plan's order and in the reverse order, and "
-        f"{len(singles)} of them gave the same numbers in a process of their own."))
+        return Grouping(settings=total, alone=len(singles), pass_s=pass_s, elapsed_s=elapsed, differences=differences[:20],
+                        says=(f"Settings run one per process: with the settings sharing processes the numbers differed "
+                              f"({differences[0]}), so the processes are not shared."))
+    return Grouping(True, total, len(singles), pass_s, elapsed, [], (
+        f"All {total} settings gave the same numbers in groups of {per_process} sharing a process, in the plan's order and in "
+        f"the reverse order, and {len(singles)} of them gave the same numbers in a process of their own."))
 
 
 def settings_at_once(value: Any, *, cores: int | None = None, fleet: int = 1) -> int:
