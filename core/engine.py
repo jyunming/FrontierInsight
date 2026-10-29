@@ -6663,7 +6663,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                            node, name, len(made.replaced), ", ".join(made.replaced[:6]))
         elif made.why:
             self._log.warning("[%s] the repair of %s holds no usable script (%s)", node, name, made.why)
-        return made.code, made.why
+        return _skeleton.without_raise(made.code), made.why
 
     async def _ask_for_plan_parts(self, prompt: str) -> dict[str, Any]:
         """One JSON object of the asked parts from the plan's model (node ``plan_revise``, so it is the same model, limits
@@ -14704,6 +14704,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if new is None:
             self._log.warning("[equations] the repair of %s was not used: %s", failure.get("function"), why)
             return False
+        new = _skeleton.without_raise(new)
         framed = _skeleton.repair_problem(source, new, where["file"])  # a framed simulate.py keeps FI's frame
         if framed:
             self._log.warning("[equations] the repair of %s is not used: %s", failure.get("function"), framed)

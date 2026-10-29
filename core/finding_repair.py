@@ -1592,6 +1592,7 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
                                   + ", which the finding does not speak of")
     if new is None or not new.strip():
         return False, why or "the reply held no usable code"
+    new = _skeleton.without_raise(new)
     if new != old:
         edits[rel] = (old, new)
     if not edits:

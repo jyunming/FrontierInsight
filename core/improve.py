@@ -594,6 +594,7 @@ def check_edit(files: dict[str, str], edit: Edit, allowed: list[str], *, tried: 
         return None, "it changes nothing"
     from . import skeleton as _skeleton
 
+    new = _skeleton.without_raise(new)
     framed = _skeleton.repair_problem(old, new, name)  # FI's frame of simulate.py stays as it is (nothing when it has none)
     if framed:
         return None, framed

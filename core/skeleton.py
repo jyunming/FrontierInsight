@@ -397,10 +397,23 @@ def repair_problem(old: str, new: str, name: str) -> str:
     return frame_intact(old, new)
 
 
+def without_raise(text: str) -> str:
+    """``text`` without the line :func:`refuse` put in: it is FI's own line, so a repair of the file never has to remove it and
+    never keeps it."""
+    if not text or RAISE_MARK not in text:
+        return text
+    return "".join(ln for ln in text.splitlines(keepends=True) if RAISE_MARK not in ln)
+
+
 def heal(frame: str, text: str) -> str:
-    """The canonical ``frame`` with the function ``trial``, the helpers and the imports of ``text`` (a reply whose frame was
-    changed) put into it, or the bare ``frame`` when they cannot be. The damaged frame is never kept: a repair is compared with
-    the frame FI wrote, whatever the model's reply did to it."""
+    """The canonical frame with what :func:`heal_ex` could keep of ``text``."""
+    return heal_ex(frame, text)[0]
+
+
+def heal_ex(frame: str, text: str) -> tuple[str, str]:
+    """``(the canonical frame with the function trial, the helpers and the imports of text put into it, "")``, or ``(the bare
+    frame, why they could not be)``. The damaged frame is never kept: a repair is compared with the frame FI wrote, whatever
+    the model's reply did to it."""
     kept = text.lstrip("\ufeff")
     for begin in (TOP_BEGIN, BOTTOM_BEGIN):
         i = kept.find(begin)
@@ -408,9 +421,9 @@ def heal(frame: str, text: str) -> str:
         if i >= 0 and j >= 0:
             k = kept.find("\n", j)
             kept = kept[:i] + kept[k + 1:] if k >= 0 else kept[:i]
-    kept = "".join(ln for ln in kept.splitlines(keepends=True) if RAISE_MARK not in ln)
-    made, _why, _left = _fill(frame, kept)
-    return made if made is not None else frame
+    kept = without_raise(kept)
+    made, why, _left = _fill(frame, kept)
+    return (made, "") if made is not None else (frame, why)
 
 
 def refuse(text: str, problem: str) -> str:
@@ -445,7 +458,7 @@ def compose(frame: str, simulate_reply: str) -> tuple[str, str]:
     harness, say what is wrong with it)."""
     if has_frame(simulate_reply):
         problem = frame_intact(frame, simulate_reply)
-        return simulate_reply, problem
+        return (without_raise(simulate_reply) if not problem else simulate_reply), problem
     try:
         tree = ast.parse(simulate_reply)
     except SyntaxError:
@@ -457,7 +470,8 @@ def compose(frame: str, simulate_reply: str) -> tuple[str, str]:
         return simulate_reply, "the reply holds no function `trial`"
     text, why, left = _fill(frame, simulate_reply)
     if text is None:
-        return refuse(simulate_reply, why), why  # the run then stops with the reason, never with a NameError
+        # The file keeps FI's frame (a later repair is checked against it); the run then stops with the reason.
+        return refuse(heal(frame, simulate_reply), why), why
     return text, (("left out of the model's reply, which the file cannot carry: " + "; ".join(left)) if left else "")
 
 

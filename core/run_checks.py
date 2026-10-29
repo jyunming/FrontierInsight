@@ -695,7 +695,10 @@ class RunChecksMixin:
             problem = _skeleton.frame_intact(frame, text)
             if problem:
                 # the run then says what changed and the simulation is repaired; the file keeps FI's frame, never the damaged one
-                text = _skeleton.refuse(_skeleton.heal(frame, text), problem)
+                healed, lost = _skeleton.heal_ex(frame, text)
+                if lost:  # the reply's own function could not be kept either: say that too
+                    problem += f"; the reply's function `trial` could not be used either: {lost}"
+                text = _skeleton.refuse(healed, problem)
             else:
                 self._log.info("[implement] simulate.py is FI's frame with the model's trial function")  # type: ignore[attr-defined]
         return text

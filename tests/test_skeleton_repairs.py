@@ -381,3 +381,57 @@ async def test_the_figure_seed_and_update_requests_carry_the_note_and_a_changed_
     path.write_text(FRAMED, encoding="utf-8")
     await eng._repair_typed_figures(state, path, [])
     assert chat.await_args.args[0][-1]["content"].startswith(skeleton.REPAIR_NOTE)
+
+
+# --- review round 2 ---------------------------------------------------------------------------------------------------------
+
+def _runs(folder: Path, text: str) -> str:
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "simulate.py").write_text(text, encoding="utf-8")
+    (folder / "fi_frame.py").write_text(skeleton.RUNTIME, encoding="utf-8")
+    done = subprocess.run([sys.executable, "-B", "-c", "import simulate; print(simulate.run_trial({'rate': 0.5, 'dose': 2}, 0, 1))"],
+                          cwd=folder, capture_output=True, text=True, timeout=60)
+    return done.stdout.strip() or done.stderr.strip().splitlines()[-1]
+
+
+@pytest.mark.asyncio
+async def test_a_body_only_repair_of_a_refused_file_is_kept_without_the_raise_line_and_runs(tmp_path: Path) -> None:
+    refused = _refused_file()
+    assert "stop" not in _runs(tmp_path / "before", refused) and "RuntimeError" in _runs(tmp_path / "before", refused)
+    eng, _chat = _engine(tmp_path, refused, {"functions": BODY.replace("x * 1.0", "x * 1.5"), "patch_summary": "scale"})
+    patch = await eng._node_execute_reflect(_crash_state())
+    on_disk = (eng.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")
+    assert patch["exec_reflect_iter"] == 1 and "the repair was not used" not in str(patch["exec_reflect_history"])
+    assert skeleton.RAISE_MARK not in on_disk and "x * 1.5" in on_disk
+    assert skeleton.frame_intact(skeleton.frame_source(DESIGN, stochastic=True), on_disk) == ""
+    assert _runs(tmp_path / "after", on_disk) == "{'growth': 1.5}"
+
+
+def test_an_edit_of_a_refused_file_by_the_improve_loop_leaves_no_raise_line() -> None:
+    refused = _refused_file()
+    new, why = improve.check_edit({"simulate.py": refused}, _edit("return x * 1.0", "return x * 1.5"), ["simulate.py"],
+                                  tried=set(), expected=[])
+    assert why == "" and new is not None and skeleton.RAISE_MARK not in new and "x * 1.5" in new
+
+
+def test_a_frameless_reply_that_is_refused_still_leaves_the_file_the_design_s_frame() -> None:
+    frame = skeleton.frame_source(DESIGN, stochastic=True)
+    reply = BODY.replace("def trial(cell, ctx):", "def trial(cell, context):")
+    text, problem = skeleton.compose(frame, reply)
+    assert "(cell, ctx)" in problem and skeleton.has_frame(text) and skeleton.RAISE_MARK in text
+    assert skeleton.frame_intact(frame, text) == ""
+    # a later repair that is a whole script of its own is judged against that frame, not waved through
+    assert skeleton.repair_problem(text, UNFRAMED, "simulate.py").startswith("the frame FI wrote was changed")
+    fixed = skeleton.without_raise(text).replace("raise NotImplementedError", "return TrialResult()  # raise NotImplementedError")
+    assert skeleton.repair_problem(text, fixed, "simulate.py") == ""
+
+
+def test_the_reason_names_the_trial_when_the_trial_was_the_cause(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    cfg.execution.code_skeleton = True
+    eng = Engine(cfg)
+    eng.quest_root.mkdir(parents=True, exist_ok=True)
+    reply = DAMAGED_REPLY.replace("def trial(cell, ctx):", "def trial(cell, context):")
+    text = eng._framed({"design": DESIGN}, reply)
+    first = next(ln for ln in text.splitlines() if skeleton.RAISE_MARK in ln)
+    assert "SETTINGS" in first and "`trial` could not be used either" in first and "(cell, ctx)" in first
