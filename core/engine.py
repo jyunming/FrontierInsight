@@ -13581,6 +13581,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "summary": ("the second model's finding " + str(issue.get("id")) + ": " + str(issue.get("text") or ""))[:300]})
 
         notes: list[str] = []  # what went wrong in the measures of a try (core/finding_repair.py: ``Env.notes``)
+        self._gate_notes = notes  # what the analysis gate shows without refusing goes to the same list
         env = _finding_repair.Env(
             root=self.quest_root, code=code, record=record, save=lambda: _code_review.save(self.quest_root, record),
             ask=ask, run_tests=run_tests, snapshot=snapshot, static=static,
@@ -14177,11 +14178,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # The same code (the script and the model's package) that was judged fine is not called again.
         seen = _trial_runner.code_inputs_sha(self.quest_root, new_code)
         if self.__dict__.get("_entry_judged_fine") == seen:
-            return ""
+            return await self._gate_refusal(state)
         fault = await self._simulation_repair_fault_uncached(state, new_code)
         if not fault:
             self._entry_judged_fine = seen
-        return fault
+        # Then the analysis is run from start to end on the recorded results (nothing happens with the switch off).
+        return fault or await self._gate_refusal(state)
 
     async def _simulation_kept_or_back(self, state: QuestState, path: Path, old_code: str,
                                        package_before: dict[str, str], node: str) -> str:
@@ -18507,6 +18509,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # with what the run gave (core/small_run.py).
         if (small := await self._small_run_gate(state, py, exec_env)) is not None:
             return small, None, False
+        if (gated := await self._gate_first(state)) is not None:  # the analysis on the recorded results (switch off: None)
+            return gated, None, False
         await self._code_review_gate(state)
         # A finding's test that crashed inside the code showed a crash, not the finding: the crash repair takes it.
         if (crashed := await self._review_crash_run(state)) is not None:
@@ -20586,6 +20590,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         package_before = self._package_snapshot() if repair_simulation else {}
         code_path.write_text(new_code, encoding="utf-8")
         package_fixed: dict[str, str] = {}
+        if not repair_simulation and not repair_submit and (fault := await self._gate_refusal(state)):
+            # experiment.py alone does not reach the simulation's checks below: the analysis gate is its check.
+            code_path.write_text(script_code, encoding="utf-8")
+            self._log.warning("[execute_reflect] the repair of %s is not used: %s; keeping it as written", script_name, fault)
+            await self._keep_refused_repair("execute_reflect", script_name, new_code, fault)
+            history[-1]["patch_summary"] = (f"[the repair was not used and {script_name} is as it was: {fault}] "
+                                            + str(history[-1].get("patch_summary") or ""))[:400]
+            return {**spent, "exec_reflect_iter": iters + bump, "exec_reflect_history": history}
         if repair_simulation:
             code_dir = self.quest_root / "code"
             package_fixed = {rel: _attempts._sha((code_dir / rel).read_bytes())
