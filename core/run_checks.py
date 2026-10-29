@@ -138,6 +138,30 @@ def settings_the_study_compares(fi_dir: Path, design: Any, protocol: dict[str, A
     return {axis: why for axis, why in out.items() if axis in axes}
 
 
+def _literal_keys(files: dict[str, str]) -> set[str]:
+    """The names the code's text looks up by a literal key (``x["name"]``, ``x.get("name")``) anywhere. Used only to hold a
+    repair back: a setting FI's small run saw no read of, whose name the code does look up somewhere, is read under a
+    condition the small run did not reach, not ignored."""
+    import ast
+
+    out: set[str] = set()
+    for text in files.values():
+        try:
+            tree = ast.parse(text)
+        except (SyntaxError, ValueError):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load):
+                key = node.slice
+                if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                    out.add(key.value)
+            elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                  and node.func.attr in ("get", "pop", "setdefault") and node.args
+                  and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)):
+                out.add(node.args[0].value)
+    return out
+
+
 def unread_findings(files: dict[str, str], protocol: dict[str, Any], design: Any, fi_dir: Path) -> tuple[
         list[Any], dict[str, str], list[str], str]:
     """FI's reading of which settings of ``protocol.grid`` the code never reads: ``(misread, compared, unread, why)``.
@@ -620,7 +644,6 @@ class RunChecksMixin:
         Nothing is said when the reading is not certain or the code reads a name the plan does not give (a misspelt read
         is a fault of the code: core/grid_keys.py sends it back), after the freeze, or for a redesign. No model is asked.
         Returns the failed run for the repair, or ``None`` to go on."""
-        from . import engine as _e
         from . import grid_keys as _grid_keys
 
         if _frozen.load(self.quest_root) is not None or int(state.get("iteration", 0) or 0) > 0:  # type: ignore[attr-defined]
@@ -643,8 +666,14 @@ class RunChecksMixin:
                 self._log.info("[execute] FI could not tell whether the code reads every setting of the grid (%s); "  # type: ignore[attr-defined]
                                "every setting is kept and run", why)
             return None
-        line = (f"FI's reading of the code finds no use of {', '.join(f'`{k}`' for k in unread)}; every setting is kept "
-                "and run.")
+        self._note_unread_setting(f"FI's reading of the code finds no use of {', '.join(f'`{k}`' for k in unread)}; every "
+                                  "setting is kept and run.")
+        return None
+
+    def _note_unread_setting(self, line: str) -> None:
+        """One line about a setting the code does not use, in run.log and in plan.md (once)."""
+        from . import engine as _e
+
         self._log.warning("[execute] %s", line)  # type: ignore[attr-defined]
         path = _plan.plan_path(self.quest_root)  # type: ignore[attr-defined]
         try:
@@ -654,9 +683,45 @@ class RunChecksMixin:
                 _plan.note_edit(self.quest_root, text)  # type: ignore[attr-defined]
                 path.write_text(edited, encoding="utf-8")
                 _plan.record_version(self.quest_root, edited, by="engine",  # type: ignore[attr-defined]
-                                     note="FI's reading of the code finds no use of a setting; every setting is kept")
+                                     note="FI found no use of a setting; every setting is kept")
         except OSError as e:
             self._log.warning("[execute] FI could not add that line to plan.md: %r", e)  # type: ignore[attr-defined]
+
+    def _unread_in_small_run(self, state: Any, record: dict[str, Any], simulate: Path) -> dict[str, Any] | None:
+        """FI's small run saw the code never ask for a setting of the grid (:meth:`core.small_run.SmallRun.reads`: a fact
+        FI observed, not a reading of the text). The same consequence as the reading of the code above, which runs later and
+        still runs: a setting the study compares sends the simulation back (a failed run, while a repair is left, before the
+        freeze); any other is one line in plan.md and run.log. The grid is never changed. ``None`` to go on."""
+        reads = record.get("reads") if isinstance(record.get("reads"), dict) else {}
+        never = [str(a) for a in reads.get("never") or []]
+        if not never or _frozen.load(self.quest_root) is not None or int(state.get("iteration", 0) or 0) > 0:  # type: ignore[attr-defined]
+            return None
+        protocol = self._draft_protocol(state) or {}  # type: ignore[attr-defined]
+        grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+        never = [a for a in never if isinstance(grid.get(a), list) and len(grid[a]) >= 2]
+        if not never:
+            return None
+        asked = [str(a) for a in reads.get("unknown") or []]
+        compared = settings_the_study_compares(self.fi_dir, state.get("design"), protocol, never)  # type: ignore[attr-defined]
+        # The small run covers the middle and the two corners of the grid, so a setting the code reads only under a condition
+        # the small run did not reach (a source of one family, a method of one kind) looks unread. Where the text of the code
+        # does read it, it is a note and nothing is sent back; the whole study reads it.
+        from . import grid_keys as _grid_keys
+        from . import unread_settings as _unread
+
+        files = {rel: text for rel, text in _grid_keys.code_files(simulate.parent).items()
+                 if rel not in ("run.py", _trial_runner.SUBMIT_NAME)}
+        # (the analysis script reads FI's record of the trials, not the cell: its lookups say nothing about the simulation)
+        seen = set(_unread.setting_reads(files, analysis=False)[0] or ()) | _literal_keys(
+            {rel: text for rel, text in files.items() if rel != "experiment.py"})
+        sent = {a: why for a, why in compared.items() if a not in seen}
+        if sent:
+            return self._unread_compared_setting(state, grid, sent, simulate, ran=True, asked=asked)
+        conditional = [a for a in never if a in seen]
+        self._note_unread_setting(
+            f"FI's small run: the simulation never asked for {', '.join(f'`{k}`' for k in never)}"
+            + (f" (the code does read {', '.join(f'`{k}`' for k in conditional)}, under a condition the small run did not reach)"
+               if conditional else "") + "; every setting is kept and run.")
         return None
 
     def _record_step_coverage(self, state: Any, simulate: Path) -> list[str]:
@@ -710,7 +775,7 @@ class RunChecksMixin:
         return settings_the_study_compares(self.fi_dir, state.get("design"), protocol, axes)  # type: ignore[attr-defined]
 
     def _unread_compared_setting(self, state: Any, grid: dict[str, Any], compared: dict[str, str],
-                                 simulate: Path) -> dict[str, Any] | None:
+                                 simulate: Path, *, ran: bool = False, asked: list[str] | None = None) -> dict[str, Any] | None:
         """A setting the study compares and the code never reads: a fault of the code. Sent back to be repaired a bounded
         number of times; after that the grid is kept as written (the run then shows the setting changed nothing)."""
         said = "; ".join(f"`{axis}` ({why})" for axis, why in compared.items())
@@ -722,8 +787,10 @@ class RunChecksMixin:
                           "to be repaired, not taking the setting out of the plan", said)
         print("[FI] the code never reads a setting the study compares; sending the simulation back to be repaired")
         values = "; ".join(f"`{axis}` takes {', '.join(str(v) for v in grid[axis][:6])}" for axis in compared)
+        wrong = (f" It asked for {', '.join(f'`{k}`' for k in asked)}, which the plan's grid does not give." if asked else "")
         return self._code_review_failed_run(  # type: ignore[attr-defined]
-            f"FI read the code before the run: nothing in it reads {said}. The plan's grid gives each run its own value "
+            f"FI {'ran the simulation on a small case' if ran else 'read the code'} before the run: nothing in it reads "
+            f"{said}.{wrong} The plan's grid gives each run its own value "
             f"({values}), and the study compares the results across those values, so the simulation must use the value it is "
             "given (`cell[\"<name>\"]`, the name exactly as the grid spells it) where the plan's model uses it. Do not fix "
             "the value inside the code.", script=simulate.name)
@@ -1607,6 +1674,8 @@ class RunChecksMixin:
         from . import small_run as _small
 
         record = await self._small_run(state, py, exec_env)
+        if record and not record.get("crashed"):
+            return self._unread_in_small_run(state, record, self.quest_root / "code" / _split_run.SIMULATE_NAME)  # type: ignore[attr-defined]
         if not record or not record.get("crashed"):
             return None
         if int(state.get("exec_reflect_iter") or 0) >= self.config.engine.exec_reflect_max_iterations:  # type: ignore[attr-defined]
