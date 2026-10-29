@@ -32,6 +32,7 @@ from dataclasses import replace as _replace
 from pathlib import Path
 from typing import Any
 
+from . import cost_model as _cost_model
 from . import frozen_protocol as _frozen
 from . import numeric_warnings as _numeric
 from . import in_run as _in_run
@@ -870,6 +871,8 @@ class RunChecksMixin:
                 if slowdown is not None:
                     est = _estimate.with_once(_estimate.estimate(grid, runs, runner.deterministic, probes, at_once=at_once,
                                                                  slowdown=slowdown), once_seen)
+            # The timings are kept term by term (core/cost_model.py), not only their total; nothing reads them back yet.
+            _cost_model.keep_measured(self.quest_root, probes=probes, est=est, slowdown=slowdown, limit_s=limit_s, key=key)  # type: ignore[attr-defined]
             line = _estimate.says(est, limit_s, topic=by_topic)
             base = {"key": key, "estimate_s": est.seconds * _estimate.SAFETY, "limit_s": limit_s, "says": line,
                     "reduced": reduced, "at": time.time(), "timed": est.timed, "cells": est.cells, "trials": est.trials,
@@ -1159,6 +1162,10 @@ class RunChecksMixin:
                                                             deterministic=deterministic)
                     if slowdown is not None:
                         est = _estimate.estimate(grid, runs, deterministic, probes, at_once=at_once, slowdown=slowdown)
+        if probes:
+            _cost_model.keep_measured(self.quest_root, probes=probes, est=est, slowdown=slowdown, at_once=at_once,  # type: ignore[attr-defined]
+                                      limit_s=limit_s, plan={"scan": scan}, scan_s=est.seconds if est is not None else None,
+                                      design=_cost_model.design_key(block, runner.simulate))
         if per_setting is not None and (est is None or per_setting * scan > est.seconds):
             est = _estimate.Estimate(seconds=per_setting * scan, at_least=False, complete=True, cells=scan, trials=scan * runs)
         if est is None:
@@ -1288,6 +1295,10 @@ class RunChecksMixin:
                         searched = search_n
                     elif not searched:
                         searched = 0
+            _cost_model.keep_measured(self.quest_root, per_evaluation_s=per_eval, per_evaluation_at_least=lower, slowdown=slowdown,  # type: ignore[attr-defined]
+                                      check_unit_s=unit if check_n else None, check_unit_basis="search-design lower bound",
+                                      plan={"evaluations": search_n, "check_runs": check_n, "scan": scan, "runs_per_evaluation": runs},
+                                      design=_cost_model.design_key(block, runner.simulate))
             if not searched and not checked:
                 # The line a person reads is the whole study: the scan alone said "about 6 minutes" of a search that ran
                 # for hours.

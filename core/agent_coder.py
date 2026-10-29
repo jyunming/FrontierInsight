@@ -108,7 +108,7 @@ _SKIP_FILES = {
     ".fi/model_calls.jsonl", ".fi/cost.jsonl", ".fi/audit.jsonl", ".fi/thinking.jsonl", ".fi/attempts.jsonl",
     ".fi/confirmations.jsonl", ".fi/branch_ledger.jsonl", ".fi/launch.log",
     # the records of FI's own runs and checks of the code
-    ".fi/small_run.json", ".fi/run_estimate.json", ".fi/pilot_check.json", ".fi/run_facts.json",
+    ".fi/small_run.json", ".fi/run_estimate.json", ".fi/cost_model.json", ".fi/pilot_check.json", ".fi/run_facts.json",
     ".fi/trial_checks.json", ".fi/code_review.json", ".fi/oracle_review.json", ".fi/equation_tests.json",
     ".fi/function_steps.json", ".fi/second_impl.json", ".fi/oracles_added.json", ".fi/failure.json",
 }
