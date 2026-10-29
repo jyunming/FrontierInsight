@@ -2159,7 +2159,7 @@ class RunChecksMixin:
         # The repaired code must also still give the study's results from the function FI calls for the study.
         simulate = self.quest_root / "code" / _split_run.SIMULATE_NAME  # type: ignore[attr-defined]
         try:
-            fault = await self._simulation_repair_fault(ctx[0], simulate.read_text(encoding="utf-8")) if simulate.is_file() else ""  # type: ignore[attr-defined]
+            fault = await self._simulation_entry_fault(ctx[0], simulate.read_text(encoding="utf-8")) if simulate.is_file() else ""  # type: ignore[attr-defined]
         except OSError:
             return ""
         return fault  # the analysis gate follows as ``Env.gate`` (one call for each change)

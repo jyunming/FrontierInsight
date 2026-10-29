@@ -78,6 +78,23 @@ def _quiet(eng: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
     eng._small_run_ctx = ({}, sys.executable, {})  # type: ignore[attr-defined]
 
 
+class _Lines(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__(logging.DEBUG)
+        self.lines: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.lines.append(record.getMessage())
+
+
+def _lines(eng: Engine) -> _Lines:
+    """The engine's quest log does not propagate to the root logger: attach a handler to read it."""
+    handler = _Lines()
+    eng._log.addHandler(handler)
+    eng._log.setLevel(logging.DEBUG)
+    return handler
+
+
 def _gate_files(eng: Engine) -> bool:
     return (eng.fi_dir / "pipeline_gate.json").exists()
 
@@ -100,13 +117,18 @@ async def test_with_the_switch_off_nothing_is_run_written_or_logged(tmp_path: Pa
 
     monkeypatch.setattr("core.pipeline_gate.analysis_gate", never)
     (eng.quest_root / "code" / "experiment.py").write_text(EXPERIMENT.replace("fill_time(m)", "fill_time(m, x)"), encoding="utf-8")
-    with caplog.at_level(logging.DEBUG):
+    seen = _lines(eng)
+    if True:
         assert await eng._small_run_again() == ""
         assert await eng._simulation_repair_fault({}, SIMULATE) == ""
         assert await eng._gate_first({}) is None
         assert await eng._gate_refusal({}) == ""
-    assert not _gate_files(eng) and "[gate]" not in caplog.text
-    assert "_gate_last" not in eng.__dict__ and "_gate_cache" not in eng.__dict__
+        assert await eng._finding_gate({}) == ""
+        await eng._gate_baseline({})
+        eng._gate_commit({})
+    assert not _gate_files(eng) and not [x for x in seen.lines if "[gate]" in x]
+    assert not {"_gate_kept", "_gate_seen", "_gate_cache", "_gate_totals", "_gate_notes", "_gate_state"} & set(eng.__dict__)
+    assert not (eng.fi_dir / "cannot_repair.json").exists() and eng._cannot_repair_problems() == []
 
 
 @pytest.mark.asyncio
@@ -125,8 +147,11 @@ class _Log:
         return lambda *a, **k: None
 
 
-async def _finding_repair(eng: Engine, monkeypatch: pytest.MonkeyPatch, fill: str) -> tuple[dict[str, Any], list[str]]:
+async def _finding_repair(eng: Engine, monkeypatch: pytest.MonkeyPatch, fill: str, *,
+                          small_run_context: bool = True, reject_after_gate: bool = False) -> tuple[dict[str, Any], list[str]]:
     _quiet(eng, monkeypatch)
+    if not small_run_context:
+        del eng._small_run_ctx  # type: ignore[attr-defined]
     root, code = eng.quest_root, eng.quest_root / "code"
     issue = {"id": "F-1", "kind": "quantity", "file": "experiment.py", "function": "fill_time", "text": "one second too many",
              "why": "w", "fix": "f", "severity": "high", "changes_result": True, "readings": [{"n": 1, "status": "open"}],
@@ -150,13 +175,22 @@ async def _finding_repair(eng: Engine, monkeypatch: pytest.MonkeyPatch, fill: st
     async def snapshot() -> dict[str, str]:
         return {}
 
+    async def gate() -> str:
+        why = await eng._finding_gate({})
+        if not why and reject_after_gate:  # a later check of the loop refuses the change the gate passed
+            raise fr._Rejected("a later check refuses it")
+        return why
+
+    def on_accept(rel: str, old: str, new: str, issue: dict[str, Any]) -> None:
+        eng._gate_commit({})
+
     prompts = {"code_finding_test": string.Template("TEST $finding\n$code\n$problem"),
                "code_review_repair": string.Template("REPAIR $finding\n$code\n$test\n$failure\n$how\n$problem")}
     env = fr.Env(root=root, code=code, record=record, save=lambda: None, ask=ask, run_tests=run_tests, snapshot=snapshot,
                  static=dict, keeps=lambda old, new, rel: "", prompts=prompts, topic="a tank", equations="[]",
                  scrub=lambda t: t, log=_Log(), package="", code_model="writer", small_run=eng._small_run_again,
-                 notes=[])
-    eng._gate_notes = env.notes  # as the engine does
+                 gate=gate, on_accept=on_accept, notes=[])
+    await eng._gate_baseline({})
     changed = await fr.repair_issues(env)
     return issue, changed
 
@@ -165,12 +199,13 @@ async def _finding_repair(eng: Engine, monkeypatch: pytest.MonkeyPatch, fill: st
 async def test_a_finding_repair_that_breaks_the_analysis_is_refused_with_the_gates_sentence_and_the_file_put_back(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     eng = _engine(tmp_path, gate=True)
-    assert await eng._gate_first({}) is None and eng._gate_last.ok  # type: ignore[attr-defined]  # the code before the repair
     issue, changed = await _finding_repair(eng, monkeypatch, BAD_FILL)
     assert changed == []
     assert (eng.quest_root / "code" / "experiment.py").read_text(encoding="utf-8") == EXPERIMENT
     why = json.dumps(issue["repairs"])
-    assert "the analysis no longer runs" in why and "has an error in its code" in why and "running the analysis" in why
+    assert "the analysis no longer runs from start to end on the recorded trials" in why
+    assert "has an error in its code" in why and "running the analysis" in why
+    assert "small run of the simulation" not in why, "a refusal by the gate does not say the small run failed"
     assert json.loads((eng.fi_dir / "pipeline_gate.json").read_text(encoding="utf-8"))["kind"] == "fault"
 
 
@@ -186,10 +221,9 @@ async def test_the_same_repair_is_kept_as_before_with_the_switch_off(tmp_path: P
 @pytest.mark.asyncio
 async def test_a_good_finding_repair_is_kept_with_the_switch_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     eng = _engine(tmp_path, gate=True)
-    assert await eng._gate_first({}) is None
     issue, changed = await _finding_repair(eng, monkeypatch, GOOD_FILL)
     assert changed == ["experiment.py"] and issue["outcome"] == "fixed"
-    assert eng._gate_last.ok  # type: ignore[attr-defined]
+    assert eng._gate_kept[1].ok  # type: ignore[attr-defined]
 
 
 # --- _simulation_repair_fault (one place for its callers) ---------------------------------------------------------------
@@ -204,7 +238,7 @@ async def test_a_simulation_repair_that_breaks_the_analysis_is_a_fault_and_one_c
         return ""
 
     monkeypatch.setattr(eng, "_simulation_repair_fault_uncached", entry_fine)
-    assert await eng._gate_first({}) is None and eng._gate_last.ok  # type: ignore[attr-defined]
+    assert await eng._gate_first({}) is None and eng._gate_kept[1].ok  # type: ignore[attr-defined]
     path = eng.quest_root / "code" / "simulate.py"
     path.write_text(NO_SCALE, encoding="utf-8")
     fault = await eng._simulation_kept_or_back({}, path, SIMULATE, {}, "improve")
@@ -267,15 +301,21 @@ async def test_a_first_version_whose_analysis_does_not_run_goes_to_the_crash_rep
     assert repaired is None and rewrote is False
     assert stop["exec_result"]["directive"] is True and stop["exec_result"]["failed_script"] == "experiment.py"
     assert "SCALING" in stop["exec_result"]["stderr_tail"] or "running the analysis" in stop["exec_result"]["stderr_tail"]
-    assert eng._gate_last.kind == "fault"  # type: ignore[attr-defined]
-    # no repair left: shown, not a stop
+    assert eng._gate_kept[1].kind == "fault"  # type: ignore[attr-defined]
+    # no repair left: recorded for QUALITY.md and the paper's limitations, not a stop
+    assert eng._cannot_repair_problems() == []
+    with pytest.raises(_Reached):
+        await eng._gate_pass({"exec_reflect_iter": 3}, sys.executable, {}, eng.quest_root / "code" / "simulate.py")
+    assert [p["check"] for p in eng._cannot_repair_problems()] == ["gate"]
+    assert eng._cannot_repair_stop() is None, "what rests on FI's reading goes on"
+    # no repair left (again): shown, not a stop
     with pytest.raises(_Reached):
         await eng._gate_pass({"exec_reflect_iter": 3}, sys.executable, {}, eng.quest_root / "code" / "simulate.py")
     # a version that runs goes on to the next check
     (eng.quest_root / "code" / "experiment.py").write_text(EXPERIMENT, encoding="utf-8")
     with pytest.raises(_Reached):
         await eng._gate_pass({"exec_reflect_iter": 0}, sys.executable, {}, eng.quest_root / "code" / "simulate.py")
-    assert eng._gate_last.ok  # type: ignore[attr-defined]
+    assert eng._gate_kept[1].ok and eng._cannot_repair_problems() == []  # type: ignore[attr-defined]  # ok clears the record
 
 
 @pytest.mark.asyncio
@@ -335,3 +375,174 @@ async def test_a_gate_run_does_not_touch_the_code_history(tmp_path: Path) -> Non
     before = log()
     assert await eng._gate_first({}) is None
     assert log() == before
+
+
+# --- F1: a change to any file the analysis runs is gated, at every caller ----------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("node", ["protocol", "execute"])  # protocol repair; the typed-result and static repairs say "execute"
+async def test_a_change_to_experiment_py_by_the_callers_of_kept_or_back_is_refused_and_put_back(
+        tmp_path: Path, node: str) -> None:
+    eng = _engine(tmp_path, gate=True)
+    await eng._gate_baseline({})
+    path = eng.quest_root / "code" / "experiment.py"
+    path.write_text(BROKEN_ANALYSIS, encoding="utf-8")
+    fault = await eng._simulation_kept_or_back({}, path, EXPERIMENT, {}, node)
+    assert fault.startswith("the analysis no longer runs from start to end on the recorded trials")
+    assert path.read_text(encoding="utf-8") == EXPERIMENT
+    good = EXPERIMENT.replace("+ 1.0", "+ 0.0")
+    path.write_text(good, encoding="utf-8")
+    assert await eng._simulation_kept_or_back({}, path, EXPERIMENT, {}, node) == ""
+    assert path.read_text(encoding="utf-8") == good and eng._gate_kept[1].ok  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_the_same_experiment_py_change_is_kept_by_kept_or_back_with_the_switch_off(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, gate=False)
+    path = eng.quest_root / "code" / "experiment.py"
+    path.write_text(BROKEN_ANALYSIS, encoding="utf-8")
+    assert await eng._simulation_kept_or_back({}, path, EXPERIMENT, {}, "protocol") == ""
+    assert path.read_text(encoding="utf-8") == BROKEN_ANALYSIS and not _gate_files(eng)
+
+
+ORACLE_OLD = EXPERIMENT + "\n# FI_ORACLE\n"
+
+
+@pytest.mark.asyncio
+async def test_an_oracle_repair_of_experiment_py_that_breaks_the_analysis_is_not_used(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, gate=True)
+    path = eng.quest_root / "code" / "experiment.py"
+    path.write_text(ORACLE_OLD, encoding="utf-8")
+    await eng._gate_baseline({})
+    reply = BROKEN_ANALYSIS + "\n# FI_ORACLE\n"
+    eng._client = type("Stub", (), {"chat": AsyncMock(return_value=json.dumps({"code": reply, "patch_summary": "fix"}))})()
+    got = await eng._repair_script_for_oracle({"design": {}}, path, [], ["check"])
+    assert got[0] is None and got[2] == "not_usable"
+    assert path.read_text(encoding="utf-8") == ORACLE_OLD
+    good = ORACLE_OLD.replace("+ 1.0", "+ 0.0")
+    eng._client = type("Stub", (), {"chat": AsyncMock(return_value=json.dumps({"code": good, "patch_summary": "fix"}))})()
+    got = await eng._repair_script_for_oracle({"design": {}}, path, [], ["check"])
+    assert got[0] == good and got[2] == "applied" and path.read_text(encoding="utf-8") == good
+
+
+# --- F2: the baseline is the kept code's result -------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_change_the_gate_passed_but_another_check_refused_is_not_the_baseline(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """K (kept) has a fault the gate sees; X is fine for the gate and refused by a later check; Y has K's fault again.
+    Y is compared with K (which had it: nothing new), not with X (which was ok)."""
+    eng = _engine(tmp_path, gate=True)
+    path = eng.quest_root / "code" / "experiment.py"
+    path.write_text(BROKEN_ANALYSIS, encoding="utf-8")  # K
+    await eng._gate_baseline({})
+    assert eng._gate_kept[1].kind == "fault"  # type: ignore[attr-defined]
+    k_key = eng._gate_kept[0]  # type: ignore[attr-defined]
+    path.write_text(EXPERIMENT, encoding="utf-8")  # X: the gate passes it ...
+    assert await eng._gate_refusal({}) == ""
+    path.write_text(BROKEN_ANALYSIS, encoding="utf-8")  # ... and a later check puts K back: no keep point was reached
+    assert eng._gate_kept[0] == k_key and eng._gate_kept[1].kind == "fault"  # type: ignore[attr-defined]
+    path.write_text(BROKEN_ANALYSIS + "\n# a comment\n", encoding="utf-8")  # Y: K's fault
+    assert await eng._gate_refusal({}) == "", "the fault was in the kept code already: nothing new"
+
+
+@pytest.mark.asyncio
+async def test_a_finding_repair_refused_after_the_gate_leaves_the_baseline_alone(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    eng = _engine(tmp_path, gate=True)
+    issue, changed = await _finding_repair(eng, monkeypatch, GOOD_FILL, reject_after_gate=True)
+    assert changed == []
+    assert (eng.quest_root / "code" / "experiment.py").read_text(encoding="utf-8") == EXPERIMENT
+    assert eng._gate_seen[1].ok and eng._gate_kept[0] != eng._gate_seen[0]  # type: ignore[attr-defined]
+    # the next change is compared with the kept code (ok), so a break is refused
+    (eng.quest_root / "code" / "experiment.py").write_text(BROKEN_ANALYSIS, encoding="utf-8")
+    assert "no longer runs" in await eng._gate_refusal({})
+
+
+SMALL_DATA_ANALYSIS = EXPERIMENT.replace(
+    "def main():\n", "def main():\n    if len(json.load(open(os.environ['FI_TRIALS']))['cells']) > 1:\n"
+    "        raise ValueError('a fit needs more points')\n")
+
+
+@pytest.mark.asyncio
+async def test_a_kept_result_that_is_not_ok_is_the_baseline_and_is_recorded_for_the_report(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, gate=True)
+    path = eng.quest_root / "code" / "experiment.py"
+    path.write_text(SMALL_DATA_ANALYSIS, encoding="utf-8")
+    assert await eng._gate_first({}) is None
+    assert eng._gate_kept[1].kind == "small_data"  # type: ignore[attr-defined]
+    problems = eng._cannot_repair_problems()
+    assert [(p["check"], p["source"]) for p in problems] == [("gate", "read")] and "too few trials" in problems[0]["text"]
+    assert eng._cannot_repair_stop() is None
+    # the baseline was not ok, so a fault is not new against it: nothing is refused
+    path.write_text(BROKEN_ANALYSIS, encoding="utf-8")
+    assert await eng._gate_refusal({}) == ""
+    # a kept change that is ok clears the record
+    path.write_text(EXPERIMENT, encoding="utf-8")
+    assert await eng._gate_refusal({}) == ""
+    eng._gate_commit({})
+    assert eng._gate_kept[1].ok and eng._cannot_repair_problems() == []  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_quest_derives_the_baseline_from_the_code_on_disk_and_a_redesign_replaces_it(
+        tmp_path: Path) -> None:
+    eng = _engine(tmp_path, gate=True)
+    assert await eng._gate_first({}) is None
+    old_key = eng._gate_kept[0]  # type: ignore[attr-defined]
+    for name in ("_gate_kept", "_gate_seen", "_gate_cache"):  # what a restart loses
+        eng.__dict__.pop(name, None)
+    await eng._gate_baseline({})
+    assert eng._gate_kept[0] == old_key and eng._gate_kept[1].ok  # type: ignore[attr-defined]
+    path = eng.quest_root / "code" / "experiment.py"
+    path.write_text(BROKEN_ANALYSIS, encoding="utf-8")  # a break after the resume is refused
+    assert "no longer runs" in await eng._gate_refusal({})
+    # a redesign: all-new code on disk with no keep point; the next loop's baseline is that code's
+    path.write_text(EXPERIMENT.replace("+ 1.0", "+ 2.0"), encoding="utf-8")
+    await eng._gate_baseline({})
+    assert eng._gate_kept[0] != old_key and eng._gate_kept[1].ok  # type: ignore[attr-defined]
+
+
+# --- F4, F5, F8 -----------------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_finding_repair_with_no_small_run_context_is_still_gated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    eng = _engine(tmp_path, gate=True)
+    issue, changed = await _finding_repair(eng, monkeypatch, BAD_FILL, small_run_context=False)
+    assert changed == [] and "no longer runs from start to end" in json.dumps(issue["repairs"])
+
+
+@pytest.mark.asyncio
+async def test_one_gate_call_for_each_change_of_a_finding_repair(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    eng = _engine(tmp_path, gate=True)
+    calls: list[int] = []
+    real = eng._gate_refusal
+
+    async def counted(state: Any) -> str:
+        calls.append(1)
+        return await real(state)
+
+    monkeypatch.setattr(eng, "_gate_refusal", counted)
+    await _finding_repair(eng, monkeypatch, GOOD_FILL)
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_gates_seconds_are_in_the_log_the_record_and_the_cost_summary(
+        tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    from core.engine import write_cost_summary
+
+    eng = _engine(tmp_path, gate=True)
+    seen = _lines(eng)
+    assert await eng._gate_first({}) is None
+    line = next(x for x in seen.lines if "[gate]" in x)
+    assert " s; 1 run(s)" in line
+    record = json.loads((eng.fi_dir / "pipeline_gate.json").read_text(encoding="utf-8"))
+    assert record["runs"] == 1 and record["seconds_total"] >= 0 and record["ok"] is True
+    (eng.fi_dir / "cost.jsonl").write_text("", encoding="utf-8")
+    write_cost_summary(eng.fi_dir)
+    summary = json.loads((eng.fi_dir / "cost.summary.json").read_text(encoding="utf-8"))
+    assert summary["gate_runs"] == 1 and summary["gate_seconds"] == record["seconds_total"]
