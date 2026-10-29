@@ -202,6 +202,68 @@ def run_cell(cell):
     assert _rows(alone) == _rows(shared)
 
 
+def test_a_group_cut_by_its_time_marks_no_setting_out_of_time_that_finishes_alone(tmp_path: Path) -> None:
+    # a slow machine: the group is given 1 s, each of its 6 settings takes 0.5 s, so the group is cut mid-way; every setting
+    # finishes alone, so none is out of time (an equal share of the group's time, 0.17 s, used to mark the running one)
+    slow = MARK + '''
+import time
+
+def run_cell(cell):
+    time.sleep(0.5)
+    return {"level": cell["rate"] * 2.0}
+'''
+    root = _quest(tmp_path, slow)
+    grid = {"rate": [1, 2, 3, 4, 5, 6], "size": [2]}
+    keys = [trial_runner.cell_key(c) for c in trial_runner.cells(grid)]
+    run = asyncio.run(trial_runner.run_trials(
+        _executor(), sys.executable, root, "code/simulate.py", grid, runs_per_setting=1, base_seed=7, deterministic=True,
+        timeout_s=60, env={"FI_TEST_MARK": str(tmp_path / "m.txt")}, run_id="r1", per_process=6, groups=[keys],
+        group_allowance_s=1.0, at_once=2))
+    assert [c.timed_out for c in run.cells] == [False] * 6
+    assert run.ok_trials == 6 and run.failed_trials == 0
+
+
+def test_a_slow_opposite_order_stops_the_check(tmp_path: Path) -> None:
+    # the first setting is quick when it comes first in its process and slow when it comes later: the reverse run takes far
+    # more than twice the forward run
+    order = MARK + '''
+import time
+_calls = 0
+
+def run_cell(cell):
+    global _calls
+    time.sleep(7.0 if cell["rate"] == 1 and _calls > 0 else 0.05)
+    _calls += 1
+    return {"level": cell["rate"] * 2.0}
+'''
+    root = _quest(tmp_path, order)
+    grid = {"rate": [1, 2, 3, 4, 5, 6], "size": [2]}
+    grouping = asyncio.run(trial_runner.measure_grouping(
+        _executor(), sys.executable, root, "code/simulate.py", grid, runs_per_setting=1, base_seed=7, deterministic=True,
+        timeout_s=120, per_process=3, cost=None, env={"FI_TEST_MARK": str(tmp_path / "m.txt")}, at_once=2))
+    assert grouping.too_long and not grouping.same and "twice as long" in grouping.says
+
+
+def test_the_check_times_what_the_run_does_so_the_run_is_not_slower_than_the_price(tmp_path: Path) -> None:
+    # many quick settings: the plan, the groups and the rows are a large part of the time; the price covers them
+    import time
+
+    root = _quest(tmp_path, PURE)
+    grid = {"rate": list(range(1, 61)), "size": [2, 3, 4, 5]}
+    env = {"FI_TEST_MARK": str(tmp_path / "m.txt")}
+    grouping = asyncio.run(trial_runner.measure_grouping(
+        _executor(), sys.executable, root, "code/simulate.py", grid, runs_per_setting=1, base_seed=7, deterministic=True,
+        timeout_s=120, per_process=15, cost=None, env=env, at_once=16))
+    assert grouping.same and len(grouping.groups) == 16
+    began = time.monotonic()
+    run = asyncio.run(trial_runner.run_trials(
+        _executor(), sys.executable, root, "code/simulate.py", grid, runs_per_setting=1, base_seed=7, deterministic=True,
+        timeout_s=120, env=env, run_id="r1", per_process=15, groups=grouping.groups, group_allowance_s=60, at_once=16))
+    took = time.monotonic() - began
+    assert run.ok_trials == 240
+    assert grouping.forward_s * 1.5 >= took, (grouping.forward_s, took)
+
+
 def test_each_setting_keeps_its_own_warnings(tmp_path: Path) -> None:
     warn = MARK + '''
 import warnings
@@ -299,6 +361,17 @@ def test_sizing_does_not_share_a_study_that_keeps_state(tmp_path: Path) -> None:
     got, runner, me = _sizing(tmp_path, COUNTER, settings=12, at_once=4, limit_s=60.0)
     assert got is None and runner.per_process == 1 and runner.shared_groups is None
     assert any("differed" in line for line in me._log.lines)
+
+
+def test_the_time_of_a_check_that_fails_is_still_counted(tmp_path: Path, monkeypatch) -> None:
+    async def broken(*args, **kwargs):
+        await asyncio.sleep(0.3)
+        raise RuntimeError("the check could not run")
+
+    monkeypatch.setattr(trial_runner, "measure_grouping", broken)
+    got, runner, me = _sizing(tmp_path, PURE, settings=12, at_once=4, limit_s=60.0)
+    assert got is None and runner.per_process == 1 and me._pilot_spent >= 0.3
+    assert any("could not be run" in line for line in me._log.lines)
 
 
 def test_a_resumed_run_shares_processes_again_from_the_kept_groups_without_a_cost(tmp_path: Path) -> None:

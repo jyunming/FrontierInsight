@@ -607,14 +607,14 @@ def _plan(quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *, r
         out_path = folder / out_name.format(index=index)
         out_path.unlink(missing_ok=True)
         nonce = hashlib.sha256(f"{time.time_ns()}|{index}|{id(trials)}".encode()).hexdigest()[:24]
-        spec_path.write_text(json.dumps({"module": str(module).replace("\\", "/"), "entry": entry,
-                                         "cell": {**cell, **inside}, "kind": kind,
-                                         "levels": _in_run.levels_json(levels),
-                                         "trials": trials, "nonce": nonce, "keep_spec": keep_spec,
-                                         "thresholds": dict(thresholds or {})}, default=str),
-                             encoding="utf-8")
+        spec = {"module": str(module).replace("\\", "/"), "entry": entry,
+                "cell": {**cell, **inside}, "kind": kind,
+                "levels": _in_run.levels_json(levels),
+                "trials": trials, "nonce": nonce, "keep_spec": keep_spec,
+                "thresholds": dict(thresholds or {})}
+        spec_path.write_text(json.dumps(spec, default=str), encoding="utf-8")
         plan.append({"index": index, "key": key, "cell": cell, "levels": levels, "trials": trials, "nonce": nonce,
-                     "entry": entry,
+                     "entry": entry, "spec_data": spec,  # kept in memory: reading a file just written is the slow part of grouping
                      "spec": spec_path.relative_to(quest_root).as_posix(),
                      "out": out_path.relative_to(quest_root).as_posix()})
     return plan
@@ -788,8 +788,7 @@ async def run_trials(
             parts = _stderr_parts(result, members)
             timed_out = bool(getattr(result, "timed_out", False))
             bad = timed_out or getattr(result, "returncode", 0) not in (0, None)
-            hung = False
-            last_end = _last_end(quest_root, task) if timed_out else 0.0
+            hung: dict[str, Any] | None = None
             for number, member in enumerate(members):
                 if took:
                     walls[member["index"]] = took / len(members)
@@ -797,17 +796,16 @@ async def run_trials(
                 if not bad or done:
                     # a setting that reported everything ends as a process of its own would end
                     results[member["index"]] = _ProcessEnd(result, clean=True, stderr=parts[number])
-                elif timed_out and not hung and took:
-                    hung = True  # the setting that was running when the group's time ran out
-                    if member.get("allowance") is not None and took - last_end >= member["allowance"]:
-                        # it used the time its own setting is allowed: only it is out of time
-                        results[member["index"]] = _ProcessEnd(result, stderr=parts[number])
-                    else:
-                        unfinished.append(member)  # it was cut by the group's end, not by its own: it runs again alone
                 elif timed_out and not took:
                     results[member["index"]] = _ProcessEnd(result, stderr=parts[number])  # nothing was started
+                elif timed_out and hung is None:
+                    hung = member  # the setting running when the group's time ran out
                 else:
                     unfinished.append(member)
+            if hung is not None:
+                # A setting is out of time only by its own run: the one that was running when the group was cut goes first,
+                # alone, with the time one process per setting would give it, then the rest.
+                unfinished.insert(0, hung)
         # The settings that had not finished when the process died or the time ran out run again, one to a process, as they
         # would have without sharing: a setting that kills or hangs its process costs only itself.
         if unfinished:
@@ -892,11 +890,10 @@ def _units(quest_root: Path, part: list[dict[str, Any]], per_process: int, cost:
         specs = []
         for m in members:
             path = quest_root / m["spec"]
-            specs.append(json.loads(path.read_text(encoding="utf-8")))
+            specs.append(m.get("spec_data") or json.loads(path.read_text(encoding="utf-8")))
             path.unlink(missing_ok=True)
             m["alone"] = (m["spec"], m["out"], specs[-1])
-            own = _allowance(cost, m["cell"], SAFETY)
-            m["allowance"] = allowance_s / len(members) if allowance_s else own
+            m["allowance"] = _allowance(cost, m["cell"], SAFETY)
         first, gid = specs[0], members[0]["index"]
         spec_path, out_path = folder / f"group{gid}.json", folder / f"group{gid}.out.jsonl"
         out_path.unlink(missing_ok=True)
@@ -924,24 +921,6 @@ def _allowance(cost: Any, cell: dict[str, Any], margin: float) -> float | None:
     except Exception:  # noqa: BLE001 -- a cost that cannot be worked out leaves the setting without an allowance
         return None
     return value if math.isfinite(value) and value > 0 else None
-
-
-def _last_end(quest_root: Path, task: dict[str, Any]) -> float:
-    """When the last trial a shared process reported ended, in seconds into that process (the setting running when it was
-    stopped began then); 0 when it reported none."""
-    end = 0.0
-    try:
-        lines = (quest_root / task["out"]).read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return end
-    for line in lines:
-        try:
-            row = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(row, dict) and isinstance(row.get("at_s"), (int, float)) and isinstance(row.get("duration_s"), (int, float)):
-            end = max(end, float(row["at_s"]) + float(row["duration_s"]))
-    return end
 
 
 def _stderr_parts(result: Any, members: list[dict[str, Any]]) -> list[str]:
@@ -1109,9 +1088,13 @@ async def measure_grouping(
     picks = sorted({round(i * (total - 1) / (count - 1)) for i in range(count)})
     singles = _plan(quest_root, module, grid, folder=work / "alone", out_name="cell{index}.out.jsonl",
                     cell_list=[every[i] for i in picks], **kw)
+    # The forward pass is timed over what the run itself does: the plan and the groups it builds, the processes, and reading
+    # the rows back (``setup_s`` here, ``collect_s`` below), so its price is the run's, not only the processes'.
+    began_forward = time.monotonic()
     forward = _plan(quest_root, module, grid, folder=work / "forward", out_name="cell{index}.out.jsonl", cell_list=every, **kw)
-    reverse = _plan(quest_root, module, grid, folder=work / "reverse", out_name="cell{index}.out.jsonl", cell_list=every, **kw)
     units_f = _units(quest_root, forward, per_process, cost, work / "forward")
+    setup_s = time.monotonic() - began_forward
+    reverse = _plan(quest_root, module, grid, folder=work / "reverse", out_name="cell{index}.out.jsonl", cell_list=every, **kw)
     units_r = _units(quest_root, reverse, per_process, cost, work / "reverse", reverse=True)
     groups = [[m["key"] for m in u["members"]] if u.get("members") else [u["key"]] for u in units_f]
     limit = max(30, int(timeout_s))
@@ -1134,18 +1117,30 @@ async def measure_grouping(
     differences: list[str] = []
     forward_s = 0.0
     too_long = False
+    slow_rest = False
     try:
-        forward_s = await run_all([(u, True) for u in units_f], "forward", min(limit, max_pass_s) if max_pass_s else limit)
-        if any(getattr(r, "timed_out", False) for r in ended["forward"]):
+        deadline = (min(limit, max_pass_s) if max_pass_s else limit) - setup_s
+        forward_s = setup_s
+        if deadline <= 1:
+            too_long = True
+        else:
+            forward_s += await run_all([(u, True) for u in units_f], "forward", deadline)
+        if too_long or any(getattr(r, "timed_out", False) for r in ended["forward"]):
             too_long = True
         elif any(getattr(r, "returncode", 1) != 0 for r in ended["forward"]):
             differences.append("a process of the check did not end normally")
         else:
-            await run_all([(u, True) for u in units_r] + [(t, False) for t in singles], "rest", limit)
-            if any(getattr(r, "returncode", 1) != 0 or getattr(r, "timed_out", False) for r in ended["rest"]):
+            began_collect = time.monotonic()
+            rows_f = _rows_of_plan(quest_root, forward)
+            forward_s += time.monotonic() - began_collect
+            # the other two runs are bounded by twice the forward pass: an order that costs far more is not a study to share
+            await run_all([(u, True) for u in units_r] + [(t, False) for t in singles], "rest", min(limit, max(5.0, 2 * forward_s)))
+            if any(getattr(r, "timed_out", False) for r in ended["rest"]):
+                slow_rest = True
+            elif any(getattr(r, "returncode", 1) != 0 for r in ended["rest"]):
                 differences.append("a process of the check did not end normally")
             else:
-                rows_f, rows_r = _rows_of_plan(quest_root, forward), _rows_of_plan(quest_root, reverse)
+                rows_r = _rows_of_plan(quest_root, reverse)
                 rows_s = _rows_of_plan(quest_root, singles)
                 for task in forward:
                     for t in task["trials"]:
@@ -1161,6 +1156,10 @@ async def measure_grouping(
     elapsed = time.monotonic() - began
     common = dict(settings=total, alone=len(singles), pass_s=forward_s, elapsed_s=elapsed, groups=groups, forward_s=forward_s,
                   runs_checked=runs)
+    if slow_rest:
+        return Grouping(too_long=True, says=(
+            f"Settings run one per process: the settings in the opposite order, or each on its own, took more than twice as "
+            f"long as the first run ({forward_s:.0f} seconds), so the processes are not shared."), **common)
     if too_long:
         return Grouping(too_long=True, says=(
             f"Settings run one per process: the settings sharing processes had not finished after "

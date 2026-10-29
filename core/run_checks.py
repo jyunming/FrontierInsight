@@ -1998,6 +1998,7 @@ class RunChecksMixin:
             protocol = self._protocol_block(state) or {}  # type: ignore[attr-defined]
         except Exception:  # noqa: BLE001
             protocol = {}
+        began = time.monotonic()
         try:
             grouping = await _trial_runner.measure_grouping(
                 self.executor, python, self.quest_root, module, grid,  # type: ignore[attr-defined]
@@ -2008,7 +2009,8 @@ class RunChecksMixin:
         except Exception as e:  # noqa: BLE001 -- a check that cannot run leaves the run as it is
             log.warning("[execute] Settings run one per process: the check of sharing processes could not be run (%r).", e)
             return None
-        self._pilot_spent += grouping.elapsed_s  # type: ignore[attr-defined]
+        finally:
+            self._pilot_spent += time.monotonic() - began  # type: ignore[attr-defined]  # the check's time counts however it ends
         if not grouping.same:
             log.warning("[execute] %s", grouping.says)
             return None
