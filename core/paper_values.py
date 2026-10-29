@@ -558,11 +558,46 @@ def load(quest_root: Path | str, protocol: dict[str, Any] | None = None,
         from . import trial_checks as _checks
 
         # no key reads the error or interval of a setting whose reported uncertainty FI measured not to match
-        cells = _checks.without_withheld([c for c in cells if isinstance(c, dict)], _checks.withheld_values(quest_root))
+        cells = _checks.without_withheld(_with_derived([c for c in cells if isinstance(c, dict)], quest_root),
+                                         _checks.withheld_values(quest_root))
     rec = from_cells(cells, protocol, unread, left_out) if isinstance(cells, list) else None
     if rec is not None:
         rec.seeds = _ledger_seeds(Path(quest_root))
     return rec
+
+
+#: Where the analysis FI writes keeps the quantities it worked out (core/analysis_frame.py).
+DERIVED = Path("data") / "results" / "derived.json"
+
+
+def _with_derived(cells: list[dict[str, Any]], quest_root: Path | str) -> list[dict[str, Any]]:
+    """``cells`` with each quantity the analysis worked out for a setting (``data/results/derived.json``, ``by_setting``) put in
+    that setting's cell as a metric of one value: it has no interval (n is 1) and no key reads more of it than it is. A quantity
+    a trial returned keeps its own record, and a number that is not finite is not kept. Without that file, or for a quantity
+    worked out once for the whole study, the cells are as they were."""
+    try:
+        data = json.loads((Path(quest_root) / DERIVED).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return cells
+    items = data.get("derived") if isinstance(data, dict) else None
+    if not isinstance(items, dict):
+        return cells
+    from . import frame_table as _table
+
+    extra: dict[str, dict[str, Any]] = {}
+    for ident, item in items.items():
+        by_setting = item.get("by_setting") if isinstance(item, dict) and item.get("status") == "ok" else None
+        for key, value in (by_setting.items() if isinstance(by_setting, dict) else []):
+            if _table.finite(value):
+                extra.setdefault(str(key), {})[str(ident)] = {"values": [float(value)], "trials": [0], "derived": True}
+    if not extra:
+        return cells
+    out = []
+    for c in cells:
+        key = str(c.get("key") or _table.cell_key(c.get("cell") or {}))
+        add = {} if c.get("level") else {i: m for i, m in extra.get(key, {}).items() if i not in (c.get("metrics") or {})}
+        out.append({**c, "metrics": {**(c.get("metrics") or {}), **add}} if add else c)
+    return out
 
 
 def _ledger_seeds(root: Path) -> dict[str, dict[int, int]]:
