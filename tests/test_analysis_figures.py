@@ -32,7 +32,7 @@ def _search_record(root: Path, *, best: Any = "make", checked: bool = False, sca
     objective = {"quantity": "growth_rate", "direction": "maximise", "unit": "1/h"}
     record: dict[str, Any] = {
         "objective": objective,
-        "best": {"design": {"dose": 3.0}, "objective": 1.8} if best == "make" else best,
+        "best": {"design": {"dose": 3.0}, "objective": 2.0} if best == "make" else best,
         "baseline": {"design": {"dose": 1.0}, "objective": 1.0},
         "improvement": {"value": 0.8, "unit": "1/h"},
         "checked_at_finer_settings": checked,
@@ -73,35 +73,125 @@ def _namespace(**bodies: Any) -> types.SimpleNamespace:
     return types.SimpleNamespace(**bodies)
 
 
-# ---- the static refusal --------------------------------------------------------------------------------------------------------
-@pytest.mark.parametrize("call", ["fig.savefig('x.png')", "plt.savefig('x.png')", "plt.show()", "plt.close(fig)", "plt.figure()",
-                                  "plt.subplots()", "savefig('x.png')"])
-def test_a_body_that_saves_shows_or_opens_a_figure_is_refused_with_a_plain_reason(call):
-    source = "def figure_growth(fig, table):\n    fig.axes[0].plot([1, 2])\n    %s\n" % call
-    reason = af.figure_body_problem(source)
-    assert "figure_growth" in reason and "FI creates the figure" in reason
-    assert "AST" not in reason and "Traceback" not in reason
+# ---- the runtime guard ----------------------------------------------------------------------------------------------------------
+def _run(tmp_path, body, name="x"):
+    out = af.run_figures([{"id": name, "file": name + ".png"}], {"figure_" + name: body}, _Table(), str(tmp_path))
+    return out[0]
 
 
-def test_an_honest_body_and_other_functions_are_not_refused():
-    source = ("def helper(fig):\n    fig.savefig('x.png')\n\n"
-              "def figure_growth(fig, table):\n    ax = fig.axes[0]\n    ax.plot([1, 2])\n    ax.legend()\n")
-    assert af.figure_body_problem(source) == ""  # a helper outside a figure body is not this check's
-    assert af.figure_body_problem("def figure_x(:\n") == ""  # a syntax error is the gate's to say
+def _saved_alias():
+    import matplotlib.pyplot as plt
+    return plt.savefig  # bound before the guard, the way a top-level `from matplotlib.pyplot import savefig` is
 
 
-def test_a_refused_body_is_not_run_and_the_others_are_drawn(tmp_path):
-    drew = []
+_EARLY_SAVE = _saved_alias()
 
-    def figure_bad(fig, table):  # pragma: no cover - never reached
-        drew.append("bad")
-        fig.savefig("x.png")
 
+def _helper_that_saves(fig):
+    fig.savefig("helper.png")
+
+
+def _bodies():
+    def aliased(fig, table):
+        fig.axes[0].plot([1, 2])
+        _EARLY_SAVE("early.png")
+
+    def helper(fig, table):
+        fig.axes[0].plot([1, 2])
+        _helper_that_saves(fig.axes[0].figure)
+
+    def canvas(fig, table):
+        fig.axes[0].plot([1, 2])
+        fig.axes[0].figure.canvas.print_figure("canvas.png")
+
+    def run_text(fig, table):
+        fig.axes[0].plot([1, 2])
+        exec("import matplotlib.pyplot as p\np.savefig('exec.png')")
+
+    def shows(fig, table):
+        fig.axes[0].plot([1, 2])
+        __import__("matplotlib.pyplot").pyplot.show()
+
+    def makes(fig, table):
+        fig.axes[0].plot([1, 2])
+        __import__("matplotlib.pyplot").pyplot.figure()
+
+    def swallows(fig, table):
+        fig.axes[0].plot([1, 2])
+        try:
+            fig.axes[0].figure.savefig("swallowed.png")
+        except Exception:
+            pass
+
+    return {"aliased": aliased, "helper": helper, "canvas": canvas, "exec": run_text, "shows": shows, "makes": makes,
+            "swallows": swallows}
+
+
+@pytest.mark.parametrize("which", ["aliased", "helper", "canvas", "exec", "shows", "makes", "swallows"])
+def test_a_body_that_saves_shows_or_makes_a_figure_is_refused_at_run_time_with_a_plain_reason(tmp_path, which, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    out = _run(tmp_path, _bodies()[which], which)
+    assert out["status"] == "refused", out
+    assert "FI creates the figure" in out["why"] and "Traceback" not in out["why"]
+    assert not list(tmp_path.glob("*.png"))  # nothing was saved by the body, and FI drew nothing
+
+
+def test_the_guard_is_lifted_after_the_body_and_a_figure_made_in_it_is_closed(tmp_path):
+    import matplotlib.pyplot as plt
+    from matplotlib.figure import Figure
+    saved, shown = Figure.savefig, plt.show
+    before = len(plt.get_fignums())
+    _run(tmp_path, _bodies()["makes"], "makes")
+    assert Figure.savefig is saved and plt.show is shown and len(plt.get_fignums()) == before
+
+
+def test_an_honest_body_with_a_file_or_connection_close_is_not_refused(tmp_path):
+    class Handle:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+        def show(self):
+            return "rows"
+
+    def figure_honest(fig, table):
+        fh = Handle()
+        fh.show()
+        fig.axes[0].plot([1, 2, 3])
+        fig.axes[0].figure.subplots_adjust(left=0.2)
+        fh.close()
+
+    assert _run(tmp_path, figure_honest, "honest")["status"] == "ok"
+
+
+def test_a_refused_body_is_not_kept_and_the_others_are_drawn(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     out = af.run_figures([{"id": "bad", "file": "bad.png"}, {"id": "good", "file": "good.png"}],
-                         _namespace(figure_bad=figure_bad, figure_good=_good), _Table(), str(tmp_path))
-    assert [o["status"] for o in out] == ["refused", "ok"]
-    assert drew == [] and not (tmp_path / "bad.png").exists() and (tmp_path / "good.png").is_file()
-    assert "FI creates the figure" in out[0]["said"] and af.exit_code(out) == 1
+                         _namespace(figure_bad=_bodies()["canvas"], figure_good=_good), _Table(), str(tmp_path))
+    assert [o["status"] for o in out] == ["refused", "ok"] and af.exit_code(out) == 1
+    assert not (tmp_path / "bad.png").exists() and (tmp_path / "good.png").is_file()
+
+
+def test_a_figure_that_fails_does_not_leave_the_file_of_an_earlier_run(tmp_path):
+    (tmp_path / "later.png").write_bytes(b"old figure")
+
+    def figure_later(fig, table):
+        raise ValueError("now broken")
+
+    out = af.run_figures([{"id": "later", "file": "later.png"}], _namespace(figure_later=figure_later), _Table(), str(tmp_path))
+    assert out[0]["status"] == "failed" and not (tmp_path / "later.png").exists()
+    (tmp_path / "later.png").write_bytes(b"old figure")
+    assert af.run_figures([{"id": "later", "file": "later.png"}], _namespace(), _Table(), str(tmp_path))[0]["status"] == "not_written"
+    assert not (tmp_path / "later.png").exists()
+
+
+def test_one_empty_panel_of_two_is_a_failure_of_that_figure(tmp_path):
+    def figure_half(fig, table):
+        fig.axes[0].plot([1, 2])
+
+    out = af.run_figures([{"id": "half", "file": "half.png", "panels": 2}], _namespace(figure_half=figure_half), _Table(), str(tmp_path))
+    assert out[0]["status"] == "failed" and "panel 2" in out[0]["why"] and not (tmp_path / "half.png").exists()
 
 
 # ---- a declared figure ----------------------------------------------------------------------------------------------------------
@@ -186,13 +276,93 @@ def test_the_search_figures_are_drawn_from_a_small_record_and_the_files_exist(tm
     assert "not checked" in af.said(out).lower() or "could not be checked" in af.said(out)  # the check did not run: said
 
 
-def test_one_line_per_start_of_the_best_so_far():
-    rows = [{"n": 1, "objective": 1.0, "start": 0}, {"n": 2, "objective": 3.0, "start": 0}, {"n": 3, "objective": 2.0, "start": 0},
-            {"n": 4, "objective": 5.0, "start": 1}, {"n": 5, "objective": 4.0, "start": None}]
-    lines = af._best_so_far(rows, "maximise")
-    assert set(lines) == {"start 0", "start 1", "global search"}
-    assert lines["start 0"] == [(1.0, 1.0), (2.0, 3.0), (3.0, 3.0)]  # the best so far never goes down; the line runs to its last row
-    assert af._best_so_far(rows, "minimise")["start 0"] == [(1.0, 1.0), (3.0, 1.0)]
+def _rows(level, objectives, *, n0=0, feasible=None):
+    out = []
+    for k, obj in enumerate(objectives):
+        out.append({"event": "evaluation", "n": n0 + k + 1, "stage": "baseline" if k == 0 else "local", "start": 0,
+                    "design": {"d": k}, "objective": obj, "feasible": True if feasible is None else feasible[k], "status": "ok",
+                    "level": level})
+    return out
+
+
+def _write(root, rows, record, direction="maximise"):
+    (root / "results").mkdir(parents=True, exist_ok=True)
+    (root / "raw").mkdir(parents=True, exist_ok=True)
+    if record is not None:
+        (root / "results" / "best_design.json").write_text(json.dumps(record), encoding="utf-8")
+    head = [{"event": "search", "objective": {"quantity": "q", "direction": direction, "unit": "u"}}] if direction else []
+    (root / "raw" / "optimisation_ledger.jsonl").write_text("\n".join(json.dumps(r) for r in head + rows) + "\n", encoding="utf-8")
+
+
+def _ends(root):
+    data = af._read_record(str(root))
+    sign = 1.0 if data["objective"].get("direction") == "minimise" else -1.0
+    return {a["label"]: (a["line"][-1][1] if a["line"] else None) for a in af._alternatives(data, sign)}
+
+
+def test_the_level_rules_equal_the_search_s_own():
+    from core import optimise_search
+    for level in ({"a": 1, "b": "x"}, {}, None):
+        assert af.level_key(level) == optimise_search.level_key(level)
+    assert af.level_says({"a": 1, "b": "x"}) == optimise_search.level_says({"a": 1, "b": "x"})
+
+
+def test_an_infeasible_better_row_does_not_move_the_best_so_far(tmp_path):
+    rows = _rows(None, [5.0, 4.0, 1.0, 3.0], feasible=[True, True, False, True])  # minimise: 1.0 breaks a limit
+    _write(tmp_path / "q", rows, {"objective": {"direction": "minimise"}, "best": {"design": {}, "objective": 3.0}}, "minimise")
+    assert _ends(tmp_path / "q") == {"search": 3.0}  # the best of the rows that meet every limit, not the 1.0
+
+
+def test_two_alternatives_are_two_lines_each_ending_at_its_own_best(tmp_path):
+    a, b = {"family": "a"}, {"family": "b"}
+    rows = _rows(a, [1.0, 3.0, 2.0]) + _rows(b, [1.0, 5.0], n0=3)
+    record = {"objective": {"direction": "maximise"}, "best": {"design": {}, "objective": 5.0},
+              "compared": {"levels": [{"level": a, "best": {"objective": 3.0}}, {"level": b, "best": {"objective": 5.0}}]}}
+    _write(tmp_path / "q", rows, record)
+    assert _ends(tmp_path / "q") == {"family = a": 3.0, "family = b": 5.0}  # A's 3.0 is not hidden by B's 5.0; the winner ends at the file's best
+    out = af.search_figures(str(tmp_path / "q"), str(tmp_path / "f"))
+    assert out[0]["status"] == "ok" and af.fi_faults(out) == []
+
+
+def test_a_line_that_does_not_end_at_the_recorded_best_is_an_fi_fault_not_the_models(tmp_path):
+    _write(tmp_path / "q", _rows(None, [1.0, 3.0]), {"objective": {"direction": "maximise"}, "best": {"design": {}, "objective": 4.0}})
+    out = af.search_figures(str(tmp_path / "q"), str(tmp_path / "f"))
+    assert out[0]["status"] == "fi_fault" and af.fi_faults(out) and af.exit_code(out) == 0
+    assert not (tmp_path / "f" / af.PROGRESS_FILE).exists()
+
+
+def test_a_minimise_search_without_the_best_design_file_takes_its_direction_from_the_ledger(tmp_path):
+    _write(tmp_path / "q", _rows(None, [5.0, 2.0, 3.0]), None, "minimise")
+    assert _ends(tmp_path / "q") == {"search": 2.0}
+    assert af.search_figures(str(tmp_path / "q"), str(tmp_path / "f"))[0]["status"] == "ok"
+
+
+def test_no_direction_anywhere_draws_no_best_line(tmp_path):
+    _write(tmp_path / "q", _rows(None, [5.0, 2.0]), None, direction="")
+    out = af.search_figures(str(tmp_path / "q"), str(tmp_path / "f"))
+    assert out[0]["status"] == "skipped" and "higher or lower" in out[0]["said"]
+
+
+def test_a_baseline_row_numbered_start_0_does_not_join_the_start_0_line():
+    rows = [{"n": 1, "objective": 9.0, "start": 0, "stage": "baseline", "feasible": True, "level": None},
+            {"n": 2, "objective": 1.0, "start": 0, "stage": "local", "feasible": True, "level": None}]
+    alt = af._alternatives({"rows": rows, "record": {}, "objective": {}}, 1.0)[0]
+    assert alt["line"][0] == (1.0, 9.0)  # the baseline counts for the best so far (FI's rule) ...
+    assert alt["starts"] == [[(2.0, 1.0)]]  # ... but not for start 0's own line
+
+
+def test_a_baseline_that_breaks_a_limit_is_drawn_and_said(tmp_path):
+    root = _search_record(tmp_path / "q")
+    path = root / "results" / "best_design.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["baseline"]["feasible"] = False
+    path.write_text(json.dumps(record), encoding="utf-8")
+    assert af._best_vs_baseline_figure(af._read_record(str(root)), str(tmp_path / "f"))["status"] == "ok"
+
+
+def test_the_scan_map_orders_its_axes_by_count_then_name(tmp_path):
+    data = {"scan": [{"design": {"b": b, "a": a}, "objective": a + b} for a in (1, 2) for b in (1, 2)]}
+    assert af._scan_figure(data, str(tmp_path))["status"] == "ok"
 
 
 def test_no_best_design_and_no_check_are_said_in_a_plain_sentence_not_a_crash(tmp_path):
