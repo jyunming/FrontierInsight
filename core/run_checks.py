@@ -645,15 +645,21 @@ class RunChecksMixin:
         from . import skeleton as _skeleton
 
         ex = self.config.execution  # type: ignore[attr-defined]
-        if not ex.code_skeleton or not ex.split_analysis or ex.background_jobs or self._agent_mode():  # type: ignore[attr-defined]
+        if not ex.code_skeleton or not ex.split_analysis or self._agent_mode():  # type: ignore[attr-defined]
             return ""
         design = state.get("design")
         why = _skeleton.applies(design)
         if why:
             self._log.info("[implement] FI writes no frame of simulate.py: %s", why)  # type: ignore[attr-defined]
             return ""
-        return _skeleton.frame_source(design, stochastic=_split_run.design_is_stochastic(design),
-                                      strict=_contract.from_design(design).form == "contract")
+        # A quest keeps the frame it was written with (a resume, an update of FI): the frame on disk is the one used while the
+        # plan has not changed; a plan that changed gets a new one.
+        try:
+            existing = (self.quest_root / "code" / _split_run.SIMULATE_NAME).read_text(encoding="utf-8")  # type: ignore[attr-defined]
+        except (OSError, UnicodeDecodeError):
+            existing = ""
+        return _skeleton.frame_for(design, stochastic=_split_run.design_is_stochastic(design),
+                                   strict=_contract.from_design(design).form == "contract", existing=existing)
 
     def _frame_note(self, state: Any) -> str:
         """What the code-writing request says about simulate.py when FI writes the frame, else ``""``."""
@@ -661,7 +667,29 @@ class RunChecksMixin:
 
         if not self._skeleton_frame(state):
             return ""
-        names = ", ".join(f"`{i}`" for i in _skeleton.declared_ids((state.get("design") or {}).get("protocol")))
+        protocol = (state.get("design") or {}).get("protocol")
+        names = ", ".join(f"`{i}`" for i in _skeleton.declared_ids(protocol))
+        more = ""
+        if isinstance(protocol, dict) and isinstance(protocol.get("optimisation"), dict):
+            more += ("- This study searches for the best design: `cell` is ONE design (every setting by name), and `ctx.kind` says "
+                     "what FI asks for (`\"search\"`: a design the search tries; `\"scan\"`: a row of the coarse scan; "
+                     "`\"check\"`: a case of a check). The objective and every constrained quantity are results: return them by "
+                     "name.\n")
+        inside = list(_in_run.of_study(protocol) or {})
+        if inside:
+            more += (f"- `cell[\"{inside[0]}\"]`" + (" and the others of " + ", ".join(f"`{n}`" for n in inside[1:]) if inside[1:] else "")
+                     + " compared inside each run are the LIST of their values, not one value. Give a result per value with "
+                     "`out.each(\"name\", {value: number})` (or a list in the order of the values when one thing is compared).\n")
+        if getattr(_optimise_search.study_grid(protocol), "sub_studies", None):
+            more += ("- The study has sub-studies: a `cell` holds every setting; those the sub-study does not vary are at the value "
+                     "it holds.\n")
+        silent = _skeleton.case_less_checks(protocol)
+        if silent:
+            more += ("- The plan's check(s) " + ", ".join(f"`{n}`" for n in silent) + " name no case FI can run: also give the "
+                     "function `oracle()` (no arguments) that returns the numbers those checks measure, by name.\n")
+        more += ("- Only when one call can compute every trial of a setting at once (vectorised code): give `trial_batch(cell, ctx)` "
+                 "instead of `trial`. It returns a list with one result for each seed in `ctx.seeds`, in that order "
+                 "(`ctx.results()` gives them ready, `ctx.rngs()` one generator per seed); FI checks the length and the order.\n")
         return (
             "FI writes the frame of simulate.py (the entry point, the seed, the thresholds). In the `# file: simulate.py` block "
             "give ONLY the function `trial(cell, ctx)` and the imports and helper functions it needs; no `run_trial`, no "
@@ -672,7 +700,7 @@ class RunChecksMixin:
             "plan's thresholds.\n"
             f"- Return the results the plan declares, by name ({names}; a proportion may be returned as `<name>_count` and "
             "`<name>_total`): `out = TrialResult()`, `out[\"name\"] = value`, `return out`. A result under another name is "
-            "kept as a diagnostic, not as a result of the plan.\n\n")
+            "kept as a diagnostic, not as a result of the plan.\n" + more + "\n")
 
     def _framed(self, state: Any, simulate_code: str) -> str:
         """The text of ``simulate.py`` once the model's reply is put into FI's frame (and ``fi_frame.py`` written beside it);
@@ -682,16 +710,21 @@ class RunChecksMixin:
         frame = self._skeleton_frame(state)
         if not frame or not simulate_code.strip():
             return simulate_code
-        text, note = _skeleton.compose(frame, simulate_code)
+        code_dir = self.quest_root / "code"  # type: ignore[attr-defined]
+        try:
+            previous = (code_dir / _split_run.SIMULATE_NAME).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            previous = ""
+        text, note = _skeleton.compose(frame, simulate_code, previous)
         if note:
             # what was left out of the reply is information; a refusal is a warning
             (self._log.info if note.startswith("left out") else self._log.warning)(  # type: ignore[attr-defined]
                 "[implement] simulate.py: %s", note)
         if _skeleton.has_frame(text):
-            # The runtime is written whenever the file imports it, so a changed frame is never met as a missing module.
-            code_dir = self.quest_root / "code"  # type: ignore[attr-defined]
+            # The runtime is written whenever the file imports it, so a changed frame is never met as a missing module; a quest
+            # whose frame an older FI wrote keeps the runtime that frame was written with.
             code_dir.mkdir(parents=True, exist_ok=True)
-            (code_dir / _skeleton.RUNTIME_FILE).write_text(_skeleton.RUNTIME, encoding="utf-8")
+            _skeleton.ensure_runtime(code_dir, text)
             problem = _skeleton.frame_intact(frame, text)
             if problem:
                 # the run then says what changed and the simulation is repaired; the file keeps FI's frame, never the damaged one

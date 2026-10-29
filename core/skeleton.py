@@ -8,6 +8,12 @@ its package one at a time (:func:`core.function_steps.replace_function`). A resu
 the trial assigns it (``fi_frame.TrialResult``), at run time, so a result under another name is seen at the first trial and an
 empty slot in FI's small run, not after the study.
 
+The frame fits every form of study: a sweep, sub-studies (a cell holds every setting, the ones a part does not vary at the value
+it holds), values compared inside each run (``cell[factor]`` is the list of levels; ``out.each``), a search for the best design
+(``ctx.kind``; the objective and the constrained quantities are the results), checks against a known answer (``oracle()`` beside
+``trial`` for a check with no case), a trial answered for all its seeds at once (``trial_batch``), a cluster job and a standalone
+``run.py``. A quest keeps the frame it was written with (:func:`frame_for`); a changed plan writes it again.
+
 What the frame is NOT: it does not shorten the model's science or check that it is right (about 15 percent of the lines of
 recorded simulation and analysis scripts are frame), and the analysis script is the model's still.
 
@@ -19,19 +25,24 @@ from __future__ import annotations
 
 import ast
 import itertools
+import re
 from collections import Counter
+from pathlib import Path
 from typing import Any
 
 from . import function_steps as _steps
 from . import metric_spec as _metric_spec
 
 #: Written into the frame; a quest keeps the frame it was written with (a resume reads the files, never writes them again).
-VERSION = 1
+VERSION = 2
 RUNTIME_FILE = "fi_frame.py"
 TOP_BEGIN = f"# >>> FI frame, version {VERSION}: written by FI from the plan; a repair does not change it"
 TOP_END = "# <<< FI frame"
 BOTTOM_BEGIN = f"# >>> FI frame, version {VERSION}: the functions FI's trial harness calls"
 BOTTOM_END = "# <<< FI frame"
+#: The same markers whatever version wrote them: a quest resumed with a newer FI still has the frame it was written with.
+_BEGINS = (re.compile(r"# >>> FI frame, version (\d+): written by FI from the plan; a repair does not change it"),
+           re.compile(r"# >>> FI frame, version (\d+): the functions FI's trial harness calls"))
 SLOT = "trial"
 #: Ends the one line :func:`refuse` puts into a file whose frame was changed; a repair result that still holds it is refused.
 RAISE_MARK = "# FI: the frame was changed"
@@ -46,16 +57,31 @@ import json
 import os
 import random
 
+FRAME_RUNTIME_VERSION = @VERSION@
+
+
+def _generator(seed):
+    try:
+        import numpy
+
+        return numpy.random.default_rng(seed)
+    except ImportError:
+        return random.Random(seed)
+
 
 class Ctx:
     """What a trial is given besides its settings. ``rng``: a random generator seeded by FI for this trial (numpy's when it is
     installed, else ``random.Random``); ``seed``: the same seed as a plain integer for a library that wants one; ``trial``:
     the trial's number; ``kind``: ``"scan"``, ``"search"`` or ``"check"`` (what FI is asking for); ``thresholds``: the plan's
-    frozen thresholds."""
+    frozen thresholds. A batch (``trial_batch``) is given ``seeds`` and ``trials``, one of each for every trial of the
+    setting, in the order its results are returned in; ``rngs()`` is one generator for each of those seeds and ``results()``
+    one empty result record for each."""
 
-    def __init__(self, seed=None, trial=0):
+    def __init__(self, seed=None, trial=0, seeds=None, trials=None):
         self.seed = seed
         self.trial = trial
+        self.seeds = list(seeds) if seeds is not None else [seed]
+        self.trials = list(trials) if trials is not None else [trial]
         self.kind = os.environ.get("FI_CELL_KIND") or "check"
         try:
             self.thresholds = dict(json.loads(os.environ.get("FI_THRESHOLDS") or "{}"))
@@ -66,13 +92,21 @@ class Ctx:
     @property
     def rng(self):
         if self._rng is None:
-            try:
-                import numpy
-
-                self._rng = numpy.random.default_rng(self.seed)
-            except ImportError:
-                self._rng = random.Random(self.seed)
+            self._rng = _generator(self.seed)
         return self._rng
+
+    def rngs(self):
+        """One random generator for each seed of ``seeds``, in that order."""
+        return [_generator(s) for s in self.seeds]
+
+    def results(self):
+        """One empty result record for each trial of ``trials``, in that order: a batch fills them and returns the list."""
+        out = []
+        for trial in self.trials:
+            record = TrialResult()
+            record._trial = trial
+            out.append(record)
+        return out
 
 
 class UnknownResult(KeyError):
@@ -108,6 +142,15 @@ class TrialResult(dict):
         for name, value in dict(*args, **kwargs).items():
             self[name] = value
 
+    def each(self, name, values):
+        """A result the trial gives for every value of what each run compares inside it: a mapping ``{level: number}`` or,
+        with one factor compared, a list of numbers in the order of the levels (``cell[factor]``). FI reads it by the same
+        rule whichever way it is written."""
+        if isinstance(values, dict):
+            self[name] = dict(values)
+        else:
+            self[name] = list(values.tolist() if hasattr(values, "tolist") else values)
+
     @classmethod
     def finish(cls, value):
         """The plain ``dict`` the harness reads. A model that returned a plain ``dict`` is checked the same way."""
@@ -117,7 +160,71 @@ class TrialResult(dict):
                     cls._check(cls(), name)
             return dict(value)
         return value
-'''
+
+
+class BatchError(Exception):
+    """A batch function that did not give one result for each seed it was given, in order."""
+
+
+_batches = {}
+
+
+def _cell_text(cell):
+    return json.dumps([[str(k), repr(v)] for k, v in sorted(dict.items(cell), key=lambda kv: str(kv[0]))])
+
+
+def _trials_of(ctx):
+    """``[(trial, seed)]`` of the setting this trial belongs to (the harness says them in FI_TRIAL_SEEDS), else this trial."""
+    mine = (ctx.trial, ctx.seed)
+    try:
+        rows = [(int(t), s) for t, s in json.loads(os.environ.get("FI_TRIAL_SEEDS") or "[]")]
+    except (ValueError, TypeError):
+        rows = []
+    return rows if mine in rows else [mine]
+
+
+def _one_per_seed(label, out, ctx):
+    if not isinstance(out, (list, tuple)) or len(out) != len(ctx.seeds):
+        raise BatchError("`%s` must return a list with one result for each of the %d seed(s) in ctx.seeds, in that order; it "
+                         "returned %s" % (label, len(ctx.seeds), ("%d result(s)" % len(out)) if isinstance(out, (list, tuple))
+                                                          else type(out).__name__))
+    for i, (record, trial) in enumerate(zip(out, ctx.trials)):
+        if not isinstance(record, dict):
+            raise BatchError("result %d of `%s` is a %s, not a result record" % (i, label, type(record).__name__))
+        belongs = getattr(record, "_trial", None)
+        if belongs is not None and belongs != trial:
+            raise BatchError("result %d of `%s` is the record of trial %s but the seed at that place is trial %s's: keep the "
+                             "results in the order of ctx.seeds" % (i, label, belongs, trial))
+    return list(out)
+
+
+def batch_of_trials(fn, cell, ctx):
+    """What the entry point gives for one trial when the study writes ``trial_batch(cell, ctx)``: the batch runs once for the
+    setting, with every seed of it, and each trial is given its own result."""
+    plan = _trials_of(ctx)
+    key = (_cell_text(cell), tuple(plan))
+    if key not in _batches:
+        _batches.clear()  # a process is one setting's
+        batch_ctx = Ctx(seed=plan[0][1], trial=plan[0][0], seeds=[s for _t, s in plan], trials=[t for t, _s in plan])
+        try:
+            _batches[key] = (True, _one_per_seed("trial_batch", fn(cell, batch_ctx), batch_ctx))
+        except Exception as e:  # noqa: BLE001 -- the same failure is every trial's of the setting
+            _batches[key] = (False, e)
+    ok, got = _batches[key]
+    if not ok:
+        raise got
+    return got[plan.index((ctx.trial, ctx.seed))]
+
+
+def batch_of_cells(fn, cell, ctx):
+    """What the entry point gives for one trial when the study writes ``cells_batch(cells, ctx)``: FI runs one setting in a
+    process of its own, so the batch it is given is that setting alone."""
+    out = fn([cell], ctx)
+    if not isinstance(out, (list, tuple)) or len(out) != 1:
+        raise BatchError("`cells_batch` must return a list with one result for each cell it is given (1); it returned %s"
+                         % (("%d result(s)" % len(out)) if isinstance(out, (list, tuple)) else type(out).__name__))
+    return out[0]
+'''.replace("@VERSION@", str(VERSION))
 
 # What a made-up trial body looks like, shown to the model with the frame.
 BODY_EXAMPLE = '''def trial(cell, ctx):
@@ -134,8 +241,7 @@ def declared_names(protocol: dict[str, Any] | None) -> list[str]:
     and the forms it may be returned under (``id``, ``id_count``, ``id_total``, ``id_values``), in the plan's order."""
     from . import contract as _contract
 
-    roles = _contract.raw_roles(protocol)
-    ids = [i for i, role in roles.items() if role in ("result", "reference", "physical_bound")]
+    ids = declared_ids(protocol)
     out: list[str] = []
     for ident in ids:
         for name in _metric_spec.result_forms(ident):
@@ -144,31 +250,68 @@ def declared_names(protocol: dict[str, Any] | None) -> list[str]:
     return out
 
 
+def _search_quantities(protocol: dict[str, Any] | None) -> list[str]:
+    """The names a search for the best design reads from each evaluation: the objective's quantity and the quantity of every
+    constraint (a search plan does not list them among its ``metrics``)."""
+    block = protocol.get("optimisation") if isinstance(protocol, dict) else None
+    if not isinstance(block, dict):
+        return []
+    found = [(block.get("objective") or {}).get("quantity") if isinstance(block.get("objective"), dict) else None]
+    constraints = block.get("constraints")
+    for c in [constraints] if isinstance(constraints, dict) else constraints if isinstance(constraints, list) else []:
+        found.append(c.get("quantity") if isinstance(c, dict) else None)
+    return [q.strip() for q in found if isinstance(q, str) and q.strip()]
+
+
 def declared_ids(protocol: dict[str, Any] | None) -> list[str]:
-    """The ids (without the forms) of the results a trial is expected to set."""
+    """The ids (without the forms) of the results a trial is expected to set: the plan's results, and, for a search for the
+    best design, the objective and each constrained quantity."""
     from . import contract as _contract
 
-    return [i for i, role in _contract.raw_roles(protocol).items() if role in ("result", "reference", "physical_bound")]
+    ids = [i for i, role in _contract.raw_roles(protocol).items() if role in ("result", "reference", "physical_bound")]
+    return ids + [q for q in dict.fromkeys(_search_quantities(protocol)) if q not in ids]
+
+
+def settings_of(protocol: dict[str, Any] | None) -> list[str]:
+    """The names a cell holds: the grid's settings and what each run compares inside it (``in_each_run``: ``cell[name]`` is the
+    list of its levels); for a search, the conditions held fixed, the numerical settings, the design variables and what each
+    evaluation compares inside it. A sub-study's cell holds every setting too (the ones it does not vary at the value it
+    holds), so the union is every cell's list."""
+    protocol = protocol if isinstance(protocol, dict) else {}
+    names = [str(k) for k in protocol["grid"]] if isinstance(protocol.get("grid"), dict) else []
+    block = protocol.get("optimisation")
+    if isinstance(block, dict):
+        from . import optimise_search as _search
+
+        try:
+            names += [*_search.cell_of(block, {}), *_search.check_settings(block)]
+        except (KeyError, TypeError, ValueError):
+            pass  # a block that cannot be read is the plan check's to name
+        names += [str(v["name"]) for v in block.get("design_variables") or [] if isinstance(v, dict) and v.get("name")]
+    elif isinstance(protocol.get("in_each_run"), dict):
+        names += [str(k) for k in protocol["in_each_run"]]
+    return list(dict.fromkeys(names))
 
 
 def applies(design: Any) -> str:
     """``""`` when the frame can be written for this plan, else why not (said in run.log; the model then writes the whole
-    script as before). The first slices cover a plan that declares at least one result and has none of: a search for the
-    best design, a known-answer check that names no case (the model must write ``oracle()``
-    for it), or a cluster job (a separate submit script)."""
-    from . import oracle_check as _oracle
-
+    script as before). Every form of study has one: a sweep over settings, sub-studies, values compared inside each run, a
+    search for the best design (its objective and constrained quantities are the results), checks against a known answer
+    (one that names no case is answered by an ``oracle()`` the model writes beside ``trial``) and a cluster job. What the
+    frame needs is a result to declare."""
     if not isinstance(design, dict) or not isinstance(design.get("protocol"), dict):
         return "the plan has no protocol"
-    protocol = design["protocol"]
-    if not declared_ids(protocol):
+    if not declared_ids(design["protocol"]):
         return "the plan declares no result"
-    if protocol.get("optimisation") or design.get("optimisation"):
-        return "the plan searches for a best design"
-    for o in protocol.get("oracles") or []:
-        if isinstance(o, dict) and _oracle.case_of(o) is None:
-            return f"the check `{o.get('name')}` names no case"
     return ""
+
+
+def case_less_checks(protocol: dict[str, Any] | None) -> list[str]:
+    """The names of the plan's checks that name no case FI can run: the model answers them with ``oracle()`` in simulate.py."""
+    from . import oracle_check as _oracle
+
+    return [str(o.get("name")) for o in (protocol.get("oracles") if isinstance(protocol, dict) else None) or []
+            if isinstance(o, dict) and _oracle.case_of(o) is None]
 
 
 def frame_source(design: dict[str, Any], *, stochastic: bool, strict: bool = False) -> str:
@@ -176,31 +319,37 @@ def frame_source(design: dict[str, Any], *, stochastic: bool, strict: bool = Fal
     ``run_cell``. ``strict``: a name outside the plan's list is refused (a plan in the contract form), else recorded."""
     protocol = design["protocol"]
     names = declared_names(protocol)
-    grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
-    settings = [str(k) for k in grid]
+    settings = settings_of(protocol)
     entry = (
         "def run_trial(cell, trial_id, seed):\n"
         "    return TrialResult.finish(trial(cell, Ctx(seed=seed, trial=trial_id)))\n"
         if stochastic else
         "def run_cell(cell):\n"
         "    return TrialResult.finish(trial(cell, Ctx(seed=None, trial=0)))\n")
-    return (
-        '"""The simulation. FI wrote the parts between the markers (the entry point, the list of results the plan declares);\n'
-        'the study\'s own code is the function `trial` and any helper below it."""\n\n'
+    top = (
         f"{TOP_BEGIN}\n"
         f"FRAME_VERSION = {VERSION}  # the first statement: the model's imports go before the frame, never inside it\n"
         "import os as _os  # noqa: E402\nimport sys as _sys  # noqa: E402\n\n"
         "_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))\n"
         "from fi_frame import Ctx, TrialResult  # noqa: E402\n\n"
-        f"SETTINGS = {tuple(settings)!r}  # the settings the plan varies\n"
+        f"SETTINGS = {tuple(settings)!r}  # the settings a cell holds\n"
         f"RESULTS = {tuple(names)!r}  # the names a trial returns\n"
         f"TrialResult.declare(RESULTS, strict={bool(strict)!r})\n"
-        f"{TOP_END}\n\n\n"
+        f"{TOP_END}\n")
+    return _assemble(top, f"{BOTTOM_BEGIN}\n{entry}{BOTTOM_END}\n")
+
+
+def _assemble(top: str, bottom: str) -> str:
+    """The frame's text from its two marked parts (each whole, with its closing marker line)."""
+    return (
+        '"""The simulation. FI wrote the parts between the markers (the entry point, the list of results the plan declares);\n'
+        'the study\'s own code is the function `trial` and any helper below it."""\n\n'
+        f"{top}\n\n"
         f"{SLOT_SIGNATURE}:\n"
         '    """One trial at the setting `cell`: draw with `ctx.rng`, read the thresholds from `ctx.thresholds`, return the\n'
         '    results by name (`out = TrialResult(); out["name"] = value; return out`)."""\n'
         f'    raise NotImplementedError("{_steps._STUB_MARK}")\n\n\n'
-        f"{BOTTOM_BEGIN}\n{entry}{BOTTOM_END}\n")
+        f"{bottom}")
 
 
 # ---- the model's reply ------------------------------------------------------------------------------------------------
@@ -213,8 +362,42 @@ def fill(frame: str, reply: str) -> tuple[str | None, str]:
     return text, why
 
 
+#: The batch forms a study may give instead of ``trial``: ``(function, the runtime function that calls it, its parameters)``.
+BATCH_FORMS = (("trial_batch", "batch_of_trials", ["cell", "ctx"]), ("cells_batch", "batch_of_cells", ["cells", "ctx"]))
+
+
+def batch_form(reply: str) -> str:
+    """The name of the batch function a reply gives (``trial_batch`` or ``cells_batch``) when it gives no ``trial``, else ``""``."""
+    try:
+        names = {n.name for n in ast.parse(reply).body if isinstance(n, ast.FunctionDef)}
+    except SyntaxError:
+        return ""
+    return "" if SLOT in names else next((f for f, _h, _p in BATCH_FORMS if f in names), "")
+
+
+def _adapted(reply: str) -> tuple[str, str]:
+    """``(reply, "")`` with a ``trial`` written by FI that calls the batch function the reply gives (``trial_batch(cell, ctx)``
+    answering all the seeds of a setting at once, ``cells_batch(cells, ctx)``), or ``(reply, why)`` when its parameters are not
+    the ones FI calls it with. A reply with ``trial`` is left as it is."""
+    form = batch_form(reply)
+    if not form:
+        return reply, ""
+    helper, want = next((h, p) for f, h, p in BATCH_FORMS if f == form)
+    node = next(n for n in ast.parse(reply).body if isinstance(n, ast.FunctionDef) and n.name == form)
+    if _steps._param_names(node) != want:
+        return reply, (f"`{form}` must take exactly ({', '.join(want)}), as FI calls it; the reply has "
+                       f"({', '.join(_steps._param_names(node))})")
+    return (reply.rstrip("\n") + "\n\n\ndef trial(cell, ctx):\n"
+            f"    # FI: this study gives `{form}`; FI calls it for each trial\n"
+            f"    from fi_frame import {helper}\n\n"
+            f"    return {helper}({form}, cell, ctx)\n"), ""
+
+
 def _fill(frame: str, reply: str) -> tuple[str | None, str, list[str]]:
     """:func:`fill` and, as the third value, what of the reply could not be carried into the file (plain phrases)."""
+    reply, why = _adapted(reply)
+    if why:
+        return None, why, []
     text, why, left = _steps.replace_function_ex(frame, SLOT, reply, signature=SLOT_SIGNATURE, equation="trial", wide=True)
     if text is None:
         return None, why, []
@@ -222,16 +405,26 @@ def _fill(frame: str, reply: str) -> tuple[str | None, str, list[str]]:
     return (None, problem, []) if problem else (text, "", left)
 
 
-def _regions(source: str) -> list[str] | None:
+def _spans(source: str) -> list[tuple[int, int, int]] | None:
+    """``[(start, end of the marked text, end of its closing line)]`` of the frame's two parts, whatever version wrote them."""
     out = []
-    for begin in (TOP_BEGIN, BOTTOM_BEGIN):
-        i = source.find(begin)
-        if i < 0:
+    for begin in _BEGINS:
+        m = begin.search(source)
+        if m is None:
             return None
-        j = source.find(TOP_END, i)
+        j = source.find(TOP_END, m.start())
         if j < 0:
             return None
-        out.append(source[i:j])
+        k = source.find("\n", j)
+        out.append((m.start(), j, k + 1 if k >= 0 else len(source)))
+    return out
+
+
+def _regions(source: str) -> list[str] | None:
+    spans = _spans(source)
+    if spans is None:
+        return None
+    out = [source[i:j] for i, j, _k in spans]
     return out
 
 
@@ -402,12 +595,12 @@ def heal(frame: str, text: str) -> str:
     changed) put into it, or the bare ``frame`` when they cannot be. The damaged frame is never kept: a repair is compared with
     the frame FI wrote, whatever the model's reply did to it."""
     kept = text.lstrip("\ufeff")
-    for begin in (TOP_BEGIN, BOTTOM_BEGIN):
-        i = kept.find(begin)
-        j = kept.find(TOP_END, i) if i >= 0 else -1
-        if i >= 0 and j >= 0:
-            k = kept.find("\n", j)
-            kept = kept[:i] + kept[k + 1:] if k >= 0 else kept[:i]
+    for _ in _BEGINS:
+        spans = _spans(kept)
+        if spans is None:
+            break
+        i, _j, k = spans[0]
+        kept = kept[:i] + kept[k:]
     kept = "".join(ln for ln in kept.splitlines(keepends=True) if RAISE_MARK not in ln)
     made, _why, _left = _fill(frame, kept)
     return made if made is not None else frame
@@ -437,21 +630,27 @@ def has_frame(source: str) -> bool:
     return _regions(source) is not None
 
 
-def compose(frame: str, simulate_reply: str) -> tuple[str, str]:
+def compose(frame: str, simulate_reply: str, previous: str = "") -> tuple[str, str]:
     """What becomes ``simulate.py`` when the model was asked for ``trial`` only: ``(source, note)``. A reply that already holds
     the whole frame is accepted when :func:`frame_intact` says so; a reply that is a whole simulation of its own
     (``run_trial`` / ``run_cell`` and no ``trial``) is kept as it is, with a note: the plan then runs as before, without the frame.
     A reply that holds a ``trial`` that does not fit is returned unchanged with the reason (the checks of the code, and the
-    harness, say what is wrong with it)."""
+    harness, say what is wrong with it). ``previous``: the ``simulate.py`` the quest has now; a reply that keeps exactly the
+    frame in it while the plan asks for another (a result was added, a setting renamed) is put into the frame for the new
+    plan: a change of the plan writes the frame again, and a change the model made to it is still refused."""
     if has_frame(simulate_reply):
         problem = frame_intact(frame, simulate_reply)
+        if problem and has_frame(previous) and RAISE_MARK not in previous and not frame_intact(previous, simulate_reply):
+            made = heal(frame, simulate_reply)
+            if has_frame(made) and not frame_intact(frame, made):
+                return made, "the plan changed, so FI wrote the frame again; the model's `trial` and its helpers are kept in it"
         return simulate_reply, problem
     try:
         tree = ast.parse(simulate_reply)
     except SyntaxError:
         return simulate_reply, "the reply is not valid Python"
     names = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
-    if SLOT not in names:
+    if SLOT not in names and not batch_form(simulate_reply):
         if names & {"run_trial", "run_cell"}:
             return simulate_reply, "the reply is a whole simulation without the function `trial`: kept as written, without the frame"
         return simulate_reply, "the reply holds no function `trial`"
@@ -459,6 +658,78 @@ def compose(frame: str, simulate_reply: str) -> tuple[str, str]:
     if text is None:
         return refuse(simulate_reply, why), why  # the run then stops with the reason, never with a NameError
     return text, (("left out of the model's reply, which the file cannot carry: " + "; ".join(left)) if left else "")
+
+
+# ---- a frame is written once ---------------------------------------------------------------------------------------------
+
+def frame_version(source: str) -> int | None:
+    """The version of FI's frame that wrote the frame of ``source`` (a simulate.py), or ``None`` when it has none."""
+    m = _BEGINS[0].search(source or "")
+    return int(m.group(1)) if m else None
+
+
+def runtime_version(text: str) -> int:
+    """The version a ``fi_frame.py`` says it is (the first runtime had no line and is version 1)."""
+    m = re.search(r"^FRAME_RUNTIME_VERSION = (\d+)", text or "", re.MULTILINE)
+    return int(m.group(1)) if m else 1
+
+
+def _plan_of(source: str) -> tuple | None:
+    """What the plan decided in a frame: its settings, its results, whether a name outside them is refused, and which entry
+    point it has. The rest of the frame is FI's, and another version of FI may word it otherwise."""
+    regions = _regions(source)
+    if regions is None:
+        return None
+    found: dict[str, Any] = {}
+    try:
+        for node in ast.parse(regions[0]).body:
+            if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) \
+                    and node.targets[0].id in ("SETTINGS", "RESULTS"):
+                found[node.targets[0].id] = ast.literal_eval(node.value)
+            elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call) and getattr(node.value.func, "attr", "") == "declare":
+                found["strict"] = next((ast.literal_eval(k.value) for k in node.value.keywords if k.arg == "strict"), False)
+        entries = tuple(sorted(n.name for n in ast.parse(regions[1]).body if isinstance(n, ast.FunctionDef)))
+    except (SyntaxError, ValueError):
+        return None
+    return found.get("SETTINGS"), found.get("RESULTS"), found.get("strict"), entries
+
+
+def frame_for(design: dict[str, Any], *, stochastic: bool, strict: bool = False, existing: str = "") -> str:
+    """The frame the model's ``trial`` is put into. A quest keeps the frame it was written with: when ``existing`` (the quest's
+    simulate.py) has a frame that another version of FI wrote for the same plan, that frame is returned, so a resume or an
+    update of FI never changes it. When the plan changed (a result was added, a setting renamed), or there is no frame yet,
+    the frame is written new."""
+    fresh = frame_source(design, stochastic=stochastic, strict=strict)
+    old = frame_version(existing)
+    if old is None or old == VERSION:
+        return fresh
+    kept = _plan_of(existing)
+    if kept is None or kept != _plan_of(fresh):
+        return fresh
+    spans = _spans(existing)
+    assert spans is not None
+    return _assemble(existing[spans[0][0]:spans[0][2]], existing[spans[1][0]:spans[1][2]])
+
+
+def ensure_runtime(code_dir: Path | str, simulate_source: str) -> bool:
+    """Write ``fi_frame.py`` beside simulate.py when the frame needs it: it is missing, it is not FI's runtime, or it is an older
+    runtime and simulate.py has the frame of this version. A quest whose frame was written by an older version keeps the runtime
+    it was written with. Returns whether the file was written."""
+    path = Path(code_dir) / RUNTIME_FILE
+    try:
+        have = path.read_text(encoding="utf-8")
+    except OSError:
+        have = None
+    if have is not None:
+        if have.lstrip("\ufeff") == RUNTIME:
+            return False
+        ours = have.lstrip("\ufeff").startswith(RUNTIME_HEAD)
+        framed = frame_version(simulate_source)
+        if ours and runtime_version(have) != VERSION and framed is not None and framed != VERSION:
+            return False  # the runtime of an older frame stays with it
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(RUNTIME, encoding="utf-8")
+    return True
 
 
 # ---- what the small run shows ----------------------------------------------------------------------------------------

@@ -801,6 +801,86 @@ def replace_function_ex(source: str, name: str, reply: str, *, signature: str, e
     return out, "", left
 
 
+def _literal(value: Any) -> Any:
+    """``value`` as a plain constant a module may be given (a number, a truth value or a short text), else :data:`_NOT_PLAIN`.
+    A text is read the way Python reads it (``"1e-10"`` is the number, ``"5,10,...,170"`` is not a constant)."""
+    if isinstance(value, str):
+        try:
+            value = ast.literal_eval(value.strip())
+        except (ValueError, SyntaxError):
+            return _NOT_PLAIN
+    if isinstance(value, bool) or (isinstance(value, (int, float)) and abs(value) != float("inf") and value == value):
+        return value
+    return value if isinstance(value, str) and len(value) <= 80 else _NOT_PLAIN
+
+
+_NOT_PLAIN = object()
+
+
+def plan_constants(outline: dict[str, Any] | None, protocol: dict[str, Any] | None) -> dict[str, Any]:
+    """``{name: value}`` of the numbers the plan fixes, from the two places it says them: the outline's ``constants`` (a name and
+    a literal value) and the protocol's ``constants``. A value that is not a plain number, truth value or short text (a list, a
+    range, a formula) is not a constant FI can write and is left out; the outline's name wins over the protocol's."""
+    out: dict[str, Any] = {}
+    for c in (outline or {}).get("constants") or []:
+        if isinstance(c, dict) and isinstance(c.get("name"), str) and c["name"].strip().isidentifier():
+            value = _literal(c.get("value"))
+            if value is not _NOT_PLAIN:
+                out.setdefault(c["name"].strip(), value)
+    given = protocol.get("constants") if isinstance(protocol, dict) else None
+    for name, raw in (given.items() if isinstance(given, dict) else ()):
+        value = _literal(raw)
+        if isinstance(name, str) and name.isidentifier() and value is not _NOT_PLAIN:
+            out.setdefault(name, value)
+    return out
+
+
+def with_constants(source: str, values: dict[str, Any]) -> tuple[str, list[str]]:
+    """``(source, names)`` with a module-level assignment, written by FI, for each name the module reads and nothing in it
+    binds when the plan fixes that number (``values``, from :func:`plan_constants`) under that very name. A function of the
+    model's package is written to one equation at a time and reads the plan's numbers as module names; setting them was left to
+    whichever script imported the package, and a script written without that line failed with a NameError inside the package.
+    A name the module binds itself is never touched, and a name the plan does not fix (or fixes under another spelling) is
+    left to the code check."""
+    from . import undefined_names as _undefined
+
+    if not values:
+        return source, []
+    found: dict[str, Any] = {}
+    for use in _undefined.undefined_in("model.py", source):
+        if use.name in values and use.name not in found:
+            found[use.name] = values[use.name]
+    if not found:
+        return source, []
+    block = ("# FI: the numbers the plan fixes, written by FI so that no script has to set them in this module\n"
+             + "".join(f"{name} = {value!r}\n" for name, value in found.items()))
+    lines = source.splitlines(keepends=True)
+    after = 0
+    for n in ast.parse(source).body:
+        is_doc = isinstance(n, ast.Expr) and isinstance(getattr(n, "value", None), ast.Constant) and isinstance(n.value.value, str)
+        if not (is_doc or isinstance(n, (ast.Import, ast.ImportFrom))):
+            break
+        after = n.end_lineno or after
+    head = "".join(lines[:after]).rstrip("\n")
+    tail = "".join(lines[after:]).lstrip("\n")
+    return (head + "\n\n\n" if head else "") + block + "\n\n" + tail, list(found)
+
+
+def write_constants(model_path: Path, values: dict[str, Any], log: Any = None) -> list[str]:
+    """:func:`with_constants` on the file ``model_path``, written back only when a constant was added; the names added."""
+    try:
+        source = model_path.read_text(encoding="utf-8")
+        new, added = with_constants(source, values)
+    except (OSError, SyntaxError, ValueError):
+        return []
+    if added:
+        model_path.write_text(new, encoding="utf-8")
+        if log is not None:
+            log.info("[implement] FI wrote the plan's number(s) %s into %s: the model's functions read them there", ", ".join(added),
+                     model_path.name)
+    return added
+
+
 def _with_imports(source: str, imports: list[str]) -> str:
     """``imports`` added after the module's docstring and its existing imports."""
     tree = ast.parse(source)
@@ -1041,8 +1121,11 @@ class FunctionFiller:
                  prompts: dict[str, string.Template], chat: ChatFn, run: RunFn, log: Any, repairs: int = 2,
                  max_calls: int = 30, constants: str = "", install: InstallFn | None = None,
                  module_repairs: int = MODULE_REPAIRS, declared: list[str] | None = None,
-                 topic_block: str = "", passages: dict[str, str] | None = None) -> None:
+                 topic_block: str = "", passages: dict[str, str] | None = None,
+                 values: dict[str, Any] | None = None) -> None:
         self.topic_block = topic_block or "(the topic is not available)"
+        #: The numbers the plan fixes (:func:`plan_constants`): FI writes each one the package reads and does not bind.
+        self.values = dict(values or {})
         #: ``{equation or step id: passages from the literature}`` (core/step_passages.py), found by the caller before the
         #: step starts; an id with none gets an empty literature block.
         self.passages = {str(k): str(v) for k, v in (passages or {}).items() if str(v).strip()}
@@ -1144,6 +1227,7 @@ class FunctionFiller:
         attempt added to the module), another function's name, ``MODULE_LEVEL`` or ``ELSEWHERE``. ``trace`` is the end of
         the traceback when the import failed. ``known``: the fingerprints of the module's statements before this attempt."""
         known = known if known is not None else set()
+        write_constants(self.model_path, self.values, self.log)  # before the file is read: the check sees the plan's numbers
         text = self.model_path.read_text(encoding="utf-8")
         try:
             ast.parse(text)
@@ -1520,6 +1604,7 @@ class FunctionFiller:
     def _finish(self, specs: list[Spec], record: dict[str, Any]) -> Outcome:
         """The step's end: ``done`` when every function passes, ``partial`` when the module imports and every function
         has code but some still fail their test, else the code is written whole."""
+        write_constants(self.model_path, self.values, self.log)
         source = self.model_path.read_text(encoding="utf-8")
         no_code = [s for s in specs if record["functions"][s.name]["status"] != DONE and is_stub(source, s.name)]
         done, total = counts(record)
