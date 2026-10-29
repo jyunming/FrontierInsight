@@ -82,12 +82,21 @@ _PLACEHOLDER = re.compile(r"\{\{v:([^{}]{1,300})\}\}")
 #: A number of the method FI computes from the plan's own numbers: the writer types ``{{calc:1 - 0.05 / 2}}``, FI keeps it
 #: as the key ``calc:1 - 0.05 / 2`` (filled, marked and taken out like every other key) and shows it to the writer as typed.
 CALC = "calc:"
-_CALC_TYPED = re.compile(r"\{\{\s*calc\s*:\s*([^{}\n]{1,300}?)\s*\}\}")
+#: ``{{trend:<result> over <axis> @ ...}}`` and ``{{comparison:<result> <form> vs <result> <form> @ ...}}`` are keys of the same
+#: kind (:mod:`core.trend`): the direction and size of a change along a setting, and one result against another inside each
+#: setting. Typed like ``calc``, kept as ``{{v:trend:...}}``.
+TREND = "trend:"
+COMPARISON = "comparison:"
+_CALC_TYPED = re.compile(r"\{\{\s*(calc|trend|comparison)\s*:\s*([^{}\n]{1,300}?)\s*\}\}")
 _WORDS = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten")
 
 
 class _Unfilled(Exception):
     """A key the records cannot support; the message is the reason."""
+
+
+class _NoNumbers(_Unfilled):
+    """A setting whose every trial gave no number (undefined, crashed): a key over several settings may leave it out."""
 
 
 # --- rounding: one function ---------------------------------------------------------------------------------------
@@ -138,6 +147,7 @@ class Measured:
     words: str = ""
     symmetric: bool = False  # a t interval: ``pm`` may print it as value +/- half-width
     parts: list[float] = field(default_factory=list)  # a range's two ends
+    note: str = ""  # words that follow the value: the settings a reducer left out because they have no number
 
 
 def fmt(m: Measured, form: str = "mean", percent: bool = False) -> str:
@@ -722,9 +732,9 @@ def _finite(v: Any) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(float(v))
 
 
-def _per_draw(rec: Records, cells: list[dict[str, Any]], metric: str) -> list[float]:
-    """One value per different random draw behind ``metric`` in ``cells``: the mean of the trials that ran on one seed
-    (FI's ledger), in any setting."""
+def _draw_values(rec: Records, cells: list[dict[str, Any]], metric: str) -> dict[Any, float]:
+    """``{random draw: the mean of the trials of ``metric`` that ran on it}`` over ``cells``, in any setting (the draw is
+    the seed in FI's ledger, :func:`_draw_key`)."""
     groups: dict[Any, list[float]] = {}
     for c in cells:
         m = c["metrics"].get(metric)
@@ -736,7 +746,13 @@ def _per_draw(rec: Records, cells: list[dict[str, Any]], metric: str) -> list[fl
         for i, v in enumerate(raw):
             if _finite(v):
                 groups.setdefault(_draw_key(rec, c, ids, i), []).append(float(v))
-    return [sum(g) / len(g) for g in groups.values()]
+    return {k: sum(g) / len(g) for k, g in groups.items()}
+
+
+def _per_draw(rec: Records, cells: list[dict[str, Any]], metric: str) -> list[float]:
+    """One value per different random draw behind ``metric`` in ``cells``: the mean of the trials that ran on one seed
+    (FI's ledger), in any setting."""
+    return list(_draw_values(rec, cells, metric).values())
 
 
 def _per_draw_pairs(rec: Records, cells: list[dict[str, Any]], a: str, b: str) -> tuple[list[float], list[float]]:
@@ -955,7 +971,7 @@ def _measure(rec: Records, metric: str, form: str, arg: str, where: dict[str, Pi
     cells = _matching(rec, where, metric)
     values = _trials(cells, metric)
     if not values and form not in ("failed",):
-        raise _Unfilled(f"{metric} has no numeric trials at that setting")
+        raise _NoNumbers(f"{metric} has no numeric trials at that setting")
     if form not in ("ref", "n", "failed", "count") and _differs_between_settings(cells, metric):
         raise _Unfilled(
             f"{metric} is a value each setting sets, and it differs between the settings pooled here, so it has no single "
@@ -1077,13 +1093,26 @@ def _reduce(rec: Records, key: Key) -> tuple[Measured, str]:
         raise _Unfilled(f"no trials of {key.metric}")
     settings: list[dict[str, Any]] = []
     results: list[Measured] = []
+    kept: list[tuple[Any, ...]] = []
+    empty: list[str] = []
     for combo in combos:
         fixed = {a: (Pick("value", combo[each.index(a)]) if a in each else p) for a, p in key.where.items()}
+        here = _setting_words(dict(zip(each, combo)))
         try:
             results.append(_one(rec, key, fixed))
+        except _NoNumbers as why:
+            if key.reducer != "range":  # a largest, smallest or count over fewer settings than the sentence says is wrong, not partial
+                raise _Unfilled(f"not computable at {here}: {why}") from None
+            empty.append(here)  # a range names the settings that gave a number and says which gave none
+            continue
         except _Unfilled as why:
-            raise _Unfilled(f"not computable at {_setting_words(dict(zip(each, combo)))}: {why}") from None
+            raise _Unfilled(f"not computable at {here}: {why}") from None
+        kept.append(combo)
         settings.append(dict(zip(each, combo)))
+    if not results:
+        raise _Unfilled(f"{key.metric} has no numeric trials at any of the settings")
+    combos = kept
+    note = (f" (no number at {'; '.join(empty[:3])}" + (f" and {len(empty) - 3} more" if len(empty) > 3 else "") + ")") if empty else ""
     xs = [m.value for m in results]
     r = key.reducer
     kind = results[0].kind if key.op == "" else ("ratio" if key.op == "ratio" else "plain")
@@ -1106,15 +1135,15 @@ def _reduce(rec: Records, key: Key) -> tuple[Measured, str]:
             else:
                 lo, hi, _how = _tt.interval(s)
             k += _rbs.comparison(ref_kind, ref, m.value, lo, hi, s["n"]) == key.word
-        return Measured(k, "words", words=_number_word(k)), "count"
+        return Measured(k, "words", words=_number_word(k), note=note), "count"
     if r in ("min", "max"):
-        return Measured((min if r == "min" else max)(xs), kind), r
+        return Measured((min if r == "min" else max)(xs), kind, note=note), r
     if r == "max_abs":
-        return Measured(max(abs(x) for x in xs), kind), r
+        return Measured(max(abs(x) for x in xs), kind, note=note), r
     if r == "range":
-        return Measured(min(xs), kind, parts=[min(xs), max(xs)]), r
+        return Measured(min(xs), kind, parts=[min(xs), max(xs)], note=note), r
     pick = xs.index(min(xs) if r == "argmin" else max(xs))
-    return Measured(xs[pick], "words", words=f"at {_setting_words(settings[pick])}"), r
+    return Measured(xs[pick], "words", words=f"at {_setting_words(settings[pick])}", note=note), r
 
 
 def _plural(k: int, unit: str) -> str:
@@ -1217,13 +1246,15 @@ def _check_left_out(rec: Records, key: Key) -> None:
 
 
 def placeholder(key: str) -> str:
-    """The key as the writer types it: ``{{calc:...}}`` for an expression, ``{{v:...}}`` for a result."""
-    return "{{" + key + "}}" if key.startswith(CALC) else "{{v:" + key + "}}"
+    """The key as the writer types it: ``{{calc:...}}`` for an expression, ``{{trend:...}}`` and ``{{comparison:...}}`` for a
+    change along a setting and a result against another, ``{{v:...}}`` for a result."""
+    return "{{" + key + "}}" if key.startswith((CALC, TREND, COMPARISON)) else "{{v:" + key + "}}"
 
 
 def keyed_calcs(markdown: str) -> str:
-    """``markdown`` with each ``{{calc:EXPR}}`` the writer typed made the key ``{{v:calc:EXPR}}``, so FI fills it as a key."""
-    return _CALC_TYPED.sub(lambda m: "{{v:" + CALC + m.group(1) + "}}", markdown or "")
+    """``markdown`` with each ``{{calc:EXPR}}`` (and ``{{trend:...}}``, ``{{comparison:...}}``) the writer typed made the key
+    ``{{v:calc:EXPR}}``, so FI fills it as a key."""
+    return _CALC_TYPED.sub(lambda m: "{{v:" + m.group(1) + ":" + m.group(2) + "}}", markdown or "")
 
 
 def _calc_text(x: float) -> str:
@@ -1297,6 +1328,22 @@ def calc(expression: str, protocol: dict[str, Any] | None, topic: str = "") -> V
         return Value(key, NOT_RECORDED, Hit(key, str(why)))
 
 
+def _series_value(shown: str, rec: Records | None) -> Value:
+    """A ``trend:`` or ``comparison:`` key (:mod:`core.trend`), filled or ``not recorded`` with the reason."""
+    from . import trend as _trend
+
+    try:
+        if rec is None or not rec.cells:
+            raise _Unfilled("this study has no per-setting trial record")
+        make = _trend.trend_text if shown.startswith(TREND) else _trend.comparison_text
+        text, numbers, inputs = make(rec, shown.partition(":")[2])
+        return Value(shown, text, numbers=numbers, inputs=inputs)
+    except _Unfilled as why:
+        return Value(shown, NOT_RECORDED, Hit(shown, str(why)))
+    except Exception as why:  # noqa: BLE001 -- a statistic that cannot be worked out is a value FI does not hold, never a broken write
+        return Value(shown, NOT_RECORDED, Hit(shown, f"the series could not be worked out ({type(why).__name__}: {why})"))
+
+
 def resolve(text: str, rec: Records | None) -> Value:
     """The key's value rendered, or ``not recorded`` with a :class:`Hit` saying why. Never a guess."""
     shown = text.strip()
@@ -1305,6 +1352,8 @@ def resolve(text: str, rec: Records | None) -> Value:
     shown = shown[2:] if shown.startswith("v:") else shown
     if shown.startswith(CALC):
         return calc(shown[len(CALC):].strip(), rec.protocol if rec else None, rec.topic if rec else "")
+    if shown.startswith((TREND, COMPARISON)):
+        return _series_value(shown, rec)
     answer = _answer(shown, rec)
     if answer is not None:
         return answer
@@ -1333,6 +1382,7 @@ def resolve(text: str, rec: Records | None) -> Value:
                 out = " to ".join(sig(x * scale, digits) + tail for x in measured.parts)
             else:
                 out = fmt(measured, key.form, key.percent and measured.kind != "words")
+            out += measured.note
             return Value(shown, out, numbers=measured.parts or [measured.value], inputs=_inputs(rec, key))
         measured = _one(rec, key, key.where)
         if key.form == "sd" and not key.op:  # a spread is written with its own interval, as a mean's is
@@ -1544,7 +1594,7 @@ def _places_value(key_text: str) -> str | None:
     """The quantity a key renders the value of (its mean, with or without an interval, or the lowest, highest or widest of its
     settings), else ``None``: a count, a spread, a reference, a correlation, a comparison or a setting is not the quantity."""
     body = key_text.strip()
-    if body.startswith(CALC):
+    if body.startswith((CALC, TREND, COMPARISON)):
         return None
     segments = [x.strip() for x in body.split("|")]
     if "@" not in segments[0]:  # the key of a value the analysis recorded: {{v:<name>}} or {{v:<name> | %}}
@@ -1815,6 +1865,12 @@ To say how a measured value compares with a theory or reference value, place {{v
 values of sigma (0.914 to 0.927 times ...)", or "consistent with" where the value's 95% interval holds it), setting by setting.
 Do not type above, below, larger, smaller, exceeds, within or equal for such a comparison; never set one pooled number beside
 another.
+To say how a quantity changes along a setting (it rises, falls, or does not change; which step of a convergence series is
+irregular), place {{trend:<value> over <setting> @ <every other setting>=each or =<value>}} as the statement itself; add
+| order for the pairwise orders of an error series (| order_size when the setting is a step size). FI words the direction and
+size from the 95% interval of the change, or says it has none. To set one quantity against another inside each setting, place
+{{comparison:<value> <mean|sd|rms> vs <value> <mean|sd|rms> @ <every setting>=each}} (an SD against the root-mean-square of a
+reported error). Do not type rises, falls, flat, unchanged, stays, irregular, coarsest or finest for such a series.
 A quantity listed under "Worked out by the analysis across the settings" is placed with its key as listed ({{v:<name>}}, no
 settings): it is the study's answer for that quantity, so place it where the paper gives that quantity.
 Numbers that are not available: a number that only the analysis script computed, and that no key on this list gives, is not

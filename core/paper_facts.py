@@ -67,7 +67,7 @@ FACT_NAMES = ("seed", "run_time", "time_limit", "time_limit_met", "trials_per_se
 #: FI's blocks a placeholder can name: a whole block of the paper FI writes from its records, on a line of its own.
 #: Not a fact: its numbers are accounted for setting by setting (core/results_by_setting.py), never as FI's record.
 #: ``run_facts`` has no file: its paragraph is composed from :func:`facts` (:func:`run_facts_text`).
-BLOCK_NAMES = ("results_table", "run_facts", "limitations")
+BLOCK_NAMES = ("results_table", "answers", "run_facts", "limitations")
 _BLOCK_FILES = {"results_table": Path(".fi") / "results_table.md"}  # = core.results_by_setting.PAPER_BLOCK
 #: ``{{figure:<file stem>:layout}}`` and ``{{figure:<file stem>:lines}}``: what a saved figure draws, from the recorder's
 #: files (:mod:`core.figure_facts`), not from the writer. The marker key is ``figure-<kind>-<stem>``.
@@ -1133,6 +1133,63 @@ def limitations_text(quest_root: Path | str) -> str:
     return "\n".join(f"- {s}" for s in sentences)
 
 
+def answers_text(quest_root: Path | str) -> str:
+    """The block ``{{answers}}`` stands for: one line for each quantity the topic asks for and marks main, with FI's value
+    and its interval (a key FI fills), from the plan's own ``protocol.topic_map`` entry (``metric:<id>``). A quantity the
+    plan maps to nothing FI holds is said as not answered, and why. ``""`` when the topic asks for no main quantity or FI
+    holds no trial record. Every key in it is tried here, so a line never asks the writer to fix a key it did not write."""
+    from . import topic_requirements as _topic_req
+
+    root = Path(quest_root)
+    req = _read(root, f".fi/{_topic_req.FILE}")
+    protocol = plan_protocol(root)
+    asked = [q for q in (req.get("quantities") if isinstance(req, dict) else None) or [] if isinstance(q, dict) and q.get("main") is True]
+    if not asked or not isinstance(protocol, dict):
+        return ""
+    rec = _values.records_of(root, protocol)
+    if rec is None or not rec.cells:
+        return ""
+    plan = _topic_req.view({}, protocol)
+    varied = rec.varied()
+    lines: list[str] = []
+    for item in asked:
+        name = " ".join(str(item.get("name") or "").split())
+        if not name:
+            continue
+        mapped = _topic_req.mapping_of(req, plan, "quantities", item)
+        # The plan's explicit map to a metric that exists is the fact; the line names that metric, so a wrong map is
+        # disclosed, never hidden. Whether the metric's name resembles the quantity's is not asked here.
+        metric = mapped[1] if mapped is not None and mapped[0] in ("ok", "judge") else ""
+        if not metric:
+            why = (f"the plan's own map for it does not hold: {mapped[1]}" if mapped is not None and mapped[0] == "bad"
+                   else "the plan maps it to no result of the study")
+            lines.append(f"- {name}: not answered ({why})")
+            continue
+        if metric in rec.by_run:
+            lines.append(f"- {name}: not answered (the analysis worked it out once for each replicate and the values differ, "
+                         "so no single value stands for the study)")
+            continue
+        if metric not in rec.metrics() and metric not in rec.answers:
+            lines.append(f"- {name}: not answered (FI holds no value for {metric})")
+            continue
+        if metric in rec.answers:
+            tries = [(f"{{{{v:{metric}}}}}", " (one value worked out by the analysis; no interval is recorded for it)")]
+        elif varied:
+            where = ", ".join(f"{rec.short(a)}=each" for a in varied)
+            tries = [(f"{{{{v:{metric} @ {where} | range}}}}",
+                      f" (no single value: it differs with {', '.join(rec.short(a) for a in varied)}; this is the mean in each "
+                      "setting, lowest to highest, and the tables give every setting)")]
+        else:
+            tries = [(f"{{{{v:{metric}:mean_ci @ }}}}", ""), (f"{{{{v:{metric} @ }}}}", " (no interval: the trials give none)")]
+        got = [(k, note, _values.resolve(k, rec)) for k, note in tries]
+        done = next(((k, note) for k, note, v in got if v.filled), None)
+        if done is None:
+            lines.append(f"- {name}: not answered (FI cannot state {metric}: {got[-1][2].hit.reason if got[-1][2].hit else 'no record'})")
+        else:
+            lines.append(f"- {name} (the plan's map: `{metric}`): {done[0]}{done[1]}")
+    return ("**Answers to the questions asked.**" + chr(10) * 2 + chr(10).join(lines)) if lines else ""
+
+
 def run_facts_text(quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) -> str:
     """The paragraph ``{{run_facts}}`` stands for, composed from FI's records: how many settings and trials, the seed, the
     run time, and the topic's time limit with the verdict, each only when FI holds it. ``""`` when it holds none."""
@@ -1243,6 +1300,8 @@ def block_text(quest_root: Path | str, name: str, *, topic: str = "", fallback_s
         return run_facts_text(quest_root, topic=topic, fallback_s=fallback_s)
     if name == "limitations":
         return limitations_text(quest_root)
+    if name == "answers":
+        return answers_text(quest_root)
     rel = _BLOCK_FILES.get(name)
     if rel is None:
         return ""
@@ -1572,7 +1631,8 @@ def writer_section(quest_root: Path | str, *, topic: str = "", fallback_s: Any =
     over_note = _one(over["note"]) if isinstance(over, dict) and isinstance(over.get("note"), str) and over["note"].strip() else ""
     figure_known = _figure_facts(root)
     real = [i for i in items if i.kind != CODE_FINDING]
-    if not run_text and not real and not reduced_note and not over_note and not has_table and not figure_known:
+    has_answers = bool(answers_text(root))
+    if not run_text and not real and not reduced_note and not over_note and not has_table and not figure_known and not has_answers:
         return ""
     lines.append("FI'S RECORD OF THIS RUN. The facts below come from FI's own records. FI fills them in; do not type "
                  "them yourself.")
@@ -1594,6 +1654,10 @@ def writer_section(quest_root: Path | str, *, topic: str = "", fallback_s: Any =
                      "the tables, but do not copy them into a table of your own.")
     if over_note:
         lines.append(f"Time limit: {over_note} Say this in the paper.")
+    if has_answers:
+        lines.append("{{answers}}: FI's list of the quantities the topic asks for, each with its value from FI's records "
+                     "(and its interval where one exists) or said as not answered. FI puts it before the discussion when the "
+                     "paper is saved. Do not type these values; refer to them as \"the answers\" (for example \"see the answers\").")
     if real:
         lines.append("Limitations: FI adds the list below to the end of your Limitations section when the paper is saved "
                      "(or where you put {{limitations}} on a line of its own), from its records. It reads now:")
