@@ -56,8 +56,8 @@ class _Change:
     lower: float | None
     upper: float | None
     how: str
-    #: The settings' trials are identical (no spread on either side), so the difference is exact and has no interval.
-    exact: bool = False
+    #: The change has no spread, so it is exact and has no interval; ``exact`` says why, in words.
+    exact: str = ""
     #: Said after the interval when it is over fewer trials than the means printed beside it.
     note: str = ""
 
@@ -160,17 +160,22 @@ def _change(rec: _pv.Records, metric: str, a: _Point, b: _Point) -> _Change:
         diffs = [db[k] - da[k] for k in common]
         s = _tt.summary(diffs)
         half = _stats.t_quantile(0.975, len(diffs) - 1) * s["sd"] / math.sqrt(len(diffs))
+        # A spread at the rounding of the numbers themselves is no spread.
+        if half <= 1e-12 * max([abs(d) for d in diffs] + [abs(da[k]) for k in common]):
+            half = 0.0
         note = (f"; the means are over all {a.n} and {b.n} trials, the change and its interval over the {len(diffs)} paired draws"
                 if len(diffs) < a.n or len(diffs) < b.n else "")
         return _Change(s["mean"], s["mean"] - half, s["mean"] + half, f"paired over {len(diffs)} shared random draws",
-                       exact=half == 0, note=note)
+                       exact=(f"each of the {len(diffs)} shared random draws changed by the same amount, so the change "
+                              "has no spread and no 95% interval") if half == 0 else "", note=note)
     diff = b.mean - a.mean
     if a.n < 2 or b.n < 2:
         return _Change(diff, None, None, "each setting ran once" if a.n < 2 and b.n < 2 else "one setting ran once")
     va, vb = a.sd ** 2 / a.n, b.sd ** 2 / b.n
     se = math.sqrt(va + vb)
     if se == 0:
-        return _Change(diff, diff, diff, "two samples, no spread", exact=True)
+        return _Change(diff, diff, diff, "two samples, no spread",
+                       exact="the trials of both settings are identical, so the values are exact and there is no 95% interval")
     df = (va + vb) ** 2 / ((va ** 2 / (a.n - 1)) + (vb ** 2 / (b.n - 1)))
     half = _stats.t_quantile(0.975, df) * se
     return _Change(diff, diff - half, diff + half, "two independent samples (Welch)")
@@ -232,8 +237,7 @@ def _direction(rec: _pv.Records, metric: str, axis: str, points: list[_Point]) -
     lead = {"rises": "rises", "falls": "falls", "none": "no change beyond its 95% interval"}[ch.word]
     if ch.exact:  # no spread on either side: the values are exact, a zero-width interval is not an interval
         lead = "no change" if ch.word == "none" else lead
-        detail = (f", {ends} (change {_pv.sig(ch.diff)}{_ratio(first.mean, last.mean)}; the trials of both settings are "
-                  "identical, so the values are exact and there is no 95% interval)")
+        detail = f", {ends} (change {_pv.sig(ch.diff)}{_ratio(first.mean, last.mean)}; {ch.exact})"
         return ch.word, lead + detail + _shape(rec, axis, points), ratio
     detail = f", {ends} (change {_signed(ch)}, 95% interval{_ratio(first.mean, last.mean)}{ch.note})"
     return ch.word, lead + detail + _shape(rec, axis, points), ratio

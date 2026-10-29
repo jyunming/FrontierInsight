@@ -307,6 +307,19 @@ def test_a_paired_interval_over_fewer_draws_says_how_many_were_paired() -> None:
     assert "the means are over all 100 and 60 trials, the change and its interval over the 60 paired draws" in text
 
 
+def test_the_same_shift_on_every_shared_draw_is_not_called_identical_trials() -> None:
+    """The second review's input: draws that vary, each shifted by the same 0.5 on the same seeds, were said to have
+    "identical" trials; and a shift that is not a binary fraction printed a 17-digit interval at the rounding."""
+    for shift in (0.5, 0.1):
+        draws = [0.25, 0.75, 0.5, 1.0, 0.125]
+        cells = [_cell({"size": 10}, score=draws), _cell({"size": 20}, score=[d + shift for d in draws])]
+        rec = pv.from_cells(cells)
+        rec.seeds = {c["key"]: {i: i for i in range(5)} for c in cells}
+        text = _say(rec, "score over size @ ").text
+        assert "rises" in text and "changed by the same amount" in text, text
+        assert "identical" not in text and "0.0000000000" not in text
+
+
 def test_a_refinement_ratio_of_three_gives_the_order_from_the_real_ratio() -> None:
     errs = [1e-2 / 9 ** i for i in range(4)]  # second order, the step shrinks by 3 each time
     value = _say(_errors(errs, [9, 27, 81, 243]), "error over steps @ | order")
