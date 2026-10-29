@@ -333,8 +333,8 @@ def test_the_numbers_the_plan_fixes_that_the_package_reads_are_written_into_it_b
     exec(compile(new, "model.py", "exec"), ns)
     assert ns["deflection"](10.0) == pytest.approx(0.025) and ns["margin"](1.0) == 0.75
     assert "UNUSED" not in new and "unused" not in new, "only what the package reads"
-    again, nothing = function_steps.with_constants(new, values)
-    assert nothing == [] and again == new
+    again, names = function_steps.with_constants(new, values)
+    assert again == new and sorted(names) == sorted(added), "the block is made again from the plan: the same plan, the same text"
     broken: dict[str, Any] = {}
     exec(compile(PACKAGE, "model.py", "exec"), broken)
     with pytest.raises(NameError):
@@ -384,3 +384,105 @@ async def test_the_engine_writes_the_outlines_numbers_into_the_package_and_into_
     assert "UNIT = 1.0" not in model_path.read_text(encoding="utf-8")
     engine._write_plan_constants({**STATE, "implement_outline": outline}, "spring")
     assert "UNIT = 1.0" in model_path.read_text(encoding="utf-8")
+
+
+# ---- a number the plan changes, a number it drops, every module of the package ----------------------------------------------------------
+
+def test_a_number_the_plan_changed_is_changed_in_fis_block_and_one_the_plan_dropped_leaves_it() -> None:
+    module = "def f(x):\n    return x * LENGTH + SAFETY\n"
+    first, names = function_steps.with_constants(module, {"LENGTH": 6.0, "SAFETY": 1})
+    assert "LENGTH = 6.0" in first and sorted(names) == ["LENGTH", "SAFETY"]
+    second, _ = function_steps.with_constants(first, {"LENGTH": 7.0, "SAFETY": 1})
+    assert "LENGTH = 7.0" in second and "6.0" not in second and second.count("LENGTH =") == 1
+    third, names3 = function_steps.with_constants(second, {"LENGTH": 7.0})
+    assert "SAFETY =" not in third and names3 == ["LENGTH"], "a number the plan no longer fixes is not kept"
+    fourth, none = function_steps.with_constants(third, {})
+    assert none == [] and "FI: the numbers" not in fourth and "LENGTH =" not in fourth
+
+
+def test_a_name_the_model_binds_itself_after_fi_wrote_it_is_the_models_and_leaves_fis_block() -> None:
+    first, _ = function_steps.with_constants("def f():\n    return LENGTH\n", {"LENGTH": 6.0})
+    now = first + "\nLENGTH = 3.0\n"
+    new, names = function_steps.with_constants(now, {"LENGTH": 7.0})
+    assert names == [] and "LENGTH = 3.0" in new and "7.0" not in new and "6.0" not in new
+
+
+def test_the_plan_numbers_reach_every_module_of_the_package_and_a_rewrite_changes_a_changed_number(tmp_path: Path) -> None:
+    package = tmp_path / "beam"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "model.py").write_text("def f():\n    return LENGTH\n", encoding="utf-8")
+    (package / "loads.py").write_text("def g(x):\n    return x * YOUNG\n", encoding="utf-8")
+    written = function_steps.write_package_constants(package, {"LENGTH": 2.5, "YOUNG": 1000.0})
+    assert sorted(written) == ["LENGTH", "YOUNG"]
+    assert "LENGTH = 2.5" in (package / "model.py").read_text(encoding="utf-8")
+    assert "YOUNG = 1000.0" in (package / "loads.py").read_text(encoding="utf-8")
+    assert function_steps.write_package_constants(package, {"LENGTH": 2.5, "YOUNG": 1000.0}) == [], "nothing to change"
+    function_steps.write_package_constants(package, {"LENGTH": 3.0, "YOUNG": 1000.0})
+    assert "LENGTH = 3.0" in (package / "model.py").read_text(encoding="utf-8")
+
+
+# ---- with the frame off nothing moves ----------------------------------------------------------------------------------------------
+
+def test_the_trial_harness_and_the_unframed_run_py_are_what_they_were_before_the_frame() -> None:
+    assert "FI_TRIAL_SEEDS" not in trial_runner.HARNESS_SOURCE and "fi_frame" not in trial_runner.HARNESS_SOURCE
+    assert code_project.run_source(None) == code_project.RUN_SOURCE
+    assert "fi_frame" not in code_project.RUN_SOURCE
+
+
+def test_an_unframed_simulation_gets_the_plain_run_py(tmp_path: Path) -> None:
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "simulate.py").write_text("def run_cell(cell):\n    return {'a': 1}\n", encoding="utf-8")
+    assert code_project.run_source(code) == code_project.RUN_SOURCE
+    (code / "simulate.py").write_text(_framed(COLONY, "def trial(cell, ctx):\n    return TrialResult()\n"), encoding="utf-8")
+    assert code_project.run_source(code) != code_project.RUN_SOURCE
+
+
+def test_a_framed_run_py_whose_edit_no_longer_applies_is_a_fault_not_a_silent_plain_run_py(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "simulate.py").write_text(_framed(COLONY, "def trial(cell, ctx):\n    return TrialResult()\n"), encoding="utf-8")
+    monkeypatch.setattr(code_project, "_FRAMED_EDITS", (("text no run.py has", "other"),))
+    with pytest.raises(RuntimeError, match="no longer applies"):
+        code_project.run_source(code)
+
+
+_VALUES = "def run_trial(cell, trial_id, seed):\n    return {'growth': cell['rate'] * cell['dose'] + seed * 0.001}\n"
+_FRAMED_VALUES = ("def trial(cell, ctx):\n    out = TrialResult()\n    out['growth'] = cell['rate'] * cell['dose'] + ctx.seed * 0.001\n"
+                  "    return out\n")
+
+
+def test_a_plain_grid_gives_the_same_rows_through_the_framed_simulation_as_through_the_plain_one(tmp_path: Path) -> None:
+    cell, trials = {"rate": 0.2, "dose": 2}, [{"trial": t, "seed": 100 + t} for t in range(3)]
+    plain = _rows(_quest(tmp_path, _VALUES, "plain"), cell, trials)
+    framed = _rows(_quest(tmp_path, _framed(COLONY, _FRAMED_VALUES), "framed"), cell, trials)
+    drop = {"duration_s", "at_s", "nonce", "warnings"}
+
+    def core(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [{k: v for k, v in r.items() if k not in drop} for r in rows]
+
+    assert [r["status"] for r in plain] == ["ok"] * 3
+    assert core(framed) == core(plain), "the frame changes how the study is written, not a trial's row"
+
+
+# ---- a batch: its cost per trial, and its order by seed ---------------------------------------------------------------------------
+
+def test_the_estimate_of_a_trial_batch_study_divides_the_batch_time_over_its_seeds(tmp_path: Path) -> None:
+    from core import run_estimate
+
+    body = ("import time\n\ndef trial_batch(cell, ctx):\n    out = ctx.results()\n    for r in out:\n        time.sleep(0.05)\n"
+            "        r['growth'] = 1.0\n    return out\n")
+    root = _quest(tmp_path, _framed(COLONY, body))
+    probe, why = asyncio.run(run_estimate._time_one(_executor(), sys.executable, root, root / "code" / "simulate.py",
+                                                     {"rate": 0.1, "dose": 1}, runs=8, deterministic=False, timeout_s=120,
+                                                     env=None, thresholds=None))
+    assert why == "" and probe is not None
+    assert probe.per_trial_s is not None and probe.per_trial_s >= 0.04, "the batch's time is shared by its 8 seeds"
+    assert probe.at(800, 8).seconds >= 800 * 0.04, "a full run of 800 trials is not estimated as the 8 timed"
+
+
+def test_a_batch_of_results_the_model_built_itself_is_refused_because_their_order_cannot_be_told(tmp_path: Path) -> None:
+    body = "def trial_batch(cell, ctx):\n    return [TrialResult() for _ in ctx.seeds]\n"
+    rows = _rows(_quest(tmp_path, _framed(COLONY, body)), {"rate": 0.1, "dose": 1}, TRIALS)
+    assert [r["status"] for r in rows] == ["failed"] * 3 and "ctx.results()" in rows[0]["reason"], rows[0]["reason"]

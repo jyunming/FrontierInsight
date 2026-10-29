@@ -226,9 +226,6 @@ def main():
     # The frozen protocol's thresholds (what counts as an outbreak, a success): run_trial reads them from here, never
     # from a number of its own.
     os.environ["FI_THRESHOLDS"] = json.dumps(spec.pop("thresholds", None) or {})
-    # The trial numbers and seeds of this setting: the frame of simulate.py (core/skeleton.py) gives a study that answers all
-    # the trials of a setting at once (``trial_batch``) the seeds it must answer.
-    os.environ["FI_TRIAL_SEEDS"] = json.dumps([[t["trial"], t.get("seed")] for t in spec["trials"]])
     # What this call is for (a search design, a scan row, a check case): the code reads it from here, so the cell stays
     # exactly the study's settings.
     # Always set from this spec, never inherited from whoever started the harness: no kind, or one FI does not know, is a check.

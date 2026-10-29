@@ -75,6 +75,7 @@ from . import in_run as _in_run
 from . import metric_spec as _metric_spec
 from . import optimise_search as _search
 from . import outside_run as _outside
+from . import skeleton as _skeleton
 from . import trial_checks as _checks
 from . import trial_runner as _tr
 
@@ -679,7 +680,13 @@ async def _time_one(
         return None, f"the trial did not report (exit code {getattr(result, 'returncode', '?')})"
     durations = [float(r.get("duration_s") or 0.0) for r in done]
     overhead = max(0.0, wall - sum(durations))  # the process, the loading and the harness
-    if len(done) == 1:
+    if n > 1 and len(done) >= 1 and _skeleton.gives_batch(module):
+        # The setting's trials were answered by one call (``trial_batch``), which the harness timed as the first trial's: its
+        # time is the n trials', so one run costs the share of it, and the process and the loading are the rest.
+        per_trial = sum(durations) / n
+        fixed = overhead
+        seconds = fixed + int(runs) * per_trial
+    elif len(done) == 1:
         seconds, fixed, per_trial = wall, (wall if deterministic else None), (0.0 if deterministic else None)
     else:
         # The process, the loading and the first call once; every later run costs what the later timed ones did on average,

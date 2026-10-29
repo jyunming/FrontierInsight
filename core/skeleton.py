@@ -56,6 +56,7 @@ RUNTIME = '''"""FI's frame of simulate.py: the trial's context and its result re
 import json
 import os
 import random
+import sys
 
 FRAME_RUNTIME_VERSION = @VERSION@
 
@@ -173,12 +174,31 @@ def _cell_text(cell):
     return json.dumps([[str(k), repr(v)] for k, v in sorted(dict.items(cell), key=lambda kv: str(kv[0]))])
 
 
+def _harness_trials():
+    """The ``[[trial, seed]]`` of the setting the harness (``.fi/trial_harness.py``) is running: read from its ``main()``, where
+    its spec is. The harness has no line for this (its text, and every key made from it, is the same with or without the
+    frame), so the frame looks at the spec it was given."""
+    frame = sys._getframe(1)
+    while frame is not None:
+        if frame.f_code.co_name == "main":
+            spec = frame.f_locals.get("spec")
+            trials = spec.get("trials") if isinstance(spec, dict) else None
+            if isinstance(trials, list) and "module" in spec and "entry" in spec:
+                return [[t["trial"], t.get("seed")] for t in trials if isinstance(t, dict) and "trial" in t]
+        frame = frame.f_back
+    return None
+
+
 def _trials_of(ctx):
-    """``[(trial, seed)]`` of the setting this trial belongs to (the harness says them in FI_TRIAL_SEEDS), else this trial."""
+    """``[(trial, seed)]`` of the setting this trial belongs to (the harness's spec, or a ``run.py`` that says them in
+    FI_TRIAL_SEEDS), else this trial."""
     mine = (ctx.trial, ctx.seed)
     try:
-        rows = [(int(t), s) for t, s in json.loads(os.environ.get("FI_TRIAL_SEEDS") or "[]")]
-    except (ValueError, TypeError):
+        given = _harness_trials()
+        if given is None:
+            given = json.loads(os.environ.get("FI_TRIAL_SEEDS") or "[]")
+        rows = [(int(t), s) for t, s in given]
+    except (ValueError, TypeError, KeyError):
         rows = []
     return rows if mine in rows else [mine]
 
@@ -192,6 +212,10 @@ def _one_per_seed(label, out, ctx):
         if not isinstance(record, dict):
             raise BatchError("result %d of `%s` is a %s, not a result record" % (i, label, type(record).__name__))
         belongs = getattr(record, "_trial", None)
+        if belongs is None and len(out) > 1:
+            raise BatchError("result %d of `%s` is not one of ctx.results(): with more than one seed, FI can tell that the "
+                             "results are in the order of ctx.seeds only from the records ctx.results() gives; fill those "
+                             "and return them" % (i, label))
         if belongs is not None and belongs != trial:
             raise BatchError("result %d of `%s` is the record of trial %s but the seed at that place is trial %s's: keep the "
                              "results in the order of ctx.seeds" % (i, label, belongs, trial))
@@ -373,6 +397,15 @@ def batch_form(reply: str) -> str:
     except SyntaxError:
         return ""
     return "" if SLOT in names else next((f for f, _h, _p in BATCH_FORMS if f in names), "")
+
+
+def gives_batch(path: Any) -> bool:
+    """Whether the simulation in the file ``path`` answers all the trials of a setting in one call (``trial_batch``)."""
+    try:
+        return any(isinstance(n, ast.FunctionDef) and n.name == "trial_batch"
+                   for n in ast.parse(Path(path).read_text(encoding="utf-8")).body)
+    except (OSError, SyntaxError, ValueError):
+        return False
 
 
 def _adapted(reply: str) -> tuple[str, str]:

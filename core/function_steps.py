@@ -835,28 +835,35 @@ def plan_constants(outline: dict[str, Any] | None, protocol: dict[str, Any] | No
     return out
 
 
-def with_constants(source: str, values: dict[str, Any]) -> tuple[str, list[str]]:
-    """``(source, names)`` with a module-level assignment, written by FI, for each name the module reads and nothing in it
-    binds when the plan fixes that number (``values``, from :func:`plan_constants`) under that very name. A function of the
-    model's package is written to one equation at a time and reads the plan's numbers as module names; setting them was left to
-    whichever script imported the package, and a script written without that line failed with a NameError inside the package.
-    A name the module binds itself is never touched, and a name the plan does not fix (or fixes under another spelling) is
-    left to the code check."""
+PLAN_BLOCK_BEGIN = "# >>> FI: the numbers the plan fixes (written by FI from the plan every time; do not edit)"
+PLAN_BLOCK_END = "# <<< FI: the numbers the plan fixes"
+_PLAN_BLOCK_RE = re.compile(re.escape(PLAN_BLOCK_BEGIN) + r".*?" + re.escape(PLAN_BLOCK_END) + r"[ \t]*\n?", re.DOTALL)
+
+
+def with_constants(source: str, values: dict[str, Any], name: str = "model.py") -> tuple[str, list[str]]:
+    """``(source, names)``: the module with FI's block of the plan's numbers written from ``values`` (:func:`plan_constants`)
+    in full: one module-level assignment for each name the module reads and nothing outside the block binds, when the plan
+    fixes that number under that very name. A function of the model's package is written to one equation at a time and reads
+    the plan's numbers as module names; setting them was left to whichever script imported the package, and a script written
+    without that line failed with a NameError inside the package. The block is made again from the plan on every call: a value
+    the plan changed is changed in it, a number the plan dropped (or the module now binds itself) leaves it. A name the module
+    binds outside the block is never touched, and a name the plan does not fix (or fixes under another spelling) is left to the
+    code check. ``names`` are the names in the block."""
     from . import undefined_names as _undefined
 
-    if not values:
-        return source, []
+    bare = _PLAN_BLOCK_RE.sub("", source)
     found: dict[str, Any] = {}
-    for use in _undefined.undefined_in("model.py", source):
-        if use.name in values and use.name not in found:
-            found[use.name] = values[use.name]
+    if values:
+        for use in _undefined.undefined_in(name, bare):
+            if use.name in values and use.name not in found:
+                found[use.name] = values[use.name]
     if not found:
-        return source, []
-    block = ("# FI: the numbers the plan fixes, written by FI so that no script has to set them in this module\n"
-             + "".join(f"{name} = {value!r}\n" for name, value in found.items()))
-    lines = source.splitlines(keepends=True)
+        return bare, []
+    block = (PLAN_BLOCK_BEGIN + "\n" + "".join(f"{key} = {value!r}\n" for key, value in found.items())
+             + PLAN_BLOCK_END + "\n")
+    lines = bare.splitlines(keepends=True)
     after = 0
-    for n in ast.parse(source).body:
+    for n in ast.parse(bare).body:
         is_doc = isinstance(n, ast.Expr) and isinstance(getattr(n, "value", None), ast.Constant) and isinstance(n.value.value, str)
         if not (is_doc or isinstance(n, (ast.Import, ast.ImportFrom))):
             break
@@ -867,18 +874,29 @@ def with_constants(source: str, values: dict[str, Any]) -> tuple[str, list[str]]
 
 
 def write_constants(model_path: Path, values: dict[str, Any], log: Any = None) -> list[str]:
-    """:func:`with_constants` on the file ``model_path``, written back only when a constant was added; the names added."""
+    """:func:`with_constants` on the file ``model_path``, written back only when the file changes; the names in its block when
+    it did, else ``[]``."""
     try:
         source = model_path.read_text(encoding="utf-8")
-        new, added = with_constants(source, values)
+        new, names = with_constants(source, values, model_path.name)
     except (OSError, SyntaxError, ValueError):
         return []
-    if added:
-        model_path.write_text(new, encoding="utf-8")
-        if log is not None:
-            log.info("[implement] FI wrote the plan's number(s) %s into %s: the model's functions read them there", ", ".join(added),
-                     model_path.name)
-    return added
+    if new == source:
+        return []
+    model_path.write_text(new, encoding="utf-8")
+    if log is not None:
+        log.info("[implement] FI wrote the plan's number(s) %s into %s: the model's functions read them there",
+                 ", ".join(names) or "(none left)", model_path.name)
+    return names
+
+
+def write_package_constants(package_dir: Path, values: dict[str, Any], log: Any = None) -> list[str]:
+    """:func:`write_constants` on every module of the package folder: a name any of them reads and nothing binds."""
+    out: list[str] = []
+    if values and package_dir.is_dir():
+        for path in sorted(package_dir.rglob("*.py")):
+            out += write_constants(path, values, log)
+    return out
 
 
 def _with_imports(source: str, imports: list[str]) -> str:

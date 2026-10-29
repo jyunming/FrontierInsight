@@ -330,7 +330,10 @@ def run_source(code_dir: Path | str | None = None) -> str:
     text = RUN_SOURCE
     for old, new in _FRAMED_EDITS:
         if text.count(old) != 1:
-            return RUN_SOURCE  # the template moved on and this edit did not: the plain run.py is still right
+            # The template moved on and this edit did not: a run.py without the frame's runtime would fail at the first trial,
+            # so this is a fault of FI's (a test of the framed run.py fails), never a silent fall back.
+            raise RuntimeError("FI's run.py template changed and its edit for a framed simulation no longer applies: "
+                               + old.strip().splitlines()[0][:80])
         text = text.replace(old, new)
     return text.replace("@FI_FRAME_RUNTIME@", repr(_skeleton.RUNTIME), 1)
 
