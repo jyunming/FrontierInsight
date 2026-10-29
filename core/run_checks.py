@@ -947,6 +947,7 @@ class RunChecksMixin:
         # FI lowers the runs once; the lowered run is timed again, and a resume after the cut does not cut a second time.
         cut_done = bool(reduced) and prior.get("fits") is False
         speed_done = False
+        grouping_done = False
         at_once = int(getattr(runner, "at_once", 1) or 1)
         slowdown: float | None = None  # measured once, only when the settings one after another would not fit
         # The timing with the most paid once: a later timing runs on the cache the earlier one filled (run_estimate.with_once).
@@ -962,6 +963,8 @@ class RunChecksMixin:
             if record.get("key") == key and record.get("fits"):
                 self._log.info("[execute] %s (timed before; nothing in the experiment has changed)",  # type: ignore[attr-defined]
                                record.get("says") or "the experiment fits")
+                if int(record.get("per_process") or 1) > 1:
+                    runner.per_process = int(record["per_process"])  # type: ignore[attr-defined]
                 return None
             if record.get("key") == key and record.get("truncated"):
                 self._log.info("[execute] %s (timed before; nothing in the experiment has changed)",  # type: ignore[attr-defined]
@@ -1037,6 +1040,20 @@ class RunChecksMixin:
                 _estimate.write_record(self.quest_root, {**base, "fits": False, "stopped": text, "fit": fits_in})  # type: ignore[attr-defined]
                 return self._stop_too_long(text, fit=fits_in)
             self._log.warning("[execute] %s, so it would not finish within it", line)  # type: ignore[attr-defined]
+            if not grouping_done and isinstance(runner, _trial_runner.TrialsRunner):
+                # Over the time allowed: before anything is cut, settings may share processes when a sample shows the
+                # very same numbers (core/trial_runner.py ``measure_grouping``); below the limit nothing here runs.
+                grouping_done = True
+                shared = await self._group_settings(state, runner, python, env, grid, runs, thresholds, inside, est, limit_s,
+                                                    budget_s=max(0.0, budget_s - self._pilot_spent))
+                if shared is not None:
+                    line += f" {shared}"
+                    base["says"] = line
+                    self._log.info("[execute] %s", shared)  # type: ignore[attr-defined]
+                    print(f"[FI] {shared}")
+                    self._say_headroom(est, hard_s)
+                    _estimate.write_record(self.quest_root, {**base, "fits": True, "per_process": runner.per_process})  # type: ignore[attr-defined]
+                    return None
             if (not speed_done and not cut_done and int(self.config.engine.improve_rounds or 0) > 0  # type: ignore[attr-defined]
                     and isinstance(runner, _trial_runner.TrialsRunner)):
                 # Before the runs are cut or the quest stops: try to make the simulation itself faster, same numbers.
@@ -1942,6 +1959,56 @@ class RunChecksMixin:
             tried=[*[str(t) for t in fault.get("tried") or []],
                    f"sent the simulation back to be repaired with these numbers ({repairs} repair"
                    f"{'s' if repairs != 1 else ''}); the fault stood"])
+
+    async def _group_settings(self, state: Any, runner: Any, python: Any, env: Any, grid: dict[str, list[Any]], runs: int,
+                              thresholds: dict[str, Any], inside: dict[str, list[Any]], est: Any, limit_s: float,
+                              budget_s: float = 300.0) -> str | None:
+        """The study is over the time allowed: measure whether settings can share processes (same numbers on a sample, a
+        group size computed from the measured start of a process and time of a trial). Sets ``runner.per_process`` and
+        returns the sentence for the log when the study then fits the time allowed; else says why not in the log, leaves
+        one process per setting, and returns ``None`` (the cut and the disclosure go on as before)."""
+        from . import mc_error as _mc_error
+
+        try:
+            protocol = self._protocol_block(state) or {}  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            protocol = {}
+        # The sizing's own timings first (core/cost_model.py): when they already say the trials are too slow for sharing to
+        # save enough, the sample is not run.
+        model = _cost_model.read(self.quest_root)  # type: ignore[attr-defined]
+        n_runs = 1 if runner.deterministic else runs
+        if model is not None and model.seconds("fixed") is not None and model.seconds("per_trial") is not None:
+            guess = _cost_model.settings_per_process(
+                est.cells, (model.seconds("per_trial") or 0.0) * n_runs, model.seconds("fixed") or 0.0, est.at_once,
+                est.slowdown if est.at_once > 1 else None)
+            if guess <= 1:
+                self._log.warning("[execute] Settings run one per process: the sizing timed a setting at about %s and the start "  # type: ignore[attr-defined]
+                                  "of a process at about %s, so sharing processes would not save enough.",
+                                  _estimate.plain_duration((model.seconds("per_trial") or 0.0) * n_runs),
+                                  _estimate.plain_duration(model.seconds("fixed") or 0.0))
+                return None
+        try:
+            grouping = await _trial_runner.measure_grouping(
+                self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(), grid,  # type: ignore[attr-defined]
+                runs_per_setting=runs, base_seed=int((env or {}).get("FI_REPLICATE_SEED") or 0),
+                deterministic=runner.deterministic, timeout_s=int(max(30.0, min(budget_s, float(self.config.execution.timeout_s)))),  # type: ignore[attr-defined]
+                env=env, thresholds=thresholds, paired=_mc_error.paired(protocol, self.quest_root), in_each_run=inside,
+                log=self._log, at_once=est.at_once, slowdown=est.slowdown if est.at_once > 1 else None)  # type: ignore[attr-defined]
+        except Exception as e:  # noqa: BLE001 -- a check that cannot run leaves the run as it is
+            self._log.warning("[execute] settings were not put in shared processes: the sample could not be run (%r)", e)  # type: ignore[attr-defined]
+            return None
+        if grouping.per_process <= 1:
+            self._log.warning("[execute] %s", grouping.says)  # type: ignore[attr-defined]
+            return None
+        seconds = _cost_model.grouped_seconds(grouping.settings, (grouping.per_trial_s or 0.0) * n_runs,
+                                              grouping.start_s or 0.0, est.at_once, grouping.per_process,
+                                              est.slowdown if est.at_once > 1 else None)
+        if seconds * _estimate.SAFETY > limit_s:
+            self._log.warning("[execute] %s Even so FI expects about %s, over the limit of %s, so the usual cut applies.",  # type: ignore[attr-defined]
+                              grouping.says, _estimate.plain_duration(seconds * _estimate.SAFETY), _estimate.plain_duration(limit_s))
+            return None
+        runner.per_process = grouping.per_process
+        return f"{grouping.says} FI then expects about {_estimate.plain_duration(seconds * _estimate.SAFETY)}, within the limit."
 
     async def _speed_up(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         """:meth:`_speed_up_rounds`, which commits each version it keeps with its own words (code_project.CodeRuns)."""

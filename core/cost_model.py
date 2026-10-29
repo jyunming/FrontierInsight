@@ -22,6 +22,7 @@ import hashlib
 import math
 import os
 import re
+import statistics
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -376,6 +377,51 @@ def seconds_with_settings_per_process(model: CostModel, settings: int, per_proce
     processes = math.ceil(settings / max(1, int(per_process)))
     return settings * per_trial + processes * fixed
 
+
+def grouped_seconds(settings: int, per_setting_s: float, start_s: float, at_once: int, per_process: int,
+                    slowdown: float | None = None) -> float:
+    """The time of ``settings`` settings when ``per_process`` of them share a process and ``at_once`` processes run at the
+    same time: each wave of processes takes the start of a process plus its settings. The measured ``slowdown`` (how many
+    times longer a process takes beside ``at_once - 1`` others) applies in full only when ``at_once`` processes run; with
+    fewer it grows from 1 (alone) in step with how many run."""
+    n = max(1, int(per_process))
+    at_once = max(1, int(at_once))
+    processes = math.ceil(settings / n)
+    running = min(at_once, processes)
+    waves = math.ceil(processes / running)
+    each = math.ceil(settings / processes)
+    share = 1.0 + (slowdown - 1.0) * (running - 1) / (at_once - 1) if slowdown and at_once > 1 and slowdown > 1.0 else 1.0
+    return waves * (start_s + each * per_setting_s) * share
+
+
+#: A group size is used only when it takes at most this share of the time one process per setting takes.
+GROUPING_MUST_TAKE = 0.8
+
+
+def settings_per_process(settings: int, per_setting_s: float, start_s: float, at_once: int, slowdown: float | None = None) -> int:
+    """How many settings should share a process: the smallest number whose time is within 5% of the best, and only when
+    that takes at most :data:`GROUPING_MUST_TAKE` of the time with one process per setting; else 1. Computed from the
+    measured start of a process and the measured time of a setting, never guessed: when the settings themselves are slow the
+    answer is 1."""
+    if settings < 2:
+        return 1
+    alone = grouped_seconds(settings, per_setting_s, start_s, at_once, 1, slowdown)
+    tried = {}
+    for processes in range(1, min(settings, 4096) + 1):
+        n = math.ceil(settings / processes)
+        tried.setdefault(n, grouped_seconds(settings, per_setting_s, start_s, at_once, n, slowdown))
+    best = min(tried.values())
+    n = min(k for k, v in tried.items() if v <= best * 1.05)
+    return n if n > 1 and tried[n] <= GROUPING_MUST_TAKE * alone else 1
+
+
+def start_and_trial(alone_walls: list[float], trial_seconds: list[float], trials: int) -> tuple[float, float]:
+    """The start of a process and the time of one trial, from one sample: the wall time of each sample setting in a process
+    of its own (``alone_walls``; the fastest is the one without a cold start) and the time of each trial as the trials
+    measured it themselves (``trial_seconds``, taken in the shared process). A setting of ``trials`` trials then costs
+    its trials plus the start."""
+    per_trial = statistics.median(trial_seconds) if trial_seconds else 0.0
+    return max(0.0, min(alone_walls) - max(1, trials) * per_trial), per_trial
 
 # ---- the size of a search ---------------------------------------------------------------------------------------------
 
