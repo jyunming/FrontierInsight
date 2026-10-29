@@ -151,7 +151,7 @@ _PLAN_LOOK = [".fi/oracle_guidance.json", ".fi/oracle_review.json", ".fi/oracle_
               ".fi/topic_requirements.json", ".fi/topic_covered.json", ".fi/topic_asked.json",
               # The plan's parts asked of its model and the ledger of its simplifications belong to the plan written.
               ".fi/protocol_part_asked.json", ".fi/grid_asked.json", ".fi/grid_asked_again.json", ".fi/search_block_asked.json",
-              ".fi/plan_sources_asked.json", ".fi/ledger_asked.json", ".fi/ledger.json"]
+              ".fi/plan_sources_asked.json", ".fi/ledger_asked.json", ".fi/ledger.json", ".fi/contract_parts.json"]
 
 _OWN: dict[str, list[str]] = {
     # The review's own file is its check of the paper against FI's records; what is made from the reviewed paper is made

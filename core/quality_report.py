@@ -34,7 +34,7 @@ STAGE_NAME = {"plan": "Plan", "checks": "Checks", "design": "Design", "code": "C
 _NODE_STAGE = {
     "clarify": "plan", "ideate": "plan", "ideate_query": "plan", "ideate_reflect": "plan", "ideate_tournament": "plan",
     "literature_query": "plan", "literature_foundational": "plan", "literature_screen": "plan", "source_router": "plan",
-    "select_skills": "plan", "plan": "plan", "plan_revise": "plan", "plan_criteria": "plan",
+    "select_skills": "plan", "plan": "plan", "plan_revise": "plan", "plan_criteria": "plan", "plan_contract": "plan",
     "oracle_review": "checks", "implement_oracle": "checks", "oracle_recompute": "checks",
     "design": "design", "design_self_critique": "design", "design_review": "design",
     "implement_outline": "code", "implement": "code", "implement_body": "code", "implement_function": "code",
@@ -173,6 +173,7 @@ class _Quest:
         self.oracle_corrections = _dict(_json(fi / "oracle_corrections.json"))
         self.search_asked = _dict(_json(fi / "search_block_asked.json"))
         self.protocol_asked = _dict(_json(fi / "protocol_part_asked.json"))
+        self.contract_parts = _dict(_json(fi / "contract_parts.json"))
         self.pilot = _dict(_json(fi / "pilot_check.json"))
         self.cannot_repair = _dict(_json(fi / "cannot_repair.json"))
         self.trial_checks = _dict(_json(fi / "trial_checks.json"))
@@ -516,6 +517,14 @@ def _plan_problems(q: _Quest) -> list[dict[str, str]]:
         out.append(_problem("plan", f"the plan left out its {parts}", "FI's plan check",
                             "fixed" if pp.get("outcome") in ("kept", "told in the plan") else "not fixed",
                             ".fi/protocol_part_asked.json"))
+    for part, rec in _dict(q.contract_parts.get("parts")).items():
+        rec = _dict(rec)
+        if rec and not rec.get("valid"):
+            from . import contract_parts as _cparts
+
+            why = "the call failed" if rec.get("error") else "its answer could not be used after " + str(rec.get("asks")) + " asks"
+            out.append(_problem("plan", f"the plan was not given {_cparts.PART_WORDS.get(part, part)} ({why}); it stays in the "
+                                "older form", "FI's plan check", "disclosed", ".fi/contract_parts.json"))
     if q.pause.get("kind") == "plan":
         out.append(_problem("plan", q.pause.get("headline") or "the plan cannot be run as written", "FI's plan check",
                             "not fixed", ".fi/pause.json"))

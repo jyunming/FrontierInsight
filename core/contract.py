@@ -88,6 +88,8 @@ class Result(_Strict):
     unit: str = ""  # the physical unit of the value, if any
     label: str = ""
     depends_on: tuple[str, ...] | None = None  # the settings it should change with; None: not declared
+    #: ``each_run``: every trial returns it; ``afterwards``: the study computes it from the trials; None: not declared.
+    returned: Literal["each_run", "afterwards"] | None = None
     range: Range | None = None
     known_value: dict[str, Any] | None = None
     reference: dict[str, Any] | None = None
@@ -235,12 +237,12 @@ class StudyContract(_Strict):
 
 # --- reading a plan ------------------------------------------------------------------------------------------------------
 
-_NOTE_KEYS = ("seed_policy", "ci_method", "failure_policy", "acceptance", "simplifications", "definitions")
+_NOTE_KEYS = ("seed_policy", "ci_method", "failure_policy", "acceptance", "simplifications", "definitions", "named_results")
 _DESIGN_NOTES = ("hypothesis", "method", "expected_outcome", "rationale", "variables")
 #: Protocol keys the reader places; any other key goes to the notes and is named in the gaps.
 _PLACED = {"grid", "sub_studies", "in_each_run", "numerical_settings", "constants", "thresholds", "runs_per_setting",
            "min_runs_per_setting", "precision", "metrics", "oracles", "criteria", "topic_map", "optimisation", "model",
-           "labels", "comparisons", "derived", "figures", "steps", "shared_draws", "form", "parts_left_out", *_NOTE_KEYS}
+           "labels", "comparisons", "derived", "figures", "steps", "shared_draws", "form", "parts_left_out", "names_not_asked", *_NOTE_KEYS}
 
 
 def oracle_measures(protocol: Any) -> tuple[dict[str, list[str]], set[str]]:
@@ -415,7 +417,8 @@ def from_design(design: dict[str, Any] | None) -> StudyContract:
                 "kind": m.get("kind") or "mean",
                 "estimand": str(m.get("estimand") or ""), "observation": str(m.get("unit") or ""),
                 "unit": str(m.get("physical_unit") or ""), "label": str(m.get("label") or labels.get(rid, "")),
-                "depends_on": depends, "range": ranges.get(rid) or m.get("range"),
+                "depends_on": depends, "returned": m.get("returned") if m.get("returned") in ("each_run", "afterwards") else None,
+                "range": ranges.get(rid) or m.get("range"),
                 "known_value": m.get("known_value"), "reference": m.get("reference"), "given": _ident(given),
                 "cluster": m.get("cluster"), "paired": bool(m.get("paired")), "family": str(m.get("family") or ""),
                 "undefined_when": _mapping(m.get("undefined_when"))}
@@ -473,6 +476,9 @@ def from_design(design: dict[str, Any] | None) -> StudyContract:
         gaps.append("these parts of the protocol are kept only as notes: " + ", ".join(other))
 
     form = "contract" if p.get("form") == "contract" else "older"
+    unasked = p.get("names_not_asked")
+    if isinstance(unasked, list) and unasked:
+        gaps.append("the plan uses more names than were asked about; not asked: " + ", ".join(str(x) for x in unasked))
     left_out = p.get("parts_left_out")
     if isinstance(left_out, list) and left_out:
         gaps.append("the plan's model did not give, in a form that could be used, " + ", ".join(str(x) for x in left_out)
@@ -572,11 +578,11 @@ def _declared_names(protocol: dict[str, Any]) -> set[str]:
     return names
 
 
-def undeclared_names(design: Any) -> dict[str, str]:
+def undeclared_names(design: Any, not_asked: list[str] | None = None) -> dict[str, str]:
     """The names the plan relies on without declaring them as results, each with where the plan uses it: a name in the
     formula of a check's ``measure``, a key of ``labels``, the path of a ``result_assertions`` bound, or a name in
     backticks in the method. FI finds them by shape; a model's answer is then asked about each. In the order the plan
-    uses them, at most :data:`MAX_NAMES`."""
+    uses them, at most :data:`MAX_NAMES`; the names past that are added to ``not_asked`` when it is given."""
     design = design if isinstance(design, dict) else {}
     p = design.get("protocol") if isinstance(design.get("protocol"), dict) else {}
     known = {n.lower() for n in _declared_names(p)} | _KNOWN_WORDS
@@ -601,6 +607,8 @@ def undeclared_names(design: Any) -> dict[str, str]:
             take(a["path"].strip(), "a bound on its value")
     for m in re.finditer(r"`([A-Za-z_][A-Za-z0-9_]*)`", str(design.get("method") or "")):
         take(m.group(1), "the method")
+    if not_asked is not None:
+        not_asked.extend(list(found)[MAX_NAMES:])
     return dict(list(found.items())[:MAX_NAMES])
 
 
@@ -633,6 +641,8 @@ def check_part(part: str, value: Any, design: Any) -> list[str]:
                 continue
             if row.get("role") not in ROLES:
                 out.append(f"`{rid}`: role must be one of {', '.join(ROLES)}")
+            if row.get("returned") not in ("each_run", "afterwards"):
+                out.append(f"`{rid}`: returned must be each_run or afterwards")
             dep = row.get("depends_on")
             if not isinstance(dep, list) or not all(isinstance(s, str) for s in dep):
                 out.append(f"`{rid}`: depends_on must be a list of settings (empty when it changes with none)")
@@ -641,6 +651,9 @@ def check_part(part: str, value: Any, design: Any) -> list[str]:
                 if bad:
                     out.append(f"`{rid}`: {', '.join(bad)} is not a setting that varies (the settings are "
                                f"{', '.join(varied) or 'none'})")
+        given = {str(m.get("given")) for m in p.get("metrics") or [] if isinstance(m, dict) and m.get("given")}
+        out += [f"`{g}` is the subset another result is given, so each run returns it (returned: each_run)"
+                for g in sorted(given) if isinstance(value.get(g), dict) and value[g].get("returned") == "afterwards"]
         out += [f"`{k}` is not a declared result" for k in value if k not in declared]
     elif part == "names":
         wanted = undeclared_names(design)

@@ -1207,11 +1207,18 @@ def _returns_lines(protocol: Any) -> list[str]:
     for m in metrics:
         dep = m.get("depends_on")
         lines.append(f"- `{m['id']}`: {_RESULT_ROLE_WORDS.get(str(m['role']), str(m['role']))}"
-                     + ("; changes with " + ", ".join(f"`{s}`" for s in dep) if isinstance(dep, list) and dep else
-                        "; changes with none of the settings" if isinstance(dep, list) else ""))
+                     + ("; may change with " + ", ".join(f"`{s}`" for s in dep) if isinstance(dep, list) and dep else
+                        "; changes with none of the settings" if isinstance(dep, list) else "")
+                     + ("; computed afterwards from the runs" if m.get("returned") == "afterwards" else ""))
     for d in protocol.get("derived") or []:
         if isinstance(d, dict) and d.get("id"):
-            lines.append(f"- `{d['id']}`: computed afterwards from " + ", ".join(f"`{i}`" for i in d.get("inputs") or []))
+            lines.append(f"- `{d['id']}`: " + ("a theory or reference value FI computes from `" + str(d["formula"]) + "`"
+                                                 if d.get("formula") else "computed afterwards from "
+                                                 + ", ".join(f"`{i}`" for i in d.get("inputs") or [])))
+    for n in protocol.get("named_results") or []:
+        if isinstance(n, dict) and n.get("id"):
+            lines.append(f"- `{n['id']}`: " + (f"a reference value from equation {n['equation']} of the model (not checked)"
+                                              if n.get("equation") else "a number the simulation is said to return (nothing requires it)"))
     for c in protocol.get("comparisons") or []:
         if isinstance(c, dict) and c.get("result"):
             lines.append(f"- compared: `{c['result']}` between values of `{c.get('across')}` ({c.get('how', 'difference')})")
@@ -1723,6 +1730,9 @@ def refresh_model_section(text: str) -> str:
     # What the study returns is shown from the block too (the roles and what each result changes with).
     returns = re.search(rf"^##\s+{re.escape(RETURNS_HEADING)}\s*$", text, re.MULTILINE)
     ret_lines = _returns_lines(parsed.design.get("protocol"))
+    if returns and not ret_lines:  # the roles are gone: so is the section
+        after = re.search(r"^##\s+", text[returns.end():], re.MULTILINE)
+        text = text[:returns.start()] + (text[returns.end() + after.start():] if after else "")
     if ret_lines:
         if returns:
             after = re.search(r"^##\s+", text[returns.end():], re.MULTILINE)
