@@ -12,12 +12,16 @@ that crashed a real analysis), in a scratch copy of the quest. No model is asked
 with a ``kind``:
 
 * ``fault``: the code is wrong whatever the data: a name that is not defined (including a definition placed after the
-  main guard), an attribute, import, syntax or type error, a run that ended without its ``RESULT_JSON`` line.
+  main guard), an import or syntax error, a run that ended without its ``RESULT_JSON`` line; and a ``TypeError`` or
+  ``AttributeError`` that shows at the same place of the code on a larger copy of the record too (3 trials can cause
+  one: a fit with more parameters than points, a helper that returns ``None`` for a small ``n``).
 * ``small_data``: the outcome 3 trials can explain (a ``ValueError`` in a fit, a missing setting, a figure that was not
-  drawn, a quantity with no usable value) or that the gate cannot judge.
+  drawn, a quantity with no usable value, a ``TypeError`` that goes away on more trials) or that the gate cannot judge.
 * ``time``: the run did not end in its time.
+* ``not_checked``: the gate could not run here (a Docker quest: the scratch folder is not visible to the container).
 
-The kind is decided by the exception's type and where it was raised, never by words in its message.
+The kind is decided by the exception's type, where it was raised and, for a ``TypeError`` or ``AttributeError``, a
+second run on more trials; never by words in its message.
 :func:`gate_verdict` is the decision rule: a change is refused only when the code passed before it and has a new
 ``fault`` after it; ``small_data`` and ``time`` are shown, never a reason to refuse.
 """
@@ -41,15 +45,29 @@ from typing import Any
 
 from . import contract as _contract
 from . import trial_runner as _trials
-from .code_layout import _is_main_guard
+from .code_layout import _SCRIPT_NAMES, _is_main_guard
 
 TRIALS = 3
 #: Evaluations of a search kept in the small copy of its ledger.
 SEARCH_ROWS = 200
-FAULT, SMALL_DATA, TIME = "fault", "small_data", "time"
+#: Trials per setting of the larger copy that confirms a ``TypeError`` or ``AttributeError`` (the recorded trials of
+#: each setting up to this many, 3x the small copy) and the longest that confirming run may take: a candidate fault
+#: costs at most this much more, so a gate run adds well under a minute.
+CONFIRM_TRIALS = 10
+CONFIRM_TIMEOUT_S = 40
+#: The most a copied folder of the quest may weigh (bytes); a larger one is left out of the scratch copy.
+COPY_CAP = 50 * 1024 * 1024
+FAULT, SMALL_DATA, TIME, NOT_CHECKED = "fault", "small_data", "time", "not_checked"
 #: The exceptions that say the code is wrong whatever the data.
-_FAULTS = frozenset({"NameError", "UnboundLocalError", "AttributeError", "ImportError", "ModuleNotFoundError",
-                     "SyntaxError", "IndentationError", "TabError", "TypeError"})
+_HARD_FAULTS = frozenset({"NameError", "UnboundLocalError", "ImportError", "ModuleNotFoundError",
+                          "SyntaxError", "IndentationError", "TabError"})
+#: The exceptions that say so only if they show on more data too (too little data can raise them).
+_MAYBE_FAULTS = frozenset({"AttributeError", "TypeError"})
+_FAULTS = _HARD_FAULTS | _MAYBE_FAULTS
+_STAGES = {"static": "reading the code", "derive": "running the analysis", "figures": "drawing the figures",
+           "facts": "filling the paper's numbers"}
+_KINDS = {FAULT: "has an error in its code", SMALL_DATA: "stopped, too few trials to tell whether the code is wrong",
+          TIME: "did not finish in time", NOT_CHECKED: "was not checked"}
 _EXC_LINE = re.compile(r"^([A-Za-z_][\w.]*)(?::|$)")
 
 
@@ -73,7 +91,8 @@ class GateResult:
     def says(self) -> str:
         if self.ok:
             return "the analysis ran from start to end on a small copy of the recorded results"
-        return f"the analysis {self.kind} ({self.stage}{', ' + self.where if self.where else ''}): {self.detail}"
+        what, stage = _KINDS.get(self.kind, "stopped"), _STAGES.get(self.stage, self.stage)
+        return f"the analysis {what} ({stage}{', ' + self.where if self.where else ''}): {self.detail}"
 
 
 @dataclass
@@ -139,7 +158,11 @@ def late_definitions(source: str) -> dict[str, int]:
         got |= {n.id for n in ast.walk(fn) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
         return got
 
-    pending = set(loads(body[guard], False))
+    # The guard block's own variables (a loop or comprehension target, an assignment, a lambda argument) are not
+    # names it needs from elsewhere; a later top-level `for i in ...` does not make `i` a late definition.
+    own_guard = {n.id for n in ast.walk(body[guard]) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+    own_guard |= {a.arg for a in ast.walk(body[guard]) if isinstance(a, ast.arg)}
+    pending = set(loads(body[guard], False)) - own_guard
     for s in body[:guard]:
         if not isinstance(s, (ast.Import, ast.ImportFrom)):
             pending |= loads(s, True)
@@ -159,11 +182,13 @@ def late_definitions(source: str) -> dict[str, int]:
 
 
 def late_definitions_in(code_dir: Path) -> list[tuple[str, str, int]]:
-    """``(file, name, line)`` of each :func:`late_definitions` entry in the folder's scripts (not its tests)."""
+    """``(file, name, line)`` of each :func:`late_definitions` entry in the scripts FI runs (``experiment.py``,
+    ``simulate.py``, ``submit.py``, ``run.py`` at the top of the folder). A helper module's own guard (a self-test) is
+    not run as a script, so it is not looked at."""
     out: list[tuple[str, str, int]] = []
-    for path in sorted(Path(code_dir).rglob("*.py")):
+    for path in sorted(Path(code_dir).glob("*.py")):
         rel = path.relative_to(code_dir).as_posix()
-        if rel.startswith(("tests/", ".")) or "/." in rel or "__pycache__" in rel or path.name.startswith("test_"):
+        if path.name not in _SCRIPT_NAMES:
             continue
         try:
             found = late_definitions(path.read_text(encoding="utf-8"))
@@ -177,30 +202,39 @@ def late_definitions_in(code_dir: Path) -> list[tuple[str, str, int]]:
 
 
 def last_exception(stderr: str) -> str:
-    """The type of the exception the last traceback in ``stderr`` ends with (``"ValueError"``,
-    ``"LinAlgError"``), ``""`` when it holds no traceback (a script that stopped itself with a message)."""
+    """The type of the exception the script died of (``"ValueError"``, ``"LinAlgError"``): the last traceback in
+    ``stderr``, and only when its exception line ends ``stderr`` (apart from indented lines, such as a note). A
+    traceback the script handled and printed, followed by anything else, is not what stopped it: ``""``, as for a
+    script that stopped itself with a message."""
     lines = (stderr or "").splitlines()
     start = max((i for i, ln in enumerate(lines) if ln.startswith("Traceback (most recent call last)")), default=None)
     if start is None:
         return ""
-    for ln in lines[start + 1:]:
+    for i in range(start + 1, len(lines)):
+        ln = lines[i]
         if ln[:1] in (" ", "\t") or not ln.strip():
             continue
         m = _EXC_LINE.match(ln)
-        return m.group(1).rsplit(".", 1)[-1] if m else ""
+        if not m:
+            return ""
+        if any(x[:1] not in (" ", "\t") for x in lines[i + 1:] if x.strip()):
+            return ""
+        return m.group(1).rsplit(".", 1)[-1]
     return ""
 
 
 def kind_of(exception: str) -> str:
-    """``fault`` for an exception that says the code is wrong whatever the data, else ``small_data``."""
+    """``fault`` for an exception that may say the code is wrong whatever the data (a ``TypeError`` or
+    ``AttributeError`` is confirmed on more trials by :func:`analysis_gate`), else ``small_data``."""
     return FAULT if exception in _FAULTS else SMALL_DATA
 
 
 # --- the small copy of the recorded raw ----------------------------------------------------------------------------------
 
 
-def _shrink(entry: dict[str, Any], n: int) -> dict[str, Any]:
-    """One recorded setting with its first ``n`` trials, its counts recomputed."""
+def _shrink(entry: dict[str, Any], n: int, failed: int = 0) -> dict[str, Any]:
+    """One recorded setting with its first ``n`` trials, its counts recomputed. ``failed`` is how many of those trials
+    the ledger records as failed; a setting with no good trial stays with none."""
     e = copy.deepcopy(entry)
     for m in (e.get("metrics") or {}).values():
         if not isinstance(m, dict) or not isinstance(m.get("values"), list):
@@ -213,8 +247,9 @@ def _shrink(entry: dict[str, Any], n: int) -> dict[str, Any]:
         if isinstance(m.get("why_missing"), dict):
             m["why_missing"] = ({k: min(v, m["non_finite"]) for k, v in m["why_missing"].items()}
                                 if m["non_finite"] else {})
-    e["planned"] = e["ok"] = min(int(e.get("ok") or n), n)
-    e["failed"] = 0
+    ok = min(int(e.get("ok") or 0), max(n - failed, 0))
+    e["ok"], e["failed"] = ok, failed
+    e["planned"] = ok + failed
     return e
 
 
@@ -230,7 +265,22 @@ def small_raw(quest_root: Path, scratch: Path, trials: int = TRIALS) -> bool:
     if not isinstance(data, dict) or not isinstance(data.get("cells"), list):
         return False
     dst.mkdir(parents=True, exist_ok=True)
-    data["cells"] = [_shrink(c, trials) for c in data["cells"] if isinstance(c, dict)]
+    failed_by_cell: dict[str, int] = {}
+    if (src / "ledger.jsonl").is_file():
+        with open(src / "ledger.jsonl", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if '"failed"' not in line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if (row.get("event") == "trial" and row.get("status") == "failed" and isinstance(row.get("trial"), int)
+                        and row["trial"] < trials):
+                    key = str(row.get("cell"))
+                    failed_by_cell[key] = failed_by_cell.get(key, 0) + 1
+    data["cells"] = [_shrink(c, trials, failed_by_cell.get(str(c.get("key")), 0))
+                     for c in data["cells"] if isinstance(c, dict)]
     (dst / "trials.json").write_text(json.dumps(data), encoding="utf-8")
     if (src / "ledger.jsonl").is_file():
         with open(src / "ledger.jsonl", encoding="utf-8", errors="replace") as fh, \
@@ -275,21 +325,81 @@ def _copy_code(code_dir: Path, dst: Path) -> None:
     shutil.copytree(code_dir, dst, ignore=shutil.ignore_patterns(".git", "__pycache__", "tests", ".venv"))
 
 
+def _within(path: Path, cap: int) -> bool:
+    """Whether the files under ``path`` weigh at most ``cap`` bytes (stops counting once over)."""
+    total = 0
+    for f in path.rglob("*"):
+        try:
+            if f.is_file():
+                total += f.stat().st_size
+        except OSError:
+            continue
+        if total > cap:
+            return False
+    return True
+
+
+def _copy_quest_folders(quest_root: Path, scratch: Path) -> None:
+    """The quest's inputs, needs, results and data folders, and the subfolders of ``raw/`` (a check's own record, such as
+    ``raw/oracle_check/``), each left out when it weighs more than :data:`COPY_CAP` (``data/``: 20 MB)."""
+    for name, cap in (("inputs", COPY_CAP), ("needs", COPY_CAP), ("results", COPY_CAP), ("data", 20 * 1024 * 1024)):
+        src = quest_root / name
+        if src.is_dir() and _within(src, cap):
+            shutil.copytree(src, scratch / name, dirs_exist_ok=True)
+    raw = quest_root / "raw"
+    if raw.is_dir():
+        for sub in sorted(p for p in raw.iterdir() if p.is_dir()):
+            if _within(sub, COPY_CAP):
+                shutil.copytree(sub, scratch / "raw" / sub.name, dirs_exist_ok=True)
+
+
 def _draws(code_dir: Path) -> bool:
     return any("savefig" in p.read_text(encoding="utf-8", errors="replace")
                for p in Path(code_dir).rglob("*.py") if "tests" not in p.relative_to(code_dir).parts)
 
 
+def _quest_python(quest_root: Path) -> str:
+    """The quest's own venv interpreter when it exists, else this one."""
+    for rel in (".venv/Scripts/python.exe", ".venv/bin/python"):
+        if (quest_root / rel).is_file():
+            return str(quest_root / rel)
+    return sys.executable
+
+
+def recorded_trials(quest_root: Path | str) -> int:
+    """The most trials any setting of the quest's ``raw/trials.json`` records (0 when unreadable)."""
+    try:
+        cells = json.loads((Path(quest_root) / "raw" / "trials.json").read_text(encoding="utf-8")).get("cells") or []
+    except (OSError, ValueError, AttributeError):
+        return 0
+    best = 0
+    for c in cells:
+        for m in ((c or {}).get("metrics") or {}).values():
+            if isinstance(m, dict) and isinstance(m.get("values"), list):
+                best = max(best, len(m["values"]))
+    return best
+
+
 async def analysis_gate(quest_root: Path | str, code_dir: Path | str, protocol: dict[str, Any] | None = None, *,
-                        executor: Any = None, python: Path | str | None = None, trials: int = TRIALS,
-                        timeout_s: int = 180, search: bool | None = None, work_dir: Path | str | None = None,
-                        keep: bool = False) -> GateResult:
+                        python: Path | str | None = None, trials: int = TRIALS, timeout_s: int = 180,
+                        search: bool | None = None, work_dir: Path | str | None = None, keep: bool = False,
+                        sandbox: str = "venv") -> GateResult:
     """Run ``code_dir``'s ``experiment.py`` from start to end in a scratch copy of the quest on a small copy of its
     recorded raw (see the module docstring) and say how it went. ``quest_root`` is only read. ``search`` (default:
-    the quest recorded a search) adds FI's "not checked" record of the search. ``executor`` and ``python`` default
-    to a plain :class:`~core.execution.VenvExecutor` and this interpreter; a quest's own are passed by the engine."""
+    the quest recorded a search) adds FI's "not checked" record of the search. The gate always runs the code with its
+    own plain executor, never the engine's (whose ``before_run`` would commit the candidate into the quest's code
+    history), with ``python`` (default: the quest's own venv interpreter when it has one, else this one). Under
+    ``sandbox="docker"`` the scratch folder is not visible to the container: the result is ``not_checked``.
+
+    A ``TypeError`` or ``AttributeError`` can come from too little data, so it is run again on a larger copy of the
+    record (up to :data:`CONFIRM_TRIALS` trials of every setting, at most :data:`CONFIRM_TIMEOUT_S` s) and is a
+    ``fault`` only when the same exception type shows at the same place at both sizes; ``seconds["confirm"]`` is that
+    run's time. A record that holds no more trials than the small copy gives the same run, which counts as both."""
     quest_root, code_dir = Path(quest_root), Path(code_dir)
     seconds: dict[str, float] = {}
+    if sandbox == "docker":
+        return GateResult(False, "static", NOT_CHECKED, "", "the quest runs its code in Docker, which cannot see the "
+                          "gate's scratch copy, so the analysis was not run before the change was kept", seconds=seconds)
     began = time.monotonic()
     late = late_definitions_in(code_dir)
     seconds["static"] = round(time.monotonic() - began, 2)
@@ -297,8 +407,30 @@ async def analysis_gate(quest_root: Path | str, code_dir: Path | str, protocol: 
         file, name, line = late[0]
         return GateResult(False, "static", FAULT, f"code/{file} line {line}",
                           (", ".join(f"`{n}`" for _f, n, _l in late[:4]) + (" is" if len(late) == 1 else " are")
-                           + " defined after the main guard, which runs first and uses it"), "NameError",
+                           + " defined after the line that starts the script (`if __name__ == \"__main__\":`), "
+                             "which runs first and needs it"), "NameError",
                           late=[f"{f}:{n}" for f, n, _ in late], seconds=seconds)
+    py = str(python or _quest_python(quest_root))
+    got = await _run_gate(quest_root, code_dir, protocol, py, trials, timeout_s, search, work_dir, keep, seconds)
+    if not (got.stage == "derive" and got.kind == FAULT and got.exception in _MAYBE_FAULTS):
+        return got
+    bigger = min(CONFIRM_TRIALS, recorded_trials(quest_root))
+    if bigger <= trials:
+        return got  # the record holds no more trials: the larger copy is the same run
+    began = time.monotonic()
+    again = await _run_gate(quest_root, code_dir, protocol, py, bigger, min(timeout_s, CONFIRM_TIMEOUT_S), search,
+                            None, False, {})
+    got.seconds["confirm"] = round(time.monotonic() - began, 2)
+    if again.stage == "derive" and again.exception == got.exception and again.where == got.where:
+        return got
+    got.kind = SMALL_DATA
+    got.detail = (f"{got.detail} (not the same on {bigger} trials of every setting: too few trials to tell)")[:400]
+    return got
+
+
+async def _run_gate(quest_root: Path, code_dir: Path, protocol: dict[str, Any] | None, python: str, trials: int,
+                    timeout_s: int, search: bool | None, work_dir: Path | str | None, keep: bool,
+                    seconds: dict[str, float]) -> GateResult:
     scratch = Path(work_dir) if work_dir else Path(tempfile.mkdtemp(prefix="fi_gate_"))
     try:
         began = time.monotonic()
@@ -306,12 +438,7 @@ async def analysis_gate(quest_root: Path | str, code_dir: Path | str, protocol: 
         _copy_code(code_dir, scratch / "code")
         for name in ("figures", "results", "raw", "needs"):
             (scratch / name).mkdir(exist_ok=True)
-        for name in ("inputs", "needs", "results"):
-            if (quest_root / name).is_dir():
-                shutil.copytree(quest_root / name, scratch / name, dirs_exist_ok=True)
-        data = quest_root / "data"
-        if data.is_dir() and sum(f.stat().st_size for f in data.rglob("*") if f.is_file()) <= 20 * 1024 * 1024:
-            shutil.copytree(data, scratch / "data", dirs_exist_ok=True)
+        await asyncio.to_thread(_copy_quest_folders, quest_root, scratch)
         if not await asyncio.to_thread(small_raw, quest_root, scratch, trials):
             return GateResult(False, "static", SMALL_DATA, "", "the quest has no recorded raw/trials.json to copy",
                               seconds=seconds)
@@ -329,13 +456,11 @@ async def analysis_gate(quest_root: Path | str, code_dir: Path | str, protocol: 
             env["FI_OPTIMISATION"] = "raw/optimisation_ledger.jsonl"
             env["FI_BEST_DESIGN"] = "results/best_design.json"
         seconds["prepare"] = round(time.monotonic() - began, 2)
-        if executor is None:
-            from .execution import VenvExecutor
+        from .execution import VenvExecutor
 
-            executor = VenvExecutor()
+        executor = VenvExecutor()  # a plain one: no before_run, so nothing is committed to the quest's code history
         began = time.monotonic()
-        run = await executor.execute([str(python or sys.executable), "code/experiment.py"], cwd=scratch,
-                                     timeout_s=timeout_s, env=env)
+        run = await executor.execute([python, "code/experiment.py"], cwd=scratch, timeout_s=timeout_s, env=env)
         seconds["derive"] = round(time.monotonic() - began, 2)
         if getattr(run, "timed_out", False):
             return GateResult(False, "derive", TIME, "", f"the analysis was still running after {timeout_s} s",
@@ -358,7 +483,7 @@ async def analysis_gate(quest_root: Path | str, code_dir: Path | str, protocol: 
         seconds["facts"] = round(time.monotonic() - began, 2)
         if unfilled:
             return GateResult(False, "facts", SMALL_DATA, "",
-                              "no value a paper key can fill for: " + ", ".join(unfilled[:6]), unfilled=unfilled,
+                              "no usable value for: " + ", ".join(unfilled[:6]), unfilled=unfilled,
                               seconds=seconds)
         return GateResult(True, seconds=seconds)
     finally:

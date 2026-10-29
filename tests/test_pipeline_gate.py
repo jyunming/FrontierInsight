@@ -5,6 +5,7 @@ fill time is measured at a few pump rates."""
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from core import pipeline_gate as gate
@@ -59,6 +60,7 @@ async def test_a_definition_after_the_main_guard_is_a_fault(tmp_path):
     got = await run_gate(tmp_path, script)
     assert not got.ok and got.kind == gate.FAULT and got.stage == "static"
     assert got.late == ["experiment.py:later"] and "line" in got.where
+    assert "main guard" not in got.detail and "starts the script" in got.detail
 
 
 def test_a_definition_after_the_guard_that_nothing_reaches_is_not_a_fault():
@@ -129,3 +131,146 @@ def test_a_definition_after_the_guard_that_the_code_before_did_not_have_is_refus
     assert gate.gate_verdict(before, after).reject
     same = gate.GateResult(False, "static", gate.FAULT, "", "x", "NameError", late=["experiment.py:f"])
     assert not gate.gate_verdict(same, after).reject
+
+
+def _raise_if_short(exc: str, below: int) -> str:
+    return OK_SCRIPT.replace('print("RESULT_JSON', 'if len(data["cells"][0]["metrics"]["fill_s"]["values"]) < '
+                             f'{below}:\n        {exc}\n    print("RESULT_JSON')
+
+
+async def test_a_type_error_that_only_3_trials_cause_is_small_data_and_is_not_refused(tmp_path):
+    got = await run_gate(tmp_path, _raise_if_short("raise TypeError('need more points than parameters')", 4))
+    assert not got.ok and got.kind == gate.SMALL_DATA and got.exception == "TypeError"
+    assert "confirm" in got.seconds and "too few trials" in got.detail
+    assert not gate.gate_verdict(gate.GateResult(True), got).reject
+
+
+async def test_an_attribute_error_that_shows_on_more_trials_at_the_same_place_is_a_fault(tmp_path):
+    got = await run_gate(tmp_path, _raise_if_short("None.fill_rate", 99))
+    assert got.kind == gate.FAULT and got.exception == "AttributeError" and "confirm" in got.seconds
+    assert gate.gate_verdict(gate.GateResult(True), got).reject
+
+
+async def test_a_name_error_is_a_fault_at_once_without_a_second_run(tmp_path):
+    got = await run_gate(tmp_path, OK_SCRIPT.replace("sum(", "total_of("))
+    assert got.kind == gate.FAULT and "confirm" not in got.seconds
+
+
+async def test_a_type_error_with_no_more_trials_on_record_is_the_same_run_and_stays_a_fault(tmp_path):
+    quest = make_quest(tmp_path / "q", trials=2)
+    code = make_code(tmp_path / "c", _raise_if_short("raise TypeError('x')", 99))
+    got = await gate.analysis_gate(quest, code, None, timeout_s=60)
+    assert got.kind == gate.FAULT and "confirm" not in got.seconds
+
+
+async def test_a_run_that_ends_without_its_result_line_is_a_fault(tmp_path):
+    got = await run_gate(tmp_path, "print('done')\n")
+    assert not got.ok and got.kind == gate.FAULT and "RESULT_JSON" in got.detail
+
+
+TB = 'Traceback (most recent call last):\n  File "a.py", line 3, in f\n    x.y\n'
+
+
+def test_last_exception_alone():
+    assert gate.last_exception(TB + "AttributeError: 'NoneType' object has no attribute 'y'\n") == "AttributeError"
+    assert gate.last_exception("") == "" and gate.last_exception("[run] gave up\n") == ""
+    chained = (TB + "KeyError: 'a'\n\nDuring handling of the above exception, another exception occurred:\n\n"
+               + TB + "scipy.linalg.LinAlgError: singular\n")
+    assert gate.last_exception(chained) == "LinAlgError"
+    assert gate.last_exception('  File "a.py", line 1\n    x = (\n        ^\n') == ""
+    assert gate.last_exception(TB + "TypeError: bad\n    a note line\n") == "TypeError"
+
+
+def test_a_traceback_the_script_handled_is_not_what_stopped_it():
+    assert gate.last_exception(TB + "AttributeError: z\n[run] gave up: too few points\n") == ""
+
+
+async def test_a_handled_traceback_followed_by_a_message_is_small_data(tmp_path):
+    script = ("import sys, traceback\ntry:\n    None.z\nexcept AttributeError:\n    traceback.print_exc()\n"
+              "sys.exit('[run] gave up: too few points')\n")
+    got = await run_gate(tmp_path, script)
+    assert got.kind == gate.SMALL_DATA and got.exception == ""
+
+
+def test_a_loop_or_comprehension_variable_after_the_guard_is_not_a_late_definition():
+    source = (OK_SCRIPT.replace("    main()", "    out = [i for i in range(3)]\n    main()")
+              + "\nfor i in range(2):\n    pass\n")
+    assert gate.late_definitions(source) == {}
+
+
+def test_a_helper_modules_own_guard_is_not_looked_at(tmp_path):
+    code = make_code(tmp_path / "c", OK_SCRIPT)
+    guarded = 'if __name__ == "__main__":\n    selftest()\n\ndef selftest():\n    pass\n'
+    (code / "helpers.py").write_text(guarded, encoding="utf-8")
+    assert gate.late_definitions_in(code) == []
+    (code / "simulate.py").write_text(guarded, encoding="utf-8")
+    assert [n for _f, n, _l in gate.late_definitions_in(code)] == ["selftest"]
+
+
+async def test_the_gate_runs_with_a_plain_executor_that_commits_nothing(tmp_path, monkeypatch):
+    from core.execution import VenvExecutor
+
+    seen = []
+    real = VenvExecutor.execute
+
+    async def spy(self, *a, **kw):
+        seen.append(self.before_run)
+        return await real(self, *a, **kw)
+
+    monkeypatch.setattr(VenvExecutor, "execute", spy)
+    got = await run_gate(tmp_path, OK_SCRIPT)
+    assert got.ok and seen == [None]
+
+
+async def test_under_docker_the_gate_says_it_did_not_check(tmp_path):
+    got = await run_gate(tmp_path, OK_SCRIPT, sandbox="docker")
+    assert got.kind == gate.NOT_CHECKED and "Docker" in got.detail and not got.ok
+    assert not gate.gate_verdict(gate.GateResult(True), got).reject
+
+
+def test_the_quests_own_venv_python_is_used_when_it_exists(tmp_path):
+    assert gate._quest_python(tmp_path) == sys.executable
+    exe = tmp_path / ".venv" / ("Scripts/python.exe" if sys.platform.startswith("win") else "bin/python")
+    exe.parent.mkdir(parents=True)
+    exe.write_text("", encoding="utf-8")
+    assert gate._quest_python(tmp_path) == str(exe)
+
+
+def test_a_setting_with_no_good_trial_stays_with_none_and_failed_rows_agree(tmp_path):
+    quest = make_quest(tmp_path / "q", trials=5, settings=2)
+    path = quest / "raw" / "trials.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["cells"][0].update(ok=0, failed=5)
+    data["cells"][0]["metrics"]["fill_s"]["values"] = []
+    data["cells"][1].update(ok=4, failed=1)
+    path.write_text(json.dumps(data), encoding="utf-8")
+    rows = [{"event": "trial", "cell": "rate=2", "trial": t, "status": "failed" if t in (1, 4) else "ok"}
+            for t in range(5)]
+    (quest / "raw" / "ledger.jsonl").write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+    assert gate.small_raw(quest, tmp_path / "s")
+    got = json.loads((tmp_path / "s" / "raw" / "trials.json").read_text(encoding="utf-8"))["cells"]
+    assert got[0]["ok"] == 0
+    assert (got[1]["ok"], got[1]["failed"], got[1]["planned"]) == (2, 1, 3)
+    kept = [json.loads(ln) for ln in (tmp_path / "s" / "raw" / "ledger.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert sum(1 for r in kept if r["status"] == "failed") == got[1]["failed"]
+
+
+def test_raw_subfolders_are_copied_and_a_huge_folder_is_left_out(tmp_path, monkeypatch):
+    quest = make_quest(tmp_path / "q")
+    (quest / "raw" / "checks").mkdir()
+    (quest / "raw" / "checks" / "a.json").write_text("{}", encoding="utf-8")
+    (quest / "results").mkdir()
+    (quest / "results" / "big.bin").write_bytes(b"0" * 4096)
+    (quest / "needs").mkdir()
+    (quest / "needs" / "n.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(gate, "COPY_CAP", 1024)
+    scratch = tmp_path / "scratch"
+    (scratch / "raw").mkdir(parents=True)
+    gate._copy_quest_folders(quest, scratch)
+    assert (scratch / "raw" / "checks" / "a.json").is_file() and (scratch / "needs" / "n.json").is_file()
+    assert not (scratch / "results").exists()
+
+
+def test_what_a_person_reads_has_no_internal_ids():
+    r = gate.GateResult(False, "derive", gate.SMALL_DATA, "code/experiment.py line 9", "ValueError: x", "ValueError")
+    assert "small_data" not in r.says() and "too few trials" in r.says() and "derive" not in r.says()
