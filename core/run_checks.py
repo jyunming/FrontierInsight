@@ -1997,6 +1997,106 @@ class RunChecksMixin:
                           "to be repaired", record.get("says"))
         return self._code_review_failed_run(message, script=_split_run.SIMULATE_NAME)  # type: ignore[attr-defined]
 
+    # --- the analysis gate (core/pipeline_gate.py; ``engine.pipeline_gate``, off by default) -------------------------------
+
+    def _gate_key(self, code: Path, raw: Path) -> str:
+        """What the gate's outcome depends on: the study's inputs and simulate.py (as :func:`trial_runner.code_inputs_sha`),
+        every other file of the code folder (the analysis the gate runs) and the recorded raw it runs on."""
+        h = hashlib.sha256()
+        simulate = code / _split_run.SIMULATE_NAME
+        text = simulate.read_text(encoding="utf-8", errors="replace") if simulate.is_file() else ""
+        h.update(_trial_runner.code_inputs_sha(self.quest_root, text).encode())  # type: ignore[attr-defined]
+        for path in sorted(code.rglob("*")):
+            if not path.is_file() or {".git", "__pycache__"} & set(path.relative_to(code).parts):
+                continue
+            h.update(path.relative_to(code).as_posix().encode())
+            h.update(path.read_bytes())
+        stat = raw.stat()
+        h.update(f"{stat.st_size}:{stat.st_mtime_ns}".encode())
+        return h.hexdigest()
+
+    async def _analysis_gate(self, state: Any, code_dir: Path | str | None = None) -> Any:
+        """The analysis gate's result for the code as it is now (``None`` when the switch is off, the quest is a
+        no-simulation quest, no raw has been recorded yet, or the gate could not run: it never turns into a fault). The
+        result is kept for the same code and raw, written to ``.fi/pipeline_gate.json`` and logged in one line."""
+        if not self.config.engine.pipeline_gate:  # type: ignore[attr-defined]
+            return None
+        if state.get("no_simulation_resolved"):
+            return None
+        raw = self.quest_root / "raw" / "trials.json"  # type: ignore[attr-defined]
+        if not raw.is_file():
+            return None
+        code = Path(code_dir) if code_dir else self.quest_root / "code"  # type: ignore[attr-defined]
+        try:
+            from . import pipeline_gate as _gate
+            from .small_run import budget as _budget
+
+            key = self._gate_key(code, raw)
+            cache = self.__dict__.setdefault("_gate_cache", {})
+            if key in cache:
+                return cache[key]
+            protocol = self._protocol_block(state)  # type: ignore[attr-defined]
+            got = await _gate.analysis_gate(
+                self.quest_root, code, protocol if isinstance(protocol, dict) else None,  # type: ignore[attr-defined]
+                sandbox=self.config.execution.sandbox,  # type: ignore[attr-defined]
+                timeout_s=_budget(self.config.execution.timeout_s))  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001 -- a gate that could not run is not a fault
+            self._log.warning("[gate] the analysis could not be checked: %s", exc)  # type: ignore[attr-defined]
+            return None
+        cache[key] = got
+        try:
+            (self.fi_dir / "pipeline_gate.json").write_text(  # type: ignore[attr-defined]
+                json.dumps(got.record(), indent=2), encoding="utf-8")
+        except OSError:
+            pass
+        self._log.info("[gate] %s", got.says())  # type: ignore[attr-defined]
+        return got
+
+    def _gate_disclose(self, text: str) -> None:
+        """What the gate found that is not a reason to refuse: the log, and the notes of the repair in progress."""
+        notes = self.__dict__.get("_gate_notes")
+        if isinstance(notes, list) and text in notes:
+            return
+        self._log.warning("[gate] %s", text)  # type: ignore[attr-defined]
+        if isinstance(notes, list):
+            notes.append(text)
+
+    async def _gate_refusal(self, state: Any) -> str:
+        """After a change to the code was written: why it cannot stay (the analysis, which ran before, no longer runs), or
+        ``""``. Nothing at all happens with the switch off."""
+        if not self.config.engine.pipeline_gate:  # type: ignore[attr-defined]
+            return ""
+        from . import pipeline_gate as _gate
+
+        after = await self._analysis_gate(state)
+        if after is None:
+            return ""
+        verdict = _gate.gate_verdict(self.__dict__.get("_gate_last"), after)
+        if verdict.reject:
+            return "the analysis no longer runs: " + verdict.why
+        if verdict.disclose:
+            self._gate_disclose(verdict.disclose)
+        if after.ok:
+            self._gate_last = after
+        return ""
+
+    async def _gate_first(self, state: Any) -> dict[str, Any] | None:
+        """Before the long run, once the small run has passed: the analysis is run on the recorded results. A fault goes to
+        the repair of a failed run (while one is left) with the gate's sentence; anything else is only shown. ``None`` to go on."""
+        after = await self._analysis_gate(state)
+        if after is None:
+            return None
+        self._gate_last = after
+        if after.kind == "fault":
+            if int(state.get("exec_reflect_iter") or 0) >= self.config.engine.exec_reflect_max_iterations:  # type: ignore[attr-defined]
+                self._gate_disclose(after.says() + " (no repair is left)")
+                return None
+            self._log.warning("[gate] the analysis does not run on the recorded results; sending it to be repaired")  # type: ignore[attr-defined]
+            return self._code_review_failed_run(after.says(), script="experiment.py")  # type: ignore[attr-defined]
+        if not after.ok:
+            self._gate_disclose(after.says())
+        return None
+
     async def _small_run_again(self) -> str:
         """For a repair of a reader's finding: ``""`` when FI's small run still runs on the code as it is now, else why not.
         ``""`` when there is no small run to make."""
@@ -2009,9 +2109,12 @@ class RunChecksMixin:
         # The repaired code must also still give the study's results from the function FI calls for the study.
         simulate = self.quest_root / "code" / _split_run.SIMULATE_NAME  # type: ignore[attr-defined]
         try:
-            return await self._simulation_repair_fault(ctx[0], simulate.read_text(encoding="utf-8")) if simulate.is_file() else ""  # type: ignore[attr-defined]
+            fault = await self._simulation_repair_fault(ctx[0], simulate.read_text(encoding="utf-8")) if simulate.is_file() else ""  # type: ignore[attr-defined]
         except OSError:
             return ""
+        # FI's frame and the small run are checked above (cheaper); then the analysis is run from start to end on the
+        # recorded results (core/pipeline_gate.py; nothing happens with the switch off).
+        return fault or await self._gate_refusal(ctx[0])
 
     async def _review_crash_run(self, state: Any) -> dict[str, Any] | None:
         """A test written for a reader's finding that crashed inside the code (not in the test) showed a crash, not the
