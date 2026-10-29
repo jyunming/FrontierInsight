@@ -149,8 +149,9 @@ class SmallRun:
                 + (f" (the small run's time ran out in {sum(1 for s in self.settings if s.timed_out)} of them; "
                    "a setting that did not finish is slower than the time it was given)" if self.timed_out else ""))
 
-    def directive(self) -> str:
-        """For the repair of a failed run: what failed, where, and the last traceback."""
+    def directive(self, level_rule: str = "") -> str:
+        """For the repair of a failed run: what failed, where, and the last traceback. ``level_rule``: FI's one rule for a
+        result compared inside each run (:func:`core.skeleton.level_rule`), said only when a failure is of that kind."""
         if self.load_error:
             return (f"FI ran the simulation on a small case before the study, and it could not be loaded: {self.load_error}\n\n"
                     "Repair it so that FI can import simulate.py and call its trial function. Keep everything else as it is.")
@@ -159,12 +160,14 @@ class SmallRun:
             why = "; ".join(f"{n}x {r}" for r, n in s.reasons[:2])
             lines.append(f"- {s.key or 'the one setting'}: {s.failed} of {s.planned} trials failed - {why}")
         tb = next((s.traceback for s in self.faults if s.traceback), "")
+        from . import in_run as _in_run
+        rule = (" " + level_rule) if level_rule and any(_in_run.is_level_fault(r) for s in self.faults for r, _ in s.reasons) else ""
         return ("FI ran the simulation on a small case before the study (a few trials at the middle of the plan's settings "
                 "and at its corners), and most trials failed in these settings:\n" + "\n".join(lines)
                 + (f"\n\nThe last traceback:\n{tb[-1500:]}" if tb else "")
                 + "\n\nRepair the simulation so that a trial at these settings runs to the end and gives its numbers. Never "
                 "return NaN, an infinity or a made-up value in place of a trial that failed: FI counts such a trial as "
-                "failed. Keep everything else as it is.")
+                "failed." + rule + " Keep everything else as it is.")
 
     def for_reader(self, limit: int = 2500) -> str:
         """What the code's reader is shown: each setting's returned values (at most a few per name) and its failures."""

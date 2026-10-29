@@ -10982,7 +10982,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._log.info("[implement_outline] the design changed since the outline was written; writing it again")
         self._log.info("[implement_outline] drafting scaffold + signatures")
         try:
-            prompt = self._prompts["implement_outline"].substitute(
+            prompt = self._frame_outline_template(state, self._prompts["implement_outline"]).substitute(
                 topic_block=self._topic_block(),
                 design_block=self._code_design_block(state, names_only=True),
                 clarify_block=_format_clarify(state),
@@ -11124,7 +11124,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             )
             prompt += _rerun_directive(state.get("review") or {}, rerun_for)
             if self._split_on(state) and (self.quest_root / "code" / _split_run.SIMULATE_NAME).is_file():
-                prompt += _SPLIT_RERUN_NOTE
+                prompt += _skeleton.RERUN_NOTE if self._frame_variant(state) else _SPLIT_RERUN_NOTE
             kept_asks = [str(p) for p in (state.get("extend_check") or {}).get("asked") or [] if str(p).strip()]
             if kept_asks and not extend:
                 # The script was extended for a person's request; this rerun must not drop what was added for it.
@@ -11134,9 +11134,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if extend:
             self._log.info("[implement] extending the existing script for: %s", "; ".join(p[:80] for p in extend))
             prompt += _extend_directive(self._scripts_on_disk(), extend, self._submit_on_disk(),
-                                        package=self._package_shown(state))
+                                        package=self._package_shown(state), frame=bool(self._frame_variant(state)))
             if self._split_on(state) and (self.quest_root / "code" / _split_run.SIMULATE_NAME).is_file():
-                prompt += _SPLIT_RERUN_NOTE
+                prompt += _skeleton.RERUN_NOTE if self._frame_variant(state) else _SPLIT_RERUN_NOTE
         # A revised plan: the scripts that exist are changed only where the revision touched what they read (the model's
         # functions, written above, were kept or written again by their own record).
         incremental = None
@@ -18214,8 +18214,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             returncode="(the oracle run did not pass)",
             # The contract of the layout this quest has: a two-script quest's simulation is a function FI calls, with
             # no FI_ORACLE run and no ORACLE_JSON line (saying both contracts sent repairs to write a branch nothing reads).
-            stdout_tail=_oracle.directive(oracles, found, disputed=disputed, trial=bool(getattr(self, "_trial_mode", False)))
-            + (_TRIAL_ORACLE_NOTE if getattr(self, "_trial_mode", False) else "")
+            stdout_tail=_oracle.directive(oracles, found, disputed=disputed, trial=bool(getattr(self, "_trial_mode", False)),
+                                          frame=path.name == _split_run.SIMULATE_NAME and _skeleton.has_frame(code))
+            + ((_skeleton.ORACLE_NOTE if path.name == _split_run.SIMULATE_NAME and _skeleton.has_frame(code)
+                else _TRIAL_ORACLE_NOTE) if getattr(self, "_trial_mode", False) else "")
             # A check against a known answer tests the equations, which may be in the model's package.
             + (self._package_repair_note(state) if path.name == _split_run.SIMULATE_NAME else ""),
             stderr_tail=stderr_tail,
@@ -20435,8 +20437,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             elif repair_simulation:
                 script_code = simulate_path.read_text(encoding="utf-8")
                 # The crash may be in the model's package simulate.py calls: shown, and fixable there.
-                split_note = (_SPLIT_REFLECT_SIMULATE + (_SEARCH_REFLECT_SIMULATE if _optim.has_block(state.get("design"))
-                                                         else "")
+                framed = _skeleton.has_frame(script_code)
+                split_note = ((_skeleton.REFLECT_SIMULATE if framed else _SPLIT_REFLECT_SIMULATE)
+                              + ((_skeleton.REFLECT_SEARCH if framed else _SEARCH_REFLECT_SIMULATE)
+                                 if _optim.has_block(state.get("design")) else "")
                               + self._package_repair_note(state))
             elif _optim.has_block(state.get("design")):
                 split_note = _SEARCH_REFLECT_ANALYSIS
@@ -33038,7 +33042,7 @@ def _rerun_directive(review: dict[str, Any], named: str) -> str:
 
 
 def _extend_directive(scripts: dict[str, str], points: list[str], submit: str = "",
-                      package: tuple[str, dict[str, str]] | None = None) -> str:
+                      package: tuple[str, dict[str, str]] | None = None, frame: bool = False) -> str:
     """What the implement prompt is told when a person's refine asked for a number the study lacks: the scripts that
     exist are the base, and only what the number needs is changed. ``package``: the model's package the simulation
     computes with (``core/code_layout.py``), shown too so the extension sees the equations it calls."""
@@ -33054,7 +33058,8 @@ def _extend_directive(scripts: dict[str, str], points: list[str], submit: str = 
         "experiment: start from the script(s) below and change as little as you can so that they also produce what is "
         "asked. Keep the protocol, the design, every setting, the seeds, the RESULT_JSON keys that exist and every figure "
         "that exists exactly as they are (same file names, same content); only add the measurement, the setting or the "
-        "figure the ask needs, and report it in RESULT_JSON. Return the whole script(s), in the reply format above.",
+        "figure the ask needs, and report it in RESULT_JSON. "
+        + (_skeleton.EXTEND_REPLY if frame else "Return the whole script(s), in the reply format above."),
         "What the person asked for:",
         *(f"  - {p}" for p in points),
         "",

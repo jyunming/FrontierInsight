@@ -1532,7 +1532,10 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
         topic=env.topic or "(not stated)", equations=env.equations, finding=finding_block(issue, env.scrub),
         test=_read(env.root / test) if test else "(none)", failure=failure or "(none)", code=code_block,
         package=env.package or "(none)", how=how, problem=detail or "(none: this is the first try)")
-    reply = await _ask(env, _skeleton.repair_note(old) + prompt, who, "repair")
+    framed = _skeleton.has_frame(old)
+    if framed:  # the handling of the pilot and the seed is in FI's frame, which a repair keeps as it is
+        prompt = prompt.replace(", the handling of `FI_PILOT` and `FI_REPLICATE_SEED`, and the final", ", and the final")
+    reply = await _ask(env, _skeleton.repair_note(old, whole=not scope) + prompt, who, "repair")
     dotted = str(issue.get("function") or "")
     edits: dict[str, tuple[str, str]] = {}  # file -> (old text, new text)
     if scope:

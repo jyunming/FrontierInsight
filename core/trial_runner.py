@@ -1544,8 +1544,14 @@ class TrialsRunner:
         thresholds = data.get("thresholds") if isinstance(data.get("thresholds"), dict) else {}
         reasons = _checks.reasons_of_run(run.cells, self.quest_root) or _checks.ledger_reasons(self.quest_root)
         left = self._repairs_left() if callable(self._repairs_left) else bool(self._repairs_left)
+        from . import skeleton as _skeleton
+
+        try:
+            level_rule = _skeleton.level_rule(protocol, self.simulate.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            level_rule = ""
         verdict = _checks.judge(cells, protocol, thresholds or None, reasons, repairs_left=bool(left),
-                                quest_root=self.quest_root)
+                                quest_root=self.quest_root, level_rule=level_rule)
         kept = _checks.write_record(self.quest_root, verdict.record())
         if verdict.action == _checks.DISCLOSE and not (kept and _checks.withheld_values(self.quest_root)):
             # The columns FI keeps back are read from this record: without it nothing would be kept back, so it is a stop.

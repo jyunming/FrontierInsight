@@ -1240,8 +1240,21 @@ _TRIAL_CONTRACT = (
 )
 
 
+_FRAME_CONTRACT = (
+    "The contract: FI checks the simulation itself. For an oracle that names a `case` and a `measure`, FI calls the function "
+    "`trial` in simulate.py on that case and computes the `measure` (one returned name, or a formula of them) from the "
+    "result, so `trial` must return every name the measure uses, computed by the real simulation. An oracle without a `case` "
+    "is read from `def oracle() -> dict` in simulate.py, which computes each such check with the same simulation code and "
+    "returns its value keyed by the check's name. FI sets the environment variable `FI_CELL_KIND` to `check` for that call "
+    "(the case is the call's cell, with no extra key), and code that treats a search design or a grid row differently must "
+    "take the `check` branch, as it does when the variable is unset. "
+    "Nothing the script writes decides pass or fail: the engine judges each value against the `expected` and `tolerance` the "
+    "protocol fixes above (for an invariant the value is the worst violation observed, and the expected value is 0).\n\n"
+)
+
+
 def directive(oracles: list[dict[str, Any]], found: list[str], disputed: list[str] | None = None, *,
-              trial: bool = False) -> str:
+              trial: bool = False, frame: bool = False) -> str:
     """What stands where a traceback would in the repair request. ``disputed``: the checks an earlier repair called wrong
     (their proposals wait for a person); they are left out of what to fix, and the script is not to be changed for them.
     ``trial``: the simulation is a function FI calls itself (the two-script layout), so the request states that
@@ -1269,7 +1282,7 @@ def directive(oracles: list[dict[str, Any]], found: list[str], disputed: list[st
         "The oracles the design declares (independent of the script's own numbers):\n" + declared_block + "\n\n"
         + set_aside +
         "What went wrong:\n" + "\n".join(f"- {p}" for p in found) + "\n\n"
-        + (_TRIAL_CONTRACT if trial else _SCRIPT_CONTRACT) +
+        + (_FRAME_CONTRACT if trial and frame else _TRIAL_CONTRACT if trial else _SCRIPT_CONTRACT) +
         "If a value is outside its tolerance, find out which is wrong before changing anything: the simulator or estimator (fix "
         "it) or the way the value is measured (fix that), and say which in `patch_summary`. Never make a check pass by "
         "measuring something else, skipping it or hard-coding its value: a check the script can always pass is not an oracle. If "
@@ -1291,6 +1304,11 @@ def directive(oracles: list[dict[str, Any]], found: list[str], disputed: list[st
         "that check); when other problems need a fix too, you are asked for it again without the disputed check. A person "
         "decides whether to accept the change; nothing changes without them.\n\n"
         + ("Keep everything else unchanged: the same functions and the values they return, and every comment that marks "
+           "where an equation of the plan's model is computed (`# E1`). When you fix the simulation, give each function you "
+           "change whole (`trial` and its helpers; the frame is FI's); always give one sentence in `patch_summary`, and "
+           "leave `give_up_reason` empty."
+           if trial and frame else
+           "Keep everything else unchanged: the same functions and the values they return, and every comment that marks "
            "where an equation of the plan's model is computed (`# E1`). When you fix the simulation, return the whole of "
            "simulate.py in `code`; always give one sentence in `patch_summary`, and leave `give_up_reason` empty."
            if trial else

@@ -252,12 +252,17 @@ def _whole_number(value: Any) -> bool:
 # Rules of the single-script request that a frame written by FI makes untrue (see :meth:`_frame_template`).
 _FRAME_DROP_BULLETS = ("- Single Python file.", "- **Honour `FI_PILOT`", "- **Honour `FI_REPLICATE_SEED`",
                        "- **Answer the design's oracles when asked.**")
-_FRAME_REPLY = ("# Output format\nRespond with EXACTLY these, in this order, and nothing else:\n\n"
-               "1. A fenced Python block starting with the line `# file: simulate.py`: the function `trial` and the imports and "
-               "helper functions it needs (nothing of FI's frame).\n"
-               "2. A fenced Python block starting with the line `# file: experiment.py`: the analysis.\n"
-               "3. A single line `DEPS:` followed by a comma-separated list of pip-installable package names. Use the outline's "
-               "`deps` as the baseline; add only if you genuinely needed something more.\n\n")
+def _frame_reply(cluster: bool = False) -> str:
+    """The reply format of a request where FI writes the frame of simulate.py; with ``cluster`` (the trials run as a job
+    array) the driver `submit.py` the cluster section asks for is a block of the format too."""
+    return ("# Output format\nRespond with EXACTLY these, in this order, and nothing else:\n\n"
+            "1. A fenced Python block starting with the line `# file: simulate.py`: the function `trial` and the imports and "
+            "helper functions it needs (nothing of FI's frame).\n"
+            "2. A fenced Python block starting with the line `# file: experiment.py`: the analysis.\n"
+            + ("3. A fenced Python block starting with the line `# file: submit.py`: the driver that submits the job array, as "
+               "the section on the cluster says.\n4." if cluster else "3.")
+            + " A single line `DEPS:` followed by a comma-separated list of pip-installable package names. Use the outline's "
+            "`deps` as the baseline; add only if you genuinely needed something more.\n\n")
 _FRAME_BODY_INTRO = (
     "You are the **Implementation Body** stage of an automated research pipeline.\n\n"
     "A prior stage produced a structural outline for the experiment. Your job: write the code the output format below asks for. "
@@ -265,7 +270,7 @@ _FRAME_BODY_INTRO = (
     "you do NOT alter the imports or the figures-dir setup of the scaffold. The outline locked those decisions.\n\n")
 
 
-def frame_template_text(text: str) -> str:
+def frame_template_text(text: str, cluster: bool = False) -> str:
     """``text`` (a code-writing template) for a request where FI writes the frame of simulate.py: the bullets about a single
     script, the pilot, the seed and the oracle run are taken out, the reply format is the frame's, and the template does not
     say the whole scaffold is filled."""
@@ -282,10 +287,24 @@ def frame_template_text(text: str) -> str:
                         "; an import is not a second file you author")
     a, b = text.find("# Output format"), text.find("# Inputs")
     if 0 <= a < b:
-        text = text[:a] + _FRAME_REPLY + text[b:]
+        text = text[:a] + _frame_reply(cluster) + text[b:]
     c = text.find("# The topic, as the person wrote it")
     if c > 0 and text.startswith("You are the **Implementation Body**"):
         text = _FRAME_BODY_INTRO + text[c:]
+    return text
+
+
+def frame_outline_text(text: str) -> str:
+    """``text`` (the outline template) for a request where FI writes the frame of simulate.py."""
+    text = text.replace(
+        "- The next stage will write a single Python file constrained to:",
+        "- FI writes the frame of simulate.py (its entry points, the loop over settings and trials, the seeds and the main). "
+        "The outline lists the function `trial` (ONE trial: it takes the settings and returns the plan's results) and the "
+        "helper functions it uses, which are the equation and step functions below, and, for experiment.py, the functions of "
+        "the analysis (statistics, figures, `RESULT_JSON`). It lists no entry point, no loop over settings or trials and no "
+        "main for the simulation. The next stage writes `trial` and its helpers, and experiment.py, constrained to:")
+    text = text.replace("(those belong to the scenario, in the other functions)",
+                        "(those belong to FI's frame, or to the analysis)")
     return text
 
 
@@ -696,7 +715,9 @@ class RunChecksMixin:
         design = state.get("design")
         why = _skeleton.applies(design)
         if why:
-            self._log.info("[implement] FI writes no frame of simulate.py: %s", why)  # type: ignore[attr-defined]
+            if getattr(self, "_frame_why_logged", None) != why:  # one line, not one for every request that asks
+                self._frame_why_logged = why
+                self._log.info("[implement] FI writes no frame of simulate.py: %s", why)  # type: ignore[attr-defined]
             return ""
         # A quest keeps the frame it was written with (a resume, an update of FI): the frame on disk is the one used while the
         # plan has not changed; a plan that changed gets a new one.
@@ -730,7 +751,7 @@ class RunChecksMixin:
             more += (f"- `cell[\"{inside[0]}\"]`" + (" and the others of " + ", ".join(f"`{n}`" for n in inside[1:]) if inside[1:] else "")
                      + " compared inside each run are the LIST of their values, not one value: use every value of it. Give a "
                      "result per value with `out.each(\"name\", {value: number})` (or a list in the order of the values when one "
-                     "thing is compared), a number for EVERY value (`float('nan')` where the result does not exist for one). A "
+                     "thing is compared), a number for EVERY value (NaN or None where the result does not exist for one). A "
                      "number the run gives once (fitted across all the values) is returned as a number. "
                      + "Key a mapping " + _in_run.key_forms(_in_run.level_cells(inside_map)) + ".\n")
         if getattr(_optimise_search.study_grid(protocol), "sub_studies", None):
@@ -799,7 +820,8 @@ class RunChecksMixin:
                 "`trial`, as the start of this request says), then `# file: experiment.py`, then the `DEPS:` line.\n\n")
         outline = ("If an outline is given, it describes the whole experiment as one program: put the code of one trial in "
                    "`trial` and the statistics, figure and `RESULT_JSON` code in experiment.py, keeping every name and "
-                   "signature of the outline's functions that you keep.\n")
+                   "signature of the outline's functions that you keep. simulate.py holds no loop over settings or trials and no "
+                   "main: the frame has them, so leave out whatever of the outline does that.\n")
         block = head + analysis + outline
         if self.config.execution.background_jobs:  # type: ignore[attr-defined]
             block += _e._CLUSTER_PROTOCOL
@@ -823,8 +845,17 @@ class RunChecksMixin:
 
         if not self._frame_variant(state):
             return tmpl
-        return _string.Template(frame_template_text(tmpl.template))
+        return _string.Template(frame_template_text(tmpl.template, bool(self.config.execution.background_jobs)))  # type: ignore[attr-defined]
 
+    def _frame_outline_template(self, state: Any, tmpl: Any) -> Any:
+        """The outline request with what contradicts the frame taken out (``tmpl`` itself when there is no frame): the outline
+        lists `trial` and its helpers for simulate.py (and the analysis for experiment.py), never an entry point, a loop over
+        settings or trials, or a main of the simulation, which are the frame's."""
+        import string as _string
+
+        if not self._frame_variant(state):
+            return tmpl
+        return _string.Template(frame_outline_text(tmpl.template))
     def _frame_outline(self, state: Any, outline: dict[str, Any]) -> dict[str, Any]:
         """The outline without the entry points of simulate.py (``run_trial``, ``run_cell``, ``oracle``): their signatures are
         the frame's, not the model's. ``outline`` itself when there is no frame."""
@@ -883,19 +914,16 @@ class RunChecksMixin:
                 self._log.info("[implement] simulate.py is FI's frame with the model's trial function")  # type: ignore[attr-defined]
         return text
 
-    def _in_each_run_repair_note(self, state: Any) -> str:
-        """For the repair of a failed small run when FI writes the frame and the plan compares values inside each run: the
-        rule for a result per compared value, from FI's record of the study's factors (``""`` otherwise)."""
-        if not self._skeleton_frame(state):
+    def _level_rule(self, state: Any, simulate: Any) -> str:
+        """FI's one rule for a result compared inside each run (:func:`core.skeleton.level_rule`) when simulate.py has FI's
+        frame, else ``""``; a repair of a failed run says it only when a failure is of that kind."""
+        from . import skeleton as _skeleton
+
+        try:
+            source = Path(simulate).read_text(encoding="utf-8")
+        except (OSError, TypeError, ValueError, UnicodeDecodeError):
             return ""
-        inside = _in_run.of_study(self._protocol_block(state)) or {}  # type: ignore[attr-defined]
-        if not inside:
-            return ""
-        names = ", ".join(f"`{k}`" for k in inside)
-        return (f"\n\nThe plan compares the values of {names} inside each run: `cell` holds the LIST of them. A result that depends "
-                "on the compared value is given for EVERY value of the list, with `out.each(\"name\", {value: number})` (keyed "
-                + _in_run.key_forms(_in_run.level_cells(inside)) + "), and `float('nan')` for a value where that result does not "
-                "exist; leaving a value out makes the trial fail. A number the run gives once is a plain number.")
+        return _skeleton.level_rule(self._protocol_block(state), source)  # type: ignore[attr-defined]
 
     # ---- a setting of the grid the code never reads ----------------------------------------------------------------------
 
@@ -2149,7 +2177,7 @@ class RunChecksMixin:
             if s.fault and not s.traceback:
                 s.traceback = tb
                 break
-        message = _small.SmallRun(settings, str(record.get("load_error") or "")).directive() + self._in_each_run_repair_note(state)
+        message = _small.SmallRun(settings, str(record.get("load_error") or "")).directive(self._level_rule(state, self.quest_root / "code" / _split_run.SIMULATE_NAME))  # type: ignore[attr-defined]
         self._log.warning("[execute] FI's small run of the simulation failed before the code is read (%s); sending it "  # type: ignore[attr-defined]
                           "to be repaired", record.get("says"))
         return self._code_review_failed_run(message, script=_split_run.SIMULATE_NAME)  # type: ignore[attr-defined]

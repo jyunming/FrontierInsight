@@ -596,14 +596,21 @@ REPAIR_NOTE = (
     "fi_frame.py. Only the function `trial(cell, ctx)` and the helper functions and imports it uses may change. Give each "
     "function you change whole, with its own parameters (in `functions` when the reply has that key); do not give the whole "
     "file, and do not seed, redefine `run_trial`/`run_cell`/`TrialResult` or touch fi_frame.py. A change to the frame is "
-    "refused before anything runs and the repair counts as not made. This replaces any instruction below to return the "
-    "whole of simulate.py.\n\n")
+    "refused before anything runs and the repair counts as not made.\n\n")
 
 
-def repair_note(source: str) -> str:
+REPAIR_NOTE_WHOLE = (
+    "FIRST, what you may change: FI wrote the frame of simulate.py, the parts between its `# >>> FI frame` and "
+    "`# <<< FI frame` lines (the `fi_frame` import, SETTINGS, RESULTS and the function `run_trial` or `run_cell`), and the file "
+    "fi_frame.py. Only the function `trial(cell, ctx)` and the helper functions and imports it uses may change. Give the whole "
+    "file with the frame's lines exactly as they are: do not seed, redefine `run_trial`/`run_cell`/`TrialResult` or touch "
+    "fi_frame.py. A change to the frame is refused before anything runs and the repair counts as not made.\n\n")
+
+
+def repair_note(source: str, whole: bool = False) -> str:
     """:data:`REPAIR_NOTE` when ``source`` (the text of simulate.py) has FI's frame, else ``""`` (a study without a frame is
-    asked exactly as before)."""
-    return REPAIR_NOTE if has_frame(source or "") else ""
+    asked exactly as before). ``whole``: the reply is the whole file (:data:`REPAIR_NOTE_WHOLE`), not functions."""
+    return (REPAIR_NOTE_WHOLE if whole else REPAIR_NOTE) if has_frame(source or "") else ""
 
 
 def repair_problem(old: str, new: str, name: str) -> str:
@@ -674,6 +681,59 @@ def refuse(text: str, problem: str) -> str:
 
 def has_frame(source: str) -> bool:
     return _regions(source) is not None
+
+
+def level_rule(protocol: Any, source: str) -> str:
+    """FI's one rule for a result compared inside each run, for a repair of a simulate.py that has FI's frame (``""``
+    otherwise, and when the plan compares nothing inside each run). It is the one exception to "never return NaN in place of a
+    failed trial": the request that writes the code (`core.run_checks`) and every repair say it in these words."""
+    from . import in_run as _in_run
+
+    if not has_frame(source or ""):
+        return ""
+    inside = _in_run.of_study(protocol) or {}
+    if not inside:
+        return ""
+    names = ", ".join(f"`{k}`" for k in inside)
+    return (f"The one exception: for a result the plan compares inside each run (over the values of {names}), a value where "
+            "the result does not exist is NaN (or None) under that value's key, and EVERY compared value is present as a key "
+            "(`out.each(\"name\", {value: number})`, keyed " + _in_run.key_forms(_in_run.level_cells(inside)) + "); a value left "
+            "out makes the trial fail.")
+
+
+# The repairs of a simulate.py that has FI's frame: the function the model gives is `trial` and its helpers, whole; the
+# frame is FI's. Each replaces the text of the same repair for a simulate.py the model wrote whole.
+REFLECT_SIMULATE = (
+    "SPLIT EXPERIMENT: this script is simulate.py, the simulation half of a two-script experiment. FI wrote its frame and calls "
+    "the function `trial(cell, ctx)` once per trial, keeping the record itself; the trials failed, or what FI ran does not "
+    "match the frozen protocol (the reason is below). Repair `trial` and the helper functions it uses, each function you "
+    "change given whole. `trial` returns the plan's results (`out = TrialResult()`, `out[\"name\"] = value`) and raises on a "
+    "failed trial, with no loop over settings, no files and no RESULT_JSON. Keep every comment that marks where an equation "
+    "of the plan's model is computed (`# E1`).\n")
+
+REFLECT_SEARCH = (
+    "THIS STUDY IS A SEARCH FOR THE BEST DESIGN: FI calls `trial(cell, ctx)` once for each design it tries; `cell` holds the "
+    "design variables, the conditions the plan holds fixed and the search's numerical settings, by name. `trial` returns the "
+    "objective and every constrained quantity under the plan's own names, and never searches or loops over designs itself.\n")
+
+ORACLE_NOTE = (
+    "\n\nTHE TRIAL CONTRACT: an oracle that names a `case` and a `measure` is NOT measured by anything you write for the "
+    "check: FI calls `trial` itself on that case and computes the `measure` (one returned name, or a formula of them) from "
+    "what it returns, so `trial` must return every name the `measure` uses, computed by the real simulation. `trial` is ONE "
+    "trial: never average many trials inside it. Only an oracle without a `case` is measured by `def oracle() -> dict` in "
+    "simulate.py, which computes each such check with the same simulation code and returns them as a dict keyed by the "
+    "check's name. Keep every comment that marks where an equation of "
+    "the plan's model is computed (`# E1`). When you fix the simulation, give each function you change whole (`trial` and "
+    "its helpers; the frame is FI's); when the only thing wrong is a check itself, return its `oracle_change` and leave "
+    "`code` and `functions` empty, as said above.\n")
+
+RERUN_NOTE = (
+    "\nThe experiment is two scripts. In the `# file: simulate.py` block give `trial` and its helpers back exactly as they are "
+    "unless the problem the review found is IN the simulation: the trials FI already ran are then used as they are, and only "
+    "experiment.py runs again. Change `trial` only when the simulation itself has to change.\n")
+
+EXTEND_REPLY = ("Return what the reply format above asks for: in the `# file: simulate.py` block only `trial` and the helpers "
+                "it uses (FI keeps the frame), and experiment.py whole.")
 
 
 def compose(frame: str, simulate_reply: str, previous: str = "") -> tuple[str, str]:

@@ -120,15 +120,3 @@ async def test_the_frame_is_shown_first_and_asks_simulate_py_for_nothing_but_tri
     assert len(model.prompts) == 1, "one request: the function is asked for beside experiment.py"
     sim = (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")
     assert skeleton.has_frame(sim) and "def trial(cell, ctx)" in sim and "ctx.rng.random()" in sim
-
-
-@pytest.mark.asyncio
-async def test_a_failed_small_run_of_a_study_that_compares_values_inside_each_run_gets_the_rule_for_a_result_per_value(tmp_path: Path) -> None:
-    inside = {"design": {"protocol": {**DESIGN["protocol"], "in_each_run": {"method": ["slow", "fast"]}}}}
-    engine = _engine(tmp_path, skeleton_on=True)
-    note = engine._in_each_run_repair_note(inside)
-    assert "`method`" in note and "out.each(" in note and "EVERY value" in note and "float('nan')" in note
-    assert "method=slow" in note, "the keys are those FI reads"
-    assert engine._in_each_run_repair_note(STATE) == "", "no compared values, no note"
-    off = _engine(tmp_path / "off", skeleton_on=False)
-    assert off._in_each_run_repair_note(inside) == "", "the frame is off: the repair is what it was"
