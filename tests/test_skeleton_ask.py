@@ -114,6 +114,7 @@ async def test_option_prompt_shows_the_frame_first_and_asks_simulate_py_for_noth
     prompt = model.prompts[0]
     assert prompt.startswith("FI writes the frame of simulate.py"), "the frame instruction is the first thing in the request"
     assert "ONLY the function `trial(cell, ctx)`" in prompt[:400]
+    assert "add no import of `fi_frame`" in prompt[:700], "a model shown the frame's import line must not copy it"
     assert "def trial(cell, ctx):" in prompt and "# >>> FI frame" in prompt, "the frame's own code is shown with the `trial` stub"
     text = _sans_frame(prompt)
     assert "<FRAME>" in text

@@ -759,6 +759,7 @@ class RunChecksMixin:
                 "`trial(cell, ctx)` and the imports and helper functions it needs.\n")
         return (
             lead +
+            "- The frame already imports `TrialResult` and `Ctx`: add no import of `fi_frame`.\n"
             "- `cell[\"name\"]`: the settings, read by name.\n"
             "- `ctx.rng`: the random generator FI seeded for this trial. Draw every random number from it. `ctx.seed` is the "
             "same seed as an integer for a library that wants one; `ctx.trial` is the trial's number; `ctx.thresholds` holds the "
