@@ -211,7 +211,7 @@ def fill(frame: str, reply: str) -> tuple[str | None, str]:
 
 def _fill(frame: str, reply: str) -> tuple[str | None, str, list[str]]:
     """:func:`fill` and, as the third value, what of the reply could not be carried into the file (plain phrases)."""
-    text, why, left = _steps.replace_function_ex(frame, SLOT, reply, signature=SLOT_SIGNATURE, equation="trial")
+    text, why, left = _steps.replace_function_ex(frame, SLOT, reply, signature=SLOT_SIGNATURE, equation="trial", wide=True)
     if text is None:
         return None, why, []
     problem = frame_intact(frame, text)
@@ -283,7 +283,6 @@ def _pinned(tree: ast.Module) -> Counter:
         elif isinstance(n, ast.Delete):
             names = [x for t in n.targets for x in _targets(t)]
         elif isinstance(n, (ast.Import, ast.ImportFrom)):
-            names = [(a.asname or a.name).split(".")[0] for a in n.names]
             if (isinstance(n, ast.ImportFrom) and n.module == "fi_frame") or any(a.name == "fi_frame" for a in n.names):
                 out["an import of fi_frame"] += 1
         for name in names:
@@ -386,7 +385,7 @@ def compose(frame: str, simulate_reply: str) -> tuple[str, str]:
         return simulate_reply, "the reply holds no function `trial`"
     text, why, left = _fill(frame, simulate_reply)
     if text is None:
-        return simulate_reply, why
+        return refuse(simulate_reply, why), why  # the run then stops with the reason, never with a NameError
     return text, (("left out of the model's reply, which the file cannot carry: " + "; ".join(left)) if left else "")
 
 

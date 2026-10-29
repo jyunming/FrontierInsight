@@ -205,3 +205,9 @@ def test_a_key_built_at_run_time_that_the_small_run_missed_is_a_known_gap(tmp_pa
     source = ("def run_trial(cell, t, seed):\n    if cell['dose'] > 2:\n        return {'x': cell['ra' + 'te']}\n    return {}\n")
     _eng, sent = _gate(tmp_path, {"comparisons": ["rate"]}, ["rate"], source=source)
     assert sent is not None
+
+
+def test_a_cell_dumped_as_yaml_reads_like_the_dict() -> None:
+    yaml = pytest.importorskip("yaml")
+    plain = {"b": 1, "a": 2.5}
+    assert yaml.safe_dump(in_run.Cell(plain)) == yaml.safe_dump(plain)

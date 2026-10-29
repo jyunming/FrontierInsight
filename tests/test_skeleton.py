@@ -240,7 +240,7 @@ def test_what_the_file_cannot_carry_is_said_plainly() -> None:
     assert "`run_trial`" in note and "already has that name" in note
     steps_reply = "def f(x):\n    return x\n\nclass K:\n    pass\n\nGRID = list(range(3))\n\ndef trial(cell, ctx):\n    return {}\n"
     source = "def f(x):\n    return x + 1\n\nclass K:\n    v = 1\n\ndef trial(cell, ctx):\n    raise NotImplementedError\n"
-    out, why, left = function_steps.replace_function_ex(source, "trial", steps_reply, signature="def trial(cell, ctx)", equation="t")
+    out, why, left = function_steps.replace_function_ex(source, "trial", steps_reply, signature="def trial(cell, ctx)", equation="t", wide=True)
     assert out is not None, why
     assert "GRID = list(range(3))" in out and out.count("class K") == 1
     assert any("`f`" in x for x in left) and any("`K`" in x for x in left)
@@ -335,3 +335,45 @@ def test_the_small_run_of_a_framed_simulation_sends_back_a_compared_setting_it_n
     eng2, state2 = _framed_trial(honest, design, BODY)
     assert asyncio.run(eng2._small_run_gate(state2, sys.executable, {})) is None
     assert eng2._small_run_note and "never asked for" not in eng2._small_run_note
+
+
+
+# ---- the function-step path is not changed; the wider carry is the frame's alone --------------------------------------------
+
+_STEP_SOURCE = "import numpy as np\nfrom foo import Bar\n\nLIMIT = 3\n\ndef f(x):\n    return x\n\ndef g(x):\n    raise NotImplementedError\n"
+_STEP_REPLY = ("import math\nnp = None\nclass Bar:\n    pass\nKEY = open('x').read()\nSCALE = 2\nTAU = math.pi * 2\n"
+               "def helper(y):\n    return y\ndef g(x):\n    return helper(x) * SCALE\n")
+#: What replace_function gave for these two before the frame existed (a912fa03), byte for byte.
+_STEP_OLD = ("import numpy as np\nfrom foo import Bar\nimport math\n\n\nLIMIT = 3\n\ndef f(x):\n    return x\n\n# E1\ndef g(x):\n"
+             "    return helper(x) * SCALE\n\n\nnp = None\n\n\nSCALE = 2\n\n\ndef helper(y):\n    return y\n")
+
+
+def test_a_function_step_replacement_is_byte_identical_to_what_it_always_gave() -> None:
+    out, why = function_steps.replace_function(_STEP_SOURCE, "g", _STEP_REPLY, signature="def g(x)", equation="E1")
+    assert why == "" and out == _STEP_OLD
+
+
+def test_the_wide_carry_keeps_the_files_own_imports_and_says_what_it_left_out() -> None:
+    out, why, left = function_steps.replace_function_ex(_STEP_SOURCE, "g", _STEP_REPLY, signature="def g(x)", equation="E1", wide=True)
+    assert out is not None, why
+    assert "np = None" not in out and out.count("class Bar") == 0 and "TAU = math.pi * 2" in out
+    assert any(x.startswith("a constant `np`") for x in left) and any(x.startswith("a class `Bar`") for x in left)
+
+
+def test_an_import_of_a_name_the_frame_uses_is_not_a_rebinding() -> None:
+    frame = _frame()
+    ok, why = skeleton.fill(frame, "from helpers import run_trial\n" + BODY)
+    assert ok is not None, why
+    assert skeleton.frame_intact(frame, ok) == ""
+
+
+def test_a_reply_the_frame_refuses_stops_the_run_with_the_reason() -> None:
+    bad_params, note = skeleton.compose(_frame(), "def trial(cell, seed):\n    return {}\n")
+    assert "(cell, ctx)" in note
+    with pytest.raises(RuntimeError, match=r"\(cell, ctx\)"):
+        exec(compile(bad_params, "simulate.py", "exec"), {})
+    clash = "import fi_frame" + chr(10) + BODY
+    refused, note2 = skeleton.compose(_frame(), clash)
+    assert not skeleton.has_frame(refused) and "fi_frame" in note2
+    with pytest.raises(RuntimeError, match="fi_frame"):
+        exec(compile(refused, "simulate.py", "exec"), {})

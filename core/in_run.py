@@ -52,7 +52,7 @@ class Cell(dict):
     @staticmethod
     def _represent(dumper, data):
         data._whole = True
-        return dumper.represent_dict(list(dict.items(data)))
+        return dumper.represent_dict(dict.copy(data))
 
     @staticmethod
     def _teach_yaml():

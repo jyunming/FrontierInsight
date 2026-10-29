@@ -695,13 +695,15 @@ def _bound(node: ast.AST) -> set[str]:
     return set()
 
 
-def replace_function_ex(source: str, name: str, reply: str, *, signature: str, equation: str) -> tuple[str | None, str, list[str]]:
+def replace_function_ex(source: str, name: str, reply: str, *, signature: str, equation: str,
+                        wide: bool = False) -> tuple[str | None, str, list[str]]:
     """``(new module text, "", left out)`` with the function ``name`` of ``source`` replaced by the one in ``reply`` (a block
     of Python), or ``(None, why not, [])``. The reply's imports are added, and so are its other functions, its classes (a
     dataclass too), its module constants (whatever they are computed from) and its try/except import blocks, when the module
     has no such name. What cannot be carried (a name the module already has, a loop or a call at module level) is left out and
     listed, one plain phrase each, in ``left out``. The reply's function must have the outline's parameters, exactly; and the
-    equation's label (``# E1``) is kept on it."""
+    equation's label (``# E1``) is kept on it. Without ``wide`` only imports, helper functions and literal constants are
+    carried, exactly as :func:`replace_function` always did; ``wide`` (the frame of simulate.py) carries the rest."""
     if not reply.strip():
         return None, "the reply held no code", []
     try:
@@ -737,6 +739,10 @@ def replace_function_ex(source: str, name: str, reply: str, *, signature: str, e
     taken = {getattr(n, "name", None) for n in old_tree.body} | {t.id for n in old_tree.body if isinstance(n, ast.Assign)
                                                                 for t in n.targets if isinstance(t, ast.Name)}
     have_imports = {ast.dump(n) for n in old_tree.body if isinstance(n, (ast.Import, ast.ImportFrom))}
+    if wide:  # a name the file imports is taken too: a carried class or constant must not rebind it
+        for n in old_tree.body:
+            if isinstance(n, (ast.Import, ast.ImportFrom, ast.Try)):
+                taken |= _bound(n)
     imports, helpers, left = [], [], []
     for n in new_tree.body:
         if n is node:
@@ -744,6 +750,19 @@ def replace_function_ex(source: str, name: str, reply: str, *, signature: str, e
         if isinstance(n, (ast.Import, ast.ImportFrom)):
             if ast.dump(n) not in have_imports:
                 imports.append(_segment(reply_lines, n).rstrip(chr(10)))
+            continue
+        if not wide:
+            if isinstance(n, ast.FunctionDef) and n.name not in taken:
+                helpers.append(_segment(reply_lines, n))
+                taken.add(n.name)
+            elif isinstance(n, ast.Assign) and all(isinstance(t, ast.Name) for t in n.targets):
+                try:
+                    ast.literal_eval(n.value)
+                except (ValueError, SyntaxError):
+                    continue
+                if not any(t.id in taken for t in n.targets):  # type: ignore[attr-defined]
+                    helpers.append(_segment(reply_lines, n))
+                    taken.update(t.id for t in n.targets)  # type: ignore[attr-defined]
             continue
         if isinstance(n, ast.Expr) and isinstance(getattr(n, "value", None), ast.Constant):
             continue  # a docstring or a bare string: nothing to carry
@@ -758,9 +777,9 @@ def replace_function_ex(source: str, name: str, reply: str, *, signature: str, e
         if not carry:
             left.append(f"a statement at the top of the reply (`{ast.unparse(n).splitlines()[0][:60]}`)")
         elif names & taken:
-            left.append("the " + ("function" if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) else "class" if isinstance(n, ast.ClassDef)
-                                  else "definition") + " " + ", ".join(f"`{x}`" for x in sorted(names & taken))
-                        + " (the module already has that name)")
+            kind = ("a function" if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) else "a class" if isinstance(n, ast.ClassDef)
+                    else "a constant" if isinstance(n, (ast.Assign, ast.AnnAssign)) else "an import block")
+            left.append(f"{kind} " + ", ".join(f"`{x}`" for x in sorted(names & taken)) + " (the file already has that name)")
         else:
             helpers.append(_segment(reply_lines, n))
             taken.update(names)

@@ -674,7 +674,9 @@ class RunChecksMixin:
             return simulate_code
         text, note = _skeleton.compose(frame, simulate_code)
         if note:
-            self._log.warning("[implement] simulate.py: %s", note)  # type: ignore[attr-defined]
+            # what was left out of the reply is information; a refusal is a warning
+            (self._log.info if note.startswith("left out") else self._log.warning)(  # type: ignore[attr-defined]
+                "[implement] simulate.py: %s", note)
         if _skeleton.has_frame(text):
             # The runtime is written whenever the file imports it, so a changed frame is never met as a missing module.
             code_dir = self.quest_root / "code"  # type: ignore[attr-defined]
