@@ -99,6 +99,10 @@ def typed_result_exempt(protocol: dict[str, Any] | None, design: dict[str, Any] 
     return names | {str(k) for k in thresholds}
 
 
+#: The metric keys that hold a model's answer about the contract, not the plan's own statement of the study.
+_CONTRACT_ANSWERS = ("role", "depends_on", "returned")
+
+
 def settings_the_study_compares(fi_dir: Path, design: Any, protocol: dict[str, Any], axes: list[str]) -> dict[str, str]:
     """``{setting: why it is part of the study}`` for each of ``axes`` that the study compares, from FI's records: a
     factor the topic compares (:func:`core.topic_requirements.compared_axes`, read from ``fi_dir``), a key of a check's
@@ -130,10 +134,15 @@ def settings_the_study_compares(fi_dir: Path, design: Any, protocol: dict[str, A
         return set()
 
     for metric in protocol.get("metrics") or []:
-        for axis in names({k: v for k, v in metric.items() if k not in ("id", "description", "kind")}
+        # `depends_on` and `role` are a model's answer to a question about the contract (core/contract_parts.py): what a
+        # result "may change with" is a superset, read by no check, so it never makes a setting one the study compares.
+        for axis in names({k: v for k, v in metric.items() if k not in ("id", "description", "kind", *_CONTRACT_ANSWERS)}
                           if isinstance(metric, dict) else {}):
             out.setdefault(axis, f"the metric `{metric.get('id')}` is given per value of it")
-    for axis in names(protocol.get("comparisons")) | names(design.get("comparisons")):
+    # A comparison marked `asked` is the model's answer to FI's question after the plan, read by no check.
+    planned = [c for v in (protocol.get("comparisons"), design.get("comparisons"))
+               for c in (v if isinstance(v, list) else [v]) if not (isinstance(c, dict) and c.get("asked"))]
+    for axis in names(planned):
         out.setdefault(axis, "the plan compares its values")
     return {axis: why for axis, why in out.items() if axis in axes}
 

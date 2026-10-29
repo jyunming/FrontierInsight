@@ -90,6 +90,7 @@ from . import code_layout as _code_layout
 from . import changelog as _changelog
 from . import code_project as _code_project
 from . import contract as _contract
+from . import contract_parts as _contract_parts
 from . import rerun_from as _rerun_from
 from . import attempt_records as _attempts
 from . import attempt_memory as _memory
@@ -5795,6 +5796,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # The plan writes the audited design in its own canonical form: the audit's verdict covers it.
         _receipts.carry_output(self.quest_root, "design_audit", _receipts.design_core(design),
                                _receipts.design_core(normalized), "the plan wrote the audited design in its own form")
+        # Only FI writes `form`: a model's own word is dropped. The questions come after the receipt is carried, so what
+        # the methodology audit did not see (the answers) is not covered by its verdict.
+        normalized = _contract_parts.strip_fi_keys(normalized)
+        if self._runs_code(state) and self._client is not None and isinstance(normalized.get("protocol"), dict):
+            normalized, contract_notes = await self._ask_contract_parts(normalized)
+            repaired_notes += contract_notes
         audit = [str(item) if not isinstance(item, dict) else "; ".join(str(v) for v in item.values() if v)
                  for item in (objections if isinstance(objections, list) else [])]
         audit += repaired_notes
@@ -5853,6 +5860,37 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if ask:
             self._pause_for_plan(no_criteria=no_criteria)
         return {"design_objections": objections} if isinstance(objections, list) else {}
+
+    async def _ask_contract_parts(self, design: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+        """``(design, notes)``: ``design`` with the contract parts the plan's model gave in a form that could be used
+        (:func:`core.contract_parts.ask_parts`), and a sentence for the parts it did not. What was asked and answered is kept
+        in ``.fi/contract_parts.json`` (and shown in QUALITY.md). Never a stop. A part whose call raised is left out alone
+        and said three ways: run.log with the traceback, one console line, and a note in plan.md."""
+        async def ask(prompt: str) -> str:
+            return await self._chat(prompt, node="plan_contract")
+
+        try:
+            out = await _contract_parts.ask_parts(design, ask, lambda t: _parse_json_lenient(t, node="plan_contract"), self._prompts)
+        except Exception:  # noqa: BLE001 -- the plan goes on without the parts
+            self._log.warning("[plan] the contract parts could not be asked; the plan stays in the older form", exc_info=True)
+            print("[FI] FI could not ask the plan about the study's results; the study goes on with the plan as written")
+            return design, ["The plan was not asked what kind of number each result is (the call failed); the plan stays in "
+                            "the older form."]
+        for part, trace in out.errors.items():
+            what = _contract_parts.PART_WORDS[part]
+            self._log.warning("[plan] FI could not ask the plan about %s:\n%s", what, trace)
+            print(f"[FI] FI could not ask the plan about {what}; the study goes on with the plan as written")
+            out.notes.append(f"FI could not ask the plan about {what} (the call failed); the study goes on with the plan as "
+                             "written.")
+        try:
+            (self.fi_dir / "contract_parts.json").write_text(json.dumps(
+                {"form": out.form, "parts": out.parts, "names_not_asked": out.design.get("protocol", {}).get("names_not_asked", [])},
+                indent=1, default=str) + "\n", encoding="utf-8")
+        except OSError as e:
+            self._log.warning("[plan] couldn't write .fi/contract_parts.json: %r", e)
+        self._log.info("[plan] contract parts: %s", "; ".join(
+            f"{k} {'ok' if v['valid'] else 'left out'} after {v['asks']} ask(s)" for k, v in out.parts.items()) or "none asked")
+        return out.design, out.notes
 
     def _criteria_follow_checks(self, made: list[str]) -> None:
         """The criteria FI made from the plan's own checks (``made``, their names), made again from the checks as FI's look
@@ -7672,7 +7710,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         planned, _why = _plan.load_design(self.quest_root)
         planned_protocol = planned.get("protocol") if isinstance(planned, dict) else None
         if not isinstance(planned_protocol, dict) or not planned_protocol:
-            return design
+            return {**design, "protocol": _contract_parts.settle_form(base, None)}
         protocol: dict[str, Any] = dict(base)
         taken: list[str] = []
         # The criteria go last: one that names a check is only kept with that check.
@@ -7700,8 +7738,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             if fixed is not None and part in fixed:
                 protocol[part] = fixed[part]
                 taken.append(part)
+        # `form` is FI's, worked out again from the redrafted results: `contract` only when every one has a validated
+        # role (core/contract_parts.py::settle_form); nothing is asked, and a redesign after the freeze stays as frozen.
+        protocol = _contract_parts.settle_form(protocol, planned_protocol)
         if not taken:
-            return design
+            return {**design, "protocol": protocol}
         self._log.warning("[design] the redesign's protocol leaves out %s, which the plan's protocol has; FI kept the plan's "
                           "(nothing is asked of a model for this)", ", ".join(f"`protocol.{p}`" for p in taken))
         path = self.fi_dir / _DRAFTED_PARTS_ASKED
@@ -28142,6 +28183,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "plan_revise",                      # --revise-plan: rewrite plan.md as the person asked
         "plan_parts",                       # FI asks for ONLY the missing parts of the plan, as JSON (never the whole file)
         "plan_criteria",                    # the plan named no check of correctness: ask once more
+        "plan_roles", "plan_names", "plan_comparisons",  # the contract's parts, asked one at a time (core/contract_parts.py)
         "json_reanswer",                    # a required check's reply could not be read: one short JSON re-answer
         "json_reanswer_part",               # ... when part of it could be read: only the unreadable keys are asked again
         "oracle_review",                    # a second model reads the plan's checks against known answers
@@ -29467,7 +29509,8 @@ _SEARCH_ASKED = "search_block_asked.json"
 _DRAFTED_SEARCH_ASKED = "drafted_search_asked.json"  # the same bound, for a design drafted at the design step
 #: The parts of a protocol that a redesign writes itself: it is never given the plan's in their place by
 #: :meth:`Engine._inherit_plan_parts` (a search for the best design is a different kind of study, not a missing part).
-_REDESIGN_OWNED_PARTS = frozenset({"grid", "sub_studies", "in_each_run", "metrics", "model", "topic_map", "optimisation"})
+_REDESIGN_OWNED_PARTS = frozenset({"grid", "sub_studies", "in_each_run", "metrics", "model", "topic_map", "optimisation",
+                                   "form", "parts_left_out", "names_not_asked"})
 _DRAFTED_PARTS_ASKED = "drafted_parts_asked.json"  # the same bound, for protocol parts a redesign drafted that could not be read
 _LEDGER_ASKED = "ledger_asked.json"  # which ledger parts were asked about, in which design round
 _LEDGER_PARTS = ("simplifications", "definitions", "steps")  # the plan's ledger parts: each asked once per quest
