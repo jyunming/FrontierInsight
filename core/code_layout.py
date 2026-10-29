@@ -256,13 +256,13 @@ def save(quest_root: Path, decision: dict[str, Any]) -> None:
 
 
 def prompt_block(package: str, equations: list[str], frame: str = "") -> str:
-    """The layout the code-writing prompts ask for, after the two-script contract. ``frame``: ``"prompt"`` or ``"filler"`` when
+    """The layout the code-writing prompts ask for, after the two-script contract. ``frame``: ``"prompt"`` when
     FI writes the frame of simulate.py (core/skeleton.py): the request then names no entry point of simulate.py."""
     labels = ", ".join(equations) if equations else "each equation of the plan's model"
     if frame:
-        beside = "the function `trial` and experiment.py" if frame == "prompt" else "experiment.py"
+        beside = "the function `trial` and experiment.py"
         sim = ("- `trial` reads the setting from `cell` and computes it by calling the package (`from {package} import model`).\n"
-               "  The mathematics is in the package.\n").format(package=package) if frame == "prompt" else ""
+               "  The mathematics is in the package.\n").format(package=package)
         return f"""
 THE CODE AS A SMALL RESEARCH TOOL. Besides {beside}, write the model as a package, each file its own
 fenced Python block whose first line is `# file: <path>`:
@@ -309,17 +309,13 @@ def steps_block(steps: list[tuple[str, str, str]] | None) -> str:
 def prefilled_block(package: str, model_source: str, steps: list[tuple[str, str, str]] | None = None, frame: str = "") -> str:
     """The layout the code-writing prompts ask for when FI has already written and checked the package, function by
     function (:mod:`core.function_steps`): only the two scripts are asked for. ``steps``: the package's functions that are
-    steps of the method, which the scripts call and do not write again. ``frame``: ``"prompt"`` or ``"filler"`` when FI writes
-    the frame of simulate.py (what is asked for is then ``trial`` and experiment.py, or experiment.py alone), ``"trial"`` for
-    the request that writes the function ``trial`` alone."""
+    steps of the method, which the scripts call and do not write again. ``frame``: ``"prompt"`` when FI writes
+    the frame of simulate.py (what is asked for is then ``trial`` and experiment.py)."""
     if frame:
-        only = {"prompt": "Write only the function `trial` (with the helpers it needs) and experiment.py.",
-                "filler": "Write only experiment.py.", "trial": "Write only the function `trial`."}[frame]
+        only = "Write only the function `trial` (with the helpers it needs) and experiment.py."
         sim = (f"- `trial` reads the setting from `cell` and computes it by calling the package (`from {package} import model`, "
-               "then `model.<function>(...)`, with the signatures\n  below). The mathematics is in the package.\n"
-               if frame != "filler" else "")
-        exp = ("- experiment.py never imports the package: it reads only the records FI hands it, as the contract above says.\n"
-               if frame != "trial" else "")
+               "then `model.<function>(...)`, with the signatures\n  below). The mathematics is in the package.\n")
+        exp = "- experiment.py never imports the package: it reads only the records FI hands it, as the contract above says.\n"
         return f"""
 THE CODE AS A SMALL RESEARCH TOOL. The model's package `{package}/` is ALREADY WRITTEN AND TESTED: FI wrote it one function
 at a time, one function per equation, and checked each function against the plan's equation. Do NOT write any file of the
@@ -348,10 +344,7 @@ itself. The package's `{package}/{MODEL_NAME}` as it is:
 {steps_block(steps)}"""
 
 
-def reminder(package: str, frame: str = "") -> str:
-    if frame == "filler":  # FI writes simulate.py itself: it is not asked for
-        return (f"\n\nREMINDER: the reply did not hold the package. Give every file again, each in its own fenced block: "
-                f"`# file: experiment.py`, `# file: {package}/__init__.py` and `# file: {package}/{MODEL_NAME}`.\n")
+def reminder(package: str) -> str:
     return (f"\n\nREMINDER: the reply did not hold the package. Give every file again, each in its own fenced block: "
             f"`# file: simulate.py`, `# file: experiment.py`, `# file: {package}/__init__.py` and "
             f"`# file: {package}/{MODEL_NAME}`.\n")

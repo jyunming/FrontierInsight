@@ -1,8 +1,6 @@
-"""How the code request asks for the function ``trial`` when FI writes the frame of simulate.py
-(``execution.code_skeleton`` with ``execution.code_skeleton_ask``): ``prompt`` shows the frame first and asks for ``trial`` beside
-experiment.py with nothing that asks simulate.py for an entry point, a seed or a loop; ``filler`` asks for experiment.py alone and
-writes ``trial`` in a request of its own through the function-by-function step. With the frame off the request is what it was.
-Made-up topic: a colony's growth. No real model is called."""
+"""How the code request asks for the function ``trial`` when FI writes the frame of simulate.py (``execution.code_skeleton``):
+the frame is shown first and ``trial`` is asked for beside experiment.py, with nothing that asks simulate.py for an entry point,
+a seed or a loop. With the frame off the request is what it was. Made-up topic: a colony's growth. No real model is called."""
 
 from __future__ import annotations
 
@@ -49,10 +47,9 @@ BOTH = ("```python\n# file: simulate.py\n" + TRIAL + "```\n\n" + EXPERIMENT)
 ASKS = re.compile(r"run_trial|run_cell|FI_REPLICATE_SEED|FI_PILOT|FI_ORACLE|complete script|Single Python file|single-file")
 
 
-def _engine(tmp_path: Path, *, skeleton_on: bool, ask: str = "prompt") -> Engine:
+def _engine(tmp_path: Path, *, skeleton_on: bool) -> Engine:
     cfg = Config(topic="a colony's growth", title="colony", provider=ProviderConfig(name="openai"),
-                 execution=ExecutionConfig(sandbox="venv", timeout_s=120, split_analysis=True, code_skeleton=skeleton_on,
-                                           code_skeleton_ask=ask),
+                 execution=ExecutionConfig(sandbox="venv", timeout_s=120, split_analysis=True, code_skeleton=skeleton_on),
                  knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "outputs"))
     engine = Engine(cfg)
     engine.quest_root.mkdir(parents=True, exist_ok=True)
@@ -82,8 +79,8 @@ class _Model:
         return None
 
 
-async def _implement(tmp_path: Path, *, skeleton_on: bool, ask: str = "prompt", model: _Model | None = None) -> tuple[Engine, _Model]:
-    engine = _engine(tmp_path, skeleton_on=skeleton_on, ask=ask)
+async def _implement(tmp_path: Path, *, skeleton_on: bool, model: _Model | None = None) -> tuple[Engine, _Model]:
+    engine = _engine(tmp_path, skeleton_on=skeleton_on)
     await engine.executor.setup(engine.quest_root)
     (engine.quest_root / "code").mkdir(parents=True, exist_ok=True)
     model = model or _Model([TRIAL], BOTH)
@@ -98,19 +95,15 @@ def _sans_frame(prompt: str) -> str:
 
 @pytest.mark.asyncio
 async def test_with_the_frame_off_the_code_request_is_what_it_was(tmp_path: Path) -> None:
-    """The request hash is that of the commit before this change (6ad6c160); ``code_skeleton_ask`` changes nothing when off."""
-    seen = []
-    for name, ask in (("a", "prompt"), ("b", "filler")):
-        _engine_, model = await _implement(tmp_path / name, skeleton_on=False, ask=ask)
-        text = model.prompts[0].replace(str(_engine_.quest_root), "<quest>").replace(str(tmp_path / name), "<tmp>")
-        seen.append(hashlib.sha256(text.encode("utf-8")).hexdigest())
-    assert seen[0] == seen[1], "the ask changes nothing when the frame is off"
-    assert seen[0] == "cb29b006a3c41edc2c87a9193062533bc94a569f4ddf13bf2b72ad4296636a6d", seen[0]
+    """The request hash is that of the commit before this change (6ad6c160)."""
+    engine, model = await _implement(tmp_path, skeleton_on=False)
+    text = model.prompts[0].replace(str(engine.quest_root), "<quest>").replace(str(tmp_path), "<tmp>")
+    assert hashlib.sha256(text.encode("utf-8")).hexdigest() == "cb29b006a3c41edc2c87a9193062533bc94a569f4ddf13bf2b72ad4296636a6d"
 
 
 @pytest.mark.asyncio
-async def test_option_prompt_shows_the_frame_first_and_asks_simulate_py_for_nothing_but_trial(tmp_path: Path) -> None:
-    engine, model = await _implement(tmp_path, skeleton_on=True, ask="prompt")
+async def test_the_frame_is_shown_first_and_asks_simulate_py_for_nothing_but_trial(tmp_path: Path) -> None:
+    engine, model = await _implement(tmp_path, skeleton_on=True)
     prompt = model.prompts[0]
     assert prompt.startswith("FI writes the frame of simulate.py"), "the frame instruction is the first thing in the request"
     assert "ONLY the function `trial(cell, ctx)`" in prompt[:400]
@@ -130,50 +123,12 @@ async def test_option_prompt_shows_the_frame_first_and_asks_simulate_py_for_noth
 
 
 @pytest.mark.asyncio
-async def test_option_filler_asks_no_simulate_file_and_fills_trial_through_the_function_filler(tmp_path: Path) -> None:
-    engine, model = await _implement(tmp_path, skeleton_on=True, ask="filler", model=_Model([TRIAL], EXPERIMENT))
-    code_request, trial_request = model.prompts
-    assert "# file: simulate.py" not in code_request, "simulate.py is not asked for as a file"
-    assert code_request.startswith("FI writes simulate.py itself") and "# file: experiment.py" in code_request
-    assert not ASKS.search(_sans_frame(code_request).split("## Outline")[0])
-    assert trial_request.startswith("You are the **Trial Function** stage")
-    assert "ONE function, `trial(cell, ctx)`" in trial_request and "# >>> FI frame" in trial_request
-    assert "`growth`" in trial_request and "`survival`" in trial_request, "the declared results are in the function request"
-    assert "`ctx.rng`" in trial_request and "`cell[\"name\"]`" in trial_request, "the helper rules are in it"
-    sim = (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")
-    assert skeleton.has_frame(sim) and "ctx.rng.random()" in sim and skeleton.frame_intact(engine._skeleton_frame(STATE), sim) == ""
-    record = json.loads((engine.fi_dir / "function_steps_trial.json").read_text(encoding="utf-8"))
-    assert record["functions"]["trial"]["status"] == function_steps.DONE and record["calls"] == 1
-    assert not (engine.fi_dir / function_steps.RECORD).exists(), "the package's own record is not touched"
-    assert (engine.quest_root / "code" / "experiment.py").is_file()
-
-
-@pytest.mark.asyncio
-async def test_option_filler_repairs_the_function_alone_and_a_failure_leaves_the_frames_stub(tmp_path: Path) -> None:
-    wrong = "def trial(cell):\n    return {}\n"  # not the signature FI calls it with
-    engine, model = await _implement(tmp_path / "a", skeleton_on=True, ask="filler", model=_Model([wrong, TRIAL], EXPERIMENT))
-    assert [p.startswith("You are the **Trial Function") for p in model.prompts] == [False, True, True]
-    assert model.prompts[2].startswith("You are the **Trial Function Repair**") and "def trial(cell):" not in model.prompts[2].split("# What is wrong")[0]
-    assert "ctx.rng.random()" in (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")
-    engine, model = await _implement(tmp_path / "b", skeleton_on=True, ask="filler", model=_Model([wrong], EXPERIMENT))
-    assert len(model.prompts) == 1 + 3, "a fill and two repairs, then the function stays a stub for the small run to report"
-    sim = (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")
-    assert skeleton.has_frame(sim) and "not written yet" in sim
-    assert "did not pass FI's check" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
-
-
-def test_a_reply_with_experiment_py_alone_is_read_only_when_fi_writes_simulate_py_itself() -> None:
-    from core.engine import _PY_FENCE_RE
-    from core.split_run import parse_split_response
-
-    assert parse_split_response(EXPERIMENT, _PY_FENCE_RE) is None
-    got = parse_split_response(EXPERIMENT, _PY_FENCE_RE, simulate_optional=True)
-    assert got is not None and got["simulate"] == "" and "RESULT_JSON" in got["analysis"]
-    assert parse_split_response(BOTH, _PY_FENCE_RE, simulate_optional=True)["simulate"].strip().startswith("def trial")
-
-
-def test_the_reminder_for_a_package_does_not_ask_for_simulate_py_when_fi_writes_it() -> None:
-    from core import code_layout
-
-    assert "simulate.py" in code_layout.reminder("colony") and "simulate.py" not in code_layout.reminder("colony", "filler")
-    assert "simulate.py" not in code_layout.prompt_block("colony", ["E1"], frame="filler").split("RESEARCH TOOL.")[1][:60]
+async def test_a_failed_small_run_of_a_study_that_compares_values_inside_each_run_gets_the_rule_for_a_result_per_value(tmp_path: Path) -> None:
+    inside = {"design": {"protocol": {**DESIGN["protocol"], "in_each_run": {"method": ["bonferroni", "bh"]}}}}
+    engine = _engine(tmp_path, skeleton_on=True)
+    note = engine._in_each_run_repair_note(inside)
+    assert "`method`" in note and "out.each(" in note and "EVERY value" in note and "float('nan')" in note
+    assert "method=bonferroni" in note, "the keys are those FI reads"
+    assert engine._in_each_run_repair_note(STATE) == "", "no compared values, no note"
+    off = _engine(tmp_path / "off", skeleton_on=False)
+    assert off._in_each_run_repair_note(inside) == "", "the frame is off: the repair is what it was"
