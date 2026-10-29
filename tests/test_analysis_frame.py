@@ -571,16 +571,66 @@ def test_undefined_trials_are_printed_not_dropped(tmp_path: Path) -> None:
     assert "growth_undefined" not in printed[KEYS[2]]
 
 
-def test_a_stale_derived_json_and_figure_are_taken_away_when_a_run_starts(tmp_path: Path) -> None:
-    quest = _quest(tmp_path, _design())
-    (quest / af.DERIVED_PATH).parent.mkdir(parents=True)
-    (quest / af.DERIVED_PATH).write_text(json.dumps({"derived": {"x": {"status": "ok", "by_setting": {KEYS[0]: 9.0}}},
-                                                      "figures": [{"file": "growth.png"}]}), encoding="utf-8")
-    (quest / "figures").mkdir()
-    (quest / "figures" / "growth.png").write_bytes(b"old")
+def test_a_run_that_fails_after_an_accepted_run_keeps_its_figures_and_says_so(tmp_path: Path) -> None:
+    bodies = """
+    def figure_fig1(fig, table):
+        fig.axes[0].plot([1, 2], [1, 2])
+    """
+    quest = _quest(tmp_path, _design(), bodies)
+    code, _printed, first, err = _run(quest)
+    assert code == 0, err
+    figure = quest / "figures" / "growth.png"
+    accepted = figure.read_bytes()
     (quest / "raw" / "trials.json").write_text("not json", encoding="utf-8")
+    code, printed, record, _err = _run(quest)
+    assert code == 2 and printed is None
+    assert figure.read_bytes() == accepted  # the accepted figure is still there
+    assert record["from_earlier_run"] is True and record["this_run"]["status"] == "stopped" and "record of the trials" in record["this_run"]["why"]
+    assert record["figures_from_earlier_run"] == ["growth.png"] and record["derived"] == first["derived"]
+    assert not (quest / af.PREVIOUS_PATH).exists() and not (quest / "figures" / "previous").exists()
+
+
+def test_a_figure_a_later_run_did_not_draw_is_kept_and_marked(tmp_path: Path) -> None:
+    quest = _quest(tmp_path, _design(), "def figure_fig1(fig, table):\n    fig.axes[0].plot([1, 2], [1, 2])\n")
+    assert _run(quest)[0] == 0
+    accepted = (quest / "figures" / "growth.png").read_bytes()
+    (quest / "code" / "fi_figures.py").unlink()  # a quest whose analysis has no figure step
     code, _printed, record, _err = _run(quest)
-    assert code == 2 and not record and not (quest / "figures" / "growth.png").exists()
+    assert code == 0 and (quest / "figures" / "growth.png").read_bytes() == accepted
+    assert record["figures"] == [] and record["figures_from_earlier_run"] == ["growth.png"]
+    assert "kept from the earlier run" in " ".join(record["notes"])
+    code, _printed, record, _err = _run(quest)  # the file is the earlier run's only until a run draws it
+    assert code == 0
+
+
+def test_a_figure_the_new_run_tried_and_failed_is_never_the_old_one(tmp_path: Path) -> None:
+    quest = _quest(tmp_path, _design(), "def figure_fig1(fig, table):\n    fig.axes[0].plot([1, 2], [1, 2])\n")
+    assert _run(quest)[0] == 0
+    derive = quest / "code" / "derive.py"
+    derive.write_text(derive.read_text(encoding="utf-8") + "\n\ndef figure_fig1(fig, table):\n    raise ValueError('x')\n", encoding="utf-8")
+    code, _printed, record, _err = _run(quest)
+    assert code == 1 and record["figures"][0]["status"] == "failed" and not (quest / "figures" / "growth.png").exists()
+    assert "figures_from_earlier_run" not in record
+
+
+def test_a_result_worked_out_afterwards_can_be_read_from_the_record(tmp_path: Path) -> None:
+    design = _design()
+    design["protocol"]["metrics"].append({"id": "slope", "kind": "mean", "role": "result", "returned": "afterwards"})
+    rec = copy.deepcopy(RECORD)
+    for c in rec["cells"]:
+        c["metrics"]["slope"] = {"values": [2.0, 4.0], "trials": [0, 1]}
+    bodies = "def derive_slope(table):\n    return sum(table.mean('slope', k) for k in table.keys())\n"
+    _code, printed, record, _err = _run(_quest(tmp_path, design, bodies, record=rec))
+    assert record["derived"]["slope"]["status"] == "ok" and printed["slope"] == 12.0
+    assert record["derived"]["slope"]["inputs"] == ["slope"]
+
+
+def test_undefined_trials_are_counted_from_the_values_when_the_record_does_not_count_them(tmp_path: Path) -> None:
+    rec = copy.deepcopy(RECORD)
+    rec["cells"][0]["metrics"]["growth"]["values"] = [1.0, None, float("nan"), 2.0]  # no non_finite in the record
+    rec["cells"][0]["metrics"]["growth"]["trials"] = [0, 1, 2, 3]
+    _code, printed, _record, _err = _run(_quest(tmp_path, _design(), record=rec))
+    assert printed[KEYS[0]]["growth_undefined"] == 2 and printed[KEYS[0]]["growth_values"] == [1.0, 2.0]
 
 
 def test_a_dict_that_leaves_out_settings_says_why(tmp_path: Path) -> None:

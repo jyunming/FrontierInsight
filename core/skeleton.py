@@ -453,9 +453,17 @@ class Table:
 
     def undefined(self, name, key):
         """How many trials of setting ``key`` returned ``name`` with no value (a NaN or an infinity): FI's record says it."""
+        import fi_table
+
         self._check(name)
-        got = (self._metric(name, key) or {}).get("non_finite") if isinstance(self._metric(name, key), dict) else None
-        return int(got) if isinstance(got, int) and not isinstance(got, bool) and got > 0 else 0
+        metric = self._metric(name, key)
+        if not isinstance(metric, dict):
+            return 0
+        got = metric.get("non_finite")
+        if isinstance(got, int) and not isinstance(got, bool):
+            return max(got, 0)
+        raw = metric.get("values")  # the record does not count them: count the values that are not numbers
+        return sum(1 for v in raw if not fi_table.finite(v)) if isinstance(raw, (list, tuple)) else 0
 
     def part(self, name):
         """The keys of the settings of the part ``name`` of a study made of parts."""

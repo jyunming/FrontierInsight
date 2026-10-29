@@ -61,6 +61,7 @@ DERIVE_FILE = "derive.py"
 EXPERIMENT_FILE = "experiment.py"
 #: Where FI keeps what it worked out (under the quest folder).
 DERIVED_PATH = Path("data") / "results" / "derived.json"
+PREVIOUS_PATH = Path("data") / "results" / "derived.previous.json"  # the earlier run's, while a run is under way
 DERIVED_SCHEMA = "fi.derived/v1"
 #: The module the figure step lives in (the text of ``core/analysis_figures.py``); ``experiment.py`` calls its ``run_figures`` (and
 #: ``search_figures`` for a search) and takes ``said`` / ``exit_code`` / ``fi_faults`` from it.
@@ -73,7 +74,7 @@ BEGIN = f"# >>> FI analysis frame, version {VERSION}: written by FI from the pla
 END = "# <<< FI analysis frame"
 _BEGIN = re.compile(r"# >>> FI analysis frame, version (\d+): written by FI from the plan; a repair does not change it")
 #: The names the frame binds once; a second binding outside the marked part changes what ``experiment.py`` reads.
-FRAME_NAMES = frozenset({"ANALYSIS_VERSION", "RESULTS", "ROLES", "KINDS", "PAIRED", "DERIVED", "REFERENCES", "HELD", "FIXED",
+FRAME_NAMES = frozenset({"ANALYSIS_VERSION", "RESULTS", "ROLES", "KINDS", "AFTERWARDS", "PAIRED", "DERIVED", "REFERENCES", "HELD", "FIXED",
                          "COMPARED", "PARTS", "FIGURES", "SEARCH", "Table", "Figure", "NotYet", "Missing", "UnknownResult", "fi_frame"})
 #: A body's parameters, by the kind of body.
 SIGNATURES = {"derive": ["table"], "reference": ["setting"], "figure": ["fig", "table"]}
@@ -119,6 +120,7 @@ def plan_of(design: dict[str, Any]) -> dict[str, Any]:
             references[r.id] = _reference_values.normalized(ref)
     return {
         "results": [r.id for r in c.results if r.id not in afterwards],
+        "afterwards": sorted(afterwards),
         "roles": {**roles, **{d["id"]: d["role"] for d in derived}},
         "kinds": {**{r.id: r.kind for r in c.results}, **{d["id"]: d["kind"] for d in derived}},
         "paired": [r.id for r in c.results if r.paired and c.shared_draws],
@@ -155,6 +157,7 @@ def _frame_text(plan: dict[str, Any]) -> str:
         f"RESULTS = {_literal(tuple(plan['results']))}  # every result the plan declares: what a body reads from FI's record, by id\n"
         f"ROLES = {_literal(plan['roles'])}\n"
         f"KINDS = {_literal(plan['kinds'])}\n"
+        f"AFTERWARDS = {_literal(tuple(plan['afterwards']))}  # results the study works out from the trials: readable from the record\n"
         f"PAIRED = {_literal(tuple(plan['paired']))}\n"
         f"DERIVED = {_literal({d['id']: {k: d[k] for k in ('by', 'formula', 'inputs', 'role')} for d in plan['derived']})}\n"
         f"REFERENCES = {_literal(plan['references'])}  # results whose reference FI works out from a formula\n"
@@ -399,7 +402,9 @@ class FIFault(Exception):
 
 
 RECORD = os.path.join("data", "results", "derived.json")
+PREVIOUS = os.path.join("data", "results", "derived.previous.json")
 _CALC = []
+_ASIDE = {"files": []}
 
 
 def _number(v):
@@ -775,25 +780,63 @@ def result_json(table, records, compared):
     return _clean(out)
 
 
-def _forget_last_run(quest_root):
-    """Take away what the last run of this analysis left (its numbers and the figures it drew), so a run that stops early leaves
-    nothing of an earlier one to be read as its own."""
+def _set_aside(quest_root):
+    """Move what the last run left (its derived.json and the figures it drew) out of the places this run writes to, so nothing of it
+    can be read as this run's. :func:`_put_back` returns what this run did not replace, marked as the earlier run's."""
     path = os.path.join(quest_root, RECORD)
     try:
         with open(path, encoding="utf-8") as f:
             old = json.load(f)
     except (OSError, ValueError):
-        old = None
+        return
+    figures = os.path.join(quest_root, "figures")
     for outcome in (old.get("figures") if isinstance(old, dict) else None) or []:
-        if isinstance(outcome, dict) and outcome.get("file"):
-            try:
-                os.remove(os.path.join(quest_root, "figures", os.path.basename(str(outcome["file"]))))
-            except OSError:
-                pass
+        name = os.path.basename(str(outcome.get("file") or "")) if isinstance(outcome, dict) else ""
+        if name and os.path.exists(os.path.join(figures, name)):
+            os.makedirs(os.path.join(figures, "previous"), exist_ok=True)
+            os.replace(os.path.join(figures, name), os.path.join(figures, "previous", name))
+            _ASIDE["files"].append(name)
+    os.replace(path, os.path.join(quest_root, PREVIOUS))
+
+
+def _put_back(quest_root, document, why=""):
+    """Finish with the earlier run's files. A figure this run drew (or tried to draw) replaces the old one; one it did not touch
+    comes back and is listed as the earlier run's. Without a ``document`` (this run stopped before it wrote one) the earlier
+    derived.json comes back too, saying that it is the earlier run's and why this run stopped."""
+    figures = os.path.join(quest_root, "figures")
+    tried = {os.path.basename(str(o.get("file"))) for o in (document or {}).get("figures") or [] if isinstance(o, dict) and o.get("file")}
+    kept = []
+    for name in _ASIDE["files"]:
+        src = os.path.join(figures, "previous", name)
+        if not os.path.exists(src):
+            continue
+        if name in tried:
+            os.remove(src)
+        else:
+            os.replace(src, os.path.join(figures, name))
+            kept.append(name)
     try:
-        os.remove(path)
+        os.rmdir(os.path.join(figures, "previous"))
     except OSError:
         pass
+    _ASIDE["files"] = []
+    prev = os.path.join(quest_root, PREVIOUS)
+    if document is not None:
+        if kept:
+            document["figures_from_earlier_run"] = kept
+        return kept
+    try:
+        with open(prev, encoding="utf-8") as f:
+            old = json.load(f)
+    except (OSError, ValueError):
+        return kept
+    old["from_earlier_run"] = True
+    old["this_run"] = {"status": "stopped", "why": why}
+    old["figures_from_earlier_run"] = kept
+    with open(os.path.join(quest_root, RECORD), "w", encoding="utf-8") as f:
+        json.dump(old, f, indent=1)
+    os.remove(prev)
+    return kept
 
 
 def _figures(table, quest_root):
@@ -820,14 +863,15 @@ def run(record_path, quest_root):
     """The whole analysis: ``(RESULT_JSON, records, exit code, derived.json as written)``. Writes data/results/derived.json. The
     exit code is 2 for a fault of FI's own (nothing to send the model), else 1 when a body of a counting role, or a figure body,
     failed or was refused, else 0 (a body not written yet is listed in ``not_computed`` and does not stop the run)."""
-    _forget_last_run(quest_root)
+    _set_aside(quest_root)
     cells = fi_table.load(record_path)
     if not cells:
         raise FIFault("FI's record of the trials (%s) is missing or empty, so there is nothing to analyse" % record_path)
     notes = []
     base = {**derive.FIXED, **_thresholds(record_path)}
-    first = Table(cells, list(derive.RESULTS))
-    table = Table(cells, list(derive.RESULTS), _references(first, base, notes),
+    readable = list(derive.RESULTS) + list(derive.AFTERWARDS)
+    first = Table(cells, readable)
+    table = Table(cells, readable, _references(first, base, notes),
                   {name: first.at(**hold) for name, hold in derive.PARTS.items()})
     compared = {k: list(v) for k, v in derive.COMPARED.items()}
     records = _derived(table, base, compared)
@@ -837,12 +881,21 @@ def run(record_path, quest_root):
     not_computed += [{"id": rid, "status": "no_data", "why": "no trial gave a value for it"}
                      for rid in derive.RESULTS if rid in out and out[rid] is None]
     faults = [r["why"] for r in records.values() if r.get("fi_fault")] + list(figure_faults)
+    kept_figures = _put_back(quest_root, {"figures": outcomes})
     document = {"schema": "fi.derived/v1", "derived": records, "not_computed": not_computed, "complete": not not_computed,
                 "figures": outcomes, "figures_said": said, "fi_faults": faults, "notes": notes}
+    if kept_figures:
+        document["figures_from_earlier_run"] = kept_figures
+        document["notes"] = notes + ["%s: kept from the earlier run, this run did not draw %s" % (
+            ", ".join(kept_figures), "it" if len(kept_figures) == 1 else "them")]
     path = os.path.join(quest_root, RECORD)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(_clean(document), f, indent=1)
+    try:
+        os.remove(os.path.join(quest_root, PREVIOUS))
+    except OSError:
+        pass
     bad = [i for i, r in records.items() if r["status"] in ("failed", "refused") and r["role"] in COUNTING and not r.get("fi_fault")]
     return out, records, (2 if faults else 1 if bad or figure_code else 0), document
 
@@ -874,9 +927,11 @@ if __name__ == "__main__":
     except SystemExit:
         raise
     except FIFault as e:
+        _put_back(os.path.dirname(HERE), None, str(e))
         sys.stderr.write("FI's analysis cannot start (this is FI's, not the study's code): %s\\n" % e)
         sys.exit(2)
     except BaseException as e:  # noqa: BLE001
+        _put_back(os.path.dirname(HERE), None, "%s: %s" % (type(e).__name__, e))
         sys.stderr.write("FI's analysis stopped inside its own lines, not in the study's code (this is FI's fault): %s: %s\\n"
                          % (type(e).__name__, e))
         traceback.print_exc()
