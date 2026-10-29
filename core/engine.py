@@ -11553,6 +11553,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # The person read plan.md; FI then had it rewritten to fit the time it measured, so they did not read this one.
             approved_by = ("auto: FI had the plan rewritten to fit the time it measured after the person read it "
                            f"(pauses.plan={mode}), and nobody approved the protocol it rewrote")
+        if approved_by.startswith("human") and self._size_edit_after_read():
+            # The person read plan.md; FI then made the study smaller to fit the time it measured, so they did not read this one.
+            approved_by = ("auto: FI made the study smaller to fit the time it measured after the person read the plan "
+                           f"(pauses.plan={mode}), and nobody approved the protocol it changed")
         iteration = int(state.get("iteration", 0) or 0)
         source = "plan.md" if iteration == 0 else f"design at iteration {iteration} (a quest begun before the protocol was frozen)"
         if at_confirm:

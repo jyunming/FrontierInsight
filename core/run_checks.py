@@ -219,6 +219,10 @@ def _search_sample(block: dict[str, Any], grid: Any) -> list[dict[str, Any]]:
     return out
 
 
+def _whole_number(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
 class RunChecksMixin:
     """Methods of :class:`core.engine.Engine`; see the module docstring."""
 
@@ -1103,6 +1107,7 @@ class RunChecksMixin:
         from . import optimise as _optimise
         from . import optimise_search as _optimise_search
 
+        earlier = (_estimate.read_record(self.quest_root).get("truncated") or {})  # type: ignore[attr-defined]
         self._clear_cut(runner)  # what an earlier sizing of this study decided is decided again below
         raw = _optimise.block_of(self._protocol_block(state))  # type: ignore[attr-defined]
         block, _why = _optimisation_plan.normalize(raw) if raw is not None else (None, "")
@@ -1300,19 +1305,20 @@ class RunChecksMixin:
                         searched = 0
             design_key = _cost_model.design_key(block, runner.simulate)
             finer_s: float | None = None
+            finer_basis, finer_low = _cost_model.MEASURED, False
             if checked:
                 # The study is cut, so the check's reserve matters: one run of the check at its finest settings is timed
                 # (a finer setting costs more than the search's design, which is only a lower bound).
-                finer_s = await self._time_finer_check(
+                finer_s, finer_basis, finer_low = await self._time_finer_check(
                     block, state, runner, python, env, deterministic=deterministic, thresholds=thresholds, inside=inside,
                     left_s=budget_s - (time.monotonic() - timing_started), limit_s=limit_s)
             _cost_model.keep_measured(self.quest_root, per_evaluation_s=per_eval, per_evaluation_at_least=lower, slowdown=slowdown,  # type: ignore[attr-defined]
                                       check_unit_s=unit if check_n else None, check_unit_basis="search-design lower bound",
-                                      finer_unit_s=finer_s, scan_s=scan_alone,
+                                      finer_unit_s=finer_s, finer_unit_basis=finer_basis, finer_unit_at_least=finer_low,
+                                      scan_s=scan_alone,
                                       plan={"evaluations": search_n, "check_runs": check_n, "scan": scan, "runs_per_evaluation": runs},
                                       design=design_key)
-            sized = self._size_the_search(block, limit_s, check_n, scan_alone, design_key, searched or checked, alternatives,
-                                          check_s * _estimate.SAFETY)
+            sized = self._size_the_search(block, limit_s, check_n, scan_alone, design_key, searched or checked)
             if not searched and not checked:
                 # The line a person reads is the whole study: the scan alone said "about 6 minutes" of a search that ran
                 # for hours.
@@ -1369,13 +1375,24 @@ class RunChecksMixin:
             planned_search = planned_check = 0
         one_s = per_eval or first_s or _estimate.cheapest_setting_s(probes)
         timed = sized is not None and sized.evaluations is not None  # FI's size was worked out from what was measured
-        lowered = timed and self._lower_the_evaluations(state, block, sized, planned_search, alternatives, limit_s)
+        # A resume or a repair sizes the study again from the plan FI already lowered: what it asked for stays in the record.
+        asked, kept_to = planned_search, 0
+        if (_whole_number(earlier.get("evaluations_lowered_to")) and _whole_number(earlier.get("evaluations"))
+                and planned_search == int(earlier["evaluations_lowered_to"])):
+            asked, kept_to = int(earlier["evaluations"]), int(earlier["evaluations_lowered_to"])
         if self._run_up_to_the_limit(
                 runner, est, limit_s, one_s, kind="search",
                 reserve_s=max(check_s * _estimate.SAFETY, sized.check_reserve_s) if timed else check_s * _estimate.SAFETY,
-                planned={"scan": scan, "evaluations": planned_search, "check_runs": planned_check,
-                         **({"evaluations_lowered_to": int(sized.evaluations)} if lowered else {})},
+                planned={"scan": scan, "evaluations": asked, "check_runs": planned_check,
+                         **({"evaluations_lowered_to": kept_to} if kept_to else {})},
                 detail=text, fit=fits_in, deadline_s=sized.deadline_s if timed else None):
+            # Only a study that goes on is made smaller in plan.md: one that stops as too long leaves the plan as it was.
+            lowered = self._lower_the_evaluations(state, block, sized, planned_search, alternatives, limit_s) if timed else 0
+            if lowered:
+                record = _estimate.read_record(self.quest_root)  # type: ignore[attr-defined]
+                if isinstance(record.get("truncated"), dict):
+                    record["truncated"]["evaluations_lowered_to"] = int(lowered)
+                    _estimate.write_record(self.quest_root, record)  # type: ignore[attr-defined]
             return None
         self._log.warning("[execute] the search's coarse scan: %s", text)  # type: ignore[attr-defined]
         return self._stop_too_long(text, fit=fits_in)
@@ -1569,35 +1586,42 @@ class RunChecksMixin:
                 "over_topic_limit": "at_plan_minimum" if over_topic else False}
 
     async def _time_finer_check(self, block: dict[str, Any], state: Any, runner: Any, python: Any, env: Any, *,
-                                deterministic: bool, thresholds: Any, inside: Any, left_s: float, limit_s: float) -> float | None:
+                                deterministic: bool, thresholds: Any, inside: Any, left_s: float,
+                                limit_s: float) -> tuple[float | None, str, bool]:
         """Seconds one run of FI's check takes at its finest numerical settings (the baseline design at the last level of
         :func:`core.optimum_check.levels_of`), or ``None`` when the plan names no finer setting or it could not be timed in
-        the time left. A failure here is not the run's: the check is then counted at the search design's cost, as a lower
-        bound."""
+        the time left, with where the number comes from and whether it is only a lower bound. A failure here is not the
+        run's: the check is then counted at the search design's cost, as a lower bound. The time of one trial without the
+        process start is used where the timing separates the two; otherwise the number includes the start and says so."""
         from . import optimise as _optimise
         from . import optimum_check as _optimum_check
 
+        none: tuple[float | None, str, bool] = (None, _cost_model.MEASURED, False)
         if left_s < 5:
-            return None
+            return none
         try:
             level = (_optimum_check.levels_of(block).get("levels") or [{}])[-1]
             if not level:
-                return None
+                return none
             cell = _optimise.complete_case(self._protocol_block(state), dict(level), keep_inside=True)  # type: ignore[attr-defined]
-        except (KeyError, TypeError, ValueError, AttributeError):
-            return None
-        probe, why = await _estimate._time_one(
-            self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(),  # type: ignore[attr-defined]
-            cell, runs=1, deterministic=deterministic, timeout_s=int(max(5, min(limit_s / 4.0, left_s))), env=env,
-            thresholds=thresholds, in_each_run=inside or None, name="pilot_finer")
+            probe, why = await _estimate._time_one(
+                self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(),  # type: ignore[attr-defined]
+                cell, runs=1, deterministic=deterministic, timeout_s=int(max(5, min(limit_s / 4.0, left_s))), env=env,
+                thresholds=thresholds, in_each_run=inside or None, name="pilot_finer")
+        except Exception as exc:  # noqa: BLE001 -- an optional timing must never stop a run
+            self._log.info("[execute] FI could not time one run of its check at finer settings (%r)", exc)  # type: ignore[attr-defined]
+            return none
         if probe is None:
             self._log.info("[execute] FI could not time one run of its check at finer settings (%s); the check is counted "  # type: ignore[attr-defined]
                            "at the cost of one search design, at least", str(why)[:200])
-            return None
-        return float(probe.seconds)
+            return none
+        per_trial = getattr(probe, "per_trial_s", None)
+        if isinstance(per_trial, (int, float)) and per_trial > 0:
+            return float(per_trial), _cost_model.MEASURED, bool(probe.at_least)
+        return float(probe.seconds), "measured, includes the start of the process", bool(probe.at_least)
 
     def _size_the_search(self, block: dict[str, Any], limit_s: float, check_runs: int, scan_s: float, design: str,
-                         cut: Any, alternatives: int, old_reserve_s: float) -> Any:
+                         cut: Any) -> Any:
         """How many evaluations the search may use, from FI's own cost model (:func:`core.cost_model.search_plan`) and not from
         the plan's count: what the time allowed leaves after the coarse scan, FI's check of the best design (its runs times
         one measured run at the finest settings, at most half the limit) and the analysis, over what one evaluation was
@@ -1614,7 +1638,8 @@ class RunChecksMixin:
             planned = int(_optimisation_plan.evaluations(block)[0] or 0) or None
         except (KeyError, TypeError, ValueError):
             planned = None
-        plan = _cost_model.search_plan(model, limit_s, planned_evaluations=planned, check_runs=check_runs, scan_s=scan_s, design=design)
+        plan = _cost_model.search_plan(model, limit_s, planned_evaluations=planned, check_runs=check_runs, scan_s=scan_s, design=design,
+                                         margin=_estimate.SAFETY)
         if plan.evaluations is None:
             line = (f"FI could not work out how many evaluations the search can use ({plan.why or 'nothing was measured'}), "
                     "so the plan's number stands and the search is stopped at the time limit.")
@@ -1625,21 +1650,21 @@ class RunChecksMixin:
         return plan
 
     def _lower_the_evaluations(self, state: Any, block: dict[str, Any], plan: Any, planned: int, alternatives: int,
-                               limit_s: float) -> bool:
+                               limit_s: float) -> int:
         """The search's evaluations FI's cost model gives, written into plan.md as a version of the engine (only
-        ``evaluation_budget``; no request to the plan's model), when that is fewer than the plan's. ``True`` when
-        it was written; ``False`` when it was not (the plan's own count fits, or plan.md cannot be changed: a frozen
+        ``evaluation_budget``; no request to the plan's model), when that is fewer than the plan's. The evaluations
+        now in plan.md when it was written; ``0`` when it was not (the plan's own count fits, or plan.md cannot be changed: a frozen
         protocol, a redesign, an unreadable plan): the search is then stopped by its deadline alone."""
         count = int(plan.evaluations or 0)
         if not planned or count <= 0 or count >= planned:
-            return False
+            return 0
         if _frozen.load(self.quest_root) is not None or int(state.get("iteration", 0) or 0) > 0:  # type: ignore[attr-defined]
             self._log.info("[execute] the protocol is frozen: the search keeps its %s evaluations and stops at the time "  # type: ignore[attr-defined]
                            "FI worked out for it", f"{planned:,}")
-            return False
+            return 0
         budget = block.get("evaluation_budget") if isinstance(block.get("evaluation_budget"), dict) else None
         if budget is None:
-            return False
+            return 0
         starts, per_start = int(budget["starts"]), int(budget["per_start"])
         factor = count / planned
         new_per = max(1, int(per_start * factor))
@@ -1658,7 +1683,7 @@ class RunChecksMixin:
 
             edited = _plan.edit_design_block(text, change)
             if edited is None or _plan.parse(edited).design is None:
-                return False
+                return 0
             edited = _plan.refresh_model_section(edited)
             _plan.note_edit(self.quest_root, text)  # type: ignore[attr-defined]
             path.write_text(edited, encoding="utf-8")
@@ -1666,10 +1691,10 @@ class RunChecksMixin:
                                  note="fewer search evaluations, so the search, its check and the analysis fit the time allowed, set by FI")
         except OSError as e:
             self._log.warning("[execute] FI could not lower the search's evaluations in plan.md: %r", e)  # type: ignore[attr-defined]
-            return False
+            return 0
         new_total = new_starts * new_per * max(1, alternatives)
         line = (f"FI made the search smaller so that it fits the time allowed ({_estimate.plain_duration(limit_s)}): the plan "
-                f"asked for {planned:,} evaluations; one takes about {_estimate.plain_duration(plan.wall_per_evaluation_s or 0.0)}, "
+                f"asked for {planned:,} evaluations; one takes {'under a second' if (plan.wall_per_evaluation_s or 0.0) < 1.0 else 'about ' + _estimate.plain_duration(plan.wall_per_evaluation_s or 0.0)}, "
                 f"and the coarse scan, FI's check of the best design and the analysis need the rest, so the search is given "
                 f"{new_total:,} ({new_starts:,} starting points of {new_per:,}). The checks, thresholds and tolerances are unchanged.")
         self._log.warning("[execute] %s", line)  # type: ignore[attr-defined]
@@ -1677,7 +1702,16 @@ class RunChecksMixin:
         sized_block = {**block, "evaluation_budget": {**budget, "starts": new_starts, "per_start": new_per}}
         self._sized_protocol = {**(getattr(self, "_sized_protocol", None) or {}), "optimisation": sized_block}
         _cost_model.keep_measured(self.quest_root, plan={"evaluations_planned": planned, "evaluations_set": new_total})  # type: ignore[attr-defined]
-        return True
+        return new_total
+
+    def _size_edit_after_read(self) -> bool:
+        """Whether FI made the study smaller in plan.md (fewer runs per setting, fewer search evaluations): a person who
+        read the plan before then did not read the protocol that runs (the record of who approved it says so)."""
+        try:
+            return any(str(row.get("by")) == "engine" and str(row.get("note") or "").startswith("fewer ")
+                       for row in _plan.history(self.quest_root))  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            return False
 
     @staticmethod
     def _too_long_text(est: _estimate.Estimate, limit_s: float, cut: bool = True) -> str:

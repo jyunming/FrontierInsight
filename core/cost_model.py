@@ -137,7 +137,7 @@ def keep_measured(quest_root: Path | str, *, probes: list[Any] | None = None, es
                   at_once: int | None = None, limit_s: float | None = None, key: str = "", per_evaluation_s: float | None = None,
                   per_evaluation_at_least: bool = False, check_unit_s: float | None = None, check_unit_basis: str = MEASURED,
                   finer_unit_s: float | None = None, scan_s: float | None = None, plan: dict[str, Any] | None = None,
-                  design: str = "") -> bool:
+                  design: str = "", finer_unit_basis: str = MEASURED, finer_unit_at_least: bool = False) -> bool:
     """Add what the sizing measured to the quest's record (made if there is none). Adds only; never raises, since a
     missing record must not change a run. ``design`` (:func:`design_key`) ties the search terms to the design they were
     measured on: terms kept for another design are dropped first. ``probes`` are :class:`core.run_estimate.Probe`; ``est`` an ``Estimate``."""
@@ -174,7 +174,7 @@ def keep_measured(quest_root: Path | str, *, probes: list[Any] | None = None, es
         if check_unit_s:
             model.terms["check_unit"] = Term(float(check_unit_s), check_unit_basis, check_unit_basis != MEASURED)
         if finer_unit_s:
-            model.terms["finer_check_unit"] = Term(float(finer_unit_s), MEASURED)
+            model.terms["finer_check_unit"] = Term(float(finer_unit_s), finer_unit_basis, finer_unit_at_least)
         if scan_s is not None:
             model.terms["scan"] = Term(float(scan_s), MEASURED)
         if plan:
@@ -396,7 +396,8 @@ class SearchPlan:
 
 
 def search_plan(model: CostModel, limit_s: float, *, planned_evaluations: int | None = None, check_runs: int | None = None,
-                scan_s: float | None = None, analysis_s: float = ANALYSIS_RESERVE_S, design: str = "") -> SearchPlan:
+                scan_s: float | None = None, analysis_s: float = ANALYSIS_RESERVE_S, design: str = "",
+                margin: float = 1.0) -> SearchPlan:
     """The evaluations a search may use in ``limit_s`` seconds:
 
     ``(limit - scan - check reserve - analysis reserve) / wall seconds per evaluation``
@@ -437,7 +438,7 @@ def search_plan(model: CostModel, limit_s: float, *, planned_evaluations: int | 
     # setting of ``runs_per_evaluation`` runs; a finer-settings unit is the time of one run of the check.
     per_setting_runs = max(1, int(model.plan.get("runs_per_evaluation") or 1))
     unit = finer if finer is not None else (model.seconds("check_unit") or model.seconds("per_evaluation") or 0.0) / per_setting_runs
-    wanted = runs * unit * share
+    wanted = runs * unit * share * max(1.0, float(margin))  # ``margin``: the safety factor the estimates use
     reserve = min(wanted, float(limit_s) / 2.0)  # as the run itself keeps for the check: never more than half the limit
     room = float(limit_s) - scan - reserve - analysis_s
     n = max(0, int(room / wall)) if wall > 0 else 0
