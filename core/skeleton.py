@@ -803,9 +803,10 @@ REFLECT_INTRO_DERIVE = ("Produce a corrected function of derive.py (and the help
 
 #: The one rule for a function that gives a number for each value the plan compares inside each run.
 DERIVE_LEVEL_RULE = (
-    "When the plan compares values inside each run, a function that gives one number for each compared value returns a mapping "
-    "with EVERY compared value as a key, written the way `table.levels` shows it; where the result does not exist for a value "
-    "its number is `None` (a left-out key is refused).")
+    "When the plan compares values inside each run, a function that gives one number for each value of one compared setting "
+    "returns a mapping whose keys are those values written as text (`\"bh\"`, `0.5`: the value alone, not `method=bh`), with "
+    "EVERY value of that setting as a key; where the result does not exist for a value its number is `None` (a left-out key is "
+    "refused).")
 
 _BODY_RETURNS = {
     "derive": ("It returns one number for the study, a mapping of setting keys to numbers, or `table.missing(\"why\")` where "
@@ -851,15 +852,18 @@ _REFLECT_SWAPS = (
 )
 
 
-def derive_prompt(source: str, prompt: str) -> str:
+def derive_prompt(source: str, prompt: str, body: str = "") -> str:
     """The repair request ``prompt`` (made from agents/execute_reflect.md) for a function of a derive.py with text ``source``:
     the note on what may change first, then the text with every sentence about a whole script that prints its results (the
     intro, the rule for a value that does not exist, the whole-script ``code`` key, the lines about ``RESULT_JSON``) replaced
-    by what is true for a function of derive.py; ``prompt`` unchanged when ``source`` has no FI frame."""
+    by what is true for a function of derive.py; ``prompt`` unchanged when ``source`` has no FI frame. ``body``: the function
+    that failed, named in the opening."""
     if not has_analysis_frame(source):
         return prompt
     for old, new in _REFLECT_SWAPS:
         prompt = prompt.replace(old, new)
+    failed = f"The function `{body}` of derive.py" if body else "A function of derive.py"
+    prompt = prompt.replace("The agent-generated experiment script just failed", f"{failed} just failed")
     return DERIVE_REPAIR_NOTE + prompt
 
 

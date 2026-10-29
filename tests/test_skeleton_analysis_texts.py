@@ -6,6 +6,7 @@ was (sha256 at df4ff1ad). Made-up topic: a colony's growth. No real model is cal
 from __future__ import annotations
 
 import hashlib
+import re
 import importlib
 import json
 import sys
@@ -203,7 +204,7 @@ def test_repair_problem_without_the_analysis_frame_checks_nothing_of_these_files
 
 #: Phrases FI itself wrote for the single-script path; none may reach the model when FI writes the analysis.
 FORBIDDEN = ("# file: experiment.py", "FI_TRIALS", "FI_BEST_DESIGN", "FI_OPTIMISATION", "FI_OPTIMUM_CHECK", "RESULT_JSON", "figures/",
-             "figures-dir", "plt.subplots(", "why_missing", "emit `null`", "run_grid", "THIRD fenced", "after the other two",
+             "figures-dir", "plt.subplots(", "under `\"why_missing\"`", "emit `null`", "run_grid", "THIRD fenced", "after the other two",
              "give the whole corrected script", "Save figures to", "Stratify when", "matplotlib.use", "os.makedirs",
              "raw results files", "the analysis holds", "single-file", "Single Python file", "Honour `FI_PILOT`",
              "Honour `FI_REPLICATE_SEED`")
@@ -229,7 +230,7 @@ def _new_path_texts(tmp_path: Path) -> dict[str, str]:
     texts["protocols/cluster+empty"] = engine._frame_protocols({"design": DESIGN}, False, {}, [])
     for body in BODIES:
         texts["repair/" + body] = skeleton.reflect_derive(body, compared=True)
-    texts["repair/request"] = skeleton.derive_prompt(DERIVE, _agent("execute_reflect"))
+    texts["repair/request"] = skeleton.derive_prompt(DERIVE, _agent("execute_reflect"), "derive_doubling_time")
     texts["rerun"] = skeleton.RERUN_NOTE_ANALYSIS
     texts["extend"] = skeleton.EXTEND_REPLY_ANALYSIS
     texts["layout"] = (code_layout.prompt_block("colony", ["E1"], frame="prompt", analysis=True)
@@ -247,6 +248,45 @@ def test_no_text_of_the_new_path_speaks_of_a_script_the_model_no_longer_writes(t
     # the replaced rules are there instead
     assert "table.missing(" in texts["implement_body/False"] and "plt.subplots" not in texts["implement_body/False"]
     assert "one more fenced block" in texts["protocols/cluster+empty"] and "experiment.py" not in cluster and "FI_TRIALS" not in texts["protocols/cluster"]
+
+
+#: The only sentences of the new path that name experiment.py: FI says it writes it, or that a reply must not contain it.
+EXPERIMENT_PY_SAYINGS = (
+    "FI writes experiment.py, you do not", "FI wrote experiment.py, which", "all of experiment.py (the statistics",
+    "FI writes experiment.py and runs it once", "FI writes experiment.py; if the problem", "give experiment.py or touch",
+    "(FI writes experiment.py)", "FI writes experiment.py, so leave out", "give no experiment.py")
+
+
+def test_the_new_path_names_experiment_py_only_to_say_that_FI_writes_it(tmp_path: Path) -> None:
+    cluster = run_checks._cluster_bodies()
+    assert "experiment.py" not in cluster
+    for name, text in _new_path_texts(tmp_path).items():
+        rest = text
+        for ok in EXPERIMENT_PY_SAYINGS:
+            rest = rest.replace(ok, "")
+        assert "experiment.py" not in rest, (name, rest[max(0, rest.index("experiment.py") - 80):][:160])
+        # a word of the schema, not a value: the only `null` is the one in the give-up line of the repair request
+        assert "null" not in rest.replace("leave empty/null otherwise", ""), name
+        # no sentence that starts in lower case after a full stop (a broken join), except a file name
+        flat = re.sub(r"\. (simulate|derive|experiment)\.py", ". X", rest)
+        assert not re.search(r"\. [a-z]", flat), (name, re.search(r".{40}\. [a-z].{20}", flat, re.S))
+
+
+def test_the_level_rule_gives_the_key_form_the_analysis_accepts() -> None:
+    rule = skeleton.DERIVE_LEVEL_RULE
+    assert "written as text" in rule and "not `method=bh`" in rule and "EVERY value" in rule and "table.levels shows" not in rule
+    assert ". its " not in run_checks._IN_EACH_RUN_BODIES and rule in run_checks._IN_EACH_RUN_BODIES
+
+
+def test_the_repair_opening_says_which_function_failed() -> None:
+    on = skeleton.derive_prompt(DERIVE, _agent("execute_reflect"), "derive_doubling_time")
+    assert "The function `derive_doubling_time` of derive.py just failed" in on and "experiment script just failed" not in on
+    assert "A function of derive.py just failed" in skeleton.derive_prompt(DERIVE, _agent("execute_reflect"))
+
+
+def test_the_report_bullet_says_in_place_what_trial_does_with_a_missing_value() -> None:
+    text = run_checks.frame_template_text(_agent("implement_body"), False, BODIES)
+    assert "as said above" not in text and "in `trial`, return `None` and give the reason beside it" in text
 
 
 def test_the_repair_request_of_a_body_has_no_rule_of_a_script_that_prints_its_results() -> None:

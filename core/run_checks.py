@@ -277,7 +277,7 @@ _ANALYSIS_SWAPS = (
     ("- **Report what the method produced",
      "- **Report what the method produced, even when it is bad.** Never clamp, cap or clip a result into the range the design "
      "expects. A quantity that is undefined at a setting is `table.missing(\"<a few words why>\")` in a function of derive.py "
-     "(and `None` with its reason in `trial`, as said above); never a stand-in number (0, -1, a bound, a marker value) - a "
+     "(in `trial`, return `None` and give the reason beside it as `out[\"why_missing\"]`); never a stand-in number (0, -1, a bound, a marker value) - a "
      "result pinned to a bound is rejected."),
 )
 
@@ -471,8 +471,7 @@ works out every number and figure the plan declares and prints the results. Ther
 """
 _IN_EACH_RUN_BODIES = (
     "FI keeps each value's own results: `table.levels(id, factor, key)` gives the number of the value of the compared setting "
-    "`factor`. "
-    "its number. " + _skeleton.DERIVE_LEVEL_RULE + " A number the run gives once is one number.")
+    "`factor`. " + _skeleton.DERIVE_LEVEL_RULE + " A number the run gives once is one number.")
 
 
 class RunChecksMixin:
