@@ -72,12 +72,10 @@ def _quest(tmp_path: Path, design: dict[str, Any], bodies: str = "", record: dic
     return quest
 
 
-def _run(quest: Path, *, root: bool = True) -> tuple[int, dict[str, Any] | None, dict[str, Any], str]:
-    """Run FI's experiment.py in a fresh Python with only the code folder on its path (and FI's folder named, for the formula
-    calculator, unless ``root`` is false). Returns the exit code, the printed RESULT_JSON, derived.json and stderr."""
+def _run(quest: Path) -> tuple[int, dict[str, Any] | None, dict[str, Any], str]:
+    """Run FI's experiment.py in a fresh Python with only the code folder on its path (nothing of FI's source is named).
+    Returns the exit code, the printed RESULT_JSON, derived.json and stderr."""
     env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "FI_ROOT", "FI_TRIALS")}
-    if root:
-        env[af.ROOT_ENV] = str(ROOT)
     r = subprocess.run([sys.executable, "experiment.py"], cwd=quest / "code", env=env, capture_output=True, text=True, timeout=300,
                        creationflags=NO_WINDOW)
     last = [ln for ln in r.stdout.splitlines() if ln.startswith("RESULT_JSON: ")]
@@ -97,7 +95,7 @@ def _ids(result: dict[str, Any]) -> set[str]:
         if "=" in k and isinstance(v, dict):
             for name in v:
                 if name not in skip:
-                    found.add(next((name[: -len(s)] for s in ("_values", "_count", "_total", "_pair_id") if name.endswith(s)), name))
+                    found.add(next((name[: -len(s)] for s in ("_values", "_count", "_total", "_pair_id", "_undefined") if name.endswith(s)), name))
         else:
             found.add(k)
     return found
@@ -325,15 +323,30 @@ def test_a_formula_equals_a_hand_computation(tmp_path: Path) -> None:
     assert got["gain"]["inputs"] == ["growth"]
 
 
-def test_a_formula_without_the_calculator_says_why(tmp_path: Path) -> None:
-    code, _printed, record, _err = _run(_quest(tmp_path, _design([_derived("gain", formula="growth - base")])), root=False)
-    assert record["derived"]["gain"]["status"] == "failed" and af.ROOT_ENV in record["derived"]["gain"]["why"]
-    assert code == 1
+def test_a_formula_needs_nothing_of_fis_source_and_the_copy_is_cores(tmp_path: Path) -> None:
+    files = af.carried_files()
+    assert sorted(files) == ["fi_core/__init__.py", "fi_core/oracle_check.py", "fi_core/oracle_forms.py", "fi_figures.py"]
+    for name in af.CORE_COPIES:
+        assert files[f"fi_core/{name}"] == (ROOT / "core" / name).read_text(encoding="utf-8")
+    assert files["fi_figures.py"] == (ROOT / "core" / "analysis_figures.py").read_text(encoding="utf-8")
+    quest = _quest(tmp_path, _design([_derived("gain", formula="growth - base")]))
+    assert all((quest / "code" / f).is_file() for f in files)
+    code, _printed, record, _err = _run(quest)  # a fresh Python that knows no FI folder
+    assert code == 0 and record["derived"]["gain"]["status"] == "ok"
+
+
+def test_a_missing_calculator_is_fis_fault_not_the_models(tmp_path: Path) -> None:
+    quest = _quest(tmp_path, _design([_derived("gain", formula="growth - base")]))
+    shutil.rmtree(quest / "code" / af.CORE_DIR)
+    code, printed, _record, err = _run(quest)
+    assert code == 2 and printed is None and "formula calculator" in err and "not the study's" in err
 
 
 def test_a_formula_over_a_name_nobody_gives_fails_in_words(tmp_path: Path) -> None:
-    _code, _printed, record, _err = _run(_quest(tmp_path, _design([_derived("odd", formula="growth * nothing_here")])))
-    assert record["derived"]["odd"]["status"] == "failed" and "nothing_here" in record["derived"]["odd"]["why"]
+    code, _printed, record, err = _run(_quest(tmp_path, _design([_derived("odd", formula="growth * nothing_here")])))
+    odd = record["derived"]["odd"]
+    assert odd["status"] == "failed" and "nothing_here" in odd["why"] and odd["fi_fault"]  # a plan fault: FI's, not a body's
+    assert code == 2 and "FI's fault" in err and record["fi_faults"]
 
 
 def test_a_setting_with_no_value_is_missing_with_its_reason(tmp_path: Path) -> None:
@@ -403,7 +416,7 @@ def test_experiment_on_a_recorded_quest_gives_exactly_the_declared_ids(tmp_path:
     assert code == 0, err[-800:]
     c = contract.from_design(design)
     assert _ids(printed) == {r.id for r in c.results} | {d.id for d in c.derived}
-    stubbed = {d.id for d in c.derived if not (d.formula or "").strip()}
+    stubbed = {d.id for d in c.derived if not (d.formula or "").strip()} | {r.id for r in c.results if r.returned == "afterwards"}
     assert {i for i, r in record["derived"].items() if r["status"] == "not_written"} == stubbed
     assert (quest / af.DERIVED_PATH).is_file() and not (scratch / "data").exists()
 
@@ -460,7 +473,7 @@ def test_the_record_the_run_names_is_the_one_read(tmp_path: Path) -> None:
     other["cells"] = other["cells"][:1]
     (quest / "raw" / "trials.analysis.json").write_text(json.dumps(other), encoding="utf-8")
     env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "FI_ROOT")}
-    env.update({af.ROOT_ENV: str(ROOT), "FI_TRIALS": "raw/trials.analysis.json"})
+    env.update({"FI_TRIALS": "raw/trials.analysis.json"})
     r = subprocess.run([sys.executable, "experiment.py"], cwd=quest / "code", env=env, capture_output=True, text=True,
                        creationflags=NO_WINDOW)
     named = json.loads([ln for ln in r.stdout.splitlines() if ln.startswith("RESULT_JSON: ")][-1][13:])
@@ -490,3 +503,136 @@ def test_levels_with_an_unknown_axis_is_a_plain_error() -> None:
     assert table.levels("growth", "mode", "rate=0.1") == {"a": 1.5, "b": 1.5}
     with pytest.raises(ValueError, match="no recorded value"):
         table.levels("growth", "mode", "rate=0.1", nonsense=1)
+
+
+# ---- the review round -----------------------------------------------------------------------------------------------------------
+def _levels_record() -> dict[str, Any]:
+    """One setting whose every run compares two things inside it (mode and size): a record for each combination."""
+    base = {"rate": 0.1}
+    cells = [{"cell": base, "key": "rate=0.1", "planned": 4, "ok": 4, "failed": 0, "metrics": {}}]
+    for mode in ("a", "b"):
+        for size in (1, 2):
+            level = {"mode": mode, "size": size}
+            cells.append({"cell": {**base, **level}, "level": level, "key": "", "planned": 4, "ok": 4, "failed": 0,
+                          "metrics": {"growth": {"values": [float(size), float(size) + (1 if mode == "b" else 0)]}}})
+    return {"schema": "fi.trials/v1", "thresholds": {}, "cells": cells}
+
+
+def test_two_compared_factors_print_a_value_for_every_combination(tmp_path: Path) -> None:
+    design = _design(grid={"rate": [0.1]}, in_each_run={"mode": ["a", "b"], "size": [1, 2]})
+    code, printed, record, err = _run(_quest(tmp_path, design, record=_levels_record()))
+    assert code == 0, err
+    assert printed["rate=0.1"]["growth"] == {"mode=a,size=1": 1.0, "mode=a,size=2": 2.0, "mode=b,size=1": 1.5, "mode=b,size=2": 2.5}
+    assert "growth" not in {r["id"] for r in record["not_computed"]}
+
+
+def test_one_results_shape_never_stops_the_others(tmp_path: Path) -> None:
+    rec = _levels_record()
+    for c in rec["cells"][1:]:
+        c["metrics"]["alive"] = {"values": [1.0, 0.0]}
+    rec["cells"][0]["metrics"] = {"wobble": {"values": [1.0, 2.0]}}  # a result with its own values beside the per-level ones
+    design = _design(grid={"rate": [0.1]}, in_each_run={"mode": ["a", "b"], "size": [1, 2]})
+    code, printed, _record, _err = _run(_quest(tmp_path, design, record=rec))
+    assert code == 0 and printed["rate=0.1"]["wobble"] == 1.5 and set(printed["rate=0.1"]["alive"]) == set(printed["rate=0.1"]["growth"])
+
+
+def test_a_result_the_study_works_out_afterwards_has_a_body_and_a_stub_shows(tmp_path: Path) -> None:
+    design = _design()
+    design["protocol"]["metrics"].append({"id": "slope", "kind": "mean", "role": "result", "returned": "afterwards"})
+    quest = _quest(tmp_path, design)
+    assert "derive_slope" in af.stubs((quest / "code" / "derive.py").read_text(encoding="utf-8"))
+    code, printed, record, _err = _run(quest)
+    assert code == 0 and printed["slope"] is None and record["derived"]["slope"]["status"] == "not_written"
+    assert any(i["id"] == "slope" and i["status"] == "not_written" for i in record["not_computed"])
+    assert record["complete"] is False
+    derive = quest / "code" / "derive.py"
+    derive.write_text(derive.read_text(encoding="utf-8") + "\n\ndef derive_slope(table):\n    return 0.5\n", encoding="utf-8")
+    _code, printed, record, _err = _run(quest)
+    assert printed["slope"] == 0.5 and "slope" not in {i["id"] for i in record["not_computed"]}
+
+
+def test_derived_json_lists_every_declared_result_that_is_missing(planted: Any, tmp_path: Path) -> None:
+    listed = {i["id"]: i["status"] for i in planted[2]["not_computed"]}
+    assert listed["stub"] == "not_written" and listed["wrong_type"] == "refused" and listed["raises"] == "failed"
+    assert "good_number" not in listed and "nan_diagnostic" not in listed and planted[2]["complete"] is False
+    rec = copy.deepcopy(RECORD)
+    for c in rec["cells"]:
+        c["metrics"].pop("wobble")
+    _code, _printed, record, _err = _run(_quest(tmp_path, _design(), record=rec))
+    assert any(i["id"] == "wobble" and i["status"] == "no_data" for i in record["not_computed"])
+
+
+def test_undefined_trials_are_printed_not_dropped(tmp_path: Path) -> None:
+    rec = copy.deepcopy(RECORD)
+    rec["cells"][0]["metrics"]["growth"]["non_finite"] = 2
+    rec["cells"][1]["metrics"]["growth"] = {"values": [], "trials": [], "non_finite": 3}  # no trial of it has a value
+    _code, printed, _record, _err = _run(_quest(tmp_path, _design(), record=rec))
+    assert printed[KEYS[0]]["growth_undefined"] == 2 and printed[KEYS[1]]["growth_undefined"] == 3
+    assert "growth_undefined" not in printed[KEYS[2]]
+
+
+def test_a_stale_derived_json_and_figure_are_taken_away_when_a_run_starts(tmp_path: Path) -> None:
+    quest = _quest(tmp_path, _design())
+    (quest / af.DERIVED_PATH).parent.mkdir(parents=True)
+    (quest / af.DERIVED_PATH).write_text(json.dumps({"derived": {"x": {"status": "ok", "by_setting": {KEYS[0]: 9.0}}},
+                                                      "figures": [{"file": "growth.png"}]}), encoding="utf-8")
+    (quest / "figures").mkdir()
+    (quest / "figures" / "growth.png").write_bytes(b"old")
+    (quest / "raw" / "trials.json").write_text("not json", encoding="utf-8")
+    code, _printed, record, _err = _run(quest)
+    assert code == 2 and not record and not (quest / "figures" / "growth.png").exists()
+
+
+def test_a_dict_that_leaves_out_settings_says_why(tmp_path: Path) -> None:
+    bodies = f"""
+    def derive_peak(table):
+        return {{{KEYS[0]!r}: 1.0, {KEYS[1]!r}: None}}
+    """
+    _code, printed, record, _err = _run(_quest(tmp_path, _design([_derived("peak")]), bodies))
+    peak = record["derived"]["peak"]
+    assert peak["status"] == "ok" and set(peak["missing"]) == set(KEYS[1:])
+    assert "no reason" in peak["missing"][KEYS[1]] and "no value for this setting" in peak["missing"][KEYS[2]]
+    assert printed[KEYS[2]]["why_missing"]["peak"]
+
+
+def test_a_body_that_exits_is_refused_and_a_fault_of_fis_own_lines_is_fis(tmp_path: Path) -> None:
+    items = [("quitter", "result", "import sys\n    sys.exit(0)"), ("fine", "result", "return 1.0")]
+    design, bodies = _planted_design(items)
+    code, printed, record, _err = _run(_quest(tmp_path, design, bodies))
+    assert record["derived"]["quitter"]["status"] == "refused" and "sys.exit" in record["derived"]["quitter"]["why"]
+    assert printed["fine"] == 1.0 and code == 1
+    design = _design([_derived("odd")])
+    code, _printed, record, err = _run(_quest(tmp_path / "second", design, "from math import sqrt as derive_odd\n"))
+    odd = record["derived"]["odd"]
+    assert odd["fi_fault"] and "FI's own lines" in odd["why"] and code == 2 and "FI's fault" in err
+
+
+def test_the_figures_run_end_to_end_and_a_failed_body_counts(tmp_path: Path) -> None:
+    bodies = """
+    def figure_fig1(fig, table):
+        for k in table.keys():
+            fig.axes[0].plot([1, 2], [table.mean("growth", k)] * 2)
+    """
+    quest = _quest(tmp_path, _design(), bodies)
+    code, _printed, record, err = _run(quest)
+    assert code == 0, err
+    assert [o["status"] for o in record["figures"]] == ["ok"] and record["figures_said"].startswith("1 of 1 figure(s) drawn")
+    assert (quest / "figures" / "growth.png").is_file()
+    derive = quest / "code" / "derive.py"
+    derive.write_text(derive.read_text(encoding="utf-8") + "\n\ndef figure_fig1(fig, table):\n    import matplotlib.pyplot as plt\n    plt.savefig('x.png')\n", encoding="utf-8")
+    code, _printed, record, _err = _run(quest)
+    assert code == 1 and record["figures"][0]["status"] == "refused" and not (quest / "figures" / "growth.png").exists()
+    code, _printed, record, _err = _run(_quest(tmp_path / "stub", _design()))
+    assert code == 0 and record["figures"][0]["status"] == "not_written"
+
+
+@pytest.mark.skipif(not RECORDED, reason="the recorded scratch quests are not here")
+def test_the_figure_step_runs_on_a_recorded_quest(tmp_path: Path) -> None:
+    scratch = next(p for p in RECORDED if p.name == "cov1_pendulum_amplitude")
+    design = json.loads((scratch / "design.json").read_text(encoding="utf-8"))
+    quest = tmp_path / "quest"
+    shutil.copytree(scratch / "raw", quest / "raw")
+    af.ensure_files(quest / "code", design)
+    code, _printed, record, err = _run(quest)
+    assert code == 0, err
+    assert record["figures"] == [] and record["figures_said"] == ""  # the plan names no figure FI can draw (declared false)

@@ -295,8 +295,15 @@ class Table:
         self._parts = dict(parts or {})
         self.served = []
         self._settings = {}
+        self._by_setting = {}
         for c in self._cells:
-            if not c.get("level"):
+            if c.get("level"):
+                level = c["level"]
+                base = {a: v for a, v in (c.get("cell") or {}).items() if a not in level}
+                import fi_table
+
+                self._by_setting.setdefault(fi_table.cell_key(base), []).append(c)
+            else:
                 self._settings.setdefault(self._key_of(c), c)
 
     @classmethod
@@ -426,6 +433,29 @@ class Table:
             raise ValueError("`%s` is not recorded for each value of `%s` alone at %s; the run also compares %s: give their values "
                              "(levels(%r, %r, %r, %s=...))" % (name, factor, key, ", ".join(have), name, factor, key, have[0]))
         return out
+
+    def level_means(self, name, key):
+        """The mean of ``name`` for every value (or combination of values) the runs of setting ``key`` compared inside them that
+        FI holds a record for: ``{text: mean or None}``. The text is the value alone when the run compares one factor, else
+        the combination written as a setting is (``mode=a,size=2``). Never raises for the shape of the record."""
+        import fi_table
+
+        self._check(name)
+        out = {}
+        for c in self._by_setting.get(key, []):
+            if name not in c["metrics"]:
+                continue
+            level = c["level"]
+            text = fi_table._fmt(next(iter(level.values()))) if len(level) == 1 else fi_table.cell_key(level)
+            s = fi_table.summary(fi_table.values_of(c["metrics"].get(name)))
+            out[text] = s["mean"] if s["n"] else None
+        return out
+
+    def undefined(self, name, key):
+        """How many trials of setting ``key`` returned ``name`` with no value (a NaN or an infinity): FI's record says it."""
+        self._check(name)
+        got = (self._metric(name, key) or {}).get("non_finite") if isinstance(self._metric(name, key), dict) else None
+        return int(got) if isinstance(got, int) and not isinstance(got, bool) and got > 0 else 0
 
     def part(self, name):
         """The keys of the settings of the part ``name`` of a study made of parts."""

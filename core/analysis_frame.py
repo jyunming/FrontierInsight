@@ -33,11 +33,12 @@ The exit code is 1 when a body of a counting role (:data:`core.numeric_warnings.
 otherwise. A failure in FI's own lines is FI's, never the model's: the run says so and stops.
 
 ``experiment.py`` runs in the quest's own Python, where FI's ``core`` package is not importable; it reads FI's record through the
-carried ``fi_table.py`` and the runtime ``fi_frame.py`` (:mod:`core.skeleton`). The one thing it takes from FI's source is the
-formula calculator, found through the environment variable :data:`ROOT_ENV` (the folder that holds ``core/``); without it a
-quantity with a formula is reported as not computed and says why. Figures are drawn by a step that is called only when
-``code/fi_figures.py`` is there (:data:`FIGURES_MODULE`; ``core/analysis_figures.py`` writes it), so the analysis runs without it.
-Nothing here knows a field of science."""
+carried ``fi_table.py`` and the runtime ``fi_frame.py`` (:mod:`core.skeleton`). The formula calculator is FI's own text of
+``core/oracle_forms.py`` and ``core/oracle_check.py``, carried unchanged into ``code/fi_core/`` (:func:`carried_files`; the tests
+hold the copies equal to core's), so no folder of FI's has to be reachable (a cluster host, ``run.py``). The figures are drawn by
+``code/fi_figures.py``, the text of ``core/analysis_figures.py``. A formula FI cannot compute, a missing record and a fault of FI's
+own figures are FI's, not the study's: the run says so, exits 2 and nothing is sent to the model. Nothing here knows a field of
+science."""
 
 from __future__ import annotations
 
@@ -49,6 +50,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from . import analysis_figures as _figures
 from . import contract as _contract
 from . import function_steps as _steps
 from . import reference_values as _reference_values
@@ -60,17 +62,19 @@ EXPERIMENT_FILE = "experiment.py"
 #: Where FI keeps what it worked out (under the quest folder).
 DERIVED_PATH = Path("data") / "results" / "derived.json"
 DERIVED_SCHEMA = "fi.derived/v1"
-#: The environment variable that names the folder holding FI's ``core/`` (for the formula calculator).
-ROOT_ENV = "FI_ROOT"
-#: The module the figure step lives in; ``experiment.py`` calls ``fi_figures.draw(derive, table, records, quest_root)`` when it is there.
+#: The module the figure step lives in (the text of ``core/analysis_figures.py``); ``experiment.py`` calls its ``run_figures`` (and
+#: ``search_figures`` for a search) and takes ``said`` / ``exit_code`` / ``fi_faults`` from it.
 FIGURES_MODULE = "fi_figures"
+#: The folder of FI's own formula calculator, copied unchanged from ``core/`` beside ``experiment.py``.
+CORE_DIR = "fi_core"
+CORE_COPIES = ("oracle_forms.py", "oracle_check.py")
 
 BEGIN = f"# >>> FI analysis frame, version {VERSION}: written by FI from the plan; a repair does not change it"
 END = "# <<< FI analysis frame"
 _BEGIN = re.compile(r"# >>> FI analysis frame, version (\d+): written by FI from the plan; a repair does not change it")
 #: The names the frame binds once; a second binding outside the marked part changes what ``experiment.py`` reads.
 FRAME_NAMES = frozenset({"ANALYSIS_VERSION", "RESULTS", "ROLES", "KINDS", "PAIRED", "DERIVED", "REFERENCES", "HELD", "FIXED",
-                         "COMPARED", "PARTS", "FIGURES", "Table", "Figure", "NotYet", "Missing", "UnknownResult", "fi_frame"})
+                         "COMPARED", "PARTS", "FIGURES", "SEARCH", "Table", "Figure", "NotYet", "Missing", "UnknownResult", "fi_frame"})
 #: A body's parameters, by the kind of body.
 SIGNATURES = {"derive": ["table"], "reference": ["setting"], "figure": ["fig", "table"]}
 _BODY_PREFIXES = tuple(f"{k}_" for k in SIGNATURES)
@@ -102,13 +106,19 @@ def plan_of(design: dict[str, Any]) -> dict[str, Any]:
         by = "formula" if formula else (f"reference_{d.id}" if d.role == "reference" else f"derive_{d.id}")
         derived.append({"id": d.id, "by": by, "formula": formula or None, "inputs": list(d.inputs), "role": d.role, "kind": d.kind,
                         "label": d.label})
+    for r in c.results:
+        if r.returned == "afterwards" and r.id not in {d["id"] for d in derived}:
+            # a result the study works out from the trials (a fitted slope): no trial returns it, so it is a function of the study's
+            derived.append({"id": r.id, "by": f"derive_{r.id}", "formula": None, "inputs": [], "role": r.role, "kind": r.kind,
+                            "label": r.label})
+    afterwards = {d["id"] for d in derived} & {r.id for r in c.results}
     references: dict[str, Any] = {}
     for r in c.results:
         ref = r.reference
         if isinstance(ref, dict) and _reference_values.shape_problem(ref) is None:
             references[r.id] = _reference_values.normalized(ref)
     return {
-        "results": [r.id for r in c.results],
+        "results": [r.id for r in c.results if r.id not in afterwards],
         "roles": {**roles, **{d["id"]: d["role"] for d in derived}},
         "kinds": {**{r.id: r.kind for r in c.results}, **{d["id"]: d["kind"] for d in derived}},
         "paired": [r.id for r in c.results if r.paired and c.shared_draws],
@@ -118,6 +128,7 @@ def plan_of(design: dict[str, Any]) -> dict[str, Any]:
         "fixed": _reference_values.inputs(protocol),
         "compared": {str(k): list(v) for k, v in c.settings.in_each_run.items()},
         "parts": {str(s.get("name")): dict(s.get("hold") or {}) for s in c.settings.sub_studies if s.get("name")},
+        "search": c.search is not None,
         "figures": {f.id: {"file": f.file, "shows": list(f.shows), "x": f.x, "series": f.series, "panels": f.panels}
                     for f in c.figures if f.declared},
     }
@@ -152,6 +163,7 @@ def _frame_text(plan: dict[str, Any]) -> str:
         f"COMPARED = {_literal(plan['compared'])}  # what each run compares inside it\n"
         f"PARTS = {_literal(plan['parts'])}  # the sub-studies and the settings each holds\n"
         f"FIGURES = {_literal(plan['figures'])}\n"
+        f"SEARCH = {bool(plan['search'])!r}  # a search for the best design: FI draws its own figures from its record\n"
         f"{END}\n")
     return body
 
@@ -315,6 +327,18 @@ def frame_problem(simulate_source: str) -> str:
     return ""
 
 
+def carried_files() -> dict[str, str]:
+    """The files FI copies into the code folder besides ``derive.py`` and ``experiment.py``, by their path there: the formula
+    calculator (``core/oracle_forms.py`` and ``core/oracle_check.py`` as they are, in a package of their own: the standard library
+    is all they need) and the figure step."""
+    here = Path(__file__).parent
+    out = {f"{CORE_DIR}/__init__.py": '"""FI\'s formula calculator: core/oracle_forms.py and core/oracle_check.py, copied as they are."""\n'}
+    for name in CORE_COPIES:
+        out[f"{CORE_DIR}/{name}"] = (here / name).read_text(encoding="utf-8")
+    out[f"{FIGURES_MODULE}.py"] = Path(_figures.__file__).read_text(encoding="utf-8")
+    return out
+
+
 def ensure_files(code_dir: Path | str, design: dict[str, Any], simulate_source: str = "") -> list[str]:
     """Write ``derive.py`` and ``experiment.py`` into ``code_dir`` (with the runtime and the table they import, as
     :func:`core.skeleton.ensure_runtime` and ``ensure_table`` write them), keeping the bodies a ``derive.py`` already has.
@@ -334,7 +358,8 @@ def ensure_files(code_dir: Path | str, design: dict[str, Any], simulate_source: 
     except OSError:
         have = ""
     text = derive_source(design, have)
-    for name, content in ((DERIVE_FILE, text), (EXPERIMENT_FILE, EXPERIMENT)):
+    for name, content in (*carried_files().items(), (DERIVE_FILE, text), (EXPERIMENT_FILE, EXPERIMENT)):
+        (folder / name).parent.mkdir(parents=True, exist_ok=True)
         try:
             if (folder / name).read_text(encoding="utf-8") == content:
                 continue
@@ -364,7 +389,7 @@ sys.path.insert(0, HERE)
 
 import derive  # noqa: E402
 import fi_table  # noqa: E402
-from fi_frame import Missing, NotYet, Table  # noqa: E402
+from fi_frame import Missing, NotYet, Table, UnknownResult  # noqa: E402
 
 COUNTING = ("result", "reference", "physical_bound")
 
@@ -374,7 +399,6 @@ class FIFault(Exception):
 
 
 RECORD = os.path.join("data", "results", "derived.json")
-FIGURES_MODULE = "fi_figures"
 _CALC = []
 
 
@@ -387,14 +411,23 @@ def _finite(v):
 
 
 def _calculator():
-    """FI's formula calculator: it is found through FI_ROOT (the folder that holds FI's core/)."""
+    """FI's formula calculator: FI's own text of core/oracle_forms.py, copied beside this file as fi_core/."""
     if not _CALC:
-        root = os.environ.get("FI_ROOT")
-        if root and root not in sys.path:
-            sys.path.append(root)
-        from core import oracle_forms
+        try:
+            from fi_core import oracle_forms
+        except ImportError as e:
+            raise FIFault("FI's formula calculator (fi_core/) is not beside experiment.py (%s)" % e)
         _CALC.append(oracle_forms)
     return _CALC[0]
+
+
+def _why(ev):
+    """Why FI's calculator gave no number, in words."""
+    if ev.unreadable:
+        return "its formula cannot be read (%s)" % ev.unreadable
+    if ev.missing:
+        return "it uses %s, which is not given here" % ", ".join("`%s`" % n for n in ev.missing)
+    return ev.problem or "it gives no number"
 
 
 def _forms_of(value):
@@ -403,12 +436,16 @@ def _forms_of(value):
 
 def _where(e):
     """A plain sentence for an exception: its text and the line of derive.py it came from."""
-    frames = [f for f in traceback.extract_tb(e.__traceback__) if os.path.basename(f.filename) == "derive.py"]
+    tb = traceback.extract_tb(e.__traceback__)
+    frames = [f for f in tb if os.path.basename(f.filename) == "derive.py"]
     text = "%s: %s" % (type(e).__name__, e)
-    if frames:
-        return "%s (derive.py line %d, in %s)" % (text, frames[-1].lineno, frames[-1].name), False
-    last = traceback.extract_tb(e.__traceback__)[-1:]
-    return "%s (in FI's own lines: %s)" % (text, "%s line %d" % (os.path.basename(last[0].filename), last[0].lineno) if last else "?"), True
+    # FI's own lines raise on purpose when a body misuses the table (an id or a setting that is not there): that is the body's.
+    # Anything else raised inside them, or an exception with no line of derive.py at all, is FI's.
+    inner = os.path.basename(tb[-1].filename) if tb else ""
+    mine = not frames or (inner in ("fi_frame.py", "fi_table.py") and not isinstance(e, (UnknownResult, KeyError, ValueError)))
+    if mine:
+        return "%s (in FI's own lines: %s line %d)" % (text, inner, tb[-1].lineno if tb else 0), True
+    return "%s (derive.py line %d, in %s)" % (text, frames[-1].lineno, frames[-1].name), False
 
 
 def _scalar(by, role, v, level=False):
@@ -480,14 +517,17 @@ def check_return(by, role, value, keys, compared):
         if status != "ok":
             return {"status": status, "why": "%s (under `%s`)" % (why, k)}
         kept[str(k)] = number
-        if number is None and why:
-            missing[str(k)] = why
+        if number is None:
+            missing[str(k)] = why or "`%s` gave None here and no reason" % by
         if note:
             disclosed.append(note + " under `%s`" % k)
     out = {"status": "ok", "why": "", "missing": missing}
     if disclosed:
         out["disclosed"] = disclosed
     if factor is None:
+        for k in keys:
+            if k not in kept:
+                missing[k] = "`%s` gave no value for this setting" % by
         out["by_setting"] = kept
     else:
         canon = {}
@@ -504,6 +544,8 @@ def _call(by, fn, *args):
         return fn(*args), None
     except NotYet as e:
         return None, ("not_written", str(e) or "%s is not written yet" % by, False)
+    except SystemExit:
+        return None, ("refused", "`%s` ended the run itself (sys.exit); a function of the study returns its value" % by, False)
     except Exception as e:  # noqa: BLE001 -- one body's failure must not stop the others
         why, mine = _where(e)
         return None, ("failed", why, mine)
@@ -545,21 +587,24 @@ def _applies(when, table, key):
     return any(all(has(a, v) for a, v in f.items()) for f in when)
 
 
-def _references(table, base):
-    """FI's reference of each result whose plan gives a formula: ``{id: {setting key: number}}``."""
+def _references(table, base, notes):
+    """FI's reference of each result whose plan gives a formula: ``{id: {setting key: number}}``. A setting where the formula gives
+    no number has no reference, and ``notes`` says so."""
     out = {}
     for rid, ref in derive.REFERENCES.items():
-        try:
-            forms = _calculator()
-        except Exception:  # noqa: BLE001 -- the formula calculator is not here: no reference is offered
-            return {}
-        got = {}
+        forms = _calculator()
+        got, dropped = {}, {}
         for key in table.keys():
             if not _applies(ref.get("when"), table, key):
                 continue
             ev = forms.evaluate(ref["formula"], _setting_values(table, key, base), special=True)
             if ev.value is not None:
                 got[key] = ev.value
+            else:
+                dropped[key] = _why(ev)
+        if dropped:
+            notes.append("the reference of `%s` has no value at %d setting(s) (%s: %s), so none is offered there"
+                         % (rid, len(dropped), next(iter(dropped)), next(iter(dropped.values()))))
         out[rid] = got
     return out
 
@@ -567,19 +612,14 @@ def _references(table, base):
 def _formula(item, table, base, done):
     """A quantity with a formula, worked out by FI's calculator: one number, or one per setting when it names a setting's value or
     an input of the plan that differs between settings."""
-    try:
-        forms = _calculator()
-    except Exception as e:  # noqa: BLE001
-        return {"status": "failed", "why": ("FI's formula calculator is not available to this script (%s); the folder that holds "
-                                            "FI's core/ is named by FI_ROOT" % e)}
+    forms = _calculator()
     names = forms.names(item["formula"], {**forms.FUNCTIONS, **forms.SPECIAL_FUNCTIONS})
     axes = {a for k in table.keys() for a in table.setting(k)}
     per_setting = any(n in axes or n in derive.RESULTS or n in done for n in names)
     if not per_setting:
         ev = forms.evaluate(item["formula"], base, special=True)
         if ev.value is None:
-            return {"status": "failed", "why": ev.unreadable or ("it uses %s, which the plan does not give a value" % ", ".join(
-                "`%s`" % n for n in ev.missing) if ev.missing else "its formula %s" % ev.problem)}
+            return {"status": "failed", "fi_fault": True, "why": "the plan's formula for `%s` cannot be computed: %s" % (item["id"], _why(ev))}
         return {"status": "ok", "why": "", "value": ev.value, "inputs": []}
     kept, missing, used = {}, {}, set()
     for key in table.keys():
@@ -596,7 +636,7 @@ def _formula(item, table, base, done):
                     break
                 values[n] = mean
             elif n in done:
-                got = done[n]
+                got = done[n] if done[n].get("status") == "ok" else {}
                 v = got.get("value") if "value" in got else (got.get("by_setting") or {}).get(key)
                 used.add(n)
                 if v is None:
@@ -608,12 +648,12 @@ def _formula(item, table, base, done):
             if ev.value is not None:
                 kept[key] = ev.value
                 continue
-            why = ev.unreadable or ("it uses %s, which this setting does not give" % ", ".join("`%s`" % n for n in ev.missing)
-                                    if ev.missing else "its formula %s" % ev.problem)
+            why = _why(ev)
         missing[key] = why
     if not kept:
-        return {"status": "failed", "why": "no setting gave it (%s)" % (next(iter(missing.values()), "the study has no settings")),
-                "inputs": sorted(used)}
+        return {"status": "failed", "fi_fault": True, "inputs": sorted(used),
+                "why": "the plan's formula for `%s` gives no number at any setting (%s)" % (
+                    item["id"], next(iter(missing.values()), "the study has no settings"))}
     return {"status": "ok", "why": "", "by_setting": kept, "missing": missing, "inputs": sorted(used)}
 
 
@@ -681,23 +721,28 @@ def result_json(table, records, compared):
     for key in table.keys():
         row = {}
         for rid in derive.RESULTS:
-            vals = table.values(rid, key)
-            if vals:
-                seen.add(rid)
-                row[rid] = table.mean(rid, key)
-                row[rid + "_values"] = vals
-                if derive.KINDS.get(rid) == "proportion":
-                    row[rid + "_count"] = int(round(sum(vals)))
-                    row[rid + "_total"] = len(vals)
-                if rid in derive.PAIRED and table.trials(rid, key):
-                    row[rid + "_pair_id"] = table.trials(rid, key)
-            else:
-                for factor in compared:
-                    got = table.levels(rid, factor, key)
+            try:
+                vals = table.values(rid, key)
+                if vals:
+                    seen.add(rid)
+                    row[rid] = table.mean(rid, key)
+                    row[rid + "_values"] = vals
+                    if derive.KINDS.get(rid) == "proportion":
+                        row[rid + "_count"] = int(round(sum(vals)))
+                        row[rid + "_total"] = len(vals)
+                    if rid in derive.PAIRED and table.trials(rid, key):
+                        row[rid + "_pair_id"] = table.trials(rid, key)
+                else:
+                    got = table.level_means(rid, key)
                     if got:
                         seen.add(rid)
-                        row[rid] = {str(k): v for k, v in got.items()}
-                        break
+                        row[rid] = got
+                undefined = table.undefined(rid, key)
+                if undefined:
+                    seen.add(rid)
+                    row[rid + "_undefined"] = undefined
+            except Exception as e:  # noqa: BLE001 -- one result's shape never stops the others
+                why[rid] = "FI could not print it at %s: %s: %s" % (key, type(e).__name__, e)
         failed = table.failed(key)
         if failed:
             row["n_failed"] = failed
@@ -716,61 +761,109 @@ def result_json(table, records, compared):
             for key, v in rec["by_setting"].items():
                 if v is not None:
                     out.setdefault(key, {})[ident] = v
-                elif rec.get("missing", {}).get(key):
-                    out.setdefault(key, {}).setdefault("why_missing", {})[ident] = rec["missing"][key]
+            for key, reason in (rec.get("missing") or {}).items():
+                if reason and (rec["by_setting"].get(key) is None):
+                    out.setdefault(key, {}).setdefault("why_missing", {})[ident] = reason
         elif "by_level" in rec:
             out[ident] = rec["by_level"]["values"]
     for rid in derive.RESULTS:
         if rid not in seen:
             out[rid] = None
-            why[rid] = "no trial gave a value for it"
+            why.setdefault(rid, "no trial gave a value for it")
     if why:
         out["why_missing"] = why
     return _clean(out)
 
 
+def _forget_last_run(quest_root):
+    """Take away what the last run of this analysis left (its numbers and the figures it drew), so a run that stops early leaves
+    nothing of an earlier one to be read as its own."""
+    path = os.path.join(quest_root, RECORD)
+    try:
+        with open(path, encoding="utf-8") as f:
+            old = json.load(f)
+    except (OSError, ValueError):
+        old = None
+    for outcome in (old.get("figures") if isinstance(old, dict) else None) or []:
+        if isinstance(outcome, dict) and outcome.get("file"):
+            try:
+                os.remove(os.path.join(quest_root, "figures", os.path.basename(str(outcome["file"]))))
+            except OSError:
+                pass
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def _figures(table, quest_root):
+    """``(outcomes, said, exit code of the bodies, FI's own faults)`` of the figure step."""
+    if not os.path.exists(os.path.join(HERE, "fi_figures.py")):
+        return [], "", 0, []
+    try:
+        import fi_figures
+    except ImportError as e:
+        raise FIFault("FI's figure step (fi_figures.py) cannot be loaded (%s)" % e)
+    out_dir = os.path.join(quest_root, "figures")
+    os.makedirs(out_dir, exist_ok=True)
+    specs = [dict(v, id=i) for i, v in derive.FIGURES.items()]
+    try:
+        outcomes = fi_figures.run_figures(specs, derive, table, out_dir)
+        if derive.SEARCH:
+            outcomes += fi_figures.search_figures(quest_root, out_dir)
+    except Exception as e:  # noqa: BLE001 -- the figure step is FI's own code
+        return [], "", 0, ["FI's figure step stopped with %s: %s" % (type(e).__name__, e)]
+    return outcomes, fi_figures.said(outcomes), fi_figures.exit_code(outcomes), fi_figures.fi_faults(outcomes)
+
+
 def run(record_path, quest_root):
-    """The whole analysis: ``(RESULT_JSON, records, exit code)``. Writes data/results/derived.json."""
+    """The whole analysis: ``(RESULT_JSON, records, exit code, derived.json as written)``. Writes data/results/derived.json. The
+    exit code is 2 for a fault of FI's own (nothing to send the model), else 1 when a body of a counting role, or a figure body,
+    failed or was refused, else 0 (a body not written yet is listed in ``not_computed`` and does not stop the run)."""
+    _forget_last_run(quest_root)
     cells = fi_table.load(record_path)
     if not cells:
         raise FIFault("FI's record of the trials (%s) is missing or empty, so there is nothing to analyse" % record_path)
+    notes = []
     base = {**derive.FIXED, **_thresholds(record_path)}
     first = Table(cells, list(derive.RESULTS))
-    table = Table(cells, list(derive.RESULTS), _references(first, base),
+    table = Table(cells, list(derive.RESULTS), _references(first, base, notes),
                   {name: first.at(**hold) for name, hold in derive.PARTS.items()})
     compared = {k: list(v) for k, v in derive.COMPARED.items()}
     records = _derived(table, base, compared)
     out = result_json(table, records, compared)
-    figures = None
-    try:
-        figures = __import__(FIGURES_MODULE)
-    except ImportError:
-        pass
-    done = None
-    if figures is not None:
-        try:
-            done = figures.draw(derive, table, records, quest_root)
-        except Exception as e:  # noqa: BLE001 -- a figure step that fails is said, not an error of the numbers
-            done = [{"status": "failed", "why": "%s: %s" % (type(e).__name__, e)}]
+    outcomes, said, figure_code, figure_faults = _figures(table, quest_root)
+    not_computed = [{"id": i, "status": r["status"], "why": r.get("why") or ""} for i, r in records.items() if r["status"] != "ok"]
+    not_computed += [{"id": rid, "status": "no_data", "why": "no trial gave a value for it"}
+                     for rid in derive.RESULTS if rid in out and out[rid] is None]
+    faults = [r["why"] for r in records.values() if r.get("fi_fault")] + list(figure_faults)
+    document = {"schema": "fi.derived/v1", "derived": records, "not_computed": not_computed, "complete": not not_computed,
+                "figures": outcomes, "figures_said": said, "fi_faults": faults, "notes": notes}
     path = os.path.join(quest_root, RECORD)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(_clean({"schema": "fi.derived/v1", "derived": records, "figures": done}), f, indent=1)
-    bad = [i for i, r in records.items() if r["status"] in ("failed", "refused") and r["role"] in COUNTING]
-    return out, records, (1 if bad else 0)
+        json.dump(_clean(document), f, indent=1)
+    bad = [i for i, r in records.items() if r["status"] in ("failed", "refused") and r["role"] in COUNTING and not r.get("fi_fault")]
+    return out, records, (2 if faults else 1 if bad or figure_code else 0), document
 
 
 def main():
     quest = os.path.dirname(HERE)
     record = fi_table.record_path(quest)
-    out, records, code = run(record, quest)
+    out, records, code, document = run(record, quest)
     for ident, r in records.items():
         if r["status"] in ("failed", "refused"):
-            sys.stderr.write("%s was not worked out: %s\\n" % (ident, r.get("why")))
+            sys.stderr.write("%s was not worked out%s: %s\\n" % (ident, " (FI's fault, not the study's)" if r.get("fi_fault") else "", r.get("why")))
         elif r["status"] == "not_written":
             sys.stderr.write("%s is computed by no trial and no function of the study yet\\n" % ident)
         for note in r.get("disclosed") or []:
             sys.stderr.write("%s: %s\\n" % (ident, note))
+    for item in document["not_computed"]:
+        if item["status"] == "no_data":
+            sys.stderr.write("%s: %s\\n" % (item["id"], item["why"]))
+    for text in [document["figures_said"]] + document["notes"] + document["fi_faults"]:
+        if text:
+            sys.stderr.write(text + "\\n")
     sys.stdout.write("RESULT_JSON: " + json.dumps(out) + "\\n")
     return code
 
