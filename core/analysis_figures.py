@@ -7,9 +7,9 @@ What the writer of ``experiment.py`` (``core/analysis_frame.py``) calls, all of 
 * ``run_figures(figures, namespace, table, out_dir) -> list[dict]`` draws every declared figure. ``figures`` is the plan's
   ``contract.Figure`` list as dicts (``id``, ``file``, ``panels``, ``x``, ``series``, ``shows``); ``namespace`` is the module
   of ``derive.py`` (a body is its attribute ``figure_<id>``); ``table`` is the ``Table`` of the run. One figure's failure never
-  stops the others. Each outcome is ``{"id", "file", "status": ok | not_written | failed | refused, "why", "said"}``. While a
+  stops the others. Each outcome is ``{"id", "file", "status": ok | not_written | failed | refused | fi_fault, "why", "said"}``. While a
   body runs FI's own figure is the only one it may draw on: saving or showing a figure, or making one, raises a plain error
-  at that moment (``refused``), whatever way the body reaches it. The file of an earlier run is removed before a figure is
+  at that moment (``refused``), whatever way the body reaches it, and a file the body wrote in the figure folder is removed and refused. A fault of FI's own lines is ``fi_fault``, never the model's. The file of an earlier run is removed before a figure is
   drawn, so a figure that fails is never the old one.
 * ``search_figures(root, out_dir) -> list[dict]`` draws FI's own figures of a search from ``results/best_design.json`` and
   ``raw/optimisation_ledger.jsonl`` (the files ``FI_BEST_DESIGN`` and ``FI_OPTIMISATION`` name): the best objective so far
@@ -64,8 +64,12 @@ def _guard(name: str, plt: Any):
 
     did: list[str] = []
 
-    def refuse(what: str):
+    def refuse(what: str, original=None):
         def blocked(*args, **kwargs):
+            if original is not None:  # pyplot.sca and the like name a figure that is already open: that is not making one
+                num = args[0] if args else kwargs.get("num")
+                if (isinstance(num, Figure) and num.number in plt.get_fignums()) or (isinstance(num, int) and num in plt.get_fignums()):
+                    return original(*args, **kwargs)
             if what not in did:
                 did.append(what)
             raise FigureMisuse(_misuse_text(name, what))
@@ -78,7 +82,7 @@ def _guard(name: str, plt: Any):
     saved = [(owner, attr, getattr(owner, attr)) for owner, attr, _ in targets]
     before = set(plt.get_fignums())
     for owner, attr, what in targets:
-        setattr(owner, attr, refuse(what))
+        setattr(owner, attr, refuse(what, getattr(owner, attr) if (owner, attr) == (plt, "figure") else None))
     try:
         yield did
     finally:
@@ -148,41 +152,73 @@ def _empty_panels(axes: list[Any]) -> list[int]:
     return [i + 1 for i, a in enumerate(axes) if a.get_visible() and not (a.has_data() or a.texts)]
 
 
-def _draw_one(spec: dict[str, Any], body: Any, table: Any, out_dir: str) -> dict[str, Any]:
-    fid, file = str(spec.get("id")), str(spec.get("file") or "%s.png" % spec.get("id"))
-    _remove(out_dir, file)
-    if body is None:
-        return _outcome(fid, file, "not_written")
-    name = getattr(body, "__name__", "figure_%s" % fid)
-    plt = fig = None
-    did: list[str] = []
+def _folder(out_dir: str) -> dict[str, tuple[int, int]]:
+    """Every file in the figure folder with its time and size: what a body must leave as it found it."""
+    seen = {}
     try:
+        for entry in os.scandir(out_dir):
+            if entry.is_file():
+                info = entry.stat()
+                seen[entry.name] = (info.st_mtime_ns, info.st_size)
+    except OSError:
+        pass
+    return seen
+
+
+def _draw_one(spec: dict[str, Any], body: Any, table: Any, out_dir: str) -> dict[str, Any]:
+    """Draw one declared figure. A fault of the model's body is ``failed`` / ``refused`` (its repair); a fault of FI's own lines
+    (making the figure, handing it over, the folder) is ``fi_fault`` and is never sent to the model."""
+    fid, file = str(spec.get("id")), str(spec.get("file") or "%s.png" % spec.get("id"))
+    plt = fig = None
+    try:
+        _remove(out_dir, file)
+        if body is None:
+            return _outcome(fid, file, "not_written")
+        name = getattr(body, "__name__", "figure_%s" % fid)
         plt, fig, axes = _new_figure(spec.get("panels") or 1)
         handle = _figure_handle(axes, spec, file)
         plt.sca(axes[0])  # a body that draws with the bare pyplot calls still draws on its first axes
+        os.makedirs(out_dir, exist_ok=True)
+        folder = _folder(out_dir)
+    except Exception as err:
+        if plt is not None and fig is not None:
+            plt.close(fig)
+        return _outcome(fid, file, "fi_fault", "FI could not make the figure `%s` (%s: %s)." % (fid, type(err).__name__, err))
+    did: list[str] = []
+    try:
         try:
             with _guard(name, plt) as did:
                 body(handle, table)
         except FigureMisuse as err:
             return _outcome(fid, file, "refused", str(err))
+        except Exception as err:
+            if type(err).__name__ == "NotYet":
+                return _outcome(fid, file, "not_written")
+            if did:
+                return _outcome(fid, file, "refused", _misuse_text(name, did[0]))
+            where = _last_frame(traceback.format_exc())
+            return _outcome(fid, file, "failed", "`figure_%s` stopped with %s: %s (%s)." % (fid, type(err).__name__, err, where))
         if did:
             return _outcome(fid, file, "refused", _misuse_text(name, did[0]))
+        after = _folder(out_dir)
+        wrote = sorted(n for n, v in after.items() if folder.get(n) != v)
+        if wrote:  # a body that reached a way of saving the guard does not know: whatever it wrote is removed
+            for n in wrote:
+                _remove(out_dir, n)
+            return _outcome(fid, file, "refused", "`%s` wrote %s itself; FI creates the figure, saves it and closes it. Draw only on "
+                            "the axes the function is given (`fig.axes`)." % (name, ", ".join(wrote)))
         empty = _empty_panels(axes)
         if empty:
             return _outcome(fid, file, "failed", "`figure_%s` drew nothing on panel %s." % (fid, " and ".join(map(str, empty))))
-        os.makedirs(out_dir, exist_ok=True)
-        fig.savefig(os.path.join(out_dir, file))  # the recorder of the house style notes what the figure draws
+        try:
+            fig.savefig(os.path.join(out_dir, file))  # the recorder of the house style notes what the figure draws
+        except Exception as err:
+            return _outcome(fid, file, "failed", "`figure_%s` drew something that cannot be saved (%s: %s)." % (fid, type(err).__name__, err))
         return _outcome(fid, file, "ok")
     except Exception as err:
-        if type(err).__name__ == "NotYet":
-            return _outcome(fid, file, "not_written")
-        if did:
-            return _outcome(fid, file, "refused", _misuse_text(name, did[0]))
-        where = _last_frame(traceback.format_exc())
-        return _outcome(fid, file, "failed", "`figure_%s` stopped with %s: %s (%s)." % (fid, type(err).__name__, err, where))
+        return _outcome(fid, file, "fi_fault", "FI stopped while drawing the figure `%s` (%s: %s)." % (fid, type(err).__name__, err))
     finally:
-        if plt is not None and fig is not None:
-            plt.close(fig)
+        plt.close(fig)
 
 
 def _figure_handle(axes: list[Any], spec: dict[str, Any], file: str) -> Any:
@@ -222,8 +258,8 @@ def level_key(level: Any) -> str:
 
 
 def level_says(level: Any) -> str:
-    """The alternative in words (the rule of ``optimise_search.level_says``); ``search`` for a search of one alternative."""
-    return ", ".join("%s = %s" % (k, v) for k, v in level.items()) if isinstance(level, dict) and level else "search"
+    """The alternative in words (the rule of ``optimise_search.level_says``): empty for no alternative."""
+    return ", ".join("%s = %s" % (k, v) for k, v in level.items()) if isinstance(level, dict) else ""
 
 
 def _read_record(root: str) -> dict[str, Any]:
@@ -296,8 +332,11 @@ def _alternatives(data: dict[str, Any], sign: float) -> list[dict[str, Any]]:
     record = data["record"]
     recorded: dict[str, Any] = {}
     compared = record.get("compared") if isinstance(record.get("compared"), dict) else {}
+    same: dict[str, str] = {}
     for entry in compared.get("levels") or []:
-        if isinstance(entry, dict):
+        if isinstance(entry, dict) and isinstance(entry.get("same_as"), dict):
+            same[level_key(entry.get("level"))] = level_says(entry["same_as"])  # only probes; its best is the first one's
+        elif isinstance(entry, dict):
             best = entry.get("best") if isinstance(entry.get("best"), dict) else {}
             recorded[level_key(entry.get("level"))] = best.get("objective") if _number(best.get("objective")) else None
     if not recorded and "" in order and "best" in record:
@@ -309,9 +348,9 @@ def _alternatives(data: dict[str, Any], sign: float) -> list[dict[str, Any]]:
         for row in rows:
             if row.get("start") is not None and row.get("stage") not in ("baseline", "scan"):
                 starts.setdefault(row["start"], []).append(row)
-        out.append({"key": key, "label": level_says(levels[key]), "line": _best_so_far(rows, sign),
+        out.append({"key": key, "label": level_says(levels[key]) or "search", "line": _best_so_far(rows, sign),
                     "starts": [_best_so_far(v, sign) for _, v in sorted(starts.items(), key=lambda kv: str(kv[0]))],
-                    "recorded": recorded.get(key, "unknown")})
+                    "recorded": recorded.get(key, "unknown"), "same_as": same.get(key)})
     return out
 
 
@@ -337,8 +376,11 @@ def _progress_figure(data: dict[str, Any], out_dir: str) -> dict[str, Any]:
                         "the best design so far is not drawn.")
     sign = 1.0 if direction == "minimise" else -1.0
     alternatives = _alternatives(data, sign)
+    for a in alternatives:
+        if a["same_as"]:
+            a["line"], a["starts"] = [], []  # an alternative that was not searched has probe rows only: not drawn
     drawn = [a for a in alternatives if a["line"]]
-    wrong = [a["label"] for a in alternatives if _disagrees(a)]
+    wrong = [a["label"] for a in alternatives if not a["same_as"] and _disagrees(a)]
     if wrong:
         return _outcome(fid, file, "fi_fault", "FI's drawing of the search does not end at the best FI recorded for: %s." % "; ".join(wrong))
     if not drawn:
@@ -359,9 +401,11 @@ def _progress_figure(data: dict[str, Any], out_dir: str) -> dict[str, Any]:
         os.makedirs(out_dir, exist_ok=True)
         fig.savefig(os.path.join(out_dir, file))
         out = _outcome(fid, file, "ok")
-        none = [a["label"] for a in alternatives if not a["line"]]
-        if none:
-            out["note"] = "No design met every limit for: %s." % "; ".join(none)
+        none = [a["label"] for a in alternatives if not a["line"] and not a["same_as"]]
+        same = ["%s gave the same results as %s, so it is not drawn" % (a["label"], a["same_as"]) for a in alternatives if a["same_as"]]
+        notes = (["No design met every limit for: %s." % "; ".join(none)] if none else []) + [s + "." for s in same]
+        if notes:
+            out["note"] = " ".join(notes)
         return out
     finally:
         plt.close(fig)

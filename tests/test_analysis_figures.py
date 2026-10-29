@@ -414,3 +414,72 @@ def test_the_recorded_search_as_it_is_draws_its_progress_and_says_the_check_did_
     out = af.search_figures(str(RECORD), str(tmp_path / "figs"))
     assert [o["status"] for o in out] == ["ok", "ok"] and af.exit_code(out) == 0
     assert "could not be checked" in af.said(out)
+
+
+# ---- fix round 2 ------------------------------------------------------------------------------------------------------------------
+def test_a_body_that_picks_one_of_the_two_panels_with_pyplot_sca_is_not_refused(tmp_path):
+    import matplotlib.pyplot as plt
+
+    def figure_pick(fig, table):
+        plt.sca(fig.axes[1])
+        plt.plot([1, 2, 3])
+        fig.axes[0].plot([3, 2, 1])
+
+    out = af.run_figures([{"id": "pick", "file": "pick.png", "panels": 2}], _namespace(figure_pick=figure_pick), _Table(), str(tmp_path))
+    assert out[0]["status"] == "ok", out
+
+
+def test_an_alternative_that_was_not_searched_gives_no_false_fault_and_is_said(tmp_path):
+    a, b = {"family": "a"}, {"family": "b"}
+    rows = _rows(a, [1.0, 3.0]) + _rows(b, [1.0], n0=2)  # b: probe rows only
+    record = {"objective": {"direction": "maximise"}, "best": {"design": {}, "objective": 3.0},
+              "compared": {"levels": [{"level": a, "best": {"objective": 3.0}},
+                                      {"level": b, "best": {"objective": 3.0, "evaluation": 2}, "same_as": a, "probes": 1}]}}
+    _write(tmp_path / "q", rows, record)
+    out = af.search_figures(str(tmp_path / "q"), str(tmp_path / "f"))
+    assert out[0]["status"] == "ok" and af.fi_faults(out) == []
+    assert "family = b gave the same results as family = a" in out[0]["note"]
+
+
+@pytest.mark.parametrize("where", ["handle", "folder"])
+def test_a_fault_of_fi_s_own_lines_is_fi_s_and_never_the_model_s(tmp_path, monkeypatch, where):
+    if where == "handle":
+        monkeypatch.setattr(af, "_figure_handle", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("frame broke")))
+    else:
+        monkeypatch.setattr(af, "_folder", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("folder broke")))
+    out = af.run_figures([{"id": "g", "file": "g.png"}], _namespace(figure_g=_good), _Table(), str(tmp_path))
+    assert out[0]["status"] == "fi_fault" and af.exit_code(out) == 0 and af.fi_faults(out)
+
+
+def test_an_fi_fault_after_the_body_is_fi_s_too(tmp_path, monkeypatch):
+    calls = {"n": 0}
+    real = af._folder
+
+    def folder(out_dir):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("folder broke after the body")
+        return real(out_dir)
+
+    monkeypatch.setattr(af, "_folder", folder)
+    out = af.run_figures([{"id": "g", "file": "g.png"}], _namespace(figure_g=_good), _Table(), str(tmp_path))
+    assert out[0]["status"] == "fi_fault" and af.exit_code(out) == 0
+
+
+def test_the_copied_level_rules_equal_the_search_s_own_for_empty_levels_too():
+    from core import optimise_search
+    assert af.level_says({}) == optimise_search.level_says({}) == ""
+    assert af.level_key({}) == optimise_search.level_key({}) == "" and af.level_key(None) == optimise_search.level_key(None)
+
+
+def test_a_file_the_body_wrote_in_the_figure_folder_is_removed_and_refused(tmp_path):
+    def figure_png(fig, table):
+        fig.axes[0].plot([1, 2])
+        with open(str(tmp_path / "side.png"), "wb") as handle:
+            fig.axes[0].figure.canvas.print_png(handle)
+
+    (tmp_path / "other.png").write_bytes(b"another figure of an earlier step")
+    out = af.run_figures([{"id": "png", "file": "png.png"}], _namespace(figure_png=figure_png), _Table(), str(tmp_path))
+    assert out[0]["status"] == "refused" and "side.png" in out[0]["why"]
+    assert not (tmp_path / "side.png").exists() and not (tmp_path / "png.png").exists()
+    assert (tmp_path / "other.png").read_bytes() == b"another figure of an earlier step"
