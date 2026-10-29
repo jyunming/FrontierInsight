@@ -13886,14 +13886,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             chat=chat, run=self._run_outside, log=self._log, repairs=_function_steps.REPAIRS,
             max_calls=_function_steps.max_calls_for(len(specs)), constants=constants, install=self._install_packages,
             declared=deps, topic_block=self._topic_block(), passages=passages,
-            values=_function_steps.plan_constants(outline, protocol if isinstance(protocol, dict) else None))
+            values=_function_steps.plan_constants(outline, protocol if isinstance(protocol, dict) else None, self._log))
 
     def _write_plan_constants(self, state: QuestState, package: str) -> None:
         """FI's block of the plan's numbers in every module of the package kept from an earlier pass is made again from the
         plan (:func:`core.function_steps.write_package_constants`), so a newly written simulate.py need not set them and a
         number the plan changed is changed there."""
         protocol = self._protocol_block(state)
-        values = _function_steps.plan_constants(state.get("implement_outline"), protocol if isinstance(protocol, dict) else None)
+        values = _function_steps.plan_constants(state.get("implement_outline"), protocol if isinstance(protocol, dict) else None,
+                                                self._log)
         _function_steps.write_package_constants(self.quest_root / "code" / package, values, self._log)
 
     async def _step_passages(self, protocol: dict[str, Any] | None, specs: list[Any]) -> dict[str, str]:
