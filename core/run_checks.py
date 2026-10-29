@@ -2003,18 +2003,25 @@ class RunChecksMixin:
     # ``_gate_first``, and re-derived from the code on disk (``_gate_baseline``) where a repair loop starts and the key of
     # the code on disk is not the kept one (new code, a person's edit, a resume). Nothing is checkpointed.
 
-    def _gate_key(self, code: Path, raw: Path) -> str:
+    def _gate_key(self, code: Path, raw: Path, was: dict[str, str] | None = None, absent: tuple[str, ...] = ()) -> str:
         """What the gate's outcome depends on: the study's inputs and simulate.py (as :func:`trial_runner.code_inputs_sha`),
-        every other file of the code folder (the analysis the gate runs) and the recorded raw it runs on."""
+        every other file of the code folder (the analysis the gate runs) and the recorded raw it runs on. With ``was`` (file
+        name -> text) and ``absent`` the key of the code as it was before a change: those files put back, those removed.
+        Line endings do not count (a file written on Windows and the same text read back are one code)."""
+        files: dict[str, bytes] = {}
+        for path in code.rglob("*"):
+            if path.is_file() and not ({".git", "__pycache__"} & set(path.relative_to(code).parts)):
+                files[path.relative_to(code).as_posix()] = path.read_bytes().replace(b"\r\n", b"\n")
+        for rel, text in (was or {}).items():
+            files[rel] = text.encode("utf-8").replace(b"\r\n", b"\n")
+        for rel in absent:
+            files.pop(rel, None)
         h = hashlib.sha256()
-        simulate = code / _split_run.SIMULATE_NAME
-        text = simulate.read_text(encoding="utf-8", errors="replace") if simulate.is_file() else ""
-        h.update(_trial_runner.code_inputs_sha(self.quest_root, text).encode())  # type: ignore[attr-defined]
-        for path in sorted(code.rglob("*")):
-            if not path.is_file() or {".git", "__pycache__"} & set(path.relative_to(code).parts):
-                continue
-            h.update(path.relative_to(code).as_posix().encode())
-            h.update(path.read_bytes())
+        h.update(_trial_runner.code_inputs_sha(  # type: ignore[attr-defined]
+            self.quest_root, files.get(_split_run.SIMULATE_NAME, b"").decode("utf-8", errors="replace")).encode())
+        for rel in sorted(files):
+            h.update(rel.encode())
+            h.update(files[rel])
         stat = raw.stat()
         h.update(f"{stat.st_size}:{stat.st_mtime_ns}".encode())
         return h.hexdigest()
@@ -2036,6 +2043,7 @@ class RunChecksMixin:
             return None
         raw = self.quest_root / "raw" / "trials.json"  # type: ignore[attr-defined]
         code = Path(code_dir) if code_dir else self.quest_root / "code"  # type: ignore[attr-defined]
+        key = ""
         try:
             from . import pipeline_gate as _gate
             from .small_run import budget as _budget
@@ -2043,7 +2051,8 @@ class RunChecksMixin:
             key = self._gate_key(code, raw)
             cache = self.__dict__.setdefault("_gate_cache", {})
             if key in cache:
-                self._gate_seen = (key, cache[key])
+                if cache[key] is not None:  # None: the gate could not run on this code, said once
+                    self._gate_seen = (key, cache[key])
                 return cache[key]
             protocol = self._protocol_block(state)  # type: ignore[attr-defined]
             began = time.monotonic()
@@ -2054,6 +2063,13 @@ class RunChecksMixin:
             spent = round(time.monotonic() - began, 1)
         except Exception as exc:  # noqa: BLE001 -- a gate that could not run is not a fault
             self._log.warning("[gate] the analysis could not be checked: %s", exc)  # type: ignore[attr-defined]
+            if key:  # said once, and not run again for this code and raw
+                self.__dict__.setdefault("_gate_cache", {})[key] = None
+                try:
+                    (self.fi_dir / "pipeline_gate.json").write_text(  # type: ignore[attr-defined]
+                        json.dumps({"error": str(exc)[:300]}, indent=2), encoding="utf-8")
+                except OSError:
+                    pass
             return None
         cache[key] = got
         self._gate_seen = (key, got)
@@ -2085,6 +2101,48 @@ class RunChecksMixin:
         if kept and kept[0] == key:
             return
         got = await self._analysis_gate(state)
+        self._gate_kept = (key, got) if got is not None else None
+
+    async def _gate_baseline_before(self, state: Any, path: Path, old_code: str, package_before: dict[str, str]) -> None:
+        """For a caller that has written a change to ``path`` (and maybe the model's package) and not called
+        :meth:`_gate_baseline` first: the baseline is the gate's result for the code as it was just before the write
+        (``old_code`` and ``package_before`` put back), taken from the kept result when its key is that code's, else from the
+        cache or one gate run of that code in a scratch copy; never a result kept for other code."""
+        if not self._gate_applies(state):
+            return
+        code, raw = self.quest_root / "code", self.quest_root / "raw" / "trials.json"  # type: ignore[attr-defined]
+        try:
+            rel = path.relative_to(code).as_posix()
+            from . import code_layout as _layout
+
+            was = {rel: old_code, **package_before}
+            absent = tuple(r for r in _layout.package_sources(code) if package_before and r not in package_before)
+            key = self._gate_key(code, raw, was, absent)
+        except (OSError, ValueError):
+            return
+        kept = self.__dict__.get("_gate_kept")
+        if kept and kept[0] == key:
+            return
+        cache = self.__dict__.setdefault("_gate_cache", {})
+        if key in cache:
+            self._gate_kept = (key, cache[key]) if cache[key] is not None else None
+            return
+        import shutil
+        import tempfile
+
+        scratch = Path(tempfile.mkdtemp(prefix="gate_before_"))
+        try:
+            shutil.copytree(code, scratch / "code", ignore=shutil.ignore_patterns(".git", "__pycache__"))
+            for name, text in was.items():
+                (scratch / "code" / name).parent.mkdir(parents=True, exist_ok=True)
+                (scratch / "code" / name).write_text(text, encoding="utf-8")
+            for name in absent:
+                (scratch / "code" / name).unlink(missing_ok=True)
+            got = await self._analysis_gate(state, code_dir=scratch / "code")
+        except OSError:
+            got = None
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
         self._gate_kept = (key, got) if got is not None else None
 
     def _gate_commit(self, state: Any) -> None:

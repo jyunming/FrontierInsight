@@ -546,3 +546,46 @@ async def test_the_gates_seconds_are_in_the_log_the_record_and_the_cost_summary(
     write_cost_summary(eng.fi_dir)
     summary = json.loads((eng.fi_dir / "cost.summary.json").read_text(encoding="utf-8"))
     assert summary["gate_runs"] == 1 and summary["gate_seconds"] == record["seconds_total"]
+
+
+# --- the protocol caller after a redesign; a gate error ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_protocol_repair_after_a_redesign_is_compared_with_the_code_before_it_not_a_stale_baseline(
+        tmp_path: Path) -> None:
+    eng = _engine(tmp_path, gate=True)
+    assert await eng._gate_first({}) is None and eng._gate_kept[1].ok  # type: ignore[attr-defined]  # the first design
+    path = eng.quest_root / "code" / "experiment.py"
+    path.write_text(BROKEN_ANALYSIS, encoding="utf-8")  # the redesign: its analysis already fails on the raw on disk
+    # a protocol repair that does not change that failure is not refused (the failure is not the repair's)
+    repaired = BROKEN_ANALYSIS + "\n# the protocol's setting is named\n"
+    path.write_text(repaired, encoding="utf-8")
+    assert await eng._simulation_kept_or_back({}, path, BROKEN_ANALYSIS, {}, "protocol") == ""
+    assert path.read_text(encoding="utf-8") == repaired
+    # a redesign whose analysis runs, then a protocol repair that breaks it: refused and put back
+    path.write_text(EXPERIMENT.replace("+ 1.0", "+ 2.0"), encoding="utf-8")
+    ok_redesign = path.read_text(encoding="utf-8")
+    path.write_text(BROKEN_ANALYSIS, encoding="utf-8")
+    fault = await eng._simulation_kept_or_back({}, path, ok_redesign, {}, "protocol")
+    assert "no longer runs" in fault and path.read_text(encoding="utf-8") == ok_redesign
+
+
+@pytest.mark.asyncio
+async def test_a_gate_that_cannot_run_is_said_once_and_not_run_again_for_the_same_code(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    eng = _engine(tmp_path, gate=True)
+    seen = _lines(eng)
+    calls: list[int] = []
+
+    async def broken(*a: Any, **k: Any) -> Any:
+        calls.append(1)
+        raise OSError("scratch folder full")
+
+    monkeypatch.setattr("core.pipeline_gate.analysis_gate", broken)
+    await eng._gate_baseline({})
+    await eng._gate_baseline({})
+    await eng._gate_baseline({})
+    assert len(calls) == 1 and len([x for x in seen.lines if "could not be checked" in x]) == 1
+    assert await eng._gate_refusal({}) == "" and len(calls) == 1
+    assert "error" in json.loads((eng.fi_dir / "pipeline_gate.json").read_text(encoding="utf-8"))

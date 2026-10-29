@@ -14195,6 +14195,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         """For every place that adopts a changed simulation: the check of :meth:`_simulation_repair_fault` on the file now on
         disk (``path``: simulate.py; any other file is not this check's). On a fault the old text and package are put back and
         the sentence is returned; ``""`` keeps the change."""
+        # The baseline is the gate's result for the code as it was just before this write (nothing with the switch off).
+        await self._gate_baseline_before(state, path, old_code, package_before)
         if path.name != _split_run.SIMULATE_NAME:
             # not the entry check's, but the analysis runs this file (experiment.py, a helper): the analysis gate
             fault = await self._gate_refusal(state)
