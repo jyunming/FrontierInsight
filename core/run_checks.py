@@ -1155,7 +1155,8 @@ class RunChecksMixin:
                         est = _estimate.estimate(grid, runs, deterministic, probes, at_once=at_once, slowdown=slowdown)
         if probes:
             _cost_model.keep_measured(self.quest_root, probes=probes, est=est, slowdown=slowdown, at_once=at_once,  # type: ignore[attr-defined]
-                                      limit_s=limit_s, plan={"scan": scan})
+                                      limit_s=limit_s, plan={"scan": scan}, scan_s=est.seconds if est is not None else None,
+                                      design=_cost_model.design_key(block, runner.simulate))
         if per_setting is not None and (est is None or per_setting * scan > est.seconds):
             est = _estimate.Estimate(seconds=per_setting * scan, at_least=False, complete=True, cells=scan, trials=scan * runs)
         if est is None:
@@ -1287,7 +1288,8 @@ class RunChecksMixin:
                         searched = 0
             _cost_model.keep_measured(self.quest_root, per_evaluation_s=per_eval, per_evaluation_at_least=lower, slowdown=slowdown,  # type: ignore[attr-defined]
                                       check_unit_s=unit if check_n else None, check_unit_basis="search-design lower bound",
-                                      plan={"evaluations": search_n, "check_runs": check_n, "scan": scan})
+                                      plan={"evaluations": search_n, "check_runs": check_n, "scan": scan, "runs_per_evaluation": runs},
+                                      design=_cost_model.design_key(block, runner.simulate))
             if not searched and not checked:
                 # The line a person reads is the whole study: the scan alone said "about 6 minutes" of a search that ran
                 # for hours.

@@ -157,9 +157,9 @@ def test_with_no_measured_cost_per_evaluation_no_number_is_given() -> None:
 
 def test_a_check_not_measured_at_finer_settings_is_priced_at_the_design_cost_and_said_to_be_a_lower_bound() -> None:
     got = cm.search_plan(_search_model(per_evaluation=2.0, scan=0.0), 1000.0)
-    assert got.check_reserve_s == 20.0 and "lower bound" in got.why
+    assert got.check_reserve_s == 20.0 and "at least" in got.why
     exact = cm.search_plan(_search_model(per_evaluation=2.0, finer_check_unit=47.0), 1000.0)
-    assert exact.check_reserve_s == 470.0 and "lower bound" not in exact.why
+    assert exact.check_reserve_s == 470.0 and "at least" not in exact.why
 
 
 def test_settings_run_at_once_share_the_cost_only_when_the_slowdown_was_measured() -> None:
@@ -243,7 +243,7 @@ def test_one_design_timed_twice_with_a_big_difference_is_sized_at_the_larger_and
     model = cm.read(tmp_path)
     assert model is not None and model.evaluation_timings == [1.9, 7.2] and model.seconds("per_evaluation") == 7.2
     got = cm.search_plan(model, 7200.0)
-    assert got.wall_per_evaluation_s == 7.2 and "timed 2 times" in got.why and "larger" in got.why
+    assert got.wall_per_evaluation_s == 7.2 and "timed 2 times" in got.why and "longest time" in got.why
 
 
 def test_an_experiment_estimate_after_a_search_estimate_does_not_replace_it(tmp_path: Path) -> None:
@@ -266,3 +266,88 @@ def test_a_search_with_no_estimate_line_and_no_end_has_a_rate_but_no_scan_time(t
             and not ln.startswith("2026-03-01 13:")]
     row = cm.actuals_from_log(_quest(tmp_path, chr(10).join(kept) + chr(10)))[0]
     assert row["search_s"] == 5400.0 and row["search_rate_per_s"] > 1.0 and "scan_s" not in row and row["exec_s"] is None
+
+
+# ---- fixes of the first review -------------------------------------------------------------------------------------------
+
+
+def test_the_check_reserve_divides_a_whole_setting_by_its_runs_as_the_run_does() -> None:
+    """A setting of 5 runs takes 10 s; the check's 20 runs then cost 20 x 10 / 5 = 40 s, not 20 x 10 = 200 s."""
+    model = _search_model(per_evaluation=10.0, scan=0.0)
+    model.plan.update(check_runs=20, runs_per_evaluation=5)
+    got = cm.search_plan(model, 10_000.0)
+    assert got.check_reserve_s == pytest.approx(40.0)
+    model.plan["runs_per_evaluation"] = 1
+    assert cm.search_plan(model, 10_000.0).check_reserve_s == pytest.approx(200.0)
+
+
+def test_a_scan_the_plan_has_but_nobody_timed_gives_no_number() -> None:
+    model = _search_model(per_evaluation=2.0, finer_check_unit=5.0)
+    model.plan["scan"] = 100
+    got = cm.search_plan(model, 10_000.0)
+    assert got.evaluations is None and "coarse scan was not measured" in got.why
+    assert cm.search_plan(model, 10_000.0, scan_s=300.0).evaluations is not None
+    model.plan["scan"] = 1  # no scan to time
+    assert cm.search_plan(model, 10_000.0).evaluations is not None
+
+
+@pytest.mark.asyncio
+async def test_the_sizing_keeps_the_scan_time_and_the_runs_per_evaluation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    block = copy.deepcopy(_SCAN_BLOCK)
+    block["grid"] = {"axis0": [0, 1, 2]}
+    block["evaluation_budget"] = {"starts": 8, "per_start": 2500, "seconds_per_evaluation": 0.3}
+    eng, runner = await _search_engine(tmp_path, block)
+
+    async def fifteen(*a: Any, **k: Any) -> Any:
+        return run_estimate.Probe(None, None, {}, 15.0, fixed_s=3.0, per_trial_s=12.0), ""
+
+    monkeypatch.setattr(run_estimate, "_time_one", fifteen)
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    model = cm.read(eng.quest_root)
+    assert model is not None and model.seconds("scan") is not None and model.seconds("scan") > 0
+    assert model.plan["runs_per_evaluation"] >= 1 and model.search_key
+
+
+def test_reserves_larger_than_the_limit_never_make_a_negative_deadline() -> None:
+    model = _search_model(per_evaluation=1.0, finer_check_unit=100.0, scan=500.0)  # 10 runs x 100 s of check, 1000 s allowed
+    got = cm.search_plan(model, 1000.0)
+    assert got.check_reserve_s == 500.0 and got.deadline_s is not None and got.deadline_s >= 0.0
+    assert got.evaluations == 0 and "half the time allowed" in got.why and "already fill the time allowed" in got.why
+    tiny = cm.search_plan(model, 50.0)  # the analysis reserve alone is over the limit
+    assert tiny.deadline_s == 0.0 and tiny.evaluations == 0
+
+
+def test_timings_of_an_earlier_design_are_dropped_and_not_used(tmp_path: Path) -> None:
+    assert cm.keep_measured(tmp_path, per_evaluation_s=90.0, check_unit_s=90.0, plan={"check_runs": 10}, design="old")
+    assert cm.keep_measured(tmp_path, per_evaluation_s=2.0, plan={"check_runs": 10}, design="new")
+    model = cm.read(tmp_path)
+    assert model is not None and model.evaluation_timings == [2.0] and model.seconds("per_evaluation") == 2.0
+    assert model.term("check_unit").seconds is None and model.search_key == "new"
+    # a record kept for one design says nothing of another
+    stale = cm.search_plan(model, 10_000.0, design="newer")
+    assert stale.evaluations is None and "earlier design" in stale.why
+    assert cm.search_plan(model, 10_000.0, design="new").evaluations is not None
+
+
+def test_a_design_key_follows_the_block_and_the_code(tmp_path: Path) -> None:
+    sim = tmp_path / "simulate.py"
+    sim.write_text("a = 1\n", encoding="utf-8")
+    one = cm.design_key({"grid": {"x": [1, 2]}}, sim)
+    assert one == cm.design_key({"grid": {"x": [1, 2]}}, sim) and one != cm.design_key({"grid": {"x": [1, 3]}}, sim)
+    sim.write_text("a = 2\n", encoding="utf-8")
+    assert one != cm.design_key({"grid": {"x": [1, 2]}}, sim)
+
+
+def test_the_analysis_of_a_search_is_timed_from_the_end_of_its_check(tmp_path: Path) -> None:
+    log = "\n".join([
+        "2026-03-01 10:00:00,000 [INFO] [execute] FI estimates the search for the best design takes about 1 h",
+        "2026-03-01 10:01:00,000 [INFO] [optimise] the coarse scan ran 10 setting(s), not counted in the search's budget",
+        "2026-03-01 11:00:00,000 [INFO] [optimise] 500 evaluation(s) of the 1000 allowed, method m; stopped because the time limit (execution.timeout_s) was reached",
+        "2026-03-01 11:00:05,000 [INFO] [optimise] checking the best design at finer numerical settings (at most 6 runs of the simulation, apart from the search's budget)",
+        "2026-03-01 11:05:00,000 [INFO] [optimise]   the check ran the simulation 6 time(s) (at most 6 planned), apart from the search's budget",
+        "2026-03-01 11:05:12,000 [INFO] [execute] rc=0 duration=3912.0s figures=1 result_json=True"])
+    root = _quest(tmp_path, log)
+    row = cm.actuals_from_log(root)[0]
+    assert row["check_s"] == 312.0 and row["analysis_s"] == 12.0  # not 312: the check is not analysis
+    model = cm.from_legacy_record(root)
+    assert model is not None and model.seconds("analysis") == 12.0

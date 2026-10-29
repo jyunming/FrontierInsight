@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import hashlib
 import math
+import os
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -59,6 +61,8 @@ class CostModel:
     probes: list[dict[str, Any]] = field(default_factory=list)
     #: What the plan asked of a search: ``{"evaluations": N, "check_runs": N, "scan": N}``.
     plan: dict[str, Any] = field(default_factory=dict)
+    #: The design (the plan's search block and the simulation) the search terms were measured on; terms of another one are not used.
+    search_key: str = ""
     #: Every timing of one new design of a search (seconds): one design timed twice has differed by 3.8x between runs.
     evaluation_timings: list[float] = field(default_factory=list)
     #: The estimate FI printed (padded) for the last attempt, seconds.
@@ -87,7 +91,9 @@ def write(quest_root: Path | str, model: CostModel) -> bool:
     try:
         path = Path(quest_root) / RECORD
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(asdict(model), indent=1, default=str) + "\n", encoding="utf-8")
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(asdict(model), indent=1, default=str) + "\n", encoding="utf-8")
+        os.replace(tmp, path)  # a kill in the middle leaves the earlier record, never half of one
         return True
     except OSError:
         return False
@@ -107,14 +113,34 @@ def _probe_row(p: Any) -> dict[str, Any]:
             "first_s": p.first_s, "timed_trials": p.timed_trials}
 
 
+_SEARCH_TERMS = ("per_evaluation", "check_unit", "finer_check_unit", "scan", "wall_per_evaluation")
+
+
+def design_key(block: Any, simulate: Path | str | None = None) -> str:
+    """Which design a search timing belongs to: the plan's search block and the simulation's code. A redesign changes it."""
+    try:
+        h = hashlib.sha256(json.dumps(block, sort_keys=True, default=str).encode("utf-8"))
+        if simulate:
+            h.update(Path(simulate).read_bytes())
+        return h.hexdigest()[:16]
+    except Exception:  # noqa: BLE001 -- a key that cannot be made leaves the terms unkeyed, never changes a run
+        return ""
+
+
 def keep_measured(quest_root: Path | str, *, probes: list[Any] | None = None, est: Any = None, slowdown: float | None = None,
                   at_once: int | None = None, limit_s: float | None = None, key: str = "", per_evaluation_s: float | None = None,
                   per_evaluation_at_least: bool = False, check_unit_s: float | None = None, check_unit_basis: str = MEASURED,
-                  finer_unit_s: float | None = None, scan_s: float | None = None, plan: dict[str, Any] | None = None) -> bool:
+                  finer_unit_s: float | None = None, scan_s: float | None = None, plan: dict[str, Any] | None = None,
+                  design: str = "") -> bool:
     """Add what the sizing measured to the quest's record (made if there is none). Adds only; never raises, since a
-    missing record must not change a run. ``probes`` are :class:`core.run_estimate.Probe`; ``est`` an ``Estimate``."""
+    missing record must not change a run. ``design`` (:func:`design_key`) ties the search terms to the design they were
+    measured on: terms kept for another design are dropped first. ``probes`` are :class:`core.run_estimate.Probe`; ``est`` an ``Estimate``."""
     try:
         model = read(quest_root) or CostModel()
+        if design and model.search_key != design:
+            for name in _SEARCH_TERMS:
+                model.terms.pop(name, None)
+            model.evaluation_timings, model.plan, model.search_key = [], {}, design
         if probes:
             model.probes = [_probe_row(p) for p in probes]
             base = next((p for p in probes if p.axis is None), None)
@@ -196,7 +222,15 @@ def actuals_from_log(quest_root: Path | str) -> list[dict[str, Any]]:
                 end = _when(ts)
                 cur.update(rc=int(c.group(1)), exec_s=float(c.group(2)), ended=end)
                 cur["started"] = end - cur["exec_s"]
-                if cur.get("study_end") is not None:
+                if cur.get("search_end") is not None:
+                    # a search's analysis starts when its check ends (no check logged: when the search ends); a check that
+                    # started and never finished leaves the analysis time unknown
+                    after = cur.get("check_end")
+                    if after is None and cur.get("check_start") is None:
+                        after = cur["search_end"]
+                    if after is not None:
+                        cur["analysis_s"] = round(end - after, 1)
+                elif cur.get("study_end") is not None:
                     cur["analysis_s"] = round(end - cur["study_end"], 1)
                     cur["study_s"] = round(cur["study_end"] - (cur.get("printed_at") or cur["started"]), 1)
                 rows.append(cur)
@@ -222,6 +256,7 @@ def actuals_from_log(quest_root: Path | str) -> list[dict[str, Any]]:
             k = re.search(r"the check ran the simulation (\d+) time", msg)
             if k:
                 cur["check_runs_done"] = int(k.group(1))
+                cur["check_end"] = _when(ts)
     if cur.get("search_end") is not None:  # a search whose execute never logged its end (the process was killed)
         # when it started is known only from the estimate line before it; without one the scan's time is not known either
         cur.update(rc=None, ended=cur.get("check_start") or cur["search_end"], partial=True, started=cur.get("printed_at"))
@@ -288,9 +323,9 @@ def from_legacy_record(quest_root: Path | str) -> CostModel | None:
     if n and study:
         model.terms["per_trial"] = Term(total / n, DERIVED)
         model.terms["fixed"] = Term(max(0.0, study - total) / max(1, cells or model.cells), DERIVED)
-    for a in actuals:
-        if a.get("analysis_s") is not None:
-            model.terms["analysis"] = Term(float(a["analysis_s"]), DERIVED)
+    seen = sorted(float(a["analysis_s"]) for a in actuals if a.get("analysis_s") is not None)
+    if seen:  # the 90th percentile of the analysis runs seen, not the last one
+        model.terms["analysis"] = Term(seen[max(0, math.ceil(0.9 * len(seen)) - 1)], DERIVED)
     for a in reversed(actuals):
         if a.get("search_rate_per_s"):
             at_once = int(a.get("search_at_once") or model.at_once or 1)
@@ -355,7 +390,7 @@ class SearchPlan:
 
 
 def search_plan(model: CostModel, limit_s: float, *, planned_evaluations: int | None = None, check_runs: int | None = None,
-                scan_s: float | None = None, analysis_s: float = ANALYSIS_RESERVE_S) -> SearchPlan:
+                scan_s: float | None = None, analysis_s: float = ANALYSIS_RESERVE_S, design: str = "") -> SearchPlan:
     """The evaluations a search may use in ``limit_s`` seconds:
 
     ``(limit - scan - check reserve - analysis reserve) / wall seconds per evaluation``
@@ -363,30 +398,48 @@ def search_plan(model: CostModel, limit_s: float, *, planned_evaluations: int | 
     where one evaluation costs what it took alone (``per_evaluation``) times the measured slowdown divided by how many run
     at once (a rate observed on the search itself, ``wall_per_evaluation``, wins), and the check reserve is the check's runs
     times one measured design at the finer settings (``finer_check_unit``; the search-design cost, flagged a lower bound,
-    when that was not measured). A slowdown that was not measured is not assumed: the check is then priced one run after
-    another. Never more than ``planned_evaluations``. ``evaluations`` is ``None`` when nothing per-evaluation was measured."""
+    when that was not measured), at most half the time allowed. A slowdown that was not measured is not assumed: the check
+    is then priced one run after another. Never more than ``planned_evaluations``. ``evaluations`` is ``None`` (and ``why``
+    says what is missing) when nothing per-evaluation was measured, when the scan the plan has was not timed, or when the
+    timings are of another ``design`` than the one asked for."""
     runs = int(check_runs if check_runs is not None else model.plan.get("check_runs") or 0)
-    scan = float(scan_s if scan_s is not None else (model.seconds("scan") or 0.0))
+    scan = scan_s if scan_s is not None else model.seconds("scan")
+    scan_planned = int(model.plan.get("scan") or 0)
     wall = model.seconds("wall_per_evaluation")
     basis = "observed on the search itself"
     share = (model.slowdown or 1.0) / max(1, model.at_once) if model.slowdown else 1.0
+
+    def nothing(why: str) -> SearchPlan:
+        return SearchPlan(None, None, 0.0, runs, analysis_s, float(scan or 0.0), None, UNKNOWN, why)
+
+    if design and model.search_key != design:
+        return nothing("the timings kept are of an earlier design of this study, so no number of evaluations is given")
     if wall is None:
         alone = model.seconds("per_evaluation")
         if alone is None:
-            return SearchPlan(None, None, 0.0, runs, analysis_s, scan, None, UNKNOWN,
-                              "no cost per evaluation was measured, so no number of evaluations is given")
+            return nothing("no cost per evaluation was measured, so no number of evaluations is given")
         wall, basis = alone * share, model.term("per_evaluation").basis
+    if scan is None:
+        if scan_planned > 1:
+            return nothing("the time of the coarse scan was not measured, so no number of evaluations is given")
+        scan = 0.0
     finer = model.seconds("finer_check_unit")
-    unit = finer if finer is not None else model.seconds("check_unit") or model.seconds("per_evaluation") or 0.0
-    reserve = runs * unit * share
+    # The live arithmetic (core/run_checks.py, _size_the_scan): ``unit / runs * check_n * share``, where ``unit`` is a whole
+    # setting of ``runs_per_evaluation`` runs; a finer-settings unit is the time of one run of the check.
+    per_setting_runs = max(1, int(model.plan.get("runs_per_evaluation") or 1))
+    unit = finer if finer is not None else (model.seconds("check_unit") or model.seconds("per_evaluation") or 0.0) / per_setting_runs
+    wanted = runs * unit * share
+    reserve = min(wanted, float(limit_s) / 2.0)  # as the run itself keeps for the check: never more than half the limit
     room = float(limit_s) - scan - reserve - analysis_s
     n = max(0, int(room / wall)) if wall > 0 else 0
     if planned_evaluations is not None:
         n = min(n, int(planned_evaluations))
     notes = ["the scan, the check and the analysis already fill the time allowed"] if room <= 0 else []
+    if reserve < wanted:
+        notes.append("the check would need more than half the time allowed; it is given half")
     timed = [t for t in model.evaluation_timings if t > 0]
     if len(timed) > 1 and max(timed) > 2.0 * min(timed):
-        notes.append(f"the same design was timed {len(timed)} times, from {min(timed):.3g} s to {max(timed):.3g} s: sized at the larger")
+        notes.append(f"the same design was timed {len(timed)} times, from {min(timed):.3g} s to {max(timed):.3g} s; the longest time is used")
     if runs and finer is None:
-        notes.append("the check is priced at the search-design cost (a lower bound): no finer design was measured")
-    return SearchPlan(n, float(limit_s) - reserve - analysis_s, reserve, runs, analysis_s, scan, wall, basis, "; ".join(notes))
+        notes.append("the check at finer settings was not timed; it is counted at the cost of one search design, at least")
+    return SearchPlan(n, max(0.0, float(limit_s) - reserve - analysis_s), reserve, runs, analysis_s, float(scan), wall, basis, "; ".join(notes))
