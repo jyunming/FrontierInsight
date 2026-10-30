@@ -206,15 +206,20 @@ class SettingFailures:
                 + (f" - {why}" if why else ""))
 
 
-def _truth_names(protocol: dict[str, Any] | None) -> set[str]:
-    """The names a ``known_value`` declares (the estimate, its standard error or variance, its interval's ends): where the
-    truth is declared, a trial with no number for one of them is a miss of the calibration (:func:`calibration`)."""
-    out: set[str] = set()
+def truth_names(protocol: dict[str, Any] | None) -> list[str]:
+    """The names a ``known_value`` declares (the estimate, its standard error or variance, its interval's ends), in the plan's
+    order: where the truth is declared, a trial with no number for one of them is a miss of the calibration
+    (:func:`calibration`), and the frame of simulate.py lets a trial return them (:func:`core.skeleton.returnable_names`)."""
+    out: list[str] = []
     for spec in _metric_spec.declared(protocol):
         kv = spec.get("known_value") or {}
-        out.update(str(kv[k]) for k in ("estimate", "standard_error", "variance") if kv.get(k))
-        out.update(str(n) for n in kv.get("interval") or [])
-    return out
+        out += [str(kv[k]) for k in ("estimate", "standard_error", "variance") if kv.get(k)]
+        out += [str(n) for n in kv.get("interval") or []]
+    return list(dict.fromkeys(out))
+
+
+def _truth_names(protocol: dict[str, Any] | None) -> set[str]:
+    return set(truth_names(protocol))
 
 
 def _metric_names(protocol: dict[str, Any] | None) -> list[tuple[str, dict[str, list[Any]]]]:

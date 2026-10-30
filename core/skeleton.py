@@ -34,6 +34,9 @@ from typing import Any
 from . import frame_table as _frame_table
 from . import function_steps as _steps
 from . import metric_spec as _metric_spec
+from . import oracle_check as _oracle_check
+from . import oracle_forms as _oracle_forms
+from . import trial_checks as _trial_checks
 
 #: Written into the frame; a quest keeps the frame it was written with (a resume reads the files, never writes them again).
 VERSION = 3
@@ -122,8 +125,10 @@ class UnknownResult(KeyError):
 
 class TrialResult(dict):
     """What one trial returns: a ``dict`` filled by assignment (``out["name"] = value``). A name the plan declares is a
-    result; any other is kept as a diagnostic (FI lists such names from what the trials returned; ``strict`` plans refuse it
-    at once, naming the declared ones).
+    result; so is a name FI itself reads from a trial (a known value's estimate, error and interval ends, what a check
+    measures: :func:`core.skeleton.returnable_names`, the one list ``declare`` is given), which is a diagnostic. Any other
+    name is kept as a diagnostic (FI lists such names from what the trials returned); ``strict`` plans refuse it at once,
+    naming the names allowed.
     ``declare`` is called by the frame, once, before any trial."""
 
     declared = frozenset()
@@ -138,7 +143,7 @@ class TrialResult(dict):
         if name in self.declared:
             return
         if self.strict:
-            raise UnknownResult("`%s` is not a result the plan declares; the declared results are: %s"
+            raise UnknownResult("`%s` is not a result the plan declares; the names a trial may return are: %s"
                                 % (name, ", ".join(sorted(self.declared)) or "(none)"))
 
     def __setitem__(self, name, value):
@@ -492,9 +497,57 @@ BODY_EXAMPLE = '''def trial(cell, ctx):
 '''
 
 
+#: Names FI itself asks every trial for besides the plan's results (the request to the model says so): the reason a value
+#: does not exist (``out["why_missing"] = {"name": "diverged"}``).
+FI_ASKED_NAMES = ("why_missing",)
+
+
+def required_names(protocol: dict[str, Any] | None) -> list[str]:
+    """The names, besides the declared results, that other parts of FI read from what a trial returns, so a trial must be
+    free to return them: the estimate, standard error (or variance) and interval ends of a metric's ``known_value`` (the
+    calibration check, :func:`core.trial_checks.truth_names`), every name the ``measure`` of a check that names a case uses
+    (the oracle check calls the simulation on the case and reads them, :func:`core.oracle_check.case_of`), and the list of
+    clusters a clustered metric names. They are diagnostics: read by the checks, never reported as results of the plan. A
+    formula measure is worked out from what the simulation returned alone, so every name it uses is listed, a setting or a
+    constant of the plan too."""
+    out: list[str] = list(_trial_checks.truth_names(protocol))
+    for oracle in _oracle_check.declared(protocol):
+        got = _oracle_check.case_of(oracle)
+        if got is not None:
+            out += _oracle_forms.read_names(got[1])
+    for spec in _metric_spec.declared(protocol):
+        key = _metric_spec._cluster_key(spec)
+        if key:
+            out.append(key)
+    declared = set(declared_names(protocol))
+    return [n for n in dict.fromkeys(out) if n not in declared]
+
+
+def diagnostic_names(protocol: dict[str, Any] | None) -> list[str]:
+    """The names a trial of a plan in the contract form may return that are not results of the plan: what
+    :func:`required_names` lists and :data:`FI_ASKED_NAMES`. They stay in the record of the trials but are not quantities of
+    the study, so the results table and the writer's list of quantities leave them out. A metric the plan declares, in any role
+    (a timing, a diagnostic), is a quantity of the study and is never listed here. ``[]`` for a plan in the older form, whose
+    tables list every name a trial returned, as they always did."""
+    from . import contract as _contract
+
+    if not isinstance(protocol, dict) or _contract.from_design({"protocol": protocol}).form != "contract":
+        return []
+    metrics = {str(i) for i in _contract.raw_roles(protocol)} | {str(s["id"]) for s in _metric_spec.declared(protocol)}
+    kept = {form for ident in metrics for form in _metric_spec.result_forms(ident)}
+    return [n for n in dict.fromkeys([*required_names(protocol), *FI_ASKED_NAMES]) if n not in kept]
+
+
+def returnable_names(protocol: dict[str, Any] | None) -> list[str]:
+    """Every name a trial may return, the one list the frame's ``RESULTS`` holds: the declared results under their forms
+    (:func:`declared_names`), the names other parts of FI read from a trial (:func:`required_names`) and the names FI asks
+    for itself (:data:`FI_ASKED_NAMES`). A name outside it is refused at once by a plan in the contract form."""
+    return list(dict.fromkeys([*declared_names(protocol), *required_names(protocol), *FI_ASKED_NAMES]))
+
+
 def declared_names(protocol: dict[str, Any] | None) -> list[str]:
-    """The names a trial may return: every id the plan declares as a counting result (result, reference or physical bound)
-    and the forms it may be returned under (``id``, ``id_count``, ``id_total``, ``id_values``), in the plan's order."""
+    """The names a trial may return as results: every id the plan declares as a counting result (result, reference or physical
+    bound) and the forms it may be returned under (``id``, ``id_count``, ``id_total``, ``id_values``), in the plan's order."""
     from . import contract as _contract
 
     ids = declared_ids(protocol)
@@ -574,7 +627,7 @@ def frame_source(design: dict[str, Any], *, stochastic: bool, strict: bool = Fal
     """The text of ``simulate.py`` with the frame and an empty ``trial``. ``stochastic``: ``run_trial`` (one call per seed), else
     ``run_cell``. ``strict``: a name outside the plan's list is refused (a plan in the contract form), else recorded."""
     protocol = design["protocol"]
-    names = declared_names(protocol)
+    names = returnable_names(protocol)
     settings = settings_of(protocol)
     entry = (
         "def run_trial(cell, trial_id, seed):\n"
@@ -589,7 +642,7 @@ def frame_source(design: dict[str, Any], *, stochastic: bool, strict: bool = Fal
         "_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))\n"
         "from fi_frame import Ctx, TrialResult  # noqa: E402\n\n"
         f"SETTINGS = {tuple(settings)!r}  # the settings a cell holds\n"
-        f"RESULTS = {tuple(names)!r}  # the names a trial returns\n"
+        f"RESULTS = {tuple(names)!r}  # the names a trial may return: the plan's results and the names FI reads from a trial\n"
         f"TrialResult.declare(RESULTS, strict={bool(strict)!r})\n"
         f"{TOP_END}\n")
     return _assemble(top, f"{BOTTOM_BEGIN}\n{entry}{BOTTOM_END}\n")
@@ -603,7 +656,8 @@ def _assemble(top: str, bottom: str) -> str:
         f"{top}\n\n"
         f"{SLOT_SIGNATURE}:\n"
         '    """One trial at the setting `cell`: draw with `ctx.rng`, read the thresholds from `ctx.thresholds`, return the\n'
-        '    results by name (`out = TrialResult(); out["name"] = value; return out`)."""\n'
+        '    results by name (`out = TrialResult(); out["name"] = value; return out`). Return only the names in RESULTS: in a\n'
+        '    plan of the contract form any other name fails every trial, so keep other numbers in local variables."""\n'
         f'    raise NotImplementedError("{_steps._STUB_MARK}")\n\n\n'
         f"{bottom}")
 
@@ -1186,6 +1240,34 @@ def _plan_of(source: str) -> tuple | None:
     return found.get("SETTINGS"), found.get("RESULTS"), found.get("strict"), entries
 
 
+def heal_results(existing: str, design: dict[str, Any], *, stochastic: bool, strict: bool = False) -> str:
+    """``existing`` (the quest's simulate.py) with the ``RESULTS`` line of its frame written again as the plan's list of names a
+    trial may return now is (:func:`returnable_names`), when it is short of it. Only that line changes, and only when the frame
+    is for the same plan (the same settings, the same entry point, the same refusal) and its old list is part of the new one;
+    anything else is returned as it is. A frame an older FI wrote, or a resume after the code was written, so keeps the frame it
+    was written with and is still FI's own frame: a repair that puts functions into the file is compared with the healed one."""
+    if frame_version(existing) is None:
+        return existing
+    fresh = frame_source(design, stochastic=stochastic, strict=strict)
+    was, now = _plan_of(existing), _plan_of(fresh)
+    if was is None or now is None or was[0] != now[0] or was[2] != now[2] or was[3] != now[3]:
+        return existing
+    if was[1] == now[1] or not isinstance(was[1], tuple) or not set(was[1]) <= set(now[1]):
+        return existing
+    protocol = design.get("protocol")
+    if not set(declared_names(protocol)) <= set(was[1]) or not set(now[1]) - set(was[1]) <= {*required_names(protocol), *FI_ASKED_NAMES}:
+        return existing  # a result was added or taken out: the plan changed, and the frame is written again, not healed
+    spans, new_spans = _spans(existing), _spans(fresh)
+    if spans is None or new_spans is None:
+        return existing
+    top, new_top = existing[spans[0][0]:spans[0][1]], fresh[new_spans[0][0]:new_spans[0][1]]
+    line = re.search(r"^RESULTS = .*$", top, re.MULTILINE)
+    new_line = re.search(r"^RESULTS = .*$", new_top, re.MULTILINE)
+    if line is None or new_line is None:
+        return existing
+    return existing[:spans[0][0] + line.start()] + new_line.group(0) + existing[spans[0][0] + line.end():]
+
+
 def frame_for(design: dict[str, Any], *, stochastic: bool, strict: bool = False, existing: str = "") -> str:
     """The frame the model's ``trial`` is put into. A quest keeps the frame it was written with: when ``existing`` (the quest's
     simulate.py) has a frame that another version of FI wrote for the same plan, that frame is returned, so a resume or an
@@ -1195,6 +1277,7 @@ def frame_for(design: dict[str, Any], *, stochastic: bool, strict: bool = False,
     old = frame_version(existing)
     if old is None or old == VERSION:
         return fresh
+    existing = heal_results(existing, design, stochastic=stochastic, strict=strict)  # a short list of names is made whole
     kept = _plan_of(existing)
     if kept is None or kept != _plan_of(fresh):
         return fresh

@@ -265,6 +265,14 @@ def names(text: Any, functions: dict[str, Callable[..., float]] | None = None) -
     return list(dict.fromkeys(n.id for n in found))
 
 
+def read_names(measure: Any) -> list[str]:
+    """The names a check's ``measure`` may be read from, in the order FI's readers try them: the measure itself, as ONE returned
+    name (``trial_runner._check_from`` and ``mc_error.measure_names`` take it verbatim first, so a measure written as plain
+    words, ``error rate``, or with a hyphen, ``p-value``, is a name too), then the names of the formula it is."""
+    text = str(measure or "").strip()
+    return list(dict.fromkeys([text, *names(text)])) if text else []
+
+
 def is_name(text: Any) -> bool:
     """Whether ``text`` is one returned name alone (the form every oracle had before formulas)."""
     tree, _ = _tree(text)

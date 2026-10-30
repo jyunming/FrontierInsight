@@ -902,6 +902,12 @@ class RunChecksMixin:
         return _skeleton.frame_for(design, stochastic=_split_run.design_is_stochastic(design),
                                    strict=_contract.from_design(design).form == "contract", existing=existing)
 
+    def _strict_frame(self, state: Any) -> bool:
+        """Whether the frame refuses a name outside its list (a plan in the contract form)."""
+        from . import contract as _contract
+
+        return _contract.from_design(state.get("design")).form == "contract"
+
     def _frame_on(self) -> bool:
         """Whether FI writes the frame of simulate.py, and so the analysis of a plan in the contract form: the settings
         (``execution.code_skeleton`` with ``split_analysis``, and not the agent coder), read before any code exists."""
@@ -1092,8 +1098,11 @@ class RunChecksMixin:
             "same seed as an integer for a library that wants one; `ctx.trial` is the trial's number; `ctx.thresholds` holds the "
             "plan's thresholds.\n"
             f"- Return the results the plan declares, by name ({names}; a proportion may be returned as `<name>_count` and "
-            "`<name>_total`): `out = TrialResult()`, `out[\"name\"] = value`, `return out`. A result under another name is "
-            "kept as a diagnostic, not as a result of the plan.\n"
+            "`<name>_total`): `out = TrialResult()`, `out[\"name\"] = value`, `return out`. The frame lists in RESULTS every name "
+            "`trial` may return (the plan's results, the names of a `known_value`, the names a check's `measure` uses, "
+            "`why_missing`); " + ("a name outside that list fails EVERY trial with `UnknownResult`, so keep any other number in "
+                                  "a local variable" if self._strict_frame(state) else "any other name is kept as a diagnostic, "
+                                  "not as a result of the plan") + ".\n"
             "- A quantity the method cannot give at this setting (it diverged, there is no crossing in the range) is `None`, with "
             "the reason in `out[\"why_missing\"] = {\"name\": \"reason\"}`, never a stand-in number (0, -1, a bound). A trial whose "
             "code fails raises an exception with the reason instead of returning a made-up value. `trial` writes no files, "
@@ -1232,6 +1241,43 @@ class RunChecksMixin:
                 del lines[n.lineno - 1:n.end_lineno]
             out["scaffold"] = "".join(lines)
         return out
+
+    def _heal_frame(self, state: Any) -> bool:
+        """Write the ``RESULTS`` line of the frame in the quest's simulate.py again when it is short of the names a trial may return
+        now (:func:`core.skeleton.heal_results`): a quest resumed after its code was written keeps the frame it was written with,
+        and a repair that puts functions into that file is compared with it. Only that line changes, and only for the same plan.
+        Returns whether the file was written."""
+        from . import skeleton as _skeleton
+
+        design = state.get("design") if isinstance(state, dict) else None
+        if not isinstance(design, dict) or not self._frame_on() or _skeleton.applies(design):
+            return False
+        path = self.quest_root / "code" / _split_run.SIMULATE_NAME  # type: ignore[attr-defined]
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return False
+        if not _skeleton.has_frame(text):
+            return False
+        healed = _skeleton.heal_results(text, design, stochastic=_split_run.design_is_stochastic(design),
+                                        strict=self._strict_frame(state))
+        if healed == text:
+            return False
+        if self._study_results_recorded():  # type: ignore[attr-defined]
+            # A trial is recorded: the file's text is part of what the run's keys and records were made from, so it is not changed.
+            if not getattr(self, "_frame_older_said", False):
+                self._frame_older_said = True
+                self._log.info("[implement] simulate.py: its frame is older than the plan's list of names a trial may return; "  # type: ignore[attr-defined]
+                               "left as it is, because trials of the study are already recorded")
+            return False
+        import os
+
+        temp = path.with_name(path.name + ".fi-tmp")
+        temp.write_text(healed, encoding="utf-8")
+        os.replace(temp, path)
+        self._log.info("[implement] simulate.py: the frame's list of names a trial may return was written again "  # type: ignore[attr-defined]
+                       "(it now holds the names FI's checks read from a trial)")
+        return True
 
     def _framed(self, state: Any, simulate_code: str) -> str:
         """The text of ``simulate.py`` once the model's reply is put into FI's frame (and ``fi_frame.py`` written beside it);

@@ -514,7 +514,12 @@ class Records:
         return [k for k, vs in self.axes().items() if len(vs) > 1]
 
     def metrics(self) -> list[str]:
-        return list(self._once("metrics", lambda: list(dict.fromkeys(m for c in self.cells for m in c["metrics"]))))
+        def make() -> list[str]:
+            from . import skeleton as _skeleton
+
+            hidden = set(_skeleton.diagnostic_names(self.protocol))  # a contract plan's diagnostics are not its quantities
+            return list(dict.fromkeys(m for c in self.cells for m in c["metrics"] if m not in hidden))
+        return list(self._once("metrics", make))
 
     def in_run_axes(self) -> list[str]:
         """The axes whose values are compared inside each run (the plan's ``in_each_run``, and the ``level`` a value's own
