@@ -283,3 +283,52 @@ def test_a_declared_timing_metric_a_check_uses_is_still_a_quantity(tmp_path: Pat
     (tmp_path / "raw" / "trials.json").write_text(__import__("json").dumps({"cells": cells}), encoding="utf-8")
     assert {r["metric"] for r in trial_table.rows(tmp_path, hidden)} == {"est", "t_run"}
     assert paper_values.Records(cells=cells, protocol=protocol).metrics() == ["est", "t_run"]
+
+
+# ---- a metric the plan says each run returns may be returned, whatever its role ---------------------------------------------
+
+def _with_diagnostics(returned: str | None) -> dict[str, Any]:
+    spec: dict[str, Any] = {"id": "drift", "kind": "mean", "role": "diagnostic", "estimand": "the drift of the readings",
+                            "unit": "one trial"}
+    if returned:
+        spec["returned"] = returned
+    return {"protocol": {**DESIGN["protocol"], "form": "contract", "metrics": [*DESIGN["protocol"]["metrics"], spec]}}
+
+
+def test_a_diagnostic_the_plan_says_each_run_returns_is_returnable_but_not_required() -> None:
+    protocol = _with_diagnostics("each_run")["protocol"]
+    assert skeleton.each_run_names(protocol) == ["drift", "drift_count", "drift_total", "drift_values"]
+    got = skeleton.returnable_names(protocol)
+    assert all(n in got for n in skeleton.each_run_names(protocol)) and len(got) == len(set(got))
+    assert got.index("drift") > got.index("hit_values"), "after the declared results, in the plan's order"
+    assert "drift" not in skeleton.declared_ids(protocol) and "drift" not in skeleton.declared_names(protocol)
+    assert "drift" not in skeleton.empty_slots(protocol, ["est", "hit"]), "a trial that leaves it out is not missing a result"
+    assert "drift" not in skeleton.diagnostic_names(protocol), "a declared metric stays a quantity of the study"
+    frame = skeleton.frame_source(_with_diagnostics("each_run"), stochastic=True, strict=True)
+    assert "drift" in _results(frame)
+
+
+def test_a_diagnostic_the_plan_does_not_say_each_run_returns_is_not_returnable() -> None:
+    for returned in (None, "afterwards"):
+        protocol = _with_diagnostics(returned)["protocol"]
+        assert skeleton.each_run_names(protocol) == []
+        assert "drift" not in skeleton.returnable_names(protocol), "as before: only a metric each run returns is let through"
+    assert skeleton.returnable_names(_with_diagnostics(None)["protocol"]) == skeleton.returnable_names(DESIGN["protocol"])
+
+
+def test_a_strict_frame_runs_a_trial_that_returns_the_diagnostic_and_one_that_omits_it(tmp_path: Path) -> None:
+    design = _with_diagnostics("each_run")
+    for name, body in (("with", BODY.replace('    out["why_missing"]', '    out["drift"] = 0.5\n    out["why_missing"]')), ("without", BODY)):
+        text, why = skeleton.fill(skeleton.frame_source(design, stochastic=True, strict=True), body)
+        assert text is not None, why
+        got = _small(_quest(tmp_path / name, text))
+        assert not got.crashed, got.says()
+        assert ("drift" in got.record()["returned"]) == (name == "with")
+        assert skeleton.empty_slots(design["protocol"], got.record()["returned"]) == []
+
+
+def test_the_analysis_reads_the_diagnostic_from_the_record() -> None:
+    from core import analysis_frame
+
+    plan = analysis_frame.plan_of(_with_diagnostics("each_run"))
+    assert "drift" in plan["results"], "a body may read it from the Table"

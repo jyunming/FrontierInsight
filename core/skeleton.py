@@ -538,11 +538,27 @@ def diagnostic_names(protocol: dict[str, Any] | None) -> list[str]:
     return [n for n in dict.fromkeys([*required_names(protocol), *FI_ASKED_NAMES]) if n not in kept]
 
 
+def each_run_names(protocol: dict[str, Any] | None) -> list[str]:
+    """The names (every form) of the metrics the plan itself says each run returns (``returned: each_run``) in a role that
+    :func:`declared_ids` does not count, a diagnostic above all. The plan asked the trial for them, so the frame must let it
+    return them; they are not results a trial is expected to set, so nothing is missing when a trial leaves one out. In the
+    plan's order, read without validating the entries like :func:`core.contract.raw_roles`."""
+    metrics = protocol.get("metrics") if isinstance(protocol, dict) else None
+    counted = set(declared_ids(protocol))
+    out: list[str] = []
+    for m in metrics if isinstance(metrics, list) else []:
+        if not isinstance(m, dict) or not m.get("id") or m.get("returned") != "each_run" or str(m["id"]) in counted:
+            continue
+        out += [n for n in _metric_spec.result_forms(str(m["id"])) if n not in out]
+    return out
+
+
 def returnable_names(protocol: dict[str, Any] | None) -> list[str]:
     """Every name a trial may return, the one list the frame's ``RESULTS`` holds: the declared results under their forms
-    (:func:`declared_names`), the names other parts of FI read from a trial (:func:`required_names`) and the names FI asks
-    for itself (:data:`FI_ASKED_NAMES`). A name outside it is refused at once by a plan in the contract form."""
-    return list(dict.fromkeys([*declared_names(protocol), *required_names(protocol), *FI_ASKED_NAMES]))
+    (:func:`declared_names`), the metrics the plan says each run returns whatever their role (:func:`each_run_names`), the
+    names other parts of FI read from a trial (:func:`required_names`) and the names FI asks for itself
+    (:data:`FI_ASKED_NAMES`). A name outside it is refused at once by a plan in the contract form."""
+    return list(dict.fromkeys([*declared_names(protocol), *each_run_names(protocol), *required_names(protocol), *FI_ASKED_NAMES]))
 
 
 def declared_names(protocol: dict[str, Any] | None) -> list[str]:
@@ -1255,7 +1271,7 @@ def heal_results(existing: str, design: dict[str, Any], *, stochastic: bool, str
     if was[1] == now[1] or not isinstance(was[1], tuple) or not set(was[1]) <= set(now[1]):
         return existing
     protocol = design.get("protocol")
-    if not set(declared_names(protocol)) <= set(was[1]) or not set(now[1]) - set(was[1]) <= {*required_names(protocol), *FI_ASKED_NAMES}:
+    if not set(declared_names(protocol)) <= set(was[1]) or not set(now[1]) - set(was[1]) <= {*each_run_names(protocol), *required_names(protocol), *FI_ASKED_NAMES}:
         return existing  # a result was added or taken out: the plan changed, and the frame is written again, not healed
     spans, new_spans = _spans(existing), _spans(fresh)
     if spans is None or new_spans is None:
