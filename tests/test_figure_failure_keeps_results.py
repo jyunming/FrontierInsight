@@ -1,14 +1,16 @@
-"""A figure of the study's that failed after its repairs belongs to the analysis, not to the run: the run's results were
-produced, so the confirm run still confirms them and the improve step is not skipped for "no result". A run that crashed
-without results is still no result. No real model is called."""
+"""A figure of the study's that failed after its repairs belongs to the analysis, not to the run: FI decides once per run
+whether its results were produced (``exec_result["results_produced"]``: exit code 0, or exit code 1 with only a figure failed in
+FI's own record), and every reader that means "the run produced its results" uses that fact. A run that crashed without
+results is still no result. No real model is called."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
 from core import analysis_frame as frame
-from core import phased
+from core import evidence, phased
 from tests.test_confirm_one_shot import _TRIAL, _code, _env
 from tests.test_phased import _config
 
@@ -41,34 +43,46 @@ def _confirm(engine, exec_result: dict, result_json: dict) -> dict:
     return phased.load(root)
 
 
+class _Ran:
+    def __init__(self, returncode: int, printed: bool = True) -> None:
+        self.returncode = returncode
+        self.stdout = 'RESULT_JSON: {"a": 1}\n' if printed else ""
+        self.stderr = ""
+
+
+def _fis_experiment(engine, on: bool = True) -> None:
+    code = engine.quest_root / "code"
+    code.mkdir(parents=True, exist_ok=True)
+    (code / "experiment.py").write_text(frame.EXPERIMENT_HEAD + "\n" if on else "print('hand written')\n", encoding="utf-8")
+
+
+# ---- confirm and improve ----------------------------------------------------------------------------------------------
+
+
 def test_a_failed_figure_does_not_wipe_out_the_confirmation_of_the_results(tmp_path: Path) -> None:
-    engine = _engine(tmp_path, phased_on=True)
-    _record(engine.quest_root, figure="failed")
-    record = _confirm(engine, {"returncode": 1}, {"a": 2})
+    record = _confirm(_engine(tmp_path, phased_on=True), {"returncode": 1, "results_produced": True}, {"a": 2})
     assert phased.status(record) == phased.CONFIRMED, phased.status(record)
 
 
-def test_a_crash_without_results_still_confirms_nothing(tmp_path: Path) -> None:
-    engine = _engine(tmp_path, phased_on=True)
-    _record(engine.quest_root, figure="ok", result="failed")  # a function of the study's for a result failed
-    record = _confirm(engine, {"returncode": 1}, {"a": 2})
+def test_a_run_without_results_confirms_nothing(tmp_path: Path) -> None:
+    record = _confirm(_engine(tmp_path, phased_on=True), {"returncode": 1, "results_produced": False}, {"a": 2})
+    assert phased.status(record) != phased.CONFIRMED
+    # an exec_result with no such fact: the return code decides
+    record = _confirm(_engine(tmp_path / "again", phased_on=True), {"returncode": 1}, {"a": 2})
     assert phased.status(record) != phased.CONFIRMED
 
 
 def test_a_failed_figure_does_not_skip_the_improve_step_but_a_crash_does(tmp_path: Path) -> None:
     engine = _engine(tmp_path, phased_on=False)
-    state = {"result_json": {"a": 2}, "exec_result": {"returncode": 1}, "exec_give_up_reason": "the figure could not be drawn"}
-    _record(engine.quest_root, figure="failed")
+    state = {"result_json": {"a": 2}, "exec_result": {"returncode": 1, "results_produced": True},
+             "exec_give_up_reason": "the figure could not be drawn"}
     assert not engine._run_has_no_result(state)
     assert engine._improve_skip(state) != "the run did not produce a result"
-    # the same exit code with no record of this run, a record of an earlier run, or no result printed: no result
-    (engine.quest_root / frame.DERIVED_PATH).unlink()
-    assert engine._run_has_no_result(state)
-    _record(engine.quest_root, figure="failed", from_earlier_run=True)
-    assert engine._run_has_no_result(state)
-    _record(engine.quest_root, figure="failed")
+    assert engine._run_has_no_result({**state, "exec_result": {"returncode": 1, "results_produced": False}})
+    assert engine._run_has_no_result({**state, "exec_result": {"returncode": 1}})
     assert engine._run_has_no_result({**state, "result_json": {}})
-    assert engine._run_has_no_result({**state, "exec_result": {"returncode": 2}})
+    # a clean run that gave up (not over a figure) is still no result
+    assert engine._run_has_no_result({**state, "exec_result": {"returncode": 0, "results_produced": True}})
 
 
 def test_only_figures_failed_reads_fis_record(tmp_path: Path) -> None:
@@ -77,5 +91,93 @@ def test_only_figures_failed_reads_fis_record(tmp_path: Path) -> None:
     assert frame.only_figures_failed(rec, 1)
     assert not frame.only_figures_failed(rec, 0) and not frame.only_figures_failed(rec, 2)
     assert not frame.only_figures_failed({**rec, "fi_faults": ["FI's own"]}, 1)
+    assert not frame.only_figures_failed({**rec, "from_earlier_run": True}, 1)
     _record(tmp_path, figure="ok")
     assert not frame.only_figures_failed(frame.read_record(tmp_path), 1)
+
+
+# ---- the fact itself --------------------------------------------------------------------------------------------------
+
+
+def test_run_produced_is_decided_from_fis_record_and_only_for_fis_own_analysis(tmp_path: Path) -> None:
+    engine = _engine(tmp_path, phased_on=False)
+    _record(engine.quest_root, figure="failed")
+    _fis_experiment(engine)
+    assert engine._run_produced(_Ran(0))
+    assert engine._run_produced(_Ran(1))  # only a figure failed
+    assert not engine._run_produced(_Ran(2))  # FI's exit code for a crash or its own fault, although the record was written
+    assert not engine._run_produced(_Ran(1, printed=False))  # no RESULT line
+    _record(engine.quest_root, figure="ok")
+    assert not engine._run_produced(_Ran(1)), "exit 1 with a printed result and no failed figure in the record is a crash"
+    _record(engine.quest_root, figure="failed", result="failed")
+    assert not engine._run_produced(_Ran(1))
+    _record(engine.quest_root, figure="failed")
+    _fis_experiment(engine, on=False)  # a hand-written experiment.py is never figures-only
+    assert not engine._run_produced(_Ran(1))
+
+
+def test_evidence_executed_reads_the_fact(tmp_path: Path) -> None:
+    def executed(exec_result: dict) -> bool:
+        rec = evidence.assess(tmp_path, {"result_json": {"a": 1}, "exec_result": exec_result})
+        return not any(lvl["gaps"] for lvl in rec["ladder"] if lvl["level"] == "executed")
+
+    assert executed({"returncode": 1, "results_produced": True})
+    assert not executed({"returncode": 1, "results_produced": False})
+    assert not executed({"returncode": 1})
+    assert executed({"returncode": 0})
+
+
+def test_the_manifest_and_the_results_check_treat_a_figure_only_failure_as_a_run(tmp_path: Path, monkeypatch) -> None:
+    engine = _engine(tmp_path, phased_on=False)
+    _record(engine.quest_root, figure="failed")
+    _fis_experiment(engine)
+    monkeypatch.setattr(engine, "_protocol_block", lambda state: {"x": 1})
+    monkeypatch.setattr("core.run_manifest.checkable", lambda protocol: True)
+    state = {"design": {}}
+    assert engine._run_manifest_problems(state, True, _Ran(2), None)[0] == "not_run"
+    try:
+        status = engine._run_manifest_problems(state, True, _Ran(1), None)[0]
+    except Exception:  # noqa: BLE001 - it went past the "did not run" line into the comparison, which a bare fixture cannot make
+        status = "compared"
+    assert status != "not_run"
+    seen: list[str] = []
+    monkeypatch.setattr("core.engine._extract_result_json", lambda text: seen.append(text) or {})
+    asyncio.run(engine._results_match_run(state, _Ran(1), None, True))
+    assert seen, "the results check read the results of the figure-only run"
+
+
+def test_a_figure_only_failure_gets_every_check_of_the_run(tmp_path: Path, monkeypatch) -> None:
+    from core.engine import Engine
+    from tests.test_split_analysis import SIMULATE, _engine as split_engine, _write
+
+    analysis = (
+        "import json, os, pathlib, sys\n"
+        "raw = pathlib.Path(os.environ['FI_RAW_DIR'])\n"
+        "data = json.loads((raw / 'values.json').read_text())\n"
+        "doc = {'schema': 'fi.derived/v1', 'derived': {}, 'fi_faults': [],\n"
+        "       'figures': [{'id': 'fig2', 'status': 'failed', 'file': 'f.png'}]}\n"
+        "os.makedirs('data/results', exist_ok=True)\n"
+        "json.dump(doc, open('data/results/derived.json', 'w'))\n"
+        "print('RESULT_JSON: ' + json.dumps({'mean': sum(data['values'])}))\n"
+        "sys.exit(CODE)\n")
+
+    def run(sub: str, code: int, *, fis: bool = True):
+        eng = split_engine(tmp_path / sub, replicates=2)
+        _write(eng, simulate=SIMULATE, analysis=analysis.replace("CODE", str(code)))
+        monkeypatch.setattr(Engine, "_analysis_on", lambda self: fis)
+        return eng, asyncio.run(eng._node_execute({"deps": []}))
+
+    eng, out = run("fig", 1)
+    er = out["exec_result"]
+    assert er["returncode"] == 1 and er["results_produced"] is True
+    raw = eng.quest_root / "data" / "results" / "raw"
+    assert (raw / "seed0" / "values.json").is_file() and (raw / "seed1" / "values.json").is_file(), \
+        "the run was accepted (its data is kept) and its replicates ran"
+    assert out["result_json"] == {"mean": 6.0}
+    # the same output with exit code 2 (a crash after derived.json was written), and from a hand-written analysis
+    eng2, out2 = run("crash", 2)
+    assert out2["exec_result"]["results_produced"] is False
+    assert not (eng2.quest_root / "data" / "results" / "raw").exists()
+    eng3, out3 = run("hand", 1, fis=False)
+    assert out3["exec_result"]["results_produced"] is False
+    assert not (eng3.quest_root / "data" / "results" / "raw").exists()

@@ -319,7 +319,7 @@ class ResultChecksMixin:
         record_path = self.quest_root / "needs" / RECORD  # type: ignore[attr-defined]
         record_path.unlink(missing_ok=True)  # an earlier pass's record is not this run's
         self._analysis_sendback_body = ""  # the function of derive.py this run is sent back to, when FI wrote the analysis
-        if result.returncode != 0:
+        if not self._run_produced(result):  # type: ignore[attr-defined]
             return result, failed_script
         result_json = _e._extract_result_json(result.stdout or "")
         self._result_kept = []

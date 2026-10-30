@@ -3531,8 +3531,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         try:
             _record, lines = _phased.record_confirm(
                 self.quest_root,
-                state.get("result_json") if (self._figures_only_failed(state)
-                                             or (state.get("exec_result") or {}).get("returncode", 0) == 0) else None,
+                state.get("result_json") if self._exec_produced(state.get("exec_result") or {}, 0) else None,
                 design_sha256=_frozen.sha256(state.get("design") or {}) if data_quest else None,
                 key=self._phased_key())
         except OSError as e:
@@ -12074,7 +12073,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # own script): no manifest. That is a gap for a stochastic study; a deterministic one (an ODE sweep) has no
             # per-trial outcomes to record.
             return ("single_script" if _split_run.design_is_stochastic(state.get("design")) else "not_applicable"), []
-        if result.returncode != 0:
+        if not self._run_produced(result):
             return "not_run", []
         result_json = _extract_result_json(getattr(result, "stdout", "") or "")
         if getattr(self, "_trial_mode", False):
@@ -16343,21 +16342,32 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         return (self._split_on(state) and simulate.is_file()
                 and bool(_trial_runner.entries(simulate) & {"run_trial", "run_cell"}))
 
-    def _figures_only_failed(self, state: QuestState) -> bool:
-        """The last run printed its results and exited 1 only because a figure of the study's failed (FI's record of the run
-        says so): the results stand, and the figure's repair goes on by itself."""
-        result = state.get("exec_result") or {}
-        return bool(state.get("result_json")) and _analysis_frame.only_figures_failed(
-            _analysis_frame.read_record(self.quest_root), result.get("returncode", 1))
+    def _run_produced(self, result: Any) -> bool:
+        """Whether a run of the experiment produced its results: it exited 0, or it exited 1 only because a figure of the study's
+        failed. The second is read from FI's own record of the run (derived.json) and only when FI wrote the analysis and the run
+        printed its RESULT line. Decided once per run (``exec_result["results_produced"]``); the figure's repair keeps reading the
+        return code and the figure statuses."""
+        rc = result.returncode
+        if rc == 0:
+            return True
+        return bool(rc == 1 and self._analysis_on() and _extract_result_json(getattr(result, "stdout", "") or "")
+                    and _analysis_frame.only_figures_failed(_analysis_frame.read_record(self.quest_root), rc))
 
-    def _run_has_no_result(self, state: QuestState) -> bool:
-        """The run gave up, exited with an error, or printed no result (the improve loop's test). A figure that failed after
-        its repairs is not that: the results were produced."""
-        if self._figures_only_failed(state):
-            return False
+    @staticmethod
+    def _exec_produced(exec_result: dict[str, Any], default_rc: int) -> bool:
+        """The run's ``results_produced`` fact, or (a record without it) whether its return code is 0."""
+        if "results_produced" in exec_result:
+            return bool(exec_result["results_produced"])
+        return exec_result.get("returncode", default_rc) == 0
+
+    @staticmethod
+    def _run_has_no_result(state: QuestState) -> bool:
+        """The run gave up, did not produce its results, or printed no result (the improve loop's test). A figure that failed
+        after its repairs is not that: the results were produced."""
         result = state.get("exec_result") or {}
-        return bool(state.get("exec_give_up_reason") or result.get("returncode", 1) != 0
-                    or not state.get("result_json"))
+        produced = Engine._exec_produced(result, 1)
+        figure_only = produced and result.get("returncode", 1) != 0
+        return bool((state.get("exec_give_up_reason") and not figure_only) or not produced or not state.get("result_json"))
 
     def _experiment_gave_no_result(self, state: QuestState) -> bool:
         """A simulation ran (its record is there) and produced no result at all. A quest with no simulation, one that has
@@ -19232,6 +19242,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # Which of the two scripts failed, for the repair; read now, before a replicate
         # runs through the same runner.
         failed_script = runner.failed_script if split else None
+        # Whether the results were produced, decided once from this run (rc 0, or only a figure failed: FI's record of it).
+        produced = self._run_produced(result)
         # What the simulation says it did, against the frozen protocol (core/run_manifest.py): a run that differs is sent
         # back like a failed one, and after the repairs the quest stops.
         manifest_stop = self.fi_dir / "run_manifest_stop.json"
@@ -19248,12 +19260,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             manifest_status, manifest_found, self._manifest_note = "pending", [], ""
         else:
             run_cell_random = (await self._run_cell_randomness(state, py, primary_env)
-                               if split and result.returncode == 0 and self.config.engine.run_manifest_check != "off"
+                               if split and produced and self.config.engine.run_manifest_check != "off"
                                else None)
             manifest_status, manifest_found = self._run_manifest_problems(state, split, result, run_cell_random)
         # A run that crashed or has not recorded yet says nothing about the record: the repairs already spent stay spent
         # (an analysis repair that crashes must not earn a fresh budget when the crash is fixed).
-        manifest_attempts_next = manifest_attempts if (result.returncode != 0 or manifest_status in ("not_run", "pending")) else 0
+        manifest_attempts_next = manifest_attempts if (not produced or manifest_status in ("not_run", "pending")) else 0
         manifest_analysis_only = False
         manifest_fis_fault = False  # the difference is in what FI's own analysis printed (core/analysis_frame.py)
         acting: list[str] = []
@@ -19343,7 +19355,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         })
         # The run's data is kept only once the run is accepted: not a crash, a run the manifest sent back or stopped,
         # nor a job still pending (its raw files are half written).
-        run_accepted = result.returncode == 0 and manifest_status not in ("stopped", "pending", "repairing")
+        run_accepted = produced and manifest_status not in ("stopped", "pending", "repairing")
         if run_accepted:
             await asyncio.to_thread(self._save_run_data, run_started, split)
             if split and self.config.rigor_profile == "research":
@@ -19366,9 +19378,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return self._manifest_stop(acting, manifest_attempts_next or manifest_attempts)
         # What the run reports is compared with what ran; a fault is sent back like a failed run, and what stays is left out
         # (core/result_checks.py).
-        ran_with_results = result.returncode == 0
+        ran_with_results = produced
+        result_before_check = result
         result, failed_script = await self._results_match_run(state, result, failed_script, split)
-        result_check_sent_back = ran_with_results and result.returncode != 0
+        result_check_sent_back = ran_with_results and result is not result_before_check
         figures = sorted(
             p.name for p in (self.quest_root / "figures").iterdir()
             if p.is_file() and p.suffix.lower() in _FIGURE_SUFFIXES
@@ -19426,7 +19439,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         replicates_ran = False
         all_agreed = True  # every replicate that finished gave seed 0's numbers
         primary_figures: dict[str, tuple[bytes, bytes | None, dict[str, bytes]]] = {}
-        if result.returncode == 0 and result_json is not None:
+        if produced and result_json is not None:
             # Tag seed 0 explicitly so the aggregator can attribute it.
             result_json_replicates.append({"_seed": 0, **result_json})
 
@@ -19442,7 +19455,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 **state, "result_json": result_json,
                 "manifest_failed_trials": getattr(self, "_manifest_failed_trials", None),
             }), self._walk_memo())
-            if result.returncode == 0 and result_json is not None
+            if produced and result_json is not None
             else []
         )
         repair_left = (
@@ -19466,7 +19479,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             )
         if (
             replicates_n > 1
-            and result.returncode == 0
+            and produced
             and result_json is not None
             and not skip_replicates
         ):
@@ -19491,7 +19504,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     env=rep_env,
                 )
                 rep_rj = self._without_typed_results(_extract_result_json(rep_result.stdout))
-                if rep_result.returncode == 0 and rep_rj is not None:
+                if self._run_produced(rep_result) and rep_rj is not None:
                     result_json_replicates.append({"_seed": seed, **rep_rj})
                     self._log.info(
                         "[execute] replicate seed=%d rc=0 duration=%.1fs",
@@ -19637,7 +19650,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             for name in figures:
                 if name not in replotted and name in figure_records:
                     figure_records[name]["single_seed"] = 0
-        self._record_no_difference(getattr(runner, "no_difference", None) if result.returncode == 0 else None)
+        self._record_no_difference(getattr(runner, "no_difference", None) if produced and not result_check_sent_back else None)
         self._keep_raw_stdout(result.stdout)
         self._keep_analysis_answers(
             result_json, state,
@@ -19676,6 +19689,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 # that gives up runs the same code once more, its results kept. Held on this run's own record, so it
                 # never outlives the run.
                 "result_check_sent_back": result_check_sent_back,
+                # Whether the run produced its results (rc 0, or only a figure failed): every reader that means "the run
+                # produced its results" reads this, not the return code.
+                "results_produced": bool(produced and not result_check_sent_back),
                 # FI's analysis (core/analysis_frame.py): what it was doing when it stopped (a function of derive.py, or FI's
                 # own step), read from its whole stderr, and the function of derive.py a check after the run named.
                 **({"analysis_step": _analysis_frame.running_step(result.stderr or "", self.quest_root)}
