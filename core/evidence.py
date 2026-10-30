@@ -393,7 +393,7 @@ def assess(
 
     # executed
     exec_result = state.get("exec_result") or {}
-    executed = bool(state.get("result_json")) and exec_result.get("returncode", 0) == 0
+    executed = bool(state.get("result_json")) and bool(exec_result.get("results_produced", exec_result.get("returncode", 0) == 0))
     if not executed:
         gaps["executed"].append("the experiment has not produced results (it has not run, or it failed)")
 
