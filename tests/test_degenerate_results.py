@@ -530,6 +530,26 @@ async def test_dropping_a_figure_removes_exactly_that_file_and_keeps_its_sibling
     assert not (eng.fi_dir / "figure_records" / "empty_one.json").exists() and (folder / "empty_one_other.png").exists()
 
 
+def test_a_dropped_figure_is_marked_dropped_with_its_reason_in_the_run_record_and_a_drawn_one_stays_ok(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    eng = _engine(tmp_path, monkeypatch)
+    folder = eng.quest_root / "figures"
+    (folder / "empty_two.png").write_bytes(b"png")
+    (folder / "fine_two.png").write_bytes(b"png")
+    record_path = eng.quest_root / "data" / "results" / "derived.json"
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    record_path.write_text(json.dumps({"schema": 1, "derived": {}, "figures": [
+        {"id": "empty_two", "file": "empty_two.png", "status": "ok", "why": "", "said": "Figure `empty_two` was drawn (empty_two.png)."},
+        {"id": "fine_two", "file": "fine_two.png", "status": "ok", "why": "", "said": "Figure `fine_two` was drawn (fine_two.png)."},
+    ]}), encoding="utf-8")
+    eng._drop_figures(["empty_two.png"], {"empty_two.png": "the panel draws no data"})
+    entries = {e["id"]: e for e in json.loads(record_path.read_text(encoding="utf-8"))["figures"]}
+    assert entries["empty_two"]["status"] == "dropped" and entries["empty_two"]["why"] == "the panel draws no data"
+    assert "left out" in entries["empty_two"]["said"]
+    assert entries["fine_two"]["status"] == "ok" and not (folder / "empty_two.png").exists()
+
+
 @pytest.mark.asyncio
 async def test_a_repair_that_gives_up_on_a_sent_back_run_keeps_its_results_and_leaves_out_what_is_wrong(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
