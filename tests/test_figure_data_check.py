@@ -245,3 +245,26 @@ def test_the_note_reaches_the_writers_prompt_only_when_a_figure_was_left_out(tmp
 def test_the_implement_prompt_says_to_draw_from_results() -> None:
     text = (Path(__file__).resolve().parent.parent / "agents" / "implement.md").read_text(encoding="utf-8")
     assert "never from numbers typed into the plotting code" in text
+
+
+def test_a_figure_function_of_fis_derive_py_is_scanned_though_it_never_saves_a_figure(tmp_path: Path) -> None:
+    """The analysis FI writes (core/analysis_frame.py): FI saves each figure a ``figure_<id>`` function draws, so derive.py
+    holds no ``savefig`` call, and a figure drawn there from typed-in numbers is found all the same, laid to its own file."""
+    from core import analysis_frame as af
+
+    design = {"protocol": {"form": "contract", "grid": {"rate": [0.1, 0.2]}, "runs_per_setting": 3,
+                           "metrics": [{"id": "growth", "kind": "mean", "role": "result"}],
+                           "figures": [{"id": "fig1", "file": "growth.png", "shows": ["growth"], "x": "rate"},
+                                       {"id": "fig2", "file": "other.png", "shows": ["growth"], "x": "rate"}]}}
+    code = tmp_path / "code"
+    af.ensure_files(code, design)
+    typed = ("def figure_fig1(fig, table):\n    ax = fig.axes[0]\n    ax.plot([1, 2, 3], [0.5, 0.7, 0.9], label='growth')\n\n\n"
+             "def figure_fig2(fig, table):\n    fig.axes[0].plot([1, 2], [table.mean('growth', k) for k in table.keys()])\n")
+    text, note = af.compose(design, typed, (code / "derive.py").read_text(encoding="utf-8"))
+    assert not note and ".savefig(" not in text
+    (code / "derive.py").write_text(text, encoding="utf-8")
+    found = fdc.typed_series_in(code)
+    # derive.py alone: FI's own figure step (fi_figures.py, which does save figures) draws nothing typed into it
+    assert list(found) == [code / "derive.py"] and len(found[code / "derive.py"]) == 1
+    only = found[code / "derive.py"][0]
+    assert only.saved_as == {"growth.png"} and fdc.figures_to_drop([only], ["growth.png", "other.png"]) == ["growth.png"]

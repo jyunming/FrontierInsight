@@ -540,15 +540,24 @@ def _fis_analysis_result(scratch: Path, run: Any, protocol: dict[str, Any] | Non
     err = getattr(run, "stderr", "") or ""
     printed = "RESULT_JSON:" in (getattr(run, "stdout", "") or "")
     if run.returncode != 0:
-        got = _analysis.failure(record, err, run.returncode, printed)
+        got = _analysis.failure(record, err, run.returncode, printed, timed_out=bool(getattr(run, "timed_out", False)))
         if got["kind"] == "fi":
             return GateResult(False, "derive", NOT_CHECKED, "", "FI's own analysis could not run on the small copy (FI's "
                               "fault, not the study's code): " + got["why"][:300], seconds=seconds, left_out=left_out)
         why = got["why"]
-        rec = next((r for r in (record.get("derived") or {}).values()
-                    if isinstance(r, dict) and r.get("by") == got["body"]), None) if got["body"] else None
+        # what FI's record of this run says of the function: a derived quantity's record, or a figure's outcome
+        body = str(got["body"] or "")
+        rec = None
+        if body and printed and not record.get("from_earlier_run"):
+            rec = next((r for r in (record.get("derived") or {}).values()
+                        if isinstance(r, dict) and r.get("by") == body), None)
+            if rec is None and body.startswith("figure_"):
+                rec = next(({"status": o.get("status"), "why": o.get("why")} for o in record.get("figures") or []
+                            if isinstance(o, dict) and f"figure_{o.get('id')}" == body), None)
         said = str(rec.get("why") if rec else "") or why
-        exc = last_exception(err) if got["kind"] == "module" else (m.group(1) if (m := _EXC_LINE.match(said)) else "")
+        # a figure's outcome says "`figure_x` stopped with NameError: ...": the exception's name follows "stopped with"
+        m = _EXC_LINE.match(said) or re.search(r"stopped with ([A-Za-z_][\w.]*)(?::|\b)", said)
+        exc = last_exception(err) if got["kind"] == "module" else (m.group(1) if m else "")
         status = str(rec.get("status")) if rec else ("failed" if got["kind"] == "module" else "")
         kind = (kind_of(exc) if exc else SMALL_DATA) if status == "failed" else FAULT if status == "refused" else SMALL_DATA
         if kind == FAULT and exc in _MAYBE_FAULTS and left_out:

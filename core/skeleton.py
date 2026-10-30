@@ -858,8 +858,11 @@ REPAIR_NOTE_WHOLE = (
 
 
 def repair_note(source: str, whole: bool = False) -> str:
-    """:data:`REPAIR_NOTE` when ``source`` (the text of simulate.py) has FI's frame, else ``""`` (a study without a frame is
-    asked exactly as before). ``whole``: the reply is the whole file (:data:`REPAIR_NOTE_WHOLE`), not functions."""
+    """:data:`REPAIR_NOTE` when ``source`` (the text of simulate.py) has FI's frame, :data:`DERIVE_FINDING_NOTE` when it is a
+    derive.py of the analysis FI writes, else ``""`` (a study without a frame is asked exactly as before). ``whole``: the reply
+    is the whole file (:data:`REPAIR_NOTE_WHOLE`), not functions."""
+    if has_analysis_frame(source or ""):
+        return DERIVE_FINDING_NOTE
     return (REPAIR_NOTE_WHOLE if whole else REPAIR_NOTE) if has_frame(source or "") else ""
 
 
@@ -1027,6 +1030,15 @@ DERIVE_REPAIR_NOTE = (
     "function you change whole, with its own parameters (in `functions`); do not give the whole file, and do not give "
     "experiment.py or touch fi_frame.py. A change to FI's lines is refused before anything runs and the repair counts as "
     "not made.\n\n")
+
+#: What a repair of a finding in derive.py may change (core/finding_repair.py): its reply is fenced Python, functions or the
+#: whole file, so the note says what of the file is FI's rather than which JSON key to use.
+DERIVE_FINDING_NOTE = (
+    "FIRST, what you may change: FI wrote experiment.py, which runs the analysis, and the frame of derive.py (the lines "
+    "between its `# >>> FI analysis frame` and `# <<< FI analysis frame` lines), and both stay as they are. Only the functions "
+    "named `derive_...`, `reference_...` and `figure_...` of derive.py, the helper functions and the imports they use may "
+    "change; a whole derive.py keeps FI's frame exactly as it is. A change to FI's lines is refused before anything runs and "
+    "the repair counts as not made.\n\n")
 
 REFLECT_INTRO_DERIVE = ("Produce a corrected function of derive.py (and the helper functions it uses) that runs to completion on "
                         "the available CPU venv and returns what the plan declares through FI's analysis. The fix must address "

@@ -712,6 +712,14 @@ class RunChecksMixin:
         replaced too."""
         text = stderr or ""
         lines = text.splitlines()
+        # FI's analysis (core/analysis_frame.py) says each step as it begins it: only the last one (what was running when it
+        # stopped) is the model's to read.
+        from .analysis_frame import STEP_MARK
+
+        steps = [i for i, line in enumerate(lines) if line.startswith(STEP_MARK)]
+        if len(steps) > 1:
+            lines = [line for i, line in enumerate(lines) if i not in set(steps[:-1])]
+            text = "\n".join(lines)
         # FI's own messages in the error output (why a run was refused: "FI ran no trial successfully: ...", "FI's run gave
         # a result that is not usable: ...") name a quantity to say what to repair; they are FI's diagnosis, not a value the
         # script printed, so they stay. Only what the script itself printed is filtered (and any bare value, below).
@@ -986,8 +994,20 @@ class RunChecksMixin:
         plan = _analysis.plan_of(state.get("design"))
         from .numeric_warnings import COUNTING_ROLES
 
-        wanted = [(d["id"], d["by"]) for d in plan.get("derived") or []
-                  if d.get("by") in left and (d.get("role") or "result") in COUNTING_ROLES]
+        items = {d["id"]: d for d in plan.get("derived") or []}
+        # A quantity of a counting role worked out by a formula of the plan from a stub's quantity needs the stub as well.
+        counting = {i for i, d in items.items() if (d.get("role") or "result") in COUNTING_ROLES}
+        needed, todo = set(counting), list(counting)
+        from . import oracle_forms as _forms
+
+        while todo:
+            d = items.get(todo.pop()) or {}
+            uses = [*(d.get("inputs") or []), *_forms.names(d.get("formula") or "")] if d.get("by") == "formula" else []
+            for n in uses:
+                if n in items and n not in needed:
+                    needed.add(n)
+                    todo.append(n)
+        wanted = [(i, d["by"]) for i, d in items.items() if d.get("by") in left and i in needed]
         if not wanted:
             return None
         said = "; ".join(f"`{i}` is computed by no trial and no function of the study's yet (`{b}` is still FI's stub)"

@@ -203,7 +203,8 @@ async def test_a_restart_at_the_design_needs_a_name_and_replaces_the_protocol_on
     refused = Engine(cfg, resume_quest_id=first.quest_id)
     await refused.run(from_step="design")
     out = capsys.readouterr().out
-    assert "replaces its plan.md and its experiment plan (frozen)" in out and "--approve-as <you>" in out
+    # The design step reads plan.md again and does not move it aside, so the refusal does not say it replaces it.
+    assert "replaces its experiment plan (frozen)" in out and "replaces its plan.md" not in out and "--approve-as <you>" in out
     assert frozen.read_text(encoding="utf-8") == old and not (refused.fi_dir / "previous").exists()
 
     # With a name: the old protocol is kept aside, the audit says who approved and which protocol was replaced.

@@ -436,6 +436,7 @@ def from_design(design: dict[str, Any] | None) -> StudyContract:
     ids = {r.id for r in results}
     derived = [d for d in (_first_valid(Derived, x, gaps, f"derived `{x.get('id')}`") for x in derived_rows)
                if d is not None]
+    derived = _computable(derived, ids | settings.names(), p, gaps)
     ids |= {d.id for d in derived}
     comparisons = [c for c in (_first_valid(Comparison, x, gaps, f"comparison `{x.get('id')}`")
                                for x in _rows(p.get("comparisons"), gaps, "the comparisons")) if c is not None]
@@ -507,6 +508,64 @@ def from_design(design: dict[str, Any] | None) -> StudyContract:
 
 
 _ONE = {"derived": "derived", "comparisons": "comparison", "figures": "figure"}
+
+
+def _computable(derived: list[Derived], known: set[str], protocol: dict[str, Any], gaps: list[str]) -> list[Derived]:
+    """The derived quantities FI can work out as the plan writes them: a formula that cannot be read, that names what the plan
+    does not declare (a result, a derived quantity, a setting, a constant or threshold), or that names other formulas round in
+    a circle is left out, with a gap that says why, when the plan is read, and never found only after the long run."""
+    from . import oracle_forms as _forms
+    from . import reference_values as _reference_values
+
+    functions = {**_forms.FUNCTIONS, **_forms.SPECIAL_FUNCTIONS}
+    known = set(known) | set(_reference_values.inputs(protocol))
+    kept = list(derived)
+    while True:
+        kept, circle = _without_circles(_with_known_names(kept, known, functions, gaps), functions)
+        if not circle:
+            return kept
+        gaps.append("derived " + ", ".join(f"`{i}`" for i in circle) + " are left out: their formulas name each other in a "
+                    "circle, so none of them can be worked out first")
+
+
+def _with_known_names(kept: list[Derived], known: set[str], functions: dict[str, Any], gaps: list[str]) -> list[Derived]:
+    from . import oracle_forms as _forms
+
+    kept, first = list(kept), {d.id for d in kept}
+    while True:
+        ids = {d.id for d in kept}
+        dropped = False
+        for d in list(kept):
+            if not d.formula:
+                continue
+            why = _forms.evaluate(d.formula, {}, special=True).unreadable or None  # read as FI works it out
+            if why is None:
+                unknown = [n for n in _forms.names(d.formula, functions) if n not in known and n not in ids]
+                why = ("it uses " + ", ".join(f"`{n}`" for n in unknown)
+                       + (", which is itself left out" if set(unknown) <= first else ", which the plan does not declare")
+                       if unknown else None)
+            if why is not None:
+                gaps.append(f"derived `{d.id}` is left out: its formula ({d.formula}) cannot be worked out as written ({why})")
+                kept.remove(d)
+                dropped = True
+        if not dropped:
+            return kept
+
+
+def _without_circles(kept: list[Derived], functions: dict[str, Any]) -> tuple[list[Derived], list[str]]:
+    """``(kept, circle)``: the formulas that name each other round in a circle (none of them can be worked out first) taken
+    out."""
+    from . import oracle_forms as _forms
+
+    formulas = {d.id: set(_forms.names(d.formula, functions)) for d in kept if d.formula}
+    done = {d.id for d in kept if not d.formula}
+    while True:
+        ready = [i for i, uses in formulas.items() if i not in done and uses & set(formulas) <= done]
+        if not ready:
+            break
+        done.update(ready)
+    circle = sorted(i for i in formulas if i not in done)
+    return [d for d in kept if d.id not in circle], circle
 
 
 def _without_broken_links(base: dict[str, Any], parts: dict[str, Any], gaps: list[str], error: ValueError) -> StudyContract:

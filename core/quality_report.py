@@ -558,7 +558,10 @@ def _run_problems(q: _Quest) -> list[dict[str, str]]:
         first = next(e for e in manifest if e.get("status") in ("repairing", "stopped", "warned"))
         last = manifest[-1].get("status")
         found_by = "FI's run-record check" + (" (recorded only)" if last == "warned" else "")
-        out.append(_problem("run", _one((_list(first.get("problems")) or ["the run did not report what the protocol fixed"])[0], 200),
+        # what FI's own analysis printed (core/analysis_frame.py): a fault of FI's, which no repair of the study's code changes
+        fis = _dict(_json(q.root / "needs" / "RUN_MANIFEST_CHECK.json")).get("fault") == "FI's own analysis"
+        out.append(_problem("run", ("a fault of FI's own analysis, not of the study's code: " if fis else "")
+                            + _one((_list(first.get("problems")) or ["the run did not report what the protocol fixed"])[0], 200),
                             found_by, "fixed" if last in ("ok", "pass", "not_applicable") else "not fixed",
                             f".fi/audit.jsonl seq {first.get('seq')}"))
     # What the analysis did not print of trials FI holds whole is not a difference in the results: it is here, not in the paper.
@@ -707,7 +710,8 @@ def _analysis_problems(q: _Quest) -> list[dict[str, str]]:
     from . import analysis_frame as _analysis
 
     said = {"not_written": "the study's function for it was not written", "no_data": "no trial gave a value for it",
-            "failed": "the study's function for it failed", "refused": "FI refused what the study's function for it returned"}
+            "failed": "the study's function for it failed", "refused": "FI refused what the study's function for it returned",
+            "blocked": "a quantity it is worked out from was not computed"}
     for item in _analysis.not_computed(_analysis.read_record(q.root)):
         out.append(_problem("analysis", f"{item['id']} was not computed: {said.get(item['status'], item['status'])}"
                             + (f" ({_one(item['why'], 200)})" if item["why"] and item["status"] != "not_written" else ""),

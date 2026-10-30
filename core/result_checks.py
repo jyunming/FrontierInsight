@@ -317,6 +317,7 @@ class ResultChecksMixin:
 
         record_path = self.quest_root / "needs" / RECORD  # type: ignore[attr-defined]
         record_path.unlink(missing_ok=True)  # an earlier pass's record is not this run's
+        self._analysis_sendback_body = ""  # the function of derive.py this run is sent back to, when FI wrote the analysis
         if result.returncode != 0:
             return result, failed_script
         result_json = _e._extract_result_json(result.stdout or "")
@@ -337,6 +338,17 @@ class ResultChecksMixin:
         used = self._result_counter(state)
         repair_left = (int(state.get("exec_reflect_iter", 0) or 0) < self.config.engine.exec_reflect_max_iterations  # type: ignore[attr-defined]
                        and not state.get("exec_give_up_reason"))
+        body = ""
+        if found and split and not any(f.fix == SIMULATION for f in found) and self._analysis_on():  # type: ignore[attr-defined]
+            # FI wrote the analysis (core/analysis_frame.py): what is flagged goes to the function of derive.py FI's record
+            # says made it (the figure, the derived quantity). What FI's own lines made has no function of the study's to
+            # repair it: a fault of FI's, left out of the results and said, never a stop.
+            body = self._fis_body_of(found)
+            if not body:
+                self._log.warning(  # type: ignore[attr-defined]
+                    "[execute] the results check found %s in what FI's own analysis made, not a function of the study's: "
+                    "a fault of FI's, left out of the results and said", "; ".join(f.note for f in found))
+                repair_left = False
         if found and used < REPAIRS and repair_left:
             self._save_result_counter(state, used + 1)
             self._log.warning(  # type: ignore[attr-defined]
@@ -344,6 +356,10 @@ class ResultChecksMixin:
                 "; ".join(f.note for f in found), "simulation" if any(f.fix == SIMULATION for f in found) else "analysis",
                 used + 1, REPAIRS)
             to_fix = (_split_run.SIMULATE_NAME if any(f.fix == SIMULATION for f in found) else _split_run.ANALYSIS_NAME) if split else None
+            if body:
+                from . import analysis_frame as _analysis
+
+                to_fix, self._analysis_sendback_body = _analysis.DERIVE_FILE, body
             kept = "\n".join(line for line in (result.stdout or "").splitlines() if not line.startswith("RESULT_JSON:"))
             why = "\n\n".join(f.directive for f in found[:2])
             result = _e.ExecutionResult(1, kept, (result.stderr or "") + "\n[FI] " + why, result.duration_s, result.timed_out)
@@ -354,6 +370,25 @@ class ResultChecksMixin:
                         *self._figure_gap_findings({n for f in found for n in f.figures}), *self._no_figures_standing(state)]
         self._leave_out_results([*found, *standing], record_path, result_json)
         return result, failed_script
+
+    def _fis_body_of(self, found: list[Found]) -> str:
+        """The function of derive.py FI's record of the run (data/results/derived.json) says made what ``found`` flags: a
+        figure by its file, a derived quantity by its id (also one of the keys taken out). ``""``: FI's own lines made it."""
+        from . import analysis_frame as _analysis
+
+        record = _analysis.read_record(self.quest_root)  # type: ignore[attr-defined]
+        if record.get("from_earlier_run"):
+            return ""
+        for f in found:
+            for name in f.figures:
+                body = _analysis.made_by(record, figure=name)
+                if body:
+                    return body
+            for ident in [f.quantity, *f.keys]:
+                body = _analysis.made_by(record, quantity=str(ident).rsplit(".", 1)[-1]) if ident else ""
+                if body:
+                    return body
+        return ""
 
     def _leave_out_results(self, found: list[Found], record_path: Path, result_json: Any = None) -> None:
         """What is still wrong after the repairs is left out of the results the paper may use: written to

@@ -307,6 +307,7 @@ def required_items(quest_root: Path | str) -> list[Item]:
         q, status = item["id"], item["status"]
         why = ("no trial gave a value for it" if status == "no_data" else
                "the study's code to work it out was not written" if status == "not_written" else
+               "a quantity it is worked out from was not computed" if status == "blocked" else
                "the study's code to work it out gave no usable value")
         add(NOT_COMPUTED, q, _sentence(f"The plan asks for {_said(root, q)}; {why}, so this study does not report it"))
     checked = _read(root, "needs/RESULT_CHECK.json")

@@ -541,12 +541,13 @@ def write_package(code_dir: Path, files: dict[str, str], *, same: Any = None) ->
 
 
 def package_dirs(code_dir: Path) -> list[Path]:
-    """The Python packages in ``code/`` (a folder with ``__init__.py``), not the tests."""
+    """The Python packages of the study's in ``code/`` (a folder with ``__init__.py``), not the tests and not FI's own formula
+    calculator (:data:`FI_CORE_FOLDER`)."""
     code_dir = Path(code_dir)
     if not code_dir.is_dir():
         return []
     return sorted(p for p in code_dir.iterdir()
-                  if p.is_dir() and (p / "__init__.py").is_file() and p.name not in (TESTS_DIR, "__pycache__"))
+                  if p.is_dir() and (p / "__init__.py").is_file() and p.name not in (TESTS_DIR, "__pycache__", FI_CORE_FOLDER))
 
 
 def package_sources(code_dir: Path) -> dict[str, str]:
@@ -572,6 +573,9 @@ ANALYSIS_SCRIPT = "experiment.py"
 TABLE_SCRIPT = "fi_table.py"
 #: FI's own copies of its helpers under ``code/``, not the quest's code.
 SKILLS_FOLDER = "skills"
+#: FI's formula calculator, copied beside the analysis FI writes (core/analysis_frame.py ``CORE_DIR``): like the reader of the
+#: record, FI's by its name, never a package of the study's, an input of the trials, or code the reader is shown.
+FI_CORE_FOLDER = "fi_core"
 
 
 #: The names under ``code/`` the analysis FI writes may use (core/analysis_frame.py); only a file that holds FI's text is its.
@@ -590,7 +594,7 @@ def simulation_inputs(quest_root: Path | str, code: Path | None = None) -> list[
     Under ``code/`` (or ``code``, when given): every file, whatever its suffix (a helper module beside ``simulate.py``,
     a model package, a parameter table, a pickled lookup, a binary array: the simulation may read any of them), except
     the analysis script (:data:`ANALYSIS_SCRIPT`), FI's reader of the record (:data:`TABLE_SCRIPT`), the rest of the analysis FI
-    writes (``derive.py`` with FI's frame, ``fi_figures.py`` and ``fi_core/`` with FI's text), the tests (``tests/``, ``test_*.py``), FI's copies under ``skills/``,
+    writes (``derive.py`` with FI's frame and ``fi_figures.py`` with FI's text; FI's calculator ``fi_core/`` by its name), the tests (``tests/``, ``test_*.py``), FI's copies under ``skills/``,
     notes (``.md``), caches (``__pycache__``), hidden files and folders, and what a run writes (:data:`GENERATED_FOLDERS`).
     Under ``<quest_root>/inputs/``: every file, since a simulation may read any of the person's files there. A change to
     any listed file is a change to the simulation, so a cached result of the old version must not be reused (:func:`core.outside_run.code_version`,
@@ -605,7 +609,7 @@ def simulation_inputs(quest_root: Path | str, code: Path | None = None) -> list[
             parts = path.relative_to(code_dir).parts
             if any(p.startswith(".") or p in GENERATED_FOLDERS for p in parts):
                 continue
-            if parts[0] in (TESTS_DIR, SKILLS_FOLDER) or (path.name.startswith("test_") and path.suffix == ".py"):
+            if parts[0] in (TESTS_DIR, SKILLS_FOLDER, FI_CORE_FOLDER) or (path.name.startswith("test_") and path.suffix == ".py"):
                 continue
             if parts in ((ANALYSIS_SCRIPT,), (TABLE_SCRIPT,)) or path.suffix.lower() == ".md":
                 continue

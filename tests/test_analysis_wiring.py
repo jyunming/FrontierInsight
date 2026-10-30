@@ -171,19 +171,41 @@ async def test_a_failing_body_is_repaired_alone_and_no_trial_runs_again_for_it(t
 
 
 @pytest.mark.asyncio
-async def test_a_formula_fi_cannot_compute_stops_plainly_and_is_never_sent_to_the_model(tmp_path: Path) -> None:
+async def test_a_formula_fi_cannot_compute_is_left_out_when_the_plan_is_read_and_the_run_goes_on(tmp_path: Path) -> None:
     design = json.loads(json.dumps(DESIGN))
     design["protocol"]["derived"][1]["formula"] = "growth * nothing_here"
     model = _Model(_reply())
     engine, state = await _implement(tmp_path, model, design)
+    assert [d["id"] for d in af.plan_of(design)["derived"]] == ["peak"]  # left out, with a gap that says why
     state.update(await engine._node_execute(dict(state)))
-    assert state["exec_result"]["returncode"] == af.FI_FAULT_EXIT
-    calls = len(model.prompts)
-    patch = await engine._node_execute_reflect(dict(state))
-    assert len(model.prompts) == calls  # no model call
-    said = patch["exec_result"]["cannot_repair"]
+    assert state["exec_result"]["returncode"] == 0 and _ids(state["result_json"]) == {"growth", "peak"}
+    assert await engine._node_execute_reflect(dict(state)) == {}
+
+
+@pytest.mark.asyncio
+async def test_a_formula_fault_at_run_time_stops_plainly_with_advice_that_works(tmp_path: Path) -> None:
+    from core import rerun_from
+
+    engine = _engine(tmp_path)
+    _fis_quest(engine)
+    record = {"schema": af.DERIVED_SCHEMA, "derived": {"spread": {
+        "status": "failed", "fi_fault": True, "plan": True, "by": "formula", "role": "diagnostic",
+        "why": "the plan's formula for `spread` cannot be computed: it uses `nothing_here`, which the plan does not declare"}},
+        "fi_faults": ["the plan's formula for `spread` cannot be computed"], "figures": []}
+    (engine.quest_root / af.DERIVED_PATH).parent.mkdir(parents=True, exist_ok=True)
+    (engine.quest_root / af.DERIVED_PATH).write_text(json.dumps(record), encoding="utf-8")
+    chat = AsyncMock(return_value="{}")
+    engine._client = type("Stub", (), {"chat": chat})()
+    state = {"design": DESIGN, "result_json": {"peak": 1.0}, "exec_result": {
+        "returncode": af.FI_FAULT_EXIT, "failed_script": "experiment.py", "stdout_tail": "", "stderr_tail": ""}}
+    patch = await engine._node_execute_reflect(state)
+    chat.assert_not_awaited()  # no model call
+    said, advice = patch["exec_result"]["cannot_repair"], patch["exec_result"]["cannot_repair_advice"]
     assert "cannot compute a formula of the plan" in said and "nothing_here" in said
-    assert "plan.md" in patch["exec_result"]["cannot_repair_advice"]
+    assert f"--resume {engine.quest_id} --from design --approve-as <your name>" in advice and "plan.md" in advice
+    # what the advice says is so: the design step needs the approval, and it reads plan.md again rather than moving it aside
+    assert rerun_from.needs_approval("design") and "plan.md" not in rerun_from.outputs_of("design")
+    assert "plan.md" in rerun_from.REDOES["design"]
     assert engine._route_after_execute_reflect({**state, **patch}) == "stuck"
     assert (engine.quest_root / "code" / "experiment.py").read_text(encoding="utf-8") == af.EXPERIMENT
 
@@ -235,6 +257,96 @@ def _run_analysis(quest: Path) -> int:
     env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "FI_TRIALS")}
     return subprocess.run([sys.executable, "experiment.py"], cwd=quest / "code", env=env, capture_output=True, text=True,
                           timeout=300, creationflags=NO_WINDOW).returncode
+
+
+# ---- a check after a clean run is routed by FI's record of which function made what it flags ------------------------------
+FIGURED = {**DESIGN, "protocol": {**DESIGN["protocol"], "figures": [
+    {"id": "fig1", "file": "growth.png", "shows": ["growth"], "x": "rate", "series": "dose"}]}}
+FIGURE_BODY = '''
+def figure_fig1(fig, table):
+    for k in table.keys():
+        fig.axes[0].axhline(table.mean("growth", k))  # reference lines only: the check of the figures flags it
+'''
+
+
+@pytest.mark.asyncio
+async def test_a_result_check_after_a_clean_run_goes_to_the_function_that_made_what_it_flags(tmp_path: Path) -> None:
+    from core import result_checks
+    from core.execution import ExecutionResult
+
+    model = _Model(_reply(DERIVE + FIGURE_BODY))
+    engine, state = await _implement(tmp_path, model, FIGURED)
+    state.update(await engine._node_execute(dict(state)))
+    assert state["exec_result"]["returncode"] == 0
+    record = af.read_record(engine.quest_root)
+    assert record["bodies"]["figure_fig1"]["outputs"] == ["figure:fig1"] and record["bodies"]["derive_peak"]["outputs"] == ["peak"]
+    assert af.made_by(record, figure="growth.png") == "figure_fig1" and af.made_by(record, quantity="peak") == "derive_peak"
+    assert af.made_by(record, quantity="spread") == ""  # FI's formula over the trials alone: no function of the study's
+    found = result_checks.Found("degenerate_results", result_checks.ANALYSIS, "redraw it from the run's values",
+                                "a figure draws only reference lines", "said", figures=["growth.png"])
+    engine._trial_mode = True
+    engine._result_findings = lambda st, rj: [found]  # type: ignore[method-assign]
+    clean = ExecutionResult(0, "RESULT_JSON: " + json.dumps(state["result_json"]), "", 1.0, False)
+    sent, to_fix = await engine._results_match_run(dict(state), clean, None, True)
+    assert sent.returncode == 1 and to_fix == af.DERIVE_FILE and engine._analysis_sendback_body == "figure_fig1"
+    routed = engine._fis_analysis_route(state, {"returncode": 1, "failed_script": to_fix, "failed_body": "figure_fig1",
+                                                "result_check_sent_back": True, "stderr_tail": sent.stderr}, 1, [])
+    assert routed == {"body": "figure_fig1"}
+    # A finding in what FI's own lines printed (a trial's mean in FI's table) has no function to go to: it is left out of
+    # the results and said, the run goes on, and nothing stops.
+    own = result_checks.Found("reported_settings", result_checks.ANALYSIS, "d", "a mean is not the trials' mean", "said",
+                              keys=["rate=0.1,dose=1.growth"])
+    engine._result_findings = lambda st, rj: [own]  # type: ignore[method-assign]
+    kept, to_fix = await engine._results_match_run(dict(state), clean, None, True)
+    assert kept.returncode == 0 and to_fix is None and engine._analysis_sendback_body == ""
+    assert "a mean is not the trials' mean" in (engine.quest_root / "needs" / "RESULT_CHECK.json").read_text(encoding="utf-8")
+    # A send-back that names no function, on a run FI's record shows clean, goes where it always went: never a stop.
+    assert engine._fis_analysis_route(state, {"returncode": 1, "failed_script": "experiment.py", "directive": True,
+                                              "stderr_tail": "[FI] something"}, 1, []) == {"body": None}
+
+
+def test_problems_of_a_clean_run_go_to_the_function_fi_lays_them_to(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from core import numeric_warnings
+
+    engine = _engine(tmp_path)
+    _fis_quest(engine)
+    record = {"schema": af.DERIVED_SCHEMA, "figures": [], "derived": {
+        "peak": {"status": "ok", "value": 9.0, "by": "derive_peak", "role": "result", "inputs": ["growth"]},
+        "spread": {"status": "ok", "value": 1.0, "by": "formula", "role": "diagnostic", "inputs": ["growth"]}},
+        "bodies": {"derive_peak": {"status": "ok", "outputs": ["peak"], "seconds": 0.1,
+                                   "warnings": ["RuntimeWarning: overflow encountered in exp"]}}}
+    (engine.quest_root / af.DERIVED_PATH).parent.mkdir(parents=True, exist_ok=True)
+    (engine.quest_root / af.DERIVED_PATH).write_text(json.dumps(record), encoding="utf-8")
+    state = {"design": DESIGN, "result_json": {"peak": 9.0}}
+    warned = numeric_warnings.scan("x.py:3: RuntimeWarning: overflow encountered in exp\n")
+    assert engine._fis_analysis_route(state, {"returncode": 0}, 0, [], warned, []) == {"body": "derive_peak"}
+    other = numeric_warnings.scan("simulate.py:9: RuntimeWarning: invalid value encountered in divide\n")
+    assert engine._fis_analysis_route(state, {"returncode": 0}, 0, [], other, []) == {"body": None}  # the simulation's
+    bound = SimpleNamespace(path="peak", paths=())
+    assert engine._fis_analysis_route(state, {"returncode": 0}, 0, [], [], [bound]) == {"body": "derive_peak"}
+    trial = SimpleNamespace(path="rate=0.1,dose=1.growth", paths=())
+    assert engine._fis_analysis_route(state, {"returncode": 0}, 0, [], [], [trial]) == {"body": None}
+
+
+@pytest.mark.asyncio
+async def test_a_difference_only_in_what_fis_own_analysis_printed_is_recorded_not_sent_back(tmp_path: Path) -> None:
+    model = _Model(_reply())
+    engine, state = await _implement(tmp_path, model)
+    said = "the analysis prints a count of trials for rate=0.1,dose=1 that is not FI's"
+
+    def problems(self, st, split, result, random=None):  # noqa: ANN001
+        self._manifest_failed_trials, self._manifest_fabricated, self._manifest_unprinted = 0, [], []
+        self._manifest_differences, self._manifest_note, self._manifest_analysis_problems = [], "", [said]
+        return "differs", [said]
+
+    engine._run_manifest_problems = problems.__get__(engine)  # type: ignore[method-assign]
+    engine.config.engine.run_manifest_check = "block"  # every difference acted on (under warn it is only recorded anyway)
+    state.update(await engine._node_execute(dict(state)))
+    assert state["exec_result"]["returncode"] == 0 and state["result_json"]
+    record = json.loads((engine.quest_root / "needs" / "RUN_MANIFEST_CHECK.json").read_text(encoding="utf-8"))
+    assert record["status"] == "warned" and said in record["problems"] and record["fault"] == "FI's own analysis"
 
 
 def _record_of_trials() -> dict[str, Any]:
@@ -373,3 +485,84 @@ async def test_with_the_frame_off_or_an_older_plan_the_model_writes_experiment_p
     assert not af.is_fis_file(code / "experiment.py") and not (code / "derive.py").exists()
     assert (code / "experiment.py").read_text(encoding="utf-8").strip() == analysis.strip()
     assert "FI_ANALYSIS_FILES" not in (code / "run.py").read_text(encoding="utf-8")
+
+
+# ---- FI's own files are not the study's -----------------------------------------------------------------------------------
+def test_fis_formula_calculator_is_no_part_of_the_study(tmp_path: Path) -> None:
+    from core import code_review, split_run, trial_runner
+
+    engine = _engine(tmp_path)
+    code = _fis_quest(engine)
+    root = engine.quest_root
+    assert (code / af.CORE_DIR / "__init__.py").is_file()
+    assert code_layout.package_dirs(code) == [] and code_layout.package_sources(code) == {}
+    assert not any(af.CORE_DIR in p.as_posix() for p in code_layout.simulation_inputs(root))
+    assert not any(name.startswith(af.CORE_DIR) for name in code_review._code_files(code))
+    before = (outside_run.code_version(root), trial_runner._run_key(code / "simulate.py", {}, 1, 0, False),
+              split_run.simulation_sha(code / "simulate.py"))
+    calc = code / af.CORE_DIR / "oracle_forms.py"
+    calc.write_text(calc.read_text(encoding="utf-8") + "\n# a newer FI\n", encoding="utf-8")  # FI changed between runs
+    after = (outside_run.code_version(root), trial_runner._run_key(code / "simulate.py", {}, 1, 0, False),
+             split_run.simulation_sha(code / "simulate.py"))
+    assert after == before  # a resumed quest reruns no trial for it
+    # a package of the study's own is still the study's
+    (code / "model").mkdir()
+    (code / "model" / "__init__.py").write_text("RATE = 1\n", encoding="utf-8")
+    assert [p.name for p in code_layout.package_dirs(code)] == ["model"]
+    assert trial_runner._run_key(code / "simulate.py", {}, 1, 0, False) != before[1]
+
+
+def test_the_gate_judges_a_figure_function_that_names_nothing_a_fault(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from core import pipeline_gate
+
+    engine = _engine(tmp_path)
+    code = _fis_quest(engine, FIGURED)
+    text, note = af.compose(FIGURED, DERIVE + "\ndef figure_fig1(fig, table):\n    fig.axes[0].plot(rates, [1, 2])\n",
+                            (code / "derive.py").read_text(encoding="utf-8"))
+    (code / "derive.py").write_text(text, encoding="utf-8")
+    (engine.quest_root / "raw").mkdir(exist_ok=True)
+    cells = [{"cell": {"rate": r, "dose": d}, "key": f"rate={r},dose={d}", "planned": 2, "ok": 2, "failed": 0,
+              "metrics": {"growth": {"values": [r * d, r * d + 0.1], "trials": [0, 1]}}} for r in (0.1, 0.2) for d in (1, 2)]
+    (engine.quest_root / "raw" / "trials.json").write_text(json.dumps({"schema": "fi.trials/v1", "cells": cells}),
+                                                           encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "FI_TRIALS")}
+    r = subprocess.run([sys.executable, "experiment.py"], cwd=code, env=env, capture_output=True, text=True, timeout=300,
+                       creationflags=NO_WINDOW)
+    assert r.returncode == 1
+    got = pipeline_gate._fis_analysis_result(engine.quest_root, SimpleNamespace(returncode=r.returncode, stdout=r.stdout,
+                                                                                 stderr=r.stderr), FIGURED["protocol"], {}, [])
+    assert got.kind == pipeline_gate.FAULT and got.body == "figure_fig1" and "NameError" in got.detail
+
+
+def test_a_finding_repair_of_derive_py_says_what_of_the_file_is_fis() -> None:
+    derive = af.derive_source(DESIGN)
+    assert skeleton.repair_note(derive) == skeleton.DERIVE_FINDING_NOTE and "frame" in skeleton.DERIVE_FINDING_NOTE
+    assert skeleton.repair_note("print(1)\n") == ""  # a study without FI's files is asked as before
+
+
+def test_the_model_reads_only_the_last_step_fis_analysis_said(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    err = "\n".join([af.STEP_MARK + "fi: reading FI's record of the trials", af.STEP_MARK + "derive_peak",
+                     "Traceback (most recent call last):", "ZeroDivisionError: division by zero"])
+    said = engine._stderr_for_models(err)
+    assert af.STEP_MARK + "derive_peak" in said and "reading FI's record" not in said and "ZeroDivisionError" in said
+
+
+def test_a_run_sent_back_or_stopped_keeps_no_answers_of_its_own(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = _engine(tmp_path)
+    _fis_quest(engine)
+    path = engine.quest_root / af.DERIVED_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"schema": af.DERIVED_SCHEMA, "derived": {"peak": {"status": "ok", "value": 3.0, "by": "derive_peak"}},
+                                "from_earlier_run": True}), encoding="utf-8")
+    seen: list[Any] = []
+    monkeypatch.setattr(paper_values, "write_answers", lambda *a, **k: seen.append(a))
+    engine._keep_analysis_answers({"peak": 3.0}, {"design": DESIGN})  # a record of an earlier run
+    engine._keep_analysis_answers({}, {"design": DESIGN})  # a run whose RESULT_JSON was taken out (sent back)
+    assert seen == []
+    path.write_text(json.dumps({"schema": af.DERIVED_SCHEMA, "derived": {"peak": {"status": "ok", "value": 3.0}}}),
+                    encoding="utf-8")
+    engine._keep_analysis_answers({"peak": 3.0}, {"design": DESIGN})
+    assert len(seen) == 1

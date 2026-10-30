@@ -1097,8 +1097,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                         if _rerun_from.needs_approval(from_step):
                             if not (approved_by or "").strip():
                                 self._log.warning("[run] --from %s replaces the frozen protocol and needs --approve-as", from_step)
-                                print(f"[FI] running quest {self.quest_id} again from the {from_step} step replaces its plan.md "
-                                      f"and its experiment plan (frozen) (the old ones are kept in .fi/previous/). Nothing was "
+                                mine = "plan.md and its " if "plan.md" in _rerun_from.outputs_of(from_step) else ""
+                                print(f"[FI] running quest {self.quest_id} again from the {from_step} step replaces its {mine}"
+                                      f"experiment plan (frozen) (the old ones are kept in .fi/previous/). Nothing was "
                                       f"changed. To go ahead: --resume {self.quest_id} --from {from_step} "
                                       f"--approve-as <you>")
                                 return self._collect_artifacts({})
@@ -11673,20 +11674,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
     _FIGURE_DATA_REPAIRS = 2
 
     def _figure_scripts_with_typed_numbers(self) -> dict[Path, list[_figdata.TypedSeries]]:
-        """Each script in ``code/`` that saves a figure and has a plotting call drawing numbers typed into the code."""
-        found: dict[Path, list[_figdata.TypedSeries]] = {}
-        code_dir = self.quest_root / "code"
-        for path in sorted(code_dir.glob("*.py")) if code_dir.is_dir() else []:
-            try:
-                text = path.read_text(encoding="utf-8")
-            except OSError:
-                continue
-            if ".savefig(" not in text:
-                continue
-            typed = _figdata.typed_series(text, path.name)
-            if typed:
-                found[path] = typed
-        return found
+        """Each script in ``code/`` that draws a figure (it saves one, or it is a derive.py whose figure functions FI saves)
+        and has a plotting call drawing numbers typed into the code."""
+        return _figdata.typed_series_in(self.quest_root / "code")
 
     async def _figures_from_results(self, state: QuestState) -> tuple[int, bool]:
         """Send a script that draws typed-in numbers back to draw its figures from the run's saved results: ``(the
@@ -11716,7 +11706,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             reflect_history_block=_format_reflect_history([]),
             design_block=self._code_design_block(state), clarify_block=_format_clarify(state),
         )
-        prompt = _skeleton.framed_prompt(code, prompt)
+        body = next((name for name, (first, last, _file) in _figdata.fi_figure_bodies(code).items()
+                     if first <= found[0].line <= last), "") if found else ""
+        # A figure function of derive.py (core/analysis_frame.py) is repaired as a function of derive.py, never as a script.
+        prompt = (_skeleton.derive_prompt(code, prompt, body) if path.name == _analysis_frame.DERIVE_FILE
+                  else _skeleton.framed_prompt(code, prompt))
         try:
             text = await self._chat(prompt, node="implement_figures")
         except Exception as exc:  # noqa: BLE001 -- a repair is best-effort
@@ -11742,7 +11736,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             await self._keep_refused_repair("figures", path.name, new_code,
                                             broken or "it lost a part FI reads from the script")
             return False
-        left = _figdata.typed_series(new_code, path.name)
+        left = _figdata.typed_series_of_script(new_code, path.name) or _figdata.typed_series(new_code, path.name)
         if len(left) >= len(found):
             self._log.warning("[execute] the rewritten %s still draws %d figure series from typed-in numbers; keeping it "
                               "as written", path.name, len(left))
@@ -19164,6 +19158,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # (an analysis repair that crashes must not earn a fresh budget when the crash is fixed).
         manifest_attempts_next = manifest_attempts if (result.returncode != 0 or manifest_status in ("not_run", "pending")) else 0
         manifest_analysis_only = False
+        manifest_fis_fault = False  # the difference is in what FI's own analysis printed (core/analysis_frame.py)
         acting: list[str] = []
         unprinted_recorded: list[str] = []  # warn: what the analysis did not print, kept in the record for QUALITY.md
         if manifest_found:
@@ -19193,6 +19188,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     "extended at a person's request (%s); the difference is recorded",
                     "; ".join(manifest_found), "; ".join(by_request),
                 )
+            elif (acting and set(acting) <= set(self._manifest_analysis_problems) and split
+                  and _analysis_frame.is_fis_file(self.quest_root / "code" / _analysis_frame.EXPERIMENT_FILE)):
+                # FI wrote the analysis (core/analysis_frame.py): what it prints of the trials is FI's own table, so a
+                # difference only in what the analysis printed is a fault of FI's. No function of the study's could repair it:
+                # it is recorded (the paper and QUALITY.md say it) and the quest goes on.
+                manifest_status, manifest_fis_fault = "warned", True
+                self._log.warning("[run_manifest] the results FI's own analysis printed differ from the record: %s; a fault of "
+                                  "FI's, not of the study's code: recorded, not sent back", "; ".join(acting))
             elif mode == "warn" and not acting:
                 # What the analysis does not print of trials FI holds whole is not a difference in the record: the log has
                 # it, the paper (core/paper_facts.py) and the quality report do not.
@@ -19239,6 +19242,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             **({"unprinted": list(unprinted_recorded)} if unprinted_recorded else {}),
             **({"note": self._manifest_note} if getattr(self, "_manifest_note", "") else {}),
             **({"headline": warned_headline} if warned_headline else {}),
+            **({"fault": "FI's own analysis"} if manifest_fis_fault else {}),
         })
         # The run's data is kept only once the run is accepted: not a crash, a run the manifest sent back or stopped,
         # nor a job still pending (its raw files are half written).
@@ -19575,6 +19579,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 # that gives up runs the same code once more, its results kept. Held on this run's own record, so it
                 # never outlives the run.
                 "result_check_sent_back": result_check_sent_back,
+                # FI's analysis (core/analysis_frame.py): what it was doing when it stopped (a function of derive.py, or FI's
+                # own step), read from its whole stderr, and the function of derive.py a check after the run named.
+                **({"analysis_step": _analysis_frame.running_step(result.stderr or "")} if result.returncode != 0 else {}),
+                **({"failed_body": self._analysis_sendback_body}
+                   if result.returncode != 0 and getattr(self, "_analysis_sendback_body", "") else {}),
             },
             "figures": figures,
             "figure_records": figure_records,
@@ -20263,18 +20272,44 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             patch["exec_reflect_history"] = history  # the repair's own reason for giving up, kept
         return patch
 
+    def _fis_body_of_problems(self, record: dict[str, Any], findings: Any, implausible: Any) -> str:
+        """The function of derive.py FI's record of a run that ended cleanly lays its problems to: one whose own call raised the
+        numeric warnings found (FI caught them per function), else the one that made a derived quantity a declared bound
+        flags. ``""``: none, the simulation's to repair."""
+        bodies = record.get("bodies") if isinstance(record.get("bodies"), dict) else {}
+        wanted = {(w.kind, w.text) for w in findings or []}
+        for name, row in bodies.items():
+            said = (row or {}).get("warnings") if isinstance(row, dict) else None
+            if said and wanted & {(w.kind, w.text) for w in _numeric.scan("\n".join(map(str, said)))}:
+                return str(name)
+        derived = record.get("derived") if isinstance(record.get("derived"), dict) else {}
+        for v in implausible or []:
+            for path in (getattr(v, "path", ""), *(getattr(v, "paths", ()) or ())):
+                for part in reversed(re.split(r"[.\[\]/]", str(path or ""))):
+                    if part in derived:
+                        body = _analysis_frame.made_by(record, quantity=part)
+                        if body:
+                            return body
+        return ""
+
     def _fis_analysis_route(self, state: QuestState, exec_result: dict[str, Any], rc: int,
-                            overlaps: list[str]) -> dict[str, Any]:
+                            overlaps: list[str], findings: Any = (), implausible: Any = ()) -> dict[str, Any]:
         """Where the repair of a run goes when FI wrote its analysis (core/analysis_frame.py), read from FI's own record of the
         run (``data/results/derived.json``), never from the words of a traceback: ``{"body": name}`` for a function of the
         study's derive.py (``""``: a statement of derive.py outside the functions), ``{"body": None}`` for the simulation, or
-        ``{"stop": patch}``. FI's experiment.py is never sent to the model: a fault of FI's own (exit code 2, an empty or
-        unreadable record, a stop before the analysis began) ends the quest with the reason said plainly, and no model call."""
+        ``{"stop": patch}``. Who caused a failure is what was running: whatever stopped the analysis while a function of the
+        study's ran is that function's. FI's experiment.py is never sent to the model: a fault of FI's own (exit code 2, a stop
+        in one of FI's own steps) ends the quest with the reason said plainly, and no model call. A check after a clean run
+        (``findings``: its numeric warnings; ``implausible``: a declared bound broken) goes to the function FI's record lays it
+        to, else to the simulation; a check that sent the run back is never a stop."""
         design = state.get("design")
         record = _analysis_frame.read_record(self.quest_root)
+        fresh = bool(state.get("result_json")) and not record.get("from_earlier_run")
         if rc == 0:
             if not overlaps:
-                return {"body": None}  # a result that runs but is wrong (all zero, out of bounds, numerics): the simulation
+                # a result that runs but is wrong (all zero, out of bounds, numerics): the function of derive.py FI's record
+                # lays it to, else the simulation
+                return {"body": (self._fis_body_of_problems(record, findings, implausible) if fresh else "") or None}
             files = {Path(str(f.get("file") or "")).name: f"figure_{i}"
                      for i, f in (_analysis_frame.plan_of(design).get("figures") or {}).items() if isinstance(f, dict)}
             for line in overlaps:
@@ -20286,24 +20321,33 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                               "derive.py; keeping it as drawn")
             return {"stop": {"figure_overlap_repaired": True}}
         stderr = str(exec_result.get("stderr_tail") or "")
-        if exec_result.get("directive") and exec_result.get("failed_script") == _analysis_frame.DERIVE_FILE:
+        if "failed_body" in exec_result:
             return {"body": str(exec_result.get("failed_body") or "")}  # FI's check named the function itself
         # The analysis printed its RESULT_JSON line, so FI's record is this run's (the line itself is not kept in the tail)
         printed = bool(state.get("result_json")) or "RESULT_JSON:" in str(exec_result.get("stdout_tail") or "")
-        if exec_result.get("failed_script") == _analysis_frame.EXPERIMENT_FILE and rc != _analysis_frame.FI_FAULT_EXIT:
-            # A check after the run (the run record, the result check) sent the analysis back with its RESULT_JSON line
-            # taken out. The analysis is FI's, so what is wrong is a function of derive.py the record names, or else FI's own.
-            printed = True
-        found = _analysis_frame.failure(record, stderr, rc, printed)
+        sent_back = bool(exec_result.get("directive") or exec_result.get("result_check_sent_back")
+                         or (exec_result.get("failed_script") == _analysis_frame.EXPERIMENT_FILE
+                             and rc != _analysis_frame.FI_FAULT_EXIT))
+        step = str(exec_result.get("analysis_step") or "") or _analysis_frame.running_step(stderr, self.quest_root)
+        found = _analysis_frame.failure(record, stderr, rc, printed or sent_back, step=step,
+                                        timed_out=bool(exec_result.get("timed_out")))
         if found["kind"] == "body":
             return {"body": found["body"]}
         if found["kind"] == "module":
             return {"body": ""}
+        if sent_back:
+            # A check of FI's sent a run back that FI's record shows ended cleanly, naming no function of the study's: it
+            # goes where it always went (the simulation), never to a stop.
+            return {"body": None}
         why = found["why"]
         if found["formula"]:
             text = f"FI's analysis cannot compute a formula of the plan: {why}"
-            advice = ("Correct that formula in the design of plan.md, then run the quest again from the design step "
-                      f"(`python launch.py --resume {self.quest_id} --from design`).")
+            # ``--from design`` takes the design written in plan.md again (it is not moved aside) and replaces the frozen
+            # protocol, so it needs a person's approval (``--approve-as``).
+            advice = ("Correct that formula in the design block of plan.md, then run the quest again from the design step: "
+                      f"`python launch.py --resume {self.quest_id} --from design --approve-as <your name>` (plan.md is "
+                      "read again as you left it; the frozen experiment plan, the code and the run are made again from it, "
+                      "and the old ones are kept in .fi/previous/).")
             tried = ["ran the study's trials", "worked out the plan's formulas from FI's record of the trials",
                      "a formula is not one FI can compute, so no function of the study's was asked to repair it"]
         else:
@@ -20545,7 +20589,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # that needs the simulation repaired, or a fault of FI's own (said plainly, and the quest stops).
         repair_body, failed_body = False, ""
         if split and not (repair_simulation or repair_submit) and _analysis_frame.is_fis_file(analysis_on_disk):
-            routed = self._fis_analysis_route(state, exec_result, rc, overlaps)
+            routed = self._fis_analysis_route(state, exec_result, rc, overlaps, findings, implausible)
             if "stop" in routed:
                 return routed["stop"]
             repair_body, failed_body = routed["body"] is not None, routed["body"] or ""
@@ -24779,8 +24823,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         it worked out once for the study, by the plan's formula or a function of derive.py, as well as the printed results."""
         try:
             if self._analysis_on():
+                record = _analysis_frame.read_record(self.quest_root)
+                if not result_json or record.get("from_earlier_run"):
+                    return  # a run sent back, stopped or killed: its numbers are not this run's answers
                 protocol = self._protocol_block(state)
-                values = _analysis_frame.study_values(_analysis_frame.read_record(self.quest_root))
+                values = _analysis_frame.study_values(record)
                 printed = result_json if isinstance(result_json, dict) else {}
                 ids = list(dict.fromkeys([*(str(m["id"]) for m in (protocol or {}).get("metrics") or []
                                             if isinstance(m, dict) and m.get("id")), *values]))

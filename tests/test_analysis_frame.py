@@ -247,7 +247,9 @@ def test_a_stub_and_a_body_that_raises_are_said_apart(planted: Any) -> None:
     raised = _status(planted, "raises")
     assert raised["status"] == "failed" and "derive.py line" in raised["why"] and not raised.get("fi_fault")
     assert "not_declared" in _status(planted, "reads_unknown_id")["why"] and "growth" in _status(planted, "reads_unknown_id")["why"]
-    assert "good_number" not in planted[3]  # the stderr names what failed, not what worked
+    # the stderr names what failed, not what worked (apart from FI's line naming each step as it begins it)
+    said = "\n".join(ln for ln in planted[3].splitlines() if not ln.startswith(af.STEP_MARK))
+    assert "good_number" not in said and af.STEP_MARK + "derive_good_number" in planted[3]
     assert "stub is computed by no trial" in planted[3]
 
 
@@ -342,11 +344,113 @@ def test_a_missing_calculator_is_fis_fault_not_the_models(tmp_path: Path) -> Non
     assert code == 2 and printed is None and "formula calculator" in err and "not the study's" in err
 
 
-def test_a_formula_over_a_name_nobody_gives_fails_in_words(tmp_path: Path) -> None:
-    code, _printed, record, err = _run(_quest(tmp_path, _design([_derived("odd", formula="growth * nothing_here")])))
+def test_a_formula_over_a_name_nobody_gives_is_left_out_of_the_plan_and_fails_in_words_at_run_time(tmp_path: Path) -> None:
+    # Found when the plan is read: the quantity is left out, with a gap that says why, before anything runs.
+    design = _design([_derived("odd", formula="growth * nothing_here"), _derived("fine", formula="growth * base")])
+    kept = contract.from_design(design)
+    assert [d.id for d in kept.derived] == ["fine"]
+    assert any("`odd` is left out" in g and "nothing_here" in g for g in kept.gaps)
+    # Should one reach the run all the same (a derive.py written before this check), it is the plan's fault, said plainly.
+    late = 'DERIVED["odd"] = {"by": "formula", "formula": "growth * nothing_here", "inputs": ["growth"], "role": "result"}\n'
+    code, _printed, record, err = _run(_quest(tmp_path, design, late))
     odd = record["derived"]["odd"]
     assert odd["status"] == "failed" and "nothing_here" in odd["why"] and odd["fi_fault"]  # a plan fault: FI's, not a body's
     assert code == 2 and "FI's fault" in err and record["fi_faults"]
+
+
+def test_formulas_that_name_each_other_in_a_circle_are_left_out_of_the_plan() -> None:
+    kept = contract.from_design(_design([_derived("a", formula="b + 1"), _derived("b", formula="a * 2"),
+                                         _derived("c", formula="growth / 2")]))
+    assert [d.id for d in kept.derived] == ["c"]
+    assert any("`a`, `b` are left out" in g and "circle" in g for g in kept.gaps)
+
+
+def test_formulas_are_worked_out_after_what_they_name_whatever_order_the_plan_lists_them_in(tmp_path: Path) -> None:
+    design = _design([_derived("half", formula="peak / 2", inputs=("peak",)), _derived("peak")])
+    bodies = """
+    def derive_peak(table):
+        return max(table.mean("growth", k) for k in table.keys())
+    """
+    code, _printed, record, _err = _run(_quest(tmp_path, design, bodies))
+    assert code == 0 and record["derived"]["half"]["status"] == "ok"
+    assert record["derived"]["half"]["value"] == pytest.approx(record["derived"]["peak"]["value"] / 2)
+    assert list(record["derived"]) == ["half", "peak"]  # the record keeps the plan's order
+
+
+def test_a_value_a_body_says_does_not_exist_leaves_a_formula_over_it_missing_never_fis_fault(tmp_path: Path) -> None:
+    design = _design([_derived("peak"), _derived("half", formula="peak / 2", inputs=("peak",))])
+    bodies = """
+    def derive_peak(table):
+        return table.missing("the growth never peaks inside the range studied")
+    """
+    code, _printed, record, _err = _run(_quest(tmp_path, design, bodies))
+    half = record["derived"]["half"]
+    assert code == 0 and half["status"] == "ok" and half["value"] is None and not half.get("fi_fault")
+    assert "never peaks" in half["missing"][""] and not record["fi_faults"]
+
+
+def test_a_formula_over_a_body_that_failed_is_blocked_and_the_repair_is_the_bodys(tmp_path: Path) -> None:
+    design = _design([_derived("peak"), _derived("half", formula="peak / 2", inputs=("peak",))])
+    bodies = """
+    def derive_peak(table):
+        return 1 / 0
+    """
+    code, _printed, record, err = _run(_quest(tmp_path, design, bodies))
+    half = record["derived"]["half"]
+    assert code == 1 and half["status"] == "blocked" and half["cause"] == "derive_peak" and not half.get("fi_fault")
+    got = af.failure(record, err, code, True)
+    assert got["kind"] == "body" and got["body"] == "derive_peak" and "ZeroDivisionError" in got["why"]
+    assert [i["status"] for i in record["not_computed"] if i["id"] == "half"] == ["blocked"]
+
+
+def test_what_a_body_raises_inside_fis_table_is_the_bodys_and_its_time_and_warnings_are_kept(tmp_path: Path) -> None:
+    design = _design([_derived("peak"), _derived("calm")])
+    bodies = """
+    import warnings
+
+
+    def derive_peak(table):
+        return max(table.mean("growth", table.setting(k)) for k in table.keys())  # a setting given where its key goes
+
+
+    def derive_calm(table):
+        warnings.warn("overflow encountered in exp", RuntimeWarning)
+        return 1.0
+    """
+    code, _printed, record, err = _run(_quest(tmp_path, design, bodies))
+    peak = record["derived"]["peak"]
+    assert code == 1 and peak["status"] == "failed" and not peak.get("fi_fault") and not record["fi_faults"]
+    assert "derive.py line" in peak["why"] and "over what `derive_peak` gave it" in peak["why"]
+    assert af.failure(record, err, code, True)["body"] == "derive_peak"
+    calm = record["bodies"]["derive_calm"]
+    assert calm["outputs"] == ["calm"] and calm["warnings"] == ["RuntimeWarning: overflow encountered in exp"]
+    assert "RuntimeWarning: overflow encountered in exp" in err  # the numeric-warning scan still reads it
+    assert record["bodies"]["figure_fig1"]["outputs"] == ["figure:fig1"]
+
+
+def test_an_analysis_stopped_while_a_body_runs_is_laid_to_that_body(tmp_path: Path) -> None:
+    quest = _quest(tmp_path, _design([_derived("slow")]), """
+    import time
+
+
+    def derive_slow(table):
+        time.sleep(60)
+        return 1.0
+    """)
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "FI_ROOT", "FI_TRIALS")}
+    proc = subprocess.Popen([sys.executable, "experiment.py"], cwd=quest / "code", env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, creationflags=NO_WINDOW)
+    try:
+        _out, err = proc.communicate(timeout=6)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        _out, err = proc.communicate()
+    assert af.running_step(err) == "derive_slow" and af.running_step("", quest) == "derive_slow"
+    got = af.failure({}, err, proc.returncode, False, timed_out=True)
+    assert got["kind"] == "body" and got["body"] == "derive_slow" and "ran past the time allowed" in got["why"]
+    # FI's own step running when it stopped is FI's; a stop before any step (the import of derive.py) is the module's
+    assert af.failure({}, af.STEP_MARK + "fi: writing the results\n", 1, False)["kind"] == "fi"
+    assert af.failure({}, 'File "x/derive.py", line 3\nNameError: name', 1, False)["kind"] == "module"
 
 
 def test_a_setting_with_no_value_is_missing_with_its_reason(tmp_path: Path) -> None:
@@ -645,16 +749,22 @@ def test_a_dict_that_leaves_out_settings_says_why(tmp_path: Path) -> None:
     assert printed[KEYS[2]]["why_missing"]["peak"]
 
 
-def test_a_body_that_exits_is_refused_and_a_fault_of_fis_own_lines_is_fis(tmp_path: Path) -> None:
+def test_a_body_that_exits_is_refused_and_what_raises_while_a_body_runs_is_the_bodys(tmp_path: Path) -> None:
     items = [("quitter", "result", "import sys\n    sys.exit(0)"), ("fine", "result", "return 1.0")]
     design, bodies = _planted_design(items)
     code, printed, record, _err = _run(_quest(tmp_path, design, bodies))
     assert record["derived"]["quitter"]["status"] == "refused" and "sys.exit" in record["derived"]["quitter"]["why"]
     assert printed["fine"] == 1.0 and code == 1
+    # A body that is a function of a library (no line of derive.py at all): what it raises is still the body's, not FI's.
     design = _design([_derived("odd")])
     code, _printed, record, err = _run(_quest(tmp_path / "second", design, "from math import sqrt as derive_odd\n"))
     odd = record["derived"]["odd"]
-    assert odd["fi_fault"] and "FI's own lines" in odd["why"] and code == 2 and "FI's fault" in err
+    assert odd["status"] == "failed" and not odd.get("fi_fault") and "`derive_odd`" in odd["why"] and code == 1
+    # FI's own lines failing outside every body (here its formula calculator is gone) is FI's fault: exit code 2.
+    quest = _quest(tmp_path / "third", _design([_derived("half", formula="growth / 2")]))
+    shutil.rmtree(quest / "code" / af.CORE_DIR)
+    code, _printed, record, err = _run(quest)
+    assert code == 2 and "FI's" in err and af.failure(record, err, code, False)["kind"] == "fi"
 
 
 def test_the_figures_run_end_to_end_and_a_failed_body_counts(tmp_path: Path) -> None:
