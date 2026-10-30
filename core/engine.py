@@ -2843,6 +2843,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         ``proceed`` to the analysis."""
         return "rerun" if state.get("improve_rerun") else "proceed"
 
+    def _repair_budget_left(self, state: QuestState) -> bool:
+        """Whether the run's repairs are not spent (the repair of a crash or a figure goes on). The router after the repair and
+        ``_node_execute`` (which holds back the work of a final run while a repair is coming) both ask this."""
+        return (int(state.get("exec_reflect_iter", 0) or 0) < self.config.engine.exec_reflect_max_iterations
+                and not state.get("exec_give_up_reason"))
+
     def _route_after_execute_reflect(self, state: QuestState) -> str:
         """Route based on whether the reflect node patched the
         code (→ retry execute) or accepted the failure / success
@@ -2878,8 +2884,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # reflect node, whatever is left of the crash repairs (a repair that gave up has gone on above, as before).
         if self._numeric_turn(state):
             return "retry"
-        iters = state.get("exec_reflect_iter", 0)
-        if iters >= self.config.engine.exec_reflect_max_iterations:
+        if not self._repair_budget_left(state):
             return "proceed"
         if rc == 0 and has_result_json:
             # Clean exit + parsed metrics — but an all-zero/degenerate
@@ -19244,6 +19249,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         failed_script = runner.failed_script if split else None
         # Whether the results were produced, decided once from this run (rc 0, or only a figure failed: FI's record of it).
         produced = self._run_produced(result)
+        result_after_run = result  # the fact is not true of a result a check below replaces (sent back)
+        # A run that produced its results but exits 1 for a failed figure is replaced by the figure's repair while repairs are
+        # left (the router, ``_repair_budget_left``): the work of a final run waits for the run that ends the loop.
+        provisional = produced and result.returncode != 0 and self._repair_budget_left(state)
         # What the simulation says it did, against the frozen protocol (core/run_manifest.py): a run that differs is sent
         # back like a failed one, and after the repairs the quest stops.
         manifest_stop = self.fi_dir / "run_manifest_stop.json"
@@ -19355,7 +19364,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         })
         # The run's data is kept only once the run is accepted: not a crash, a run the manifest sent back or stopped,
         # nor a job still pending (its raw files are half written).
-        run_accepted = produced and manifest_status not in ("stopped", "pending", "repairing")
+        run_accepted = produced and not provisional and manifest_status not in ("stopped", "pending", "repairing")
         if run_accepted:
             await asyncio.to_thread(self._save_run_data, run_started, split)
             if split and self.config.rigor_profile == "research":
@@ -19458,13 +19467,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             if produced and result_json is not None
             else []
         )
-        repair_left = (
-            int(state.get("exec_reflect_iter", 0) or 0)
-            < self.config.engine.exec_reflect_max_iterations
-            and not state.get("exec_give_up_reason")
-        )
-        skip_replicates = bool(gate_violations) and repair_left
-        if skip_replicates and replicates_n > 1:
+        repair_left = self._repair_budget_left(state)
+        skip_replicates = (bool(gate_violations) and repair_left) or provisional
+        if provisional and replicates_n > 1:
+            self._log.info("[execute] skipping %d replicate(s): a figure failed and its repair is coming, so this run is replaced",
+                           replicates_n - 1)
+        elif skip_replicates and replicates_n > 1:
             self._log.info(
                 "[execute] skipping %d replicate(s): the primary result already "
                 "violates %d assertion(s), so execute_reflect is about to "
@@ -19680,7 +19688,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "flat_output": (str(getattr(runner, "flat", None) or "") if result.returncode != 0 else ""),
                 # A fault FI's checks of the trials found (core/trial_checks.py): the stop once the repairs are spent (a reported
                 # uncertainty measured not to match is not one: the run goes on, DISCLOSE).
-                "trial_checks": (dict(getattr(runner, "trial_fault", None) or {}) if result.returncode != 0 else {}),
+                "trial_checks": (dict(getattr(runner, "trial_fault", None) or {})
+                                 if result.returncode != 0 and not produced else {}),
                 # The search's objective did not move across the design space, and the plan may still be revised for it
                 # (core/optimise.py): the gate sends what FI measured back to the plan.
                 "flat_objective": (dict(getattr(runner, "flat_objective", None) or {}) if result.returncode != 0 else {}),
@@ -19691,7 +19700,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "result_check_sent_back": result_check_sent_back,
                 # Whether the run produced its results (rc 0, or only a figure failed): every reader that means "the run
                 # produced its results" reads this, not the return code.
-                "results_produced": bool(produced and not result_check_sent_back),
+                "results_produced": bool(produced and result is result_after_run and not result_check_sent_back),
                 # FI's analysis (core/analysis_frame.py): what it was doing when it stopped (a function of derive.py, or FI's
                 # own step), read from its whole stderr, and the function of derive.py a check after the run named.
                 **({"analysis_step": _analysis_frame.running_step(result.stderr or "", self.quest_root)}
