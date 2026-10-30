@@ -122,7 +122,7 @@ def _with_package(reply: str, prompt: str) -> str:
     pkg = asked.group(1)
     reply = reply.replace("# file: simulate.py\n", f"# file: simulate.py\nfrom {pkg} import model\n", 1)
     # The headline is computed through the package's function (gamma = 1, so the values are unchanged), as an honest
-    # simulation of the model does; one that never called the package would be a gap (core/step_coverage.py).
+    # simulation of the model does.
     reply = reply.replace('100.0 * cell["R0"]', '100.0 * model.infection_rate(cell["R0"], 1.0)')
     return (reply + f"```python\n# file: {pkg}/__init__.py\n\"\"\"The epidemic model.\"\"\"\n```\n"
             f"```python\n# file: {pkg}/model.py\ndef infection_rate(r0, gamma):\n    return r0 * gamma\n```\n")

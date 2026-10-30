@@ -38,7 +38,6 @@ from typing import Any, Awaitable, Callable, Iterable
 
 from . import code_findings as _issues
 from . import function_steps as _steps
-from . import step_coverage as _sc
 from . import optimise as _optimise
 from . import skeleton as _skeleton
 from . import trial_runner as _trials
@@ -309,16 +308,37 @@ REACH_CHARS = 20000  # the most source text of reached functions a repair reques
 _OUTPUT_METHODS = {"append", "extend", "update", "write", "writelines", "dump", "add", "setdefault", "insert"}
 
 
+_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
 _COMPS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
 
 
-def _walk_scope(nodes: list[ast.AST]):
-    """Like ``step_coverage._shallow`` and also not entering a comprehension (its own scope, as in Python 3)."""
+def _shallow(nodes: list[ast.AST]):
+    """Every node of ``nodes`` and below, not entering the body of a nested function, class or lambda (the nested scope
+    itself is yielded)."""
     stack = list(reversed(nodes))
     while stack:
         n = stack.pop()
         yield n
-        if not isinstance(n, (*_sc._SCOPES, *_COMPS)):
+        if not isinstance(n, _SCOPES):
+            stack.extend(reversed(list(ast.iter_child_nodes(n))))
+
+
+def _params(node: ast.AST) -> set[str]:
+    args = getattr(node, "args", None)
+    if not isinstance(args, ast.arguments):
+        return set()
+    names = [a.arg for a in [*args.posonlyargs, *args.args, *args.kwonlyargs]]
+    names += [a.arg for a in (args.vararg, args.kwarg) if a is not None]
+    return set(names)
+
+
+def _walk_scope(nodes: list[ast.AST]):
+    """Like ``_shallow`` and also not entering a comprehension (its own scope, as in Python 3)."""
+    stack = list(reversed(nodes))
+    while stack:
+        n = stack.pop()
+        yield n
+        if not isinstance(n, (*_SCOPES, *_COMPS)):
             stack.extend(reversed(list(ast.iter_child_nodes(n))))
 
 
@@ -332,7 +352,7 @@ def _scope_names(body: list[ast.AST], params: set[str]) -> set[str]:
             out.add(n.name)
         elif isinstance(n, ast.MatchMapping) and n.rest:
             out.add(n.rest)
-        elif isinstance(n, _sc._SCOPES):
+        elif isinstance(n, _SCOPES):
             if not isinstance(n, ast.Lambda):
                 out.add(n.name)
         elif isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
@@ -354,8 +374,8 @@ def _resolved_calls(fn: ast.AST, top: set[str]) -> dict[int, str]:
         for n in _walk_scope(body):
             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in top and n.func.id not in shadow:
                 out[id(n)] = n.func.id
-            if isinstance(n, _sc._SCOPES):
-                scope([n.body] if isinstance(n, ast.Lambda) else list(n.body), _sc._params(n), shadow)
+            if isinstance(n, _SCOPES):
+                scope([n.body] if isinstance(n, ast.Lambda) else list(n.body), _params(n), shadow)
             elif isinstance(n, _COMPS):
                 targets = {x.id for g in n.generators for x in ast.walk(g.target) if isinstance(x, ast.Name)}
                 inner: list[ast.AST] = [n.key, n.value] if isinstance(n, ast.DictComp) else [n.elt]
@@ -363,7 +383,7 @@ def _resolved_calls(fn: ast.AST, top: set[str]) -> dict[int, str]:
                     inner += [g.iter, *g.ifs]
                 scope(inner, targets, shadow)
 
-    scope(list(fn.body), _sc._params(fn), set())  # type: ignore[attr-defined]
+    scope(list(fn.body), _params(fn), set())  # type: ignore[attr-defined]
     return out
 
 
@@ -379,18 +399,18 @@ def _live_callees(fn: ast.FunctionDef | ast.AsyncFunctionDef, top: set[str]) -> 
     def names_of(target: ast.AST) -> set[str]:
         return {n.id for n in ast.walk(target) if isinstance(n, ast.Name)}
 
-    params = _sc._params(fn)
+    params = _params(fn)
     outside = params | {g for x in ast.walk(fn) if isinstance(x, ast.Global) for g in x.names}
     # (a name the function does not bind at all is the module's own)
     # ``outside`` is completed below with the names the function never binds, once its locals are known
     local = _scope_names(list(fn.body), set()) - outside
     outside |= {x.id for x in ast.walk(fn) if isinstance(x, ast.Name) and x.id not in local and x.id not in params}
-    for n in _sc._shallow(list(fn.body)):
+    for n in _shallow(list(fn.body)):
         if isinstance(n, (ast.Return, ast.Yield, ast.YieldFrom)) and n.value is not None:
             outputs.append(n.value)
     for n in ast.walk(fn):
         if n is not fn and isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            for r in _sc._shallow(list(n.body)):
+            for r in _shallow(list(n.body)):
                 if isinstance(r, ast.Return) and r.value is not None:
                     edges.append(({n.name}, r.value, False))
         elif isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign)) and n.value is not None:
