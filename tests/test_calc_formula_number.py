@@ -30,3 +30,21 @@ def test_a_formula_value_is_filled_from_the_plans_numbers_and_an_unplanned_numbe
     assert not bad.filled
     # a typed result-looking number that no plan number gives is still not allowed
     assert typed_numbers.hits("The cutoff is 9.4 here.", typed_numbers.plan_numbers(PLAN, TOPIC))
+
+
+def test_the_writer_is_told_every_function_a_calc_may_call() -> None:
+    """The writer is told the calculator's whole list (a writer not told of ndtr wrote a wrong closed form instead)."""
+    from core import oracle_forms
+
+    prompt = (Path(__file__).resolve().parents[1] / "agents" / "write_patch.md").read_text(encoding="utf-8")
+    for name in [*oracle_forms.FUNCTIONS, "ndtr", "ndtri", "t_quantile"]:
+        assert name + "(" in paper_values.WRITER_RULES or name + "," in paper_values.WRITER_RULES, name
+    for name in ("ndtr", "ndtri", "t_quantile"):
+        assert name + "(" in prompt, name
+    assert "<CALC_FUNCTIONS>" not in paper_values.WRITER_RULES
+
+
+def test_a_normal_tail_power_is_filled_from_the_plans_numbers() -> None:
+    plan = {"constants": {"alpha": 0.05, "shift": 2.5}}
+    got = paper_values.calc("1 - ndtr(ndtri(1 - 0.05) - 2.5)", plan, "")
+    assert got.filled and got.text == "0.8038"
