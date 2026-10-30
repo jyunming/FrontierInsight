@@ -28,6 +28,7 @@ from typing import Any
 
 from . import code_reach as _code_reach
 from . import code_review as _code_review
+from .contract import figure_file
 from . import degenerate_results as _degenerate
 from . import reported_settings as _reported
 
@@ -169,7 +170,7 @@ class ResultChecksMixin:
         """The plan has figures and the run, which finished, saved none: nothing was drawn, so the paper has no figure. Not
         sent back (the results stand); the writer is told, and the limitations say so."""
         planned = (state.get("design") or {}).get("figures_planned")
-        names = [Path(str(f)).name for f in planned if str(f).strip()] if isinstance(planned, list) else []
+        names = [figure_file(f) for f in planned if str(f).strip()] if isinstance(planned, list) else []
         if not names or self._saved_figures():
             return []
         listed = ", ".join(f"`{n}`" for n in names[:6])

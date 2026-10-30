@@ -10,12 +10,15 @@ cannot be used (at most :data:`MAX_ASKS` asks of a part in all):
 * ``comparisons``: which results the study compares between values of one setting;
 * ``formulas``, only when FI works out the analysis itself (core/analysis_frame.py) and the plan has a formula FI cannot
   work out as written (:func:`core.contract.from_design` with ``fi_analysis``): a formula FI can work out for each, or that
-  the study's own code computes it.
+  the study's own code computes it;
+* ``figures``, only when FI works out the analysis itself and the plan names a figure only by file name: what each figure
+  shows, along which setting, in how many panels (or that it cannot be drawn from the study's numbers). FI draws only the
+  figures the contract declares, so a figure named only by file name would be drawn by nobody.
 
 When every part is usable FI writes ``form: contract`` into the protocol; the model never does. A part that stays
 unusable is left out, named in ``protocol.parts_left_out`` (the contract reads that into its gaps), and the plan stays in
-the older form; a formula still not workable is left out alone, with its gap, and the plan keeps its form. Nothing here
-stops a quest.
+the older form; a formula still not workable is left out alone, with its gap, and the plan keeps its form; a figure still not declared is
+left out alone, with its gap. Nothing here stops a quest.
 """
 
 from __future__ import annotations
@@ -36,9 +39,11 @@ MAX_ASKS = 3
 PART_WORDS = {"roles": "what kind of number each result is, what it may change with and whether each run returns it",
               "names": "what the names the plan uses but does not declare are",
               "comparisons": "which results are compared between values of a setting",
-              "formulas": "a formula FI can work out for each quantity the plan works out with one"}
-#: The parts whose answer the plan's form does not wait on: a formula still not workable is left out alone.
-_OWN_PARTS = ("formulas",)
+              "formulas": "a formula FI can work out for each quantity the plan works out with one",
+              "figures": "what each figure the plan names shows"}
+#: The parts whose answer the plan's form does not wait on: a formula still not workable, or a figure still not declared,
+#: is left out alone.
+_OWN_PARTS = ("formulas", "figures")
 _ROLE_HINT = {"reference": "its plan gives a formula, so it is a reference", "diagnostic": "a check of the plan measures it as a "
               "size of disagreement, so it is a diagnostic"}
 
@@ -151,6 +156,103 @@ def _apply_formulas(p: dict[str, Any], answer: dict[str, Any]) -> dict[str, Any]
     return {**p, "derived": derived}
 
 
+def _planned_figures(design: dict[str, Any]) -> list[Any]:
+    p = design.get("protocol") or {}
+    planned = p.get("figures") if "figures" in p else design.get("figures_planned")
+    return planned if isinstance(planned, list) else []
+
+
+def figure_faults(design: dict[str, Any]) -> dict[str, str]:
+    """The figures the plan lists that nothing declares (named only by file name, or a declaration that no longer fits the
+    plan's results and settings), each by file name with the plan's own words about it. A figure the plan's model answered
+    ``drop`` for is not one."""
+    p = design.get("protocol") if isinstance(design.get("protocol"), dict) else {}
+    c = _contract.from_design({**design, "protocol": {**p, "form": "contract"}})
+    done = {_contract.figure_file(f.file) for f in c.figures if f.declared}
+    said = p.get("figure_declarations") if isinstance(p.get("figure_declarations"), dict) else {}
+    done |= {n for n, d in said.items() if isinstance(d, dict) and d.get("drop") is True}
+    out: dict[str, str] = {}
+    for f in _planned_figures(design):
+        name = _contract.figure_file(f)
+        if name and name not in done and name not in out:
+            text = json.dumps(f, default=str) if isinstance(f, dict) else str(f).strip()
+            out[name] = _short(text[len(name):].strip() if text.startswith(name) and text != name else text, 600)
+    return out
+
+
+def _figure_holds(design: dict[str, Any]) -> tuple[list[str], list[str], list[str]]:
+    """``(lines, settings, single)``: what a figure may show, one line each (a reported number or a quantity worked out from
+    them: the analysis's table serves nothing else), the settings with more than one value, which a figure may use as ``x`` or
+    ``series``, and the settings that have one."""
+    c = _contract.from_design({**design, "protocol": {**design["protocol"], "form": "contract"}}, fi_analysis=True)
+    lines = [f"- {r.id}: {_short(r.estimand or r.label, 160) or 'a reported number'}" for r in c.results]
+    lines += [f"- {d.id}: {_short(d.label, 160) or 'worked out from the reported numbers'}" for d in c.derived]
+    values = {**c.settings.compared, **c.settings.in_each_run}
+    return (lines, sorted(k for k in c.settings.varied() if len(values.get(k, ())) > 1),
+            sorted(k for k in c.settings.varied() if len(values.get(k, ())) <= 1))
+
+
+def _figures_prompt(templates: dict[str, string.Template], design: dict[str, Any], faults: dict[str, str],
+                    problems: list[str], last: str) -> str:
+    lines, settings, _single = _figure_holds(design)
+    return templates["plan_figures"].substitute(
+        figures="\n".join(f"- {name}: {text}" for name, text in faults.items()), shows="\n".join(lines) or "- (nothing)",
+        settings=", ".join(settings) or "(the study varies no setting)", max_panels=_contract.MAX_PANELS,
+        method=_short(design.get("method")), again=_problems_text(problems, last))
+
+
+def _check_figures(value: Any, asked: dict[str, str], design: dict[str, Any]) -> list[str]:
+    """Why ``value``, the answer for ``figures``, cannot be used; empty when it can. Each figure asked about gets what it
+    shows (a reported number or a quantity worked out from them), its ``x`` setting, a ``series`` setting other than ``x`` (or
+    none) and its panels, or ``drop`` with why. A setting must have more than one value to be drawn along."""
+    if not isinstance(value, dict):
+        return ["the answer for `figures` must be a mapping"]
+    lines, settings, single = _figure_holds(design)
+    ids = [line[2:].split(":")[0] for line in lines]
+    out: list[str] = []
+    for name in asked:
+        row = value.get(name)
+        if not isinstance(row, dict):
+            out.append(f"`{name}` is not answered")
+            continue
+        if row.get("drop") is True:
+            continue
+        shows = row.get("shows")
+        if not isinstance(shows, list) or not shows or not all(isinstance(s, str) for s in shows):
+            out.append(f"`{name}`: `shows` must list the numbers the figure shows ({', '.join(ids)}), or answer `drop`: true")
+        elif [s for s in shows if s not in ids]:
+            out.append(f"`{name}` shows {', '.join('`' + s + '`' for s in shows if s not in ids)}, which the study does not "
+                       f"report or work out (it holds {', '.join(ids)})")
+        for axis in ("x", "series"):
+            used = row.get(axis)
+            if axis == "x" and used in (None, ""):
+                out.append(f"`{name}`: `x` is the setting the figure is drawn along ({', '.join(settings) or 'none'})")
+            elif used not in (None, "") and used not in settings:
+                why = "has one value in the study" if used in single else "is not a setting of the study"
+                out.append(f"`{name}`: `{axis}` is `{used}`, which {why} (the settings to use are {', '.join(settings) or 'none'})")
+        if row.get("x") not in (None, "") and row.get("x") == row.get("series"):
+            out.append(f"`{name}`: `series` must be another setting than `x`, or null")
+        panels = row.get("panels", 1)
+        if isinstance(panels, bool) or not isinstance(panels, int) or not 1 <= panels <= _contract.MAX_PANELS:
+            out.append(f"`{name}`: `panels` must be a whole number from 1 to {_contract.MAX_PANELS}")
+    return out + [f"`{k}` was not asked about" for k in value if k not in asked]
+
+
+def _apply_figures(p: dict[str, Any], design: dict[str, Any], answer: dict[str, Any], asked: dict[str, str]) -> dict[str, Any]:
+    """What the plan's model said about each figure asked, kept by file name in ``figure_declarations`` beside the plan's own
+    list of figures, which is never changed (the contract joins the two). The earlier declarations of files the plan still
+    lists are kept; a file no longer listed loses its."""
+    listed = {_contract.figure_file(f) for f in _planned_figures({**design, "protocol": p})}
+    old = p.get("figure_declarations") if isinstance(p.get("figure_declarations"), dict) else {}
+    decls = {n: d for n, d in old.items() if n in listed and n not in asked and isinstance(d, dict)}
+    for name in asked:
+        row = answer[name]
+        decls[name] = ({"drop": True, "why": _short(row.get("why"), 300)} if row.get("drop") is True else
+                       {"shows": list(row["shows"]), "x": row.get("x") or None, "series": row.get("series") or None,
+                        "panels": row.get("panels", 1)})
+    return {**p, "figure_declarations": decls}
+
+
 def _prompt(part: str, templates: dict[str, string.Template], design: dict[str, Any], names: dict[str, str],
             problems: list[str], last: str, derived: list[str]) -> str:
     p = design.get("protocol") or {}
@@ -216,11 +318,11 @@ def _apply_comparisons(p: dict[str, Any], items: list[dict[str, Any]]) -> dict[s
 
 
 def strip_fi_keys(design: Any) -> Any:
-    """``design`` without the keys only FI writes (``form``, ``parts_left_out``, ``names_not_asked``, and the ``asked``
-    mark on a comparison or derived quantity): a model's own word for them is never believed."""
+    """``design`` without the keys only FI writes (``form``, ``parts_left_out``, ``names_not_asked``, ``figure_declarations``, and the ``asked`` mark on a comparison or derived quantity): a model's own word for them is never
+    believed."""
     if not isinstance(design, dict) or not isinstance(design.get("protocol"), dict):
         return design
-    protocol = {k: v for k, v in design["protocol"].items() if k not in _FI_KEYS}
+    protocol = {k: v for k, v in design["protocol"].items() if k not in (*_FI_KEYS, "figure_declarations")}
     for key in _ASKED_ROWS:
         if isinstance(protocol.get(key), list):
             protocol[key] = [{k: v for k, v in r.items() if k not in ("asked", "as_planned")} if isinstance(r, dict) else r
@@ -234,7 +336,7 @@ def without_answers(design: Any) -> Any:
     results and the keys only FI writes. The methodology audit's verdict is on the rest (core/receipts.design_core)."""
     if not isinstance(design, dict) or not isinstance(design.get("protocol"), dict):
         return design
-    protocol = {k: v for k, v in design["protocol"].items() if k not in (*_FI_KEYS, "named_results")}
+    protocol = {k: v for k, v in design["protocol"].items() if k not in (*_FI_KEYS, "named_results", "figure_declarations")}
     if isinstance(protocol.get("metrics"), list):
         protocol["metrics"] = [{k: v for k, v in m.items() if k not in _ANSWER_KEYS} if isinstance(m, dict) else m
                                for m in protocol["metrics"]]
@@ -273,23 +375,32 @@ def settle_form(protocol: dict[str, Any], planned: dict[str, Any] | None = None)
 
 
 async def ask_parts(design: Any, ask: Callable[[str], Awaitable[str]], parse: Callable[[str], Any],
-                    templates: dict[str, string.Template], *, fi_analysis: bool = False) -> Outcome:
+                    templates: dict[str, string.Template], *, fi_analysis: bool = False,
+                    only: tuple[str, ...] | None = None) -> Outcome:
     """Ask the parts of ``design`` (a normalized design with metrics) and return the design with what could be used.
     ``ask`` sends a prompt and returns the reply; ``parse`` reads a reply into a mapping or ``None``. A part whose call
     raises is left out alone (its traceback is in ``Outcome.errors``); the parts already usable are kept. ``fi_analysis``:
-    FI works out this plan's analysis itself, so each formula is held to what FI can work out (the ``formulas`` part)."""
+    FI works out this plan's analysis itself, so each formula is held to what FI can work out (the ``formulas`` part) and
+    each figure is declared (the ``figures`` part): FI draws only the figures the contract declares. ``only``: ask just these
+    parts of a design that already holds the others (a redesign's figures); its form and the declarations it holds are kept."""
     out = Outcome(design=design)
     if not isinstance(design, dict) or not isinstance(design.get("protocol"), dict) or not design["protocol"].get("metrics"):
         return out
-    current = strip_fi_keys(copy.deepcopy(design))
+    current = copy.deepcopy(design) if only else strip_fi_keys(copy.deepcopy(design))
     not_asked: list[str] = []
-    names = _contract.undeclared_names(current, not_asked)
+    names = {} if only else _contract.undeclared_names(current, not_asked)
     derived_ids: list[str] = []
     order = ["roles"] + (["names"] if names else []) + (["formulas"] if fi_analysis else []) + ["comparisons"]
+    if fi_analysis:
+        order.append("figures")  # last: a figure may show a quantity the parts before it declared
+    if only:
+        order = [x for x in order if x in only]
     for part in order:
-        faults = _formula_faults(current) if part == "formulas" else {}
-        if part == "formulas" and not faults:
-            continue  # every formula of the plan is one FI can work out: nothing to ask
+        if part == "figures" and "roles" in out.parts and not out.parts["roles"]["valid"]:
+            continue  # the plan stays in the older form, which FI does not write the analysis for
+        faults = _formula_faults(current) if part == "formulas" else figure_faults(current) if part == "figures" else {}
+        if part in ("formulas", "figures") and not faults:
+            continue  # every formula is one FI can work out, every figure is declared: nothing to ask
         record: dict[str, Any] = {"asks": 0, "valid": False, "problems": []}
         out.parts[part] = record
         problems: list[str] = []
@@ -298,16 +409,19 @@ async def ask_parts(design: Any, ask: Callable[[str], Awaitable[str]], parse: Ca
             while record["asks"] < MAX_ASKS and not record["valid"]:
                 record["asks"] += 1
                 reply = await ask(_formulas_prompt(templates, current, faults, problems, last) if part == "formulas" else
+                                  _figures_prompt(templates, current, faults, problems, last) if part == "figures" else
                                   _prompt(part, templates, current, names if part == "names" else {}, problems, last, derived_ids))
                 last = reply or ""
                 got = parse(reply) if reply else None
                 if not isinstance(got, dict):
                     problems = ["the answer was not one JSON object"]
                     continue
-                value = got.get({"roles": "results", "names": "names", "comparisons": "comparisons", "formulas": "formulas"}[part])
+                value = got.get({"roles": "results", "names": "names", "comparisons": "comparisons", "formulas": "formulas",
+                                "figures": "figures"}[part])
                 if part == "comparisons":
                     value = {"comparisons": value if value is not None else [], "_derived": derived_ids}
                 problems = (_check_formulas(value, faults, current) if part == "formulas" else
+                            _check_figures(value, faults, current) if part == "figures" else
                             _contract.check_part(part, value, current))
                 if problems:
                     continue
@@ -316,6 +430,8 @@ async def ask_parts(design: Any, ask: Callable[[str], Awaitable[str]], parse: Ca
                     kept, checked = _apply_roles(p, value), None
                 elif part == "formulas":
                     kept, checked = _apply_formulas(p, value), None
+                elif part == "figures":
+                    kept, checked = _apply_figures(p, current, value, faults), None
                 elif part == "names":
                     kept, checked = _apply_names(p, value)
                 else:
@@ -337,6 +453,9 @@ async def ask_parts(design: Any, ask: Callable[[str], Awaitable[str]], parse: Ca
                     still = _formula_faults({**current, "protocol": fixed})
                     gaps = [*(f"`{i}`: its formula still cannot be worked out ({why})" for i, why in still.items() if i in faults),
                             *(g for g in gaps if not any(f"`{i}` is left out" in g for i in faults))]
+                if part == "figures":  # a figure answered is declared, not only named by its file
+                    still = figure_faults({**current, "protocol": fixed})
+                    gaps = [*(f"`{n}` is still named only by its file name" for n in still if n in faults), *gaps]
                 if gaps:
                     problems = gaps
                     continue
@@ -358,6 +477,22 @@ async def ask_parts(design: Any, ask: Callable[[str], Awaitable[str]], parse: Ca
         out.notes.append("The plan's model was asked for a formula FI can work out for " + ", ".join(f"`{i}`" for i in still)
                          + ", and did not give one; " + ("it is" if len(still) == 1 else "they are")
                          + " left out of the study (the plan's gaps say why).")
+    if "figures" in out.parts:
+        asked = figure_faults(current) if not out.parts["figures"]["valid"] else {}
+        if asked:
+            out.notes.append("The plan's model was asked what " + ", ".join(f"`{n}`" for n in asked)
+                             + (" shows" if len(asked) == 1 else " show") + ", and did not say; "
+                             + ("it is" if len(asked) == 1 else "they are") + " left out of the figures FI draws (the plan's "
+                             "gaps say why).")
+        dropped = {n: r.get("why") for n, r in (out.parts["figures"].get("answer") or {}).items() if r.get("drop") is True}
+        if dropped:
+            out.notes.append("The plan's model said " + ", ".join(f"`{n}`" + (f" ({_short(w, 160)})" if w else "")
+                                                                   for n, w in dropped.items())
+                             + " cannot be drawn from the study's numbers; "
+                             + ("it is" if len(dropped) == 1 else "they are") + " left out of the figures FI draws.")
+    if only:  # the parts already there, and the form, stay as they were
+        out.design = current
+        return out
     protocol = {k: v for k, v in current["protocol"].items() if k not in _FI_KEYS}
     if not_asked:
         protocol["names_not_asked"] = not_asked

@@ -77,7 +77,7 @@ def test_a_plan_in_the_contract_form_is_read_with_its_roles_comparisons_derived_
     assert c.role_of("anything_else") == "diagnostic"
     assert c.result("ratio").depends_on == ("load",)
     assert c.comparisons[0].how == "difference" and c.derived[0].formula is None
-    assert c.figures == (C.Figure(id="fig1", file="figures/ratio.png", shows=("ratio", "ratio_gain"), x="load",
+    assert c.figures == (C.Figure(id="fig1", file="ratio.png", shows=("ratio", "ratio_gain"), x="load",
                                   series="method"),)
     assert not any("no role" in g or "file name" in g for g in c.gaps)
 

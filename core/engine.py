@@ -7698,6 +7698,83 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if gaps != (record.get("ledger_left") or []) or own != (record.get("unsourced_definitions") or []):
             self._topic_covered_write(ledger_left=gaps, unsourced_definitions=own)
 
+    async def _ask_figures_of_an_edited_plan(self, state: QuestState, design: Any, plan_sha: str) -> tuple[Any, str]:
+        """The design read from plan.md with the figures nothing declares asked about (a person added or renamed one), and the
+        answer written into plan.md's design block, so a resume reads it and does not ask again."""
+        before = design.get("protocol", {}).get("figure_declarations") if isinstance(design, dict) and isinstance(
+            design.get("protocol"), dict) else None
+        asked = await self._ask_figures_of_a_redesign(state, design)
+        now = asked.get("protocol", {}).get("figure_declarations") if isinstance(asked, dict) and isinstance(
+            asked.get("protocol"), dict) else None
+        path = _plan.plan_path(self.quest_root)
+        if not plan_sha or now == before or not now or not path.is_file():
+            return asked, plan_sha
+
+        def change(block: dict[str, Any]) -> dict[str, Any]:
+            protocol = dict(block.get("protocol") or {})
+            protocol["figure_declarations"] = now
+            return {**block, "protocol": protocol}
+
+        try:
+            updated = _plan.edit_design_block(path.read_text(encoding="utf-8"), change)
+            if updated is None:
+                return asked, plan_sha
+            path.write_text(updated, encoding="utf-8")
+            _plan.record_version(self.quest_root, updated, by="engine", note="what the plan's model said each new figure shows")
+            return asked, _plan.sha256(updated)
+        except OSError as e:
+            self._log.warning("[design] couldn't write the figure declarations into plan.md: %r", e)
+            return asked, plan_sha
+
+    def _figure_declarations_after_the_freeze(self, state: QuestState, frozen_protocol: Any) -> dict[str, Any]:
+        """What the plan's model said about each figure, once the protocol is frozen: the declarations the frozen protocol
+        holds, then those of the design in the state (a redesign after the freeze asked about its new files). They are kept in
+        the design, never in the frozen record (:data:`core.frozen_protocol.UNFROZEN_KEYS`)."""
+        out: dict[str, Any] = {}
+        design = state.get("design") if isinstance(state, dict) else None
+        for protocol in (frozen_protocol, design.get("protocol") if isinstance(design, dict) else None):
+            said = protocol.get("figure_declarations") if isinstance(protocol, dict) else None
+            if isinstance(said, dict):
+                out.update({k: v for k, v in said.items() if isinstance(v, dict)})
+        return out
+
+    async def _ask_figures_of_a_redesign(self, state: QuestState, design: Any) -> Any:
+        """``design`` of a redesign (or of a plan a person edited) with the figures it plans that no declaration covers asked
+        about, in one question (:func:`core.contract_parts.ask_parts` with ``only=("figures",)``, at most ``MAX_ASKS``
+        asks): what the plan's model said about a file the design still plans was inherited (:meth:`_inherit_plan_parts`, or,
+        after the freeze, :meth:`_figure_declarations_after_the_freeze`), a new file is asked. Never a stop; a figure left
+        undeclared is drawn by nobody and the contract's gaps say so.
+
+        This runs after the freeze too, and only for figures: a figure is not a result, a setting or a check, the declarations
+        are outside the frozen hash, and the frozen protocol itself (its results, settings and checks) is not touched here."""
+        protocol = design.get("protocol") if isinstance(design, dict) else None
+        frozen = _frozen.protocol_of(self.quest_root)
+        if isinstance(protocol, dict) and frozen is not None:
+            said = self._figure_declarations_after_the_freeze(state, frozen)
+            said.update(protocol.get("figure_declarations") or {})  # the design's own, last
+            if said:
+                design = {**design, "protocol": {**protocol, "figure_declarations": said}}
+                protocol = design["protocol"]
+        if (not isinstance(protocol, dict) or protocol.get("form") != "contract" or self._client is None
+                or not self._runs_code(state)
+                or not self._fis_analysis_planned(design) or not _contract_parts.figure_faults(design)):
+            return design
+
+        async def ask(prompt: str) -> str:
+            return await self._chat(prompt, node="plan_contract")
+
+        try:
+            out = await _contract_parts.ask_parts(design, ask, lambda t: _parse_json_lenient(t, node="plan_contract"),
+                                                  self._prompts, fi_analysis=True, only=("figures",))
+        except Exception:  # noqa: BLE001 -- the redesign goes on with its figures undeclared
+            self._log.warning("[design] the figures of the redesign could not be asked about", exc_info=True)
+            return design
+        for note in out.notes:
+            self._log.warning("[design] %s", note)
+        self._log.info("[design] figures of the redesign: %s", "; ".join(
+            f"{k} {'ok' if v['valid'] else 'left out'} after {v['asks']} ask(s)" for k, v in out.parts.items()) or "none asked")
+        return out.design
+
     def _inherit_plan_parts(self, state: QuestState, design: Any, *, iteration: int) -> Any:
         """A redesign (a design drafted at this step, not read from ``plan.md``) keeps every part of the plan's protocol that it
         does not write itself: the runs per setting, the precision, the thresholds, the checks against known answers, the
@@ -9167,6 +9244,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             design, plan_sha = await self._ask_plan_for_the_search(state, design, plan_sha)
             design, plan_sha = await self._ask_plan_for_the_parts(state, design, plan_sha)
             design, plan_sha = await self._ask_plan_for_the_grid(state, design, plan_sha)
+            design, plan_sha = await self._ask_figures_of_an_edited_plan(state, design, plan_sha)
         else:
             # A design drafted here (a redesign) did not come from plan.md: its search block is completed the same way.
             design, moved_parts = _plan.hoist_protocol_parts(design)
@@ -9176,6 +9254,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             design = await self._complete_a_drafted_search(state, design, iteration=iteration)
             design = await self._complete_drafted_parts(state, design, iteration=iteration)
             design = self._inherit_plan_parts(state, design, iteration=iteration)
+            design = await self._ask_figures_of_a_redesign(state, design)
             design = await self._ask_design_for_the_grid(state, design, iteration=iteration)
             self._check_the_ledger_of_a_redesign(state, design)
         self._stop_if_no_settings_to_vary(state, design)
@@ -11447,6 +11526,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if frozen is not None:
             protocol = frozen.get("protocol")
             protocol = protocol if isinstance(protocol, dict) and protocol else None
+            said = self._figure_declarations_after_the_freeze(state, protocol)
+            if protocol is not None and said:  # not part of the frozen hash (core/frozen_protocol.py::UNFROZEN_KEYS)
+                protocol = {**protocol, "figure_declarations": said}
         else:
             protocol = self._draft_protocol(state)
         self._note_contract(state, protocol, frozen, adopted)
@@ -28433,6 +28515,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "plan_criteria",                    # the plan named no check of correctness: ask once more
         "plan_roles", "plan_names", "plan_comparisons",  # the contract's parts, asked one at a time (core/contract_parts.py)
         "plan_formulas",                    # ... and a formula FI cannot work out as written, when FI writes the analysis
+        "plan_figures",                     # ... and a figure the plan names only by file name, when FI writes the analysis
         "json_reanswer",                    # a required check's reply could not be read: one short JSON re-answer
         "json_reanswer_part",               # ... when part of it could be read: only the unreadable keys are asked again
         "oracle_review",                    # a second model reads the plan's checks against known answers
@@ -34120,7 +34203,7 @@ def _planned_figure_order(state: QuestState) -> list[str]:
     naming a figure this run did not draw matches nothing here.
     """
     planned = (state.get("design") or {}).get("figures_planned")
-    planned_names = [Path(str(f)).name for f in planned if str(f).strip()] if isinstance(planned, list) else []
+    planned_names = [_contract.figure_file(f) for f in planned if str(f).strip()] if isinstance(planned, list) else []
     produced = {Path(str(f)).name for f in (state.get("figures") or [])}
     records = state.get("figure_records") or {}
     return [name for name in dict.fromkeys(planned_names)
