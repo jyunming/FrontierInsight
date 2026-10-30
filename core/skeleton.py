@@ -34,6 +34,9 @@ from typing import Any
 from . import frame_table as _frame_table
 from . import function_steps as _steps
 from . import metric_spec as _metric_spec
+from . import oracle_check as _oracle_check
+from . import oracle_forms as _oracle_forms
+from . import trial_checks as _trial_checks
 
 #: Written into the frame; a quest keeps the frame it was written with (a resume reads the files, never writes them again).
 VERSION = 3
@@ -122,8 +125,10 @@ class UnknownResult(KeyError):
 
 class TrialResult(dict):
     """What one trial returns: a ``dict`` filled by assignment (``out["name"] = value``). A name the plan declares is a
-    result; any other is kept as a diagnostic (FI lists such names from what the trials returned; ``strict`` plans refuse it
-    at once, naming the declared ones).
+    result; so is a name FI itself reads from a trial (a known value's estimate, error and interval ends, what a check
+    measures: :func:`core.skeleton.returnable_names`, the one list ``declare`` is given), which is a diagnostic. Any other
+    name is kept as a diagnostic (FI lists such names from what the trials returned); ``strict`` plans refuse it at once,
+    naming the names allowed.
     ``declare`` is called by the frame, once, before any trial."""
 
     declared = frozenset()
@@ -492,9 +497,40 @@ BODY_EXAMPLE = '''def trial(cell, ctx):
 '''
 
 
+#: Names FI itself asks every trial for besides the plan's results (the request to the model says so): the reason a value
+#: does not exist (``out["why_missing"] = {"name": "diverged"}``).
+FI_ASKED_NAMES = ("why_missing",)
+
+
+def required_names(protocol: dict[str, Any] | None) -> list[str]:
+    """The names, besides the declared results, that other parts of FI read from what a trial returns, so a trial must be
+    free to return them: the estimate, standard error (or variance) and interval ends of a metric's ``known_value`` (the
+    calibration check, :func:`core.trial_checks.truth_names`), every name the ``measure`` of a check that names a case uses
+    (the oracle check calls the simulation on the case and reads them, :func:`core.oracle_check.case_of`), and the list of
+    clusters a clustered metric names. They are diagnostics: read by the checks, never reported as results of the plan."""
+    out: list[str] = list(_trial_checks.truth_names(protocol))
+    for oracle in _oracle_check.declared(protocol):
+        got = _oracle_check.case_of(oracle)
+        if got is not None:
+            out += _oracle_forms.names(got[1])
+    for spec in _metric_spec.declared(protocol):
+        key = _metric_spec._cluster_key(spec)
+        if key:
+            out.append(key)
+    declared = set(declared_names(protocol))
+    return [n for n in dict.fromkeys(out) if n not in declared]
+
+
+def returnable_names(protocol: dict[str, Any] | None) -> list[str]:
+    """Every name a trial may return, the one list the frame's ``RESULTS`` holds: the declared results under their forms
+    (:func:`declared_names`), the names other parts of FI read from a trial (:func:`required_names`) and the names FI asks
+    for itself (:data:`FI_ASKED_NAMES`). A name outside it is refused at once by a plan in the contract form."""
+    return list(dict.fromkeys([*declared_names(protocol), *required_names(protocol), *FI_ASKED_NAMES]))
+
+
 def declared_names(protocol: dict[str, Any] | None) -> list[str]:
-    """The names a trial may return: every id the plan declares as a counting result (result, reference or physical bound)
-    and the forms it may be returned under (``id``, ``id_count``, ``id_total``, ``id_values``), in the plan's order."""
+    """The names a trial may return as results: every id the plan declares as a counting result (result, reference or physical
+    bound) and the forms it may be returned under (``id``, ``id_count``, ``id_total``, ``id_values``), in the plan's order."""
     from . import contract as _contract
 
     ids = declared_ids(protocol)
@@ -574,7 +610,7 @@ def frame_source(design: dict[str, Any], *, stochastic: bool, strict: bool = Fal
     """The text of ``simulate.py`` with the frame and an empty ``trial``. ``stochastic``: ``run_trial`` (one call per seed), else
     ``run_cell``. ``strict``: a name outside the plan's list is refused (a plan in the contract form), else recorded."""
     protocol = design["protocol"]
-    names = declared_names(protocol)
+    names = returnable_names(protocol)
     settings = settings_of(protocol)
     entry = (
         "def run_trial(cell, trial_id, seed):\n"
@@ -589,7 +625,7 @@ def frame_source(design: dict[str, Any], *, stochastic: bool, strict: bool = Fal
         "_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))\n"
         "from fi_frame import Ctx, TrialResult  # noqa: E402\n\n"
         f"SETTINGS = {tuple(settings)!r}  # the settings a cell holds\n"
-        f"RESULTS = {tuple(names)!r}  # the names a trial returns\n"
+        f"RESULTS = {tuple(names)!r}  # the names a trial may return: the plan's results and the names FI reads from a trial\n"
         f"TrialResult.declare(RESULTS, strict={bool(strict)!r})\n"
         f"{TOP_END}\n")
     return _assemble(top, f"{BOTTOM_BEGIN}\n{entry}{BOTTOM_END}\n")
@@ -603,7 +639,8 @@ def _assemble(top: str, bottom: str) -> str:
         f"{top}\n\n"
         f"{SLOT_SIGNATURE}:\n"
         '    """One trial at the setting `cell`: draw with `ctx.rng`, read the thresholds from `ctx.thresholds`, return the\n'
-        '    results by name (`out = TrialResult(); out["name"] = value; return out`)."""\n'
+        '    results by name (`out = TrialResult(); out["name"] = value; return out`). Only the names in RESULTS may be\n'
+        '    returned; any other name fails every trial, so keep other numbers in local variables."""\n'
         f'    raise NotImplementedError("{_steps._STUB_MARK}")\n\n\n'
         f"{bottom}")
 

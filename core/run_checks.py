@@ -902,6 +902,12 @@ class RunChecksMixin:
         return _skeleton.frame_for(design, stochastic=_split_run.design_is_stochastic(design),
                                    strict=_contract.from_design(design).form == "contract", existing=existing)
 
+    def _strict_frame(self, state: Any) -> bool:
+        """Whether the frame refuses a name outside its list (a plan in the contract form)."""
+        from . import contract as _contract
+
+        return _contract.from_design(state.get("design")).form == "contract"
+
     def _frame_on(self) -> bool:
         """Whether FI writes the frame of simulate.py, and so the analysis of a plan in the contract form: the settings
         (``execution.code_skeleton`` with ``split_analysis``, and not the agent coder), read before any code exists."""
@@ -1092,8 +1098,11 @@ class RunChecksMixin:
             "same seed as an integer for a library that wants one; `ctx.trial` is the trial's number; `ctx.thresholds` holds the "
             "plan's thresholds.\n"
             f"- Return the results the plan declares, by name ({names}; a proportion may be returned as `<name>_count` and "
-            "`<name>_total`): `out = TrialResult()`, `out[\"name\"] = value`, `return out`. A result under another name is "
-            "kept as a diagnostic, not as a result of the plan.\n"
+            "`<name>_total`): `out = TrialResult()`, `out[\"name\"] = value`, `return out`. The frame lists in RESULTS every name "
+            "`trial` may return (the plan's results, the names of a `known_value`, the names a check's `measure` uses, "
+            "`why_missing`); " + ("a name outside that list fails EVERY trial with `UnknownResult`, so keep any other number in "
+                                  "a local variable" if self._strict_frame(state) else "any other name is kept as a diagnostic, "
+                                  "not as a result of the plan") + ".\n"
             "- A quantity the method cannot give at this setting (it diverged, there is no crossing in the range) is `None`, with "
             "the reason in `out[\"why_missing\"] = {\"name\": \"reason\"}`, never a stand-in number (0, -1, a bound). A trial whose "
             "code fails raises an exception with the reason instead of returning a made-up value. `trial` writes no files, "
