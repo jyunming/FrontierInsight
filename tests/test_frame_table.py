@@ -419,3 +419,10 @@ def test_the_last_error_in_the_dict_is_the_latest_raised_and_an_unhashable_id_ke
     assert list(t.last_error) == ["alive", "growth"] and "again" in t.last_error["growth"]
     with pytest.raises(type(t).__init__.__globals__["UnknownResult"]):
         t.mean(["growth"], "rate=0.1,dose=1")
+
+
+def test_a_list_is_not_a_key_of_level_means_or_reference_either() -> None:
+    t = _table()
+    for read in (lambda: t.level_means("growth", ["rate=0.1,dose=1"]), lambda: t.reference("growth", ["rate=0.1,dose=1"])):
+        with pytest.raises(TypeError, match="list of settings"):
+            read()

@@ -575,7 +575,7 @@ def test_the_reads_are_forgotten_between_figures(tmp_path):
     def figure_two(fig, table):
         fig.axes[0].plot([1, 2], [1, 2])
 
-    out = af.run_figures([{"id": "one", "file": "one.png"}, {"id": "two", "file": "two.png"}],
+    out = af.run_figures([{"id": "one", "file": "one.png", "shows": ["r1"]}, {"id": "two", "file": "two.png", "shows": ["r1"]}],
                          {"figure_one": figure_one, "figure_two": figure_two}, table, str(tmp_path))
     assert [o["status"] for o in out] == ["ok", "failed"]
 
@@ -607,3 +607,40 @@ def test_the_failure_text_survives_what_a_model_may_read_when_a_quantity_is_left
     assert out["status"] == "failed" and key not in out["said"]
     seen = eng._stderr_for_models(af.said([out]))
     assert "drew nothing from the trial record" in seen and "[FI NOTE]" not in seen
+
+
+def test_a_figure_that_declares_no_result_is_not_checked_and_one_that_declares_results_is(tmp_path):
+    def layout(fig, table):
+        fig.axes[0].plot([1, 2], [1, 2])  # a layout or a reference curve: reads nothing, says it shows no result
+
+    assert _shown(tmp_path, layout, shows=[])["status"] == "ok"
+    assert _shown(tmp_path, layout, shows="missing")["status"] == "ok"
+    assert _shown(tmp_path, layout, shows=["r1"])["status"] == "failed"
+
+
+def test_a_levels_error_that_names_the_result_is_cut_to_its_type_and_the_line_survives_what_a_model_reads(tmp_path, monkeypatch):
+    from tests.test_run_checks import _typed_engine
+    import asyncio
+
+    eng, _asked = _typed_engine(tmp_path, monkeypatch, [json.dumps({"code": "def broken(:\n"})])
+    asyncio.run(eng._results_from_computation({}))
+    key = sorted(eng._left_out_quantities())[0]
+    from core import frame_table, skeleton
+
+    sys.modules["fi_table"] = frame_table
+    ns: dict[str, Any] = {"fi_table": frame_table}
+    exec(compile(skeleton.RUNTIME, "fi_frame.py", "exec"), ns)  # noqa: S102 -- FI's own runtime text
+    cells = [{"cell": {"a": 1}, "key": "a=1", "planned": 1, "ok": 1, "failed": 0, "metrics": {key: {"values": [1.0]}}},
+             {"cell": {"a": 1}, "level": {"m": 1, "n": 2}, "key": "a=1", "metrics": {key: {"values": [1.0]}}}]
+    table = ns["Table"](cells, [key])
+
+    def figure_x(fig, table):
+        try:
+            table.levels(key, "m", "a=1")  # the run also compares another factor: the error names the result
+        except Exception:
+            pass
+        fig.axes[0].plot([1, 2], [1, 2])
+
+    out = _shown(tmp_path, figure_x, table=table)
+    assert out["status"] == "failed" and key not in out["said"] and "raised ValueError." in out["why"]
+    assert "drew nothing from the trial record" in eng._stderr_for_models(af.said([out]))

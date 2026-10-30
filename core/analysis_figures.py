@@ -172,6 +172,8 @@ def _last_read_error(table: Any) -> str:
     last = list(errors.values())[-1] if isinstance(errors, dict) and errors else ""
     if last.startswith("UnknownResult"):
         return "UnknownResult: a result the plan does not declare"
+    if last.startswith(("ValueError", "KeyError")):  # `levels` names the result in its ValueError: only the type is kept
+        return last.split(":", 1)[0]
     return last[:240]
 
 
@@ -180,8 +182,9 @@ def _drew_nothing(spec: dict[str, Any], table: Any) -> str:
     record its reads). FI's table notes each read that returned data, so this reads no text of the body. It names no result:
     the line goes to a model, and a line naming a left-out quantity is taken out of what a model reads."""
     gave = getattr(table, "gave_values", None)
-    if not isinstance(gave, (set, frozenset)) or gave:
-        return ""
+    shows = spec.get("shows")
+    if not isinstance(gave, (set, frozenset)) or gave or not shows or not isinstance(shows, (list, tuple)):
+        return ""  # a figure that declares no result draws what it says it draws (a layout, a reference curve): not checked
     text = "`figure_%s` drew nothing from the trial record: no read of a result returned a value." % spec.get("id")
     err = _last_read_error(table)
     return text + (" The last read raised %s." % err if err else "")

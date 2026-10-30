@@ -365,10 +365,14 @@ class Table:
         if name not in self.served:
             self.served.append(name)
 
-    def _cell(self, key):
+    @staticmethod
+    def _one_key(key):
         if isinstance(key, (list, tuple)):
             raise TypeError("`%s` is a list of settings, not one setting: `table.at(...)` gives every key that holds those values; "
                             "take one of them (for example `table.at(...)[0]`) or loop over them" % (list(key),))
+
+    def _cell(self, key):
+        self._one_key(key)
         if key not in self._settings:
             raise KeyError("`%s` is not a setting of the study; the settings are: %s" % (key, ", ".join(self.keys())))
         return self._settings[key]
@@ -487,6 +491,7 @@ class Table:
         import fi_table
 
         self._check(name)
+        self._one_key(key)
         out = {}
         for c in self._by_setting.get(key, []):
             if name not in c["metrics"]:
@@ -523,6 +528,7 @@ class Table:
     def reference(self, name, key):
         """The reference value of ``name`` at setting ``key`` that FI worked out from the plan; ``None`` when it has none."""
         self._check(name)
+        self._one_key(key)
         return (self._references.get(name) or {}).get(key)
 
     def missing(self, why):
