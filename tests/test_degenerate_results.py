@@ -539,15 +539,21 @@ def test_a_dropped_figure_is_marked_dropped_with_its_reason_in_the_run_record_an
     (folder / "fine_two.png").write_bytes(b"png")
     record_path = eng.quest_root / "data" / "results" / "derived.json"
     record_path.parent.mkdir(parents=True, exist_ok=True)
-    record_path.write_text(json.dumps({"schema": 1, "derived": {}, "figures": [
+    record_path.write_text(json.dumps({"schema": 1, "derived": {}, "figures_said": "2 of 2 figure(s) drawn.", "figures": [
         {"id": "empty_two", "file": "empty_two.png", "status": "ok", "why": "", "said": "Figure `empty_two` was drawn (empty_two.png)."},
         {"id": "fine_two", "file": "fine_two.png", "status": "ok", "why": "", "said": "Figure `fine_two` was drawn (fine_two.png)."},
     ]}), encoding="utf-8")
     eng._drop_figures(["empty_two.png"], {"empty_two.png": "the panel draws no data"})
-    entries = {e["id"]: e for e in json.loads(record_path.read_text(encoding="utf-8"))["figures"]}
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    entries = {e["id"]: e for e in record["figures"]}
     assert entries["empty_two"]["status"] == "dropped" and entries["empty_two"]["why"] == "the panel draws no data"
     assert "left out" in entries["empty_two"]["said"]
     assert entries["fine_two"]["status"] == "ok" and not (folder / "empty_two.png").exists()
+    # figures_said is the run's own builder over the updated entries: one drawn, one dropped (counted as not drawn).
+    from core import analysis_figures
+
+    assert record["figures_said"] == analysis_figures.said(record["figures"])
+    assert record["figures_said"].startswith("1 of 2 figure(s) drawn.") and "left out" in record["figures_said"]
 
 
 @pytest.mark.asyncio

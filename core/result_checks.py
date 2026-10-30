@@ -70,6 +70,10 @@ def _mark_dropped_figures(quest_root: Path, names: list[str], reasons: dict[str,
                               "said": f"Figure `{entry.get('id')}` was left out of the results: {why}."})
                 changed = True
     if changed:
+        from . import analysis_figures as _figures
+
+        # The record's own sentence about the figures, built as the run builds it (so it counts the dropped one as not drawn).
+        record["figures_said"] = _figures.said(entries)
         try:
             path.write_text(json.dumps(record, indent=1), encoding="utf-8")
         except OSError as exc:
