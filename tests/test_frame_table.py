@@ -407,3 +407,15 @@ def test_the_last_error_of_a_read_is_kept_even_when_the_caller_swallows_it() -> 
         pass
     assert t.last_error["growth"].startswith("TypeError: ") and "list of settings" in t.last_error["growth"]
     assert t.gave_values == set()
+
+
+def test_the_last_error_in_the_dict_is_the_latest_raised_and_an_unhashable_id_keeps_its_own_error() -> None:
+    t = _table()
+    for name, key in (("growth", "no such setting"), ("alive", "no such setting"), ("growth", "again")):
+        try:
+            t.mean(name, key)
+        except KeyError:
+            pass
+    assert list(t.last_error) == ["alive", "growth"] and "again" in t.last_error["growth"]
+    with pytest.raises(type(t).__init__.__globals__["UnknownResult"]):
+        t.mean(["growth"], "rate=0.1,dose=1")

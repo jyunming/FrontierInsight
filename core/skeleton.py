@@ -294,7 +294,9 @@ def _noting(method):
         try:
             return method(self, name, *args, **kwargs)
         except Exception as err:
-            self.last_error[name] = "%s: %s" % (type(err).__name__, err)
+            if isinstance(name, str):
+                self.last_error.pop(name, None)  # the dict keeps the order of the raises: the last item is the latest
+                self.last_error[name] = "%s: %s" % (type(err).__name__, err)
             raise
     wrapper.__name__, wrapper.__doc__ = method.__name__, method.__doc__
     return wrapper

@@ -165,41 +165,26 @@ def _folder(out_dir: str) -> dict[str, tuple[int, int]]:
     return seen
 
 
-def with_sources(spec: dict[str, Any], derived: Any) -> dict[str, Any]:
-    """``spec`` with ``counts_as``: for each result it shows, the ids whose data it is drawn from. ``derived`` is the plan's own map
-    ``{id: {"inputs": [...]}}``; a derived id is followed through its inputs (and theirs) down to the trial results, and a cycle
-    is cut. Nothing is read from the body."""
-    derived = derived if isinstance(derived, dict) else {}
-
-    def sources(ident: str, seen: frozenset) -> list:
-        got = [ident]
-        entry = derived.get(ident)
-        for i in (entry.get("inputs") if isinstance(entry, dict) else None) or []:
-            if i not in seen:
-                got += sources(str(i), seen | {ident})
-        return got
-
-    return dict(spec, counts_as={str(s): sources(str(s), frozenset()) for s in spec.get("shows") or []})
+def _last_read_error(table: Any) -> str:
+    """The most recent exception a read of the table raised, cut to its type and first clause (an ``UnknownResult`` lists the
+    declared results, so only its type is kept: this text must not name a result)."""
+    errors = getattr(table, "last_error", None)
+    last = list(errors.values())[-1] if isinstance(errors, dict) and errors else ""
+    if last.startswith("UnknownResult"):
+        return "UnknownResult: a result the plan does not declare"
+    return last[:240]
 
 
-def _shows_none(spec: dict[str, Any], table: Any) -> str:
-    """Why a figure that is to show results drew none of them from the trial record (``""`` when it drew one, or when the table
-    does not record its reads). FI's table notes each read that returned data, so this reads no text of the body."""
-    shows = spec.get("shows")
-    gave, errors = getattr(table, "gave_values", None), getattr(table, "last_error", None)
-    if not shows or not isinstance(shows, (list, tuple)) or not isinstance(gave, (set, frozenset)):
+def _drew_nothing(spec: dict[str, Any], table: Any) -> str:
+    """Why a figure drew nothing from the trial record (``""`` when some read of a result gave data, or when the table does not
+    record its reads). FI's table notes each read that returned data, so this reads no text of the body. It names no result:
+    the line goes to a model, and a line naming a left-out quantity is taken out of what a model reads."""
+    gave = getattr(table, "gave_values", None)
+    if not isinstance(gave, (set, frozenset)) or gave:
         return ""
-    shows = [str(s) for s in shows]
-    own = spec.get("counts_as") if isinstance(spec.get("counts_as"), dict) else {}
-    if any(g in gave for s in shows for g in own.get(s, [s])):
-        return ""
-    said = ", ".join("`%s`" % s for s in shows)
-    text = "the figure is to show %s, and `figure_%s` drew none of them from the trial record (no read of it returned a value)." % (
-        said, spec.get("id"))
-    for s in shows:
-        if isinstance(errors, dict) and errors.get(s):
-            text += " The last read of `%s` raised %s." % (s, errors[s])
-    return text
+    text = "`figure_%s` drew nothing from the trial record: no read of a result returned a value." % spec.get("id")
+    err = _last_read_error(table)
+    return text + (" The last read raised %s." % err if err else "")
 
 
 def _draw_one(spec: dict[str, Any], body: Any, table: Any, out_dir: str) -> dict[str, Any]:
@@ -250,7 +235,7 @@ def _draw_one(spec: dict[str, Any], body: Any, table: Any, out_dir: str) -> dict
         empty = _empty_panels(axes)
         if empty:
             return _outcome(fid, file, "failed", "`figure_%s` drew nothing on panel %s." % (fid, " and ".join(map(str, empty))))
-        none_drawn = _shows_none(spec, table)
+        none_drawn = _drew_nothing(spec, table)
         if none_drawn:
             return _outcome(fid, file, "failed", none_drawn)
         try:
