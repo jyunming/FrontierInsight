@@ -165,6 +165,43 @@ def _folder(out_dir: str) -> dict[str, tuple[int, int]]:
     return seen
 
 
+def with_sources(spec: dict[str, Any], derived: Any) -> dict[str, Any]:
+    """``spec`` with ``counts_as``: for each result it shows, the ids whose data it is drawn from. ``derived`` is the plan's own map
+    ``{id: {"inputs": [...]}}``; a derived id is followed through its inputs (and theirs) down to the trial results, and a cycle
+    is cut. Nothing is read from the body."""
+    derived = derived if isinstance(derived, dict) else {}
+
+    def sources(ident: str, seen: frozenset) -> list:
+        got = [ident]
+        entry = derived.get(ident)
+        for i in (entry.get("inputs") if isinstance(entry, dict) else None) or []:
+            if i not in seen:
+                got += sources(str(i), seen | {ident})
+        return got
+
+    return dict(spec, counts_as={str(s): sources(str(s), frozenset()) for s in spec.get("shows") or []})
+
+
+def _shows_none(spec: dict[str, Any], table: Any) -> str:
+    """Why a figure that is to show results drew none of them from the trial record (``""`` when it drew one, or when the table
+    does not record its reads). FI's table notes each read that returned data, so this reads no text of the body."""
+    shows = spec.get("shows")
+    gave, errors = getattr(table, "gave_values", None), getattr(table, "last_error", None)
+    if not shows or not isinstance(shows, (list, tuple)) or not isinstance(gave, (set, frozenset)):
+        return ""
+    shows = [str(s) for s in shows]
+    own = spec.get("counts_as") if isinstance(spec.get("counts_as"), dict) else {}
+    if any(g in gave for s in shows for g in own.get(s, [s])):
+        return ""
+    said = ", ".join("`%s`" % s for s in shows)
+    text = "the figure is to show %s, and `figure_%s` drew none of them from the trial record (no read of it returned a value)." % (
+        said, spec.get("id"))
+    for s in shows:
+        if isinstance(errors, dict) and errors.get(s):
+            text += " The last read of `%s` raised %s." % (s, errors[s])
+    return text
+
+
 def _draw_one(spec: dict[str, Any], body: Any, table: Any, out_dir: str) -> dict[str, Any]:
     """Draw one declared figure. A fault of the model's body is ``failed`` / ``refused`` (its repair); a fault of FI's own lines
     (making the figure, handing it over, the folder) is ``fi_fault`` and is never sent to the model."""
@@ -177,6 +214,9 @@ def _draw_one(spec: dict[str, Any], body: Any, table: Any, out_dir: str) -> dict
         name = getattr(body, "__name__", "figure_%s" % fid)
         plt, fig, axes = _new_figure(spec.get("panels") or 1)
         handle = _figure_handle(axes, spec, file)
+        reset = getattr(table, "reset_reads", None)
+        if callable(reset):
+            reset()  # what the reads of this one body give is recorded from here
         plt.sca(axes[0])  # a body that draws with the bare pyplot calls still draws on its first axes
         os.makedirs(out_dir, exist_ok=True)
         folder = _folder(out_dir)
@@ -210,6 +250,9 @@ def _draw_one(spec: dict[str, Any], body: Any, table: Any, out_dir: str) -> dict
         empty = _empty_panels(axes)
         if empty:
             return _outcome(fid, file, "failed", "`figure_%s` drew nothing on panel %s." % (fid, " and ".join(map(str, empty))))
+        none_drawn = _shows_none(spec, table)
+        if none_drawn:
+            return _outcome(fid, file, "failed", none_drawn)
         try:
             fig.savefig(os.path.join(out_dir, file))  # the recorder of the house style notes what the figure draws
         except Exception as err:

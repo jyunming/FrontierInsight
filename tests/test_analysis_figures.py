@@ -483,3 +483,88 @@ def test_a_file_the_body_wrote_in_the_figure_folder_is_removed_and_refused(tmp_p
     assert out[0]["status"] == "refused" and "side.png" in out[0]["why"]
     assert not (tmp_path / "side.png").exists() and not (tmp_path / "png.png").exists()
     assert (tmp_path / "other.png").read_bytes() == b"another figure of an earlier step"
+
+
+# ---- a figure that is to show results and draws none of them from the record ------------------------------------------------------
+def _real_table():
+    from core import frame_table, skeleton
+
+    sys.modules["fi_table"] = frame_table
+    ns: dict[str, Any] = {"fi_table": frame_table}
+    exec(compile(skeleton.RUNTIME, "fi_frame.py", "exec"), ns)  # noqa: S102 -- FI's own runtime text
+    cells = [{"cell": {"a": a}, "key": "a=%d" % a, "planned": 2, "ok": 2, "failed": 0,
+              "metrics": {"r1": {"values": [1.0 * a, 2.0 * a]}, "r2": {"values": [float("nan")]}}} for a in (1, 2, 3)]
+    return ns["Table"](cells, ["r1", "r2"])
+
+
+def _shown(tmp_path, body, shows=("r1",)):
+    spec = {"id": "x", "file": "x.png"}
+    if shows != "missing":
+        spec["shows"] = shows
+    return af.run_figures([spec], {"figure_x": body}, _real_table(), str(tmp_path))[0]
+
+
+def test_a_figure_that_hides_the_error_of_its_reads_and_draws_only_curves_is_failed_with_the_error_text(tmp_path):
+    def figure_x(fig, table):
+        import numpy as np
+
+        for p in range(1, 3):
+            try:
+                table.mean("r1", table.at(a=p))  # a list, not a key
+            except Exception:
+                continue
+        fig.axes[0].plot(np.linspace(1, 3, 5), np.linspace(1, 3, 5) ** 2)
+        fig.axes[0].axhline(0.05)
+
+    out = _shown(tmp_path, figure_x)
+    assert out["status"] == "failed" and "`r1`" in out["why"] and "TypeError: " in out["why"] and "list of settings" in out["why"]
+    assert not (tmp_path / "x.png").exists()
+
+
+def test_a_figure_that_reads_and_plots_what_it_shows_is_ok(tmp_path):
+    def figure_x(fig, table):
+        fig.axes[0].plot([1, 2, 3], [table.mean("r1", k) for k in table.keys()])
+
+    assert _shown(tmp_path, figure_x)["status"] == "ok"
+
+
+def test_a_figure_that_reads_only_another_declared_name_is_failed_naming_what_it_was_to_show(tmp_path):
+    def figure_x(fig, table):
+        got = [table.mean("r2", k) for k in table.keys()]
+        fig.axes[0].plot([1, 2, 3], [g for g in got if g is not None] or [0, 0, 0])
+
+    out = _shown(tmp_path, figure_x)
+    assert out["status"] == "failed" and "`r1`" in out["why"] and "none of them" in out["why"]
+
+
+def test_one_declared_result_drawn_of_two_is_not_failed(tmp_path):
+    def figure_x(fig, table):
+        fig.axes[0].plot([1, 2, 3], [table.mean("r1", k) for k in table.keys()])
+
+    assert _shown(tmp_path, figure_x, shows=["r1", "r2"])["status"] == "ok"
+
+
+def test_a_figure_with_no_shows_is_unchanged(tmp_path):
+    def figure_x(fig, table):
+        fig.axes[0].axhline(0.05)
+
+    assert _shown(tmp_path, figure_x, shows="missing")["status"] == "ok"
+    assert _shown(tmp_path, figure_x, shows=[])["status"] == "ok"
+
+
+def test_a_derived_result_is_drawn_when_the_body_read_one_of_its_inputs_down_to_the_trial_results(tmp_path):
+    derived = {"d1": {"inputs": ["d2"]}, "d2": {"inputs": ["r1", "d1"]}}  # d1 -> d2 -> r1, and a cycle back to d1
+
+    def figure_x(fig, table):
+        fig.axes[0].plot([1, 2, 3], [table.mean("r1", k) for k in table.keys()])
+
+    spec = af.with_sources({"id": "x", "file": "x.png", "shows": ["d1"]}, derived)
+    assert spec["counts_as"] == {"d1": ["d1", "d2", "r1"]}
+    assert af.run_figures([spec], {"figure_x": figure_x}, _real_table(), str(tmp_path))[0]["status"] == "ok"
+    bare = {"id": "x", "file": "x.png", "shows": ["d1"], "counts_as": {"d1": ["d1"]}}
+    assert af.run_figures([bare], {"figure_x": figure_x}, _real_table(), str(tmp_path))[0]["status"] == "failed"
+
+    def reads_other(fig, table):
+        fig.axes[0].plot([1, 2, 3], [table.mean("r2", k) or 0 for k in table.keys()])
+
+    assert af.run_figures([spec], {"figure_x": reads_other}, _real_table(), str(tmp_path))[0]["status"] == "failed"

@@ -1253,7 +1253,7 @@ def _figures(table, quest_root):
         raise FIFault("FI's figure step (fi_figures.py) cannot be loaded (%s)" % e)
     out_dir = os.path.join(quest_root, "figures")
     os.makedirs(out_dir, exist_ok=True)
-    specs = [dict(v, id=i) for i, v in derive.FIGURES.items()]
+    specs = [fi_figures.with_sources(dict(v, id=i), derive.DERIVED) for i, v in derive.FIGURES.items()]
     try:
         outcomes = []
         for spec in specs:

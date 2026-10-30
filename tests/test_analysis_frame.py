@@ -767,7 +767,7 @@ def test_undefined_trials_are_printed_not_dropped(tmp_path: Path) -> None:
 def test_a_run_that_fails_after_an_accepted_run_keeps_its_figures_and_says_so(tmp_path: Path) -> None:
     bodies = """
     def figure_fig1(fig, table):
-        fig.axes[0].plot([1, 2], [1, 2])
+        fig.axes[0].plot([1, 2], [table.mean("growth", k) for k in table.keys()][:2])
     """
     quest = _quest(tmp_path, _design(), bodies)
     code, _printed, first, err = _run(quest)
@@ -784,7 +784,7 @@ def test_a_run_that_fails_after_an_accepted_run_keeps_its_figures_and_says_so(tm
 
 
 def test_a_figure_a_later_run_did_not_draw_is_kept_and_marked(tmp_path: Path) -> None:
-    quest = _quest(tmp_path, _design(), "def figure_fig1(fig, table):\n    fig.axes[0].plot([1, 2], [1, 2])\n")
+    quest = _quest(tmp_path, _design(), "def figure_fig1(fig, table):\n    fig.axes[0].plot([1, 2], [table.mean('growth', k) for k in table.keys()][:2])\n")
     assert _run(quest)[0] == 0
     accepted = (quest / "figures" / "growth.png").read_bytes()
     (quest / "code" / "fi_figures.py").unlink()  # a quest whose analysis has no figure step
@@ -797,7 +797,7 @@ def test_a_figure_a_later_run_did_not_draw_is_kept_and_marked(tmp_path: Path) ->
 
 
 def test_a_figure_the_new_run_tried_and_failed_is_never_the_old_one(tmp_path: Path) -> None:
-    quest = _quest(tmp_path, _design(), "def figure_fig1(fig, table):\n    fig.axes[0].plot([1, 2], [1, 2])\n")
+    quest = _quest(tmp_path, _design(), "def figure_fig1(fig, table):\n    fig.axes[0].plot([1, 2], [table.mean('growth', k) for k in table.keys()][:2])\n")
     assert _run(quest)[0] == 0
     derive = quest / "code" / "derive.py"
     derive.write_text(derive.read_text(encoding="utf-8") + "\n\ndef figure_fig1(fig, table):\n    raise ValueError('x')\n", encoding="utf-8")
