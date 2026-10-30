@@ -310,7 +310,9 @@ def test_a_quest_with_an_older_frame_keeps_the_analysis_the_model_writes(tmp_pat
     assert engine._analysis_bodies({"design": DESIGN}) == BODIES
     code = engine.quest_root / "code"
     code.mkdir(parents=True, exist_ok=True)
-    (code / "simulate.py").write_text("# version 2\n", encoding="utf-8")
+    # A frame an older FI wrote for the same plan: the quest keeps it (skeleton.frame_for), and with it the model's analysis
+    older = skeleton.frame_source(DESIGN, stochastic=True).replace(f"version {skeleton.VERSION}", "version 2")
+    (code / "simulate.py").write_text(older, encoding="utf-8")
     assert engine._analysis_bodies({"design": DESIGN}) is None
 
 
