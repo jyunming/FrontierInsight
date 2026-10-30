@@ -39,7 +39,7 @@ COMPARE = {"comparisons": [{"result": "algae_peak", "across": "temp", "values": 
 GOOD = {"figures": {
     "pond_peak.png": {"shows": ["algae_peak"], "x": "temp", "series": "nutrient", "panels": 2},
     "pond_bloom.png": {"shows": ["bloom"], "x": "nutrient", "series": "temp", "panels": 1},
-    "pond_gap.png": {"shows": ["algae_peak_by_temp"], "x": "nutrient", "series": None, "panels": 1}}}
+    "pond_gap.png": {"shows": ["algae_peak", "bloom"], "x": "nutrient", "series": None, "panels": 1}}}
 BAD = {"figures": {**GOOD["figures"], "pond_bloom.png": {"shows": ["salinity"], "x": "nutrient", "panels": 1}}}
 
 MARKERS = (("roles", "What kind of number it is"), ("comparisons", "compares between values"),
@@ -89,10 +89,10 @@ async def test_figures_named_only_by_file_are_asked_and_declared_and_the_gap_goe
     assert [(f.id, f.file, f.shows, f.x, f.series, f.panels, f.declared) for f in c.figures] == [
         ("fig1", "pond_peak.png", ("algae_peak",), "temp", "nutrient", 2, True),
         ("fig2", "pond_bloom.png", ("bloom",), "nutrient", "temp", 1, True),
-        ("fig3", "pond_gap.png", ("algae_peak_by_temp",), "nutrient", None, 1, True)]
+        ("fig3", "pond_gap.png", ("algae_peak", "bloom"), "nutrient", None, 1, True)]
     assert not any("only by file name" in g for g in c.gaps), c.gaps
     first = fake.prompts[2][1]  # the plan's own words, what may be shown, the settings and the panel limit
-    assert "- pond_gap.png: (the difference in peak" in first and "- algae_peak_by_temp:" in first
+    assert "- pond_gap.png: (the difference in peak" in first and "- algae_peak:" in first and "algae_peak_by_temp" not in first
     assert "nutrient, temp" in first and f"at most {contract.MAX_PANELS} panel" in first
 
 
@@ -118,7 +118,7 @@ async def test_a_bad_answer_is_sent_back_and_the_second_good_one_kept() -> None:
 @pytest.mark.asyncio
 async def test_each_fault_of_an_answer_is_named() -> None:
     held = cp.strip_fi_keys(DESIGN)
-    asked = cp._figure_faults(held)
+    asked = cp.figure_faults(held)
     assert list(asked) == ["pond_peak.png", "pond_bloom.png", "pond_gap.png"]
     row = {"shows": ["algae_peak"], "x": "temp", "series": None, "panels": 1}
     problems = cp._check_figures({"pond_peak.png": {**row, "x": "depth", "panels": 9}, "pond_bloom.png": {"shows": []},
@@ -188,11 +188,168 @@ async def test_the_audits_verdict_covers_the_design_after_the_figures_are_answer
     """The answer is FI's, not the study the audit judged: the design core is the plan's, with the figures as it wrote them,
     and a model's own mark for the answer is dropped."""
     out = await run(Fake(roles=[ROLES], comparisons=[COMPARE], figures=[GOOD]))
-    assert "figures" in out.design["protocol"] and "figures_asked" in out.design["protocol"]
+    assert "figure_declarations" in out.design["protocol"] and "figures" not in out.design["protocol"]
+    assert out.design["figures_planned"] == PLANNED  # the plan's own list is never rewritten
     assert receipts.design_core(out.design) == receipts.design_core(DESIGN)
     both = _copy()
     both["protocol"]["figures"] = ["x.png (shows algae)"]
     again = await run(Fake(roles=[ROLES], comparisons=[COMPARE], figures=[{"figures": {"x.png": GOOD["figures"]["pond_peak.png"]}}]),
                       both)
     assert receipts.design_core(again.design) == receipts.design_core(both)
-    assert "figures" not in cp.strip_fi_keys(out.design)["protocol"]
+    assert "figure_declarations" not in cp.strip_fi_keys(out.design)["protocol"]
+    assert again.design["protocol"]["figures"] == ["x.png (shows algae)"]
+
+
+# --- the redesign, the plan file, the file names, the axes ---------------------------------------------------------------------
+def _planned_protocol() -> dict[str, Any]:
+    """The plan's protocol after the plan step answered the figures of DESIGN (as the plan file holds it)."""
+    p = json.loads(json.dumps(DESIGN["protocol"]))
+    for m in p["metrics"]:
+        m.update(ROLES["results"][m["id"]])
+    return {**p, "form": "contract", "figure_declarations": json.loads(json.dumps(GOOD["figures"]))}
+
+
+def _redesign_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, asked: list[str], answer: Any) -> Any:
+    from core.config import ExecutionConfig
+    from tests.test_contract_parts import _engine
+
+    engine = _engine(tmp_path)
+    monkeypatch.setattr("core.plan.load_design", lambda root: ({"hypothesis": "h", "protocol": _planned_protocol()}, None))
+    engine.config.execution = ExecutionConfig(sandbox="venv", split_analysis=True, code_skeleton=True)
+    engine._client = object()  # type: ignore[assignment]
+    engine._prompts = TEMPLATES
+
+    async def chat(prompt: str, **kw: Any) -> str:
+        asked.append(prompt)
+        return json.dumps(answer)
+
+    monkeypatch.setattr(engine, "_chat", chat)
+    return engine
+
+
+def _redraft(**changes: Any) -> dict[str, Any]:
+    """A redesign: its own grid, metrics (with roles) and figures, none of the plan's declarations."""
+    protocol = {"grid": {"nutrient": [1, 2, 4], "temp": [10, 20]}, "runs_per_setting": 50,
+                "metrics": [{**m, **ROLES["results"][m["id"]]} for m in DESIGN["protocol"]["metrics"]]}
+    return {"hypothesis": "h", "method": "m", "protocol": protocol, **changes}
+
+
+@pytest.mark.asyncio
+async def test_a_redesign_that_keeps_the_figures_inherits_their_declarations_and_asks_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asked: list[str] = []
+    engine = _redesign_engine(tmp_path, monkeypatch, asked, {})
+    state = {"design": {}, "iteration": 1}
+    design = engine._inherit_plan_parts(state, _redraft(figures_planned=list(PLANNED)), iteration=1)
+    assert set(design["protocol"]["figure_declarations"]) == {"pond_peak.png", "pond_bloom.png", "pond_gap.png"}
+    design = await engine._ask_figures_of_a_redesign(state, design)
+    assert asked == []
+    c = contract.from_design(design, fi_analysis=True)
+    assert [f.declared for f in c.figures] == [True] * 3 and not any("only by file name" in g for g in c.gaps)
+    assert {"figure_fig1", "figure_fig2", "figure_fig3"} <= set(af.body_names(af.plan_of(design)))
+
+
+@pytest.mark.asyncio
+async def test_a_redesign_with_its_own_figures_has_the_new_ones_asked_and_declared_and_the_gone_ones_dropped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asked: list[str] = []
+    new = {"figures": {"pond_new.png": {"shows": ["bloom"], "x": "temp", "series": "nutrient", "panels": 1}}}
+    engine = _redesign_engine(tmp_path, monkeypatch, asked, new)
+    state = {"design": {}, "iteration": 1}
+    own = ["pond_peak.png (peak against temp)", "pond_new.png (bloom against temp for each nutrient)"]
+    design = engine._inherit_plan_parts(state, _redraft(figures_planned=own), iteration=1)
+    design = await engine._ask_figures_of_a_redesign(state, design)
+    assert len(asked) == 1 and "- pond_new.png:" in asked[0] and "- pond_peak.png:" not in asked[0]
+    c = contract.from_design(design, fi_analysis=True)
+    assert [(f.id, f.file, f.declared) for f in c.figures] == [("fig1", "pond_peak.png", True), ("fig2", "pond_new.png", True)]
+    assert set(design["protocol"]["figure_declarations"]) == {"pond_peak.png", "pond_new.png"}  # the files no longer planned are gone
+    assert design["figures_planned"] == own
+
+
+@pytest.mark.asyncio
+async def test_a_redesign_whose_old_declaration_no_longer_fits_has_that_figure_asked_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asked: list[str] = []
+    again = {"figures": {"pond_peak.png": {"drop": True, "why": "it needs the setting that is gone"},
+                         "pond_bloom.png": {"shows": ["bloom"], "x": "nutrient", "series": None, "panels": 1}}}
+    engine = _redesign_engine(tmp_path, monkeypatch, asked, again)
+    state = {"design": {}, "iteration": 1}
+    redraft = _redraft(figures_planned=list(PLANNED[:2]))
+    redraft["protocol"]["grid"] = {"nutrient": [1, 2, 4], "light": [1, 2]}  # `temp` is gone: the figure that used it cannot stand
+    design = engine._inherit_plan_parts(state, redraft, iteration=1)
+    design = await engine._ask_figures_of_a_redesign(state, design)
+    assert len(asked) == 1 and "- pond_peak.png:" in asked[0] and "- pond_bloom.png:" in asked[0]
+    c = contract.from_design(design, fi_analysis=True)
+    assert [f.file for f in c.figures] == ["pond_bloom.png"] and c.figures[0].declared and c.figures[0].x == "nutrient"
+
+
+@pytest.mark.asyncio
+async def test_a_redesign_is_not_asked_when_fi_does_not_write_the_analysis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core.config import ExecutionConfig
+
+    asked: list[str] = []
+    engine = _redesign_engine(tmp_path, monkeypatch, asked, {})
+    state = {"design": {}, "iteration": 1}
+    redraft = _redraft(figures_planned=["pond_new.png (x)"])
+    redraft["protocol"]["form"] = "contract"
+    engine.config.execution = ExecutionConfig(sandbox="venv", split_analysis=True, code_skeleton=False)
+    assert await engine._ask_figures_of_a_redesign(state, redraft) == redraft and asked == []
+
+
+def test_the_declarations_survive_the_plan_file_and_the_plans_own_figures_are_what_is_drawn() -> None:
+    from core import plan
+
+    protocol = _planned_protocol()
+    text = plan.render("Algae", {}, {**DESIGN, "protocol": protocol, "plan": {}}, [])
+    parsed = plan.parse(text).design
+    assert parsed["protocol"]["figure_declarations"] == protocol["figure_declarations"]
+    assert parsed["figures_planned"] == PLANNED
+    assert [f.declared for f in contract.from_design(parsed, fi_analysis=True).figures] == [True] * 3
+    # a person adds a figure and removes two in plan.md: the plan's list decides which are drawn
+    edited = {**parsed, "figures_planned": [PLANNED[0], "pond_extra.png (anything)"]}
+    c = contract.from_design(edited, fi_analysis=True)
+    assert [(f.file, f.declared) for f in c.figures][0] == ("pond_peak.png", True)
+    assert c.figures[1].declared is False and len(c.figures) == 2
+    assert list(cp.figure_faults(edited)) == ["pond_extra.png"]
+
+
+def test_a_planned_figure_has_one_file_name_everywhere_it_is_matched() -> None:
+    from core import engine as eng
+
+    assert contract.figure_file("pond_peak.png (two panels, nutrient 1 and 4)") == "pond_peak.png"
+    assert contract.figure_file("figures/pond_peak.png (two panels)") == "pond_peak.png"
+    assert contract.figure_file("figures\\pond_peak.png") == "pond_peak.png"
+    assert contract.figure_file("my pond.png (a title with words)") == "my pond.png"
+    assert contract.figure_file({"file": "out/a.png"}) == "a.png" and contract.figure_file("") == ""
+    state = {"design": {"figures_planned": ["figures/pond_peak.png (two panels)", "pond_gap.png"]},
+             "figures": ["figures/pond_peak.png"], "figure_records": {}}
+    assert eng._planned_figure_order(state) == ["pond_peak.png"]
+    declared = contract.from_design({"protocol": {**_planned_protocol()},
+                                     "figures_planned": ["figures/pond_peak.png (two panels)"]}, fi_analysis=True)
+    assert [f.file for f in declared.figures] == ["pond_peak.png"]  # saved under its base name, in the figures folder
+
+
+def test_an_axis_must_be_another_setting_than_x_with_more_than_one_value() -> None:
+    held = cp.strip_fi_keys(DESIGN)
+    held["protocol"]["grid"]["light"] = [3]  # one value
+    asked = {"a.png": "", "b.png": "", "c.png": ""}
+    base = {"shows": ["algae_peak"], "panels": 1}
+    problems = cp._check_figures({"a.png": {**base, "x": "temp", "series": "temp"}, "b.png": {**base, "x": "light"},
+                                  "c.png": {**base, "series": "temp"}}, asked, held)
+    text = " | ".join(problems)
+    assert "`a.png`: `series` must be another setting than `x`" in text
+    assert "`b.png`: `x` is `light`, which has one value" in text
+    assert "`c.png`: `x` is the setting the figure is drawn along" in text
+    assert cp._check_figures({n: {**base, "x": "temp", "series": "nutrient"} for n in asked}, asked, held) == []
+
+
+@pytest.mark.asyncio
+async def test_figures_are_not_asked_when_the_roles_could_not_be_used() -> None:
+    fake = Fake(roles=["no json", "no json", "no json"], comparisons=[COMPARE])
+    out = await run(fake)
+    assert fake.asked("figures") == 0 and out.form == "older"

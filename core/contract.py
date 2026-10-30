@@ -140,6 +140,15 @@ class Figure(_Strict):
     declared: bool = True
 
 
+def figure_file(planned: Any) -> str:
+    """The file name of a planned figure, the one name every part of FI matches a saved figure by: the plan gives a figure as
+    ``fig1.png`` or as ``figures/fig1.png (two panels: ...)``, and a figure is saved in the figures folder under its base name."""
+    text = str(planned.get("file") or "") if isinstance(planned, dict) else str(planned or "")
+    head = text.split("(")[0].strip()
+    name = head if re.search(r"\.\w{2,4}$", head) else (text.split() or [""])[0].split("(")[0]
+    return name.strip().strip(",;:").replace("\\", "/").rsplit("/", 1)[-1]
+
+
 class Precision(_Strict):
     target: str  # a result or comparison id
     half_width: float = Field(gt=0)
@@ -246,7 +255,7 @@ _DESIGN_NOTES = ("hypothesis", "method", "expected_outcome", "rationale", "varia
 #: Protocol keys the reader places; any other key goes to the notes and is named in the gaps.
 _PLACED = {"grid", "sub_studies", "in_each_run", "numerical_settings", "constants", "thresholds", "runs_per_setting",
            "min_runs_per_setting", "precision", "metrics", "oracles", "criteria", "topic_map", "optimisation", "model",
-           "labels", "comparisons", "derived", "figures", "steps", "shared_draws", "form", "parts_left_out", "names_not_asked", "figures_asked", *_NOTE_KEYS}
+           "labels", "comparisons", "derived", "figures", "steps", "shared_draws", "form", "parts_left_out", "names_not_asked", "figure_declarations", *_NOTE_KEYS}
 
 
 def oracle_measures(protocol: Any) -> tuple[dict[str, list[str]], set[str]]:
@@ -459,8 +468,26 @@ def from_design(design: dict[str, Any] | None, *, fi_analysis: bool = False,
     planned = p.get("figures") if "figures" in p else design.get("figures_planned")
     if planned is not None and not isinstance(planned, list):
         gaps.append("the figures are not a list, so they are left out")
+    # What the plan's model said each figure shows (core/contract_parts.py) is kept by file name beside the plan's own list,
+    # which it never replaces: a figure added or removed in the plan is the one drawn.
+    said = p.get("figure_declarations") if isinstance(p.get("figure_declarations"), dict) else {}
     for i, f in enumerate(planned if isinstance(planned, list) else [], 1):
+        name = figure_file(f)
+        decl = said.get(name) if name else None
+        if isinstance(decl, dict) and decl.get("drop") is True:
+            continue  # the plan's model said it cannot be drawn from the study's numbers
+        own = None
         if isinstance(f, dict):
+            try:
+                own = Figure(**{"id": f"fig{i}", **f})
+            except ValueError:
+                own = None
+        if own is not None:
+            fig = own
+        elif isinstance(decl, dict):
+            fig = _first_valid(Figure, {"id": f"fig{i}", **{k: v for k, v in decl.items() if k in ("shows", "x", "series", "panels")},
+                                       "file": name}, gaps, f"figure {i}")
+        elif isinstance(f, dict):
             fig = _first_valid(Figure, {"id": f"fig{i}", **f}, gaps, f"figure {i}")
         else:
             fig = Figure(id=f"fig{i}", file=str(f), declared=False)

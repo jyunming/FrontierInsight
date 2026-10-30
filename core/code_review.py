@@ -55,6 +55,7 @@ from pathlib import Path
 from typing import Any
 
 from . import code_reach as _code_reach
+from .contract import figure_file
 from . import oracle_check as _oracle
 from . import review_pairs as _pairs
 
@@ -125,7 +126,7 @@ def requirements(design: dict[str, Any] | None, protocol: dict[str, Any] | None)
             add("metric", f"the result reports {mid}" + (f" ({est})" if est else ""),
                 bool(headline_metric) and (mid.lower() == headline_metric or headline_metric in mid.lower()), mid, defined)
     for fig in design.get("figures_planned") if isinstance(design.get("figures_planned"), list) else []:
-        add("figure", f"the script draws the planned figure {Path(str(fig)).name}")
+        add("figure", f"the script draws the planned figure {figure_file(fig)}")
     grid, inside = _settings_of(protocol)  # where the plan view takes them from
     for name, values in grid.items():
         if isinstance(values, list) and len(values) > 1:

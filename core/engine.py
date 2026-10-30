@@ -7698,6 +7698,32 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if gaps != (record.get("ledger_left") or []) or own != (record.get("unsourced_definitions") or []):
             self._topic_covered_write(ledger_left=gaps, unsourced_definitions=own)
 
+    async def _ask_figures_of_a_redesign(self, state: QuestState, design: Any) -> Any:
+        """``design`` of a redesign with the figures it plans that no declaration covers asked about, in one question
+        (:func:`core.contract_parts.ask_parts` with ``only=("figures",)``, at most ``MAX_ASKS`` asks): what the plan's model
+        said about a file the redesign still plans was inherited (:meth:`_inherit_plan_parts`), a new file is asked. Never a
+        stop; a figure left undeclared is drawn by nobody and the contract's gaps say so. After the freeze nothing is asked."""
+        protocol = design.get("protocol") if isinstance(design, dict) else None
+        if (not isinstance(protocol, dict) or protocol.get("form") != "contract" or self._client is None
+                or not self._runs_code(state) or _frozen.load(self.quest_root) is not None
+                or not self._fis_analysis_planned(design) or not _contract_parts.figure_faults(design)):
+            return design
+
+        async def ask(prompt: str) -> str:
+            return await self._chat(prompt, node="plan_contract")
+
+        try:
+            out = await _contract_parts.ask_parts(design, ask, lambda t: _parse_json_lenient(t, node="plan_contract"),
+                                                  self._prompts, fi_analysis=True, only=("figures",))
+        except Exception:  # noqa: BLE001 -- the redesign goes on with its figures undeclared
+            self._log.warning("[design] the figures of the redesign could not be asked about", exc_info=True)
+            return design
+        for note in out.notes:
+            self._log.warning("[design] %s", note)
+        self._log.info("[design] figures of the redesign: %s", "; ".join(
+            f"{k} {'ok' if v['valid'] else 'left out'} after {v['asks']} ask(s)" for k, v in out.parts.items()) or "none asked")
+        return out.design
+
     def _inherit_plan_parts(self, state: QuestState, design: Any, *, iteration: int) -> Any:
         """A redesign (a design drafted at this step, not read from ``plan.md``) keeps every part of the plan's protocol that it
         does not write itself: the runs per setting, the precision, the thresholds, the checks against known answers, the
@@ -9176,6 +9202,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             design = await self._complete_a_drafted_search(state, design, iteration=iteration)
             design = await self._complete_drafted_parts(state, design, iteration=iteration)
             design = self._inherit_plan_parts(state, design, iteration=iteration)
+            design = await self._ask_figures_of_a_redesign(state, design)
             design = await self._ask_design_for_the_grid(state, design, iteration=iteration)
             self._check_the_ledger_of_a_redesign(state, design)
         self._stop_if_no_settings_to_vary(state, design)
@@ -34121,7 +34148,7 @@ def _planned_figure_order(state: QuestState) -> list[str]:
     naming a figure this run did not draw matches nothing here.
     """
     planned = (state.get("design") or {}).get("figures_planned")
-    planned_names = [Path(str(f)).name for f in planned if str(f).strip()] if isinstance(planned, list) else []
+    planned_names = [_contract.figure_file(f) for f in planned if str(f).strip()] if isinstance(planned, list) else []
     produced = {Path(str(f)).name for f in (state.get("figures") or [])}
     records = state.get("figure_records") or {}
     return [name for name in dict.fromkeys(planned_names)

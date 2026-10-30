@@ -3,10 +3,10 @@ You wrote the plan for a simulation study. It names the figures below only by fi
 The figures, each with what the plan says about it:
 $figures
 
-What a figure may show (the numbers the study reports, the quantities worked out from them, and the comparisons):
+What a figure may show (the numbers the study reports and the quantities worked out from them):
 $shows
 
-A figure's x axis, and what it draws as separate lines or groups (`series`), are settings of the study. They may be: $settings
+A figure's x axis (`x`, required) and what it draws as separate lines or groups (`series`, a different setting, or null) are settings of the study that take more than one value. They may be: $settings
 A figure has at most $max_panels panel(s).
 
 How the study measures (from your plan):
