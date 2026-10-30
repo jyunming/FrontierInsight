@@ -53,7 +53,6 @@ def test_a_value_of_a_setting_worded_as_optimised_is_not_a_search() -> None:
     found = [g for g in gaps if g["kind"] == "search"]
     assert len(found) == 1 and "S1" not in unresolved
     assert "does not search for it" in found[0]["sentence"] and "design variable" in found[0]["sentence"]
-    assert tr.main_gaps(gaps) == found
     text = "\n".join(tr.plan_lines(req, gaps, reviewer="", same_model=False, topic=TOPIC))
     assert "- To search for (FI runs the search): the fin spacing and fin thickness" in text
     assert "NOT searched for in the plan" in text

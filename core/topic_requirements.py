@@ -727,12 +727,6 @@ def named_sentence(kind: str, element: str) -> str:
             "it.")
 
 
-def main_gaps(gaps: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The gaps the question cannot be answered without: a factor or a quantity the topic's reader marked as main (a formula
-    is a specification the code is shown, so a missing one is said, not a stop)."""
-    return [g for g in gaps if g["main"] and g["kind"] in ("factor", "level", "quantity", "search")]
-
-
 # ---------------------------------------------------------------------------------------------------------------------
 # the request to the plan, and what is kept of its answer
 # ---------------------------------------------------------------------------------------------------------------------

@@ -187,10 +187,6 @@ CHECKS: tuple[Check, ...] = (
           'implement', 'own_record', 'repair',
           "An equation whose named function does not take the example's inputs by name is found before the body "
           'is written.'),
-    Check('step_coverage', 'core.run_checks', 'RunChecksMixin._record_step_coverage',
-          'execute', 'model_code', 'note',
-          "A metric the simulation returns that is a typed number or computed without any call into the model's "
-          'package; recorded in .fi/step_coverage.json, evidence gap, QUALITY.md. Never stops.'),
     Check('code_review_requirements', 'core.engine', 'Engine._code_review_gate',
           'execute', 'model_judge', 'repair',
           "A second model reads the plan's required outputs against the code (implemented / missing / "

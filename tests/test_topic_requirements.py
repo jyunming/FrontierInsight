@@ -476,7 +476,6 @@ def test_an_axis_whose_values_merely_fit_is_not_a_cover_and_a_formula_needs_the_
     assert items[0]["plan_says_it_is_covered_by"] == "batch_size" and items[1]["plan_says_it_is_covered_by"] == "E1"
     rejected, _ = tr.gaps_from(req, view, {"F1": "missing", "M1": "missing"})
     assert [(g["kind"], g["main"]) for g in rejected] == [("factor", True), ("formula", False)]
-    assert tr.main_gaps(rejected)[0]["name"] == "room temperature", "the main factor stops the quest"
     assert tr.gaps_from(req, view, {"F1": "covered", "M1": "covered"}) == ([], [])
     unread, unjudged = tr.gaps_from(req, view, {})
     assert unread == [] and unjudged == ["room temperature", "cooling law"], "no answer is named as unchecked, never a pass"
