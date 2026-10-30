@@ -353,3 +353,112 @@ async def test_figures_are_not_asked_when_the_roles_could_not_be_used() -> None:
     fake = Fake(roles=["no json", "no json", "no json"], comparisons=[COMPARE])
     out = await run(fake)
     assert fake.asked("figures") == 0 and out.form == "older"
+
+
+# --- after the freeze, a plan a person edited, file names ------------------------------------------------------------------------
+def _frozen_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, asked: list[str], answer: Any) -> Any:
+    from core import frozen_protocol as fp
+
+    engine = _redesign_engine(tmp_path, monkeypatch, asked, answer)
+    engine.quest_root.mkdir(parents=True, exist_ok=True)
+    fp.freeze(engine.quest_root, _planned_protocol(), approved_by="test", source="test")
+    return engine
+
+
+def test_the_declarations_are_not_part_of_what_the_freeze_hashes_and_a_protocol_without_them_hashes_as_it_did() -> None:
+    import hashlib
+
+    from core import frozen_protocol as fp
+
+    plain = {"grid": {"nutrient": [1, 2]}, "runs_per_setting": 5}
+    old_way = hashlib.sha256(json.dumps(plain, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+                                        default=str).encode("utf-8")).hexdigest()
+    assert fp.sha256(plain) == old_way  # a protocol without the key: the hash every existing quest froze with
+    assert fp.sha256({**plain, "figure_declarations": {"a.png": {"shows": ["x"]}}}) == old_way
+    assert fp.sha256({**plain, "figures": ["a.png"]}) != old_way  # anything else is still frozen
+    assert fp.sha256([{"figure_declarations": 1}]) != fp.sha256([{}])  # only the top-level key of a protocol is left out
+
+
+@pytest.mark.asyncio
+async def test_a_redesign_after_the_freeze_gets_its_new_figure_declared_and_drawn_and_the_frozen_hash_stands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core import frozen_protocol as fp
+
+    asked: list[str] = []
+    new = {"figures": {"pond_new.png": {"shows": ["bloom"], "x": "temp", "series": "nutrient", "panels": 1}}}
+    engine = _frozen_engine(tmp_path, monkeypatch, asked, new)
+    before = fp.load(engine.quest_root)
+    assert before is not None and "problem" not in before
+    previous = {"hypothesis": "h", "figures_planned": list(PLANNED), "protocol": _planned_protocol()}
+    state = {"design": previous, "iteration": 2}
+    # the redesign renames one figure and adds one; it also tries to change the study (a run count): the frozen protocol stands
+    own = [PLANNED[0], "pond_new.png (bloom against temp for each nutrient)"]
+    redraft = _redraft(figures_planned=own)
+    redraft["protocol"] = {**redraft["protocol"], "runs_per_setting": 9999}
+    held = engine._hold_design_to_frozen(state, redraft)
+    assert held["protocol"]["runs_per_setting"] == 50 and fp.sha256(held["protocol"]) == before["sha256"]
+    design = await engine._ask_figures_of_a_redesign(state, held)
+    assert len(asked) == 1 and "- pond_new.png:" in asked[0] and "- pond_peak.png:" not in asked[0]
+    c = contract.from_design(design, fi_analysis=True)
+    assert [(f.id, f.file, f.declared) for f in c.figures] == [("fig1", "pond_peak.png", True), ("fig2", "pond_new.png", True)]
+    assert {"figure_fig1", "figure_fig2"} <= set(af.body_names(af.plan_of(design)))
+    assert design["protocol"]["runs_per_setting"] == 50  # the answer touched the figures and nothing else of the protocol
+    after = fp.load(engine.quest_root)
+    assert after == before and "problem" not in after  # the frozen record is as it was
+    assert fp.sha256(design["protocol"]) == before["sha256"]
+    # the next redesign (the design in the state is this one) keeps what was asked and asks nothing more
+    again = engine._hold_design_to_frozen({"design": design, "iteration": 3}, _redraft(figures_planned=own))
+    again = await engine._ask_figures_of_a_redesign({"design": design, "iteration": 3}, again)
+    assert len(asked) == 1 and [f.declared for f in contract.from_design(again, fi_analysis=True).figures] == [True, True]
+    # the protocol the checks read is the frozen one with the declarations of the design in force
+    block = engine._protocol_block({"design": design, "iteration": 3})
+    assert block is not None and fp.sha256(block) == before["sha256"] and "pond_new.png" in block["figure_declarations"]
+
+
+@pytest.mark.asyncio
+async def test_a_person_adding_a_figure_in_plan_md_has_it_asked_once_and_the_answer_written_to_the_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core import plan
+
+    asked: list[str] = []
+    new = {"figures": {"pond_extra.png": {"shows": ["algae_peak"], "x": "nutrient", "series": "temp", "panels": 1}}}
+    engine = _redesign_engine(tmp_path, monkeypatch, asked, new)
+    state = {"design": {}, "iteration": 0}
+    protocol = _planned_protocol()
+    edited = {**DESIGN, "figures_planned": [*PLANNED, "pond_extra.png (anything)"], "protocol": protocol}
+    engine.quest_root.mkdir(parents=True, exist_ok=True)
+    path = plan.plan_path(engine.quest_root)
+    path.write_text(plan.render("Algae", {}, {**edited, "plan": {}}, []), encoding="utf-8")
+    design = plan.parse(path.read_text(encoding="utf-8")).design
+    sha = plan.sha256(path.read_text(encoding="utf-8"))
+    design, sha2 = await engine._ask_figures_of_an_edited_plan(state, design, sha)
+    assert len(asked) == 1 and "- pond_extra.png:" in asked[0] and sha2 != sha
+    assert sha2 == plan.sha256(path.read_text(encoding="utf-8"))
+    assert [f.declared for f in contract.from_design(design, fi_analysis=True).figures] == [True] * 4
+    # a resume reads plan.md: the answer is there and nothing is asked again
+    again = plan.parse(path.read_text(encoding="utf-8")).design
+    assert "pond_extra.png" in again["protocol"]["figure_declarations"]
+    again, sha3 = await engine._ask_figures_of_an_edited_plan(state, again, sha2)
+    assert len(asked) == 1 and sha3 == sha2
+
+
+def test_a_planned_name_without_an_extension_is_kept_whole_and_a_decimal_is_not_an_extension() -> None:
+    names = [contract.figure_file(s) for s in ("Figure 1 (main result)", "Figure 2 (the other)")]
+    assert names == ["Figure 1", "Figure 2"]  # two figures stay two
+    assert contract.figure_file("fig.png shows x against y at 0.25") == "fig.png"
+    assert contract.figure_file("plot at 0.25 (x against y)") == "plot at 0.25"
+    assert contract.figure_file("plot 0.25") == "plot 0.25"
+    assert contract.figure_file("figures/Figure 3 (b)") == "Figure 3"
+    from core import code_review
+
+    design = {"protocol": {}, "figures_planned": ["Figure 1 (a)", "Figure 2 (b)"]}
+    found = [r for r in code_review.requirements(design, {}) if "planned figure" in str(r)]
+    assert len(found) == 2  # the two figures are two requirements, not one
+
+
+def test_a_models_own_figure_with_a_folder_is_read_under_its_base_name() -> None:
+    d = {"protocol": {"form": "contract", "grid": {"nutrient": [1, 2]}, "metrics": [{"id": "algae_peak", "kind": "mean"}],
+                      "figures": [{"file": "figures/a.png", "shows": ["algae_peak"], "x": "nutrient"}]}}
+    assert [f.file for f in contract.from_design(d).figures] == ["a.png"]

@@ -7698,14 +7698,65 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if gaps != (record.get("ledger_left") or []) or own != (record.get("unsourced_definitions") or []):
             self._topic_covered_write(ledger_left=gaps, unsourced_definitions=own)
 
+    async def _ask_figures_of_an_edited_plan(self, state: QuestState, design: Any, plan_sha: str) -> tuple[Any, str]:
+        """The design read from plan.md with the figures nothing declares asked about (a person added or renamed one), and the
+        answer written into plan.md's design block, so a resume reads it and does not ask again."""
+        before = design.get("protocol", {}).get("figure_declarations") if isinstance(design, dict) and isinstance(
+            design.get("protocol"), dict) else None
+        asked = await self._ask_figures_of_a_redesign(state, design)
+        now = asked.get("protocol", {}).get("figure_declarations") if isinstance(asked, dict) and isinstance(
+            asked.get("protocol"), dict) else None
+        path = _plan.plan_path(self.quest_root)
+        if not plan_sha or now == before or not now or not path.is_file():
+            return asked, plan_sha
+
+        def change(block: dict[str, Any]) -> dict[str, Any]:
+            protocol = dict(block.get("protocol") or {})
+            protocol["figure_declarations"] = now
+            return {**block, "protocol": protocol}
+
+        try:
+            updated = _plan.edit_design_block(path.read_text(encoding="utf-8"), change)
+            if updated is None:
+                return asked, plan_sha
+            path.write_text(updated, encoding="utf-8")
+            _plan.record_version(self.quest_root, updated, by="engine", note="what the plan's model said each new figure shows")
+            return asked, _plan.sha256(updated)
+        except OSError as e:
+            self._log.warning("[design] couldn't write the figure declarations into plan.md: %r", e)
+            return asked, plan_sha
+
+    def _figure_declarations_after_the_freeze(self, state: QuestState, frozen_protocol: Any) -> dict[str, Any]:
+        """What the plan's model said about each figure, once the protocol is frozen: the declarations the frozen protocol
+        holds, then those of the design in the state (a redesign after the freeze asked about its new files). They are kept in
+        the design, never in the frozen record (:data:`core.frozen_protocol.UNFROZEN_KEYS`)."""
+        out: dict[str, Any] = {}
+        design = state.get("design") if isinstance(state, dict) else None
+        for protocol in (frozen_protocol, design.get("protocol") if isinstance(design, dict) else None):
+            said = protocol.get("figure_declarations") if isinstance(protocol, dict) else None
+            if isinstance(said, dict):
+                out.update({k: v for k, v in said.items() if isinstance(v, dict)})
+        return out
+
     async def _ask_figures_of_a_redesign(self, state: QuestState, design: Any) -> Any:
-        """``design`` of a redesign with the figures it plans that no declaration covers asked about, in one question
-        (:func:`core.contract_parts.ask_parts` with ``only=("figures",)``, at most ``MAX_ASKS`` asks): what the plan's model
-        said about a file the redesign still plans was inherited (:meth:`_inherit_plan_parts`), a new file is asked. Never a
-        stop; a figure left undeclared is drawn by nobody and the contract's gaps say so. After the freeze nothing is asked."""
+        """``design`` of a redesign (or of a plan a person edited) with the figures it plans that no declaration covers asked
+        about, in one question (:func:`core.contract_parts.ask_parts` with ``only=("figures",)``, at most ``MAX_ASKS``
+        asks): what the plan's model said about a file the design still plans was inherited (:meth:`_inherit_plan_parts`, or,
+        after the freeze, :meth:`_figure_declarations_after_the_freeze`), a new file is asked. Never a stop; a figure left
+        undeclared is drawn by nobody and the contract's gaps say so.
+
+        This runs after the freeze too, and only for figures: a figure is not a result, a setting or a check, the declarations
+        are outside the frozen hash, and the frozen protocol itself (its results, settings and checks) is not touched here."""
         protocol = design.get("protocol") if isinstance(design, dict) else None
+        frozen = _frozen.protocol_of(self.quest_root)
+        if isinstance(protocol, dict) and frozen is not None:
+            said = self._figure_declarations_after_the_freeze(state, frozen)
+            said.update(protocol.get("figure_declarations") or {})  # the design's own, last
+            if said:
+                design = {**design, "protocol": {**protocol, "figure_declarations": said}}
+                protocol = design["protocol"]
         if (not isinstance(protocol, dict) or protocol.get("form") != "contract" or self._client is None
-                or not self._runs_code(state) or _frozen.load(self.quest_root) is not None
+                or not self._runs_code(state)
                 or not self._fis_analysis_planned(design) or not _contract_parts.figure_faults(design)):
             return design
 
@@ -9193,6 +9244,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             design, plan_sha = await self._ask_plan_for_the_search(state, design, plan_sha)
             design, plan_sha = await self._ask_plan_for_the_parts(state, design, plan_sha)
             design, plan_sha = await self._ask_plan_for_the_grid(state, design, plan_sha)
+            design, plan_sha = await self._ask_figures_of_an_edited_plan(state, design, plan_sha)
         else:
             # A design drafted here (a redesign) did not come from plan.md: its search block is completed the same way.
             design, moved_parts = _plan.hoist_protocol_parts(design)
@@ -11474,6 +11526,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if frozen is not None:
             protocol = frozen.get("protocol")
             protocol = protocol if isinstance(protocol, dict) and protocol else None
+            said = self._figure_declarations_after_the_freeze(state, protocol)
+            if protocol is not None and said:  # not part of the frozen hash (core/frozen_protocol.py::UNFROZEN_KEYS)
+                protocol = {**protocol, "figure_declarations": said}
         else:
             protocol = self._draft_protocol(state)
         self._note_contract(state, protocol, frozen, adopted)

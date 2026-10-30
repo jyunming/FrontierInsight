@@ -144,8 +144,11 @@ def figure_file(planned: Any) -> str:
     """The file name of a planned figure, the one name every part of FI matches a saved figure by: the plan gives a figure as
     ``fig1.png`` or as ``figures/fig1.png (two panels: ...)``, and a figure is saved in the figures folder under its base name."""
     text = str(planned.get("file") or "") if isinstance(planned, dict) else str(planned or "")
-    head = text.split("(")[0].strip()
-    name = head if re.search(r"\.\w{2,4}$", head) else (text.split() or [""])[0].split("(")[0]
+    head = text.split("(")[0].strip()  # the name, then (a description)
+    first = (head.split() or [""])[0]
+    # "fig1.png shows x against y": the first word is the file (an extension is a dot and a letter, not the decimal of "0.25");
+    # "Figure 1" or "my plot.png": no such word, so the whole head is the name
+    name = first if re.search(r"\.[A-Za-z][A-Za-z0-9]{1,3}$", first.rstrip(",;:")) else head
     return name.strip().strip(",;:").replace("\\", "/").rsplit("/", 1)[-1]
 
 
@@ -479,7 +482,7 @@ def from_design(design: dict[str, Any] | None, *, fi_analysis: bool = False,
         own = None
         if isinstance(f, dict):
             try:
-                own = Figure(**{"id": f"fig{i}", **f})
+                own = Figure(**{"id": f"fig{i}", **f, **({"file": figure_file(f)} if f.get("file") else {})})
             except ValueError:
                 own = None
         if own is not None:
