@@ -358,6 +358,19 @@ def test_a_formula_over_a_name_nobody_gives_is_left_out_of_the_plan_and_fails_in
     assert code == 2 and "FI's fault" in err and record["fi_faults"]
 
 
+def test_a_formula_over_what_the_analysis_is_not_given_is_left_out_of_the_plan_not_stopped_on_after_the_run(
+        tmp_path: Path) -> None:
+    # A numerical setting and a value compared inside each run are declared, but the analysis never sees them: the plan
+    # leaves such a formula out (at run time it would be the plan's fault, exit 2, after the long run).
+    design = _design([_derived("per_step", formula="growth / dt"), _derived("by_mode", formula="growth * mode"),
+                      _derived("fine", formula="growth * base * cutoff")], numerical_settings={"dt": 0.1})
+    kept = contract.from_design(design)
+    assert [d.id for d in kept.derived] == ["fine"]
+    assert any("`per_step` is left out" in g and "the analysis is not given" in g for g in kept.gaps)
+    code, _printed, record, _err = _run(_quest(tmp_path, design))
+    assert code == 0 and record["derived"]["fine"]["status"] == "ok" and not record["fi_faults"]
+
+
 def test_formulas_that_name_each_other_in_a_circle_are_left_out_of_the_plan() -> None:
     kept = contract.from_design(_design([_derived("a", formula="b + 1"), _derived("b", formula="a * 2"),
                                          _derived("c", formula="growth / 2")]))

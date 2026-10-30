@@ -436,7 +436,11 @@ def from_design(design: dict[str, Any] | None) -> StudyContract:
     ids = {r.id for r in results}
     derived = [d for d in (_first_valid(Derived, x, gaps, f"derived `{x.get('id')}`") for x in derived_rows)
                if d is not None]
-    derived = _computable(derived, ids | settings.names(), p, gaps)
+    # what a formula may name when FI works it out (core/analysis_frame.py): a result, a derived quantity, a setting of the
+    # grid, a constant or threshold, and the plan's fixed settings; never a numerical setting or a value compared inside a
+    # run, which the analysis is not given
+    derived = _computable(derived, ids | set(settings.compared) | set(settings.fixed), p, gaps,
+                          not_given=set(settings.numerical) | set(settings.in_each_run))
     ids |= {d.id for d in derived}
     comparisons = [c for c in (_first_valid(Comparison, x, gaps, f"comparison `{x.get('id')}`")
                                for x in _rows(p.get("comparisons"), gaps, "the comparisons")) if c is not None]
@@ -510,7 +514,8 @@ def from_design(design: dict[str, Any] | None) -> StudyContract:
 _ONE = {"derived": "derived", "comparisons": "comparison", "figures": "figure"}
 
 
-def _computable(derived: list[Derived], known: set[str], protocol: dict[str, Any], gaps: list[str]) -> list[Derived]:
+def _computable(derived: list[Derived], known: set[str], protocol: dict[str, Any], gaps: list[str],
+                not_given: set[str] = frozenset()) -> list[Derived]:
     """The derived quantities FI can work out as the plan writes them: a formula that cannot be read, that names what the plan
     does not declare (a result, a derived quantity, a setting, a constant or threshold), or that names other formulas round in
     a circle is left out, with a gap that says why, when the plan is read, and never found only after the long run."""
@@ -521,14 +526,15 @@ def _computable(derived: list[Derived], known: set[str], protocol: dict[str, Any
     known = set(known) | set(_reference_values.inputs(protocol))
     kept = list(derived)
     while True:
-        kept, circle = _without_circles(_with_known_names(kept, known, functions, gaps), functions)
+        kept, circle = _without_circles(_with_known_names(kept, known, functions, gaps, set(not_given)), functions)
         if not circle:
             return kept
         gaps.append("derived " + ", ".join(f"`{i}`" for i in circle) + " are left out: their formulas name each other in a "
                     "circle, so none of them can be worked out first")
 
 
-def _with_known_names(kept: list[Derived], known: set[str], functions: dict[str, Any], gaps: list[str]) -> list[Derived]:
+def _with_known_names(kept: list[Derived], known: set[str], functions: dict[str, Any], gaps: list[str],
+                      not_given: set[str]) -> list[Derived]:
     from . import oracle_forms as _forms
 
     kept, first = list(kept), {d.id for d in kept}
@@ -542,7 +548,9 @@ def _with_known_names(kept: list[Derived], known: set[str], functions: dict[str,
             if why is None:
                 unknown = [n for n in _forms.names(d.formula, functions) if n not in known and n not in ids]
                 why = ("it uses " + ", ".join(f"`{n}`" for n in unknown)
-                       + (", which is itself left out" if set(unknown) <= first else ", which the plan does not declare")
+                       + (", which is itself left out" if set(unknown) <= first else
+                          ", a numerical setting or a value compared inside each run, which the analysis is not given"
+                          if set(unknown) <= not_given else ", which the plan does not declare")
                        if unknown else None)
             if why is not None:
                 gaps.append(f"derived `{d.id}` is left out: its formula ({d.formula}) cannot be worked out as written ({why})")

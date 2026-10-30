@@ -219,6 +219,21 @@ def _fis_quest(engine: Engine, design: dict[str, Any] = DESIGN) -> Path:
 
 
 @pytest.mark.asyncio
+async def test_an_analysis_stopped_for_its_time_in_a_function_goes_to_that_functions_repair(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    _fis_quest(engine)
+    model = _Model("{}", repair={"functions": DERIVE, "patch_summary": "faster"})
+    engine._client = model
+    state = {"design": DESIGN, "result_json": {}, "exec_result": {
+        "returncode": 1, "timed_out": True, "failed_script": af.DERIVE_FILE, "stdout_tail": "", "analysis_step": "derive_peak",
+        "stderr_tail": af.STEP_MARK + "derive_peak"}}
+    patch = await engine._node_execute_reflect(state)
+    assert "cannot_repair" not in (patch.get("exec_result") or {})  # no stop
+    asked = model.prompts[-1]
+    assert skeleton.DERIVE_REPAIR_NOTE in asked and "`derive_peak`" in asked
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("repairs_made", [0, 3])  # 3: every repair spent, and the fault still stops (no repair is asked for it)
 async def test_an_empty_record_is_fis_fault_said_plainly_with_no_model_call(tmp_path: Path, repairs_made: int) -> None:
     engine = _engine(tmp_path)
