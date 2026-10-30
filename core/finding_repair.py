@@ -1081,15 +1081,21 @@ def other_functions_changed(old: str, new: str, allowed: str) -> list[str]:
 
 def target_file(issue: dict[str, Any], code_dir: Path) -> str:
     """The file an issue is repaired in: the one it names, else by what it is about (the simulation or the analysis, as
-    :func:`core.code_review.files_for` decides)."""
+    :func:`core.code_review.files_for` decides). When FI writes the analysis (core/analysis_frame.py), an issue of the
+    analysis is repaired in the study's ``derive.py``: ``experiment.py`` is FI's own and no repair edits it."""
+    from . import analysis_frame as _analysis
     from . import code_review as _review
 
     if issue.get("file"):
-        return str(issue["file"])
-    probe = {"kind": "logic" if issue.get("kind") == "logic" else str(issue.get("kinds", ["requirement"])[0]),
-             "file": "", "severity": issue.get("severity", "medium"), "headline": issue.get("headline", False)}
-    got = _review.files_for([probe], code_dir)
-    return next(iter(got), "")
+        got = str(issue["file"])
+    else:
+        probe = {"kind": "logic" if issue.get("kind") == "logic" else str(issue.get("kinds", ["requirement"])[0]),
+                 "file": "", "severity": issue.get("severity", "medium"), "headline": issue.get("headline", False)}
+        got = next(iter(_review.files_for([probe], code_dir)), "")
+    if got.replace("\\", "/").rsplit("/", 1)[-1] == _analysis.EXPERIMENT_FILE and _analysis.is_fis_file(Path(code_dir) / got) \
+            and (Path(code_dir) / _analysis.DERIVE_FILE).is_file():
+        return _analysis.DERIVE_FILE
+    return got
 
 
 def scope_function(issue: dict[str, Any], source: str) -> str:

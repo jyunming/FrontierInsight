@@ -914,13 +914,96 @@ class RunChecksMixin:
         design = state.get("design")
         if _analysis.applies(design):
             return None
-        try:  # a quest whose frame an older FI wrote keeps the analysis the model writes (the frame is not rewritten under a run)
-            existing = (self.quest_root / "code" / _split_run.SIMULATE_NAME).read_text(encoding="utf-8")  # type: ignore[attr-defined]
-        except (OSError, UnicodeDecodeError):
-            existing = ""
-        if _analysis.frame_problem(existing):
+        # A quest whose frame an older FI wrote keeps the analysis the model writes (the frame is not rewritten under a run).
+        # Read from the frame FI writes now, not the file on disk: a changed plan gets a new frame, of this version, before
+        # the reply is put into it, so the request and what is written of the reply agree.
+        if _analysis.frame_problem(self._skeleton_frame(state)):
             return None
         return _analysis.body_names(_analysis.plan_of(design))
+
+    def _analysis_written(self, state: Any, derive_reply: str, simulate_text: str) -> str:
+        """Write the analysis FI writes for this plan into ``code/`` (core/analysis_frame.py): ``derive.py`` with the study's
+        functions from ``derive_reply`` put into FI's frame, and ``experiment.py``, ``fi_table.py``, ``fi_figures.py`` and
+        ``fi_core/`` beside it. Returns the text of ``experiment.py`` (FI's)."""
+        from . import analysis_frame as _analysis
+
+        code_dir = self.quest_root / "code"  # type: ignore[attr-defined]
+        code_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            existing = (code_dir / _analysis.DERIVE_FILE).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            existing = ""
+        design = state.get("design")
+        text, note = _analysis.compose(design, derive_reply, existing)
+        if note:
+            self._log.warning("[implement] derive.py: %s", note)  # type: ignore[attr-defined]
+        if text != existing:
+            (code_dir / _analysis.DERIVE_FILE).write_text(text, encoding="utf-8")
+        _analysis.ensure_files(code_dir, design, simulate_text)
+        names = ", ".join(f"`{b}`" for b in _analysis.body_names(_analysis.plan_of(design)))
+        self._log.info("[implement] FI wrote the analysis (experiment.py, the frame of derive.py and the files they use); "  # type: ignore[attr-defined]
+                       "the model's part of it is %s", names or "nothing (the plan needs no function of derive.py)")
+        return _analysis.EXPERIMENT
+
+    def _keep_fis_analysis(self, state: Any) -> None:
+        """Before a run, when FI writes the analysis of this quest (core/analysis_frame.py) and derive.py has FI's frame: FI's
+        own files are as FI wrote them. A step that wrote other text over experiment.py (or a carried file) is undone here,
+        whatever path it came by, and the run says so; the study's functions in derive.py are kept."""
+        from . import analysis_frame as _analysis
+
+        code_dir = self.quest_root / "code"  # type: ignore[attr-defined]
+        if not _analysis.analysis_file(code_dir, _analysis.DERIVE_FILE) or self._analysis_bodies(state) is None:
+            return
+        try:
+            simulate = (code_dir / _split_run.SIMULATE_NAME).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            simulate = ""
+        try:
+            written = _analysis.ensure_files(code_dir, state.get("design"), simulate)
+        except Exception as exc:  # noqa: BLE001 -- the run then shows what is wrong with the files
+            self._log.warning("[execute] FI's analysis files could not be checked: %r", exc)  # type: ignore[attr-defined]
+            return
+        if written:
+            self._log.warning("[execute] FI wrote its own analysis files again before the run (%s): they are FI's, and "  # type: ignore[attr-defined]
+                              "they differed from what FI writes for this plan", ", ".join(written))
+
+    def _fis_stub_sendback(self, state: Any) -> dict[str, Any] | None:
+        """Before anything runs, when FI writes the analysis (core/analysis_frame.py): a function of derive.py that is still
+        FI's stub, for a declared quantity of a counting role (a result, a reference, a physical bound), goes to the repair
+        of that function while a repair is left. A stub gives no value on any number of trials, so the long run would only
+        say so; read from the file FI wrote, not guessed. ``None`` to go on (the run then lists what it did not work out)."""
+        from . import analysis_frame as _analysis
+
+        code_dir = self.quest_root / "code"  # type: ignore[attr-defined]
+        if not self._analysis_on() or self._analysis_bodies(state) is None:
+            return None
+        if int(state.get("exec_reflect_iter") or 0) >= self.config.engine.exec_reflect_max_iterations:  # type: ignore[attr-defined]
+            return None
+        try:
+            left = set(_analysis.stubs((code_dir / _analysis.DERIVE_FILE).read_text(encoding="utf-8")))
+        except (OSError, UnicodeDecodeError):
+            return None
+        plan = _analysis.plan_of(state.get("design"))
+        from .numeric_warnings import COUNTING_ROLES
+
+        wanted = [(d["id"], d["by"]) for d in plan.get("derived") or []
+                  if d.get("by") in left and (d.get("role") or "result") in COUNTING_ROLES]
+        if not wanted:
+            return None
+        said = "; ".join(f"`{i}` is computed by no trial and no function of the study's yet (`{b}` is still FI's stub)"
+                         for i, b in wanted[:4])
+        self._log.warning("[execute] %s: sending derive.py back for it before the run", said)  # type: ignore[attr-defined]
+        failed = self._code_review_failed_run(  # type: ignore[attr-defined]
+            f"FI read derive.py before the run: {said}. Write `{wanted[0][1]}`, so the run can give the value the plan "
+            "asks for.", script=_analysis.DERIVE_FILE)
+        failed["exec_result"]["failed_body"] = wanted[0][1]
+        return failed
+
+    def _analysis_on(self) -> bool:
+        """Whether this quest's analysis is the one FI writes: ``code/experiment.py`` holds FI's text."""
+        from . import analysis_frame as _analysis
+
+        return _analysis.is_fis_file(self.quest_root / "code" / _analysis.EXPERIMENT_FILE)  # type: ignore[attr-defined]
 
     def _frame_rules(self, state: Any) -> str:
         """What the code request says about the function ``trial`` when FI writes the frame, else ``""``."""
@@ -2636,6 +2719,11 @@ class RunChecksMixin:
         self._gate_kept = self.__dict__.get("_gate_seen")
         if after.kind == "fault" and int(state.get("exec_reflect_iter") or 0) < self.config.engine.exec_reflect_max_iterations:  # type: ignore[attr-defined]
             self._log.warning("[gate] the analysis does not run on the recorded results; sending it to be repaired")  # type: ignore[attr-defined]
+            if self._analysis_on():
+                # FI's analysis: the function of derive.py its record names goes to the repair, never FI's experiment.py
+                failed = self._code_review_failed_run(after.says(), script="derive.py")  # type: ignore[attr-defined]
+                failed["exec_result"]["failed_body"] = getattr(after, "body", "")
+                return failed
             return self._code_review_failed_run(after.says(), script="experiment.py")  # type: ignore[attr-defined]
         self._gate_standing(after)
         return None
@@ -2697,7 +2785,8 @@ class RunChecksMixin:
                        f"{now.detail}\n\nThe call (a test written to check a reader's finding about the code):\n```python\n"
                        f"{test_text[:1500]}\n```\n\nRepair the code so that this call runs to the end and returns its values. "
                        "Keep everything else as it is.")
-            script = ("experiment.py" if at.startswith("code/experiment.py") or not self._split_on(state)  # type: ignore[attr-defined]
+            script = ("derive.py" if at.startswith("code/derive.py") and self._analysis_on() else
+                      "experiment.py" if at.startswith("code/experiment.py") or not self._split_on(state)  # type: ignore[attr-defined]
                       else _split_run.SIMULATE_NAME)
             return self._code_review_failed_run(message, script=script)  # type: ignore[attr-defined]
         return None
@@ -3175,10 +3264,13 @@ class RunChecksMixin:
         return out
 
     def _stop_before_run(self, text: str, kind: str, tried: list[str] | None = None,
-                         advice: str | None = None) -> dict[str, Any]:
+                         advice: str | None = None, ran: bool = False) -> dict[str, Any]:
         """The quest's plain stop before the study (``too_long``: it would not fit the time allowed; ``not_run``: a text of
-        the simulation could not be checked), with no paper."""
-        self._log.warning("[execute] %s; stopping, the study was not run", text)  # type: ignore[attr-defined]
+        the simulation could not be checked), with no paper. ``ran``: the trials did run and the stop is in the analysis."""
+        if ran:
+            self._log.warning("[execute] %s; stopping, no paper is written", text)  # type: ignore[attr-defined]
+        else:
+            self._log.warning("[execute] %s; stopping, the study was not run", text)  # type: ignore[attr-defined]
         return {
             "exec_result": {
                 "returncode": 1, "duration_s": 0.0, "timed_out": False, "stdout_tail": "", "stderr_tail": text[-2000:],

@@ -182,13 +182,17 @@ def same_script(a: str, b: str) -> bool:
     return lines(a) == lines(b)
 
 
-def parse_split_response(text: str, fence: re.Pattern[str]) -> dict[str, str] | None:
+def parse_split_response(text: str, fence: re.Pattern[str], *, bodies: bool = False) -> dict[str, str] | None:
     """The two scripts of a code-writing reply: ``{"simulate": ..., "analysis": ...}``, or
     ``None`` when the reply does not hold both.
 
     Each fenced block names its script on its first line (``# file: simulate.py`` and
     ``# file: experiment.py``); with no such line, two blocks are read in that order. ``fence``
-    is the engine's own pattern for a fenced Python block."""
+    is the engine's own pattern for a fenced Python block.
+
+    ``bodies``: FI writes the analysis (core/analysis_frame.py), so the reply holds ``simulate.py`` and the functions of
+    ``derive.py`` (``"derive"``, absent when the plan needs none), never ``experiment.py``: ``None`` only when it has no
+    ``simulate.py`` block, and an ``experiment.py`` block in it is not read."""
     blocks = [m.group(1).strip("\n") for m in fence.finditer(text or "")]
     named: dict[str, str] = {}
     markers = [_FILE_MARKER.match(next((line for line in b.splitlines() if line.strip()), "")) for b in blocks]
@@ -216,6 +220,11 @@ def parse_split_response(text: str, fence: re.Pattern[str]) -> dict[str, str] | 
             named["analysis"] = body
         elif name == "submit.py":
             named["submit"] = body  # a cluster quest's third script (core/trial_runner.py)
+        elif bodies and name == "derive.py":
+            named["derive"] = body
+    if bodies:
+        named.pop("analysis", None)
+        return named if "simulate" in named else None
     if "simulate" in named and "analysis" in named:
         return named
     if len(blocks) == 2 and not named:

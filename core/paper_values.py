@@ -1514,8 +1514,10 @@ def records_of(quest_root: Path | str, protocol: dict[str, Any] | None) -> Recor
     rec = load(root, protocol, left_out=_checks.left_out_by_record(root))
     if rec is None or not rec.cells:
         return rec
-    # The plan's quantities no trial returned, which the analysis recorded one value for (never one FI left out).
-    planned = {str(m["id"]) for m in (protocol.get("metrics") if isinstance(protocol, dict) else None) or []
+    # The plan's quantities no trial returned, which the analysis recorded one value for (never one FI left out); a plan in
+    # the contract form names the quantities worked out from the results under ``derived``.
+    planned = {str(m["id"]) for key in ("metrics", "derived")
+               for m in (protocol.get(key) if isinstance(protocol, dict) else None) or []
                if isinstance(m, dict) and m.get("id")}
     single, by_run = _read_answers(root)
     rec.answers = {k: v for k, v in single.items() if k in planned and k not in rec.metrics() and k not in rec.left_out}
@@ -1543,17 +1545,20 @@ ANSWERS = Path(".fi") / "analysis_answers.json"
 
 
 def write_answers(quest_root: Path | str, result_json: Any, protocol: dict[str, Any] | None,
-                  runs: list[Any] | None = None, scheduled: int | None = None) -> list[str]:
+                  runs: list[Any] | None = None, scheduled: int | None = None, ids: list[str] | None = None) -> list[str]:
     """Keep, from each run of the analysis (``runs``: one result per replicate seed, as :class:`core.engine.Engine` publishes
     them; ``result_json`` alone is one run), the number under each name the plan gives a quantity
     (``protocol.metrics[].id``): the exact name and nothing matched by its words, after FI took out the quantities it left
     out. ``scheduled`` is how many runs FI scheduled (a run that failed is not among ``runs`` and counts as missing). An empty
-    or missing result leaves the earlier record as it was (a run that failed recorded nothing). Returns the names kept."""
+    or missing result leaves the earlier record as it was (a run that failed recorded nothing). ``ids``: the names to keep
+    instead of the plan's metrics (the analysis FI writes keeps its own record of the quantities it worked out, the plan's
+    ``derived`` among them). Returns the names kept."""
     results = [r for r in (runs if runs and len(runs) > 1 else [result_json]) if isinstance(r, dict) and r]
     if not results:
         return []
-    ids = list(dict.fromkeys(str(m["id"]) for m in (protocol.get("metrics") if isinstance(protocol, dict) else None) or []
-                             if isinstance(m, dict) and m.get("id")))
+    if ids is None:
+        ids = list(dict.fromkeys(str(m["id"]) for m in (protocol.get("metrics") if isinstance(protocol, dict) else None) or []
+                                 if isinstance(m, dict) and m.get("id")))
     rows = []
     for n, result in enumerate(results):
         values = {i: float(result[i]) for i in ids

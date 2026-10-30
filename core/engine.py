@@ -167,6 +167,7 @@ from . import protocol_check as _protocol
 from . import retractions as _retractions
 from . import script_reply as _script_reply
 from . import skeleton as _skeleton
+from . import analysis_frame as _analysis_frame
 from . import split_run as _split_run
 from . import stop_power as _stop_power
 from . import stats as _stats
@@ -10982,7 +10983,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._log.info("[implement_outline] the design changed since the outline was written; writing it again")
         self._log.info("[implement_outline] drafting scaffold + signatures")
         try:
-            prompt = self._frame_outline_template(state, self._prompts["implement_outline"]).substitute(
+            # FI writes the analysis too (a plan in the contract form): the outline lists the functions of derive.py instead
+            prompt = self._frame_outline_template(state, self._prompts["implement_outline"],
+                                                  self._analysis_bodies(state)).substitute(
                 topic_block=self._topic_block(),
                 design_block=self._code_design_block(state, names_only=True),
                 clarify_block=_format_clarify(state),
@@ -11067,6 +11070,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return await self._implement_by_agent(state, outline or self._outline_with_example_names(
                 state, state.get("implement_outline") or {}), extend)
         body_prompt = self._prompts.get("implement_body")
+        # FI writes the analysis as well (core/analysis_frame.py; a plan in the contract form, the frame on): the functions of
+        # derive.py the model is asked for, else ``None``. Read once, so the request and what is written of its reply agree.
+        bodies = self._analysis_bodies(state)
         if outline and outline.get("scaffold") and body_prompt is not None:
             self._log.info(
                 "[implement] filling scaffold (%d functions to body)",
@@ -11075,7 +11081,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # The model's package, one function at a time (core/function_steps.py): when it is written and checked, the
             # request below asks for the two scripts only.
             await self._fill_model_functions(state, outline)
-            prompt = self._frame_template(state, body_prompt).substitute(
+            prompt = self._frame_template(state, body_prompt, bodies).substitute(
                 topic_block=self._topic_block(),
                 design_block=self._code_design_block(state),
                 clarify_block=_format_clarify(state),
@@ -11084,7 +11090,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 skills_block=(self._skills_block(state) + self._dropped_skills_note(state)) or "(no skills selected for this quest)",
                 inputs_block=self._inputs_block(),
                 job_block=self._job_block(state),
-                split_block=self._split_block(state),
+                split_block=self._split_block(state, bodies),
             )
         else:
             # Legacy single-shot path: no outline available (pre-Phase-2
@@ -11103,14 +11109,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 )
             else:
                 self._log.info("[implement] generating experiment code (legacy one-shot)")
-            prompt = self._frame_template(state, self._prompts["implement"]).substitute(
+            prompt = self._frame_template(state, self._prompts["implement"], bodies).substitute(
                 topic_block=self._topic_block(),
                 design_block=self._code_design_block(state),
                 timeout_s=self._planning_limit(state),
                 skills_block=(self._skills_block(state) + self._dropped_skills_note(state)) or "(no skills selected for this quest)",
                 inputs_block=self._inputs_block(),
                 job_block=self._job_block(state),
-                split_block=self._split_block(state),
+                split_block=self._split_block(state, bodies),
             )
         prompt = self._frame_note(state) + prompt  # FI writes the frame of simulate.py: said first (core/run_checks.py)
         # A review that named something this run computed sent the experiment
@@ -11122,25 +11128,30 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._log.info(
                 "[implement] the review sent the experiment back over %r", rerun_for,
             )
-            prompt += _rerun_directive(state.get("review") or {}, rerun_for)
+            prompt += _rerun_directive(state.get("review") or {}, rerun_for, analysis=bodies is not None)
             if self._split_on(state) and (self.quest_root / "code" / _split_run.SIMULATE_NAME).is_file():
-                prompt += _skeleton.RERUN_NOTE if self._frame_variant(state) else _SPLIT_RERUN_NOTE
+                prompt += (_skeleton.RERUN_NOTE_ANALYSIS if bodies is not None
+                           else _skeleton.RERUN_NOTE if self._frame_variant(state) else _SPLIT_RERUN_NOTE)
             kept_asks = [str(p) for p in (state.get("extend_check") or {}).get("asked") or [] if str(p).strip()]
             if kept_asks and not extend:
                 # The script was extended for a person's request; this rerun must not drop what was added for it.
                 prompt += ("\n\nThe script was extended earlier for the reader's request: "
                            + "; ".join(p[:200] for p in kept_asks)
-                           + ". Keep what was added for it, and keep its results in RESULT_JSON.\n")
+                           + (". Keep what was added for it.\n" if bodies is not None
+                              else ". Keep what was added for it, and keep its results in RESULT_JSON.\n"))
         if extend:
             self._log.info("[implement] extending the existing script for: %s", "; ".join(p[:80] for p in extend))
-            prompt += _extend_directive(self._scripts_on_disk(), extend, self._submit_on_disk(),
-                                        package=self._package_shown(state), frame=bool(self._frame_variant(state)))
+            prompt += _extend_directive(self._study_scripts_on_disk() if bodies is not None else self._scripts_on_disk(),
+                                        extend, self._submit_on_disk(), package=self._package_shown(state),
+                                        frame=bool(self._frame_variant(state)), analysis=bodies is not None)
             if self._split_on(state) and (self.quest_root / "code" / _split_run.SIMULATE_NAME).is_file():
-                prompt += _skeleton.RERUN_NOTE if self._frame_variant(state) else _SPLIT_RERUN_NOTE
+                prompt += (_skeleton.RERUN_NOTE_ANALYSIS if bodies is not None
+                           else _skeleton.RERUN_NOTE if self._frame_variant(state) else _SPLIT_RERUN_NOTE)
         # A revised plan: the scripts that exist are changed only where the revision touched what they read (the model's
-        # functions, written above, were kept or written again by their own record).
+        # functions, written above, were kept or written again by their own record). Not when FI writes the analysis: the
+        # revision's path gives back an experiment.py, which is FI's there; the request above asks for the bodies instead.
         incremental = None
-        if not extend and not rerun_for and outline and outline.get("scaffold"):
+        if not extend and not rerun_for and outline and outline.get("scaffold") and bodies is None:
             incremental = await self._incremental_scripts(state, outline)
         text = "" if incremental is not None else await self._chat(prompt, node="implement")
         # Two scripts (execution.split_analysis): the simulation, and the analysis, which
@@ -11151,25 +11162,31 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         submit_code = ""
         package_files: dict[str, str] = {}
         if self._split_on(state):
+            fis = bodies is not None  # FI writes the analysis: the reply holds simulate.py and derive.py's functions
             scripts = ({"simulate": incremental["simulate"], "analysis": incremental["analysis"]} if incremental is not None
-                       else _split_run.parse_split_response(text, _PY_FENCE_RE))
+                       else _split_run.parse_split_response(text, _PY_FENCE_RE, bodies=fis))
             if scripts is None:
                 self._log.warning(
-                    "[implement] execution.split_analysis is on but the reply did not hold both "
-                    "scripts (`# file: simulate.py` and `# file: experiment.py`); asking once more",
+                    "[implement] execution.split_analysis is on but the reply did not hold %s; asking once more",
+                    "the `# file: simulate.py` block" if fis
+                    else "both scripts (`# file: simulate.py` and `# file: experiment.py`)",
                 )
-                text = await self._chat(prompt + _SPLIT_REPLY_REMINDER, node="implement")
-                scripts = _split_run.parse_split_response(text, _PY_FENCE_RE)
+                text = await self._chat(prompt + (_BODIES_REPLY_REMINDER if fis else _SPLIT_REPLY_REMINDER), node="implement")
+                scripts = _split_run.parse_split_response(text, _PY_FENCE_RE, bodies=fis)
             if (scripts is not None and incremental is None and self.config.execution.background_jobs
                     and "submit" not in scripts):
                 self._log.warning("[implement] a cluster quest's reply did not hold submit.py; asking once more")
-                text = await self._chat(prompt + _SPLIT_REPLY_REMINDER + _CLUSTER_REPLY_REMINDER, node="implement")
-                scripts = _split_run.parse_split_response(text, _PY_FENCE_RE) or scripts
+                text = await self._chat(prompt + (_BODIES_REPLY_REMINDER + _CLUSTER_BODIES_REMINDER if fis
+                                                  else _SPLIT_REPLY_REMINDER + _CLUSTER_REPLY_REMINDER), node="implement")
+                scripts = _split_run.parse_split_response(text, _PY_FENCE_RE, bodies=fis) or scripts
             if scripts is not None:
                 # The research-tool layout (core/code_layout.py): the model's package, asked for once more when missing.
                 scripts, text, package_files = await self._code_package_reply(state, prompt, text, scripts,
-                                                                              extend=bool(extend))
-                simulate_code, code = self._framed(state, scripts["simulate"]), scripts["analysis"]
+                                                                              extend=bool(extend), bodies=fis)
+                simulate_code = self._framed(state, scripts["simulate"])
+                # FI's own experiment.py and the study's functions put into FI's frame of derive.py (core/analysis_frame.py)
+                code = (self._analysis_written(state, scripts.get("derive", ""), simulate_code) if fis
+                        else scripts["analysis"])
                 submit_code = scripts.get("submit", "")
                 deps = incremental["deps"] if incremental is not None else _parse_split_deps(text)
                 broken = list(_run_manifest.split_lint({_split_run.SIMULATE_NAME: simulate_code, "experiment.py": code}))
@@ -11183,7 +11200,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             else:
                 if self.config.execution.split_failure == "block":
                     self._split_contract_broken(
-                        ["the reply did not hold both scripts (`# file: simulate.py` and `# file: experiment.py`), also when asked again"],
+                        ["the reply did not hold the `# file: simulate.py` block, also when asked again" if fis else
+                         "the reply did not hold both scripts (`# file: simulate.py` and `# file: experiment.py`), also when asked again"],
                         what="the code-writing step did not return both scripts", source=_stop_power.MEASURED,
                     )
                 self._log.warning(
@@ -12409,6 +12427,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 out[name] = path.read_text(encoding="utf-8")
         return out
 
+    def _study_scripts_on_disk(self) -> dict[str, str]:
+        """The study's own files when FI writes the analysis (core/analysis_frame.py): simulate.py and derive.py; experiment.py
+        is FI's and is not shown as the study's code."""
+        out: dict[str, str] = {}
+        for name in (_split_run.SIMULATE_NAME, "derive.py"):
+            path = self.quest_root / "code" / name
+            if path.is_file():
+                out[name] = path.read_text(encoding="utf-8")
+        return out
+
     def _protocol_record(self, payload: dict[str, Any]) -> None:
         try:
             path = self.quest_root / "needs" / "PROTOCOL_CHECK.json"
@@ -13161,10 +13189,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         return None
 
     async def _code_package_reply(self, state: QuestState, prompt: str, text: str, scripts: dict[str, str], *,
-                                  extend: bool) -> tuple[dict[str, str], str, dict[str, str]]:
+                                  extend: bool, bodies: bool = False) -> tuple[dict[str, str], str, dict[str, str]]:
         """``(scripts, reply, package files)`` for a two-script reply: the model's package in it, asked for again when the
         reply left it out (while ``execution.code_package_max_extra_calls`` allows). A reply that still has none keeps
-        the code it has, and says so."""
+        the code it has, and says so. ``bodies``: FI writes the analysis, so the reply holds simulate.py and the functions of
+        derive.py, never experiment.py."""
         layout = self._code_layout(state)
         if layout is None:
             return scripts, text, {}
@@ -13216,11 +13245,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                   package)
                 _code_layout.spend_call(self.quest_root)
                 try:
-                    again = await self._chat(prompt + _code_layout.reminder(package), node="implement")
+                    again = await self._chat(prompt + _code_layout.reminder(package, analysis=bodies), node="implement")
                 except Exception as e:  # noqa: BLE001 -- the package is asked for as a help; the code that came stays
                     self._log.warning("[implement] asking again for the model's package failed: %r", e)
                     again = ""
-                again_scripts = _split_run.parse_split_response(again, _PY_FENCE_RE)
+                again_scripts = _split_run.parse_split_response(again, _PY_FENCE_RE, bodies=bodies)
                 again_files = _code_layout.reply_files(again, _PY_FENCE_RE, package)
                 if again_scripts is not None and _code_layout.complete(again_files, package):
                     scripts, text, files = again_scripts, again, again_files
@@ -18521,6 +18550,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # Cheap faults a person finds in a minute, read before anything runs (core/static_checks.py).
         if (static_stop := await self._static_gate(state)) is not None:
             return static_stop, None, False
+        # A function of derive.py that is still FI's stub, for a result the plan asks for (core/analysis_frame.py).
+        if (stub := self._fis_stub_sendback(state)) is not None:
+            return stub, None, False
         # Where the simulation implements each equation the plan's model computes the data with (`# E1`): read before
         # anything runs, so a stop for it spends nothing and a resume reads the script a person labelled.
         stop = self._cannot_repair_stop() or self._code_problems_stop(state)
@@ -18740,6 +18772,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             except Exception as exc:  # noqa: BLE001 -- versions in requirements.txt are a convenience
                 self._log.warning("[code] could not read the installed versions for requirements.txt: %s", exc)
         _code_project.record_installed(self.quest_root, pinned)
+        self._keep_fis_analysis(state)
         code_path = self.quest_root / "code" / "experiment.py"
         # Two scripts (execution.split_analysis): every run of ``experiment.py`` below goes
         # through ``runner``, which runs ``simulate.py`` first unless the raw files it wrote
@@ -20230,6 +20263,57 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             patch["exec_reflect_history"] = history  # the repair's own reason for giving up, kept
         return patch
 
+    def _fis_analysis_route(self, state: QuestState, exec_result: dict[str, Any], rc: int,
+                            overlaps: list[str]) -> dict[str, Any]:
+        """Where the repair of a run goes when FI wrote its analysis (core/analysis_frame.py), read from FI's own record of the
+        run (``data/results/derived.json``), never from the words of a traceback: ``{"body": name}`` for a function of the
+        study's derive.py (``""``: a statement of derive.py outside the functions), ``{"body": None}`` for the simulation, or
+        ``{"stop": patch}``. FI's experiment.py is never sent to the model: a fault of FI's own (exit code 2, an empty or
+        unreadable record, a stop before the analysis began) ends the quest with the reason said plainly, and no model call."""
+        design = state.get("design")
+        record = _analysis_frame.read_record(self.quest_root)
+        if rc == 0:
+            if not overlaps:
+                return {"body": None}  # a result that runs but is wrong (all zero, out of bounds, numerics): the simulation
+            files = {Path(str(f.get("file") or "")).name: f"figure_{i}"
+                     for i, f in (_analysis_frame.plan_of(design).get("figures") or {}).items() if isinstance(f, dict)}
+            for line in overlaps:
+                body = files.get(Path(line.split(":", 1)[0]).name)
+                if body:
+                    return {"body": body}
+            # A figure FI drew itself: there is no function of the study's to redraw it.
+            self._log.warning("[execute_reflect] figure_overlap: the overlapping figure is drawn by FI, not by a function of "
+                              "derive.py; keeping it as drawn")
+            return {"stop": {"figure_overlap_repaired": True}}
+        stderr = str(exec_result.get("stderr_tail") or "")
+        if exec_result.get("directive") and exec_result.get("failed_script") == _analysis_frame.DERIVE_FILE:
+            return {"body": str(exec_result.get("failed_body") or "")}  # FI's check named the function itself
+        # The analysis printed its RESULT_JSON line, so FI's record is this run's (the line itself is not kept in the tail)
+        printed = bool(state.get("result_json")) or "RESULT_JSON:" in str(exec_result.get("stdout_tail") or "")
+        if exec_result.get("failed_script") == _analysis_frame.EXPERIMENT_FILE and rc != _analysis_frame.FI_FAULT_EXIT:
+            # A check after the run (the run record, the result check) sent the analysis back with its RESULT_JSON line
+            # taken out. The analysis is FI's, so what is wrong is a function of derive.py the record names, or else FI's own.
+            printed = True
+        found = _analysis_frame.failure(record, stderr, rc, printed)
+        if found["kind"] == "body":
+            return {"body": found["body"]}
+        if found["kind"] == "module":
+            return {"body": ""}
+        why = found["why"]
+        if found["formula"]:
+            text = f"FI's analysis cannot compute a formula of the plan: {why}"
+            advice = ("Correct that formula in the design of plan.md, then run the quest again from the design step "
+                      f"(`python launch.py --resume {self.quest_id} --from design`).")
+            tried = ["ran the study's trials", "worked out the plan's formulas from FI's record of the trials",
+                     "a formula is not one FI can compute, so no function of the study's was asked to repair it"]
+        else:
+            text = f"FI's own analysis stopped (a fault of FI's, not of the study's code): {why}"
+            advice = ("This is a fault in FI: report it with the quest's .fi/run.log, and once it is fixed run the quest "
+                      f"again from the run step (`python launch.py --resume {self.quest_id} --from run`).")
+            tried = ["ran the study's trials", "ran FI's analysis on FI's record of them",
+                     "the fault is in FI's own analysis, so it was not sent to the model to repair"]
+        return {"stop": self._stop_before_run(text, "cannot_repair", tried=tried, advice=advice, ran=True)}
+
     async def _node_execute_reflect(self, state: QuestState) -> QuestState:
         """Post-execute repair node.
 
@@ -20446,12 +20530,26 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         repair_submit = split and exec_result.get("failed_script") == _trial_runner.SUBMIT_NAME
         script_code = state.get("code") or ""
         analysis_on_disk = self.quest_root / "code" / "experiment.py"
+        # The analysis FI writes (core/analysis_frame.py): experiment.py is FI's and is never sent to the model. What failed is
+        # read from FI's own record of the run: a function of the study's derive.py (repaired alone, through its body), a run
+        # that needs the simulation repaired, or a fault of FI's own (said plainly, and the quest stops).
+        repair_body, failed_body = False, ""
+        if split and not (repair_simulation or repair_submit) and _analysis_frame.is_fis_file(analysis_on_disk):
+            routed = self._fis_analysis_route(state, exec_result, rc, overlaps)
+            if "stop" in routed:
+                return routed["stop"]
+            repair_body, failed_body = routed["body"] is not None, routed["body"] or ""
+            repair_simulation = not repair_body
         if analysis_on_disk.is_file() and not (repair_simulation or repair_submit):
             # The file is what runs; the state can be a version behind it (a repair of a second model's findings, a redrawn
             # figure), and a repair of the stale text would undo it.
             script_code = analysis_on_disk.read_text(encoding="utf-8")
+        if repair_body:
+            script_code = (self.quest_root / "code" / _analysis_frame.DERIVE_FILE).read_text(encoding="utf-8")
         if split:
-            if repair_submit:
+            if repair_body:
+                split_note = _skeleton.reflect_derive(failed_body, compared=bool(_in_run.of_study(self._protocol_block(state))))
+            elif repair_submit:
                 script_code = (self.quest_root / "code" / _trial_runner.SUBMIT_NAME).read_text(encoding="utf-8")
                 split_note = (
                     "[FI NOTE] The script below is code/submit.py, the driver that submits FI's job array to the cluster "
@@ -20501,6 +20599,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         )
         if repair_simulation:
             prompt = _skeleton.framed_prompt(script_code, prompt)  # what may change, first (nothing when there is no frame)
+        elif repair_body:
+            prompt = _skeleton.derive_prompt(script_code, prompt, failed_body)  # the function of derive.py, never experiment.py
         try:
             text = await self._chat(prompt, node="execute_reflect")
         except Exception as exc:  # noqa: BLE001
@@ -20538,7 +20638,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
 
         new_code = parsed.get("code") or ""
         script_name = (_trial_runner.SUBMIT_NAME if repair_submit
-                       else _split_run.SIMULATE_NAME if repair_simulation else "experiment.py")
+                       else _split_run.SIMULATE_NAME if repair_simulation
+                       else _analysis_frame.DERIVE_FILE if repair_body else "experiment.py")
         # The reply's functions are put into the script and the rest of it stays as it was (core/script_reply.py).
         split_why = ""
         if new_code.strip() or (isinstance(parsed.get("functions"), str) and parsed["functions"].strip()):
@@ -20568,10 +20669,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     "script as written, with its figures as drawn",
                 )
                 await self._keep_refused_repair(
-                    "execute_reflect",
-                    (_trial_runner.SUBMIT_NAME if repair_submit
-                     else _split_run.SIMULATE_NAME if repair_simulation else "experiment.py"),
-                    new_code, "the figure redraw is not a Python script")
+                    "execute_reflect", script_name, new_code, "the figure redraw is not a Python script")
                 return spent
 
         patch_summary = parsed.get("patch_summary") or "(no summary)"
@@ -20606,10 +20704,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
 
         # Write the patched code to disk so the next `execute` picks it
         # up. We mirror the implement node's behavior.
-        code_path = self.quest_root / "code" / (
-            _trial_runner.SUBMIT_NAME if repair_submit
-            else _split_run.SIMULATE_NAME if repair_simulation else "experiment.py"
-        )
+        code_path = self.quest_root / "code" / script_name
         await self._gate_baseline(state)
         code_path.parent.mkdir(parents=True, exist_ok=True)
         parent_sha = _attempts._file_sha(code_path)
@@ -20655,9 +20750,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             "exec_reflect_history": history,
             "exec_patch_pending": True,
         }
-        if not repair_simulation and not repair_submit:
+        if not repair_simulation and not repair_submit and not repair_body:
             # ``code`` is the script that prints RESULT_JSON, which is the analysis when
-            # there are two.
+            # there are two (FI's own experiment.py, unchanged, when FI writes the analysis).
             patch["code"] = new_code
         # If the agent declared additional deps for the fix, merge them
         # so the next `execute` pip-installs them.
@@ -24665,8 +24760,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
     def _keep_analysis_answers(self, result_json: Any, state: QuestState, runs: list[Any] | None = None,
                                scheduled: int | None = None) -> None:
         """Keep the value the run recorded under each name the plan gives a quantity, so the paper's key for a quantity no
-        trial returns can be filled (core/paper_values.py::write_answers). Best-effort."""
+        trial returns can be filled (core/paper_values.py::write_answers). Best-effort. When FI wrote the analysis
+        (core/analysis_frame.py), the numbers come from FI's own record of it (``data/results/derived.json``): every quantity
+        it worked out once for the study, by the plan's formula or a function of derive.py, as well as the printed results."""
         try:
+            if self._analysis_on():
+                protocol = self._protocol_block(state)
+                values = _analysis_frame.study_values(_analysis_frame.read_record(self.quest_root))
+                printed = result_json if isinstance(result_json, dict) else {}
+                ids = list(dict.fromkeys([*(str(m["id"]) for m in (protocol or {}).get("metrics") or []
+                                            if isinstance(m, dict) and m.get("id")), *values]))
+                _paper_values.write_answers(self.quest_root, {**printed, **values}, protocol, None, scheduled, ids=ids)
+                return
             _paper_values.write_answers(self.quest_root, result_json, self._protocol_block(state), runs, scheduled)
         except Exception as e:  # noqa: BLE001 -- the quantity then has no key; the paper is not held to place it
             self._log.warning("[execute] the run's recorded answers could not be kept for the paper's keys (%s: %s)",
@@ -27613,14 +27718,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # A background job (a cluster) runs FI's trials as a job array (core/trial_runner.py): two scripts and submit.py.
         return self._runs_code(state)
 
-    def _split_block(self, state: QuestState) -> str:
+    def _split_block(self, state: QuestState, bodies: list[str] | None = None) -> str:
         """The two-script contract for the code-writing prompts, or nothing when
-        ``execution.split_analysis`` is off."""
+        ``execution.split_analysis`` is off. ``bodies``: FI writes the analysis (:meth:`_analysis_bodies`), so the request
+        asks for the functions of derive.py, never experiment.py."""
         if not self._split_on(state):
             return ""
         search = _optim.has_block(state.get("design")) and not self.config.execution.background_jobs
         inside = _in_run.of_study(self._protocol_block(state))
-        block = self._frame_protocols(state, search, inside) or (
+        block = self._frame_protocols(state, search, inside, bodies) or (
                  _SPLIT_PROTOCOL + (_CLUSTER_PROTOCOL if self.config.execution.background_jobs else "")
                  + (_SEARCH_PROTOCOL if search else "")
                  + (_IN_EACH_RUN_PROTOCOL.replace("$factors", ", ".join(f"`{k}`" for k in inside))
@@ -27634,11 +27740,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 # FI wrote and checked the package function by function: only the two scripts are asked for.
                 block += _code_layout.prefilled_block(
                     package, (self.quest_root / "code" / package / _code_layout.MODEL_NAME).read_text(encoding="utf-8"),
-                    steps=self._written_steps(state), frame=self._frame_variant(state))
+                    steps=self._written_steps(state), frame=self._frame_variant(state), analysis=bodies is not None)
                 block += self._function_steps_partial_note()
             else:
                 block += _code_layout.prompt_block(package, _oracle.generating_equations(self._protocol_block(state)),
-                                                   frame=self._frame_variant(state))
+                                                   frame=self._frame_variant(state), analysis=bodies is not None)
                 block += self._function_steps_note(package)
         return block
 
@@ -29288,6 +29394,11 @@ _CLUSTER_REPLY_REMINDER = (
     "\n\nThis quest runs its trials on a cluster: reply with THREE fenced Python blocks, `# file: simulate.py`, "
     "`# file: experiment.py` and `# file: submit.py`, as the section on the cluster above says."
 )
+#: :data:`_CLUSTER_REPLY_REMINDER` when FI writes the analysis (core/analysis_frame.py): experiment.py is FI's, never asked for.
+_CLUSTER_BODIES_REMINDER = (
+    "\n\nThis quest runs its trials on a cluster: the reply also holds the fenced Python block `# file: submit.py`, after the "
+    "other blocks, as the section on the cluster above says."
+)
 
 _IN_EACH_RUN_PROTOCOL = """
 **What each run compares inside it** (`protocol.in_each_run`: $factors). These are not settings of their own: every run
@@ -29919,6 +30030,14 @@ _SPLIT_REPLY_REMINDER = """
 
 ## Your last reply did not hold both scripts
 Reply with exactly two fenced Python blocks: the first starting with the line `# file: simulate.py`, the second starting with the line `# file: experiment.py`, then the `DEPS:` line. Nothing else.
+"""
+
+#: :data:`_SPLIT_REPLY_REMINDER` when FI writes the analysis (core/analysis_frame.py): the reply's own blocks are simulate.py and
+#: the functions of derive.py; experiment.py is FI's and is never asked for.
+_BODIES_REPLY_REMINDER = """
+
+## Your last reply did not hold the `# file: simulate.py` block
+Reply with exactly the blocks the output format above names: a fenced Python block starting with the line `# file: simulate.py` (the function `trial` and its helpers), then, when the format lists functions of derive.py, a fenced Python block starting with the line `# file: derive.py` holding only those functions, then the `DEPS:` line. Nothing else.
 """
 
 _TRIAL_ORACLE_NOTE = """
@@ -33061,9 +33180,10 @@ def _review_sends_the_experiment_back(review: dict[str, Any], state: QuestState)
     return _rerun_evidence(review, state)
 
 
-def _rerun_directive(review: dict[str, Any], named: str) -> str:
+def _rerun_directive(review: dict[str, Any], named: str, analysis: bool = False) -> str:
     """What the implement prompt is told when a review sent the experiment
-    back: what the review named, and the review's own must-fix prose."""
+    back: what the review named, and the review's own must-fix prose. ``analysis``: FI writes the analysis and reports the
+    results itself (core/analysis_frame.py), so the code is not asked to report them."""
     notes = [
         item
         for field in ("blocking", "weaknesses", "suggestions")
@@ -33074,17 +33194,38 @@ def _rerun_directive(review: dict[str, Any], named: str) -> str:
         "## The review sent this experiment back",
         f"The review of the last draft found a problem with `{named}` — something "
         "this run computed, which no rewrite of the paper can fix. Write the "
-        "experiment so that it is computed correctly and reported in RESULT_JSON, "
-        "and keep everything the design asks for.",
+        + ("code so that it is computed correctly (FI reports it from its own record), "
+           if analysis else "experiment so that it is computed correctly and reported in RESULT_JSON, ")
+        + "and keep everything the design asks for.",
         *(f"  - {note}" for note in notes),
     ])
 
 
 def _extend_directive(scripts: dict[str, str], points: list[str], submit: str = "",
-                      package: tuple[str, dict[str, str]] | None = None, frame: bool = False) -> str:
+                      package: tuple[str, dict[str, str]] | None = None, frame: bool = False,
+                      analysis: bool = False) -> str:
     """What the implement prompt is told when a person's refine asked for a number the study lacks: the scripts that
     exist are the base, and only what the number needs is changed. ``package``: the model's package the simulation
-    computes with (``core/code_layout.py``), shown too so the extension sees the equations it calls."""
+    computes with (``core/code_layout.py``), shown too so the extension sees the equations it calls. ``analysis``: FI writes
+    the analysis (core/analysis_frame.py): ``scripts`` are simulate.py and derive.py, and the reply gives functions only."""
+    if analysis:
+        shown = "\n\n".join(f"### code/{name}\n```python\n{code}\n```" for name, code in scripts.items())
+        if submit.strip():
+            shown += f"\n\n### code/{_trial_runner.SUBMIT_NAME}\n```python\n{submit}\n```"
+        if package and package[1]:
+            shown += "\n\n" + _code_layout.sources_block(package[1]) + "\n\n" + _code_layout.extend_note(package[0])
+        return "\n".join([
+            "",
+            "## Extend the code that exists",
+            "This study was already run and written up. A person read it and asked for a number it lacks. Do not write a new "
+            "experiment: start from the code below and change as little as you can so that it also gives what is asked. "
+            "Keep the protocol, the design, every setting and every function that exists exactly as they are; FI keeps its "
+            "frame, runs the trials and writes the analysis that reports the results. " + _skeleton.EXTEND_REPLY_ANALYSIS,
+            "What the person asked for:",
+            *(f"  - {p}" for p in points),
+            "",
+            shown or "(no code was saved: write it from the design)",
+        ])
     shown = "\n\n".join(f"### code/{name}\n```python\n{code}\n```" for name, code in scripts.items())
     if submit.strip():
         shown += f"\n\n### code/{_trial_runner.SUBMIT_NAME}\n```python\n{submit}\n```"

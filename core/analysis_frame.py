@@ -373,6 +373,181 @@ def ensure_files(code_dir: Path | str, design: dict[str, Any], simulate_source: 
     return written
 
 
+# ---- what the engine does with the analysis FI wrote -------------------------------------------------------------------------
+#: The exit code of FI's experiment.py for a fault of FI's own (a formula FI cannot compute, a record that is missing or empty, a
+#: fault of FI's own figures): nothing is sent to the model.
+FI_FAULT_EXIT = 2
+#: The files FI carries beside experiment.py and derive.py (:func:`carried_files`), never the study's: a repair or an edit does
+#: not change them, and they are not part of the simulation.
+_CARRIED_TOP = (f"{FIGURES_MODULE}.py",)
+
+
+def is_fis(text: str) -> bool:
+    """Whether ``text`` (an experiment.py) is the analysis FI writes."""
+    return (text or "").lstrip("﻿").startswith(EXPERIMENT_HEAD)
+
+
+def is_fis_file(path: Path | str) -> bool:
+    try:
+        return is_fis(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
+def carried_file(code_dir: Path | str, rel: str) -> bool:
+    """Whether ``rel`` (a path in the code folder ``code_dir``) is a file FI carries there for its analysis and holds FI's text:
+    the figure step and the formula calculator. A module of the study's own with such a name is the study's."""
+    rel = str(rel).replace("\\", "/")
+    if rel not in _CARRIED_TOP and not rel.startswith(f"{CORE_DIR}/"):
+        return False
+    want = carried_files().get(rel)
+    if want is None:
+        return False
+    try:
+        return (Path(code_dir) / rel).read_text(encoding="utf-8").lstrip("﻿") == want
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
+def analysis_file(code_dir: Path | str, rel: str) -> bool:
+    """Whether ``rel`` is a file of the analysis FI writes (``experiment.py`` and ``derive.py`` with FI's text, or a file FI
+    carries beside them): never a file the simulation depends on."""
+    rel = str(rel).replace("\\", "/")
+    folder = Path(code_dir)
+    if rel == EXPERIMENT_FILE:
+        return is_fis_file(folder / rel)
+    if rel == DERIVE_FILE:
+        try:
+            return _BEGIN.search((folder / rel).read_text(encoding="utf-8")) is not None
+        except (OSError, UnicodeDecodeError):
+            return False
+    return carried_file(folder, rel)
+
+
+def compose(design: dict[str, Any], reply: str, existing: str = "") -> tuple[str, str]:
+    """``(derive.py, note)``: FI's frame of ``derive.py`` for this plan with the study's functions from ``reply`` (the reply's
+    ``# file: derive.py`` block) put into it, each through :func:`core.function_steps.replace_function_ex` (the path that puts
+    the model's ``trial`` into the frame of simulate.py), with the helpers and imports they use. ``existing``: the file the quest
+    has now; the bodies it holds are kept unless the reply gives them again. A reply that cannot be used leaves FI's file with the
+    stubs (``note`` says why), so the run shows the functions as not written and the repair asks for them."""
+    frame = derive_source(design, existing)
+    wanted = body_names(plan_of(design))
+    if not (reply or "").strip():
+        return frame, ("the reply held no functions of derive.py" if wanted else "")
+    try:
+        tree = ast.parse(reply)
+    except SyntaxError as e:
+        return frame, f"the derive.py block is not valid Python ({e.msg}, line {e.lineno}); FI's stubs stay"
+    given = [n.name for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in wanted]
+    unknown = [n.name for n in tree.body if isinstance(n, ast.FunctionDef) and n.name.startswith(_BODY_PREFIXES)
+               and n.name not in wanted]
+    text, notes = frame, []
+    for name in given:
+        made, why, _left = _steps.replace_function_ex(text, name, reply, signature=_skeleton.body_signature(name),
+                                                      equation=name, wide=True)
+        if made is None:
+            notes.append(f"`{name}`: {why}")
+            continue
+        text = made
+    problem = derive_intact(frame, text)
+    if problem:
+        return frame, problem + "; FI's stubs stay"
+    if unknown:
+        notes.append("the plan asks for no " + ", ".join(f"`{n}`" for n in unknown) + "; kept as a helper only")
+    missing = [n for n in wanted if n not in given and n in stubs(text)]
+    if missing:
+        notes.append("the reply did not give " + ", ".join(f"`{n}`" for n in missing))
+    return text, "; ".join(notes)
+
+
+def failed_script(analysis: Path | str, returncode: int) -> str:
+    """The file a failed run of the analysis ``analysis`` (experiment.py) sends to be repaired: ``derive.py`` when the analysis
+    is FI's and it did not stop for a fault of FI's own (exit code 2: then ``experiment.py``, which the repair step reports and
+    never sends to the model); the analysis itself otherwise."""
+    path = Path(analysis)
+    if is_fis_file(path) and returncode != FI_FAULT_EXIT:
+        return DERIVE_FILE
+    return path.name
+
+
+def read_record(quest_root: Path | str) -> dict[str, Any]:
+    """FI's record of the last run of its analysis (``data/results/derived.json``), or ``{}``."""
+    import json
+
+    try:
+        data = json.loads((Path(quest_root) / DERIVED_PATH).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+_DERIVE_FRAME = re.compile(r'File "[^"]*derive\.py", line (\d+)(?:, in (\S+))?')
+
+
+def failure(record: dict[str, Any], stderr: str, returncode: int, printed: bool) -> dict[str, Any]:
+    """What a failed run of FI's experiment.py was, from FI's own record of it (``record``: derived.json) and how it ended
+    (``printed``: it printed its ``RESULT_JSON`` line, so ``record`` is this run's):
+    ``{"kind": "body" | "module" | "fi", "body": the function of derive.py, "why": a plain sentence, "formula": bool}``.
+
+    * ``fi``: FI's own fault (exit code 2, or a stop before the analysis began that no line of derive.py is in): never sent to
+      the model; ``formula`` says it is a formula of the plan FI could not compute.
+    * ``module``: a statement of derive.py outside any function stopped its import (a syntax error, a name defined nowhere).
+    * ``body``: the function the record names as failed or refused (a quantity of a counting role first, else a figure)."""
+    record = record if isinstance(record, dict) else {}
+    derived = record.get("derived") if isinstance(record.get("derived"), dict) else {}
+    last = next((ln.strip() for ln in reversed((stderr or "").splitlines()) if ln.strip()), "")
+    if returncode == FI_FAULT_EXIT:
+        fresh = printed and not record.get("from_earlier_run")
+        formula = [r for r in derived.values() if isinstance(r, dict) and r.get("fi_fault") and r.get("by") == "formula"] if fresh else []
+        said = [str(r.get("why") or "") for r in formula] or ([str(x) for x in record.get("fi_faults") or []] if fresh else [])
+        if record.get("from_earlier_run"):
+            said = [str((record.get("this_run") or {}).get("why") or "")]
+        said = [s for s in said if s]
+        return {"kind": "fi", "body": "", "formula": bool(formula), "why": "; ".join(said) or last or "FI's analysis stopped"}
+    frames = _DERIVE_FRAME.findall(stderr or "")
+    if not printed:
+        if frames:  # the import of derive.py stopped: a statement outside the functions, or a function's own syntax
+            return {"kind": "module", "body": "", "formula": False,
+                    "why": f"derive.py stops when it is imported (line {frames[-1][0]}): {last[:300]}"}
+        return {"kind": "fi", "body": "", "formula": False,
+                "why": "FI's analysis stopped before it began, in its own lines, not in a function of the study's"
+                       + (f" ({last[:300]})" if last else "")}
+    bad = [(i, r) for i, r in derived.items() if isinstance(r, dict) and r.get("status") in ("failed", "refused")
+           and not r.get("fi_fault") and str(r.get("by") or "").startswith(_BODY_PREFIXES)]
+    bad += [(str(o.get("id")), {"by": f"figure_{o.get('id')}", "why": o.get("why"), "role": "figure"})
+            for o in record.get("figures") or [] if isinstance(o, dict) and o.get("status") in ("failed", "refused")]
+    if not bad:
+        return {"kind": "fi", "body": "", "formula": False,
+                "why": "FI's analysis ended with a failure its record does not name a function of the study's for"
+                       + (f" ({last[:300]})" if last else "")}
+    counting = [b for b in bad if b[1].get("role") in ("result", "reference", "physical_bound")]
+    ident, rec = (counting or bad)[0]
+    return {"kind": "body", "body": str(rec["by"]), "formula": False, "why": f"`{ident}`: {rec.get('why') or 'failed'}"}
+
+
+def study_values(record: dict[str, Any]) -> dict[str, float]:
+    """The study-wide numbers FI's record of the run holds (a quantity worked out once for the study, by its formula or its
+    function): ``{id: value}``, finite values only."""
+    import math
+
+    derived = (record.get("derived") if isinstance(record, dict) and record.get("schema") == DERIVED_SCHEMA
+               and isinstance(record.get("derived"), dict) else {})
+    out: dict[str, float] = {}
+    for ident, rec in derived.items():
+        v = rec.get("value") if isinstance(rec, dict) and rec.get("status") == "ok" else None
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(float(v)):
+            out[str(ident)] = float(v)
+    return out
+
+
+def not_computed(record: dict[str, Any]) -> list[dict[str, str]]:
+    """The declared quantities the last run did not work out, from its record: ``[{"id", "status", "why"}]`` (a function not
+    written yet, one that failed or was refused, a result no trial gave)."""
+    items = record.get("not_computed") if isinstance(record, dict) and record.get("schema") == DERIVED_SCHEMA else None
+    return [{"id": str(i.get("id")), "status": str(i.get("status") or ""), "why": str(i.get("why") or "")}
+            for i in items or [] if isinstance(i, dict) and i.get("id")]
+
+
 # ---- experiment.py ---------------------------------------------------------------------------------------------------------
 #: ``experiment.py`` is all FI's; this is the whole of it. It uses the standard library, the runtime (``fi_frame``) and the table
 #: (``fi_table``) beside it. ``check_return`` and ``run`` can be called after importing it: it runs nothing on import.

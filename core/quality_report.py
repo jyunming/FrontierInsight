@@ -703,6 +703,15 @@ def _analysis_problems(q: _Quest) -> list[dict[str, str]]:
     if q.stuck and _stuck_stage(q) == "analysis":
         out.append(_problem("analysis", q.stuck.get("problem") or "the analysis could not be read", "FI", "not fixed",
                             "needs/STUCK.json"))
+    # The analysis FI writes (core/analysis_frame.py): each declared quantity its last run did not work out, from FI's record.
+    from . import analysis_frame as _analysis
+
+    said = {"not_written": "the study's function for it was not written", "no_data": "no trial gave a value for it",
+            "failed": "the study's function for it failed", "refused": "FI refused what the study's function for it returned"}
+    for item in _analysis.not_computed(_analysis.read_record(q.root)):
+        out.append(_problem("analysis", f"{item['id']} was not computed: {said.get(item['status'], item['status'])}"
+                            + (f" ({_one(item['why'], 200)})" if item["why"] and item["status"] != "not_written" else ""),
+                            "FI's analysis", "left out", _analysis.DERIVED_PATH.as_posix()))
     return out
 
 

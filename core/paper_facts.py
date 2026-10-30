@@ -299,6 +299,16 @@ def required_items(quest_root: Path | str) -> list[Item]:
             for n in gate.get("names") if isinstance(gate.get("names"), list) else []:
                 add(NOT_COMPUTED, n, _sentence(f"The plan asks for {_said(root, _one(n))}; the code does not compute it, so "
                                                "this study does not report it"))
+    # The analysis FI writes (core/analysis_frame.py): each declared quantity its last run did not work out, from FI's own record
+    # of that run (``data/results/derived.json``), never a null left silent.
+    from . import analysis_frame as _analysis
+
+    for item in _analysis.not_computed(_read(root, _analysis.DERIVED_PATH.as_posix()) or {}):
+        q, status = item["id"], item["status"]
+        why = ("no trial gave a value for it" if status == "no_data" else
+               "the study's code to work it out was not written" if status == "not_written" else
+               "the study's code to work it out gave no usable value")
+        add(NOT_COMPUTED, q, _sentence(f"The plan asks for {_said(root, q)}; {why}, so this study does not report it"))
     checked = _read(root, "needs/RESULT_CHECK.json")
     for c in (checked.get("checks") if isinstance(checked, dict) else None) or []:
         if isinstance(c, dict) and c.get("quantity"):

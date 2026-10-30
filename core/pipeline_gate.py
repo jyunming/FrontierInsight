@@ -87,11 +87,14 @@ class GateResult:
     seconds: dict[str, float] = field(default_factory=dict)
     #: Folders of the quest left out of the scratch copy because they were over the size cap.
     left_out: list[str] = field(default_factory=list)
+    #: When FI writes the analysis (core/analysis_frame.py): the function of derive.py FI's record of the run names as the
+    #: one that failed, was refused or is still FI's stub (``""``: none, or a statement of derive.py outside its functions).
+    body: str = ""
 
     def record(self) -> dict[str, Any]:
         return {"ok": self.ok, "stage": self.stage, "kind": self.kind, "where": self.where, "detail": self.detail,
                 "exception": self.exception, "unfilled": self.unfilled, "late": self.late, "seconds": self.seconds,
-                "left_out": self.left_out}
+                "left_out": self.left_out, **({"body": self.body} if self.body else {})}
 
     def says(self) -> str:
         if self.ok:
@@ -484,6 +487,11 @@ async def _run_gate(quest_root: Path, code_dir: Path, protocol: dict[str, Any] |
             return GateResult(False, "derive", TIME, "", f"the analysis was still running after {timeout_s} s",
                               seconds=seconds)
         err = getattr(run, "stderr", "") or ""
+        from . import analysis_frame as _analysis
+
+        if _analysis.is_fis_file(scratch / "code" / _analysis.EXPERIMENT_FILE):
+            # The analysis is FI's: its own record of the run says which function of the study's failed (FI's lines never do).
+            return await asyncio.to_thread(_fis_analysis_result, scratch, run, protocol, seconds, left_out)
         where = _trials.last_frame(err, scratch)
         exc = last_exception(err)
         if run.returncode != 0:
@@ -512,6 +520,69 @@ async def _run_gate(quest_root: Path, code_dir: Path, protocol: dict[str, Any] |
     finally:
         if not keep and not work_dir:
             shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _fis_analysis_result(scratch: Path, run: Any, protocol: dict[str, Any] | None, seconds: dict[str, float],
+                         left_out: list[str]) -> GateResult:
+    """The gate's outcome for the analysis FI writes (core/analysis_frame.py), read from FI's own record of the run
+    (``data/results/derived.json``) rather than from its printed text:
+
+    * a fault of FI's own (exit code 2, or a stop in FI's lines): ``not_checked``, never a fault of the study's code, so
+      nothing is refused for it;
+    * a function of derive.py that raised: judged by the exception's type as for any analysis (a name defined nowhere is a
+      ``fault``); one whose return FI refused (a wrong type, a key that is not a setting): a ``fault``, whatever the data;
+      one that gave NaN for a result: ``small_data``;
+    * a function still FI's stub for a declared quantity of a counting role: a ``fault`` at the facts stage, since the long
+      run would give no value for it (FI's stub is the same on any number of trials)."""
+    from . import analysis_frame as _analysis
+
+    record = _analysis.read_record(scratch)
+    err = getattr(run, "stderr", "") or ""
+    printed = "RESULT_JSON:" in (getattr(run, "stdout", "") or "")
+    if run.returncode != 0:
+        got = _analysis.failure(record, err, run.returncode, printed)
+        if got["kind"] == "fi":
+            return GateResult(False, "derive", NOT_CHECKED, "", "FI's own analysis could not run on the small copy (FI's "
+                              "fault, not the study's code): " + got["why"][:300], seconds=seconds, left_out=left_out)
+        why = got["why"]
+        rec = next((r for r in (record.get("derived") or {}).values()
+                    if isinstance(r, dict) and r.get("by") == got["body"]), None) if got["body"] else None
+        said = str(rec.get("why") if rec else "") or why
+        exc = last_exception(err) if got["kind"] == "module" else (m.group(1) if (m := _EXC_LINE.match(said)) else "")
+        status = str(rec.get("status")) if rec else ("failed" if got["kind"] == "module" else "")
+        kind = (kind_of(exc) if exc else SMALL_DATA) if status == "failed" else FAULT if status == "refused" else SMALL_DATA
+        if kind == FAULT and exc in _MAYBE_FAULTS and left_out:
+            kind = SMALL_DATA
+            said += f" (a folder too large to copy was left out of the check: {', '.join(left_out)})"
+        where = f"code/derive.py, in {got['body']}" if got["body"] else "code/derive.py"
+        return GateResult(False, "derive", kind, where, said[:300], exc, seconds=seconds, left_out=left_out,
+                          body=got["body"])
+    if not printed:
+        return GateResult(False, "derive", NOT_CHECKED, "", "FI's own analysis ended without its RESULT_JSON line (FI's "
+                          "fault, not the study's code)", seconds=seconds)
+    roles = {str(d.get("id")): str(d.get("role") or "result") for d in (protocol or {}).get("derived") or [] if isinstance(d, dict)}
+    derived = record.get("derived") if isinstance(record.get("derived"), dict) else {}
+    stubs = [(i, str((derived.get(i) or {}).get("by") or "")) for i in [x["id"] for x in _analysis.not_computed(record)
+                                                                       if x["status"] == "not_written"]
+             if str((derived.get(i) or {}).get("role") or roles.get(i, "result")) in _COUNTING]
+    if stubs:
+        names = [i for i, _b in stubs]
+        return GateResult(False, "facts", FAULT, f"code/derive.py, in {stubs[0][1]}" if stubs[0][1] else "code/derive.py",
+                          "; ".join(f"`{i}` is computed by no trial and no function of the study's yet (`{b}` is still FI's "
+                                    "stub)" if b else f"`{i}` is computed by no trial and no function of the study's yet"
+                                    for i, b in stubs[:4]),
+                          unfilled=names, seconds=seconds, body=stubs[0][1])
+    began = time.monotonic()
+    unfilled = _unfilled_headlines(scratch, protocol)
+    seconds["facts"] = round(time.monotonic() - began, 2)
+    if unfilled:
+        return GateResult(False, "facts", SMALL_DATA, "", "no usable value for: " + ", ".join(unfilled[:6]), unfilled=unfilled,
+                          seconds=seconds)
+    return GateResult(True, seconds=seconds)
+
+
+#: The roles a declared quantity counts for (core/numeric_warnings.COUNTING_ROLES).
+_COUNTING = ("result", "reference", "physical_bound")
 
 
 def _unfilled_headlines(scratch: Path, protocol: dict[str, Any] | None) -> list[str]:

@@ -1310,7 +1310,9 @@ def repair_breaks_contract(old: str, new: str, name: str, *, oracles: list[dict[
         return f"it is not Python that parses ({type(exc).__name__})"
     if not any(not (isinstance(n, ast.Expr) and isinstance(n.value, (ast.Name, ast.Constant))) for n in tree.body):
         return "it holds no code (only a name or a value), so it is not the whole of the script"
-    if name in ("simulate.py", "fi_frame.py"):  # FI's frame (core/skeleton.py), when the file has one; else nothing here
+    # FI's frame (core/skeleton.py) and the analysis FI writes (derive.py, experiment.py), when the file has FI's text; else
+    # nothing here
+    if name in ("simulate.py", "fi_frame.py", "derive.py", "experiment.py"):
         from . import skeleton as _skeleton
 
         framed = _skeleton.repair_problem(old, new, name)
@@ -1904,7 +1906,10 @@ class TrialsRunner:
         result = await _outside.OutsideExecutor(self.executor, self.quest_root, inputs=_outside.ANALYSIS_INPUTS, skip=(),
                                                 log=self.log, replace=swap).execute(
             cmd, cwd=cwd, timeout_s=timeout_s, env=analysis_env)
-        self.failed_script = None if result.returncode == 0 else self.analysis.name
+        from . import analysis_frame as _analysis
+
+        # the analysis FI writes: a function of the study's derive.py is what is repaired, never FI's experiment.py
+        self.failed_script = None if result.returncode == 0 else _analysis.failed_script(self.analysis, result.returncode)
         if result.returncode != 0 and self.left_out_settings and not self.trial_fault:
             # Settings are left out only once the repairs are spent, so no repair of the analysis is coming: an analysis
             # that cannot run without them (it checks the planned grid) ends the quest with that said plainly.

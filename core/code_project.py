@@ -328,14 +328,31 @@ def run_source(code_dir: Path | str | None = None) -> str:
     if not framed:
         return RUN_SOURCE
     text = RUN_SOURCE
-    for old, new in _FRAMED_EDITS:
+    for old, new in _FRAMED_EDITS + (_ANALYSIS_EDITS if _fis_analysis(code_dir) else ()):
         if text.count(old) != 1:
             # The template moved on and this edit did not: a run.py without the frame's runtime would fail at the first trial,
             # so this is a fault of FI's (a test of the framed run.py fails), never a silent fall back.
             raise RuntimeError("FI's run.py template changed and its edit for a framed simulation no longer applies: "
                                + old.strip().splitlines()[0][:80])
         text = text.replace(old, new)
+    if _fis_analysis(code_dir):
+        text = text.replace("@FI_ANALYSIS_FILES@", repr(_analysis_files()), 1)
     return text.replace("@FI_FRAME_RUNTIME@", repr(_quest_runtime(code_dir)), 1)
+
+
+def _fis_analysis(code_dir: Path | str | None) -> bool:
+    """Whether the analysis of the code folder ``code_dir`` is the one FI writes (core/analysis_frame.py)."""
+    from . import analysis_frame as _analysis
+
+    return code_dir is not None and _analysis.is_fis_file(Path(code_dir) / _analysis.EXPERIMENT_FILE)
+
+
+def _analysis_files() -> list[str]:
+    """The names, in the code folder, of the analysis FI writes: what ``run.py`` needs beside ``experiment.py`` to run it."""
+    from . import analysis_frame as _analysis
+
+    tops = {rel.split("/", 1)[0] for rel in _analysis.carried_files()}
+    return sorted({_analysis.EXPERIMENT_FILE, _analysis.DERIVE_FILE, "fi_table.py", *tops})
 
 
 def _quest_runtime(code_dir: Path | str) -> str:
@@ -349,6 +366,32 @@ def _quest_runtime(code_dir: Path | str) -> str:
     except (OSError, UnicodeDecodeError):
         return _skeleton.RUNTIME
     return have if have.startswith(_skeleton.RUNTIME_HEAD) else _skeleton.RUNTIME
+
+
+#: What a ``run.py`` adds when FI wrote the analysis (core/analysis_frame.py). FI's ``experiment.py`` reads the record of the trials
+#: in the folder its code folder is in and writes its results and figures there, so ``run.py`` runs it from a copy of this folder
+#: inside its own work folder: the analysis reads this run's record, through the same ``fi_table.py`` FI's own run uses, and the
+#: quest's results stay as FI wrote them. The files are not carried inside ``run.py``: it is part of what the trials' cache key
+#: hashes, and FI's analysis files are not, so a newer FI's analysis never runs the trials of an unchanged quest again.
+_ANALYSIS_EDITS = (
+    ("""    sys.exit(subprocess.call([sys.executable, str(HERE / "experiment.py")]))
+""", """    # FI wrote this study's analysis: it runs from a copy of this folder in WORK, so it reads this run's record of the trials
+    # and writes its results and figures in WORK.
+    missing = [name for name in FI_ANALYSIS_FILES if not (HERE / name).exists()]
+    if missing:
+        sys.exit("[run] FI's analysis needs " + ", ".join(missing) + " beside run.py; copy the whole code folder")
+    copy = WORK / "code"
+    shutil.rmtree(copy, ignore_errors=True)
+    shutil.copytree(HERE, copy, ignore=shutil.ignore_patterns("output", "__pycache__", ".*"))
+    sys.exit(subprocess.call([sys.executable, str(copy / "experiment.py")]))
+"""),
+    ("""def load_simulation():
+""", """FI_ANALYSIS_FILES = @FI_ANALYSIS_FILES@  # the analysis FI wrote (experiment.py and the files it uses)
+
+
+def load_simulation():
+"""),
+)
 
 
 #: What a ``run.py`` for a framed simulation adds: the runtime's text, written beside ``simulate.py`` when it is missing, and the

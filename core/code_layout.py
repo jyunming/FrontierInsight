@@ -355,7 +355,13 @@ itself. The package's `{package}/{MODEL_NAME}` as it is:
 {steps_block(steps)}"""
 
 
-def reminder(package: str) -> str:
+def reminder(package: str, analysis: bool = False) -> str:
+    """The request again for a reply that left out the package. ``analysis``: FI writes experiment.py (core/analysis_frame.py),
+    so the reply's own files are simulate.py and the functions of derive.py the reply format lists."""
+    if analysis:
+        return (f"\n\nREMINDER: the reply did not hold the package. Give every block of the output format again, each in its "
+                f"own fenced block (`# file: simulate.py`, and `# file: derive.py` when the format lists functions of it), "
+                f"with `# file: {package}/__init__.py` and `# file: {package}/{MODEL_NAME}`.\n")
     return (f"\n\nREMINDER: the reply did not hold the package. Give every file again, each in its own fenced block: "
             f"`# file: simulate.py`, `# file: experiment.py`, `# file: {package}/__init__.py` and "
             f"`# file: {package}/{MODEL_NAME}`.\n")
@@ -568,12 +574,23 @@ TABLE_SCRIPT = "fi_table.py"
 SKILLS_FOLDER = "skills"
 
 
+#: The names under ``code/`` the analysis FI writes may use (core/analysis_frame.py); only a file that holds FI's text is its.
+_ANALYSIS_PARTS = ("derive.py", "fi_figures.py", "fi_core")
+
+
+def _analysis_part(code_dir: Path, rel: str) -> bool:
+    from . import analysis_frame as _analysis
+
+    return _analysis.analysis_file(code_dir, rel)
+
+
 def simulation_inputs(quest_root: Path | str, code: Path | None = None) -> list[Path]:
     """Every file the simulation may depend on, in a stable sorted order (by path relative to ``quest_root``).
 
     Under ``code/`` (or ``code``, when given): every file, whatever its suffix (a helper module beside ``simulate.py``,
     a model package, a parameter table, a pickled lookup, a binary array: the simulation may read any of them), except
-    the analysis script (:data:`ANALYSIS_SCRIPT`), FI's reader of the record (:data:`TABLE_SCRIPT`), the tests (``tests/``, ``test_*.py``), FI's copies under ``skills/``,
+    the analysis script (:data:`ANALYSIS_SCRIPT`), FI's reader of the record (:data:`TABLE_SCRIPT`), the rest of the analysis FI
+    writes (``derive.py`` with FI's frame, ``fi_figures.py`` and ``fi_core/`` with FI's text), the tests (``tests/``, ``test_*.py``), FI's copies under ``skills/``,
     notes (``.md``), caches (``__pycache__``), hidden files and folders, and what a run writes (:data:`GENERATED_FOLDERS`).
     Under ``<quest_root>/inputs/``: every file, since a simulation may read any of the person's files there. A change to
     any listed file is a change to the simulation, so a cached result of the old version must not be reused (:func:`core.outside_run.code_version`,
@@ -592,6 +609,8 @@ def simulation_inputs(quest_root: Path | str, code: Path | None = None) -> list[
                 continue
             if parts in ((ANALYSIS_SCRIPT,), (TABLE_SCRIPT,)) or path.suffix.lower() == ".md":
                 continue
+            if path.suffix == ".py" and parts[0] in _ANALYSIS_PARTS and _analysis_part(code_dir, "/".join(parts)):
+                continue  # the analysis FI writes (derive.py, its figure step, its formula calculator): a repair of it runs no trial again
             out.append(path)
     inputs = root / "inputs"
     if inputs.is_dir():

@@ -179,11 +179,27 @@ def _is_frame_runtime(path: Path) -> bool:
 def editable(quest_root: Path) -> list[str]:
     """The files of ``code/`` an edit may change: the simulation (``simulate.py``), the helper modules beside it and the
     modules of the model's package (``<package>/model.py``), by their path in ``code/``."""
+    from . import analysis_frame as _analysis
+
     code = Path(quest_root) / "code"
     names = sorted(p.name for p in code.glob("*.py") if p.is_file() and p.name not in NOT_EDITABLE
-                   and not _is_frame_runtime(p)) if code.is_dir() else []
-    names += _package_files(code)
+                   and not _is_frame_runtime(p) and not _analysis_part(code, p.name)) if code.is_dir() else []
+    # The analysis FI writes (derive.py with FI's frame, the files FI carries beside it) is not part of the simulation: an
+    # edit of it cannot change what a round measures.
+    names += [rel for rel in _package_files(code) if not _analysis.analysis_file(code, rel)]
     return sorted(names, key=lambda n: (n != "simulate.py", "/" not in n, n))
+
+
+def _analysis_part(code: Path, name: str) -> bool:
+    from . import analysis_frame as _analysis
+    from . import skeleton as _skeleton
+
+    if name == _skeleton.TABLE_FILE:
+        try:
+            return (code / name).read_text(encoding="utf-8").lstrip("﻿") == _skeleton.TABLE_SOURCE
+        except OSError:
+            return False
+    return _analysis.analysis_file(code, name)
 
 
 def snapshot(quest_root: Path) -> dict[str, str]:

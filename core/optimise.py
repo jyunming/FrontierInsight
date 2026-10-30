@@ -1750,7 +1750,10 @@ class OptimisationRunner:
             if differs and self.log is not None:
                 self.log.warning("[optimise] experiment.py reports %s, which FI's record of the search does not hold; "
                                  "FI's own numbers are in its result under `fi_search`", "; ".join(differs[:5]))
-        self.failed_script = None if result.returncode == 0 else self.analysis.name
+        from . import analysis_frame as _analysis
+
+        # the analysis FI writes: a function of the study's derive.py is what is repaired, never FI's experiment.py
+        self.failed_script = None if result.returncode == 0 else _analysis.failed_script(self.analysis, result.returncode)
         return ExecutionResult(
             returncode=result.returncode, stdout=stdout, duration_s=time.monotonic() - started,
             stderr=(run.stderr + "\n" + (result.stderr or "")).strip(), timed_out=result.timed_out,
