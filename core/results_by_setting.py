@@ -208,13 +208,21 @@ class Distinct:
         return len({_run_setting(s) for s in self.settings})
 
 
+def _diagnostics(protocol: dict[str, Any] | None) -> list[str]:
+    """The names a trial of a plan in the contract form returns that are not its results (they stay in the record, and are not
+    rows of the table): :func:`core.skeleton.diagnostic_names`."""
+    from . import skeleton as _skeleton
+
+    return _skeleton.diagnostic_names(protocol)
+
+
 def distinct(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, unread: list[str]) -> Distinct:
     """The distinct settings of a trial record (:func:`core.trial_table.summaries`), pooling the cells that differ only
     in ``unread`` axes (see the module docstring)."""
     # A record of a setting that never ran (core/trial_table.py ``not_run``) holds no value, but the setting is still one
     # the plan fixed: it stays, to be said as "not run" in each table, never dropped and never described as a failure.
     records = [c for c in summarised if c.get("metrics") or c.get("not_run")]
-    values = _trial_table.kept_values(records)
+    values = _trial_table.kept_values(records, _diagnostics(protocol))
     unread_set = set(unread)
     groups: dict[str, list[dict[str, Any]]] = {}
     for c in records:
@@ -774,7 +782,7 @@ def from_quest(quest_root: Path, protocol: dict[str, Any] | None,
     summarised = _trial_table.summaries(cells)
     protocol = _without_left_out(protocol, Path(quest_root))
     built = build(summarised, protocol, _grid_keys.code_files(Path(quest_root) / "code"), judged)
-    return _trial_table.rows_of(summarised), built
+    return _trial_table.rows_of(summarised, _diagnostics(protocol)), built
 
 
 def write(quest_root: Path, protocol: dict[str, Any] | None, judged: list[dict[str, Any]] | None = None) -> Built | None:

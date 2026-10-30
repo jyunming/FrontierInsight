@@ -196,15 +196,19 @@ def per_setting_precision(quest_root: Path, metric: str, target: float) -> dict[
             "widest_setting": widest_at, "without_interval": without, "without_value": no_value}
 
 
-def kept_values(summarised: list[dict[str, Any]]) -> list[str]:
+def kept_values(summarised: list[dict[str, Any]], hide: Any = ()) -> list[str]:
     """The value names the table reports, in the order they first appear: not a trial index, not one number in every
-    trial of every setting (a setting echoed back, a constant)."""
+    trial of every setting (a setting echoed back, a constant), and not a name in ``hide`` (the names a plan in the contract
+    form lets a trial return that are not its results: :func:`core.skeleton.diagnostic_names`)."""
+    hidden = set(hide)
     by_metric: dict[str, list[dict[str, Any]]] = {}
     for c in summarised:
         for name, s in c["metrics"].items():
             by_metric.setdefault(name, []).append(s)
     out = []
     for name, per_cell in by_metric.items():
+        if name in hidden:
+            continue
         shown = [s for s in per_cell if s["n"]]
         if not shown:  # no setting gave a number: kept only when the table can say why (not run / no finite value)
             if any(s.get("status") for s in per_cell):
@@ -214,10 +218,10 @@ def kept_values(summarised: list[dict[str, Any]]) -> list[str]:
     return out
 
 
-def rows_of(summarised: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """:func:`rows` from :func:`summaries`."""
+def rows_of(summarised: list[dict[str, Any]], hide: Any = ()) -> list[dict[str, Any]]:
+    """:func:`rows` from :func:`summaries` (``hide``: see :func:`kept_values`)."""
     out: list[dict[str, Any]] = []
-    for name in kept_values(summarised):
+    for name in kept_values(summarised, hide):
         for c in summarised:
             s = c["metrics"].get(name)
             if s is None and c.get("not_run"):
@@ -234,10 +238,10 @@ def rows_of(summarised: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def rows(quest_root: Path) -> list[dict[str, Any]]:
+def rows(quest_root: Path, hide: Any = ()) -> list[dict[str, Any]]:
     """One row per setting and per value the trials returned: ``{"setting", "metric", "n", "mean", "sd",
     "ci_lower", "ci_upper", "method", "cell"}``; ``[]`` without a trial record."""
-    return rows_of(summaries(_record(quest_root)))
+    return rows_of(summaries(_record(quest_root)), hide)
 
 
 def _num(x: Any) -> str:
@@ -276,9 +280,10 @@ def markdown(table: list[dict[str, Any]]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write(quest_root: Path) -> list[dict[str, Any]]:
-    """Write ``paper/results_table.md`` from the trial record and return its rows; nothing is written without one."""
-    table = rows(quest_root)
+def write(quest_root: Path, hide: Any = ()) -> list[dict[str, Any]]:
+    """Write ``paper/results_table.md`` from the trial record and return its rows; nothing is written without one (``hide``:
+    see :func:`kept_values`)."""
+    table = rows(quest_root, hide)
     if table:
         paper = Path(quest_root) / "paper"
         paper.mkdir(parents=True, exist_ok=True)

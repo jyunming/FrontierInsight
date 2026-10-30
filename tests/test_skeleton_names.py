@@ -53,7 +53,8 @@ def test_the_frame_lists_the_names_a_known_value_and_the_checks_read_from_a_tria
     for name in ("est_se", "est_lo", "est_hi", "max_gap_vs_reference", "why_missing"):
         assert name in got
     assert got == tuple(skeleton.returnable_names(protocol))
-    assert skeleton.required_names(protocol) == ["est_se", "est_lo", "est_hi", "max_gap_vs_reference"], \
+    assert skeleton.required_names(protocol) == ["est_se", "est_lo", "est_hi", "max_gap_vs_reference",
+                                                 "max(0, est_lo - est, est - est_hi)"], \
         "the estimate is a declared result; a check with no case is answered by oracle(), not by a trial"
 
 
@@ -108,3 +109,115 @@ def test_a_misspelled_result_and_a_name_nothing_reads_still_fail_the_first_trial
 def test_the_trial_note_tells_the_model_what_a_strict_frame_does_with_another_name() -> None:
     frame = skeleton.frame_source(DESIGN, stochastic=True, strict=True)
     assert "fails every trial" in frame
+
+
+# ---- a measure written as words is returnable under exactly the name FI reads ------------------------------------------------
+
+PROSE: dict[str, Any] = {"protocol": {**DESIGN["protocol"], "oracles": [
+    {"name": "words", "kind": "special_case", "expected": 0, "tolerance": 1e-6, "case": {"noise": 0.1, "readings": 10},
+     "measure": "error rate"},
+    {"name": "hyphen", "kind": "special_case", "expected": 0, "tolerance": 1e-6, "case": {"noise": 0.1, "readings": 10},
+     "measure": "p-value"},
+    {"name": "settings", "kind": "special_case", "expected": 0, "tolerance": 1e-6, "case": {"noise": 0.1, "readings": 10},
+     "measure": "noise * offset_true - gap"}]}}
+
+PROSE_BODY = '''
+def trial(cell, ctx):
+    out = TrialResult()
+    out["est"] = 2.0
+    out["hit_count"] = 1
+    out["hit_total"] = 1
+    out["error rate"] = 0.0
+    out["p-value"] = 0.5
+    out["gap"] = 0.0
+    return out
+'''
+
+
+def test_a_measure_that_is_not_a_formula_is_listed_as_the_one_name_fi_reads() -> None:
+    from core import oracle_forms
+
+    assert oracle_forms.read_names("error rate") == ["error rate"]
+    assert oracle_forms.read_names(" p-value ")[0] == "p-value"
+    assert oracle_forms.read_names("gap") == ["gap"]
+    assert oracle_forms.read_names("") == []
+    got = skeleton.required_names(PROSE["protocol"])
+    assert "error rate" in got and "p-value" in got and "gap" in got
+    assert "noise" not in got and "offset_true" not in got, "a setting and a constant are not names a trial returns"
+
+
+def test_a_strict_frame_runs_a_trial_that_returns_a_measure_written_as_words(tmp_path: Path) -> None:
+    text, why = skeleton.fill(skeleton.frame_source(PROSE, stochastic=True, strict=True), PROSE_BODY)
+    assert text is not None, why
+    got = _small(_quest(tmp_path, text))
+    assert not got.crashed, got.says()
+    assert {"error rate", "p-value", "gap"} <= set(got.record()["returned"])
+
+
+# ---- a frame written with the short list is made whole ----------------------------------------------------------------------
+
+def _short(design: dict[str, Any], **kw: Any) -> str:
+    """The frame as it was written before the names FI reads were added: RESULTS holds the declared results only."""
+    frame = skeleton.frame_source(design, stochastic=True, **kw)
+    full = tuple(skeleton.returnable_names(design["protocol"]))
+    return frame.replace(repr(full), repr(tuple(skeleton.declared_names(design["protocol"]))), 1)
+
+
+def test_a_frame_with_the_short_list_is_written_again_with_the_full_one() -> None:
+    old = _short(DESIGN, strict=True)
+    assert "est_se" not in old
+    healed = skeleton.heal_results(old, DESIGN, stochastic=True, strict=True)
+    assert healed == skeleton.frame_source(DESIGN, stochastic=True, strict=True)
+    assert skeleton.heal_results(healed, DESIGN, stochastic=True, strict=True) == healed
+    assert skeleton.frame_intact(skeleton.frame_for(DESIGN, stochastic=True, strict=True, existing=old), healed) == ""
+
+
+def test_a_frame_of_another_plan_or_refusal_is_left_alone() -> None:
+    old = _short(DESIGN, strict=True)
+    other = {"protocol": {**DESIGN["protocol"], "grid": {"noise": [0.1]}}}
+    assert skeleton.heal_results(old, other, stochastic=True, strict=True) == old
+    assert skeleton.heal_results(old, DESIGN, stochastic=True, strict=False) == old
+    assert skeleton.heal_results("x = 1", DESIGN, stochastic=True, strict=True) == "x = 1"
+
+
+def test_a_repair_of_a_healed_file_is_compared_with_the_healed_frame(tmp_path: Path) -> None:
+    from tests.test_skeleton import _engine_with
+
+    design = {"protocol": {**DESIGN["protocol"], "form": "contract"}}
+    old, _ = skeleton.fill(_short(design, strict=True), BODY.replace("est_se", "est_x").replace("est_lo", "est_y"))
+    eng = _engine_with(tmp_path, True)
+    code = tmp_path / "code"
+    code.mkdir(exist_ok=True)
+    (code / "simulate.py").write_text(old or "", encoding="utf-8")
+    state = {"design": design}
+    assert eng._heal_frame(state) is True
+    on_disk = (code / "simulate.py").read_text(encoding="utf-8")
+    assert "'est_se'" in on_disk and "def trial" in on_disk
+    assert eng._heal_frame(state) is False
+    new, why = skeleton.fill(skeleton.frame_for(design, stochastic=True, strict=True, existing=on_disk), BODY)
+    assert new is not None, why
+    assert skeleton.repair_problem(on_disk, new, "simulate.py") == ""
+    got = _small(_quest(tmp_path / "run", new))
+    assert not got.crashed, got.says()
+
+
+# ---- the names that are not results stay out of the results table and the writer's quantities --------------------------------
+
+def test_the_diagnostics_of_a_contract_plan_are_not_rows_or_quantities(tmp_path: Path) -> None:
+    from core import paper_values, trial_table
+
+    contract_protocol = {**DESIGN["protocol"], "form": "contract"}
+    hidden = skeleton.diagnostic_names(contract_protocol)
+    assert {"est_se", "est_lo", "est_hi", "max_gap_vs_reference", "why_missing"} <= set(hidden)
+    assert skeleton.diagnostic_names(DESIGN["protocol"]) == [], "a plan in the older form lists every name, as before"
+    cells = [{"cell": {"noise": n}, "key": f"noise={n}",
+              "metrics": {name: {"values": [1.0 + n, 2.0 + n, 3.0 + 2 * n]} for name in ("est", "est_se", "est_lo", "est_hi")}}
+             for n in (0.1, 0.2)]
+    (tmp_path / "raw").mkdir()
+    (tmp_path / "raw" / "trials.json").write_text(__import__("json").dumps({"cells": cells}), encoding="utf-8")
+    shown = {r["metric"] for r in trial_table.rows(tmp_path, hidden)}
+    assert shown == {"est"}
+    assert {r["metric"] for r in trial_table.rows(tmp_path)} == {"est", "est_se", "est_lo", "est_hi"}
+    rec = paper_values.Records(cells=[{**c, "metrics": c["metrics"]} for c in cells], protocol=contract_protocol)
+    assert rec.metrics() == ["est"]
+    assert paper_values.Records(cells=cells, protocol=DESIGN["protocol"]).metrics() == ["est", "est_se", "est_lo", "est_hi"]

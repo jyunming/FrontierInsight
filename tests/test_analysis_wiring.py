@@ -458,7 +458,10 @@ def _sha(text: str) -> str:
 PINS_AT_811719AF = {
     "rerun": "34124f75b6227ac4", "extend": "2914c7194f650d8d", "extend_frame": "9f8a6f074628a11a", "reminder": "b4415cb88db73e38",
     "split_reminder": "26239b84a51fbd8a", "cluster_reminder": "b697f4362f85d4a6", "run_none": "dab51e372647d8db",
-    "run_plain": "dab51e372647d8db", "run_framed": "ad084c60d61b9dde",
+    "run_plain": "dab51e372647d8db",
+    # the frame's own text (written only with the frame on): its RESULTS comment, its trial docstring and the refusal message
+    # changed with the one list of names a trial may return (core/skeleton.py returnable_names); it was "ad084c60d61b9dde"
+    "run_framed": "b50a812e071887c7",
 }
 
 

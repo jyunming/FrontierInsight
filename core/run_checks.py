@@ -1242,6 +1242,32 @@ class RunChecksMixin:
             out["scaffold"] = "".join(lines)
         return out
 
+    def _heal_frame(self, state: Any) -> bool:
+        """Write the ``RESULTS`` line of the frame in the quest's simulate.py again when it is short of the names a trial may return
+        now (:func:`core.skeleton.heal_results`): a quest resumed after its code was written keeps the frame it was written with,
+        and a repair that puts functions into that file is compared with it. Only that line changes, and only for the same plan.
+        Returns whether the file was written."""
+        from . import skeleton as _skeleton
+
+        design = state.get("design") if isinstance(state, dict) else None
+        if not isinstance(design, dict) or not self._frame_on() or _skeleton.applies(design):
+            return False
+        path = self.quest_root / "code" / _split_run.SIMULATE_NAME  # type: ignore[attr-defined]
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return False
+        if not _skeleton.has_frame(text):
+            return False
+        healed = _skeleton.heal_results(text, design, stochastic=_split_run.design_is_stochastic(design),
+                                        strict=self._strict_frame(state))
+        if healed == text:
+            return False
+        path.write_text(healed, encoding="utf-8")
+        self._log.info("[implement] simulate.py: the frame's list of names a trial may return was written again "  # type: ignore[attr-defined]
+                       "(it now holds the names FI's checks read from a trial)")
+        return True
+
     def _framed(self, state: Any, simulate_code: str) -> str:
         """The text of ``simulate.py`` once the model's reply is put into FI's frame (and ``fi_frame.py`` written beside it);
         the reply itself when there is no frame or the reply is a whole simulation of its own."""

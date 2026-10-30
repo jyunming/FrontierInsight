@@ -2318,6 +2318,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._audit("node_started", node=name, iteration=state.get("iteration", 0), **({"resumed": True} if resumed else {}))
             self.__dict__["_chat_at_node_start"] = dict(self._last_chat)
             self._progress_stage(name)
+            try:
+                self._heal_frame(state)
+            except Exception:  # noqa: BLE001 -- a repair of the frame's list must never stop a node
+                pass
             began = time.monotonic()
             self.__dict__.pop("_provider_unavailable", None)
             self.__dict__.pop("_provider_signin", None)
@@ -22625,7 +22629,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if drafted_note := self._drafted_parts_note():
             evidence_note = f"{evidence_note}\n\n{drafted_note}".strip()
         try:
-            trial_rows = _trial_table.write(self.quest_root)
+            trial_rows = _trial_table.write(self.quest_root, _skeleton.diagnostic_names(self._protocol_block(state)))
             try:  # every setting with its reference value (core/results_by_setting.py), for a table too long to give
                 by_setting = _results_by_setting.write(self.quest_root, self._protocol_block(state), self._judged_checks())
             except Exception as e:  # noqa: BLE001 -- the same: a help, never a reason to stop
