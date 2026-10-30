@@ -3531,7 +3531,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         try:
             _record, lines = _phased.record_confirm(
                 self.quest_root,
-                state.get("result_json") if (state.get("exec_result") or {}).get("returncode", 0) == 0 else None,
+                state.get("result_json") if (self._figures_only_failed(state)
+                                             or (state.get("exec_result") or {}).get("returncode", 0) == 0) else None,
                 design_sha256=_frozen.sha256(state.get("design") or {}) if data_quest else None,
                 key=self._phased_key())
         except OSError as e:
@@ -16342,9 +16343,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         return (self._split_on(state) and simulate.is_file()
                 and bool(_trial_runner.entries(simulate) & {"run_trial", "run_cell"}))
 
-    @staticmethod
-    def _run_has_no_result(state: QuestState) -> bool:
-        """The run gave up, exited with an error, or printed no result (the improve loop's test)."""
+    def _figures_only_failed(self, state: QuestState) -> bool:
+        """The last run printed its results and exited 1 only because a figure of the study's failed (FI's record of the run
+        says so): the results stand, and the figure's repair goes on by itself."""
+        result = state.get("exec_result") or {}
+        return bool(state.get("result_json")) and _analysis_frame.only_figures_failed(
+            _analysis_frame.read_record(self.quest_root), result.get("returncode", 1))
+
+    def _run_has_no_result(self, state: QuestState) -> bool:
+        """The run gave up, exited with an error, or printed no result (the improve loop's test). A figure that failed after
+        its repairs is not that: the results were produced."""
+        if self._figures_only_failed(state):
+            return False
         result = state.get("exec_result") or {}
         return bool(state.get("exec_give_up_reason") or result.get("returncode", 1) != 0
                     or not state.get("result_json"))
@@ -16919,7 +16929,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         never what chose the version."""
         root = self.quest_root
         result = state.get("exec_result") or {}
-        failed = bool(state.get("exec_give_up_reason")) or result.get("returncode", 1) != 0 or not state.get("result_json")
+        failed = self._run_has_no_result(state)
         if failed and not (record.get("fell_back") or state.get("improve_fell_back")):
             original = _improve.load_snapshot(root, "original", fi_real=getattr(self, "_fi_real", None))
             if original is not None:

@@ -63,6 +63,8 @@ EXPERIMENT_FILE = "experiment.py"
 DERIVED_PATH = Path("data") / "results" / "derived.json"
 PREVIOUS_PATH = Path("data") / "results" / "derived.previous.json"  # the earlier run's, while a run is under way
 DERIVED_SCHEMA = "fi.derived/v1"
+#: The roles whose failed function makes experiment.py exit 1 (the same tuple as ``COUNTING`` in the text of experiment.py).
+_COUNTING_ROLES = ("result", "reference", "physical_bound")
 #: The module the figure step lives in (the text of ``core/analysis_figures.py``); ``experiment.py`` calls its ``run_figures`` (and
 #: ``search_figures`` for a search) and takes ``said`` / ``exit_code`` / ``fi_faults`` from it.
 FIGURES_MODULE = "fi_figures"
@@ -622,6 +624,25 @@ def failure(record: dict[str, Any], stderr: str, returncode: int, printed: bool,
     counting = [b for b in bad if b[1].get("role") in ("result", "reference", "physical_bound")]
     ident, rec = (counting or bad)[0]
     return {"kind": "body", "body": str(rec["by"]), "formula": False, "why": f"`{ident}`: {rec.get('why') or 'failed'}"}
+
+
+def only_figures_failed(record: dict[str, Any], returncode: int) -> bool:
+    """Whether a run of FI's experiment.py that exited 1 produced all its results and only a figure of the study's failed or was
+    refused. FI's record of the run (derived.json) says it: ``run()`` exits 1 for a quantity of a counting role it could not work out
+    or for a figure, and 0 for neither, so a record of this run with no such quantity and a failed figure is the second. A figure is
+    the analysis's, not the run's: the repair of it goes on (``failure`` names its body), but what the run produced stands."""
+    if returncode != 1 or not isinstance(record, dict) or record.get("schema") != DERIVED_SCHEMA or record.get("from_earlier_run"):
+        return False
+    if record.get("fi_faults"):
+        return False
+    derived = record.get("derived") if isinstance(record.get("derived"), dict) else {}
+    status_of = {r.get("by"): r.get("status") for r in derived.values() if isinstance(r, dict)}
+    for r in derived.values():
+        if not isinstance(r, dict) or r.get("role") not in _COUNTING_ROLES or r.get("fi_fault"):
+            continue
+        if r.get("status") in ("failed", "refused") or (r.get("status") == "blocked" and status_of.get(r.get("cause")) in ("failed", "refused")):
+            return False
+    return any(isinstance(o, dict) and o.get("status") in ("failed", "refused") for o in record.get("figures") or [])
 
 
 def study_values(record: dict[str, Any]) -> dict[str, float]:
