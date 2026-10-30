@@ -32,7 +32,7 @@ DESIGN: dict[str, Any] = {"hypothesis": "growth rises with the rate", "protocol"
     "form": "contract", "grid": {"rate": [0.1, 0.2], "dose": [1, 2]}, "runs_per_setting": 3,
     "metrics": [{"id": "growth", "kind": "mean", "role": "result"}],
     "derived": [{"id": "peak", "inputs": ["growth"], "role": "result"},
-                {"id": "spread", "inputs": ["growth"], "role": "diagnostic", "formula": "max(growth) - min(growth)"}]}}
+                {"id": "spread", "inputs": ["growth"], "role": "diagnostic", "formula": "growth / (rate * dose)"}]}}
 DECLARED = {"growth", "peak", "spread"}
 
 TRIAL = '''
@@ -581,3 +581,51 @@ def test_a_run_sent_back_or_stopped_keeps_no_answers_of_its_own(tmp_path: Path, 
                     encoding="utf-8")
     engine._keep_analysis_answers({"peak": 3.0}, {"design": DESIGN})
     assert len(seen) == 1
+
+
+# ---- what the run needs, and what is read of a run that stopped -----------------------------------------------------------
+@pytest.mark.asyncio
+async def test_fi_installs_matplotlib_for_the_plans_figures_whatever_the_reply_lists(tmp_path: Path) -> None:
+    # FI draws the plan's figures itself (fi_figures.py): the reply's DEPS may leave matplotlib out, and in a clean venv or
+    # a container the figures would then fail inside FI's own step, after the long run.
+    design = json.loads(json.dumps(DESIGN))
+    design["protocol"]["figures"] = [{"id": "fig1", "file": "growth.png", "shows": ["growth"], "x": "rate", "series": "dose"}]
+    engine, state = await _implement(tmp_path / "figures", _Model(_reply()), design)  # the reply's DEPS list is empty
+    assert "matplotlib" in state["deps"]
+    asked: list[list[str]] = []
+
+    async def install(packages):  # noqa: ANN001, ANN202
+        asked.append(list(packages))
+        return []
+
+    engine._install_packages = install  # type: ignore[method-assign]
+    await engine._node_execute(dict(state))
+    assert asked and "matplotlib" in asked[0], asked
+    _plain, plain = await _implement(tmp_path / "plain", _Model(_reply()))  # no figure planned: nothing added
+    assert "matplotlib" not in plain["deps"]
+
+
+@pytest.mark.asyncio
+async def test_the_run_record_names_the_analysis_step_only_when_the_analysis_is_fis(tmp_path: Path) -> None:
+    analysis = "raise RuntimeError('the analysis broke')\n"
+    reply = ("```python\n# file: simulate.py\n" + TRIAL + "```\n\n```python\n# file: experiment.py\n" + analysis
+             + "```\n\nDEPS:\n")
+    engine, state = await _implement(tmp_path, _Model(reply), DESIGN, skeleton_on=False)
+    state.update(await engine._node_execute(dict(state)))
+    assert state["exec_result"]["returncode"] != 0 and "analysis_step" not in state["exec_result"]
+
+
+def test_a_file_a_killed_run_left_does_not_lay_an_import_failure_to_a_function(tmp_path: Path) -> None:
+    # A run killed while derive_peak ran leaves FI's file of what was running; the next run stops while derive.py is
+    # imported (before any step is said) and names its own id on stderr: the stop is the module's, not derive_peak's.
+    engine = _engine(tmp_path)
+    _fis_quest(engine)
+    stale = engine.quest_root / af.RUNNING_PATH
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text(json.dumps({"step": "derive_peak", "run": "a-run-that-was-killed"}), encoding="utf-8")
+    stderr = "\n".join([af.RUN_MARK + "this-run", "Traceback (most recent call last):",
+                         '  File "C:/q/code/derive.py", line 40, in <module>', "NameError: name 'x' is not defined"])
+    for result in ({"returncode": 1, "failed_script": af.DERIVE_FILE, "stdout_tail": "", "stderr_tail": stderr,
+                    "analysis_step": af.running_step(stderr, engine.quest_root)},  # as the run record keeps it
+                   {"returncode": 1, "failed_script": af.DERIVE_FILE, "stdout_tail": "", "stderr_tail": stderr}):  # an older one
+        assert engine._fis_analysis_route({"design": DESIGN, "result_json": {}}, result, 1, []) == {"body": ""}, result

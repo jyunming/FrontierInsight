@@ -5873,7 +5873,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return await self._chat(prompt, node="plan_contract")
 
         try:
-            out = await _contract_parts.ask_parts(design, ask, lambda t: _parse_json_lenient(t, node="plan_contract"), self._prompts)
+            out = await _contract_parts.ask_parts(design, ask, lambda t: _parse_json_lenient(t, node="plan_contract"), self._prompts,
+                                                  fi_analysis=self._fis_analysis_planned(design))
         except Exception:  # noqa: BLE001 -- the plan goes on without the parts
             self._log.warning("[plan] the contract parts could not be asked; the plan stays in the older form", exc_info=True)
             print("[FI] FI could not ask the plan about the study's results; the study goes on with the plan as written")
@@ -11245,7 +11246,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         design_deps = _coerce_dep_list(
             (state.get("design") or {}).get("dependencies")
         )
-        deps = sorted({*deps, *design_deps})
+        deps = sorted({*deps, *design_deps, *(self._fis_analysis_packages(state) if bodies is not None else [])})
         left_out = self._dropped_tool_names(state)
         if left_out:
             kept = [d for d in deps if _experiment_deps.normalize(_experiment_deps.requirement_name(d) or d) not in left_out]
@@ -11473,7 +11474,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             if key in cache and cache[key][0] is design and (cache[key][2] or not adopted):
                 return cache[key][1]
             contract = cache[key][1] if key in cache and cache[key][0] is design else _contract.from_design(
-                {**design, "protocol": protocol})
+                {**design, "protocol": protocol}, fi_analysis=self._fis_analysis_planned({**design, "protocol": protocol}))
             if len(cache) > 8:
                 cache.clear()
             cache[key] = (design, contract, adopted)
@@ -19581,7 +19582,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "result_check_sent_back": result_check_sent_back,
                 # FI's analysis (core/analysis_frame.py): what it was doing when it stopped (a function of derive.py, or FI's
                 # own step), read from its whole stderr, and the function of derive.py a check after the run named.
-                **({"analysis_step": _analysis_frame.running_step(result.stderr or "")} if result.returncode != 0 else {}),
+                **({"analysis_step": _analysis_frame.running_step(result.stderr or "", self.quest_root)}
+                   if result.returncode != 0 and self._analysis_on() else {}),
                 **({"failed_body": self._analysis_sendback_body}
                    if result.returncode != 0 and getattr(self, "_analysis_sendback_body", "") else {}),
             },
@@ -20328,7 +20330,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         sent_back = bool(exec_result.get("directive") or exec_result.get("result_check_sent_back")
                          or (exec_result.get("failed_script") == _analysis_frame.EXPERIMENT_FILE
                              and rc != _analysis_frame.FI_FAULT_EXIT))
-        step = str(exec_result.get("analysis_step") or "") or _analysis_frame.running_step(stderr, self.quest_root)
+        # The step read when the run ended (its whole stderr, then the file of what was running, if that is the run's own);
+        # the file is read here only for a record that has none (an older one).
+        step = str(exec_result.get("analysis_step") or "") or _analysis_frame.running_step(
+            stderr, None if "analysis_step" in exec_result else self.quest_root)
         found = _analysis_frame.failure(record, stderr, rc, printed or sent_back, step=step,
                                         timed_out=bool(exec_result.get("timed_out")))
         if found["kind"] == "body":
@@ -28427,6 +28432,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "plan_parts",                       # FI asks for ONLY the missing parts of the plan, as JSON (never the whole file)
         "plan_criteria",                    # the plan named no check of correctness: ask once more
         "plan_roles", "plan_names", "plan_comparisons",  # the contract's parts, asked one at a time (core/contract_parts.py)
+        "plan_formulas",                    # ... and a formula FI cannot work out as written, when FI writes the analysis
         "json_reanswer",                    # a required check's reply could not be read: one short JSON re-answer
         "json_reanswer_part",               # ... when part of it could be read: only the unreadable keys are asked again
         "oracle_review",                    # a second model reads the plan's checks against known answers

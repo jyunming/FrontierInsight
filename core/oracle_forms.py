@@ -35,7 +35,7 @@ import re
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from fractions import Fraction
-from statistics import NormalDist
+from statistics import NormalDist, fmean
 from typing import Any, Callable
 
 from . import oracle_check as _oracle
@@ -135,6 +135,18 @@ SPECIAL_FUNCTIONS: dict[str, Callable[..., float]] = {
 #: ``expected_formula`` is written in a language FI states (:data:`EXPECTED_FORMULA_LANGUAGE`); in prose ``gamma(T)`` or
 #: ``j0(x)`` can be the author's own function, so the others are never read there.
 PROSE_FUNCTIONS: dict[str, Callable[..., float]] = {"ellipk": _ellipk}
+#: The functions FI's own analysis of a study (core/analysis_frame.py) may call besides :data:`FUNCTIONS` and
+#: :data:`SPECIAL_FUNCTIONS`: a plain word a plan writes for the mean of numbers. Never a check's formula, whose language
+#: (:data:`FUNCTION_LIST`) stays as it is.
+ANALYSIS_FUNCTIONS: dict[str, Callable[..., float]] = {"mean": _variadic(fmean)}
+#: What an analysis formula may call beyond :data:`FUNCTIONS` (``evaluate(..., special=ANALYSIS_SPECIAL)``).
+ANALYSIS_SPECIAL: dict[str, Callable[..., float]] = {**SPECIAL_FUNCTIONS, **ANALYSIS_FUNCTIONS}
+#: The words for a summary of numbers, and what it is of one number.
+_SUMMARIES = {"min": ("minimum", "that number"), "max": ("maximum", "that number"), "sum": ("sum", "that number"),
+              "mean": ("mean", "that number"), "avg": ("mean", "that number"), "average": ("mean", "that number"),
+              "median": ("median", "that number"), "std": ("standard deviation", "zero"),
+              "stdev": ("standard deviation", "zero"), "var": ("variance", "zero"), "variance": ("variance", "zero"),
+              "range": ("range", "zero"), "ptp": ("range", "zero"), "count": ("count", "one")}
 
 _BINARY: dict[type, Callable[[float, float], float]] = {
     ast.Add: lambda a, b: a + b, ast.Sub: lambda a, b: a - b, ast.Mult: lambda a, b: a * b,
@@ -212,6 +224,27 @@ def _tree(text: Any, functions: dict[str, Callable[..., float]] | None = None) -
             continue
         return None, f"it uses {_WHAT.get(type(node), type(node).__name__)}, which a formula here may not"
     return tree, ""
+
+
+def one_number_summary(text: Any) -> str:
+    """Why ``text``, a formula FI's own analysis works out, says nothing as written: it summarises one number, as
+    ``max(growth)`` does. The analysis gives each name one number at a setting (that setting's mean of a result, the
+    setting's own value, a fixed value), so a maximum of it is that number and ``max(growth) - min(growth)`` is 0 at every
+    setting. ``""`` when it summarises nothing of one number. A plain sentence, for the plan's model and a person."""
+    try:
+        tree = ast.parse(str(text if text is not None else "").strip(), mode="eval")
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return ""
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _SUMMARIES
+                and len(node.args) == 1 and not node.keywords and not isinstance(node.args[0], ast.Starred)):
+            continue
+        word, value = _SUMMARIES[node.func.id]
+        called = {id(n.func) for n in ast.walk(node.args[0]) if isinstance(n, ast.Call)}
+        named = any(isinstance(n, ast.Name) and id(n) not in called and n.id not in CONSTANTS for n in ast.walk(node.args[0]))
+        return (f"`{ast.unparse(node)}` is a {word} over one number{' per setting' if named else ''}, which is {value}; "
+                "say whether it is over the trials of a setting or over the settings")
+    return ""
 
 
 def problem(text: Any) -> str | None:
@@ -729,6 +762,15 @@ EXPECTED_FORMULA_LANGUAGE = (
     "ndtr(x) (the standard normal distribution function, P(Z <= x)), ndtri(p) (its inverse) and erfinv(y) (all "
     "as SciPy names them, so ellipk(sin(a/2)**2) for amplitude a), and the settings of the check's `case` by name; "
     "angles in radians (30 degrees is 30*pi/180)"
+)
+
+
+#: How a formula FI's own analysis works out (core/analysis_frame.py) is written, for the plan's model.
+ANALYSIS_FORMULA_LANGUAGE = (
+    "numbers, + - * / ** %, parentheses, pi, the functions "
+    + ", ".join(sorted({*FUNCTIONS, *ANALYSIS_FUNCTIONS}))
+    + " (min, max, sum and mean of two or more numbers) and the special functions erf(x), erfc(x), gamma(x), lgamma(x), "
+    "j0(x), j1(x), ellipk(m), ndtr(x), ndtri(p) and erfinv(y)"
 )
 
 

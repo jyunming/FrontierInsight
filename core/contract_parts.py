@@ -7,11 +7,15 @@ cannot be used (at most :data:`MAX_ASKS` asks of a part in all):
 * ``roles``: for every declared result, what kind of number it is and which settings it changes with;
 * ``names``: for every name the plan relies on and does not declare (:func:`core.contract.undeclared_names`), whether it
   is a result, a reference value, a diagnostic, or computed afterwards from the results;
-* ``comparisons``: which results the study compares between values of one setting.
+* ``comparisons``: which results the study compares between values of one setting;
+* ``formulas``, only when FI works out the analysis itself (core/analysis_frame.py) and the plan has a formula FI cannot
+  work out as written (:func:`core.contract.from_design` with ``fi_analysis``): a formula FI can work out for each, or that
+  the study's own code computes it.
 
 When every part is usable FI writes ``form: contract`` into the protocol; the model never does. A part that stays
 unusable is left out, named in ``protocol.parts_left_out`` (the contract reads that into its gaps), and the plan stays in
-the older form. Nothing here stops a quest.
+the older form; a formula still not workable is left out alone, with its gap, and the plan keeps its form. Nothing here
+stops a quest.
 """
 
 from __future__ import annotations
@@ -31,7 +35,10 @@ from . import plan as _plan
 MAX_ASKS = 3
 PART_WORDS = {"roles": "what kind of number each result is, what it may change with and whether each run returns it",
               "names": "what the names the plan uses but does not declare are",
-              "comparisons": "which results are compared between values of a setting"}
+              "comparisons": "which results are compared between values of a setting",
+              "formulas": "a formula FI can work out for each quantity the plan works out with one"}
+#: The parts whose answer the plan's form does not wait on: a formula still not workable is left out alone.
+_OWN_PARTS = ("formulas",)
 _ROLE_HINT = {"reference": "its plan gives a formula, so it is a reference", "diagnostic": "a check of the plan measures it as a "
               "size of disagreement, so it is a diagnostic"}
 
@@ -45,7 +52,7 @@ class Outcome:
 
     @property
     def form(self) -> str:
-        return "contract" if self.parts and all(p["valid"] for p in self.parts.values()) else "older"
+        return "contract" if self.parts and all(p["valid"] for k, p in self.parts.items() if k not in _OWN_PARTS) else "older"
 
 
 def _short(text: Any, n: int = 1800) -> str:
@@ -81,6 +88,67 @@ def _problems_text(problems: list[str], last: str) -> str:
         return ""
     return ("\nYour last answer could not be used, for these reasons:\n" + "\n".join(f"- {x}" for x in problems[:8])
             + f"\n\nYour last answer was:\n{_short(last, 3000)}\n\nAnswer again, fixing only these.\n")
+
+
+def _formulas_prompt(templates: dict[str, string.Template], design: dict[str, Any], faults: dict[str, str],
+                     problems: list[str], last: str) -> str:
+    from . import reference_values as _reference_values
+
+    p = design.get("protocol") or {}
+    rows = {str(d.get("id")): d for d in p.get("derived") or [] if isinstance(d, dict)}
+    known = ([str(m.get("id")) for m in p.get("metrics") or [] if isinstance(m, dict) and m.get("id")]
+             + [i for i in rows if i not in faults] + [str(k) for k in (p.get("grid") or {})]
+             + sorted(_reference_values.analysis_inputs(p)))
+    return templates["plan_formulas"].substitute(
+        formulas="\n".join(f"- {i}: {rows.get(i, {}).get('formula')} ({why})" for i, why in faults.items()),
+        known=", ".join(dict.fromkeys(known)) or "(nothing)", formula_language=_forms.ANALYSIS_FORMULA_LANGUAGE,
+        method=_short(design.get("method")), again=_problems_text(problems, last))
+
+
+def _formula_faults(design: dict[str, Any]) -> dict[str, str]:
+    """The plan's derived quantities whose formula FI's own analysis cannot work out as written, each with why."""
+    faults: dict[str, str] = {}
+    _contract.from_design({**design, "protocol": {**design["protocol"], "form": "contract"}}, fi_analysis=True, left_out=faults)
+    return faults
+
+
+def _check_formulas(value: Any, asked: dict[str, str], design: dict[str, Any]) -> list[str]:
+    """Why ``value``, the answer for ``formulas``, cannot be used; empty when it can. Each quantity asked about gets a
+    ``formula``, or ``function: true`` with ``inputs`` (the reported numbers it is computed from)."""
+    if not isinstance(value, dict):
+        return ["the answer for `formulas` must be a mapping"]
+    p = design.get("protocol") or {}
+    declared = [str(m["id"]).strip() for m in p.get("metrics") or [] if isinstance(m, dict) and m.get("id")]
+    out: list[str] = []
+    for ident in asked:
+        row = value.get(ident)
+        if not isinstance(row, dict):
+            out.append(f"`{ident}` is not answered")
+        elif row.get("function") is True:
+            inputs = row.get("inputs")
+            if not isinstance(inputs, list) or not inputs or not all(i in declared for i in inputs):
+                out.append(f"`{ident}`: a quantity the study's code computes needs `inputs`, the reported numbers it is "
+                           f"computed from ({', '.join(declared)})")
+        elif not (isinstance(row.get("formula"), str) and row["formula"].strip()):
+            out.append(f"`{ident}`: give a `formula`, or `function`: true with its `inputs`")
+    return out + [f"`{k}` was not asked about" for k in value if k not in asked]
+
+
+def _apply_formulas(p: dict[str, Any], answer: dict[str, Any]) -> dict[str, Any]:
+    """Each derived quantity asked about with the formula answered, or with none (the study's own function computes it from
+    the inputs answered); the plan's own row is kept beside it, as the methodology audit judged it."""
+    derived = []
+    for d in p.get("derived") or []:
+        row = answer.get(str(d.get("id"))) if isinstance(d, dict) else None
+        if isinstance(row, dict):
+            planned = {k: v for k, v in d.items() if k != "as_planned"}
+            if row.get("function") is True:
+                d = {**{k: v for k, v in planned.items() if k != "formula"}, "inputs": list(row["inputs"])}
+            else:
+                d = {**planned, "formula": row["formula"].strip()}
+            d["as_planned"] = d.get("as_planned") or planned
+        derived.append(d)
+    return {**p, "derived": derived}
 
 
 def _prompt(part: str, templates: dict[str, string.Template], design: dict[str, Any], names: dict[str, str],
@@ -155,7 +223,7 @@ def strip_fi_keys(design: Any) -> Any:
     protocol = {k: v for k, v in design["protocol"].items() if k not in _FI_KEYS}
     for key in _ASKED_ROWS:
         if isinstance(protocol.get(key), list):
-            protocol[key] = [{k: v for k, v in r.items() if k != "asked"} if isinstance(r, dict) else r
+            protocol[key] = [{k: v for k, v in r.items() if k not in ("asked", "as_planned")} if isinstance(r, dict) else r
                              for r in protocol[key]]
     return design if protocol == design["protocol"] else {**design, "protocol": protocol}
 
@@ -172,7 +240,9 @@ def without_answers(design: Any) -> Any:
                                for m in protocol["metrics"]]
     for key in _ASKED_ROWS:
         if isinstance(protocol.get(key), list):
-            rows = [r for r in protocol[key] if not (isinstance(r, dict) and r.get("asked"))]
+            rows = [r["as_planned"] if isinstance(r, dict) and isinstance(r.get("as_planned"), dict) else r
+                    for r in protocol[key]]
+            rows = [r for r in rows if not (isinstance(r, dict) and r.get("asked"))]
             if rows:
                 protocol[key] = rows
             else:
@@ -203,10 +273,11 @@ def settle_form(protocol: dict[str, Any], planned: dict[str, Any] | None = None)
 
 
 async def ask_parts(design: Any, ask: Callable[[str], Awaitable[str]], parse: Callable[[str], Any],
-                    templates: dict[str, string.Template]) -> Outcome:
+                    templates: dict[str, string.Template], *, fi_analysis: bool = False) -> Outcome:
     """Ask the parts of ``design`` (a normalized design with metrics) and return the design with what could be used.
     ``ask`` sends a prompt and returns the reply; ``parse`` reads a reply into a mapping or ``None``. A part whose call
-    raises is left out alone (its traceback is in ``Outcome.errors``); the parts already usable are kept."""
+    raises is left out alone (its traceback is in ``Outcome.errors``); the parts already usable are kept. ``fi_analysis``:
+    FI works out this plan's analysis itself, so each formula is held to what FI can work out (the ``formulas`` part)."""
     out = Outcome(design=design)
     if not isinstance(design, dict) or not isinstance(design.get("protocol"), dict) or not design["protocol"].get("metrics"):
         return out
@@ -214,8 +285,11 @@ async def ask_parts(design: Any, ask: Callable[[str], Awaitable[str]], parse: Ca
     not_asked: list[str] = []
     names = _contract.undeclared_names(current, not_asked)
     derived_ids: list[str] = []
-    order = ["roles"] + (["names"] if names else []) + ["comparisons"]
+    order = ["roles"] + (["names"] if names else []) + (["formulas"] if fi_analysis else []) + ["comparisons"]
     for part in order:
+        faults = _formula_faults(current) if part == "formulas" else {}
+        if part == "formulas" and not faults:
+            continue  # every formula of the plan is one FI can work out: nothing to ask
         record: dict[str, Any] = {"asks": 0, "valid": False, "problems": []}
         out.parts[part] = record
         problems: list[str] = []
@@ -223,21 +297,25 @@ async def ask_parts(design: Any, ask: Callable[[str], Awaitable[str]], parse: Ca
         try:
             while record["asks"] < MAX_ASKS and not record["valid"]:
                 record["asks"] += 1
-                reply = await ask(_prompt(part, templates, current, names if part == "names" else {}, problems, last, derived_ids))
+                reply = await ask(_formulas_prompt(templates, current, faults, problems, last) if part == "formulas" else
+                                  _prompt(part, templates, current, names if part == "names" else {}, problems, last, derived_ids))
                 last = reply or ""
                 got = parse(reply) if reply else None
                 if not isinstance(got, dict):
                     problems = ["the answer was not one JSON object"]
                     continue
-                value = got.get({"roles": "results", "names": "names", "comparisons": "comparisons"}[part])
+                value = got.get({"roles": "results", "names": "names", "comparisons": "comparisons", "formulas": "formulas"}[part])
                 if part == "comparisons":
                     value = {"comparisons": value if value is not None else [], "_derived": derived_ids}
-                problems = _contract.check_part(part, value, current)
+                problems = (_check_formulas(value, faults, current) if part == "formulas" else
+                            _contract.check_part(part, value, current))
                 if problems:
                     continue
                 p = current["protocol"]
                 if part == "roles":
                     kept, checked = _apply_roles(p, value), None
+                elif part == "formulas":
+                    kept, checked = _apply_formulas(p, value), None
                 elif part == "names":
                     kept, checked = _apply_names(p, value)
                 else:
@@ -251,9 +329,14 @@ async def ask_parts(design: Any, ask: Callable[[str], Awaitable[str]], parse: Ca
                     if fixed is None:
                         problems = [str(why)]
                         continue
-                before = set(_contract.from_design(current).gaps)
-                gaps = [g for g in _contract.from_design({**current, "protocol": {**fixed, "form": "contract"}}).gaps
+                before = set(_contract.from_design(current, fi_analysis=fi_analysis).gaps)
+                gaps = [g for g in _contract.from_design({**current, "protocol": {**fixed, "form": "contract"}},
+                                                         fi_analysis=fi_analysis).gaps
                         if g not in before and ("could not be read" in g or "refers to something" in g or "left out" in g)]
+                if part == "formulas":  # a formula answered is held to what FI can work out, also one written as before
+                    still = _formula_faults({**current, "protocol": fixed})
+                    gaps = [*(f"`{i}`: its formula still cannot be worked out ({why})" for i, why in still.items() if i in faults),
+                            *(g for g in gaps if not any(f"`{i}` is left out" in g for i in faults))]
                 if gaps:
                     problems = gaps
                     continue
@@ -269,7 +352,12 @@ async def ask_parts(design: Any, ask: Callable[[str], Awaitable[str]], parse: Ca
             out.errors[part] = record["error"]
             problems = ["the call could not be made: " + record["error"].strip().splitlines()[-1][:200]]
         record["problems"] = problems
-    left = [PART_WORDS[k] for k, v in out.parts.items() if not v["valid"]]
+    left = [PART_WORDS[k] for k, v in out.parts.items() if not v["valid"] and k not in _OWN_PARTS]
+    still = _formula_faults(current) if "formulas" in out.parts and not out.parts["formulas"]["valid"] else {}
+    if still:
+        out.notes.append("The plan's model was asked for a formula FI can work out for " + ", ".join(f"`{i}`" for i in still)
+                         + ", and did not give one; " + ("it is" if len(still) == 1 else "they are")
+                         + " left out of the study (the plan's gaps say why).")
     protocol = {k: v for k, v in current["protocol"].items() if k not in _FI_KEYS}
     if not_asked:
         protocol["names_not_asked"] = not_asked

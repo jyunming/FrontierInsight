@@ -100,7 +100,7 @@ def plan_of(design: dict[str, Any]) -> dict[str, Any]:
     role: a body may read a diagnostic) with their role and kind, the quantities derived from them and how each is computed, the
     references that carry a formula, the figures, what each run compares inside it, the sub-studies, and the numbers a formula may use."""
     protocol = design["protocol"]
-    c = _contract.from_design(design)
+    c = _contract.from_design(design, fi_analysis=True)
     roles = {r.id: r.role for r in c.results}
     derived = []
     for d in c.derived:
@@ -128,7 +128,7 @@ def plan_of(design: dict[str, Any]) -> dict[str, Any]:
         "derived": derived,
         "references": {k: {"formula": v["formula"], "when": v.get("when")} for k, v in references.items()},
         "held": _reference_values.held_values(protocol),
-        "fixed": _reference_values.inputs(protocol),
+        "fixed": _reference_values.analysis_inputs(protocol),
         "compared": {str(k): list(v) for k, v in c.settings.in_each_run.items()},
         "parts": {str(s.get("name")): dict(s.get("hold") or {}) for s in c.settings.sub_studies if s.get("name")},
         "search": c.search is not None,
@@ -486,6 +486,11 @@ _DERIVE_FRAME = re.compile(r'File "[^"]*derive\.py", line (\d+)(?:, in (\S+))?')
 #: How FI's experiment.py says on stderr what it does now (a function of derive.py by its name, or FI's own step ``fi: ...``).
 STEP_MARK = "[FI analysis] now: "
 _STEP = re.compile(r"^\[FI analysis\] now: (.+?)\s*$", re.M)
+#: The line a run of FI's analysis starts with, before derive.py is imported: the run's id, which the file of what was running
+#: (``RUNNING_PATH``) carries too.
+RUN_MARK = "[FI analysis] run: "
+_RUN = re.compile(r"^\[FI analysis\] run: (\S+)", re.M)
+_MARK = re.compile(r"^\[FI analysis\] (?:now|run): ")
 #: The file in which FI's experiment.py keeps what it does now, while it runs.
 RUNNING_PATH = "data/results/derived.running.json"
 
@@ -493,7 +498,8 @@ RUNNING_PATH = "data/results/derived.running.json"
 def running_step(stderr: str, quest_root: Path | str | None = None) -> str:
     """What FI's analysis was doing when it last said so: the name of a function of derive.py, or FI's own step (``fi: ...``);
     ``""`` when it said nothing (it stopped before its first step, while derive.py was imported). Read from its stderr, else
-    from the file it keeps while it runs (``quest_root``)."""
+    from the file it keeps while it runs (``quest_root``), when that file is this run's: a run killed before it could remove
+    the file leaves it, and a later run that stops while derive.py is imported names its own id on stderr, not that one."""
     found = _STEP.findall(stderr or "")
     if found:
         return found[-1].strip()
@@ -504,7 +510,12 @@ def running_step(stderr: str, quest_root: Path | str | None = None) -> str:
             got = json.loads((Path(quest_root) / RUNNING_PATH).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return ""
-        return str(got.get("step") or "").strip() if isinstance(got, dict) else ""
+        if not isinstance(got, dict):
+            return ""
+        runs = _RUN.findall(stderr or "")
+        if runs and str(got.get("run") or "") != runs[-1]:
+            return ""  # left by an earlier run
+        return str(got.get("step") or "").strip()
     return ""
 
 
@@ -567,7 +578,7 @@ def failure(record: dict[str, Any], stderr: str, returncode: int, printed: bool,
       quantity of a counting role first, also one worked out from the function's quantity, else a figure)."""
     record = record if isinstance(record, dict) else {}
     derived = record.get("derived") if isinstance(record.get("derived"), dict) else {}
-    last = next((ln.strip() for ln in reversed((stderr or "").splitlines()) if ln.strip() and not _STEP.match(ln.strip())), "")
+    last = next((ln.strip() for ln in reversed((stderr or "").splitlines()) if ln.strip() and not _MARK.match(ln.strip())), "")
     if returncode == FI_FAULT_EXIT and not timed_out:
         fresh = printed and not record.get("from_earlier_run")
         formula = [r for r in derived.values() if isinstance(r, dict) and r.get("fi_fault") and r.get("by") == "formula"] if fresh else []
@@ -654,6 +665,12 @@ import warnings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+# This run's id, said before derive.py is imported and kept in RUNNING beside each step: a file of what was running that a
+# killed run left is then never read as this run's.
+RUN = "%d-%d" % (os.getpid(), time.time_ns())
+if __name__ == "__main__":
+    sys.stderr.write("[FI analysis] run: %s\\n" % RUN)
+    sys.stderr.flush()
 
 import derive  # noqa: E402
 import fi_table  # noqa: E402
@@ -688,7 +705,7 @@ def _progress(step):
             path = os.path.join(_STATE["quest"], RUNNING)
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w", encoding="utf-8") as f:
-                json.dump({"step": step}, f)
+                json.dump({"step": step, "run": RUN}, f)
         except OSError:
             pass
 
@@ -844,7 +861,7 @@ def _call(by, fn, *args):
             bad = ("not_written", str(e) or "%s is not written yet" % by)
         except SystemExit:
             bad = ("refused", "`%s` ended the run itself (sys.exit); a function of the study returns its value" % by)
-        except Exception as e:  # noqa: BLE001 -- one body's failure must not stop the others
+        except (Exception, KeyboardInterrupt) as e:  # noqa: BLE001 -- one body's failure must not stop the others
             bad = ("failed", _where(e, by))
     seen["seconds"] += time.monotonic() - began
     for w in caught:
@@ -929,10 +946,13 @@ def _formula(item, table, base, done):
     not written yet) leaves this one ``blocked`` with that function as its ``cause``; one that does not exist somewhere (a
     reason given) leaves this one missing there, with the reason."""
     forms = _calculator()
-    unreadable = forms.evaluate(item["formula"], {}, special=True).unreadable  # read as it is worked out: with FI's functions
+    unreadable = forms.evaluate(item["formula"], {}, special=forms.ANALYSIS_SPECIAL).unreadable  # read with FI's functions
     if unreadable:
         return _plan_fault(item, "its formula cannot be read (%s)" % unreadable)
-    names = forms.names(item["formula"], {**forms.FUNCTIONS, **forms.SPECIAL_FUNCTIONS})
+    one = forms.one_number_summary(item["formula"])  # max(growth) of one mean per setting: that mean, never a spread
+    if one:
+        return _plan_fault(item, one)
+    names = forms.names(item["formula"], {**forms.FUNCTIONS, **forms.ANALYSIS_SPECIAL})
     axes = {a for k in table.keys() for a in table.setting(k)}
     results = set(derive.RESULTS) | set(derive.AFTERWARDS)
     unknown = [n for n in names if n not in axes and n not in results and n not in derive.DERIVED and n not in base]
@@ -954,7 +974,7 @@ def _formula(item, table, base, done):
                     return {"status": "ok", "why": "", "value": None, "missing": {"": "`%s` does not exist: %s" % (n, why)},
                             "inputs": [n]}
                 values[n] = done[n]["value"]
-        ev = forms.evaluate(item["formula"], values, special=True)
+        ev = forms.evaluate(item["formula"], values, special=forms.ANALYSIS_SPECIAL)
         out = {"status": "ok", "why": "", "value": ev.value, "inputs": [n for n in names if n in done]}
         if ev.value is None:
             out["missing"] = {"": _why(ev)}
@@ -983,7 +1003,7 @@ def _formula(item, table, base, done):
                     break
                 values[n] = v
         if not why:
-            ev = forms.evaluate(item["formula"], values, special=True)
+            ev = forms.evaluate(item["formula"], values, special=forms.ANALYSIS_SPECIAL)
             if ev.value is not None:
                 kept[key] = ev.value
                 continue
@@ -1280,6 +1300,7 @@ def run(record_path, quest_root):
                   {name: first.at(**hold) for name, hold in derive.PARTS.items()})
     compared = {k: list(v) for k, v in derive.COMPARED.items()}
     records = _derived(table, base, compared)
+    _progress("fi: printing the results")
     out = result_json(table, records, compared)
     outcomes, said, figure_code, figure_faults = _figures(table, quest_root)
     not_computed = [{"id": i, "status": r["status"], "why": r.get("why") or ""} for i, r in records.items() if r["status"] != "ok"]

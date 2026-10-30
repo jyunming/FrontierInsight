@@ -123,6 +123,8 @@ class Derived(_Strict):
     kind: Literal["mean", "proportion"] = "mean"
     label: str = ""
     asked: bool = False  # the model's answer to FI's question after the plan (core/contract_parts.py): read by no check
+    # the plan's own row, when FI asked about its formula (core/contract_parts.py): read by no check; what the audit judged
+    as_planned: dict[str, Any] | None = None
 
 
 class Figure(_Strict):
@@ -358,8 +360,14 @@ def _named_id(text: Any, ids: set[str]) -> str | None:
     return max(named, key=len) if named else None
 
 
-def from_design(design: dict[str, Any] | None) -> StudyContract:
-    """The contract a plan's design block gives, by fixed rules (no model, no guess); see the module docstring."""
+def from_design(design: dict[str, Any] | None, *, fi_analysis: bool = False,
+                left_out: dict[str, str] | None = None) -> StudyContract:
+    """The contract a plan's design block gives, by fixed rules (no model, no guess); see the module docstring.
+
+    ``fi_analysis``: FI works out this plan's derived quantities itself (core/analysis_frame.py), so a formula it cannot work
+    out as written is left out, with a gap that says why; without it the model's own analysis computes them, and every
+    formula is kept as the plan writes it. ``left_out``, when given, is filled with the id of each such formula and why (not
+    one left out only because it names another that is)."""
     design = design if isinstance(design, dict) else {}
     gaps: list[str] = []
     p = _mapping(design.get("protocol"), gaps, "the protocol")
@@ -437,10 +445,12 @@ def from_design(design: dict[str, Any] | None) -> StudyContract:
     derived = [d for d in (_first_valid(Derived, x, gaps, f"derived `{x.get('id')}`") for x in derived_rows)
                if d is not None]
     # what a formula may name when FI works it out (core/analysis_frame.py): a result, a derived quantity, a setting of the
-    # grid, a constant or threshold, and the plan's fixed settings; never a numerical setting or a value compared inside a
-    # run, which the analysis is not given
-    derived = _computable(derived, ids | set(settings.compared) | set(settings.fixed), p, gaps,
-                          not_given=set(settings.numerical) | set(settings.in_each_run))
+    # grid, a constant or threshold, the plan's fixed settings and a numerical setting's one value; never a value compared
+    # inside a run, which the analysis is not given
+    if fi_analysis:
+        derived = _computable(derived, ids | set(settings.compared) | set(settings.fixed), p, gaps,
+                              not_given=set(settings.numerical) | set(settings.in_each_run),
+                              left_out=left_out if left_out is not None else {})
     ids |= {d.id for d in derived}
     comparisons = [c for c in (_first_valid(Comparison, x, gaps, f"comparison `{x.get('id')}`")
                                for x in _rows(p.get("comparisons"), gaps, "the comparisons")) if c is not None]
@@ -515,26 +525,31 @@ _ONE = {"derived": "derived", "comparisons": "comparison", "figures": "figure"}
 
 
 def _computable(derived: list[Derived], known: set[str], protocol: dict[str, Any], gaps: list[str],
-                not_given: set[str] = frozenset()) -> list[Derived]:
-    """The derived quantities FI can work out as the plan writes them: a formula that cannot be read, that names what the plan
-    does not declare (a result, a derived quantity, a setting, a constant or threshold), or that names other formulas round in
-    a circle is left out, with a gap that says why, when the plan is read, and never found only after the long run."""
+                not_given: set[str] = frozenset(), left_out: dict[str, str] | None = None) -> list[Derived]:
+    """The derived quantities FI can work out as the plan writes them: a formula that cannot be read, that summarises one
+    number (``max(growth)``: the analysis has one number of each result at a setting), that names what the plan does not
+    declare (a result, a derived quantity, a setting, a constant or threshold), or that names other formulas round in a
+    circle is left out, with a gap that says why, when the plan is read, and never found only after the long run."""
     from . import oracle_forms as _forms
     from . import reference_values as _reference_values
 
-    functions = {**_forms.FUNCTIONS, **_forms.SPECIAL_FUNCTIONS}
-    known = set(known) | set(_reference_values.inputs(protocol))
+    functions = {**_forms.FUNCTIONS, **_forms.ANALYSIS_SPECIAL}
+    known = set(known) | set(_reference_values.analysis_inputs(protocol))
+    left_out = left_out if left_out is not None else {}
     kept = list(derived)
     while True:
-        kept, circle = _without_circles(_with_known_names(kept, known, functions, gaps, set(not_given)), functions)
+        kept, circle = _without_circles(_with_known_names(kept, known, functions, gaps, set(not_given) - known, left_out),
+                                        functions)
         if not circle:
             return kept
+        why = "its formula names others in a circle, so none of them can be worked out first"
+        left_out.update({i: why for i in circle})
         gaps.append("derived " + ", ".join(f"`{i}`" for i in circle) + " are left out: their formulas name each other in a "
                     "circle, so none of them can be worked out first")
 
 
 def _with_known_names(kept: list[Derived], known: set[str], functions: dict[str, Any], gaps: list[str],
-                      not_given: set[str]) -> list[Derived]:
+                      not_given: set[str], left_out: dict[str, str]) -> list[Derived]:
     from . import oracle_forms as _forms
 
     kept, first = list(kept), {d.id for d in kept}
@@ -544,16 +559,22 @@ def _with_known_names(kept: list[Derived], known: set[str], functions: dict[str,
         for d in list(kept):
             if not d.formula:
                 continue
-            why = _forms.evaluate(d.formula, {}, special=True).unreadable or None  # read as FI works it out
+            # read as FI works it out
+            why = (_forms.one_number_summary(d.formula)
+                   or _forms.evaluate(d.formula, {}, special=_forms.ANALYSIS_SPECIAL).unreadable or None)
+            itself = False
             if why is None:
                 unknown = [n for n in _forms.names(d.formula, functions) if n not in known and n not in ids]
+                itself = bool(unknown) and set(unknown) <= first
                 why = ("it uses " + ", ".join(f"`{n}`" for n in unknown)
-                       + (", which is itself left out" if set(unknown) <= first else
-                          ", a numerical setting or a value compared inside each run, which the analysis is not given"
-                          if set(unknown) <= not_given else ", which the plan does not declare")
+                       + (", which is itself left out" if itself else
+                          ", a value compared inside each run or a numerical setting with no one value, which the analysis "
+                          "is not given" if set(unknown) <= not_given else ", which the plan does not declare")
                        if unknown else None)
             if why is not None:
                 gaps.append(f"derived `{d.id}` is left out: its formula ({d.formula}) cannot be worked out as written ({why})")
+                if not itself:
+                    left_out[d.id] = why
                 kept.remove(d)
                 dropped = True
         if not dropped:

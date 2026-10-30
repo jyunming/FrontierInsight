@@ -13,7 +13,7 @@ import pytest
 from core import contract, contract_parts as cp, metric_spec, numeric_warnings, plan, quality_report, rerun_from, run_checks
 
 TEMPLATES = {n: string.Template((Path(__file__).parent.parent / "agents" / f"{n}.md").read_text(encoding="utf-8"))
-             for n in ("plan_roles", "plan_names", "plan_comparisons")}
+             for n in ("plan_roles", "plan_names", "plan_comparisons", "plan_formulas")}
 
 DESIGN: dict[str, Any] = {
     "hypothesis": "h", "method": "Simulate algae growth; compare with `growth_theory` computed by the closed form.",
@@ -47,7 +47,8 @@ class Fake:
 
     async def __call__(self, prompt: str) -> str:
         part = next(k for k, marker in (("roles", "What kind of number it is"), ("names", "Say what each one is"),
-                                        ("comparisons", "compares between values")) if marker in prompt)
+                                        ("comparisons", "compares between values"),
+                                        ("formulas", "cannot work these out as written")) if marker in prompt)
         self.prompts.append((part, prompt))
         reply = self.replies[part].pop(0)
         if isinstance(reply, Exception):
@@ -474,3 +475,77 @@ def test_a_redesign_before_the_freeze_works_out_the_form_again_from_its_own_resu
     kept2 = engine._inherit_plan_parts({"design": {"protocol": done}, "iteration": 1}, {"hypothesis": "h", "protocol": done},
                                        iteration=1)["protocol"]
     assert "form" not in kept2
+
+
+# --- the formulas of a plan FI works out itself (core/analysis_frame.py) ----------------------------------------------------
+def _with_formulas(*derived: dict[str, Any]) -> dict[str, Any]:
+    d = json.loads(json.dumps(DESIGN))
+    d["protocol"]["numerical_settings"] = {"dt": {"search": 0.1, "check": [0.05]}}
+    d["protocol"]["derived"] = list(derived)
+    return d
+
+
+MID = {"id": "mid", "inputs": ["algae_peak"], "role": "result", "formula": "mean(algae_peak, bloom)"}
+PER_STEP = {"id": "per_step", "inputs": ["algae_peak"], "role": "result", "formula": "algae_peak / dt"}
+SPREAD = {"id": "spread", "inputs": ["algae_peak"], "role": "diagnostic", "formula": "max(algae_peak) - min(algae_peak)"}
+
+
+@pytest.mark.asyncio
+async def test_with_fis_analysis_off_the_plans_formulas_are_read_and_asked_as_before() -> None:
+    # Without FI's own analysis the model's experiment.py computes these: no formula is left out, nothing more is asked,
+    # and what .fi/contract.json is written from (the gaps) is what it was before FI checked formulas (a688fd6f).
+    names = {"names": {"growth_theory": {"answer": "reference", "what": "x", "formula": "max(nutrient) - min(nutrient)"}}}
+    fake = Fake(roles=[ROLES], names=[names], comparisons=[COMPARE])
+    out = await run(fake, _with_formulas(MID, PER_STEP, SPREAD))
+    assert [p for p, _ in fake.prompts] == ["roles", "names", "comparisons"] and out.form == "contract"
+    c = contract.from_design(out.design)
+    assert [d.id for d in c.derived] == ["mid", "per_step", "spread", "growth_theory"]
+    assert not any("left out" in g for g in c.gaps), c.gaps
+
+
+@pytest.mark.asyncio
+async def test_with_fis_analysis_a_formula_fi_cannot_work_out_is_asked_about_and_the_answer_used() -> None:
+    # A formula written straight in the plan (no name was asked about) is asked about as a names answer's is, with the reason
+    # in plain words: a summary of one number per setting would be that number, so `spread` would be 0 at every setting.
+    bad = {"formulas": {"spread": {"formula": "max(algae_peak, 0) - min(algae_peak)"}}}
+    good = {"formulas": {"spread": {"function": True, "inputs": ["algae_peak"]}}}
+    fake = Fake(roles=[ROLES], names=[NAMES], formulas=[bad, good], comparisons=[COMPARE])
+    out = await cp.ask_parts(_with_formulas(MID, PER_STEP, SPREAD), fake, parse, TEMPLATES, fi_analysis=True)
+    assert [p for p, _ in fake.prompts] == ["roles", "names", "formulas", "formulas", "comparisons"]
+    first, again = fake.prompts[2][1], fake.prompts[3][1]
+    assert "- spread: max(algae_peak) - min(algae_peak)" in first
+    assert ("`max(algae_peak)` is a maximum over one number per setting, which is that number; say whether it is over the "
+            "trials of a setting or over the settings") in first
+    assert "- per_step:" not in first and "- mid:" not in first  # a numerical setting's value and mean() are the analysis's
+    assert "`min(algae_peak)` is a minimum over one number per setting" in again
+    assert out.form == "contract" and out.parts["formulas"]["valid"] and out.parts["formulas"]["asks"] == 2
+    c = contract.from_design(out.design, fi_analysis=True)
+    spread = next(d for d in c.derived if d.id == "spread")
+    assert spread.formula is None and spread.inputs == ("algae_peak",)  # a function of the study's computes it
+    assert [d.id for d in c.derived] == ["mid", "per_step", "spread"]
+    assert not any("left out" in g for g in c.gaps), c.gaps
+
+
+@pytest.mark.asyncio
+async def test_a_formula_still_not_workable_after_the_asks_is_left_out_alone_and_the_plan_keeps_its_form() -> None:
+    bad = {"formulas": {"spread": {"formula": "max(algae_peak) - min(algae_peak)"}}}
+    fake = Fake(roles=[ROLES], names=[NAMES], formulas=[bad, bad, bad], comparisons=[COMPARE])
+    out = await cp.ask_parts(_with_formulas(PER_STEP, SPREAD), fake, parse, TEMPLATES, fi_analysis=True)
+    assert out.parts["formulas"]["asks"] == cp.MAX_ASKS and not out.parts["formulas"]["valid"]
+    assert out.form == "contract" and "parts_left_out" not in out.design["protocol"]
+    c = contract.from_design(out.design, fi_analysis=True)
+    assert [d.id for d in c.derived] == ["per_step"]
+    assert any("`spread` is left out" in g and "over the trials of a setting or over the settings" in g for g in c.gaps)
+    assert any("`spread`" in n and "left out" in n for n in out.notes)
+
+
+def test_the_plan_step_asks_about_formulas_only_when_fi_writes_the_analysis(tmp_path: Path) -> None:
+    from core.config import ExecutionConfig
+
+    engine = _engine(tmp_path)
+    design = _with_formulas(SPREAD)
+    assert engine._fis_analysis_planned(design) is False  # the frame is off by default
+    engine.config.execution = ExecutionConfig(sandbox="venv", split_analysis=True, code_skeleton=True)
+    assert engine._fis_analysis_planned(design) is True
+    assert engine._fis_analysis_planned({"protocol": {"grid": {"x": [1]}}}) is False  # no result declared: no frame
+

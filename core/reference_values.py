@@ -145,6 +145,22 @@ def inputs(protocol: dict[str, Any] | None) -> dict[str, float]:
     return found
 
 
+def analysis_inputs(protocol: dict[str, Any] | None) -> dict[str, float]:
+    """The numbers FI's own analysis (core/analysis_frame.py) gives a formula besides a setting's own values: :func:`inputs`,
+    and each numerical setting at the one value the whole study runs at (``protocol.numerical_settings``: a number, or the
+    ``search`` value of ``{"search": ..., "check": [...]}``; the finer values FI runs a few settings again at, in
+    core/refinement_check.py, are never the study's). A reference formula and a check keep :func:`inputs`."""
+    found: dict[str, float] = {}
+    raw = protocol.get("numerical_settings") if isinstance(protocol, dict) else None
+    for name, item in (raw.items() if isinstance(raw, dict) else []):
+        value = item.get("search") if isinstance(item, dict) else item[0] if isinstance(item, list) and len(item) == 1 else item
+        number = _num(value)
+        if number is not None and str(name).strip():
+            found[str(name).strip()] = number
+    found.update(inputs(protocol))
+    return found
+
+
 def grid_axes(protocol: dict[str, Any] | None) -> dict[str, list[Any]]:
     grid = protocol.get("grid") if isinstance(protocol, dict) else None
     return {str(k): list(v) for k, v in grid.items() if isinstance(v, list) and v} if isinstance(grid, dict) else {}

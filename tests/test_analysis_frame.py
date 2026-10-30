@@ -347,7 +347,7 @@ def test_a_missing_calculator_is_fis_fault_not_the_models(tmp_path: Path) -> Non
 def test_a_formula_over_a_name_nobody_gives_is_left_out_of_the_plan_and_fails_in_words_at_run_time(tmp_path: Path) -> None:
     # Found when the plan is read: the quantity is left out, with a gap that says why, before anything runs.
     design = _design([_derived("odd", formula="growth * nothing_here"), _derived("fine", formula="growth * base")])
-    kept = contract.from_design(design)
+    kept = contract.from_design(design, fi_analysis=True)
     assert [d.id for d in kept.derived] == ["fine"]
     assert any("`odd` is left out" in g and "nothing_here" in g for g in kept.gaps)
     # Should one reach the run all the same (a derive.py written before this check), it is the plan's fault, said plainly.
@@ -358,22 +358,55 @@ def test_a_formula_over_a_name_nobody_gives_is_left_out_of_the_plan_and_fails_in
     assert code == 2 and "FI's fault" in err and record["fi_faults"]
 
 
-def test_a_formula_over_what_the_analysis_is_not_given_is_left_out_of_the_plan_not_stopped_on_after_the_run(
+def test_a_formula_over_the_plans_fixed_values_is_worked_out_and_one_over_what_no_setting_holds_is_left_out(
         tmp_path: Path) -> None:
-    # A numerical setting and a value compared inside each run are declared, but the analysis never sees them: the plan
-    # leaves such a formula out (at run time it would be the plan's fault, exit 2, after the long run).
-    design = _design([_derived("per_step", formula="growth / dt"), _derived("by_mode", formula="growth * mode"),
-                      _derived("fine", formula="growth * base * cutoff")], numerical_settings={"dt": 0.1})
-    kept = contract.from_design(design)
-    assert [d.id for d in kept.derived] == ["fine"]
-    assert any("`per_step` is left out" in g and "the analysis is not given" in g for g in kept.gaps)
+    # A numerical setting is one value the whole study runs at (a number, or the "search" value of its finer checks): the
+    # analysis is given it, as it is given a constant. A value compared inside each run, or a numerical setting with no one
+    # value, is no number of a setting: a formula over it is left out when the plan is read, not stopped on after the run.
+    design = _design([_derived("per_step", formula="growth / dt"), _derived("per_mesh", formula="growth * mesh"),
+                      _derived("by_mode", formula="growth * mode"), _derived("by_tol", formula="growth * tol"),
+                      _derived("mid", formula="mean(growth, base)")],
+                     numerical_settings={"dt": 0.1, "mesh": {"search": 0.5, "check": [0.25]}, "tol": {"check": [0.001]}})
+    kept = contract.from_design(design, fi_analysis=True)
+    assert [d.id for d in kept.derived] == ["per_step", "per_mesh", "mid"]
+    for ident in ("by_mode", "by_tol"):
+        assert any(f"`{ident}` is left out" in g and "which the analysis is not given" in g for g in kept.gaps), kept.gaps
+    fixed = af.plan_of(design)["fixed"]
+    assert fixed["dt"] == 0.1 and fixed["mesh"] == 0.5 and "tol" not in fixed
     code, _printed, record, _err = _run(_quest(tmp_path, design))
-    assert code == 0 and record["derived"]["fine"]["status"] == "ok" and not record["fi_faults"]
+    assert code == 0 and not record["fi_faults"]
+    for c in RECORD["cells"]:
+        mean = _mean(c["metrics"]["growth"]["values"])
+        assert record["derived"]["per_step"]["by_setting"][c["key"]] == pytest.approx(mean / 0.1)
+        assert record["derived"]["per_mesh"]["by_setting"][c["key"]] == pytest.approx(mean * 0.5)
+        assert record["derived"]["mid"]["by_setting"][c["key"]] == pytest.approx((mean + 2.0) / 2)
+
+
+def test_a_summary_of_one_number_per_setting_is_left_out_of_the_plan_and_never_worked_out_as_zero(tmp_path: Path) -> None:
+    # At a setting the analysis has one number of each result (that setting's mean): max(growth) is growth itself, so
+    # max(growth) - min(growth) would be 0 at every setting, with nothing said. It is asked about when the plan is read.
+    design = _design([_derived("spread", "diagnostic", formula="max(growth) - min(growth)"),
+                      _derived("fine", formula="max(growth, base) - min(growth, base)")])
+    kept = contract.from_design(design, fi_analysis=True)
+    assert [d.id for d in kept.derived] == ["fine"]
+    assert any("`spread` is left out" in g and "`max(growth)` is a maximum over one number per setting, which is that number; "
+               "say whether it is over the trials of a setting or over the settings" in g for g in kept.gaps), kept.gaps
+    assert "spread" not in {d["id"] for d in af.plan_of(design)["derived"]}
+    assert [d.id for d in contract.from_design(design).derived] == ["spread", "fine"]  # without FI's analysis: as before
+    # One that reaches the run all the same (a derive.py written before this check) is not worked out, and FI says so.
+    late = ('DERIVED["spread"] = {"by": "formula", "formula": "max(growth) - min(growth)", "inputs": ["growth"], '
+            '"role": "diagnostic"}\n')
+    code, _printed, record, err = _run(_quest(tmp_path, design, late))
+    spread = record["derived"]["spread"]
+    assert spread["status"] == "failed" and spread["fi_fault"] and "one number per setting" in spread["why"]
+    assert spread.get("value") is None and not spread.get("by_setting")
+    assert code == 2 and "FI's fault" in err
+    assert record["derived"]["fine"]["status"] == "ok"
 
 
 def test_formulas_that_name_each_other_in_a_circle_are_left_out_of_the_plan() -> None:
     kept = contract.from_design(_design([_derived("a", formula="b + 1"), _derived("b", formula="a * 2"),
-                                         _derived("c", formula="growth / 2")]))
+                                         _derived("c", formula="growth / 2")]), fi_analysis=True)
     assert [d.id for d in kept.derived] == ["c"]
     assert any("`a`, `b` are left out" in g and "circle" in g for g in kept.gaps)
 
@@ -464,6 +497,49 @@ def test_an_analysis_stopped_while_a_body_runs_is_laid_to_that_body(tmp_path: Pa
     # FI's own step running when it stopped is FI's; a stop before any step (the import of derive.py) is the module's
     assert af.failure({}, af.STEP_MARK + "fi: writing the results\n", 1, False)["kind"] == "fi"
     assert af.failure({}, 'File "x/derive.py", line 3\nNameError: name', 1, False)["kind"] == "module"
+
+
+def test_fis_own_step_that_prints_the_results_is_said_under_its_own_name(tmp_path: Path) -> None:
+    # A stop there (its time ran out) is FI's own step, never the last function of the study's that ran before it.
+    quest = _quest(tmp_path, _design([_derived("peak")]), """
+    def derive_peak(table):
+        return max(table.mean("growth", k) for k in table.keys())
+    """)
+    code, _printed, _record, err = _run(quest)
+    steps = [ln[len(af.STEP_MARK):].strip() for ln in err.splitlines() if ln.startswith(af.STEP_MARK)]
+    assert code == 0 and steps[steps.index("derive_peak") + 1] == "fi: printing the results", steps
+    got = af.failure({}, af.STEP_MARK + "derive_peak\n" + af.STEP_MARK + "fi: printing the results\n", -9, False, timed_out=True)
+    assert got["kind"] == "fi" and "printing the results" in got["why"]
+
+
+def test_a_file_of_what_was_running_left_by_a_killed_run_is_not_read_as_this_runs(tmp_path: Path) -> None:
+    quest = _quest(tmp_path, _design([_derived("peak")]), """
+    def derive_peak(table):
+        return 1.0
+    """)
+    stale = quest / af.RUNNING_PATH
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text(json.dumps({"step": "derive_peak", "run": "a-run-that-was-killed"}), encoding="utf-8")
+    with (quest / "code" / "derive.py").open("a", encoding="utf-8") as f:
+        f.write("\nthis_name_is_defined_nowhere\n")  # derive.py now stops when it is imported, before any step is said
+    code, _printed, record, err = _run(quest)
+    assert code == 1 and stale.is_file() and af.running_step(err, quest) == ""
+    got = af.failure(record, err, code, False, step=af.running_step(err, quest))
+    assert got["kind"] == "module", got
+    # With no output at all (lost when the run was stopped) the file is all there is of this run, and it is read.
+    assert af.running_step("", quest) == "derive_peak"
+
+
+def test_a_body_that_raises_keyboardinterrupt_is_that_bodys_own_fault(tmp_path: Path) -> None:
+    quest = _quest(tmp_path, _design([_derived("peak")]), """
+    def derive_peak(table):
+        raise KeyboardInterrupt
+    """)
+    code, _printed, record, err = _run(quest)
+    peak = record["derived"]["peak"]
+    assert code == 1 and peak["status"] == "failed" and "KeyboardInterrupt" in peak["why"] and not peak.get("fi_fault")
+    got = af.failure(record, err, code, True)
+    assert got["kind"] == "body" and got["body"] == "derive_peak", got
 
 
 def test_a_setting_with_no_value_is_missing_with_its_reason(tmp_path: Path) -> None:

@@ -714,11 +714,12 @@ class RunChecksMixin:
         lines = text.splitlines()
         # FI's analysis (core/analysis_frame.py) says each step as it begins it: only the last one (what was running when it
         # stopped) is the model's to read.
-        from .analysis_frame import STEP_MARK
+        from .analysis_frame import RUN_MARK, STEP_MARK
 
         steps = [i for i, line in enumerate(lines) if line.startswith(STEP_MARK)]
-        if len(steps) > 1:
-            lines = [line for i, line in enumerate(lines) if i not in set(steps[:-1])]
+        runs = {i for i, line in enumerate(lines) if line.startswith(RUN_MARK)}  # the run's id: FI's, never the model's
+        if len(steps) > 1 or runs:
+            lines = [line for i, line in enumerate(lines) if i not in set(steps[:-1]) | runs]
             text = "\n".join(lines)
         # FI's own messages in the error output (why a run was refused: "FI ran no trial successfully: ...", "FI's run gave
         # a result that is not usable: ...") name a quantity to say what to repair; they are FI's diagnosis, not a value the
@@ -883,8 +884,7 @@ class RunChecksMixin:
         from . import contract as _contract
         from . import skeleton as _skeleton
 
-        ex = self.config.execution  # type: ignore[attr-defined]
-        if not ex.code_skeleton or not ex.split_analysis or self._agent_mode():  # type: ignore[attr-defined]
+        if not self._frame_on():
             return ""
         design = state.get("design")
         why = _skeleton.applies(design)
@@ -901,6 +901,20 @@ class RunChecksMixin:
             existing = ""
         return _skeleton.frame_for(design, stochastic=_split_run.design_is_stochastic(design),
                                    strict=_contract.from_design(design).form == "contract", existing=existing)
+
+    def _frame_on(self) -> bool:
+        """Whether FI writes the frame of simulate.py, and so the analysis of a plan in the contract form: the settings
+        (``execution.code_skeleton`` with ``split_analysis``, and not the agent coder), read before any code exists."""
+        ex = self.config.execution  # type: ignore[attr-defined]
+        return bool(ex.code_skeleton and ex.split_analysis and not self._agent_mode())  # type: ignore[attr-defined]
+
+    def _fis_analysis_planned(self, design: Any) -> bool:
+        """Whether FI will work out this plan's analysis itself (core/analysis_frame.py) once the plan is in the contract
+        form: its formulas are then held, when the plan is read, to what FI can work out. Read at the plan step, before
+        any code exists; with the frame off the model's own analysis computes them, and nothing of this is asked."""
+        from . import skeleton as _skeleton
+
+        return self._frame_on() and not _skeleton.applies(design)
 
     def _frame_variant(self, state: Any) -> str:
         """``"prompt"`` when FI writes the frame of simulate.py (the code request shows the frame first and asks for ``trial``
@@ -928,6 +942,17 @@ class RunChecksMixin:
         if _analysis.frame_problem(self._skeleton_frame(state)):
             return None
         return _analysis.body_names(_analysis.plan_of(design))
+
+    def _fis_analysis_packages(self, state: Any) -> list[str]:
+        """The packages FI's own analysis needs whatever the reply lists: matplotlib, when the plan declares a figure or a
+        search (FI draws those itself, in fi_figures.py; a clean venv or a container has no matplotlib of its own)."""
+        from . import analysis_frame as _analysis
+
+        design = state.get("design")
+        if _analysis.applies(design):
+            return []
+        plan = _analysis.plan_of(design)
+        return ["matplotlib"] if plan["figures"] or plan["search"] else []
 
     def _analysis_written(self, state: Any, derive_reply: str, simulate_text: str) -> str:
         """Write the analysis FI writes for this plan into ``code/`` (core/analysis_frame.py): ``derive.py`` with the study's

@@ -66,7 +66,8 @@ class Case:
     want: str  # "go on" | the function the repair must go to | "stop"
     figures: list[dict[str, Any]] | None = None
     timeout: float | None = None  # the analysis is stopped for its time after this many seconds
-    plant: str = ""  # "no_calculator" | "empty_record" | "late_formula": FI's own fault, planted beside the study's code
+    plant: str = ""  # "no_calculator" | "empty_record" | "late_formula" | "one_number_summary": FI's own fault, planted beside
+    # the study's code; "stale_running": the file of what was running, left by an earlier run that was killed
 
 
 CASES = [
@@ -143,10 +144,18 @@ import os
 def derive_peak(table):
     os._exit(3)
 ''', "derive_peak"),
+    Case("a function that raises KeyboardInterrupt", "body", [PEAK], '''
+def derive_peak(table):
+    raise KeyboardInterrupt
+''', "derive_peak"),
+    Case("derive.py stops on import, with a file an earlier killed run left", "body", [PEAK], GOOD_PEAK + '''
+this_name_is_defined_nowhere
+''', "derive.py", plant="stale_running"),
     # a fault of FI's own: a plain stop
     Case("FI's formula calculator is missing", "fi", [PEAK, HALF], GOOD_PEAK, "stop", plant="no_calculator"),
     Case("FI's record of the trials is empty", "fi", [PEAK], GOOD_PEAK, "stop", plant="empty_record"),
     Case("a formula that names nothing declared reaches the run", "fi", [PEAK], GOOD_PEAK, "stop", plant="late_formula"),
+    Case("a summary of one number per setting reaches the run", "fi", [PEAK], GOOD_PEAK, "stop", plant="one_number_summary"),
 ]
 
 
@@ -173,6 +182,12 @@ def _run_case(case: Case, root: Path) -> dict[str, Any]:
     if case.plant == "late_formula":  # a derive.py written before the plan was checked for it
         bodies += ('\nDERIVED["odd"] = {"by": "formula", "formula": "growth * nothing_here", "inputs": ["growth"], '
                    '"role": "result"}\n')
+    if case.plant == "one_number_summary":  # max(growth) - min(growth): 0 at every setting, were it worked out
+        bodies += ('\nDERIVED["spread"] = {"by": "formula", "formula": "max(growth) - min(growth)", "inputs": ["growth"], '
+                   '"role": "result"}\n')
+    if case.plant == "stale_running":
+        (quest / af.RUNNING_PATH).parent.mkdir(parents=True, exist_ok=True)
+        (quest / af.RUNNING_PATH).write_text(json.dumps({"step": "derive_peak", "run": "a-run-that-was-killed"}), encoding="utf-8")
     with (code / "derive.py").open("a", encoding="utf-8") as f:
         f.write("\n\n" + bodies)
     if case.plant == "no_calculator":
@@ -200,13 +215,13 @@ def _run_case(case: Case, root: Path) -> dict[str, Any]:
         "stderr_tail": engine._stderr_for_models(stderr)[-2000:],
         "failed_script": af.failed_script(code / "experiment.py", rc) if rc != 0 else None}
     if rc != 0 and hasattr(af, "running_step"):
-        exec_result["analysis_step"] = af.running_step(stderr)
+        exec_result["analysis_step"] = af.running_step(stderr, quest)  # as the engine reads it: the whole stderr, then the file
     state = {"design": design, "result_json": result_json}
     kwargs = {"findings": findings, "implausible": []} if "findings" in inspect.signature(engine._fis_analysis_route).parameters else {}
     routed = engine._fis_analysis_route(state, exec_result, rc, [], **kwargs)
     if "stop" in routed:
         return {"got": "stop", "rc": rc, "why": str((routed["stop"].get("exec_result") or {}).get("cannot_repair") or "")}
-    return {"got": routed["body"] if routed["body"] is not None else "simulation", "rc": rc, "why": ""}
+    return {"got": "simulation" if routed["body"] is None else routed["body"] or "derive.py", "rc": rc, "why": ""}
 
 
 def bench(root: Path) -> dict[str, Any]:
