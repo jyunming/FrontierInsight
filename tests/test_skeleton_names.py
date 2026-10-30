@@ -328,7 +328,28 @@ def test_a_strict_frame_runs_a_trial_that_returns_the_diagnostic_and_one_that_om
 
 
 def test_the_analysis_reads_the_diagnostic_from_the_record() -> None:
+    """A guard, not a test of the each_run rule: the analysis already listed every declared result, of any role, as readable."""
     from core import analysis_frame
 
     plan = analysis_frame.plan_of(_with_diagnostics("each_run"))
     assert "drift" in plan["results"], "a body may read it from the Table"
+
+
+def test_a_frame_written_before_an_each_run_diagnostic_was_added_is_healed_with_its_names() -> None:
+    before = {"protocol": {**DESIGN["protocol"], "form": "contract"}}
+    after = _with_diagnostics("each_run")
+    old = skeleton.frame_source(before, stochastic=True, strict=True)
+    assert "drift" not in old
+    healed = skeleton.heal_results(old, after, stochastic=True, strict=True)
+    assert healed != old and "'drift_values'" in healed
+    assert healed == skeleton.frame_source(after, stochastic=True, strict=True)
+
+
+def test_a_frame_is_not_healed_when_the_plan_gains_a_real_result() -> None:
+    before = {"protocol": {**DESIGN["protocol"], "form": "contract"}}
+    old = skeleton.frame_source(before, stochastic=True, strict=True)
+    metrics = [*DESIGN["protocol"]["metrics"], {"id": "extra", "kind": "mean", "role": "result", "returned": "each_run",
+                                                "estimand": "an extra number", "unit": "one trial"}]
+    after = {"protocol": {**before["protocol"], "metrics": metrics}}
+    assert "extra" in skeleton.declared_ids(after["protocol"])
+    assert skeleton.heal_results(old, after, stochastic=True, strict=True) == old
