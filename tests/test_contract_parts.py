@@ -524,6 +524,11 @@ async def test_with_fis_analysis_a_formula_fi_cannot_work_out_is_asked_about_and
     assert spread.formula is None and spread.inputs == ("algae_peak",)  # a function of the study's computes it
     assert [d.id for d in c.derived] == ["mid", "per_step", "spread"]
     assert not any("left out" in g for g in c.gaps), c.gaps
+    from core import receipts  # the answer changed a row the audit judged: its verdict still covers the design
+
+    planned = _with_formulas(MID, PER_STEP, SPREAD)
+    planned["protocol"] = plan.normalize_protocol(planned["protocol"])[0]  # as the plan step holds it when the audit ran
+    assert receipts.design_core(out.design) == receipts.design_core(planned)
 
 
 @pytest.mark.asyncio
