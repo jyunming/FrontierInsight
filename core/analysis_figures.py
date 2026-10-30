@@ -7,7 +7,7 @@ What the writer of ``experiment.py`` (``core/analysis_frame.py``) calls, all of 
 * ``run_figures(figures, namespace, table, out_dir) -> list[dict]`` draws every declared figure. ``figures`` is the plan's
   ``contract.Figure`` list as dicts (``id``, ``file``, ``panels``, ``x``, ``series``, ``shows``); ``namespace`` is the module
   of ``derive.py`` (a body is its attribute ``figure_<id>``); ``table`` is the ``Table`` of the run. One figure's failure never
-  stops the others. Each outcome is ``{"id", "file", "status": ok | not_written | failed | refused | fi_fault, "why", "said"}``. While a
+  stops the others. Each outcome is ``{"id", "file", "status": ok | not_written | failed | refused | fi_fault, "why", "said"}``; ``dropped`` is set after the run, by ``result_checks`` (an empty figure FI took out of the results), and is never ok. While a
   body runs FI's own figure is the only one it may draw on: saving or showing a figure, or making one, raises a plain error
   at that moment (``refused``), whatever way the body reaches it, and a file the body wrote in the figure folder is removed and refused. A fault of FI's own lines is ``fi_fault``, never the model's. The file of an earlier run is removed before a figure is
   drawn, so a figure that fails is never the old one.

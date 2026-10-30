@@ -44,6 +44,42 @@ ANALYSIS = "analysis"
 SIMULATION = "simulation"
 
 
+def _mark_dropped_figures(quest_root: Path, names: list[str], reasons: dict[str, str], log: Any) -> None:
+    """The figures' entries in FI's record of the run (``data/results/derived.json``) become ``dropped``, with the reason FI
+    took each out (``reasons``, else a plain default). Nothing else in the record changes; a record that is not there is left."""
+    from . import analysis_frame as _analysis
+
+    path = quest_root / _analysis.DERIVED_PATH
+    if not names or not path.is_file():
+        return
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        log.warning("[execute] could not mark the dropped figures in the record (%r)", exc)
+        return
+    entries = record.get("figures") if isinstance(record, dict) else None
+    if not isinstance(entries, list):
+        return
+    changed = False
+    for name in names:
+        file_name = Path(name).name
+        why = reasons.get(name) or reasons.get(file_name) or "FI took it out of the results"
+        for entry in entries:
+            if isinstance(entry, dict) and Path(str(entry.get("file") or "")).name == file_name:
+                entry.update({"status": "dropped", "why": why,
+                              "said": f"Figure `{entry.get('id')}` was left out of the results: {why}."})
+                changed = True
+    if changed:
+        from . import analysis_figures as _figures
+
+        # The record's own sentence about the figures, built as the run builds it (so it counts the dropped one as not drawn).
+        record["figures_said"] = _figures.said(entries)
+        try:
+            path.write_text(json.dumps(record, indent=1), encoding="utf-8")
+        except OSError as exc:
+            log.warning("[execute] could not write the dropped figures to the record (%r)", exc)
+
+
 @dataclass
 class Found:
     """What one check found in the results."""
@@ -255,16 +291,19 @@ class ResultChecksMixin:
                       _degenerate.plain_note(drawn, quantities), _degenerate.writer_note(drawn, quantities),
                       keys=[q.name for q in quantities], figures=sorted({p.figure for p in drawn}))]
 
-    def _drop_figures(self, names: list[str]) -> None:
+    def _drop_figures(self, names: list[str], reasons: dict[str, str] | None = None) -> None:
         """Take exactly the named figure files out of ``figures/``; a figure's record (shared by its formats) goes with the last
-        of them."""
+        of them. The figure's entry in FI's record of the run (derived.json) is then ``dropped`` with its reason (``reasons``:
+        figure file name -> why), so no reader takes it for a figure that was drawn."""
         folder = self.quest_root / "figures"  # type: ignore[attr-defined]
+        gone: list[str] = []
         for name in names:
             stem = Path(name).stem
             targets = [folder / Path(name).name]
             others = [p for p in (folder.iterdir() if folder.is_dir() else [])
                       if p.is_file() and p.stem == stem and p.name != Path(name).name and p.suffix.lower() != ".json"]
             if not others:
+                gone.append(name)
                 targets += [folder / f"{stem}.json", self.fi_dir / "figure_records" / f"{stem}.json",  # type: ignore[attr-defined]
                             self.fi_dir / "figure_records" / f"{stem}.seed0.json"]  # type: ignore[attr-defined]
                 # Its paper copy goes too: paper.pdf would otherwise show the figure through it.
@@ -276,6 +315,7 @@ class ResultChecksMixin:
                     target.unlink(missing_ok=True)
                 except OSError as exc:
                     self._log.warning("[execute] could not remove %s (%r)", target.name, exc)  # type: ignore[attr-defined]
+        _mark_dropped_figures(self.quest_root, gone, reasons or {}, self._log)  # type: ignore[attr-defined]
 
     def _result_counter(self, state: Any) -> int:
         record = _read_json(self.fi_dir / _COUNTER)  # type: ignore[attr-defined]
@@ -394,7 +434,7 @@ class ResultChecksMixin:
     def _leave_out_results(self, found: list[Found], record_path: Path, result_json: Any = None) -> None:
         """What is still wrong after the repairs is left out of the results the paper may use: written to
         ``needs/RESULT_CHECK.json`` (read for the writer's note and for the quantities the analysis no longer sees)."""
-        self._drop_figures(sorted({n for f in found for n in f.figures}))
+        self._drop_figures(sorted({n for f in found for n in f.figures}), {n: f.note for f in found for n in f.figures})
         keys = sorted({k for f in found for k in f.keys})
         record = {"removed_quantities": keys, "removed_figures": sorted({n for f in found for n in f.figures}),
                   "removed_values": _values_left_out(result_json, set(keys)),
