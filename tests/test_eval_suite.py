@@ -710,3 +710,26 @@ def test_import_grade_parses_unfixed_changes_numbers_line(tmp_path: Path) -> Non
     entry_na = grade.import_grade(tmp_path / "r", "c", _w_and(tmp_path / "c.md", row + "PARTS NOT DONE: 0 | STATED: n/a" + chr(10) +
                                                                "UNFIXED CHANGES NUMBERS: n/a" + chr(10)))
     assert entry_na.get("unfixed_changes_numbers") is None
+
+
+def test_a_record_contradiction_alone_never_makes_a_paper_fake_before_a_grade() -> None:
+    unfixed = collect.record_contradiction({"outcome": "paper", "stage": "checks", "chain": ["x was wrong -> fixed"]})
+    assert unfixed.startswith("a checks problem was not fixed")
+    notexec = "EVIDENCE.json says the experiment was not executed"
+    for none in (None, {}, {"g1": "", "g2": None}):
+        assert collect.paper_status("paper", none, unfixed) == "ungraded"
+        assert collect.paper_status("paper", none, notexec) == "ungraded"
+    # once a grade exists, it decides (the grader's judgment of the unfixed problem is kept as before)
+    ok = {"g1": "pass", "g2": "pass", "g3": "pass", "parts_not_done": 0}
+    assert collect.paper_status("paper", {**ok, "unfixed_changes_numbers": True}, unfixed) == "fake"
+    assert collect.paper_status("paper", {**ok, "unfixed_changes_numbers": False}, unfixed) == "trustworthy"
+    assert collect.paper_status("paper", {"g1": "fail (x)", "g2": "pass", "g3": "fail"}, unfixed) == "fake"
+
+
+def test_the_round_report_calls_an_ungraded_contradiction_an_observation() -> None:
+    row = {"topic": "t", "outcome": "paper", "paper_status": "ungraded", "contradiction": "a checks problem was not fixed: x",
+           "grade": None}
+    data = {"round": "r", "metrics": collect.metrics([row]), "topics": [row], "collected_at": "now"}
+    text = collect.render_round(data)
+    assert "Record contradiction: a checks problem was not fixed: x; not graded yet" in text
+    assert "(fake)" not in text
