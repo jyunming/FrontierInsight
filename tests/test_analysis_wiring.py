@@ -197,12 +197,13 @@ def _fis_quest(engine: Engine, design: dict[str, Any] = DESIGN) -> Path:
 
 
 @pytest.mark.asyncio
-async def test_an_empty_record_is_fis_fault_said_plainly_with_no_model_call(tmp_path: Path) -> None:
+@pytest.mark.parametrize("repairs_made", [0, 3])  # 3: every repair spent, and the fault still stops (no repair is asked for it)
+async def test_an_empty_record_is_fis_fault_said_plainly_with_no_model_call(tmp_path: Path, repairs_made: int) -> None:
     engine = _engine(tmp_path)
     _fis_quest(engine)
     chat = AsyncMock(return_value="{}")
     engine._client = type("Stub", (), {"chat": chat})()
-    state = {"design": DESIGN, "result_json": {}, "exec_result": {
+    state = {"design": DESIGN, "result_json": {}, "exec_reflect_iter": repairs_made, "exec_result": {
         "returncode": 2, "failed_script": "experiment.py", "stdout_tail": "",
         "stderr_tail": "FI's analysis cannot start (this is FI's, not the study's code): FI's record of the trials is empty"}}
     patch = await engine._node_execute_reflect(state)
@@ -210,6 +211,11 @@ async def test_an_empty_record_is_fis_fault_said_plainly_with_no_model_call(tmp_
     assert "FI's own analysis stopped" in patch["exec_result"]["cannot_repair"]
     assert "record of the trials is empty" in patch["exec_result"]["cannot_repair"]
     assert "fault in FI" in patch["exec_result"]["cannot_repair_advice"]
+    assert engine._route_after_execute_reflect({**state, **patch}) == "stuck"
+    # the evidence gate names the stop by its kind (``stuck_reason``), and the stop report says it
+    said = (await engine._node_stuck_no_findings({**state, **patch, "evidence_assessment": {"stuck_reason": "cannot_repair"}}))["stuck"]
+    assert "trials that ran are kept" in said["problem"] and "repairs did not remove it" not in said["problem"]
+    assert "FI's own analysis" in said["why_repairs_ended"]
 
 
 # ---- what the run did not work out is said ---------------------------------------------------------------------------------

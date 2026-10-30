@@ -20312,7 +20312,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                       f"again from the run step (`python launch.py --resume {self.quest_id} --from run`).")
             tried = ["ran the study's trials", "ran FI's analysis on FI's record of them",
                      "the fault is in FI's own analysis, so it was not sent to the model to repair"]
-        return {"stop": self._stop_before_run(text, "cannot_repair", tried=tried, advice=advice, ran=True)}
+        stop = self._stop_before_run(text, "cannot_repair", tried=tried, advice=advice, ran=True)
+        stop["exec_result"]["fis_fault"] = True  # the stop report says no repair was tried, and why
+        return {"stop": stop}
 
     async def _node_execute_reflect(self, state: QuestState) -> QuestState:
         """Post-execute repair node.
@@ -20405,6 +20407,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     f"To go on with the warnings noted in the evidence instead, set `engine.numeric_warnings: warn` in "
                     f"the quest's config.yaml, approve it with `python launch.py --update {self.quest_id}`, and run it "
                     f"again from the run step (`--resume {self.quest_id} --from run`)."))
+        # A fault of FI's own analysis (core/analysis_frame.py) stops plainly whatever repairs are left: it asks the model for
+        # nothing, so the repair budget has no say in it, and it is never taken on to the analysis.
+        if (rc != 0 and self._split_on(state) and (self.quest_root / "code" / _split_run.SIMULATE_NAME).is_file()
+                and exec_result.get("failed_script") not in (_split_run.SIMULATE_NAME, _trial_runner.SUBMIT_NAME)
+                and _analysis_frame.is_fis_file(self.quest_root / "code" / _analysis_frame.EXPERIMENT_FILE)):
+            fis_stop = self._fis_analysis_route(state, exec_result, rc, []).get("stop")
+            if fis_stop is not None:
+                return fis_stop
         if iters >= self.config.engine.exec_reflect_max_iterations and not manifest_turn and not numeric_turn:
             # A run the run-manifest check sent back, with no repair left (earlier crashes spent them, or none are
             # allowed): the difference stands, and the quest stops and names it, never going on with no results.
@@ -22052,6 +22062,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             tried = [str(t) for t in (state.get("exec_result") or {}).get("cannot_repair_tried") or []] or [
                 "repaired the code as far as its limit allows", said]
             ended = "FI's repairs ended and the problem stood"
+            if (state.get("exec_result") or {}).get("fis_fault"):
+                # A fault of FI's own analysis (core/analysis_frame.py): the trials ran, and no repair of the study's code was tried
+                problem = f"{_one_line(said, 400)}; the trials that ran are kept"
+                ended = "the fault is in FI's own analysis, which no repair of the study's code can change"
         if reason == "flat":
             # The simulation gives the same numbers whatever it is given (core/flat_output.py): not a finding.
             symptom = str((state.get("exec_result") or {}).get("flat_output") or "").strip().rstrip(".")
@@ -24770,7 +24784,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 printed = result_json if isinstance(result_json, dict) else {}
                 ids = list(dict.fromkeys([*(str(m["id"]) for m in (protocol or {}).get("metrics") or []
                                             if isinstance(m, dict) and m.get("id")), *values]))
-                _paper_values.write_answers(self.quest_root, {**printed, **values}, protocol, None, scheduled, ids=ids)
+                # one record for the whole study (derived.json), whatever number of runs was scheduled
+                _paper_values.write_answers(self.quest_root, {**printed, **values}, protocol, None, None, ids=ids)
                 return
             _paper_values.write_answers(self.quest_root, result_json, self._protocol_block(state), runs, scheduled)
         except Exception as e:  # noqa: BLE001 -- the quantity then has no key; the paper is not held to place it
