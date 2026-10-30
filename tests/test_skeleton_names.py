@@ -130,6 +130,8 @@ def trial(cell, ctx):
     out["error rate"] = 0.0
     out["p-value"] = 0.5
     out["gap"] = 0.0
+    out["noise"] = cell["noise"] * 2  # the check "noise * offset_true - gap" is worked out from what the trial returns
+    out["offset_true"] = 2.0
     return out
 '''
 
@@ -143,7 +145,7 @@ def test_a_measure_that_is_not_a_formula_is_listed_as_the_one_name_fi_reads() ->
     assert oracle_forms.read_names("") == []
     got = skeleton.required_names(PROSE["protocol"])
     assert "error rate" in got and "p-value" in got and "gap" in got
-    assert "noise" not in got and "offset_true" not in got, "a setting and a constant are not names a trial returns"
+    assert "noise" in got and "offset_true" in got, "a formula is worked out from what the trial returns: its settings too"
 
 
 def test_a_strict_frame_runs_a_trial_that_returns_a_measure_written_as_words(tmp_path: Path) -> None:
@@ -151,7 +153,10 @@ def test_a_strict_frame_runs_a_trial_that_returns_a_measure_written_as_words(tmp
     assert text is not None, why
     got = _small(_quest(tmp_path, text))
     assert not got.crashed, got.says()
-    assert {"error rate", "p-value", "gap"} <= set(got.record()["returned"])
+    assert {"error rate", "p-value", "gap", "noise", "offset_true"} <= set(got.record()["returned"])
+    # a setting named in RESULTS changes nothing about how settings are read: the cell still comes from SETTINGS and the grid
+    assert skeleton.settings_of(PROSE["protocol"]) == ["noise", "readings"] and got.axes == ["noise", "readings"]
+    assert all(s.failed == 0 for s in got.settings)
 
 
 # ---- a frame written with the short list is made whole ----------------------------------------------------------------------
@@ -221,3 +226,60 @@ def test_the_diagnostics_of_a_contract_plan_are_not_rows_or_quantities(tmp_path:
     rec = paper_values.Records(cells=[{**c, "metrics": c["metrics"]} for c in cells], protocol=contract_protocol)
     assert rec.metrics() == ["est"]
     assert paper_values.Records(cells=cells, protocol=DESIGN["protocol"]).metrics() == ["est", "est_se", "est_lo", "est_hi"]
+
+
+def test_a_known_value_name_equal_to_a_constants_name_is_still_listed() -> None:
+    design = {"protocol": {**DESIGN["protocol"], "constants": {"offset_true": 2.0, "est_se": 0.5}}}
+    assert "est_se" in skeleton.required_names(design["protocol"])
+
+
+# ---- the heal waits for the first recorded trial -----------------------------------------------------------------------------
+
+def _healable(tmp_path: Path) -> tuple[Any, dict[str, Any], Path]:
+    from tests.test_skeleton import _engine_with
+
+    design = {"protocol": {**DESIGN["protocol"], "form": "contract"}}
+    old, _ = skeleton.fill(_short(design, strict=True), BODY.replace("est_se", "est_x").replace("est_lo", "est_y"))
+    eng = _engine_with(tmp_path, True)
+    path = tmp_path / "code" / "simulate.py"
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(old or "", encoding="utf-8")
+    return eng, {"design": design}, path
+
+
+def test_the_frame_is_not_healed_once_a_trial_is_recorded(tmp_path: Path) -> None:
+    import json
+
+    eng, state, path = _healable(tmp_path)
+    ledger = eng._raw_root() / "ledger.jsonl"
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text(json.dumps({"event": "trial", "status": "ok"}) + chr(10), encoding="utf-8")
+    before = path.read_bytes()
+    assert eng._heal_frame(state) is False
+    assert path.read_bytes() == before, "the file is not touched after a trial is recorded"
+    assert not (tmp_path / "code" / "simulate.py.fi-tmp").exists()
+    ledger.unlink()
+    assert eng._heal_frame(state) is True and path.read_bytes() != before
+    assert not (tmp_path / "code" / "simulate.py.fi-tmp").exists(), "written through a temporary file, then moved"
+
+
+# ---- a metric the plan declares stays a quantity of the study ---------------------------------------------------------------
+
+def test_a_declared_timing_metric_a_check_uses_is_still_a_quantity(tmp_path: Path) -> None:
+    from core import paper_values, trial_table
+
+    protocol = {**DESIGN["protocol"], "form": "contract", "metrics": [
+        *DESIGN["protocol"]["metrics"],
+        {"id": "t_run", "kind": "mean", "role": "timing", "estimand": "the run time", "unit": "one trial"}],
+        "oracles": [{"name": "bound", "kind": "invariant", "expected": 0, "tolerance": 1e-9,
+                     "case": {"noise": 0.1, "readings": 10}, "measure": "max(0, viol - t_run)"}]}
+    assert "t_run" in skeleton.required_names(protocol) or "t_run" in skeleton.returnable_names(protocol)
+    hidden = skeleton.diagnostic_names(protocol)
+    assert "viol" in hidden and "t_run" not in hidden
+    cells = [{"cell": {"noise": n}, "key": f"noise={n}",
+              "metrics": {name: {"values": [1.0 + n, 2.0 + n, 3.0 + 2 * n]} for name in ("est", "viol", "t_run")}}
+             for n in (0.1, 0.2)]
+    (tmp_path / "raw").mkdir()
+    (tmp_path / "raw" / "trials.json").write_text(__import__("json").dumps({"cells": cells}), encoding="utf-8")
+    assert {r["metric"] for r in trial_table.rows(tmp_path, hidden)} == {"est", "t_run"}
+    assert paper_values.Records(cells=cells, protocol=protocol).metrics() == ["est", "t_run"]

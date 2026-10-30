@@ -1263,7 +1263,18 @@ class RunChecksMixin:
                                         strict=self._strict_frame(state))
         if healed == text:
             return False
-        path.write_text(healed, encoding="utf-8")
+        if self._study_results_recorded():  # type: ignore[attr-defined]
+            # A trial is recorded: the file's text is part of what the run's keys and records were made from, so it is not changed.
+            if not getattr(self, "_frame_older_said", False):
+                self._frame_older_said = True
+                self._log.info("[implement] simulate.py: its frame is older than the plan's list of names a trial may return; "  # type: ignore[attr-defined]
+                               "left as it is, because trials of the study are already recorded")
+            return False
+        import os
+
+        temp = path.with_name(path.name + ".fi-tmp")
+        temp.write_text(healed, encoding="utf-8")
+        os.replace(temp, path)
         self._log.info("[implement] simulate.py: the frame's list of names a trial may return was written again "  # type: ignore[attr-defined]
                        "(it now holds the names FI's checks read from a trial)")
         return True

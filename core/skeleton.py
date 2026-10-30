@@ -508,7 +508,8 @@ def required_names(protocol: dict[str, Any] | None) -> list[str]:
     calibration check, :func:`core.trial_checks.truth_names`), every name the ``measure`` of a check that names a case uses
     (the oracle check calls the simulation on the case and reads them, :func:`core.oracle_check.case_of`), and the list of
     clusters a clustered metric names. They are diagnostics: read by the checks, never reported as results of the plan. A
-    setting or a constant of the plan that a measure's formula mentions is not a name a trial returns, so it is left out."""
+    formula measure is worked out from what the simulation returned alone, so every name it uses is listed, a setting or a
+    constant of the plan too."""
     out: list[str] = list(_trial_checks.truth_names(protocol))
     for oracle in _oracle_check.declared(protocol):
         got = _oracle_check.case_of(oracle)
@@ -519,22 +520,22 @@ def required_names(protocol: dict[str, Any] | None) -> list[str]:
         if key:
             out.append(key)
     declared = set(declared_names(protocol))
-    fixed = set(settings_of(protocol))
-    for part in ("constants", "thresholds"):
-        fixed.update(str(k) for k in (protocol.get(part) if isinstance(protocol, dict) and isinstance(protocol.get(part), dict) else ()))
-    return [n for n in dict.fromkeys(out) if n not in declared and n not in fixed]
+    return [n for n in dict.fromkeys(out) if n not in declared]
 
 
 def diagnostic_names(protocol: dict[str, Any] | None) -> list[str]:
     """The names a trial of a plan in the contract form may return that are not results of the plan: what
     :func:`required_names` lists and :data:`FI_ASKED_NAMES`. They stay in the record of the trials but are not quantities of
-    the study, so the results table and the writer's list of quantities leave them out. ``[]`` for a plan in the older form,
-    whose tables list every name a trial returned, as they always did."""
+    the study, so the results table and the writer's list of quantities leave them out. A metric the plan declares, in any role
+    (a timing, a diagnostic), is a quantity of the study and is never listed here. ``[]`` for a plan in the older form, whose
+    tables list every name a trial returned, as they always did."""
     from . import contract as _contract
 
     if not isinstance(protocol, dict) or _contract.from_design({"protocol": protocol}).form != "contract":
         return []
-    return list(dict.fromkeys([*required_names(protocol), *FI_ASKED_NAMES]))
+    metrics = {str(i) for i in _contract.raw_roles(protocol)} | {str(s["id"]) for s in _metric_spec.declared(protocol)}
+    kept = {form for ident in metrics for form in _metric_spec.result_forms(ident)}
+    return [n for n in dict.fromkeys([*required_names(protocol), *FI_ASKED_NAMES]) if n not in kept]
 
 
 def returnable_names(protocol: dict[str, Any] | None) -> list[str]:
