@@ -1897,7 +1897,8 @@ whole number from 0 to 10 inside a formula. A typed result, or any other typed n
 A number the method works out from the plan's numbers (a quantile, a cutoff or bound from a formula of the plan's constants, a
 reference value, a count from the grid) is not typed either: write {{calc:EXPR}} and FI computes it, also inside a formula.
 Build EXPR from the plan's numbers as the plan writes them, e.g. {{calc:1 - 0.05 / 2}} or, for a bound a / (b * c) - 1 of
-the plan's own a, b and c, {{calc:a / (b * c) - 1}} with their digits for a, b and c.
+the plan's own a, b and c, {{calc:a / (b * c) - 1}} with their digits for a, b and c. EXPR may use + - * / ** and
+parentheses and the functions <CALC_FUNCTIONS>.
 How to write a key: {{v:<value> @ <where>}}. The value is a quantity from the list below. <where> names every setting the
 study varied, each as name=<value it took> (one setting), name=all (the trials of all its settings together) or name=each (kept
 apart, for a smallest, largest or range). Add :<form> after the value for another form of it (default is the mean). Add | % to
@@ -1921,6 +1922,19 @@ settings): it is the study's answer for that quantity, so place it where the pap
 Numbers that are not available: a number that only the analysis script computed, and that no key on this list gives, is not
 available. The Analysis block above shows such numbers; do not copy any of them as digits. Use the key for the same quantity
 when the list has one, otherwise say it in words or leave it out."""
+
+
+def calc_functions_said() -> str:
+    """The functions an expression of ``{{calc:...}}`` may call (:func:`calc`), in words for the writer: the formula functions
+    of :data:`core.oracle_forms.FUNCTIONS` and FI's statistical ones. Said from the calculator's own table, so the writer is
+    never told fewer than FI computes."""
+    from . import oracle_forms as _forms
+
+    return (", ".join(sorted(_forms.FUNCTIONS)) + ", ndtr(x) (the standard normal distribution function, P(Z <= x)), ndtri(p) "
+            "(its inverse, the standard normal quantile) and t_quantile(p, df) (the Student-t quantile)")
+
+
+WRITER_RULES = WRITER_RULES.replace("<CALC_FUNCTIONS>", calc_functions_said())
 
 
 def writer_block(rec: Records | None) -> str:
