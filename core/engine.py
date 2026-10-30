@@ -28433,6 +28433,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "plan_criteria",                    # the plan named no check of correctness: ask once more
         "plan_roles", "plan_names", "plan_comparisons",  # the contract's parts, asked one at a time (core/contract_parts.py)
         "plan_formulas",                    # ... and a formula FI cannot work out as written, when FI writes the analysis
+        "plan_figures",                     # ... and a figure the plan names only by file name, when FI writes the analysis
         "json_reanswer",                    # a required check's reply could not be read: one short JSON re-answer
         "json_reanswer_part",               # ... when part of it could be read: only the unreadable keys are asked again
         "oracle_review",                    # a second model reads the plan's checks against known answers
