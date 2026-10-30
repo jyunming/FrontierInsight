@@ -461,7 +461,7 @@ PINS_AT_811719AF = {
     "run_plain": "dab51e372647d8db",
     # the frame's own text (written only with the frame on): its RESULTS comment, its trial docstring and the refusal message
     # changed with the one list of names a trial may return (core/skeleton.py returnable_names); it was "ad084c60d61b9dde"
-    "run_framed": "b50a812e071887c7",
+    "run_framed": "a1e6aa7606d5a1bd",
 }
 
 

@@ -365,3 +365,64 @@ def test_the_reader_of_the_record_is_not_an_input_of_the_trials(tmp_path: Path) 
     names = [p.name for p in code_layout.simulation_inputs(tmp_path)]
     assert skeleton.TABLE_FILE == code_layout.TABLE_SCRIPT
     assert skeleton.TABLE_FILE not in names and skeleton.RUNTIME_FILE in names and "simulate.py" in names
+
+
+# ---- what a read gave and raised (FI's own record of the reads, for the figure check) ----------------------------------------------
+def test_a_list_of_settings_is_not_a_key_and_the_message_says_what_to_do() -> None:
+    t = _table()
+    keys = t.at(rate=0.2)
+    assert isinstance(keys, list)
+    with pytest.raises(TypeError) as err:
+        t.mean("growth", keys)
+    assert "list of settings, not one setting" in str(err.value) and "table.at(...)[0]" in str(err.value)
+    with pytest.raises(TypeError):
+        t.interval("growth", tuple(keys))
+    assert t.mean("growth", keys[0]) == pytest.approx(2.25), "one key of the list is a key"
+
+
+def test_gave_values_holds_only_the_ids_a_read_returned_data_for_and_resets() -> None:
+    t = _table(cells=[_cell(0.1, 1, [1.0, 2.0]), _cell(0.1, 2, [float("nan")])])
+    assert t.gave_values == set()
+    assert t.mean("growth", "rate=0.1,dose=2") is None and t.values("growth", "rate=0.1,dose=2") == []
+    assert t.interval("growth", "rate=0.1,dose=2") == (None, None) and t.n("growth", "rate=0.1,dose=2") == 0
+    assert "growth" in t.served and t.gave_values == set(), "served is not given: no read returned a value"
+    assert t.mean("alive", "rate=0.1,dose=1") == pytest.approx(0.0) and t.gave_values == {"alive"}
+    assert t.values("growth", "rate=0.1,dose=1") == [1.0, 2.0] and t.gave_values == {"alive", "growth"}
+    t.reset_reads()
+    assert t.trials("growth", "rate=0.1,dose=1") == [0, 1] and t.gave_values == set(), "trial numbers are not a result's values"
+    assert t.gave_values == set() and t.last_error == {}
+
+
+def test_the_last_error_of_a_read_is_kept_even_when_the_caller_swallows_it() -> None:
+    t = _table()
+    for key in (t.at(rate=0.1), "no such setting"):
+        try:
+            t.mean("growth", key)
+        except Exception:  # the way a body hides it
+            continue
+    assert t.last_error["growth"].startswith("KeyError: ") and "no such setting" in t.last_error["growth"]
+    try:
+        t.mean("growth", t.at(rate=0.1))
+    except Exception:
+        pass
+    assert t.last_error["growth"].startswith("TypeError: ") and "list of settings" in t.last_error["growth"]
+    assert t.gave_values == set()
+
+
+def test_the_last_error_in_the_dict_is_the_latest_raised_and_an_unhashable_id_keeps_its_own_error() -> None:
+    t = _table()
+    for name, key in (("growth", "no such setting"), ("alive", "no such setting"), ("growth", "again")):
+        try:
+            t.mean(name, key)
+        except KeyError:
+            pass
+    assert list(t.last_error) == ["alive", "growth"] and "again" in t.last_error["growth"]
+    with pytest.raises(type(t).__init__.__globals__["UnknownResult"]):
+        t.mean(["growth"], "rate=0.1,dose=1")
+
+
+def test_a_list_is_not_a_key_of_level_means_or_reference_either() -> None:
+    t = _table()
+    for read in (lambda: t.level_means("growth", ["rate=0.1,dose=1"]), lambda: t.reference("growth", ["rate=0.1,dose=1"])):
+        with pytest.raises(TypeError, match="list of settings"):
+            read()

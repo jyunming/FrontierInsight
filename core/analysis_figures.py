@@ -165,6 +165,31 @@ def _folder(out_dir: str) -> dict[str, tuple[int, int]]:
     return seen
 
 
+def _last_read_error(table: Any) -> str:
+    """The most recent exception a read of the table raised, cut to its type and first clause (an ``UnknownResult`` lists the
+    declared results, so only its type is kept: this text must not name a result)."""
+    errors = getattr(table, "last_error", None)
+    last = list(errors.values())[-1] if isinstance(errors, dict) and errors else ""
+    if last.startswith("UnknownResult"):
+        return "UnknownResult: a result the plan does not declare"
+    if last.startswith(("ValueError", "KeyError")):  # `levels` names the result in its ValueError: only the type is kept
+        return last.split(":", 1)[0]
+    return last[:240]
+
+
+def _drew_nothing(spec: dict[str, Any], table: Any) -> str:
+    """Why a figure drew nothing from the trial record (``""`` when some read of a result gave data, or when the table does not
+    record its reads). FI's table notes each read that returned data, so this reads no text of the body. It names no result:
+    the line goes to a model, and a line naming a left-out quantity is taken out of what a model reads."""
+    gave = getattr(table, "gave_values", None)
+    shows = spec.get("shows")
+    if not isinstance(gave, (set, frozenset)) or gave or not shows or not isinstance(shows, (list, tuple)):
+        return ""  # a figure that declares no result draws what it says it draws (a layout, a reference curve): not checked
+    text = "`figure_%s` drew nothing from the trial record: no read of a result returned a value." % spec.get("id")
+    err = _last_read_error(table)
+    return text + (" The last read raised %s." % err if err else "")
+
+
 def _draw_one(spec: dict[str, Any], body: Any, table: Any, out_dir: str) -> dict[str, Any]:
     """Draw one declared figure. A fault of the model's body is ``failed`` / ``refused`` (its repair); a fault of FI's own lines
     (making the figure, handing it over, the folder) is ``fi_fault`` and is never sent to the model."""
@@ -177,6 +202,9 @@ def _draw_one(spec: dict[str, Any], body: Any, table: Any, out_dir: str) -> dict
         name = getattr(body, "__name__", "figure_%s" % fid)
         plt, fig, axes = _new_figure(spec.get("panels") or 1)
         handle = _figure_handle(axes, spec, file)
+        reset = getattr(table, "reset_reads", None)
+        if callable(reset):
+            reset()  # what the reads of this one body give is recorded from here
         plt.sca(axes[0])  # a body that draws with the bare pyplot calls still draws on its first axes
         os.makedirs(out_dir, exist_ok=True)
         folder = _folder(out_dir)
@@ -210,6 +238,9 @@ def _draw_one(spec: dict[str, Any], body: Any, table: Any, out_dir: str) -> dict
         empty = _empty_panels(axes)
         if empty:
             return _outcome(fid, file, "failed", "`figure_%s` drew nothing on panel %s." % (fid, " and ".join(map(str, empty))))
+        none_drawn = _drew_nothing(spec, table)
+        if none_drawn:
+            return _outcome(fid, file, "failed", none_drawn)
         try:
             fig.savefig(os.path.join(out_dir, file))  # the recorder of the house style notes what the figure draws
         except Exception as err:

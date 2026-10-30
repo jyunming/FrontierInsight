@@ -483,3 +483,164 @@ def test_a_file_the_body_wrote_in_the_figure_folder_is_removed_and_refused(tmp_p
     assert out[0]["status"] == "refused" and "side.png" in out[0]["why"]
     assert not (tmp_path / "side.png").exists() and not (tmp_path / "png.png").exists()
     assert (tmp_path / "other.png").read_bytes() == b"another figure of an earlier step"
+
+
+# ---- a figure that drew nothing from the trial record ----------------------------------------------------------------------------
+def _real_table(declared=("r1", "r2")):
+    from core import frame_table, skeleton
+
+    sys.modules["fi_table"] = frame_table
+    ns: dict[str, Any] = {"fi_table": frame_table}
+    exec(compile(skeleton.RUNTIME, "fi_frame.py", "exec"), ns)  # noqa: S102 -- FI's own runtime text
+    cells = [{"cell": {"a": a}, "key": "a=%d" % a, "planned": 2, "ok": 2, "failed": 0,
+              "metrics": {"r1": {"values": [1.0 * a, 2.0 * a]}, "r2": {"values": [float("nan")]}}} for a in (1, 2, 3)]
+    return ns["Table"](cells, list(declared))
+
+
+def _shown(tmp_path, body, shows=("r1",), table=None):
+    spec = {"id": "x", "file": "x.png"}
+    if shows != "missing":
+        spec["shows"] = list(shows)
+    return af.run_figures([spec], {"figure_x": body}, table or _real_table(), str(tmp_path))[0]
+
+
+def test_a_figure_that_hides_the_error_of_its_reads_and_draws_only_curves_is_failed_with_the_error_text(tmp_path):
+    def figure_x(fig, table):
+        import numpy as np
+
+        for p in range(1, 3):
+            try:
+                table.mean("r1", table.at(a=p))  # a list, not a key
+            except Exception:
+                continue
+        fig.axes[0].plot(np.linspace(1, 3, 5), np.linspace(1, 3, 5) ** 2)
+        fig.axes[0].axhline(0.05)
+
+    out = _shown(tmp_path, figure_x)
+    assert out["status"] == "failed" and "drew nothing from the trial record" in out["why"]
+    assert "TypeError: " in out["why"] and "list of settings" in out["why"] and "`r1`" not in out["why"]
+    assert not (tmp_path / "x.png").exists()
+
+
+def test_a_figure_that_reads_only_a_result_with_no_value_is_failed(tmp_path):
+    def figure_x(fig, table):
+        got = [table.mean("r2", k) for k in table.keys()]
+        fig.axes[0].plot([1, 2, 3], [g for g in got if g is not None] or [0, 0, 0])
+
+    assert _shown(tmp_path, figure_x)["status"] == "failed"
+
+
+def test_a_figure_that_reads_and_plots_a_result_is_ok(tmp_path):
+    def figure_x(fig, table):
+        fig.axes[0].plot([1, 2, 3], [table.mean("r1", k) for k in table.keys()])
+
+    assert _shown(tmp_path, figure_x)["status"] == "ok"
+
+
+def test_what_the_figure_is_declared_to_show_does_not_decide_it(tmp_path):
+    """A shown id may be a derived result with no declared inputs, or a comparison: the body reads the results it is made of."""
+    def figure_x(fig, table):
+        fig.axes[0].plot([1, 2, 3], [table.mean("r1", k) for k in table.keys()])
+
+    for shows in (["slope"], ["diff_between_settings"], [], "missing"):
+        assert _shown(tmp_path, figure_x, shows=shows)["status"] == "ok", shows
+
+
+def test_a_read_inside_a_derive_the_body_calls_counts(tmp_path):
+    def derive_slope(table):
+        return [table.mean("r1", k) for k in table.keys()]
+
+    def figure_x(fig, table):
+        fig.axes[0].plot([1, 2, 3], derive_slope(table))
+
+    assert _shown(tmp_path, figure_x, shows=["slope"])["status"] == "ok"
+
+
+def test_only_a_reference_a_count_of_undefined_or_trial_numbers_is_not_a_read_of_a_result(tmp_path):
+    def figure_x(fig, table):
+        table.reference("r1", "a=1")
+        table.undefined("r1", "a=1")
+        table.trials("r1", "a=1")
+        fig.axes[0].plot([1, 2], [1, 2])
+
+    assert _shown(tmp_path, figure_x)["status"] == "failed"
+
+
+def test_the_reads_are_forgotten_between_figures(tmp_path):
+    table = _real_table()
+
+    def figure_one(fig, table):
+        fig.axes[0].plot([1, 2, 3], [table.mean("r1", k) for k in table.keys()])
+
+    def figure_two(fig, table):
+        fig.axes[0].plot([1, 2], [1, 2])
+
+    out = af.run_figures([{"id": "one", "file": "one.png", "shows": ["r1"]}, {"id": "two", "file": "two.png", "shows": ["r1"]}],
+                         {"figure_one": figure_one, "figure_two": figure_two}, table, str(tmp_path))
+    assert [o["status"] for o in out] == ["ok", "failed"]
+
+
+def test_a_table_that_does_not_record_its_reads_is_not_held_to_the_check(tmp_path):
+    def figure_x(fig, table):
+        fig.axes[0].axhline(0.05)
+
+    assert _shown(tmp_path, figure_x, table=_Table())["status"] == "ok"
+
+
+def test_the_failure_text_survives_what_a_model_may_read_when_a_quantity_is_left_out(tmp_path, monkeypatch):
+    from tests.test_run_checks import _typed_engine
+
+    eng, _asked = _typed_engine(tmp_path, monkeypatch, [json.dumps({"code": "def broken(:\n"})])
+    import asyncio
+
+    asyncio.run(eng._results_from_computation({}))
+    key = sorted(eng._left_out_quantities())[0]
+
+    def figure_x(fig, table):
+        try:
+            table.mean("zzz", "a=1")  # not declared: the error would list the declared results, among them the left-out one
+        except Exception:
+            pass
+        fig.axes[0].plot([1, 2], [1, 2])
+
+    out = _shown(tmp_path, figure_x, table=_real_table(declared=(key,)))
+    assert out["status"] == "failed" and key not in out["said"]
+    seen = eng._stderr_for_models(af.said([out]))
+    assert "drew nothing from the trial record" in seen and "[FI NOTE]" not in seen
+
+
+def test_a_figure_that_declares_no_result_is_not_checked_and_one_that_declares_results_is(tmp_path):
+    def layout(fig, table):
+        fig.axes[0].plot([1, 2], [1, 2])  # a layout or a reference curve: reads nothing, says it shows no result
+
+    assert _shown(tmp_path, layout, shows=[])["status"] == "ok"
+    assert _shown(tmp_path, layout, shows="missing")["status"] == "ok"
+    assert _shown(tmp_path, layout, shows=["r1"])["status"] == "failed"
+
+
+def test_a_levels_error_that_names_the_result_is_cut_to_its_type_and_the_line_survives_what_a_model_reads(tmp_path, monkeypatch):
+    from tests.test_run_checks import _typed_engine
+    import asyncio
+
+    eng, _asked = _typed_engine(tmp_path, monkeypatch, [json.dumps({"code": "def broken(:\n"})])
+    asyncio.run(eng._results_from_computation({}))
+    key = sorted(eng._left_out_quantities())[0]
+    from core import frame_table, skeleton
+
+    sys.modules["fi_table"] = frame_table
+    ns: dict[str, Any] = {"fi_table": frame_table}
+    exec(compile(skeleton.RUNTIME, "fi_frame.py", "exec"), ns)  # noqa: S102 -- FI's own runtime text
+    cells = [{"cell": {"a": 1}, "key": "a=1", "planned": 1, "ok": 1, "failed": 0, "metrics": {key: {"values": [1.0]}}},
+             {"cell": {"a": 1}, "level": {"m": 1, "n": 2}, "key": "a=1", "metrics": {key: {"values": [1.0]}}}]
+    table = ns["Table"](cells, [key])
+
+    def figure_x(fig, table):
+        try:
+            table.levels(key, "m", "a=1")  # the run also compares another factor: the error names the result
+        except Exception:
+            pass
+        fig.axes[0].plot([1, 2], [1, 2])
+
+    out = _shown(tmp_path, figure_x, table=table)
+    assert out["status"] == "failed" and key not in out["said"] and "raised ValueError." in out["why"]
+    assert "drew nothing from the trial record" in eng._stderr_for_models(af.said([out]))

@@ -288,6 +288,20 @@ class Figure:
         self.file = file
 
 
+def _noting(method):
+    """Keep the last exception a read of a result raised (the first argument is the result's id), then raise it again."""
+    def wrapper(self, name, *args, **kwargs):
+        try:
+            return method(self, name, *args, **kwargs)
+        except Exception as err:
+            if isinstance(name, str):
+                self.last_error.pop(name, None)  # the dict keeps the order of the raises: the last item is the latest
+                self.last_error[name] = "%s: %s" % (type(err).__name__, err)
+            raise
+    wrapper.__name__, wrapper.__doc__ = method.__name__, method.__doc__
+    return wrapper
+
+
 class Table:
     """FI's own record of the trials (``raw/trials.json``), read-only, held to the results the plan declares. Reading an id the
     plan does not declare raises ``UnknownResult`` naming the declared ones; ``served`` lists the ids that were read. A setting
@@ -295,6 +309,8 @@ class Table:
     beside this file)."""
 
     def __init__(self, cells, declared, references=None, parts=None):
+        self.gave_values = set()  # the ids a read returned data for (at least one finite value), since the last ``reset_reads``
+        self.last_error = {}  # id -> "Type: message" of the last exception a read of that id raised, even if the caller caught it
         self._cells = [c for c in cells if isinstance(c, dict) and isinstance(c.get("metrics"), dict)]
         self.declared = list(declared)
         self._references = dict(references or {})
@@ -332,6 +348,16 @@ class Table:
 
         return str(cell.get("key") or fi_table.cell_key(cell.get("cell") or {}))
 
+    def reset_reads(self):
+        """Forget what the reads gave and raised so far (FI does this before it calls each figure body)."""
+        self.gave_values.clear()
+        self.last_error.clear()
+
+    def _gave(self, name, got):
+        if got:
+            self.gave_values.add(name)
+        return got
+
     def _check(self, name):
         if name not in self.declared:
             raise UnknownResult("`%s` is not a result the plan declares; the declared results are: %s"
@@ -339,7 +365,14 @@ class Table:
         if name not in self.served:
             self.served.append(name)
 
+    @staticmethod
+    def _one_key(key):
+        if isinstance(key, (list, tuple)):
+            raise TypeError("`%s` is a list of settings, not one setting: `table.at(...)` gives every key that holds those values; "
+                            "take one of them (for example `table.at(...)[0]`) or loop over them" % (list(key),))
+
     def _cell(self, key):
+        self._one_key(key)
         if key not in self._settings:
             raise KeyError("`%s` is not a setting of the study; the settings are: %s" % (key, ", ".join(self.keys())))
         return self._settings[key]
@@ -355,19 +388,21 @@ class Table:
     def _metric(self, name, key):
         return self._cell(key)["metrics"].get(name)
 
+    @_noting
     def values(self, name, key):
         """Every finite value the trials of setting ``key`` gave for result ``name``, in the order the trials gave them."""
         import fi_table
 
         self._check(name)
-        return fi_table.values_of(self._metric(name, key))
+        return self._gave(name, fi_table.values_of(self._metric(name, key)))
 
+    @_noting
     def trials(self, name, key):
         """The trial number of each value ``values`` gives (``[]`` when the record does not say them)."""
         import fi_table
 
         self._check(name)
-        return fi_table.trials_of(self._metric(name, key))
+        return fi_table.trials_of(self._metric(name, key))  # trial numbers are not a result's values: not a read that gave data
 
     def _summary(self, name, key):
         import fi_table
@@ -375,21 +410,27 @@ class Table:
         self._check(name)
         return fi_table.summary(fi_table.values_of(self._metric(name, key)))
 
+    @_noting
     def n(self, name, key):
         """How many trials of setting ``key`` gave a finite value for ``name``."""
-        return self._summary(name, key)["n"]
+        return self._gave(name, self._summary(name, key)["n"])
 
+    @_noting
     def mean(self, name, key):
         """The mean of those values; ``None`` when no trial gave one."""
         s = self._summary(name, key)
+        self._gave(name, s["n"])
         return s["mean"] if s["n"] else None
 
+    @_noting
     def interval(self, name, key):
         """``(lower, upper)`` of the 95% interval of the mean (Wilson when every trial gave 0 or 1, else a t interval);
         ``(None, None)`` when the trials give none."""
         import fi_table
 
-        return fi_table.interval(self._summary(name, key))[:2]
+        s = self._summary(name, key)
+        self._gave(name, s["n"])
+        return fi_table.interval(s)[:2]
 
     def failed(self, key):
         """How many planned trials of setting ``key`` did not end well, as the record says; ``None`` if it does not."""
@@ -397,7 +438,7 @@ class Table:
         return got if isinstance(got, int) and not isinstance(got, bool) else None
 
     def at(self, **settings):
-        """The keys of the settings that hold every value given (``table.at(N=100)``), in the record's order."""
+        """A LIST of the keys of the settings that hold every value given (``table.at(N=100)`` -> ``[key, ...]``), in the record's order; pass one key of it (``table.at(N=100)[0]``) to a read, never the list."""
         return [k for k in self.keys()
                 if all(a in self._settings[k].get("cell", {}) and self._settings[k]["cell"][a] == v for a, v in settings.items())]
 
@@ -409,6 +450,7 @@ class Table:
             pairs.sort(key=lambda p: p[0])
         return pairs
 
+    @_noting
     def levels(self, name, factor, key, **fixed):
         """The mean of ``name`` for each value of ``factor`` that each run of setting ``key`` compared inside it:
         ``{value: mean or None}``, in the record's order. When a run compares more than one factor and ``name`` is given for
@@ -431,6 +473,7 @@ class Table:
                 continue
             s = fi_table.summary(fi_table.values_of(c["metrics"].get(name)))
             out[level[factor]] = s["mean"] if s["n"] else None
+            self._gave(name, s["n"])
         if not out and seen:
             have = sorted({a for axes in seen for a in axes} - {factor})
             if not have:
@@ -440,6 +483,7 @@ class Table:
                              "(levels(%r, %r, %r, %s=...))" % (name, factor, key, ", ".join(have), name, factor, key, have[0]))
         return out
 
+    @_noting
     def level_means(self, name, key):
         """The mean of ``name`` for every value (or combination of values) the runs of setting ``key`` compared inside them that
         FI holds a record for: ``{text: mean or None}``. The text is the value alone when the run compares one factor, else
@@ -447,6 +491,7 @@ class Table:
         import fi_table
 
         self._check(name)
+        self._one_key(key)
         out = {}
         for c in self._by_setting.get(key, []):
             if name not in c["metrics"]:
@@ -455,8 +500,10 @@ class Table:
             text = fi_table._fmt(next(iter(level.values()))) if len(level) == 1 else fi_table.cell_key(level)
             s = fi_table.summary(fi_table.values_of(c["metrics"].get(name)))
             out[text] = s["mean"] if s["n"] else None
+            self._gave(name, s["n"])
         return out
 
+    @_noting
     def undefined(self, name, key):
         """How many trials of setting ``key`` returned ``name`` with no value (a NaN or an infinity): FI's record says it."""
         import fi_table
@@ -477,9 +524,11 @@ class Table:
             raise UnknownResult("`%s` is not a part of the study; the parts are: %s" % (name, ", ".join(sorted(self._parts)) or "(none)"))
         return list(self._parts[name])
 
+    @_noting
     def reference(self, name, key):
         """The reference value of ``name`` at setting ``key`` that FI worked out from the plan; ``None`` when it has none."""
         self._check(name)
+        self._one_key(key)
         return (self._references.get(name) or {}).get(key)
 
     def missing(self, why):
