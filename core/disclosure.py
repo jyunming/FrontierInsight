@@ -28,6 +28,7 @@ whether ``engine.phased`` is set.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import re
@@ -732,6 +733,82 @@ def _precision_sentence(missed: Any) -> str:
             f"{', '.join(said)}{more}.")
 
 
+def _failed_check_results(protocol: dict[str, Any], oracle: dict[str, Any]) -> list[str]:
+    """The reported results that rest on a known-answer check, from the plan's own structure (never from words): the
+    results whose id, or whose declared estimate, standard error or interval, is a name the check's ``measure`` reads,
+    and the derived quantities computed from one of them. Diagnostics and references are not reported results."""
+    from . import contract as _contract
+    from . import oracle_forms as _forms
+
+    read = set(_forms.read_names(oracle.get("measure")))
+    try:  # a measure FI's formula language does not run (it calls float()) still names what it reads
+        tree = ast.parse(str(oracle.get("measure") or "").strip(), mode="eval")
+        called = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+        read |= {n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and id(n) not in called}
+    except (SyntaxError, ValueError):
+        pass
+    roles = _contract.raw_roles(protocol)
+    marked: list[str] = []
+    for m in protocol.get("metrics") or []:
+        if not isinstance(m, dict) or not m.get("id") or roles.get(str(m["id"])) in ("diagnostic", "reference", "timing"):
+            continue
+        known = m.get("known_value") if isinstance(m.get("known_value"), dict) else {}
+        owned = {str(m["id"])}
+        for key in ("estimate", "standard_error", "interval"):
+            owned |= {str(v) for v in (known.get(key) if isinstance(known.get(key), list) else [known.get(key)])}
+        if owned & read:
+            marked.append(str(m["id"]))
+    derived = [d for d in protocol.get("derived") or [] if isinstance(d, dict) and d.get("id")]
+    grew = True
+    while grew:
+        grew = False
+        for d in derived:
+            inputs = d.get("inputs") if isinstance(d.get("inputs"), list) else []
+            if str(d["id"]) not in marked and any(str(i) in marked for i in inputs):
+                marked.append(str(d["id"]))
+                grew = True
+    return marked
+
+
+def _failed_checks_sentence(quest_root: Path) -> str:
+    """For each known-answer check the quest went on with although it failed (``needs/ORACLE_CHECK.json``), the reported
+    results that rest on it, once: a check, its result and the results computed from that one come from the same
+    calculation, so none of them is confirmed. A check that names no reported result adds nothing here."""
+    from . import accepted_checks as _accepted
+    from . import frozen_protocol as _frozen
+
+    record = _read_json(Path(quest_root) / "needs" / _accepted.ORACLE_RECORD)
+    if not isinstance(record, dict) or record.get("status") != _accepted.WENT_ON:
+        return ""
+    protocol = _frozen.protocol_of(Path(quest_root)) or {}
+    oracles = {str(o.get("name") or "").strip().lower(): o for o in protocol.get("oracles") or [] if isinstance(o, dict)}
+    labels = {str(m["id"]): " ".join(str(m.get("label") or m["id"]).split())
+              for m in [*(protocol.get("metrics") or []), *(protocol.get("derived") or [])]
+              if isinstance(m, dict) and m.get("id")}
+    said: list[str] = []
+    for e in record.get("went_on") or []:
+        oracle = oracles.get(str(e.get("name") or "").strip().lower()) if isinstance(e, dict) else None
+        ids = _failed_check_results(protocol, oracle) if oracle else []
+        if not ids:
+            continue
+        if e.get("unmeasured"):
+            what = "could not be judged"
+        elif e.get("disagreement"):
+            what = "disagreed with the plan's own working of the expected value"
+        elif e.get("undecided"):
+            what = "was not decided at the precision its tolerance needs"
+        else:
+            what = f"failed ({_accepted.conditions_text(e)})"
+        shown = [labels.get(i, i) for i in ids]
+        listed = shown[0] if len(shown) == 1 else ", ".join(shown[:-1]) + " and " + shown[-1]
+        said.append(f"The known-answer check '{e.get('name')}' {what}; the reported "
+                    + (f"result {listed} comes" if len(shown) == 1 else f"results {listed} come")
+                    + " from the calculation it checks and "
+                    + ("is" if len(shown) == 1 else "are") + " not confirmed.")
+    more = f" And {len(said) - _SHOWN} more." if len(said) > _SHOWN else ""
+    return " ".join(said[:_SHOWN]) + more
+
+
 def _widened_sentence(record: Any) -> str:
     """The known-answer checks whose tolerance FI widened to the digits their expected value is written to, after the plan,
     asked once, left it tighter (``Engine._widen_to_precision`` keeps the sentences in ``.fi/oracle_review.json``)."""
@@ -901,6 +978,7 @@ def run_record(quest_root: Path, *, topic: str = "", duration_s: float | None = 
     parts.append(_contract_sentence(_read_json(quest_root / ".fi" / "contract.json")))
     parts.append(_edge_sentence(_read_json(quest_root / ".fi" / "edge_everywhere.json")))
     parts.append(_widened_sentence(_read_json(quest_root / ".fi" / "oracle_review.json")))
+    parts.append(_failed_checks_sentence(quest_root))
     parts.append(_objections_sentence(_read_json(quest_root / OBJECTIONS_RECORD)))
     parts.append(unresolved_sentence(_read_json(quest_root / OBJECTIONS_RECORD)))
     parts.append(last_review_sentence(last_review_points(quest_root)))
