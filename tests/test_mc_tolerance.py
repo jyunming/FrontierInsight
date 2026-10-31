@@ -1056,11 +1056,32 @@ def test_the_checks_on_a_declared_average_with_no_reading_are_the_ones_asked_abo
     average over trials and says nothing of how it holds; a check that says it is not. A check of a quantity (the
     Bonferroni power, a special case on ``power_bonferroni``) is read on the mean already and is not asked about:
     ``per_trial: true`` would only make a random quantity a rule of every trial (review pass 2, P2)."""
-    assert mc.unsaid_reading(PROTOCOL) == ["bh_fdr_upper_bound"]
-    assert mc.unsaid_reading({**PROTOCOL, "oracles": S1_CHECKS}) == []
+    cased = [o["name"] for o in PROTOCOL["oracles"] if o.get("case") and o.get("measure")]
+    assert mc.unsaid_reading(PROTOCOL) == cased and "bh_fdr_upper_bound" in cased
+    # A reading the plan volunteered while writing it is not an answer to the question: still unsaid.
+    assert mc.unsaid_reading({**PROTOCOL, "oracles": S1_CHECKS}) == cased
     every = [{**o, "per_trial": True} for o in PROTOCOL["oracles"]]
-    assert mc.unsaid_reading({**PROTOCOL, "oracles": every}) == []
+    assert mc.unsaid_reading({**PROTOCOL, "oracles": every}) == cased
+    # Answered to the focused question: not asked again.
+    answered = [{**o, "per_trial": False, mc.ASKED_KEY: True} for o in PROTOCOL["oracles"]]
+    assert mc.unsaid_reading({**PROTOCOL, "oracles": answered}) == []
+    # A study that runs one trial per setting has nothing to ask.
+    assert mc.unsaid_reading({**PROTOCOL, "runs_per_setting": 1, "min_runs_per_setting": 1}) == []
     assert mc.unsaid_reading(None) == []
+
+
+def test_a_volunteered_reading_on_a_check_of_a_quantity_is_not_an_answer() -> None:
+    """The fault: a plan wrote ``per_trial: true`` on checks whose own definition is a mean (a mean squared standardised
+    error, a coverage fraction), so each was judged on its worst trial and failed. The old code asked about no
+    check of a quantity and took the volunteered flag; now the flag counts for nothing until the question is answered."""
+    quantity = {"name": "coverage", "kind": "special_case", "case": {"n": 20}, "measure": "covered", "per_trial": True,
+                "expected": 0.95, "tolerance": 0.06}
+    protocol = {"runs_per_setting": 200, "oracles": [quantity]}
+    assert mc.unsaid_reading(protocol) == ["coverage"]
+    answered = {**quantity, "per_trial": False, mc.ASKED_KEY: True}
+    assert mc.unsaid_reading({**protocol, "oracles": [answered]}) == [] and mc.reads_a_mean(answered)
+    kept_true = {**quantity, mc.ASKED_KEY: True}  # the known positive: answered "every trial" stays a worst-trial rule
+    assert mc.unsaid_reading({**protocol, "oracles": [kept_true]}) == [] and not mc.reads_a_mean(kept_true)
 
 
 @pytest.mark.asyncio
@@ -1073,7 +1094,7 @@ async def test_the_plan_is_asked_once_and_the_s1_bound_ends_up_declared_on_the_a
 
     engine, model = _s1_plan(tmp_path, [{"protocol": {"oracles": [
         {"name": "bh_fdr_upper_bound", "per_trial": False, "tolerance": 0.5, "expected": 7},
-        {"name": "bonferroni_power_exact", "per_trial": True},  # a quantity, not asked about: not taken
+        {"name": "bonferroni_power_exact", "per_trial": True},  # a quantity: asked about too, its answer is taken
         {"name": "bh_superset_of_bonferroni", "per_trial": False},  # not asked about: not taken
     ]}}])
     state = {"topic": engine.config.topic, "iteration": 0}
@@ -1083,16 +1104,16 @@ async def test_the_plan_is_asked_once_and_the_s1_bound_ends_up_declared_on_the_a
     assert READING_ASK in model.asked[0]
     # The s1 plan's metric definitions ride in the same request; its opening says both.
     assert "also do not say whether they hold in every single trial or only on average" in model.asked[0]
-    assert "the checks 'bh_fdr_upper_bound' use fdr_bh, which" in model.asked[0]
+    assert "'bh_fdr_upper_bound'" in model.asked[0] and "has not been asked whether" in model.asked[0]
     checks = _plan_checks(engine)
-    assert checks["bh_fdr_upper_bound"]["per_trial"] is False
-    for name in ("bonferroni_power_exact", "bh_superset_of_bonferroni"):
-        assert "per_trial" not in checks[name], f"{name}, not asked about, keeps its own reading"
+    assert checks["bh_fdr_upper_bound"]["per_trial"] is False and checks["bh_fdr_upper_bound"][mc.ASKED_KEY] is True
+    # Every check run on a case of its own is asked about, a quantity too: its answer is taken and marked answered.
+    assert checks["bonferroni_power_exact"]["per_trial"] is True and checks["bonferroni_power_exact"][mc.ASKED_KEY]
+    assert checks["bh_superset_of_bonferroni"]["per_trial"] is False
     for key in ("tolerance", "expected", "measure", "kind"):
         assert checks["bh_fdr_upper_bound"].get(key) == BOUND.get(key), key
-    assert mc.unsaid_reading(engine._design_from_plan()[0]["protocol"]) == []
-    from core import plan
-    assert "every such check says it now" in plan.plan_path(engine.quest_root).read_text(encoding="utf-8")
+    left = mc.unsaid_reading(engine._design_from_plan()[0]["protocol"])
+    assert not {"bh_fdr_upper_bound", "bonferroni_power_exact", "bh_superset_of_bonferroni"} & set(left)
     # Asked again (the design step of the same run): nothing is left to ask, and nothing is asked.
     design, sha = engine._design_from_plan()
     await engine._ask_plan_for_the_parts(state, design, sha)
@@ -1100,6 +1121,7 @@ async def test_the_plan_is_asked_once_and_the_s1_bound_ends_up_declared_on_the_a
     engine._freeze_protocol_if_due({"iteration": 0})
     frozen_bound = {o["name"]: o for o in frozen.protocol_of(engine.quest_root)["oracles"]}["bh_fdr_upper_bound"]
     assert frozen_bound["per_trial"] is False and mc.reads_a_mean(frozen_bound)
+    assert frozen_bound[mc.ASKED_KEY] is True, "the frozen protocol keeps that the question was answered"
 
 
 @pytest.mark.asyncio
@@ -1141,7 +1163,7 @@ async def test_how_a_check_holds_is_asked_only_before_the_first_run(tmp_path: Pa
 def test_the_answer_sets_per_trial_only_on_the_checks_the_question_named(tmp_path: Path) -> None:
     """Review pass 2, P1-4: the request asks for the metrics and for how ``fdp_le_one`` holds. The answer adds two
     metrics declared as means and, with them, sets ``per_trial: false`` on ``counts_agree``, a second implementation
-    with a tolerance of 0 that was never asked about: that would read ``abs(count_a - count_b)`` on the means, where
+    with a tolerance of 0 and no case of its own, that was never asked about: that would read ``abs(count_a - count_b)`` on the means, where
     the two counters may disagree by one in every trial. Only the checks named in the question take ``per_trial``."""
     import logging
     import types
@@ -1153,9 +1175,9 @@ def test_the_answer_sets_per_trial_only_on_the_checks_the_question_named(tmp_pat
     oracles = [
         {"name": "fdp_le_one", "kind": "invariant", "expected": 0, "tolerance": 0, "case": {"m": 10},
          "measure": "max(0, fdr_bh - 1)", "reference": "derivation: V <= R"},
-        {"name": "counts_agree", "kind": "second_implementation", "expected": 0, "tolerance": 0, "case": {"m": 10},
+        {"name": "counts_agree", "kind": "second_implementation", "expected": 0, "tolerance": 0,
          "measure": "abs(count_a - count_b)", "reference": "second implementation: independent counter"},
-    ]
+    ]  # no `case` of its own: FI cannot run it by itself, so the question does not name it
     before = plan.render("topic", {}, {"hypothesis": "h", "protocol": {"grid": {"m": [10]}, "metrics": metrics,
                                                                       "oracles": oracles}})
     more = metrics + [{"id": "count_a", "estimand": "E[count a]", "kind": "mean", "unit": "a repeat"},
@@ -1169,6 +1191,30 @@ def test_the_answer_sets_per_trial_only_on_the_checks_the_question_named(tmp_pat
     assert after["fdp_le_one"]["per_trial"] is True
     assert "per_trial" not in after["counts_agree"], after["counts_agree"]
     assert mc.reads_a_mean(after["counts_agree"]), "unset: the mean"
+
+
+def test_a_volunteered_reading_is_dropped_when_the_answer_leaves_the_check_out() -> None:
+    """A check asked about that the model does not answer loses the reading it volunteered while writing the plan (it
+    was not an answer to this question) and is not marked answered, so it is read as an average and said unsaid."""
+    import logging
+    import types
+
+    from core import plan
+    from core.engine import Engine
+
+    oracles = [{"name": "rate", "kind": "special_case", "expected": 0.05, "tolerance": 0.01, "case": {"m": 10},
+                "measure": "rate_hat", "per_trial": True, "reference": "derivation: rate = alpha"},
+               {"name": "other", "kind": "special_case", "expected": 1, "tolerance": 0.1, "case": {"m": 10},
+                "measure": "x_hat", "reference": "derivation: x = 1"}]
+    before = plan.render("topic", {}, {"hypothesis": "h", "protocol": {"grid": {"m": [10]}, "runs_per_setting": 100,
+                                                                      "oracles": oracles}})
+    answer = {"protocol": {"oracles": [{"name": "other", "per_trial": True}]}}
+    owner = types.SimpleNamespace(_log=logging.getLogger("test"), _ledger_problems=lambda *a, **k: {})
+    kept = Engine._keep_only_the_parts(owner, before, answer, ["per_trial"])  # type: ignore[arg-type]
+    assert kept is not None
+    after = {o["name"]: o for o in plan.raw_design_block(kept)["protocol"]["oracles"]}
+    assert "per_trial" not in after["rate"] and mc.ASKED_KEY not in after["rate"] and mc.reads_a_mean(after["rate"])
+    assert after["other"]["per_trial"] is True and after["other"][mc.ASKED_KEY] is True
 
 
 UNLUCKY = '''
