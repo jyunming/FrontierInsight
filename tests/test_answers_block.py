@@ -111,3 +111,49 @@ def test_an_explicit_map_to_an_existing_metric_is_placed_and_named_whatever_the_
 def test_a_varied_study_has_no_single_value_and_the_block_says_so(tmp_path, monkeypatch) -> None:
     text = pf.answers_text(_quest(tmp_path, monkeypatch))
     assert "no single value: it differs with dose" in text and "the tables give every setting" in text
+
+
+def _in_run_quest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, with_total: bool = True) -> tuple[Path, dict]:
+    """A study with a grid setting (dose) and a value compared inside each run (mode: a, b). ``rate`` is a number per mode
+    (cells carry the mode), ``total`` is one number per run (its cells do not)."""
+    def met(vs):
+        return {"values": vs, "trials": list(range(len(vs))), "count": len(vs), "total": 0.0, "non_finite": 0}
+
+    cells = []
+    for d in (1, 2):
+        for m in ("a", "b"):
+            cells.append({"cell": {"dose": d, "mode": m}, "level": {"mode": m}, "key": f"dose={d},mode={m}", "planned": 2, "ok": 2,
+                          "failed": 0, "metrics": {"rate": met([0.1 * d, 0.1 * d + 0.01])}})
+        if with_total:
+            cells.append({"cell": {"dose": d}, "key": f"dose={d}", "planned": 2, "ok": 2, "failed": 0,
+                          "metrics": {"total": met([5.0 * d, 5.0 * d + 1.0])}})
+    (tmp_path / "raw").mkdir(parents=True)
+    (tmp_path / "raw" / "trials.json").write_text(json.dumps({"cells": cells}), encoding="utf-8")
+    (tmp_path / ".fi").mkdir()
+    req = {"quantities": [{"name": "rate per mode", "main": True}, {"name": "total", "main": True}]}
+    (tmp_path / ".fi" / "topic_requirements.json").write_text(json.dumps(req), encoding="utf-8")
+    protocol = {"metrics": [{"id": "rate", "kind": "mean"}, {"id": "total", "kind": "mean"}],
+                "in_each_run": {"mode": ["a", "b"]},
+                "topic_map": [{"item": "Q1", "by": "metric:rate"}, {"item": "Q2", "by": "metric:total"}]}
+    monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: protocol)
+    return tmp_path, protocol
+
+
+def test_a_quantity_with_one_number_per_run_is_answered_though_the_study_compares_values_inside_each_run(tmp_path, monkeypatch) -> None:
+    """Before: the line looked the quantity up by every varied axis, the in-run one too, found no trial at ``mode = None`` and
+    said "not answered" for a value FI holds. Now the in-run axis is read from the per-value records where the quantity has
+    them (``=each``) and pooled whole where it is one number per run (``=all``)."""
+    root, protocol = _in_run_quest(tmp_path, monkeypatch)
+    text = pf.answers_text(root)
+    assert "not answered" not in text and "None" not in text
+    assert "{{v:total @ dose=each, mode=all | range}}" in text and "{{v:rate @ dose=each, mode=each | range}}" in text
+    rec = pv.records_of(root, protocol)
+    assert pv.resolve("{{v:total @ dose=each, mode=all | range}}", rec).filled
+    assert pv.resolve("{{v:rate @ dose=each, mode=each | range}}", rec).filled
+
+
+def test_a_quantity_that_is_in_no_record_is_still_not_answered_in_an_in_run_study(tmp_path, monkeypatch) -> None:
+    """The known positive: with the per-run quantity's records gone, its line still says not answered."""
+    root, _ = _in_run_quest(tmp_path, monkeypatch, with_total=False)
+    text = pf.answers_text(root)
+    assert "- total (the plan's map" not in text and "total: not answered" in text
