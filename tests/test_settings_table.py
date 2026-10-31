@@ -72,24 +72,26 @@ def _records() -> pv.Records:
 
 def test_an_sd_is_written_with_its_95_percent_interval_like_a_mean() -> None:
     rec = _records()
-    sd = pv.resolve("Ea_hat:sd @ sigma=0.005, n_points=all, temperature_K=all, interval_type=all", rec)
-    ci = pv.resolve("Ea_hat:sd_ci @ sigma=0.005, n_points=all, temperature_K=all, interval_type=all", rec)
+    sd = pv.resolve("Ea_hat:sd @ sigma=0.005, n_points=5, temperature_K=all, interval_type=all", rec)
+    ci = pv.resolve("Ea_hat:sd_ci @ sigma=0.005, n_points=5, temperature_K=all, interval_type=all", rec)
     assert sd.filled and sd.text == ci.text
-    assert "95% chi-square interval" in sd.text and "16 trials" in sd.text and " to " in sd.text
-    value, _dof = pv._pooled_sd(pv._matching(rec, pv.parse("Ea_hat:sd @ sigma=0.005, n_points=all, temperature_K=all, interval_type=all").where, "Ea_hat"),
+    assert "95% chi-square interval" in sd.text and " trials)" in sd.text and " to " in sd.text
+    value, _dof = pv._sd_of(rec, pv._matching(rec, pv.parse("Ea_hat:sd @ sigma=0.005, n_points=5, temperature_K=all, interval_type=all").where, "Ea_hat"),
                                 "Ea_hat")
     lo, hi = sd.numbers[1], sd.numbers[2]
     assert lo < value < hi and math.isclose(sd.numbers[0], value)
-    mean = pv.resolve("Ea_hat:mean_ci @ sigma=0.005, n_points=all, temperature_K=all, interval_type=all", rec)
+    mixed = pv.resolve("Ea_hat:sd @ sigma=0.005, n_points=all, temperature_K=all, interval_type=all", rec)
+    assert not mixed.filled and "different settings" in mixed.hit.reason  # one SD over settings that differ is not filled
+    mean = pv.resolve("Ea_hat:mean_ci @ sigma=0.005, n_points=5, temperature_K=all, interval_type=all", rec)
     assert "t interval of the mean" in mean.text  # the way a mean is written is unchanged
-    assert "chi-square" not in pv.resolve("Ea_hat:mean @ sigma=0.005, n_points=all, temperature_K=all, interval_type=all", rec).text
+    assert "chi-square" not in pv.resolve("Ea_hat:mean @ sigma=0.005, n_points=5, temperature_K=all, interval_type=all", rec).text
 
 
 def test_an_sd_used_in_arithmetic_or_a_reducer_stays_one_number() -> None:
     rec = _records()
-    ratio = pv.resolve("Ea_hat:sd @ sigma=0.1, n_points=all, temperature_K=all, interval_type=all | ratio @ sigma=0.005, n_points=all, temperature_K=all, interval_type=all", rec)
+    ratio = pv.resolve("Ea_hat:sd @ sigma=0.1, n_points=5, temperature_K=all, interval_type=all | ratio @ sigma=0.005, n_points=5, temperature_K=all, interval_type=all", rec)
     assert ratio.filled and "interval" not in ratio.text
-    biggest = pv.resolve("Ea_hat:sd @ sigma=each, n_points=all, temperature_K=all, interval_type=all | max", rec)
+    biggest = pv.resolve("Ea_hat:sd @ sigma=each, n_points=5, temperature_K=all, interval_type=all | max", rec)
     assert biggest.filled and "interval" not in biggest.text
 
 

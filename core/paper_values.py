@@ -27,8 +27,10 @@ other. It has one form (the value, with ``| %`` for a percent); it has no settin
 
 Naming every axis is deliberate: a key that left one out would render a pooled number that reads like a per-setting
 one. Pooling is defined once: the trials of the matching settings are concatenated (Wilson interval for a 0/1 value,
-t interval otherwise, :mod:`core.trial_table`); ``sd`` is the pooled within-setting SD, sqrt(sum((n_i - 1) s_i^2) /
-sum(n_i - 1)), not the SD of the concatenated trials.
+t interval otherwise, :mod:`core.trial_table`). An ``sd`` is never pooled over settings: the settings the code reads have
+different spreads, so one SD over several is the spread of none of them and the key is not filled (name one setting, or
+``sd @ <axis>=each | range`` for the SD setting by setting). Only cells that share their random draws are pooled, over the
+draws.
 
 A key FI cannot fill (an unknown metric, form or axis value, an axis left out, a record that lacks the data) renders
 ``not recorded`` and is reported as a :class:`Hit`; it is never filled with a guess. No number is read from the
@@ -948,8 +950,20 @@ def chi2_quantile(p: float, dof: float) -> float:
     return (lo + hi) / 2
 
 
+def _sd_of(rec: Records, cells: list[dict[str, Any]], metric: str) -> tuple[float, int]:
+    """``(the SD of ``metric`` over ``cells``, its degrees of freedom)``: the one rule for an SD of several cells. Each cell
+    is a different setting (copies under a setting nothing reads are already one cell), and different settings have different
+    spreads, so one SD over them is the spread of none of them: refused, unless the cells share their random draws (then the
+    caller's per-draw path applies). Name one setting, or ask for the SD setting by setting."""
+    if len(cells) > 1 and not rec.share_draws(cells):
+        raise _Unfilled(
+            f"{metric} is measured at {len(cells)} different settings here, and one SD over them is the spread of none of "
+            f"them; name one setting, or give the SD setting by setting: {{{{v:{metric}:sd @ <axis>=each, ... | range}}}}")
+    return _pooled_sd(cells, metric)
+
+
 def _pooled_sd(cells: list[dict[str, Any]], metric: str) -> tuple[float, int]:
-    """``(the within-setting pooled SD, its degrees of freedom)``."""
+    """``(the within-setting pooled SD, its degrees of freedom)`` of cells that are one population (use :func:`_sd_of`)."""
     num = dof = 0.0
     for c in cells:
         _, sd, n = _stats.mean_std(_tt._values(c["metrics"][metric]))
@@ -1060,7 +1074,7 @@ def _measure(rec: Records, metric: str, form: str, arg: str, where: dict[str, Pi
             raise _Unfilled("fewer than two trials, so there is no standard error")
         return Measured(se)
     if form in ("sd", "sd_ci"):
-        sd, df = _pooled_sd(cells, metric)
+        sd, df = _sd_of(rec, cells, metric)
         if form == "sd":
             return Measured(sd)
         obs, shared = _observations(rec, cells, metric)
@@ -1952,7 +1966,7 @@ def sheet(rec: Records | None, max_lines: int = SHEET_MAX_LINES, max_shown: int 
     full = [line for m in names for line in parts[m][0]]
     pooled = list(dict.fromkeys(line for m in names for _, line in parts[m][2]))  # a line pinned to one value can also be the line of that value's own axis
     extremes = [line for m in names for line in parts[m][1]]
-    body = full + ["Pooled (the trials of the other axes together; sd is the within-setting pooled SD):"] + pooled
+    body = full + ["Pooled (the trials of the other axes together; an sd is not pooled over settings, so a pooled line shows no SD):"] + pooled
     if sum(1 for line in body if line.startswith("- ")) > max_lines:
         body = ["Too many settings to list; the pooled lines and each value's extremes:"] + pooled + extremes
     return head + "\n" + "\n".join(body) + "\n" + _answers_block(rec) + _set_by_setting_line(rec, varied) + SHEET_GRAMMAR
