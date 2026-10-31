@@ -1490,6 +1490,9 @@ class RunChecksMixin:
             runner.per_process = 1
             runner.shared_groups = None
             runner.group_allowance_s = None
+            if runner.group_reuse is not None:
+                runner.group_reuse.discard()
+            runner.group_reuse = None
         # A run_trial that returns the mean of many trials (it calls run_cell) is a fault of the code, not of the plan's size:
         # it goes back to the code step, never to the plan to shrink the grid (which dropped settings the topic required).
         if isinstance(runner, _trial_runner.TrialsRunner):
@@ -2991,6 +2994,8 @@ class RunChecksMixin:
             self._pilot_spent += time.monotonic() - began  # type: ignore[attr-defined]  # the check's time counts however it ends
         if not grouping.same:
             log.warning("[execute] %s", grouping.says)
+            if grouping.reuse is not None:
+                grouping.reuse.discard()
             return None
         wanted = 1 if runner.deterministic else max(1, int(runs))
         seconds = grouping.forward_s * wanted / max(1, grouping.runs_checked)
@@ -2999,13 +3004,17 @@ class RunChecksMixin:
             log.warning("[execute] %s Even with %d settings to a process, timed that way, FI expects about %s, over the limit "
                         "of %s, so the usual cut applies.", grouping.says, n, _estimate.plain_duration(padded),
                         _estimate.plain_duration(limit_s))
+            if grouping.reuse is not None:
+                grouping.reuse.discard()
             return None
         runner.per_process = n
+        runner.group_reuse = grouping.reuse
         runner.shared_groups = grouping.groups
         runner.group_allowance_s = padded
         _run_facts.record_shared_check(self.quest_root, settings=grouping.settings, alone=grouping.alone)  # type: ignore[attr-defined]
         log.info("[execute] %s Settings run %d to a process (%d processes); timed that way, FI expects about %s, within the "
-                 "limit.", grouping.says, n, len(grouping.groups), _estimate.plain_duration(padded))
+                 "limit.%s", grouping.says, n, len(grouping.groups), _estimate.plain_duration(padded),
+                 " The first of those runs is kept as the study's own results." if grouping.reuse is not None else "")
         said = ("FI runs several settings together to save start-up time; their numbers matched when they were run in either "
                 f"order. Timed that way, it expects about {_estimate.plain_duration(padded)}, within the limit.")
         return said, seconds, dataclasses.replace(est, seconds=seconds)

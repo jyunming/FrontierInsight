@@ -17,10 +17,53 @@ from core import run_checks, trial_runner
 from core.execution import SharedInterpreterExecutor
 
 MARK = '''
-import os
-with open(os.environ["FI_TEST_MARK"], "a") as _f:
-    _f.write("start\\n")                       # one line per process that loads the study
+import os, uuid
+with open(os.environ["FI_TEST_MARK"] + "." + uuid.uuid4().hex, "w") as _f:   # one file per process that loads the study
+    _f.write("start")
 '''
+
+
+def _starts(mark: Path) -> int:
+    """How many processes loaded the study: one mark file each (one shared file lost lines to concurrent appends)."""
+    return len(list(mark.parent.glob(mark.name + ".*")))
+
+
+def _clear(mark: Path) -> None:
+    for old in mark.parent.glob(mark.name + ".*"):
+        old.unlink()
+
+
+def _virtual_time(monkeypatch: pytest.MonkeyPatch, cost=lambda cell: 0.0, per_process_s: float = 0.1) -> dict:
+    """The runner's clock is a clock of the test's own: each process started moves it by a fixed ``per_process_s`` plus
+    ``cost(cell)`` for every trial of every setting in it, whatever the machine is doing. The timings the sizing and the check
+    decide on are then the same on every run."""
+    clock = {"now": 0.0}
+    monkeypatch.setattr(trial_runner, "time", SimpleNamespace(
+        monotonic=lambda: clock["now"], time=time.time, time_ns=time.time_ns, perf_counter=time.perf_counter,
+        sleep=time.sleep))
+    started = SharedInterpreterExecutor.execute
+
+    def spent(cmd, cwd) -> float:
+        try:
+            path = Path(cmd[2])
+            spec = json.loads((path if path.is_absolute() else Path(cwd) / path).read_text(encoding="utf-8"))
+            members = spec.get("members") or [spec]
+            return sum(cost(m["cell"]) * len(m["trials"]) for m in members)
+        except Exception:  # noqa: BLE001 -- a process whose spec cannot be read costs only its start
+            return 0.0
+
+    async def start(self, cmd, **kw):  # type: ignore[no-untyped-def]
+        took = per_process_s + spent(cmd, kw.get("cwd"))
+        clock["now"] += took
+        if took > kw.get("timeout_s", float("inf")):  # the process would have been stopped for its time
+            from core.execution import ExecutionResult
+
+            return ExecutionResult(returncode=-9, stdout="", stderr="", duration_s=float(kw["timeout_s"]), timed_out=True)
+        kw["timeout_s"] = 600  # the virtual time decided the stop above; the real process gets a limit no load reaches
+        return await started(self, cmd, **kw)
+
+    monkeypatch.setattr(SharedInterpreterExecutor, "execute", start)
+    return clock
 
 PURE = MARK + '''
 def run_cell(cell):
@@ -71,12 +114,12 @@ def _executor() -> SharedInterpreterExecutor:
 
 def _run(root: Path, tmp_path: Path, *, per_process: int, deterministic: bool = True, runs: int = 3, grid=None):
     mark = tmp_path / f"marks{per_process}.txt"
-    mark.unlink(missing_ok=True)
+    _clear(mark)
     run = asyncio.run(trial_runner.run_trials(
         _executor(), sys.executable, root, "code/simulate.py", grid or GRID, runs_per_setting=runs, base_seed=7,
         deterministic=deterministic, timeout_s=120, env={"FI_TEST_MARK": str(mark)}, run_id="r1", per_process=per_process,
         cost=lambda cell: 5.0))
-    starts = len(mark.read_text().splitlines()) if mark.exists() else 0
+    starts = _starts(mark)
     return run, starts
 
 
@@ -248,10 +291,9 @@ def run_cell(cell):
     assert grouping.too_long and not grouping.same and "twice as long" in grouping.says
 
 
-def test_the_check_times_what_the_run_does_so_the_run_is_not_slower_than_the_price(tmp_path: Path) -> None:
+def test_the_check_times_what_the_run_does_so_the_run_is_not_slower_than_the_price(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _virtual_time(monkeypatch)
     # many quick settings: the plan, the groups and the rows are a large part of the time; the price covers them
-    import time
-
     root = _quest(tmp_path, PURE)
     grid = {"rate": list(range(1, 61)), "size": [2, 3, 4, 5]}
     env = {"FI_TEST_MARK": str(tmp_path / "m.txt")}
@@ -259,11 +301,11 @@ def test_the_check_times_what_the_run_does_so_the_run_is_not_slower_than_the_pri
         _executor(), sys.executable, root, "code/simulate.py", grid, runs_per_setting=1, base_seed=7, deterministic=True,
         timeout_s=120, per_process=15, cost=None, env=env, at_once=16))
     assert grouping.same and len(grouping.groups) == 16
-    began = time.monotonic()
+    began = trial_runner.time.monotonic()
     run = asyncio.run(trial_runner.run_trials(
         _executor(), sys.executable, root, "code/simulate.py", grid, runs_per_setting=1, base_seed=7, deterministic=True,
         timeout_s=120, env=env, run_id="r1", per_process=15, groups=grouping.groups, group_allowance_s=60, at_once=16))
-    took = time.monotonic() - began
+    took = trial_runner.time.monotonic() - began
     assert run.ok_trials == 240
     assert grouping.forward_s * 1.5 >= took, (grouping.forward_s, took)
 
@@ -316,7 +358,8 @@ def _sizing(tmp_path: Path, source: str, *, settings: int, at_once: int, limit_s
     return got, runner, me
 
 
-def test_sizing_shares_processes_by_the_measured_time_of_the_grouped_run(tmp_path: Path) -> None:
+def test_sizing_shares_processes_by_the_measured_time_of_the_grouped_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _virtual_time(monkeypatch)
     got, runner, me = _sizing(tmp_path, PURE, settings=12, at_once=4, limit_s=60.0)
     assert got is not None
     said, seconds, est = got
@@ -326,9 +369,11 @@ def test_sizing_shares_processes_by_the_measured_time_of_the_grouped_run(tmp_pat
     assert "several settings together" in said and "process" not in said
     assert 0 < seconds * 1.5 <= 60.0 and runner.group_allowance_s == seconds * 1.5 and est.seconds == seconds
     assert me._pilot_spent > 0
+    assert runner.group_reuse is not None  # the check's first run is kept for the run
 
 
-def test_the_settings_are_spread_over_the_slots_the_run_uses_at_once(tmp_path: Path) -> None:
+def test_the_settings_are_spread_over_the_slots_the_run_uses_at_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _virtual_time(monkeypatch)
     got, runner, _ = _sizing(tmp_path, PURE, settings=20, at_once=8, limit_s=60.0)
     assert got is not None and runner.per_process == 3 and len(runner.shared_groups) == 7  # ceil(20 / 8) = 3 to a process, 7 processes: no more than the 8 at once
     assert max(len(g) for g in runner.shared_groups) == 3
@@ -337,23 +382,21 @@ def test_the_settings_are_spread_over_the_slots_the_run_uses_at_once(tmp_path: P
     assert none is None and runner.per_process == 1 and runner.shared_groups is None
 
 
-def test_the_time_is_scaled_to_the_runs_per_setting_and_padded(tmp_path: Path) -> None:
+def test_the_time_is_scaled_to_the_runs_per_setting_and_padded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _virtual_time(monkeypatch, cost=lambda cell: 0.2)
     # a study with random draws and 30 runs per setting: the check runs 3 and the time is scaled ten times, so the
     # padded time passes the limit although the check itself was short
-    slow = STOCHASTIC.replace("rng = random.Random(seed)", "import time; time.sleep(0.2); rng = random.Random(seed)")
-    got, runner, me = _sizing(tmp_path, slow, settings=12, at_once=4, limit_s=20.0, deterministic=False, runs=30)
+    got, runner, me = _sizing(tmp_path, STOCHASTIC, settings=12, at_once=4, limit_s=20.0, deterministic=False, runs=30)
     assert got is None and runner.per_process == 1 and runner.shared_groups is None
     assert any("over the limit" in line for line in me._log.lines)
 
 
-def test_a_grouped_run_that_would_fit_once_padded_is_not_stopped_early(tmp_path: Path) -> None:
+def test_a_grouped_run_that_would_fit_once_padded_is_not_stopped_early(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _virtual_time(monkeypatch, cost=lambda cell: 16.0 if cell['rate'] == 6 else 0.05)  # not one of the sample's settings
     # the first run takes more than a quarter of the limit but less than the limit less the margin: it would fit, so the
     # check lets it finish and the settings share processes
     heavy = MARK + '''
-import time
-
 def run_cell(cell):
-    time.sleep(16.0 if cell["rate"] == 12 else 0.05)
     return {"level": cell["rate"] * 2.0}
 '''
     got, runner, me = _sizing(tmp_path, heavy, settings=12, at_once=4, limit_s=60.0)
@@ -361,14 +404,12 @@ def run_cell(cell):
     assert 15.0 < got[1] * 1.5 <= 60.0
 
 
-def test_a_check_never_runs_longer_than_the_study_it_hopes_to_replace(tmp_path: Path) -> None:
+def test_a_check_never_runs_longer_than_the_study_it_hopes_to_replace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _virtual_time(monkeypatch, cost=lambda cell: 6.0 if cell['rate'] == 12 else 0.05)
     # the check's trials are not reused, so its time is extra: it stops where the grouped run would take as long as the
     # study's own estimate without sharing (here 4 s), well inside the limit less the margin
     heavy = MARK + '''
-import time
-
 def run_cell(cell):
-    time.sleep(6.0 if cell["rate"] == 12 else 0.05)
     return {"level": cell["rate"] * 2.0}
 '''
     got, runner, me = _sizing(tmp_path, heavy, settings=12, at_once=4, limit_s=60.0, est_seconds=4.0)
@@ -376,16 +417,10 @@ def run_cell(cell):
     assert any("had not finished" in line for line in me._log.lines)
 
 
-def test_processes_that_really_are_slow_are_not_shared_and_the_reason_is_stated(tmp_path: Path) -> None:
+def test_processes_that_really_are_slow_are_not_shared_and_the_reason_is_stated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _virtual_time(monkeypatch, cost=lambda cell: 0.6)
     # the known positive: a group that cannot finish within the limit less the margin keeps one process per setting
-    slow = MARK + '''
-import time
-
-def run_cell(cell):
-    time.sleep(0.6)
-    return {"level": cell["rate"] * 2.0}
-'''
-    root = _quest(tmp_path, slow)
+    root = _quest(tmp_path, PURE)
     grid = {"rate": list(range(1, 9)), "size": [2]}
     grouping = asyncio.run(trial_runner.measure_grouping(
         _executor(), sys.executable, root, "code/simulate.py", grid, runs_per_setting=1, base_seed=7, deterministic=True,
@@ -394,13 +429,11 @@ def run_cell(cell):
     assert grouping.says.startswith("Settings run one per process") and "longer than the check allows" in grouping.says
 
 
-def test_a_group_that_passes_the_limit_less_the_margin_stops_the_check(tmp_path: Path) -> None:
+def test_a_group_that_passes_the_limit_less_the_margin_stops_the_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _virtual_time(monkeypatch, cost=lambda cell: 6.0 if cell['rate'] == 12 else 0.05)
     # one setting is far costlier than the rest (a cost that grows along an axis): the group holding it passes the bound
     grows = MARK + '''
-import time
-
 def run_cell(cell):
-    time.sleep(6.0 if cell["rate"] == 12 else 0.05)
     return {"level": cell["rate"] * 2.0}
 '''
     got, runner, me = _sizing(tmp_path, grows, settings=12, at_once=4, limit_s=8.0)
@@ -409,7 +442,8 @@ def run_cell(cell):
     assert not (runner.simulate.parents[1] / ".fi" / "trials" / "group_check").exists()
 
 
-def test_sizing_does_not_share_a_study_that_keeps_state(tmp_path: Path) -> None:
+def test_sizing_does_not_share_a_study_that_keeps_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _virtual_time(monkeypatch)
     got, runner, me = _sizing(tmp_path, COUNTER, settings=12, at_once=4, limit_s=60.0)
     assert got is None and runner.per_process == 1 and runner.shared_groups is None
     assert any("differed" in line for line in me._log.lines)
@@ -422,25 +456,13 @@ def test_the_time_of_a_check_that_fails_is_still_counted(tmp_path: Path, monkeyp
 
     monkeypatch.setattr(trial_runner, "measure_grouping", broken)
     got, runner, me = _sizing(tmp_path, PURE, settings=12, at_once=4, limit_s=60.0)
-    assert got is None and runner.per_process == 1 and me._pilot_spent >= 0.3
+    assert got is None and runner.per_process == 1 and me._pilot_spent >= 0.25  # the timer's resolution: a 0.3 s sleep can read 0.297 s
     assert any("could not be run" in line for line in me._log.lines)
 
 
 def test_a_resumed_run_shares_processes_again_from_the_kept_groups_without_a_cost(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # The sizing times its grouped pass on trial_runner's clock (the real one): under load a start-up could pass the
-    # check's limit. A fixed 0.1 s per process started on a clock of the test's own makes the pass the same every time.
-    clock = {"now": 0.0}
-    monkeypatch.setattr(trial_runner, "time", SimpleNamespace(
-        monotonic=lambda: clock["now"], time=time.time, time_ns=time.time_ns, perf_counter=time.perf_counter,
-        sleep=time.sleep))
-    started = SharedInterpreterExecutor.execute
-
-    async def start(self, cmd, **kw):  # type: ignore[no-untyped-def]
-        clock["now"] += 0.1
-        return await started(self, cmd, **kw)
-
-    monkeypatch.setattr(SharedInterpreterExecutor, "execute", start)
+    _virtual_time(monkeypatch)  # the sizing's timing does not depend on the machine's load
     got, runner, _ = _sizing(tmp_path, PURE, settings=12, at_once=4, limit_s=60.0)
     assert got is not None
     kept = json.loads(json.dumps({"per_process": runner.per_process, "shared_groups": runner.shared_groups,
@@ -450,11 +472,11 @@ def test_a_resumed_run_shares_processes_again_from_the_kept_groups_without_a_cos
     grid = {"rate": list(range(1, 13)), "size": [2]}
 
     def go(**extra):
-        mark.unlink(missing_ok=True)
+        _clear(mark)
         run = asyncio.run(trial_runner.run_trials(
             _executor(), sys.executable, root, "code/simulate.py", grid, runs_per_setting=1, base_seed=7, deterministic=True,
             timeout_s=120, env={"FI_TEST_MARK": str(mark)}, run_id="r1", at_once=4, cost=None, **extra))
-        return run, len(mark.read_text().splitlines())
+        return run, _starts(mark)
 
     alone, alone_starts = go()
     resumed, starts = go(per_process=kept["per_process"], groups=kept["shared_groups"],
@@ -501,3 +523,92 @@ def run_cell(cell):
     for c in shared.cells:
         assert c.stderr.strip() == f"working on {c.cell['rate']}"
     assert "[fi-setting]" not in shared.stderr()
+
+
+# --- the check's first run stands for the real run (core/trial_runner.py ``GroupedRun``) -------------------------------------
+
+
+class _Lines:
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+
+    def info(self, msg, *a):  # type: ignore[no-untyped-def]
+        self.lines.append(msg % a if a else msg)
+
+    warning = info
+
+
+def _check_and_run(root: Path, tmp_path: Path, *, deterministic: bool, base_seed: int = 7, edit=None, runs: int = 2):
+    """The check, then the real run given the check's first run; returns (grouping, run, log, processes started after the check)."""
+    mark = tmp_path / "marks.txt"
+    _clear(mark)
+    env = {"FI_TEST_MARK": str(mark)}
+    grouping = asyncio.run(trial_runner.measure_grouping(
+        _executor(), sys.executable, root, "code/simulate.py", GRID, runs_per_setting=runs, base_seed=7,
+        deterministic=deterministic, timeout_s=120, per_process=3, cost=None, env=env, at_once=4, sample=2))
+    during_check = _starts(mark)
+    if edit is not None:
+        edit(root)
+    log = _Lines()
+    run = asyncio.run(trial_runner.run_trials(
+        _executor(), sys.executable, root, "code/simulate.py", GRID, runs_per_setting=runs, base_seed=base_seed,
+        deterministic=deterministic, timeout_s=120, env=env, run_id="r1", per_process=3, groups=grouping.groups,
+        at_once=4, reuse=grouping.reuse, log=log))
+    return grouping, run, log, _starts(mark) - during_check
+
+
+@pytest.mark.parametrize("source,deterministic", [(PURE, True), (STOCHASTIC, False)])
+def test_the_first_run_of_the_check_is_the_runs_results_and_the_record_is_the_same(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str, deterministic: bool) -> None:
+    _virtual_time(monkeypatch)
+    root = _quest(tmp_path, source)
+    grouping, run, log, started = _check_and_run(root, tmp_path, deterministic=deterministic)
+    assert grouping.same and grouping.reuse is not None
+    assert started == 0 and any("is not run again" in line for line in log.lines)
+    plain, _ = _run(root, tmp_path, per_process=1, deterministic=deterministic, runs=2)
+    assert _rows(run) == _rows(plain)  # values, seeds, statuses: those of a run of the same study
+    reused_ledger = [json.loads(x) for x in run.ledger_path.read_text(encoding="utf-8").splitlines()]
+    plain_ledger = [json.loads(x) for x in plain.ledger_path.read_text(encoding="utf-8").splitlines()]
+    key = lambda ds: [(d["event"], d["cell"], d.get("trial"), d.get("seed"), d.get("values_sha256")) for d in ds]  # noqa: E731
+    assert key(reused_ledger) == key(plain_ledger)
+    assert {d["run_id"] for d in reused_ledger} == {"r1"}
+    assert run.per_process == 3 and run.wall_s is not None and run.wall_s > 0
+    assert not (root / ".fi" / "trials" / "group_check").exists()
+
+
+def test_a_changed_code_or_other_seeds_fall_back_to_running_the_study(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _virtual_time(monkeypatch)
+    root = _quest(tmp_path, PURE)
+
+    def edit(r: Path) -> None:
+        (r / "code" / "simulate.py").write_text(PURE + "\n# edited\n", encoding="utf-8")
+
+    grouping, run, log, started = _check_and_run(root, tmp_path, deterministic=True, edit=edit)
+    assert grouping.same and started == 2 and run.ok_trials == 6 and run.wall_s is None
+    assert any("not used as the run (the code changed since it ran)" in line for line in log.lines)
+    root = _quest(tmp_path / "b", STOCHASTIC)
+    grouping, run, log, started = _check_and_run(root, tmp_path, deterministic=False, base_seed=8)
+    assert started == 2 and run.wall_s is None and any("base seed" in line for line in log.lines)
+    plain, _ = _run(root, tmp_path, per_process=1, deterministic=False, runs=2)
+    assert [r["seed"] for c in run.cells for r in c.rows] != [r["seed"] for c in plain.cells for r in c.rows]
+
+
+def test_more_runs_than_the_check_ran_fall_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _virtual_time(monkeypatch)
+    root = _quest(tmp_path, STOCHASTIC)
+    grouping, run, log, started = _check_and_run(root, tmp_path, deterministic=False, runs=5)
+    assert grouping.same and started == 2 and run.wall_s is None
+    assert any("it ran 3 trial(s) of each setting and the real run runs 5" in line for line in log.lines)
+
+
+def test_a_check_that_did_not_finish_or_differed_keeps_nothing_and_the_run_is_whole(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _virtual_time(monkeypatch)
+    for name, source in (("counter", COUNTER), ("crash", CRASHES)):
+        root = _quest(tmp_path / name, source)
+        mark = tmp_path / "m.txt"
+        got = asyncio.run(trial_runner.measure_grouping(
+            _executor(), sys.executable, root, "code/simulate.py", GRID, runs_per_setting=1, base_seed=7,
+            deterministic=True, timeout_s=120, per_process=3, cost=None, env={"FI_TEST_MARK": str(mark)}, at_once=2))
+        assert not got.same and got.reuse is None
+        left = [p.name for p in (root / ".fi" / "trials").glob("*") if p.name.startswith(("cell", "group"))]
+        assert left == [], left  # none of the first run's files stay
