@@ -456,7 +456,9 @@ runs on the table of FI's record and can change nothing in it:
   When `fig.x` is a result id (not a setting), draw one point for each trial of a setting: `table.values(fig.x, key)` against
   `table.values(<shown id>, key)`, paired by `table.trials(...)` (a trial with no finite value in one is left out of both).
 - The table gives, for a result `id` at a setting `key`: `table.mean(id, key)`, `table.interval(id, key)`, `table.n(id, key)`,
-  `table.values(id, key)` (one number for each trial that ran), `table.failed(key)`; and `table.keys()`, `table.setting(key)`,
+  `table.values(id, key)` (one number for each trial that ran), `table.failed(key)`, and, for a result the plan gives a true
+  value and an interval, `table.coverage(id, key)` (1.0 for each trial whose interval holds the true value, else 0.0; the
+  interval's own ends are not results to read; give a factor compared inside each run as `table.coverage(id, key, factor="value")`); and `table.keys()`, `table.setting(key)`,
   `table.at(**settings)` (the key of one setting), `table.across(axis, **fixed)` (the values of one setting with their keys),
   `table.reference(id, key)` and, for a sub-study, `table.part(name)`. Name only ids the plan declares: any other id raises an error
   that lists the ones FI holds.
@@ -843,7 +845,8 @@ class RunChecksMixin:
                 continue
             parts.append(f"FI's checks of the code before the run found this, and the repairs did not remove it: {p['text']}. "
                          f"It is {_stop_power.source_words(p.get('source'))}, so the run went on. Say it in the "
-                         "limitations as FI's reading of the code, not as a fact of the results.")
+                         "limitations as " + ("what FI saw on a small copy of the results" if p.get("source") == _stop_power.COPY
+                                              else "FI's reading of the code") + ", not as a fact of the results.")
         if observed := self._no_difference_note():
             parts.append(observed)
         sized = _read_json(self.quest_root / _estimate.RECORD)  # type: ignore[attr-defined]
@@ -2725,14 +2728,18 @@ class RunChecksMixin:
     def _gate_standing(self, result: Any) -> None:
         """What the gate found in the code that stays: ok clears the record, anything else (a fault no repair is left for,
         too few trials to tell, the time, a Docker quest) goes to the problems FI could not repair as FI's reading, so
-        QUALITY.md and the paper's limitations say it and the quest goes on (core/stop_power.py)."""
+        QUALITY.md and the paper's limitations say it and the quest goes on (core/stop_power.py). A run of the code on the small
+        copy that raised an error or drew nothing is FI's own observation (``COPY``); only a gate that could not check is a
+        reading."""
         self._clear_cannot_repair("gate")  # type: ignore[attr-defined]
         if result.ok:
             return
+        from . import pipeline_gate as _gate
+
         self._log.warning("[gate] %s", result.says())  # type: ignore[attr-defined]
         self._record_cannot_repair(  # type: ignore[attr-defined]
             result.says(), ["ran the analysis from start to end on a small copy of the recorded results"],
-            source=_stop_power.READ, check="gate")
+            source=_stop_power.COPY if result.kind in (_gate.FAULT, _gate.SMALL_DATA) else _stop_power.READ, check="gate")
 
     async def _gate_refusal(self, state: Any) -> str:
         """After a change to the code was written: why it cannot stay (the analysis, which ran before, no longer runs), or

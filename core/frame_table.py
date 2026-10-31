@@ -82,6 +82,20 @@ def finite(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
 
 
+def hits(metrics, ends, truth):
+    """1.0 or 0.0 for each trial that ran (a trial number any metric of ``metrics`` holds a value for), 1.0 where the interval
+    the trial reported (the values of the two metrics named in ``ends``) holds ``truth``; a trial with no interval counts 0.0.
+    ``None`` when ``metrics`` does not hold both ends at all. The one pairing FI uses for a coverage, wherever it counts one."""
+    if not all(isinstance(metrics.get(e), dict) for e in ends):
+        return None
+    series = []
+    for e in ends:
+        raw = metrics[e].get("values") or []
+        series.append({t: float(v) for t, v in zip(metrics[e].get("trials") or range(len(raw)), raw) if finite(v)})
+    ran = {t for m in metrics.values() if isinstance(m, dict) for t in (m.get("trials") or []) if isinstance(t, int)}
+    return [1.0 if i in series[0] and i in series[1] and series[0][i] <= truth <= series[1][i] else 0.0 for i in sorted(ran)]
+
+
 def values_of(metric):
     """The finite values of one metric record of a setting, as floats, in the order the trials gave them."""
     raw = metric.get("values") if isinstance(metric, dict) else metric

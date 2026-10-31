@@ -336,7 +336,8 @@ class Table:
     is named by ``keys()`` (FI's names, ``a=1,b=2``). The numbers come from ``fi_table`` (``core/frame_table.py``, carried
     beside this file)."""
 
-    def __init__(self, cells, declared, references=None, parts=None):
+    def __init__(self, cells, declared, references=None, parts=None, known=None):
+        self._known = dict(known or {})  # id -> {"interval": [low id, high id], "truth": number or "axis": name}: a result with a known true value
         self.gave_values = set()  # the ids a read returned data for (at least one finite value), since the last ``reset_reads``
         self.last_error = {}  # id -> "Type: message" of the last exception a read of that id raised, even if the caller caught it
         self._cells = [c for c in cells if isinstance(c, dict) and isinstance(c.get("metrics"), dict)]
@@ -459,6 +460,33 @@ class Table:
         s = self._summary(name, key)
         self._gave(name, s["n"])
         return fi_table.interval(s)[:2]
+
+    @_noting
+    def coverage(self, name, key, **level):
+        """For a result the plan gives a true value and an interval (``known_value``): one 1.0 or 0.0 for each trial of setting
+        ``key`` that ran, 1.0 where the interval the trial reported holds the true value (a trial with no interval counts 0.0).
+        FI counts it from its own record; the mean is the coverage. When a run compares a factor inside it, give its value
+        (``table.coverage("id", key, factor="value")``). ``[]`` where the record holds no such trials."""
+        import fi_table
+
+        self._check(name)
+        spec = self._known.get(name)
+        if not isinstance(spec, dict) or len(spec.get("interval") or ()) != 2:
+            raise UnknownResult("`%s` is declared, but the plan gives it no true value and interval, so it has no coverage; the results "
+                                "with one are: %s" % (name, ", ".join(sorted(self._known)) or "(none)"))
+        self._one_key(key)
+        if level:
+            cells = [c for c in self._by_setting.get(key, []) if c.get("level") == level]
+        else:
+            cells = [self._cell(key)]
+        out = []
+        for c in cells:
+            truth = spec.get("truth", (c.get("cell") or {}).get(spec.get("axis")))
+            if not fi_table.finite(truth):
+                continue
+            got = fi_table.hits(c.get("metrics") or {}, spec["interval"], truth)  # None: this record does not hold the interval
+            out += got or []
+        return self._gave(name, out)
 
     def failed(self, key):
         """How many planned trials of setting ``key`` did not end well, as the record says; ``None`` if it does not."""
