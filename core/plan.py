@@ -863,13 +863,13 @@ def part_request(topic: str, unread: dict[str, str]) -> str:
              for part, why in unread.items() if part in PART_RULES]
     lead = ("Parts of this plan's protocol could not be read, so the experiment would not run what the study needs."
             if any(part in ASKED_PARTS for part in unread) else
-            "Some known-answer checks of this plan do not say whether they hold in every single trial or only on average "
-            "over trials." if set(unread) == {"per_trial"} else
+            "The plan has not yet said, for its known-answer checks, whether each holds in every single trial or only on "
+            "average over trials." if set(unread) == {"per_trial"} else
             "Parts of this plan's protocol are missing or incomplete, so the plan does not say what it leaves out or how its "
             "metrics are defined.")
     if "per_trial" in unread and set(unread) != {"per_trial"}:
-        lead += (" Some known-answer checks also do not say whether they hold in every single trial or only on average "
-                 "over trials.")
+        lead += (" The plan has also not yet said, for its known-answer checks, whether each holds in every single trial or "
+                 "only on average over trials.")
     return (
         f"{lead} Write "
         f"each of them again in the design block, from the plan and the topic: “{' '.join(str(topic or '').split())[:600]}”.\n"

@@ -1103,7 +1103,7 @@ async def test_the_plan_is_asked_once_and_the_s1_bound_ends_up_declared_on_the_a
     assert len(model.asked) == 1
     assert READING_ASK in model.asked[0]
     # The s1 plan's metric definitions ride in the same request; its opening says both.
-    assert "also do not say whether they hold in every single trial or only on average" in model.asked[0]
+    assert "has also not yet said, for its known-answer checks, whether each holds in every single trial or only on average" in model.asked[0]
     assert "'bh_fdr_upper_bound'" in model.asked[0] and "has not been asked whether" in model.asked[0]
     checks = _plan_checks(engine)
     assert checks["bh_fdr_upper_bound"]["per_trial"] is False and checks["bh_fdr_upper_bound"][mc.ASKED_KEY] is True
@@ -1143,7 +1143,7 @@ async def test_an_answer_that_does_not_say_leaves_the_check_judged_on_every_tria
         assert "`per_trial` true or false" in model.asked[1]
     checks = _plan_checks(engine)
     assert "per_trial" not in checks["bh_fdr_upper_bound"] and mc.reads_a_mean(checks["bh_fdr_upper_bound"])
-    assert "a check still does not say" in plan.plan_path(engine.quest_root).read_text(encoding="utf-8")
+    assert "a check is still unanswered" in plan.plan_path(engine.quest_root).read_text(encoding="utf-8")
     design, sha = engine._design_from_plan()
     await engine._ask_plan_for_the_parts(state, design, sha)
     assert len(model.asked) == first, "the same problem is not asked about again"

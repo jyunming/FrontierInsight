@@ -7658,9 +7658,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             lines = []
             for part in asked:
                 if part == "per_trial":
-                    lines.append("FI asked the plan's model whether each check on an average over trials holds in every "
-                                 "single trial or only on average, and "
-                                 + ("a check still does not say (it is read as an average over trials)" if part in left else "every such check says it now") + ".")
+                    lines.append("FI asked the plan's model whether each known-answer check holds in every "
+                                 "single trial or only on average over trials, and "
+                                 + ("a check is still unanswered (it is read as an average over trials)" if part in left else "every check is answered now") + ".")
                 elif part in _LEDGER_PARTS:
                     lines.append(f"FI asked the plan's model to write `protocol.{part}` again, and "
                                  + ("it still has gaps (the experiment goes on; the paper says so)" if part in left
