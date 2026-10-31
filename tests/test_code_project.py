@@ -313,6 +313,44 @@ def test_verify_warns_in_plain_words_when_it_does_not_run(tmp_path):
     assert result["status"] == "failed"
 
 
+_RERUN_RUN_PY = """import json, os, sys
+os.makedirs("../run_output/data/results", exist_ok=True)
+doc = {"schema": "fi.derived/v1", "derived": {"r1": {"role": "result", "by": "derive_r1", "status": "ok"}},
+       "figures": [{"id": "fig1", "status": "ok"}, {"id": "fig2", "status": FIG2}], "fi_faults": []}
+json.dump(doc, open("../run_output/data/results/derived.json", "w"))
+print("RESULT_JSON: " + json.dumps({"a": 1}) if PRINT else "no result")
+sys.exit(1)
+"""
+
+
+def _rerun_quest(tmp_path, *, fig2="failed", printed=True, fis=True):
+    from core import analysis_frame
+
+    root = tmp_path / "q"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "requirements.txt").write_text("", encoding="utf-8")
+    (root / "code" / "experiment.py").write_text(analysis_frame.EXPERIMENT_HEAD + chr(10) if fis else "print('x')" + chr(10), encoding="utf-8")
+    (root / "code" / "run.py").write_text(
+        _RERUN_RUN_PY.replace("FIG2", repr(fig2)).replace("PRINT", repr(printed)), encoding="utf-8")
+    return root
+
+
+def test_verify_says_the_results_reproduced_when_only_a_figure_was_not_drawn(tmp_path):
+    result = code_project.verify(_rerun_quest(tmp_path))
+    assert result["ok"] is True and result["status"] == "ran_figures_failed", result
+    assert "did NOT run" not in result["says"] and "reproduced the results" in result["says"]
+    assert "`fig2` not drawn, as in the run" in result["says"]
+
+
+def test_verify_still_says_it_did_not_run_when_the_rerun_gave_no_results(tmp_path):
+    for name, kwargs in (("noline", {"printed": False}), ("notfi", {"fis": False})):  # no RESULT line / not FI's analysis
+        result = code_project.verify(_rerun_quest(tmp_path / name, **kwargs))
+        assert result["ok"] is False and result["status"] == "failed" and "did NOT run" in result["says"], result
+    # a figure that is fine but exit 1 is not "only a figure failed"
+    result = code_project.verify(_rerun_quest(tmp_path / "ok", fig2="ok"))
+    assert result["ok"] is False and "did NOT run" in result["says"], result
+
+
 def test_verify_reports_a_run_cut_off_by_the_time_limit_as_not_finished(tmp_path):
     root = _quest(tmp_path, two=False)
     (root / "code" / "experiment.py").write_text("import time\ntime.sleep(60)\n", encoding="utf-8")

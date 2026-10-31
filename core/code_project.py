@@ -1224,10 +1224,26 @@ def _minutes(seconds: float) -> str:
     return f"{seconds / 60:g} min" if seconds >= 60 else f"{seconds:g} s"
 
 
+def _figures_only_failed(quest_root: Path, returncode: int, stdout: str) -> str:
+    """When the clean rerun of ``run.py`` exited 1 but produced its results and only figures failed, in the same sense as the
+    run itself (``analysis_frame.run_produced``, the rule behind ``results_produced``): a plain sentence naming the figures
+    that were not drawn; else ``""``. The rerun works in ``run_output/``, where its own record of the analysis is."""
+    from . import analysis_frame as _analysis
+    from .engine import _extract_result_json
+
+    record = _analysis.read_record(Path(quest_root) / "run_output")
+    on = _analysis.is_fis_file(Path(quest_root) / "code" / _analysis.EXPERIMENT_FILE)
+    if not _analysis.run_produced(returncode, bool(_extract_result_json(stdout)), record, on):
+        return ""
+    names = [f"`{o.get('id')}`" for o in record.get("figures") or [] if isinstance(o, dict) and o.get("status") in ("failed", "refused")]
+    return ("figure " if len(names) == 1 else "figures ") + ", ".join(names) + " not drawn" if names else ""
+
+
 def verify(quest_root: Path, *, run_timeout_s: float = 900.0, install_timeout_s: float = 900.0) -> dict[str, Any]:
     """Run ``code/`` the way a person would: a fresh environment, only ``requirements.txt`` installed, then
-    ``python run.py``. Never raises; returns ``{"ok": bool, "status": "ran" | "failed" | "not_finished", "reason":
-    plain words, "says": ...}`` (also saved to ``needs/CODE_PROJECT_CHECK.json``). ``not_finished`` is a run that
+    ``python run.py``. Never raises; returns ``{"ok": bool, "status": "ran" | "ran_figures_failed" | "failed" |
+    "not_finished", "reason": plain words, "says": ...}`` (also saved to ``needs/CODE_PROJECT_CHECK.json``). ``ran_figures_failed``
+    is a rerun that reproduced the results and only a figure was not drawn, as in the run: ``ok`` is True. ``not_finished`` is a run that
     installed and was still going when ``run_timeout_s`` ran out: FI stopped it (the whole process tree), and that
     is not a failure, so ``ok`` is False but only ``failed`` deserves a warning."""
     import shutil
@@ -1263,9 +1279,9 @@ def verify(quest_root: Path, *, run_timeout_s: float = 900.0, install_timeout_s:
                     [str(py), str(code_dir / RUN)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                     encoding="utf-8", errors="replace", cwd=code_dir, env=scrub_secrets(),
                 ) as tree:
-                    err = ""
+                    out = err = ""
                     try:
-                        _out, err = tree.proc.communicate(timeout=run_timeout_s)
+                        out, err = tree.proc.communicate(timeout=run_timeout_s)
                     except subprocess.TimeoutExpired:
                         # Still running, unless run.py already exited (non-zero) and a worker it left behind holds the pipes.
                         if tree.proc.poll() is None:
@@ -1279,6 +1295,10 @@ def verify(quest_root: Path, *, run_timeout_s: float = 900.0, install_timeout_s:
                     if result.get("status") != "not_finished":
                         if tree.proc.returncode == 0:
                             result["ok"] = True
+                        elif (figures := _figures_only_failed(quest_root, tree.proc.returncode, out or "")):
+                            result["ok"] = True  # the results were produced, as in the run; only a figure was not drawn
+                            result["status"] = "ran_figures_failed"
+                            result["figures_note"] = figures
                         else:
                             result["reason"] = f"run.py stopped with an error: {(err or '').strip()[-300:]}"
     except subprocess.TimeoutExpired:
@@ -1291,7 +1311,10 @@ def verify(quest_root: Path, *, run_timeout_s: float = 900.0, install_timeout_s:
     result["status"] = result.get("status") or ("ran" if result["ok"] else "failed")
     result["says"] = (
         "code/ was run again in a clean environment from requirements.txt and it ran."
-        if result["ok"] else
+        if result["status"] == "ran" else
+        "code/ was run again in a clean environment from requirements.txt and it reproduced the results; "
+        f"{result['figures_note']}, as in the run."
+        if result["status"] == "ran_figures_failed" else
         f"code/ was started again in a clean environment from requirements.txt; {result['reason']}. "
         "The results above are not affected."
         if result["status"] == "not_finished" else

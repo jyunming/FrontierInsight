@@ -96,6 +96,15 @@ def test_only_figures_failed_reads_fis_record(tmp_path: Path) -> None:
     assert not frame.only_figures_failed(frame.read_record(tmp_path), 1)
 
 
+def test_run_produced_is_one_rule_for_the_run_and_the_clean_rerun(tmp_path: Path) -> None:
+    _record(tmp_path, figure="failed")
+    rec = frame.read_record(tmp_path)
+    assert frame.run_produced(0, False, {}, False)
+    assert frame.run_produced(1, True, rec, True)
+    assert not frame.run_produced(1, False, rec, True) and not frame.run_produced(1, True, rec, False)
+    assert not frame.run_produced(2, True, rec, True) and not frame.run_produced(1, True, {}, True)
+
+
 # ---- the fact itself --------------------------------------------------------------------------------------------------
 
 

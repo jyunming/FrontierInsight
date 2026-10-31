@@ -16353,10 +16353,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         printed its RESULT line. Decided once per run (``exec_result["results_produced"]``); the figure's repair keeps reading the
         return code and the figure statuses."""
         rc = result.returncode
-        if rc == 0:
-            return True
-        return bool(rc == 1 and self._analysis_on() and _extract_result_json(getattr(result, "stdout", "") or "")
-                    and _analysis_frame.only_figures_failed(_analysis_frame.read_record(self.quest_root), rc))
+        return _analysis_frame.run_produced(
+            rc, bool(rc != 0 and _extract_result_json(getattr(result, "stdout", "") or "")),
+            _analysis_frame.read_record(self.quest_root) if rc == 1 else {}, rc == 1 and self._analysis_on())
 
     @staticmethod
     def _exec_produced(exec_result: dict[str, Any], default_rc: int) -> bool:
