@@ -737,7 +737,8 @@ def claim_note(quest_root: Path, protocol: dict[str, Any] | None, judged: list[d
 def paper_block(built: Built | None, cap: int | None = None) -> str:
     """The tables as they go into the paper, in Markdown: every row while they have at most ``cap`` rows (default
     :data:`PAPER_MAX_ROWS`); otherwise their slice at the first, middle and last value of each setting, naming the files
-    with every row; otherwise one sentence naming those files. ``""`` when there is nothing to tabulate. FI puts it
+    with every row; otherwise the whole tables that fit, in order, naming the files of the others; otherwise one
+    sentence naming those files. ``""`` when there is nothing to tabulate. FI puts it
     where the paper has ``{{results_table}}`` (core/paper_facts.py), so no number of it is typed by the writer."""
     if built is None or not built.tables:
         return ""
@@ -749,11 +750,23 @@ def paper_block(built: Built | None, cap: int | None = None) -> str:
         tables, lead = built.tables, []
     else:
         cut = _slice(built)
-        if not 0 < sum(len(t.rows) for t in cut) <= cap:
-            return (f"Results for all {built.distinct.n_settings} settings are in the supplementary table "
-                    "`paper/results_by_setting.csv`.\n")
-        tables = cut
-        lead = [f"FI's tables of every setting have more rows than fit here; the full tables are in {files}."]
+        if 0 < sum(len(t.rows) for t in cut) <= cap:
+            tables = cut
+            lead = [f"FI's tables of every setting have more rows than fit here; the full tables are in {files}."]
+        else:
+            # Whole tables, in the plan's order, while they fit: a number is never given here without its interval,
+            # and a quantity that does not fit is named with the files that hold it.
+            tables, used = [], 0
+            for t in built.tables:
+                if used + len(t.rows) <= cap:
+                    tables.append(t)
+                    used += len(t.rows)
+            if not tables:
+                return (f"Results for all {built.distinct.n_settings} settings are in the supplementary table "
+                        "`paper/results_by_setting.csv`.\n")
+            left = [f"`{t.value}`" for t in built.tables if t not in tables]
+            lead = [f"FI's tables of every setting have more rows than fit here; the tables of "
+                    f"{', '.join(left)} are in {files}."]
     return "\n\n".join([*lead, *notes, *(markdown(t).rstrip("\n") for t in tables)]) + "\n"
 
 

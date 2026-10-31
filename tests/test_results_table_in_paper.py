@@ -60,6 +60,16 @@ def test_the_paper_block_is_every_row_then_a_slice_then_a_sentence() -> None:
     assert rbs.paper_block(None) == ""
 
 
+def test_a_block_too_long_even_as_a_slice_keeps_the_whole_tables_that_fit() -> None:
+    built = _built("kin_s1", P.kin_protocol())
+    block = rbs.paper_block(built, cap=30)  # 100 rows, a 36-row slice: both over the cap, one table of 25 fits
+    assert block.count("**Table (") == 1 and "**Table (coverage_Ea).**" in block
+    assert block.count("| 2000 |") == 25 and "±" in block
+    assert "the tables of `coverage_lnA`, `Ea_hat`, `lnA_hat` are in" in block
+    assert "paper/results_by_setting.csv" in block
+    assert "Results for all" not in block
+
+
 def test_write_saves_the_block_and_a_run_without_a_table_removes_it(tmp_path: Path) -> None:
     root = _quest(tmp_path)
     block = root / rbs.PAPER_BLOCK
