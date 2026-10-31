@@ -287,16 +287,6 @@ class Figure:
         self.series = series
         self.shows = shows
         self.file = file
-        self.declared = {}
-
-    def panel(self, which, **settings):
-        """Say which setting a panel shows: ``fig.panel(0, m=200)`` (``which``: the panel's place in ``axes``, or the axes).
-        FI then writes that panel's title itself, ``m = 200``, and its caption states it; a panel given nothing gets no
-        title of FI's."""
-        index = which if isinstance(which, int) else self.axes.index(which)
-        if not 0 <= index < len(self.axes):
-            raise IndexError("panel %r: this figure has %d panel(s)" % (which, len(self.axes)))
-        self.declared[index] = dict(settings)
 
 
 def _noting(method):

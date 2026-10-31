@@ -134,9 +134,19 @@ def plan_of(design: dict[str, Any]) -> dict[str, Any]:
         "compared": {str(k): list(v) for k, v in c.settings.in_each_run.items()},
         "parts": {str(s.get("name")): dict(s.get("hold") or {}) for s in c.settings.sub_studies if s.get("name")},
         "search": c.search is not None,
-        "figures": {f.id: {"file": f.file, "shows": list(f.shows), "x": f.x, "series": f.series, "panels": f.panels}
+        "figures": {f.id: {"file": f.file, "shows": list(f.shows), "x": f.x, "series": f.series, "panels": f.panels,
+                           **_panel_words(c, f.panels)}
                     for f in c.figures if f.declared},
     }
+
+
+def _panel_words(c: Any, panels: int) -> dict[str, Any]:
+    """For a figure of several panels: the settings a panel may be declared for with their values, and the plan's label for each
+    (``fig.panel``, ``core/analysis_figures.py``); nothing for a one-panel figure."""
+    if panels < 2:
+        return {}
+    settings = {str(k): list(v) for k, v in {**c.settings.compared, **c.settings.in_each_run}.items()}
+    return {"settings": settings, "labels": {k: c.labels[k] for k in settings if c.labels.get(k)}}
 
 
 def body_names(plan: dict[str, Any]) -> list[str]:
@@ -179,8 +189,10 @@ def _stub(plan: dict[str, Any], name: str) -> str:
     if kind == "figure":
         f = plan["figures"][ident]
         shows = ", ".join(f["shows"]) or "what the plan names"
+        panel_note = ("\n    Panels that show different settings: `fig.panel(0, setting=value)` on each (FI writes the title)."
+                      if f["panels"] > 1 else "")
         return (f"def {name}(fig, table):\n"
-                f'    """Draw on `fig.axes` ({f["panels"]} panel(s)); FI creates, saves and closes the figure. It shows {shows}."""\n'
+                f'    """Draw on `fig.axes` ({f["panels"]} panel(s)); FI creates, saves and closes the figure. It shows {shows}.{panel_note}"""\n'
                 f'    raise NotYet("{name} is not written yet")\n')
     d = next(d for d in plan["derived"] if d["id"] == ident)
     what = d["label"] or ident

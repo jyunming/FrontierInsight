@@ -683,3 +683,17 @@ def test_a_panel_given_nothing_keeps_the_body_title_and_a_one_panel_figure_is_un
         af._set_panel_titles = real
     assert out[0]["status"] == "ok" and out[0]["panels"] == [] and seen == {"title": "growth over time", "record": []}
     plt.close("all")
+
+
+def test_a_panel_declared_for_a_setting_or_value_the_study_does_not_have_is_refused_naming_what_may_be_used(tmp_path):
+    def figure_grid(fig, table):
+        fig.axes[0].plot([1, 2])
+        fig.axes[1].plot([1, 2])
+        fig.panel(0, size=20)
+        fig.panel(1, size=999)
+
+    spec = {"id": "grid", "file": "grid.png", "panels": 2, "settings": {"size": [20, 200], "kind": ["a", "b"]}, "labels": {"size": "Colony size"}}
+    out = af.run_figures([spec], _namespace(figure_grid=figure_grid), _Table(), str(tmp_path))
+    assert out[0]["status"] == "failed" and "UnknownSetting" in out[0]["why"] and "size = 20, 200" in out[0]["why"] and "kind = a, b" in out[0]["why"]
+    ok = af.run_figures([dict(spec, id="g2", file="g2.png")], _namespace(figure_g2=lambda fig, table: [a.plot([1, 2]) for a in fig.axes] and fig.panel(1, size=200)), _Table(), str(tmp_path))
+    assert ok[0]["status"] == "ok" and ok[0]["panels"][0]["title"] == "size = 200".replace("size", "Colony size")

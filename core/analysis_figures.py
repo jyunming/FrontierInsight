@@ -261,16 +261,31 @@ def _figure_handle(axes: list[Any], spec: dict[str, Any], file: str) -> Any:
         class Figure:  # type: ignore[no-redef]
             def __init__(self, axes, x=None, series=None, shows=None, file=None):
                 self.axes, self.x, self.series, self.shows, self.file = list(axes), x, series, shows, file
-                self.declared = {}
-
-            def panel(self, which, **settings):
-                self.declared[which if isinstance(which, int) else self.axes.index(which)] = dict(settings)
     handle = Figure(axes, x=spec.get("x"), series=spec.get("series"), shows=spec.get("shows"), file=file)
-    if not hasattr(handle, "panel"):  # a runtime written before `panel` existed (a resumed quest keeps its own)
-        handle.declared = {}
-        handle.panel = lambda which, **settings: handle.declared.__setitem__(
-            which if isinstance(which, int) else handle.axes.index(which), dict(settings))
+    handle.declared = {}
+    handle.panel = _panel_declarer(handle, spec.get("settings") or {})
     return handle
+
+
+class UnknownSetting(KeyError):
+    """A panel declared for a setting the study does not vary, or a value it does not take."""
+
+
+def _panel_declarer(handle: Any, allowed: dict[str, Any]):
+    """``fig.panel(which, **settings)``: say which setting a panel shows (``which`` is the panel's place in ``fig.axes``, or the
+    axes). FI then writes the panel's title. A setting the plan does not vary, or a value outside its declared values, raises
+    ``UnknownSetting`` naming what may be used (``allowed`` is empty for a plan that did not record its settings: not checked)."""
+    def panel(which: Any, **settings: Any) -> None:
+        index = which if isinstance(which, int) else handle.axes.index(which)
+        if not 0 <= index < len(handle.axes):
+            raise IndexError("panel %r: this figure has %d panel(s)" % (which, len(handle.axes)))
+        for name, value in settings.items():
+            if allowed and (name not in allowed or value not in allowed[name]):
+                raise UnknownSetting("panel %d: `%s = %s` is not a setting this study varies; the settings and values a panel may "
+                                     "use are: %s" % (index, name, value, "; ".join("%s = %s" % (k, ", ".join(map(str, v)))
+                                                                                      for k, v in allowed.items())))
+        handle.declared[index] = dict(settings)
+    return panel
 
 
 def _panel_title(settings: dict[str, Any], labels: dict[str, Any]) -> str:
