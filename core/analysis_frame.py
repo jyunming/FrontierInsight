@@ -1142,6 +1142,7 @@ def result_json(table, records, compared):
     result under its own name beside ``<name>_values`` (and ``_count`` / ``_total`` for a proportion, ``_pair_id`` for a paired
     result); the quantities derived for the study stand at the top level."""
     out, why = {}, {}
+    out_levels = {}  # the rows of the values compared inside each run, keyed as FI's record keys them
     seen = set()
     for key in table.keys():
         row = {}
@@ -1162,6 +1163,10 @@ def result_json(table, records, compared):
                     if got:
                         seen.add(rid)
                         row[rid] = got
+                        for rkey, text, vals in table.level_rows(rid, key):  # the trials behind each compared value, under its record key
+                            lrow = out_levels.setdefault(rkey, {})
+                            lrow[rid] = got.get(text)
+                            lrow[rid + "_values"] = vals
                 undefined = table.undefined(rid, key)
                 if undefined:
                     seen.add(rid)
@@ -1173,6 +1178,8 @@ def result_json(table, records, compared):
             row["n_failed"] = failed
         if row:
             out[key] = row
+    for rkey, lrow in out_levels.items():
+        out.setdefault(rkey, {}).update(lrow)
     for ident, rec in records.items():
         if rec.get("status") != "ok":
             out[ident] = None

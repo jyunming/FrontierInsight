@@ -1689,7 +1689,7 @@ def _text_of(value: Any) -> str:
 
 
 def _addressable(value: Any) -> bool:
-    return not re.search(r"[,|{}=@]", str(value)) and str(value).strip() == str(value) and str(value) != ""
+    return not re.search(r"[,|{}]", str(value)) and str(value).strip() == str(value) and str(value) != ""
 
 
 def _line_key(metric: str, form: str, where: dict[str, Any], short: dict[str, str] | None = None) -> str:

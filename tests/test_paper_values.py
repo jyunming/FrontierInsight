@@ -492,3 +492,27 @@ def test_axes_with_plain_names_are_unchanged_by_the_short_names(tmp_path):
     rec = pv.records_of(_quest(tmp_path, _tiny_cells()), None)
     assert rec.aliases() == {"m": "m", "method": "method"}
     assert pv.resolve("{{v:fdr @ m=20, method=bh}}", rec).filled
+
+
+def _level_cells(label_for_a: str, with_values: bool) -> list[dict]:
+    out = []
+    for label, shift in ((label_for_a, 0.0), ("b", 1.0)):
+        cell = {"dose": 1, "mode": label}
+        vals = [1.0 + shift, 2.0 + shift] if with_values else []
+        out.append({"cell": cell, "key": f"dose=1,mode={label}", "level": {"mode": label}, "planned": 2, "ok": len(vals), "failed": 0,
+                    "metrics": {"rate": {"values": vals, "trials": list(range(len(vals)))}}})
+    return out
+
+
+def test_a_result_recorded_per_compared_value_is_fillable_when_the_values_name_has_an_equals_sign() -> None:
+    protocol = {"metrics": [{"id": "rate", "role": "result", "kind": "mean"}]}
+    rec = pv.from_cells(_level_cells("T_0 = 300 (exact)", True), protocol)
+    assert "rate" in rec.fillable()
+    value = pv.resolve("{{v:rate @ dose=1, mode=T_0 = 300 (exact)}}", rec)
+    assert value.filled and value.text.startswith("1.5")
+
+
+def test_a_result_with_no_value_in_any_trial_is_still_not_fillable() -> None:  # the known positive
+    protocol = {"metrics": [{"id": "rate", "role": "result", "kind": "mean"}]}
+    rec = pv.from_cells(_level_cells("T_0 = 300 (exact)", False), protocol)
+    assert "rate" not in rec.fillable()

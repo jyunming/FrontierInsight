@@ -426,3 +426,15 @@ def test_a_list_is_not_a_key_of_level_means_or_reference_either() -> None:
     for read in (lambda: t.level_means("growth", ["rate=0.1,dose=1"]), lambda: t.reference("growth", ["rate=0.1,dose=1"])):
         with pytest.raises(TypeError, match="list of settings"):
             read()
+
+
+def test_level_rows_give_the_trials_behind_each_compared_value_under_its_record_key_and_level_means_text() -> None:
+    base = {"rate": 0.1, "dose": 1}
+    cells = _colony() + [_level_cell(base, {"soil": "dry"}, [1.0, 3.0]), _level_cell(base, {"soil": "wet"}, [2.0, 4.0])]
+    t = _table(cells)
+    key = "rate=0.1,dose=1"
+    assert t.level_rows("growth", key) == [("rate=0.1,dose=1,soil=dry", "dry", [1.0, 3.0]), ("rate=0.1,dose=1,soil=wet", "wet", [2.0, 4.0])]
+    assert {text for _k, text, _v in t.level_rows("growth", key)} == set(t.level_means("growth", key))
+    assert t.level_rows("growth", "rate=0.2,dose=1") == []
+    with pytest.raises(TypeError, match="list of settings"):
+        t.level_rows("growth", [key])
