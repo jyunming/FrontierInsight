@@ -244,4 +244,7 @@ def test_a_short_report_keyed_by_index_is_still_flagged() -> None:
     analysis = _keyed_by_index(_analysis())
     analysis["by_setting"]["0"]["ler_values"] = [1.0] * 20000
     found = _findings(analysis)
-    assert found and "reports more than that" in found[0][0], found
+    # The keys do not name settings, so the parts are read as one report; they add up above the record, so the largest part
+    # stands for them and the rest of the record reads as left out (a true finding too, and the first). The list above the
+    # whole record is reported as more than FI recorded, whichever place it comes in.
+    assert any("reports more than that" in f and "20000 value(s) where FI's record has 16989" in f for f, _ in found), found
