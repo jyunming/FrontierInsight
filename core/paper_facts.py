@@ -1036,6 +1036,34 @@ def _seed_text(root: Path) -> str:
             f"into the code that runs a trial, {verdict.get('entry') or 'code/simulate.py'})")
 
 
+def seed_meaning_text(root: Path) -> str:
+    """What the seed record means for the intervals, said to the writer as FI's fact (``""`` when the records do not show
+    it): trials that each drew from their own seed make the interval over trials include the variation between seeds, and
+    trials that share one seed, or never drew, do not. Without it the writer takes "one base seed" for "one seed" and
+    types that the intervals leave seed-to-seed variation out."""
+    study = _read(root, "code/study.json")
+    if isinstance(study, dict) and study.get("entry") == "run_cell":
+        return ""
+    base, trial_seeds = _disclosure.recorded_seeds(root)
+    drew = _drew_record(root)
+    if drew is False:
+        return ("No trial drew random numbers, so the results do not depend on a seed and the intervals are not about "
+                "seed variation.")
+    verdict = _run_facts.seed_verdict(root)
+    state = verdict.get("verdict")
+    if state == _run_facts.NO_ENTRY:
+        return ""
+    if len(trial_seeds) > 1 and (state == _run_facts.REACHES or (state == _run_facts.UNKNOWN and drew is True)):
+        origin = f" derived from base seed {base}" if base is not None else ""
+        return (f"Each of the trials ran on its own seed{origin}; the trial seeds are all different. The intervals over "
+                "the trials therefore include the variation between seeds. Do not call the study single-seed or say "
+                "the intervals leave seed-to-seed variation out.")
+    if len(trial_seeds) == 1 and state in (_run_facts.REACHES, _run_facts.UNKNOWN):
+        return ("Every trial ran on the same seed, so the trials do not vary the seed and the intervals do not include "
+                "seed-to-seed variation.")
+    return ""
+
+
 def _trial_counts(root: Path) -> tuple[str, str, str]:
     """``(trials per setting, settings, trials failed)`` from FI's ledger, each ``""`` when there is none."""
     rows = _disclosure._ledger_rows(root)
@@ -1782,6 +1810,8 @@ def writer_section(quest_root: Path | str, *, topic: str = "", fallback_s: Any =
                      "the seed, the run time, the topic's time limit); if you need to refer to them, say \"the run facts "
                      "in the Methods\". A seed, a run time or a count of settings or trials typed as a number is sent "
                      "back to you, and so is a claim about the topic's time limit that the record contradicts.")
+    if (seed_meaning := seed_meaning_text(root)):
+        lines.append(f"Seed: {seed_meaning}")
     if figure_known:
         lines.append("A figure's panel layout and its line styles are in the caption FI writes under it, from FI's "
                      "record of the saved picture. You have not seen the picture: do not describe them in your own words.")
