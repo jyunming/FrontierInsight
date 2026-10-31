@@ -462,7 +462,8 @@ PINS_AT_811719AF = {
     # the frame's own text (written only with the frame on): its RESULTS comment, its trial docstring and the refusal message
     # changed with the one list of names a trial may return (core/skeleton.py returnable_names); it was "ad084c60d61b9dde"
     # and again when the seeds of a setting moved from an environment variable to a file (FI_TRIAL_SEEDS_FILE); it was "5b45d638db4dcd2c"
-    "run_framed": "b61961f03c91d396",
+    # and again when the frame began to note whether a trial drew random numbers (Ctx records `drew`, VERSION 4); it was "b61961f03c91d396"
+    "run_framed": "74142777df2c137d",
 }
 
 
