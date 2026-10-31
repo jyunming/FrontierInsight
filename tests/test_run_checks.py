@@ -12,6 +12,7 @@ import re
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -440,8 +441,22 @@ async def test_a_study_that_keeps_state_is_refused_sharing_by_the_real_check_and
 
 
 @pytest.mark.asyncio
-async def test_the_groups_of_a_checked_study_are_kept_in_the_record_and_restored_on_a_resume(tmp_path: Path) -> None:
+async def test_the_groups_of_a_checked_study_are_kept_in_the_record_and_restored_on_a_resume(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     eng, model, runner, ex = await _sizing(tmp_path, timeout_s=12, min_runs_per_setting=8, sharing=True)
+    # The sharing check times its grouped pass with trial_runner's clock, which is the real wall clock: a process start-up
+    # under load would decide whether the study fits. Here each process started costs a fixed 0.1 s on a clock of its own
+    # (the simulation's sleeps are virtual), so the check's time is the same on every machine.
+    clock = {"now": 0.0}
+    monkeypatch.setattr(trial_runner, "time", SimpleNamespace(
+        monotonic=lambda: clock["now"], time=time.time, time_ns=time.time_ns, perf_counter=time.perf_counter, sleep=time.sleep))
+    started = ex.execute
+
+    async def start(cmd: list[str], **kw: Any) -> Any:
+        clock["now"] += 0.1
+        return await started(cmd, **kw)
+
+    monkeypatch.setattr(ex, "execute", start)
     assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
     assert runner.per_process > 1 and runner.shared_groups and runner.group_allowance_s, _log(eng)
     assert plan.load_design(eng.quest_root)[0]["protocol"]["runs_per_setting"] == 40, "shared, not lowered"
