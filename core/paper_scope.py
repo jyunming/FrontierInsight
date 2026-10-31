@@ -24,10 +24,6 @@ from . import paper_patch
 _HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(\S.*?)[ \t#]*$")
 _FENCE_RE = re.compile(r"^[ \t]*(```|~~~)")
 _QUOTE_RES = (re.compile("“([^”]{25,})”"), re.compile(r'"([^"\n]{25,})"'), re.compile(r"`([^`\n]{25,})`"))
-_WORDS_RE = re.compile(r"\S+")
-# A section the writer shortens gives up at most this share of its words (the rest of the cut comes from the next section).
-_MAX_CUT_SHARE = 0.4
-_CUT_WORDS_RE = re.compile(r"\bCut about (\d+) words", re.IGNORECASE)
 # The engine's own sections (their text is FI's, written from its records) are never asked for.
 _FI_BLOCK_RE = re.compile(r"<!--\s*fi:(?!v\b|fact-)")
 
@@ -202,34 +198,6 @@ def naming(markdown: str, sections: list[Section], text: str) -> set[int]:
             if at is not None:
                 out.add(at)
     return out
-
-
-def words_to_cut(hit: str) -> int | None:
-    """The words an ``over_page_limit`` hit asks to cut (FI's own sentence, ``Cut about N words``), else ``None``."""
-    m = _CUT_WORDS_RE.search(hit)
-    return int(m.group(1)) if m else None
-
-
-def to_shorten(markdown: str, sections: list[Section], cut: int) -> dict[int, int]:
-    """The sections to shorten for a page limit, with the length (in words) each is cut to: the longest first, none taking
-    more than :data:`_MAX_CUT_SHARE` of its words, until their shares cover ``cut``. The abstract and FI's own sections are
-    left alone. ``{}`` when the sections cannot give ``cut`` words."""
-    pool = []
-    for s in sections:
-        body = text_of(markdown, s)
-        if not s.index or s.title.lower() == "abstract" or _FI_BLOCK_RE.search(body):
-            continue
-        pool.append((len(_WORDS_RE.findall(body)), s.index))
-    out: dict[int, int] = {}
-    left = cut
-    for words, index in sorted(pool, reverse=True):
-        if left <= 0:
-            break
-        take = min(left, int(words * _MAX_CUT_SHARE))
-        if take > 0:
-            out[index] = words - take
-            left -= take
-    return out if left <= 0 else {}
 
 
 def holds_values(markdown: str, sections: list[Section]) -> set[int]:

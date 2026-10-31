@@ -129,24 +129,6 @@ def test_changed_names_the_sections_whose_filled_values_differ() -> None:
     assert paper_scope.changed(before, before.replace("## B", "## Z")) is None, "other headings: nothing to compare"
 
 
-# --- a page limit: the longest sections, each cut by a share ---------------------------------------------------------
-
-def test_a_page_limit_asks_for_the_longest_sections_with_a_length_to_cut_to(tmp_path: Path) -> None:
-    filler = " ".join(["word"] * 400)
-    long_draft = DRAFT.replace("## Discussion\n", f"## Discussion\n{filler} {filler[:800]}.\n\n").replace(
-        "## Introduction\n", f"## Introduction\n{filler}.\n\n")
-    reply = "## Discussion\nShort discussion [1].\n"
-    eng, client, _ = _engine(tmp_path, [long_draft, reply])
-    out1, before = _first_draft(eng)
-    after = _revise(eng, out1, ["over_page_limit: the rendered PDF is 5 pages; the limit is 4. Cut about 100 words"])
-    prompt = client.calls[1][1]
-    assert client.nodes == ["write", "write"]
-    assert "1. `## Discussion` (about " in prompt and "2. `" not in prompt, "the longest section gives the words"
-    assert "over the page limit" in prompt
-    assert _section(after, "Results") == _section(before, "Results")
-    assert _section(after, "Abstract") == _section(before, "Abstract"), "the abstract is never cut"
-
-
 # --- the module ------------------------------------------------------------------------------------------------------
 
 def test_splice_keeps_every_other_byte_and_drops_unasked_sections() -> None:

@@ -20,7 +20,6 @@ from typing import Any
 
 import pytest
 import yaml
-from langgraph.checkpoint.memory import MemorySaver
 from pydantic import ValidationError
 
 from core.config import (
@@ -28,12 +27,7 @@ from core.config import (
     ProviderConfig, page_limit_from_text, resolve_page_limit,
 )
 from core.engine import (
-    _PAGE_LIMIT_REWRITES,
     Engine,
-    _format_review_for_writer,
-    _hits_need_only_a_rewrite,
-    _only_page_limit_hits,
-    _page_limit_hit,
     _page_limit_note,
     _words_to_cut,
 )
@@ -471,66 +465,48 @@ def _review(eng: Engine, tmp_path: Path, **state: Any) -> dict[str, Any]:
 
 
 @pytest.mark.parametrize("panel", [False, True])
-def test_a_draft_over_the_limit_is_sent_back_without_using_an_iteration(
+def test_a_draft_over_the_limit_is_recorded_and_never_sent_back_to_be_shortened(
     tmp_path: Path, monkeypatch, panel: bool,
 ) -> None:
+    """The limit is a guideline: Further reading is fitted and the trim is offered, but a draft still over it forces
+    no hit, no iteration and no rewrite. The overrun goes on record for QUALITY.md."""
     eng = _engine(tmp_path, panel=panel)
     calls = _measured(monkeypatch, 5)
-    # The iterations are already spent: the shortening still happens.
-    patch = _review(eng, tmp_path, iteration=2, page_limit_rewrites=0)
+    patch = _review(eng, tmp_path, iteration=2)
     # The paper lists a Further reading entry, so it is tried once without it;
     # still 5 pages, the body is what is over and the paper stays as written.
     assert calls == [tmp_path / "paper" / "paper.md", tmp_path / ".fi" / "page_check_trial.md"]
     assert (tmp_path / "paper" / "paper.md").read_text(encoding="utf-8") == PAPER
-    assert not (tmp_path / ".fi" / "page_check_trial.md").exists()
-    hits = patch["review"]["must_flag_hits"]
-    assert hits == [_page_limit_hit(5, 4, 250)]
-    assert patch["review"]["page_limit"] == {"pages": 5, "limit": 4, "rewrites": 0, "words_to_cut": 250}
-    assert "iteration" not in patch
-    assert patch["page_limit_rewrites"] == 1
-    state = {"review": patch["review"], "iteration": 2, "page_limit_rewrites": 1}
-    assert eng._route_after_review(state) == "rewrite"  # type: ignore[arg-type]
-
-
-@pytest.mark.parametrize("panel", [False, True])
-def test_after_two_shortening_rewrites_the_overrun_is_recorded_not_forced(
-    tmp_path: Path, monkeypatch, panel: bool,
-) -> None:
-    eng = _engine(tmp_path, panel=panel)
-    _measured(monkeypatch, 5)
-    patch = _review(eng, tmp_path, iteration=0, page_limit_rewrites=_PAGE_LIMIT_REWRITES)
     assert patch["review"]["must_flag_hits"] == []
-    assert patch["review"]["page_limit"] == {
-        "pages": 5, "limit": 4, "rewrites": 2, "exceeded_after_rewrites": True,
-    }
-    assert "page_limit_rewrites" not in patch and "iteration" not in patch
-    state = {"review": patch["review"], "iteration": 0, "page_limit_rewrites": 2}
-    assert eng._route_after_review(state) == "done"  # type: ignore[arg-type]
+    assert patch["review"]["page_limit"] == {"pages": 5, "limit": 4}
+    assert "iteration" not in patch and "page_limit_rewrites" not in patch
+    assert json.loads((tmp_path / ".fi" / "page_limit.json").read_text()) == {"pages": 5, "limit": 4, "final": True}
+    assert eng._route_after_review({"review": patch["review"], "iteration": 0}) == "done"  # type: ignore[arg-type]
+    assert eng._route_after_review({"review": patch["review"], "iteration": 2}) == "done"  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("panel", [False, True])
-def test_other_hits_take_the_normal_path_and_the_shortening_still_counts(
+def test_a_real_review_point_over_the_limit_still_gets_its_revise_round(
     tmp_path: Path, monkeypatch, panel: bool,
 ) -> None:
     eng = _engine(tmp_path, panel=panel)
     _measured(monkeypatch, 6, last_page_empty=0.2)
     patch = _review(eng, tmp_path, iteration=0, claim_check_failed="No capacity")
     hits = patch["review"]["must_flag_hits"]
-    assert len(hits) == 2 and hits[0].startswith("citations_unchecked") and hits[1] == _page_limit_hit(6, 4, 800)
-    assert patch["iteration"] == 1 and patch["page_limit_rewrites"] == 1
-    assert eng._route_after_review({"review": patch["review"], "iteration": 1, "page_limit_rewrites": 1}) == "rewrite"  # type: ignore[arg-type]
+    assert len(hits) == 1 and hits[0].startswith("citations_unchecked")
+    assert patch["iteration"] == 1
+    assert eng._route_after_review({"review": patch["review"], "iteration": 1}) == "rewrite"  # type: ignore[arg-type]
     # With the iterations spent, other hits do not get past the budget.
-    assert eng._route_after_review({"review": patch["review"], "iteration": 2, "page_limit_rewrites": 1}) == "done"  # type: ignore[arg-type]
+    assert eng._route_after_review({"review": patch["review"], "iteration": 2}) == "done"  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("panel", [False, True])
-def test_a_draft_within_the_limit_is_recorded_and_not_forced(tmp_path: Path, monkeypatch, panel: bool) -> None:
+def test_a_draft_within_the_limit_is_recorded(tmp_path: Path, monkeypatch, panel: bool) -> None:
     eng = _engine(tmp_path, panel=panel)
     _measured(monkeypatch, 4)
     patch = _review(eng, tmp_path)
     assert patch["review"]["must_flag_hits"] == []
-    assert patch["review"]["page_limit"] == {"pages": 4, "limit": 4, "rewrites": 0}
-    assert "page_limit_rewrites" not in patch
+    assert patch["review"]["page_limit"] == {"pages": 4, "limit": 4}
 
 
 @pytest.mark.parametrize("panel", [False, True])
@@ -542,7 +518,7 @@ def test_without_a_limit_the_draft_is_never_rendered(tmp_path: Path, monkeypatch
 
     monkeypatch.setattr(Engine, "_measure_draft_pages", boom)
     patch = _review(eng, tmp_path)
-    assert "page_limit" not in patch["review"] and "page_limit_rewrites" not in patch
+    assert "page_limit" not in patch["review"]
     assert patch["review"]["must_flag_hits"] == []
 
 
@@ -555,14 +531,14 @@ def test_a_draft_that_cannot_be_measured_is_not_forced(tmp_path: Path, monkeypat
 
 @pytest.mark.parametrize("panel", [False, True])
 @pytest.mark.parametrize("topic", [SIR_TOPIC, "Extinction times in a stochastic SIR model"])
+@pytest.mark.parametrize("pages", [4, 5])
 def test_an_over_page_limit_hit_the_reviewer_writes_is_dropped(
-    tmp_path: Path, monkeypatch, panel: bool, topic: str,
+    tmp_path: Path, monkeypatch, panel: bool, topic: str, pages: int,
 ) -> None:
-    """Only the measured page count forces the hit. A reviewer's own
-    ``over_page_limit`` never moves the shortening counter, so kept, it would
-    send the paper back to be rewritten on every review, without end."""
+    """The page count forces nothing, whatever the reviewer writes: a kept ``over_page_limit`` would send the paper back
+    to be rewritten for a length the quest does not hold itself to."""
     eng = _engine(tmp_path, topic=topic, panel=panel)
-    _measured(monkeypatch, 4)  # within the limit, when there is one
+    _measured(monkeypatch, pages)
 
     async def flagging(prompt, *, node=None):  # noqa: ANN001, ARG001
         if node == "review_moderator":
@@ -577,66 +553,6 @@ def test_an_over_page_limit_hit_the_reviewer_writes_is_dropped(
     assert patch["review"]["must_flag_hits"] == []
     assert "page_limit_rewrites" not in patch and "iteration" not in patch
     assert eng._route_after_review({"review": patch["review"], "iteration": 0}) == "done"  # type: ignore[arg-type]
-
-
-@pytest.mark.parametrize("panel", [False, True])
-def test_a_measured_overrun_replaces_the_reviewers_own_page_hit(tmp_path: Path, monkeypatch, panel: bool) -> None:
-    eng = _engine(tmp_path, panel=panel)
-    _measured(monkeypatch, 5)
-
-    async def flagging(prompt, *, node=None):  # noqa: ANN001, ARG001
-        if node == "review_moderator":
-            return json.dumps({"rationale": "all accept"})
-        return json.dumps({
-            "verdict": "accept", "score": 4, "suggestions": [], "must_flag_hits": ["over_page_limit"],
-        })
-
-    eng._chat = flagging  # type: ignore[assignment,method-assign]
-    patch = _review(eng, tmp_path)
-    assert patch["review"]["must_flag_hits"] == [_page_limit_hit(5, 4, 250)]
-    assert patch["page_limit_rewrites"] == 1
-
-
-def test_only_page_limit_hits() -> None:
-    hit = _page_limit_hit(5, 4, 100)
-    assert _only_page_limit_hits([hit]) and _only_page_limit_hits([hit, hit])
-    assert not _only_page_limit_hits([]) and not _only_page_limit_hits([hit, "unsupported_claim"])
-    assert _hits_need_only_a_rewrite([hit]) and _hits_need_only_a_rewrite([hit, "figure_caption: x"])
-
-
-def test_the_route_bypasses_the_iteration_budget_only_within_the_shortening_cap(tmp_path: Path) -> None:
-    eng = _engine(tmp_path, max_iterations=0)
-    review = {"verdict": "accept", "must_flag_hits": [_page_limit_hit(5, 4, 100)]}
-    assert eng._route_after_review({"review": review, "iteration": 0, "page_limit_rewrites": 2}) == "rewrite"  # type: ignore[arg-type]
-    assert eng._route_after_review({"review": review, "iteration": 0, "page_limit_rewrites": 3}) == "done"  # type: ignore[arg-type]
-
-
-def test_the_graph_shortens_the_paper_after_the_iterations_are_spent(tmp_path: Path) -> None:
-    eng = _engine(tmp_path, max_iterations=2)
-    visits: list[str] = []
-    reviews = iter([
-        {"review": {"verdict": "accept", "must_flag_hits": [_page_limit_hit(5, 4, 250)]},
-         "page_limit_rewrites": 1},
-        {"review": {"verdict": "accept", "must_flag_hits": []}},
-    ])
-
-    def node(name: str, patch: Any = None) -> Any:
-        async def run(state: dict[str, Any]) -> dict[str, Any]:
-            visits.append(name)
-            return patch() if patch else {}
-        return run
-
-    for name in ("design", "implement_outline", "implement", "execute", "analyze", "write", "claim_check"):
-        setattr(eng, f"_node_{name}", node(name))
-    eng._node_review = node("review", lambda: next(reviews))  # type: ignore[method-assign]
-    eng._route_after_evidence_gate = lambda state: "write"  # type: ignore[method-assign]
-    graph = eng._build_graph().compile(checkpointer=MemorySaver())
-    config = {"configurable": {"thread_id": "shorten"}}
-    graph.update_state(config, {"topic": SIR_TOPIC, "iteration": 2}, as_node="evidence_gate")
-    asyncio.run(graph.ainvoke(None, config))
-    assert visits == ["write", "claim_check", "review", "write", "claim_check", "review"]
-    values = graph.get_state(config).values
-    assert values["iteration"] == 2 and values["page_limit_rewrites"] == 1
 
 
 # --- measuring a draft -----------------------------------------------------------
@@ -737,7 +653,7 @@ def test_a_draft_latex_cannot_typeset_is_counted_on_the_browser_render_and_says_
 
 
 @pytest.mark.slow
-def test_a_real_render_forces_a_long_draft_and_passes_a_short_one(tmp_path: Path) -> None:
+def test_a_real_render_records_a_long_draft_and_passes_a_short_one(tmp_path: Path) -> None:
     from generation._pandoc import find_pandoc
     from generation._pdf_engine import find_pdf_engine
 
@@ -747,12 +663,12 @@ def test_a_real_render_forces_a_long_draft_and_passes_a_short_one(tmp_path: Path
     paper = tmp_path / "paper" / "paper.md"
     filler = " ".join(f"Sentence {k} reports one more result of the outbreak study." for k in range(260))
     paper.write_text(f"# A Long Draft\n\n## Abstract\n\nShort.\n\n## Results\n\n{filler}\n", encoding="utf-8")
-    hits, record = asyncio.run(eng._page_limit_review({}, paper))  # type: ignore[arg-type]
+    record = asyncio.run(eng._page_limit_review({}, paper))  # type: ignore[arg-type]
     assert record is not None and record["pages"] > 2, record
-    assert len(hits) == 1 and hits[0].startswith("over_page_limit: the rendered PDF is")
+    assert json.loads((tmp_path / ".fi" / "page_limit.json").read_text())["final"] is True
     paper.write_text("# A Short Draft\n\n## Abstract\n\nShort.\n\n## Results\n\nOne result.\n", encoding="utf-8")
-    hits, record = asyncio.run(eng._page_limit_review({}, paper))  # type: ignore[arg-type]
-    assert hits == [] and record == {"pages": 1, "limit": 2, "rewrites": 0}
+    record = asyncio.run(eng._page_limit_review({}, paper))  # type: ignore[arg-type]
+    assert record == {"pages": 1, "limit": 2}
     assert (tmp_path / ".fi" / "page_check" / "paper.pdf").is_file()
     assert not (tmp_path / "paper.pdf").exists() and not (tmp_path / "paper_pdf_source.md").exists()
 
@@ -798,14 +714,3 @@ def test_with_a_limit_the_writer_gets_a_word_budget(tmp_path: Path) -> None:
     assert "default to **journal-length**." + _page_limit_note(4, 3) + "\n\n## Never narrate" in prompt
     planned = _write_prompt(_engine(tmp_path), {"design": {"figures_planned": ["a.png", "b.png"]}})
     assert _page_limit_note(4, 2) in planned
-
-
-def test_the_writer_is_told_the_pages_the_limit_and_the_words_to_cut() -> None:
-    hit = _page_limit_hit(5, 4, 250)
-    text = _format_review_for_writer({"review": {"verdict": "accept", "score": 5, "must_flag_hits": [hit]}})  # type: ignore[typeddict-item]
-    assert text.splitlines() == [
-        "Verdict: accept (score 5)",
-        "Must fix:",
-        "  - over_page_limit: the rendered PDF is 5 pages; the limit is 4. Cut about 250 words, "
-        "keep every figure and all numbers; shorten background and discussion first",
-    ]

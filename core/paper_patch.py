@@ -28,9 +28,8 @@ import re
 from dataclasses import dataclass
 
 # The must-fix hits that name one passage of the paper, and what each names.
-# ``over_page_limit`` (the whole paper must be shorter) and ``citations_unchecked``
-# (nothing was located at all) are not here: they are answered by writing the paper
-# again.
+# ``citations_unchecked`` (nothing was located at all) is not here: it is answered by
+# writing the paper again.
 PATCHABLE_HITS = {
     "unsupported_claim": "claim",
     # A typed number, or a result key FI could not fill (core/typed_numbers.py, core/paper_facts.py). Only when the hit quotes
@@ -39,7 +38,6 @@ PATCHABLE_HITS = {
     "mislabelled_statistic": "statistic",
 }
 _NOT_A_PASSAGE = {
-    "over_page_limit": "the draft is over the page limit, which needs the whole paper shortened",
     "citations_unchecked": "the claim check did not run, so no passage was named",
 }
 
