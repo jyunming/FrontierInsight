@@ -1,0 +1,82 @@
+"""The repair of a static fault reads its reply the way the repair of a crashed script does: ``functions`` and ``code``."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from pathlib import Path
+from types import SimpleNamespace
+
+from core import static_checks as sc
+from core import undefined_names as un
+from core.engine import Engine
+
+OLD = "def simulate(n):\n    return n * SCALE\n\n\nif __name__ == '__main__':\n    print(simulate(3))\n"
+
+
+class _Prompt:
+    def substitute(self, **kw: object) -> str:
+        return "repair"
+
+
+class _Host(sc.StaticChecksMixin):
+    _script_from_reply = Engine._script_from_reply
+
+    def __init__(self, root: Path, reply: str) -> None:
+        self.quest_root = root
+        self.fi_dir = root / ".fi"
+        self._prompts = {"execute_reflect": _Prompt()}
+        self._log = logging.getLogger("test_static_repair_reply")
+        self._reply = reply
+
+    def _topic_block(self) -> str:
+        return ""
+
+    def _code_design_block(self, state: object) -> str:
+        return ""
+
+    async def _chat(self, prompt: str, node: str = "") -> str:
+        return self._reply
+
+    def _package_snapshot(self) -> dict:
+        return {}
+
+    async def _simulation_kept_or_back(self, *a: object, **k: object) -> bool:
+        return False
+
+    async def _keep_unrun_try(self, *a: object, **k: object) -> None:
+        return None
+
+
+def _run(tmp_path: Path, reply: dict | str) -> tuple[bool, str]:
+    (tmp_path / "code").mkdir()
+    (tmp_path / "code" / "sim.py").write_text(OLD, encoding="utf-8")
+    host = _Host(tmp_path, reply if isinstance(reply, str) else json.dumps(reply))
+    found = un.problems(host._static_files())
+    assert len(found) == 1
+    ok = asyncio.run(host._repair_static({}, un, found, None, {}))
+    return ok, (tmp_path / "code" / "sim.py").read_text(encoding="utf-8")
+
+
+def test_a_reply_with_the_fix_in_functions_is_put_into_the_script(tmp_path: Path) -> None:
+    fixed = "def simulate(n):\n    SCALE = 2.0\n    return n * SCALE\n"
+    ok, text = _run(tmp_path, {"functions": fixed, "code": ""})
+    assert ok and "SCALE = 2.0" in text and "__main__" in text
+    assert un.problems({"sim.py": text}) == []
+
+
+def test_a_reply_with_the_fix_in_code_is_still_taken(tmp_path: Path) -> None:
+    ok, text = _run(tmp_path, {"functions": "", "code": "SCALE = 2.0\n" + OLD})
+    assert ok and text.startswith("SCALE = 2.0")
+
+
+def test_a_reply_that_fixes_nothing_is_refused(tmp_path: Path) -> None:
+    same = "def simulate(n):\n    return n * SCALE\n"
+    ok, text = _run(tmp_path, {"functions": same, "code": ""})
+    assert not ok and text == OLD
+
+
+def test_an_empty_reply_is_refused(tmp_path: Path) -> None:
+    ok, text = _run(tmp_path, {"functions": "", "code": ""})
+    assert not ok and text == OLD

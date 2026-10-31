@@ -189,6 +189,11 @@ class StaticChecksMixin:
         if _e._strip_outer_fence(text).lstrip().startswith("{"):
             parsed = _e._parse_json_lenient(text, node="execute_reflect") or {}
         new_code = parsed.get("code")
+        functions = parsed.get("functions")
+        if isinstance(functions, str) and functions.strip():
+            # The reply format of the repair prompt: functions to put in, code only for a module-level change. The same
+            # splice as a repair of a crashed script (Engine._script_from_reply) turns it into the script.
+            new_code, _why = self._script_from_reply("execute", code, new_code, parsed, script)  # type: ignore[attr-defined]
         if not (isinstance(new_code, str) and new_code.strip()):
             new_code, _deps = _e._parse_implement_response(text)
         try:
