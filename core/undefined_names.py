@@ -82,14 +82,44 @@ def _unbound_uses(top: symtable.SymbolTable, defined: set[str], script: str, lin
     return out
 
 
+_GLOBALS_MUTATORS = frozenset({"update", "setdefault", "pop", "popitem", "clear", "__setitem__", "__delitem__"})
+# Built-ins that only read the mapping they are given: ``globals()`` passed to one of them sets nothing.
+_GLOBALS_READERS = frozenset({"sorted", "list", "tuple", "set", "frozenset", "dict", "len", "iter", "print", "repr", "str",
+                              "any", "all", "enumerate", "reversed"})
+
+
+def _is_globals_call(node: ast.AST) -> bool:
+    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "globals"
+            and not node.args and not node.keywords)
+
+
 def _run_time_names(tree: ast.AST) -> tuple[set[str], bool]:
-    """The names a script sets on a module at run time (``module.NAME = ...``, ``setattr(module, "NAME", ...)``), and
-    whether it does so in a way the text does not show (a ``setattr`` with a computed name, ``exec``, ``globals()``): then
-    the names that script uses may be set by itself and are not all in the text."""
+    """The names a script sets on a module at run time (``module.NAME = ...``, ``setattr(module, "NAME", ...)``,
+    ``globals()["NAME"] = ...``), and whether it does so in a way the text does not show (a ``setattr`` with a computed
+    name, ``exec``, a write to ``globals()`` under a computed key or through a method such as ``update``): then the names
+    that script uses may be set by itself and are not all in the text. A read of ``globals()`` (``sorted(globals())``,
+    ``globals().get(...)``) sets nothing and does not make the script opaque."""
     names: set[str] = set()
     opaque = False
+    parent = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
     for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store):
+        if _is_globals_call(node):
+            # Only a use whose effect the text shows is a read: anything else (``g = globals()``, ``helper(globals())``)
+            # may write names the text does not show.
+            up = parent.get(node)
+            if isinstance(up, ast.Subscript) and up.value is node:
+                key = up.slice
+                if isinstance(up.ctx, ast.Store) and isinstance(key, ast.Constant) and isinstance(key.value, str):
+                    names.add(key.value)
+                elif not isinstance(up.ctx, ast.Load):  # a computed key, or a ``del``: the name is not in the text
+                    opaque = True
+            elif isinstance(up, ast.Attribute) and up.value is node:
+                if up.attr in _GLOBALS_MUTATORS:  # ``globals().update(...)`` sets names the text may not show
+                    opaque = True
+            elif not (isinstance(up, ast.Call) and node in up.args and isinstance(up.func, ast.Name)
+                      and up.func.id in _GLOBALS_READERS):
+                opaque = True
+        elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store):
             names.add(node.attr)
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             if node.func.id == "setattr" and len(node.args) >= 2:
@@ -97,7 +127,7 @@ def _run_time_names(tree: ast.AST) -> tuple[set[str], bool]:
                     names.add(node.args[1].value)
                 else:
                     opaque = True
-            elif node.func.id in ("exec", "globals"):
+            elif node.func.id == "exec":
                 opaque = True
     return names, opaque
 
@@ -123,8 +153,8 @@ def problems(files: dict[str, str], protocol: dict[str, Any] | None = None,
     """The names used but never defined, in the scripts of ``files`` (``{script name: text}``). A name counts as defined when
     any script of the folder binds it at module level, or sets it on a module at run time (scripts import one another, and
     a package's constants are often set by the script that calls it). A script that does not parse, that holds a
-    ``from ... import *``, or that sets names at run time in a way the text does not show (``globals()``, ``exec``, a
-    computed ``setattr``) is not judged itself: a name it uses may be one it sets. The other scripts are judged as usual,
+    ``from ... import *``, or that sets names at run time in a way the text does not show (a write to ``globals()``
+    under a computed key or through ``update``, ``exec``, a computed ``setattr``) is not judged itself: a name it uses may be one it sets. The other scripts are judged as usual,
     since a name they use reaches them only by an import, which binds it."""
     read = {script: r for script, text in files.items() if (r := _read(script, text)) is not None}
     defined: set[str] = set()
