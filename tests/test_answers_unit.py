@@ -94,3 +94,17 @@ def test_the_paper_says_not_answered_with_both_units_and_prints_no_number(tmp_pa
     assert "- peak algae: not answered (the result the plan names is in a pure number (no unit), the question asks for m)" in text
     assert "algae_peak" not in text
     assert "{{v:bloom:mean_ci @ nutrient=1, temp=10}}" in text  # the known positive is unchanged
+
+
+def test_a_replacement_whose_unit_is_not_stated_does_not_replace_the_plans_map() -> None:
+    p = {**PROTOCOL, "metrics": [*PROTOCOL["metrics"], {"id": "depth", "kind": "mean", "estimand": "pond depth", "unit": "one pond run"}],
+         "topic_map": [{"item": "peak algae", "by": "metric:bloom"}]}
+    design = {**DESIGN, "protocol": p}
+    asked = {"Q1": {"name": "peak algae", "stated": "report the peak", "by": "metric:bloom"}}
+    answer = {"Q1": {"unit": "m", "plan_unit": "1", "by": "metric:depth"}}
+    row = cp._apply_answers(p, design, answer, asked)["topic_map"][0]
+    assert row["by"] == "metric:bloom" and "the question asks for m" in row["unit_conflict"]
+    answer["Q1"]["by_unit"] = "m"
+    row = cp._apply_answers(p, design, answer, asked)["topic_map"][0]
+    assert row["by"] == "metric:depth" and "unit_conflict" not in row
+

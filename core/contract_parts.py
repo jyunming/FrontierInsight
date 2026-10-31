@@ -379,6 +379,11 @@ def _differ(asked_in: Any, got: Any) -> tuple[str, str] | None:
     return str(asked_in).strip() or "1", str(got).strip() or "1"
 
 
+def _same_unit(asked_in: Any, got: Any) -> bool:
+    """Whether both units are given and are the same unit."""
+    return asked_in is not None and got is not None and _unit_key(asked_in) == _unit_key(got)
+
+
 def unit_gaps(row: Any, planned: str, design: dict[str, Any]) -> dict[str, tuple[str, str] | None]:
     """The units of one answer, ``{"chosen": ..., "planned": ...}``, each ``(the unit the question asks in, the unit of the
     result)`` when both are given and differ, else ``None``. ``chosen``: the result the answer names (``by``); ``planned``: the
@@ -490,8 +495,10 @@ def _apply_answers(p: dict[str, Any], design: dict[str, Any], answer: dict[str, 
                 m["unit_conflict"] = conflicts[ident]
             elif gone and by == "none":
                 m["unit_conflict"] = _unit_reason(gone, True)  # the plan's result is in another unit than the question
-            elif gone:
+            elif gone and _same_unit(row.get("unit"), _unit_of(design, by, row.get("by_unit"))):
                 m["by"] = by  # ... and the answer names a result in the question's unit
+            elif gone:  # ... and the result the answer names has no unit stated or declared: neither is taken
+                m["unit_conflict"] = _unit_reason(gone, True)
         if not mine and by and by != "none":
             rows.append({"item": ident, "by": by, "at": at, **({"statistic": stat} if stat else {}),
                          **({"unit_conflict": conflicts[ident]} if ident in (conflicts or {}) else {})})
