@@ -185,9 +185,10 @@ def test_fdr_check_agreement_and_what_each_check_confirms() -> None:
     checked = {q["metric"]: q.get("checked", {}) for q in computed["quantities"]}
     assert checked["power_bonferroni"]["state"] == "agrees"  # by its measure: bonferroni_power_exact, passed
     assert checked["power_bonferroni"]["check"] == "bonferroni_power_exact"
-    assert checked["any_false_discovery_uncorrected"]["state"] == "agrees"  # through checked_by (another measure name)
-    assert checked["any_false_discovery_bh"]["state"] == "agrees"
-    assert checked["fdr_bh"]["state"] == "not_confirmed"  # bh_fdr_upper_bound failed: it confirms nothing
+    # checked_by names a check that measures another name (`p_any_false_uncorrected`): it says nothing about this value
+    assert checked["any_false_discovery_uncorrected"]["state"] == "unchecked"
+    assert checked["any_false_discovery_bh"]["state"] == "unchecked"
+    assert checked["fdr_bh"]["state"] == "unchecked"  # bh_fdr_upper_bound measures a formula of fdr_bh, not fdr_bh itself
     assert checked["any_false_discovery_bonferroni"]["state"] == "unchecked"
     # at plan time (no verdicts yet) the same reference agrees with the expected value of the check
     assert rv.cross_check(protocol, next(m for m in protocol["metrics"] if m["id"] == "power_bonferroni"))["state"] == "agrees"
@@ -663,3 +664,28 @@ def test_a_reference_on_a_constant_gives_a_reference_at_every_setting_and_an_or_
     assert rv.problems(either) == []
     rows = [r for r in rv.compute(either, rv.grid_settings(either))["by_setting"] if r["metric"] == "level"]
     assert [r["reference"] for r in rows] == [None, 0.5]
+
+
+def _named_check_plan(measure: str, expected: float) -> dict[str, Any]:
+    """A neutral plan: one metric `err` whose reference (value `err_exact`, formula `x**2 - 1`) names the check `chk`."""
+    return {"grid": {"x": [1.0, 2.0, 3.0]},
+            "metrics": [{"id": "err", "reference": {"value": "err_exact", "formula": "x**2 - 1", "checked_by": "chk"}}],
+            "oracles": [{"name": "chk", "measure": measure, "case": {"x": 2.0}, "expected": expected, "tolerance": 1e-6}]}
+
+
+def test_a_named_check_of_another_quantity_neither_confirms_nor_drops_the_reference() -> None:
+    protocol = _named_check_plan("ratio", 4.0)  # the formula gives 3.0 at x = 2; the check measures `ratio`, not `err_exact`
+    assert rv.problems(protocol) == []
+    checked = rv.cross_check(protocol, protocol["metrics"][0])
+    assert checked["state"] == "unchecked" and "`ratio`, not this value" in checked["why"]
+    computed = rv.compute(protocol, rv.grid_settings(protocol))
+    assert computed["quantities"][0]["status"] == "computed"
+    assert [r["reference"] for r in computed["by_setting"]] == [0.0, 3.0, 8.0]
+
+
+@pytest.mark.parametrize("measure", ["err_exact", "err"])
+def test_a_named_check_of_this_value_still_drops_a_disagreeing_reference(measure: str) -> None:
+    protocol = _named_check_plan(measure, 4.0)
+    problems = rv.problems(protocol)
+    assert len(problems) == 1 and "disagrees with a known-answer check" in problems[0] and "'chk'" in problems[0]
+    assert rv.cross_check(_named_check_plan(measure, 3.0), protocol["metrics"][0])["state"] == "agrees"
