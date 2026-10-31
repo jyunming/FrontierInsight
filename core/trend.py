@@ -7,7 +7,9 @@ trial record, so FI computes it (no model is called) and the writer places the k
 * ``{{trend:<result> over <axis> @ <other>=each|<value>, ...}}`` -- the direction and size of the change of ``<result>``
   from the first to the last value of ``<axis>``, for each setting of the other axes (:func:`trend_text`). Add
   ``| order`` (the axis counts steps or points: finer is larger) or ``| order_size`` (the axis is a step size: finer is
-  smaller) for the pairwise orders of an error series.
+  smaller) for the pairwise orders of an error series. Which way the axis runs is a fact of the record, so FI reads it from
+  where the mean error is lower (:func:`_finer_is_larger`); the writer's word is used for "coarsest" and "finest" only when
+  the record agrees, and otherwise the pairs are named by where the error is lower, never by a guess.
 * ``{{comparison:<result> <form> vs <other result> <form> @ <axis>=each, ...}}`` -- the ratio of one result's form to
   another's inside each setting (:func:`comparison_text`), forms ``mean``, ``sd`` and ``rms`` (a spread against a spread,
   a mean against a mean).
@@ -243,41 +245,67 @@ def _direction(rec: _pv.Records, metric: str, axis: str, points: list[_Point]) -
     return ch.word, lead + detail + _shape(rec, axis, points), ratio
 
 
-def _orders(points: list[_Point], size: bool) -> list[tuple[Any, Any, float | None]]:
-    """``(coarser x, finer x, order)`` for each neighbouring pair, coarse to fine; the order from the means,
-    ``ln(e1 / e2) / |ln(x2 / x1)|``, ``None`` where it is not defined (a zero or negative error, a non-positive step)."""
-    ordered = sorted(points, key=lambda p: float(p.x), reverse=size)
+def _finer_is_larger(points: list[_Point]) -> bool | None:
+    """Which end of the axis the error falls toward, read from the record: ``True`` when the mean error is lower at the largest
+    value of the axis than at the smallest, ``False`` for the reverse, ``None`` when the two are equal or undefined. A writer's
+    ``| order`` / ``| order_size`` is a guess at the same fact (is the axis a count of steps or a step size?) and is only used
+    for the words coarse and fine when this record agrees with it."""
+    if len(points) < 2:
+        return None
+    ordered = sorted(points, key=lambda p: float(p.x))
+    lo, hi = ordered[0].mean, ordered[-1].mean
+    if not (math.isfinite(lo) and math.isfinite(hi)) or lo == hi:
+        return None
+    return hi < lo
+
+
+def _orders(points: list[_Point], finer_larger: bool | None) -> list[tuple[Any, Any, float | None]]:
+    """``(first x, second x, order)`` for each neighbouring pair, from the end where the error is higher to the end where it is
+    lower (``finer_larger`` False: from the largest x down); the order from the means, ``ln(e1 / e2) / |ln(x2 / x1)|``, ``None``
+    where it is not defined (a zero or negative error, a non-positive x). With ``finer_larger`` ``None`` the pairs run from the
+    smallest x up and the order is its absolute value, since the record does not say which way the error falls."""
+    ordered = sorted(points, key=lambda p: float(p.x), reverse=finer_larger is False)
     out = []
     for a, b in zip(ordered, ordered[1:]):
         ok = a.mean > 0 and b.mean > 0 and float(a.x) > 0 and float(b.x) > 0 and float(a.x) != float(b.x)
-        out.append((a.x, b.x, math.log(a.mean / b.mean) / abs(math.log(float(b.x) / float(a.x))) if ok else None))
+        value = math.log(a.mean / b.mean) / abs(math.log(float(b.x) / float(a.x))) if ok else None
+        out.append((a.x, b.x, abs(value) if value is not None and finer_larger is None else value))
     return out
 
 
-def _order_words(rec: _pv.Records, axis: str, pairs: list[tuple[Any, Any, float | None]]) -> tuple[str, list[float]]:
+def _order_words(rec: _pv.Records, axis: str, pairs: list[tuple[Any, Any, float | None]], labels: str) -> tuple[str, list[float]]:
+    """``labels``: ``coarse`` (the writer's reading of the axis agrees with the record: coarsest and finest pair), ``lower``
+    (the pairs are named by where the error is lower, no claim what the axis counts) or ``unknown`` (the record does not say
+    which way the error falls: absolute orders and no verdict)."""
     name = rec.short(axis)
     defined = [(a, b, p) for a, b, p in pairs if p is not None]
     if not defined:
-        return "no order is defined (an error is 0 or a step is not positive)", []
+        return "no order is defined (an error is 0 or a value of the setting is not positive)", []
+    first, last = ((" (the coarsest pair)", " (the finest pair)") if labels == "coarse"
+                   else (" (the pair at the high-error end)", " (the pair at the low-error end)") if labels == "lower"
+                   else ("", ""))
 
     def where(i: int) -> str:
         a, b, _p = pairs[i]
-        end = " (the coarsest pair)" if i == 0 else " (the finest pair)" if i == len(pairs) - 1 else ""
+        end = first if i == 0 else last if i == len(pairs) - 1 else ""
         return f"{name} = {a} to {b}{end}"
 
     values = [p for _a, _b, p in defined]
     low = min(range(len(pairs)), key=lambda i: math.inf if pairs[i][2] is None else pairs[i][2])
     high = max(range(len(pairs)), key=lambda i: -math.inf if pairs[i][2] is None else pairs[i][2])
+    note = ("" if labels != "unknown" else " (absolute values: the mean error is the same at both ends, so the record does "
+            "not say which way it falls)")
     if len(pairs) <= MAX_ORDERS_LISTED:
         shown = "; ".join(f"{name} = {a} to {b}: " + ("not defined" if p is None else _pv.sig(p, 3)) for a, b, p in pairs)
-        text = f"orders between neighbouring values, from the mean at each: {shown}"
+        text = f"orders between neighbouring values, from the mean at each: {shown}{note}"
     else:
         text = (f"orders between {len(pairs)} neighbouring pairs, from the mean at each: {_pv.sig(min(values), 3)} to "
                 f"{_pv.sig(max(values), 3)}; lowest {_pv.sig(pairs[low][2], 3)} at {where(low)}, highest "
-                f"{_pv.sig(pairs[high][2], 3)} at {where(high)}")
-    not_falling = [i for i, (_a, _b, p) in enumerate(pairs) if p is not None and p <= 0]
-    if not_falling:
-        text += "; the error does not fall at " + ", ".join(where(i) for i in not_falling[:4])
+                f"{_pv.sig(pairs[high][2], 3)} at {where(high)}{note}")
+    if labels != "unknown":
+        not_falling = [i for i, (_a, _b, p) in enumerate(pairs) if p is not None and p <= 0]
+        if not_falling:
+            text += "; the error does not fall at " + ", ".join(where(i) for i in not_falling[:4])
     return text, values
 
 
@@ -319,7 +347,10 @@ def trend_text(rec: _pv.Records, body: str) -> tuple[str, list[float], dict[str,
                 skipped.append(scope)
                 continue
             if order:
-                text, nums = _order_words(rec, axis, _orders(points, order == ORDER_SIZE))
+                measured = _finer_is_larger(points)
+                said = None if order == "" else (order == ORDER)
+                labels = "unknown" if measured is None else "coarse" if measured == said else "lower"
+                text, nums = _order_words(rec, axis, _orders(points, measured), labels)
                 results.append((scope, "", text, min(nums) if nums else None))
                 order_numbers += [min(nums), max(nums)] if nums else []
             else:

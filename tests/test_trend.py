@@ -170,6 +170,23 @@ def test_an_axis_of_step_sizes_is_read_the_other_way_round() -> None:
     assert text.count(": 3.00") == 3 and "(the coarsest pair)" not in text
 
 
+def test_a_count_of_steps_the_writer_called_a_step_size_is_still_read_by_where_the_error_falls() -> None:
+    sizes = [2 ** k for k in range(2, 13)]
+    errs = [1e-2 * 16.0 ** -k for k in range(11)]
+    value = _say(_errors(errs, sizes), "error over steps @ | order_size")
+    assert value.numbers == [pytest.approx(4.0), pytest.approx(4.0)]
+    assert "-4" not in value.text and "does not fall" not in value.text
+    assert "coarsest" not in value.text and "finest" not in value.text
+    assert "the pair at the high-error end" in value.text
+
+
+def test_when_the_mean_error_is_the_same_at_both_ends_the_orders_are_absolute_and_no_verdict_is_given() -> None:
+    sizes = [2 ** k for k in range(2, 13)]
+    errs = [1e-3, 5e-4, 2e-4, 5e-4, 1e-3, 5e-4, 2e-4, 5e-4, 1e-3, 5e-4, 1e-3]
+    text = _say(_errors(errs, sizes), "error over steps @ | order").text
+    assert "does not fall" not in text and "coarsest" not in text and "the record does not say" in text
+
+
 def test_an_order_with_an_error_of_zero_is_not_defined() -> None:
     text = _say(_errors([1e-3, 2.5e-4, 0.0, 0.0], [16, 32, 64, 128]), "error over steps @ | order").text
     assert "steps = 16 to 32: 2.00" in text and "steps = 32 to 64: not defined" in text
