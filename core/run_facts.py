@@ -879,12 +879,47 @@ def seed_verdict(quest_root: Path | str) -> dict[str, Any]:
         # What else the seed is handed to does not matter once it seeds a generator: the other generators the trial
         # could draw from are the two checks above.
         out.update(verdict=REACHES, fi_seed_reaches=True)
+    elif (ledger_says := seed_reaches_by_ledger(root)) is True:
+        # The code trace could not follow the seed, but FI's own record of the trials answers it: trials given different
+        # seeds returned different outcomes, so the seed reaches the simulation. The trace's doubt is kept, not shown.
+        out.update(verdict=REACHES, fi_seed_reaches=True, decided_by="ledger",
+                   code_trace=("FI cannot follow the seed past " + "; ".join(dict.fromkeys(flow.unsure))) if flow.unsure
+                   else "FI could not tell from the code what run_trial does with its seed")
     elif flow.unsure or not param:
         where = "; ".join(dict.fromkeys(flow.unsure)) if flow.unsure else "run_trial, which has no seed parameter FI can find"
         out.update(verdict=UNKNOWN, why=f"FI cannot follow the seed past {where}")
     else:
         out.update(verdict=UNKNOWN, why="FI could not tell from the code what run_trial does with its seed")
     return out
+
+
+def seed_reaches_by_ledger(quest_root: Path | str) -> bool | None:
+    """Whether FI's own trial ledger (``raw/ledger.jsonl``) answers that the seed FI gives each trial reaches the simulation:
+    ``True`` when, in some setting, trials that ran with different seeds returned different outcomes (``values_sha256``);
+    ``None`` when the ledger does not show it (no ledger, one seed, or every trial returned the same outcome), so the
+    code decides. It never answers ``False``: identical outcomes may be a result that does not depend on chance, which
+    the code's reading and the frame's ``drew`` record say better."""
+    try:
+        handle = (Path(quest_root) / "raw" / "ledger.jsonl").open(encoding="utf-8")
+    except OSError:
+        return None
+    seeds: dict[str, set[int]] = {}
+    outcomes: dict[str, set[str]] = {}
+    with handle:
+        for line in handle:
+            if '"trial"' not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if (not isinstance(row, dict) or row.get("event") != "trial" or row.get("status") != "ok"
+                    or not isinstance(row.get("cell"), str) or isinstance(row.get("seed"), bool)
+                    or not isinstance(row.get("seed"), int) or not row.get("values_sha256")):
+                continue
+            seeds.setdefault(row["cell"], set()).add(row["seed"])
+            outcomes.setdefault(row["cell"], set()).add(str(row["values_sha256"]))
+    return True if any(len(seeds[c]) > 1 and len(outcomes[c]) > 1 for c in seeds) else None
 
 
 def record_seed(quest_root: Path | str) -> dict[str, Any]:
