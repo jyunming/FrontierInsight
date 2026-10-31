@@ -313,6 +313,11 @@ CHECKS: tuple[Check, ...] = (
           'ideate', 'model_judge', 'repair',
           'Pairwise model comparisons of all ideas pick the winner that replaces the first choice '
           '(engine.ideate_tournament); inconclusive falls back to the earliest idea.'),
+    Check('literature_novelty_evidence', 'core.novelty', 'check',
+          'plan', 'own_record', 'strip',
+          "The model's note on whether the retrieved sources already answer the question is checked against FI's "
+          'own list of sources: an evidence item whose source is not in the list, or whose quoted sentence is not in '
+          "that source's text, is removed and counted in run.log. The note is only disclosed (knowledge.novelty_check)."),
     Check('scope_cards_literature_refs', 'core.scope_cards', 'normalize',
           'plan', 'own_record', 'strip',
           "Study cards from the model are checked against FI's own list of retrieved sources; a card's "

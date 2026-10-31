@@ -33,7 +33,7 @@ STAGE_NAME = {"plan": "Plan", "checks": "Checks", "design": "Design", "code": "C
 #: Which stage a model call belongs to (the step name, without any ``.suffix``).
 _NODE_STAGE = {
     "clarify": "plan", "ideate": "plan", "ideate_query": "plan", "ideate_reflect": "plan", "ideate_tournament": "plan",
-    "literature_query": "plan", "literature_foundational": "plan", "literature_screen": "plan", "source_router": "plan",
+    "literature_query": "plan", "literature_foundational": "plan", "literature_screen": "plan", "literature_novelty": "plan", "source_router": "plan",
     "select_skills": "plan", "plan": "plan", "plan_revise": "plan", "plan_criteria": "plan", "plan_contract": "plan",
     "oracle_review": "checks", "implement_oracle": "checks", "oracle_recompute": "checks",
     "design": "design", "design_self_critique": "design", "design_review": "design",
