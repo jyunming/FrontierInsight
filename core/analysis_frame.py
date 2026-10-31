@@ -645,6 +645,15 @@ def only_figures_failed(record: dict[str, Any], returncode: int) -> bool:
     return any(isinstance(o, dict) and o.get("status") in ("failed", "refused") for o in record.get("figures") or [])
 
 
+def run_produced(returncode: int, printed_result: bool, record: dict[str, Any], analysis_on: bool) -> bool:
+    """Whether a run of the study produced its results: it exited 0, or it exited 1 only because a figure of the study's failed
+    (FI wrote the analysis, the run printed its RESULT line, and its record says only figures failed). The one rule behind the
+    run's ``results_produced`` and the clean rerun of ``code/``, so the two cannot disagree about the same run."""
+    if returncode == 0:
+        return True
+    return bool(returncode == 1 and analysis_on and printed_result and only_figures_failed(record, returncode))
+
+
 def study_values(record: dict[str, Any]) -> dict[str, float]:
     """The study-wide numbers FI's record of the run holds (a quantity worked out once for the study, by its formula or its
     function): ``{id: value}``, finite values only."""
