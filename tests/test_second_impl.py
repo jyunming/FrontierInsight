@@ -1068,3 +1068,76 @@ def test_a_run_that_ran_out_of_time_is_not_run_again(tmp_path):
     e = asyncio.run(s.run_all())["functions"]["activation_energy"]
     assert calls == [5.0], calls
     assert e["status"] == "unconfirmed" and "did not finish in time" in e["why"]
+
+
+# --- what is compared is what both versions return ----------------------------------------------------------------------
+
+
+def _script_rows(tmp_path, main_src: str, ref_src: str, inputs: list) -> list:
+    pkg = tmp_path / "code" / "pkg"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "model.py").write_text(main_src, encoding="utf-8")
+    (tmp_path / "ref.py").write_text(ref_src, encoding="utf-8")
+    (tmp_path / "inputs.json").write_text(json.dumps(inputs), encoding="utf-8")
+    script = si.compare_script(code_dir="code", module="pkg.model", name="level", reference="ref.py", inputs="inputs.json",
+                               uses=[])
+    p = subprocess.run([sys.executable, "-B", "-c", script], cwd=tmp_path, capture_output=True, text=True, timeout=120)
+    return si.parse_output(p.stdout)["rows"]
+
+
+MAIN_FOUR = ("def level(x):\n    if x <= 0:\n        return (float('nan'), float('nan'), False, 'x<=0')\n"
+             "    return (2.0 * x, 0.5 * x, True, '')\n")
+REF_TWO = "def level(x):\n    if x <= 0:\n        return (float('nan'), 0.25)\n    return (2.0 * x, 0.5 * x)\n"
+
+
+def test_extra_trailing_items_are_named_not_a_disagreement(tmp_path):
+    inputs = [{"x": 1.0}, {"x": 2.0}]
+    rows = _script_rows(tmp_path, MAIN_FOUR, REF_TWO, inputs)
+    v = si.judge_rows(rows, inputs, si.REL)
+    assert v["status"] == si.AGREE and not v["disagreements"] and v["compared"] == 2
+    assert "only the first version returns items 3 and 4; not checked by the other version" in v["shape_notes"][0]
+
+
+def test_a_shared_item_that_differs_is_still_a_disagreement_beside_extra_items(tmp_path):
+    ref = "def level(x):\n    return (2.5 * x, 0.5 * x)\n"
+    inputs = [{"x": 1.0}]
+    rows = _script_rows(tmp_path, MAIN_FOUR, ref, inputs)
+    v = si.judge_rows(rows, inputs, si.REL)
+    assert v["status"] == si.DISAGREE and v["disagreements"][0]["kind"] == "value"
+
+
+def test_a_series_of_another_length_is_still_a_disagreement(tmp_path):
+    main = "def level(x):\n    return [x, x, x]\n"
+    ref = "def level(x):\n    return [x, x]\n"
+    inputs = [{"x": 1.0}]
+    v = si.judge_rows(_script_rows(tmp_path, main, ref, inputs), inputs, si.REL)
+    assert v["status"] == si.DISAGREE
+
+
+def test_a_reported_failure_on_an_input_the_study_did_not_produce_is_not_a_disagreement(tmp_path):
+    inputs = [{"x": 1.0}, {"x": -1.0}]
+    rows = _script_rows(tmp_path, MAIN_FOUR, REF_TWO, inputs)
+    v = si.judge_rows(rows, inputs, si.REL, study_inputs=[{"x": 1.0}])
+    assert v["status"] == si.AGREE and not v["disagreements"] and v["compared"] == 1
+    assert v["failing_inputs"][0]["inputs"] == {"x": -1.0}
+    # the same input, when a trial of the study did give it, stays a disagreement on that input
+    kept = si.judge_rows(rows, inputs, si.REL, study_inputs=[{"x": 1.0}, {"x": -1.0}])
+    assert kept["status"] == si.DISAGREE and kept["disagreements"][0]["inputs"] == {"x": -1.0}
+    # and with no record of what the study gave, it also stays one
+    assert si.judge_rows(rows, inputs, si.REL)["status"] == si.DISAGREE
+
+
+def test_a_bare_nan_against_a_number_is_not_taken_for_a_reported_failure(tmp_path):
+    main = "def level(x):\n    return float('nan') if x < 0 else x\n"
+    ref = "def level(x):\n    return 0.0 if x < 0 else x\n"
+    inputs = [{"x": 1.0}, {"x": -1.0}]
+    v = si.judge_rows(_script_rows(tmp_path, main, ref, inputs), inputs, si.REL, study_inputs=[{"x": 1.0}])
+    assert v["status"] == si.DISAGREE
+
+
+def test_a_real_difference_beside_a_reported_failure_is_still_a_disagreement(tmp_path):
+    ref = "def level(x):\n    return (float('nan'), 0.25) if x <= 0 else (3.0 * x, 0.5 * x)\n"
+    inputs = [{"x": 1.0}, {"x": -1.0}]
+    v = si.judge_rows(_script_rows(tmp_path, MAIN_FOUR, ref, inputs), inputs, si.REL, study_inputs=[{"x": 1.0}])
+    assert v["status"] == si.DISAGREE and v["disagreements"][0]["inputs"] == {"x": 1.0}
