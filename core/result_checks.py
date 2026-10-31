@@ -94,6 +94,10 @@ class Found:
     quantity: str = ""  # the plan's name of the quantity the keys belong to, when the check is about one
 
 
+#: ``Found.kind`` of a declared result that equals an earlier declared one in every trial.
+COPY_KIND = "copy_of_result"
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -188,6 +192,23 @@ class ResultChecksMixin:
                "left out: do not report them.")
         ids = sorted({w["id"] for w in wrong})
         return [Found("coverage_recount", ANALYSIS, directive, note, say, keys=ids, quantity=ids[0])]
+
+    def _result_copy_findings(self) -> list[Found]:
+        """A declared result that is the same number as an earlier declared one in every trial (FI's own comparison of the
+        trials, :func:`core.flat_output.copied_results`): it is not reported as a quantity of its own, whatever the plan says it
+        is (a half-width or an error written as a copy of the value). It is reported once, under the first. Nothing is repaired
+        or stopped: the numbers stand under the first name, and the paper says the second was the same number."""
+        from . import flat_output as _flat
+
+        found: list[Found] = []
+        for copy, (first, trials) in sorted(_flat.read_copies(self.quest_root).items()):  # type: ignore[attr-defined]
+            note = f"`{copy}` was the same number as `{first}` in every one of {trials} trials"
+            say = (f"{note[0].upper()}{note[1:]}, so it is not a second result: FI took `{copy}` out of the results. Do NOT "
+                   f"report it as a quantity of its own or under its declared meaning; its numbers are those of `{first}`. "
+                   f"Say plainly, in the limitations, that the study returned `{copy}` as a copy of `{first}` and reports it "
+                   "once.")
+            found.append(Found(COPY_KIND, ANALYSIS, "", note, say, keys=[copy], quantity=copy))
+        return found
 
     def _saved_figures(self) -> list[str]:
         from . import engine as _e
@@ -370,8 +391,8 @@ class ResultChecksMixin:
         # A run that drew none of the planned figures still has its results: they stand, and the writer is told there is
         # no figure. Sent back like a failed run, a repair that gave up would have thrown the results away and stopped the
         # quest with nothing to write up (a false stop).
-        standing = [*self._code_reader_findings(result_json), *self._figure_gap_findings(set()),
-                    *self._no_figures_standing(state)]
+        standing = [*self._code_reader_findings(result_json), *self._result_copy_findings(),
+                    *self._figure_gap_findings(set()), *self._no_figures_standing(state)]
         if not found and not standing:
             if self._result_kept:
                 self._write_kept(record_path)
@@ -407,7 +428,7 @@ class ResultChecksMixin:
             self._clear_stale_figures()  # type: ignore[attr-defined]
             return result, to_fix
         if found:  # a figure that is taken out has no gap to report
-            standing = [*self._code_reader_findings(result_json),
+            standing = [*self._code_reader_findings(result_json), *self._result_copy_findings(),
                         *self._figure_gap_findings({n for f in found for n in f.figures}), *self._no_figures_standing(state)]
         self._leave_out_results([*found, *standing], record_path, result_json)
         return result, failed_script

@@ -15,8 +15,10 @@ another quantity does move is left alone, and so is a single setting.
 from __future__ import annotations
 
 import ast
+import json
 import math
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterable
 
 from . import in_run as _in_run
@@ -355,14 +357,16 @@ MIN_IDENTICAL_TRIALS = 3
 
 
 def identical_results(cells: list[Any], *, declared: Iterable[str] | None = None,
-                      ignore: Iterable[str] = ()) -> list[tuple[str, str, int]]:
+                      ignore: Iterable[str] = (), whole_only: bool = False) -> list[tuple[str, str, int]]:
     """Pairs of results the run returned that are the same number in every trial of every setting, while each of them
     differs from one trial to another: ``[(a, b, trials)]``. Two estimators (or two arms of a comparison) that agree
     trial by trial are not two findings: either the second is the first computed again, or they are equal by construction
     (an identity of the model), and a paper must not present "no difference between them" as something the study found.
     ``declared``: only the plan's declared results are compared (the whole run when none of them was returned);
     ``ignore``: names that are no result (a timing). A result that is the same in every trial is not paired: that is a
-    constant, which :func:`observed_flat_sweep` judges."""
+    constant, which :func:`observed_flat_sweep` judges. ``whole_only``: only results the run returns as a whole (not one
+    value of a result returned per setting, per arm or per level), the earlier-declared of a pair first: the pairs where
+    the second declared result is a copy of the first, which :func:`copied_results` names."""
     left_out = {str(n) for n in ignore}
     if declared:
         left_out |= declared_only(declared, returned_names(cells))
@@ -376,13 +380,16 @@ def identical_results(cells: list[Any], *, declared: Iterable[str] | None = None
             if r.get("status") != "ok":
                 continue
             row = {str(name) if not at else f"{at}: {name}": float(v) for at, name, v in _in_run.flat("", r.get("values") or {})
-                   if _is_number(v) and str(name) not in left_out}
+                   if _is_number(v) and str(name) not in left_out and not (whole_only and at)}
             for n, v in row.items():
                 columns.setdefault(n, []).append(v)
             count = (count or 0) + 1
     if not count:
         return []
     names = sorted(n for n, v in columns.items() if len(v) == count and _varies(v))
+    if whole_only and declared:
+        order = {str(d): i for i, d in enumerate(declared)}
+        names.sort(key=lambda n: order.get(n, len(order)))  # stable: the plan's order, so the second declared is the copy
     out: list[tuple[str, str, int]] = []
     taken: set[str] = set()
     for i, a in enumerate(names):
@@ -393,6 +400,42 @@ def identical_results(cells: list[Any], *, declared: Iterable[str] | None = None
                 out.append((a, b, count))
                 taken.add(b)
     return out
+
+
+def copied_results(pairs: list[tuple[str, str, int]]) -> dict[str, tuple[str, int]]:
+    """``{the later declared result: (the earlier declared one it equals, trials)}`` from
+    :func:`identical_results` run with ``whole_only``. The copy is the same number as the first in every trial, so it is
+    not a second finding: it is reported once, under the first, and never as a quantity of its own (whatever its declared
+    meaning, FI's record holds the first's numbers under both names)."""
+    return {b: (a, n) for a, b, n in pairs}
+
+
+#: FI's record of the declared results that are copies of another, for the results check (core/result_checks.py).
+COPIES_RECORD = Path(".fi") / "result_copies.json"
+
+
+def write_copies(quest_root: Path | str, copies: dict[str, tuple[str, int]]) -> None:
+    """Keep ``copies`` (:func:`copied_results`) in the quest's record; none removes an earlier run's record."""
+    path = Path(quest_root) / COPIES_RECORD
+    if not copies:
+        path.unlink(missing_ok=True)
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({c: {"same_as": a, "trials": n} for c, (a, n) in copies.items()}, indent=1),
+                        encoding="utf-8")
+    except OSError:
+        pass
+
+
+def read_copies(quest_root: Path | str) -> dict[str, tuple[str, int]]:
+    """:func:`write_copies`'s record; ``{}`` without one."""
+    try:
+        data = json.loads((Path(quest_root) / COPIES_RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {str(c): (str(v["same_as"]), int(v.get("trials") or 0)) for c, v in data.items()
+            if isinstance(v, dict) and v.get("same_as")} if isinstance(data, dict) else {}
 
 
 def identical_results_note(pairs: list[tuple[str, str, int]]) -> str:

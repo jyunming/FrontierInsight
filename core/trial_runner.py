@@ -1866,6 +1866,7 @@ class TrialsRunner:
         from . import flat_output as _flat
 
         self.no_difference = None
+        _flat.write_copies(self.quest_root, {})  # an earlier run's copies are not this run's
         # A number that differs when the same setting is called again (a timing) is no result of any setting: left out
         # of both judgements, so it cannot hide a setting that changed nothing else.
         unsteady = await unsteady_names(
@@ -1898,6 +1899,10 @@ class TrialsRunner:
             twins = _flat.identical_results(run.cells, declared=declared, ignore=unsteady)
             if twins:
                 notes.append(_flat.identical_results_note(twins))
+                # A declared result that is the same number as an earlier declared one in every trial is reported once, under
+                # the first (core/result_checks.py): the copy is no second quantity, whatever the plan says it is.
+                _flat.write_copies(self.quest_root, _flat.copied_results(_flat.identical_results(
+                    run.cells, declared=declared, ignore=unsteady, whole_only=True)))
             if notes:
                 self.no_difference = " ".join(notes)
                 if self.log is not None:
