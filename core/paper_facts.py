@@ -1332,6 +1332,13 @@ def answers_text(quest_root: Path | str) -> str:
         name = " ".join(str(item.get("name") or "").split())
         if not name:
             continue
+        # An entry whose result is in another unit than the question asks in (``unit_conflict``, written by the answers
+        # part after its asks) is never filled with that result's number.
+        conflict = next((str(m["unit_conflict"]) for m in _topic_req.map_entries(req, plan, "quantities", item)
+                         if m.get("unit_conflict")), "")
+        if conflict:
+            lines.append(f"- {name}: not answered ({conflict})")
+            continue
         mapped = _topic_req.mapping_of(req, plan, "quantities", item)
         # The plan's explicit map to a metric that exists is the fact; the line names that metric, so a wrong map is
         # disclosed, never hidden. Whether the metric's name resembles the quantity's is not asked here.

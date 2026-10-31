@@ -197,7 +197,8 @@ def _figure_holds(design: dict[str, Any]) -> tuple[list[str], list[str], list[st
     them: the analysis's table serves nothing else), the settings with more than one value, which a figure may use as ``x`` or
     ``series``, and the settings that have one."""
     c = _contract.from_design({**design, "protocol": {**design["protocol"], "form": "contract"}}, fi_analysis=True)
-    lines = [f"- {r.id}: {_short(r.estimand or r.label, 160) or 'a reported number'}" for r in c.results]
+    lines = [f"- {r.id}: {_short(r.estimand or r.label, 160) or 'a reported number'}"
+             + (f" [{r.unit}]" if r.unit else "") for r in c.results]
     lines += [f"- {d.id}: {_short(d.label, 160) or 'worked out from the reported numbers'}" for d in c.derived]
     values = {**c.settings.compared, **c.settings.in_each_run}
     return (lines, sorted(k for k in c.settings.varied() if len(values.get(k, ())) > 1),
@@ -327,8 +328,11 @@ STATISTICS = ("value", "bias", "sd")
 def _answers_prompt(templates: dict[str, string.Template], design: dict[str, Any], asked: dict[str, dict[str, str]],
                     problems: list[str], last: str) -> str:
     lines, _settings, _single = _figure_holds(design)
+    declared = {str(m.get("id")): str(m["physical_unit"]).strip() or "1" for m in design["protocol"].get("metrics") or []
+                if isinstance(m, dict) and m.get("physical_unit") is not None}
+    lines = [f"{x} [{declared[x[2:].split(':')[0]]}]" if x[2:].split(":")[0] in declared else x for x in lines]
     quantities = "\n".join(f"- {i}: {q['name']}" + (f" (the topic: {_short(q['stated'], 200)})" if q["stated"] else "")
-                           + (f" [the plan maps it to `{q['by']}`]" if q["by"] else "") for i, q in asked.items())
+                           + (f" [the plan maps it to `{q['by']}`]" if q.get("by") else "") for i, q in asked.items())
     settings = "\n".join(f"- {a}: {json.dumps(v)}" for a, v in _topic_req.view(design, design["protocol"])["axes"].items())
     eqs = ", ".join(sorted(_contract._model_equation_ids(design["protocol"]))) or "(none)"
     return templates["plan_answers"].substitute(
@@ -353,7 +357,54 @@ def _refined_by(protocol: dict[str, Any], planned: str, answered: str) -> str:
     return planned
 
 
-def _check_answers(value: Any, asked: dict[str, dict[str, str]], design: dict[str, Any]) -> list[str]:
+def _unit_key(text: Any) -> str:
+    """A unit as written, compared by its letters only: case and spaces do not matter, and a pure number (``""``) is ``1``."""
+    return "".join(str(text if text is not None else "").lower().split()) or "1"
+
+
+def _unit_of(design: dict[str, Any], result: str, stated: Any) -> Any:
+    """The unit of the result ``metric:<id>`` / ``equation:<id>``: the plan's own ``physical_unit`` for it where the plan
+    declares one, else what the answer states (``None`` when neither)."""
+    head, _s, name = result.partition(":")
+    declared = next((m.get("physical_unit") for m in design["protocol"].get("metrics") or []
+                     if isinstance(m, dict) and head.strip() == "metric" and str(m.get("id")) == name.strip()
+                     and m.get("physical_unit") is not None), None)
+    return declared if declared is not None else stated
+
+
+def _differ(asked_in: Any, got: Any) -> tuple[str, str] | None:
+    """``(asked_in, got)`` as written when both are given and are not the same unit, else ``None``."""
+    if asked_in is None or got is None or _unit_key(asked_in) == _unit_key(got):
+        return None
+    return str(asked_in).strip() or "1", str(got).strip() or "1"
+
+
+def unit_gaps(row: Any, planned: str, design: dict[str, Any]) -> dict[str, tuple[str, str] | None]:
+    """The units of one answer, ``{"chosen": ..., "planned": ...}``, each ``(the unit the question asks in, the unit of the
+    result)`` when both are given and differ, else ``None``. ``chosen``: the result the answer names (``by``); ``planned``: the
+    result the plan's own map names (``planned``, ``""`` for none). The question's unit is the answer's ``unit``; a result's
+    is the plan's ``physical_unit`` for it where declared, else the answer's ``by_unit`` / ``plan_unit``."""
+    out: dict[str, tuple[str, str] | None] = {"chosen": None, "planned": None}
+    if not isinstance(row, dict):
+        return out
+    by = str(row.get("by") or "").strip()
+    if by.partition(":")[0].strip() in ("metric", "equation"):
+        out["chosen"] = _differ(row.get("unit"), _unit_of(design, by, row.get("by_unit")))
+    if planned.partition(":")[0].strip() in ("metric", "equation"):
+        stated = row.get("plan_unit")
+        if stated is None and by in ("", planned):
+            stated = row.get("by_unit")
+        out["planned"] = _differ(row.get("unit"), _unit_of(design, planned, stated))
+    return out
+
+
+def _unit_reason(units: tuple[str, str], planned: bool) -> str:
+    """Why a quantity is not answered: the result named for it is in another unit than the question asks in."""
+    return f"the result {'the plan names' if planned else 'named for it'} is in {units[1]}, the question asks for {units[0]}"
+
+
+def _check_answers(value: Any, asked: dict[str, dict[str, str]], design: dict[str, Any],
+                   conflicts: dict[str, str] | None = None) -> list[str]:
     """Why ``value``, the answer for ``answers``, cannot be used; empty when it can. Each quantity asked about gets ``by`` (a
     result or derived id as ``metric:<id>``, an equation as ``equation:<id>``, or ``none``; not needed where the plan already
     maps it) and, only if the topic asks for it at one setting, ``at``: a setting of the study with one of its values."""
@@ -371,16 +422,30 @@ def _check_answers(value: Any, asked: dict[str, dict[str, str]], design: dict[st
             continue
         by = str(row.get("by") or "").strip()
         head, _s, name = by.partition(":")
-        if not q["by"] and by != "none" and not ((head == "metric" and name in ids) or (head == "equation" and name in eqs)):
+        if not q.get("by") and by != "none" and not ((head == "metric" and name in ids) or (head == "equation" and name in eqs)):
             out.append(f"`{ident}`: `by` must be `metric:<id>` with an id of {', '.join(ids)}, `equation:<id>` with an id of "
                        f"{', '.join(sorted(eqs)) or '(none)'}, or `none`")
+        # The unit the question asks in against the unit of the result it will be answered by: the plan's map when the answer
+        # keeps it, else the result the answer names. A change of the plan's map is taken only in _apply_answers, when the
+        # plan's own result is in another unit.
+        planned = q.get("by", "")
+        kept = bool(planned) and by in ("", planned)
+        gaps = unit_gaps(row, planned, design)
+        units = gaps["planned"] if kept else gaps["chosen"] if not planned or gaps["planned"] else None
+        if units:
+            result = planned if kept else by
+            if conflicts is None:
+                out.append(f"`{ident}`: the question asks for a quantity in `{units[0]}`, but `{result}` is in `{units[1]}`; "
+                           f"answer a result that is in `{units[0]}`, or `none`")
+            else:
+                conflicts[ident] = _unit_reason(units, kept)
         stat = row.get("statistic")
         if stat not in (None, "") and stat not in STATISTICS:
             out.append(f"`{ident}`: `statistic` must be one of {', '.join(STATISTICS)}")
         elif stat == "bias":
             from . import paper_values as _values
 
-            target = (q["by"] or by).partition(":")[2].strip()
+            target = (q.get("by") or by).partition(":")[2].strip()
             if _values.known_truth(design["protocol"], target) is None:
                 out.append(f"`{ident}`: `bias` needs a result with a known true value that the plan fixes; `{target or by}` has none "
                            "(answer `value` or `sd`, or another result)")
@@ -399,7 +464,7 @@ def _check_answers(value: Any, asked: dict[str, dict[str, str]], design: dict[st
 
 
 def _apply_answers(p: dict[str, Any], design: dict[str, Any], answer: dict[str, Any],
-                   asked: dict[str, dict[str, str]]) -> dict[str, Any]:
+                   asked: dict[str, dict[str, str]], conflicts: dict[str, str] | None = None) -> dict[str, Any]:
     """The plan's ``topic_map`` with an ``at`` on the entry of each quantity asked about (the plan's own ``by`` is kept), and
     an entry added where the plan had none and the model named a result; ``none`` adds nothing."""
     rows = [dict(m) for m in p.get("topic_map") or [] if isinstance(m, dict)]
@@ -410,6 +475,8 @@ def _apply_answers(p: dict[str, Any], design: dict[str, Any], answer: dict[str, 
         mine = [m for m in rows if _topic_req._name_key(m.get("item")) in keys]
         by = str(row.get("by") or "").strip()
         stat = row.get("statistic") if row.get("statistic") in ("bias", "sd") else None
+        planned = q.get("by", "")
+        gone = unit_gaps(row, planned, design)["planned"] if planned and by not in ("", planned) else None
         for m in mine:
             m["at"] = at
             if stat:
@@ -417,8 +484,16 @@ def _apply_answers(p: dict[str, Any], design: dict[str, Any], answer: dict[str, 
             else:
                 m.pop("statistic", None)  # the answer is the value: an earlier entry's bias or sd no longer holds
             m["by"] = _refined_by(design["protocol"], str(m.get("by") or ""), by)
+            m.pop("unit_conflict", None)
+            if ident in (conflicts or {}):
+                m["unit_conflict"] = conflicts[ident]
+            elif gone and by == "none":
+                m["unit_conflict"] = _unit_reason(gone, True)  # the plan's result is in another unit than the question
+            elif gone:
+                m["by"] = by  # ... and the answer names a result in the question's unit
         if not mine and by and by != "none":
-            rows.append({"item": ident, "by": by, "at": at, **({"statistic": stat} if stat else {})})
+            rows.append({"item": ident, "by": by, "at": at, **({"statistic": stat} if stat else {}),
+                         **({"unit_conflict": conflicts[ident]} if ident in (conflicts or {}) else {})})
     return {**p, "topic_map": rows}
 
 
@@ -594,9 +669,11 @@ async def ask_parts(design: Any, ask: Callable[[str], Awaitable[str]], parse: Ca
                                 "figures": "figures", "answers": "answers"}[part])
                 if part == "comparisons":
                     value = {"comparisons": value if value is not None else [], "_derived": derived_ids}
+                conflicts: dict[str, str] = {}  # answers: units that still differ at the last ask (not answered, with why)
                 problems = (_check_formulas(value, faults, current) if part == "formulas" else
                             _check_figures(value, faults, current) if part == "figures" else
-                            _check_answers(value, faults, current) if part == "answers" else
+                            _check_answers(value, faults, current, conflicts if record["asks"] >= MAX_ASKS else None)
+                            if part == "answers" else
                             _contract.check_part(part, value, current))
                 if problems:
                     continue
@@ -608,7 +685,7 @@ async def ask_parts(design: Any, ask: Callable[[str], Awaitable[str]], parse: Ca
                 elif part == "figures":
                     kept, checked = _apply_figures(p, current, value, faults), None
                 elif part == "answers":
-                    kept, checked = _apply_answers(p, current, value, faults), None
+                    kept, checked = _apply_answers(p, current, value, faults, conflicts), None
                 elif part == "names":
                     kept, checked = _apply_names(p, value)
                 else:

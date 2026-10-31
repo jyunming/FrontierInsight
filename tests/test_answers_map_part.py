@@ -87,6 +87,23 @@ def test_an_answer_naming_what_the_study_does_not_have_is_asked_again_with_the_r
     assert not out.parts["answers"]["valid"] and "topic_map" not in out.design["protocol"]
 
 
+def test_an_answer_in_a_different_physical_unit_is_refused_even_when_the_model_calls_it_the_right_unit() -> None:
+    """The plan's declared physical unit, not the answer's self-described ``by_unit``, decides what a result means."""
+    protocol = {**PROTOCOL, "metrics": [
+        {"id": "length", "kind": "mean", "estimand": "pond length", "unit": "one pond run", "physical_unit": "m"},
+        {"id": "relative_error", "kind": "mean", "estimand": "relative length error", "unit": "one pond run", "physical_unit": "1"},
+    ]}
+    design = {**DESIGN, "protocol": protocol}
+    asked = {"Q1": {"name": "pond length", "stated": "report pond length in metres", "by": ""}}
+    bad = {"answers": {"Q1": {"unit": "m", "by": "metric:relative_error", "by_unit": "m"}}}
+    good = {"answers": {"Q1": {"unit": "m", "by": "metric:length", "by_unit": "m"}}}
+    out, seen = _ask(design, [bad, good], asked)
+    assert out.parts["answers"]["valid"] and out.parts["answers"]["asks"] == 2
+    assert "metric:relative_error" in seen[1] and "question asks for a quantity in `m`" in seen[1]
+    assert "- length: pond length [m]" in seen[0]
+    assert {"item": "Q1", "by": "metric:length", "at": {}} in out.design["protocol"]["topic_map"]
+
+
 KNOWN = {**PROTOCOL, "constants": {"peak_true": 30.0},
          "metrics": [{"id": "algae_peak", "kind": "mean", "estimand": "peak algae count", "unit": "one pond run",
                       "known_value": {"true_value": "peak_true", "estimate": "algae_peak", "standard_error": "peak_se", "level": 0.95}},
