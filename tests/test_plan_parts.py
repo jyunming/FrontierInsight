@@ -223,7 +223,10 @@ def test_the_real_long_plan_takes_a_small_answer_and_its_topic_gaps_shrink(tmp_p
     assert gaps_before, "the real plan lacked what the topic asked for"
     pitches = next(f for f in req["factors"] if f["name"] == "pitches")  # a numeric setting: its value is held fixed in the search
     scan = {"pitches": [float(v) for v in pitches["range"]]}
-    answer = {"protocol": {"optimisation": {"grid": scan, "fixed": {"pitches": scan["pitches"][0]}}}}
+    # The plan's own topic map is what places a topic factor on a setting (no setting is picked by comparing words).
+    item = tr._item_id("factors", req["factors"].index(pitches))
+    answer = {"protocol": {"optimisation": {"grid": scan, "fixed": {"pitches": scan["pitches"][0]}},
+                           "topic_map": [{"item": item, "by": "setting:pitches"}]}}
     calls: list[str] = []
 
     async def chat(messages: list[dict[str, str]], **kw: Any) -> str:
