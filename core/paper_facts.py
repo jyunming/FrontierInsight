@@ -935,14 +935,12 @@ def _seed_text(root: Path) -> str:
         return (f"a separate seed for each trial, derived from base seed {base}" if base is not None
                 else "a separate seed for each trial, passed to the simulation by FI")
     if state == _run_facts.UNKNOWN:
-        # One run for each setting and a plan that says in its own seed policy how it seeds: that is said, in the plan's words,
-        # instead of a seed FI passed and the code may not use.
-        policy = " ".join(str((plan_protocol(root) or {}).get("seed_policy") or "").split())
-        if policy and _trial_counts(root)[0] == "1":
-            return f"one run for each setting; the plan's seed policy reads: \"{policy[:300].rstrip(' .')}\""
         base, _trial = _disclosure.recorded_seeds(root)
         said = f"a seed passed to each trial, derived from base seed {base}" if base is not None else "a seed passed to each trial"
-        return f"{said} (FI could not tell from the code whether the simulation uses it)"
+        # The plan's own words on how it seeds follow the recorded seed, which is never replaced by them.
+        policy = " ".join(str((plan_protocol(root) or {}).get("seed_policy") or "").split())[:300].rstrip(" .")
+        return (f"{said} (FI could not tell from the code whether the simulation uses it)"
+                + (f"; the plan's seed policy reads: \"{policy}\"" if policy else ""))
     driving = [d for d in verdict.get("driving_seeds") or [] if isinstance(d, dict)]
     if state == _run_facts.PARTLY:
         # Both are true and both drive the trials: FI's per-trial seed and a number typed into the code.
