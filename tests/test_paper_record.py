@@ -307,7 +307,7 @@ def test_every_required_item_has_an_id_and_one_plain_sentence(tmp_path: Path) ->
                                           "study's plan that varies it.")
     assert items["left_out"].id == "left-out-coverage-ea" and items["not_computed"].id == "not-computed-ea-sd-se"
     assert items["precision"].id == "precision-coverage-lna"
-    assert items["second_version"].id == "second-version-fit-k" and "fit_k" in items["second_version"].sentence
+    assert items["second_version"].id == "second-version-fit-k" and "fit_k" not in items["second_version"].sentence
     assert items["untested"].sentence == "Equation E3 was not tested at all before the run."
     kinds = [i.kind for i in paper_facts.required_items(root)]
     assert kinds.count("not_done") == 2, "a plain sentence of an older record is an item too"

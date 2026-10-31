@@ -125,3 +125,55 @@ def test_other_templates_have_no_fi_in_them(tmp_path: Path) -> None:
     for item in paper_facts.required_items(root):
         _clean(item.sentence)
     assert paper_facts.fewer_runs_text({"from": {"runs_per_setting": 100}, "to": {"runs_per_setting": 10}}).count("FI") == 0
+
+
+METRICS = [{"id": "ratio_x", "label": "Estimated ratio $r$"}, {"id": "gap_y", "label": "Estimated gap"},
+           {"id": "other_z", "label": "Another quantity"}]
+DISAGREE = {"status": "unresolved", "limitation":
+            "Two independently written versions of step S3 (solve it) gave different results (given the inputs a = [1, 2], "
+            "version 1 returned [3.0] and version 2 returned [4.0]); the number depends on which is right.",
+            "disagreements": [{"inputs": {"a": [1, 2]}, "main": "[3.0]", "other": "[4.0]"}]}
+
+
+def _second_version(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dependence: dict) -> str:
+    root = _root(tmp_path)
+    _write(root, ".fi/second_impl.json", {"functions": {"solve_it": DISAGREE}})
+    monkeypatch.setattr("core.second_impl.read_dependence", lambda r: dependence)
+    monkeypatch.setattr(paper_facts, "_plan_metrics", lambda r: METRICS)
+    [item] = _of(root, paper_facts.SECOND_VERSION)
+    for word in ("S3", "solve_it", "[3.0]", "version 1", "version 2", "a = "):
+        assert word not in item.sentence, (word, item.sentence)
+    _clean(item.sentence)
+    return item.sentence
+
+
+def test_a_disagreement_that_the_results_depend_on_names_them_by_the_papers_labels(tmp_path: Path,
+                                                                                  monkeypatch: pytest.MonkeyPatch) -> None:
+    said = _second_version(tmp_path, monkeypatch, {"solve_it": {"status": "feeds", "headline_moved": ["ratio_x", "gap_y"]}})
+    assert '"Estimated ratio $r$" and "Estimated gap" depend on that calculation, so they are not independently confirmed' in said
+    (tmp_path / "b").mkdir()
+    one = _second_version(tmp_path / "b", monkeypatch, {"solve_it": {"status": "feeds", "headline_moved": ["ratio_x"]}})
+    assert '"Estimated ratio $r$" depends on that calculation, so it is not independently confirmed' in one
+
+
+def test_a_disagreement_the_results_do_not_use_is_not_in_the_paper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _root(tmp_path)
+    _write(root, ".fi/second_impl.json", {"functions": {"solve_it": DISAGREE}})
+    monkeypatch.setattr("core.second_impl.read_dependence", lambda r: {"solve_it": {"status": "does_not_feed"}})
+    assert _of(root, paper_facts.SECOND_VERSION) == []
+    assert "S3" in (root / ".fi/second_impl.json").read_text(encoding="utf-8"), "the record still holds it for QUALITY.md"
+
+
+def test_a_disagreement_with_no_dependence_record_does_not_claim_either(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    said = _second_version(tmp_path, monkeypatch, {})
+    assert said.endswith("and the run did not show whether the reported results depend on it.")
+
+
+def test_the_precision_metric_is_named_by_the_plans_label(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _root(tmp_path)
+    monkeypatch.setattr(paper_facts, "_plan_metrics", lambda r: METRICS)
+    reduced = {"from": {"runs_per_setting": 100}, "to": {"runs_per_setting": 50}, "limit": "topic",
+               "precision": {"metric": "gap_y", "half_width": 0.1, "target": 0.05}}
+    _write(root, ".fi/run_estimate.json", {"reduced": reduced})
+    [item] = _of(root, paper_facts.FEWER_RUNS)
+    assert "the 95% interval of Estimated gap is about" in item.sentence and "gap_y" not in item.sentence

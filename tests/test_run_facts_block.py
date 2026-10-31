@@ -39,10 +39,10 @@ def test_settings_run_at_the_same_time_read_as_whole_sentences(tmp_path: Path) -
     root = _quest(tmp_path, AT_ONCE)
     text = pf.run_facts_text(root, topic=TOPIC)
     assert text == (
-        "**Run.** FI ran the 680 settings 16 at a time; the run took 611.1 s (about 10.2 minutes). The trials' own "
-        "computation adds up to 31.3 s. FI did not time the delivered code, which runs the settings one after another: "
-        "by FI's measurements such a run takes at least 31.3 s and at most 9,200.3 s (each setting's time while 16 ran at "
-        "once, added up). Whether it keeps to the topic's limit of 60 s is not shown.")
+        "**Run.** The 680 settings ran 16 at a time; the run took 611.1 s (about 10.2 minutes). The trials' own "
+        "computation adds up to 31.3 s. The delivered code runs the settings one after another and was not timed as a "
+        "whole; from the settings' own times such a run takes at least 31.3 s and at most 9,200.3 s (each setting's time "
+        "while 16 ran at once, added up). Whether it keeps to the topic's limit of 60 s is not shown.")
     assert "((" not in text and ") (" not in text, "no nested or stacked brackets"
 
 
@@ -116,8 +116,8 @@ def test_the_writers_own_place_is_kept_and_a_second_pass_adds_nothing(tmp_path: 
 def test_render_fills_the_block_between_markers_and_a_re_render_takes_the_records_as_they_are(tmp_path: Path) -> None:
     root = _quest(tmp_path, AT_ONCE)
     filled = pf.render(_at(PAPER, root), root, topic=TOPIC).text
-    assert "<!-- fi:fact-run_facts -->\n**Run.** FI ran the 680 settings" in filled
-    assert "FI ran the 680" not in pf.without_blocks(filled)
+    assert "<!-- fi:fact-run_facts -->\n**Run.** The 680 settings ran" in filled
+    assert "The 680 settings ran" not in pf.without_blocks(filled)
     assert "{{run_facts}}" in pf.to_placeholders(filled)
     _quest(tmp_path, {**AT_ONCE, "wall_s": 700.0})
     assert "the run took 700 s" in pf.render(filled, root, topic=TOPIC).text
@@ -151,7 +151,7 @@ def test_the_writer_is_told_about_the_paragraph_and_no_longer_about_required_pla
     text = pf.writer_section(root, topic=TOPIC)
     assert "Required" not in text and "{{seed}}" not in text and "{{run_time}}" not in text
     assert "Example (in the Methods)" not in text
-    assert "the run facts in the Methods" in text and "FI ran the 680 settings 16 at a time" in text
+    assert "the run facts in the Methods" in text and "The 680 settings ran 16 at a time" in text
     assert "Do not state these facts yourself" in text
     assert pf.writer_section(_quest(tmp_path / "none", None), topic="Compare two filters.") == ""
 
@@ -191,7 +191,7 @@ def test_singular_settings(tmp_path: Path) -> None:
     root = _quest(tmp_path, {"wall_s": 5.0, "trials": 3, "cells": 1, "trial_sum_s": 4.0, "at_once": 4,
                              "settings_s": 20.0}, settings=1, per=3)
     text = pf.run_facts_text(root, topic=TOPIC)
-    assert "The study ran 1 setting, 3 trials in each." in text and "FI ran the 1 setting 4 at a time" in text
+    assert "The study ran 1 setting, 3 trials in each." in text and "The 1 setting ran 4 at a time" in text
     assert "1 settings" not in text
 
 
@@ -214,7 +214,7 @@ def test_it_is_the_run_unless_the_delivered_code_was_just_described(tmp_path: Pa
     rows = [{"event": "trial", "cell": "a", "trial": 0, "seed": 1, "status": "ok", "duration_s": 100.0}]
     (root / "raw" / "ledger.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
     text = pf.run_facts_text(root, topic=TOPIC)  # only the trials' least time is known
-    assert "FI did not time the whole run." in text and text.endswith("The run goes over the topic's limit of 60 s.")
+    assert "The whole run was not timed." in text and text.endswith("The run goes over the topic's limit of 60 s.")
 
 
 def test_a_paper_resumed_straight_into_review_gets_the_run_paragraph(tmp_path: Path) -> None:

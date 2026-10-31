@@ -247,6 +247,55 @@ def _code_files_sentence(root: Path) -> str:
     return f"The code is kept in separate parts ({parts}), not in {wanted} the topic asked for"
 
 
+def _labelled_precision(root: Path, reduced: dict[str, Any]) -> dict[str, Any]:
+    """``reduced`` with the precision's metric named the way the paper names it: when the record holds the id of one of the
+    plan's metrics, the plan's label for it (the record keeps the id; a reader of the paper knows the label)."""
+    precision = reduced.get("precision")
+    if not isinstance(precision, dict):
+        return reduced
+    for m in _plan_metrics(root):
+        if str(m.get("id") or "") == str(precision.get("metric") or "") and _one(m.get("label")):
+            return {**reduced, "precision": {**precision, "metric": _one(m["label"])}}
+    return reduced
+
+
+def _listed_labels(labels: list[str], cap: int = 4) -> str:
+    shown = labels[:cap]
+    if len(labels) > cap:
+        shown.append(f"{len(labels) - cap} more")
+    return shown[0] if len(shown) == 1 else ", ".join(shown[:-1]) + " and " + shown[-1]
+
+
+def _second_not_used(root: Path, function: str) -> bool:
+    """Whether FI's dependence record shows the reported results do not use ``function``: such a disagreement changes how no
+    reported number reads, so it is in QUALITY.md only and not in the paper."""
+    from . import second_impl as _second
+
+    verdict = _second.read_dependence(root).get(function)
+    return isinstance(verdict, dict) and verdict.get("status") == _second.NOT_FEEDING
+
+
+def second_version_text(root: Path, function: str) -> str:
+    """The Limitations sentence for a key function whose two independently written versions still disagree, in the
+    paper's words: what the reported results owe to it, from FI's own dependence record (``core/second_impl.py::dependence``:
+    the results that changed when the function's result was changed, by the plan's labels), never the function's name, the
+    plan's step id or the inputs the versions were compared on (those are in QUALITY.md and ``.fi/second_impl.json``).
+    A function the record does not show as used says that."""
+    from . import second_impl as _second
+
+    verdict = _second.read_dependence(root).get(function)
+    verdict = verdict if isinstance(verdict, dict) else {}
+    lead = "Two independently written versions of one calculation in the code gave different results on a test input"
+    if verdict.get("status") == _second.FEEDS:
+        known = {str(m.get("id")): _one(m.get("label")) or str(m.get("id")) for m in _plan_metrics(root) if m.get("id")}
+        labels = [f'"{known[i]}"' for i in dict.fromkeys(str(x) for x in verdict.get("headline_moved") or []) if i in known]
+        behind = _listed_labels(labels) if labels else "the reported results"
+        return (f"{lead}, and the run did not settle which is right; {behind} "
+                f"{'depends' if len(labels) == 1 else 'depend'} on that calculation, so "
+                f"{'it is' if len(labels) == 1 else 'they are'} not independently confirmed")
+    return f"{lead}, and the run did not show whether the reported results depend on it"
+
+
 def required_items(quest_root: Path | str) -> list[Item]:
     """Every item the Limitations must place, from FI's records. A missing or unreadable record gives none."""
     root = Path(quest_root)
@@ -324,10 +373,8 @@ def required_items(quest_root: Path | str) -> list[Item]:
         from . import second_impl as _second
 
         for fname, entry in ((_second.load(root).get("functions") or {}).items()):
-            if isinstance(entry, dict) and entry.get("status") == _second.UNRESOLVED:
-                said = _one(entry.get("limitation")) or (f"Two independently written versions of `{fname}` gave different "
-                                                         "results; the number depends on which is right")
-                add(SECOND_VERSION, fname, _sentence(said))
+            if isinstance(entry, dict) and entry.get("status") == _second.UNRESOLVED and not _second_not_used(root, fname):
+                add(SECOND_VERSION, fname, _sentence(second_version_text(root, fname)))
     except Exception:  # noqa: BLE001 -- a record that cannot be read adds nothing
         pass
     # Equations not tested against a worked example before the run.
@@ -393,7 +440,7 @@ def required_items(quest_root: Path | str) -> list[Item]:
                 + (f"{late:,} trials were not run because the study's time limit ran out" if late else "")), key="all")
     estimate = _read(root, ".fi/run_estimate.json")
     reduced = estimate.get("reduced") if isinstance(estimate, dict) else None
-    if isinstance(reduced, dict) and (said := fewer_runs_text(reduced)):
+    if isinstance(reduced, dict) and (said := fewer_runs_text(_labelled_precision(root, reduced))):
         add(FEWER_RUNS, FEWER_RUNS_NAME, _sentence(f"The experiment ran {said}"), key="runs")
     if (cut_said := _disclosure.cut_short_text(root)):
         add(CUT_SHORT, CUT_SHORT_NAME, _sentence(cut_said), key="cut")
@@ -1061,8 +1108,8 @@ def facts(quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) ->
                      f"code does, the settings take {_run_facts.reader_words(reader, _plain)})")
         out["run_time"] = Fact("run_time", said)
     elif least is not None:
-        what = ("the settings run, the search and its check at finer settings; FI did not time the rest"
-                if _search_seconds(root) else "the trials alone; FI did not time the whole run")
+        what = ("the settings run, the search and its check at finer settings; the rest was not timed"
+                if _search_seconds(root) else "the trials alone; the whole run was not timed")
         out["run_time"] = Fact("run_time", f"at least {_plain(least)} ({what})")
     limit, met = _limit_and_met(root, topic, wall, least, reader_known)
     if limit is not None:
@@ -1119,7 +1166,7 @@ def _delivered_sentence(reader: dict[str, Any]) -> str:
         said = f"at most {plain(most)} (each setting's time {together}, added up)"
     else:  # the trials' own time is a true lower bound whatever the timing noise of the other
         said = f"at least {plain(least)}"
-    return f"FI did not time the delivered code, which runs the settings one after another: by FI's measurements such a run takes {said}."
+    return f"The delivered code runs the settings one after another and was not timed as a whole; from the settings' own times such a run takes {said}."
 
 
 def _run_time_sentences(root: Path, wall: float | None, least: float | None,
@@ -1132,8 +1179,8 @@ def _run_time_sentences(root: Path, wall: float | None, least: float | None,
             return []
         if _search_seconds(root):
             return [f"The settings run, the search and its check at finer settings took at least {_plain(least)}.",
-                    "FI did not time the rest."]
-        return [f"The trials alone took at least {_plain(least)}.", "FI did not time the whole run."]
+                    "The rest was not timed."]
+        return [f"The trials alone took at least {_plain(least)}.", "The whole run was not timed."]
     took = {"confirm": "the confirming run, whose results are reported, took",
             "explore": "the exploring run, whose results are reported, took"}.get(stage or "", "the run took")
     n = settings or _cells_run(root)
@@ -1141,13 +1188,13 @@ def _run_time_sentences(root: Path, wall: float | None, least: float | None,
     if reader is None:
         lead = f"{took[:1].upper()}{took[1:]} {_plain(wall)}."
     elif reader["at_once"] == 1:
-        lead = f"FI ran {sets} one at a time; {took} {_plain(wall)}."
+        lead = f"{sets[:1].upper()}{sets[1:]} ran one at a time; {took} {_plain(wall)}."
     elif reader["at_once"] is not None:
-        lead = f"FI ran {sets} {reader['at_once']} at a time; {took} {_plain(wall)}."
+        lead = f"{sets[:1].upper()}{sets[1:]} ran {reader['at_once']} at a time; {took} {_plain(wall)}."
     elif reader["overlap"]:
-        lead = f"FI ran several of {sets} at the same time (it did not count how many); {took} {_plain(wall)}."
+        lead = f"Several of {sets} ran at the same time (how many was not counted); {took} {_plain(wall)}."
     else:
-        lead = f"FI did not record whether {sets} ran at the same time; {took} {_plain(wall)}."
+        lead = f"It was not recorded whether {sets} ran at the same time; {took} {_plain(wall)}."
     out = [lead]
     if stage == "confirm":
         explore = (others.get("explore") or {}).get("wall_s")
