@@ -1131,6 +1131,42 @@ def _setting_words(setting: dict[str, Any]) -> str:
     return ", ".join(f"{a} = {v}" for a, v in setting.items())
 
 
+def _missing_words(missing: list[tuple[Any, ...]], each: list[str], universe: list[tuple[Any, ...]]) -> str:
+    """Which settings of a ``| range`` gave no number, said whole and compactly. A set that is every combination of some
+    values of the axes (the usual case: every value of one setting at fixed others) is one clause; any other set is split by
+    its first axis until each part is such a clause. Nothing is cut off with a count: the words name every missing setting."""
+    values = [list(dict.fromkeys(c[i] for c in universe)) for i in range(len(each))]
+
+    def either(vs: list[Any]) -> str:
+        return str(vs[0]) if len(vs) == 1 else ", ".join(str(v) for v in vs[:-1]) + f" or {vs[-1]}"
+
+    def clause(group: list[tuple[Any, ...]], axes: list[int]) -> list[str]:
+        seen = {i: list(dict.fromkeys(c[i] for c in group)) for i in axes}
+        size = 1
+        for i in axes:
+            size *= len(seen[i])
+        if size == len({tuple(c[i] for i in axes) for c in group}):  # every combination of the values seen is missing
+            every = [i for i in axes if len(seen[i]) > 1 and len(seen[i]) == len(values[i])]
+            said = [f"{each[i]} = {either(seen[i])}" for i in axes if i not in every]
+            if every:
+                said.append("for " + " and ".join(f"every {each[i]}" for i in every))
+            return [", ".join(said)]
+        i = next(i for i in axes if len(seen[i]) > 1)
+        rest = [j for j in axes if j != i]
+        rows = {v: {tuple(c[j] for j in rest) for c in group if c[i] == v} for v in seen[i]}
+        out: list[str] = []
+        done: set[Any] = set()
+        for v in seen[i]:
+            if v in done:
+                continue
+            same = [w for w in seen[i] if rows[w] == rows[v]]
+            done.update(same)
+            out += [f"{each[i]} = {either(same)}" + (f", {t}" if t else "") for t in (clause([c for c in group if c[i] in same], rest) if rest else [""])]
+        return out
+
+    return "; ".join(clause(list(dict.fromkeys(missing)), list(range(len(each)))))
+
+
 def _reduce(rec: Records, key: Key) -> tuple[Measured, str]:
     each = [a for a, p in key.where.items() if p.kind == "each"]
     if not each:
@@ -1144,10 +1180,11 @@ def _reduce(rec: Records, key: Key) -> tuple[Measured, str]:
             combos.append(combo)
     if not combos:
         raise _Unfilled(f"no trials of {key.metric}")
+    combos_all = list(combos)
     settings: list[dict[str, Any]] = []
     results: list[Measured] = []
     kept: list[tuple[Any, ...]] = []
-    empty: list[str] = []
+    empty: list[tuple[Any, ...]] = []
     for combo in combos:
         fixed = {a: (Pick("value", combo[each.index(a)]) if a in each else p) for a, p in key.where.items()}
         here = _setting_words(dict(zip(each, combo)))
@@ -1156,7 +1193,7 @@ def _reduce(rec: Records, key: Key) -> tuple[Measured, str]:
         except _NoNumbers as why:
             if key.reducer != "range":  # a largest, smallest or count over fewer settings than the sentence says is wrong, not partial
                 raise _Unfilled(f"not computable at {here}: {why}") from None
-            empty.append(here)  # a range names the settings that gave a number and says which gave none
+            empty.append(combo)  # a range names the settings that gave a number and says which gave none
             continue
         except _Unfilled as why:
             raise _Unfilled(f"not computable at {here}: {why}") from None
@@ -1165,7 +1202,7 @@ def _reduce(rec: Records, key: Key) -> tuple[Measured, str]:
     if not results:
         raise _Unfilled(f"{key.metric} has no numeric trials at any of the settings")
     combos = kept
-    note = (f" (no number at {'; '.join(empty[:3])}" + (f" and {len(empty) - 3} more" if len(empty) > 3 else "") + ")") if empty else ""
+    note = f" (no number {'at' if len(empty) == 1 else 'where'} {_missing_words(empty, each, combos_all)})" if empty else ""
     xs = [m.value for m in results]
     r = key.reducer
     kind = results[0].kind if key.op == "" else ("ratio" if key.op == "ratio" else "plain")
