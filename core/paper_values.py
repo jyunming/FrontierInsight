@@ -78,6 +78,10 @@ _INTERVAL_FORMS = frozenset({"mean_ci", "ci", "pm", "sd_ci", "corr_ci"})
 _OPEN = "<!-- fi:v {{{{v:{key}}}}} -->"
 CLOSE = "<!-- /fi:v -->"
 _MARK = re.compile(r"<!-- fi:v \{\{v:(.*?)\}\} -->(.*?)<!-- /fi:v -->", re.S)
+#: A math span that holds keys: the span as the writer wrote it (keys in it) in the opening marker, the filled span between.
+SPAN_OPEN = "<!-- fi:v-span {original} -->"
+SPAN_CLOSE = "<!-- /fi:v-span -->"
+_SPAN = re.compile(r"<!-- fi:v-span (.*?) -->(.*?)<!-- /fi:v-span -->", re.S)
 _PLACEHOLDER = re.compile(r"\{\{v:([^{}]{1,300})\}\}")
 #: A number of the method FI computes from the plan's own numbers: the writer types ``{{calc:1 - 0.05 / 2}}``, FI keeps it
 #: as the key ``calc:1 - 0.05 / 2`` (filled, marked and taken out like every other key) and shows it to the writer as typed.
@@ -150,7 +154,7 @@ class Measured:
     note: str = ""  # words that follow the value: the settings a reducer left out because they have no number
 
 
-def fmt(m: Measured, form: str = "mean", percent: bool = False) -> str:
+def fmt(m: Measured, form: str = "mean", percent: bool = False, bare: bool = False) -> str:
     """The one rounding function. A value with an interval: the larger half-width at two significant figures, the value
     and both ends to that place; the ends are always written out, and ``+/-`` only for a symmetric (t) interval under
     ``pm``. A value without an interval: four significant figures, trailing zeros kept; a ratio three; a count exact."""
@@ -163,10 +167,14 @@ def fmt(m: Measured, form: str = "mean", percent: bool = False) -> str:
     scale = 100.0 if percent else 1.0
     tail = "%" if percent else ""
     if m.kind == "over_settings":
+        if bare:
+            return f"{sig(m.value * scale, 4)}{tail}"
         return f"{sig(m.value * scale, 4)}{tail} (mean over {m.n} settings, one run each; no interval)"
     if m.kind == "interval":
         assert m.lower is not None and m.upper is not None
         v, lo, hi = interval_places(m.value * scale, m.lower * scale, m.upper * scale)
+        if bare:
+            return f"{v}{tail}"
         if form == "ci":
             return f"{lo}{tail} to {hi}{tail}"
         if form == "pm" and m.symmetric:
@@ -225,6 +233,7 @@ class Value:
     hit: Hit | None = None
     numbers: list[float] = field(default_factory=list)
     inputs: dict[str, Any] = field(default_factory=dict)
+    bare: str = ""  # the value alone, with none of the words that qualify it: what goes inside math or code
 
     @property
     def filled(self) -> bool:
@@ -1427,13 +1436,14 @@ def resolve(text: str, rec: Records | None) -> Value:
             else:
                 out = fmt(measured, key.form, key.percent and measured.kind != "words")
             out += measured.note
-            return Value(shown, out, numbers=measured.parts or [measured.value], inputs=_inputs(rec, key))
+            bare = out if how == "range" and measured.parts else fmt(measured, key.form, key.percent and measured.kind != "words", bare=True)
+            return Value(shown, out, numbers=measured.parts or [measured.value], inputs=_inputs(rec, key), bare=bare)
         measured = _one(rec, key, key.where)
         if key.form == "sd" and not key.op:  # a spread is written with its own interval, as a mean's is
             measured = _measure(rec, key.metric, "sd_ci", key.form_arg, key.where)
         out = fmt(measured, key.form, key.percent)
         return Value(shown, out, numbers=[measured.value] + ([measured.lower, measured.upper] if measured.lower is not None else []),
-                     inputs=_inputs(rec, key))
+                     inputs=_inputs(rec, key), bare=fmt(measured, key.form, key.percent, bare=True))
     except _Unfilled as why:
         return Value(shown, NOT_RECORDED, Hit(shown, str(why)))
 
@@ -1445,20 +1455,43 @@ def resolve(text: str, rec: Records | None) -> Value:
 RECORD = Path(".fi") / "paper_values.json"
 
 
-def fill_values(markdown: str, rec: Records | None, plain: Any = None) -> tuple[str, list[Value]]:
+def fill_values(markdown: str, rec: Records | None, plain: Any = None, span_of: Any = None) -> tuple[str, list[Value]]:
     """``markdown`` with every ``{{v:...}}`` filled and wrapped in its marker, and each key's :class:`Value`. ``plain``:
     a function of a text offset that says the key sits where no reader sees a marker as markup (math, code); its value is
-    then written bare."""
+    then written bare. ``span_of``: a function of such an offset that gives the ``(start, end)`` of the math span around
+    it (or ``None``): the whole span is then wrapped in :data:`SPAN_OPEN` / :data:`SPAN_CLOSE` with its text as the writer
+    wrote it, keys and all, so a later round restores the keys (:func:`to_placeholders`) and the paper still names them."""
     values: list[Value] = []
 
-    def one(m: re.Match[str]) -> str:
+    def bare(m: re.Match[str]) -> str:
         value = resolve(m.group(1), rec)
         values.append(value)
-        return value.text if plain is not None and plain(m.start()) else value.marked
+        return value.bare or value.text
 
     # A {{calc:...}} turned into its key keeps the length a caller's ``plain`` offsets were taken at only when none is
     # typed, so the caller makes the keys first (core/paper_facts.py:render); here they are made for any other caller.
-    return _PLACEHOLDER.sub(one, keyed_calcs(markdown)), values
+    text = keyed_calcs(markdown)
+    out: list[str] = []
+    pos = 0
+    for m in _PLACEHOLDER.finditer(text):
+        if m.start() < pos:
+            continue  # inside a span already filled
+        if plain is not None and plain(m.start()):
+            span = span_of(m.start()) if span_of is not None else None
+            if span and "-->" not in text[span[0]:span[1]]:
+                a, b = span
+                out += [text[pos:a], SPAN_OPEN.format(original=text[a:b]), _PLACEHOLDER.sub(bare, text[a:b]), SPAN_CLOSE]
+                pos = b
+            else:
+                out += [text[pos:m.start()], bare(m)]
+                pos = m.end()
+            continue
+        value = resolve(m.group(1), rec)
+        values.append(value)
+        out += [text[pos:m.start()], value.marked]
+        pos = m.end()
+    out.append(text[pos:])
+    return "".join(out), values
 
 
 def fill(markdown: str, rec: Records | None) -> tuple[str, list[Hit]]:
@@ -1469,8 +1502,9 @@ def fill(markdown: str, rec: Records | None) -> tuple[str, list[Hit]]:
 
 def keys_in(markdown: str) -> list[str]:
     """The keys of a paper, filled or not, in order of first use."""
-    found = [m.group(1).strip() for m in _MARK.finditer(markdown or "")]
-    found += [m.group(1).strip() for m in _PLACEHOLDER.finditer(keyed_calcs(_MARK.sub("", markdown or "")))]
+    markdown = _SPAN.sub(lambda m: m.group(1), markdown or "")
+    found = [m.group(1).strip() for m in _MARK.finditer(markdown)]
+    found += [m.group(1).strip() for m in _PLACEHOLDER.finditer(keyed_calcs(_MARK.sub("", markdown)))]
     return list(dict.fromkeys(found))
 
 
@@ -1667,12 +1701,12 @@ def placed_metrics(markdown: str) -> set[str]:
 
 def to_placeholders(markdown: str) -> str:
     """A filled paper turned back into keys, for the next writer round."""
-    return _MARK.sub(lambda m: placeholder(m.group(1)), markdown or "")
+    return _MARK.sub(lambda m: placeholder(m.group(1)), _SPAN.sub(lambda m: m.group(1), markdown or ""))
 
 
 def without_marks(markdown: str) -> str:
     """The reader's text: the markers gone, the values kept."""
-    return _MARK.sub(lambda m: m.group(2), markdown or "")
+    return _MARK.sub(lambda m: m.group(2), _SPAN.sub(lambda m: m.group(2), markdown or ""))
 
 
 # --- the sheet the writer is shown --------------------------------------------------------------------------------

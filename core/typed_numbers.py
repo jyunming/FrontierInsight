@@ -37,7 +37,7 @@ _PLAN_NUMBER = re.compile(r"(?<![\w.])\d+(?:\.\d+)?(?:[eE]-?\d+)?")
 
 # --- what is FI's or not the writer's: blanked out, length kept, before any number is read --------------------------------
 
-_FI_V = re.compile(r"<!-- fi:v \{\{v:.*?\}\} -->.*?<!-- /fi:v -->", re.S)
+_FI_V = re.compile(r"<!-- fi:v \{\{v:.*?\}\} -->.*?<!-- /fi:v -->|<!-- fi:v-span .*? -->.*?<!-- /fi:v-span -->", re.S)
 # FI's own blocks (a fact it filled in, the best-design section, the phase note) are its text, not the writer's. The engine's
 # paragraphs (attempts, run record, code findings) are taken out of the paper before this check, and a pair that is none of
 # FI's names hides nothing from it.
@@ -73,7 +73,7 @@ _LEVEL_AFTER = re.compile(r"(?:st|nd|rd|th)[ \t-]*(?:percentile|quantile)", re.I
 _CITE = re.compile(r"\[\s*W?\d+(?:\s*[–-]\s*\d+)?(?:\s*[,;]\s*W?\d+(?:\s*[–-]\s*\d+)?)*\s*\]")
 
 
-_TAGS = re.compile(r"<!-- (?:/fi:[\w-]+|fi:v \{\{v:.*?\}\}|fi:fact-[\w-]+) -->")
+_TAGS = re.compile(r"<!-- (?:/fi:[\w-]+|fi:v \{\{v:.*?\}\}|fi:v-span .*?|fi:fact-[\w-]+) -->")
 
 
 def _plain(sentence: str) -> str:

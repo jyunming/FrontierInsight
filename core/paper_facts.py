@@ -1724,7 +1724,10 @@ def render(markdown: str, quest_root: Path | str, *, topic: str = "", fallback_s
     out = re.sub(r"([.!?])(<!-- /fi:fact-[\w-]+ -->)\.", r"\1\2", out)
     # The result numbers go in last, from the trial record: a key inside math or code gets its bare value.
     keyed_hidden = _hidden_spans(out)
-    out, values = _values.fill_values(out, records, plain=lambda pos: _inside(pos, keyed_hidden))
+    def math_span(pos: int) -> tuple[int, int] | None:
+        return next((sp for sp in keyed_hidden if sp[0] <= pos < sp[1] and out[sp[0]] in "$\\"), None)
+
+    out, values = _values.fill_values(out, records, plain=lambda pos: _inside(pos, keyed_hidden), span_of=math_span)
     return Rendered(out, tuple(dict.fromkeys(unfilled)), tuple(values))
 
 
