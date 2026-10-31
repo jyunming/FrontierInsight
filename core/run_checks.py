@@ -455,6 +455,8 @@ runs on the table of FI's record and can change nothing in it:
   `table`. FI makes the figure, saves it and closes it: never call `savefig`, `show`, `close`, `figure` or `subplots`.
   When `fig.x` is a result id (not a setting), draw one point for each trial of a setting: `table.values(fig.x, key)` against
   `table.values(<shown id>, key)`, paired by `table.trials(...)` (a trial with no finite value in one is left out of both).
+  When panels show different settings, say which on each: `fig.panel(0, m=200)` (the panel's place in `fig.axes`, then the setting
+  and its value). FI writes that panel's title from it (`m = 200`); do not type a title for such a panel.
 - The table gives, for a result `id` at a setting `key`: `table.mean(id, key)`, `table.interval(id, key)`, `table.n(id, key)`,
   `table.values(id, key)` (one number for each trial that ran), `table.failed(key)`, and, for a result the plan gives a true
   value and an interval, `table.coverage(id, key)` (1.0 for each trial whose interval holds the true value, else 0.0; the

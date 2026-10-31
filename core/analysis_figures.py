@@ -247,11 +247,12 @@ def _draw_one(spec: dict[str, Any], body: Any, table: Any, out_dir: str) -> dict
         none_drawn = _drew_nothing(spec, table)
         if none_drawn:
             return _outcome(fid, file, "failed", none_drawn)
+        panel_record = _set_panel_titles(handle, axes, spec.get("labels") or {})
         try:
             fig.savefig(os.path.join(out_dir, file))  # the recorder of the house style notes what the figure draws
         except Exception as err:
             return _outcome(fid, file, "failed", "`figure_%s` drew something that cannot be saved (%s: %s)." % (fid, type(err).__name__, err))
-        return _outcome(fid, file, "ok")
+        return dict(_outcome(fid, file, "ok"), panels=panel_record)
     except Exception as err:
         return _outcome(fid, file, "fi_fault", "FI stopped while drawing the figure `%s` (%s: %s)." % (fid, type(err).__name__, err))
     finally:
@@ -266,7 +267,52 @@ def _figure_handle(axes: list[Any], spec: dict[str, Any], file: str) -> Any:
         class Figure:  # type: ignore[no-redef]
             def __init__(self, axes, x=None, series=None, shows=None, file=None):
                 self.axes, self.x, self.series, self.shows, self.file = list(axes), x, series, shows, file
-    return Figure(axes, x=spec.get("x"), series=spec.get("series"), shows=spec.get("shows"), file=file)
+    handle = Figure(axes, x=spec.get("x"), series=spec.get("series"), shows=spec.get("shows"), file=file)
+    handle.declared = {}
+    handle.panel = _panel_declarer(handle, spec.get("settings") or {})
+    return handle
+
+
+class UnknownSetting(KeyError):
+    """A panel declared for a setting the study does not vary, or a value it does not take."""
+
+
+def _panel_declarer(handle: Any, allowed: dict[str, Any]):
+    """``fig.panel(which, **settings)``: say which setting a panel shows (``which`` is the panel's place in ``fig.axes``, or the
+    axes). FI then writes the panel's title. A setting the plan does not vary, or a value outside its declared values, raises
+    ``UnknownSetting`` naming what may be used (``allowed`` is empty for a plan that did not record its settings: not checked)."""
+    def panel(which: Any, **settings: Any) -> None:
+        index = which if isinstance(which, int) else handle.axes.index(which)
+        if not 0 <= index < len(handle.axes):
+            raise IndexError("panel %r: this figure has %d panel(s)" % (which, len(handle.axes)))
+        for name, value in settings.items():
+            if allowed and (name not in allowed or value not in allowed[name]):
+                raise UnknownSetting("panel %d: `%s = %s` is not a setting this study varies; the settings and values a panel may "
+                                     "use are: %s" % (index, name, value, "; ".join("%s = %s" % (k, ", ".join(map(str, v)))
+                                                                                      for k, v in allowed.items())))
+        handle.declared[index] = dict(settings)
+    return panel
+
+
+def _panel_title(settings: dict[str, Any], labels: dict[str, Any]) -> str:
+    """The title FI writes for a panel from the settings the body declared for it: ``label = value``, the label the plan
+    gives the setting, else its name."""
+    return ", ".join("%s = %s" % (labels.get(k) or k, "%.4g" % v if isinstance(v, float) else v) for k, v in settings.items())
+
+
+def _set_panel_titles(handle: Any, axes: list[Any], labels: dict[str, Any]) -> list[dict[str, Any]]:
+    """Give each panel the body declared its settings for FI's title in place of whatever the body typed there (the body's
+    title can name a line the panel does not draw); a panel it declared nothing for keeps the body's own. Returns the record."""
+    record = []
+    for index, settings in sorted((getattr(handle, "declared", None) or {}).items()):
+        if not isinstance(index, int) or not 0 <= index < len(axes) or not isinstance(settings, dict) or not settings:
+            continue
+        title = _panel_title(settings, labels)
+        for loc in ("left", "center", "right"):
+            axes[index].set_title("", loc=loc)
+        axes[index].set_title(title)
+        record.append({"panel": index + 1, "settings": settings, "title": title})
+    return record
 
 
 def run_figures(figures: list[dict[str, Any]], namespace: Any, table: Any, out_dir: str) -> list[dict[str, Any]]:
