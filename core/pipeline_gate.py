@@ -68,7 +68,7 @@ _MAYBE_FAULTS = frozenset({"AttributeError", "TypeError"})
 _FAULTS = _HARD_FAULTS | _MAYBE_FAULTS
 _STAGES = {"static": "reading the code", "derive": "running the analysis", "figures": "drawing the figures",
            "facts": "filling the paper's numbers"}
-_KINDS = {FAULT: "has an error in its code", SMALL_DATA: "stopped, too few trials to tell whether the code is wrong",
+_KINDS = {FAULT: "has an error in its code", SMALL_DATA: "stopped on a small copy of the recorded results, which may have too few trials to tell whether the code is wrong",
           TIME: "did not finish in time", NOT_CHECKED: "was not checked"}
 _EXC_LINE = re.compile(r"^([A-Za-z_][\w.]*)(?::|$)")
 
