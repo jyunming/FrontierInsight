@@ -474,21 +474,22 @@ def analysis_file(code_dir: Path | str, rel: str) -> bool:
     return carried_file(folder, rel)
 
 
-def compose(design: dict[str, Any], reply: str, existing: str = "") -> tuple[str, str]:
+def compose(design: dict[str, Any], reply: str, existing: str = "", keep: Any = ()) -> tuple[str, str]:
     """``(derive.py, note)``: FI's frame of ``derive.py`` for this plan with the study's functions from ``reply`` (the reply's
     ``# file: derive.py`` block) put into it, each through :func:`core.function_steps.replace_function_ex` (the path that puts
     the model's ``trial`` into the frame of simulate.py), with the helpers and imports they use. ``existing``: the file the quest
     has now; the bodies it holds are kept unless the reply gives them again. A reply that cannot be used leaves FI's file with the
-    stubs (``note`` says why), so the run shows the functions as not written and the repair asks for them."""
+    stubs (``note`` says why), so the run shows the functions as not written and the repair asks for them. ``keep``: the
+    functions FI keeps as they ran (core/kept_bodies.py); a reply that gives one of them again does not replace it."""
     frame = derive_source(design, existing)
     wanted = body_names(plan_of(design))
     if not (reply or "").strip():
-        return frame, ("the reply held no functions of derive.py" if wanted else "")
+        return frame, ("the reply held no functions of derive.py" if [n for n in wanted if n not in keep] else "")
     try:
         tree = ast.parse(reply)
     except SyntaxError as e:
         return frame, f"the derive.py block is not valid Python ({e.msg}, line {e.lineno}); FI's stubs stay"
-    given = [n.name for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in wanted]
+    given = [n.name for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in wanted and n.name not in keep]
     unknown = [n.name for n in tree.body if isinstance(n, ast.FunctionDef) and n.name.startswith(_BODY_PREFIXES)
                and n.name not in wanted]
     text, notes = frame, []
