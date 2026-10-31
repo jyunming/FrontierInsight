@@ -849,3 +849,33 @@ def test_a_baseline_of_a_variable_that_takes_listed_values_is_one_of_them_and_th
     assert merged(["b", "c", "d"], "c")["baseline"]["values"]["layout"] == "c"  # the answer's, a member
     assert merged(["b", "c", "d"], "zz")["baseline"]["values"]["layout"] == "b"  # else the first listed
     assert merged(["b", "c", "d"], None)["baseline"]["values"]["layout"] == "b"
+
+
+# -- a reader's verdict that disagrees with its own earlier reading is not written into the paper ----------------------------
+
+def _reader_gap(ident: str = "Q2", **extra: Any) -> dict[str, Any]:
+    return {"kind": "quantity", "name": "spread over repeats", "id": ident, "judged": True, **extra}
+
+
+def test_verdict_history_lists_every_reading_of_an_item_in_order() -> None:
+    record = {"judged": {"a": {"Q1": "covered", "Q2": "covered"}, "b": {"Q2": "missing"}, "c": {"Q2": "missing"}}}
+    assert tr.verdict_history(record) == {"Q1": ["covered"], "Q2": ["covered", "missing", "missing"]}
+    assert tr.verdict_history({}) == {} and tr.verdict_history(None) == {} and tr.verdict_history({"judged": 3}) == {}
+
+
+def test_a_gap_the_reader_also_called_covered_does_not_stand_but_a_steady_one_and_a_name_match_gap_do() -> None:
+    history = {"Q2": ["covered", "missing", "missing"], "Q3": ["missing", "missing"]}
+    assert not tr.stands(_reader_gap("Q2"), history), "covered once, missing later: one reading is not a fact"
+    assert tr.stands(_reader_gap("Q3"), history), "missing every time it was read: the gap is written (a true gap is kept)"
+    assert tr.stands(_reader_gap("Q4"), history), "never read twice"
+    level = {"kind": "level", "name": "lid", "id": "F1"}  # settled by a name match, not by a reader
+    assert tr.stands(level, {"F1": ["covered"]})
+    dropped = {"kind": "factor", "name": "lid material", "id": "F1", "judged": True}  # a redesign can drop a setting
+    assert tr.stands(dropped, {"F1": ["covered", "missing"]}), "a setting a redesign dropped is a true gap"
+
+
+def test_gaps_from_marks_a_reader_verdict() -> None:
+    req = tr.parse({"factors": [{"name": "lid", "levels": ["paper", "foam", "steel"], "main": True}]})
+    abbreviated = tr.view({"protocol": {"in_each_run": {"lid": ["paper", "foam", "st"]}}})
+    gaps, _ = tr.gaps_from(req, abbreviated, {"F1": "missing"})
+    assert gaps[0]["judged"] is True

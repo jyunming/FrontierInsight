@@ -721,6 +721,7 @@ def gaps_from(req: dict[str, Any], plan: dict[str, Any], verdicts: dict[str, str
             found_gap = gap({"factors": "factor", "quantities": "quantity", "formulas": "formula",
                              "searches": "search"}[kind], item, axis=mapped_axis(req, plan, item) if kind == "factors" else "",
                              ident=ident)
+            found_gap["judged"] = True  # a reader's verdict, not a name match: see :func:`stands`
             named = mapping_of(req, plan, kind, item)
             if named is not None and named[0] == "judge":
                 # The plan's own map names an element for the item and the reading did not accept it: both are said, so the
@@ -734,6 +735,40 @@ def gaps_from(req: dict[str, Any], plan: dict[str, Any], verdicts: dict[str, str
                              "sentence": found_gap["sentence"] + " " + named_sentence(kind, named[1])}
             gaps.append(found_gap)
     return gaps, unjudged
+
+
+def verdict_history(record: Any) -> dict[str, list[str]]:
+    """``{item id: every verdict the reader gave it}`` over the quest, from ``topic_covered.json`` (``judged``: one entry per
+    reading, each on the plan as it was then)."""
+    judged = record.get("judged") if isinstance(record, dict) else None
+    out: dict[str, list[str]] = {}
+    for verdicts in (judged.values() if isinstance(judged, dict) else []):
+        for ident, verdict in (verdicts.items() if isinstance(verdicts, dict) else []):
+            out.setdefault(str(ident), []).append(str(verdict))
+    return out
+
+
+def contradicted(history: dict[str, list[str]], ident: Any) -> bool:
+    """True when the reader called the item covered (or replaced by another) in some reading of the quest: its own reading
+    of the same item then disagrees with itself, and a single reading is not a fact the paper may state."""
+    return any(v in ("covered", "replaced") for v in history.get(str(ident or ""), []))
+
+
+def settled_covered(history: dict[str, list[str]], ident: Any, *, quantity: bool) -> bool:
+    """Whether the readings leave an item covered: its last reading called it covered (or replaced), or, for a quantity (see
+    :func:`stands`), any reading did."""
+    seen = history.get(str(ident or ""), [])
+    return contradicted(history, ident) if quantity else bool(seen) and seen[-1] in ("covered", "replaced")
+
+
+def stands(found: dict[str, Any], history: dict[str, list[str]]) -> bool:
+    """Whether a gap may be said in the paper. A gap a name match settled, and a gap about a setting, a formula or a search
+    (which a redesign can really drop: the plan's text shows it), always stands. A quantity only a reader's verdict called
+    missing stands unless that reader called the same quantity covered in another reading: what a study reports (the
+    interval over repeats, the reference drawn, the run time) is made by FI from the run, which the reading of the plan
+    cannot see, and the readings differ from one asking to the next (one quest's went covered, missing, missing, missing);
+    the paper had said the study did not report what it reports."""
+    return not (found.get("judged") and found.get("kind") == "quantity" and contradicted(history, found.get("id")))
 
 
 _ELEMENT_WORD = {"factors": "the setting", "quantities": "the metric", "formulas": "the equation", "searches": "the search",

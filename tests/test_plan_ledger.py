@@ -110,3 +110,18 @@ def test_ledger_roundtrip(tmp_path):
     assert pl.read_ledger(tmp_path / "none.json") is None
     path.write_text("{}", encoding="utf-8")
     assert pl.read_ledger(path) is None
+
+
+def test_an_item_the_reader_called_covered_is_not_listed_as_neither_included_nor_named():
+    """A quantity the name match cannot settle was listed as one the plan neither includes nor names; the reader had called it
+    covered, and the paper then said the study lacked what it reports (a cup-cooling study's spread over repeats)."""
+    req = {"factors": [], "quantities": [{"name": "spread over repeats", "main": True}, {"name": "heat lost", "main": True}],
+           "formulas": []}
+    proto = {"grid": {"lid": [1, 2]}, "metrics": [{"id": "t60", "estimand": "time to reach sixty degrees"}]}
+    assert [u["id"] for u in pl.uncovered(req, proto)] == ["Q1", "Q2"], "without a reading, not shown covered: listed"
+    history = {"Q1": ["covered", "missing"], "Q2": ["missing"]}
+    assert [u["id"] for u in pl.uncovered(req, proto, history=history)] == ["Q2"], "a true gap is still listed"
+    # a formula (a redesign can drop it) is skipped only when its LAST reading was covered
+    req_f = {"factors": [], "quantities": [], "formulas": [{"name": "cooling law", "text": "dT/dt = -k*(T - Tr)", "main": True}]}
+    assert pl.uncovered(req_f, proto, history={"M1": ["covered", "covered"]}) == []
+    assert [u["id"] for u in pl.uncovered(req_f, proto, history={"M1": ["covered", "missing"]})] == ["M1"]

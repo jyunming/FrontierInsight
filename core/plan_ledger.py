@@ -164,7 +164,8 @@ def _named_in(item: dict[str, Any], ident: str, simplifications: list[dict[str, 
     return False
 
 
-def uncovered(req: Any, protocol: Any, *, design: Any = None) -> list[dict[str, str]]:
+def uncovered(req: Any, protocol: Any, *, design: Any = None,
+              history: dict[str, list[str]] | None = None) -> list[dict[str, str]]:
     """The topic items (``id`` ``F1`` / ``Q2`` / ``M1``, ``kind``, ``name``, ``sentence``) that the plan neither covers (as
     :func:`core.topic_requirements.match` judges: a setting, a metric, an equation, or the plan's own ``topic_map``) nor names
     in ``protocol.simplifications``. Items the name match cannot settle either way are listed too: they are not shown to be
@@ -184,6 +185,8 @@ def uncovered(req: Any, protocol: Any, *, design: Any = None) -> list[dict[str, 
             # A level the setting's values leave out, or a search the plan does not run, is settled by the name match.
             level_gap = next((g for g in gaps if g["kind"] in ("level", "search") and g["name"] == name), None)
             if ident not in unresolved and level_gap is None:
+                continue
+            if level_gap is None and _topic.settled_covered(history or {}, ident, quantity=kind == "quantities"):
                 continue
             if _named_in(item, ident, simplifications):
                 continue

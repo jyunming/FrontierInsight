@@ -557,3 +557,23 @@ async def test_a_rewrite_after_the_test_run_that_invents_a_measure_name_is_refus
     _, honest = _texts(eng, oracles=[_check("gap", "abs(base_temperature - plate_alt) / 2")])
     kept = eng._keep_only_the_parts(before, honest, ["oracles"])
     assert kept is not None and "abs(base_temperature - plate_alt) / 2" in kept
+
+
+def test_the_paper_leaves_out_what_the_reader_called_covered_and_keeps_what_it_called_missing(tmp_path: Path) -> None:
+    """A cup-cooling study: the reader called the spread over repeats covered, then missing; it called the heat loss missing every
+    time. The limitations say the plan lacks the heat loss and say nothing of the spread."""
+    eng = _engine(tmp_path, [])
+    req = tr.parse({"quantities": [{"name": "spread over repeats", "main": True}, {"name": "heat lost", "main": True}]})
+    eng.fi_dir.mkdir(parents=True, exist_ok=True)
+    (eng.fi_dir / "topic_requirements.json").write_text(json.dumps(req), encoding="utf-8")
+    eng._topic_covered_write(judged={"a": {"Q1": "covered", "Q2": "missing"}, "b": {"Q1": "missing", "Q2": "missing"}})
+    design = {"protocol": {"grid": {"lid": [1, 2]}, "metrics": [{"id": "t60", "estimand": "time to sixty degrees"}]}}
+    head = "`protocol.simplifications` is incomplete: "
+    asked = [head + "the topic asks for spread over repeats, which the plan neither includes nor names in `simplifications`; "
+             "the topic asks for heat lost, which the plan neither includes nor names in `simplifications`"]
+    eng._note_the_ledger_for_the_writer(design, asked)
+    kept = eng._topic_covered_read()["ledger_left"]
+    assert len(kept) == 1 and "heat lost" in kept[0] and "spread over repeats" not in kept[0]
+    gaps = [{"kind": "quantity", "id": "Q1", "name": "spread over repeats", "judged": True},
+            {"kind": "quantity", "id": "Q2", "name": "heat lost", "judged": True}]
+    assert [g["name"] for g in eng._gaps_to_say(gaps)] == ["heat lost"]

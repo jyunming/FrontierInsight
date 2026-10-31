@@ -7075,6 +7075,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         self._topic_covered_write(judged={**judged, key: verdicts})
         return verdicts
 
+    def _gaps_to_say(self, gaps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """The gaps the paper may state (:func:`core.topic_requirements.stands`): one a reader called missing and also covered in
+        another reading is kept out of ``left`` and named in run.log. Plan.md and the redesign asks still use all of ``gaps``."""
+        history = _topic_req.verdict_history(self._topic_covered_read())
+        said = [g for g in gaps if _topic_req.stands(g, history)]
+        for g in gaps:
+            if g not in said:
+                self._log.info("[plan] a reader called %r missing but also covered in another reading; the paper does not say "
+                               "the study lacks it", g.get("name"))
+        return said
+
     async def _topic_gaps(self, req: dict[str, Any], design: Any,
                           protocol: Any = None) -> tuple[list[dict[str, Any]], list[str]]:
         """``(gaps, unjudged)``: what the topic asks for that ``design`` (with ``protocol``, the one that runs, when that is
@@ -7225,7 +7236,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         _plan.record_version(self.quest_root, updated, by="engine", note="what the topic asks for, and whether the plan has it")
         if asked:  # the record names the plan it was made on: the plan as FI wrote its note on it
             self._record_search_asked(asked, calls, _plan.sha256(updated), "told in the plan", _TOPIC_ASKED)
-        self._topic_covered_write(plan_done=True, left=gaps, unjudged=unjudged, asked=asked)
+        self._topic_covered_write(plan_done=True, left=self._gaps_to_say(gaps), unjudged=unjudged, asked=asked)
 
     async def _ask_design_for_the_topic(self, state: QuestState, design: dict[str, Any], req: dict[str, Any],
                                         gaps: list[dict[str, Any]], *, iteration: int) -> dict[str, Any]:
@@ -7348,7 +7359,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 design = await self._ask_design_for_the_topic(state, design, req, gaps,
                                                               iteration=int(state.get("iteration", 0) or 0))
             gaps, unjudged = await self._topic_gaps(req, design, running(design))
-        self._topic_covered_write(left=gaps, unjudged=unjudged, checked_at_design=True)
+        self._topic_covered_write(left=self._gaps_to_say(gaps), unjudged=unjudged, checked_at_design=True)
         if gaps:
             # Never a stop: FI's reading of a plan against a topic misses a setting held under another name or form often
             # enough (in 8 recorded stops, most of what it called missing was there) that what it found is said, not acted
@@ -7621,16 +7632,19 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 found[part] = "; ".join(problems)[:1200].rstrip()
         return found
 
-    def _ledger_uncovered(self, design: Any) -> list[str]:
+    def _ledger_uncovered(self, design: Any, *, said: bool = False) -> list[str]:
         """Plain sentences for what the topic asks for that the plan neither covers nor names in ``protocol.simplifications``
-        (:func:`core.plan_ledger.uncovered`, from the kept reading of the topic). Empty when the topic was not read."""
+        (:func:`core.plan_ledger.uncovered`, from the kept reading of the topic). Empty when the topic was not read. ``said``: for
+        the paper, leaving out what the reader called covered; what the plan's model is asked is not cut by readings that come
+        later, so a resume asks the same again (and no more)."""
         try:
             req = self._topic_requirements_read()
             if not isinstance(req, dict) or req.get("error") or not isinstance(design, dict):
                 return []
             protocol = design.get("protocol") if isinstance(design.get("protocol"), dict) else {}
             return [f"the topic asks for {g['name']}, which the plan neither includes nor names in `simplifications`"
-                    for g in _ledger.uncovered(req, protocol, design=design)]
+                    for g in _ledger.uncovered(req, protocol, design=design,
+                                           history=_topic_req.verdict_history(self._topic_covered_read()) if said else None)]
         except Exception as e:  # noqa: BLE001 -- never a stop
             self._log.warning("[plan] what the topic asks for could not be held against the simplifications: %r", e)
             return []
@@ -7816,6 +7830,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         protocol = design.get("protocol") if isinstance(design, dict) else None
         own = self._own_definitions(protocol) if isinstance(protocol, dict) else []
         record = self._topic_covered_read()
+        head = "`protocol.simplifications` is incomplete: "
+        if isinstance(protocol, dict) and any(g.startswith(head) for g in gaps):
+            # What the paper says of the simplifications leaves out the topic items the reader called covered (the plan has
+            # them; saying it neither includes nor names them was false): the sentence is made again without those.
+            now = "; ".join(filter(None, [self._ledger_problems(protocol).get("simplifications"),
+                                          *self._ledger_uncovered(design, said=True)]))[:1600].rstrip()
+            gaps = [(head + now if g.startswith(head) else g) for g in gaps if now or not g.startswith(head)]
         if gaps != (record.get("ledger_left") or []) or own != (record.get("unsourced_definitions") or []):
             self._topic_covered_write(ledger_left=gaps, unsourced_definitions=own)
 
