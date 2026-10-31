@@ -6,7 +6,7 @@ afterwards needs a new exception for every new wording. The root fix is the one 
 fact comes from FI's records, not from the writer.
 
 The records are the ones the plot-style recorder (``core/plot_style.py::_fi_recording_savefig``) leaves next to each
-figure in ``.fi/figure_records/``: ``<stem>.json`` (each panel's place on the figure and its titles) and
+figure in ``.fi/figure_records/``: ``<stem>.json`` (each panel's place on the figure and its axis labels) and
 ``<stem>.seed0.json`` (each panel's lines with their line style, marker and label). This module turns them into two plain
 sentences per figure, which the paper gets through placeholders (:mod:`core.paper_facts`):
 
@@ -79,7 +79,7 @@ def _boxes(record: Any) -> list[dict[str, Any]]:
         if any(all(abs(a - b) < _SAME for a, b in zip(place, p["place"])) for p in panels):
             continue
         panels.append({"place": [float(v) for v in place],
-                       "name": _one(ax.get("title")) or _one(ax.get("ylabel")) or ""})
+                       "name": _one(ax.get("ylabel")) or _one(ax.get("xlabel")) or ""})
     insets = []
     for p in panels:
         x, y, w, h = p["place"]

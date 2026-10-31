@@ -16,7 +16,7 @@ BOTTOM = [0.1, 0.1, 0.8, 0.35]
 
 def _record(*places, titles=("", "")):
     return {"file": "fig_a.png", "axes": [
-        {"title": titles[i] if i < len(titles) else "", "ylabel": "gain", "place": p, "series": []}
+        {"title": titles[i] if i < len(titles) else "", "ylabel": (titles[i] if i < len(titles) else "") or "gain", "place": p, "series": []}
         for i, p in enumerate(places)]}
 
 

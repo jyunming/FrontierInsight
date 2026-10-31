@@ -25,10 +25,10 @@ from core.engine import (
 PLAN = {"figures_planned": ["error_vs_step.png", "cost_by_size.png", "spread_map.png"]}
 FIGURES = ["spread_map.png", "cost_by_size.png", "error_vs_step.png"]
 RECORDS = {
-    "error_vs_step.png": {"axes": [{"title": "Error against step size", "ylabel": "error", "series": [
+    "error_vs_step.png": {"axes": [{"ylabel": "error", "series": [
         {"label": "scheme A", "min": 0.001, "max": 0.2, "shows": "yes"}]}]},
-    "cost_by_size.png": {"axes": [{"title": "Cost by problem size", "ylabel": "seconds", "series": []}]},
-    "spread_map.png": {"axes": [{"title": "Spread over the grid", "series": []}]},
+    "cost_by_size.png": {"axes": [{"ylabel": "seconds", "series": []}]},
+    "spread_map.png": {"axes": [{"ylabel": "Spread over the grid", "series": []}]},
 }
 STATE = {"design": PLAN, "figures": FIGURES, "figure_records": RECORDS}
 # A draft that discusses every figure by number and embeds none.
@@ -87,7 +87,7 @@ def test_each_figure_goes_after_the_paragraph_that_first_names_its_number() -> N
     lines = out.split("\n")
     for number, name in enumerate(placed, start=1):
         at = _embed_line(out, name)
-        assert lines[at].startswith(f"![**Figure {number}.** {RECORDS[name]['axes'][0]['title']}.")
+        assert lines[at].startswith(f"![**Figure {number}.** {RECORDS[name]['axes'][0]['ylabel']}.")
         assert f"Figure {number}" in _paragraph_above(lines, at)
     assert _embed_line(out, "spread_map.png") < lines.index("## References")
 
@@ -146,7 +146,7 @@ def test_with_no_figure_nothing_is_placed() -> None:
 # ---- the caption, from the records only --------------------------------------------------------------------------------
 
 def test_a_caption_is_the_panel_title_with_the_series_and_what_the_record_says_of_them() -> None:
-    record = {"axes": [{"title": "Energy drift", "series": [
+    record = {"axes": [{"ylabel": "Energy drift", "series": [
         {"label": "scheme A", "shows": "yes"}, {"label": "scheme B", "shows": "flat"},
         {"label": "limit", "y": 0.5, "shows": "reference line"}]}]}
     caption = _figure_caption_text("drift.png", record, n_seeds=None)
@@ -168,8 +168,8 @@ def test_a_grid_of_panels_is_described_by_name_and_panel_count() -> None:
 
 
 def test_a_panel_that_draws_nothing_is_left_out_of_the_caption() -> None:
-    record = {"axes": [{"title": "Rate", "series": [{"label": "a", "shows": "yes"}]},
-                       {"title": "Odds", "series": [{"label": "b", "shows": "no points"}]}]}
+    record = {"axes": [{"ylabel": "Rate", "series": [{"label": "a", "shows": "yes"}]},
+                       {"ylabel": "Odds", "series": [{"label": "b", "shows": "no points"}]}]}
     caption = _figure_caption_text("r.png", record, n_seeds=None)
     assert "Rate" in caption and "Odds" not in caption
 
@@ -179,11 +179,6 @@ def test_the_layout_and_line_styles_come_from_fis_figure_facts() -> None:
     facts = {"two:layout": "two panels side by side", "two:lines": "the dashed line is the reference"}
     caption = _figure_caption_text("two.png", record, n_seeds=None, facts=facts)
     assert caption.endswith("Two panels side by side. The dashed line is the reference.")
-
-
-def test_a_title_the_paper_copy_drops_is_carried_by_the_caption() -> None:
-    record = {"axes": [{"title": "Rate", "series": []}], "paper_dropped": ["Rate over time"]}
-    assert _figure_caption_text("r.png", record, n_seeds=None).startswith("Rate over time: Rate.")
 
 
 def test_a_mean_over_seeds_is_said_in_the_caption() -> None:
@@ -238,7 +233,7 @@ def test_the_write_node_delivers_every_figure_with_fis_captions_without_spending
     written = Path(patch["paper_md"]).read_text(encoding="utf-8")
     for number, name in enumerate(["error_vs_step.png", "cost_by_size.png", "spread_map.png"], start=1):
         assert written.count(f"](figures/{name})") == 1, name
-        assert f"![**Figure {number}.** {RECORDS[name]['axes'][0]['title']}." in written
+        assert f"![**Figure {number}.** {RECORDS[name]['axes'][0]['ylabel']}." in written
     assert "Nothing changes" not in written
     assert "iteration" not in patch, "placing the figures costs no iteration"
 
@@ -267,7 +262,7 @@ def test_one_drawing_saved_in_two_formats_is_one_figure_shown_as_its_png() -> No
 
 
 def test_a_caption_holds_no_square_bracket() -> None:
-    record = {"axes": [{"title": "r = 0.99 [0.98, 1.00]", "series": []}, {"title": "rate in [2%, 30%)", "series": []}]}
+    record = {"axes": [{"ylabel": "r = 0.99 [0.98, 1.00]", "series": []}, {"ylabel": "rate in [2%, 30%)", "series": []}]}
     caption = _figure_caption_text("a.png", record, n_seeds=None)
     assert "[" not in caption and "]" not in caption and "(0.98, 1.00)" in caption
 
@@ -300,3 +295,20 @@ def test_an_untitled_panel_is_named_by_its_place_in_the_saved_figure_when_an_emp
     record = {"axes": [{"series": [{"label": "B", "shows": "no points"}]}, {"series": [{"label": "A", "shows": "flat"}]}, {"series": [{"label": "A", "shows": "yes"}]}]}
     caption = _figure_caption_text("a.png", record, n_seeds=None)
     assert "A is flat at this scale in panel 2." in caption, caption
+
+
+# ---- a caption never copies the script's own title -----------------------------------------------------------------
+
+def test_a_caption_does_not_copy_a_title_that_names_a_line_the_figure_does_not_draw() -> None:
+    record = {"axes": [{"title": "Drift (dashed: the model)", "ylabel": "Drift", "xlabel": "noise",
+                        "series": [{"label": "n = 6", "shows": "yes"}]}]}
+    facts = {"s:lines": "solid lines and markers are drawn; no dashed or dotted line is drawn"}
+    caption = _figure_caption_text("s.png", record, n_seeds=None, facts=facts)
+    assert "the model" not in caption
+    assert caption == ("Drift against noise. It draws n = 6. Solid lines and markers are drawn; "
+                       "no dashed or dotted line is drawn.")
+
+
+def test_a_figure_title_the_paper_copy_drops_is_not_copied_into_the_caption() -> None:
+    record = {"axes": [{"ylabel": "Rate", "series": []}], "paper_dropped": ["Rate, dotted: the model"]}
+    assert _figure_caption_text("r.png", record, n_seeds=None) == "Rate."

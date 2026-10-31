@@ -350,6 +350,7 @@ try:
         import numpy as _fi_np
         from matplotlib.collections import LineCollection as _FiLineCollection
         from matplotlib.collections import PathCollection as _FiPathCollection
+        from matplotlib.text import Text as _FiText
         from matplotlib.collections import PolyCollection as _FiPolyCollection
         from matplotlib.figure import Figure as _FiFigure
 
@@ -810,7 +811,7 @@ try:
                         for second, b in boxes[i + 1:]:
                             share = _fi_share(a, b)
                             if share >= _FI_TITLE_SHARE:
-                                found.append({"check": "tick_label_overlap", "axis": axis_name,
+                                found.append({"check": "label_overlap", "where": axis_name + "-axis tick labels",
                                               "text": first.get_text(), "over": second.get_text(),
                                               "share": round(share, 2)})
                     label = axis.label
@@ -823,6 +824,18 @@ try:
                         if share >= _FI_TITLE_SHARE:
                             found.append({"check": "axis_label_overlap", "axis": axis_name,
                                           "text": label.get_text(), "over": tick.get_text(),
+                                          "share": round(share, 2)})
+            # Text the script wrote inside a panel (a curve's name, a note) drawn over another, measured as the tick
+            # labels are. An annotation is measured by its words, not by its arrow.
+            for ax in fig.get_axes():
+                notes = [(t, _FiText.get_window_extent(t, renderer)) for t in ax.texts
+                         if t.get_visible() and t.get_text().strip()]
+                for i, (first, a) in enumerate(notes):
+                    for second, b in notes[i + 1:]:
+                        share = _fi_share(a, b)
+                        if share >= _FI_TITLE_SHARE:
+                            found.append({"check": "label_overlap", "where": "labels written in the panel",
+                                          "text": first.get_text(), "over": second.get_text(),
                                           "share": round(share, 2)})
             # A label past the canvas edge, a pixel of rounding allowed.
             edge = 1.0
