@@ -137,3 +137,37 @@ def test_a_study_run_through_the_deterministic_entry_says_no_seed_was_passed_oth
                                        "(FI could not tell from the code whether the simulation uses it)")  # the plan's prose is not quoted
     study.write_text(json.dumps({"entry": "run_cell", "base_seed": 0}), encoding="utf-8")
     assert pf._seed_text(tmp_path) == "none (each setting ran once with no random numbers; FI passed no seed)"
+
+
+DERIVED = [{"id": "peak_ratio", "inputs": ["algae_peak"], "role": "result", "label": "ratio of the peak at the high to the low temperature",
+            "asked": True}]
+
+
+def test_a_comparison_of_a_worked_out_quantity_does_not_split_its_setting_into_a_line_for_each_value(tmp_path, monkeypatch) -> None:
+    """Before: a comparison whose result is a quantity worked out from the results (here across nutrient) made every value of
+    that setting an alternative, one near-identical line each. Now only a comparison of a reported result splits."""
+    root = _quest(tmp_path, monkeypatch, [{"item": "Q1", "by": "metric:algae_peak", "at": {}}])
+    worked = {**PROTOCOL, "derived": DERIVED, "topic_map": [{"item": "Q1", "by": "metric:algae_peak", "at": {}}],
+              "comparisons": [{"id": "r_by_nutrient", "result": "peak_ratio", "across": "nutrient", "values": [1, 2], "how": "ratio"}]}
+    monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: worked)
+    text = pf.answers_text(root)
+    assert "- peak algae (the plan's map: `algae_peak`): {{v:algae_peak @ nutrient=each, temp=each | range}}" in text
+    assert "nutrient = " not in text.split("water clarity")[0]
+
+
+def test_a_quantity_worked_out_from_the_mapped_result_replaces_the_map_and_is_answered_once(tmp_path, monkeypatch) -> None:
+    protocol = {**PROTOCOL, "derived": DERIVED, "topic_map": [{"item": "Q1", "by": "metric:algae_peak"}]}
+    design = {**DESIGN, "protocol": protocol}
+    asked = tr.quantities_to_place(REQ, protocol)
+    kept = cp._apply_answers(protocol, design, {"Q1": {"by": "metric:peak_ratio"}, "Q2": {"by": "none"}, "Q3": {"by": "none"}}, asked)
+    assert {"item": "Q1", "by": "metric:peak_ratio", "at": {}} in kept["topic_map"]
+    # an answer that is not worked out from the mapped result leaves the plan's own map
+    other = cp._apply_answers(protocol, design, {"Q1": {"by": "metric:bloom"}, "Q2": {"by": "none"}, "Q3": {"by": "none"}}, asked)
+    assert {"item": "Q1", "by": "metric:algae_peak", "at": {}} in other["topic_map"]
+    # the paper's line for it is one value, not a range
+    root = _quest(tmp_path, monkeypatch, kept["topic_map"])
+    monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: kept)
+    pv.write_answers(root, {"peak_ratio": 1.5}, kept, ids=["peak_ratio"])
+    text = pf.answers_text(root)
+    assert "- peak algae (the plan's map: `peak_ratio`): {{v:peak_ratio}} (one value worked out by the analysis" in text
+    assert "peak_ratio" in cp._answers_prompt(TEMPLATES, design, asked, [], "")  # the model is shown what it is worked out from
