@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -251,6 +252,28 @@ def test_run_py_of_a_framed_simulation_carries_the_frame_and_runs_standalone(tmp
     rows = json.loads(out.read_text(encoding="utf-8"))
     assert [r["ok"] for r in rows] == [True] * 3 and {r["values"]["growth_seeds"] for r in rows} == {3.0}, rows
     assert (code / skeleton.RUNTIME_FILE).read_text(encoding="utf-8") == skeleton.RUNTIME
+
+
+def test_a_setting_with_thousands_of_trials_gets_its_seeds_through_a_file_and_the_environment_stays_short(tmp_path: Path) -> None:
+    code = tmp_path / "code"
+    code.mkdir()
+    body = ("import os\n\ndef trial_batch(cell, ctx):\n    out = ctx.results()\n    for record in out:\n"
+            "        record['growth'] = 1.0\n        record['growth_seeds'] = len(ctx.seeds)\n"
+            "        record['env_longest'] = max(len(v) for v in os.environ.values())\n    return out\n")
+    (code / "simulate.py").write_text(_framed(COLONY, body), encoding="utf-8")
+    (code / "run.py").write_text(code_project.run_source(code), encoding="utf-8")
+    study = tmp_path / "study.json"
+    study.write_text(json.dumps({"entry": "run_trial", "grid": {"rate": [0.1], "dose": [1]}, "runs_per_setting": 4000, "base_seed": 0}),
+                     encoding="utf-8")
+    out = tmp_path / "rows.json"
+    env = {k: v for k, v in os.environ.items() if k not in ("FI_TRIAL_SEEDS", "FI_TRIAL_SEEDS_FILE")}
+    done = subprocess.run([sys.executable, str(code / "run.py"), "--cell", "0", str(out), str(study)], capture_output=True, text=True,
+                          cwd=str(tmp_path), env=env)
+    assert done.returncode == 0, done.stderr[-600:]
+    rows = json.loads(out.read_text(encoding="utf-8"))
+    assert len(rows) == 4000 and all(r["ok"] for r in rows), rows[:1]
+    assert {r["values"]["growth_seeds"] for r in rows} == {4000.0}, "the batch was given every seed of the setting"
+    assert max(r["values"]["env_longest"] for r in rows) < 20000, "no environment value carries the seed list"
 
 
 # ---- a resume keeps the frame, a change of the plan writes it again -----------------------------------------------------------------

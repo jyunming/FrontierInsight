@@ -395,7 +395,7 @@ def load_simulation():
 
 
 #: What a ``run.py`` for a framed simulation adds: the runtime's text, written beside ``simulate.py`` when it is missing, and the
-#: seeds of the setting (the harness's ``FI_TRIAL_SEEDS``) in the process that runs its trials.
+#: seeds of the setting (a file, named by ``FI_TRIAL_SEEDS_FILE``, as the harness reads them) in the process that runs its trials.
 _FRAMED_EDITS = (
     ("""def load_simulation():
     import importlib.util
@@ -417,8 +417,10 @@ def load_simulation():
         seed = trial_seed(int(study.get("base_seed") or 0), "" if study.get("paired") else key, trial)
 """, """    runs = 1 if entry == "run_cell" else int(study.get("runs_per_setting") or 1)
     rows = []
-    os.environ["FI_TRIAL_SEEDS"] = json.dumps([[t, None if entry == "run_cell" else trial_seed(
-        int(study.get("base_seed") or 0), "" if study.get("paired") else key, t)] for t in range(runs)])
+    seeds_file = Path(out_path).with_name("trial_seeds.json")  # beside the rows, in the setting's own temporary folder
+    seeds_file.write_text(json.dumps([[t, None if entry == "run_cell" else trial_seed(
+        int(study.get("base_seed") or 0), "" if study.get("paired") else key, t)] for t in range(runs)]), encoding="utf-8")
+    os.environ["FI_TRIAL_SEEDS_FILE"] = str(seeds_file)
     for trial in range(runs):
         seed = trial_seed(int(study.get("base_seed") or 0), "" if study.get("paired") else key, trial)
 """),
@@ -426,7 +428,9 @@ def load_simulation():
     rows = []
 """, """    levels = levels_of(spec.get("levels"))  # as the harness reads its spec (FI's evaluation names none)
     rows = []
-    os.environ["FI_TRIAL_SEEDS"] = json.dumps([[t["trial"], t.get("seed")] for t in spec["trials"]])
+    seeds_file = Path(out_path).with_name("trial_seeds.json")
+    seeds_file.write_text(json.dumps([[t["trial"], t.get("seed")] for t in spec["trials"]]), encoding="utf-8")
+    os.environ["FI_TRIAL_SEEDS_FILE"] = str(seeds_file)
 """),
 )
 

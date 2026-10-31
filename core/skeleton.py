@@ -201,13 +201,14 @@ def _harness_trials():
 
 
 def _trials_of(ctx):
-    """``[(trial, seed)]`` of the setting this trial belongs to (the harness's spec, or a ``run.py`` that says them in
-    FI_TRIAL_SEEDS), else this trial."""
+    """``[(trial, seed)]`` of the setting this trial belongs to (the harness's spec, or a ``run.py`` that says them in a
+    file named by FI_TRIAL_SEEDS_FILE), else this trial."""
     mine = (ctx.trial, ctx.seed)
     try:
         given = _harness_trials()
         if given is None:
-            given = json.loads(os.environ.get("FI_TRIAL_SEEDS") or "[]")
+            path = os.environ.get("FI_TRIAL_SEEDS_FILE")
+            given = json.load(open(path, encoding="utf-8")) if path else []
         rows = [(int(t), s) for t, s in given]
     except (ValueError, TypeError, KeyError):
         rows = []
