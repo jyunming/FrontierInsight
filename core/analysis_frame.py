@@ -1204,11 +1204,12 @@ def _coverage_of(table, rid, key, row, out_levels):
         for _text, c in table._level_cells(rid, key):
             hits = table.coverage(rid, key, **c["level"])
             if hits:
-                out_levels.setdefault(table._key_of(c), {})[rid + "_coverage"] = sum(hits) / len(hits)
+                out_levels.setdefault(table._key_of(c), {}).setdefault(rid + "_coverage", sum(hits) / len(hits))
         return
     hits = table.coverage(rid, key)
     if hits:
-        row[rid + "_coverage"] = sum(hits) / len(hits)
+        # a result of the study's own under this name keeps its value: FI's count is added beside it, never over it
+        row.setdefault(rid + "_coverage", sum(hits) / len(hits))
 
 
 def result_json(table, records, compared):

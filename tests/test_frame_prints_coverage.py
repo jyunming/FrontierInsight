@@ -80,3 +80,14 @@ def test_a_failing_figure_does_not_take_the_coverage_or_the_other_figure_away(tm
     assert status["fig1"] == "failed" and "cannot read it" in next(o["why"] for o in record["figures"] if o["id"] == "fig1")
     assert status["fig2"] == "ok" and (quest / "figures" / "two.png").is_file()
     assert printed[KEYS[0]]["growth_coverage"] == pytest.approx(0.75)
+
+
+def test_a_result_of_the_study_under_the_coverage_name_keeps_its_own_value(tmp_path: Path) -> None:
+    record = _record_with_intervals()
+    for c in record["cells"]:
+        n = len(c["metrics"]["growth"]["values"])
+        c["metrics"]["growth_coverage"] = {"values": [0.5] * n, "trials": list(range(n))}
+    metrics = _metrics() + [{"id": "growth_coverage", "kind": "mean", "role": "result"}]
+    code, printed, _record, err = _run(_quest(tmp_path, _design(metrics=metrics), record=record))
+    assert code == 0, err
+    assert printed[KEYS[0]]["growth_coverage"] == pytest.approx(0.5)  # the study's own value, not FI's count 0.75
