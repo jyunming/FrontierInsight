@@ -1422,10 +1422,6 @@ CHECKS: tuple[Check, ...] = (
     Check('review_reviewer_page_limit_dropped', 'core.engine', '_without_reviewer_page_limit_hits',
           'review', 'own_record', 'note',
           'over_page_limit hits written by a reviewer are dropped; the page limit is a guideline and forces no round'),
-    Check('review_sends_experiment_back', 'core.engine', '_review_sends_the_experiment_back',
-          'review', 'model_text', 'repair',
-          'review prose names a result_json key, figure file or experiment.py: route re_execute (implement '
-          'again), at most _CODE_REEXECUTES (1)'),
     Check('review_hits_text_only', 'core.engine', '_hits_need_only_a_rewrite',
           'review', 'model_text', 'repair',
           'all must-fix hit names in _TEXT_ONLY_HITS: write again only; else objection kept in QUALITY.md and '
