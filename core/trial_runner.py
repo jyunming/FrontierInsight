@@ -457,6 +457,22 @@ def read_facts(rows: Any, axes: Any) -> dict[str, Any]:
     return {"measurable": not why, "read": read, "unknown": unknown, "never": never, "why": why}
 
 
+def unread_axes(cells: Any, skip: Any = ()) -> list[str]:
+    """The settings the study varied that no trial of the whole run asked for (:func:`read_facts` over every trial's row,
+    FI's own record of what the code read): a fact FI observed, not a reading of the code's text. Empty where the record
+    makes no claim (a trial that failed, or took the cell as a whole). ``skip``: axes left out (numerical settings)."""
+    cells = [c for c in cells if isinstance(getattr(c, "cell", None), dict)]
+    if any(c.returncode or c.timed_out or c.load_error or any(r.get("status") != "ok" for r in c.rows) for c in cells):
+        return []
+    skipped = {str(a) for a in skip}
+    values: dict[str, set[str]] = {}
+    for c in cells:
+        for a, v in c.cell.items():
+            values.setdefault(str(a), set()).add(json.dumps(v, sort_keys=True, default=str))
+    varied = [a for a, v in values.items() if len(v) > 1 and a not in skipped]
+    return read_facts([r for c in cells for r in c.rows], varied)["never"]
+
+
 def _fmt(value: Any) -> str:
     if isinstance(value, float) and value.is_integer():
         return repr(value)
@@ -1866,7 +1882,10 @@ class TrialsRunner:
             declared = [str(s["id"]) for s in _metric_spec.declared(protocol) if s.get("id")]
             unchanged = _flat.unchanged_axes(run.cells, skip=numerical_axes(protocol), ignore=unsteady,
                                              declared=declared)
-            notes = [_flat.unchanged_axes_note(unchanged)] if unchanged else []
+            # The settings no trial read: seed noise hides them from the comparison above, so FI's own record of what the code
+            # read says it (core/in_run.py ``Cell``). Disclosed in the same words; the run is not stopped for it.
+            unread_seen = [a for a in unread_axes(run.cells) if a not in dict(unchanged)]
+            notes = [_flat.unchanged_axes_note(unchanged, unread=unread_seen)] if (unchanged or unread_seen) else []
             twins = _flat.identical_results(run.cells, declared=declared, ignore=unsteady)
             if twins:
                 notes.append(_flat.identical_results_note(twins))

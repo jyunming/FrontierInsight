@@ -796,7 +796,7 @@ class RunChecksMixin:
         note = record.get("note") if isinstance(record, dict) else None
         if not isinstance(note, str) or not note.strip():
             return ""
-        return (f"Observed: {note} Report it as a result that did not change in the settings tried; do not call the "
+        return (f"Observed: {note} Report it as stated here, not as an effect the study found; do not call the "
                 "simulation broken, and do not claim that the setting can have no effect in general.")
 
     # ---- the note for the writer ---------------------------------------------------------------------------------------
