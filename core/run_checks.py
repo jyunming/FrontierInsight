@@ -455,9 +455,12 @@ runs on the table of FI's record and can change nothing in it:
   `table`. FI makes the figure, saves it and closes it: never call `savefig`, `show`, `close`, `figure` or `subplots`.
 - The table gives, for a result `id` at a setting `key`: `table.mean(id, key)`, `table.interval(id, key)`, `table.n(id, key)`,
   `table.values(id, key)` (one number for each trial that ran), `table.failed(key)`; and `table.keys()`, `table.setting(key)`,
-  `table.at(**settings)` (the key of one setting), `table.across(axis, **fixed)` (the values of one setting with their keys),
+  `table.at(**settings)` (a LIST of the keys of the settings that hold those values: pass one of them, `table.at(**settings)[0]`,
+  to a read, never the list), `table.across(axis, **fixed)` (the values of one setting with their keys),
   `table.reference(id, key)` and, for a sub-study, `table.part(name)`. Name only ids the plan declares: any other id raises an error
-  that lists the ones FI holds.
+  that lists the ones FI holds. `table.mean` is `None` and `table.interval` is `(None, None)` at a setting where no trial gave
+  the result a value (a result the run records only at some settings): test for `None` before any arithmetic, `float()` or
+  drawing, and skip that setting (or return `table.missing("why")`).
 - Take no number from your own head: a value a function returns comes from `table`, from the plan's thresholds or from a formula
   written out in the function. A function reads no file, prints nothing and keeps nothing between calls.
 - If you cannot work a function out, leave it as FI wrote it (it raises `NotYet`): FI then says that number is not computed.

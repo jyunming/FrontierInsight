@@ -402,3 +402,32 @@ MORE_PINS_AT_DF4FF1AD = {
     "protocols_search_inside": "224963aed9fe2a67", "template_implement": "a70893e8a2235784",
     "template_implement_body": "d02bdddb32e99d50", "outline_template": "fa01183231dce8c8",
     "repair_fi_frame": "2aca732a1c3b9c74", "reflect_prompt": "40e6696c66d0e48e"}
+
+
+# ---- what the request says of the table is what the table does ---------------------------------------------------------------------
+def _made_up_table(monkeypatch):
+    """Two settings of a made-up study: a result recorded at both, a second recorded only at one."""
+    from core import frame_table
+
+    monkeypatch.setitem(sys.modules, "fi_table", frame_table)  # the quest carries it beside the frame as fi_table.py
+    mod = types.ModuleType("fi_frame_for_test")
+    exec(skeleton.RUNTIME, mod.__dict__)  # noqa: S102 -- FI's own runtime text
+    def metric(values):
+        return {"values": values, "trials": list(range(len(values))), "count": len(values), "total": sum(values), "non_finite": 0}
+    cells = [{"cell": {"dose": d, "tol": 1}, "key": f"dose={d},tol=1", "planned": 2, "ok": 2, "failed": 0,
+              "metrics": {"growth": metric([1.0, 2.0]), **({"late": metric([3.0])} if d == 2 else {})}} for d in (1, 2)]
+    return mod.Table(cells, ["growth", "late"])
+
+
+def test_the_request_tells_a_body_what_at_and_mean_give_and_the_table_does_it(monkeypatch):
+    rules = run_checks._ANALYSIS_BODIES_RULES
+    assert "a LIST of the keys" in rules and "`table.mean` is `None`" in rules
+    table = _made_up_table(monkeypatch)
+    found = table.at(tol=1)
+    assert isinstance(found, list) and len(found) == 2  # a list, as the request says
+    with pytest.raises(TypeError, match="list of settings"):
+        table.mean("growth", found)
+    assert table.mean("late", "dose=1,tol=1") is None and table.mean("late", "dose=2,tol=1") == 3.0
+    assert table.interval("late", "dose=1,tol=1") == (None, None)
+    with pytest.raises(KeyError, match="is not a result the plan declares"):  # a known positive: an undeclared name is still refused
+        table.mean("nothing_declared", "dose=1,tol=1")
