@@ -839,3 +839,14 @@ def test_a_file_without_a_main_block_still_gets_the_helper_at_the_end() -> None:
     old = "def main():\n    return 1\n"
     new, _, why = fr.splice(old, "def main():\n    return helper()\n\n\ndef helper():\n    return 2\n", scope={"main"})
     assert why == "" and new == "def main():\n    return helper()\n\n\ndef helper():\n    return 2\n"
+
+
+def test_a_repair_cannot_add_a_star_import_but_may_add_an_ordinary_import() -> None:
+    old = "import os\nX = 1\n\n\ndef f():\n    return X\n"
+    assert fr.frame_changes(old, old + "\nfrom numpy import *\n")
+    assert fr.frame_changes(old, old + "\nfrom os.path import *\n")
+    assert fr.frame_changes(old, old + "\nimport math\n") == []
+    assert fr.frame_changes(old, old + "\nfrom math import sqrt\n") == []
+    assert fr.frame_changes(old, old + "\ny = (z := 3)\n")
+    new, _, why = fr.splice(old, "from numpy import *\nimport math\n\n\ndef f():\n    return math.sqrt(X)\n", scope={"f"})
+    assert why == "" and "import math" in new and "import *" not in new
