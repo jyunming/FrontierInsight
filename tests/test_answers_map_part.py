@@ -115,6 +115,15 @@ def test_the_prompt_lists_the_statistics_and_an_answer_without_one_is_the_value(
     assert all("statistic" not in r for r in out.design["protocol"]["topic_map"])
 
 
+
+def test_an_answer_that_is_the_value_clears_an_earlier_statistic_on_the_entry() -> None:
+    p = {**PROTOCOL, "topic_map": [{"item": "peak algae", "by": "metric:algae_peak", "statistic": "bias"}]}
+    asked = {"Q1": {"name": "peak algae", "stated": "report the peak"}}
+    rows = cp._apply_answers(p, {**DESIGN, "protocol": p}, {"Q1": {"by": "metric:algae_peak", "statistic": "value"}}, asked)["topic_map"]
+    assert rows == [{"item": "peak algae", "by": "metric:algae_peak", "at": {}}]
+    rows = cp._apply_answers(p, {**DESIGN, "protocol": p}, {"Q1": {"by": "metric:algae_peak", "statistic": "sd"}}, asked)["topic_map"]
+    assert rows[0]["statistic"] == "sd"
+
 def _quest(tmp_path: Path, monkeypatch, topic_map: list[dict[str, Any]]) -> Path:
     (tmp_path / "raw").mkdir(parents=True)
     cells = []

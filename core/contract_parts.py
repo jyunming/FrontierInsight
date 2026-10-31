@@ -414,6 +414,8 @@ def _apply_answers(p: dict[str, Any], design: dict[str, Any], answer: dict[str, 
             m["at"] = at
             if stat:
                 m["statistic"] = stat
+            else:
+                m.pop("statistic", None)  # the answer is the value: an earlier entry's bias or sd no longer holds
             m["by"] = _refined_by(design["protocol"], str(m.get("by") or ""), by)
         if not mine and by and by != "none":
             rows.append({"item": ident, "by": by, "at": at, **({"statistic": stat} if stat else {})})
