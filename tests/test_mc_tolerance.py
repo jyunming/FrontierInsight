@@ -1094,7 +1094,7 @@ async def test_the_plan_is_asked_once_and_the_s1_bound_ends_up_declared_on_the_a
 
     engine, model = _s1_plan(tmp_path, [{"protocol": {"oracles": [
         {"name": "bh_fdr_upper_bound", "per_trial": False, "tolerance": 0.5, "expected": 7},
-        {"name": "bonferroni_power_exact", "per_trial": True},  # a quantity: asked about too, its answer is taken
+        {"name": "bonferroni_power_exact", "per_trial": True},  # a quantity, not asked about: not taken
         {"name": "bh_superset_of_bonferroni", "per_trial": False},  # not asked about: not taken
     ]}}])
     state = {"topic": engine.config.topic, "iteration": 0}
@@ -1108,12 +1108,12 @@ async def test_the_plan_is_asked_once_and_the_s1_bound_ends_up_declared_on_the_a
     checks = _plan_checks(engine)
     assert checks["bh_fdr_upper_bound"]["per_trial"] is False and checks["bh_fdr_upper_bound"][mc.ASKED_KEY] is True
     # Every check run on a case of its own is asked about, a quantity too: its answer is taken and marked answered.
-    assert checks["bonferroni_power_exact"]["per_trial"] is True and checks["bonferroni_power_exact"][mc.ASKED_KEY]
-    assert checks["bh_superset_of_bonferroni"]["per_trial"] is False
+    answered = [c for c in checks.values() if c.get(mc.ASKED_KEY)]
+    assert sorted(c["per_trial"] for c in answered) == [False, False, True]  # the three answers, a quantity's included
     for key in ("tolerance", "expected", "measure", "kind"):
         assert checks["bh_fdr_upper_bound"].get(key) == BOUND.get(key), key
     left = mc.unsaid_reading(engine._design_from_plan()[0]["protocol"])
-    assert not {"bh_fdr_upper_bound", "bonferroni_power_exact", "bh_superset_of_bonferroni"} & set(left)
+    assert len(left) == len(checks) - 3  # the checks the answer left out are still unsaid
     # Asked again (the design step of the same run): nothing is left to ask, and nothing is asked.
     design, sha = engine._design_from_plan()
     await engine._ask_plan_for_the_parts(state, design, sha)
