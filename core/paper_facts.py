@@ -935,7 +935,9 @@ def _seed_text(root: Path) -> str:
         return (f"a separate seed for each trial, derived from base seed {base}" if base is not None
                 else "a separate seed for each trial, passed to the simulation by FI")
     if state == _run_facts.UNKNOWN:
-        return "a seed passed to each trial (FI could not tell from the code whether the simulation uses it)"
+        base, _trial = _disclosure.recorded_seeds(root)
+        said = f"a seed passed to each trial, derived from base seed {base}" if base is not None else "a seed passed to each trial"
+        return f"{said} (FI could not tell from the code whether the simulation uses it)"
     driving = [d for d in verdict.get("driving_seeds") or [] if isinstance(d, dict)]
     if state == _run_facts.PARTLY:
         # Both are true and both drive the trials: FI's per-trial seed and a number typed into the code.
