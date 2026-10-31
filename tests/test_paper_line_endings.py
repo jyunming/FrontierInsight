@@ -45,19 +45,14 @@ def test_taking_out_values_fi_could_not_fill_keeps_the_line_endings_and_moves_th
     assert _receipt_names(eng, paper)
 
 
-async def test_the_page_limit_sentence_after_the_checks_moves_their_receipts(tmp_path: Path) -> None:
+async def test_the_page_overrun_leaves_the_paper_and_the_receipts_of_the_checks_alone(tmp_path: Path) -> None:
     eng, paper = _quest(tmp_path, "# T\n\n## Methods\nM.\n\n## Limitations\nFew.\n\n## References\n1. A.\n",
                         checks=("claim_check", "citation_check"))
-
-    async def measure(path: Path, state: dict) -> dict:
-        return {"pages": 6}
-
-    eng._measure_draft_pages = measure
+    before = paper.read_bytes()
     assert await eng._state_page_overrun({}, paper, 4, 6) == 6
-    assert "This paper is 6 pages, over the 4-page limit set for it" in paper.read_text(encoding="utf-8")
+    assert paper.read_bytes() == before
     for check in ("claim_check", "citation_check"):
         assert _receipt_names(eng, paper, check), check
-        assert "page count" in json.loads(receipts.path(eng.quest_root, check).read_text(encoding="utf-8"))["detail"]
 
 
 def _ledger(eng: Any, claims: list[str]) -> Path:

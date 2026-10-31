@@ -83,7 +83,6 @@ UNDEFINED = "undefined"
 FEWER_RUNS = "fewer_runs"
 CUT_SHORT = "cut_short"
 RUN_DIFFERENCE = "run_difference"
-PAGE_LIMIT = "page_limit"
 SHARED_SEEDS = "shared_seeds"
 UNSUPPORTED_CLAIMS = "unsupported_claims"
 UNRESOLVED_REVIEW = "unresolved_review"
@@ -105,7 +104,7 @@ _ID_PREFIX = {NOT_DONE: "topic", LEFT_OUT: "left-out", NOT_COMPUTED: "not-comput
               SECOND_VERSION: "second-version", UNTESTED: "equation", CODE_FINDING: "finding", FAILED_TRIALS: "failed-trials",
               SETTING_LEFT_OUT: "setting-left-out", CALIBRATION: "calibration", TRIALS_UNCHECKED: "trials-unchecked",
               UNDEFINED: "undefined",
-              FEWER_RUNS: "fewer", CUT_SHORT: "cut-short", RUN_DIFFERENCE: "difference", PAGE_LIMIT: "pages", SHARED_SEEDS: "shared-seeds",
+              FEWER_RUNS: "fewer", CUT_SHORT: "cut-short", RUN_DIFFERENCE: "difference", SHARED_SEEDS: "shared-seeds",
               UNSUPPORTED_CLAIMS: "unsupported", UNRESOLVED_REVIEW: "review", LAST_REVIEW: "last-review"}
 #: More settings left out than this are placed as one item.
 _MAX_SETTING_ITEMS = 6
@@ -452,10 +451,6 @@ def required_items(quest_root: Path | str) -> list[Item]:
     _trial_check_items(root, add)
     if (said_seeds := shared_seeds_text(root)):
         add(SHARED_SEEDS, "seeds shared across settings", _sentence(said_seeds), key="seeds")
-    pages = _read(root, str(PAGE_RECORD))
-    if isinstance(pages, dict) and pages.get("final") and isinstance(pages.get("pages"), int)             and isinstance(pages.get("limit"), int) and pages["pages"] > pages["limit"]:
-        add(PAGE_LIMIT, "page limit", _sentence(
-            f"This paper is {pages['pages']} pages, over the {pages['limit']}-page limit set for it"), key="limit")
     from . import disclosure as _disc
 
     unresolved = _disc.unresolved_sentence(_read(root, str(_disc.OBJECTIONS_RECORD)))
@@ -1620,6 +1615,16 @@ def place_blocks(markdown: str, quest_root: Path | str, *, topic: str = "", fall
 
         text = _best.insert_before_discussion(text, ["{{" + name + "}}"])
     return text
+
+
+def page_limit_text(quest_root: Path | str) -> str:
+    """The sentence for the quality report when the finished paper is longer than the topic's page limit, else ``""``. The
+    limit is a guideline: the paper does not carry this sentence (QUALITY.md and run.log do)."""
+    pages = _read(Path(quest_root), str(PAGE_RECORD))
+    if (isinstance(pages, dict) and pages.get("final") and isinstance(pages.get("pages"), int)
+            and isinstance(pages.get("limit"), int) and pages["pages"] > pages["limit"]):
+        return _sentence(f"This paper is {pages['pages']} pages, over the {pages['limit']}-page limit set for it")
+    return ""
 
 
 def write_page_record(quest_root: Path | str, pages: int, limit: int, *, final: bool) -> None:

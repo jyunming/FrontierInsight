@@ -24019,7 +24019,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
     async def _node_citation_check(self, state: QuestState) -> QuestState:
         """The last step before the paper is delivered: its citations are read against their sources
         (:meth:`_check_citations`), then the paper as delivered is measured against the page limit, and one still over it
-        says so in its Limitations from that measurement (:meth:`_state_page_overrun`). The review states an overrun only
+        goes on record for the quality report (:meth:`_state_page_overrun`). The review states an overrun only
         when it has used up its shortening rewrites, and a paper can also leave the review loop earlier (its other
         findings out of rounds), so the delivered paper is measured here, whatever route brought it."""
         out = await self._check_citations(state)
@@ -24041,7 +24041,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 pages = await self._state_page_overrun({**state, **out}, Path(paper_path), limit,  # type: ignore[arg-type]
                                                        int(measured["pages"]))
                 self._log.warning("[page_limit] the paper as delivered renders to %d pages, over the limit of %d: "
-                                  "its Limitations say so", pages, limit)
+                                  "QUALITY.md says so", pages, limit)
         return out
 
     async def _check_citations(self, state: QuestState) -> QuestState:
@@ -25507,22 +25507,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         return len(standing)
 
     async def _state_page_overrun(self, state: QuestState, paper_path: Path, limit: int, pages: int) -> int:
-        """The paper stays over its page limit: FI's measurement goes on record (``.fi/page_limit.json``), FI puts the
-        sentence that says so in the Limitations (core/paper_facts.py ``PAGE_LIMIT``), and the paper that now carries it is
-        measured again, since the sentence is a few lines of its own. Returns the page count of the paper as it stands,
-        which is the one the sentence states (twice at most: a sentence that tips the paper onto one more page is stated
-        with that page)."""
-        for _ in range(2):
-            _paper_facts.write_page_record(self.quest_root, pages, limit, final=True)
-            # The sentence is FI's own measurement: it adds no claim and no citation, so both checks' receipts move.
-            self._restate_limitations({**state, "paper_md": str(paper_path)},
-                                      "FI stated its own page count in the Limitations and added no claim")
-            again = await self._measure_draft_pages(paper_path, state)
-            if again is None or int(again["pages"]) == pages:
-                break
-            pages = int(again["pages"])
-        if pages <= limit:  # the sentence was the only thing over: nothing to state
-            _paper_facts.write_page_record(self.quest_root, pages, limit, final=False)
+        """The paper stays over its page limit: FI's measurement goes on record (``.fi/page_limit.json``), which the
+        quality report prints (core/paper_facts.py ``page_limit_text``). The limit is a guideline, so the paper itself
+        carries no sentence about it. Returns the page count."""
+        _paper_facts.write_page_record(self.quest_root, pages, limit, final=True)
         return pages
 
     async def _page_limit_review(

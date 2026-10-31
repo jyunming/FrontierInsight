@@ -46,48 +46,36 @@ def test_a_name_that_is_no_metric_of_the_plan_stays_its_own_item_and_still_tells
     assert "`coverage_lnA`" in item.sentence and "±0.01002" in item.sentence and "target of ±0.01" in item.sentence
 
 
-def test_a_paper_over_its_page_limit_after_the_rewrites_says_so_with_the_measured_pages(tmp_path: Path) -> None:
+def test_a_paper_over_its_page_limit_after_the_rewrites_is_told_to_the_quality_report_not_the_paper(tmp_path: Path) -> None:
     root = _quest(tmp_path, [])
-    assert not [i for i in paper_facts.required_items(root) if i.kind == paper_facts.PAGE_LIMIT]
+    assert paper_facts.page_limit_text(root) == ""
     paper_facts.write_page_record(root, 7, 4, final=False)  # a draft a rewrite will still shorten: nothing to state
-    assert not [i for i in paper_facts.required_items(root) if i.kind == paper_facts.PAGE_LIMIT]
+    assert paper_facts.page_limit_text(root) == ""
     paper_facts.write_page_record(root, 4, 4, final=True)  # within the limit: nothing to state
-    assert not [i for i in paper_facts.required_items(root) if i.kind == paper_facts.PAGE_LIMIT]
+    assert paper_facts.page_limit_text(root) == ""
     paper_facts.write_page_record(root, 7, 4, final=True)
-    (item,) = [i for i in paper_facts.required_items(root) if i.kind == paper_facts.PAGE_LIMIT]
-    assert "7 pages" in item.sentence and "4-page limit" in item.sentence
+    assert paper_facts.page_limit_text(root) == "This paper is 7 pages, over the 4-page limit set for it."
     paper = "# T\n\n## Methods\nM.\n\n## Discussion\n**Limitations.** Few.\n\n## References\n1. A.\n"
     out = paper_facts.render(paper_facts.place_blocks(paper, root), root).text
-    assert "This paper is 7 pages, over the 4-page limit set for it" in out
-    assert out.index("**Limitations.** Few.") < out.index("This paper is 7 pages") < out.index("## References")
+    assert "pages, over the" not in out and "page limit" not in out.lower()
 
 
-async def test_the_review_puts_the_page_overrun_in_the_paper_and_measures_the_paper_that_carries_it(tmp_path: Path) -> None:
-    """The last review of a paper still over the limit: the record, the sentence in the Limitations (the paper's bold
-    "Limitations." paragraph is no section), and the page count the sentence states is the final paper's."""
+async def test_the_page_overrun_is_recorded_and_the_paper_is_left_as_it_is(tmp_path: Path) -> None:
     from tests.test_plan_optimisation import _engine
 
     eng = _engine(tmp_path, [])
     root = eng.quest_root
     (root / ".fi").mkdir(parents=True, exist_ok=True)
     paper = root / "paper.md"
-    paper.write_text("# T\n\n## Methods\nM.\n\n## Discussion\n**Limitations.** Few.\n\n## References\n1. A.\n",
-                     encoding="utf-8")
-    seen: list[str] = []
-
-    async def measure(path: Path, state: dict) -> dict:
-        seen.append(Path(path).read_text(encoding="utf-8"))
-        return {"pages": 7 if "pages, over the" in seen[-1] else 6}  # the sentence tips the paper onto one more page
-
-    eng._measure_draft_pages = measure  # type: ignore[method-assign]
-    pages = await eng._state_page_overrun({}, paper, 4, 6)
-    text = paper.read_text(encoding="utf-8")
-    assert pages == 7 and "This paper is 7 pages, over the 4-page limit set for it" in text
-    assert json.loads((root / ".fi" / "page_limit.json").read_text()) == {"pages": 7, "limit": 4, "final": True}
-    assert text.count("pages, over the") == 1  # re-stated, not added again
+    body = "# T\n\n## Methods\nM.\n\n## Discussion\n**Limitations.** Few.\n\n## References\n1. A.\n"
+    paper.write_text(body, encoding="utf-8")
+    assert await eng._state_page_overrun({}, paper, 4, 6) == 6
+    assert paper.read_text(encoding="utf-8") == body
+    assert json.loads((root / ".fi" / "page_limit.json").read_text()) == {"pages": 6, "limit": 4, "final": True}
+    assert "6 pages, over the 4-page limit" in paper_facts.page_limit_text(root)
 
 
-async def test_a_paper_that_leaves_the_review_over_its_page_limit_says_so_whatever_route_brought_it(
+async def test_a_paper_that_leaves_the_review_over_its_page_limit_is_recorded_whatever_route_brought_it(
         tmp_path: Path, monkeypatch) -> None:
     """Round s4: both papers left the review with "shortening 2 of 2" still pending and other findings out of rounds, so
     the review never reached the step that states the overrun, and 6- and 7-page papers shipped silent. The last step
@@ -115,7 +103,7 @@ async def test_a_paper_that_leaves_the_review_over_its_page_limit_says_so_whatev
     eng._measure_draft_pages = measure  # type: ignore[method-assign]
     out = await eng._node_citation_check({"paper_md": str(paper)})  # type: ignore[arg-type]
     assert out == {"citation_next": "done"}
-    assert "This paper is 7 pages, over the 4-page limit set for it" in paper.read_text(encoding="utf-8")
+    assert paper.read_text(encoding="utf-8") == body  # the paper itself says nothing about its length
     assert json.loads((root / ".fi" / "page_limit.json").read_text()) == {"pages": 7, "limit": 4, "final": True}
 
     # A paper within the limit is left as it is.
@@ -124,3 +112,12 @@ async def test_a_paper_that_leaves_the_review_over_its_page_limit_says_so_whatev
     pages["n"] = 4
     await eng._node_citation_check({"paper_md": str(paper)})  # type: ignore[arg-type]
     assert "limit set for it" not in paper.read_text(encoding="utf-8") and not (root / ".fi" / "page_limit.json").exists()
+
+
+def test_the_quality_report_prints_the_page_limit_line_under_what_the_paper_does_not_carry() -> None:
+    from core import quality_report
+
+    lines = quality_report._paper_record_lines({"page_limit": "This paper is 6 pages, over the 4-page limit set for it."})
+    text = "\n".join(lines)
+    assert "### Page limit" in text and "This paper is 6 pages, over the 4-page limit set for it." in text
+    assert quality_report._paper_record_lines({"page_limit": ""}) == []

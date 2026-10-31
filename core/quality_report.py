@@ -1229,7 +1229,7 @@ def _paper_records(q: _Quest) -> dict[str, Any]:
     root = q.root
     engine = _dict(q.config.get("engine"))
     topic = str(q.config.get("topic") or "")
-    out: dict[str, Any] = {"how_reached": "", "run_record": "", "code_findings": "", "paper_check": {}}
+    out: dict[str, Any] = {"how_reached": "", "run_record": "", "code_findings": "", "page_limit": "", "paper_check": {}}
     # The study as the quest resolved it (clarify can decide a quest needs no simulation, or is a survey, when the YAML did
     # not say so): the last design route records both. A quest with no such record falls back to the YAML.
     resolved = next((_dict(e.get("facts")) for e in reversed(q.decisions("design")) if _dict(e.get("facts"))), {})
@@ -1244,6 +1244,7 @@ def _paper_records(q: _Quest) -> dict[str, Any]:
                                   f"{_d._plain_seconds(least)}.")
         out["code_findings"] = _cr.findings_block(root, root / "code").replace(
             "**Open points in the code that produced these results.** ", "")
+        out["page_limit"] = _pf.page_limit_text(root)
         kept = _pf.kept_check(root)
         out["paper_check"] = {"hits": [str(h) for h in _list(kept.get("hits"))],
                               "unmet_items": [_dict(i) for i in _list(kept.get("unmet_items"))],
@@ -1406,7 +1407,8 @@ def _citations_line(c: dict[str, Any]) -> str:
 def _paper_record_lines(records: dict[str, Any]) -> list[str]:
     """The section of what FI recorded about the run that the paper does not carry, and what its check of the paper found."""
     labels = (("how_reached", "How this result was reached"), ("run_record", "What FI recorded about the run"),
-              ("code_findings", "Open points in the code that produced the results"))
+              ("code_findings", "Open points in the code that produced the results"),
+              ("page_limit", "Page limit"))
     parts = [(title, records.get(key)) for key, title in labels if records.get(key)]
     check = records.get("paper_check") or {}
     unmet = [i for i in check.get("unmet_items") or [] if isinstance(i, dict)]

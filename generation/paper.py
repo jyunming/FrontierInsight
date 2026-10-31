@@ -399,6 +399,14 @@ _PDFLATEX_ONLY: dict[str, str] = {
 for _glyph, _latex in _PDFLATEX_ONLY.items():
     _LATEX_UNICODE_REPLACEMENTS.setdefault(_glyph, _latex)
 
+# A private-use code point (U+E000..U+F8FF) is assigned no character by Unicode: it means
+# something only inside the font of the file it was copied from (a scraped page title can
+# carry a copyright sign of a symbol font as U+F6D9), so no font here can set it and LaTeX
+# has no form for it. It is left off the typeset copy and listed in the render record
+# like any other invisible character; the paper's own paper.md keeps it.
+for _cp in range(0xE000, 0xF900):
+    _LATEX_UNICODE_REPLACEMENTS.setdefault(chr(_cp), "")
+
 # Pre-compile a translator for str.translate — that path is faster
 # than a chained str.replace and Python's translate handles multi-
 # char destination strings transparently.

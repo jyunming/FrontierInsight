@@ -42,11 +42,11 @@ def _clean(text: str) -> None:
         assert not re.search(rf"\b{re.escape(word)}\b" if word == "FI" else re.escape(word), text), (word, text)
 
 
-def test_the_page_overrun_reads_as_a_paper_sentence(tmp_path: Path) -> None:
+def test_the_page_overrun_reads_as_a_plain_sentence_for_the_quality_report(tmp_path: Path) -> None:
     root = _root(tmp_path)
     paper_facts.write_page_record(root, 6, 4, final=True)
-    [item] = _of(root, paper_facts.PAGE_LIMIT)
-    assert item.sentence == "This paper is 6 pages, over the 4-page limit set for it."
+    assert paper_facts.page_limit_text(root) == "This paper is 6 pages, over the 4-page limit set for it."
+    _clean(paper_facts.page_limit_text(root))
 
 
 def test_the_code_files_sentence_is_made_from_the_layout_not_the_stored_prose(tmp_path: Path) -> None:
