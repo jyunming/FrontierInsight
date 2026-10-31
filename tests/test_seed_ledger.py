@@ -16,7 +16,10 @@ from core import paper_facts, run_facts
 LIBRARY = "import somelib\ndef run_trial(cell, trial_id, seed):\n    return somelib.simulate(cell, seed=seed)\n"
 
 
-def _quest(tmp_path: Path, seeds: list[int], outcomes: list[str], drew: bool | None = None, src: str = LIBRARY) -> Path:
+def _quest(tmp_path: Path, seeds: list[int], outcomes: list[str], drew: bool | None = None, src: str = LIBRARY,
+           repeat: str | None = "same") -> Path:
+    """``repeat``: the small run ran trial 0's seed again and got the study's outcome ("same"), another ("other"), or FI
+    has no second run of any seed (None)."""
     root = tmp_path / "q"
     (root / "code").mkdir(parents=True)
     (root / "raw").mkdir()
@@ -26,9 +29,14 @@ def _quest(tmp_path: Path, seeds: list[int], outcomes: list[str], drew: bool | N
     rows += [{"event": "trial", "cell": "a", "trial": i, "seed": s, "status": "ok", "values_sha256": h}
              for i, (s, h) in enumerate(zip(seeds, outcomes))]
     (root / "raw" / "ledger.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    if repeat is not None:
+        for sub, vals in (("small_run/s0", {"x": 1.0}), ("trials", {"x": 1.0 if repeat == "same" else 2.0})):
+            (root / ".fi" / sub).mkdir(parents=True, exist_ok=True)
+            (root / ".fi" / sub / "cell0.out.jsonl").write_text(
+                json.dumps({"trial": 0, "seed": seeds[0], "status": "ok", "values": vals}) + "\n", encoding="utf-8")
     if drew is not None:
-        (root / ".fi" / "trials").mkdir(parents=True)
-        (root / ".fi" / "trials" / "cell0.out.jsonl").write_text(
+        (root / ".fi" / "trials").mkdir(parents=True, exist_ok=True)
+        (root / ".fi" / "trials" / "cell9.out.jsonl").write_text(
             "\n".join(json.dumps({"trial": i, "status": "ok", "drew": drew}) for i in range(len(seeds))), encoding="utf-8")
     return root
 
@@ -69,3 +77,16 @@ def test_the_writer_section_carries_the_seed_fact(tmp_path: Path) -> None:
     root = _quest(tmp_path, [1, 2, 3, 4], ["a", "b", "c", "d"])
     section = paper_facts.writer_section(root)
     assert "Seed: Each of the trials ran on its own seed" in section, section
+
+
+def test_known_negative_distinct_outcomes_but_a_repeated_seed_differing_is_not_reaches(tmp_path: Path) -> None:
+    """An unseeded generator: different seeds give different outcomes, and so does the same seed run twice."""
+    root = _quest(tmp_path, [1, 2, 3, 4], ["a", "b", "c", "d"], repeat="other")
+    assert run_facts.seed_repeat_agrees(root) is False
+    assert run_facts.seed_verdict(root)["verdict"] == "unknown"
+
+
+def test_no_seed_run_twice_keeps_unknown(tmp_path: Path) -> None:
+    root = _quest(tmp_path, [1, 2, 3, 4], ["a", "b", "c", "d"], repeat=None)
+    assert run_facts.seed_repeat_agrees(root) is None
+    assert run_facts.seed_verdict(root)["verdict"] == "unknown"

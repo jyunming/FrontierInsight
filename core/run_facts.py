@@ -893,12 +893,53 @@ def seed_verdict(quest_root: Path | str) -> dict[str, Any]:
     return out
 
 
+def _rows(path: Path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                if '"seed"' not in line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(row, dict) and row.get("status") == "ok" and isinstance(row.get("seed"), int)                         and isinstance(row.get("values"), dict):
+                    yield row
+    except OSError:
+        return
+
+
+def seed_repeat_agrees(quest_root: Path | str) -> bool | None:
+    """Whether the same seed gave the same outcome where FI already ran it twice: FI's small run (``.fi/small_run/``,
+    which runs the first trials of some settings before the study) and the study's own trials (``.fi/trials/``) share
+    seeds, because a trial's seed is fixed by the base seed, the setting and the trial number. ``True`` when every such
+    pair returned the same values (and there is at least one), ``False`` when one pair differs (the outcome does not
+    depend on the seed alone, as with a generator nothing seeds), ``None`` when no seed was run twice."""
+    root = Path(quest_root)
+    small: dict[int, str] = {}
+    for path in sorted((root / ".fi" / "small_run").glob("*/*.jsonl")):
+        for row in _rows(path):
+            small[row["seed"]] = json.dumps(row["values"], sort_keys=True, default=str)
+    if not small:
+        return None
+    pairs = 0
+    for path in sorted((root / ".fi" / "trials").glob("*.jsonl")):
+        for row in _rows(path):
+            was = small.get(row["seed"])
+            if was is None:
+                continue
+            pairs += 1
+            if json.dumps(row["values"], sort_keys=True, default=str) != was:
+                return False
+    return True if pairs else None
+
+
 def seed_reaches_by_ledger(quest_root: Path | str) -> bool | None:
-    """Whether FI's own trial ledger (``raw/ledger.jsonl``) answers that the seed FI gives each trial reaches the simulation:
-    ``True`` when, in some setting, trials that ran with different seeds returned different outcomes (``values_sha256``);
-    ``None`` when the ledger does not show it (no ledger, one seed, or every trial returned the same outcome), so the
-    code decides. It never answers ``False``: identical outcomes may be a result that does not depend on chance, which
-    the code's reading and the frame's ``drew`` record say better."""
+    """Whether FI's own records answer that the seed FI gives each trial reaches the simulation. Both halves are needed:
+    (1) in the trial ledger (``raw/ledger.jsonl``), in some setting, trials that ran with different seeds returned
+    different outcomes (``values_sha256``); and (2) a seed FI ran twice (its small run and the study,
+    :func:`seed_repeat_agrees`) gave the same outcome both times. Different outcomes alone are what a generator nothing
+    seeds gives too. ``None`` when either half is missing, so the code decides; it never answers ``False``."""
     try:
         handle = (Path(quest_root) / "raw" / "ledger.jsonl").open(encoding="utf-8")
     except OSError:
@@ -919,7 +960,9 @@ def seed_reaches_by_ledger(quest_root: Path | str) -> bool | None:
                 continue
             seeds.setdefault(row["cell"], set()).add(row["seed"])
             outcomes.setdefault(row["cell"], set()).add(str(row["values_sha256"]))
-    return True if any(len(seeds[c]) > 1 and len(outcomes[c]) > 1 for c in seeds) else None
+    if not any(len(seeds[c]) > 1 and len(outcomes[c]) > 1 for c in seeds):
+        return None
+    return True if seed_repeat_agrees(quest_root) is True else None
 
 
 def record_seed(quest_root: Path | str) -> dict[str, Any]:
