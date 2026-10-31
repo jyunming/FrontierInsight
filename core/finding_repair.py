@@ -725,7 +725,7 @@ def splice(source: str, reply: str, scope: set[str] | None = None,
     for n in old_tree.body:
         taken |= _bound_names(n)
     imports = [_steps._segment(block_lines, n).rstrip("\n") for n in new_tree.body
-               if isinstance(n, (ast.Import, ast.ImportFrom)) and ast.dump(n) not in have and not (_bound_names(n) & taken)]
+               if ast.dump(n) not in have and _plain_new_import(n, taken)]
     if imports:
         out = _steps._with_imports(out, imports)
     try:
@@ -782,6 +782,13 @@ def _bound_names(node: ast.stmt) -> set[str]:
     return names
 
 
+def _plain_new_import(node: ast.stmt, taken: set[str]) -> bool:
+    """Whether a top-level import is one a repair may add: it binds only names the file did not bind before, and it is
+    not a star import (which would make the names the script uses unknowable to FI's own name checks)."""
+    return (isinstance(node, (ast.Import, ast.ImportFrom)) and not (_bound_names(node) & taken)
+            and not any(a.name == "*" for a in node.names))
+
+
 def _frame(tree: ast.Module) -> list[tuple[str, str]]:
     """Every statement that is not a function, as ``(where, ast.dump)``: the module's own statements (constants, imports,
     guards) and those in the body of a class (its header and its class-level assignments); the methods and functions are
@@ -836,7 +843,7 @@ def frame_changes(old: str, new: str) -> list[str]:
     for node in after.body:
         if isinstance(node, ast.ClassDef) and node.name not in taken:
             new_classes.add(node.name)
-        elif isinstance(node, (ast.Import, ast.ImportFrom)) and not (_bound_names(node) & taken):
+        elif _plain_new_import(node, taken):
             skip.add(ast.dump(node))
     new_frame = [(w, d) for w, d in _frame(after) if d not in skip and w.split(".")[0] not in new_classes
                  and not any(f"ClassDef(name='{c}'" in d for c in new_classes)]
@@ -989,8 +996,7 @@ def _added(old: str, new: str) -> list[tuple[str, str, ast.stmt]]:
     kept = _frame_nodes(before)
     out = []
     for where, dump, node in _frame_nodes(after):
-        if (isinstance(node, (ast.Import, ast.ImportFrom)) and where == "" and not (_bound_names(node) & taken)
-                and not any(a.name == "*" for a in node.names)):
+        if where == "" and _plain_new_import(node, taken):
             continue
         if where.split(".")[0] in new_classes or (isinstance(node, ast.ClassDef) and where == "" and node.name in new_classes):
             if _plain_class_statement(node):
