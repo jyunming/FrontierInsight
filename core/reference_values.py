@@ -230,8 +230,8 @@ def cross_check(protocol: dict[str, Any] | None, metric: dict[str, Any],
                 judged: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """What the plan's known-answer checks say about a metric's reference: ``{"state", "check", "why"}``.
 
-    The checks it is compared with: the one ``checked_by`` names, else every check whose ``measure`` is the value's name
-    or the metric's id. A check is comparable when its measure is that one name (a formula such as ``max(0, x - 0.04)``
+    The checks it is compared with: every check whose ``measure`` is the value's name or the metric's id; ``checked_by``
+    picks one of them, and a check that measures another quantity says nothing about this one (``unchecked``). A check is comparable when its measure is that one name (a formula such as ``max(0, x - 0.04)``
     measures something else) and its case is one the reference holds for. Then the reference computed at the check's case
     must equal the check's expected value within its tolerance: ``disagrees`` otherwise (the reference is not used). With
     ``judged`` (the engine's verdicts, :func:`core.oracle_check.last_judged`): ``agrees`` only through a check the engine
@@ -247,6 +247,10 @@ def cross_check(protocol: dict[str, Any] | None, metric: dict[str, Any],
         if not chosen:
             return {"state": "unchecked", "check": ref.get("checked_by"),
                     "why": f"it names the check {ref.get('checked_by')!r}, which the plan does not have"}
+        other = [o for o in chosen if str(o.get("measure") or "").strip() not in {name, ident}]
+        if other:  # what a check measures is its own `measure`: a named check of another quantity says nothing here
+            return {"state": "unchecked", "check": None,
+                    "why": f"the check {str(other[0]['name']).strip()!r} measures `{other[0].get('measure')}`, not this value"}
     else:
         chosen = [o for o in oracles if str(o.get("measure") or "").strip() in {name, ident}]
     given = inputs(protocol)
