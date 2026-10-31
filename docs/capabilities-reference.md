@@ -133,8 +133,11 @@ checks that the headline results are computed with those tested functions and no
 (`second_impl.dependence`, `Engine._dependence_check`): at up to three settings where a function is called, FI runs the
 simulation once as it is and once with every number the function returns changed by up to 5% (0.5% when the run stops
 at 5%), in a copy of the quest that neither reads nor keeps the study's kept values (`data/results/cache/`). A headline
-result that moves uses the function. When none moves, the tests of that function say nothing about the headline
-results: that is a gap in the evidence (`core/evidence.py`), and the writer is told to say so. A function not called
+result that moves uses the function. When none moves, FI claims nothing: a few percent need not flip a threshold
+decision at one setting, and a fit recovers the value that generated its data whatever the function returns. The one
+"unused" FI states is the one it can show from the code itself (`second_impl.discarded_calls`): every call of the
+function stands alone as a statement or puts its result in a name nothing reads. That is a gap in the evidence
+(`core/evidence.py`) and the writer is told to say so. A function not called
 at the settings FI ran, a result that differs between two runs of the same setting, a result that is a whole number
 (a count, a yes/no, a step of a grid, which a change of a few percent need not move), or a run that stops whenever the
 number is changed is recorded (`.fi/second_impl/dependence.json`, tied to the code it was made on) and is no gap.
