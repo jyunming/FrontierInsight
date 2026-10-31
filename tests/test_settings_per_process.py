@@ -7,7 +7,11 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from core import run_checks, trial_runner
 from core.execution import SharedInterpreterExecutor
@@ -374,7 +378,21 @@ def test_the_time_of_a_check_that_fails_is_still_counted(tmp_path: Path, monkeyp
     assert any("could not be run" in line for line in me._log.lines)
 
 
-def test_a_resumed_run_shares_processes_again_from_the_kept_groups_without_a_cost(tmp_path: Path) -> None:
+def test_a_resumed_run_shares_processes_again_from_the_kept_groups_without_a_cost(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The sizing times its grouped pass on trial_runner's clock (the real one): under load a start-up could pass the
+    # check's limit. A fixed 0.1 s per process started on a clock of the test's own makes the pass the same every time.
+    clock = {"now": 0.0}
+    monkeypatch.setattr(trial_runner, "time", SimpleNamespace(
+        monotonic=lambda: clock["now"], time=time.time, time_ns=time.time_ns, perf_counter=time.perf_counter,
+        sleep=time.sleep))
+    started = SharedInterpreterExecutor.execute
+
+    async def start(self, cmd, **kw):  # type: ignore[no-untyped-def]
+        clock["now"] += 0.1
+        return await started(self, cmd, **kw)
+
+    monkeypatch.setattr(SharedInterpreterExecutor, "execute", start)
     got, runner, _ = _sizing(tmp_path, PURE, settings=12, at_once=4, limit_s=60.0)
     assert got is not None
     kept = json.loads(json.dumps({"per_process": runner.per_process, "shared_groups": runner.shared_groups,
