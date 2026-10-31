@@ -7521,6 +7521,21 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 reasons.append(f"`protocol.{part}` as you wrote it cannot be read: {why}"
                                + (f" The entry as you wrote it: {entry}" if entry else ""))
                 continue
+            if part == "oracles" and getattr(self, "_test_run_returned", None):
+                # After the test run of the checks the code is not rewritten: a check may not start to read a name nothing
+                # defines (the plan does not declare it and the simulation did not return it), or it could never be judged.
+                # The reason goes back to the plan's model, so it writes the measure from names that exist.
+                unknown = _contract.unknown_measure_names(old_protocol, fixed, self._test_run_returned)
+                if unknown:
+                    ids = ", ".join(f"`{i}`" for i in sorted(self._test_run_returned))
+                    reasons.append("; ".join(
+                        f"the check `{n}` measures {', '.join('`' + w + '`' for w in ws)}, which the plan does not declare "
+                        "and the simulation did not return" for n, ws in unknown.items())
+                        + f". The simulation returned: {ids}. Write each measure as a formula of those names, or leave the "
+                        "check as it was")
+                    self._log.warning("[plan] `protocol.oracles` reads names nothing defines: %s", "; ".join(
+                        f"{n}: {', '.join(ws)}" for n, ws in unknown.items()))
+                    continue
             if part in _LEDGER_PARTS:
                 problems = self._ledger_problems(fixed, passages).get(part)
                 if problems:
@@ -18390,7 +18405,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         print(f"[FI] A test run of the checks before the study: {len(found)} of them may mean something different in the "
               "plan and in the simulation; asking the plan to look at them once (see plan.md and .fi/run.log)")
         before = self._planned_oracles()
-        failed = await self._revise_checks_only(_forms.dry_run_request(found))
+        # The names the simulation returned on the test run: a rewrite of a check may read only these and the plan's own
+        # declared names (:func:`core.contract.unknown_measure_names`, applied where the rewrite is read).
+        self._test_run_returned = {str(k) for c in record.get("checks") or [] if isinstance(c, dict)
+                                   and isinstance(c.get("returned"), dict) for k in c["returned"]}
+        try:
+            failed = await self._revise_checks_only(_forms.dry_run_request(found))
+        finally:
+            self._test_run_returned = None
         after = self._planned_oracles()
         changes = _forms.describe_changes(before, after)
         changed = [name for name, oracle in after.items() if before.get(name) != oracle]
