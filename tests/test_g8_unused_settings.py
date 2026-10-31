@@ -5,6 +5,7 @@ Neutral toy topics only (a cooling cup, two estimators of a rate).
 from __future__ import annotations
 
 import asyncio
+import math
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -65,6 +66,17 @@ def test_two_estimators_that_agree_in_every_trial_are_named_as_identical() -> No
     assert got == [("est_plain", "est_weighted", 4)]
     note = flat.identical_results_note(got)
     assert "`est_plain` and `est_weighted`" in note and "by design" in note and "``" not in note
+
+
+def test_two_methods_that_agree_closely_are_not_copies_but_rounding_level_agreement_is() -> None:
+    ns = (1.0, 2.0, 3.0, 4.0)
+    close = [_cell({"n": n}, {"est_a": 0.5 * n, "est_b": 0.5 * n * (1 + 1e-12)}) for n in ns]
+    assert flat.identical_results(close) == [], "agreement to 1e-12 is two methods reaching one answer, not a copy"
+    assert flat.identical_results(close, whole_only=True, declared=["est_a", "est_b"]) == []
+    exact = [_cell({"n": n}, {"est_a": 0.5 * n, "est_b": 0.5 * n}) for n in ns]
+    assert flat.identical_results(exact) == [("est_a", "est_b", 4)]
+    one_ulp = [_cell({"n": n}, {"est_a": 0.5 * n, "est_b": math.nextafter(0.5 * n, 10.0)}) for n in ns]
+    assert flat.identical_results(one_ulp) == [("est_a", "est_b", 4)], "a unit in the last place is rounding"
 
 
 def test_results_that_differ_in_any_trial_or_never_vary_are_not_paired() -> None:
