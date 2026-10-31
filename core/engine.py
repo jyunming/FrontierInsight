@@ -33381,80 +33381,17 @@ def _hits_need_only_a_rewrite(hits: list[Any]) -> bool:
 # many, the same flag takes the text routes it may also belong to.
 _CODE_REEXECUTES = 1
 
-# A results key short enough to double as an English word ("mean", "n",
-# "ci_upper") would match review prose by accident; a compound one
-# ("deterministic_final_size") is never written by chance.
-_RESULT_KEY_MIN_LEN = 8
-
-
-def _nested_key_names(value: Any) -> set[str]:
-    """Every key name in a nested results structure, at any depth."""
-    names: set[str] = set()
-    if isinstance(value, dict):
-        for key, child in value.items():
-            names.add(str(key))
-            names |= _nested_key_names(child)
-    elif isinstance(value, list):
-        for child in value:
-            names |= _nested_key_names(child)
-    return names
-
-
-def _rerun_evidence(review: dict[str, Any], state: QuestState) -> str:
-    """What the review's must-fix evidence names that only running the
-    experiment again can fix — ``""`` when it names nothing of the sort.
-
-    A must-flag hit is a *short identifier* (``agents/review.md`` asks for one),
-    so what it is about is spelled out in the review's own prose: its
-    ``blocking`` sentence, its ``weaknesses`` and its ``suggestions``. That
-    prose is matched against names this quest actually produced, not against a
-    list of English words — a key of ``result_json`` (a value the run computed),
-    a file name in ``figure_records`` (a figure's underlying data), or the
-    experiment file. "ensure the solver is correctly integrated so the
-    'deterministic_final_size' is not reported as 0.0" names a results key and
-    no rewrite can fix it; "remove the attribution to [2]" and "say in the
-    caption that this is one seed" name none, and stay a rewrite.
-
-    The advisory checks are deliberately not read: every
-    ``numeric_oracle_warnings`` finding quotes a result path (a ``formula_slip``
-    quotes the paper's own calculation instead), and those findings
-    are advisory precisely because a pattern match over prose misreads a DOI
-    often enough that a forced re-run costs more than a flagged number. Nor are
-    the hits themselves: they are short identifiers, and one can quote a
-    passage of the paper, which would read as a problem with the data
-    when it is a problem with the
-    paper's words.
-    """
-    if not state.get("code"):
-        return ""  # no experiment to run again (an analyze-only or survey quest)
-    names = {
-        name for name in _nested_key_names(state.get("result_json") or {})
-        if "_" in name and len(name) >= _RESULT_KEY_MIN_LEN
-    }
-    names |= {str(name) for name in state.get("figure_records") or {}}
-    names.add("experiment.py")
-    prose = " ".join(
-        item
-        for field in ("blocking", "weaknesses", "suggestions")
-        for item in _review_items(review.get(field))
-    ).lower()
-    return next((name for name in sorted(names) if name.lower() in prose), "")
-
 
 def _review_sends_the_experiment_back(review: dict[str, Any], state: QuestState) -> str:
-    """What a review that can only be answered by running the experiment again
-    names — ``""`` when this review is not one.
-
-    Only a review whose must-flags would otherwise be answered by rewriting the
-    paper is considered. A hit that already sends the quest back to ``design``
-    (``circular_evaluation`` and the rest) re-runs the experiment on its way
-    through ``implement`` anyway, and a flawed design is not fixed by writing
-    the same experiment again.
-    """
-    hits = review.get("must_flag_hits") or []
-    if not hits or not _hits_need_only_a_rewrite(hits):
-        return ""
-    return _rerun_evidence(review, state)
+    """What a review sends back to be run again: always ``""``. A review is free text, and matching the names of the
+    run's result keys, figure files or ``experiment.py`` against its prose guessed which number the reviewer meant;
+    in eight real quests the name was a seed, an oracle, a figure file or a result key that a caption or a source
+    attribution mentioned, and the study ran again for a sentence of the paper. Every check that measures a computed
+    number as wrong (the results check, the known-answer checks, the run manifest, the evidence gate) runs before the
+    review and repairs or leaves out what it finds, so a review that names a number adds no measurement. A review of
+    the paper goes to ``write``. The function stays as the one place the routes and the implement prompt ask, so a
+    future measured finding can be returned here."""
+    return ""
 
 
 def _rerun_directive(review: dict[str, Any], named: str, analysis: bool = False) -> str:
