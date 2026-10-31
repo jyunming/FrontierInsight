@@ -458,19 +458,28 @@ def read_facts(rows: Any, axes: Any) -> dict[str, Any]:
 
 
 def unread_axes(cells: Any, skip: Any = ()) -> list[str]:
-    """The settings the study varied that no trial of the whole run asked for (:func:`read_facts` over every trial's row,
-    FI's own record of what the code read): a fact FI observed, not a reading of the code's text. Empty where the record
-    makes no claim (a trial that failed, or took the cell as a whole). ``skip``: axes left out (numerical settings)."""
+    """The settings the study varied that no trial of the whole run asked for: FI's own record of what the code read
+    (:func:`read_facts`), not a reading of its text. Judged over the trials that finished, plus the reads a failed trial
+    recorded before it stopped (still reads). A setting is listed only when every one of its values has a finished trial
+    and no trial read it; a value with no finished trial makes no claim for that setting alone. Nothing is listed where
+    the code took the cell as a whole (in any trial) or no finished trial asked for any setting by name. ``skip``: axes
+    left out."""
     cells = [c for c in cells if isinstance(getattr(c, "cell", None), dict)]
-    if any(c.returncode or c.timed_out or c.load_error or any(r.get("status") != "ok" for r in c.rows) for c in cells):
-        return []
+    rows = [r for c in cells for r in c.rows if isinstance(r, dict)]
     skipped = {str(a) for a in skip}
-    values: dict[str, set[str]] = {}
+    values: dict[str, dict[str, bool]] = {}  # axis -> value -> has a finished trial
     for c in cells:
+        done = any(r.get("status") == "ok" for r in c.rows if isinstance(r, dict))
         for a, v in c.cell.items():
-            values.setdefault(str(a), set()).add(json.dumps(v, sort_keys=True, default=str))
+            seen = values.setdefault(str(a), {})
+            key = json.dumps(v, sort_keys=True, default=str)
+            seen[key] = seen.get(key, False) or done
     varied = [a for a, v in values.items() if len(v) > 1 and a not in skipped]
-    return read_facts([r for c in cells for r in c.rows], varied)["never"]
+    facts = read_facts(rows, varied)
+    if any(r.get("read_all") for r in rows):
+        return []
+    failed_reads = {str(k) for r in rows if r.get("status") != "ok" for k in r.get("read") or []}
+    return [a for a in facts["never"] if a not in failed_reads and all(values[a].values())]
 
 
 def _fmt(value: Any) -> str:

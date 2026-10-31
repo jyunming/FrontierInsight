@@ -29,11 +29,36 @@ def test_a_setting_that_is_read_is_not_reported_whatever_its_effect() -> None:
     assert T.unread_axes(_grid(["a", "b"])) == []
 
 
-def test_no_claim_when_the_code_took_the_cell_as_a_whole_or_a_trial_failed() -> None:
+def test_no_claim_when_the_code_took_the_cell_as_a_whole() -> None:
     assert T.unread_axes(_grid(["a"], whole=True)) == []
+
+
+def test_some_failed_trials_do_not_silence_an_ignored_setting() -> None:
     runs = _grid(["a"])
-    runs[0].rows[0]["status"] = "failed"
+    for c in runs[:3]:
+        c.rows[0]["status"] = "failed"
+    assert T.unread_axes(runs) == ["b"]
+
+
+def test_a_read_recorded_by_a_failed_trial_counts() -> None:
+    runs = _grid(["a"])
+    runs[0].rows[0].update(status="failed", read=["a", "b"])
     assert T.unread_axes(runs) == []
+
+
+def test_a_value_with_no_finished_trial_makes_no_claim_for_that_setting_alone() -> None:
+    runs = _grid(["a"])
+    for c in runs:
+        if c.cell["b"] == 20:
+            for r in c.rows:
+                r["status"] = "failed"
+    assert T.unread_axes(runs) == []
+    runs = _grid(["a"])
+    for c in runs:
+        if c.cell["a"] == 2:
+            for r in c.rows:
+                r["status"] = "failed"
+    assert T.unread_axes(runs) == ["b"]
 
 
 def test_a_numerical_setting_left_out_by_the_caller_is_not_listed() -> None:
