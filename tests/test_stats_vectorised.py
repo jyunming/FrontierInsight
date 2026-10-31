@@ -212,26 +212,119 @@ def test_statistics_without_a_callback_logs_through_the_module_logger(caplog: py
     assert any("[evidence] statistics: 1 of 3 contrasts" in r.getMessage() for r in caplog.records)
 
 
-def test_the_resampling_chunk_is_small_and_changes_no_number(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A chunk of 4M numbers asked for 32 MB arrays at once, which a machine short of memory refused (MemoryError in the
-    statistics). The default chunk is a small array, and any chunk size draws the same numbers."""
+# The kernels as they were before the chunk shrank (4M numbers per block), kept as the reference for the seeded draws.
+_OLD = 4_000_000
+
+
+def _old_chunks(rounds: int, width: int) -> list[int]:
+    per, out, left = max(1, _OLD // max(1, width)), [], rounds
+    while left > 0:
+        out.append(min(per, left))
+        left -= out[-1]
+    return out
+
+
+def _old_means(vals, rounds, rng):
+    import numpy as np
+
+    n, gen, arr, out = len(vals), np.random.default_rng(rng.getrandbits(64)), np.asarray(vals, dtype=float), []
+    for r in _old_chunks(rounds, n):
+        out.append(arr[gen.integers(0, n, size=(r, n))].mean(axis=1))
+    return np.concatenate(out).tolist()
+
+
+def _old_mean_differences(x, y, rounds, rng):
+    import numpy as np
+
+    nx, ny, gen = len(x), len(y), np.random.default_rng(rng.getrandbits(64))
+    ax, ay, out = np.asarray(x, dtype=float), np.asarray(y, dtype=float), []
+    for r in _old_chunks(rounds, nx + ny):
+        out.append(ax[gen.integers(0, nx, size=(r, nx))].mean(axis=1) - ay[gen.integers(0, ny, size=(r, ny))].mean(axis=1))
+    return np.concatenate(out).tolist()
+
+
+def _old_permutation_hits(pool, nx, observed, rounds, rng):
+    import numpy as np
+
+    total, gen, arr, hits = len(pool), np.random.default_rng(rng.getrandbits(64)), np.asarray(pool, dtype=float), 0
+    for r in _old_chunks(rounds, total):
+        shuffled = gen.permuted(np.broadcast_to(arr, (r, total)).copy(), axis=1)
+        diff = shuffled[:, :nx].mean(axis=1) - shuffled[:, nx:].mean(axis=1)
+        hits += int((np.abs(diff) >= abs(observed) - 1e-12).sum())
+    return hits
+
+
+def _old_sign_flip_hits(values, observed_abs, rounds, rng):
+    import numpy as np
+
+    m, gen, arr, hits = len(values), np.random.default_rng(rng.getrandbits(64)), np.asarray(values, dtype=float), 0
+    for r in _old_chunks(rounds, m):
+        flipped = np.where(gen.random((r, m)) < 0.5, arr, -arr).sum(axis=1)
+        hits += int((np.abs(flipped) >= observed_abs - 1e-12).sum())
+    return hits
+
+
+def _old_cluster_means(groups, rounds, rng):
+    import numpy as np
+
+    g, gen = len(groups), np.random.default_rng(rng.getrandbits(64))
+    sums, counts, out = np.asarray([s for s, _n in groups], dtype=float), np.asarray([n for _s, n in groups], dtype=float), []
+    for r in _old_chunks(rounds, g):
+        idx = gen.integers(0, g, size=(r, g))
+        c, s = counts[idx].sum(axis=1), sums[idx].sum(axis=1)
+        out.append(np.divide(s, c, out=np.zeros(r), where=c > 0))
+    return np.concatenate(out).tolist()
+
+
+def _old_cluster_differences(ga, gb, rounds, rng):
+    import numpy as np
+
+    gen = np.random.default_rng(rng.getrandbits(64))
+    sa, ca = np.asarray([s for s, _n in ga], dtype=float), np.asarray([n for _s, n in ga], dtype=float)
+    sb, cb = np.asarray([s for s, _n in gb], dtype=float), np.asarray([n for _s, n in gb], dtype=float)
+    out = []
+    for r in _old_chunks(rounds, len(ga) + len(gb)):
+        ia, ib = gen.integers(0, len(ga), size=(r, len(ga))), gen.integers(0, len(gb), size=(r, len(gb)))
+        na, nb = ca[ia].sum(axis=1), cb[ib].sum(axis=1)
+        ma = np.divide(sa[ia].sum(axis=1), na, out=np.zeros(r), where=na > 0)
+        mb = np.divide(sb[ib].sum(axis=1), nb, out=np.zeros(r), where=nb > 0)
+        out.append(ma - mb)
+    return np.concatenate(out).tolist()
+
+
+@pytest.mark.parametrize("chunk", [250_000, 5_003, 7, 4_000_000])
+@pytest.mark.parametrize("sizes", [(8000, 1300), (301, 211), (1501, 977)])
+def test_every_resampling_kernel_draws_the_same_numbers_as_before_at_any_chunk_size(
+    monkeypatch: pytest.MonkeyPatch, chunk: int, sizes: tuple[int, int],
+) -> None:
+    """The chunk bounds memory only: for one seed each kernel returns exactly what the 4M-chunk kernel returned (single
+    sample, two sample, permutation, sign flip, cluster means and cluster differences)."""
+    import random
+
+    na, nb = sizes
+    x, y = _sample(7, na, 0.0), _sample(8, nb, 0.2)
+    ga = [(sum(x[i::37]), len(x[i::37])) for i in range(37)]
+    gb = [(sum(y[i::29]), len(y[i::29])) for i in range(29)]
+    rounds = 2000 if na < 5000 else 500  # 8000 x 500 is above one 4M block
+    monkeypatch.setattr(stats, "_CHUNK_ELEMENTS", chunk)
+    rng = lambda: random.Random(11)  # noqa: E731
+    assert stats._resampled_means(x, rounds, rng()) == _old_means(x, rounds, rng())
+    assert stats._resampled_mean_differences(x, y, rounds, rng()) == _old_mean_differences(x, y, rounds, rng())
+    pool = x[:na // 2] + y[:nb // 2]
+    assert stats._permutation_hits(pool, na // 2, 0.01, rounds, rng()) == _old_permutation_hits(pool, na // 2, 0.01, rounds, rng())
+    assert stats._sign_flip_hits(y, 3.0, rounds, rng()) == _old_sign_flip_hits(y, 3.0, rounds, rng())
+    assert stats._resampled_cluster_means(ga, rounds, rng()) == _old_cluster_means(ga, rounds, rng())
+    assert stats._resampled_cluster_differences(ga, gb, rounds, rng()) == _old_cluster_differences(ga, gb, rounds, rng())
+
+
+def test_the_default_resampling_chunk_is_a_small_array() -> None:
     import tracemalloc
 
-    values, other = _sample(7, 8000, 0.0), _sample(8, 1300, 0.2)
-
-    def everything() -> list:
-        return [stats.bootstrap_mean_interval(values, resamples=500, seed=3), stats.cluster_bootstrap_interval(values, [i % 37 for i in range(len(values))])]
-
+    values = _sample(7, 8000, 0.0)
     assert stats._CHUNK_ELEMENTS * 8 <= 4 * 1024 * 1024
     tracemalloc.start()
-    small = everything()
+    stats.bootstrap_mean_interval(values, resamples=500, seed=3)
+    stats.two_sample_mean_test(values, _sample(8, 1300, 0.2), seed=4)
     peak = tracemalloc.get_traced_memory()[1]
     tracemalloc.stop()
     assert peak < 16 * 1024 * 1024
-    monkeypatch.setattr(stats, "_CHUNK_ELEMENTS", 4_000_000)
-    assert everything() == small
-    # The two-sample interval draws both groups per chunk, so a different chunk moves its ends by sampling noise only.
-    big = stats.two_sample_mean_test(values, other, seed=4)
-    monkeypatch.setattr(stats, "_CHUNK_ELEMENTS", 250_000)
-    now = stats.two_sample_mean_test(values, other, seed=4)
-    assert now["p"] == big["p"] and abs(now["ci_lower"] - big["ci_lower"]) < 0.02
