@@ -64,6 +64,25 @@ def test_a_script_that_sets_names_at_run_time_in_a_way_the_text_does_not_show_is
     assert _names(files) == ["DUR_KEYS"]  # the other script is judged; the one that calls globals() is not
 
 
+def test_reading_globals_does_not_stop_a_script_from_being_judged() -> None:
+    # A read of globals() (listing the names) sets no name, so a name the same file uses and nothing defines is found.
+    code = "def names():\n    return sorted(globals())\ndef simulate():\n    return sum(1 for _k in _DUR_KEYS)\n"
+    assert un.undefined_in("simulate.py", code) != []
+    assert _names({"simulate.py": code}) == ["_DUR_KEYS"]
+
+
+def test_a_name_set_through_a_literal_string_key_of_globals_is_defined() -> None:
+    assert _names({"pkg.py": "globals()['DUR_KEYS'] = 1\ndef g():\n    return DUR_KEYS\n"}) == []
+
+
+def test_a_mutation_of_globals_with_a_computed_or_method_key_still_stops_judging_the_script() -> None:
+    assert _names({"pkg.py": "globals().update(cfg)\ndef g():\n    return DUR_KEYS\n"}) == []
+    assert _names({"pkg.py": "globals()[key] = 1\ndef g():\n    return DUR_KEYS\n"}) == []
+    # globals() kept under another name or handed to a function may be written there: still not judged
+    assert _names({"pkg.py": "g = globals()\ng[key] = 1\ndef f():\n    return DUR_KEYS\n"}) == []
+    assert _names({"pkg.py": "load_into(globals())\ndef f():\n    return DUR_KEYS\n"}) == []
+
+
 def test_a_script_with_a_star_import_and_one_that_does_not_parse_are_not_judged() -> None:
     assert un.undefined_in("s.py", "from helpers import *\nprint(Heater)\n") == []
     assert un.undefined_in("s.py", "def (:\n") == []
