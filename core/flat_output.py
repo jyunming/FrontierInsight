@@ -362,8 +362,8 @@ MIN_IDENTICAL_TRIALS = 3
 
 def identical_results(cells: list[Any], *, declared: Iterable[str] | None = None,
                       ignore: Iterable[str] = (), whole_only: bool = False) -> list[tuple[str, str, int]]:
-    """Pairs of results the run returned that are the same number (to floating-point rounding, :data:`COPY_TOLERANCE`) in every trial of every setting, while each of them
-    differs from one trial to another: ``[(a, b, trials)]``. Two estimators (or two arms of a comparison) that agree
+    """Pairs of results the run returned that are the same number (to floating-point rounding, :data:`COPY_TOLERANCE`) in
+    every trial of every setting, while each of them differs from one trial to another: ``[(a, b, trials)]``. Two estimators (or two arms of a comparison) that agree
     trial by trial are not two findings: either the second is the first computed again, or they are equal by construction
     (an identity of the model), and a paper must not present "no difference between them" as something the study found.
     ``declared``: only the plan's declared results are compared (the whole run when none of them was returned);
