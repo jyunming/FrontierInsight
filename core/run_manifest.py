@@ -858,6 +858,29 @@ def _summary_verdict(printed: dict[str, Any], counts: Any) -> str | None:
     return ""
 
 
+def _summaries_match_record(result_json: Any, metric_id: str, grid: dict[str, list[Any]],
+                            recorded_by_cell: dict[str, Any] | None) -> bool:
+    """Whether the analysis, which prints no per-trial list of ``metric_id``, prints at EVERY setting where FI's record holds
+    trials of it a mean that equals the mean of those trials (:func:`_summary_verdict`, within the rounding its digits
+    carry), and no setting owes undefined trials the summary cannot show. Such a mean is FI's own number (a summary the frame
+    computes from the record, or one the analysis derives from it), checked against the trials themselves: the claim is
+    backed without a list to count. A setting with no printed mean, a different one, or undefined trials owed, is not."""
+    record = _record_by_setting(recorded_by_cell, metric_id, grid) if recorded_by_cell and grid else {}
+    owing = {cell for cell, counts in record.items() if (recorded_counts({metric_id: counts}, metric_id) or (0, 0))[0]}
+    if not owing:
+        return False
+    backed: set[frozenset[tuple[str, Any]]] = set()
+    for named, stats, _where in _printed_summaries(result_json, metric_id, grid):
+        for cell in named:
+            if cell in owing and _summary_verdict(stats, record[cell]) == "":
+                backed.add(cell)
+            elif cell in owing and _summary_verdict(stats, record[cell]):
+                return False  # a printed mean that is not that setting's own trials
+    if backed != owing:
+        return False
+    return not any((recorded_counts({metric_id: record[c]}, metric_id) or (0, 0))[1] for c in owing)
+
+
 def _account(result_json: Any, metric_id: str, grid: dict[str, list[Any]], recorded: tuple[int, int],
              recorded_by_cell: dict[str, Any] | None) -> dict[str, Any]:
     """What the analysis accounts for of ``metric_id``, counting ONE representation of the trials:
@@ -1453,10 +1476,16 @@ def metric_grid(protocol: dict[str, Any] | None, metric: str,
     inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else {}
     if not inside:
         return grid
+    # The values a run is compared over are not all recorded under every number: a fit per temperature is kept under
+    # ``temperature_K=...`` alone, a number per estimator under ``estimator=...`` alone. The metric is owed over the
+    # axes FI's own record keeps it under, read from the keys that hold it, never over every axis the study lists.
+    kept: list[str] = []
     for key, by_name in (recorded_by_cell or {}).items():
         parsed = _parse_cell(key)
         if parsed and set(parsed) & set(inside) and recorded_counts(by_name, metric) is not None:
-            return _search.with_everywhere(grid, inside)
+            kept.extend(a for a in inside if a in parsed and a not in kept)
+    if kept:
+        return _search.with_everywhere(grid, {a: inside[a] for a in inside if a in kept})
     return grid
 
 
@@ -1618,6 +1647,8 @@ def _value_count_findings(
             # has a value; a setting where none has one (power where there is no real effect) holds nothing to drop.
             owed_undefined = account["owed"][1]
             if not _values_listed(result_json, metric) and not accounted_defined and not accounted_undefined:
+                if _summaries_match_record(result_json, metric, mgrid, recorded_by_cell):
+                    return out  # the means it prints are those of FI's own trials, setting by setting: nothing to count
                 out.append((Finding(
                     f"the metric `{metric}` is a mean over the trials that measured it, {made}, but the analysis's "
                     f"RESULT_JSON has no `{metric}_values` list at all{UNPRINTED_TAIL}",
