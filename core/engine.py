@@ -7097,6 +7097,48 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             file=_TOPIC_ASKED, what="what the topic asks for", short="what the topic asks for",
             note="what the topic asks for and the plan lacked, written by the plan's model")
 
+    async def _ask_plan_for_the_answers(self, design: Any, plan_sha: str, req: dict[str, Any]) -> tuple[Any, str]:
+        """The main quantities of the topic that the plan's own map (``protocol.topic_map``) does not yet place are asked of the
+        plan's model in one question (:func:`core.contract_parts.ask_parts`, the ``answers`` part, at most ``MAX_ASKS`` asks):
+        which result answers each, and at which value of a setting where the topic asks for it at one. The answers block of the
+        paper is built from this map. A quantity the plan cannot map stays unmapped (the block says so). Never a stop. Returns
+        the design to use and its plan's hash."""
+        protocol = design.get("protocol") if isinstance(design, dict) else None
+        asked = _topic_req.quantities_to_place(req, protocol) if isinstance(protocol, dict) else {}
+        if (not asked or self._client is None or _frozen.load(self.quest_root) is not None
+                or not plan_sha):
+            return design, plan_sha
+
+        async def ask(prompt: str) -> str:
+            return await self._chat(prompt, node="plan_contract")
+
+        try:
+            out = await _contract_parts.ask_parts(design, ask, lambda t: _parse_json_lenient(t, node="plan_contract"),
+                                                  self._prompts, only=("answers",), topic_quantities=asked)
+        except Exception:  # noqa: BLE001 -- the plan goes on with its map as it was
+            self._log.warning("[plan] the plan could not be asked which results answer the topic's quantities", exc_info=True)
+            return design, plan_sha
+        part = out.parts.get("answers") or {}
+        self._log.info("[plan] results answering the topic's quantities: %s after %s ask(s)",
+                       "ok" if part.get("valid") else "left out", part.get("asks", 0))
+        try:
+            (self.fi_dir / "topic_answers.json").write_text(json.dumps(out.parts, indent=1, default=str) + "\n", encoding="utf-8")
+        except OSError as e:
+            self._log.warning("[plan] couldn't write .fi/topic_answers.json: %r", e)
+        new_map = out.design["protocol"].get("topic_map") if part.get("valid") else None
+        if new_map is None or new_map == protocol.get("topic_map"):
+            return design, plan_sha
+        path = _plan.plan_path(self.quest_root)
+        text = path.read_text(encoding="utf-8")
+        edited = _plan.edit_design_block(text, lambda block: {**block, "protocol": {**(block.get("protocol") or {}),
+                                                                                    "topic_map": new_map}})
+        if edited is None or _plan.parse(edited).design is None:
+            return design, plan_sha
+        path.write_text(edited, encoding="utf-8")
+        _plan.record_version(self.quest_root, edited, by="engine", note="which result answers each quantity the topic asks for")
+        again, sha = self._design_from_plan()
+        return (again, sha) if again is not None and sha else (design, plan_sha)
+
     async def _cover_the_topic_in_the_plan(self, state: QuestState) -> None:
         """At the plan step: read what the topic asks for (:meth:`_read_topic_requirements`), look for each in the plan, ask the
         plan's model for what is missing (:meth:`_ask_plan_for_the_topic`), and say in plan.md, in plain words, what the
@@ -7120,6 +7162,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._topic_covered_write(plan_done=True)
             return
         design, sha = await self._ask_plan_for_the_topic(state, design, sha, req)
+        design, sha = await self._ask_plan_for_the_answers(design, sha, req)
         gaps, unjudged = await self._topic_gaps(req, design)
         text = path.read_text(encoding="utf-8")
         lines = _topic_req.plan_lines(req, gaps, reviewer=str(req.get("reviewer") or ""), same_model=req.get("same_model"),
@@ -28559,6 +28602,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "plan_roles", "plan_names", "plan_comparisons",  # the contract's parts, asked one at a time (core/contract_parts.py)
         "plan_formulas",                    # ... and a formula FI cannot work out as written, when FI writes the analysis
         "plan_figures",                     # ... and a figure the plan names only by file name, when FI writes the analysis
+        "plan_answers",                     # ... and which result answers each quantity the topic asks for
         "json_reanswer",                    # a required check's reply could not be read: one short JSON re-answer
         "json_reanswer_part",               # ... when part of it could be read: only the unreadable keys are asked again
         "oracle_review",                    # a second model reads the plan's checks against known answers

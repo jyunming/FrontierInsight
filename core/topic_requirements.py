@@ -452,6 +452,29 @@ def _map_keys(req: dict[str, Any], kind: str, item: dict[str, Any]) -> set[str]:
     return keys - {""}
 
 
+def map_entries(req: dict[str, Any], plan: dict[str, Any], kind: str, item: dict[str, Any]) -> list[dict[str, Any]]:
+    """The plan's own ``protocol.topic_map`` entries for a topic item (by FI's id for it or its name), as written."""
+    wanted = _map_keys(req, kind, item)
+    return [m for m in plan.get("topic_map") or [] if isinstance(m, dict) and _name_key(m.get("item")) in wanted]
+
+
+def quantities_to_place(req: dict[str, Any], protocol: dict[str, Any]) -> dict[str, dict[str, str]]:
+    """The main quantities of the topic whose map in the plan does not yet say where in the study they are answered (no entry,
+    or an entry without an ``at``): ``{FI's id: {"name", "stated", "by"}}``, ``by`` being the plan's own map (``""`` for none).
+    The plan is asked once for these (core/contract_parts.py, the ``answers`` part)."""
+    plan = view({}, protocol)
+    out: dict[str, dict[str, str]] = {}
+    for index, item in enumerate(req.get("quantities") or []):
+        if not isinstance(item, dict) or item.get("main") is not True:
+            continue
+        entries = map_entries(req, plan, "quantities", item)
+        if entries and all("at" in m for m in entries):
+            continue
+        out[_item_id("quantities", index)] = {"name": str(item.get("name") or ""), "stated": str(item.get("stated") or ""),
+                                              "by": str(entries[0].get("by") or "") if entries else ""}
+    return out
+
+
 def mapping_of(req: dict[str, Any], plan: dict[str, Any], kind: str, item: dict[str, Any]) -> tuple[str, str] | None:
     """What the plan itself says covers a topic item (``protocol.topic_map``: ``item`` = the item's name or formula, ``by`` =
     ``setting:<name>`` / ``metric:<id>`` / ``equation:<id>``), checked here and not taken on trust: ``("ok", element)`` when
