@@ -739,6 +739,39 @@ def undeclared_names(design: Any, not_asked: list[str] | None = None) -> dict[st
     return dict(list(found.items())[:MAX_NAMES])
 
 
+def unknown_measure_names(old_protocol: Any, new_protocol: Any, returned: Any) -> dict[str, list[str]]:
+    """After a test run of the plan's checks: the checks of ``new_protocol`` that were added or whose ``measure`` was changed
+    since ``old_protocol``, each with the names that measure reads and no part of FI defines: ``{check name: [names]}``.
+    ``returned`` is what the simulation returned on the test run (the names, or the values by name). A name is defined when
+    the plan declares it (:func:`_declared_names`: a result, a derived quantity, a setting, a constant, a threshold, a key
+    of a check's case) or the simulation returned it on the test run. Any other is a number nobody computes: a check that
+    reads it can never be judged, and the code is not rewritten after this test run. ``{}`` when ``returned`` is empty (the
+    test run returned nothing to hold a name to). Pure: no model, no run."""
+    have = {str(n).lower() for n in returned or ()}
+    if not have or not isinstance(new_protocol, dict):
+        return {}
+    old = old_protocol if isinstance(old_protocol, dict) else {}
+    known = {n.lower() for n in _declared_names(new_protocol)} | _KNOWN_WORDS | have
+    before: dict[str, str] = {}
+    for o in old.get("oracles") if isinstance(old.get("oracles"), list) else []:
+        if isinstance(o, dict):
+            before[str(o.get("name") or "").strip()] = " ".join(str(o.get(k) or "") for k in ("measure", "metric")).strip()
+    out: dict[str, list[str]] = {}
+    for o in new_protocol.get("oracles") if isinstance(new_protocol.get("oracles"), list) else []:
+        if not isinstance(o, dict):
+            continue
+        name = str(o.get("name") or "").strip()
+        text = " ".join(str(o.get(k) or "") for k in ("measure", "metric")).strip()
+        if not text or before.get(name) == text:
+            continue
+        found = [m.group(0) for m in _WORD.finditer(text)
+                 if text[m.end():m.end() + 1] != "(" and not text[max(0, m.start() - 1):m.start()].isdigit()
+                 and m.group(0).lower() not in known]
+        if found:
+            out[name] = list(dict.fromkeys(found))
+    return out
+
+
 def _model_equation_ids(protocol: dict[str, Any]) -> set[str]:
     model = protocol.get("model")
     eqs = model.get("equations") if isinstance(model, dict) else None

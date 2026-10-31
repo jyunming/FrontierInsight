@@ -513,3 +513,47 @@ async def test_design_critique_style_replies_with_the_topic_read_first(tmp_path:
     eng._client = type("Stub", (), {"chat": AsyncMock(side_effect=[json.dumps(_DRAFT_DESIGN), json.dumps({})])})()
     await eng._node_design({"topic": "OPC", "iteration": 1})  # the reading is kept: the next design round asks no reading
     assert not any("A Research Topic Asks For" in c.args[0][-1]["content"] for c in eng._client.chat.await_args_list)
+
+
+# -- a rewrite of a check after the test run reads only names that exist ---------------------------------------------------
+
+
+def _check(name: str, measure: str) -> dict[str, Any]:
+    return {"name": name, "kind": "special_case", "check": "base temperature at the widest fin spacing", "expected": 0.0,
+            "tolerance": 1e-6, "case": {"fin_spacing": 4.0}, "measure": measure,
+            "reference": "derivation: one-dimensional conduction gives a linear profile"}
+
+
+def test_unknown_measure_names_holds_a_changed_measure_to_declared_and_returned_names() -> None:
+    from core import contract
+
+    old = {"metrics": [METRIC], "grid": GOOD_GRID, "oracles": [_check("gap", "abs(base_temperature - plate_alt)")]}
+    returned = ["base_temperature", "plate_alt"]
+    same = {**old}
+    assert contract.unknown_measure_names(old, same, returned) == {}, "an unchanged measure is not judged again"
+    invented = {**old, "oracles": [_check("gap", "plate_gap")]}
+    assert contract.unknown_measure_names(old, invented, returned) == {"gap": ["plate_gap"]}
+    # known positives: a formula of returned names, a declared result, and a setting are all taken
+    ok = {**old, "oracles": [_check("gap", "abs(base_temperature - plate_alt) / fin_spacing")]}
+    assert contract.unknown_measure_names(old, ok, returned) == {}
+    # nothing returned on the test run: nothing to hold a name to
+    assert contract.unknown_measure_names(old, invented, []) == {}
+
+
+@pytest.mark.asyncio
+async def test_a_rewrite_after_the_test_run_that_invents_a_measure_name_is_refused_with_the_names_the_run_returned(
+        tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    Model(eng, [], _draft(metrics=[METRIC], form="contract", oracles=[_check("gap", "abs(base_temperature - plate_alt)")]))
+    await eng._node_plan(_state(literature=LITERATURE))
+    before = _plan_text(eng)
+    _, invented = _texts(eng, oracles=[_check("gap", "plate_gap")])
+    # outside a test-run rewrite the part is read as it always was
+    assert eng._keep_only_the_parts(before, invented, ["oracles"]) is not None
+    eng._test_run_returned = {"base_temperature", "plate_alt"}
+    with pytest.raises(ValueError, match="plate_gap.*did not return.*base_temperature"):
+        eng._keep_only_the_parts(before, invented, ["oracles"])
+    # a known positive: a measure written from the returned names is taken
+    _, honest = _texts(eng, oracles=[_check("gap", "abs(base_temperature - plate_alt) / 2")])
+    kept = eng._keep_only_the_parts(before, honest, ["oracles"])
+    assert kept is not None and "abs(base_temperature - plate_alt) / 2" in kept
