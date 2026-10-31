@@ -1,5 +1,9 @@
 You wrote the plan for a simulation study. It names the figures below only by file name. FI draws each figure itself, from the study's numbers, so FI needs to know what each one shows. Do not change the rest of the plan.
 
+What FI's record of the trials holds, which a figure is drawn from (each reported number below, not a quantity worked out from them, has the value of every trial, not only a summary):
+$record
+A figure is dropped only when it needs something this record and the numbers below do not hold.
+
 The figures, each with what the plan says about it:
 $figures
 

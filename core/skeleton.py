@@ -546,6 +546,29 @@ BODY_EXAMPLE = '''def trial(cell, ctx):
 '''
 
 
+#: The reads of the table that tell what the trial record holds, in the order a reader needs them.
+TABLE_READS = ("values", "trials", "mean", "interval", "n", "failed")
+
+
+def table_reads() -> list[str]:
+    """What the analysis can read from FI's record of the trials, one line per read: its signature and the first sentence of its
+    docstring, taken from the ``Table`` class of the frame's runtime (:data:`RUNTIME`), so the lines cannot differ from what
+    the frame serves. The model that decides which figures can be drawn is told these lines."""
+    tree = ast.parse(RUNTIME)
+    table = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Table")
+    methods = {n.name: n for n in table.body if isinstance(n, ast.FunctionDef)}
+    lines = []
+    for name in TABLE_READS:
+        fn = methods.get(name)
+        doc = " ".join((ast.get_docstring(fn) or "").split()) if fn else ""
+        if not fn or not doc:
+            continue
+        args = ", ".join(a.arg for a in fn.args.args[1:])
+        first = re.split(r"(?<=[.;]) ", doc, maxsplit=1)[0].rstrip(".;").replace("``", "`")
+        lines.append(f"- `table.{name}({args})`: {first}")
+    return lines
+
+
 #: Names FI itself asks every trial for besides the plan's results (the request to the model says so): the reason a value
 #: does not exist (``out["why_missing"] = {"name": "diverged"}``).
 FI_ASKED_NAMES = ("why_missing",)

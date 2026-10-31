@@ -462,3 +462,17 @@ def test_a_models_own_figure_with_a_folder_is_read_under_its_base_name() -> None
     d = {"protocol": {"form": "contract", "grid": {"nutrient": [1, 2]}, "metrics": [{"id": "algae_peak", "kind": "mean"}],
                       "figures": [{"file": "figures/a.png", "shows": ["algae_peak"], "x": "nutrient"}]}}
     assert [f.file for f in contract.from_design(d).figures] == ["a.png"]
+
+
+def test_the_figures_prompt_tells_what_the_trial_record_holds_from_the_frames_own_table() -> None:
+    """The model that may drop a figure is told the per-trial reads FI serves, taken from the frame's `Table` class: a figure
+    needing each trial's value of a reported number is not one the study cannot draw."""
+    from core import skeleton
+
+    reads = skeleton.table_reads()
+    assert reads and any(line.startswith("- `table.values(name, key)`") for line in reads)
+    faults = {"pond_pairs.png": "peak against bloom for each trial"}
+    prompt = cp._figures_prompt(TEMPLATES, {**DESIGN, "protocol": {**DESIGN["protocol"], "form": "contract"}}, faults, [], "")
+    assert "$record" not in prompt
+    assert all(line in prompt for line in reads)
+    assert prompt.index(reads[0]) < prompt.index("pond_pairs.png")

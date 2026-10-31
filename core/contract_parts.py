@@ -33,6 +33,7 @@ from typing import Any, Awaitable, Callable
 from . import contract as _contract
 from . import oracle_forms as _forms
 from . import plan as _plan
+from . import skeleton as _skeleton
 
 #: The most times one part is asked: the first ask and two more.
 MAX_ASKS = 3
@@ -198,7 +199,8 @@ def _figures_prompt(templates: dict[str, string.Template], design: dict[str, Any
     return templates["plan_figures"].substitute(
         figures="\n".join(f"- {name}: {text}" for name, text in faults.items()), shows="\n".join(lines) or "- (nothing)",
         settings=", ".join(settings) or "(the study varies no setting)", max_panels=_contract.MAX_PANELS,
-        method=_short(design.get("method")), again=_problems_text(problems, last))
+        method=_short(design.get("method")), again=_problems_text(problems, last),
+        record="\n".join(_skeleton.table_reads()))
 
 
 def _check_figures(value: Any, asked: dict[str, str], design: dict[str, Any]) -> list[str]:
