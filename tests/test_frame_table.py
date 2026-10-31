@@ -310,7 +310,7 @@ def _older(text: str) -> str:
 
 
 def test_a_new_frame_gets_the_version_3_runtime_and_the_table() -> None:
-    assert skeleton.VERSION == 3 and skeleton.runtime_version(skeleton.RUNTIME) == 3
+    assert skeleton.VERSION == 4 and skeleton.runtime_version(skeleton.RUNTIME) == 4
     for name in ("Table", "Figure", "NotYet", "UnknownResult"):
         assert f"class {name}" in skeleton.RUNTIME
 
@@ -328,7 +328,7 @@ def test_a_version_2_runtime_and_table_are_kept_on_resume_and_a_new_frame_writes
     assert not (code / skeleton.TABLE_FILE).exists(), "a version 2 frame never reads the table"
     assert skeleton.frame_version(skeleton.frame_for(DESIGN, stochastic=True, existing=old)) == 2, "a resume keeps the frame"
     assert skeleton.ensure_runtime(code, frame) is True and skeleton.ensure_table(code, frame) is True
-    assert skeleton.runtime_version((code / skeleton.RUNTIME_FILE).read_text(encoding="utf-8")) == 3
+    assert skeleton.runtime_version((code / skeleton.RUNTIME_FILE).read_text(encoding="utf-8")) == skeleton.VERSION
     assert (code / skeleton.TABLE_FILE).read_text(encoding="utf-8") == skeleton.TABLE_SOURCE
     assert skeleton.ensure_table(code, frame) is False, "already written"
 

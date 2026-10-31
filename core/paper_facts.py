@@ -924,6 +924,27 @@ def _plain(seconds: float) -> str:
 # ---- the facts ------------------------------------------------------------------------------------------------------
 
 
+def _drew_record(root: Path) -> bool | None:
+    """Whether the trials drew random numbers, from what the frame measured and the harness wrote into each trial's row
+    (``drew``, core/skeleton.py): ``True`` when every trial that ran and carries the record drew, ``False`` when none did, ``None``
+    when no row carries it (a quest from before it was kept) or the trials differ."""
+    seen: set[bool] = set()
+    for path in sorted((root / ".fi" / "trials").glob("*.jsonl")):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                for line in fh:
+                    if '"drew"' not in line:
+                        continue
+                    row = json.loads(line)
+                    if isinstance(row, dict) and row.get("status") == "ok" and isinstance(row.get("drew"), bool):
+                        seen.add(row["drew"])
+        except (OSError, ValueError):
+            return None
+        if len(seen) > 1:
+            return None
+    return seen.pop() if seen else None
+
+
 def _seed_text(root: Path) -> str:
     """What ``{{seed}}`` says: the seed the code used, from the code's own reading (:func:`core.run_facts.seed_verdict`)."""
     study = _read(root, "code/study.json")
@@ -940,6 +961,12 @@ def _seed_text(root: Path) -> str:
                 else "a separate seed for each trial, passed to the simulation by FI")
     if state == _run_facts.UNKNOWN:
         base, _trial = _disclosure.recorded_seeds(root)
+        drew = _drew_record(root)  # measured by the frame, so the code need not be read to tell
+        if drew is False:
+            return "none: no trial drew random numbers (each setting's result does not depend on a seed)"
+        if drew is True:
+            return ("each trial drew its random numbers from its own seed, derived from base seed " + str(base) if base is not None
+                    else "each trial drew its random numbers from its own seed, passed by FI")
         said = f"a seed passed to each trial, derived from base seed {base}" if base is not None else "a seed passed to each trial"
         return f"{said} (FI could not tell from the code whether the simulation uses it)"
     driving = [d for d in verdict.get("driving_seeds") or [] if isinstance(d, dict)]
