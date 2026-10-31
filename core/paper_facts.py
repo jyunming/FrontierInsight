@@ -935,7 +935,9 @@ def _seed_text(root: Path) -> str:
         return (f"a separate seed for each trial, derived from base seed {base}" if base is not None
                 else "a separate seed for each trial, passed to the simulation by FI")
     if state == _run_facts.UNKNOWN:
-        return "a seed passed to each trial (FI could not tell from the code whether the simulation uses it)"
+        base, _trial = _disclosure.recorded_seeds(root)
+        said = f"a seed passed to each trial, derived from base seed {base}" if base is not None else "a seed passed to each trial"
+        return f"{said} (FI could not tell from the code whether the simulation uses it)"
     driving = [d for d in verdict.get("driving_seeds") or [] if isinstance(d, dict)]
     if state == _run_facts.PARTLY:
         # Both are true and both drive the trials: FI's per-trial seed and a number typed into the code.
@@ -1185,13 +1187,22 @@ def answers_text(quest_root: Path | str) -> str:
             continue
         if metric in rec.answers:
             tries = [(f"{{{{v:{metric}}}}}", " (one value worked out by the analysis; no interval is recorded for it)")]
-        elif varied:
-            where = ", ".join(f"{rec.short(a)}=each" for a in varied)
-            tries = [(f"{{{{v:{metric} @ {where} | range}}}}",
-                      f" (no single value: it differs with {', '.join(rec.short(a) for a in varied)}; this is the mean in each "
-                      "setting, lowest to highest, and the tables give every setting)")]
         else:
-            tries = [(f"{{{{v:{metric}:mean_ci @ }}}}", ""), (f"{{{{v:{metric} @ }}}}", " (no interval: the trials give none)")]
+            # An axis the study compares inside each run is read from the per-value records the run kept; a quantity that
+            # is one number per run has no record under it, so that axis is pooled whole (``=all``) for it, never looked
+            # up as a value of its own (a lookup by it finds no trial at all).
+            held = {c_axis for c in rec.carrying(metric) for c_axis in c["cell"]}
+            per_run = [a for a in varied if a in rec.in_run_axes() and a not in held]
+            each = [a for a in varied if a not in per_run]
+            pinned = ", ".join(f"{rec.short(a)}=all" for a in per_run)
+            if each:
+                where = ", ".join([f"{rec.short(a)}=each" for a in each] + ([pinned] if pinned else []))
+                tries = [(f"{{{{v:{metric} @ {where} | range}}}}",
+                          f" (no single value: it differs with {', '.join(rec.short(a) for a in each)}; this is the mean in each "
+                          "setting, lowest to highest, and the tables give every setting)")]
+            else:
+                at = pinned
+                tries = [(f"{{{{v:{metric}:mean_ci @ {at}}}}}", ""), (f"{{{{v:{metric} @ {at}}}}}", " (no interval: the trials give none)")]
         got = [(k, note, _values.resolve(k, rec)) for k, note in tries]
         done = next(((k, note) for k, note, v in got if v.filled), None)
         if done is None:
