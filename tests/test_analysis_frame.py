@@ -885,3 +885,12 @@ def test_the_figure_step_runs_on_a_recorded_quest(tmp_path: Path) -> None:
     code, _printed, record, err = _run(quest)
     assert code == 0, err
     assert record["figures"] == [] and record["figures_said"] == ""  # the plan names no figure FI can draw (declared false)
+
+
+def test_plan_of_gives_a_several_panel_figure_its_settings_and_labels_and_a_one_panel_figure_neither() -> None:
+    figures = [{"id": "fig1", "file": "a.png", "shows": ["growth"], "x": "rate", "series": "dose", "panels": 2},
+               {"id": "fig2", "file": "b.png", "shows": ["growth"], "x": "rate", "series": "dose"}]
+    plan = af.plan_of(_design(figures=figures, labels={"rate": "Infection rate", "mode": "Run mode"}))
+    assert plan["figures"]["fig1"]["settings"] == {"rate": [0.1, 0.2], "dose": [1, 2], "mode": ["a", "b"]}
+    assert plan["figures"]["fig1"]["labels"] == {"rate": "Infection rate", "mode": "Run mode"}
+    assert "settings" not in plan["figures"]["fig2"] and "labels" not in plan["figures"]["fig2"]
