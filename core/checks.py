@@ -1339,10 +1339,6 @@ CHECKS: tuple[Check, ...] = (
     Check('code_project_clean_run', 'core.engine', 'Engine._check_code_project',
           'write', 'measured', 'note',
           'code/ run in a clean environment once per code version; a failure is a warning only'),
-    Check('page_limit_over', 'core.engine', 'Engine._page_limit_review',
-          'review', 'measured', 'repair',
-          'draft rendered to PDF exceeds the page limit: forced over_page_limit hit, shortening rewrites capped '
-          "by _PAGE_LIMIT_REWRITES; only the engine's page count forces it"),
     Check('page_limit_further_reading_dropped', 'core.engine', 'Engine._drop_further_reading_to_fit',
           'review', 'measured', 'strip',
           'draft over the page limit only because of Further reading: last entries dropped until it fits'),
@@ -1420,7 +1416,7 @@ CHECKS: tuple[Check, ...] = (
           'hit consumes an iteration'),
     Check('review_reviewer_page_limit_dropped', 'core.engine', '_without_reviewer_page_limit_hits',
           'review', 'own_record', 'note',
-          'over_page_limit hits written by a reviewer are dropped; only the measured page count may force it'),
+          'over_page_limit hits written by a reviewer are dropped; the page limit is a guideline and forces no round'),
     Check('review_sends_experiment_back', 'core.engine', '_review_sends_the_experiment_back',
           'review', 'model_text', 'repair',
           'review prose names a result_json key, figure file or experiment.py: route re_execute (implement '

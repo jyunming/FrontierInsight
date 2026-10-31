@@ -539,10 +539,6 @@ class QuestState(TypedDict, total=False):
     citation_check: dict[str, Any]
     # Where the review sent the paper that the citation check then read: "done" or "human_feedback".
     citation_next: str
-    # How many drafts the review has sent back to be shortened because the
-    # rendered PDF ran over the page limit. At most ``_PAGE_LIMIT_REWRITES``;
-    # these rewrites do not use ``engine.max_iterations``.
-    page_limit_rewrites: int
     # How many times the review has sent the experiment back to be written and
     # run again because a must-flag named something this run computed. At most
     # ``_CODE_REEXECUTES``; each one costs an iteration.
@@ -3574,10 +3570,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # not raised again: a rewrite cannot answer it, and the design is not changed for it.
         repeated = set(review.get("objections_repeated") or [])
         must_flag = [h for h in review.get("must_flag_hits") or [] if _objection_key(h) not in repeated]
-        # The draft is over the page limit and nothing else is to be fixed:
-        # write it again, shorter. These rewrites have their own cap (the
-        # review stops forcing them after ``_PAGE_LIMIT_REWRITES``), so the
-        # iteration budget neither pays for them nor stops them.
         # The paper claims what FI's own records contradict: it is written again, with the contradiction named, up to
         # ``_RECORD_REWRITES`` times (outside engine.max_iterations, so even a one-round quest gets them). What is still
         # flagged after them is taken out of the paper (:meth:`_record_contradiction_hits`); what could not be taken out
@@ -3593,14 +3585,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "[route] after %d rewrites the paper still has sentences FI's check of its records flags; they are listed "
                 "in QUALITY.md, and the check reads the paper's words, so the quest goes on", _RECORD_REWRITES)
             must_flag = [h for h in must_flag if _hit_name(h) != _record_claims.HIT]
-        page_rewrites = int(state.get("page_limit_rewrites") or 0)
-        if _only_page_limit_hits(must_flag) and page_rewrites <= _PAGE_LIMIT_REWRITES:
-            self._log.info(
-                "[route] the draft is over the page limit — rewriting it shorter "
-                "(shortening %d of %d, outside engine.max_iterations)",
-                page_rewrites, _PAGE_LIMIT_REWRITES,
-            )
-            return "rewrite"
         if must_flag and state.get("iteration", 0) < self.config.engine.max_iterations:
             # Before the text routes: a flag about a computed value is not a
             # writing problem, and sending it to ``write`` is what let a paper
@@ -23553,15 +23537,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             name = _hit_name(h)
             if name in paper_patch.PATCHABLE_HITS:
                 continue
-            if name == _PAGE_LIMIT_HIT:
-                cut = _paper_scope.words_to_cut(h)
-                shorten = _paper_scope.to_shorten(previous, sections, cut) if cut else {}
-                if not shorten:
-                    unplaced.append("the page limit (no section can give the words)")
-                for index, words in shorten.items():
-                    add(index, f"the paper is over the page limit: shorten it to about {words} words")
-                    targets[index] = words
-            elif name in ("figure_missing", "citations_unchecked"):
+            if name in ("figure_missing", "citations_unchecked"):
                 unplaced.append(name)
             else:
                 bare = re.sub(r"^\[[^\]]*\]\s*", "", h)
@@ -23692,8 +23668,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         as it was. The source lists are then rebuilt from the citations in the
         edited text by the same step a whole paper goes through.
 
-        A first draft, a hit about the whole paper (``over_page_limit``,
-        ``figure_missing``), a study that changed, a reply that is not usable
+        A first draft, a hit about the whole paper (``figure_missing``), a study that changed, a reply that is not usable
         edits, and an edit that cannot be applied all return ``None``, and the log
         says which."""
         review = state.get("review") or {}
@@ -25515,25 +25490,22 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
 
     async def _page_limit_review(
         self, state: QuestState, paper_path: str | Path | None,
-    ) -> tuple[list[str], dict[str, Any] | None]:
-        """The page-limit part of the review: the forced hit (a list of at most
-        one) and the record for ``review["page_limit"]``. Without a page limit
-        nothing is rendered and both are empty, as they are when the draft
-        cannot be measured. A draft over the limit only because of its Further
-        reading is not sent back: the list's last entries are dropped from
-        ``paper_path`` until it fits (:meth:`_drop_further_reading_to_fit`), and
-        the record names them. Any other draft over the limit is forced while
-        fewer than ``_PAGE_LIMIT_REWRITES`` shortening rewrites have been made;
-        after that the overrun is only recorded."""
+    ) -> dict[str, Any] | None:
+        """The page-limit part of the review: the record for ``review["page_limit"]``.
+        Without a page limit nothing is rendered and the record is empty, as it is
+        when the draft cannot be measured. The limit is a guideline: a draft over it
+        is never sent back to be shortened. Its Further reading list loses its last
+        entries (:meth:`_drop_further_reading_to_fit`), then a few sentences of
+        background and discussion are taken out (:meth:`_trim_body_to_fit`), and what is
+        still over goes on record for the quality report and the log."""
         limit = resolve_page_limit(self.config)
         if limit is None or not paper_path or not Path(paper_path).is_file():
-            return [], None
+            return None
         measured = await self._measure_draft_pages(Path(paper_path), state)
         if measured is None:
-            return [], None
+            return None
         pages = int(measured["pages"])
-        done = int(state.get("page_limit_rewrites") or 0)
-        record: dict[str, Any] = {"pages": pages, "limit": limit, "rewrites": done}
+        record: dict[str, Any] = {"pages": pages, "limit": limit}
         if pages > limit:
             # The engine's own Further reading may be all that is over. Dropping
             # its last entries costs no model call and no rewrite of the body.
@@ -25551,8 +25523,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 )
         if pages > limit:
             # Then the body: a few sentences of background and discussion out, no
-            # rewrite and no second claim check. Whether or not shortening
-            # rewrites have been used up, since it costs the model one short call.
+            # rewrite and no second claim check; it costs the model one short call.
             cut = await self._trim_body_to_fit(state, Path(paper_path), limit, measured)
             if cut is not None:
                 before, (measured, taken) = pages, cut
@@ -25568,20 +25539,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if pages <= limit:
             self._log.info("[page_limit] the draft renders to %d pages; the limit is %d", pages, limit)
             _paper_facts.write_page_record(self.quest_root, pages, limit, final=False)
-            return [], record
-        if done >= _PAGE_LIMIT_REWRITES:
-            record["exceeded_after_rewrites"] = True
-            self._log.warning(
-                "[page_limit] the draft renders to %d pages, over the limit of %d, after %d shortening "
-                "rewrites; recorded in the review, not forced again", pages, limit, done,
-            )
-            record["pages"] = await self._state_page_overrun(state, Path(paper_path), limit, pages)
-            return [], record
-        words = _words_to_cut(pages, limit, float(measured.get("last_page_empty") or 0.0))
-        record["words_to_cut"] = words
-        hit = _page_limit_hit(pages, limit, words)
-        self._log.warning("[page_limit] %s (shortening %d of %d)", hit, done + 1, _PAGE_LIMIT_REWRITES)
-        return [hit], record
+            return record
+        self._log.warning(
+            "[page_limit] the draft renders to %d pages, over the limit of %d; the limit is a guideline, "
+            "so the paper is not written again for it (QUALITY.md says so)", pages, limit,
+        )
+        record["pages"] = await self._state_page_overrun(state, Path(paper_path), limit, pages)
+        return record
 
     def _review_models_collapsed(self, panel_results: list[dict[str, Any]]) -> str | None:
         """Under ``rigor_profile: research``: the one provider/model that actually answered every reviewer who reviewed,
@@ -25703,7 +25667,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # and its pages counted, for both review paths below. Without one,
         # nothing is rendered.
         checked = Path(paper_path).read_bytes() if paper_path and Path(paper_path).is_file() else None
-        page_hits, page_record = await self._page_limit_review(state, paper_path)
+        page_record = await self._page_limit_review(state, paper_path)
         if checked is not None and Path(paper_path).is_file() and Path(paper_path).read_bytes() != checked:
             # The fit only takes Further reading entries or whole sentences out of the draft the claim check judged,
             # and the claims of a sentence taken out leave its grounding with it (the review reads the grounding of
@@ -25839,15 +25803,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 review["typed_pass_hits"] = typed_pass
             # Forced as well: nothing checked this draft's citations.
             review["must_flag_hits"] += _citations_unchecked(state)
-            # And a draft over the page limit.
-            review["must_flag_hits"] += page_hits
             if page_record is not None:
                 review["page_limit"] = page_record
             update: QuestState = {"review": review}
             if pruned is not None:
                 update["claim_grounding"] = pruned
-            if page_hits:
-                update["page_limit_rewrites"] = int(state.get("page_limit_rewrites") or 0) + 1
             # Counted here so the router can cap the rewrites for it, and end the quest honestly after them.
             update["record_rewrites"] = (int(state.get("record_rewrites") or 0) + 1) if record_hits else 0
             # Counted here, like the shortening rewrites above, so the router
@@ -25861,9 +25821,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # non-bypassable revise path deterministic with respect to the
             # ``max_iterations`` budget — without this, a malformed
             # ``revise`` route from must-flag wouldn't have consumed the
-            # iteration and the loop could run unbounded. A hit over the page
-            # limit consumes none: its rewrites have their own counter, capped
-            # at ``_PAGE_LIMIT_REWRITES``.
+            # iteration and the loop could run unbounded.
             other_hits = self._note_design_objections(state, review)
             if review.get("verdict") == "revise" or other_hits:
                 update["iteration"] = state.get("iteration", 0) + 1
@@ -26038,17 +25996,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         unchecked = _citations_unchecked(state)
         if unchecked:
             review["must_flag_hits"] = [*(review.get("must_flag_hits") or []), *unchecked]
-        # And a draft over the page limit, as on the single-reviewer path.
-        if page_hits:
-            review["must_flag_hits"] = [*(review.get("must_flag_hits") or []), *page_hits]
         if page_record is not None:
             review["page_limit"] = page_record
 
         update: QuestState = {"review": review, "review_panel": panel_results}
         if pruned is not None:
             update["claim_grounding"] = pruned
-        if page_hits:
-            update["page_limit_rewrites"] = int(state.get("page_limit_rewrites") or 0) + 1
         update["record_rewrites"] = (int(state.get("record_rewrites") or 0) + 1) if record_hits else 0
         # As on the single-reviewer path: count a review that sends the
         # experiment back, so the router can cap those re-executes.
@@ -26058,9 +26011,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # must_flag_hits list. Without the must-flag clause, a malformed
         # persona response that recorded ``verdict=accept`` alongside a
         # must-flag hit would route to revise (via _route_after_review)
-        # without consuming iteration budget — the loop could spin. A hit
-        # over the page limit bumps nothing: its rewrites have their own
-        # counter, capped at ``_PAGE_LIMIT_REWRITES``.
+        # without consuming iteration budget — the loop could spin.
         other_hits = self._note_design_objections(state, review)
         if review.get("verdict") == "revise" or other_hits:
             update["iteration"] = state.get("iteration", 0) + 1
@@ -33140,10 +33091,8 @@ _SKILLS_IN_CODE = "skills"
 _TAKE_OUT_PASSES = 5
 
 # A paper with a page limit: the review renders each draft the way paper.pdf
-# is rendered and counts its pages. A draft over the limit is sent back to be
-# shortened at most this many times, and those rewrites do not use
-# ``engine.max_iterations``.
-_PAGE_LIMIT_REWRITES = 2
+# is rendered and counts its pages. The limit is a guideline: no hit is forced and
+# no rewrite made for it. A reviewer's own ``over_page_limit`` hit is dropped.
 _PAGE_LIMIT_HIT = "over_page_limit"
 # The most calls one trim makes to the model: a list that falls short of the words to
 # cut, or a draft still over the limit after the sentences were taken, is another
@@ -33154,11 +33103,6 @@ _TRIM_ROUNDS = 3
 # budget worked out from these leaves room.
 _WORDS_PER_PAGE = 450
 _FIGURE_PAGE_SHARE = 0.37
-
-
-def _only_page_limit_hits(hits: list[Any]) -> bool:
-    """True when every must-flag hit says the draft is over the page limit."""
-    return bool(hits) and all(_hit_name(hit) == _PAGE_LIMIT_HIT for hit in hits)
 
 
 def _without_reviewer_page_limit_hits(hits: list[Any], log: Any = None) -> list[Any]:
@@ -33182,16 +33126,6 @@ def _words_to_cut(pages: int, limit: int, last_page_empty: float) -> int:
     filled = 1.0 - min(1.0, max(0.0, last_page_empty))
     over = max(0.0, (pages - limit - 1) + filled)
     return max(100, int(over * _WORDS_PER_PAGE / 50.0 + 0.5) * 50)
-
-
-def _page_limit_hit(pages: int, limit: int, words: int) -> str:
-    """The forced hit for a draft over the page limit, which is also what the
-    writer reads under "Must fix"."""
-    return (
-        f"over_page_limit: the rendered PDF is {pages} pages; the limit is {limit}. "
-        f"Cut about {words} words, keep every figure and all numbers; shorten "
-        "background and discussion first"
-    )
 
 
 def _paper_figure_count(state: QuestState) -> int:
@@ -33396,11 +33330,10 @@ def _review_sends_the_experiment_back(review: dict[str, Any], state: QuestState)
     paper is considered. A hit that already sends the quest back to ``design``
     (``circular_evaluation`` and the rest) re-runs the experiment on its way
     through ``implement`` anyway, and a flawed design is not fixed by writing
-    the same experiment again. A draft that is merely over the page limit is
-    not one either: it has its own route and its own counter.
+    the same experiment again.
     """
     hits = review.get("must_flag_hits") or []
-    if not hits or _only_page_limit_hits(hits) or not _hits_need_only_a_rewrite(hits):
+    if not hits or not _hits_need_only_a_rewrite(hits):
         return ""
     return _rerun_evidence(review, state)
 

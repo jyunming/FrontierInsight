@@ -218,15 +218,6 @@ def test_a_flaw_in_the_design_no_check_confirms_is_stated_not_redesigned(tmp_pat
     assert _engine(tmp_path)._route_after_review(_state(review)) == "rewrite"  # type: ignore[arg-type]
 
 
-def test_a_draft_over_the_page_limit_does_not_spend_the_re_execute(tmp_path: Path) -> None:
-    """The shortening rewrites have their own route and their own counter."""
-    review = {**XG3_REVIEW,
-              "must_flag_hits": ["over_page_limit: 5 pages against a limit of 4"]}
-    assert _review_sends_the_experiment_back(review, _state(review)) == ""  # type: ignore[arg-type]
-    state = _state(review, page_limit_rewrites=1)
-    assert _engine(tmp_path)._route_after_review(state) == "rewrite"  # type: ignore[arg-type]
-
-
 # --- the cost cap ---------------------------------------------------------------
 
 @pytest.mark.parametrize(("done", "route"), [

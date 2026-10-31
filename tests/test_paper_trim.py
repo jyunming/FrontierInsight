@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from core import paper_trim
-from core.engine import Engine, _grounding_after_trim, _page_limit_hit
+from core.engine import Engine, _grounding_after_trim
 from core.paper_patch import PatchError
 from tests.test_page_limit import _engine, _quiet_log, _review
 
@@ -347,10 +347,10 @@ def test_a_draft_a_few_sentences_over_the_limit_loses_them_and_is_not_sent_back(
     patch = _review(eng, tmp_path)
 
     review = patch["review"]
-    assert review["must_flag_hits"] == []  # no over_page_limit, nothing to answer
+    assert review["must_flag_hits"] == []  # nothing to answer
     assert "iteration" not in patch and "page_limit_rewrites" not in patch
     record = review["page_limit"]
-    assert record["pages"] == 4 and record["limit"] == 4 and "words_to_cut" not in record
+    assert record["pages"] == 4 and record["limit"] == 4
     cut = record["trimmed"]
     assert cut["words"] >= 100 and len(cut["sentences"]) >= 2
     now = paper.read_text(encoding="utf-8")
@@ -375,15 +375,15 @@ def test_a_draft_a_few_sentences_over_the_limit_loses_them_and_is_not_sent_back(
     assert rendered[0] == written  # measured as written first, then the trial(s)
 
 
-def test_the_trim_is_tried_after_the_shortening_rewrites_are_used_up(tmp_path: Path, monkeypatch) -> None:
+def test_the_trim_is_tried_whatever_the_state_of_the_review(tmp_path: Path, monkeypatch) -> None:
     eng = _engine(tmp_path)
     written = _delivered(_paper(with_lists=False))
     _put(tmp_path, written)
     _render_by_words(monkeypatch, fits_at=len(written.split()) - 100)
     _with_chat(eng, json.dumps({"delete": [c.n for c in _cands(written)]}))
-    patch = _review(eng, tmp_path, page_limit_rewrites=2)
+    patch = _review(eng, tmp_path)
     record = patch["review"]["page_limit"]
-    assert record.get("trimmed") and "exceeded_after_rewrites" not in record
+    assert record.get("trimmed")
     assert patch["review"]["must_flag_hits"] == []
 
 
@@ -449,7 +449,7 @@ def test_a_draft_still_over_after_the_first_round_is_trimmed_again(tmp_path: Pat
 
 
 @pytest.mark.parametrize("reply", ["I would rather not.", '{"delete": []}', '{"delete": [999]}', None])
-def test_a_reply_that_cannot_be_used_leaves_the_paper_and_the_rewrite_as_before(
+def test_a_reply_that_cannot_be_used_leaves_the_paper_as_written_and_forces_nothing(
     tmp_path: Path, monkeypatch, reply: str | None,
 ) -> None:
     eng = _engine(tmp_path)
@@ -460,9 +460,8 @@ def test_a_reply_that_cannot_be_used_leaves_the_paper_and_the_rewrite_as_before(
     warnings = _quiet_log(eng)
     patch = _review(eng, tmp_path)
     assert paper.read_text(encoding="utf-8") == written
-    hits = patch["review"]["must_flag_hits"]
-    assert hits == [_page_limit_hit(5, 4, 100)]
-    assert "trimmed" not in patch["review"]["page_limit"] and patch["page_limit_rewrites"] == 1
+    assert patch["review"]["must_flag_hits"] == []
+    assert "trimmed" not in patch["review"]["page_limit"] and "page_limit_rewrites" not in patch
     assert any("[page_limit]" in w and "sentences to take out" in w for w in warnings)
 
 
@@ -476,7 +475,7 @@ def test_a_trim_that_does_not_bring_the_draft_within_the_limit_leaves_it_as_writ
     _with_chat(eng, json.dumps({"delete": [c.n for c in _cands(written)]}))
     patch = _review(eng, tmp_path)
     assert paper.read_text(encoding="utf-8") == written
-    assert patch["review"]["must_flag_hits"][0].startswith("over_page_limit")
+    assert patch["review"]["must_flag_hits"] == []
     assert len(rendered) <= 1 + 3  # the draft, then at most three trials
     assert not (tmp_path / ".fi" / "page_check_trial.md").exists()
 
@@ -490,7 +489,7 @@ def test_a_draft_far_over_the_limit_is_not_trimmed_and_the_model_is_not_asked(tm
     patch = _review(eng, tmp_path)
     assert [node for node, _p in calls].count("write.trim") == 0
     assert paper.read_text(encoding="utf-8") == written
-    assert patch["review"]["must_flag_hits"][0].startswith("over_page_limit")
+    assert patch["review"]["must_flag_hits"] == []
 
 
 def test_the_trim_node_answers_at_temperature_zero_and_uses_the_write_model() -> None:
