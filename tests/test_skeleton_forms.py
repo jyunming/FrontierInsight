@@ -480,7 +480,7 @@ def test_a_plain_grid_gives_the_same_rows_through_the_framed_simulation_as_throu
     cell, trials = {"rate": 0.2, "dose": 2}, [{"trial": t, "seed": 100 + t} for t in range(3)]
     plain = _rows(_quest(tmp_path, _VALUES, "plain"), cell, trials)
     framed = _rows(_quest(tmp_path, _framed(COLONY, _FRAMED_VALUES), "framed"), cell, trials)
-    drop = {"duration_s", "at_s", "nonce", "warnings"}
+    drop = {"duration_s", "at_s", "nonce", "warnings", "drew"}  # "drew": what the frame measures, the plain simulation has none
 
     def core(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return [{k: v for k, v in r.items() if k not in drop} for r in rows]

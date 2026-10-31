@@ -928,8 +928,33 @@ def _plain(seconds: float) -> str:
 # ---- the facts ------------------------------------------------------------------------------------------------------
 
 
+def _drew_record(root: Path) -> bool | None:
+    """Whether the trials drew random numbers, from what the frame measured and the harness wrote into each trial's row
+    (``drew``, core/skeleton.py): ``True`` when every trial that ran and carries the record drew, ``False`` when none did, ``None``
+    when no row carries it (a quest from before it was kept) or the trials differ."""
+    seen: set[bool] = set()
+    for path in sorted((root / ".fi" / "trials").glob("*.jsonl")):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                for line in fh:
+                    if '"drew"' not in line:
+                        continue
+                    row = json.loads(line)
+                    if isinstance(row, dict) and row.get("status") == "ok" and isinstance(row.get("drew"), bool):
+                        seen.add(row["drew"])
+        except (OSError, ValueError):
+            return None
+        if len(seen) > 1:
+            return None
+    return seen.pop() if seen else None
+
+
 def _seed_text(root: Path) -> str:
     """What ``{{seed}}`` says: the seed the code used, from the code's own reading (:func:`core.run_facts.seed_verdict`)."""
+    study = _read(root, "code/study.json")
+    if isinstance(study, dict) and study.get("entry") == "run_cell":
+        # FI ran the study through the code's deterministic entry: one run for each setting, and no seed passed to it.
+        return "none (each setting ran once with no random numbers; FI passed no seed)"
     verdict = _run_facts.seed_verdict(root)
     state = verdict.get("verdict")
     if state == _run_facts.NO_ENTRY:
@@ -940,6 +965,12 @@ def _seed_text(root: Path) -> str:
                 else "a separate seed for each trial, passed to the simulation by FI")
     if state == _run_facts.UNKNOWN:
         base, _trial = _disclosure.recorded_seeds(root)
+        drew = _drew_record(root)  # measured by the frame, so the code need not be read to tell
+        if drew is False:
+            return "none: no trial drew random numbers (each setting's result does not depend on a seed)"
+        if drew is True:
+            return ("each trial drew its random numbers from its own seed, derived from base seed " + str(base) if base is not None
+                    else "each trial drew its random numbers from its own seed, passed by FI")
         said = f"a seed passed to each trial, derived from base seed {base}" if base is not None else "a seed passed to each trial"
         return f"{said} (FI could not tell from the code whether the simulation uses it)"
     driving = [d for d in verdict.get("driving_seeds") or [] if isinstance(d, dict)]
@@ -1150,6 +1181,16 @@ def limitations_text(quest_root: Path | str) -> str:
     return "\n".join(f"- {s}" for s in sentences)
 
 
+def _answer_line(rec: Any, name: str, metric: str, tries: list[tuple[str, str]]) -> str:
+    """One line of the answers block: the first of ``tries`` (a key and the words after its value) that FI can fill, else
+    ``name`` said as not answered, with why."""
+    got = [(k, note, _values.resolve(k, rec)) for k, note in tries]
+    done = next(((k, note) for k, note, v in got if v.filled), None)
+    if done is None:
+        return f"- {name}: not answered (FI cannot state {metric}: {got[-1][2].hit.reason if got[-1][2].hit else 'no record'})"
+    return f"- {name} (the plan's map: `{metric}`): {done[0]}{done[1]}"
+
+
 def answers_text(quest_root: Path | str) -> str:
     """The block ``{{answers}}`` stands for: one line for each quantity the topic asks for and marks main, with FI's value
     and its interval (a key FI fills), from the plan's own ``protocol.topic_map`` entry (``metric:<id>``). A quantity the
@@ -1190,29 +1231,42 @@ def answers_text(quest_root: Path | str) -> str:
             lines.append(f"- {name}: not answered (FI holds no value for {metric})")
             continue
         if metric in rec.answers:
-            tries = [(f"{{{{v:{metric}}}}}", " (one value worked out by the analysis; no interval is recorded for it)")]
-        else:
-            # An axis the study compares inside each run is read from the per-value records the run kept; a quantity that
-            # is one number per run has no record under it, so that axis is pooled whole (``=all``) for it, never looked
-            # up as a value of its own (a lookup by it finds no trial at all).
-            held = {c_axis for c in rec.carrying(metric) for c_axis in c["cell"]}
-            per_run = [a for a in varied if a in rec.in_run_axes() and a not in held]
-            each = [a for a in varied if a not in per_run]
-            pinned = ", ".join(f"{rec.short(a)}=all" for a in per_run)
-            if each:
-                where = ", ".join([f"{rec.short(a)}=each" for a in each] + ([pinned] if pinned else []))
+            lines.append(_answer_line(rec, name, metric, [(f"{{{{v:{metric}}}}}", " (one value worked out by the analysis; no interval is recorded for it)")]))
+            continue
+        # The plan's own map may pin the quantity to one value of a setting (``at``); a setting the study compares (the plan's
+        # ``comparisons``) is answered once for each of its values, never as one range across them.
+        entry_at = next((m["at"] for m in _topic_req.map_entries(req, plan, "quantities", item)
+                         if isinstance(m.get("at"), dict) and m["at"]), {})
+        at = {a: v for a, v in entry_at.items() if a in rec.axes()}
+        compared = {c.get("across") for c in protocol.get("comparisons") or [] if isinstance(c, dict)}
+        # An axis the study compares inside each run is read from the per-value records the run kept; a quantity that
+        # is one number per run has no record under it, so that axis is pooled whole (``=all``) for it, never looked
+        # up as a value of its own (a lookup by it finds no trial at all).
+        held = {c_axis for c in rec.carrying(metric) for c_axis in c["cell"]}
+        per_run = [a for a in varied if a in rec.in_run_axes() and a not in held and a not in at]
+        each = [a for a in varied if a not in per_run and a not in at]
+        split = next((a for a in each if a in compared), None)
+        pinned = [f"{rec.short(a)}={v}" for a, v in at.items()]
+        fixed = pinned + [f"{rec.short(a)}=all" for a in per_run]
+        levels = [None] if split is None else list(rec.axes().get(split) or [None])
+        for level in levels:
+            here = [a for a in each if a != split] if level is not None else each
+            said = [f"{rec.short(a)}=each" for a in here]
+            label = name + (f" (when {', '.join(a + ' = ' + str(v) for a, v in at.items())})" if at and level is None else "")
+            if level is not None:
+                fixed_here = fixed + [f"{rec.short(split)}={level}"]
+                label = f"{name} ({split} = {level})" + (f" ({', '.join(a + ' = ' + str(v) for a, v in at.items())})" if at else "")
+            else:
+                fixed_here = fixed
+            if said:
+                where = ", ".join([*said, *fixed_here])
                 tries = [(f"{{{{v:{metric} @ {where} | range}}}}",
-                          f" (no single value: it differs with {', '.join(rec.short(a) for a in each)}; this is the mean in each "
+                          f" (no single value: it differs with {', '.join(rec.short(a) for a in here)}; this is the mean in each "
                           "setting, lowest to highest, and the tables give every setting)")]
             else:
-                at = pinned
-                tries = [(f"{{{{v:{metric}:mean_ci @ {at}}}}}", ""), (f"{{{{v:{metric} @ {at}}}}}", " (no interval: the trials give none)")]
-        got = [(k, note, _values.resolve(k, rec)) for k, note in tries]
-        done = next(((k, note) for k, note, v in got if v.filled), None)
-        if done is None:
-            lines.append(f"- {name}: not answered (FI cannot state {metric}: {got[-1][2].hit.reason if got[-1][2].hit else 'no record'})")
-        else:
-            lines.append(f"- {name} (the plan's map: `{metric}`): {done[0]}{done[1]}")
+                where = ", ".join(fixed_here)
+                tries = [(f"{{{{v:{metric}:mean_ci @ {where}}}}}", ""), (f"{{{{v:{metric} @ {where}}}}}", " (no interval: the trials give none)")]
+            lines.append(_answer_line(rec, label, metric, tries))
     return ("**Answers to the questions asked.**" + chr(10) * 2 + chr(10).join(lines)) if lines else ""
 
 

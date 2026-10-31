@@ -51,3 +51,13 @@ def test_a_comparison_with_the_reference_over_settings_that_each_ran_once_is_lef
                           "failed": 0, "metrics": {"y": {"values": [ref * (1 + 0.01 * r)]}}})
     got = pv.resolve("y:mean @ m=each, r=all, pi1=0.2 | vs ref", pv.from_cells(cells, protocol))
     assert not got.filled and "each setting ran once" in got.hit.reason
+
+
+def test_settings_that_each_ran_once_and_gave_one_value_print_that_value_not_a_mean():
+    cells = [_cell(a, [2.5]) for a in range(1, 6)]
+    assert _text(cells, "y:mean_ci @ a=all") == "2.500"
+
+
+def test_values_that_differ_at_the_printed_places_keep_the_mean_over_settings_wording():
+    cells = [_cell(a, [2.5 + 0.01 * a]) for a in range(1, 6)]
+    assert "mean over 5 settings, one run each; no interval" in _text(cells, "y:mean_ci @ a=all")

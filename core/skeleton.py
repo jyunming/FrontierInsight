@@ -39,7 +39,7 @@ from . import oracle_forms as _oracle_forms
 from . import trial_checks as _trial_checks
 
 #: Written into the frame; a quest keeps the frame it was written with (a resume reads the files, never writes them again).
-VERSION = 3
+VERSION = 4
 RUNTIME_FILE = "fi_frame.py"
 TOP_BEGIN = f"# >>> FI frame, version {VERSION}: written by FI from the plan; a repair does not change it"
 TOP_END = "# <<< FI frame"
@@ -79,6 +79,20 @@ def _generator(seed):
         return random.Random(seed)
 
 
+def _note_draws(drew):
+    """Say, in the row FI's harness is about to write for the trial it is running, whether the trial drew random numbers
+    (``drew``): FI measures it here, where the generator is handed out, instead of reading it from the code. Does nothing
+    outside FI's harness. The harness is found by its ``main()``, as :func:`_harness_trials` does."""
+    frame = sys._getframe(1)
+    while frame is not None:
+        if frame.f_code.co_name == "main":
+            row = frame.f_locals.get("row")
+            if isinstance(row, dict) and "trial" in row and "nonce" in row:
+                row["drew"] = bool(drew) or bool(row.get("drew"))
+                return
+        frame = frame.f_back
+
+
 class Ctx:
     """What a trial is given besides its settings. ``rng``: a random generator seeded by FI for this trial (numpy's when it is
     installed, else ``random.Random``); ``seed``: the same seed as a plain integer for a library that wants one; ``trial``:
@@ -88,7 +102,9 @@ class Ctx:
     one empty result record for each."""
 
     def __init__(self, seed=None, trial=0, seeds=None, trials=None):
-        self.seed = seed
+        self._seed = seed
+        self._drew = False
+        _note_draws(False)
         self.trial = trial
         self.seeds = list(seeds) if seeds is not None else [seed]
         self.trials = list(trials) if trials is not None else [trial]
@@ -100,13 +116,23 @@ class Ctx:
         self._rng = None
 
     @property
+    def seed(self):
+        self._drew = True
+        _note_draws(True)
+        return self._seed
+
+    @property
     def rng(self):
         if self._rng is None:
-            self._rng = _generator(self.seed)
+            self._rng = _generator(self._seed)
+        self._drew = True
+        _note_draws(True)
         return self._rng
 
     def rngs(self):
         """One random generator for each seed of ``seeds``, in that order."""
+        self._drew = True
+        _note_draws(True)
         return [_generator(s) for s in self.seeds]
 
     def results(self):
@@ -203,7 +229,7 @@ def _harness_trials():
 def _trials_of(ctx):
     """``[(trial, seed)]`` of the setting this trial belongs to (the harness's spec, or a ``run.py`` that says them in a
     file named by FI_TRIAL_SEEDS_FILE), else this trial."""
-    mine = (ctx.trial, ctx.seed)
+    mine = (ctx.trial, ctx._seed)
     try:
         given = _harness_trials()
         if given is None:
@@ -243,13 +269,14 @@ def batch_of_trials(fn, cell, ctx):
         _batches.clear()  # a process is one setting's
         batch_ctx = Ctx(seed=plan[0][1], trial=plan[0][0], seeds=[s for _t, s in plan], trials=[t for t, _s in plan])
         try:
-            _batches[key] = (True, _one_per_seed("trial_batch", fn(cell, batch_ctx), batch_ctx))
+            _batches[key] = (True, _one_per_seed("trial_batch", fn(cell, batch_ctx), batch_ctx), batch_ctx._drew)
         except Exception as e:  # noqa: BLE001 -- the same failure is every trial's of the setting
-            _batches[key] = (False, e)
-    ok, got = _batches[key]
+            _batches[key] = (False, e, batch_ctx._drew)
+    ok, got, drew = _batches[key]
+    _note_draws(drew)  # the batch ran once for the setting: each of its trials is told whether it drew
     if not ok:
         raise got
-    return got[plan.index((ctx.trial, ctx.seed))]
+    return got[plan.index((ctx.trial, ctx._seed))]
 
 
 def batch_of_cells(fn, cell, ctx):
