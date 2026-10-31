@@ -11274,6 +11274,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # FI writes the analysis as well (core/analysis_frame.py; a plan in the contract form, the frame on): the functions of
         # derive.py the model is asked for, else ``None``. Read once, so the request and what is written of its reply agree.
         bodies = self._analysis_bodies(state)
+        # The functions that already ran and passed are kept as they ran; the model is asked for the rest (core/kept_bodies.py)
+        kept = None if extend else self._bodies_kept(state, bodies, outline)
+        if kept is not None:
+            bodies = [b for b in bodies or [] if b not in kept.names]
         if outline and outline.get("scaffold") and body_prompt is not None:
             self._log.info(
                 "[implement] filling scaffold (%d functions to body)",
@@ -11320,6 +11324,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 split_block=self._split_block(state, bodies),
             )
         prompt = self._frame_note(state) + prompt  # FI writes the frame of simulate.py: said first (core/run_checks.py)
+        if kept is not None:
+            prompt = self._keep_note(kept) + prompt
         # A review that named something this run computed sent the experiment
         # back here (``re_execute``). Both prompts above carry the design and
         # the outline but no review, so without this the model would regenerate
@@ -11354,7 +11360,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         incremental = None
         if not extend and not rerun_for and outline and outline.get("scaffold") and bodies is None:
             incremental = await self._incremental_scripts(state, outline)
-        text = "" if incremental is not None else await self._chat(prompt, node="implement")
+        # Nothing left to ask for when the simulation and every function of derive.py are kept as they ran
+        everything_kept = kept is not None and kept.trial and not bodies
+        text = "" if incremental is not None or everything_kept else await self._chat(prompt, node="implement")
         # Two scripts (execution.split_analysis): the simulation, and the analysis, which
         # keeps the name ``experiment.py`` because everything else reads that one. A reply
         # that does not hold both is asked for once more; if it still does not, the quest
@@ -11365,7 +11373,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if self._split_on(state):
             fis = bodies is not None  # FI writes the analysis: the reply holds simulate.py and derive.py's functions
             scripts = ({"simulate": incremental["simulate"], "analysis": incremental["analysis"]} if incremental is not None
-                       else _split_run.parse_split_response(text, _PY_FENCE_RE, bodies=fis))
+                       else _split_run.parse_split_response(text, _PY_FENCE_RE, bodies=fis,
+                                                            simulate_kept=kept.simulate if kept is not None and kept.trial else ""))
             if scripts is None:
                 self._log.warning(
                     "[implement] execution.split_analysis is on but the reply did not hold %s; asking once more",
@@ -11386,10 +11395,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                                                               extend=bool(extend), bodies=fis)
                 simulate_code = self._framed(state, scripts["simulate"])
                 # FI's own experiment.py and the study's functions put into FI's frame of derive.py (core/analysis_frame.py)
-                code = (self._analysis_written(state, scripts.get("derive", ""), simulate_code) if fis
+                code = (self._analysis_written(state, scripts.get("derive", ""), simulate_code, kept.names if kept else ()) if fis
                         else scripts["analysis"])
                 submit_code = scripts.get("submit", "")
-                deps = incremental["deps"] if incremental is not None else _parse_split_deps(text)
+                deps = (incremental["deps"] if incremental is not None else list(state.get("deps") or []) if everything_kept
+                        else _parse_split_deps(text))
                 broken = list(_run_manifest.split_lint({_split_run.SIMULATE_NAME: simulate_code, "experiment.py": code}))
                 model_package = next(iter(package_files), "").split("/")[0] or self._package_in_use(state)
                 if model_package and _code_layout.imports(code, model_package):

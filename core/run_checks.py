@@ -956,6 +956,50 @@ class RunChecksMixin:
             return None
         return _analysis.body_names(_analysis.plan_of(design))
 
+    def _bodies_kept(self, state: Any, bodies: list[str] | None, outline: dict[str, Any]) -> Any:
+        """The functions of the study that already ran and passed, kept when the code step is entered again
+        (core/kept_bodies.py); ``None`` when FI does not write the analysis here, or nothing ran. They are put back as they ran,
+        and the model is asked only for the rest. A function stays unless the reason for the pass names it: a function the last
+        run failed in, a quantity or figure a measured finding names (a number no function of derive.py makes is the
+        simulation's), or a part of the plan the function reads that the design changed."""
+        from . import analysis_frame as _analysis
+        from . import kept_bodies as _kept
+
+        if bodies is None:
+            return None
+        design = state.get("design")
+        try:
+            trial_reads = _kept._sha(self._scripts_built_from(state, outline)) if outline else ""  # type: ignore[attr-defined]
+            _kept.snapshot(self.quest_root, design)  # type: ignore[attr-defined]
+            named = {str((state.get("exec_result") or {}).get("failed_body") or "")} - {""}
+            from . import engine as _e
+
+            sends = getattr(_e, "_review_sends_the_experiment_back", None)
+            said = sends(state.get("review") or {}, state) if sends else ""
+            if said:
+                record = _analysis.read_record(self.quest_root)  # type: ignore[attr-defined]
+                named.add(_analysis.made_by(record, quantity=said) or _analysis.made_by(record, figure=said) or _kept.TRIAL)
+            kept = _kept.decide(self.quest_root, design, list(bodies), trial_reads, named)  # type: ignore[attr-defined]
+            written = _kept.restore(self.quest_root, kept)  # type: ignore[attr-defined]
+            _kept.mark_written(self.quest_root, design, trial_reads, [b for b in bodies if b not in kept.names],  # type: ignore[attr-defined]
+                               not kept.trial)
+        except Exception as exc:  # noqa: BLE001 -- a record FI cannot read keeps nothing: every function is asked for as before
+            self._log.warning("[implement] could not tell which functions already ran and passed (%r); all are written again", exc)  # type: ignore[attr-defined]
+            return None
+        if kept.names or kept.trial or kept.again:
+            self._log.info("[implement] %s", _kept.say(kept))  # type: ignore[attr-defined]
+        if written:
+            self._log.info("[implement] put back as they ran: %s", ", ".join(written))  # type: ignore[attr-defined]
+        return kept if (kept.names or kept.trial) else None
+
+    def _keep_note(self, kept: Any) -> str:
+        """The start of the code request when functions are kept: what FI keeps, and what is still asked for."""
+        names = [*(["the simulation (`trial`)"] if kept.trial else []), *(f"`{n}`" for n in kept.names)]
+        return ("FI keeps " + ", ".join(names) + (" exactly as it ran and passed" if len(names) == 1 else " exactly as they ran and passed")
+                + ": do not write " + ("it again" if len(names) == 1 else "them again") + ", and do not change anything they use."
+                + (" Leave the `# file: simulate.py` block out." if kept.trial else "")
+                + " Give only the functions this request asks for.\n\n")
+
     def _fis_analysis_packages(self, state: Any) -> list[str]:
         """The packages FI's own analysis needs whatever the reply lists: matplotlib, when the plan declares a figure or a
         search (FI draws those itself, in fi_figures.py; a clean venv or a container has no matplotlib of its own)."""
@@ -967,7 +1011,7 @@ class RunChecksMixin:
         plan = _analysis.plan_of(design)
         return ["matplotlib"] if plan["figures"] or plan["search"] else []
 
-    def _analysis_written(self, state: Any, derive_reply: str, simulate_text: str) -> str:
+    def _analysis_written(self, state: Any, derive_reply: str, simulate_text: str, keep: Any = ()) -> str:
         """Write the analysis FI writes for this plan into ``code/`` (core/analysis_frame.py): ``derive.py`` with the study's
         functions from ``derive_reply`` put into FI's frame, and ``experiment.py``, ``fi_table.py``, ``fi_figures.py`` and
         ``fi_core/`` beside it. Returns the text of ``experiment.py`` (FI's)."""
@@ -980,7 +1024,7 @@ class RunChecksMixin:
         except (OSError, UnicodeDecodeError):
             existing = ""
         design = state.get("design")
-        text, note = _analysis.compose(design, derive_reply, existing)
+        text, note = _analysis.compose(design, derive_reply, existing, keep)
         if note:
             self._log.warning("[implement] derive.py: %s", note)  # type: ignore[attr-defined]
         if text != existing:
