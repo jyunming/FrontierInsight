@@ -428,6 +428,22 @@ def is_fis_file(path: Path | str) -> bool:
         return False
 
 
+def study_code(code_dir: Path | str) -> str | None:
+    """The code the model wrote for the analysis, when FI writes the rest: ``derive.py`` without FI's frame. ``None`` when the
+    analysis is not FI's (``experiment.py`` is then the model's own). FI's files (``experiment.py``, ``fi_table.py``,
+    ``fi_figures.py``, the frame) are never the study's, so a check that reads the code to learn what the study did (a cap on a
+    value, say) reads this and not them."""
+    folder = Path(code_dir)
+    if not is_fis_file(folder / EXPERIMENT_FILE):
+        return None
+    try:
+        source = (folder / DERIVE_FILE).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+    span = _frame_span(source)
+    return source if span is None else source[:span[0]] + source[span[1]:]
+
+
 def carried_file(code_dir: Path | str, rel: str) -> bool:
     """Whether ``rel`` (a path in the code folder ``code_dir``) is a file FI carries there for its analysis and holds FI's text:
     the figure step and the formula calculator. A module of the study's own with such a name is the study's."""

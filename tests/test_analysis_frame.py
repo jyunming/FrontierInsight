@@ -19,7 +19,7 @@ from typing import Any
 import pytest
 
 from core import analysis_frame as af
-from core import contract, numeric_warnings, paper_values, trial_runner
+from core import contract, numeric_warnings, paper_values, plausibility, trial_runner
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRATCH = Path("C:/fi_runs/c1/skeleton/s4_inputs/scratch")
@@ -923,3 +923,38 @@ def test_plan_of_gives_a_several_panel_figure_its_settings_and_labels_and_a_one_
     assert plan["figures"]["fig1"]["settings"] == {"rate": [0.1, 0.2], "dose": [1, 2], "mode": ["a", "b"]}
     assert plan["figures"]["fig1"]["labels"] == {"rate": "Infection rate", "mode": "Run mode"}
     assert "settings" not in plan["figures"]["fig2"] and "labels" not in plan["figures"]["fig2"]
+
+
+def _clamp_check(tmp_path: Path, body: str) -> list[Any]:
+    """The violations the engine finds for a result exactly on the top of a declared range, with the study's ``body`` in derive.py."""
+    from types import SimpleNamespace
+
+    from core.engine import Engine, _assertion_violations
+
+    quest = _quest(tmp_path, _design(), body)
+    state = {"result_json": {"s": {"growth": 1.0}}, "code": (quest / "code" / "experiment.py").read_text(encoding="utf-8"),
+             "design": {"result_assertions": [{"path": "growth", "min": 0.4, "max": 1.0, "unit": "x"}]}}
+    stub = SimpleNamespace(quest_root=quest, _protocol_block=lambda s: None)
+    return _assertion_violations(Engine._in_force(stub, state))
+
+
+def test_the_study_code_is_derive_without_fi_s_frame_and_none_when_the_analysis_is_not_fis(tmp_path: Path) -> None:
+    quest = _quest(tmp_path, _design(), "def derive_extra(table):\n    return min(0.5, 1.0)\n")
+    study = af.study_code(quest / "code")
+    assert study is not None and "def derive_extra" in study
+    assert af._BEGIN.search(study) is None and "FI analysis frame" not in study, "FI's frame is not the study's"
+    own = tmp_path / "own"
+    own.mkdir()
+    (own / "experiment.py").write_text("print('hello')\n", encoding="utf-8")
+    assert af.study_code(own) is None, "a model-written experiment.py is read as it is"
+
+
+def test_a_one_in_fi_s_own_files_is_not_a_cap_the_study_wrote(tmp_path: Path) -> None:
+    # FI's experiment.py has a 1 in a conditional (its exit code) that the cap search read as a clamp of the study.
+    assert 1.0 in plausibility.clamp_constants(af.EXPERIMENT), "the premise: FI's own file holds a cap-shaped 1"
+    assert _clamp_check(tmp_path, "") == []
+
+
+def test_a_cap_the_study_wrote_still_marks_a_result_on_it_as_clamped(tmp_path: Path) -> None:
+    found = _clamp_check(tmp_path, "def derive_growth(table):\n    return min(1.0, table.mean('growth'))\n")
+    assert [v.kind for v in found] == ["clamped"]

@@ -11630,6 +11630,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         """``state`` with the protocol in force (the frozen one once there is one) as its design's protocol, for the
         checks of the results that read the design (:func:`_assertion_violations`)."""
         protocol = self._protocol_block(state)  # type: ignore[arg-type]
+        # When FI writes the analysis, state["code"] is FI's own experiment.py: what the checks read to learn what the study
+        # did (a cap on a value) is the study's code, never FI's.
+        study = _analysis_frame.study_code(self.quest_root / "code")
+        if study is not None:
+            state = {**state, "code": study}
         if not isinstance(protocol, dict):
             return state
         return {**state, "design": {**(state.get("design") or {}), "protocol": protocol}}
