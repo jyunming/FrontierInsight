@@ -34050,9 +34050,9 @@ def _figure_overlap_findings(state: QuestState) -> list[str]:
                         f'figures/{name}: the figure title "{_one_line(item.get("text"))}" is drawn '
                         f'over the panel title "{_one_line(item.get("over"))}"'
                     )
-                elif item.get("check") == "tick_label_overlap":
+                elif item.get("check") == "label_overlap":
                     found.append(
-                        f'figures/{name}: the {_one_line(item.get("axis"), 4)}-axis tick labels '
+                        f'figures/{name}: the {_one_line(item.get("where"), 40)} '
                         f'"{_one_line(item.get("text"), 40)}" and "{_one_line(item.get("over"), 40)}" '
                         "run into each other"
                     )
@@ -34224,13 +34224,13 @@ def _figure_record_note(record: dict[str, Any] | None, *, n_seeds: int | None = 
         note += f" — each line is the mean of {mean_of} seeds, shaded with its 95% confidence interval"
     elif single_seed is not None:
         note += f" — shows {_single_seed_note(single_seed, n_seeds)}"
-    # The paper copy drops a figure's title (the caption carries it, core/plot_style.py): what it said reaches the
-    # reader only through the caption.
+    # The paper copy drops a figure's title (core/plot_style.py), and FI's caption does not copy a title (it states the
+    # axes and the lines FI recorded): what the title said does not reach the reader.
     gone = [" ".join(str(t).split()) for t in ((record or {}).get("paper_dropped") or []) if str(t).strip()]
     if gone:
         note += (" — in a one-column paper.pdf this figure does not show its title" + ("s " if len(gone) > 1 else " ")
                  + "; ".join(f'"{_one_line(t, 120)}"' for t in gone)
-                 + ": FI's caption carries it")
+                 + ": FI's caption does not repeat it")
     return note
 
 
@@ -34387,7 +34387,8 @@ def _figure_caption_text(
     name: str, record: dict[str, Any] | None, *, n_seeds: int | None, facts: dict[str, str] | None = None,
     credit: dict[str, Any] | None = None,
 ) -> str:
-    """The caption FI writes for a figure, from its own records only: what each panel is (its title, else its axes), the
+    """The caption FI writes for a figure, from its own records only: what each panel is (its axes: what it plots against
+    what, never the words of the script's own panel or figure title, which can name a line the figure does not draw), the
     series it draws when there are at most three (one drawn flat, or outside the plotted range, said so), its reference
     lines, the panels' layout and the line styles (``facts``, :func:`core.figure_facts.facts`), and whether a line is a
     mean over seeds. A sourced figure (``credit``) says where it is from. Never empty: with no record at all, the file's
@@ -34402,30 +34403,29 @@ def _figure_caption_text(
     numbered = [(k, ax) for k, ax in enumerate((record or {}).get("axes") or [], start=1)
                 if isinstance(ax, dict) and not _panel_draws_nothing(ax)]
     axes = [ax for _, ax in numbered]
-    titles = list(dict.fromkeys(t for t in (_caption_words(ax.get("title")) for ax in axes) if t))
-    lead = next((t for t in (_caption_words(d) for d in (record or {}).get("paper_dropped") or []) if t and t not in titles), "")
-    shared = {(_caption_words(ax.get("ylabel")), _caption_words(ax.get("xlabel"))) for ax in axes}
-    y, x = next(iter(shared)) if len(shared) == 1 else ("", "")
-    against = f"{y} against {x}" if y and x else y
-    if len(titles) > 3:
-        # A grid of panels: its titles are the settings each panel was drawn at, a list rather than a sentence about
-        # the figure, and the file's own name says what the grid shows.
-        description = f"{stem} ({len(titles)} panels)"
+    # A panel is named by what it plots (its y axis, else its x axis). A panel or figure title is the script's own
+    # sentence and is not copied: it can name a line, a reference or a style the figure does not draw, and FI's record of
+    # the lines is what the caption states.
+    def plots(ax: dict[str, Any]) -> str:
+        y, x = _caption_words(ax.get("ylabel")), _caption_words(ax.get("xlabel"))
+        return f"{y} against {x}" if y and x else y or x
+
+    def named(k: int, ax: dict[str, Any]) -> str:
+        return _caption_words(ax.get("ylabel")) or _caption_words(ax.get("xlabel")) or f"panel {k}"
+
+    plotted = list(dict.fromkeys(t for t in (plots(ax) for ax in axes) if t))
+    if len(axes) > 3:
+        # A grid of panels: the file's own name says what the grid shows.
+        description = f"{stem} ({len(axes)} panels)"
     else:
-        description = "; ".join(titles) or against or stem
-        if titles and y and x and not lead:
-            # The panel titles name each panel; what every panel plots is its axes.
-            description = f"{against}: {description}"
-    # A title the paper copy does not show (core/plot_style.py drops a figure's own title there): the caption carries it.
-    if lead:
-        description = lead if description == stem else f"{lead.rstrip(' .;,:')}: {description}"
+        description = "; ".join(plotted) or stem
     parts = [description.rstrip(" .;,") + "."]
     appears: dict[str, list[str]] = {}
     flat: dict[str, list[str]] = {}
     outside: dict[str, list[str]] = {}
     marks: list[str] = []
     for k, ax in numbered:
-        title = _caption_words(ax.get("title")) or f"panel {k}"
+        title = named(k, ax) if len(plotted) > 1 else f"panel {k}"
         for s in ax.get("series") or []:
             if not isinstance(s, dict):
                 continue

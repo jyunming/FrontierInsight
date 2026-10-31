@@ -503,7 +503,7 @@ def test_the_writer_is_told_which_titles_the_paper_copy_does_not_show(tmp_path: 
     assert "paper" not in read and read["paper_dropped"] == record["paper_dropped"]
     note = _figure_record_note(read)
     assert ('in a one-column paper.pdf this figure does not show its titles "All runs at T = 300 K"; '
-            '"sigma=0.02, n=12: observed r=0.9992": FI\'s caption carries it') in note
+            '"sigma=0.02, n=12: observed r=0.9992": FI\'s caption does not repeat it') in note
     assert "does not show" not in _figure_record_note({"axes": [{"title": "x", "series": []}]})
 
 

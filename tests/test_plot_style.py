@@ -481,8 +481,8 @@ def test_bootstrap_records_tick_labels_that_run_into_each_other(tmp_path) -> Non
         "ax2.set_xlabel('gain'); ax2.set_ylabel('hit_rate'); fig2.savefig('clean.png')\n"
     ))
     found = layout("crowded")
-    overlaps = [f for f in found if f["check"] == "tick_label_overlap"]
-    assert overlaps and all(f["axis"] == "x" and f["share"] >= 0.2 for f in overlaps)
+    overlaps = [f for f in found if f["check"] == "label_overlap"]
+    assert overlaps and all(f["where"] == "x-axis tick labels" and f["share"] >= 0.2 for f in overlaps)
     assert any(f["text"] == "settle_time_alpha_long_label" and f["over"] == "settle_time_beta_long_label"
                for f in overlaps)
     assert layout("clean") == []
@@ -644,3 +644,24 @@ def test_a_label_that_fits_is_saved_without_change_in_the_layout_check(tmp_path)
         "fig.savefig('fig.png')\n"
     ))
     assert last_ink < width - 2, (width, last_ink)
+
+
+def test_bootstrap_records_text_written_in_a_panel_drawn_over_other_text(tmp_path) -> None:
+    """Curve names written with ax.annotate at nearly one place are drawn on top of each other; names set apart are
+    not. Same share, same record, same repair route as tick labels that run into each other."""
+    layout = _layout_records(tmp_path, (
+        "import matplotlib.pyplot as plt\n"
+        "fig, ax = plt.subplots()\n"
+        "ax.plot([0, 1], [0, 1])\n"
+        "for name in ('curve one', 'curve two'):\n"
+        "    ax.annotate(name, xy=(0.5, 0.5), xytext=(4, 4), textcoords='offset points')\n"
+        "fig.savefig('piled.png')\n"
+        "fig2, ax2 = plt.subplots()\n"
+        "ax2.plot([0, 1], [0, 1])\n"
+        "ax2.annotate('curve one', xy=(0.1, 0.1)); ax2.annotate('curve two', xy=(0.6, 0.8))\n"
+        "fig2.savefig('apart.png')\n"
+    ))
+    (found,) = layout("piled")
+    assert found["check"] == "label_overlap" and found["where"] == "labels written in the panel"
+    assert {found["text"], found["over"]} == {"curve one", "curve two"} and found["share"] >= 0.2
+    assert layout("apart") == []

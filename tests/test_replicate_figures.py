@@ -312,7 +312,7 @@ def test_the_writer_and_the_caption_say_a_figure_shows_seed_0() -> None:
         "replicate (seed 0), not the means over the seeds."
     )
     caption = _figure_caption_text("sizes.png", state["figure_records"]["sizes.png"], n_seeds=None)
-    assert caption == ("Final sizes. Shows replicate seed 0 only (every run that seed made), not the mean over the "
+    assert caption == ("Count. Shows replicate seed 0 only (every run that seed made), not the mean over the "
                        "replicate seeds.")
 
 
