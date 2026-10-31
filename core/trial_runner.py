@@ -457,6 +457,31 @@ def read_facts(rows: Any, axes: Any) -> dict[str, Any]:
     return {"measurable": not why, "read": read, "unknown": unknown, "never": never, "why": why}
 
 
+def unread_axes(cells: Any, skip: Any = ()) -> list[str]:
+    """The settings the study varied that no trial of the whole run asked for: FI's own record of what the code read
+    (:func:`read_facts`), not a reading of its text. Judged over the trials that finished, plus the reads a failed trial
+    recorded before it stopped (still reads). A setting is listed only when every one of its values has a finished trial
+    and no trial read it; a value with no finished trial makes no claim for that setting alone. Nothing is listed where
+    the code took the cell as a whole (in any trial) or no finished trial asked for any setting by name. ``skip``: axes
+    left out."""
+    cells = [c for c in cells if isinstance(getattr(c, "cell", None), dict)]
+    rows = [r for c in cells for r in c.rows if isinstance(r, dict)]
+    skipped = {str(a) for a in skip}
+    values: dict[str, dict[str, bool]] = {}  # axis -> value -> has a finished trial
+    for c in cells:
+        done = any(r.get("status") == "ok" for r in c.rows if isinstance(r, dict))
+        for a, v in c.cell.items():
+            seen = values.setdefault(str(a), {})
+            key = json.dumps(v, sort_keys=True, default=str)
+            seen[key] = seen.get(key, False) or done
+    varied = [a for a, v in values.items() if len(v) > 1 and a not in skipped]
+    facts = read_facts(rows, varied)
+    if any(r.get("read_all") for r in rows):
+        return []
+    failed_reads = {str(k) for r in rows if r.get("status") != "ok" for k in r.get("read") or []}
+    return [a for a in facts["never"] if a not in failed_reads and all(values[a].values())]
+
+
 def _fmt(value: Any) -> str:
     if isinstance(value, float) and value.is_integer():
         return repr(value)
@@ -1866,7 +1891,10 @@ class TrialsRunner:
             declared = [str(s["id"]) for s in _metric_spec.declared(protocol) if s.get("id")]
             unchanged = _flat.unchanged_axes(run.cells, skip=numerical_axes(protocol), ignore=unsteady,
                                              declared=declared)
-            notes = [_flat.unchanged_axes_note(unchanged)] if unchanged else []
+            # The settings no trial read: seed noise hides them from the comparison above, so FI's own record of what the code
+            # read says it (core/in_run.py ``Cell``). Disclosed in the same words; the run is not stopped for it.
+            unread_seen = [a for a in unread_axes(run.cells) if a not in dict(unchanged)]
+            notes = [_flat.unchanged_axes_note(unchanged, unread=unread_seen)] if (unchanged or unread_seen) else []
             twins = _flat.identical_results(run.cells, declared=declared, ignore=unsteady)
             if twins:
                 notes.append(_flat.identical_results_note(twins))

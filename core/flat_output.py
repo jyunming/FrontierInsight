@@ -432,14 +432,25 @@ def no_effect_search(no_effect: dict[str, Any], block: dict[str, Any]) -> str:
             f"setting means, and the paper must say so.")
 
 
-def unchanged_axes_note(axes: list[tuple[str, int]]) -> str:
-    """The plain observation of :func:`unchanged_axes`, for run.log, the analysis and the writer; ``""`` for none."""
+def unchanged_axes_note(axes: list[tuple[str, int]], unread: Iterable[str] = ()) -> str:
+    """The plain observation of :func:`unchanged_axes`, for run.log, the analysis and the writer; ``""`` for none.
+    ``unread``: settings no trial of the run read (:func:`core.trial_runner.unread_axes`, FI's own record of what the code
+    asked for): their values cannot show an effect, said first, and the same advice follows."""
+    said = ""
+    if unread := [str(a) for a in unread]:
+        one = len(unread) == 1
+        said = (f"The simulation's code never read {_names(unread, limit=8)} in any trial, so the settings of the study that "
+                f"differ in {'it' if one else 'them'} are one result repeated and their values cannot show an effect. ")
+        if not axes:
+            return said + ("Report no difference, trend or best value along "
+                           f"{'it' if one else 'them'}, and say plainly in the paper that the code did not use "
+                           f"{'it' if one else 'them'}.")
     if not axes:
         return ""
     named = _names([a for a, _ in axes], limit=8)
     pairs = min(p for _, p in axes)
     one = len(axes) == 1
-    return (f"Changing {named} changed no number the simulation returned: in each of at least {pairs} pairs of "
+    return said + (f"Changing {named} changed no number the simulation returned: in each of at least {pairs} pairs of "
             f"settings that differ in {'it' if one else 'one of them'} alone, every result was the same. In the settings "
             f"tried the results do not depend on {'it' if one else 'them'}, so the settings of the study that differ in "
             f"{'it' if one else 'them'} are one result repeated, not a comparison: report no difference, trend or best "
