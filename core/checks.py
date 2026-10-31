@@ -509,8 +509,8 @@ CHECKS: tuple[Check, ...] = (
           'undecided.'),
     Check('oracle_per_trial_reading_unsaid', 'core.mc_error', 'unsaid_reading',
           'design', 'model_text', 'repair',
-          'A rule check using a number the protocol declares as a mean, without saying whether it holds every '
-          "trial or on average, is asked of the plan's model once (per_trial)."),
+          "Every check run on random trials is asked of the plan's model once, check by check, whether it holds in "
+          'every trial or on average (per_trial); a reading volunteered while writing the plan is not an answer.'),
     Check('oracle_duplicate_names', 'core.oracle_check', 'duplicate_names',
           'implement', 'own_record', 'note',
           'Two checks (or two reported values) sharing a name are warned: a value is matched by name.'),

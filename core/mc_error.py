@@ -133,25 +133,23 @@ def per_trial_flag(oracle: dict[str, Any]) -> bool | None:
     return None
 
 
+#: Set on a check by FI when the plan's model has answered the question of how it holds over the trials.
+ASKED_KEY = "reading_asked"
+
+
 def unsaid_reading(protocol: dict[str, Any] | None) -> list[str]:
-    """The checks whose reading the plan has to say and has not: each rule (an invariant, a symmetry, a second
-    implementation) whose ``measure`` uses a number the protocol declares as a mean or proportion over runs
-    (:func:`mean_names`), with ``per_trial`` unset. Whether such a rule holds in every single trial or only on average is
-    a fact about the science, so FI asks the plan once (the plan step's per-part request) and never guesses it; a check
-    still unsaid is read on the mean over trials (:func:`reads_a_mean`). A check of a quantity is read on the mean already and
-    is not asked about (``per_trial: true`` would only make a random quantity a rule of every trial)."""
-    if not isinstance(protocol, dict):
+    """The checks whose reading the plan's model has not been asked: every check FI can run on a case of its own, when the
+    study repeats its trials (or the plan does not say it does not), until the focused question (``PART_RULES["per_trial"]``
+    in core/plan.py) has been answered for it (:data:`ASKED_KEY`). A ``per_trial`` the plan volunteered while writing the
+    plan is not an answer: asked one check at a time, the model reads the check's own definition (6 plans, 53 checks: all
+    answered right), while volunteered beside everything else it got 3 of 53 wrong. Whether a check holds in every single
+    trial or only on average is a fact about the science, so FI asks once and never guesses it; a check still unsaid is
+    read on the mean over trials (:func:`reads_a_mean`) unless its kind is a rule of every trial."""
+    if not isinstance(protocol, dict) or repeats_trials(protocol) is False:
         return []
-    means = mean_names(protocol)
-    out: list[str] = []
-    for oracle in protocol.get("oracles") or []:
-        if not isinstance(oracle, dict) or per_trial_flag(oracle) is not None or not str(oracle.get("name") or "").strip():
-            continue
-        if _oracle.kind_of(oracle) not in _forms.VIOLATION_KINDS:
-            continue
-        if set(_forms.names(str(oracle.get("measure") or ""))) & means:
-            out.append(str(oracle["name"]).strip())
-    return out
+    return [str(o["name"]).strip() for o in protocol.get("oracles") or []
+            if isinstance(o, dict) and str(o.get("name") or "").strip() and _oracle.case_of(o) is not None
+            and not o.get(ASKED_KEY)]
 
 
 def reads_a_mean(oracle: dict[str, Any]) -> bool:
