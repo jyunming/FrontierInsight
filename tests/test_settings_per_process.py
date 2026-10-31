@@ -296,7 +296,7 @@ class _Log:
 
 
 def _sizing(tmp_path: Path, source: str, *, settings: int, at_once: int, limit_s: float, deterministic: bool = True,
-            runs: int = 1):
+            runs: int = 1, est_seconds: float = 9999.0):
     from types import SimpleNamespace
 
     from core import run_estimate
@@ -308,7 +308,7 @@ def _sizing(tmp_path: Path, source: str, *, settings: int, at_once: int, limit_s
     runner = SimpleNamespace(simulate=root / "code" / "simulate.py", deterministic=deterministic, per_process=1,
                              shared_groups=None, group_allowance_s=None, cost=lambda cell: 2.0)
     # the estimate's own terms are made wrong on purpose (work_seconds 100x too high): nothing here may read them
-    est = run_estimate.Estimate(seconds=9999.0, at_least=False, complete=True, cells=settings, trials=settings,
+    est = run_estimate.Estimate(seconds=est_seconds, at_least=False, complete=True, cells=settings, trials=settings,
                                 at_once=at_once, slowdown=4.5, work_seconds=99999.0)
     got = asyncio.run(run_checks.RunChecksMixin._group_settings(
         me, None, runner, sys.executable, {"FI_TEST_MARK": str(tmp_path / "s.txt")},
@@ -359,6 +359,21 @@ def run_cell(cell):
     got, runner, me = _sizing(tmp_path, heavy, settings=12, at_once=4, limit_s=60.0)
     assert got is not None and runner.per_process == 3, me._log.lines
     assert 15.0 < got[1] * 1.5 <= 60.0
+
+
+def test_a_check_never_runs_longer_than_the_study_it_hopes_to_replace(tmp_path: Path) -> None:
+    # the check's trials are not reused, so its time is extra: it stops where the grouped run would take as long as the
+    # study's own estimate without sharing (here 4 s), well inside the limit less the margin
+    heavy = MARK + '''
+import time
+
+def run_cell(cell):
+    time.sleep(6.0 if cell["rate"] == 12 else 0.05)
+    return {"level": cell["rate"] * 2.0}
+'''
+    got, runner, me = _sizing(tmp_path, heavy, settings=12, at_once=4, limit_s=60.0, est_seconds=4.0)
+    assert got is None and runner.per_process == 1
+    assert any("had not finished" in line for line in me._log.lines)
 
 
 def test_processes_that_really_are_slow_are_not_shared_and_the_reason_is_stated(tmp_path: Path) -> None:
