@@ -270,8 +270,10 @@ def test_the_last_reviews_points_are_stated_only_when_the_paper_goes_out_as_that
     assert disclosure.last_review_points(root) == [
         "A reason.", "The abstract calls a curve roughly flat; the paper's own numbers fall.", "A second point."]
     (item,) = [i for i in paper_facts.required_items(root) if i.kind == paper_facts.LAST_REVIEW]
-    assert item.sentence.startswith("The final review raised these points, which no later round addressed: \"A reason.\"")
-    assert "roughly flat" in _filled("# T\n\n## Limitations\nOwn words.\n", root)
+    assert item.sentence.startswith("The final review of this paper did not accept it and raised 3 points that the last")
+    filled = _filled("# T\n\n## Limitations\nOwn words.\n", root)
+    assert "raised 3 points" in filled and "roughly flat" not in filled  # a count, not the reviewer's notes pasted
+    assert "roughly flat" in disclosure.last_review_sentence(disclosure.last_review_points(root))  # QUALITY.md keeps them
     _review(root, weaknesses=["Another."])  # the next round says its own: the record is not final any more
     assert disclosure.last_review_points(root) == []
 
@@ -285,26 +287,25 @@ def test_a_record_of_another_round_is_not_this_papers(tmp_path: Path) -> None:
     assert disclosure.last_review_points(root) == []
 
 
-def test_an_accepted_paper_states_nothing_and_a_long_list_is_cut_to_eight(tmp_path: Path) -> None:
+def test_an_accepted_paper_states_nothing_and_a_long_list_is_counted_in_the_paper_and_whole_in_the_quality_report(tmp_path: Path) -> None:
     root = _quest(tmp_path, item=False)
     accepted = _review(root, verdict="accept", weaknesses=["Minor."])
     assert disclosure.mark_last_review_final(root, accepted) is False and disclosure.last_review_points(root) == []
     review = _review(root, weaknesses=[f"Point number {n}." for n in range(11)])
     assert disclosure.mark_last_review_final(root, review)
     (item,) = [i for i in paper_facts.required_items(root) if i.kind == paper_facts.LAST_REVIEW]
-    assert "Point number 7." in item.sentence and "Point number 8." not in item.sentence
-    assert item.sentence.endswith("and 3 more, listed in QUALITY.md.")
+    assert "raised 11 points" in item.sentence and "Point number" not in item.sentence
     quality = disclosure.run_record(root)  # QUALITY.md holds every point
     assert all(f"Point number {n}." in quality for n in range(11))
 
 
-def test_a_long_point_is_cut_in_the_paper_whole_in_the_quality_report_and_cannot_break_the_markers(tmp_path: Path) -> None:
+def test_a_long_point_is_not_pasted_in_the_paper_whole_in_the_quality_report_and_cannot_break_the_markers(tmp_path: Path) -> None:
     root = _quest(tmp_path, item=False)
     long = "Word " * 120 + "<!-- /fi:fact-limitations --> end -->"
     review = _review(root, weaknesses=[long])
     assert disclosure.mark_last_review_final(root, review)
     (item,) = [i for i in paper_facts.required_items(root) if i.kind == paper_facts.LAST_REVIEW]
-    assert "…" in item.sentence and len(item.sentence) < 420
+    assert "Word" not in item.sentence and len(item.sentence) < 200
     assert "<!--" not in item.sentence and "-->" not in item.sentence
     out = _filled("# T\n\n## Limitations\nOwn.\n", root)
     assert out.count("<!-- /fi:fact-limitations -->") == 1
@@ -358,6 +359,6 @@ async def test_the_last_step_states_the_last_reviews_points_only_for_a_paper_tha
     eng._check_citations = citations  # type: ignore[method-assign]
     await eng._node_citation_check({"paper_md": str(paper), "review": review})  # type: ignore[arg-type]
     text = paper.read_text(encoding="utf-8")
-    assert ("roughly flat" in text) is stated
+    assert ("did not accept it" in text) is stated and "roughly flat" not in text
     assert ("roughly flat" in disclosure.run_record(root)) is stated
     assert "Own words." in text

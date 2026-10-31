@@ -516,6 +516,20 @@ def cut_off(sentence: str) -> bool:
     return bool(last) and last.group(1).lower() in _CANNOT_END and len(stripped) < len(sentence.rstrip())
 
 
+def uncut(sentence: str) -> str:
+    """``sentence`` without the words it ends on that no sentence ends on (the ones that led to the citation: "above the
+    rounded 22 degrees of."), with its end mark; ``""`` when fewer than three words would be left or it still ends on such a
+    word."""
+    tail = re.search(r"[\s*_)\]\"'.!?:;,]+$", sentence)
+    words = re.sub(r"[\s*_)\]\"'.!?:;,]+$", "", sentence).split(" ")
+    while words and re.sub(r"[^A-Za-z]", "", words[-1]).lower() in _CANNOT_END:
+        words.pop()
+    out = " ".join(words).rstrip(" ,;:")
+    if len(out.split()) < 3 or cut_off(out + (tail.group(0) if tail else ".")):
+        return ""
+    return out + (tail.group(0) if tail else ".")
+
+
 def referrer_end(paper: str, site: Site) -> tuple[int, str]:
     """``(end, why)`` for a sentence about to be cut out whole: ``(site.end, "")`` when the next sentence of its paragraph
     does not point back at it, ``(end of that sentence, "")`` when the next sentence starts with a word that points back
@@ -728,6 +742,9 @@ async def check_paper(
                     and keeps_shape(site, "")):
                 plan, new_text = {"action": "drop_sentence", "text": ""}, ""
                 note = note or "the sentence was about the source itself and could not stand without it"
+            elif (whole := uncut(new_text)):
+                new_text = whole  # the hanging words go with the citation they led to: a whole sentence stays
+                note = note or "the words that led to the citation were taken out with it"
             else:
                 note = note or "left in the paper with its citation taken out: the sentence now ends cut off"
         cut_end = site.end

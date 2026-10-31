@@ -41,7 +41,8 @@ def test_the_record_gives_one_sentence_that_quotes_each_claim_and_drops_the_refe
     assert paper_facts.write_unsupported_record(
         root, [{"claim": FIRST, "evidence": "x"}, {"claim": SECOND, "evidence": "y"}])
     (item,) = [i for i in paper_facts.required_items(root) if i.kind == paper_facts.UNSUPPORTED_CLAIMS]
-    assert "not found supported by the run's results or a cited source" in item.sentence
+    assert item.sentence.startswith("2 sentences of this paper were not found supported by the run's results or a cited source")
+    assert "QUALITY.md lists them" in item.sentence and "read them as unconfirmed" in item.sentence
     assert f'"{FIRST}"' in item.sentence and '"Every tested design settles faster than the baseline"' in item.sentence
     assert "[3]" not in item.sentence
     assert json.loads((root / ".fi" / "unsupported_claims.json").read_text())["claims"][0]["evidence"] == "x"

@@ -470,9 +470,10 @@ def _quoted_claim(text: Any) -> str:
 
 
 def unsupported_claims_text(record: Any) -> str:
-    """The sentence FI puts in the Limitations for the sentences of the paper its last claim check found supported by
-    neither the run's results nor a cited source (:data:`UNSUPPORTED_RECORD`): each one quoted, at most
-    :data:`_MAX_UNSUPPORTED_LISTED` and how many more there are. ``""`` when the record holds none."""
+    """What the Limitations tell a reader about the sentences FI's last claim check found supported by neither the run's
+    results nor a cited source (:data:`UNSUPPORTED_RECORD`): how many, that QUALITY.md lists them, and each one quoted (at
+    most :data:`_MAX_UNSUPPORTED_LISTED`, and how many more there are) to be read as unconfirmed. The sentences stay in the
+    paper; the check's own lists stay in QUALITY.md. ``""`` when the record holds none."""
     rows = record.get("claims") if isinstance(record, dict) else None
     quoted: list[str] = []
     for row in rows or []:
@@ -483,7 +484,10 @@ def unsupported_claims_text(record: Any) -> str:
         return ""
     shown = quoted[:_MAX_UNSUPPORTED_LISTED]
     more = len(quoted) - len(shown)
-    return ("These sentences of the paper were not found supported by the run's results or a cited source: "
+    n = len(quoted)
+    return (("One sentence of this paper was" if n == 1 else f"{n} sentences of this paper were")
+            + " not found supported by the run's results or a cited source (QUALITY.md lists them); read "
+            + ("it" if n == 1 else "them") + " as unconfirmed: "
             + "; ".join(f'"{q}"' for q in shown) + (f"; and {more} more" if more else ""))
 
 
