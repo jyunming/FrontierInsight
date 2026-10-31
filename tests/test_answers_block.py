@@ -52,14 +52,15 @@ def test_each_main_quantity_gets_its_value_or_is_said_as_not_answered(tmp_path, 
     assert text.startswith("**Answers to the questions asked.**")
     assert "- decay rate (the plan's map: `decay_rate`): {{v:decay_rate @ dose=each | range}} (no single value: it differs with dose; this is the mean in each setting, lowest to highest" in text
     assert "- settling limit (the plan's map: `settling_limit`): {{v:settling_limit}} (one value worked out by the analysis; no interval" in text
-    assert "- colour of the sample: not answered (the plan maps it to no result of the study)" in text
-    assert "- mapped to nothing real: not answered" in text
+    assert "- colour of the sample: the plan links no result of the study to it here; see the Results" in text
+    assert "- mapped to nothing real: the plan's map for it names no result the study returns" in text
+    assert "not answered (the plan maps it to no result" not in text  # the run's results are not said missing
     assert "side quantity" not in text  # only a quantity the topic marks main
 
 
 def test_a_quantity_whose_value_is_not_recorded_is_not_answered_and_no_key_is_offered(tmp_path, monkeypatch) -> None:
     text = pf.answers_text(_quest(tmp_path, monkeypatch, settling=None))
-    assert "- settling limit: not answered (FI holds no value for settling_limit)" in text
+    assert '- settling limit: not answered (FI holds no value for "Limit of the settling time (hours)")' in text
     assert "{{v:settling_limit" not in text
 
 
@@ -105,7 +106,7 @@ def test_an_explicit_map_to_an_existing_metric_is_placed_and_named_whatever_the_
     monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: wrong)
     text = pf.answers_text(root)
     assert "- colour of the sample (the plan's map: `decay_rate`): {{v:decay_rate" in text
-    assert "- mapped to nothing real: not answered (the plan's own map for it does not hold" in text
+    assert "- mapped to nothing real: the plan's map for it names no result the study returns" in text
 
 
 def test_a_varied_study_has_no_single_value_and_the_block_says_so(tmp_path, monkeypatch) -> None:
@@ -157,3 +158,67 @@ def test_a_quantity_that_is_in_no_record_is_still_not_answered_in_an_in_run_stud
     root, _ = _in_run_quest(tmp_path, monkeypatch, with_total=False)
     text = pf.answers_text(root)
     assert "- total (the plan's map" not in text and "total: not answered" in text
+
+
+# --- a bias or a spread asked of the estimate of a known true value --------------------------------------------------
+
+ESTIMATE_PROTOCOL = {
+    "constants": {"x_true": 10.0},
+    "metrics": [
+        {"id": "x_hat", "label": "Estimated x", "kind": "mean",
+         "known_value": {"true_value": "x_true", "estimate": "x_hat", "standard_error": "x_se", "level": 0.95}},
+        {"id": "y_hat", "label": "Estimated y", "kind": "mean",
+         "known_value": {"true_value": "y_true", "estimate": "y_hat", "standard_error": "y_se", "level": 0.95}},
+    ],
+    "topic_map": [
+        {"item": "Q1", "by": "metric:x_hat"}, {"item": "Q2", "by": "metric:x_hat"}, {"item": "Q3", "by": "metric:x_hat"},
+        {"item": "Q4", "by": "metric:y_hat"},
+    ],
+}
+ESTIMATE_REQ = {"quantities": [
+    {"name": "bias", "stated": "the bias", "main": True},
+    {"name": "spread of the estimates", "stated": "the spread", "main": True},
+    {"name": "x", "stated": "recover x", "main": True},
+    {"name": "bias of y", "stated": "the bias of y", "main": True},
+]}
+
+
+def _estimate_quest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    def met(vs):
+        return {"values": vs, "trials": list(range(len(vs))), "count": len(vs), "total": 0.0, "non_finite": 0}
+
+    data = {1: [10.5, 11.5], 2: [9.0, 9.4]}  # settings with a mean of 11.0 and 9.2 around the true value 10
+    cells = [{"cell": {"dose": d}, "key": f"dose={d}", "planned": 2, "ok": 2, "failed": 0,
+              "metrics": {"x_hat": met(v), "y_hat": met(v)}} for d, v in data.items()]
+    (tmp_path / "raw").mkdir(parents=True)
+    (tmp_path / "raw" / "trials.json").write_text(json.dumps({"cells": cells}), encoding="utf-8")
+    (tmp_path / ".fi").mkdir()
+    (tmp_path / ".fi" / "topic_requirements.json").write_text(json.dumps(ESTIMATE_REQ), encoding="utf-8")
+    monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: ESTIMATE_PROTOCOL)
+    return tmp_path
+
+
+def test_a_bias_and_a_spread_of_an_estimate_are_worked_out_and_not_the_estimates_own_mean(tmp_path, monkeypatch) -> None:
+    """Before: the questions 'bias' and 'spread' mapped to the estimate printed its mean under both words. Now the bias is the
+    mean minus the true value and the spread the sd of the trials; the question that asks for the value keeps its line."""
+    root = _estimate_quest(tmp_path, monkeypatch)
+    text = pf.answers_text(root)
+    assert "{{v:x_hat @ dose=each | diff ref | range}}" in text and "{{v:x_hat:sd @ dose=each | range}}" in text
+    assert "- x (the plan's map: `x_hat`): {{v:x_hat @ dose=each | range}} (no single value: it differs with dose; this is the mean in each setting, lowest to highest" in text
+    rec = pv.records_of(root, ESTIMATE_PROTOCOL)
+    filled = pv.fill_values(text, rec)[0]
+    assert "-0.8000 to 1.000" in filled  # 9.2 - 10 and 11.0 - 10
+    assert "0.2828 to 0.7071" in filled  # the sd of [9.0, 9.4] and of [10.5, 11.5]
+
+
+def test_a_bias_without_one_true_value_is_not_answered(tmp_path, monkeypatch) -> None:
+    root = _estimate_quest(tmp_path, monkeypatch)
+    text = pf.answers_text(root)
+    assert '- bias of y: not answered (the plan gives no one true value of "Estimated y" to measure the bias from)' in text
+    assert "{{v:y_hat @ dose=each | diff ref" not in text
+
+
+def test_the_true_value_of_a_result_without_a_reference_is_its_reference_value() -> None:
+    assert pv.known_truth(ESTIMATE_PROTOCOL, "x_hat") == 10.0
+    assert pv.known_truth(ESTIMATE_PROTOCOL, "y_hat") is None  # y_true is no fixed number of the plan
+    assert pv.known_truth(ESTIMATE_PROTOCOL, "nothing") is None

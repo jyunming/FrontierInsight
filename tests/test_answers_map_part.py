@@ -114,7 +114,7 @@ def test_a_compared_setting_is_answered_for_each_value_and_an_at_pins_the_quanti
     assert "- peak algae (temp = 20)" in text
     assert "{{v:algae_peak @ nutrient=each, temp=each | range}}" not in text  # no one range across the compared values
     assert "(nutrient = 1)" in text and "{{v:bloom:mean_ci @ nutrient=1, temp=10}}" in text
-    assert "- water clarity: not answered (the plan maps it to no result of the study)" in text  # the known positive
+    assert "- water clarity: the plan links no result of the study to it here" in text  # the known positive
     out = pv.fill_values(text, pv.records_of(root, pf.plan_protocol(root)))[0]
     assert "not recorded" not in out
 

@@ -1003,6 +1003,19 @@ def _paired(cells: list[dict[str, Any]], a: str, b: str) -> tuple[list[float], l
 # --- one setting's measure ----------------------------------------------------------------------------------------
 
 
+def known_truth(protocol: dict[str, Any] | None, metric: str) -> float | None:
+    """The true value the plan declares for ``metric`` (``known_value.true_value``) as a number FI computes from the plan's
+    own fixed numbers, for the result or the estimate it names; ``None`` when the plan declares none or the value is a
+    setting's own (it differs between settings, so it is no one number)."""
+    from . import metric_spec as _spec
+
+    for m in (protocol or {}).get("metrics") or []:
+        known = m.get("known_value") if isinstance(m, dict) else None
+        if isinstance(known, dict) and metric in (m.get("id"), known.get("estimate")):
+            return _spec.fixed_value(known.get("true_value"), _spec.fixed_numbers(protocol))
+    return None
+
+
 def _reference(rec: Records, metric: str, cells: list[dict[str, Any]]) -> tuple[float, str]:
     """The plan's reference value for ``metric`` over ``cells`` (its ``kind``); one value, or the settings pooled must
     agree on it."""
@@ -1017,7 +1030,12 @@ def _reference(rec: Records, metric: str, cells: list[dict[str, Any]]) -> tuple[
                      if q.get("status") == "computed" and q.get("value") == metric}
             row = next((r for r in computed["by_setting"] if r.get("value") == metric and r.get("reference") is not None), None)
             formula = next((q.get("formula") for q in computed["quantities"] if q.get("value") == metric), "")
-            rec._refs_cache[ident] = (None if row is None or metric not in kinds else (row["reference"], kinds[metric], formula))
+            if row is None or metric not in kinds:
+                # No reference value of its own: the true value the plan declares for the result is what it is measured from.
+                truth = known_truth(rec.protocol, metric)
+                rec._refs_cache[ident] = None if truth is None else (truth, "value", "")
+            else:
+                rec._refs_cache[ident] = (row["reference"], kinds[metric], formula)
         got = rec._refs_cache[ident]
         if got is None:
             raise _Unfilled(f"the plan gives no reference for {metric} at that setting")

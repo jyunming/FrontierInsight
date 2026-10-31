@@ -1257,14 +1257,69 @@ def limitations_text(quest_root: Path | str) -> str:
     return "\n".join(f"- {s}" for s in sentences)
 
 
-def _answer_line(rec: Any, name: str, metric: str, tries: list[tuple[str, str]]) -> str:
+_BIAS_WORD = re.compile(r"\bbias(?:es)?\b", re.I)
+_SPREAD_WORD = re.compile(r"\b(?:spread|standard deviation|scatter|sd)\b", re.I)
+
+
+def _asked_statistic(name: str) -> str:
+    """``"bias"`` or ``"spread"`` when a question's own words ask for that statistic of an estimate, else ``""``. A closed
+    pair of words, read only where the plan's result is the estimate of a known true value (:func:`_known_estimates`), the one
+    case where FI can work either statistic out from its own record; a coverage question is neither."""
+    if re.search(r"\bcoverage\b", name, re.I):
+        return ""
+    if _BIAS_WORD.search(name):
+        return "bias"
+    return "spread" if _SPREAD_WORD.search(name) else ""
+
+
+def _known_estimates(protocol: dict[str, Any]) -> dict[str, bool]:
+    """``{name: has a true value}`` for the results the plan declares with a true value (``known_value``), under each
+    result's id and under the name of its estimate. The flag says whether the plan's true value is one number FI computes
+    (:func:`core.paper_values.known_truth`): the bias of the estimate is measured from it, and without it FI states no bias."""
+    names: dict[str, bool] = {}
+    for m in protocol.get("metrics") or []:
+        known = m.get("known_value") if isinstance(m, dict) else None
+        if not isinstance(known, dict) or not known.get("true_value") or not m.get("id"):
+            continue
+        has_truth = _values.known_truth(protocol, str(m["id"])) is not None
+        for key in (m["id"], known.get("estimate")):
+            if key:
+                names[str(key)] = has_truth
+    return names
+
+
+def _plain_in(protocol: dict[str, Any], root: Path) -> Any:
+    """A function from a result's code name to what the paper calls it: the label of the plan's metric, else the name
+    :func:`_said` finds. A line that says a quantity is not answered never shows a code identifier."""
+    labels = {str(m.get("id")): _one(m.get("label")) for m in protocol.get("metrics") or [] if isinstance(m, dict)}
+
+    def plain(metric: str) -> str:
+        return labels.get(metric) or _said(root, metric).strip('"')
+    return plain
+
+
+def _answer_line(rec: Any, name: str, metric: str, tries: list[tuple[str, str]], plain: Any = None,
+                 how: str = "") -> str:
     """One line of the answers block: the first of ``tries`` (a key and the words after its value) that FI can fill, else
-    ``name`` said as not answered, with why."""
+    ``name`` said as not answered, with why. ``how`` replaces the words in brackets (the plan's map and its result) when FI
+    worked the number out itself."""
     got = [(k, note, _values.resolve(k, rec)) for k, note in tries]
     done = next(((k, note) for k, note, v in got if v.filled), None)
     if done is None:
-        return f"- {name}: not answered (FI cannot state {metric}: {got[-1][2].hit.reason if got[-1][2].hit else 'no record'})"
-    return f"- {name} (the plan's map: `{metric}`): {done[0]}{done[1]}"
+        why = got[-1][2].hit.reason if got[-1][2].hit else "no record"
+        if plain is None:
+            return f"- {name}: not answered (FI cannot state {metric}: {why})"
+        return f"- {name}: not answered (FI cannot state \"{plain(metric)}\": {why.replace(metric, plain(metric))})"
+    lead = how or "the plan's map: `" + metric + "`"
+    return f"- {name} ({lead}): {done[0]}{done[1]}"
+
+
+#: What a question that no result is linked to says. It claims nothing about the run: a quantity the analysis computed under
+#: a name the plan's map does not give is in the Results, and the line points there.
+NO_LINK = "the plan links no result of the study to it here; see the Results for what the run measured"
+#: The same for a question the plan's map points at something the study does not return as a result (an equation, a name that
+#: is none of the study's results): the plan does link something, and the line says so.
+NO_RESULT = "the plan's map for it names no result the study returns; see the Results for what the run measured"
 
 
 def answers_text(quest_root: Path | str) -> str:
@@ -1285,6 +1340,8 @@ def answers_text(quest_root: Path | str) -> str:
         return ""
     plan = _topic_req.view({}, protocol)
     varied = rec.varied()
+    estimates = _known_estimates(protocol)
+    plain = _plain_in(protocol, root)
     lines: list[str] = []
     for item in asked:
         name = " ".join(str(item.get("name") or "").split())
@@ -1294,17 +1351,16 @@ def answers_text(quest_root: Path | str) -> str:
         # The plan's explicit map to a metric that exists is the fact; the line names that metric, so a wrong map is
         # disclosed, never hidden. Whether the metric's name resembles the quantity's is not asked here.
         metric = mapped[1] if mapped is not None and mapped[0] in ("ok", "judge") else ""
+        stat = _asked_statistic(name)
         if not metric:
-            why = (f"the plan's own map for it does not hold: {mapped[1]}" if mapped is not None and mapped[0] == "bad"
-                   else "the plan maps it to no result of the study")
-            lines.append(f"- {name}: not answered ({why})")
+            lines.append(f"- {name}: {NO_RESULT if mapped is not None else NO_LINK}")
             continue
         if metric in rec.by_run:
             lines.append(f"- {name}: not answered (the analysis worked it out once for each replicate and the values differ, "
                          "so no single value stands for the study)")
             continue
         if metric not in rec.metrics() and metric not in rec.answers:
-            lines.append(f"- {name}: not answered (FI holds no value for {metric})")
+            lines.append(f"- {name}: not answered (FI holds no value for \"{plain(metric)}\")")
             continue
         if metric in rec.answers:
             lines.append(_answer_line(rec, name, metric, [(f"{{{{v:{metric}}}}}", " (one value worked out by the analysis; no interval is recorded for it)")]))
@@ -1339,15 +1395,35 @@ def answers_text(quest_root: Path | str) -> str:
                 label = f"{name} ({split} = {level})" + (f" ({', '.join(a + ' = ' + str(v) for a, v in at.items())})" if at else "")
             else:
                 fixed_here = fixed
+            # A bias or a spread asked of the estimate of a known true value is that statistic of the estimate's trials, which FI
+            # works out itself: the estimate's own mean is neither (it was printed under both words).
+            how = ""
+            if stat and metric in estimates:
+                made = "the mean estimate minus the true value" if stat == "bias" else "the spread of the estimates over the trials"
+                how = f"the plan's map: `{metric}`, here worked out as {made}"
+            if stat == "bias" and metric in estimates and not estimates[metric]:
+                lines.append(f"- {label}: not answered (the plan gives no one true value of \"{plain(metric)}\" to measure the bias from)")
+                continue
             if said:
                 where = ", ".join([*said, *fixed_here])
-                tries = [(f"{{{{v:{metric} @ {where} | range}}}}",
-                          f" (no single value: it differs with {', '.join(rec.short(a) for a in here)}; this is the mean in each "
-                          "setting, lowest to highest, and the tables give every setting)")]
+                over = f" (no single value: it differs with {', '.join(rec.short(a) for a in here)}; this is the "
+                end = ", lowest to highest, and the tables give every setting)"
+                if stat == "bias" and metric in estimates:
+                    tries = [(f"{{{{v:{metric} @ {where} | diff ref | range}}}}", over + "mean estimate minus the true value in each setting" + end)]
+                elif stat == "spread" and metric in estimates:
+                    tries = [(f"{{{{v:{metric}:sd @ {where} | range}}}}", over + "standard deviation of the estimates over the trials in each setting" + end)]
+                else:
+                    tries = [(f"{{{{v:{metric} @ {where} | range}}}}", over + "mean in each setting" + end)]
             else:
                 where = ", ".join(fixed_here)
-                tries = [(f"{{{{v:{metric}:mean_ci @ {where}}}}}", ""), (f"{{{{v:{metric} @ {where}}}}}", " (no interval: the trials give none)")]
-            lines.append(_answer_line(rec, label, metric, tries))
+                if stat == "bias" and metric in estimates:
+                    tries = [(f"{{{{v:{metric} @ {where} | diff ref}}}}", " (the mean estimate minus the true value)")]
+                elif stat == "spread" and metric in estimates:
+                    tries = [(f"{{{{v:{metric}:sd_ci @ {where}}}}}", " (the standard deviation of the estimates over the trials)"),
+                             (f"{{{{v:{metric}:sd @ {where}}}}}", " (the standard deviation of the estimates over the trials)")]
+                else:
+                    tries = [(f"{{{{v:{metric}:mean_ci @ {where}}}}}", ""), (f"{{{{v:{metric} @ {where}}}}}", " (no interval: the trials give none)")]
+            lines.append(_answer_line(rec, label, metric, tries, plain, how))
     return ("**Answers to the questions asked.**" + chr(10) * 2 + chr(10).join(lines)) if lines else ""
 
 
