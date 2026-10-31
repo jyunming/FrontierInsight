@@ -323,6 +323,33 @@ def _texts(eng: Any, **protocol: Any) -> tuple[str, dict[str, Any]]:
     return before, block
 
 
+def _checks_and_criteria(n: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    oracles = [{"name": f"limit_{i}", "kind": "special_case", "check": f"base temperature at a fin spacing of {i} mm",
+                "expected": 0.0, "tolerance": 1e-6, "case": {"fin_spacing": float(i)}, "measure": "error",
+                "reference": "derivation: one-dimensional conduction gives a linear profile"} for i in range(1, n + 1)]
+    criteria = [{"name": f"agreement_{i}", "oracle": f"limit_{i}", "direction": "lower", "target": 1e-6, "tolerance": 1e-7}
+                for i in range(1, n + 1)]
+    return oracles, criteria
+
+
+@pytest.mark.asyncio
+async def test_a_criteria_list_over_the_limit_keeps_the_first_five_in_the_models_order(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    Model(eng, [], _draft(metrics=[METRIC]))
+    await eng._node_plan(_state(literature=LITERATURE))
+    oracles, criteria = _checks_and_criteria(9)
+    before, after = _texts(eng, oracles=oracles, criteria=criteria)
+    kept = eng._keep_only_the_parts(before, after, ["oracles", "criteria"])
+    assert kept is not None, "nine criteria were refused whole (the plan then had none of the model's own)"
+    got = [c["name"] for c in plan.raw_design_block(kept)["protocol"]["criteria"]]
+    assert got == [f"agreement_{i}" for i in range(1, 6)]
+    # a known positive: five or fewer are taken exactly as written
+    oracles, criteria = _checks_and_criteria(4)
+    before, after = _texts(eng, oracles=oracles, criteria=criteria)
+    kept = eng._keep_only_the_parts(before, after, ["oracles", "criteria"])
+    assert [c["name"] for c in plan.raw_design_block(kept)["protocol"]["criteria"]] == [f"agreement_{i}" for i in range(1, 5)]
+
+
 @pytest.mark.asyncio
 async def test_an_answer_whose_ledger_parts_are_malformed_is_not_taken_and_the_exact_reason_goes_back(tmp_path: Path) -> None:
     eng = _engine(tmp_path, [])

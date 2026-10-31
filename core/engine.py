@@ -7415,6 +7415,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 continue
             if new_protocol.get(part) is None:
                 continue
+            if part == "criteria" and isinstance(new_protocol[part], list) and len(new_protocol[part]) > _criteria.MAX:
+                # More than the limit is not a list that cannot be read (the plan draft keeps the first five in the same
+                # way, core.criteria.repair): the first five in the model's own order are kept, the rest are named.
+                extra = new_protocol[part][_criteria.MAX:]
+                new_protocol = {**new_protocol, part: new_protocol[part][:_criteria.MAX]}
+                self._log.warning("[criteria] the plan's model wrote %d criteria; the first %d, in its order, are kept and "
+                                  "%d left out: %s", len(extra) + _criteria.MAX, _criteria.MAX, len(extra),
+                                  ", ".join(repr(c.get("name")) if isinstance(c, dict) else repr(c) for c in extra))
             moved: list[str] = []
             if part == "in_each_run" and isinstance(new_protocol[part], dict) and isinstance(merged.get("grid"), dict):
                 # A factor every run goes through together is not also a setting run on its own: it leaves the grid (the
