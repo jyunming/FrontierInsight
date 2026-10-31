@@ -8,6 +8,8 @@ these instructions first, then work from those inputs.
 
 # Your task
 
+**If the Inputs section has "How the introduction should frame the study", write the Introduction that way, and cite a source as having already answered the question only if that section lists it.**
+
 Produce a single Markdown paper. **Structure depends on the persona block in the Inputs section:**
 
 - If the persona block is non-empty, follow the structure that persona prescribes (essayist → thesis-driven prose, consulting analyst → exec summary / findings / recommendations, policy analyst → issue / context / recommendation, industry analyst → problem / approach / evidence / conclusions). Do NOT impose IMRAD on prose formats. Do not write an abstract. Put the keywords in a comment on the line right after the title, which readers never see: `<!-- Keywords: <keyword>, <keyword>, <keyword>, <keyword> -->`.
@@ -162,6 +164,7 @@ $analysis_block
 ## Prior work
 $literature_block$foundational_block
 
+$novelty_block
 ## Figures available (refer to each by its number)
 $figure_list
 

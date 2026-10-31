@@ -118,6 +118,7 @@ from . import improve as _improve
 from . import in_run as _in_run
 from . import plan_settings as _plan_settings
 from . import receipts as _receipts
+from . import novelty as _novelty
 from . import source_text as _source_text
 from . import experiment_deps as _experiment_deps
 from . import figure_data_check as _figdata
@@ -290,6 +291,7 @@ _DETERMINISTIC_GATE_NODES = frozenset({
     "cross_check",
     "relevance_guard",
     "literature_screen",
+    "literature_novelty",  # a judgement of the sources, not a draft
     "figures",
     "write.trim",
     "oracle_review",  # a referee's verdict on the plan's checks
@@ -359,6 +361,9 @@ class QuestState(TypedDict, total=False):
     # counts, and outcome label ("confirmed" / "swapped" /
     # "inconclusive_fallback") for visibility + future Axon write-back.
     ideate_tournament: dict[str, Any]
+    #: Whether the retrieved sources already answer the study's question (core/novelty.py): the checked record, or absent
+    #: when the call was off, failed or gave nothing usable. Disclosed only; kept also in .fi/literature_novelty.json.
+    literature_novelty: dict[str, Any]
     # How chosen_idea was picked: "ensemble", "tournament", "reflection" or "model" (the ideate node's own pick).
     idea_selection: str
     literature: list[dict[str, Any]]
@@ -4981,7 +4986,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 downloaded,
             )
 
-        return {
+        out: QuestState = {
             "literature": merged,
             "literature_iter": this_iter,
             "literature_query": query.strip(),
@@ -4989,6 +4994,61 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             "literature_query_derived": derived,
             "literature_query_set": query_set,
         }
+        novelty = await self._literature_novelty(state, merged, this_iter)
+        if novelty:
+            out["literature_novelty"] = novelty
+        return out
+
+    async def _literature_novelty(self, state: QuestState, merged: list, iteration: int) -> dict[str, Any] | None:
+        """One call: do the retrieved sources already answer the study's question, and what does the study add?
+        Disclosed only (core/novelty.py): the checked answer goes to ``.fi/literature_novelty.json`` and into the plan and
+        writer prompts. It never stops the quest; a call that fails or gives nothing usable leaves no record."""
+        if not self.config.knowledge.novelty_check or not merged:
+            return None
+        try:
+            audience = self.config.output.audience  # the labels the writer cites by, so the checked ids can be cited
+            sources = []
+            for label, meta, item in _labelled_sources(merged, audience):
+                full = _item_content(item)
+                title = str(meta.get("title") or meta.get("source") or "")
+                sources.append({
+                    "id": label, "title": title, "year": meta.get("year") or "", "text": full,
+                    "excerpt": " ".join(_format_lit_excerpt(full, title, budget=_novelty.EXCERPT_CHARS).split()),
+                })
+            if not sources:
+                return None
+            chosen = state.get("chosen_idea") or {}
+            question = " ".join(str(chosen.get(k) or "").strip() for k in ("title", "rationale")).strip() or state["topic"]
+            prompt = self._prompts["literature_novelty"].substitute(
+                topic=state["topic"][:1500], question=question[:1200],
+                # Retrieved text is material to read, never instructions (core/source_text.py).
+                sources=_source_text.fence(_novelty.format_sources(sources)),
+            )
+            self.__dict__.setdefault("_last_call_id", {}).pop("literature_novelty", None)
+            raw = await self._chat(prompt, node="literature_novelty")
+            call_id = self.__dict__.get("_last_call_id", {}).get("literature_novelty")
+            record, counts = _novelty.check(_parse_json_lenient(raw, node="literature_novelty"), sources)
+            if record is None:
+                self._log.warning("[literature] the note on what the sources already answer could not be read; "
+                                  "the quest goes on without it")
+                return None
+            dropped = counts["dropped_unknown_source"] + counts["dropped_quote_not_found"]
+            self._log.info(
+                "[literature] sources already answer the question: %s; %d of %d evidence quotes checked and kept"
+                "%s", record["already_answered"], counts["kept"], counts["given"],
+                f" ({dropped} dropped: {counts['dropped_unknown_source']} unknown source, "
+                f"{counts['dropped_quote_not_found']} quote not in the source)" if dropped else "")
+            if not record["backed"]:
+                self._log.info("[literature] no quote backs the %r answer, so it is kept in the record only",
+                               record["already_answered"])
+            _novelty.write_record(self.quest_root, record, call_id=call_id, iteration=iteration,
+                                  model=(self._chat_provenance("literature_novelty") or {}).get("model")
+                                  or self._model_for_node("literature_novelty") or self.config.provider.model)
+            return record
+        except Exception as e:  # noqa: BLE001 - a note that cannot be made never stops a quest
+            self._log.warning("[literature] could not make the note on what the sources already answer (%s: %s); "
+                              "the quest goes on without it", type(e).__name__, str(e)[:200])
+            return None
 
     def _design_feedback(self, state: QuestState) -> str:
         """What a later design pass is told: the review, FI's precision record, the person's words, the points that need a
@@ -5151,6 +5211,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # replays of a real quest (0 of 5 at the full budget): short
             # excerpts cost it the context a sound design rests on.
             literature_block=_format_lit_from_state(state, **self._lit_kwargs(state)),
+            novelty_block=_novelty.design_block(state.get("literature_novelty")),
             review_feedback=review_feedback or "(none — first iteration)",
             timeout_s=str(self.config.execution.timeout_s),
             time_note=self._time_note(state),
@@ -22843,6 +22904,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             foundational_block=_foundational_write_block(
                 state.get("literature") or [], self.config.output.audience,
             ),
+            novelty_block=_novelty.write_block(state.get("literature_novelty")),
             figure_list=_figure_list_for_prompt(state),
             clarify_block=_format_clarify(state),
             cross_check_block=_format_cross_check(state),
@@ -28535,7 +28597,7 @@ def _design_parts_listing(design: Any) -> str:
 
 def _load_prompts() -> dict[str, string.Template]:
     names = (
-        "clarify", "ideate", "ideate_reflect", "ideate_tournament",
+        "clarify", "ideate", "ideate_reflect", "ideate_tournament", "literature_novelty",
         "design", "design_self_critique",   # second-pass methodology audit
         "design_parts_map",                 # a note with no path: which listed parts of the design it is about
         "design_parts",                     # a redesign: ONLY the parts the reason concerns, the rest carried over

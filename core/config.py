@@ -1482,6 +1482,11 @@ class KnowledgeConfig(BaseModel):
     # table of contents or an unrelated paper that shares the search terms
     # from a real on-topic source; this can. Off → floor only.
     literature_screen: bool = True
+    # Novelty note. After the literature step, one call says whether the retrieved sources already answer the
+    # study's question and what the study adds. It is only disclosed: the plan prompt gets one line, the writer's
+    # introduction gets the framing, and FI keeps the answer in .fi/literature_novelty.json. It never stops the quest
+    # or changes the design. Every quoted sentence is checked against the source's text. Off -> no call, no note.
+    novelty_check: bool = True
     # Foundational works. A search engine matches every word of a query, so
     # the original method papers and textbooks a topic rests on rarely come
     # back: a damped-oscillator integrator quest found none of Verlet (1967),

@@ -58,6 +58,7 @@ A single \`/start\` or \`/new\` quest made **23–28 LLM calls** in 17 complete 
 | `literature_query` | 1 per literature pass (a resume that runs the same pass again reuses them) | Turns the topic into keyword search queries. |
 | `literature_foundational` | 1 per literature pass | Names the foundational works a keyword search misses. |
 | `literature_screen` | 1 per literature pass | Grades every retrieved source for citability. |
+| `literature_novelty` | 1 per literature pass with sources (`knowledge.novelty_check`, on) | Says whether the sources already answer the question and what the study adds; disclosed only. |
 | `source_router` | 0, or 1 per literature pass + 1 per cross-check lookup | Only with `knowledge.source_routing: auto` (the default); `manual` makes no routing call. |
 | `select_skills` | 0–1 | Picks the skills the quest carries; no call when no skill is a candidate. |
 | `plan` | 1 | Writes `plan.md` (the literature read as a reviewer would, the gap, the design). It is the design call of the first pass with a plan directive appended, so `design` makes no call that pass; the counts above were measured before this step existed. |
@@ -500,6 +501,7 @@ knowledge:
   requery_max: 2                    # Bound on those retries. Each costs one small LLM call plus a retrieval.
                                     # Your own search queries instead of FI's: write them in <quest folder>/inputs/search_queries.txt, one per line (first three used, # lines skipped); remove the file to go back to FI's. Listed in .fi/literature_queries.json.
   literature_screen: true           # One batched LLM call grades every retrieved source 0-3 ("could the paper cite this?"). Papers need 2, web pages are dropped only at 0; keeps at least relevance_min_keep; fails open. Your own local_papers / inputs/papers are never screened. Every source's grade and why it was kept or dropped is listed in .fi/literature_queries.json.
+  novelty_check: true               # One call after the literature step says whether the retrieved sources already answer your question and what the study adds. Only disclosed: the plan gets one line, the paper's introduction gets the framing; it never stops the quest or changes the design. Every quoted sentence is checked against the source. Saved in .fi/literature_novelty.json.
   foundational_works: true          # One LLM call names up to 8 foundational works (a method's original paper, a standard textbook); each is looked up by title in OpenAlex, or by author and year when no title matches, and kept only if found, plus the works at least 2 retrieved papers cite. Books count. All go through literature_screen, and the writer is asked to cite the ones that bear on the paper. Up to 18 OpenAlex requests per literature pass.
   write_back_quests: true
   write_back_only_on_accept: true  # accepted evidence only when a study (research/decision) was accepted AND reached publication_ready; anything else written back is kept as preliminary (a reminder later quests never cite)
