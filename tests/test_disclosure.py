@@ -599,7 +599,7 @@ def _failed_check_quest(root: Path, *, status: str = "went_on_failing", measure:
                      "known_value": {"estimate": "a_hat", "standard_error": "a_se", "interval": ["a_lo", "a_hi"]}},
                     {"id": "b", "label": "Quantity B", "role": "result"}, {"id": "c", "role": "result"}],
         "derived": [{"id": "d", "label": "Quantity D", "inputs": ["a", "b"]}, {"id": "e", "inputs": ["b"]}],
-        "oracles": [{"name": "a_calibration", "kind": "special_case", "expected": 1, "tolerance": 0.3, "measure": measure}],
+        "oracles": [{"name": "a_calibration", "kind": "special_case", "check": "Spread of a is 1 if the model is right. More words.", "expected": 1, "tolerance": 0.3, "measure": measure}],
     }
     (root / "needs").mkdir(parents=True, exist_ok=True)
     (root / "needs" / "FROZEN_PROTOCOL.json").write_text(json.dumps({
@@ -613,10 +613,11 @@ def _failed_check_quest(root: Path, *, status: str = "went_on_failing", measure:
 def test_a_failed_check_names_the_results_that_rest_on_it(tmp_path: Path) -> None:
     _failed_check_quest(tmp_path)
     said = disclosure.run_record(tmp_path)
-    assert "'a_calibration' failed" in said
+    assert "a_calibration" not in said and "a_hat" not in said and "measure `" not in said  # plain words, no code or id
+    assert "Spread of a is 1 if the model is right\" failed" in said
     assert "results Quantity A and Quantity D come from the calculation it checks and are not confirmed" in said
     assert "Quantity B" not in said  # b and c are not read by the check, and e comes only from b
-    assert said.count("a_calibration") == 1  # once per failed check
+    assert said.count("known-answer check") == 1  # once per failed check
 
 
 def test_a_quest_whose_checks_all_passed_gets_no_such_sentence(tmp_path: Path) -> None:

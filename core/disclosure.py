@@ -770,6 +770,17 @@ def _failed_check_results(protocol: dict[str, Any], oracle: dict[str, Any]) -> l
     return marked
 
 
+def _check_words(oracle: dict[str, Any]) -> str:
+    """A check as the plan words it for a reader: its label, else what it is, else the first sentence of its description;
+    empty when the plan gives none (the caller then falls back to the check's id)."""
+    for key in ("label", "what", "description", "check"):
+        text = " ".join(str(oracle.get(key) or "").split())
+        if text:
+            first = re.split(r"(?<=[.!?])\s", text, maxsplit=1)[0].rstrip(".")
+            return first
+    return ""
+
+
 def _failed_checks_sentence(quest_root: Path) -> str:
     """For each known-answer check the quest went on with although it failed (``needs/ORACLE_CHECK.json``), the reported
     results that rest on it, once: a check, its result and the results computed from that one come from the same
@@ -791,6 +802,7 @@ def _failed_checks_sentence(quest_root: Path) -> str:
         ids = _failed_check_results(protocol, oracle) if oracle else []
         if not ids:
             continue
+        named = _check_words(oracle) or str(e.get("name"))
         if e.get("unmeasured"):
             what = "could not be judged"
         elif e.get("disagreement"):
@@ -798,15 +810,14 @@ def _failed_checks_sentence(quest_root: Path) -> str:
         elif e.get("undecided"):
             what = "was not decided at the precision its tolerance needs"
         else:
-            what = f"failed ({_accepted.conditions_text(e)})"
+            what = f"failed ({_accepted.conditions_text({k: v for k, v in e.items() if k != 'measure'})})"
         shown = [labels.get(i, i) for i in ids]
         listed = shown[0] if len(shown) == 1 else ", ".join(shown[:-1]) + " and " + shown[-1]
-        said.append(f"The known-answer check '{e.get('name')}' {what}; the reported "
+        said.append(f"The known-answer check \"{named}\" {what}; the reported "
                     + (f"result {listed} comes" if len(shown) == 1 else f"results {listed} come")
                     + " from the calculation it checks and "
                     + ("is" if len(shown) == 1 else "are") + " not confirmed.")
-    more = f" And {len(said) - _SHOWN} more." if len(said) > _SHOWN else ""
-    return " ".join(said[:_SHOWN]) + more
+    return " ".join(said)
 
 
 def _widened_sentence(record: Any) -> str:
