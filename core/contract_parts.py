@@ -293,6 +293,23 @@ def _answers_prompt(templates: dict[str, string.Template], design: dict[str, Any
         method=_short(design.get("method")), again=_problems_text(problems, last))
 
 
+def _worked_from(protocol: dict[str, Any], ident: str) -> list[str]:
+    """The results a derived result of the plan is worked out from (``[]`` for anything else)."""
+    return next((list(d.get("inputs") or []) for d in protocol.get("derived") or []
+                 if isinstance(d, dict) and d.get("id") == ident and d.get("role", "result") == "result"), [])
+
+
+def _refined_by(protocol: dict[str, Any], planned: str, answered: str) -> str:
+    """The plan's own ``by`` (``planned``), unless the answer names a derived result worked out from the very result the
+    plan mapped: a number computed from a result (a crossing, a rate, an order) is the quantity itself where the result is only
+    what it was computed from. Any other answer leaves the plan's map as it is."""
+    head, _s, name = planned.partition(":")
+    new_head, _s, new_name = answered.partition(":")
+    if head.strip() == "metric" and new_head.strip() == "metric" and name.strip() in _worked_from(protocol, new_name.strip()):
+        return f"metric:{new_name.strip()}"
+    return planned
+
+
 def _check_answers(value: Any, asked: dict[str, dict[str, str]], design: dict[str, Any]) -> list[str]:
     """Why ``value``, the answer for ``answers``, cannot be used; empty when it can. Each quantity asked about gets ``by`` (a
     result or derived id as ``metric:<id>``, an equation as ``equation:<id>``, or ``none``; not needed where the plan already
@@ -338,9 +355,10 @@ def _apply_answers(p: dict[str, Any], design: dict[str, Any], answer: dict[str, 
         at = row.get("at") if isinstance(row.get("at"), dict) else {}
         keys = {_topic_req._name_key(ident), _topic_req._name_key(q["name"])}
         mine = [m for m in rows if _topic_req._name_key(m.get("item")) in keys]
+        by = str(row.get("by") or "").strip()
         for m in mine:
             m["at"] = at
-        by = str(row.get("by") or "").strip()
+            m["by"] = _refined_by(design["protocol"], str(m.get("by") or ""), by)
         if not mine and by and by != "none":
             rows.append({"item": ident, "by": by, "at": at})
     return {**p, "topic_map": rows}

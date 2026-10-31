@@ -11,7 +11,7 @@ The equations of the model (`equation:<id>`): $equations
 The settings of the study and their values:
 $settings
 
-`by` is `metric:<id>` or `equation:<id>` from the lists above: the one result that is the answer. If no number the study reports or works out IS the quantity (not a number it is computed from, and not a neighbouring one), answer `"by": "none"` rather than naming the nearest one. `at` is needed only when the topic asks for the quantity at ONE value of a setting (not across the settings): give that setting and its value, as `{"<setting>": <value>}`; otherwise leave it out or null.
+`by` is `metric:<id>` or `equation:<id>` from the lists above: the one result that is the answer. If no number the study reports or works out IS the quantity (not a number it is computed from, and not a neighbouring one), answer `"by": "none"` rather than naming the nearest one. Where the plan already maps a quantity to a result, keep that map, except when a number worked out from that very result (listed with "worked out from") IS the quantity, such as the value of a setting at which the result crosses a level: answer that number's id instead. `at` is needed only when the topic asks for the quantity at ONE value of a setting (not across the settings): give that setting and its value, as `{"<setting>": <value>}`; otherwise leave it out or null.
 
 How the study measures (from your plan):
 $method

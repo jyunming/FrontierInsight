@@ -351,6 +351,10 @@ def view(design: Any, protocol: Any = None) -> dict[str, Any]:
     for metric in protocol.get("metrics") if isinstance(protocol.get("metrics"), list) else []:
         if isinstance(metric, dict) and metric.get("id"):
             metrics.append((str(metric["id"]), f"{metric.get('id')} {metric.get('estimand') or ''} {metric.get('unit') or ''}"))
+    # A quantity the analysis works out from the results (a crossing, an order) is a result a topic item may be answered by.
+    for d in protocol.get("derived") if isinstance(protocol.get("derived"), list) else []:
+        if isinstance(d, dict) and d.get("id") and d.get("role", "result") == "result":
+            metrics.append((str(d["id"]), f"{d.get('id')} {d.get('label') or ''}"))
     objective = block.get("objective") if isinstance(block.get("objective"), dict) else {}
     if objective.get("quantity"):
         metrics.append((str(objective["quantity"]), str(objective["quantity"])))

@@ -1280,7 +1280,12 @@ def answers_text(quest_root: Path | str) -> str:
         entry_at = next((m["at"] for m in _topic_req.map_entries(req, plan, "quantities", item)
                          if isinstance(m.get("at"), dict) and m["at"]), {})
         at = {a: v for a, v in entry_at.items() if a in rec.axes()}
-        compared = {c.get("across") for c in protocol.get("comparisons") or [] if isinstance(c, dict)}
+        # Only a comparison of a reported result makes each value of its setting an alternative with an answer of its own. A
+        # comparison of a quantity worked out from results (an observed order across step sizes) compares the study's
+        # numerical settings, not alternatives: its setting is not split into a line for each value.
+        reported = {m.get("id") for m in protocol.get("metrics") or [] if isinstance(m, dict)}
+        compared = {c.get("across") for c in protocol.get("comparisons") or []
+                    if isinstance(c, dict) and c.get("result") in reported}
         # An axis the study compares inside each run is read from the per-value records the run kept; a quantity that
         # is one number per run has no record under it, so that axis is pooled whole (``=all``) for it, never looked
         # up as a value of its own (a lookup by it finds no trial at all).
