@@ -262,6 +262,34 @@ def test_a_range_over_settings_leaves_out_a_setting_without_a_number_and_says_so
     assert value.text == "1.500 to 4.000 (no number at size = 10, group = b)"
 
 
+def _empty_cells(missing, sizes=(10, 20, 40), groups=("a", "b"), kinds=("x", "y")):
+    return [_cell({"size": s, "group": g, "kind": k}, score=[NAN, NAN] if missing(s, g, k) else [1.0, 2.0])
+            for s in sizes for g in groups for k in kinds]
+
+
+def _empty_note(missing) -> str:
+    value = pv.resolve("{{v:score @ size=each, group=each, kind=each | range}}", pv.from_cells(_empty_cells(missing)))
+    assert value.filled, value.hit
+    return value.text[value.text.index("(no number"):]
+
+
+def test_settings_without_a_number_are_all_named_never_cut_off_with_a_count() -> None:
+    """Before: '(no number at size = 10, group = a, kind = x; ... and 5 more)' left the reader unable to tell which."""
+    whole = _empty_note(lambda s, g, k: g == "a")
+    assert whole == "(no number where group = a, for every size and every kind)"
+    part = _empty_note(lambda s, g, k: g == "a" and s in (10, 20))
+    assert part == "(no number where size = 10 or 20, group = a, for every kind)"
+    scattered = _empty_note(lambda s, g, k: (s, g, k) in {(10, "a", "x"), (20, "b", "y"), (40, "a", "y"), (40, "b", "y")})
+    assert "more" not in scattered
+    for setting in ("size = 10, group = a, kind = x", "size = 20, group = b, kind = y"):
+        assert setting.split(", ")[0] in scattered
+    assert scattered.count(";") == 2 and "size = 40, kind = y" in scattered
+
+
+def test_a_single_setting_without_a_number_is_still_named_by_itself() -> None:
+    assert _empty_note(lambda s, g, k: (s, g, k) == (20, "b", "y")) == "(no number at size = 20, group = b, kind = y)"
+
+
 # --- review fixes: ratio of a signed value, plateau, exact values, paired subset, kept failures ---------------------------
 
 
