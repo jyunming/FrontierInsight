@@ -41,7 +41,8 @@ def test_the_record_gives_one_sentence_that_quotes_each_claim_and_drops_the_refe
     assert paper_facts.write_unsupported_record(
         root, [{"claim": FIRST, "evidence": "x"}, {"claim": SECOND, "evidence": "y"}])
     (item,) = [i for i in paper_facts.required_items(root) if i.kind == paper_facts.UNSUPPORTED_CLAIMS]
-    assert "neither the results of the study nor a cited source support" in item.sentence
+    assert item.sentence.startswith("2 sentences of this paper were not found supported by the run's results or a cited source")
+    assert "QUALITY.md lists them" in item.sentence and "read them as unconfirmed" in item.sentence
     assert f'"{FIRST}"' in item.sentence and '"Every tested design settles faster than the baseline"' in item.sentence
     assert "[3]" not in item.sentence
     assert json.loads((root / ".fi" / "unsupported_claims.json").read_text())["claims"][0]["evidence"] == "x"
@@ -55,30 +56,20 @@ def test_a_long_list_is_cut_to_a_few_and_says_how_many_more(tmp_path: Path) -> N
     assert "and 3 more" in item.sentence
 
 
-def test_a_sentence_the_check_found_unsupported_is_taken_out_and_the_limitations_say_how_many(tmp_path: Path) -> None:
-    """Old code: both sentences stayed in the results as the paper's own claims and were pasted, quoted, into the
-    Limitations."""
+def test_a_paper_with_two_unsupported_claims_says_so_in_its_limitations(tmp_path: Path) -> None:
+    """Old code: the final claim check's findings went to QUALITY.md only; the delivered paper said nothing."""
     eng, path = _paper(tmp_path)
     n = eng._state_unsupported_claims({"paper_md": str(path), "claim_grounding": _grounding(FIRST, SECOND)})  # type: ignore[arg-type]
     text = path.read_text(encoding="utf-8")
-    body, limitations = text.split("## Limitations")
     assert n == 2
-    assert "fan speed is halved" not in body and "settles faster" not in body
-    assert "The settle time was 4.2 s." in body  # a supported sentence stays
-    assert "2 sentences of the draft that neither the results of the study nor a cited source supported were taken out" in limitations
-    assert "not found supported" not in text and FIRST not in limitations
-    # Stated again, not added again, and the finding survives the next (clean) pass: the sentences are gone for good.
-    eng._state_unsupported_claims({"paper_md": str(path), "claim_grounding": _grounding()})  # type: ignore[arg-type]
-    assert path.read_text(encoding="utf-8").count("taken out before delivery") == 1
-
-
-def test_a_claim_that_is_only_part_of_a_longer_sentence_is_not_cut_out_of_it_but_is_stated(tmp_path: Path) -> None:
-    longer = f"{FIRST}, but the study does not claim that this holds for other fans"
-    eng, path = _paper(tmp_path, PAPER.replace(FIRST, longer))
-    eng._state_unsupported_claims({"paper_md": str(path), "claim_grounding": _grounding(FIRST)})  # type: ignore[arg-type]
-    body, limitations = path.read_text(encoding="utf-8").split("## Limitations")
-    assert "other fans" in body and "taken out" not in limitations
-    assert "read it as unconfirmed" in limitations and FIRST in limitations
+    assert f'"{FIRST}"' in text and "Every tested design settles faster than the baseline" in text.split("## Limitations")[1]
+    assert text.index("## Limitations") < text.index("not found supported") < text.index("## References")
+    assert text.count("not found supported") == 1
+    # Nothing is taken out of the paper: both sentences are still in the results.
+    assert text.split("## Limitations")[0].count("fan speed is halved") == 1
+    # Stated again, not added again.
+    eng._state_unsupported_claims({"paper_md": str(path), "claim_grounding": _grounding(FIRST, SECOND)})  # type: ignore[arg-type]
+    assert path.read_text(encoding="utf-8").count("not found supported") == 1
 
 
 def test_a_paper_with_no_unsupported_claim_gets_no_such_sentence(tmp_path: Path) -> None:
@@ -97,12 +88,12 @@ def test_a_claim_the_paper_no_longer_holds_is_not_stated(tmp_path: Path) -> None
 def test_a_later_clean_check_removes_the_sentence_an_earlier_pass_placed(tmp_path: Path) -> None:
     """A stale disclosure must not survive: the record is emptied and the sentence goes (it must not turn into 'not
     recorded' either)."""
-    eng, path = _paper(tmp_path, PAPER.replace(FIRST, f"{FIRST}, which the study did not test elsewhere"))
-    eng._state_unsupported_claims({"paper_md": str(path), "claim_grounding": _grounding(FIRST)})  # type: ignore[arg-type]
-    assert "read it as unconfirmed" in path.read_text(encoding="utf-8")
+    eng, path = _paper(tmp_path)
+    eng._state_unsupported_claims({"paper_md": str(path), "claim_grounding": _grounding(FIRST, SECOND)})  # type: ignore[arg-type]
+    assert "not found supported" in path.read_text(encoding="utf-8")
     eng._state_unsupported_claims({"paper_md": str(path), "claim_grounding": _grounding()})  # type: ignore[arg-type]
     text = path.read_text(encoding="utf-8")
-    assert "unconfirmed" not in text and "not recorded" not in text and "fi:fact-not_done" not in text
+    assert "not found supported" not in text and "not recorded" not in text and "fi:fact-not_done" not in text
     assert json.loads((eng.quest_root / ".fi" / "unsupported_claims.json").read_text()) == {"claims": []}
     # the writer's own Limitations stay, and with nothing left to state FI adds nothing
     assert "Few settings were run." in text and "fi:fact-limitations" not in text
@@ -127,4 +118,4 @@ async def test_the_last_step_before_delivery_states_the_claims_whatever_route_br
     eng._check_citations = no_citations  # type: ignore[method-assign]
     out = await eng._node_citation_check({"paper_md": str(path)})  # type: ignore[arg-type]
     assert out["citation_next"] == "done"
-    assert "taken out before delivery" in path.read_text(encoding="utf-8")
+    assert f'"{FIRST}"' in path.read_text(encoding="utf-8")

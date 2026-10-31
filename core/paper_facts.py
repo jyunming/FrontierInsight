@@ -471,86 +471,38 @@ def _quoted_claim(text: Any) -> str:
 
 def unsupported_claims_text(record: Any) -> str:
     """What the Limitations tell a reader about the sentences FI's last claim check found supported by neither the run's
-    results nor a cited source (:data:`UNSUPPORTED_RECORD`): how many it took out of the paper before delivery (the
-    sentences themselves are listed in QUALITY.md), and each sentence it could not take out cleanly, quoted, at most
-    :data:`_MAX_UNSUPPORTED_LISTED` and how many more there are. ``""`` when the record holds neither."""
+    results nor a cited source (:data:`UNSUPPORTED_RECORD`): how many, that QUALITY.md lists them, and each one quoted (at
+    most :data:`_MAX_UNSUPPORTED_LISTED`, and how many more there are) to be read as unconfirmed. The sentences stay in the
+    paper; the check's own lists stay in QUALITY.md. ``""`` when the record holds none."""
     rows = record.get("claims") if isinstance(record, dict) else None
-    taken = record.get("taken_out") if isinstance(record, dict) else None
     quoted: list[str] = []
     for row in rows or []:
         q = _quoted_claim(row.get("claim") if isinstance(row, dict) else row)
         if q and q not in quoted:
             quoted.append(q)
-    n_taken = len({_one(t.get("claim") if isinstance(t, dict) else t) for t in taken or [] if t})
-    parts: list[str] = []
-    if n_taken:
-        parts.append(("One sentence" if n_taken == 1 else f"{n_taken} sentences") + " of the draft that neither the results "
-                     "of the study nor a cited source supported " + ("was" if n_taken == 1 else "were")
-                     + " taken out before delivery (QUALITY.md lists them)")
-    if quoted:
-        shown = quoted[:_MAX_UNSUPPORTED_LISTED]
-        more = len(quoted) - len(shown)
-        parts.append("The paper still states " + ("a sentence" if len(quoted) == 1 else "sentences")
-                     + " that neither the results of the study nor a cited source support, so read "
-                     + ("it" if len(quoted) == 1 else "them") + " as unconfirmed: "
-                     + "; ".join(f'"{q}"' for q in shown) + (f"; and {more} more" if more else ""))
-    return ". ".join(parts)
+    if not quoted:
+        return ""
+    shown = quoted[:_MAX_UNSUPPORTED_LISTED]
+    more = len(quoted) - len(shown)
+    n = len(quoted)
+    return (("One sentence of this paper was" if n == 1 else f"{n} sentences of this paper were")
+            + " not found supported by the run's results or a cited source (QUALITY.md lists them); read "
+            + ("it" if n == 1 else "them") + " as unconfirmed: "
+            + "; ".join(f'"{q}"' for q in shown) + (f"; and {more} more" if more else ""))
 
 
-def write_unsupported_record(quest_root: Path | str, claims: list[dict[str, Any]],
-                             taken_out: list[dict[str, Any]] | None = None) -> bool:
-    """Keep the claims the last claim check judged unsupported and the paper still holds, with its evidence words
-    (:data:`UNSUPPORTED_RECORD`); an empty list empties them, so a sentence an earlier pass stated is gone when the
-    Limitations block is written again. The sentences taken out of the paper (``taken_out``) are kept for good, and joined
-    to those an earlier pass took out: they are gone from the paper, so the Limitations go on saying so. Returns whether the
-    record could be written."""
+def write_unsupported_record(quest_root: Path | str, claims: list[dict[str, Any]]) -> bool:
+    """Keep the claims the last claim check judged unsupported, with its evidence words (:data:`UNSUPPORTED_RECORD`); an
+    empty list empties the record, so a sentence an earlier pass stated is gone when the Limitations block is written again. Returns whether
+    the record could be written."""
     path = Path(quest_root) / UNSUPPORTED_RECORD
     rows = [{"claim": _one(c.get("claim")), "evidence": _one(c.get("evidence"))} for c in claims if _one(c.get("claim"))]
-    before = _read(Path(quest_root), str(UNSUPPORTED_RECORD))
-    gone = [{"claim": _one(c.get("claim")), "evidence": _one(c.get("evidence"))}
-            for c in [*(before.get("taken_out") or [] if isinstance(before, dict) else []), *(taken_out or [])]
-            if isinstance(c, dict) and _one(c.get("claim"))]
-    gone = list({g["claim"]: g for g in gone}.values())
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"claims": rows, **({"taken_out": gone} if gone else {})}, indent=1,
-                                   ensure_ascii=False) + "\n", encoding="utf-8")
+        path.write_text(json.dumps({"claims": rows}, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
     except OSError:
         return False
     return True
-
-
-def take_out_sentences(paper: str, claims: list[dict[str, Any]], covers: Any) -> tuple[str, list[dict[str, Any]],
-                                                                                    list[dict[str, Any]]]:
-    """``(paper, taken out, left)``: the writer's own sentences that are, as a whole, a claim of ``claims`` (those the claim
-    check found unsupported; ``covers(claim, sentence)`` says whether the sentence states just that claim) are taken out of
-    the paper, so it does not deliver as its own what its check could not back. Only a plain sentence of the text goes: never
-    one in FI's blocks, a heading, a table, a figure line, the references, or one that holds an FI-filled value, and not one
-    the next sentence of its paragraph refers back to while carrying a number or a citation (that one stays; ``left``). A
-    claim that is only part of a longer sentence is not cut out of it (``left``): a clause cut anywhere may leave a sentence
-    that does not read."""
-    from . import citation_support as _cs
-
-    marked = [(m.start(), m.end()) for m in re.finditer(r"<!-- fi:fact-[a-z_]+ -->.*?<!-- /fi:fact-[a-z_]+ -->", paper, re.S)]
-    end = _cs.references_start(paper)
-    edits: list[tuple[int, int, str]] = []
-    taken: list[dict[str, Any]] = []
-    left: list[dict[str, Any]] = list(claims)
-    for start, stop, _blk in _cs._pp.sentence_units(paper[:end]):
-        text = paper[start:stop]
-        if (text.lstrip().startswith(("|", "![", "#", "```", "~~~")) or "{{" in text or "<!--" in text
-                or any(a < stop and start < b for a, b in marked)):
-            continue
-        hit = next((c for c in left if covers(str(c.get("claim") or ""), text)), None)
-        if hit is None:
-            continue
-        cut, why = _cs.referrer_end(paper, _cs.Site(start, stop, text, [], "prose"))
-        if why:
-            continue
-        edits.append((start, cut, ""))
-        taken.append(hit)
-        left = [c for c in left if c is not hit]
-    return (_cs._apply(paper, edits) if edits else paper), taken, left
 
 
 _MAX_DIFFERENCE_CHARS = 500

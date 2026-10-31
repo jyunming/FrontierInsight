@@ -251,7 +251,7 @@ def test_a_cut_off_sentence_inside_a_bullet_goes_but_a_bullet_that_is_only_it_st
 def test_a_sentence_that_holds_a_result_and_ends_on_the_citations_words_stays_a_whole_sentence() -> None:
     """The citation was the object of the last words ('above the rounded 22 degrees of [3]') and the sentence holds a result
     of the study, so it cannot go whole: it used to stay as 'the rounded 22 degrees of.'"""
-    paper = ("BH's proof of FDR control for independent statistics is in [2]. "
+    paper = ("The proof of the error bound for independent trials is in [2]. "
              "The crossing is therefore somewhat above the rounded 22 degrees of [3]. Next point.\n")
     sources = {"2": _src("2", "Two", FULL, full=True), "3": _src("3", "Three", FULL + "something else", full=True)}
 
