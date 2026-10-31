@@ -1115,29 +1115,8 @@ def test_a_series_of_another_length_is_still_a_disagreement(tmp_path):
     assert v["status"] == si.DISAGREE
 
 
-def test_a_reported_failure_on_an_input_the_study_did_not_produce_is_not_a_disagreement(tmp_path):
+def test_a_failure_one_version_reports_where_the_other_returns_a_number_is_a_disagreement(tmp_path):
+    # NaN from one version where the other returns a number is a different answer on that input, whatever else agrees
     inputs = [{"x": 1.0}, {"x": -1.0}]
-    rows = _script_rows(tmp_path, MAIN_FOUR, REF_TWO, inputs)
-    v = si.judge_rows(rows, inputs, si.REL, study_inputs=[{"x": 1.0}])
-    assert v["status"] == si.AGREE and not v["disagreements"] and v["compared"] == 1
-    assert v["failing_inputs"][0]["inputs"] == {"x": -1.0}
-    # the same input, when a trial of the study did give it, stays a disagreement on that input
-    kept = si.judge_rows(rows, inputs, si.REL, study_inputs=[{"x": 1.0}, {"x": -1.0}])
-    assert kept["status"] == si.DISAGREE and kept["disagreements"][0]["inputs"] == {"x": -1.0}
-    # and with no record of what the study gave, it also stays one
-    assert si.judge_rows(rows, inputs, si.REL)["status"] == si.DISAGREE
-
-
-def test_a_bare_nan_against_a_number_is_not_taken_for_a_reported_failure(tmp_path):
-    main = "def level(x):\n    return float('nan') if x < 0 else x\n"
-    ref = "def level(x):\n    return 0.0 if x < 0 else x\n"
-    inputs = [{"x": 1.0}, {"x": -1.0}]
-    v = si.judge_rows(_script_rows(tmp_path, main, ref, inputs), inputs, si.REL, study_inputs=[{"x": 1.0}])
-    assert v["status"] == si.DISAGREE
-
-
-def test_a_real_difference_beside_a_reported_failure_is_still_a_disagreement(tmp_path):
-    ref = "def level(x):\n    return (float('nan'), 0.25) if x <= 0 else (3.0 * x, 0.5 * x)\n"
-    inputs = [{"x": 1.0}, {"x": -1.0}]
-    v = si.judge_rows(_script_rows(tmp_path, MAIN_FOUR, ref, inputs), inputs, si.REL, study_inputs=[{"x": 1.0}])
-    assert v["status"] == si.DISAGREE and v["disagreements"][0]["inputs"] == {"x": 1.0}
+    v = si.judge_rows(_script_rows(tmp_path, MAIN_FOUR, REF_TWO, inputs), inputs, si.REL)
+    assert v["status"] == si.DISAGREE and [d["inputs"] for d in v["disagreements"]] == [{"x": -1.0}]

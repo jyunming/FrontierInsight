@@ -918,30 +918,6 @@ def compare_shared(a: Any, b: Any, rel: float = REL, path: str = "") -> tuple[in
     return 1, not same(a, b, rel), [], []
 
 
-def failure_only(a: Any, b: Any, rel: float = REL) -> bool:
-    """Whether the first version's result ``a`` differs from the second's ``b`` only where ``a`` is NaN (the first version
-    reports that it failed) and ``b`` is a number, in the items both return, and at least one other item both return agrees
-    (a bare NaN against a number is a different answer to the same question, not a failure reported beside agreeing items)."""
-    flagged = False
-    agreed = False
-
-    def walk(x: Any, y: Any) -> bool:
-        nonlocal flagged, agreed
-        if isinstance(x, dict) and isinstance(y, dict):
-            return all(walk(x[k], y[k]) for k in x if k in y)
-        if isinstance(x, list) and isinstance(y, list) and (len(x) == len(y) or isinstance(x, _Tuple) and isinstance(y, _Tuple)):
-            return all(walk(i, j) for i, j in zip(x, y))
-        if same(x, y, rel):
-            agreed = True
-            return True
-        if _is_num(x) and _is_num(y) and math.isnan(float(x)) and not math.isnan(float(y)):
-            flagged = True
-            return True
-        return False
-
-    return walk(a, b) and flagged and agreed
-
-
 def short(value: Any, limit: int = 120) -> str:
     """A result in few characters for a sentence or a prompt."""
     if isinstance(value, float):
@@ -961,13 +937,11 @@ _SETUP_SAID = {"ran": "the study's setup trial ran to the end", "failed": "the s
                "none": "the study's setup trial was not run"}
 
 
-def judge_rows(rows: list[dict[str, Any]], inputs: list[dict[str, Any]], rel: float, setup: str = "none",
-               study_inputs: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def judge_rows(rows: list[dict[str, Any]], inputs: list[dict[str, Any]], rel: float, setup: str = "none") -> dict[str, Any]:
     """The verdict on the rows the script returned (one per input: ``main`` / ``ref`` results, or ``main_err`` /
     ``ref_err``). Both raising excludes the input; one raising is a ``domain`` disagreement; otherwise the values are
     compared. ``{"status": agree|disagree|unconfirmed, "compared", "excluded", "disagreements": [{inputs, main, other, kind}]}``."""
     compared = excluded = unshared = 0
-    failing: list[dict[str, Any]] = []
     # For each version: how many compared inputs it raised on, and how many of those raised a missing name or module.
     raised = {"main": 0, "ref": 0}
     not_run = {"main": 0, "ref": 0}
@@ -995,11 +969,7 @@ def judge_rows(rows: list[dict[str, Any]], inputs: list[dict[str, Any]], rel: fl
             shared, differs, case_notes, case_missing = compare_shared(decode(row.get("main")), decode(row.get("ref")), rel)
             missing += [m for m in case_missing if m not in missing]
             notes += [n for n in case_notes if n not in notes]
-            if differs and study_inputs and case not in study_inputs and failure_only(decode(row.get("main")), decode(row.get("ref")), rel):
-                # The first version reports its own failure (NaN) on an input none of the study's trials gave it, where the
-                # second returns a number: a difference only on a failing input the study did not produce.
-                failing.append({"inputs": case, "main": short(decode(row.get("main"))), "other": short(decode(row.get("ref")))})
-            elif differs:
+            if differs:
                 bad.append({"inputs": case, "kind": "value", "main": short(decode(row.get("main"))),
                             "other": short(decode(row.get("ref")))})
             elif shared == 0:
@@ -1013,20 +983,15 @@ def judge_rows(rows: list[dict[str, Any]], inputs: list[dict[str, Any]], rel: fl
                     "why": f"the {name} version could not be run in the comparison: {first_error[tag]} ({said})"}
     if bad:
         status = DISAGREE
-    elif compared == 0 or unshared + len(failing) == compared or missing:
+    elif compared == 0 or unshared == compared or missing:
         status = UNCONFIRMED
     else:
         status = AGREE
-    out: dict[str, Any] = {"status": status, "compared": compared - unshared - len(failing), "excluded": excluded,
-                           "disagreements": bad}
-    if failing:
-        out["failing_inputs"] = failing[:3]
+    out: dict[str, Any] = {"status": status, "compared": compared - unshared, "excluded": excluded, "disagreements": bad}
     if notes:
         out["shape_notes"] = notes[:3]
     if status == UNCONFIRMED and missing:
         out["why"] = f"the second version does not return {', '.join(missing[:3])}, so that was not compared"
-    elif status == UNCONFIRMED and unshared + len(failing) == compared and failing:
-        out["why"] = "the versions differ only on inputs the study did not produce, where the first version reports a failure"
     elif status == UNCONFIRMED and unshared:
         out["why"] = "the two versions return no value in common to compare"
     return out
@@ -1630,8 +1595,7 @@ class SecondImpl:
         if len(rows) != len(inputs):
             return {"status": UNCONFIRMED, "why": "the comparison returned fewer results than inputs", "disagreements": [], "retry": True}
         state = str(out.get("setup") or "none") if setup else "none"
-        verdict = judge_rows(rows, inputs, tolerance_for(spec, self.protocol), setup=state,
-                             study_inputs=self.captured.get(spec.name) or None)
+        verdict = judge_rows(rows, inputs, tolerance_for(spec, self.protocol), setup=state)
         verdict["setup"] = state
         if verdict["status"] == UNCONFIRMED:
             verdict.update(why=verdict.get("why") or "the comparison could not run: both versions raised on every input", retry=False)
@@ -1682,13 +1646,6 @@ class SecondImpl:
                                            "a study that had not been set up as a trial sets it up")
                 else:
                     entry.pop("setup_note", None)
-            if res.get("failing_inputs"):
-                entry["failing_inputs"] = res["failing_inputs"]
-                entry["failing_note"] = (f"on {len(res['failing_inputs'])} input(s) the study did not produce, the first version "
-                                         "reports a failure (NaN) where the second returns a number")
-            else:
-                entry.pop("failing_inputs", None)
-                entry.pop("failing_note", None)
             if res.get("shape_notes"):
                 entry["shape_note"] = "; ".join(res["shape_notes"])
             else:
@@ -1696,7 +1653,6 @@ class SecondImpl:
             if res["status"] == AGREE:
                 self._finish(spec, entry, AGREE, f"{res.get('compared', 0)} input(s) compared"
                              + (f"; {entry['shape_note']}" if entry.get("shape_note") else "")
-                             + (f"; {entry['failing_note']}" if entry.get("failing_note") else "")
                              + (f"; {entry['setup_note']}" if entry.get("setup_note") else ""))
                 return
             if res["status"] == UNCONFIRMED:
