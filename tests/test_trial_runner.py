@@ -275,7 +275,9 @@ def test_the_protocol_check_still_catches_a_contradiction_under_the_trial_contra
     assert protocol_check.check(protocol, {"simulate.py": sim, "experiment.py": "print(1)\n"}) == []
     wrong = "rate_a_LIST = [0.9, 2.0, 5.0]\nNUM_RUNS = 30\nprint(rate_a_LIST, NUM_RUNS)\n"
     found = protocol_check.check(protocol, {"simulate.py": sim, "experiment.py": wrong})
-    assert {m.kind for m in found} >= {"grid", "runs"}, found
+    # Under the trial contract FI plans and counts the runs of each setting itself, so a runs count typed in the code is
+    # not compared with the plan; a grid that contradicts the plan is still caught.
+    assert {m.kind for m in found} == {"grid"}, found
 
 
 def test_a_value_printed_to_fewer_places_matches_the_trial_it_rounds_from() -> None:
