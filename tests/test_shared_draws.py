@@ -183,8 +183,8 @@ def test_sd_ci_and_corr_ci_count_the_draws_and_give_none_for_one_draw():
     rec.seeds = {}
     naive = pv.resolve("x:sd_ci @ n=all", rec)
     rec.seeds = seeds
-    assert "6 different random draws" in shared.text and "different random draws" not in naive.text
-    assert shared.numbers[2] - shared.numbers[1] > naive.numbers[2] - naive.numbers[1]   # fewer degrees of freedom: wider
+    assert "6 different random draws" in shared.text   # the known positive: cells sharing their seeds are pooled over the draws
+    assert not naive.filled and "different settings" in naive.hit.reason   # without shared seeds they are different populations
     corr = pv.resolve("x:corr_ci:y @ n=all", rec)
     assert corr.filled and "6 different random draws" in corr.text    # 6 pairs, not 12 trials
     one = _record({"a": {0: 1.0, 1: 2.0}, "b": {0: 1.0, 1: 2.0}}, {"a": {0: 5, 1: 5}, "b": {0: 5, 1: 5}}, {"y": {"a": {0: 1.0, 1: 2.0}, "b": {0: 1.0, 1: 2.0}}})

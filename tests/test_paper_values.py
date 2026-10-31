@@ -47,39 +47,51 @@ def _within_sd(cells, metric, **where) -> float:
 # --- A1: the five numbers the old check falsely flagged on s2 --------------------------------------------------
 
 
-KEYS = {
-    "{{v:Ea_rel_bias:sd @ noise_sigma=0.01, n_points=all | %}}": ("0.824%", dict(noise_sigma=0.01)),
-    "{{v:Ea_rel_bias:sd @ noise_sigma=0.05, n_points=all | %}}": ("4.13%", dict(noise_sigma=0.05)),
-    "{{v:Ea_rel_bias:sd @ noise_sigma=all, n_points=5 | %}}": ("6.05%", dict(n_points=5)),
-    "{{v:Ea_rel_bias:sd @ noise_sigma=all, n_points=10 | %}}": ("4.28%", dict(n_points=10)),
-}
+KEYS = [
+    "{{v:Ea_rel_bias:sd @ noise_sigma=0.01, n_points=5 | %}}",
+    "{{v:Ea_rel_bias:sd @ noise_sigma=0.05, n_points=10 | %}}",
+    "{{v:Ea_rel_bias:sd @ noise_sigma=0.005, n_points=40 | %}}",
+]
+POOLED_KEYS = [  # one SD over settings that differ in n_points or noise_sigma
+    "{{v:Ea_rel_bias:sd @ noise_sigma=0.01, n_points=all | %}}",
+    "{{v:Ea_rel_bias:sd @ noise_sigma=0.05, n_points=all | %}}",
+    "{{v:Ea_rel_bias:sd @ noise_sigma=all, n_points=5 | %}}",
+    "{{v:Ea_rel_bias:sd @ noise_sigma=all, n_points=10 | %}}",
+]
 
 
-@pytest.mark.parametrize("key", list(KEYS))
-def test_s2_sd_keys_render_and_match_numpy(s2, key):
-    text, where = KEYS[key]
+@pytest.mark.parametrize("key", KEYS)
+def test_s2_sd_keys_of_one_setting_render_and_match_numpy(s2, key):
+    where = {"noise_sigma": float(key.split("noise_sigma=")[1].split(",")[0]),
+             "n_points": int(key.split("n_points=")[1].split(" ")[0])}
     got = pv.resolve(key, s2)
-    assert got.filled and got.text.startswith(text + " (95% chi-square interval ")
+    assert got.filled and "(95% chi-square interval " in got.text and got.text.count("%") >= 3
     assert got.numbers[0] == pytest.approx(_within_sd(_cells("s2_kinetics_trials.json"), "Ea_rel_bias", **where))
 
 
-def test_s2_ratio_key_is_19_6_and_matches_numpy(s2):
-    key = "{{v:Ea_rel_bias:sd @ noise_sigma=0.1, n_points=all | ratio @ noise_sigma=0.005, n_points=all}}"
+@pytest.mark.parametrize("key", POOLED_KEYS)
+def test_an_sd_over_settings_that_differ_is_not_recorded(s2, key):
+    got = pv.resolve(key, s2)
+    assert not got.filled and got.hit is not None
+    assert "different settings" in got.hit.reason and "sd @ <axis>=each" in got.hit.reason  # tells the writer what to use
+    assert not pv.resolve(key.replace(":sd ", ":sd_ci "), s2).filled
+
+
+def test_s2_ratio_key_of_two_settings_matches_numpy(s2):
+    key = "{{v:Ea_rel_bias:sd @ noise_sigma=0.1, n_points=5 | ratio @ noise_sigma=0.005, n_points=5}}"
     got = pv.resolve(key, s2)
     cells = _cells("s2_kinetics_trials.json")
-    expected = _within_sd(cells, "Ea_rel_bias", noise_sigma=0.1) / _within_sd(cells, "Ea_rel_bias", noise_sigma=0.005)
-    assert got.filled and got.text == "19.6"
-    assert got.numbers[0] == pytest.approx(expected)
+    expected = (_within_sd(cells, "Ea_rel_bias", noise_sigma=0.1, n_points=5)
+                / _within_sd(cells, "Ea_rel_bias", noise_sigma=0.005, n_points=5))
+    assert got.filled and got.numbers[0] == pytest.approx(expected)
+    assert not pv.resolve("{{v:Ea_rel_bias:sd @ noise_sigma=0.1, n_points=all | ratio @ noise_sigma=0.005, n_points=all}}", s2).filled
 
 
-def test_pooled_sd_is_the_within_setting_sd_not_the_concatenated_one(s2):
+def test_an_sd_setting_by_setting_is_filled_where_the_pooled_one_is_not(s2):
     cells = _cells("s2_kinetics_trials.json")
-    use = [c for c in cells if c["cell"]["n_points"] == 5]
-    concatenated = float(np.std(np.concatenate([c["metrics"]["Ea_rel_bias"]["values"] for c in use]), ddof=1))
-    within = _within_sd(cells, "Ea_rel_bias", n_points=5)
-    assert abs(concatenated - within) > 1e-5  # the two definitions really differ on this record
-    got = pv.resolve("Ea_rel_bias:sd @ noise_sigma=all, n_points=5", s2)
-    assert got.numbers[0] == pytest.approx(within) and got.numbers[0] != pytest.approx(concatenated, rel=1e-5)
+    got = pv.resolve("Ea_rel_bias:sd @ noise_sigma=0.01, n_points=each | range", s2)
+    each = [_within_sd(cells, "Ea_rel_bias", noise_sigma=0.01, n_points=n) for n in sorted({c["cell"]["n_points"] for c in cells})]
+    assert got.filled and got.numbers == [pytest.approx(min(each)), pytest.approx(max(each))]
 
 
 def test_s2_coverage_wilson_interval_is_two_ends_and_count_is_exact(s2):
@@ -116,11 +128,12 @@ def test_range_over_each_setting(s2):
 
 
 def test_marker_round_trip(s2):
-    paper = "SD is {{v:Ea_rel_bias:sd @ noise_sigma=0.01, n_points=all | %}} here."
+    paper = "SD is {{v:Ea_rel_bias:sd @ noise_sigma=0.01, n_points=5 | %}} here."
     filled, hits = pv.fill(paper, s2)
     assert hits == []
-    sd = "0.824% (95% chi-square interval 0.793% to 0.859%, 1200 trials)"
-    assert filled == ("SD is <!-- fi:v {{v:Ea_rel_bias:sd @ noise_sigma=0.01, n_points=all | %}} -->" + sd +
+    sd = pv.resolve("Ea_rel_bias:sd @ noise_sigma=0.01, n_points=5 | %", s2).text
+    assert "chi-square interval" in sd
+    assert filled == ("SD is <!-- fi:v {{v:Ea_rel_bias:sd @ noise_sigma=0.01, n_points=5 | %}} -->" + sd +
                       "<!-- /fi:v --> here.")
     assert pv.to_placeholders(filled) == paper
     assert pv.without_marks(filled) == f"SD is {sd} here."
@@ -217,7 +230,7 @@ def test_other_scalar_forms(s2):
     assert pv.resolve("Ea_rel_bias:se @ noise_sigma=0.05, n_points=all", s2).numbers[0] == pytest.approx(
         np.std(x, ddof=1) / math.sqrt(len(x)))
     assert pv.resolve("Ea_rel_bias:n @ noise_sigma=0.05, n_points=all", s2).text == str(len(x))
-    got = pv.resolve("Ea_rel_bias:sd_ci @ noise_sigma=0.05, n_points=all", s2)
+    got = pv.resolve("Ea_rel_bias:sd_ci @ noise_sigma=0.05, n_points=5", s2)
     assert got.filled and "chi-square interval" in got.text and "±" not in got.text
     r = pv.resolve("Ea_rel_bias:corr:coverage_Ea @ noise_sigma=0.05, n_points=all", s2)
     y = np.concatenate([c["metrics"]["coverage_Ea"]["values"] for c in cells if c["cell"]["noise_sigma"] == 0.05])
@@ -230,7 +243,7 @@ def test_other_scalar_forms(s2):
 
 
 def test_argmax_and_max_abs(s2):
-    got = pv.resolve("Ea_rel_bias:sd @ noise_sigma=each, n_points=all | argmax", s2)
+    got = pv.resolve("Ea_rel_bias:sd @ noise_sigma=each, n_points=5 | argmax", s2)
     assert got.text == "at noise_sigma = 0.1"
     assert pv.resolve("Ea_rel_bias @ noise_sigma=each, n_points=each | max_abs | %", s2).filled
 

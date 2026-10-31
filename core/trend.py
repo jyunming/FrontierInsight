@@ -380,7 +380,7 @@ def _form_value(rec: _pv.Records, metric: str, form: str, cells: list[dict[str, 
         return sum(values) / len(values)
     if form == "rms":
         return math.sqrt(sum(v * v for v in values) / len(values))
-    return _pv._pooled_sd(cells, metric)[0]
+    return _pv._sd_of(rec, cells, metric)[0]
 
 
 def _form_name(form: str, metric: str) -> str:
