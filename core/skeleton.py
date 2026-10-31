@@ -549,15 +549,34 @@ class Table:
         self._check(name)
         self._one_key(key)
         out = {}
-        for c in self._by_setting.get(key, []):
-            if name not in c["metrics"]:
-                continue
-            level = c["level"]
-            text = fi_table._fmt(next(iter(level.values()))) if len(level) == 1 else fi_table.cell_key(level)
+        for text, c in self._level_cells(name, key):
             s = fi_table.summary(fi_table.values_of(c["metrics"].get(name)))
             out[text] = s["mean"] if s["n"] else None
             self._gave(name, s["n"])
         return out
+
+    def _level_cells(self, name, key):
+        """``(text, cell)`` for each value (or combination) the runs of setting ``key`` compared inside them that holds ``name``;
+        the text is the value alone when the run compares one factor, else the combination written as a setting is."""
+        import fi_table
+
+        out = []
+        for c in self._by_setting.get(key, []):
+            if name in c["metrics"]:
+                level = c["level"]
+                out.append((fi_table._fmt(next(iter(level.values()))) if len(level) == 1 else fi_table.cell_key(level), c))
+        return out
+
+    @_noting
+    def level_rows(self, name, key):
+        """``[(record key, text, values)]`` for each value (or combination) compared inside the runs of setting ``key``: the key
+        FI's record holds that value's trials under (the setting's key with the value added), the text ``level_means`` names it
+        by, and the finite values the trials gave for ``name`` there. Never raises for the shape of the record."""
+        import fi_table
+
+        self._check(name)
+        self._one_key(key)
+        return [(self._key_of(c), text, fi_table.values_of(c["metrics"].get(name))) for text, c in self._level_cells(name, key)]
 
     @_noting
     def undefined(self, name, key):

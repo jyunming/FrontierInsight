@@ -464,7 +464,8 @@ PINS_AT_811719AF = {
     # and again when the seeds of a setting moved from an environment variable to a file (FI_TRIAL_SEEDS_FILE); it was "5b45d638db4dcd2c"
     # and again when the frame began to note whether a trial drew random numbers (Ctx records `drew`, VERSION 4); it was "b61961f03c91d396"
     # and again with the table's `coverage` read of a result's interval (the pairing of an interval with its trials in frame_table.hits)
-    "run_framed": "4a6a5d84ab28de3b",
+    # and again when FI's result_json also prints each compared value's trials (Table.level_rows)
+    "run_framed": "edc62a31e304a785",
 }
 
 

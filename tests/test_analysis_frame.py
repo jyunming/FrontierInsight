@@ -898,3 +898,19 @@ def test_the_frame_holds_the_known_value_and_interval_of_each_result_that_has_on
     assert plan["known"] == {"growth": {"interval": ["g_lo", "g_hi"], "truth": 2.0},
                              "dose_hat": {"interval": ["g_lo", "g_hi"], "axis": "dose"}}  # a true value that is neither is left out
     assert "KNOWN = {" in af.derive_source(design)
+
+
+def test_a_result_recorded_only_per_compared_value_is_printed_with_its_trials_too(tmp_path: Path) -> None:
+    record = copy.deepcopy(RECORD)
+    for c in list(record["cells"]):
+        growth = c["metrics"].pop("growth")
+        for mode, shift in (("a", 0.0), ("b", 1.0)):
+            cell = {**c["cell"], "mode": mode}
+            record["cells"].append({"cell": cell, "key": trial_runner.cell_key(cell), "level": {"mode": mode}, "planned": c["planned"],
+                                    "ok": c["ok"], "failed": c["failed"],
+                                    "metrics": {"growth": {"values": [v + shift for v in growth["values"]], "trials": growth["trials"]}}})
+    _code, printed, _record, _err = _run(_quest(tmp_path, _design(), record=record))
+    assert printed[KEYS[0]]["growth"] == {"a": pytest.approx(1.75), "b": pytest.approx(2.75)}  # as before
+    a, b = printed[KEYS[0] + ",mode=a"], printed[KEYS[0] + ",mode=b"]  # and each value's trials, keyed as FI's record keys them
+    assert a["growth_values"] == [1.0, 1.5, 2.5, 2.0] and a["growth"] == pytest.approx(1.75)
+    assert b["growth_values"] == [2.0, 2.5, 3.5, 3.0] and b["growth"] == pytest.approx(2.75)
