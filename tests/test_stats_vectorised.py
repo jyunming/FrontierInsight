@@ -97,7 +97,7 @@ def test_a_chunk_smaller_than_one_resample_still_draws_every_round(monkeypatch: 
     assert abs(chunked["p"] - whole["p"]) < 0.04 and abs(chunked["ci_lower"] - whole["ci_lower"]) < 0.15
     assert sum(stats._chunks(2000, 10_000_000)) == 2000 and max(stats._chunks(2000, 10_000_000)) == 1
     monkeypatch.undo()
-    assert stats._chunks(10, 4) == [10] and stats._chunks(2000, 10_000) == [400] * 5
+    assert stats._chunks(10, 4) == [10] and stats._chunks(2000, 1_000) == [250] * 8
 
 
 def test_bootstrap_mean_interval_agrees_with_the_pure_python_path(pure_python) -> None:
@@ -210,3 +210,28 @@ def test_statistics_without_a_callback_logs_through_the_module_logger(caplog: py
     with caplog.at_level(logging.INFO, logger="frontier_insight.metric_spec"):
         ms.statistics(_replicates(3), {"metrics": [{"id": "x", "kind": "mean", **_ESTIMAND_UNIT}]})
     assert any("[evidence] statistics: 1 of 3 contrasts" in r.getMessage() for r in caplog.records)
+
+
+def test_the_resampling_chunk_is_small_and_changes_no_number(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A chunk of 4M numbers asked for 32 MB arrays at once, which a machine short of memory refused (MemoryError in the
+    statistics). The default chunk is a small array, and any chunk size draws the same numbers."""
+    import tracemalloc
+
+    values, other = _sample(7, 8000, 0.0), _sample(8, 1300, 0.2)
+
+    def everything() -> list:
+        return [stats.bootstrap_mean_interval(values, resamples=500, seed=3), stats.cluster_bootstrap_interval(values, [i % 37 for i in range(len(values))])]
+
+    assert stats._CHUNK_ELEMENTS * 8 <= 4 * 1024 * 1024
+    tracemalloc.start()
+    small = everything()
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    assert peak < 16 * 1024 * 1024
+    monkeypatch.setattr(stats, "_CHUNK_ELEMENTS", 4_000_000)
+    assert everything() == small
+    # The two-sample interval draws both groups per chunk, so a different chunk moves its ends by sampling noise only.
+    big = stats.two_sample_mean_test(values, other, seed=4)
+    monkeypatch.setattr(stats, "_CHUNK_ELEMENTS", 250_000)
+    now = stats.two_sample_mean_test(values, other, seed=4)
+    assert now["p"] == big["p"] and abs(now["ci_lower"] - big["ci_lower"]) < 0.02

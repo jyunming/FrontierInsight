@@ -869,8 +869,22 @@ def test_a_claim_check_of_an_earlier_draft_does_not_cover_the_final_one(tmp_path
 
 def test_a_failed_assessment_replaces_the_record_and_claims_no_level() -> None:
     record = evidence.unassessed("KeyError: 'x'")
-    assert record["status"] == "not_executed" and not any(record["levels"].values())
-    assert "could not be assessed" in evidence.summary_line(record)
+    assert record["status"] == "not_assessed" and record["levels"] == {}
+    assert "not assessed" in evidence.summary_line(record)
+
+
+def test_a_memory_failure_is_not_assessed_not_unexecuted_and_the_wording_is_plain() -> None:
+    record = evidence.unassessed("MemoryError: ")
+    assert record["status"] != "not_executed" and record["assessment_failed"] == "MemoryError: "
+    for line in (evidence.summary_line(record), evidence.summary_line(record, technical=True), *record["gaps"]):
+        assert "MemoryError" not in line and "memory" in line
+    # Read back from disk it is still not an unexecuted experiment.
+    assert evidence.upgrade(json.loads(json.dumps(record)))["status"] == "not_assessed"
+
+
+def test_an_experiment_that_did_not_run_still_records_not_executed(tmp_path: Path) -> None:
+    got = evidence.assess(_quest(tmp_path, audits=False), {}, settings=ON)
+    assert got["status"] == "not_executed" and not got.get("assessment_failed") and got["levels"]["executed"] is False
 
 
 def test_a_pass_that_names_nothing_it_judged_is_not_believed(tmp_path: Path) -> None:
@@ -915,7 +929,7 @@ def test_a_crashed_assessment_replaces_an_earlier_record(tmp_path: Path, monkeyp
     monkeypatch.setattr(evidence, "assess", boom)
     assert engine._write_evidence({}) is None
     kept = json.loads(record.read_text(encoding="utf-8"))
-    assert kept["status"] == "not_executed" and "could not be assessed" in kept["gaps"][0]
+    assert kept["status"] == "not_assessed" and "not assessed" in kept["gaps"][0]
 
 
 def test_a_receipt_with_times_that_are_not_times_is_not_believed(tmp_path: Path) -> None:

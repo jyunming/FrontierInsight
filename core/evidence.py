@@ -1058,17 +1058,31 @@ def upgrade(record: Any) -> Any:
 _NOT_EXECUTED_CLAIM = "The experiment has not produced results (it has not run, or it failed)."
 
 
+NOT_ASSESSED = "not_assessed"
+
+
+def _plain_reason(error: str) -> str:
+    """The reason an assessment failed in the words a person reads; the exception text itself stays in ``assessment_failed``
+    and in ``.fi/run.log``."""
+    name = str(error).split(":", 1)[0].strip()
+    if name == "MemoryError":
+        return "the machine ran short of memory while FI checked the result"
+    return "FI hit an error while checking the result"
+
+
 def unassessed(error: str) -> dict[str, Any]:
-    """The record kept when the assessment itself failed: no level is claimed, and the reason is the one gap. It replaces
-    an earlier record, so a level worked out on a previous pass never outlives a failed assessment of this one."""
-    gap = f"the evidence could not be assessed ({error})"
+    """The record kept when the assessment itself failed. It says the evidence was NOT ASSESSED, which is not the same as
+    "not executed": the experiment may well have run, and no level is claimed because none was measured (``levels`` is
+    empty, never a row of false). It replaces an earlier record, so a level worked out on a previous pass never outlives a
+    failed assessment of this one."""
+    gap = f"the evidence was not assessed: {_plain_reason(error)} (details in .fi/run.log)"
     return {
-        "status": "not_executed",
+        "status": NOT_ASSESSED,
         "assessment_failed": error,
-        "levels": {level: False for level in LEVELS},
-        "next_level": LEVELS[0],
+        "levels": {},
+        "next_level": None,
         "gaps": [gap],
-        "all_gaps": {LEVELS[0]: [gap]},
+        "all_gaps": {},
         "ladder": [],
     }
 
@@ -1081,11 +1095,14 @@ def summary_line(record: dict[str, Any], *, technical: bool = False) -> str:
     record = upgrade(record)
     status = str(record.get("status") or "not_executed")
     gaps = record.get("gaps") or []
+    if record.get("assessment_failed"):
+        reason = _plain_reason(str(record["assessment_failed"]))
+        if technical:
+            return f"{NOT_ASSESSED}; {reason}"
+        return f"The evidence was not assessed ({reason}); no level is claimed. This does not mean the experiment did not run."
     if technical:
         tail = f"; to reach {record.get('next_level')}: {gaps[0]}" + (f" (+{len(gaps) - 1} more)" if len(gaps) > 1 else "") if gaps else ""
         return f"{status}{tail}"
-    if record.get("assessment_failed"):
-        return f"The evidence could not be assessed ({record['assessment_failed']}); no level is claimed."
     claim = INFO.get(status, {}).get("assurance_claim") or _NOT_EXECUTED_CLAIM
     tail = f" Next: {gaps[0]}" + (f" (+{len(gaps) - 1} more)" if len(gaps) > 1 else "") if gaps else ""
     # The mark of an accept no person made, said on every surface even when another gap comes first.

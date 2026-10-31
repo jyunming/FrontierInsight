@@ -286,7 +286,9 @@ def _clean(values: list[Any]) -> list[float]:
 # interval and p-value. The draws differ from the old pure-Python stream (same distribution, not the same numbers). Without
 # numpy the original pure-Python loops run.
 
-_CHUNK_ELEMENTS = 4_000_000
+# 250k numbers is 2 MB per array (about 5 MB at the peak); 4M asked for 32 MB arrays at once, which a machine short of memory
+# refused. A smaller chunk draws the same numbers (the generator is read row by row), so the results do not change.
+_CHUNK_ELEMENTS = 250_000
 
 
 def _numpy() -> Any:
