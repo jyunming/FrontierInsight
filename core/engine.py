@@ -25450,7 +25450,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                         if isinstance(c, dict) and c.get("basis") == "unsupported" and str(c.get("claim") or "").strip()
                         and (" ".join(str(c["claim"]).split()) in flat
                              or any(_same_statement(str(c["claim"]), s) for s in sentences))]
-            if not _paper_facts.write_unsupported_record(self.quest_root, standing):
+            # A sentence that is, as a whole, a claim the check found unsupported is not delivered as the paper's own: it
+            # is taken out (the paragraph keeps its other sentences) and the Limitations say how many went.
+            after, gone, standing = _paper_facts.take_out_sentences(before, standing, _states_whole)
+            if gone and after != before:
+                checked = Path(paper_path).read_bytes()
+                Path(paper_path).write_text(after, encoding="utf-8")
+                for check in ("claim_check", "citation_check"):
+                    _receipts.carry_over(self.quest_root, check, "paper", checked, Path(paper_path).read_bytes(),
+                                         "FI took out sentences its own check found unsupported and added no claim")
+                self._log.warning("[claim_check] %d sentence(s) the check found unsupported were taken out of the paper",
+                                  len(gone))
+            if not _paper_facts.write_unsupported_record(self.quest_root, standing, gone):
                 return 0
             # A record with none empties: the Limitations block is written again from it, so a sentence an earlier pass
             # stated is gone.
@@ -25462,7 +25473,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if standing:
             self._log.warning("[claim_check] %d sentence(s) of the paper as delivered were not found supported; its "
                               "Limitations say so", len(standing))
-        return len(standing)
+        return len(standing) + len(gone)
 
     async def _state_page_overrun(self, state: QuestState, paper_path: Path, limit: int, pages: int) -> int:
         """The paper stays over its page limit: FI's measurement goes on record (``.fi/page_limit.json``), FI puts the
@@ -29470,6 +29481,14 @@ def _same_statement(a: str, b: str) -> bool:
     wa, wb = _content_stems(_CITATION_BRACKET_RE.sub(" ", a)), _content_stems(_CITATION_BRACKET_RE.sub(" ", b))
     shared = len(wa & wb)
     return shared >= _SAME_STATEMENT_WORDS and shared / min(len(wa), len(wb)) >= _SAME_STATEMENT_SHARE
+
+
+def _states_whole(claim: str, sentence: str) -> bool:
+    """Whether ``sentence`` is, as a whole, the statement ``claim``: it is the same statement (:func:`_same_statement`) and
+    says nothing the claim does not (every content word of the sentence is a word of the claim), so taking the sentence out
+    loses only what the check judged. A sentence that holds the claim among other things (a hedge, a second point) is not."""
+    wa, wb = _content_stems(_CITATION_BRACKET_RE.sub(" ", claim)), _content_stems(_CITATION_BRACKET_RE.sub(" ", sentence))
+    return _same_statement(claim, sentence) and wb <= wa
 
 
 def _apply_title_only_rule(

@@ -651,9 +651,6 @@ def mark_last_review_final(quest_root: Path, review: Any) -> bool:
     return bool(last_review_points(quest_root))
 
 
-POINT_CHARS = 300
-
-
 def _quoted_point(point: str, cap: int | None) -> str:
     """One point of a review as it is quoted: no double quotes, no comment or placeholder marks (they would break FI's
     own markers), cut after a whole word at ``cap`` characters when given."""
@@ -664,16 +661,17 @@ def _quoted_point(point: str, cap: int | None) -> str:
 
 
 def last_review_sentence(points: list[str], shown: int | None = None) -> str:
-    """The sentence for the quality report (every point, whole) and the paper's Limitations (``shown`` of them, each cut to
-    :data:`POINT_CHARS` characters, the rest counted): the points are the reviewer's, quoted; FI does not say they are
-    right."""
+    """The sentence for the quality report (every point, whole, quoted: they are the reviewer's, FI does not say they are
+    right) and, when ``shown`` is given, for the paper's Limitations (how many points, not the points: a reader of the paper
+    is not handed the reviewer's working notes)."""
     if not points:
         return ""
-    quoted = [_quoted_point(p, POINT_CHARS if shown is not None else None) for p in points]
-    more = len(points) - shown if shown is not None and len(points) > shown else 0
+    if shown is not None:  # in the paper: how many, in a reader's words; the reviewer's own words are in QUALITY.md
+        many = len(points) > 1
+        return (f"The final review of this paper did not accept it and raised {len(points)} point{'s' if many else ''} "
+                f"that the last rewrite did not resolve (QUALITY.md lists {'them' if many else 'it'})")
     return ("The final review raised these points, which no later round addressed: "
-            + "; ".join(quoted[:len(points) - more])
-            + (f"; and {more} more, listed in QUALITY.md." if more else "."))
+            + "; ".join(_quoted_point(p, None) for p in points) + ".")
 
 
 def clear_objections(quest_root: Path) -> None:

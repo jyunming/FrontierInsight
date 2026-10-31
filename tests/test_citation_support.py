@@ -246,3 +246,23 @@ def test_a_cut_off_sentence_inside_a_bullet_goes_but_a_bullet_that_is_only_it_st
     alone = "Intro [2].\n- We did not verify the equality itself against the text of [3].\n- Next point.\n"
     out2 = _drop_citation_run(alone, "drop_citation")
     assert "text of." not in out2.paper and "- Next point." in out2.paper and "\n- \n" not in out2.paper
+
+
+def test_a_sentence_that_holds_a_result_and_ends_on_the_citations_words_stays_a_whole_sentence() -> None:
+    """The citation was the object of the last words ('above the rounded 22 degrees of [3]') and the sentence holds a result
+    of the study, so it cannot go whole: it used to stay as 'the rounded 22 degrees of.'"""
+    paper = ("BH's proof of FDR control for independent statistics is in [2]. "
+             "The crossing is therefore somewhat above the rounded 22 degrees of [3]. Next point.\n")
+    sources = {"2": _src("2", "Two", FULL, full=True), "3": _src("3", "Three", FULL + "something else", full=True)}
+
+    async def judge(prompt: str) -> str:
+        rows = [ln.split(" | ") for ln in prompt.splitlines() if " | cites [" in ln]
+        return json.dumps({"verdicts": [{"id": r[0], "supported": "[2]" in r[1], "quote": FULL[:40] if "[2]" in r[1] else "",
+                                         "why": "not shown"} for r in rows]})
+
+    async def repair(prompt: str) -> str:
+        return json.dumps({"fixes": [{"id": i, "action": "drop_citation"} for i in json.loads(prompt)]})
+
+    out = _check(paper, sources, judge, repair, cs.new_record(paper, None), [], own=cs.OwnNumbers(["22"]))
+    assert "the rounded 22 degrees." in out.paper and "degrees of." not in out.paper and "[3]" not in out.paper
+    assert cs.uncut("Result is.") == "" and cs.uncut("It reads whole.") == "It reads whole."
