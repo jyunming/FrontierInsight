@@ -263,7 +263,9 @@ def _last_heading(root: Path) -> str:
 @pytest.mark.parametrize("case, kind, words", [
     ("first", "Added", "code written"),
     ("refine", "Added", "added what a refine asked for: the runtime for n=64"),
-    ("review", "Fixed", "what the review found wrong in"),
+    # a review alone no longer sends the experiment back (core/engine.py::_review_sends_the_experiment_back): a pass
+    # after a review is a revision, not a fix of something the run computed
+    ("review", "Changed", "revised after review (round 1)"),
     ("redesign", "Changed", "revised after review (round 1)"),
 ])
 def test_implement_names_the_kind_of_change(tmp_path: Path, case: str, kind: str, words: str) -> None:
