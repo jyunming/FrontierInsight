@@ -27,7 +27,7 @@ def test_a_plan_map_in_another_unit_than_the_question_is_asked_again_with_both_u
     assert out.parts["answers"]["valid"] and out.parts["answers"]["asks"] == 2
     assert "question asks for a quantity in `m`, but `metric:algae_peak` is in `1`" in seen[1]
     row = next(r for r in out.design["protocol"]["topic_map"] if r["item"] == "Q1")
-    assert row["unit_conflict"] == "the result the plan names is in 1, the question asks for m"
+    assert row["unit_conflict"] == "the result the plan names is in a pure number (no unit), the question asks for m"
 
 
 def test_a_plan_map_still_in_another_unit_after_the_last_ask_is_kept_as_not_answered() -> None:
@@ -36,7 +36,7 @@ def test_a_plan_map_still_in_another_unit_after_the_last_ask_is_kept_as_not_answ
     out, _seen = _ask(design, [bad] * cp.MAX_ASKS, ASKED)
     assert out.parts["answers"]["valid"] and out.parts["answers"]["asks"] == cp.MAX_ASKS
     row = next(r for r in out.design["protocol"]["topic_map"] if r["item"] == "Q1")
-    assert row["unit_conflict"] == "the result the plan names is in 1, the question asks for m"
+    assert row["unit_conflict"] == "the result the plan names is in a pure number (no unit), the question asks for m"
 
 
 def test_a_result_in_the_questions_unit_replaces_a_plan_map_in_another_unit() -> None:
@@ -86,11 +86,11 @@ def test_a_new_map_in_another_unit_is_asked_again_and_the_plans_declared_unit_wi
 
 def test_the_paper_says_not_answered_with_both_units_and_prints_no_number(tmp_path, monkeypatch) -> None:
     root = _quest(tmp_path, monkeypatch, [])
-    rows = [{"item": "Q1", "by": "metric:algae_peak", "at": {}, "unit_conflict": "the result the plan names is in 1, the question asks for m"},
+    rows = [{"item": "Q1", "by": "metric:algae_peak", "at": {}, "unit_conflict": "the result the plan names is in a pure number (no unit), the question asks for m"},
             {"item": "Q2", "by": "metric:bloom", "at": {"nutrient": 1}}]
     monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: {**PROTOCOL, "topic_map": rows})
     (root / ".fi" / "topic_requirements.json").write_text(json.dumps(REQ), encoding="utf-8")
     text = pf.answers_text(root)
-    assert "- peak algae: not answered (the result the plan names is in 1, the question asks for m)" in text
+    assert "- peak algae: not answered (the result the plan names is in a pure number (no unit), the question asks for m)" in text
     assert "algae_peak" not in text
     assert "{{v:bloom:mean_ci @ nutrient=1, temp=10}}" in text  # the known positive is unchanged

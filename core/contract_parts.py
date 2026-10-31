@@ -400,7 +400,8 @@ def unit_gaps(row: Any, planned: str, design: dict[str, Any]) -> dict[str, tuple
 
 def _unit_reason(units: tuple[str, str], planned: bool) -> str:
     """Why a quantity is not answered: the result named for it is in another unit than the question asks in."""
-    return f"the result {'the plan names' if planned else 'named for it'} is in {units[1]}, the question asks for {units[0]}"
+    said = [("a pure number (no unit)" if _unit_key(u) == "1" else u) for u in units]
+    return f"the result {'the plan names' if planned else 'named for it'} is in {said[1]}, the question asks for {said[0]}"
 
 
 def _check_answers(value: Any, asked: dict[str, dict[str, str]], design: dict[str, Any],
