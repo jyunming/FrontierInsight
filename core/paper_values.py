@@ -1035,6 +1035,10 @@ def _measure(rec: Records, metric: str, form: str, arg: str, where: dict[str, Pi
     if form == "mean":
         return Measured(_tt.summary(_observations(rec, cells, metric)[0])["mean"])
     if form == "mean_ci" and (ran := _one_run_each(cells, metric)):
+        if len({sig(v) for v in values}) == 1:
+            # Every setting gave the same value at the places printed: it is that one value (a deterministic result),
+            # not a mean of different ones, so it is printed as it is.
+            return Measured(values[0])
         return Measured(_tt.summary(values)["mean"], "over_settings", n=ran)
     if form in ("mean_ci", "ci", "pm"):
         mean, lo, hi, words, n, symmetric, _se = _interval(rec, cells, metric)
