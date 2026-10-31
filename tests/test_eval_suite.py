@@ -733,3 +733,14 @@ def test_the_round_report_calls_an_ungraded_contradiction_an_observation() -> No
     text = collect.render_round(data)
     assert "Record contradiction: a checks problem was not fixed: x; not graded yet" in text
     assert "(fake)" not in text
+
+
+def test_an_unassessed_evidence_record_is_not_read_as_not_executed() -> None:
+    from core import evidence
+
+    base = {"outcome": "paper", "stage": ""}
+    failed = evidence.unassessed("MemoryError: ")
+    facts = {**base, "evidence_status": failed["status"], "evidence_executed": failed["levels"].get("executed")}
+    assert collect.record_contradiction(facts) == ""
+    unrun = {**base, "evidence_status": "not_executed", "evidence_executed": False}
+    assert "not executed" in collect.record_contradiction(unrun)
