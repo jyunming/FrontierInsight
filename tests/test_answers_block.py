@@ -171,8 +171,8 @@ ESTIMATE_PROTOCOL = {
          "known_value": {"true_value": "y_true", "estimate": "y_hat", "standard_error": "y_se", "level": 0.95}},
     ],
     "topic_map": [
-        {"item": "Q1", "by": "metric:x_hat"}, {"item": "Q2", "by": "metric:x_hat"}, {"item": "Q3", "by": "metric:x_hat"},
-        {"item": "Q4", "by": "metric:y_hat"},
+        {"item": "Q1", "by": "metric:x_hat", "statistic": "bias"}, {"item": "Q2", "by": "metric:x_hat", "statistic": "sd"},
+        {"item": "Q3", "by": "metric:x_hat"}, {"item": "Q4", "by": "metric:y_hat", "statistic": "bias"},
     ],
 }
 ESTIMATE_REQ = {"quantities": [
@@ -222,3 +222,13 @@ def test_the_true_value_of_a_result_without_a_reference_is_its_reference_value()
     assert pv.known_truth(ESTIMATE_PROTOCOL, "x_hat") == 10.0
     assert pv.known_truth(ESTIMATE_PROTOCOL, "y_hat") is None  # y_true is no fixed number of the plan
     assert pv.known_truth(ESTIMATE_PROTOCOL, "nothing") is None
+
+
+def test_an_old_plan_with_no_statistic_prints_the_result_as_it_is(tmp_path, monkeypatch) -> None:
+    """Old plans type no statistic: the question's words are never read, so 'bias' prints the result's value as before."""
+    root = _estimate_quest(tmp_path, monkeypatch)
+    old = {**ESTIMATE_PROTOCOL, "topic_map": [{k: v for k, v in e.items() if k != "statistic"} for e in ESTIMATE_PROTOCOL["topic_map"]]}
+    monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: old)
+    text = pf.answers_text(root)
+    assert "- bias (the plan's map: `x_hat`): {{v:x_hat @ dose=each | range}}" in text
+    assert "diff ref" not in text and ":sd" not in text

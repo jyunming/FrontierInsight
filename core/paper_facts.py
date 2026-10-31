@@ -1257,21 +1257,6 @@ def limitations_text(quest_root: Path | str) -> str:
     return "\n".join(f"- {s}" for s in sentences)
 
 
-_BIAS_WORD = re.compile(r"\bbias(?:es)?\b", re.I)
-_SPREAD_WORD = re.compile(r"\b(?:spread|standard deviation|scatter|sd)\b", re.I)
-
-
-def _asked_statistic(name: str) -> str:
-    """``"bias"`` or ``"spread"`` when a question's own words ask for that statistic of an estimate, else ``""``. A closed
-    pair of words, read only where the plan's result is the estimate of a known true value (:func:`_known_estimates`), the one
-    case where FI can work either statistic out from its own record; a coverage question is neither."""
-    if re.search(r"\bcoverage\b", name, re.I):
-        return ""
-    if _BIAS_WORD.search(name):
-        return "bias"
-    return "spread" if _SPREAD_WORD.search(name) else ""
-
-
 def _known_estimates(protocol: dict[str, Any]) -> dict[str, bool]:
     """``{name: has a true value}`` for the results the plan declares with a true value (``known_value``), under each
     result's id and under the name of its estimate. The flag says whether the plan's true value is one number FI computes
@@ -1351,7 +1336,6 @@ def answers_text(quest_root: Path | str) -> str:
         # The plan's explicit map to a metric that exists is the fact; the line names that metric, so a wrong map is
         # disclosed, never hidden. Whether the metric's name resembles the quantity's is not asked here.
         metric = mapped[1] if mapped is not None and mapped[0] in ("ok", "judge") else ""
-        stat = _asked_statistic(name)
         if not metric:
             lines.append(f"- {name}: {NO_RESULT if mapped is not None else NO_LINK}")
             continue
@@ -1367,6 +1351,9 @@ def answers_text(quest_root: Path | str) -> str:
             continue
         # The plan's own map may pin the quantity to one value of a setting (``at``); a setting the study compares (the plan's
         # ``comparisons``) is answered once for each of its values, never as one range across them.
+        # The statistic the plan's map types for the question (``value`` when it says none: the result as it is).
+        stat = next((str(m["statistic"]) for m in _topic_req.map_entries(req, plan, "quantities", item)
+                     if m.get("statistic") in ("bias", "sd")), "")
         entry_at = next((m["at"] for m in _topic_req.map_entries(req, plan, "quantities", item)
                          if isinstance(m.get("at"), dict) and m["at"]), {})
         at = {a: v for a, v in entry_at.items() if a in rec.axes()}
@@ -1395,32 +1382,32 @@ def answers_text(quest_root: Path | str) -> str:
                 label = f"{name} ({split} = {level})" + (f" ({', '.join(a + ' = ' + str(v) for a, v in at.items())})" if at else "")
             else:
                 fixed_here = fixed
-            # A bias or a spread asked of the estimate of a known true value is that statistic of the estimate's trials, which FI
-            # works out itself: the estimate's own mean is neither (it was printed under both words).
+            # A bias or a standard deviation the plan's map types for the question is that statistic of the result's trials, which
+            # FI works out itself from its keys; the result's own mean is neither.
             how = ""
-            if stat and metric in estimates:
-                made = "the mean estimate minus the true value" if stat == "bias" else "the spread of the estimates over the trials"
+            if stat:
+                made = "the mean estimate minus the true value" if stat == "bias" else "the standard deviation over the trials"
                 how = f"the plan's map: `{metric}`, here worked out as {made}"
-            if stat == "bias" and metric in estimates and not estimates[metric]:
+            if stat == "bias" and not estimates.get(metric):
                 lines.append(f"- {label}: not answered (the plan gives no one true value of \"{plain(metric)}\" to measure the bias from)")
                 continue
             if said:
                 where = ", ".join([*said, *fixed_here])
                 over = f" (no single value: it differs with {', '.join(rec.short(a) for a in here)}; this is the "
                 end = ", lowest to highest, and the tables give every setting)"
-                if stat == "bias" and metric in estimates:
+                if stat == "bias":
                     tries = [(f"{{{{v:{metric} @ {where} | diff ref | range}}}}", over + "mean estimate minus the true value in each setting" + end)]
-                elif stat == "spread" and metric in estimates:
-                    tries = [(f"{{{{v:{metric}:sd @ {where} | range}}}}", over + "standard deviation of the estimates over the trials in each setting" + end)]
+                elif stat == "sd":
+                    tries = [(f"{{{{v:{metric}:sd @ {where} | range}}}}", over + "standard deviation over the trials in each setting" + end)]
                 else:
                     tries = [(f"{{{{v:{metric} @ {where} | range}}}}", over + "mean in each setting" + end)]
             else:
                 where = ", ".join(fixed_here)
-                if stat == "bias" and metric in estimates:
+                if stat == "bias":
                     tries = [(f"{{{{v:{metric} @ {where} | diff ref}}}}", " (the mean estimate minus the true value)")]
-                elif stat == "spread" and metric in estimates:
-                    tries = [(f"{{{{v:{metric}:sd_ci @ {where}}}}}", " (the standard deviation of the estimates over the trials)"),
-                             (f"{{{{v:{metric}:sd @ {where}}}}}", " (the standard deviation of the estimates over the trials)")]
+                elif stat == "sd":
+                    tries = [(f"{{{{v:{metric}:sd_ci @ {where}}}}}", " (the standard deviation over the trials)"),
+                             (f"{{{{v:{metric}:sd @ {where}}}}}", " (the standard deviation over the trials)")]
                 else:
                     tries = [(f"{{{{v:{metric}:mean_ci @ {where}}}}}", ""), (f"{{{{v:{metric} @ {where}}}}}", " (no interval: the trials give none)")]
             lines.append(_answer_line(rec, label, metric, tries, plain, how))

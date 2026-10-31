@@ -319,6 +319,11 @@ def _apply_figures(p: dict[str, Any], design: dict[str, Any], answer: dict[str, 
             "figure_declarations": decls}
 
 
+#: What a question about a result may ask of it, a closed set FI works out itself from its keys: the result as it is (its mean in
+#: each setting), its bias (the mean minus the true value the plan declares for it), or its standard deviation over the trials.
+STATISTICS = ("value", "bias", "sd")
+
+
 def _answers_prompt(templates: dict[str, string.Template], design: dict[str, Any], asked: dict[str, dict[str, str]],
                     problems: list[str], last: str) -> str:
     lines, _settings, _single = _figure_holds(design)
@@ -327,7 +332,7 @@ def _answers_prompt(templates: dict[str, string.Template], design: dict[str, Any
     settings = "\n".join(f"- {a}: {json.dumps(v)}" for a, v in _topic_req.view(design, design["protocol"])["axes"].items())
     eqs = ", ".join(sorted(_contract._model_equation_ids(design["protocol"]))) or "(none)"
     return templates["plan_answers"].substitute(
-        quantities=quantities, shows="\n".join(lines) or "- (nothing)", equations=eqs, settings=settings or "- (none)",
+        quantities=quantities, statistics=", ".join(STATISTICS), shows="\n".join(lines) or "- (nothing)", equations=eqs, settings=settings or "- (none)",
         method=_short(design.get("method")), again=_problems_text(problems, last))
 
 
@@ -369,6 +374,16 @@ def _check_answers(value: Any, asked: dict[str, dict[str, str]], design: dict[st
         if not q["by"] and by != "none" and not ((head == "metric" and name in ids) or (head == "equation" and name in eqs)):
             out.append(f"`{ident}`: `by` must be `metric:<id>` with an id of {', '.join(ids)}, `equation:<id>` with an id of "
                        f"{', '.join(sorted(eqs)) or '(none)'}, or `none`")
+        stat = row.get("statistic")
+        if stat not in (None, "") and stat not in STATISTICS:
+            out.append(f"`{ident}`: `statistic` must be one of {', '.join(STATISTICS)}")
+        elif stat == "bias":
+            from . import paper_values as _values
+
+            target = (q["by"] or by).partition(":")[2].strip()
+            if _values.known_truth(design["protocol"], target) is None:
+                out.append(f"`{ident}`: `bias` needs a result with a known true value that the plan fixes; `{target or by}` has none "
+                           "(answer `value` or `sd`, or another result)")
         at = row.get("at")
         if at in (None, ""):
             continue
@@ -394,11 +409,14 @@ def _apply_answers(p: dict[str, Any], design: dict[str, Any], answer: dict[str, 
         keys = {_topic_req._name_key(ident), _topic_req._name_key(q["name"])}
         mine = [m for m in rows if _topic_req._name_key(m.get("item")) in keys]
         by = str(row.get("by") or "").strip()
+        stat = row.get("statistic") if row.get("statistic") in ("bias", "sd") else None
         for m in mine:
             m["at"] = at
+            if stat:
+                m["statistic"] = stat
             m["by"] = _refined_by(design["protocol"], str(m.get("by") or ""), by)
         if not mine and by and by != "none":
-            rows.append({"item": ident, "by": by, "at": at})
+            rows.append({"item": ident, "by": by, "at": at, **({"statistic": stat} if stat else {})})
     return {**p, "topic_map": rows}
 
 

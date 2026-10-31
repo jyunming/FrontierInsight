@@ -87,6 +87,34 @@ def test_an_answer_naming_what_the_study_does_not_have_is_asked_again_with_the_r
     assert not out.parts["answers"]["valid"] and "topic_map" not in out.design["protocol"]
 
 
+KNOWN = {**PROTOCOL, "constants": {"peak_true": 30.0},
+         "metrics": [{"id": "algae_peak", "kind": "mean", "estimand": "peak algae count", "unit": "one pond run",
+                      "known_value": {"true_value": "peak_true", "estimate": "algae_peak", "standard_error": "peak_se", "level": 0.95}},
+                     PROTOCOL["metrics"][1]]}
+
+
+def test_a_typed_statistic_is_checked_and_written_into_the_map() -> None:
+    design = {**DESIGN, "protocol": KNOWN}
+    asked = tr.quantities_to_place(REQ, KNOWN)
+    bad = {"answers": {"Q1": {"by": "metric:algae_peak", "statistic": "mean_error"}, "Q2": {"by": "metric:bloom", "statistic": "bias"},
+                       "Q3": {"by": "none"}}}
+    good = {"answers": {"Q1": {"by": "metric:algae_peak", "statistic": "bias"}, "Q2": {"by": "metric:bloom", "statistic": "sd"},
+                        "Q3": {"by": "none"}}}
+    out, seen = _ask(design, [bad, good], asked)
+    assert out.parts["answers"]["valid"] and out.parts["answers"]["asks"] == 2
+    assert "`statistic` must be one of value, bias, sd" in seen[1] and "`bias` needs a result with a known true value" in seen[1]
+    rows = out.design["protocol"]["topic_map"]
+    assert {"item": "Q1", "by": "metric:algae_peak", "at": {}, "statistic": "bias"} in rows
+    assert {"item": "Q2", "by": "metric:bloom", "at": {}, "statistic": "sd"} in rows
+
+
+def test_the_prompt_lists_the_statistics_and_an_answer_without_one_is_the_value() -> None:
+    asked = tr.quantities_to_place(REQ, PROTOCOL)
+    out, seen = _ask(DESIGN, [{"answers": {"Q1": {"by": "metric:algae_peak"}, "Q2": {"by": "metric:bloom"}, "Q3": {"by": "none"}}}], asked)
+    assert "value, bias, sd" in seen[0]
+    assert all("statistic" not in r for r in out.design["protocol"]["topic_map"])
+
+
 def _quest(tmp_path: Path, monkeypatch, topic_map: list[dict[str, Any]]) -> Path:
     (tmp_path / "raw").mkdir(parents=True)
     cells = []
