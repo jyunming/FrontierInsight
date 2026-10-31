@@ -68,11 +68,26 @@ def _overlap(a0: float, a1: float, b0: float, b1: float) -> float:
     return max(0.0, min(a1, b1) - max(a0, b0)) / shorter
 
 
-def _boxes(record: Any) -> list[dict[str, Any]]:
+def blank_panels(record: Any, lines_data: Any) -> set[int]:
+    """The positions of the panels of ``record`` that hold nothing: no line, no shape, no legend and no text on them in
+    the line file (``lines_data``). Such a panel is a place the figure was made with and left unused (a 2 by 2 grid with
+    three plots), so it is not counted as a panel the figure shows. Empty when the line file is missing or does not match."""
+    shown = record.get("axes") if isinstance(record, dict) else None
+    drawn = lines_data.get("axes") if isinstance(lines_data, dict) else None
+    if not isinstance(shown, list) or not isinstance(drawn, list) or len(shown) != len(drawn):
+        return set()
+    return {i for i, (a, b) in enumerate(zip(shown, drawn))
+            if isinstance(a, dict) and isinstance(b, dict) and not b.get("lines") and not b.get("draws_other")
+            and not b.get("legend") and not b.get("has_text") and not a.get("series")}
+
+
+def _boxes(record: Any, skip: set[int] | None = None) -> list[dict[str, Any]]:
     """The distinct panels of a figure record: ``place`` (x, y, width, height in figure coordinates, y up) and a name.
     A twin axis shares its panel's box and is one panel; a small box inside another (an inset) is not a panel."""
     panels: list[dict[str, Any]] = []
-    for ax in (record.get("axes") if isinstance(record, dict) else None) or []:
+    for k, ax in enumerate((record.get("axes") if isinstance(record, dict) else None) or []):
+        if skip and k in skip:
+            continue
         place = ax.get("place") if isinstance(ax, dict) else None
         if not (isinstance(place, list) and len(place) == 4 and all(_num(v) for v in place)):
             continue
@@ -94,11 +109,11 @@ def _boxes(record: Any) -> list[dict[str, Any]]:
     return [p for p in panels if p not in insets]
 
 
-def layout(record: Any) -> dict[str, Any] | None:
+def layout(record: Any, lines_data: Any = None) -> dict[str, Any] | None:
     """``{"panels", "arrangement", "rows", "cols", "names"}`` of a figure record, the panels in reading order (top row
     first, left to right); ``arrangement`` is ``single``, ``side_by_side`` (one row), ``stacked`` (one column) or
     ``grid``. ``None`` when the record holds no panel boxes (an old record), so nothing is said."""
-    panels = _boxes(record)
+    panels = _boxes(record, blank_panels(record, lines_data))
     if not panels:
         return None
     for p in panels:
@@ -132,15 +147,19 @@ def layout(record: Any) -> dict[str, Any] | None:
             "names": [p["name"] for p in order]}
 
 
-def layout_sentence(record: Any) -> str:
-    """A plain sentence for the figure's layout, or ``""`` when the record holds none."""
-    got = layout(record)
+def layout_sentence(record: Any, lines_data: Any = None) -> str:
+    """A plain sentence for the figure's layout, or ``""`` when the record holds none. A blank panel is left out of the
+    count and said once ("... (one more place on the figure is left blank)")."""
+    got = layout(record, lines_data)
     if got is None:
         return ""
     n, names = got["panels"], got["names"]
     count = _NUMBER_WORDS.get(n, str(n))
+    blank = len(blank_panels(record, lines_data))
+    note = (f"; {_NUMBER_WORDS.get(blank, str(blank))} more {'place' if blank == 1 else 'places'} on the figure "
+            f"{'is' if blank == 1 else 'are'} left blank") if blank else ""
     if got["arrangement"] == "single":
-        return "a single panel" + (f' ("{names[0]}")' if names[0] else "")
+        return "a single panel" + (f' ("{names[0]}")' if names[0] else "") + note
     positions = {
         "side_by_side": ["left", "centre", "right"] if n == 3 else ["left", "right"] if n == 2 else [],
         "stacked": ["top", "middle", "bottom"] if n == 3 else ["top", "bottom"] if n == 2 else [],
@@ -160,7 +179,8 @@ def layout_sentence(record: Any) -> str:
             continue
         label = positions[i] if i < len(positions) else f"panel {i + 1}"
         shown.append(f'{label}: "{name}"')
-    return f"{head} ({'; '.join(shown)})" if shown else f"{head} ({tail})"
+    sentence = f"{head} ({'; '.join(shown)})" if shown else f"{head} ({tail})"
+    return sentence + note
 
 
 def styles_drawn(lines_data: Any) -> dict[str, int]:
@@ -226,7 +246,7 @@ def facts(quest_root: Path | str) -> dict[str, str]:
     ``{{figure:<stem>:<kind>}}`` is. A fact the records do not hold is not in it."""
     out: dict[str, str] = {}
     for stem, (record, lines_data) in records_of(quest_root).items():
-        for kind, text in (("layout", layout_sentence(record)), ("lines", lines_sentence(lines_data))):
+        for kind, text in (("layout", layout_sentence(record, lines_data)), ("lines", lines_sentence(lines_data))):
             if text:
                 out[f"{stem}:{kind}"] = text
     return out

@@ -72,3 +72,14 @@ def test_writer_is_given_the_figure_facts(tmp_path):
     # The layout and the line styles are in FI's caption of the figure now, not placeholders the writer types.
     assert "{{figure:" not in section
     assert "in the caption FI writes under it" in section
+
+
+def test_a_grid_with_an_unused_place_states_the_panels_it_draws(tmp_path):
+    """A 2 by 2 grid with three plots: the layout sentence says three panels and one blank place, not four panels."""
+    places = [[0.1, 0.55, 0.35, 0.35], [0.55, 0.55, 0.35, 0.35], [0.1, 0.1, 0.35, 0.35], [0.55, 0.1, 0.35, 0.35]]
+    record = _record(*places, titles=("A", "B", "C", ""))
+    drawn = {"axes": [{"lines": [{"label": "s", "kind": "data", "x": [0, 1], "y": [1, 2]}]} for _ in range(3)]
+             + [{"lines": [], "draws_other": False, "legend": False, "has_text": False}]}
+    assert figure_facts.layout_sentence(record, drawn).startswith("three panels in a grid of 2 rows by 2 columns")
+    assert figure_facts.layout_sentence(record, drawn).endswith("one more place on the figure is left blank")
+    assert figure_facts.layout_sentence(record).startswith("four panels")  # without the line file nothing is known
