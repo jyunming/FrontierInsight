@@ -286,7 +286,7 @@ async def known_answer_values(quest_root: Path, protocol: dict[str, Any] | None,
             thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
             case_env=dict(run_env), in_each_run=_in_run.of_study(protocol), mean_names=_mc_error.mean_names(protocol),
             paired=paired, proportion_names=_mc_error.proportion_names(protocol),
-            repeated=_mc_error.repeats_trials(protocol), log=log, unrun=unrun)
+            repeated=_mc_error.repeats_trials(protocol), log=log, unrun=unrun, protocol=protocol)
     judged = _oracle.judged(oracles, {"checks": checks, "engine_measured": True})
     out: dict[str, dict[str, Any]] = {}
     for j in judged:
@@ -325,7 +325,7 @@ async def _oracle_verdict(quest_root: Path, protocol: dict[str, Any] | None, *, 
             env={**base, "FI_ORACLE": "1", _split_run.RAW_DIR_ENV: _split_run.env_value(raw_dir, quest_root)},
             thresholds=thresholds, in_each_run=_in_run.of_study(protocol), mean_names=_mc_error.mean_names(protocol),
             paired=_mc_error.paired(protocol, quest_root), proportion_names=_mc_error.proportion_names(protocol),
-            repeated=_mc_error.repeats_trials(protocol), log=log)
+            repeated=_mc_error.repeats_trials(protocol), log=log, protocol=protocol)
     except Exception as exc:  # noqa: BLE001 -- a run that cannot start is reported, not raised
         return Verdict("known_answers", None, _one(f"the known-answer checks could not be run ({exc!r})"))
     judged = _oracle.judged(oracles, {"checks": checks, "engine_measured": True})
