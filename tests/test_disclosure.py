@@ -589,3 +589,37 @@ def test_the_number_checks_leave_the_findings_block_out_only_while_it_is_the_eng
     assert "41.7" in disclosure.strip_for_checks(guessed)
     # CRLF files keep the same checksum.
     assert "0.0371" not in disclosure.strip_for_checks(marked.replace("\n", "\r\n"))
+
+
+def _failed_check_quest(root: Path, *, status: str = "went_on_failing", measure: str = "(a_hat - 5) ** 2") -> None:
+    """A made-up study: results a (with a declared standard error), b and c, a derived quantity d computed from a, and one
+    known-answer check whose measure reads a_hat and a_se."""
+    protocol = {
+        "metrics": [{"id": "a", "label": "Quantity A", "role": "result",
+                     "known_value": {"estimate": "a_hat", "standard_error": "a_se", "interval": ["a_lo", "a_hi"]}},
+                    {"id": "b", "label": "Quantity B", "role": "result"}, {"id": "c", "role": "result"}],
+        "derived": [{"id": "d", "label": "Quantity D", "inputs": ["a", "b"]}, {"id": "e", "inputs": ["b"]}],
+        "oracles": [{"name": "a_calibration", "kind": "special_case", "check": "Spread of a is 1 if the model is right. More words.", "expected": 1, "tolerance": 0.3, "measure": measure}],
+    }
+    (root / "needs").mkdir(parents=True, exist_ok=True)
+    (root / "needs" / "FROZEN_PROTOCOL.json").write_text(json.dumps({
+        "schema": "fi.frozen-protocol/v1", "protocol": protocol,
+        "sha256": __import__("core.frozen_protocol", fromlist=["x"]).sha256(protocol)}), encoding="utf-8")
+    (root / "needs" / "ORACLE_CHECK.json").write_text(json.dumps({
+        "status": status, "went_on": [{"name": "a_calibration", "expected": 1, "limit": 0.3, "measured": 3.7,
+                                       "tolerance_mode": "absolute", "by": "automatic"}]}), encoding="utf-8")
+
+
+def test_a_failed_check_names_the_results_that_rest_on_it(tmp_path: Path) -> None:
+    _failed_check_quest(tmp_path)
+    said = disclosure.run_record(tmp_path)
+    assert "a_calibration" not in said and "a_hat" not in said and "measure `" not in said  # plain words, no code or id
+    assert "Spread of a is 1 if the model is right\" failed" in said
+    assert "results Quantity A and Quantity D come from the calculation it checks and are not confirmed" in said
+    assert "Quantity B" not in said  # b and c are not read by the check, and e comes only from b
+    assert said.count("known-answer check") == 1  # once per failed check
+
+
+def test_a_quest_whose_checks_all_passed_gets_no_such_sentence(tmp_path: Path) -> None:
+    _failed_check_quest(tmp_path, status="passed")
+    assert "known-answer check" not in disclosure.run_record(tmp_path)
