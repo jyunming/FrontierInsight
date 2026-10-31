@@ -123,3 +123,20 @@ def test_a_problem_found_on_an_earlier_version_of_the_code_is_said_as_not_checke
     assert "earlier version of the code found this: a seed problem" in note and "not known to be fixed" in note
     items = [p for stage in build(eng.quest_root)["stages"] for p in stage["problems"]["items"]]
     assert any(p["text"] == "a seed problem" and p["status"] == "not checked again after a later repair" for p in items)
+
+
+
+def test_a_failure_seen_on_the_small_copy_is_labelled_as_that_and_the_run_goes_on(tmp_path: Path) -> None:
+    from core.pipeline_gate import FAULT, NOT_CHECKED, SMALL_DATA, GateResult
+
+    assert not sp.may_stop(sp.COPY) and "small copy" in sp.source_words(sp.COPY) and "reading" not in sp.source_words(sp.COPY)
+    eng = _engine(tmp_path)
+    for kind, source in ((SMALL_DATA, sp.COPY), (FAULT, sp.COPY), (NOT_CHECKED, sp.READ)):
+        eng._clear_cannot_repair("gate")
+        eng._gate_standing(GateResult(False, stage="figures", kind=kind, detail="`figure_a` drew nothing from the trial record"))
+        assert [p["source"] for p in eng._cannot_repair_problems()] == [source], kind
+        assert eng._cannot_repair_stop() is None
+    eng._clear_cannot_repair("gate")
+    eng._gate_standing(GateResult(False, stage="figures", kind=SMALL_DATA, detail="`figure_a` drew nothing"))
+    note = eng._run_checks_note()
+    assert "small copy of the results" in note and "FI's reading of the code" not in note

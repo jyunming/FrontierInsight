@@ -474,7 +474,7 @@ async def test_a_kept_result_that_is_not_ok_is_the_baseline_and_is_recorded_for_
     assert await eng._gate_first({}) is None
     assert eng._gate_kept[1].kind == "small_data"  # type: ignore[attr-defined]
     problems = eng._cannot_repair_problems()
-    assert [(p["check"], p["source"]) for p in problems] == [("gate", "read")] and "too few trials" in problems[0]["text"]
+    assert [(p["check"], p["source"]) for p in problems] == [("gate", "copy")] and "too few trials" in problems[0]["text"]
     assert eng._cannot_repair_stop() is None
     # the baseline was not ok, so a fault is not new against it: nothing is refused
     path.write_text(BROKEN_ANALYSIS, encoding="utf-8")

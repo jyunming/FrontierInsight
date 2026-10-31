@@ -885,3 +885,16 @@ def test_the_figure_step_runs_on_a_recorded_quest(tmp_path: Path) -> None:
     code, _printed, record, err = _run(quest)
     assert code == 0, err
     assert record["figures"] == [] and record["figures_said"] == ""  # the plan names no figure FI can draw (declared false)
+
+
+
+def test_the_frame_holds_the_known_value_and_interval_of_each_result_that_has_one() -> None:
+    known = {"estimate": "growth", "interval": ["g_lo", "g_hi"], "level": 0.95, "standard_error": "g_se", "true_value": "base * rate"}
+    design = _design(metrics=[{"id": "growth", "kind": "mean", "role": "result", "known_value": {**known, "true_value": "base"}},
+                              {"id": "alive", "kind": "proportion", "role": "result"},
+                              {"id": "dose_hat", "kind": "mean", "role": "result", "known_value": {**known, "true_value": "dose"}},
+                              {"id": "odd", "kind": "mean", "role": "result", "known_value": {**known, "true_value": "nowhere_to_be_found"}}])
+    plan = af.plan_of(design)
+    assert plan["known"] == {"growth": {"interval": ["g_lo", "g_hi"], "truth": 2.0},
+                             "dose_hat": {"interval": ["g_lo", "g_hi"], "axis": "dose"}}  # a true value that is neither is left out
+    assert "KNOWN = {" in af.derive_source(design)

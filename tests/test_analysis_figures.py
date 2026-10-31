@@ -604,9 +604,13 @@ def test_the_failure_text_survives_what_a_model_may_read_when_a_quantity_is_left
         fig.axes[0].plot([1, 2], [1, 2])
 
     out = _shown(tmp_path, figure_x, table=_real_table(declared=(key,)))
-    assert out["status"] == "failed" and key not in out["said"]
+    first, _nl, listed = out["said"].partition("\n")
+    assert out["status"] == "failed" and key not in first and key in listed  # the declared ids are on a line of their own
     seen = eng._stderr_for_models(af.said([out]))
-    assert "drew nothing from the trial record" in seen and "[FI NOTE]" not in seen
+    # the line that lists the declared results names a left-out quantity and is taken out; the first line, which names the id
+    # that was read, stays
+    assert "drew nothing from the trial record" in seen and "`zzz` is not a result the plan declares" in seen
+    assert "[FI NOTE]" in seen and f"`{key}`" in seen.split("[FI NOTE]")[1] and f"results that can be read: {key}" not in seen
 
 
 def test_a_figure_that_declares_no_result_is_not_checked_and_one_that_declares_results_is(tmp_path):
@@ -644,3 +648,40 @@ def test_a_levels_error_that_names_the_result_is_cut_to_its_type_and_the_line_su
     out = _shown(tmp_path, figure_x, table=table)
     assert out["status"] == "failed" and key not in out["said"] and "raised ValueError." in out["why"]
     assert "drew nothing from the trial record" in eng._stderr_for_models(af.said([out]))
+
+
+def test_an_undeclared_read_names_the_id_and_the_results_that_can_be_read(tmp_path):
+    def figure_x(fig, table):
+        try:
+            table.values("r1_lo", "a=1")  # the interval end of a result: FI's record holds it, the plan does not declare it
+        except Exception:
+            pass
+        fig.axes[0].plot([1, 2], [1, 2])
+
+    out = _shown(tmp_path, figure_x, table=_real_table(declared=("r1", "r2")))
+    assert out["status"] == "failed"
+    assert "The last read raised UnknownResult: `r1_lo` is not a result the plan declares." in out["why"]
+    assert "The results that can be read: r1, r2." in out["why"]
+
+
+def test_a_known_result_is_read_by_its_coverage_from_the_record(tmp_path):
+    from core import frame_table, skeleton
+
+    sys.modules["fi_table"] = frame_table
+    ns: dict[str, Any] = {"fi_table": frame_table}
+    exec(compile(skeleton.RUNTIME, "fi_frame.py", "exec"), ns)  # noqa: S102 -- FI's own runtime text
+    two = {"values": [0.0, 1.0, 2.0, 3.0], "trials": [0, 1, 2, 3]}
+    cells = [{"cell": {"s": 1}, "key": "s=1", "planned": 4, "ok": 4, "failed": 0, "metrics": {"est": two}},
+             {"cell": {"s": 1, "m": "a"}, "key": "s=1,m=a", "level": {"m": "a"},
+              "metrics": {"lo": {"values": [0.0, 1.0, 1.0, 9.0], "trials": [0, 1, 2, 3]},
+                          "hi": {"values": [2.0, 3.0, 1.5, 9.5], "trials": [0, 1, 2, 3]}}},
+             {"cell": {"s": 1, "m": "b"}, "key": "s=1,m=b", "level": {"m": "b"},
+              "metrics": {"lo": {"values": [0.0, 1.0], "trials": [0, 2]}, "hi": {"values": [5.0], "trials": [0]}}}]
+    table = ns["Table"](cells, ["est", "other"], known={"est": {"interval": ["lo", "hi"], "truth": 1.2}})
+    assert table.coverage("est", "s=1", m="a") == [1.0, 1.0, 1.0, 0.0]  # the truth 1.2 is inside the first three intervals only
+    assert table.coverage("est", "s=1", m="b") == [1.0, 0.0]  # trial 2 reported no upper end: a miss, not left out
+    assert table.coverage("est", "s=1", m="c") == [] and "est" in table.gave_values
+    with pytest.raises(ns["UnknownResult"], match="no true value and interval"):
+        table.coverage("other", "s=1", m="a")
+    with pytest.raises(ns["UnknownResult"], match="`zzz` is not a result the plan declares"):
+        table.coverage("zzz", "s=1")

@@ -33,6 +33,7 @@ import contextlib
 import json
 import math
 import os
+import re
 import traceback
 from typing import Any
 
@@ -165,29 +166,34 @@ def _folder(out_dir: str) -> dict[str, tuple[int, int]]:
     return seen
 
 
-def _last_read_error(table: Any) -> str:
-    """The most recent exception a read of the table raised, cut to its type and first clause (an ``UnknownResult`` lists the
-    declared results, so only its type is kept: this text must not name a result)."""
+def _last_read_error(table: Any) -> tuple[str, str]:
+    """The most recent exception a read of the table raised: ``(what, which results can be read)``. An ``UnknownResult`` keeps the
+    id that was read (``g_lo`` is not a result the plan declares) and, apart from it, the ids the plan declares, so a repair
+    knows which name to change. A ``ValueError`` or ``KeyError`` of a read names a result in its text: only the type is kept."""
     errors = getattr(table, "last_error", None)
     last = list(errors.values())[-1] if isinstance(errors, dict) and errors else ""
     if last.startswith("UnknownResult"):
-        return "UnknownResult: a result the plan does not declare"
-    if last.startswith(("ValueError", "KeyError")):  # `levels` names the result in its ValueError: only the type is kept
-        return last.split(":", 1)[0]
-    return last[:240]
+        kind, _colon, said = last.partition(": ")
+        said = said[1:-1] if len(said) > 1 and said[0] == said[-1] and said[0] in "'\"" else said  # a KeyError shows its text quoted
+        head, tail = (re.split(r"; the (?:declared results|results with one) are: ", said, maxsplit=1) + [""])[:2]  # FI's own message
+        return f"{kind}: {head}"[:240], ("The results that can be read: %s." % tail.strip()[:600]) if tail.strip() else ""
+    if last.startswith(("ValueError", "KeyError")):
+        return last.split(":", 1)[0], ""
+    return last[:240], ""
 
 
 def _drew_nothing(spec: dict[str, Any], table: Any) -> str:
     """Why a figure drew nothing from the trial record (``""`` when some read of a result gave data, or when the table does not
-    record its reads). FI's table notes each read that returned data, so this reads no text of the body. It names no result:
-    the line goes to a model, and a line naming a left-out quantity is taken out of what a model reads."""
+    record its reads). FI's table notes each read that returned data, so this reads no text of the body. When the last read
+    was of an id the plan does not declare, the id and the declared ones are said, on a line of their own (a line that names a
+    quantity a run left out is taken out of what a model reads, and the first line must survive that)."""
     gave = getattr(table, "gave_values", None)
     shows = spec.get("shows")
     if not isinstance(gave, (set, frozenset)) or gave or not shows or not isinstance(shows, (list, tuple)):
         return ""  # a figure that declares no result draws what it says it draws (a layout, a reference curve): not checked
     text = "`figure_%s` drew nothing from the trial record: no read of a result returned a value." % spec.get("id")
-    err = _last_read_error(table)
-    return text + (" The last read raised %s." % err if err else "")
+    err, readable = _last_read_error(table)
+    return text + (" The last read raised %s." % err.rstrip(".") if err else "") + ("\n" + readable if readable else "")
 
 
 def _draw_one(spec: dict[str, Any], body: Any, table: Any, out_dir: str) -> dict[str, Any]:

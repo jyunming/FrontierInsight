@@ -53,6 +53,7 @@ from typing import Any
 from . import analysis_figures as _figures
 from . import contract as _contract
 from . import function_steps as _steps
+from . import metric_spec as _metric_spec
 from . import reference_values as _reference_values
 from . import skeleton as _skeleton
 
@@ -78,7 +79,7 @@ END = "# <<< FI analysis frame"
 _BEGIN = re.compile(r"# >>> FI analysis frame, version (\d+): written by FI from the plan; a repair does not change it")
 #: The names the frame binds once; a second binding outside the marked part changes what ``experiment.py`` reads.
 FRAME_NAMES = frozenset({"ANALYSIS_VERSION", "RESULTS", "ROLES", "KINDS", "AFTERWARDS", "PAIRED", "DERIVED", "REFERENCES", "HELD", "FIXED",
-                         "COMPARED", "PARTS", "FIGURES", "SEARCH", "Table", "Figure", "NotYet", "Missing", "UnknownResult", "fi_frame"})
+                         "COMPARED", "PARTS", "KNOWN", "FIGURES", "SEARCH", "Table", "Figure", "NotYet", "Missing", "UnknownResult", "fi_frame"})
 #: A body's parameters, by the kind of body.
 SIGNATURES = {"derive": ["table"], "reference": ["setting"], "figure": ["fig", "table"]}
 _BODY_PREFIXES = tuple(f"{k}_" for k in SIGNATURES)
@@ -133,10 +134,27 @@ def plan_of(design: dict[str, Any]) -> dict[str, Any]:
         "fixed": _reference_values.analysis_inputs(protocol),
         "compared": {str(k): list(v) for k, v in c.settings.in_each_run.items()},
         "parts": {str(s.get("name")): dict(s.get("hold") or {}) for s in c.settings.sub_studies if s.get("name")},
+        "known": _known_values(protocol, c),
         "search": c.search is not None,
         "figures": {f.id: {"file": f.file, "shows": list(f.shows), "x": f.x, "series": f.series, "panels": f.panels}
                     for f in c.figures if f.declared},
     }
+
+
+def _known_values(protocol: dict[str, Any], c: Any) -> dict[str, dict[str, Any]]:
+    """The results whose true value and interval the plan declares (``known_value``), for ``Table.coverage``: the two ends of the
+    interval, and the true value as a number or as the setting's own axis. Nothing is guessed: a true value that is neither
+    is left out, and so is the result."""
+    fixed = _metric_spec.fixed_numbers(protocol)
+    axes = {str(k) for part in ("grid", "in_each_run") if isinstance(protocol.get(part), dict) for k in protocol[part]}
+    out = {}
+    for r in c.results:
+        kv = r.known_value if isinstance(r.known_value, dict) else {}
+        ends, truth = kv.get("interval"), kv.get("true_value")
+        number = _metric_spec.fixed_value(truth, fixed)
+        if isinstance(ends, (list, tuple)) and len(ends) == 2 and (number is not None or truth in axes):
+            out[r.id] = {"interval": [str(e) for e in ends], **({"truth": number} if number is not None else {"axis": str(truth)})}
+    return out
 
 
 def body_names(plan: dict[str, Any]) -> list[str]:
@@ -168,6 +186,7 @@ def _frame_text(plan: dict[str, Any]) -> str:
         f"FIXED = {_literal(plan['fixed'])}  # the numbers a formula may name besides a setting's own values\n"
         f"COMPARED = {_literal(plan['compared'])}  # what each run compares inside it\n"
         f"PARTS = {_literal(plan['parts'])}  # the sub-studies and the settings each holds\n"
+        f"KNOWN = {_literal(plan['known'])}  # results with a true value and an interval: `table.coverage` counts how often it holds the truth\n"
         f"FIGURES = {_literal(plan['figures'])}\n"
         f"SEARCH = {bool(plan['search'])!r}  # a search for the best design: FI draws its own figures from its record\n"
         f"{END}\n")
@@ -1318,7 +1337,7 @@ def run(record_path, quest_root):
     readable = list(derive.RESULTS) + list(derive.AFTERWARDS)
     first = Table(cells, readable)
     table = Table(cells, readable, _references(first, base, notes),
-                  {name: first.at(**hold) for name, hold in derive.PARTS.items()})
+                  {name: first.at(**hold) for name, hold in derive.PARTS.items()}, getattr(derive, "KNOWN", {}))
     compared = {k: list(v) for k, v in derive.COMPARED.items()}
     records = _derived(table, base, compared)
     _progress("fi: printing the results")
