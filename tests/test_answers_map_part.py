@@ -126,14 +126,14 @@ def test_a_map_without_at_or_comparisons_is_read_as_before(tmp_path, monkeypatch
     assert "- peak algae (the plan's map: `algae_peak`): {{v:algae_peak @ nutrient=each, temp=each | range}}" in pf.answers_text(root)
 
 
-def test_the_plans_seed_policy_follows_the_recorded_base_seed_and_never_replaces_it(tmp_path, monkeypatch) -> None:
+def test_a_study_run_through_the_deterministic_entry_says_no_seed_was_passed_otherwise_the_recorded_base_seed(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(pf._run_facts, "seed_verdict", lambda root: {"verdict": pf._run_facts.UNKNOWN})
     monkeypatch.setattr(pf._disclosure, "recorded_seeds", lambda root: (0, frozenset()))
-    monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: {"seed_policy": "Deterministic study; no seeds are used."})
-    monkeypatch.setattr(pf, "_trial_counts", lambda root: ("1", "3", "0"))
-    said = pf._seed_text(tmp_path)
-    assert said.startswith("a seed passed to each trial, derived from base seed 0 (FI could not tell")
-    assert said.endswith("the plan's seed policy reads: \"Deterministic study; no seeds are used\"")
-    monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: {})  # no policy: the sentence is as before
+    monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: {"seed_policy": "A constant base_seed of 99 is used."})
+    (tmp_path / "code").mkdir()
+    study = tmp_path / "code" / "study.json"
+    study.write_text(json.dumps({"entry": "run_trial", "base_seed": 0}), encoding="utf-8")
     assert pf._seed_text(tmp_path) == ("a seed passed to each trial, derived from base seed 0 "
-                                       "(FI could not tell from the code whether the simulation uses it)")
+                                       "(FI could not tell from the code whether the simulation uses it)")  # the plan's prose is not quoted
+    study.write_text(json.dumps({"entry": "run_cell", "base_seed": 0}), encoding="utf-8")
+    assert pf._seed_text(tmp_path) == "none (each setting ran once with no random numbers; FI passed no seed)"

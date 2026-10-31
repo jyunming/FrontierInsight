@@ -926,6 +926,10 @@ def _plain(seconds: float) -> str:
 
 def _seed_text(root: Path) -> str:
     """What ``{{seed}}`` says: the seed the code used, from the code's own reading (:func:`core.run_facts.seed_verdict`)."""
+    study = _read(root, "code/study.json")
+    if isinstance(study, dict) and study.get("entry") == "run_cell":
+        # FI ran the study through the code's deterministic entry: one run for each setting, and no seed passed to it.
+        return "none (each setting ran once with no random numbers; FI passed no seed)"
     verdict = _run_facts.seed_verdict(root)
     state = verdict.get("verdict")
     if state == _run_facts.NO_ENTRY:
@@ -937,10 +941,7 @@ def _seed_text(root: Path) -> str:
     if state == _run_facts.UNKNOWN:
         base, _trial = _disclosure.recorded_seeds(root)
         said = f"a seed passed to each trial, derived from base seed {base}" if base is not None else "a seed passed to each trial"
-        # The plan's own words on how it seeds follow the recorded seed, which is never replaced by them.
-        policy = " ".join(str((plan_protocol(root) or {}).get("seed_policy") or "").split())[:300].rstrip(" .")
-        return (f"{said} (FI could not tell from the code whether the simulation uses it)"
-                + (f"; the plan's seed policy reads: \"{policy}\"" if policy else ""))
+        return f"{said} (FI could not tell from the code whether the simulation uses it)"
     driving = [d for d in verdict.get("driving_seeds") or [] if isinstance(d, dict)]
     if state == _run_facts.PARTLY:
         # Both are true and both drive the trials: FI's per-trial seed and a number typed into the code.
