@@ -20913,6 +20913,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                                 + str(history[-1].get("patch_summary") or ""))[:400]
                 return {**spent, "exec_reflect_iter": iters + bump, "exec_reflect_history": history}
         self._gate_commit(state)  # kept: the analysis gate's baseline
+        if getattr(self, "_code_runs", None) is not None:  # the commit of this repair says why (from this record)
+            _tail = [ln.strip() for ln in str(exec_result.get("stderr_tail", "")).splitlines() if ln.strip()]
+            _fault = str(exec_result.get("directive") or "") or (_tail[-1] if _tail else "") or (
+                str(overlaps[0]) if overlaps else "")
+            self._code_runs.describe(_changelog.detail(
+                stage="execute_reflect", attempt=attempt_no, fault=_fault,
+                functions=_changelog.changed_functions(script_code, new_code), patch=patch_summary))
         self._last_ledger_id = self._record(_attempts.LEDGER, lambda: {
             "kind": "repair", "script": code_path.name, "attempt": attempt_no,
             "parent_sha256": parent_sha, "sha256": _attempts._sha(new_code.encode("utf-8")),

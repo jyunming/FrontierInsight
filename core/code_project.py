@@ -820,7 +820,7 @@ def _git(code_dir: Path, *args: str, stdin: str | None = None, env_extra: dict[s
 
 
 def record_change(quest_root: Path, note: str, *, category: str = "changed", results: str | None = None,
-                  undo_pending: str | None = None, log: Any = None) -> bool:
+                  undo_pending: str | None = None, why: list[str] | None = None, log: Any = None) -> bool:
     """One commit in ``code/``'s own git history, and one entry in ``code/CHANGELOG.md``, when the folder changed since
     the last one (your own edits included). Returns whether it made a commit (a change to CHANGELOG.md alone is
     committed with no entry about itself). Best effort; without git it says so.
@@ -829,7 +829,8 @@ def record_change(quest_root: Path, note: str, *, category: str = "changed", res
     to ``README.md`` alone is always ``tidied``. ``results`` is the entry's "Did the results change" line when it is
     known now (:mod:`core.changelog`); without it the line says "not measured yet" until :func:`fill_pending`.
     ``undo_pending``: this change puts back a version that ran before, so every earlier entry still waiting for its run
-    says it was not measured, and why."""
+    says it was not measured, and why. ``why``: the lines :func:`core.changelog.detail` makes (the step, the fault, the
+    functions changed, the repair's summary); they are the body of the commit message and sit in the entry."""
     import shutil
     import subprocess
     import time
@@ -884,7 +885,7 @@ def record_change(quest_root: Path, note: str, *, category: str = "changed", res
         if _changelog.documentation_only(changed_files):
             kind, line = "tidied", _changelog.documentation_line(changed_files)
         entry = (f"{_changelog.heading(time.strftime('%Y-%m-%d %H:%M'), kind, note)}\n\n"
-                 f"Files: {names or 'none'}\n\n{line}\n\n")
+                 f"Files: {names or 'none'}\n\n" + ("\n".join(f"- {w}" for w in why) + "\n\n" if why else "") + f"{line}\n\n")
         changelog = code_dir / "CHANGELOG.md"
         before = changelog.read_bytes() if changelog.is_file() else None
         head = before.decode("utf-8") if before is not None else _changelog.HEADER
@@ -892,7 +893,7 @@ def record_change(quest_root: Path, note: str, *, category: str = "changed", res
             head = head.replace(_changelog.PENDING, _changelog.not_measured(undo_pending))
         changelog.write_bytes((head + entry).encode("utf-8"))
         _git(code_dir, "add", "-A")
-        done = _git(code_dir, "commit", "-q", "-m", note)
+        done = _git(code_dir, "commit", "-q", "-m", _changelog.message(note, why))
         if done.returncode != 0:
             _git(code_dir, "reset", "-q")
             if before is None:
@@ -1030,6 +1031,7 @@ class CodeRuns:
         self._lock = asyncio.Lock()
         self._seen: Any = None
         self._held = 0
+        self._why: list[str] | None = None
 
     def held(self) -> Any:
         import contextlib
@@ -1043,6 +1045,10 @@ class CodeRuns:
                 self._held -= 1
         return hold()
 
+    def describe(self, why: list[str]) -> None:
+        """Why the code changed (:func:`core.changelog.detail`), for the commit the next run makes of it."""
+        self._why = why or None
+
     async def before_run(self) -> None:
         import asyncio
 
@@ -1052,6 +1058,7 @@ class CodeRuns:
         try:
             async with self._lock:  # settings that start at once commit once
                 now = await asyncio.to_thread(_fingerprint, code_dir)
+                why, self._why = self._why, None
                 if now is None or now == self._seen:
                     return
                 step = (self._node() if callable(self._node) else "") or "a check"
@@ -1061,7 +1068,7 @@ class CodeRuns:
                     # index keeps every entry, whatever happens to the commit after).
                     await asyncio.to_thread(_git, code_dir, "add", "--renormalize", "--", ".")
                 await asyncio.to_thread(record_change, self.quest_root, f"the code as it ran ({step})",
-                                        category="changed", log=self._log)
+                                        category="changed", why=why, log=self._log)
                 # Seen only once code/ is committed: a commit git could not make now (a lock left for a moment) is
                 # tried again before the next run.
                 _commit, dirty = await asyncio.to_thread(head, self.quest_root)
@@ -1126,7 +1133,7 @@ def fill_pending(quest_root: Path, line: str, *, together: bool = True, log: Any
         changelog.write_bytes(text.replace(_changelog.PENDING, filled).encode("utf-8"))
         # Only CHANGELOG.md is committed: anything else changed in code/ is left for the next recorded change.
         _git(code_dir, "add", "--", "CHANGELOG.md")
-        done = _git(code_dir, "commit", "-q", "-m", "CHANGELOG: whether the results changed, from the run that followed",
+        done = _git(code_dir, "commit", "-q", "-m", _changelog.message("CHANGELOG: whether the results changed, from the run that followed", [filled]),
                     "--", "CHANGELOG.md")
         if done.returncode != 0:
             changelog.write_bytes(before)
