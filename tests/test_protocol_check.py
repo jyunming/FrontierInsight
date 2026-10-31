@@ -515,3 +515,26 @@ def test_the_plans_fewest_runs_in_the_analysis_is_not_a_different_run_count() ->
     assert [m.kind for m in other] == ["runs"], "a count the plan does not give is still a difference"
     same = pc.check(protocol, {"experiment.py": "C_VALUES = [1.0, 2.0]\nN_RUNS = 10\n"})
     assert [m.kind for m in same] == ["runs"], "only a floor on the runs may hold the plan's fewest runs"
+
+
+_FRAME_SCRIPT = (
+    "def run_trial(cell, trial_id, seed):\n    return {}\n\n"
+    "CHECK_TRIALS = 20  # an extra cross-check on the first trials only\n"
+)
+
+
+def test_under_the_trial_contract_no_name_in_the_script_is_read_as_the_runs_per_setting() -> None:
+    """FI runs the planned trials of every setting itself, so a cross-check's count named ``..._TRIALS`` is not a
+    run count (a live quest was sent to repair for ``CURVE_FIT_TRIALS = 20`` beside 1000 runs per setting)."""
+    proto = {"runs_per_setting": 1000}
+    assert pc.check(proto, {"simulate.py": _FRAME_SCRIPT}) == []
+    # a real grid difference is still found under the same contract
+    proto = {"runs_per_setting": 1000, "grid": {"dose": [1.0, 2.0, 3.0]}}
+    found = pc.check(proto, {"simulate.py": _FRAME_SCRIPT + "DOSE_VALUES = [1.0, 2.0]\n"})
+    assert [m.kind for m in found] == ["grid"]
+
+
+def test_without_the_trial_contract_a_wrong_trial_count_is_still_found() -> None:
+    plain = _FRAME_SCRIPT.replace("def run_trial(", "def trial_fn(")
+    found = pc.check({"runs_per_setting": 1000}, {"simulate.py": plain})
+    assert [(m.kind, m.found) for m in found] == [("runs", [20.0])]

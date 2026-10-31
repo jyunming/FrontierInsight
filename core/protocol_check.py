@@ -481,8 +481,8 @@ def check(protocol: dict[str, Any] | None, scripts: dict[str, str], *, analysis_
 
     Under the trial contract (simulate.py defines ``run_trial`` or ``run_cell``) FI itself hands the simulation every
     setting of the grid, runs ``runs_per_setting`` trials of each and gives the analysis the protocol's thresholds, so
-    none of those has to appear in the scripts: a script that names a different grid or run count is still a
-    contradiction, a script that names none is not.
+    none of those has to appear in the scripts: a script that names a different grid is still a
+    contradiction, a script that names none is not (the run count is FI's own fact there: not read from the script).
 
     Under that contract a ``for`` loop over literals in the ANALYSIS script is not read as the grid (``analysis_loops``
     reads it again): the analysis runs nothing of the grid, it only reads FI's record, and a loop there is a computation
@@ -522,7 +522,11 @@ def check(protocol: dict[str, Any] | None, scripts: dict[str, str], *, analysis_
                 out.append(Mismatch("grid", str(axis), want, [], "", absent, part=part))
 
     runs = protocol.get("runs_per_setting")
-    if isinstance(runs, (int, float)) and not isinstance(runs, bool):
+    # Under the trial contract FI runs the trials itself (core/trial_runner.py plans `runs_per_setting` per cell) and
+    # counts, after the run, how many ran against how many were planned (core/run_manifest.py): a number the script
+    # holds under a name that looks like a run count (a cross-check on the first trials only) is not the runs per
+    # setting, so no name is read as one.
+    if not fi_runs_trials and isinstance(runs, (int, float)) and not isinstance(runs, bool):
         # A count of zero runs is never a design: it is where a tally starts (a live quest's oracle check had
         # ``n_runs = 0`` ... ``n_runs += 2``, and was stopped as "the script sets 0 runs per setting"). Only zero is
         # skipped, not every name the script adds to (a real setting that is also incremented somewhere is still read),
