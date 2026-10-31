@@ -204,6 +204,18 @@ def _figure_holds(design: dict[str, Any]) -> tuple[list[str], list[str], list[st
             sorted(k for k in c.settings.varied() if len(values.get(k, ())) <= 1))
 
 
+def _record_reads(design: dict[str, Any]) -> list[str]:
+    """What FI's record of the trials holds, for the figures part: the frame's own reads, with this plan's facts (what each run
+    compares inside it, the results that change with it, the results with a true value and an interval)."""
+    from . import analysis_frame as _frame
+
+    protocol = {**design["protocol"], "form": "contract"}
+    c = _contract.from_design({**design, "protocol": protocol}, fi_analysis=True)
+    compared = {k: list(v) for k, v in c.settings.in_each_run.items()}
+    per_level = {r.id: [k for k in compared if k in (r.depends_on or ())] for r in c.results if set(r.depends_on or ()) & set(compared)}
+    return _skeleton.table_reads(compared, per_level, [r.id for r in c.results if r.id in _frame._known_values(protocol, c)])
+
+
 def _figures_prompt(templates: dict[str, string.Template], design: dict[str, Any], faults: dict[str, str],
                     problems: list[str], last: str) -> str:
     lines, settings, _single = _figure_holds(design)
@@ -211,7 +223,7 @@ def _figures_prompt(templates: dict[str, string.Template], design: dict[str, Any
         figures="\n".join(f"- {name}: {text}" for name, text in faults.items()), shows="\n".join(lines) or "- (nothing)",
         settings=", ".join(settings) or "(the study varies no setting)", max_panels=_contract.MAX_PANELS,
         method=_short(design.get("method")), again=_problems_text(problems, last),
-        record="\n".join(_skeleton.table_reads()), per_trial=", ".join(_per_trial(design)) or "(none)")
+        record="\n".join(_record_reads(design)), per_trial=", ".join(_per_trial(design)) or "(none)")
 
 
 def _check_figures(value: Any, asked: dict[str, str], design: dict[str, Any]) -> list[str]:

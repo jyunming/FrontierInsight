@@ -639,10 +639,16 @@ BODY_EXAMPLE = '''def trial(cell, ctx):
 TABLE_READS = ("values", "trials", "mean", "interval", "n", "failed")
 
 
-def table_reads() -> list[str]:
+def table_reads(compared: dict[str, Any] | None = None, per_level: dict[str, list[str]] | None = None,
+                coverage: list[str] | None = None) -> list[str]:
     """What the analysis can read from FI's record of the trials, one line per read: its signature and the first sentence of its
     docstring, taken from the ``Table`` class of the frame's runtime (:data:`RUNTIME`), so the lines cannot differ from what
-    the frame serves. The model that decides which figures can be drawn is told these lines."""
+    the frame serves. The model that decides which figures can be drawn is told these lines.
+
+    The plan's own facts add two lines, each only when the plan has the fact: ``compared`` (what each run compares inside it,
+    ``{setting: values}``) with ``per_level`` (each result that changes with some of it, and which) says those results are recorded for each value
+    and how to read them; ``coverage`` (the results the plan gives a true value and an interval) says ``table.coverage`` serves
+    them."""
     tree = ast.parse(RUNTIME)
     table = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Table")
     methods = {n.name: n for n in table.body if isinstance(n, ast.FunctionDef)}
@@ -655,6 +661,20 @@ def table_reads() -> list[str]:
         args = ", ".join(a.arg for a in fn.args.args[1:])
         first = re.split(r"(?<=[.;]) ", doc, maxsplit=1)[0].rstrip(".;").replace("``", "`")
         lines.append(f"- `table.{name}({args})`: {first}")
+    levels = {str(k): [str(x) for x in v] for k, v in (compared or {}).items()}
+    groups: dict[tuple[str, ...], list[str]] = {}
+    for rid, factors in (per_level or {}).items():
+        if factors:
+            groups.setdefault(tuple(factors), []).append(rid)
+    for factors, ids in groups.items():
+        what = ", ".join(f"`{k}` ({', '.join(levels.get(k, []))})" for k in factors)
+        lines.append(f"- {', '.join('`%s`' % r for r in ids)}: compared inside each run, so recorded for each value of {what}, not once "
+                     "for the setting (`table.values` does not read it): `table.level_rows(name, key)` gives every trial's values "
+                     "for each value, `table.level_means(name, key)` their means.")
+    if coverage:
+        used = sorted({f for r in coverage for f in (per_level or {}).get(r, ())})
+        lines.append("- `table.coverage(name, key%s)`: 1.0 or 0.0 for each trial whose reported interval holds the true value, for %s; "
+                     "the mean is the coverage." % ("".join(f", {f}=value" for f in used), ", ".join("`%s`" % r for r in coverage)))
     return lines
 
 
