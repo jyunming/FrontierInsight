@@ -11,6 +11,7 @@ What a figure may show (the numbers the study reports and the quantities worked 
 $shows
 
 A figure's x axis (`x`, required) and what it draws as separate lines or groups (`series`, a different setting, or null) are settings of the study that take more than one value. They may be: $settings
+A figure may instead use as `x` one of the numbers every trial returns ($per_trial), when everything it `shows` is such a number too: it then draws each trial's pair of values (a scatter of one number against another, a point for each trial of a setting).
 A figure has at most $max_panels panel(s).
 
 How the study measures (from your plan):

@@ -234,13 +234,20 @@ class StudyContract(_Strict):
             unknown = [s for s in f.shows if s not in set(ids)]
             if unknown:
                 raise ValueError(f"figure `{f.id}` shows {', '.join(unknown)}, which are not declared")
-            for axis in (f.x, f.series):
-                if axis is not None and axis not in settings:
-                    raise ValueError(f"figure `{f.id}` uses `{axis}`, which is not a varied setting")
+            if f.series is not None and f.series not in settings:
+                raise ValueError(f"figure `{f.id}` uses `{f.series}`, which is not a varied setting")
+            if f.x is not None and f.x not in settings:
+                # a result every trial returns may be the x axis: the figure then plots each trial's pair of values
+                if f.x not in self.per_trial_ids() or not set(f.shows) <= set(self.per_trial_ids()):
+                    raise ValueError(f"figure `{f.id}` uses `{f.x}`, which is not a varied setting")
         p = self.budget.precision
         if p is not None and p.target not in set(ids):
             raise ValueError(f"the precision target `{p.target}` is not a declared result or comparison")
         return self
+
+    def per_trial_ids(self) -> list[str]:
+        """The results every trial returns (``returned: each_run``): the record holds each trial's value of each."""
+        return [r.id for r in self.results if r.returned == "each_run"]
 
     def result(self, name: str) -> Result | None:
         return next((r for r in self.results if r.id == name), None)

@@ -181,6 +181,12 @@ def figure_faults(design: dict[str, Any]) -> dict[str, str]:
     return out
 
 
+def _per_trial(design: dict[str, Any]) -> list[str]:
+    """The results every trial returns: a figure may use one as its ``x`` (each trial's pair of values is drawn)."""
+    c = _contract.from_design({**design, "protocol": {**design["protocol"], "form": "contract"}}, fi_analysis=True)
+    return c.per_trial_ids()
+
+
 def _figure_holds(design: dict[str, Any]) -> tuple[list[str], list[str], list[str]]:
     """``(lines, settings, single)``: what a figure may show, one line each (a reported number or a quantity worked out from
     them: the analysis's table serves nothing else), the settings with more than one value, which a figure may use as ``x`` or
@@ -200,7 +206,7 @@ def _figures_prompt(templates: dict[str, string.Template], design: dict[str, Any
         figures="\n".join(f"- {name}: {text}" for name, text in faults.items()), shows="\n".join(lines) or "- (nothing)",
         settings=", ".join(settings) or "(the study varies no setting)", max_panels=_contract.MAX_PANELS,
         method=_short(design.get("method")), again=_problems_text(problems, last),
-        record="\n".join(_skeleton.table_reads()))
+        record="\n".join(_skeleton.table_reads()), per_trial=", ".join(_per_trial(design)) or "(none)")
 
 
 def _check_figures(value: Any, asked: dict[str, str], design: dict[str, Any]) -> list[str]:
@@ -210,6 +216,7 @@ def _check_figures(value: Any, asked: dict[str, str], design: dict[str, Any]) ->
     if not isinstance(value, dict):
         return ["the answer for `figures` must be a mapping"]
     lines, settings, single = _figure_holds(design)
+    per_trial = _per_trial(design)
     ids = [line[2:].split(":")[0] for line in lines]
     out: list[str] = []
     for name in asked:
@@ -229,6 +236,8 @@ def _check_figures(value: Any, asked: dict[str, str], design: dict[str, Any]) ->
             used = row.get(axis)
             if axis == "x" and used in (None, ""):
                 out.append(f"`{name}`: `x` is the setting the figure is drawn along ({', '.join(settings) or 'none'})")
+            elif axis == "x" and used in per_trial and not [s for s in row.get("shows") or [] if s not in per_trial]:
+                continue  # a result every trial returns, drawn against the results it is paired with
             elif used not in (None, "") and used not in settings:
                 why = "has one value in the study" if used in single else "is not a setting of the study"
                 out.append(f"`{name}`: `{axis}` is `{used}`, which {why} (the settings to use are {', '.join(settings) or 'none'})")

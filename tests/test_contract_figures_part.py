@@ -476,3 +476,21 @@ def test_the_figures_prompt_tells_what_the_trial_record_holds_from_the_frames_ow
     assert "$record" not in prompt
     assert all(line in prompt for line in reads)
     assert prompt.index(reads[0]) < prompt.index("pond_pairs.png")
+
+
+def test_a_figure_may_use_a_result_every_trial_returns_as_its_x_and_nothing_else() -> None:
+    import asyncio
+
+    ok = {"figures": {**GOOD["figures"], "pond_pairs.png": {"shows": ["bloom"], "x": "algae_peak", "series": "temp", "panels": 1}}}
+    planned = [*PLANNED, "pond_pairs.png (peak against bloom, a point for each trial)"]
+    design = _copy(figures_planned=planned)
+    fake = Fake(roles=[ROLES], comparisons=[COMPARE], figures=[ok])
+    out = asyncio.run(run(fake, design))
+    assert out.parts["figures"]["valid"], out.parts["figures"]["problems"]
+    assert "every trial returns (algae_peak, bloom)" in fake.prompts[-1][1]
+    # a worked-out quantity on an axis, or a result that is not returned in each run, is still refused
+    asked = {"pond_pairs.png": "x"}
+    row = ok["figures"]["pond_pairs.png"]
+    assert cp._check_figures({"pond_pairs.png": row}, asked, out.design) == []
+    for bad in ({**row, "x": "salinity"}, {**row, "shows": ["algae_peak"], "x": "algae_peak", "series": "algae_peak"}):
+        assert cp._check_figures({"pond_pairs.png": bad}, asked, out.design)
