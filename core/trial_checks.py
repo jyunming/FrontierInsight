@@ -66,6 +66,7 @@ from statistics import NormalDist
 from typing import Any, Iterable
 
 from . import metric_spec as _metric_spec
+from .frame_table import hits as _table_hits
 from . import stats as _stats
 
 #: A setting where more than this share of the trials failed is a fault (its numbers rest on the trials that survived).
@@ -712,6 +713,30 @@ def _judge_ratio(q: "Quantity", per: list[tuple[Any, ...]]) -> None:
         q.detects_from = min(floors)
 
 
+_OWN = "_own_metrics"  # in a record :func:`_with_main` completed: the names it held itself
+
+
+def _own_here(cell: dict[str, Any], names: Iterable[Any]) -> bool:
+    """Whether ``cell`` holds any of ``names`` itself (a record :func:`_with_main` did not complete holds all it has)."""
+    own = cell.get(_OWN)
+    return own is None or any(n in own for n in names)
+
+
+def _with_main(cells: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """``cells`` where each record kept for a value a run compares inside it (``level``) also holds what its setting's own record
+    holds under the names it lacks: the record keeps the estimate with the setting and the standard error and interval ends
+    with each value compared, and the two are one setting's numbers for each trial. Nothing else changes."""
+    mains = {json.dumps(c.get("cell") or {}, sort_keys=True, default=str): c for c in cells if not c.get("level")}
+    out = []
+    for c in cells:
+        level = c.get("level")
+        main = mains.get(json.dumps({a: v for a, v in (c.get("cell") or {}).items() if a not in (level or {})}, sort_keys=True,
+                                    default=str)) if isinstance(level, dict) else None
+        out.append({**c, "metrics": {**(main.get("metrics") or {}), **(c.get("metrics") or {})}, _OWN: set(c.get("metrics") or {})}
+                   if main is not None else c)
+    return out
+
+
 def _cell_hits(cell: dict[str, Any], kv: dict[str, Any], truth: float) -> tuple[dict[int, float], dict[int, float], list[float]]:
     """``(estimates, standard errors, hits)`` of one setting for a declared known value: each trial's estimate and standard
     error by trial, and 1/0 per trial for whether the interval the trial reports (the declared two ends) covers ``truth``.
@@ -729,9 +754,7 @@ def _cell_hits(cell: dict[str, Any], kv: dict[str, Any], truth: float) -> tuple[
     held = cell.get("metrics") or {}
     if not ends or not all(n in held for n in [kv["estimate"], *ends]):
         return e, s, []
-    lo, hi = _series(cell, ends[0]), _series(cell, ends[1])
-    hits = [1.0 if i in lo and i in hi and lo[i] <= truth <= hi[i] else 0.0 for i in sorted(_ran(cell))]
-    return e, s, hits
+    return e, s, _table_hits(held, ends, truth) or []
 
 
 def _draw_weights(cells: list[dict[str, Any]], protocol: dict[str, Any] | None, quest_root: Path | str | None,
@@ -775,6 +798,7 @@ def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = N
     """What the trials' intervals and standard errors say against the true values the plan declares (see the module's
     notes). Only the protocol's ``known_value`` declarations are read."""
     out = Calibration()
+    cells = _with_main(cells)
     protocol = protocol if isinstance(protocol, dict) else {}
     # What the plan fixes by name: its constants and thresholds (the true value of a study is among them).
     thresholds = _metric_spec.fixed_numbers(protocol, thresholds)
@@ -827,10 +851,11 @@ def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = N
         ratio_per: list[tuple[Any, ...]] = []
         bias_per: list[tuple[Any, ...]] = []
         empty_per: list[tuple[str, int, int]] = []
-        judged_cells = [c for c in cells if (t0 := _truth_of(truth, c, thresholds)) is not None
+        mine = [c for c in cells if _own_here(c, [est, spread, *(ends or [])])]  # a completed record counts for what it holds itself
+        judged_cells = [c for c in mine if (t0 := _truth_of(truth, c, thresholds)) is not None
                         and not _undefined_here(spec.get("undefined_when") or {}, c) and est in (c.get("metrics") or {})]
         draw_weights = _draw_weights(judged_cells, protocol, quest_root, ledger)
-        for c in cells:
+        for c in mine:
             key = str(c.get("key"))
             t = _truth_of(truth, c, thresholds)
             if t is None or _undefined_here(spec.get("undefined_when") or {}, c) or est not in (c.get("metrics") or {}):
@@ -839,8 +864,9 @@ def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = N
             w = (draw_weights or {}).get(key)
             ran = _ran(c)
             cover_per.append((key, hits, [w.get(i, 1.0) for i in sorted(ran)] if w and hits else None))
-            bias_per.append((key, list(e.values()), t, _share(w, e)))
-            empty_per.append((key, len(ran), len(ran - set(e))))
+            if _own_here(c, [est]):  # the estimate is judged where the record keeps it, not again with each value compared
+                bias_per.append((key, list(e.values()), t, _share(w, e)))
+                empty_per.append((key, len(ran), len(ran - set(e))))
             if ratio is not None:
                 used = [i for i in e if i in s and s[i] >= 0]
                 ratio_per.append((key, [e[i] for i in used], [s[i] for i in used], _share(w, used)))

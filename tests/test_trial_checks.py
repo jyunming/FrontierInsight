@@ -630,3 +630,33 @@ def test_the_unit_a_series_was_rounded_to_is_read_from_the_values():
     assert tc._grain([1.25, 3.5, 0.75]) == 0.01 and tc._grain([1.0, 4.0]) == 1.0
     assert tc._grain([0.1234, 0.5678]) == 1e-4
     assert tc._grain([0.123456789012345, 0.5]) == 0.0
+
+
+def _split_record(shift: float) -> list[dict]:
+    """The record the engine keeps when a run compares values inside it: the estimate with the setting, the standard error and the
+    interval ends with each value compared (their own records, no estimate)."""
+    rng = random.Random(7)
+    out = []
+    for i in range(4):
+        est = [5.0 + rng.gauss(0, 1) for _ in range(100)]
+        trials = list(range(100))
+        out.append({"key": f"s{i}", "cell": {"s": i}, "planned": 100, "failed": 0, "metrics": {"x_hat": {"values": est, "trials": trials}}})
+        for level in ("a", "b"):
+            out.append({"key": f"s{i},m={level}", "cell": {"s": i, "m": level}, "level": {"m": level},
+                        "metrics": {"x_se": {"values": [1.0] * 100, "trials": trials},
+                                    "x_lo": {"values": [x + shift - 1.96 for x in est], "trials": trials},
+                                    "x_hi": {"values": [x + shift + 1.96 for x in est], "trials": trials}}})
+    return out
+
+
+def test_the_estimate_and_the_interval_are_paired_where_the_record_keeps_them():
+    proto = _proto(known("x_hat", 5.0, se="x_se", interval=("x_lo", "x_hi")))
+    right = tc.calibration(_split_record(0.0), proto)  # the interval is the estimate's own: calibrated
+    assert not right.not_checked and not right.faults
+    assert {q.kind for q in right.quantities} == {"coverage", "se_ratio", "bias"}
+    cover = next(q for q in right.quantities if q.kind == "coverage")
+    assert cover.judged == 8 and 0.9 < cover.pooled.value <= 1.0  # judged at each value compared, from the one estimate
+    bias = next(q for q in right.quantities if q.kind == "bias")
+    assert bias.judged == 4  # the estimate is judged once, where the record keeps it
+    wrong = tc.calibration(_split_record(3.0), proto)  # an interval 3 off the estimate: a planted fault
+    assert "coverage" in {q.kind for q in wrong.faults}

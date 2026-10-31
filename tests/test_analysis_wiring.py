@@ -462,8 +462,8 @@ PINS_AT_811719AF = {
     # the frame's own text (written only with the frame on): its RESULTS comment, its trial docstring and the refusal message
     # changed with the one list of names a trial may return (core/skeleton.py returnable_names); it was "ad084c60d61b9dde"
     # and again when the seeds of a setting moved from an environment variable to a file (FI_TRIAL_SEEDS_FILE); it was "5b45d638db4dcd2c"
-    # and again with the table's `coverage` read of a result's interval; it was "b61961f03c91d396"
-    "run_framed": "72b131f2d72db4e5",
+    # and again with the table's `coverage` read of a result's interval; it was "b61961f03c91d396" (the pairing of an interval with its trials moved to frame_table.hits)
+    "run_framed": "2f47766490c0aa72",
 }
 
 

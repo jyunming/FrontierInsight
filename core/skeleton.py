@@ -457,16 +457,8 @@ class Table:
             truth = spec.get("truth", (c.get("cell") or {}).get(spec.get("axis")))
             if not fi_table.finite(truth):
                 continue
-            metrics = c.get("metrics") or {}
-            if not all(end in metrics for end in spec["interval"]):
-                continue  # this record does not hold the interval (a value compared inside a run may be kept in its own records only)
-            ends = []
-            for end in spec["interval"]:
-                m = metrics.get(end) if isinstance(metrics.get(end), dict) else {}
-                raw = m.get("values") or []
-                ends.append({t: float(v) for t, v in zip(m.get("trials") or range(len(raw)), raw) if fi_table.finite(v)})
-            ran = {t for m in metrics.values() if isinstance(m, dict) for t in (m.get("trials") or []) if isinstance(t, int)}
-            out += [1.0 if i in ends[0] and i in ends[1] and ends[0][i] <= truth <= ends[1][i] else 0.0 for i in sorted(ran)]
+            got = fi_table.hits(c.get("metrics") or {}, spec["interval"], truth)  # None: this record does not hold the interval
+            out += got or []
         return self._gave(name, out)
 
     def failed(self, key):
