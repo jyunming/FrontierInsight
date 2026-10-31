@@ -1196,6 +1196,22 @@ def _clean(o):
     return o
 
 
+def _coverage_of(table, rid, key, row, out_levels):
+    """FI's own count of how often the interval the trials reported holds the true value the plan gives, printed as
+    ``<id>_coverage`` beside the result (for each compared value under its own record key). It is FI's record, so it stands
+    whether or not a function of the study's reads it, and whatever a figure of the study's does."""
+    if table.per_level(rid, key):
+        for _text, c in table._level_cells(rid, key):
+            hits = table.coverage(rid, key, **c["level"])
+            if hits:
+                out_levels.setdefault(table._key_of(c), {}).setdefault(rid + "_coverage", sum(hits) / len(hits))
+        return
+    hits = table.coverage(rid, key)
+    if hits:
+        # a result of the study's own under this name keeps its value: FI's count is added beside it, never over it
+        row.setdefault(rid + "_coverage", sum(hits) / len(hits))
+
+
 def result_json(table, records, compared):
     """RESULT_JSON in the shape the analysis has always been asked for: one mapping per setting, keyed like ``a=1,b=2``, with each
     result under its own name beside ``<name>_values`` (and ``_count`` / ``_total`` for a proportion, ``_pair_id`` for a paired
@@ -1232,6 +1248,11 @@ def result_json(table, records, compared):
                     row[rid + "_undefined"] = undefined
             except Exception as e:  # noqa: BLE001 -- one result's shape never stops the others
                 why[rid] = "FI could not print it at %s: %s: %s" % (key, type(e).__name__, e)
+        for rid in getattr(derive, "KNOWN", {}):
+            try:
+                _coverage_of(table, rid, key, row, out_levels)
+            except Exception as e:  # noqa: BLE001 -- one coverage never stops the others
+                why[rid + "_coverage"] = "FI could not count it at %s: %s: %s" % (key, type(e).__name__, e)
         failed = table.failed(key)
         if failed:
             row["n_failed"] = failed
