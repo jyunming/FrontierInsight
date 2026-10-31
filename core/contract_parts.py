@@ -204,6 +204,23 @@ def _figure_holds(design: dict[str, Any]) -> tuple[list[str], list[str], list[st
             sorted(k for k in c.settings.varied() if len(values.get(k, ())) <= 1))
 
 
+def _named_results(design: dict[str, Any]) -> dict[str, str]:
+    """The numbers the plan itself says the study returns for each setting (its ``named_results`` answered ``result``) that no
+    declared result or derived quantity carries: a figure may show one, and FI then declares it (:func:`_apply_figures`)."""
+    p = design.get("protocol") or {}
+    have = {str(m.get("id")) for key in ("metrics", "derived") for m in p.get(key) or [] if isinstance(m, dict)}
+    return {str(n["id"]): _short(n.get("what") or n["id"], 160) for n in p.get("named_results") or []
+            if isinstance(n, dict) and n.get("id") and n.get("answer") == "result" and str(n["id"]) not in have}
+
+
+def _drawable(design: dict[str, Any]) -> list[str]:
+    """What FI's own record offers a figure to show, along a setting that takes more than one value: the declared results and
+    derived quantities and the numbers the plan names as returned. Empty when the study varies nothing or reports nothing; only
+    then is a figure one nobody can draw. A model's word that a figure cannot be drawn is never what decides it."""
+    lines, settings, _single = _figure_holds(design)
+    return [line[2:].split(":")[0] for line in lines] + list(_named_results(design)) if settings else []
+
+
 def _record_reads(design: dict[str, Any]) -> list[str]:
     """What FI's record of the trials holds, for the figures part: the frame's own reads, with this plan's facts (what each run
     compares inside it, the results that change with it, the results with a true value and an interval)."""
@@ -220,7 +237,9 @@ def _figures_prompt(templates: dict[str, string.Template], design: dict[str, Any
                     problems: list[str], last: str) -> str:
     lines, settings, _single = _figure_holds(design)
     return templates["plan_figures"].substitute(
-        figures="\n".join(f"- {name}: {text}" for name, text in faults.items()), shows="\n".join(lines) or "- (nothing)",
+        figures="\n".join(f"- {name}: {text}" for name, text in faults.items()),
+        shows="\n".join([*lines, *(f"- {j}: {w} (the plan names it as returned for each setting; FI declares it if a figure shows it)"
+                                   for j, w in _named_results(design).items())]) or "- (nothing)",
         settings=", ".join(settings) or "(the study varies no setting)", max_panels=_contract.MAX_PANELS,
         method=_short(design.get("method")), again=_problems_text(problems, last),
         record="\n".join(_record_reads(design)), per_trial=", ".join(_per_trial(design)) or "(none)")
@@ -234,7 +253,8 @@ def _check_figures(value: Any, asked: dict[str, str], design: dict[str, Any]) ->
         return ["the answer for `figures` must be a mapping"]
     lines, settings, single = _figure_holds(design)
     per_trial = _per_trial(design)
-    ids = [line[2:].split(":")[0] for line in lines]
+    named = _named_results(design)
+    ids = [line[2:].split(":")[0] for line in lines] + list(named)
     out: list[str] = []
     for name in asked:
         row = value.get(name)
@@ -242,6 +262,9 @@ def _check_figures(value: Any, asked: dict[str, str], design: dict[str, Any]) ->
             out.append(f"`{name}` is not answered")
             continue
         if row.get("drop") is True:
+            if _drawable(design):
+                out.append(f"`{name}`: FI does not drop a figure on a model's word; the study gives numbers to draw along "
+                           f"{', '.join(settings)} ({', '.join(ids)}). Say which of them the figure shows, or the closest")
             continue
         shows = row.get("shows")
         if not isinstance(shows, list) or not shows or not all(isinstance(s, str) for s in shows):
@@ -278,7 +301,22 @@ def _apply_figures(p: dict[str, Any], design: dict[str, Any], answer: dict[str, 
         decls[name] = ({"drop": True, "why": _short(row.get("why"), 300)} if row.get("drop") is True else
                        {"shows": list(row["shows"]), "x": row.get("x") or None, "series": row.get("series") or None,
                         "panels": row.get("panels", 1)})
-    return {**p, "figure_declarations": decls}
+    # A number the plan names as returned for each setting, which a figure now shows, is declared as a result of the study,
+    # computed afterwards by the study's own function (so no run is required to return it), along the settings the figure draws.
+    named = _named_results({**design, "protocol": p})
+    shown = [i for name in asked if answer[name].get("drop") is not True for i in answer[name]["shows"] if i in named]
+    if not shown:
+        return {**p, "figure_declarations": decls}
+    metrics = list(p.get("metrics") or [])
+    _lines, many, few = _figure_holds(design)
+    for ident in dict.fromkeys(shown):
+        along = list(dict.fromkeys(a for name in asked if ident in (answer[name].get("shows") or [])
+                                   for a in (answer[name].get("x"), answer[name].get("series")) if a in (*many, *few)))
+        metrics.append({"id": ident, "kind": "mean", "estimand": named[ident], "unit": "one setting", "role": "result",
+                        "depends_on": along, "returned": "afterwards"})
+    left = [n for n in p.get("named_results") or [] if not (isinstance(n, dict) and n.get("id") in shown)]
+    return {**{k: v for k, v in p.items() if k != "named_results"}, "metrics": metrics, **({"named_results": left} if left else {}),
+            "figure_declarations": decls}
 
 
 def _answers_prompt(templates: dict[str, string.Template], design: dict[str, Any], asked: dict[str, dict[str, str]],

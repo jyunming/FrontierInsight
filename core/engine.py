@@ -7884,9 +7884,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         async def ask(prompt: str) -> str:
             return await self._chat(prompt, node="plan_contract")
 
+        # After the freeze no result can be added, so the numbers the plan only names are not offered to a figure (nor declared)
+        named = protocol.get("named_results") if frozen is not None else None
+        shown = {**design, "protocol": {k: v for k, v in protocol.items() if k != "named_results"}} if named else design
         try:
-            out = await _contract_parts.ask_parts(design, ask, lambda t: _parse_json_lenient(t, node="plan_contract"),
+            out = await _contract_parts.ask_parts(shown, ask, lambda t: _parse_json_lenient(t, node="plan_contract"),
                                                   self._prompts, fi_analysis=True, only=("figures",))
+            if named:
+                out.design = {**out.design, "protocol": {**out.design["protocol"], "named_results": named}}
         except Exception:  # noqa: BLE001 -- the redesign goes on with its figures undeclared
             self._log.warning("[design] the figures of the redesign could not be asked about", exc_info=True)
             return design

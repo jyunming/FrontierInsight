@@ -128,13 +128,75 @@ async def test_each_fault_of_an_answer_is_named() -> None:
     assert "`pond_gap.png` is not answered" in text and "`extra.png` was not asked about" in text
 
 
+def _nothing_varies() -> dict[str, Any]:
+    """The pond study with one value of each setting: no number can be drawn along a setting."""
+    d = _copy()
+    d["protocol"]["grid"] = {"nutrient": [2], "temp": [10]}
+    return d
+
+
 @pytest.mark.asyncio
-async def test_a_figure_that_cannot_be_drawn_may_be_dropped_and_is_said() -> None:
-    answer = {"figures": {**GOOD["figures"], "pond_gap.png": {"drop": True, "why": "the interval is not reported"}}}
-    out = await run(Fake(roles=[ROLES], comparisons=[COMPARE], figures=[answer]))
+async def test_a_figure_is_dropped_and_said_only_when_the_study_has_nothing_to_draw_along() -> None:
+    drop = {"drop": True, "why": "the study varies nothing"}
+    answer = {"figures": {n: drop for n in ("pond_peak.png", "pond_bloom.png", "pond_gap.png")}}
+    roles = {"results": {k: {**v, "depends_on": []} for k, v in ROLES["results"].items()}}
+    out = await run(Fake(roles=[roles], comparisons=[{"comparisons": []}], figures=[answer]), _nothing_varies())
+    assert contract.from_design(out.design, fi_analysis=True).figures == () and out.parts["figures"]["valid"]
+    assert any("pond_gap.png" in n and "the study varies nothing" in n for n in out.notes)
+
+
+@pytest.mark.asyncio
+async def test_a_model_cannot_drop_a_figure_while_the_study_has_numbers_to_draw() -> None:
+    """The failure: a model said three figures could not be drawn although the study reports numbers along its settings; FI
+    took them out and the paper had none. A drop is refused, the model is told what the study reports, and the answer that
+    says what each figure shows is kept."""
+    drop = {"drop": True, "why": "the interval is not reported"}
+    answer = {"figures": {**GOOD["figures"], "pond_gap.png": drop}}
+    fake = Fake(roles=[ROLES], comparisons=[COMPARE], figures=[answer, GOOD])
+    out = await run(fake)
+    assert fake.asked("figures") == 2 and "does not drop a figure on a model's word" in fake.prompts[-1][1]
     c = contract.from_design(out.design, fi_analysis=True)
-    assert [f.file for f in c.figures] == ["pond_peak.png", "pond_bloom.png"] and out.parts["figures"]["valid"]
-    assert any("pond_gap.png" in n and "the interval is not reported" in n for n in out.notes)
+    assert [(f.file, f.declared) for f in c.figures] == [("pond_peak.png", True), ("pond_bloom.png", True), ("pond_gap.png", True)]
+    assert not any("cannot be drawn" in n for n in out.notes)
+
+
+@pytest.mark.asyncio
+async def test_a_model_that_keeps_dropping_leaves_the_figures_in_the_plan_by_name_and_says_so() -> None:
+    drop = {"drop": True, "why": "no"}
+    answer = {"figures": {n: drop for n in ("pond_peak.png", "pond_bloom.png", "pond_gap.png")}}
+    fake = Fake(roles=[ROLES], comparisons=[COMPARE], figures=[answer] * cp.MAX_ASKS)
+    out = await run(fake)
+    c = contract.from_design(out.design, fi_analysis=True)
+    assert [f.file.split(" (")[0] for f in c.figures] == ["pond_peak.png", "pond_bloom.png", "pond_gap.png"]
+    assert [f.declared for f in c.figures] == [False] * 3 and any("only by file name" in g for g in c.gaps)
+
+
+NAMED = [{"id": "bloom_days", "answer": "result", "what": "days of bloom in a run"},
+         {"id": "peak_ratio", "answer": "result", "what": "peak algae against the start"},
+         {"id": "growth_theory", "answer": "reference", "equation": "E1"}]
+
+
+@pytest.mark.asyncio
+async def test_a_number_the_plan_names_as_returned_is_declared_when_a_figure_shows_it() -> None:
+    """The plan said its study returns `bloom_days` and `peak_ratio` for each setting but did not list them among its numbers, so
+    no figure could show them and a model dropped the figures. Now the figure may show one and FI declares it as a result."""
+    d = _copy()
+    d["protocol"]["named_results"] = json.loads(json.dumps(NAMED))
+    answer = {"figures": {
+        "pond_peak.png": {"shows": ["peak_ratio"], "x": "temp", "series": "nutrient", "panels": 1},
+        "pond_bloom.png": {"shows": ["bloom_days", "bloom"], "x": "nutrient", "series": None, "panels": 1},
+        "pond_gap.png": {"drop": True, "why": "needs a number the study does not report"}}}
+    fake = Fake(roles=[ROLES], comparisons=[COMPARE], figures=[answer, {"figures": {**answer["figures"], "pond_gap.png": {
+        "shows": ["algae_peak"], "x": "temp", "series": None, "panels": 1}}}])
+    out = await run(fake, d)
+    assert "- bloom_days: days of bloom in a run (the plan names it as returned" in fake.prompts[-1][1]
+    c = contract.from_design(out.design, fi_analysis=True)
+    assert [f.file for f in c.figures] == ["pond_peak.png", "pond_bloom.png", "pond_gap.png"] and all(f.declared for f in c.figures)
+    got = {r.id: r for r in c.results}
+    assert got["peak_ratio"].returned == "afterwards" and got["peak_ratio"].depends_on == ("temp", "nutrient")
+    assert got["bloom_days"].role == "result" and got["bloom_days"].depends_on == ("nutrient",)
+    assert [n["id"] for n in out.design["protocol"]["named_results"]] == ["growth_theory"]  # only what a figure shows is declared
+    assert out.form == "contract" and not any("left out" in g for g in c.gaps)
 
 
 @pytest.mark.asyncio
@@ -273,7 +335,7 @@ async def test_a_redesign_whose_old_declaration_no_longer_fits_has_that_figure_a
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     asked: list[str] = []
-    again = {"figures": {"pond_peak.png": {"drop": True, "why": "it needs the setting that is gone"},
+    again = {"figures": {"pond_peak.png": {"shows": ["algae_peak"], "x": "nutrient", "series": None, "panels": 1},
                          "pond_bloom.png": {"shows": ["bloom"], "x": "nutrient", "series": None, "panels": 1}}}
     engine = _redesign_engine(tmp_path, monkeypatch, asked, again)
     state = {"design": {}, "iteration": 1}
@@ -283,7 +345,8 @@ async def test_a_redesign_whose_old_declaration_no_longer_fits_has_that_figure_a
     design = await engine._ask_figures_of_a_redesign(state, design)
     assert len(asked) == 1 and "- pond_peak.png:" in asked[0] and "- pond_bloom.png:" in asked[0]
     c = contract.from_design(design, fi_analysis=True)
-    assert [f.file for f in c.figures] == ["pond_bloom.png"] and c.figures[0].declared and c.figures[0].x == "nutrient"
+    assert [f.file for f in c.figures] == ["pond_peak.png", "pond_bloom.png"] and all(f.declared for f in c.figures)
+    assert c.figures[0].x == "nutrient" and c.figures[0].series is None  # the old declaration used `temp`, which is gone
 
 
 @pytest.mark.asyncio
@@ -531,3 +594,22 @@ def _skeleton_reads() -> list[str]:
     from core import skeleton
 
     return skeleton.table_reads()
+
+
+@pytest.mark.asyncio
+async def test_after_the_freeze_a_figure_is_not_offered_a_number_the_plan_only_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The frozen protocol cannot gain a result, so a redesign's figure is not offered one; the names stay in the plan."""
+    from core import frozen_protocol as _frozen
+
+    asked: list[str] = []
+    engine = _redesign_engine(tmp_path, monkeypatch, asked, {"figures": {"pond_new.png": {
+        "shows": ["bloom"], "x": "temp", "series": None, "panels": 1}}})
+    monkeypatch.setattr(_frozen, "protocol_of", lambda root: _planned_protocol())
+    redraft = _redraft(figures_planned=["pond_new.png (bloom against temp)"])
+    redraft["protocol"].update(form="contract", named_results=json.loads(json.dumps(NAMED)))
+    design = await engine._ask_figures_of_a_redesign({"design": {}, "iteration": 1}, redraft)
+    assert asked and "bloom_days" not in asked[0]
+    assert [n["id"] for n in design["protocol"]["named_results"]] == ["bloom_days", "peak_ratio", "growth_theory"]
+    assert [m["id"] for m in design["protocol"]["metrics"]] == ["algae_peak", "bloom"]

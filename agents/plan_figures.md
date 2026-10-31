@@ -2,7 +2,7 @@ You wrote the plan for a simulation study. It names the figures below only by fi
 
 What FI's record of the trials holds, which a figure is drawn from (each reported number below, not a quantity worked out from them, has the value of every trial, not only a summary):
 $record
-A figure is dropped only when it needs something this record and the numbers below do not hold.
+Answer every figure with what it shows. FI itself decides whether a figure can be drawn, from the numbers below: it does not take a figure out on your word while the study reports numbers to draw.
 
 The figures, each with what the plan says about it:
 $figures
@@ -19,5 +19,5 @@ $method
 $again
 Answer with one JSON object and nothing else, one entry for each figure above, under its file name exactly as written:
 {"figures": {"<file name>": {"shows": ["<number>"], "x": "<setting>", "series": "<setting or null>", "panels": 1}}}
-A figure that cannot be drawn from the numbers above (it needs something the study does not report) is answered:
+Only when the study reports no number to draw and varies no setting, answer a figure:
 {"figures": {"<file name>": {"drop": true, "why": "<one sentence>"}}}
