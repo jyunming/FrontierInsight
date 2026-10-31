@@ -196,10 +196,20 @@ def per_setting_precision(quest_root: Path, metric: str, target: float) -> dict[
             "widest_setting": widest_at, "without_interval": without, "without_value": no_value}
 
 
+def _constant_everywhere(shown: list[dict[str, Any]]) -> bool:
+    """Whether a value is one number in every trial of every setting. A setting with one trial cannot show that on its
+    own (one number is always "constant"), so when every setting has one trial (a deterministic study) the settings must
+    also all give the same number; when some setting has several trials, those decide."""
+    several = [s for s in shown if s["n"] > 1]
+    if several:
+        return all(s["constant"] for s in several)
+    return len({s["mean"] for s in shown}) == 1
+
+
 def kept_values(summarised: list[dict[str, Any]], hide: Any = ()) -> list[str]:
     """The value names the table reports, in the order they first appear: not a trial index, not one number in every
-    trial of every setting (a setting echoed back, a constant), and not a name in ``hide`` (the names a plan in the contract
-    form lets a trial return that are not its results: :func:`core.skeleton.diagnostic_names`)."""
+    trial of every setting (a constant; see :func:`_constant_everywhere`), and not a name in ``hide`` (the names a plan in
+    the contract form lets a trial return that are not its results: :func:`core.skeleton.diagnostic_names`)."""
     hidden = set(hide)
     by_metric: dict[str, list[dict[str, Any]]] = {}
     for c in summarised:
@@ -213,7 +223,7 @@ def kept_values(summarised: list[dict[str, Any]], hide: Any = ()) -> list[str]:
         if not shown:  # no setting gave a number: kept only when the table can say why (not run / no finite value)
             if any(s.get("status") for s in per_cell):
                 out.append(name)
-        elif not all(s["index"] for s in shown) and not all(s["constant"] for s in shown):
+        elif not all(s["index"] for s in shown) and not _constant_everywhere(shown):
             out.append(name)
     return out
 

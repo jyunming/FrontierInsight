@@ -526,7 +526,7 @@ def build(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, fil
                 mean = summary["mean"]
                 cells += [str(summary["n"]), format_pm(mean, lower, upper) + _missing_text(summary)]
                 if not binary:
-                    cells.append(_sig(summary["sd"]))
+                    cells.append(_sig(summary["sd"]) if int(summary["n"]) > 1 else "")  # one trial has no spread
                 verdict = comparison(kind, ref, mean, lower, upper, int(summary["n"]))
             else:
                 if summary and summary.get("status") == _trial_table.NOT_RUN:
