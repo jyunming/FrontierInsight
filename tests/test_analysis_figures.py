@@ -738,3 +738,21 @@ def test_a_panel_declared_for_a_setting_or_value_the_study_does_not_have_is_refu
     assert out[0]["status"] == "failed" and "UnknownSetting" in out[0]["why"] and "size = 20, 200" in out[0]["why"] and "kind = a, b" in out[0]["why"]
     ok = af.run_figures([dict(spec, id="g2", file="g2.png")], _namespace(figure_g2=lambda fig, table: [a.plot([1, 2]) for a in fig.axes] and fig.panel(1, size=200)), _Table(), str(tmp_path))
     assert ok[0]["status"] == "ok" and ok[0]["panels"][0]["title"] == "size = 200".replace("size", "Colony size")
+
+
+def test_a_figure_that_draws_nothing_is_its_own_failure_and_the_others_are_still_saved(tmp_path) -> None:
+    class Tbl:
+        def __init__(self):
+            self.gave_values = set()
+
+    def empty(fig, table):
+        fig.axes[0].axvline(1.0)  # a reference line only: no read of a result gave data
+
+    def fine(fig, table):
+        fig.axes[0].plot([0, 1], [0, 1])
+        table.gave_values.add("g")
+
+    specs = [{"id": "a", "file": "a.png", "shows": ["g"], "panels": 1}, {"id": "b", "file": "b.png", "shows": ["g"], "panels": 1}]
+    out = af.run_figures(specs, _namespace(figure_a=empty, figure_b=fine), Tbl(), str(tmp_path))
+    assert [o["status"] for o in out] == ["failed", "ok"]
+    assert (tmp_path / "b.png").is_file() and not (tmp_path / "a.png").exists()

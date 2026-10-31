@@ -1048,6 +1048,9 @@ def _formula(item, table, base, done):
             if n in values:
                 continue
             if n in results:
+                if table.per_level(n, key):
+                    why = "`%s` is recorded for each value compared inside the runs, not once for this setting" % n
+                    break
                 mean = table.mean(n, key)
                 used.add(n)
                 if mean is None:
@@ -1188,7 +1191,7 @@ def result_json(table, records, compared):
         row = {}
         for rid in derive.RESULTS:
             try:
-                vals = table.values(rid, key)
+                vals = [] if table.per_level(rid, key) else table.values(rid, key)
                 if vals:
                     seen.add(rid)
                     row[rid] = table.mean(rid, key)
@@ -1207,7 +1210,7 @@ def result_json(table, records, compared):
                             lrow = out_levels.setdefault(rkey, {})
                             lrow[rid] = got.get(text)
                             lrow[rid + "_values"] = vals
-                undefined = table.undefined(rid, key)
+                undefined = 0 if table.per_level(rid, key) else table.undefined(rid, key)
                 if undefined:
                     seen.add(rid)
                     row[rid + "_undefined"] = undefined

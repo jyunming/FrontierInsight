@@ -438,3 +438,26 @@ def test_level_rows_give_the_trials_behind_each_compared_value_under_its_record_
     assert t.level_rows("growth", "rate=0.2,dose=1") == []
     with pytest.raises(TypeError, match="list of settings"):
         t.level_rows("growth", [key])
+
+
+def test_a_read_of_a_result_recorded_per_compared_value_says_so_instead_of_returning_nothing() -> None:
+    base = {"rate": 0.1, "dose": 1}
+    cells = _colony() + [_level_cell(base, {"soil": "dry"}, [1.0, 3.0]), _level_cell(base, {"soil": "wet"}, [2.0, 4.0])]
+    for c in cells[:4]:
+        c["metrics"].pop("alive", None)
+    cells[0]["metrics"].pop("growth")  # growth is recorded under the compared values at this setting, not for the setting itself
+    t = _table(cells)
+    key = "rate=0.1,dose=1"
+    for read in (lambda: t.values("growth", key), lambda: t.mean("growth", key), lambda: t.n("growth", key),
+                 lambda: t.interval("growth", key), lambda: t.trials("growth", key), lambda: t.undefined("growth", key)):
+        with pytest.raises(KeyError) as e:
+            read()
+        said = str(e.value)
+        assert "`soil`" in said and "dry, wet" in said and "level_rows('growth', key)" in said
+    assert t.per_level("growth", key) == ["dry", "wet"]
+    # known positives: a result recorded once for the setting reads as before, and the per-value reads give the values
+    assert t.per_level("growth", "rate=0.2,dose=1") == []
+    assert t.values("growth", "rate=0.2,dose=1") == [1.25, 1.75, 2.25, 2.75, 3.25]
+    assert [v for _k, _t, v in t.level_rows("growth", key)] == [[1.0, 3.0], [2.0, 4.0]]
+    # a result no cell holds at all is still an empty read (nothing to say about a level)
+    assert t.values("alive", key) == []

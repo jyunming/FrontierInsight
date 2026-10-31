@@ -414,8 +414,22 @@ class Table:
         """The setting named ``key``: ``{axis: value}``."""
         return dict(self._cell(key).get("cell") or {})
 
+    def per_level(self, name, key):
+        """The values (or combinations) the runs of setting ``key`` compared inside them that ``name`` is recorded under, as
+        ``level_means`` names them; ``[]`` for a result recorded once for the setting (or not at all)."""
+        self._cell(key)
+        return [text for text, _c in self._level_cells(name, key)]
+
     def _metric(self, name, key):
-        return self._cell(key)["metrics"].get(name)
+        got = self._cell(key)["metrics"].get(name)
+        if got is None:
+            texts = self.per_level(name, key)
+            if texts:  # recorded for each compared value, none for the setting as a whole: an empty answer would say nothing happened
+                factors = ", ".join("`%s`" % a for a in sorted({a for _t, c in self._level_cells(name, key) for a in c["level"]}))
+                raise UnknownResult("`%s` is recorded for each value of %s (%s), not once for setting %s: read it with "
+                                    "`table.level_rows(%r, key)` (the record key, the value and the trials' values of each) or "
+                                    "`table.level_means(%r, key)`" % (name, factors, ", ".join(texts), key, name, name))
+        return got
 
     @_noting
     def values(self, name, key):

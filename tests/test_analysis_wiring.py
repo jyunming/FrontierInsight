@@ -465,7 +465,8 @@ PINS_AT_811719AF = {
     # and again when the frame began to note whether a trial drew random numbers (Ctx records `drew`, VERSION 4); it was "b61961f03c91d396"
     # and again with the table's `coverage` read of a result's interval (the pairing of an interval with its trials in frame_table.hits)
     # and again when FI's result_json also prints each compared value's trials (Table.level_rows)
-    "run_framed": "edc62a31e304a785",
+    # and again when a read of a result recorded per compared value says so (Table.per_level); it was "edc62a31e304a785"
+    "run_framed": "1212760587b97257",
 }
 
 
