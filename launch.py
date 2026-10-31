@@ -3275,21 +3275,33 @@ async def _run_generators(
             pdf = written.get(key)
             if pdf is None or output_kind in carried:
                 continue
-            if kind in redo:
-                # A redone slide that checks worse than before is put back on its own (restore_pages).
-                extra = {"restore_pages": restore_slides_pages} if kind == "slides" else {}
-                report = await check_and_redo(
-                    cfg, kind, Path(pdf), art.quest_root, redo[kind], supervisor=supervisor, **extra,
-                )
-            else:
-                report = await check_pdf(cfg, kind, Path(pdf), art.quest_root, supervisor=supervisor)
-            print(f"[FI] visual check {kind}: {_visual_check_line(report)}")
+            try:
+                if kind in redo:
+                    # A redone slide that checks worse than before is put back on its own (restore_pages).
+                    extra = {"restore_pages": restore_slides_pages} if kind == "slides" else {}
+                    report = await check_and_redo(
+                        cfg, kind, Path(pdf), art.quest_root, redo[kind], supervisor=supervisor, **extra,
+                    )
+                else:
+                    report = await check_pdf(cfg, kind, Path(pdf), art.quest_root, supervisor=supervisor)
+                print(f"[FI] visual check {kind}: {_visual_check_line(report)}")
+            except Exception as e:  # a check that broke must not cost the other outputs or the summary
+                logging.getLogger("frontier_insight").warning("visual check of the %s failed: %r", kind, e)
+                print(f"[FI] visual check of the {kind} failed: {e!r}", file=sys.stderr)
+                if on_failure is not None:
+                    on_failure(f"visual check ({kind})", e)
         # The pptx comes from the same slides.md, so a slides redo already
         # remade it; it is checked once, as the redo left it.
         pptx = written.get("slides_pptx")
         if pptx is not None and "slides" not in carried:
-            report = await check_pptx(cfg, Path(pptx), art.quest_root, supervisor=supervisor)
-            print(f"[FI] visual check {LABELS['slides_pptx']}: {_visual_check_line(report)}")
+            try:
+                report = await check_pptx(cfg, Path(pptx), art.quest_root, supervisor=supervisor)
+                print(f"[FI] visual check {LABELS['slides_pptx']}: {_visual_check_line(report)}")
+            except Exception as e:
+                logging.getLogger("frontier_insight").warning("visual check of the slides pptx failed: %r", e)
+                print(f"[FI] visual check of the slides pptx failed: {e!r}", file=sys.stderr)
+                if on_failure is not None:
+                    on_failure("visual check (slides pptx)", e)
     for name, path in written.items():
         print(f"[FI] wrote {name} -> {path}")
     # On a resume, surface any configured output still missing after the pass

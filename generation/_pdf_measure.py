@@ -208,6 +208,16 @@ def _image_pixels(obj) -> tuple[int, int] | None:
     return (width, height) if width > 0 and height > 0 else None
 
 
+def _utf16_text(text: str) -> str:
+    """PDFium hands back one UTF-16 code unit per character index, so a character
+    outside the basic plane (a math italic letter, say) arrives as two surrogate
+    halves. Join the pairs back into the character; a half with no partner becomes
+    U+FFFD, so no lone surrogate (which cannot be written as UTF-8) leaves here."""
+    if not any("\ud800" <= c <= "\udfff" for c in text):
+        return text
+    return text.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
+
+
 def _read_lines(textpage, raw) -> list[Line]:
     """Split the page text into lines. PDFium marks the line breaks it
     detects with generated ``\\r\\n``; a large horizontal jump on the same
@@ -224,7 +234,7 @@ def _read_lines(textpage, raw) -> list[Line]:
             sizes = Counter(round(c[1], 1) for c in visible)
             boxes = [c[3] for c in visible]
             lines.append(Line(
-                text=" ".join("".join(c[0] for c in run).split()),
+                text=" ".join(_utf16_text("".join(c[0] for c in run)).split()),
                 size=sizes.most_common(1)[0][0],
                 bold=sum(1 for c in visible if c[2]) >= 0.8 * len(visible),
                 box=(
