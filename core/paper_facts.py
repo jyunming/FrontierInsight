@@ -1981,16 +1981,67 @@ def take_out_unfilled(markdown: str) -> tuple[str, list[dict[str, str]]]:
     return out, taken
 
 
-def typed_hits(paper_md: str, protocol: dict[str, Any] | None, topic: str = "") -> list[str]:
+def run_numbers(quest_root: Path | str | None, protocol: dict[str, Any] | None) -> frozenset[Any]:
+    """The numbers of FI's own records of the run that the writer may state as FI states them: the trials per setting, the
+    settings and the failed trials of the trial ledger (the figures of the ``Run`` paragraph), the trials the plan asked for
+    (its ``runs_per_setting``, which the plan's numbers leave out because the paper gets them from FI), the base seed, and the
+    sizes of the plan's grid (levels of each axis, settings in all). Nothing here is read from prose. Empty without a quest."""
+    from decimal import Decimal
+
+    found: set[Any] = set()
+    if quest_root is None:
+        return frozenset()
+    root = Path(quest_root)
+
+    def take(x: Any) -> None:
+        if isinstance(x, bool) or x is None:
+            return
+        d = _typed._decimal(x)
+        if d is not None and d.is_finite():
+            found.add(d)
+
+    try:
+        for text in _trial_counts(root):
+            for m in re.finditer(r"\d[\d,]*", text or ""):
+                take(m.group(0).replace(",", ""))
+        take(_cells_run(root).replace(",", "") or None)
+        base, _trial = _disclosure.recorded_seeds(root)
+        take(base)
+    except Exception:  # noqa: BLE001 -- a record that cannot be read gives no number
+        pass
+    plan = protocol if isinstance(protocol, dict) else {}
+    for key in ("runs_per_setting", "min_runs_per_setting"):
+        take(plan.get(key))
+    grid = plan.get("grid")
+    if isinstance(grid, dict):
+        sizes = [len(v) for v in grid.values() if isinstance(v, list) and v]
+        # A count of 10 or fewer is also a small number a sentence says for other reasons (3 half-widths): only the larger
+        # sizes are the plan's grid.
+        total = 1
+        for size in sizes:
+            total *= size
+            if size > 10:
+                take(size)
+        if sizes and total > 10:
+            take(total)
+    return frozenset(found)
+
+
+def typed_hits(paper_md: str, protocol: dict[str, Any] | None, topic: str = "",
+               quest_root: Path | str | None = None) -> list[str]:
     """Rule R1 (:mod:`core.typed_numbers`) on the writer's own text: a hit for each sentence that types a number which is not
-    a number of the plan or the topic, or a label. Run only on a paper written under the rule."""
-    return _typed.hits(to_placeholders(_disclosure.without_block(paper_md)), _typed.plan_numbers(protocol, topic), HIT)
+    a number of the plan or the topic, of FI's records of the run (:func:`run_numbers`), or a label. Run only on a paper
+    written under the rule."""
+    return _typed.hits(to_placeholders(_disclosure.without_block(paper_md)), _typed.plan_numbers(protocol, topic), HIT,
+                       run_numbers(quest_root, protocol))
 
 
-def untraced_typed(paper_md: str, protocol: dict[str, Any] | None, topic: str = "") -> list[tuple[str, str]]:
+def untraced_typed(paper_md: str, protocol: dict[str, Any] | None, topic: str = "",
+                   quest_root: Path | str | None = None) -> list[tuple[str, str]]:
     """``(number, sentence)`` for each number the writer typed that FI cannot trace to the plan, the topic or its own records
     (the numbers :func:`typed_hits` reports), the paper left as it is."""
-    return _typed.untraced(to_placeholders(_disclosure.without_block(paper_md)), _typed.plan_numbers(protocol, topic))
+    return _typed.untraced(to_placeholders(_disclosure.without_block(paper_md)), _typed.plan_numbers(protocol, topic),
+                           run_numbers(quest_root, protocol))
 
 
 def plan_protocol(quest_root: Path | str, protocol: dict[str, Any] | None = None) -> dict[str, Any] | None:
@@ -2009,7 +2060,7 @@ def check(paper_md: str, quest_root: Path | str, *, topic: str = "", fallback_s:
         if keyed:
             hits += value_hits(paper_md, quest_root)
             if typed:
-                hits += typed_hits(paper_md, plan_protocol(quest_root, protocol), topic)
+                hits += typed_hits(paper_md, plan_protocol(quest_root, protocol), topic, quest_root)
         return hits
     except Exception:  # noqa: BLE001 -- a check that cannot be made flags nothing
         return []

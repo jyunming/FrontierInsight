@@ -23121,7 +23121,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         untraced: list[tuple[str, str]] = []
         if keyed and left <= 0 and not deferred:
             untraced = _paper_facts.untraced_typed(
-                paper_md, _paper_facts.plan_protocol(self.quest_root, protocol), topic)
+                paper_md, _paper_facts.plan_protocol(self.quest_root, protocol), topic, self.quest_root)
             if untraced:
                 hits = _paper_facts.check(paper_md, self.quest_root, topic=topic, fallback_s=fallback, keyed=keyed,
                                           protocol=protocol, typed=False)
@@ -23172,7 +23172,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         try:
             topic = str(self.config.topic or "")
             plan = _paper_facts.plan_protocol(self.quest_root, self._protocol_block(state))
-            hits = _paper_facts.typed_hits(paper_md, plan, topic) + _paper_facts.value_hits(paper_md, self.quest_root)
+            hits = _paper_facts.typed_hits(paper_md, plan, topic, self.quest_root) + _paper_facts.value_hits(paper_md, self.quest_root)
             # Only a hit that quotes its sentence can be edited (the passage editor refuses a round with any other, such as
             # the count of typed numbers past the first sentences); the numbers of the rest are recorded as untraced after the edit.
             return [h for h in hits if paper_patch._QUOTED in h]

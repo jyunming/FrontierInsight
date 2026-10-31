@@ -234,3 +234,61 @@ def test_a_quantile_level_named_in_the_method_is_not_a_typed_result():
     """Old code removed the 97.5 of "the 97.5th percentile". (A critical value the plan does not state stays flagged.)"""
     assert _typed("We take the 97.5th percentile of the errors.") == []
     assert _typed("The gain was 97.5 here.") == ["97.5"]
+
+
+# --- numbers of FI's own records, the level of its intervals, rounded plan constants, powers of ten ---------------------------
+
+def _ledger(root, cells=3, trials=40):
+    import json
+
+    (root / "raw").mkdir(parents=True, exist_ok=True)
+    rows = []
+    for c in range(cells):
+        rows.append({"event": "planned", "cell": f"c{c}", "trials": trials})
+        rows += [{"event": "trial", "cell": f"c{c}", "trial": t, "status": "ok", "seed": 7 + t} for t in range(trials)]
+    (root / "raw" / "ledger.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+
+def test_a_comma_list_of_values_is_not_read_as_one_grouped_number():
+    toks = [n.token for n in tn.numbers("The grid is m in {20,200,2000} and 1,234,567 trials were not run.")]
+    assert toks == ["20", "200", "2000", "1,234,567"]
+
+
+def test_the_trials_and_settings_of_the_ledger_and_the_plans_own_run_size_may_be_stated(tmp_path):
+    from core import paper_facts
+
+    _ledger(tmp_path, cells=3, trials=40)
+    plan = {**PROTOCOL, "runs_per_setting": 500}
+    facts = paper_facts.run_numbers(tmp_path, plan)
+    text = "Each of the 3 settings ran 40 trials, though the plan asked for 500 trials."
+    assert {Decimal(3), Decimal(40), Decimal(500)} <= facts
+    assert tn.typed_outside_the_plan(text, tn.plan_numbers(plan, TOPIC), facts) == []
+    # without FI's records the same sentence is flagged, as before
+    assert {"40", "500"} <= {n.token for n in tn.typed_outside_the_plan(text, tn.plan_numbers(plan, TOPIC))}
+    assert paper_facts.run_numbers(None, plan) == frozenset()
+
+
+def test_a_number_that_is_only_a_run_fact_in_name_is_still_flagged(tmp_path):
+    from core import paper_facts
+
+    _ledger(tmp_path, cells=3, trials=40)
+    facts = paper_facts.run_numbers(tmp_path, PROTOCOL)
+    assert [n.token for n in tn.typed_outside_the_plan("The bias was 41 percent of the truth.", _plan(), facts)] == ["41 percent"]
+
+
+def test_the_level_of_fis_intervals_may_be_named_but_another_level_may_not():
+    empty = tn.plan_numbers({}, "")
+    assert tn.typed_outside_the_plan("They are normal-approximation 95% intervals.", empty) == []
+    assert [n.token for n in tn.typed_outside_the_plan("They are 97% intervals.", empty)] == ["97%"]
+
+
+def test_a_plan_constant_written_to_fewer_places_is_the_plans_number_but_a_close_result_is_not():
+    plan = tn.plan_numbers({"constants": {"lnA": 16.11809565, "R": 0.008314462618}}, "")
+    for text, flagged in (("ln A = 16.118", []), ("R = 0.008314", []), ("ln A = 16.119", ["16.119"]), ("ln A = 16.1", ["16.1"])):
+        assert [n.token for n in tn.typed_outside_the_plan(text, plan)] == flagged
+
+
+def test_a_power_of_ten_is_read_as_the_number_it_writes():
+    plan = tn.plan_numbers({"constants": {"tol": 1e-12}}, "")
+    assert [n.token for n in tn.typed_outside_the_plan("A tolerance of $10^{-12}$ was used.", plan)] == []
+    assert [n.token for n in tn.typed_outside_the_plan("An error floor of $10^{-11}$ was assumed.", plan)] == ["-11"]

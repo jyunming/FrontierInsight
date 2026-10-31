@@ -21,13 +21,16 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_EVEN, ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
 from core.figure_facts import RUN_FIGURE_RE
 
 #: What FI puts where a result key it cannot fill stood (:mod:`core.paper_facts`); a typed number is never replaced.
 REMOVED = "[number removed]"
+#: The level of every interval FI computes and states (``95% t interval``, ``95% Wilson interval``, :mod:`core.paper_values`):
+#: the writer who names the level of FI's intervals types a number FI itself states in each of them.
+INTERVAL_LEVEL_PERCENT = Decimal(95)
 #: The most sentences one report names; the rest are counted in one more line.
 MAX_SENTENCES = 30
 #: Plan fields whose numbers are run facts: the paper gets them through placeholders, never typed.
@@ -147,10 +150,11 @@ def _normalise(t: str) -> str:
     return re.sub(r"[₀-₉]+", lambda m: " " * len(m.group(0)), t)
 
 
+_POWER_OF_TEN = re.compile(r"(?<![\d.])10\s*\^\s*\{?\s*$")
 _SUP = "⁰¹²³⁴⁵⁶⁷⁸⁹⁻"
 _NUM = re.compile(
     r"(?P<sign>[−\-+±]\s?)?"
-    r"(?P<int>\d{1,3}(?:,\d{3})+|\d{1,3}(?:[   ]{1,2}\d{3})+(?!\d)|\d+)"
+    r"(?P<int>\d{1,3}(?:,\d{3})+(?!\d|,\d)|\d{1,3}(?:[   ]{1,2}\d{3})+(?!\d)|\d+)"
     r"(?P<frac>\.\d+)?"
     r"(?P<exp>(?:[eE][−\-+]?\d+)|(?:\s?(?:×|\\times|x)\s?10(?:\^\{?[−\-+]?\d+\}?|[" + _SUP + r"]+)))?"
     r"(?P<pct>\s?%|\s?percent(?:age points?)?|\s?pp\b)?"
@@ -184,6 +188,8 @@ class Typed:
     # sentence end), before or after it. A number in another clause, after a ";", is the paper's own and is not left to the
     # claim check.
     cited: bool
+    # The number is the exponent of a written power of ten (``10^{-12}``): the number meant is 10 to that power.
+    power_of_ten: bool = False
 
 
 def _sentence(text: str, start: int, end: int) -> tuple[int, int]:
@@ -263,7 +269,8 @@ def numbers(markdown: str) -> list[Typed]:
             integer=not m.group("frac") and exp == 0 and not m.group("pct"),
             in_math=any(x <= s < y for x, y in maths),
             structural=label or any(x <= s < y for x, y in cites) or bool(_LEVEL_AFTER.match(text, e)),
-            sentence=_plain(sentence), cited=bool(_CITE.search(text[clause_start:clause_end]))))
+            sentence=_plain(sentence), cited=bool(_CITE.search(text[clause_start:clause_end])),
+            power_of_ten=bool(_POWER_OF_TEN.search(t[max(0, m.start() - 8):m.start()]))))
     return out
 
 
@@ -310,11 +317,34 @@ def plan_numbers(protocol: dict[str, Any] | None, topic: str = "") -> frozenset[
     return frozenset(found)
 
 
-def allowed(n: Typed, plan: frozenset[Decimal]) -> bool:
-    """Rule R1 for one typed number."""
+def _rounds_to(n: Typed, plan: frozenset[Decimal]) -> bool:
+    """The number is a number of the plan written to fewer decimals (``16.118`` for a plan's ``16.11809565``): the plan's
+    value rounded to the places the writer wrote is the writer's number. Needs four significant digits, so a short number
+    never matches by chance."""
+    if n.pct or n.integer:
+        return False
+    exp = n.value.as_tuple().exponent
+    if not isinstance(exp, int) or exp >= 0 or len(n.value.as_tuple().digits) < 4:
+        return False
+    step = Decimal(1).scaleb(exp)
+    return any(p != n.value and p.as_tuple().exponent != 0 and
+               any(p.quantize(step, rounding=r) == n.value for r in (ROUND_HALF_UP, ROUND_HALF_EVEN))
+               for p in plan if p.is_finite() and abs(p) < Decimal(10) ** 15)
+
+
+def allowed(n: Typed, plan: frozenset[Decimal], facts: frozenset[Decimal] = frozenset()) -> bool:
+    """Rule R1 for one typed number. ``facts`` are the numbers of FI's own records of the run (how many settings and trials,
+    the sizes of the plan's grid: :func:`core.paper_facts.run_numbers`), which the writer may state as FI states them."""
     if n.structural:
         return True
-    if n.value in plan or (n.pct and n.value / 100 in plan):
+    if n.power_of_ten and n.value == n.value.to_integral_value() and abs(n.value) < 400 and Decimal(10) ** int(n.value) in plan:
+        return True  # ``10^{-12}`` writes the plan's 1e-12
+    known = plan | facts
+    if n.value in known or (n.pct and n.value / 100 in known):
+        return True
+    if n.pct and n.value == INTERVAL_LEVEL_PERCENT:
+        return True
+    if _rounds_to(n, plan):
         return True
     return n.in_math and n.integer and abs(n.value) <= 10
 
@@ -331,25 +361,27 @@ class Report:
         return sum(len(tokens) for _s, tokens in self.sentences)
 
 
-def typed_outside_the_plan(markdown: str, plan: frozenset[Decimal]) -> list[Typed]:
+def typed_outside_the_plan(markdown: str, plan: frozenset[Decimal],
+                           facts: frozenset[Decimal] = frozenset()) -> list[Typed]:
     """The numbers of ``markdown`` that R1 does not allow and the claim check does not own (a cited sentence's)."""
-    return [n for n in numbers(markdown) if not allowed(n, plan) and not n.cited]
+    return [n for n in numbers(markdown) if not allowed(n, plan, facts) and not n.cited]
 
 
-def report(markdown: str, plan: frozenset[Decimal]) -> Report:
-    bad = typed_outside_the_plan(markdown, plan)
+def report(markdown: str, plan: frozenset[Decimal], facts: frozenset[Decimal] = frozenset()) -> Report:
+    bad = typed_outside_the_plan(markdown, plan, facts)
     by: dict[str, list[str]] = {}
     for n in bad:
         by.setdefault(n.sentence, []).append(n.token)
-    cited = sum(1 for n in numbers(markdown) if n.cited and not n.structural and not allowed(n, plan))
+    cited = sum(1 for n in numbers(markdown) if n.cited and not n.structural and not allowed(n, plan, facts))
     return Report(tuple((s, tuple(dict.fromkeys(t))) for s, t in by.items()), cited)
 
 
-def hits(markdown: str, plan: frozenset[Decimal], name: str = "paper_record_mismatch") -> list[str]:
+def hits(markdown: str, plan: frozenset[Decimal], name: str = "paper_record_mismatch",
+         facts: frozenset[Decimal] = frozenset()) -> list[str]:
     """One must-fix hit per sentence that holds a number R1 does not allow, shaped ``name: message — “sentence”`` (the shape
     the passage editor locates, :mod:`core.paper_patch`). ``markdown`` is the paper with FI's values as the writer's keys
     (:func:`core.paper_facts.to_placeholders`), so the sentence quoted is the writer's own text."""
-    rep = report(markdown, plan)
+    rep = report(markdown, plan, facts)
     out: list[str] = []
     for sentence, tokens in rep.sentences[:MAX_SENTENCES]:
         many = len(tokens) > 1
@@ -368,7 +400,8 @@ def hits(markdown: str, plan: frozenset[Decimal], name: str = "paper_record_mism
     return out
 
 
-def untraced(markdown: str, plan: frozenset[Decimal]) -> list[tuple[str, str]]:
+def untraced(markdown: str, plan: frozenset[Decimal],
+             facts: frozenset[Decimal] = frozenset()) -> list[tuple[str, str]]:
     """``(number, sentence)`` for each number R1 does not allow, as written. The paper is not changed: when no round is left
     to write it again, the number stays where the writer put it and is listed in the quality report as not traced."""
-    return [(n.token, n.sentence) for n in typed_outside_the_plan(markdown, plan)]
+    return [(n.token, n.sentence) for n in typed_outside_the_plan(markdown, plan, facts)]
