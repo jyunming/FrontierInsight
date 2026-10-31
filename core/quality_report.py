@@ -735,6 +735,19 @@ def _paper_problems(q: _Quest) -> list[dict[str, str]]:
         out.append(_problem("paper", f"FI could not fill the value {r.get('key')} from its records ({r.get('how')}): "
                             f"{_one(r.get('sentence'), 200)}",
                             "FI's check of the paper's numbers", "left out", ".fi/paper_record_check.json"))
+    from . import paper_values as _pv
+
+    marks = _pv.read_marks_record(q.root)
+    for r in _list(marks.get("repaired")):
+        r = _dict(r)
+        out.append(_problem("paper", f"FI put its own value back where the paper's text had changed {_one(r.get('key'), 60)} "
+                            f"from \"{_one(r.get('now'), 30)}\" to \"{_one(r.get('was'), 30)}\"",
+                            "FI's check of the paper's values", "fixed", ".fi/value_marks.json"))
+    for r in _list(marks.get("unverified")):
+        r = _dict(r)
+        out.append(_problem("paper", f"the value {_one(r.get('text'), 60)} ({_one(r.get('key'), 120)}) could not be worked out "
+                            f"again from FI's records ({_one(r.get('why'), 160)}), so it is not checked",
+                            "FI's check of the paper's values", "not fixed", ".fi/value_marks.json"))
     for r in q.record_taken_out:
         r = _dict(r)
         out.append(_problem("paper", f"after the paper was written again, it still said what FI's records contradict, so "

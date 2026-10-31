@@ -23074,6 +23074,27 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._log.warning("[review] the paper's Limitations could not be written again from FI's records (%s)", e)
             return False
 
+    def _verify_value_marks(self, markdown: str, state: QuestState) -> str:
+        """``markdown`` with every FI value mark worked out again from FI's record (core/paper_values.py::verify_marks): a
+        value a later round changed is put back, said in the run log and kept for QUALITY.md; a mark whose key FI can no
+        longer work out is left as it is and listed as unverified. Never raises."""
+        try:
+            check = _paper_values.verify_marks(markdown, self._paper_records(state))
+        except Exception as e:  # noqa: BLE001 -- the render that follows still fills every key from the record
+            self._log.warning("[review] FI's value marks could not be checked again (%s: %s)", type(e).__name__, str(e)[:200])
+            return markdown
+        for r in check.repaired:
+            self._log.warning("[review] a value FI had filled was changed inside its mark, so FI's value was put back: "
+                              "%s was \"%s\", now \"%s\"", r["key"][:120], r["was"][:60], r["now"][:60])
+        for r in check.unverified:
+            self._log.warning("[review] FI cannot work out %s again, so its text \"%s\" is not checked (%s)",
+                              r["key"][:120], r["text"][:60], r["why"][:160])
+        _paper_values.keep_marks_record(self.quest_root, check)
+        if check.checked:
+            self._log.info("[review] %d value mark(s) checked against FI's record: %d put back, %d not checkable",
+                           check.checked, len(check.repaired), len(check.unverified))
+        return check.text
+
     def _refresh_paper_facts(self, state: QuestState) -> None:
         """Before a paper is checked: a paper on disk that still carries FI's old blocks (a quest resumed from before they
         left the paper) or a placeholder not filled is cleaned and filled again from the records, so the checks read what
@@ -23083,6 +23104,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return
         try:
             before = Path(path).read_text(encoding="utf-8")
+            before = self._verify_value_marks(before, state)
             placed = _paper_facts.place_blocks(
                 _disclosure.without_block(before), self.quest_root, topic=str(self.config.topic or ""),
                 fallback_s=(state.get("exec_result") or {}).get("duration_s"),

@@ -2042,3 +2042,95 @@ def writer_block(rec: Records | None) -> str:
 def has_keys(rec: Records | None) -> bool:
     """Whether this study has trial records FI can fill keys from (else the paper is not held to the rule)."""
     return rec is not None and bool(rec.cells)
+
+
+# --- the final check of every mark ---------------------------------------------------------------------------------
+
+#: Where FI keeps the marks whose text a later round changed (put back from its record) and the ones it could not check.
+MARKS_RECORD = Path(".fi") / "value_marks.json"
+
+
+@dataclass
+class MarkCheck:
+    """What :func:`verify_marks` did: ``checked`` marks, ``repaired`` (key, text the paper carried, FI's value) and
+    ``unverified`` (key, text, why) that FI could not work out again and so left as they are."""
+    text: str
+    checked: int = 0
+    repaired: list[dict[str, str]] = field(default_factory=list)
+    unverified: list[dict[str, str]] = field(default_factory=list)
+
+
+def verify_marks(markdown: str, rec: Records | None) -> MarkCheck:
+    """Every FI value mark of ``markdown`` worked out again from FI's own record and compared with the text inside it. A
+    difference (a later round of the writer changed a digit inside the mark) is put right: FI's value goes back, from the
+    mark's own key. A key FI cannot work out any more is not trusted either: its text stays, and it is listed as unverified,
+    never kept as FI-filled. Spans of math (``fi:v-span``) are checked as a whole, from the keys of the span as typed."""
+    out = MarkCheck(markdown or "")
+    if not markdown:
+        return out
+
+    def fix(m: re.Match[str]) -> str:
+        key, shown = m.group(1), m.group(2)
+        out.checked += 1
+        value = resolve(placeholder(key), rec)
+        if value.hit is not None:
+            if shown.strip() != NOT_RECORDED:
+                out.unverified.append({"key": key, "text": shown, "why": value.hit.reason})
+            return m.group(0)
+        if value.text == shown:
+            return m.group(0)
+        out.repaired.append({"key": key, "was": shown, "now": value.text})
+        return value.marked
+
+    def fix_span(m: re.Match[str]) -> str:
+        original, shown = m.group(1), m.group(2)
+        out.checked += 1
+        values = [resolve(k.group(0), rec) for k in _PLACEHOLDER.finditer(keyed_calcs(original))]
+        bad = next((v for v in values if v.hit is not None), None)
+        if bad is not None:
+            if shown != _PLACEHOLDER.sub(lambda k: NOT_RECORDED, original):
+                out.unverified.append({"key": original, "text": shown, "why": bad.hit.reason if bad.hit else ""})
+            return m.group(0)
+        it = iter(values)
+        want = _PLACEHOLDER.sub(lambda _k: (lambda v: v.bare or v.text)(next(it)), keyed_calcs(original))
+        if want == shown:
+            return m.group(0)
+        out.repaired.append({"key": original, "was": shown, "now": want})
+        return SPAN_OPEN.format(original=original) + want + SPAN_CLOSE
+
+    text = _SPAN.sub(fix_span, markdown)
+    # A span's inside holds no marks (its keys are filled bare), so what is left is the marks outside every span.
+    out.text = _MARK.sub(fix, text)
+    return out
+
+
+def keep_marks_record(quest_root: Path | str, check: MarkCheck) -> None:
+    """Add what :func:`verify_marks` repaired or could not check to ``.fi/value_marks.json`` (QUALITY.md prints it). A
+    repair is kept even when a later check finds the paper clean, since the first one is the one that happened."""
+    if not check.repaired and not check.unverified:
+        return
+    path = Path(quest_root) / MARKS_RECORD
+    try:
+        data: dict[str, Any] = {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+        if not isinstance(data, dict):
+            data = {}
+        for name, rows in (("repaired", check.repaired), ("unverified", check.unverified)):
+            kept = [r for r in data.get(name) or [] if isinstance(r, dict)]
+            kept += [r for r in rows if r not in kept]
+            data[name] = kept
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def read_marks_record(quest_root: Path | str) -> dict[str, Any]:
+    try:
+        data = json.loads((Path(quest_root) / MARKS_RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
