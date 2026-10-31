@@ -122,3 +122,41 @@ def test_a_setting_the_code_reads_that_truly_changes_nothing_is_an_observation_n
     assert result.returncode == 0 and runner.flat is None and runner.failed_script is None
     assert runner.no_difference and "`lid`" in runner.no_difference
     assert not (root / trial_runner.UNCHANGED_SENT).exists()
+
+
+# --- a declared result that is a copy of an earlier declared one is reported once -------------------------------------
+
+def test_a_later_declared_result_equal_to_an_earlier_one_in_every_trial_is_a_copy() -> None:
+    cells = [_cell({"n": n}, {"spread": n * 0.5, "value": n * 0.5, "other": n * n}) for n in (1.0, 2.0, 3.0, 4.0)]
+    declared = ["value", "other", "spread"]
+    got = flat.identical_results(cells, declared=declared, whole_only=True)
+    assert flat.copied_results(got) == {"spread": ("value", 4)}, "the plan's order says which is the copy"
+
+
+def test_a_value_returned_per_setting_that_equals_a_whole_result_is_not_a_copy() -> None:
+    """An honest duplicate (the rate at one temperature declared again as a whole result) stays reported."""
+    cells = [_cell({"n": n}, {"k_hat": n * 0.5, "k_by_T": {"T=300": n * 0.5, "T=310": n * 0.7}}) for n in (1.0, 2.0, 3.0, 4.0)]
+    assert flat.identical_results(cells)  # still named in the note
+    assert flat.copied_results(flat.identical_results(cells, whole_only=True)) == {}
+
+
+def test_the_copies_record_round_trips_and_clears(tmp_path: Path) -> None:
+    flat.write_copies(tmp_path, {"b": ("a", 7)})
+    assert flat.read_copies(tmp_path) == {"b": ("a", 7)}
+    flat.write_copies(tmp_path, {})
+    assert flat.read_copies(tmp_path) == {}
+
+
+def test_the_results_check_leaves_a_copy_out_without_calling_it_wrong(tmp_path: Path) -> None:
+    import logging
+
+    from core.result_checks import COPY_KIND, ResultChecksMixin
+
+    class Host(ResultChecksMixin):
+        quest_root = tmp_path
+        _log = logging.getLogger("copy-test")
+
+    flat.write_copies(tmp_path, {"spread": ("value", 36000)})
+    found = Host()._result_copy_findings()
+    assert [(f.kind, f.keys) for f in found] == [(COPY_KIND, ["spread"])]
+    assert "same number as `value`" in found[0].note and "wrong" not in found[0].say

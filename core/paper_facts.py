@@ -364,6 +364,9 @@ def required_items(quest_root: Path | str) -> list[Item]:
         if isinstance(c, dict) and c.get("quantity"):
             q = _one(c["quantity"])
             note = _whole(c.get("note"), 400).rstrip(".")
+            if c.get("kind") == "copy_of_result":  # not a wrong value: the same numbers as an earlier result, reported once
+                add(LEFT_OUT, q, _sentence(f"{_said(root, q)} is not reported separately: {note or 'it was the same number as an earlier result in every trial'}"))
+                continue
             add(LEFT_OUT, q, _sentence(f"{_said(root, q)} is not reported: a check of the results showed the value is wrong"
                                        + (f" ({note})" if note else "")))
     _precision_items(root, add)
