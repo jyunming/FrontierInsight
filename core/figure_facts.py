@@ -25,6 +25,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from . import math_safe_cut as _math_safe
+
 #: A figure of the run in a paper, its caption and any attribute block pandoc reads after it (``{width=...}``). FI places
 #: these and writes their captions from its records (``core/engine.py:_place_figures``), so a check of the writer's own
 #: words leaves them out. The caption may hold any bracket; it never holds ``](``, which ends it.
@@ -57,7 +59,9 @@ def _num(value: Any) -> bool:
 
 def _one(text: Any, limit: int = 50) -> str:
     out = " ".join(str(text or "").split())
-    return out if len(out) <= limit else out[: limit - 3].rstrip() + "..."
+    if len(out) <= limit:
+        return out
+    return _math_safe.head_before_math(out, limit - 3).rstrip() + "..."
 
 
 def _overlap(a0: float, a1: float, b0: float, b1: float) -> float:

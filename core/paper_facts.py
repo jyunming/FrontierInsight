@@ -53,6 +53,7 @@ from typing import Any
 from . import disclosure as _disclosure
 from . import figure_facts as _figures
 from . import frozen_protocol as _frozen
+from . import math_safe_cut as _math_safe
 from . import paper_values as _values
 from . import run_facts as _run_facts
 from . import run_manifest as _run_manifest
@@ -511,7 +512,8 @@ def _quoted_claim(text: Any) -> str:
     when long."""
     one = _one(_CITE_MARK.sub("", str(text or ""))).replace("{{", "").replace("}}", "").replace('"', "'")
     if len(one) > _MAX_UNSUPPORTED_CHARS:
-        one = one[:_MAX_UNSUPPORTED_CHARS].rsplit(" ", 1)[0].rstrip(" ,;:") + " ..."
+        word = one[:_MAX_UNSUPPORTED_CHARS].rsplit(" ", 1)[0].rstrip(" ,;:")
+        one = _math_safe.head_before_math(one, len(word)).rstrip(" ,;:") + " ..."
     return one
 
 

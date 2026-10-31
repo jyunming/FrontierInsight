@@ -79,6 +79,7 @@ from . import confirmations as _confirmations
 from . import record_anchor as _record_anchor
 from . import evidence as _evidence
 from . import frozen_protocol as _frozen
+from . import math_safe_cut as _math_safe_cut
 from . import design_parts as _design_parts
 from . import todo as _todo
 from . import crash_kind as _crash_kind
@@ -34429,7 +34430,9 @@ _MD_FENCE_LINE_RE = re.compile(r"^\s*(```|~~~)")
 def _caption_words(text: Any, limit: int = 120) -> str:
     """A label or title from FI's record, as a caption may quote it: one line, at most ``limit`` characters."""
     words = " ".join(str(text or "").split())
-    return words if len(words) <= limit else words[:limit].rsplit(" ", 1)[0]
+    if len(words) <= limit:
+        return words
+    return _math_safe_cut.head_before_math(words, len(words[:limit].rsplit(" ", 1)[0])).rstrip()
 
 
 def _caption_safe(text: str) -> str:
