@@ -497,10 +497,13 @@ def read_captured(quest_root: Path | str) -> dict[str, Any]:
 
 #: Where FI keeps which checked functions the headline results depend on (:func:`dependence`).
 DEPENDENCE = DIR / "dependence.json"
-#: The verdicts of :func:`dependence`. ``stops_when_changed``: the simulation stops when the function's result is changed
+#: The verdicts of :func:`dependence`. ``no_change_seen``: no compared result moved when the function's result was changed
+#: (a null change shows nothing: a threshold decision need not flip at one setting, a fit recovers what generated the
+#: data), so it is never reported as the function being unused. ``discarded``: every call of it in the code throws its
+#: result away (:func:`discarded_calls`), the one "unused" that FI can show. ``stops_when_changed``: the simulation stops when the function's result is changed
 #: (it may compare its own number with it); neither shown to feed the headline results nor shown not to.
-FEEDS, NOT_FEEDING, NOT_CALLED, NOT_RUN, STOPS = ("feeds", "does_not_feed", "not_called", "could_not_run",
-                                                 "stops_when_changed")
+FEEDS, NO_CHANGE, NOT_CALLED, NOT_RUN, STOPS, DISCARDED = ("feeds", "no_change_seen", "not_called", "could_not_run",
+                                                         "stops_when_changed", "discarded")
 #: The shares by which a checked function's result is changed, in turn: the second only when the run stops at the first.
 SHIFTS = (0.05, 0.005)
 #: At most this many of the settings a function was called at are tried (the first, the last, one between).
@@ -536,6 +539,52 @@ def _spread_cells(where: list[int]) -> list[int]:
     return sorted({where[0], where[len(where) // 2], where[-1]})
 
 
+def discarded_calls(code_root: Path | str, names: list[str]) -> dict[str, int]:
+    """``{name: calls}`` for each of ``names`` that the code calls and always throws the result of away: the call stands
+    alone as a statement, or its result is put in a name that nothing in the same function (or module) reads. A function
+    with one call whose result is used anywhere, or with no call found in the code at all, is left out. This is what FI
+    can show mechanically about "unused": a change of the result that moves nothing shows no such thing (a decision need
+    not flip, a fit recovers what generated the data). Code of ``tests``, ``fi_core`` and the environment is not read."""
+    root = Path(code_root)
+    wanted = set(names)
+    seen: dict[str, list[bool]] = {}
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root).parts
+        if any(part in ("tests", "fi_core", "__pycache__", ".venv", "venv", "site-packages") or part.startswith("fi_")
+               for part in rel[:-1]) or path.name.startswith(("fi_", "test_")):
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError, ValueError):
+            continue
+        parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+        for call in [n for n in ast.walk(tree) if isinstance(n, ast.Call)]:
+            fn = call.func
+            called = fn.id if isinstance(fn, ast.Name) else fn.attr if isinstance(fn, ast.Attribute) else None
+            if called not in wanted:
+                continue
+            parent = parents.get(call)
+            if isinstance(parent, ast.Expr):
+                seen.setdefault(called, []).append(True)
+                continue
+            targets = None
+            if isinstance(parent, ast.Assign) and parent.value is call:
+                targets = parent.targets
+            elif isinstance(parent, ast.AnnAssign) and parent.value is call:
+                targets = [parent.target]
+            used = True
+            if targets is not None:
+                bound = [t.id for t in targets if isinstance(t, ast.Name)]
+                if len(bound) == len(targets) and all(isinstance(t, ast.Name) for t in targets):
+                    scope = parent
+                    while scope in parents and not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module)):
+                        scope = parents[scope]
+                    reads = {n.id for n in ast.walk(scope) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+                    used = any(b != "_" and b in reads for b in bound)
+            seen.setdefault(called, []).append(not used)
+    return {n: len(v) for n, v in seen.items() if v and all(v)}
+
+
 async def dependence(run: Callable[[list[str]], Awaitable[Any]], quest_root: Path | str, package: str,
                      names: list[str], headline: set[str], *, deterministic: bool,
                      in_each_run: dict[str, list[Any]] | None = None,
@@ -545,8 +594,9 @@ async def dependence(run: Callable[[list[str]], Awaitable[Any]], quest_root: Pat
     as it is and once with every real number the function returns changed by up to :data:`SHIFTS` (5%; 0.5% when the run
     stops at 5%). A headline result that changes depends on it (``feeds``), once a second run as it is gives the same
     numbers as the first (a result that differs between the two is left out of the comparison; when none repeats,
-    ``could_not_run``). Headline results that come out the very
-    same at every setting tried do not (``does_not_feed``: the checks of that function do not check them). A run that
+    ``could_not_run``). Results that come out the very same at every setting tried are recorded as ``no_change_seen``
+    and claim nothing (see :data:`NO_CHANGE`). A function every call of which throws its result away
+    (:func:`discarded_calls`) is ``discarded``, whatever the runs show. A run that
     stops whenever the result is changed is ``stops_when_changed`` (neither). A function never called at the settings
     that ran is ``not_called``. ``headline``: the names of the headline results, compared as the headline check compares
     them; only finite numbers of the run as it is are compared (every result it returns when a headline result is not
@@ -620,7 +670,7 @@ async def dependence(run: Callable[[list[str]], Awaitable[Any]], quest_root: Pat
                 return {"status": NOT_RUN, "why": "every result compared is a whole number (a count, a yes/no, a step "
                                                   "of a grid), which a change of a few percent need not move"}
             if not changed:
-                return {"status": NOT_FEEDING, "results": judged[:8], "scale": scale, "all_results": fallback}
+                return {"status": NO_CHANGE, "results": judged[:8], "scale": scale, "all_results": fallback}
             if late():
                 return {"status": NOT_RUN, "why": "the time given to this check was spent"}
             # A result that differs between two runs of the setting as it is (a time it took, an unseeded draw) says
@@ -642,11 +692,12 @@ async def dependence(run: Callable[[list[str]], Awaitable[Any]], quest_root: Pat
             if all(_whole(values.get(k)) for k in steady):
                 return {"status": NOT_RUN, "why": "every result compared is a whole number (a count, a yes/no, a step "
                                                   "of a grid), which a change of a few percent need not move"}
-            return {"status": NOT_FEEDING, "results": steady[:8], "scale": scale, "all_results": fallback,
+            return {"status": NO_CHANGE, "results": steady[:8], "scale": scale, "all_results": fallback,
                     "not_repeating": sorted(noisy)[:8]}
         return {"status": STOPS} if stopped else {"status": NOT_RUN, "why": "no run was made"}
 
     out: dict[str, Any] = {}
+    thrown_away = discarded_calls(root / "code", names)
     for name in names:
         if not ran:
             out[name] = {"status": NOT_RUN, "why": "the simulation did not run to the end at the settings FI tried"}
@@ -654,6 +705,9 @@ async def dependence(run: Callable[[list[str]], Awaitable[Any]], quest_root: Pat
         where = [i for i in called_at.get(name) or [] if isinstance(i, int) and 0 <= i < len(cells)]
         if not where:
             out[name] = {"status": NOT_CALLED, "settings_run": len(ran)}
+            continue
+        if name in thrown_away:  # shown from the code itself; no run of FI's is needed to say it
+            out[name] = {"status": DISCARDED, "calls": thrown_away[name]}
             continue
         tried: list[dict[str, Any]] = []
         for i in _spread_cells(where):
@@ -666,7 +720,7 @@ async def dependence(run: Callable[[list[str]], Awaitable[Any]], quest_root: Pat
         states = [e["status"] for e in tried]
         if FEEDS in states:
             out[name] = next(e for e in tried if e["status"] == FEEDS)
-        elif states and all(s == NOT_FEEDING for s in states):
+        elif states and all(s == NO_CHANGE for s in states):
             out[name] = {**tried[0], "settings_tried": len(tried)}
         elif STOPS in states:
             out[name] = {"status": STOPS, "settings_tried": len(tried)}
@@ -693,23 +747,23 @@ def read_dependence(quest_root: Path | str) -> dict[str, Any]:
 
 
 def dependence_gaps(quest_root: Path | str) -> list[str]:
-    """Evidence gaps: a checked function the headline results were shown not to use (its tests say nothing about them).
-    A function never called at the settings FI ran is said, not a gap: a reference formula or a function of the analysis
-    is not called by the simulation, and that is no fault."""
-    return [line for name, e in read_dependence(quest_root).items() if (e or {}).get("status") == NOT_FEEDING
+    """Evidence gaps: a checked function whose result the code throws away wherever it is called (its tests say nothing
+    about the results). A change of its result that moved nothing is no gap, and neither is a function never called at the
+    settings FI ran: a reference formula or a function of the analysis is not called by the simulation, and that is no
+    fault."""
+    return [line for name, e in read_dependence(quest_root).items() if (e or {}).get("status") == DISCARDED
             for line in dependence_sentences({name: e})]
 
 
 def dependence_sentences(record: dict[str, Any]) -> list[str]:
-    """One plain sentence per checked function the headline results were not shown to use."""
+    """One plain sentence per checked function the headline results were not shown to use. A change of its result that
+    moved no compared result (``no_change_seen``) says nothing either way and has no sentence."""
     out = []
     for name, e in (record or {}).items():
         status = (e or {}).get("status")
-        if status == NOT_FEEDING:
-            share = f"{100 * float(e.get('scale') or SHIFTS[0]):g}%"
-            what = "results" if e.get("all_results") else "headline results"
-            out.append(f"the {what} do not use `{name}`: with its result changed by up to {share} where the simulation calls "
-                       f"it, they came out the same, so the tests of `{name}` say nothing about them")
+        if status == DISCARDED:
+            out.append(f"`{name}` is called in the code but its result is thrown away, so the tests of `{name}` say "
+                       "nothing about the results")
         elif status == NOT_CALLED:
             out.append(f"`{name}`, a function FI tested, was not called at the {e.get('settings_run')} setting(s) FI "
                        "ran, so FI could not show that the headline results are computed with it")

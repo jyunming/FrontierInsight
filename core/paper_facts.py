@@ -266,12 +266,13 @@ def _listed_labels(labels: list[str], cap: int = 4) -> str:
 
 
 def _second_not_used(root: Path, function: str) -> bool:
-    """Whether FI's dependence record shows the reported results do not use ``function``: such a disagreement changes how no
-    reported number reads, so it is in QUALITY.md only and not in the paper."""
+    """Whether FI's dependence record shows the code throws the result of ``function`` away wherever it is called: such a
+    disagreement changes how no reported number reads, so it is in QUALITY.md only and not in the paper. A change of its
+    result that moved nothing does not show this (a decision need not flip), so it stays in the paper."""
     from . import second_impl as _second
 
     verdict = _second.read_dependence(root).get(function)
-    return isinstance(verdict, dict) and verdict.get("status") == _second.NOT_FEEDING
+    return isinstance(verdict, dict) and verdict.get("status") == _second.DISCARDED
 
 
 def second_version_text(root: Path, function: str) -> str:

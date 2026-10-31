@@ -69,7 +69,7 @@ def _check(root: Path, cells: list[dict[str, Any]], names: list[str] | None = No
 def test_a_result_computed_with_the_tested_function_depends_on_it(tmp_path: Path) -> None:
     got = _check(_quest(tmp_path), [{"level": 3.3, "mode": "package"}])
     assert got["edge"]["status"] == si.FEEDS
-    assert got["side_value"]["status"] == si.NOT_FEEDING, "a side value feeds no headline"
+    assert got["side_value"]["status"] == si.NO_CHANGE, "a side value moved no headline result"
     assert got["unused"]["status"] == si.NOT_CALLED
 
 
@@ -77,9 +77,10 @@ def test_a_result_the_simulation_computes_itself_does_not_depend_on_the_tested_f
     # 3.3, not 3.0: a whole-number result that does not move is not judged (a few percent need not move it).
     got = _check(_quest(tmp_path), [{"level": 3.3, "mode": "own"}])
     assert got["edge"]["status"] == si.NOT_CALLED
-    assert any("side_value" in s and "do not use" in s for s in si.dependence_sentences(got))
+    # A null change shows nothing: it is no statement that the function is unused, and no evidence gap.
+    assert not any("side_value" in s for s in si.dependence_sentences(got))
     assert (tmp_path / si.DEPENDENCE).is_file()
-    assert si.dependence_gaps(tmp_path), "a function the headline results do not use is an evidence gap"
+    assert si.dependence_gaps(tmp_path) == []
 
 
 def test_a_side_call_the_simulation_does_not_guard_is_not_taken_for_a_use(tmp_path: Path) -> None:
@@ -93,7 +94,8 @@ def test_a_side_call_the_simulation_does_not_guard_is_not_taken_for_a_use(tmp_pa
             return {"width": 2.0 * x}
         ''')
     got = _check(root, [{"level": 3.3}], names=["edge"])
-    assert got["edge"]["status"] == si.NOT_FEEDING
+    assert got["edge"]["status"] == si.DISCARDED
+    assert any("`edge`" in g and "thrown away" in g for g in si.dependence_gaps(root))
 
 
 def test_a_simulation_that_stops_when_the_tested_function_disagrees_is_neither_use_nor_gap(tmp_path: Path) -> None:
@@ -127,8 +129,8 @@ def test_a_headline_with_no_number_is_not_shown_to_be_unused(tmp_path: Path) -> 
     root = _quest(tmp_path, '''
         from pkg import model
         def run_cell(cell):
-            model.edge(cell["level"])
-            return {"width": float("nan")}
+            v = model.edge(cell["level"])
+            return {"width": float("nan"), "v": v}
         ''')
     got = _check(root, [{"level": 3.0}], names=["edge"])
     assert got["edge"]["status"] == si.NOT_RUN
@@ -140,8 +142,8 @@ def test_results_that_change_between_two_runs_of_one_setting_are_not_taken_for_a
         from pkg import model
         def run_cell(cell):
             x = cell["level"]
-            model.side_value(x)
-            return {"width": 2.0 * x + random.random() * 1e-3}
+            v = model.side_value(x)
+            return {"width": 2.0 * x + random.random() * 1e-3, "v": v}
         ''')
     got = _check(root, [{"level": 3.0}], names=["side_value"])
     assert got["side_value"]["status"] == si.NOT_RUN
@@ -202,18 +204,19 @@ def test_a_function_that_returns_zero_is_not_shown_to_be_unused(tmp_path: Path) 
     assert got["unused"]["status"] == si.NOT_RUN
 
 
-def test_a_time_the_run_reports_does_not_hide_that_the_headline_does_not_use_the_function(tmp_path: Path) -> None:
+def test_a_time_the_run_reports_does_not_hide_that_a_change_moved_nothing(tmp_path: Path) -> None:
     # A run returns how long it took beside its results: that number differs between any two runs.
     root = _quest(tmp_path, '''
         import time
         from pkg import model
         def run_cell(cell):
             x = cell["level"]
-            model.side_value(x)
+            v = model.side_value(x)
+            diag = v + 1.0  # read, but reaches no returned result
             return {"width": 2.0 * x, "wall_s": time.perf_counter()}
         ''')
     got = _check(root, [{"level": 3.3}], names=["side_value"], headline={"width", "bias"})
-    assert got["side_value"]["status"] == si.NOT_FEEDING
+    assert got["side_value"]["status"] == si.NO_CHANGE
     assert got["side_value"]["not_repeating"] == ["wall_s"]
 
 
@@ -224,7 +227,8 @@ def test_a_whole_number_headline_beside_a_time_is_not_shown_to_be_unused_either(
         from pkg import model
         def run_cell(cell):
             x = cell["level"]
-            model.side_value(x)
+            v = model.side_value(x)
+            diag = v + 1.0  # read, but reaches no returned result
             return {"width": 2.0 * x, "wall_s": time.perf_counter()}
         ''')
     got = _check(root, [{"level": 3.0}], names=["side_value"], headline={"width", "bias"})
@@ -241,3 +245,66 @@ def test_a_whole_number_headline_that_does_not_move_is_not_shown_to_be_unused(tm
     got = _check(root, [{"level": 3.0}], names=["edge"])
     assert got["edge"]["status"] == si.NOT_RUN and "whole number" in got["edge"]["why"], got["edge"]
     assert not si.dependence_gaps(root)
+
+
+def test_a_decision_that_does_not_flip_under_a_small_change_is_not_called_unused(tmp_path: Path) -> None:
+    """The case the old check got wrong: a function whose result decides four comparisons, none of which a few percent
+    flips at the setting tried. It is used; a null change says nothing, so there is no sentence and no gap."""
+    root = _quest(tmp_path, '''
+        from pkg import model
+        def run_cell(cell):
+            t = model.edge(cell["level"])
+            return {"width": sum(1.0 for v in (0.5, 1.0, 9.0, 20.0) if v > t) / 4}
+        ''')
+    got = _check(root, [{"level": 3.3}], names=["edge"])
+    assert got["edge"]["status"] == si.NO_CHANGE
+    assert si.dependence_sentences(got) == [] and si.dependence_gaps(root) == []
+
+
+def test_an_old_record_that_called_a_function_unused_from_a_null_change_says_nothing() -> None:
+    assert si.dependence_sentences({"edge": {"status": "does_not_feed", "scale": 0.05}}) == []
+
+
+def _code(tmp_path: Path, simulate: str, extra: dict[str, str] | None = None) -> Path:
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "model.py").write_text(MODEL, encoding="utf-8")
+    (tmp_path / "simulate.py").write_text(textwrap.dedent(simulate), encoding="utf-8")
+    for name, text in (extra or {}).items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(textwrap.dedent(text), encoding="utf-8")
+    return tmp_path
+
+
+def test_discarded_calls_finds_a_result_thrown_away_and_only_that(tmp_path: Path) -> None:
+    root = _code(tmp_path, '''
+        from pkg import model
+        def run_cell(cell):
+            model.edge(1.0)
+            kept = model.side_value(1.0)
+            unread = model.unused(1.0)
+            _ = model.unused(2.0)
+            return {"width": kept}
+        ''')
+    assert si.discarded_calls(root, ["edge", "side_value", "unused", "missing"]) == {"edge": 1, "unused": 2}
+
+
+def test_one_call_whose_result_is_used_keeps_the_function_out(tmp_path: Path) -> None:
+    root = _code(tmp_path, '''
+        from pkg import model
+        def one():
+            model.edge(1.0)
+        def two():
+            return model.edge(2.0) + 1.0
+        def three(x):
+            y = model.edge(x)
+            z = y * 2
+            return {"v": z}
+        ''')
+    assert si.discarded_calls(root, ["edge"]) == {}
+
+
+def test_discarded_calls_does_not_read_tests_or_fi_helpers(tmp_path: Path) -> None:
+    kept = "from pkg import model\ndef run_cell(c):\n    return {'w': model.edge(c)}\n"
+    dropped = "from pkg import model\ndef f():\n    model.edge(1.0)\n"
+    root = _code(tmp_path, kept, {"tests/test_x.py": dropped, "fi_core/check.py": dropped})
+    assert si.discarded_calls(root, ["edge"]) == {}

@@ -156,10 +156,16 @@ def test_a_disagreement_that_the_results_depend_on_names_them_by_the_papers_labe
     assert '"Estimated ratio $r$" depends on that calculation, so it is not independently confirmed' in one
 
 
-def test_a_disagreement_the_results_do_not_use_is_not_in_the_paper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_null_change_does_not_keep_a_disagreement_out_of_the_paper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    said = _second_version(tmp_path, monkeypatch, {"solve_it": {"status": "no_change_seen", "scale": 0.05}})
+    assert said.endswith("and the run did not show whether the reported results depend on it.")
+
+
+def test_a_disagreement_on_a_function_whose_result_the_code_throws_away_is_not_in_the_paper(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = _root(tmp_path)
     _write(root, ".fi/second_impl.json", {"functions": {"solve_it": DISAGREE}})
-    monkeypatch.setattr("core.second_impl.read_dependence", lambda r: {"solve_it": {"status": "does_not_feed"}})
+    monkeypatch.setattr("core.second_impl.read_dependence", lambda r: {"solve_it": {"status": "discarded"}})
     assert _of(root, paper_facts.SECOND_VERSION) == []
     assert "S3" in (root / ".fi/second_impl.json").read_text(encoding="utf-8"), "the record still holds it for QUALITY.md"
 

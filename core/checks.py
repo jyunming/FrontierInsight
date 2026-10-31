@@ -249,8 +249,9 @@ CHECKS: tuple[Check, ...] = (
           'MAX_ROUNDS.'),
     Check('headline_depends_on_functions', 'core.second_impl', 'dependence',
           'execute', 'measured', 'note',
-          'Perturbs a tested function and checks the headline results change; a function the headline results '
-          'do not use becomes an evidence gap.'),
+          'Perturbs a tested function and checks the headline results change (a positive finding only: a null '
+          'change is no claim); a function whose result the code throws away wherever it is called, or that the '
+          'run never calls, is stated and an evidence gap.'),
     Check('hidden_setting_check', 'core.hidden_check', 'run',
           'execute', 'measured', 'note',
           'After the run FI re-runs invariant/symmetry/second-implementation checks at a setting no prompt '
