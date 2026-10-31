@@ -1656,7 +1656,11 @@ class RunChecksMixin:
                 sped = await self._speed_up(state, runner, python, env, grid, runs, thresholds, inside, est, limit_s,
                                             budget_s=max(0.0, budget_s - self._pilot_spent), probes=probes)
                 if sped.get("kept"):
+                    # The simulation is a different one now: what was measured on the slow one (the slowdown at once, whether
+                    # settings may share processes, with the time that check was given) is measured again on the faster one.
                     cached.clear()
+                    slowdown = None
+                    grouping_done = False
                     # the slower of two timings of the faster simulation is the one the next decision is made on
                     for p in sped.get("probes") or []:
                         cached[_estimate.probe_key(p.cell, runs)] = p
@@ -2948,7 +2952,9 @@ class RunChecksMixin:
         with the runs per setting it will have (at most 3), in the order the run would use and in the opposite order, and
         the numbers are compared on every setting (core/trial_runner.py ``measure_grouping``). The time is the measured
         time of the first run, scaled to the runs per setting and padded by the sizing's margin: no term of the estimate
-        decides it. That run stops, and the check with it, when it passes a quarter of the limit. Sets
+        decides it. That run stops, and the check with it, when it passes the limit less FI's margin (a longer
+        run could not pass the test below) or the study's own estimate without sharing (a grouped run that takes as long saves
+        nothing; the check's trials are not reused, so its time is extra). Sets
         ``runner.per_process`` and the groups, and returns ``(the console sentence, the expected seconds, the estimate for
         the run)`` when the study then fits the time allowed; else says why not in the log, leaves one process per setting,
         and returns ``None`` (the cut and the disclosure go on as before)."""
@@ -2976,7 +2982,7 @@ class RunChecksMixin:
                 self.executor, python, self.quest_root, module, grid,  # type: ignore[attr-defined]
                 runs_per_setting=runs, base_seed=int((env or {}).get("FI_REPLICATE_SEED") or 0),
                 deterministic=runner.deterministic, timeout_s=timeout_s, per_process=n, cost=getattr(runner, "cost", None),
-                max_pass_s=0.25 * limit_s, env=env, thresholds=thresholds, paired=_mc_error.paired(protocol, self.quest_root),
+                max_pass_s=min(limit_s / _estimate.SAFETY, float(est.seconds or limit_s)), env=env, thresholds=thresholds, paired=_mc_error.paired(protocol, self.quest_root),
                 in_each_run=inside, log=log, at_once=at_once)
         except Exception as e:  # noqa: BLE001 -- a check that cannot run leaves the run as it is
             log.warning("[execute] Settings run one per process: the check of sharing processes could not be run (%r).", e)
