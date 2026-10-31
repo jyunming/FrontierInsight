@@ -494,3 +494,40 @@ def test_a_figure_may_use_a_result_every_trial_returns_as_its_x_and_nothing_else
     assert cp._check_figures({"pond_pairs.png": row}, asked, out.design) == []
     for bad in ({**row, "x": "salinity"}, {**row, "shows": ["algae_peak"], "x": "algae_peak", "series": "algae_peak"}):
         assert cp._check_figures({"pond_pairs.png": bad}, asked, out.design)
+
+
+def _record_design(compared: bool) -> dict[str, Any]:
+    metric = {"id": "algae_peak", "kind": "mean", "estimand": "peak algae count", "unit": "one pond run", "role": "result",
+              "returned": "each_run", "depends_on": ["nutrient", "dose"] if compared else ["nutrient"],
+              "known_value": {"true_value": 5.0, "estimate": "peak_hat", "standard_error": "peak_se",
+                              "interval": ["peak_lo", "peak_hi"], "level": 0.95}}
+    protocol = {"grid": {"nutrient": [1, 2, 4]}, "runs_per_setting": 50, "metrics": [metric,
+                {"id": "bloom", "kind": "proportion", "estimand": "P(bloom)", "unit": "one pond run", "role": "result",
+                 "returned": "each_run", "depends_on": ["nutrient"]}]}
+    if compared:
+        protocol["in_each_run"] = {"dose": ["low", "high"]}
+    return {**DESIGN, "protocol": protocol}
+
+
+def test_the_figures_prompt_names_the_values_a_run_compares_inside_it_and_how_to_read_them() -> None:
+    """A result compared inside each run is recorded for each value: the figures part is told which values and the calls that read
+    them (a plan's model once dropped a figure because it believed the record had no values for one of them), and that the
+    plan's true value and interval make `table.coverage` serve the result."""
+    lines = cp._record_reads(_record_design(True))
+    level = [x for x in lines if x.startswith("- `algae_peak`")]
+    assert len(level) == 1 and "`dose` (low, high)" in level[0] and "table.level_rows(name, key)" in level[0]
+    assert "`bloom`" not in level[0]
+    assert any(x.startswith("- `table.coverage(name, key, dose=value)`") and "`algae_peak`" in x for x in lines)
+
+
+def test_a_plan_that_compares_nothing_inside_a_run_gets_no_per_value_line() -> None:
+    lines = cp._record_reads(_record_design(False))
+    assert not any("level_rows" in x for x in lines)
+    assert any(x.startswith("- `table.coverage(name, key)`") for x in lines)  # no value to give: the plain call
+    assert [x for x in lines if "coverage" not in x] == _skeleton_reads()
+
+
+def _skeleton_reads() -> list[str]:
+    from core import skeleton
+
+    return skeleton.table_reads()
