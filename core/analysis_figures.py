@@ -241,11 +241,12 @@ def _draw_one(spec: dict[str, Any], body: Any, table: Any, out_dir: str) -> dict
         none_drawn = _drew_nothing(spec, table)
         if none_drawn:
             return _outcome(fid, file, "failed", none_drawn)
+        panel_record = _set_panel_titles(handle, axes, spec.get("labels") or {})
         try:
             fig.savefig(os.path.join(out_dir, file))  # the recorder of the house style notes what the figure draws
         except Exception as err:
             return _outcome(fid, file, "failed", "`figure_%s` drew something that cannot be saved (%s: %s)." % (fid, type(err).__name__, err))
-        return _outcome(fid, file, "ok")
+        return dict(_outcome(fid, file, "ok"), panels=panel_record)
     except Exception as err:
         return _outcome(fid, file, "fi_fault", "FI stopped while drawing the figure `%s` (%s: %s)." % (fid, type(err).__name__, err))
     finally:
@@ -260,7 +261,37 @@ def _figure_handle(axes: list[Any], spec: dict[str, Any], file: str) -> Any:
         class Figure:  # type: ignore[no-redef]
             def __init__(self, axes, x=None, series=None, shows=None, file=None):
                 self.axes, self.x, self.series, self.shows, self.file = list(axes), x, series, shows, file
-    return Figure(axes, x=spec.get("x"), series=spec.get("series"), shows=spec.get("shows"), file=file)
+                self.declared = {}
+
+            def panel(self, which, **settings):
+                self.declared[which if isinstance(which, int) else self.axes.index(which)] = dict(settings)
+    handle = Figure(axes, x=spec.get("x"), series=spec.get("series"), shows=spec.get("shows"), file=file)
+    if not hasattr(handle, "panel"):  # a runtime written before `panel` existed (a resumed quest keeps its own)
+        handle.declared = {}
+        handle.panel = lambda which, **settings: handle.declared.__setitem__(
+            which if isinstance(which, int) else handle.axes.index(which), dict(settings))
+    return handle
+
+
+def _panel_title(settings: dict[str, Any], labels: dict[str, Any]) -> str:
+    """The title FI writes for a panel from the settings the body declared for it: ``label = value``, the label the plan
+    gives the setting, else its name."""
+    return ", ".join("%s = %s" % (labels.get(k) or k, "%.4g" % v if isinstance(v, float) else v) for k, v in settings.items())
+
+
+def _set_panel_titles(handle: Any, axes: list[Any], labels: dict[str, Any]) -> list[dict[str, Any]]:
+    """Give each panel the body declared its settings for FI's title in place of whatever the body typed there (the body's
+    title can name a line the panel does not draw); a panel it declared nothing for keeps the body's own. Returns the record."""
+    record = []
+    for index, settings in sorted((getattr(handle, "declared", None) or {}).items()):
+        if not isinstance(index, int) or not 0 <= index < len(axes) or not isinstance(settings, dict) or not settings:
+            continue
+        title = _panel_title(settings, labels)
+        for loc in ("left", "center", "right"):
+            axes[index].set_title("", loc=loc)
+        axes[index].set_title(title)
+        record.append({"panel": index + 1, "settings": settings, "title": title})
+    return record
 
 
 def run_figures(figures: list[dict[str, Any]], namespace: Any, table: Any, out_dir: str) -> list[dict[str, Any]]:

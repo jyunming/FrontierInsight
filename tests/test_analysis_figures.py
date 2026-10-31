@@ -644,3 +644,42 @@ def test_a_levels_error_that_names_the_result_is_cut_to_its_type_and_the_line_su
     out = _shown(tmp_path, figure_x, table=table)
     assert out["status"] == "failed" and key not in out["said"] and "raised ValueError." in out["why"]
     assert "drew nothing from the trial record" in eng._stderr_for_models(af.said([out]))
+
+
+# ---- a panel's title is FI's, from the setting the body declared for it ----------------------------------------------------------
+def test_a_declared_panel_is_titled_by_fi_from_its_setting_not_by_the_body(tmp_path):
+    def figure_grid(fig, table):
+        for i, size in enumerate((20, 200)):
+            fig.axes[i].plot([1, 2])
+            fig.axes[i].set_title("(dashed: a curve this panel does not draw)")
+            fig.panel(i, size=size)
+
+    out = af.run_figures([{"id": "grid", "file": "grid.png", "panels": 2}], _namespace(figure_grid=figure_grid), _Table(), str(tmp_path))
+    assert out[0]["status"] == "ok"
+    assert [p["title"] for p in out[0]["panels"]] == ["size = 20", "size = 200"]
+    record = json.loads((tmp_path / ".fi" / "figure_records" / "grid.json").read_text(encoding="utf-8")) if (tmp_path / ".fi").exists() else None
+    if record:  # the house style's recorder is what the caption reads
+        assert [a["title"] for a in record["axes"]] == ["size = 20", "size = 200"]
+
+
+def test_a_panel_given_nothing_keeps_the_body_title_and_a_one_panel_figure_is_unchanged(tmp_path):
+    def figure_one(fig, table):
+        fig.axes[0].plot([1, 2])
+        fig.axes[0].set_title("growth over time")
+
+    import matplotlib.pyplot as plt
+    seen = {}
+    real = af._set_panel_titles
+
+    def spy(handle, axes, labels):
+        got = real(handle, axes, labels)
+        seen["title"], seen["record"] = axes[0].get_title(), got
+        return got
+
+    af._set_panel_titles = spy
+    try:
+        out = af.run_figures([{"id": "one", "file": "one.png"}], _namespace(figure_one=figure_one), _Table(), str(tmp_path))
+    finally:
+        af._set_panel_titles = real
+    assert out[0]["status"] == "ok" and out[0]["panels"] == [] and seen == {"title": "growth over time", "record": []}
+    plt.close("all")
