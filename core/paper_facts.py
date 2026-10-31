@@ -247,6 +247,49 @@ def _code_files_sentence(root: Path) -> str:
     return f"The code is kept in separate parts ({parts}), not in {wanted} the topic asked for"
 
 
+def _labelled_precision(root: Path, reduced: dict[str, Any]) -> dict[str, Any]:
+    """``reduced`` with the precision's metric named the way the paper names it: when the record holds the id of one of the
+    plan's metrics, the plan's label for it (the record keeps the id; a reader of the paper knows the label)."""
+    precision = reduced.get("precision")
+    if not isinstance(precision, dict):
+        return reduced
+    for m in _plan_metrics(root):
+        if str(m.get("id") or "") == str(precision.get("metric") or "") and _one(m.get("label")):
+            return {**reduced, "precision": {**precision, "metric": _one(m["label"])}}
+    return reduced
+
+
+def _listed_labels(labels: list[str], cap: int = 4) -> str:
+    shown = labels[:cap]
+    if len(labels) > cap:
+        shown.append(f"{len(labels) - cap} more")
+    return shown[0] if len(shown) == 1 else ", ".join(shown[:-1]) + " and " + shown[-1]
+
+
+def second_version_text(root: Path, function: str) -> str:
+    """The Limitations sentence for a key function whose two independently written versions still disagree, in the
+    paper's words: what the reported results owe to it, from FI's own dependence record (``core/second_impl.py::dependence``:
+    the results that changed when the function's result was changed, by the plan's labels), never the function's name, the
+    plan's step id or the inputs the versions were compared on (those are in QUALITY.md and ``.fi/second_impl.json``).
+    A function the record does not show as used says that."""
+    from . import second_impl as _second
+
+    verdict = _second.read_dependence(root).get(function)
+    verdict = verdict if isinstance(verdict, dict) else {}
+    lead = "Two independently written versions of one calculation in the code gave different results on a test input"
+    if verdict.get("status") == _second.FEEDS:
+        known = {str(m.get("id")): _one(m.get("label")) or str(m.get("id")) for m in _plan_metrics(root) if m.get("id")}
+        labels = [f'"{known[i]}"' for i in dict.fromkeys(str(x) for x in verdict.get("headline_moved") or []) if i in known]
+        behind = _listed_labels(labels) if labels else "the reported results"
+        return (f"{lead}, and the run did not settle which is right; {behind} "
+                f"{'depends' if len(labels) == 1 else 'depend'} on that calculation, so "
+                f"{'it is' if len(labels) == 1 else 'they are'} not independently confirmed")
+    if verdict.get("status") == _second.NOT_FEEDING:
+        return (f"{lead}; the reported results did not change when that calculation's result was changed, so they do not "
+                "depend on which version is right")
+    return f"{lead}, and the run did not show whether the reported results depend on it"
+
+
 def required_items(quest_root: Path | str) -> list[Item]:
     """Every item the Limitations must place, from FI's records. A missing or unreadable record gives none."""
     root = Path(quest_root)
@@ -325,9 +368,7 @@ def required_items(quest_root: Path | str) -> list[Item]:
 
         for fname, entry in ((_second.load(root).get("functions") or {}).items()):
             if isinstance(entry, dict) and entry.get("status") == _second.UNRESOLVED:
-                said = _one(entry.get("limitation")) or (f"Two independently written versions of `{fname}` gave different "
-                                                         "results; the number depends on which is right")
-                add(SECOND_VERSION, fname, _sentence(said))
+                add(SECOND_VERSION, fname, _sentence(second_version_text(root, fname)))
     except Exception:  # noqa: BLE001 -- a record that cannot be read adds nothing
         pass
     # Equations not tested against a worked example before the run.
@@ -393,7 +434,7 @@ def required_items(quest_root: Path | str) -> list[Item]:
                 + (f"{late:,} trials were not run because the study's time limit ran out" if late else "")), key="all")
     estimate = _read(root, ".fi/run_estimate.json")
     reduced = estimate.get("reduced") if isinstance(estimate, dict) else None
-    if isinstance(reduced, dict) and (said := fewer_runs_text(reduced)):
+    if isinstance(reduced, dict) and (said := fewer_runs_text(_labelled_precision(root, reduced))):
         add(FEWER_RUNS, FEWER_RUNS_NAME, _sentence(f"The experiment ran {said}"), key="runs")
     if (cut_said := _disclosure.cut_short_text(root)):
         add(CUT_SHORT, CUT_SHORT_NAME, _sentence(cut_said), key="cut")
