@@ -462,3 +462,35 @@ def test_a_models_own_figure_with_a_folder_is_read_under_its_base_name() -> None
     d = {"protocol": {"form": "contract", "grid": {"nutrient": [1, 2]}, "metrics": [{"id": "algae_peak", "kind": "mean"}],
                       "figures": [{"file": "figures/a.png", "shows": ["algae_peak"], "x": "nutrient"}]}}
     assert [f.file for f in contract.from_design(d).figures] == ["a.png"]
+
+
+def test_the_figures_prompt_tells_what_the_trial_record_holds_from_the_frames_own_table() -> None:
+    """The model that may drop a figure is told the per-trial reads FI serves, taken from the frame's `Table` class: a figure
+    needing each trial's value of a reported number is not one the study cannot draw."""
+    from core import skeleton
+
+    reads = skeleton.table_reads()
+    assert reads and any(line.startswith("- `table.values(name, key)`") for line in reads)
+    faults = {"pond_pairs.png": "peak against bloom for each trial"}
+    prompt = cp._figures_prompt(TEMPLATES, {**DESIGN, "protocol": {**DESIGN["protocol"], "form": "contract"}}, faults, [], "")
+    assert "$record" not in prompt
+    assert all(line in prompt for line in reads)
+    assert prompt.index(reads[0]) < prompt.index("pond_pairs.png")
+
+
+def test_a_figure_may_use_a_result_every_trial_returns_as_its_x_and_nothing_else() -> None:
+    import asyncio
+
+    ok = {"figures": {**GOOD["figures"], "pond_pairs.png": {"shows": ["bloom"], "x": "algae_peak", "series": "temp", "panels": 1}}}
+    planned = [*PLANNED, "pond_pairs.png (peak against bloom, a point for each trial)"]
+    design = _copy(figures_planned=planned)
+    fake = Fake(roles=[ROLES], comparisons=[COMPARE], figures=[ok])
+    out = asyncio.run(run(fake, design))
+    assert out.parts["figures"]["valid"], out.parts["figures"]["problems"]
+    assert "every trial returns (algae_peak, bloom)" in fake.prompts[-1][1]
+    # a worked-out quantity on an axis, or a result that is not returned in each run, is still refused
+    asked = {"pond_pairs.png": "x"}
+    row = ok["figures"]["pond_pairs.png"]
+    assert cp._check_figures({"pond_pairs.png": row}, asked, out.design) == []
+    for bad in ({**row, "x": "salinity"}, {**row, "shows": ["algae_peak"], "x": "algae_peak", "series": "algae_peak"}):
+        assert cp._check_figures({"pond_pairs.png": bad}, asked, out.design)

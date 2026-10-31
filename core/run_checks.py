@@ -453,6 +453,8 @@ runs on the table of FI's record and can change nothing in it:
   FI calls it once for each setting.
 - `figure_<id>(fig, table)` draws what the plan says the figure shows on `fig.axes` (one axes for each panel of the plan), from
   `table`. FI makes the figure, saves it and closes it: never call `savefig`, `show`, `close`, `figure` or `subplots`.
+  When `fig.x` is a result id (not a setting), draw one point for each trial of a setting: `table.values(fig.x, key)` against
+  `table.values(<shown id>, key)`, paired by `table.trials(...)` (a trial with no finite value in one is left out of both).
 - The table gives, for a result `id` at a setting `key`: `table.mean(id, key)`, `table.interval(id, key)`, `table.n(id, key)`,
   `table.values(id, key)` (one number for each trial that ran), `table.failed(key)`; and `table.keys()`, `table.setting(key)`,
   `table.at(**settings)` (the key of one setting), `table.across(axis, **fixed)` (the values of one setting with their keys),
