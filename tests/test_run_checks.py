@@ -1016,6 +1016,39 @@ async def test_settings_run_at_once_make_a_run_fit_that_one_after_another_would_
 
 
 @pytest.mark.asyncio
+async def test_a_kept_speed_up_makes_fi_measure_again_before_it_chooses_how_settings_share_processes(tmp_path: Path) -> None:
+    """A study over the time allowed was checked for sharing processes on the slow simulation, then a speed-up was kept, and
+    the faster simulation was never checked again: it ran one process per setting on timings of the slow one (the slowdown
+    at once, the verdict on sharing). After a kept speed-up both are measured again, once."""
+    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=8, min_runs_per_setting=8, grid={"n": [1, 2, 4], "m": [1, 2, 3, 4]})
+    runner.at_once = 4
+    eng._pilot_spent = 0.0
+    eng.config.engine.improve_rounds = 1
+    calls: list[str] = []
+    real_slowdown = eng._slowdown_at_once
+
+    async def sharing(*a: Any, **k: Any) -> None:
+        calls.append("sharing")
+        return None
+
+    async def slowdown(*a: Any, **k: Any) -> Any:
+        calls.append("slowdown")
+        return await real_slowdown(*a, **k)
+
+    async def speed_up(*a: Any, **k: Any) -> dict[str, Any]:
+        calls.append("speed_up")
+        return {"kept": True, "probes": []}
+
+    eng._group_settings = sharing  # type: ignore[method-assign]
+    eng._slowdown_at_once = slowdown  # type: ignore[method-assign]
+    eng._speed_up = speed_up  # type: ignore[method-assign]
+    await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
+    after = calls[calls.index("speed_up"):]
+    assert "sharing" in after and "slowdown" in after, calls
+    assert calls.count("speed_up") == 1, calls
+
+
+@pytest.mark.asyncio
 async def test_the_slowdown_is_measured_on_the_costliest_setting_that_finished_and_fits_the_time_left(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     eng, model, runner, ex = await _sizing(tmp_path, timeout_s=3600)

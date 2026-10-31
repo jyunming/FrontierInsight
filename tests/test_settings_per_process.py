@@ -346,7 +346,40 @@ def test_the_time_is_scaled_to_the_runs_per_setting_and_padded(tmp_path: Path) -
     assert any("over the limit" in line for line in me._log.lines)
 
 
-def test_a_group_that_passes_a_quarter_of_the_limit_stops_the_check(tmp_path: Path) -> None:
+def test_a_grouped_run_that_would_fit_once_padded_is_not_stopped_early(tmp_path: Path) -> None:
+    # the first run takes more than a quarter of the limit but less than the limit less the margin: it would fit, so the
+    # check lets it finish and the settings share processes
+    heavy = MARK + '''
+import time
+
+def run_cell(cell):
+    time.sleep(16.0 if cell["rate"] == 12 else 0.05)
+    return {"level": cell["rate"] * 2.0}
+'''
+    got, runner, me = _sizing(tmp_path, heavy, settings=12, at_once=4, limit_s=60.0)
+    assert got is not None and runner.per_process == 3, me._log.lines
+    assert 15.0 < got[1] * 1.5 <= 60.0
+
+
+def test_processes_that_really_are_slow_are_not_shared_and_the_reason_is_stated(tmp_path: Path) -> None:
+    # the known positive: a group that cannot finish within the limit less the margin keeps one process per setting
+    slow = MARK + '''
+import time
+
+def run_cell(cell):
+    time.sleep(0.6)
+    return {"level": cell["rate"] * 2.0}
+'''
+    root = _quest(tmp_path, slow)
+    grid = {"rate": list(range(1, 9)), "size": [2]}
+    grouping = asyncio.run(trial_runner.measure_grouping(
+        _executor(), sys.executable, root, "code/simulate.py", grid, runs_per_setting=1, base_seed=7, deterministic=True,
+        timeout_s=120, per_process=4, cost=None, max_pass_s=2.0, env={"FI_TEST_MARK": str(tmp_path / "m.txt")}, at_once=2))
+    assert grouping.too_long and not grouping.same
+    assert grouping.says.startswith("Settings run one per process") and "longer than the check allows" in grouping.says
+
+
+def test_a_group_that_passes_the_limit_less_the_margin_stops_the_check(tmp_path: Path) -> None:
     # one setting is far costlier than the rest (a cost that grows along an axis): the group holding it passes the bound
     grows = MARK + '''
 import time
