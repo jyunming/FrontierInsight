@@ -33835,6 +33835,13 @@ def _figure_list_for_prompt(state: QuestState) -> str:
             f"values, or say it shows a single replicate ({_seed_label(0, n_seeds)}), not the "
             "means over the seeds."
         )
+    if any(isinstance(ax.get("unlabelled_curves"), dict) for f in figs
+           for ax in ((records.get(f) or {}).get("axes") or []) if isinstance(ax, dict)):
+        lines.append(
+            "A figure that draws curves its legend does not name holds more curves than the legend lists: the text "
+            "gives the number of curves FI's record counts, and never the number of names in the legend as the "
+            "number drawn."
+        )
     if any(_hidden_series(records.get(f)) for f in figs):
         lines.append(
             "A series marked FLAT is drawn at one value on its axis, and one NOT SHOWN "
@@ -33973,6 +33980,19 @@ def _attach_unlabelled_lines(record: dict[str, Any], lines_path: Path) -> None:
         if not isinstance(panel, dict) or not isinstance(got, dict):
             continue
         groups: dict[str, dict[str, Any]] = {}
+        # What the panel draws, counted from the full line list (not from the legend): a panel with no line, no shape,
+        # no legend and no text is blank, and the curves drawn without a legend label are counted, so a caption states
+        # how many curves the saved figure holds and not only the ones its legend names.
+        data = [ln for ln in got.get("lines") or []
+                if isinstance(ln, dict) and ln.get("kind") == "data" and len(ln.get("x") or []) >= 2]
+        if (not got.get("lines") and not got.get("draws_other") and not got.get("legend") and not got.get("has_text")
+                and not panel.get("series")):
+            panel["blank"] = True
+        loose = [ln for ln in data if str(ln.get("label") or "").startswith("_")
+                 and not (_NOT_SOLID.get(str(ln.get("linestyle"))) is not None
+                          and str(ln.get("marker") or "None").lower() in ("none", "", " "))]
+        if loose:
+            panel["unlabelled_curves"] = {"count": len(loose), "drawn": len(data)}
         for line in got.get("lines") or []:
             if not isinstance(line, dict) or not str(line.get("label") or "").startswith("_"):
                 continue
@@ -34231,6 +34251,10 @@ def _figure_record_note(record: dict[str, Any] | None, *, n_seeds: int | None = 
             series.append(f"{s.get('label')} {span}{tail}")
         if series:
             bits.append("series: " + "; ".join(series))
+        loose = ax.get("unlabelled_curves")
+        if isinstance(loose, dict) and loose.get("count"):
+            bits.append(f'draws {loose["drawn"]} curves in all, of which {loose["count"]} carry no legend label '
+                        "(the legend names the others only)")
         for group in ax.get("unlabelled_lines") or []:
             k = int(group["count"])
             bits.append(f'also draws {k} {group["style"]} line{"s" if k > 1 else ""} with no legend label '
@@ -34277,6 +34301,8 @@ def _panel_draws_nothing(ax: dict[str, Any]) -> bool:
     """Whether FI's record of one panel says every line it was given has no point on it. A panel whose record lists no
     series (an image, a histogram) is not known to be empty, so it is not."""
     series = [s for s in ax.get("series") or [] if isinstance(s, dict)]
+    if ax.get("blank"):
+        return True  # no line, shape, legend or text was drawn on it (FI's record of the saved figure)
     return bool(series) and not ax.get("unlabelled_lines") and all(s.get("shows") == "no points" for s in series)
 
 
@@ -34478,6 +34504,13 @@ def _figure_caption_text(
                     parts.append(f"{label} {words}.")
                 else:
                     parts.append(f"{label} {words} in " + "; ".join(dict.fromkeys(where)) + ".")
+    for k, ax in numbered:
+        loose = ax.get("unlabelled_curves")
+        if isinstance(loose, dict) and loose.get("count"):
+            who = "It also" if len(axes) == 1 else f"Panel {k} also"
+            n = int(loose["count"])
+            parts.append(f"{who} draws {n} further curve{'s' if n > 1 else ''} with no legend label "
+                         f"({loose['drawn']} curves in all).")
     marks = list(dict.fromkeys(marks))
     if marks:
         parts.append("Marked: " + "; ".join(marks[:3]) + ".")

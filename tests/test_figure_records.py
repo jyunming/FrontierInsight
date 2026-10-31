@@ -114,3 +114,56 @@ def test_the_writer_is_told_about_the_lines_the_legend_does_not_name(tmp_path: P
     note = _figure_list_for_prompt({"figures": ["spread.png"], "figure_records": records})
     assert "also draws 2 dashed lines with no legend label (0.0043 to 0.108)" in note
     assert "also draws 1 dashed line with no legend label (0 to 0)" in note
+
+
+def _curve_records(tmp_path: Path, n_loose: int, *, blank_panel: bool = False) -> dict:
+    """A panel whose legend names 2 series while the loop behind them drew ``n_loose`` more solid curves."""
+    names = [_line("a", "-", "o", [1.0, 2.0, 3.0]), _line("b", "-", "o", [1.0, 2.0, 4.0])]
+    loose = [_line(f"_child{i}", "-", "o", [1.0, 2.0, 5.0 + i]) for i in range(n_loose)]
+    main = {"file": "sweep.png", "axes": [{"title": "t", "xlabel": "x", "ylabel": "y", "place": [0.1, 0.1, 0.4, 0.8],
+                                           "series": [{"label": "a", "min": 1, "max": 3, "shows": "yes"},
+                                                      {"label": "b", "min": 1, "max": 4, "shows": "yes"}]}]}
+    full = {"file": "sweep.png", "axes": [{"title": "t", "lines": names + loose}]}
+    if blank_panel:
+        main["axes"].append({"title": "", "xlabel": "", "ylabel": "", "place": [0.55, 0.1, 0.4, 0.8], "series": []})
+        full["axes"].append({"title": "", "lines": [], "draws_other": False, "legend": False, "has_text": False})
+    (tmp_path / "sweep.json").write_text(json.dumps(main), encoding="utf-8")
+    (tmp_path / "sweep.seed0.json").write_text(json.dumps(full), encoding="utf-8")
+    return _read_figure_records(tmp_path, ["sweep.png"])
+
+
+def test_curves_the_legend_does_not_name_are_counted_and_the_caption_says_so(tmp_path: Path) -> None:
+    from core.engine import _figure_caption_text
+    record = _curve_records(tmp_path, 5)["sweep.png"]
+    assert record["axes"][0]["unlabelled_curves"] == {"count": 5, "drawn": 7}
+    caption = _figure_caption_text("sweep.png", record, n_seeds=None)
+    assert "It draws a, b." in caption
+    assert "It also draws 5 further curves with no legend label (7 curves in all)." in caption
+    note = _figure_list_for_prompt({"figures": ["sweep.png"], "figure_records": {"sweep.png": record}})
+    assert "draws 7 curves in all, of which 5 carry no legend label" in note
+    assert "never the number of names in the legend" in note
+
+
+def test_a_figure_whose_curves_are_all_labelled_is_unchanged(tmp_path: Path) -> None:
+    """Known positive for the other side: drawn equals named, so no sentence and no key is added."""
+    from core.engine import _figure_caption_text
+    record = _curve_records(tmp_path, 0)["sweep.png"]
+    assert "unlabelled_curves" not in record["axes"][0]
+    caption = _figure_caption_text("sweep.png", record, n_seeds=None)
+    assert "further curve" not in caption and "curves in all" not in caption
+
+
+def test_a_blank_panel_is_not_counted_as_a_panel_drawn(tmp_path: Path) -> None:
+    from core import figure_facts
+    from core.engine import _figure_caption_text
+    records = _curve_records(tmp_path, 0, blank_panel=True)
+    record = records["sweep.png"]
+    assert record["axes"][1].get("blank") is True and "blank" not in record["axes"][0]
+    assert "2 panels" not in _figure_caption_text("sweep.png", record, n_seeds=None)
+    lines = json.loads((tmp_path / "sweep.seed0.json").read_text(encoding="utf-8"))
+    raw = json.loads((tmp_path / "sweep.json").read_text(encoding="utf-8"))
+    assert figure_facts.blank_panels(raw, lines) == {1}
+    assert figure_facts.layout_sentence(raw, lines) == 'a single panel ("y"); one more place on the figure is left blank'
+    # The same record with a text on the extra panel (a note) is not blank.
+    lines["axes"][1]["has_text"] = True
+    assert figure_facts.blank_panels(raw, lines) == set()

@@ -658,6 +658,8 @@ try:
                 "xlabel": ax.get_xlabel(), "ylabel": ax.get_ylabel(),
                 "xscale": ax.get_xscale(), "yscale": ax.get_yscale(),
                 "legend": ax.get_legend() is not None,
+                # Words written on the panel (a note, an annotation): a panel with text is not blank.
+                "has_text": bool(ax.texts),
                 # Whether the panel draws anything but lines (bars, an image, a patch, a collection that has paths): a panel
                 # with no lines and nothing else is empty.
                 "draws_other": any(_fi_draws(artist) for group in (ax.patches, ax.collections, ax.images, ax.tables,
