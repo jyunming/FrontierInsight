@@ -2932,6 +2932,7 @@ async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, m
                           mean_names: Collection[str] | None = None, most_trials: int | None = None,
                           paired: bool = False, proportion_names: Collection[str] | None = None,
                           repeated: bool | None = None, unrun: dict[str, str] | None = None,
+                          protocol: dict[str, Any] | None = None,
                           ) -> tuple[list[dict[str, Any]], list[str], bool]:
     """``(checks, problems, timed_out)`` for the declared oracles. An oracle with a case is measured by the ENGINE: it calls
     the simulation function on that case and reads the measure from what comes back (``measured_by: "engine"``). The rest
@@ -2945,10 +2946,17 @@ async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, m
     ``mean_names``: the protocol's metrics that are means over runs (a mean check whose names are all among them is the
     formula on their means). ``paired``: the study gives trial ``t`` of every setting one seed, and so do the checks.
     ``unrun``: when given, it is filled with ``{check name: why}`` for each case the simulation could not be run on (the
-    run's own reason: a trial that did not report, a load error; a :class:`TimeLimit` when FI stopped it at its limit)."""
+    run's own reason: a trial that did not report, a load error; a :class:`TimeLimit` when FI stopped it at its limit).
+    ``protocol``: when given, each case is made a full setting the way the study's own cells are (the case's named values
+    over the settings every cell holds, :func:`core.optimise.complete_case`), so a check is not called without a setting the
+    simulation reads in every cell of the study."""
     checks: list[dict[str, Any]] = []
     problems: list[str] = []
     timed_out = False
+    if protocol is not None:
+        from .optimise import complete_case  # a late import: core.optimise imports this module
+        oracles = [{**o, "case": complete_case(protocol, o["case"])} if isinstance(o.get("case"), dict) else o
+                   for o in oracles]
     # Every case, every batch of trials and the script's oracle() run from a copy of code/ outside the quest folder
     # (core/outside_run.py), as the study's cells do.
     executor = _outside_executor(executor, quest_root, log)

@@ -96,8 +96,11 @@ def complete_case(protocol: Any, case: dict[str, Any], *, keep_inside: bool = Fa
     (:func:`core.trial_runner.run_case`). So they are left out here unless the case names them, or ``keep_inside`` (the
     call is a search evaluation, which is given each list whole)."""
     block = block_of(protocol)
-    if block is None or not isinstance(case, dict):
+    if not isinstance(case, dict):
         return dict(case or {})
+    if block is None:
+        # A measurement over a grid: a setting every cell holds at one value is held in the case too, as in the study's own cells.
+        return {**_search.held_settings(protocol), **case}
     baseline = (block.get("baseline") or {}).get("values") if isinstance(block.get("baseline"), dict) else None
     full = _search.cell_of(block, dict(baseline) if isinstance(baseline, dict) else {})
     if not keep_inside:

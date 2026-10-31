@@ -337,3 +337,39 @@ def test_a_run_cell_that_only_mentions_run_trial_does_not_hide_a_bug_in_it(tmp_p
     assert checks[0]["value"] == 0.9 and found, "measured on run_trial, the code the study runs, and fails on it"
 
 
+
+
+# --- a check's case is a full setting: the settings every cell of the study holds are in it too ---------------------------
+
+HELD_SETTING_SIM = """
+def run_cell(cell):
+    return {"y": cell["x"] * cell["steps"]}
+"""
+HELD_PROTOCOL = {"grid": {"x": [1.0, 2.0, 3.0], "steps": [30]}}
+HELD_CHECK = {"name": "scaled", "kind": "special_case", "check": "x times steps", "expected": 60.0, "tolerance": 1e-9,
+              "case": {"x": 2.0}, "measure": "y"}
+
+
+def test_a_case_gets_the_setting_every_cell_of_the_study_holds_when_the_protocol_is_given(tmp_path: Path) -> None:
+    checks, problems, _ = _measure(tmp_path, HELD_SETTING_SIM, [HELD_CHECK], protocol=HELD_PROTOCOL)
+    assert problems == []
+    assert checks[0]["value"] == 60.0 and checks[0]["measured_by"] == "engine"
+
+
+def test_without_the_protocol_the_case_is_run_as_written_and_the_missing_setting_is_reported(tmp_path: Path) -> None:
+    checks, problems, _ = _measure(tmp_path, HELD_SETTING_SIM, [HELD_CHECK])
+    assert checks == [] and any("steps" in p for p in problems)
+
+
+def test_a_case_that_breaks_the_simulation_still_reports_the_error_with_the_protocol_given(tmp_path: Path) -> None:
+    broken = HELD_SETTING_SIM.replace('cell["x"] * cell["steps"]', '1 / (cell["x"] - 2.0) * cell["steps"]')
+    checks, problems, _ = _measure(tmp_path, broken, [HELD_CHECK], protocol=HELD_PROTOCOL)
+    assert checks == [] and any("ZeroDivisionError" in p for p in problems)
+
+
+def test_a_setting_the_study_varies_is_not_filled_in_and_a_value_the_case_names_stays() -> None:
+    from core import optimise
+
+    protocol = {"grid": {"x": [1.0, 2.0], "steps": [30], "mode": ["a"]}, "in_each_run": {"level": [1, 2]}}
+    assert optimise.complete_case(protocol, {"x": 2.0}) == {"steps": 30, "mode": "a", "x": 2.0}
+    assert optimise.complete_case(protocol, {"steps": 5}) == {"steps": 5, "mode": "a"}

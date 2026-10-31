@@ -444,6 +444,16 @@ def in_each_run(block):
     return {str(k): list(v) for k, v in inside.items() if isinstance(v, list)}
 
 
+def held_settings(protocol):
+    """The settings of a measurement's grid that have one value: every cell of the study has them at that value, whatever
+    a check's case leaves out. ``{}`` for a grid whose axes all take several values. The values each run compares inside
+    it (:func:`core.in_run.of_study`) are not settings of a cell, and are left out."""
+    grid = study_grid(protocol)
+    inside = protocol.get("in_each_run") if isinstance(protocol, dict) and isinstance(protocol.get("in_each_run"), dict) else {}
+    return {str(a): v[0] for a, v in grid.items()
+            if isinstance(v, (list, tuple)) and len(v) == 1 and str(a) not in inside}
+
+
 def cell_of(block, design):
     """What the simulation is called with: the conditions held fixed, the search's numerical settings, the values every
     evaluation goes through together (each list whole), the design."""
