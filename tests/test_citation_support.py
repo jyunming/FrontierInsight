@@ -266,3 +266,43 @@ def test_a_sentence_that_holds_a_result_and_ends_on_the_citations_words_stays_a_
     out = _check(paper, sources, judge, repair, cs.new_record(paper, None), [], own=cs.OwnNumbers(["22"]))
     assert "the rounded 22 degrees." in out.paper and "degrees of." not in out.paper and "[3]" not in out.paper
     assert cs.uncut("Result is.") == "" and cs.uncut("It reads whole.") == "It reads whole."
+
+
+# --- FI's own source lists are never prose -----------------------------------------------------------------------------
+
+WEB_ONLY = """# Title
+
+## Introduction
+A claim from a page [W1]. Another one [W2].
+
+## Further reading
+
+- [W1] (2001). First page title. https://example.org/a
+- [W2] Second page title. https://example.org/b
+"""
+
+
+def test_a_further_reading_list_without_references_is_not_read_as_sentences() -> None:
+    sites = cs.find_sites(WEB_ONLY)
+    assert [s.labels for s in sites] == [["W1"], ["W2"]]
+    assert all(s.end <= cs.cited_text_end(WEB_ONLY) for s in sites)
+
+
+def test_a_check_that_drops_every_citation_leaves_the_list_labels() -> None:
+    sources = {"W1": _src("W1", "First page title", ""), "W2": _src("W2", "Second page title", "")}
+
+    async def never(_prompt: str) -> str:
+        return "{}"
+
+    res = asyncio.run(cs.check_paper(
+        WEB_ONLY, sources, own_numbers=set(), quote_ok=lambda q, t: False, judge=never, repair=never, record={},
+        save=lambda r: None, judge_prompt=lambda c, s: "x", repair_prompt=lambda t: "x"))
+    assert res.changed, "the body citations were dropped"
+    assert res.paper.partition("## Further reading")[2] == WEB_ONLY.partition("## Further reading")[2]
+    assert "- [W1] (2001). First page title." in res.paper
+
+
+def test_a_paper_with_both_lists_has_the_same_sites_as_before() -> None:
+    both = PAPER + "\n## Further reading\n\n- [W1] A page. https://example.org\n"
+    assert [s.labels for s in cs.find_sites(both)] == [["1", "3"], ["2", "3", "4", "W2"], ["5"], ["6"]]
+    assert cs.cited_text_end(both) == cs.references_start(both)

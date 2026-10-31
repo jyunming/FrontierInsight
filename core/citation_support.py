@@ -64,6 +64,7 @@ _PART = r"(?:W\d+|\d+(?:\s*[–-]\s*\d+)?)"
 CITE_RE = re.compile(rf"\[({_PART}(?:\s*[,;]\s*{_PART})*)\]")
 _NOT_PROSE_RE = re.compile(r"`[^`\n]*`|\$\$.*?\$\$|\$[^$\n]+\$", re.DOTALL)
 _REFERENCES_RE = re.compile(r"^#{1,6}\s*references\s*$", re.IGNORECASE | re.MULTILINE)
+_FURTHER_READING_RE = re.compile(r"^#{1,6}\s*further\s+reading\s*$", re.IGNORECASE | re.MULTILINE)
 _NUMBER_RE = re.compile(r"(?<![\w.])\d+(?:[.,]\d+)*%?")
 _SENTENCES_RE = re.compile(r"(?<=[.!?])\s+")
 _ACTIONS = ("cite_other", "reword", "drop_citation", "drop_sentence")
@@ -94,6 +95,14 @@ def references_start(paper: str) -> int:
     return m.start() if m else len(paper or "")
 
 
+def cited_text_end(paper: str) -> int:
+    """Where the text that cites ends: the first of the paper's ``## References`` and ``## Further reading`` headings, or
+    its length. FI writes both lists itself, so neither is prose a citation fix may edit (a paper with web sources only
+    has no References, and its Further reading must not be read as sentences)."""
+    ends = [m.start() for m in (_REFERENCES_RE.search(paper or ""), _FURTHER_READING_RE.search(paper or "")) if m]
+    return min(ends) if ends else len(paper or "")
+
+
 @dataclass
 class Site:
     """One sentence of the paper that cites, as an exact span of its text."""
@@ -109,7 +118,7 @@ class Site:
 def find_sites(paper: str) -> list[Site]:
     """Every sentence of the paper's text that cites a source, with the labels it names. Brackets in inline code or
     math, a bracket followed by ``(`` (a link) and a bracket holding 0 or a year-sized number are not citations."""
-    end = references_start(paper)
+    end = cited_text_end(paper)
     region = paper[:end]
     spans = [(m.start(), m.end()) for m in _NOT_PROSE_RE.finditer(region)]
     sites: list[Site] = []
@@ -536,7 +545,7 @@ def referrer_end(paper: str, site: Site) -> tuple[int, str]:
     ("Neither was run", "This holds...") and has no number and no citation of its own (it goes with it: left alone it
     would refer to nothing), and ``(-1, why)`` when it points back but carries a number or a citation (then the
     sentence is kept, with only its citation taken out)."""
-    end = references_start(paper)
+    end = cited_text_end(paper)
     units = _pp.sentence_units(paper[:end])
     nxt = next(((a, b, blk) for a, b, blk in units if a >= site.end), None)
     cur = next((blk for a, b, blk in units if a <= site.start < b), None)
@@ -704,11 +713,11 @@ async def check_paper(
     # that would change a heading or a figure link is settled by the rule that needs no model instead; the others stand.
     rows: list[Row] = []
     edits: list[tuple[int, int, str]] = []
-    base_shape = _shape(paper[:references_start(paper)])
+    base_shape = _shape(paper[:cited_text_end(paper)])
 
     def keeps_shape(site: Site, text: str) -> bool:
         done = _apply(paper, [(site.start, site.end, text)])
-        return _shape(done[:references_start(done)]) == base_shape
+        return _shape(done[:cited_text_end(done)]) == base_shape
 
     for sk, labels in bad_sites.items():
         site = by_key[sk]
