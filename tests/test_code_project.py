@@ -710,3 +710,43 @@ def test_installs_and_probes_are_not_runs_of_the_code(tmp_path):
     asyncio.run(ex.install([], quest_root=tmp_path))  # nothing to install: no run at all
     asyncio.run(ex._run([sys.executable, "-c", "pass"], cwd=tmp_path, timeout_s=60))
     assert calls == []
+
+
+def test_a_repair_commit_says_why_from_the_record(tmp_path):
+    import asyncio
+    import shutil
+    import subprocess
+
+    import pytest
+
+    from core import changelog
+
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    code = tmp_path / "code"
+    code.mkdir()
+    old = "def trial(x):\n    return x\n\ndef other():\n    return 0\n"
+    new = "def trial(x):\n    return x + 1\n\ndef other():\n    return 0\n"
+    (code / "sim.py").write_text(old, encoding="utf-8")
+    runs = code_project.CodeRuns(tmp_path, node=lambda: "execute")
+
+    async def go():
+        await runs.before_run()
+        (code / "sim.py").write_text(new, encoding="utf-8")
+        runs.describe(changelog.detail(stage="execute_reflect", attempt=2, fault="KeyError: 'k'",
+                                       functions=changelog.changed_functions(old, new), patch="Key the result."))
+        await runs.before_run()
+        (code / "sim.py").write_text(new + "\n# edit\n", encoding="utf-8")
+        await runs.before_run()  # a later commit does not repeat the earlier reason
+
+    asyncio.run(go())
+
+    def message(rev):
+        return subprocess.run(["git", "log", "-1", "--format=%B", rev], cwd=code, capture_output=True, text=True,
+                              encoding="utf-8").stdout.strip()
+
+    assert message("HEAD~1") == ("the code as it ran (execute)\n\nStep: execute_reflect, attempt 2\n"
+                                 "Fault: KeyError: 'k'\nFunctions changed: trial\nPatch: Key the result.")
+    assert message("HEAD") == "the code as it ran (execute)"
+    log = (code / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert "Fault: KeyError: 'k'" in log and "Functions changed: trial" in log
