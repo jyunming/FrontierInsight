@@ -51,6 +51,7 @@ from pathlib import Path
 from typing import Any
 
 from . import disclosure as _disclosure
+from . import figure_claims as _claims
 from . import figure_facts as _figures
 from . import frozen_protocol as _frozen
 from . import math_safe_cut as _math_safe
@@ -72,6 +73,9 @@ BLOCK_NAMES = ("results_table", "answers", "run_facts", "limitations")
 _BLOCK_FILES = {"results_table": Path(".fi") / "results_table.md"}  # = core.results_by_setting.PAPER_BLOCK
 #: ``{{figure:<file stem>:layout}}`` and ``{{figure:<file stem>:lines}}``: what a saved figure draws, from the recorder's
 #: files (:mod:`core.figure_facts`), not from the writer. The marker key is ``figure-<kind>-<stem>``.
+#: ``{{figure:<file stem>:<claim> @ <args>}}``: a statement about what the figure draws (:mod:`core.figure_claims`), worded
+#: and checked by FI against its call record of the drawing. Its marker key is ``figure-<claim>-<stem>-args<hex>``, the
+#: hex being the arguments as written, so that a re-render evaluates the same claim again.
 _FIGURE_KEY = "figure-"
 _ALIASES = {"runtime": "run_time", "wall_time": "run_time", "run_seconds": "run_time", "limit": "time_limit",
             "runtime_limit": "time_limit", "limit_met": "time_limit_met", "within_limit": "time_limit_met",
@@ -87,6 +91,7 @@ RUN_DIFFERENCE = "run_difference"
 SHARED_SEEDS = "shared_seeds"
 UNSUPPORTED_CLAIMS = "unsupported_claims"
 UNRESOLVED_REVIEW = "unresolved_review"
+FIGURE_LEFT_OUT = "figure_left_out"
 LAST_REVIEW = "last_review"
 #: The sentences of the delivered paper the last claim check found supported by neither the run's results nor a cited
 #: source (``Engine._state_unsupported_claims``): ``{"claims": [{"claim", "evidence"}]}``. Empty when the last check found none.
@@ -106,7 +111,8 @@ _ID_PREFIX = {NOT_DONE: "topic", LEFT_OUT: "left-out", NOT_COMPUTED: "not-comput
               SETTING_LEFT_OUT: "setting-left-out", CALIBRATION: "calibration", TRIALS_UNCHECKED: "trials-unchecked",
               UNDEFINED: "undefined",
               FEWER_RUNS: "fewer", CUT_SHORT: "cut-short", RUN_DIFFERENCE: "difference", SHARED_SEEDS: "shared-seeds",
-              UNSUPPORTED_CLAIMS: "unsupported", UNRESOLVED_REVIEW: "review", LAST_REVIEW: "last-review"}
+              UNSUPPORTED_CLAIMS: "unsupported", UNRESOLVED_REVIEW: "review", LAST_REVIEW: "last-review",
+              FIGURE_LEFT_OUT: "figure-left-out"}
 #: More settings left out than this are placed as one item.
 _MAX_SETTING_ITEMS = 6
 
@@ -478,6 +484,8 @@ def required_items(quest_root: Path | str) -> list[Item]:
     said = unsupported_claims_text(_read(root, str(UNSUPPORTED_RECORD)))
     if said:
         add(UNSUPPORTED_CLAIMS, "unsupported sentences", _sentence(said), key="claims")
+    for stem, number in _figure_left_out_items(kept_check(root).get("taken_out_values")):
+        add(FIGURE_LEFT_OUT, f"figure {number} statements", figure_left_out_sentence(number), key=stem)
     points = _disclosure.last_review_points(root)
     if points:
         add(LAST_REVIEW, "final review points", _disclosure.last_review_sentence(points, _MAX_LAST_REVIEW_LISTED), key="points")
@@ -1515,12 +1523,45 @@ _LATEX_BEFORE = re.compile(r"(?:\\[A-Za-z]+\*?\s*|[}^_])$")
 _LATEX_COMMAND_BEFORE = re.compile(r"\\[A-Za-z]+\*?\s*$")
 
 
-def _figure_key(key: str) -> str | None:
-    """``<stem>:<kind>`` of a figure marker key (``figure-<kind>-<stem>``), else ``None``."""
+_FIGURE_ARGS = re.compile(r"\A(.+)-args([0-9a-f]+)\Z")
+
+
+def _figure_parts(key: str) -> tuple[str, str, str | None] | None:
+    """``(stem, kind, args)`` of a figure marker key (``figure-<kind>-<stem>``, with ``-args<hex>`` after a claim's
+    arguments; ``args`` is ``None`` without them), else ``None``. A kind FI does not know is accepted only with arguments."""
     if not key.startswith(_FIGURE_KEY):
         return None
-    kind, _, stem = key[len(_FIGURE_KEY):].partition("-")
-    return f"{stem}:{kind}" if kind in _figures.KINDS and stem else None
+    kind, _, rest = key[len(_FIGURE_KEY):].partition("-")
+    args = None
+    m = _FIGURE_ARGS.match(rest)
+    if m:
+        try:
+            args, rest = bytes.fromhex(m.group(2)).decode("utf-8"), m.group(1)
+        except ValueError:
+            args = None
+    known = kind in _figures.KINDS or kind in _claims.CLAIMS
+    return (rest, kind, args) if rest and kind and (known or args is not None) else None
+
+
+def _figure_key(key: str) -> str | None:
+    """``<stem>:<kind>`` (``<stem>:<claim> @ <args>`` for a claim with arguments) of a figure marker key, else ``None``."""
+    parts = _figure_parts(key)
+    if parts is None:
+        return None
+    stem, kind, args = parts
+    return f"{stem}:{kind}" + (f" @ {args}" if args is not None else "")
+
+
+def _figure_claim_text(root: Path, stem: str, claim: str, args: str) -> str | None:
+    """FI's sentence for ``claim`` on the figure ``stem`` with ``args``, from its call record of the drawing; ``None`` when
+    it cannot be established (no record, a claim FI does not make, a series or panel the figure does not hold, a raw panel,
+    a malformed argument). Never raises."""
+    try:
+        calls = _claims.load_calls(root, stem)
+        got = _claims.evaluate(calls, claim, _claims.parse_args(args), _values.sig) if calls is not None else None
+    except Exception:  # noqa: BLE001 -- a claim that cannot be evaluated is left out, never guessed
+        return None
+    return got[0] if got else None
 
 
 def _figure_facts(root: Path) -> dict[str, str]:
@@ -1852,14 +1893,24 @@ def render(markdown: str, quest_root: Path | str, *, topic: str = "", fallback_s
                 unfilled.append(f"not_done:{_slug(ident)}")
             return f"<!-- fi:fact-{key} -->{item.sentence if item else NOT_RECORDED}<!-- /fi:fact-{key} -->"
         if name == "figure" and arg is not None:
-            stem, _, kind = (arg or "").strip().rpartition(":")
-            stem, kind = stem.strip(), kind.strip().lower()
-            text_ = figure_known.get(f"{stem}:{kind}")
+            head, at, tail = (arg or "").partition("@")
+            stem, _, kind = head.strip().rpartition(":")
+            stem, kind, args = stem.strip(), kind.strip().lower(), tail.strip()
+            if at:  # a claim with arguments: worded by FI from its record of the drawing, or not at all
+                text_ = _figure_claim_text(root, stem, kind, args) if re.fullmatch(r"[\w-]+", stem) else None
+            else:
+                text_ = figure_known.get(f"{stem}:{kind}")
+                if text_ is None and kind in _claims.CLAIMS and kind not in _figures.KINDS:
+                    text_ = _figure_claim_text(root, stem, kind, "") if re.fullmatch(r"[\w-]+", stem) else None
             if text_ is None:
                 unfilled.append(f"figure:{stem}:{kind}")
             if plain:
                 return text_ if text_ else m.group(0)
-            key = f"{_FIGURE_KEY}{kind}-{stem}" if re.fullmatch(r"[\w-]+", stem) and kind in _figures.KINDS                 else _key(f"figure_{stem}_{kind}")
+            if re.fullmatch(r"[\w-]+", stem) and re.fullmatch(r"\w+", kind) and (
+                    at or kind in _figures.KINDS or kind in _claims.CLAIMS):
+                key = f"{_FIGURE_KEY}{kind}-{stem}" + (f"-args{args.encode('utf-8').hex()}" if at else "")
+            else:
+                key = _key(f"figure_{stem}_{kind}")
             return f"<!-- fi:fact-{key} -->{text_ or NOT_RECORDED}<!-- /fi:fact-{key} -->"
         if name in BLOCK_NAMES:
             if plain:
@@ -1980,6 +2031,8 @@ def _unknown_hits(markdown: str, quest_root: Path | str) -> list[str]:
                             "done, so the paper reads \"not recorded\" there. "
                             + (f"Use one of {listed}, or take it out." if listed else "Take it out."))
         elif _figure_key(key) is not None:
+            if _figure_parts(key)[1] not in _figures.KINDS:
+                continue  # a claim FI cannot establish is left out and said once (take_out_unfilled), not sent back
             if _figure_key(key) not in _figure_facts(Path(quest_root)):
                 ref = _figure_key(key)
                 hits.append(f"{HIT}: {{{{figure:{ref}}}}} is not a figure FI has a record of, so the paper reads "
@@ -2030,6 +2083,31 @@ def _whole_sentence(sentence: str) -> bool:
         t.count(a) == t.count(b) for a, b in ("()", "[]", "{}"))
 
 
+_IMAGE = re.compile(r"!\[[^\]]*\]\(\s*<?([^)\s>]+)")
+
+
+def _figure_number(markdown: str, stem: str) -> str:
+    """The number of the figure whose image file is ``stem`` (the order of the paper's images), else the stem itself."""
+    stems = [re.sub(r"\.\w+\Z", "", re.split(r"[/\\]", m.group(1))[-1]) for m in _IMAGE.finditer(markdown or "")]
+    stems = list(dict.fromkeys(stems))
+    return str(stems.index(stem) + 1) if stem in stems else stem
+
+
+def figure_left_out_sentence(figure: str) -> str:
+    return (f"Figure {figure}: some statements about this figure could not be checked against what it draws and were "
+            "left out.")
+
+
+def _figure_left_out_items(taken: Any) -> list[tuple[str, str]]:
+    """``(figure stem, figure number)`` once per figure that has a statement taken out (``take_out_unfilled``'s entries)."""
+    found: dict[str, str] = {}
+    for t in taken if isinstance(taken, list) else []:
+        key = t.get("key") if isinstance(t, dict) else None
+        if isinstance(key, str) and key.startswith("figure:") and t.get("figure"):
+            found.setdefault(key.split(":")[1], str(t["figure"]))
+    return list(found.items())
+
+
 def take_out_unfilled(markdown: str) -> tuple[str, list[dict[str, str]]]:
     """``markdown`` without the result keys FI could not fill (they read "not recorded"), for a paper no round is left to
     rewrite: ``(text, taken_out)``, ``taken_out`` having ``key``, ``sentence`` (as it read) and ``how`` for each.
@@ -2038,9 +2116,13 @@ def take_out_unfilled(markdown: str) -> tuple[str, list[dict[str, str]]]:
     bold run-in heading before it stays). Any other place (a key beside filled ones, a table row, a figure caption, a list, a
     clause that does not read as a sentence by itself) keeps its text and the key is replaced by the same visible marker
     that replaces a number the writer typed. Nothing is filled with a guess, and no filled key is touched."""
-    marks = list(_values._MARK.finditer(markdown or ""))
+    # A figure statement is a mark of the second shape (<!-- fi:fact-figure-... -->): a whole sentence FI wrote or, unfilled, none.
+    marks = sorted([*_values._MARK.finditer(markdown or ""),
+                    *(m for m in _MARK.finditer(markdown or "") if _figure_parts(m.group(1)) is not None)],
+                   key=lambda m: m.start())
     if not any(m.group(2).strip() == _values.NOT_RECORDED for m in marks):
         return markdown, []
+    is_figure = [m.re is _MARK for m in marks]
     # The text with each mark made one token, so a sentence is found as it reads: (token start, end, original start, end).
     parts: list[str] = []
     spans: list[tuple[int, int, int, int]] = []
@@ -2048,6 +2130,8 @@ def take_out_unfilled(markdown: str) -> tuple[str, list[dict[str, str]]]:
     for i, m in enumerate(marks):
         before = markdown[last:m.start()]
         token = f"\x00{i}\x00"
+        if is_figure[i]:
+            token += "."  # a figure statement is a sentence of its own, with its full stop
         parts += [before, token]
         spans.append((size + len(before), size + len(before) + len(token), m.start(), m.end()))
         size += len(before) + len(token)
@@ -2065,7 +2149,7 @@ def take_out_unfilled(markdown: str) -> tuple[str, list[dict[str, str]]]:
     groups: dict[tuple[int, int], list[int]] = {}
     for i, m in enumerate(marks):
         if m.group(2).strip() == _values.NOT_RECORDED:
-            groups.setdefault(_typed._sentence(flat, spans[i][0], spans[i][1]), []).append(i)
+            groups.setdefault(_typed._sentence(flat, spans[i][0], spans[i][1] - is_figure[i]), []).append(i)
     edits: list[tuple[int, int, str]] = []
     taken: list[dict[str, str]] = []
     for (a, b), idx in groups.items():
@@ -2080,8 +2164,10 @@ def take_out_unfilled(markdown: str) -> tuple[str, list[dict[str, str]]]:
         body_at = a + (lead.end() if lead else 0)
         # A bold run-in heading followed by nothing but the unfilled key and its punctuation has no sentence to keep.
         key_only = bool(lead) and not re.sub(r"[\s.,;:!?()\-\u2013\u2014]+", "", _TOKEN.sub("", flat[body_at:b]))
+        # A figure statement is a whole sentence by itself, so it stands for one that opens with a capital.
+        stand_in = lambda t: "X" if is_figure[int(t.group(0).strip("\x00"))] else "x"  # noqa: E731
         drop = (all(i in idx for i in inside if spans[i][0] >= body_at) and not _NOT_PROSE.match(line)
-                and (key_only or _whole_sentence(_TOKEN.sub("x", flat[body_at:b]))))
+                and (key_only or _whole_sentence(_TOKEN.sub(stand_in, flat[body_at:b]))))
         if drop and key_only and not flat[b:line_end if line_end != -1 else len(flat)].strip():
             # Nothing else on its line: the heading goes with it (a heading over nothing reads as a gap).
             start, end = original(a), original(b)
@@ -2097,6 +2183,13 @@ def take_out_unfilled(markdown: str) -> tuple[str, list[dict[str, str]]]:
                     start, end = original(line_start), min(end + 1, len(markdown))
             edits.append((start, end, ""))
         for i in idx:
+            if is_figure[i]:
+                stem, kind, args = _figure_parts(marks[i].group(1))  # type: ignore[misc]
+                if not drop:
+                    edits.append((marks[i].start(), marks[i].end(), ""))
+                taken.append({"key": f"figure:{stem}:{kind}" + (f" @ {args}" if args else ""), "sentence": sentence,
+                              "how": "sentence removed" if drop else "removed", "figure": _figure_number(markdown, stem)})
+                continue
             if not drop:
                 edits.append((marks[i].start(), marks[i].end(), REPLACED))
             taken.append({"key": marks[i].group(1).strip(), "sentence": sentence,
@@ -2205,7 +2298,14 @@ def keep_check(quest_root: Path | str, hits: list[str], paper_md: str, *, untrac
         # open problem in the code is never in the block, it is in QUALITY.md only)
         in_paper = any(m.group(1) == "limitations" for m in _MARK.finditer(paper_md or ""))
         unmet = [{"kind": i.kind, "id": i.id, "name": i.name, "text": i.sentence}
-                 for i in required_items(quest_root) if i.kind == CODE_FINDING or not in_paper]
+                 for i in required_items(quest_root) if i.kind in (CODE_FINDING, FIGURE_LEFT_OUT) or not in_paper]
+        # The statements taken out just now are not in the kept record yet: one item per figure, never per sentence.
+        have = {u["id"] for u in unmet}
+        for stem, number in _figure_left_out_items(dropped):
+            ident = f"{_ID_PREFIX[FIGURE_LEFT_OUT]}-{_slug(stem)}"
+            if ident not in have:
+                unmet.append({"kind": FIGURE_LEFT_OUT, "id": ident, "name": f"figure {number} statements",
+                              "text": figure_left_out_sentence(number)})
         unfilled = unfilled_in(paper_md)
         if not hits and not unmet and not unfilled and not untraced and not not_filled and not dropped:
             path.unlink(missing_ok=True)

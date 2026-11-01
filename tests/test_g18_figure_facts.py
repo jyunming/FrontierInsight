@@ -180,3 +180,103 @@ def test_legend_over_twin_or_inset_is_not_a_finding():
     inset = _geo(legend=legend, places=(SIDE, [0.2, 0.3, 0.15, 0.2]))
     assert figure_facts.geometry_findings(twin) == []
     assert figure_facts.geometry_findings(inset) == []
+
+
+# --- marks with arguments: FI re-evaluates a claim against its call record, or leaves the sentence out ----------------
+
+
+def _calls(raw: bool = False, panels: int = 1) -> dict:
+    def panel(k: int) -> dict:
+        return {"panel": k, "raw": raw if k == 1 else False, "raw_reason": "drawn by hand" if raw and k == 1 else None,
+                "x": {"id": "size", "kind": "setting", "label": "size", "scale": "linear"},
+                "y": {"what": "signal", "label": "signal", "scale": "linear"},
+                "series": [{"id": "a", "label": "a", "kind": "line", "step": False, "x": [1, 2, 3], "y": [1.0, 2.0, 3.0],
+                            "yerr": None, "merged_with": []}],
+                "bands": [], "refs": [], "notes": [], "texts_raw": []}
+    return {"version": 1, "fallback": False, "panels": [panel(k) for k in range(1, panels + 1)]}
+
+
+def _with_calls(tmp_path: Path, calls: dict | None, stem: str = "fig1") -> Path:
+    folder = tmp_path / ".fi" / "figure_records"
+    folder.mkdir(parents=True, exist_ok=True)
+    if calls is not None:
+        (folder / f"{stem}.calls.json").write_text(json.dumps(calls), encoding="utf-8")
+    return tmp_path
+
+
+def test_figure_mark_with_args_fills_from_record(tmp_path):
+    root = _with_calls(tmp_path, _calls())
+    mark = "{{figure:fig1:trend @ series=a, panel=1}}"
+    out = paper_facts.render(f"Results. {mark}", root)
+    assert out.unfilled == ()
+    assert "<!-- fi:fact-figure-trend-fig1-args" in out.text and "not recorded" not in out.text
+    sentence = paper_facts.without_marks(out.text).removeprefix("Results. ")
+    assert "increases" in sentence
+    assert paper_facts.to_placeholders(out.text) == f"Results. {mark}"
+    # a re-render of the filled text gives the same text
+    assert paper_facts.render(out.text, root).text == out.text
+
+
+def test_old_layout_mark_still_fills(tmp_path):
+    root = _quest(tmp_path, _record(SIDE, SIDE_RIGHT, titles=("Fit", "Residual")), _lines("-"))
+    out = paper_facts.render("Has {{figure:fig_a:layout}}.", root)
+    assert out.unfilled == () and "<!-- fi:fact-figure-layout-fig_a -->" in out.text
+    assert paper_facts.to_placeholders(out.text) == "Has {{figure:fig_a:layout}}."
+
+
+def test_made_up_claim_renders_not_recorded_and_sentence_is_taken_out(tmp_path):
+    root = _with_calls(tmp_path, _calls())
+    out = paper_facts.render("Intro.\n\nThe curve {{figure:fig1:sparkle @ series=a}} here.\n\n{{figure:fig1:sparkle @ series=a}}\n", root)
+    assert out.unfilled == ("figure:fig1:sparkle",) and "not recorded" in out.text
+    text, taken = paper_facts.take_out_unfilled(out.text)
+    assert "not recorded" not in text and "sparkle" not in text and "fi:fact-figure" not in text
+    assert text.startswith("Intro.") and all(t["how"] in ("sentence removed", "removed") for t in taken)
+    assert all(t["key"].startswith("figure:fig1:sparkle") and {"sentence", "how"} <= set(t) for t in taken)
+
+
+def test_claim_on_raw_panel_is_taken_out(tmp_path):
+    root = _with_calls(tmp_path, _calls(raw=True))
+    out = paper_facts.render("Before. {{figure:fig1:trend @ series=a, panel=1}}\n\nNext.\n", root)
+    assert out.unfilled == ("figure:fig1:trend",)
+    text, taken = paper_facts.take_out_unfilled(out.text)
+    assert text == "Before.\n\nNext.\n" and len(taken) == 1 and taken[0]["how"] == "sentence removed"
+
+
+def test_mark_with_missing_call_record_is_taken_out(tmp_path):
+    out = paper_facts.render("Before. {{figure:fig1:drawn @ series=a}}\n", tmp_path)
+    assert out.unfilled == ("figure:fig1:drawn",)
+    text, taken = paper_facts.take_out_unfilled(out.text)
+    assert text.strip() == "Before." and len(taken) == 1
+
+
+def test_malformed_args_fail_closed_without_raising(tmp_path):
+    root = _with_calls(tmp_path, _calls())
+    for args in ("series", "series=a, series=a", "=a", "panel=x, series=a", "series=zzz", "series=a, bogus=1", ""):
+        out = paper_facts.render(f"A. {{{{figure:fig1:trend @ {args}}}}}\n", root)
+        assert out.unfilled == ("figure:fig1:trend",), args
+        text, taken = paper_facts.take_out_unfilled(out.text)
+        assert "not recorded" not in text and len(taken) == 1
+
+
+def test_one_disclosure_per_figure_not_per_sentence(tmp_path):
+    root = _with_calls(tmp_path, _calls())
+    paper = ("![Cap](figures/other.png)\n\n![Cap two](figures/fig1.png)\n\n"
+             "A. {{figure:fig1:sparkle @ series=a}} B. {{figure:fig1:trend @ series=zzz}}\n\n"
+             "{{figure:fig1:range @ series=a, axis=y}} C.\n")
+    out = paper_facts.render(paper, root)
+    text, taken = paper_facts.take_out_unfilled(out.text)
+    assert len(taken) == 2 and {t["figure"] for t in taken} == {"2"}
+    paper_facts.keep_check(root, [], text, dropped=taken)
+    kept = paper_facts.kept_check(root)
+    unmet = [u for u in kept["unmet_items"] if u["kind"] == paper_facts.FIGURE_LEFT_OUT]
+    assert [u["text"] for u in unmet] == ["Figure 2: some statements about this figure could not be checked against "
+                                          "what it draws and were left out."]
+    items = [i for i in paper_facts.required_items(root) if i.kind == paper_facts.FIGURE_LEFT_OUT]
+    assert len(items) == 1 and items[0].sentence == unmet[0]["text"]
+
+
+def test_taken_out_figure_sentence_keeps_bold_run_in_heading(tmp_path):
+    root = _with_calls(tmp_path, _calls())
+    out = paper_facts.render("**Growth.** The signal rises. {{figure:fig1:trend @ series=zzz}} Later text.\n", root)
+    text, taken = paper_facts.take_out_unfilled(out.text)
+    assert text == "**Growth.** The signal rises. Later text.\n" and taken[0]["how"] == "sentence removed"
