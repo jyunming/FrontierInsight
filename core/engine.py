@@ -34866,7 +34866,8 @@ def _caption_from_calls(name: str, calls: dict[str, Any], record: dict[str, Any]
     marks: list[str] = []
     from .figure_claims import panel_name  # the panel's own setting, when it was declared, names it
     for p in panels:
-        who = panel_name(p)  # "panel 2", or "the panel at m = 200"
+        who = panel_name(p)  # "panel 2", or "the panel at Mass = 200"
+        named = many or who != f"panel {p.get('panel')}"  # a panel that was declared to show a setting is named, alone or not
         if p.get("raw"):
             parts.append("; ".join([f"{who}: custom drawing", *_call_raw_texts(p)]) + ".")
             continue
@@ -34874,11 +34875,11 @@ def _caption_from_calls(name: str, calls: dict[str, Any], record: dict[str, Any]
         bands, bars, refs = _call_extras(p)
         marks += refs
         if 1 <= len(drawn) <= 5:
-            parts.append((f"{who[0].upper()}{who[1:]} draws " if many else "It draws ") + ", ".join(drawn) + ".")
+            parts.append((f"{who[0].upper()}{who[1:]} draws " if named else "It draws ") + ", ".join(drawn) + ".")
         for band in bands:
-            parts.append((f"In {who}, " if many else "") + band + ".")
+            parts.append((f"In {who}, " if named else "") + band + ".")
         if bars:
-            parts.append((f"In {who}, error bars show " if many else "Error bars show ") + bars[0] + ".")
+            parts.append((f"In {who}, error bars show " if named else "Error bars show ") + bars[0] + ".")
     marks = list(dict.fromkeys(marks))
     if marks:
         parts.append("Marked: " + "; ".join(marks[:3]) + ".")

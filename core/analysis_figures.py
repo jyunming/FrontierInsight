@@ -443,15 +443,49 @@ def _panel_declarer(handle: Any, allowed: dict[str, Any]):
         index = which if isinstance(which, int) else handle.axes.index(which)
         if not 0 <= index < len(handle.axes):
             raise IndexError("panel %r: this figure has %d panel(s)" % (which, len(handle.axes)))
+        calls = _has_calls(handle)  # on the drawing calls' frame the check is closed: the plan's settings and values only
+        if not calls:  # an older frame: as it always was
+            for name, value in settings.items():
+                if allowed and (name not in allowed or value not in allowed[name]):
+                    raise UnknownSetting(_not_a_setting(index, name, value, allowed))
+            handle.declared[index] = dict(settings)
+            return
+        held: dict[str, Any] = {}
         for name, value in settings.items():
-            if allowed and (name not in allowed or value not in allowed[name]):
-                raise UnknownSetting("panel %d: `%s = %s` is not a setting this study varies; the settings and values a panel may "
-                                     "use are: %s" % (index, name, value, "; ".join("%s = %s" % (k, ", ".join(map(str, v)))
-                                                                                      for k, v in allowed.items())))
-        handle.declared[index] = dict(settings)
-        if _has_calls(handle):  # the call record keeps which setting the panel holds; FI's `finish` writes the title from it
-            handle._panel(index)[1]["hold"] = {k: _plain(v) for k, v in settings.items()}
+            found = _in_grid(value, allowed.get(name)) if name in allowed else _NOT_IN
+            if found is _NOT_IN:
+                raise UnknownSetting(_not_a_setting(index, name, value, allowed))
+            held[name] = found  # the plan's own value, not the body's object
+        record = handle._panel(index)[1]  # the call record keeps which setting the panel holds; `finish` writes the title from it
+        if held and record.get("hold") not in (None, held):
+            raise ValueError("panel %d was already declared to show %s; one panel shows one setting, so declare it once" %
+                             (index, ", ".join("%s = %s" % kv for kv in record["hold"].items())))
+        if held:
+            record["hold"] = held
+        handle.declared[index] = dict(held)
     return panel
+
+
+def _not_a_setting(index: int, name: str, value: Any, allowed: dict[str, Any]) -> str:
+    return ("panel %d: `%s = %s` is not a setting this study varies; the settings and values a panel may use are: %s"
+            % (index, name, value, "; ".join("%s = %s" % (k, ", ".join(map(str, v))) for k, v in allowed.items()) or "none"))
+
+
+_NOT_IN = object()
+
+
+def _in_grid(value: Any, grid: Any) -> Any:
+    """The plan's own value in ``grid`` that ``value`` equals, else ``_NOT_IN``. Numbers match by value (``1`` and ``1.0``
+    match), a bool matches only a bool, and a string only a string."""
+    value = _plain(value)
+
+    def kind(v: Any) -> str:
+        return "b" if isinstance(v, bool) else "n" if isinstance(v, numbers.Real) else "s" if isinstance(v, str) else "?"
+
+    for item in grid or []:
+        if kind(item) == kind(value) != "?" and item == value:
+            return item
+    return _NOT_IN
 
 
 def _plain(value: Any) -> Any:

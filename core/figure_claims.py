@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import figure_facts
+from .frame_figure import hold_text as _hold_text
 from . import paper_values as _values
 
 #: Two drawn values closer than this (relative) are equal to the rounding of a drawn value; a trend may run through them.
@@ -166,11 +167,9 @@ def _label(item: dict[str, Any]) -> str:
 
 
 def hold_text(panel: dict[str, Any]) -> str:
-    """The setting a panel was declared to show (``fig.panel``), as "m = 200"; empty when it has none."""
-    hold = panel.get("hold")
-    if not isinstance(hold, dict):
-        return ""
-    return ", ".join(f"{k} = {'%.4g' % v if isinstance(v, float) else v}" for k, v in hold.items())
+    """The setting a panel was declared to show (``fig.panel``), as "Mass = 200"; empty when it has none. The same words and
+    the same value form as the panel's title (``core/frame_figure.py``)."""
+    return _hold_text(panel)
 
 
 def panel_name(panel: dict[str, Any]) -> str:

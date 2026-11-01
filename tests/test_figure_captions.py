@@ -280,3 +280,16 @@ def test_caption_and_note_name_a_panel_by_the_setting_it_holds() -> None:
     assert "The panel at m = 100 draws" in caption and "The panel at m = 200 draws" in caption and "Panel 2" not in caption
     note = _note_from_calls(calls)
     assert note[0].startswith("the panel at m = 100 (") and note[1].startswith("the panel at m = 200 (")
+
+
+def test_a_single_panel_with_a_hold_and_its_band_and_bars_name_the_hold() -> None:
+    panel = _panel(1, series=[_series("error", "Method A", yerr=[0.1, 0.1, 0.1], meaning="sd")],
+                   bands=[{"series": "error", "x": [1.0, 2.0, 3.0], "lo": [0, 1, 2], "hi": [2, 3, 4], "meaning": "ci95"}])
+    panel["hold"], panel["hold_label"] = {"m": 2.5}, {"m": "Mass"}
+    caption = _figure_caption_text("a.png", None, n_seeds=None, calls=_calls(panel))
+    assert "The panel at Mass = 2.5 draws Method A." in caption
+    assert "In the panel at Mass = 2.5, Method A has a band" in caption
+    assert "In the panel at Mass = 2.5, error bars show" in caption
+    del panel["hold"], panel["hold_label"]
+    caption = _figure_caption_text("a.png", None, n_seeds=None, calls=_calls(panel))
+    assert "It draws Method A." in caption and "Error bars show one standard deviation." in caption

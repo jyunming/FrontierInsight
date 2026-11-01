@@ -630,3 +630,10 @@ def test_a_panel_with_a_hold_is_named_by_its_setting_in_a_claim():
               "drawn", series="a", panel=2)[0] == "A is drawn in panel 2"
     assert fc.panel_name(p0) == "the panel at m = 100" and fc.panel_name(_panel([], 3)) == "panel 3"
     assert fc.hold_text(_panel([], 1, hold={"m": 0.25, "k": "x"})) == "m = 0.25, k = x"
+
+
+def test_claims_name_a_hold_by_the_plans_label_and_distinct_values_read_distinct():
+    p0 = _panel([_series("a", [1, 2], [1.0, 2.0])], 1, hold={"m": 1.23441}, hold_label={"m": "Mass"})
+    p1 = _panel([_series("a", [1, 2], [3.0, 4.0])], 2, hold={"m": 1.23449}, hold_label={"m": "Mass"})
+    assert fc.hold_text(p0) == "Mass = 1.23441" and fc.hold_text(p1) == "Mass = 1.23449"
+    assert ev(_calls(p0, p1), "drawn", series="a", panel=2)[0] == "A is drawn in the panel at Mass = 1.23449"

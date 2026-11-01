@@ -1499,3 +1499,69 @@ def test_fig_panel_with_a_setting_or_value_the_plan_does_not_have_is_refused_on_
     assert out["status"] == "failed" and "UnknownSetting" in out["why"] and "size = 1, 2" in out["why"]
     out = _hold_run(tmp_path, lambda fig, table: fig.panel(1, size=999))
     assert out["status"] == "failed" and "UnknownSetting" in out["why"] and "size = 1, 2" in out["why"]
+
+
+# ---- fix round 1: the hold is checked closed on the calls frame, stored as the plan's value, named by the plan's label ----------------
+def _hold_spec_run(tmp_path, body, settings, labels=None):
+    ns = types.SimpleNamespace(figure_g=body, COMPARED={"speed": ["fast", "slow"]})
+    spec = {"id": "g", "file": "g.png", "panels": 2, "x": "size", "series": "fast", "shows": ["growth"],
+            "settings": settings, "labels": labels or {"size": "Colony size"}}
+    return af.run_figures([spec], ns, _CallTable(), str(tmp_path / "figures"))[0]
+
+
+def test_fig_panel_on_the_calls_frame_fails_closed_when_the_plan_has_no_settings(tmp_path, frame5):
+    out = _hold_spec_run(tmp_path, lambda fig, table: fig.panel(0, invented="typed by the body"), {})
+    assert out["status"] == "failed" and "UnknownSetting" in out["why"], out
+
+
+def test_a_number_matches_by_value_and_the_plans_value_is_stored(tmp_path, frame5):
+    def body(fig, table):
+        fig.panel(0, size=1.0)
+        fig.panel(1, size=2)
+        _both_panels(fig, table)
+
+    out = _hold_spec_run(tmp_path, body, {"size": [1, 2]})
+    assert out["status"] == "ok", out
+    hold = [p["hold"] for p in json.loads((frame5 / "g.calls.json").read_text(encoding="utf-8"))["panels"]]
+    assert hold == [{"size": 1}, {"size": 2}] and type(hold[0]["size"]) is int
+    assert [p["title"] for p in out["panels"]] == ["Colony size = 1", "Colony size = 2"]
+
+
+def test_a_bool_or_a_string_never_matches_a_number_and_a_number_never_matches_a_string(tmp_path, frame5):
+    for bad in (True, "1"):
+        out = _hold_spec_run(tmp_path, lambda fig, table, v=bad: fig.panel(0, size=v), {"size": [1, 2]})
+        assert out["status"] == "failed" and "UnknownSetting" in out["why"], (bad, out)
+    out = _hold_spec_run(tmp_path, lambda fig, table: fig.panel(0, mode=1), {"mode": ["1", "2"]})
+    assert out["status"] == "failed" and "UnknownSetting" in out["why"], out
+
+
+def test_distinct_plan_values_give_distinct_titles_and_claims_text(tmp_path, frame5):
+    def body(fig, table):
+        fig.panel(0, size=1.23441)
+        fig.panel(1, size=1.23449)
+        _both_panels(fig, table)
+
+    out = _hold_spec_run(tmp_path, body, {"size": [1.23441, 1.23449]})
+    assert out["status"] == "ok", out
+    assert [p["title"] for p in out["panels"]] == ["Colony size = 1.23441", "Colony size = 1.23449"]
+    panels = json.loads((frame5 / "g.calls.json").read_text(encoding="utf-8"))["panels"]
+    assert [p["hold_label"] for p in panels] == [{"size": "Colony size"}] * 2
+
+
+def test_a_second_fig_panel_with_another_hold_fails_the_same_hold_again_does_nothing_a_missing_panel_fails(tmp_path, frame5):
+    def twice(fig, table):
+        fig.panel(0, size=1)
+        fig.panel(0, size=1)
+        fig.panel(1, size=2)
+        _both_panels(fig, table)
+
+    assert _hold_spec_run(tmp_path, twice, {"size": [1, 2]})["status"] == "ok"
+
+    def other(fig, table):
+        fig.panel(0, size=1)
+        fig.panel(0, size=2)
+
+    out = _hold_spec_run(tmp_path, other, {"size": [1, 2]})
+    assert out["status"] == "failed" and "panel 0" in out["why"], out
+    out = _hold_spec_run(tmp_path, lambda fig, table: fig.panel(5, size=1), {"size": [1, 2]})
+    assert out["status"] == "failed" and "IndexError" in out["why"], out

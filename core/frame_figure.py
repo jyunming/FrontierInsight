@@ -67,6 +67,22 @@ def _same(a, b):
     return True
 
 
+def hold_value(value):
+    """A held setting's value as text: the shortest form that gives the same value back (``repr`` for a float), so two values
+    of the plan never print the same."""
+    return repr(value) if isinstance(value, float) else str(value)
+
+
+def hold_text(panel):
+    """The setting a panel was declared to show, as ``label = value`` (the plan's label when the record carries it, else the
+    setting's name); empty when it has none. The title, the claims and the caption all say it with this."""
+    hold = panel.get("hold")
+    if not isinstance(hold, dict):
+        return ""
+    labels = panel.get("hold_label") if isinstance(panel.get("hold_label"), dict) else {}
+    return ", ".join("%s = %s" % (labels.get(k) or k, hold_value(v)) for k, v in hold.items())
+
+
 def _short(description):
     """A short form of a plan description: up to its first stop, colon, semicolon or bracket, at most 48 characters."""
     text = str(description or "").strip()
@@ -850,8 +866,8 @@ class FigureCalls:
                 ax.set_title("", loc=loc)
                 changed.append("title")
         if rec.get("hold"):  # the setting the panel was declared to show (`fig.panel`): the plan's label and the value, FI's words
-            ax.set_title(", ".join("%s = %s" % (self._label_of(k), "%.4g" % v if isinstance(v, float) else v)
-                                   for k, v in rec["hold"].items()))
+            rec["hold_label"] = {k: self._label_of(k) for k in rec["hold"]}  # kept in the record, so a claim names it the same
+            ax.set_title(hold_text(rec))
         if rec["x"] is None:
             return
         image = any(e["kind"] == "image" for e in rec["series"])
