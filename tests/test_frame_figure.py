@@ -631,3 +631,21 @@ def test_sd_without_an_sd_read_is_the_sample_sd_of_the_values():
     h.line(0, "fast", [1, 2], [2.0, 4.0], "growth", yerr="sd")
     s = h.record()["panels"][0]["series"][0]
     assert s["yerr_lo"] == pytest.approx([math.sqrt(2.0), 2.0]) and s["yerr_meaning"] == "sd"
+
+
+def test_bars_are_checked_against_the_key_whose_mean_is_the_plotted_point():
+    class _Two(_Table):  # two settings vary: several keys share one x
+        def keys(self):
+            return ["size=1,step=a", "size=1,step=b"]
+
+        def mean(self, name, key):
+            return 2.0 if key.endswith("a") else 5.0
+
+        def interval(self, name, key):
+            return (1.0, 3.0) if key.endswith("a") else (4.0, 7.0)
+
+    h = _Host(1)
+    h.table = _Two()
+    h.line(0, "fast", [1], [2.0], "growth", yerr=([1.0], [1.0]), yerr_meaning="ci95")
+    h.line(0, "slow", [1], [5.0], "growth", yerr=([1.0], [1.0]), yerr_meaning="ci95")  # the widths of the other key
+    assert [s["yerr_meaning"] for s in h.record()["panels"][0]["series"]] == ["ci95", "other"]

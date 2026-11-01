@@ -293,8 +293,10 @@ class FigureCalls:
             raise ValueError("this figure's plan gives no x: pass x=(\"id of a setting or a result\", values) to say what x is")
         return ident, x
 
-    def _setting_key(self, x_id, x):
-        """The table's key of the setting where ``x_id`` is ``x`` (None when no key, or more than one, says so)."""
+    def _setting_key(self, x_id, x, what=None, y=None):
+        """The table's key of the setting where ``x_id`` is ``x``. When other settings also vary (several keys share that x), the
+        key is the one whose mean of ``what`` is the plotted ``y`` (the bars belong to the point drawn); None when no key, or
+        still more than one, fits."""
         found = []
         table = getattr(self, "table", None)
         for key in (list(table.keys()) if table is not None else []):
@@ -308,18 +310,28 @@ class FigureCalls:
                     same = text.strip() == str(x)
                 if same:
                     found.append(key)
+        if len(found) > 1 and what is not None and _finite(y):
+            fits = []
+            for key in found:
+                try:
+                    m = table.mean(what, key)
+                except Exception:  # noqa: BLE001 -- a key whose mean cannot be read does not fit
+                    continue
+                if _finite(m) and _close_width(float(m), float(y)):
+                    fits.append(key)
+            found = fits
         return found[0] if len(found) == 1 else None
 
-    def _table_widths(self, meaning, what, x_id, xs):
+    def _table_widths(self, meaning, what, x_id, xs, ys):
         """``(lower, upper)`` lists of the widths FI reads from the table for ``meaning`` (ci95 or sd) of result ``what`` at each
         x (a setting's value); an entry is None where the table gives none. ``None`` when the table cannot say at all."""
         table = getattr(self, "table", None)
         if table is None or what not in self._results() or x_id not in (getattr(self, "settings", None) or []):
             return None
         lo, hi = [], []
-        for x in xs:
+        for x, y in zip(xs, ys):
             a = b = None
-            key = None if x is None else self._setting_key(x_id, x)
+            key = None if x is None else self._setting_key(x_id, x, what, y)
             if key is not None:
                 try:
                     if meaning == "ci95":
@@ -342,7 +354,7 @@ class FigureCalls:
         table and stays as stated. The table's sd is its ``sd`` read, else the sample sd (n - 1) of its ``values``."""
         if meaning not in ("ci95", "sd"):
             return meaning  # range and other have no width in the table to check; they stay as the body stated them
-        got = self._table_widths(meaning, what, x_id, xs)
+        got = self._table_widths(meaning, what, x_id, xs, ys)
         if got is None:
             return "other"
         drawn = False
@@ -376,7 +388,7 @@ class FigureCalls:
             if what not in self._results() or x_id not in (getattr(self, "settings", None) or []):
                 raise ValueError("`yerr=%r` reads the table: `what` must be a result of the plan and x a setting; give the widths "
                                  "yourself otherwise" % (yerr,))
-            got = self._table_widths(yerr, what, x_id, xs)
+            got = self._table_widths(yerr, what, x_id, xs, ys)
             if got is None:
                 raise ValueError("the table gives no %s of `%s` at these x values" % (yerr, what))
             (lo, hi), yerr_meaning = got, yerr
