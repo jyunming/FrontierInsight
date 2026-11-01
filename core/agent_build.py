@@ -82,6 +82,7 @@ _CHECK_WORDS = {
     "known_answers": "the plan's known-answer checks",
     "unread_settings": "the check that the code reads every setting the study compares",
     "figure_data": "the check that each figure is drawn from computed numbers",
+    "figure_dry_run": "the trial of each figure function on stand-in data",
 }
 
 

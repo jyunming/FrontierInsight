@@ -49,8 +49,12 @@ typed-constants check (only ``plan.md`` is), so a number traceable only to the t
 
 from __future__ import annotations
 
+import itertools
+import json
 import logging
+import re
 import shutil
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -378,6 +382,119 @@ def _figure_verdict(code_dir: Path) -> Verdict:
                    {"scripts": {p.name: [{"line": f.line, "call": f.call, "count": f.count} for f in s] for p, s in found.items()}})
 
 
+#: What the dry run of the figure bodies prints as its last line, then the outcomes of the bodies as JSON.
+_DRY_RUN_MARK = "FI_DRY_RUN: "
+#: The most settings of the stand-in table (a larger grid is thinned to its first, middle and last value on each axis).
+_DRY_RUN_CELLS = 40
+#: Run in the quest's interpreter from a copy of the quest (``sys.argv[1]``: the settings as JSON). It uses only what ``code/``
+#: carries (``derive.py``, ``fi_frame.py``, ``fi_table.py``, ``fi_figures.py``), never FI's ``core``.
+_DRY_RUN_SCRIPT = r'''
+import json, os, shutil, sys, tempfile, warnings
+mark = %r
+sys.path.insert(0, os.path.join(os.getcwd(), "code"))
+try:
+    import derive
+    import fi_figures
+    import fi_table
+except Exception as err:
+    print(mark + json.dumps({"load": "%%s: %%s" %% (type(err).__name__, err)}))
+    sys.exit(0)
+ids = list(getattr(derive, "RESULTS", ())) + list(getattr(derive, "AFTERWARDS", ()))
+kinds = getattr(derive, "KINDS", {})
+compared = getattr(derive, "COMPARED", {})
+
+
+def metrics(i):
+    out = {}
+    for r, name in enumerate(ids):
+        if kinds.get(name) == "proportion":
+            values = [1.0 if (t + i + r) %% 3 else 0.0 for t in range(6)]
+        else:
+            values = [1.0 + 0.5 * r + 0.1 * i + 0.01 * t for t in range(6)]
+        out[name] = {"values": values, "trials": list(range(6))}
+    return out
+
+
+cells = []
+for i, setting in enumerate(json.loads(sys.argv[1])):
+    cells.append({"cell": setting, "key": fi_table.cell_key(setting), "metrics": metrics(i)})
+    for axis, values in compared.items():
+        for value in values if isinstance(values, (list, tuple)) else ():
+            there = dict(setting, **{axis: value})
+            cells.append({"cell": there, "key": fi_table.cell_key(there), "level": {axis: value}, "metrics": metrics(i + 1)})
+first = derive.Table(cells, ids)
+parts = {}
+for name, hold in getattr(derive, "PARTS", {}).items():
+    try:
+        parts[name] = first.at(**hold)
+    except Exception:
+        parts[name] = []
+table = derive.Table(cells, ids, {}, parts, getattr(derive, "KNOWN", {}))
+folder = tempfile.mkdtemp()
+done = []
+try:
+    for fid, spec in getattr(derive, "FIGURES", {}).items():
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            got = fi_figures.run_figures([dict(spec, id=fid)], derive, table, folder)[0]
+        done.append({"id": str(fid), "status": got.get("status"), "why": got.get("why") or ""})
+finally:
+    shutil.rmtree(folder, ignore_errors=True)
+print(mark + json.dumps({"figures": done}))
+''' % (_DRY_RUN_MARK,)
+
+
+def _dry_run_settings(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """The settings of the stand-in table: the plan's grid with the values it declares (no value made up), thinned to
+    :data:`_DRY_RUN_CELLS` settings when it is larger; one empty setting without a grid."""
+    grid = protocol.get("grid") if isinstance(protocol, dict) and isinstance(protocol.get("grid"), dict) else {}
+    axes = {str(k): list(v) for k, v in grid.items() if isinstance(v, (list, tuple)) and v}
+    while axes and len(list(itertools.islice(itertools.product(*axes.values()), _DRY_RUN_CELLS + 1))) > _DRY_RUN_CELLS:
+        widest = max(axes, key=lambda k: len(axes[k]))
+        if len(axes[widest]) <= 3:
+            break
+        axes[widest] = [axes[widest][0], axes[widest][len(axes[widest]) // 2], axes[widest][-1]]
+    if not axes:
+        return [{}]
+    return [dict(zip(axes, combo)) for combo in itertools.product(*axes.values())][:_DRY_RUN_CELLS]
+
+
+async def _figure_dry_run_verdict(quest_root: Path, protocol: dict[str, Any] | None, *, executor: Any, python: Any,
+                                  env: dict[str, str], log: Any, timeout_s: int) -> Verdict:
+    """Call each ``figure_<id>`` of ``code/derive.py`` on a stand-in table (finite made-up values for the declared results, the
+    plan's own settings), before the long run. A body that stops (an id the plan does not declare, a setting that is not
+    there) is a warning, never a fault: the stand-in data is not the study's, so this check never stops a run."""
+    derive = quest_root / "code" / "derive.py"
+    try:
+        text = derive.read_text(encoding="utf-8")
+    except OSError:
+        return Verdict("figure_dry_run", True, "there is no analysis with figures to try")
+    if not re.search(r"^def figure_\w+", text, re.MULTILINE):
+        return Verdict("figure_dry_run", True, "the analysis draws no figure of its own to try")
+    began = time.monotonic()
+    run = _equation_run(quest_root, executor, python, log)
+    rc, out, err = await run(["-c", _DRY_RUN_SCRIPT, json.dumps(_dry_run_settings(protocol), default=str)],
+                             timeout_s=timeout_s, env=env)
+    seconds = round(time.monotonic() - began, 1)
+    lines = [ln for ln in out.splitlines() if ln.startswith(_DRY_RUN_MARK)]
+    try:
+        record = json.loads(lines[-1][len(_DRY_RUN_MARK):])
+    except (IndexError, ValueError):
+        return Verdict("figure_dry_run", None, _one("warning: the figure functions could not be tried on stand-in data ("
+                                                     + (err.strip().splitlines()[-1] if err.strip() else f"exit {rc}") + ")"),
+                       {"seconds": seconds})
+    if record.get("load"):
+        return Verdict("figure_dry_run", None, _one(f"warning: the figure functions could not be tried on stand-in data "
+                                                     f"(derive.py did not load: {record['load']})"), {"seconds": seconds})
+    figures = record.get("figures") or []
+    bad = [f for f in figures if f.get("status") not in ("ok", "not_written")]
+    if not bad:
+        return Verdict("figure_dry_run", True, f"{len(figures)} figure function(s) ran on stand-in data", {"seconds": seconds})
+    first = "; ".join(str(f.get("why") or f"figure_{f.get('id')} gave {f.get('status')}") for f in bad[:2])
+    return Verdict("figure_dry_run", None, _one(f"warning: {len(bad)} of {len(figures)} figure function(s) stopped on stand-in data: {first}", 400),
+                   {"seconds": seconds, "figures": [{"id": f.get("id"), "status": f.get("status")} for f in bad]})
+
+
 # ---- the entry point --------------------------------------------------------------------------------------------------
 
 
@@ -428,6 +545,9 @@ async def check_code(quest_root: Path | str, protocol: dict[str, Any] | None, *,
                                                                     env=run_env, log=log, timeout_s=limit))
     guarded("unread_settings", lambda: _unread_verdict(quest_root, protocol, design))
     guarded("figure_data", lambda: _figure_verdict(code_dir))
+    await guarded_async(["figure_dry_run"], lambda: _figure_dry_run_verdict(quest_root, protocol, executor=executor, python=python,
+                                                                             env=run_env, log=log, timeout_s=limit))
     for v in out:
-        log.info("[code check] %s: %s - %s", v.check, {True: "passed", False: "FAILED", None: "not judged"}[v.passed], v.says)
+        cost = f" ({v.details['seconds']} s)" if v.check == "figure_dry_run" and "seconds" in v.details else ""
+        log.info("[code check] %s: %s - %s%s", v.check, {True: "passed", False: "FAILED", None: "not judged"}[v.passed], v.says, cost)
     return out

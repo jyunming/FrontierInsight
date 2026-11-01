@@ -18,7 +18,7 @@ from typing import Any
 import pytest
 
 from core import code_checks
-from core.execution import SharedInterpreterExecutor
+from core.execution import SharedInterpreterExecutor, scrub_secrets
 
 # Values the checks must never say: the examples' expected outputs (5.0 and 12.0), the known-answer check's expected
 # value (8.0) and its tolerance.
@@ -97,7 +97,7 @@ FAULTS: dict[str, tuple[dict[str, str], set[str]]] = {
     "figure_data": (_with(plot=("plt.plot(values, values)", "plt.plot([1, 2, 3], [4, 5, 6])")), {"figure_data"}),
 }
 ROSTER = ["typed_results", "undefined_names", "grid_keys", "typed_constants", "independent_check", "small_run", "trial_checks",
-          "equation_tests", "known_answers", "unread_settings", "figure_data"]
+          "equation_tests", "known_answers", "unread_settings", "figure_data", "figure_dry_run"]
 
 
 def _judge(root: Path, files: dict[str, str]) -> list[code_checks.Verdict]:
@@ -206,3 +206,75 @@ def test_a_check_that_raises_is_a_verdict_that_could_not_be_judged(tmp_path: Pat
     got = _verdict(verdicts, "figure_data")
     assert got.passed is None and "broken reader" in got.says
     assert _verdict(verdicts, "typed_results").passed is True
+
+
+# ---- the dry run of the figure bodies on a stand-in table -------------------------------------------------------------------
+def _quest_with_figures(root: Path, body: str) -> None:
+    """A code folder with FI's carried figure files and a ``derive.py`` that declares result ``signal`` over setting ``size``
+    and holds one figure whose body is ``body``."""
+    from core import analysis_frame, skeleton
+
+    code = root / "code"
+    code.mkdir(parents=True, exist_ok=True)
+    (code / "fi_frame.py").write_text(skeleton.RUNTIME, encoding="utf-8")
+    (code / "fi_table.py").write_text(skeleton.TABLE_SOURCE, encoding="utf-8")
+    for rel, text in analysis_frame.carried_files().items():
+        (code / rel).parent.mkdir(parents=True, exist_ok=True)
+        (code / rel).write_text(text, encoding="utf-8")
+    head = (
+        "import os as _os, sys as _sys\n_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))\n"
+        "from fi_frame import Figure, Missing, NotYet, Table, UnknownResult\n"
+        "RESULTS = ('signal',)\nKINDS = {'signal': 'mean'}\nAFTERWARDS = ()\nCOMPARED = {}\nPARTS = {}\nKNOWN = {}\n"
+        "FIGURES = {'one': {'file': 'one.png', 'panels': 1, 'shows': ['signal']}}\n\n\n")
+    (code / "derive.py").write_text(head + body, encoding="utf-8")
+
+
+DRY_PROTOCOL = {"grid": {"size": [10, 20, 40]}}
+GOOD_BODY = """def figure_one(fig, table):
+    pairs = table.across('size')
+    fig.axes[0].plot([v for v, _k in pairs], [table.mean('signal', k) for _v, k in pairs])
+"""
+
+
+def _dry(root: Path) -> code_checks.Verdict:
+    return asyncio.run(code_checks._figure_dry_run_verdict(
+        root, DRY_PROTOCOL, executor=SharedInterpreterExecutor(python_version="3.11"), python=sys.executable, env=scrub_secrets(),
+        log=code_checks._LOG, timeout_s=90))
+
+
+def test_dry_run_warns_on_undeclared_read(tmp_path: Path) -> None:
+    _quest_with_figures(tmp_path, GOOD_BODY.replace("table.mean('signal', k)", "table.mean('T_num', k) / table.mean('signal', k) - 1"))
+    got = _dry(tmp_path)
+    assert got.passed is None and got.says.startswith("warning:") and "T_num" in got.says, got
+
+
+def test_dry_run_passes_good_body(tmp_path: Path) -> None:
+    _quest_with_figures(tmp_path, GOOD_BODY)
+    got = _dry(tmp_path)
+    assert got.passed is True, got
+
+
+def test_dry_run_never_fails_the_gate(tmp_path: Path) -> None:
+    mean = "table.mean('signal', k)"
+    zero = GOOD_BODY.replace(mean, f"{mean} / ({mean} - {mean})")
+    for body in (zero, "def figure_one(fig, table):\n    raise RuntimeError('boom')\n", "def figure_one(fig, table):\n    pass\n"):
+        _quest_with_figures(tmp_path, body)
+        got = _dry(tmp_path)
+        assert got.passed is None and got.says.startswith("warning:"), got
+    (tmp_path / "code" / "derive.py").write_text("this is not python (", encoding="utf-8")
+    assert _dry(tmp_path).passed is not False
+
+
+def test_dry_run_without_derive_is_passed(tmp_path: Path) -> None:
+    (tmp_path / "code").mkdir()
+    assert _dry(tmp_path).passed is True
+    (tmp_path / "code" / "derive.py").write_text("RESULTS = ()\n", encoding="utf-8")
+    assert _dry(tmp_path).passed is True
+
+
+def test_dry_run_changes_nothing_in_the_code_folder(tmp_path: Path) -> None:
+    _quest_with_figures(tmp_path, GOOD_BODY)
+    before = {p.name: p.read_text(encoding="utf-8") for p in (tmp_path / "code").glob("*.py")}
+    _dry(tmp_path)
+    assert {p.name: p.read_text(encoding="utf-8") for p in (tmp_path / "code").glob("*.py")} == before
+    assert not (tmp_path / "figures").exists()
