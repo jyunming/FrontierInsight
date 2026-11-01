@@ -412,9 +412,7 @@ def pooled_summary(rows: list[dict[str, Any]], measure: str, expected: Any = Non
             if shown is not None:
                 gap = shown if shape_now == "bound" else abs(shown) if shape_now else abs(shown - float(expected))
         declared = form.aliases[only][1] in {str(x) for x in proportions or ()}
-        # Another per-trial name that moves adds noise the Wilson interval does not hold: then the bootstrap reads it.
-        steady = all(_same(min(columns[b]), max(columns[b])) for b in bare)
-        if steady and (not flat or declared or gap is None or gap > 0):
+        if not flat or declared or gap is None or gap > 0:
             lo, hi = wilson(int(sum(columns[only])), n)
 
             def reach(text: str) -> tuple[float, float] | None:
@@ -679,6 +677,14 @@ def undecided_words(mc: dict[str, Any] | None, limit: float | None) -> str:
         lo, hi = (_oracle.fmt_digits(float(x), 2) for x in interval)
         return (f"the range of the share of {n} trials ({when}), from {lo} to {hi}, lies neither inside nor outside "
                 f"the tolerance {tolerance}")
+    if mc.get("across"):  # a number worked out over all the trials together (mean() / sd() in the measure)
+        if mc.get("sd_small"):
+            return (f"an sd() is not decided on fewer than {SD_MIN_TRIALS} trials, and FI had {n} ({when}), so the "
+                    f"check was not decided")
+        if not _number(se):
+            return f"the {n} trials ({when}) give no error to judge the number by, so the check was not decided"
+        return (f"three standard errors (±{_oracle.fmt_digits(BAND_SE * float(se), 2)}) around the number worked out over "
+                f"all {n} trials ({when}) lie neither inside nor outside the tolerance {tolerance}")
     band = f"±{_oracle.fmt_digits(BAND_SE * float(se), 2)}" if _number(se) else "their band"
     return (f"three standard errors ({band}) around the mean of {n} trials ({when}) lie neither inside nor outside "
             f"the tolerance {tolerance}")
@@ -700,7 +706,7 @@ def record(stat: dict[str, Any] | None, *, read_as: str, verdict: str | None, wh
         "verdict": verdict or "undecided", "why": why if (verdict or "undecided") == "undecided" or why == "failed_trials"
         else "",
         **({"binomial_interval": stat["interval"]} if stat.get("binary") else {}),
-        **({"across": True} if stat.get("across") else {}), **extra,
+        **({"across": True} if stat.get("across") else {}), **({"sd_small": True} if stat.get("sd_small") else {}), **extra,
     }
     if failed_example:
         out["failed_example"] = failed_example

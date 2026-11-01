@@ -2954,6 +2954,15 @@ async def _measure_mean(executor: Any, python: Path | str, quest_root: Path, mod
     if not used or not all(_scalar(first.get(n)) for n in used):
         return None
     stat = _mc.statistic(rows, measure, means, expected, limit, proportions, repeated=repeated)
+    if stat is None and _forms.across_calls(measure):
+        # No trial gave every name inside mean() / sd(): not a missing run_trial. The failed share decides, as for any trials.
+        lost = len(failed) + len(rows)
+        verdict, why_failed = _mc.failed_share_verdict(lost, ran, None)
+        said = f"the oracle {name!r}: none of the {ran} trials on its case gave a number for `{measure}`"
+        record = _mc.record({}, read_as="mean", verdict=verdict, why=why_failed or "no_number", failed=lost, started=ran,
+                            failed_example=clip_keeping_place(failed[0], 200) if failed else "")
+        return ({"name": name, "value": None, "measured_by": "engine", "computed_as": measure, "formula_problem": said,
+                 "returned": {}, "mc": record}, said, False)
     if stat is None:
         return None
     # A number is taken for a constant only when at least MIN_TRIALS trials agree: two or three equal draws of a random
