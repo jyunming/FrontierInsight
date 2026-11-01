@@ -434,6 +434,29 @@ def test_vs_takes_a_form_that_carries_its_interval_as_the_statistic_itself(s5):
     assert "has none" in pv.resolve("Ea_hat:se @ sigma=each, n_points=40 | vs Ea_true", s5).hit.reason
 
 
+def test_vs_with_an_all_axis_and_no_each_is_refused_not_worded_as_one_setting(s5):
+    for key in ("Ea_hat:sd @ sigma=all, n_points=40 | vs Ea_sd_theory",
+                "Ea_hat:sd_ci @ sigma=all, n_points=40 | vs Ea_sd_theory"):
+        got = pv.resolve(key, s5)
+        assert not got.filled, key
+        assert "pool 5 settings into one interval" in got.hit.reason
+        assert "sigma=each" in got.hit.reason and "or give it one value" in got.hit.reason
+
+
+def test_vs_pooling_unlike_settings_is_refused_where_the_reference_is_the_same_at_each():
+    cells = [{"cell": {"h": h}, "key": f"h={h}", "planned": 4, "ok": 4, "failed": 0,
+              "metrics": {"err": {"values": [1.0, 1.1, 0.9, 1.0]}, "want": {"values": [5.0] * 4}}} for h in (1, 2)]
+    got = pv.resolve("err @ h=all | vs want", pv.from_cells(cells))
+    assert not got.filled and "with h=all it would pool 2 settings into one interval" in got.hit.reason
+    assert pv.resolve("err @ h=each | vs want", pv.from_cells(cells)).filled
+
+
+def test_vs_with_each_and_all_on_another_axis_keeps_its_behaviour(s5):
+    got = pv.resolve("Ea_hat:sd @ sigma=each, n_points=all | vs Ea_sd_theory", s5)
+    assert "pool" not in (got.hit.reason if got.hit else "")
+    assert got.text == "not recorded" or " values of sigma" in got.text
+
+
 def test_vs_with_a_varied_axis_left_unnamed_is_still_refused(s5):
     got = pv.resolve("Ea_hat:sd @ n_points=40 | vs Ea_sd_theory", s5)
     assert not got.filled and "does not name every axis" in got.hit.reason

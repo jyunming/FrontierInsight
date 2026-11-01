@@ -1295,6 +1295,15 @@ def _versus(rec: Records, key: Key) -> tuple[str, list[float]]:
     reference is inside it), and counts the outcomes. Nothing is left to the writer's choice of word."""
     each = [a for a, p in key.where.items() if p.kind == "each"]
     key = replace(key, form=_VS_WITH_INTERVAL.get(key.form, key.form))
+    pooled = [a for a, p in key.where.items() if p.kind == "all"]
+    if pooled and not each:
+        # One setting is judged by its own interval; pooling settings that differ in a varied axis would give one interval
+        # over unlike trials, and the words would still say "at that setting".
+        n = len(_matching(rec, key.where, key.metric))
+        if n > 1:
+            axis = rec.short(pooled[0])
+            raise _Unfilled(f"| vs judges one setting or each setting; with {axis}=all it would pool {n} settings into one "
+                            f"interval: mark {axis}=each to judge each value, or give it one value")
     if key.form not in _VS_INTERVAL:
         raise _Unfilled(f"vs judges a mean, an sd or a corr by the 95% interval of the measured value; {key.form} has none "
                         f"(use form {', '.join(_VS_INTERVAL)})")
