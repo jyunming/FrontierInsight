@@ -1420,7 +1420,7 @@ def _quantile_arguments(tree: ast.AST) -> tuple[set[int], set[int]]:
     """The ids of the constants that stand directly as the probability of ``ndtri``/``t_quantile`` and as the degrees of
     freedom of ``t_quantile``."""
     prob: set[int] = set()
-    dof: set[int] = set()
+    freedom: set[int] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ("ndtri", "t_quantile"):
             for i, arg in enumerate(node.args[:2]):
@@ -1428,8 +1428,8 @@ def _quantile_arguments(tree: ast.AST) -> tuple[set[int], set[int]]:
                     if i == 0:
                         prob.add(id(arg))
                     elif node.func.id == "t_quantile":
-                        dof.add(id(arg))
-    return prob, dof
+                        freedom.add(id(arg))
+    return prob, freedom
 
 
 def calc(expression: str, protocol: dict[str, Any] | None, topic: str = "", rec: Records | None = None) -> Value:
@@ -1459,7 +1459,7 @@ def calc(expression: str, protocol: dict[str, Any] | None, topic: str = "", rec:
             raise _Unfilled(f"FI cannot read it ({e.__class__.__name__})") from None
         own: list[str] = []
         of_the_plan = 0
-        prob, dof = _quantile_arguments(tree)
+        prob, freedom = _quantile_arguments(tree)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Constant) or isinstance(node.value, bool) \
                     or not isinstance(node.value, (int, float)):
@@ -1472,7 +1472,7 @@ def calc(expression: str, protocol: dict[str, Any] | None, topic: str = "", rec:
             small = d is not None and d.is_finite() and d == d.to_integral_value() and 0 <= d <= 10
             if d is not None and d.is_finite() and id(node) in prob and d in levels:
                 of_the_plan += 1  # FI's own interval level, as the probability a quantile is asked for
-            elif d is not None and d.is_finite() and id(node) in dof and d in counts:
+            elif d is not None and d.is_finite() and id(node) in freedom and d in counts:
                 pass  # the trials FI ran, as degrees of freedom: a count, never a number the plan fixes
             elif d is not None and d.is_finite() and (d in plan or -d in plan):
                 # A whole number from 0 to 10 is allowed anyway: only another plan number shows the plan fixes the value.
