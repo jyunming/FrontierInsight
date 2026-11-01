@@ -33880,7 +33880,8 @@ def _figure_list_for_prompt(state: QuestState) -> str:
                 f"{c.get('license', '')}]"
             )
         else:
-            lines.append(f"- Figure {number}: figures/{f}" + _figure_record_note(records.get(f), n_seeds=n_seeds))
+            lines.append(f"- Figure {number}: figures/{f}" + _figure_record_note(
+                records.get(f), n_seeds=n_seeds, results=state.get("result_json")))
     if any(_panel_place(ax.get("grid")) for f in figs for ax in ((records.get(f) or {}).get("axes") or [])
            if isinstance(ax, dict)):
         lines.append(
@@ -34287,9 +34288,25 @@ def _panel_place(grid: Any) -> str:
     return " ".join(w for w in (axis(rows, r0, r1, _PANEL_ROWS, "row"), axis(cols, c0, c1, _PANEL_COLS, "column")) if w)
 
 
-def _figure_record_note(record: dict[str, Any] | None, *, n_seeds: int | None = None) -> str:
+def _printed_in_figure(strings: Any, results: Any) -> str:
+    """``"text"`` for each string a figure prints, a number in it that is none of the run's recorded results marked as
+    such (``results`` is the run's ``result_json``)."""
+    from core import number_provenance as _number_provenance
+
+    out = []
+    for text in (strings if isinstance(strings, list) else []):
+        text = _one_line(str(text), 160)
+        if not text:
+            continue
+        loose = _number_provenance.unrecorded_numbers(text, results)
+        out.append(f'"{text}"' + (f" [printed in the figure, not a recorded result: {', '.join(loose)}]" if loose else ""))
+    return "; ".join(out)
+
+
+def _figure_record_note(record: dict[str, Any] | None, *, n_seeds: int | None = None, results: Any = None) -> str:
     """What a figure draws, for the writer: each panel's title, y axis and series.
-    ``n_seeds`` is how many replicate seeds ran, when known."""
+    ``n_seeds`` is how many replicate seeds ran, when known; ``results`` is the run's ``result_json``, to tell a number
+    the figure prints from one the run recorded."""
     panels = []
     for ax in (record or {}).get("axes") or []:
         if not isinstance(ax, dict):
@@ -34336,9 +34353,17 @@ def _figure_record_note(record: dict[str, Any] | None, *, n_seeds: int | None = 
             k = int(group["count"])
             bits.append(f'also draws {k} {group["style"]} line{"s" if k > 1 else ""} with no legend label '
                         f'({group["min"]:.3g} to {group["max"]:.3g})')
+        # A legend entry that only repeats a series already named above is not said twice.
+        named = {str(s.get("label")) for s in ax.get("series") or [] if isinstance(s, dict)}
+        printed = _printed_in_figure([t for t in ax.get("texts") or [] if str(t) not in named], results)
+        if printed:
+            bits.append("the panel itself prints: " + printed)
         if bits:
             panels.append(", ".join(bits))
     note = (" — " + " | ".join(panels)) if panels else ""
+    printed = _printed_in_figure((record or {}).get("texts"), results)
+    if printed:
+        note += " — the figure itself prints: " + printed
     mean_of = ((record or {}).get("replicate_mean") or {}).get("n")
     single_seed = (record or {}).get("single_seed")
     if mean_of:

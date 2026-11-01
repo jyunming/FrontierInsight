@@ -741,3 +741,46 @@ def test_error_bars_FI_cannot_measure_are_not_said_to_be_absent(tmp_path) -> Non
         assert "no error bars" not in notes[stem], notes[stem]
         assert "error bars are drawn (length not recorded)" in notes[stem], notes[stem]
     assert "no error bars are drawn" in notes["plain"]
+
+
+def test_figure_prints_text_is_recorded_and_the_writer_is_told_a_number_no_result_holds(tmp_path) -> None:
+    """A figure's own code printed "fit quality q = 0.9991" inside the plot while the paper said no such quantity was
+    computed: the record kept only that a panel had text. FI now records the strings and gives them to the writer, a
+    number that is none of the run's recorded results marked as such."""
+    pytest.importorskip("matplotlib")
+    from core.engine import _figure_record_note, _read_figure_records
+
+    boot_dir = write_boot(tmp_path, "latex")
+    records = tmp_path / "records"
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(p for p in (str(boot_dir), os.environ.get("PYTHONPATH", "")) if p),
+        "FI_FIGURE_RECORDS": str(records),
+    }
+    probe = (
+        "import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt\n"
+        "fig, ax = plt.subplots()\n"
+        "ax.plot([1, 2, 3], [1, 2, 3], label='curve A')\n"
+        "ax.text(0.1, 0.8, 'fit quality q = 0.9991', transform=ax.transAxes)\n"
+        "ax.text(0.1, 0.6, 'rate k = 0.5123', transform=ax.transAxes)\n"
+        "ax.legend()\n"
+        "fig.text(0.5, 0.01, 'note: three runs')\n"
+        "fig.savefig('printed.png')\n"
+        "fig2, ax2 = plt.subplots()\n"
+        "ax2.plot([1, 2, 3], [1, 2, 3], label='curve A')\n"
+        "fig2.savefig('plain.png')\n"
+    )
+    out = subprocess.run([sys.executable, "-c", probe], env=env, cwd=tmp_path,
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    got = _read_figure_records(records, ["printed.png", "plain.png"])
+    assert "fit quality q = 0.9991" in got["printed.png"]["axes"][0]["texts"]
+    assert "curve A" in got["printed.png"]["axes"][0]["texts"]
+    assert got["printed.png"]["texts"] == ["note: three runs"]
+    note = _figure_record_note(got["printed.png"], results={"k": 0.5123})
+    assert '"fit quality q = 0.9991" [printed in the figure, not a recorded result: 0.9991]' in note
+    assert '"rate k = 0.5123"' in note and "not a recorded result: 0.5123" not in note
+    assert 'the figure itself prints: "note: three runs"' in note
+    # A figure with no text of its own gets the note it always did.
+    assert "prints" not in _figure_record_note(got["plain.png"], results={"k": 0.5123})
+    assert _figure_record_note(got["plain.png"], results={"k": 0.5123}) == _figure_record_note(got["plain.png"])

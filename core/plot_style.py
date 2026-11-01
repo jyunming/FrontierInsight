@@ -491,6 +491,20 @@ try:
                 return _fi_values(point[1] for path in artist.get_paths() for point in path.vertices)
             return None
 
+        def _fi_texts(artists):
+            # The visible strings of text artists, whitespace folded, in drawing order, without repeats.
+            out = []
+            for artist in artists:
+                try:
+                    if not artist.get_visible():
+                        continue
+                    words = " ".join(str(artist.get_text()).split())
+                except Exception:
+                    continue
+                if words and words not in out:
+                    out.append(words[:300])
+            return out[:12]
+
         def _fi_axes(ax):
             lo, hi = ax.get_ylim()
             log = ax.get_yscale() == "log"
@@ -571,6 +585,9 @@ try:
             return {
                 "title": title, "xlabel": ax.get_xlabel(), "ylabel": ax.get_ylabel(),
                 "yscale": ax.get_yscale(), "ylim": [float(lo), float(hi)], "series": series,
+                # The words the panel itself prints besides its title: ax.text / annotate strings and the legend's
+                # entries. What the figure says is then a fact FI holds, not only what the code drew.
+                "texts": _fi_texts(list(ax.texts) + (list(ax.get_legend().get_texts()) if ax.get_legend() else [])),
             }
 
         # Tick labels a redraw gets back by setting the same scale.
@@ -954,6 +971,11 @@ try:
                 try:
                     name = _fi_os.path.basename(_fi_os.fspath(fname))
                     record = {"file": name, "axes": [{**_fi_axes(ax), **_fi_where(ax)} for ax in self.get_axes()]}
+                    # The words printed on the figure outside any panel (its title, a note), as the panels' are.
+                    try:
+                        record["texts"] = _fi_texts([getattr(self, "_suptitle", None)] + list(self.texts))[:12]
+                    except Exception:
+                        pass
                     # A failure here leaves the key out: a record without "tick_pt" was
                     # not measured, one with null draws no tick labels.
                     try:
