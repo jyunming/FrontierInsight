@@ -39,6 +39,8 @@ from pathlib import Path
 MEANINGS = ("ci95", "sd", "range", "other")
 NOTE_FORMS = ("mean", "n", "low", "high")
 IDENTICAL_RTOL = 1e-12  # two series equal within this relative tolerance are one line to the reader
+Y_RTOL = 1e-3  # a drawn y matches the table's value within this relative tolerance (plus 1e-12 absolute)
+Y_FORMS = ("mean", "sd", "se", "min", "max", "range", "max_abs")  # which statistic of the trials at a setting y may be (``form``)
 BAR_RTOL = 1e-3  # error-bar widths the body typed match the table's own widths within this relative tolerance (plus 1e-12 absolute)
 REF_STATED = "stated in the figure"  # the source of a reference line drawn at a literal value
 
@@ -133,6 +135,10 @@ def _sides(entry):
     if entry.get("yerr") is not None:
         return entry["yerr"], entry["yerr"]
     return None, None
+
+
+def _close_y(a, b):
+    return abs(a - b) <= Y_RTOL * max(abs(a), abs(b)) + 1e-12
 
 
 def _close_width(a, b):
@@ -301,10 +307,8 @@ class FigureCalls:
             raise ValueError("this figure's plan gives no x: pass x=(\"id of a setting or a result\", values) to say what x is")
         return ident, x
 
-    def _setting_key(self, x_id, x, what=None, y=None):
-        """The table's key of the setting where ``x_id`` is ``x``. When other settings also vary (several keys share that x), the
-        key is the one whose mean of ``what`` is the plotted ``y`` (the bars belong to the point drawn); None when no key, or
-        still more than one, fits."""
+    def _keys_at(self, x_id, x):
+        """Every key of the table whose setting holds ``x_id`` at the value ``x`` (a number compared as a number)."""
         found = []
         table = getattr(self, "table", None)
         for key in (list(table.keys()) if table is not None else []):
@@ -318,6 +322,14 @@ class FigureCalls:
                     same = text.strip() == str(x)
                 if same:
                     found.append(key)
+        return found
+
+    def _setting_key(self, x_id, x, what=None, y=None):
+        """The table's key of the setting where ``x_id`` is ``x``. When other settings also vary (several keys share that x), the
+        key is the one whose mean of ``what`` is the plotted ``y`` (the bars belong to the point drawn); None when no key, or
+        still more than one, fits."""
+        found = self._keys_at(x_id, x)
+        table = getattr(self, "table", None)
         if len(found) > 1 and what is not None and _finite(y):
             fits = []
             for key in found:
@@ -355,6 +367,69 @@ class FigureCalls:
             hi.append(b)
         return (lo, hi) if any(v is not None for v in lo + hi) else None
 
+    def _table_stats(self, what, key, form):
+        """The numbers the table gives for ``form`` of result ``what`` at ``key``: one, or one for each value a sub-study compared
+        inside the setting (the level-aware read). Empty when the table gives none."""
+        table = self.table
+        if form == "mean":
+            try:
+                m = table.mean(what, key)
+                return [float(m)] if _finite(m) else []
+            except Exception:  # noqa: BLE001 -- a sub-study records a result for each compared value, not for the setting
+                try:
+                    return [float(m) for m in table.level_means(what, key).values() if _finite(m)]
+                except Exception:  # noqa: BLE001 -- a read the table refuses gives nothing to compare with
+                    return []
+        try:
+            groups = [list(table.values(what, key))]
+        except Exception:  # noqa: BLE001 -- as above: the values of each compared value
+            try:
+                groups = [list(v) for _k, _t, v in table.level_rows(what, key)]
+            except Exception:  # noqa: BLE001
+                return []
+        out = []
+        for vals in groups:
+            vals = [float(v) for v in vals if _finite(v)]
+            if not vals:
+                continue
+            if form in ("sd", "se"):
+                sd = _sample_sd(vals)
+                if _finite(sd):
+                    out.append(float(sd) / (len(vals) ** 0.5 if form == "se" else 1.0))
+            elif form == "min":
+                out.append(min(vals))
+            elif form == "max":
+                out.append(max(vals))
+            elif form == "range":
+                out.append(max(vals) - min(vals))
+            elif form == "max_abs":
+                out.append(max(abs(v) for v in vals))
+        return out
+
+    def _y_matches(self, form, what, x_id, xs, ys):
+        """Whether every drawn y (a gap is skipped) equals, within ``Y_RTOL``, the table's ``form`` of result ``what`` at a setting
+        whose ``x_id`` is the drawn x (when other settings also vary, at any of them: a y that is a real value of another slice
+        is not told apart). A point with no x, no such setting or no table value cannot be checked, which counts as not matching.
+        ``None`` when there is no table to compare with."""
+        if getattr(self, "table", None) is None:
+            return None
+        for x, y in zip(xs, ys):
+            if y is None or not _finite(y):
+                continue
+            if x is None or not any(_close_y(float(y), t) for key in self._keys_at(x_id, x)
+                                    for t in self._table_stats(what, key, form)):
+                return False
+        return True
+
+    def _checked_what(self, what, form, x_id, xs, ys):
+        """``what`` when the drawn y is the table's own value, else ``other``: the series keeps its shape but FI states no value
+        from it. Checked when ``what`` is a result of the plan and x a setting; ``form`` (default the mean) says which statistic
+        of the trials y is. A mismatch, an unknown ``form`` or a point the table cannot say never refuses the call."""
+        if what not in self._results() or x_id not in (getattr(self, "settings", None) or []):
+            return what
+        ok = self._y_matches(form, what, x_id, xs, ys) if form in Y_FORMS else False
+        return what if ok is None or ok else "other"
+
     def _checked_meaning(self, meaning, what, x_id, xs, ys, lo, hi):
         """What error bars of typed widths may be called. ``ci95``/``sd`` stay only when the widths equal the table's own for
         that meaning at EVERY drawn point (``BAR_RTOL``): one point the table gives no width for, or one that differs, an unreadable
@@ -375,7 +450,7 @@ class FigureCalls:
                     return "other"
         return meaning if drawn else "other"
 
-    def _add_series(self, panel, kind, series, x, y, what, yerr, yerr_meaning, step=False):
+    def _add_series(self, panel, kind, series, x, y, what, yerr, yerr_meaning, step=False, form="mean"):
         """Check a series call and draw it; the record gets the series only if it was drawn."""
         ax, rec = self._panel(panel)
         if yerr_meaning not in MEANINGS:
@@ -408,6 +483,7 @@ class FigureCalls:
                 raise ValueError("yerr has %d values and y has %d: one bar half-width for each y (a pair has one list of lower and "
                                  "one of upper widths)" % (len(lo), len(ys)))
             yerr_meaning = self._checked_meaning(yerr_meaning, what, x_id, xs, ys, lo, hi)
+        what = self._checked_what(what, form, x_id, xs, ys)
         legend = self._label_of(series)
         with _undone(ax, rec):
             self._set_x(rec, x_id)
@@ -418,7 +494,7 @@ class FigureCalls:
                 self._tag(self._errorbar(ax, xs, ys, lo, hi))
             rec["series"].append({"id": series, "label": legend, "kind": kind, "step": bool(step), "x": xs, "y": ys,
                                   "yerr": lo if lo is not None and _same(lo, hi) else None, "yerr_lo": lo, "yerr_hi": hi,
-                                  "yerr_meaning": yerr_meaning if lo is not None else None, "merged_with": []})
+                                  "yerr_meaning": yerr_meaning if lo is not None else None, "what": what, "merged_with": []})
             self._remember(panel, "series", arts[0] if arts else None, what)
         return arts
 
@@ -430,20 +506,20 @@ class FigureCalls:
             return ax.plot(xs, _gaps(ys), linestyle="none", marker="o", label=legend)
         return ax.plot(xs, _gaps(ys), label=legend, **({"drawstyle": "steps-post"} if step else {}))
 
-    def line(self, panel, series, x, y, what, yerr=None, step=False, yerr_meaning="other"):
+    def line(self, panel, series, x, y, what, yerr=None, step=False, yerr_meaning="other", form="mean"):
         """A line (a step curve with ``step=True``) of the plan's ``series``, ``y`` being the result ``what``. ``yerr`` are the
         half-widths of error bars: one list (both sides), a pair ``(lower, upper)`` of lists, or ``"ci95"`` / ``"sd"`` for FI to
         read the widths from the table at each x (x a setting). ``yerr_meaning`` says what typed widths are (ci95, sd, range,
         other); FI keeps ci95 or sd only if the widths equal the table's own (relative 1e-3), else the meaning is ``other``."""
-        return self._add_series(panel, "line", series, x, y, what, yerr, yerr_meaning, step)
+        return self._add_series(panel, "line", series, x, y, what, yerr, yerr_meaning, step, form)
 
-    def points(self, panel, series, x, y, what, yerr=None, yerr_meaning="other"):
+    def points(self, panel, series, x, y, what, yerr=None, yerr_meaning="other", form="mean"):
         """Markers only."""
-        return self._add_series(panel, "points", series, x, y, what, yerr, yerr_meaning)
+        return self._add_series(panel, "points", series, x, y, what, yerr, yerr_meaning, form=form)
 
-    def bars(self, panel, series, x, y, what, yerr=None, yerr_meaning="other"):
+    def bars(self, panel, series, x, y, what, yerr=None, yerr_meaning="other", form="mean"):
         """Bars."""
-        return self._add_series(panel, "bars", series, x, y, what, yerr, yerr_meaning)
+        return self._add_series(panel, "bars", series, x, y, what, yerr, yerr_meaning, form=form)
 
     @staticmethod
     def _errorbar(ax, xs, ys, lo, hi):

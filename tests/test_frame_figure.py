@@ -41,11 +41,21 @@ class _Table:
         return (1.25, 3.75)
 
 
+class _IdentityTable(_Table):
+    """Every result's mean at ``size=v`` is ``v``: a test that only reads labels draws y = x, which is the table's own value."""
+
+    def keys(self):
+        return ["size=%d" % v for v in (1, 2, 3, 10, 100)]
+
+    def mean(self, name, key):
+        return float(key.partition("=")[2])
+
+
 class _Host(frame_figure.FigureCalls):
-    def __init__(self, panels=2, figsize=None):
+    def __init__(self, panels=2, figsize=None, identity=False):
         self.fig, axes = plt.subplots(1, panels, squeeze=False, figsize=figsize)
         self.axes = list(axes[0])
-        self.table = _Table()
+        self.table = _IdentityTable() if identity else _Table()
         self.x = "size"
         self.settings = ["size", "step"]
         self.series_ids = ["fast", "slow"]
@@ -58,15 +68,15 @@ def _data(host):
 
 
 def test_line_records_series_x_y_what():
-    h = _Host()
-    h.line(0, "fast", [1, 2, 3], [1.0, 2.0, 4.0], "growth")
+    h = _Host(identity=True)
+    h.line(0, "fast", [1, 2, 3], [1.0, 2.0, 3.0], "growth")
     p = h.record()["panels"][0]
     assert p["panel"] == 1 and p["raw"] is False and p["raw_reason"] is None
     assert p["x"] == {"id": "size", "kind": "setting", "label": "Size", "scale": "linear"}
     assert p["y"] == {"what": "growth", "label": "Growth", "scale": "linear"}
     s = p["series"][0]
     assert (s["id"], s["label"], s["kind"], s["step"]) == ("fast", "Fast colony", "line", False)
-    assert s["x"] == [1.0, 2.0, 3.0] and s["y"] == [1.0, 2.0, 4.0] and s["yerr"] is None and s["merged_with"] == []
+    assert s["x"] == [1.0, 2.0, 3.0] and s["y"] == [1.0, 2.0, 3.0] and s["yerr"] is None and s["merged_with"] == []
     assert h.record()["panels"][1]["series"] == []
 
 
@@ -311,8 +321,8 @@ INFO = {"growth": {"description": "Mean growth rate of the colony, measured per 
 
 
 def test_label_comes_from_plan_not_body(caplog):
-    h = _Host(panels=1)
-    h.line(0, "fast", [1, 2, 3], [1.0, 2.0, 4.0], "growth")
+    h = _Host(panels=1, identity=True)
+    h.line(0, "fast", [1, 2, 3], [1.0, 2.0, 3.0], "growth")
     h.axes[0].set_ylabel("energy drift")
     h.axes[0].set_title("A title")
     with caplog.at_level("WARNING", logger="frame_figure"):
@@ -322,13 +332,13 @@ def test_label_comes_from_plan_not_body(caplog):
 
 
 def test_label_fallback_order():
-    h = _Host(panels=3)
+    h = _Host(panels=3, identity=True)
     for i, what in enumerate(["growth", "load", "load"]):
         h.line(i, "fast", [1, 2], [1.0, 2.0], what)
     h.finish({"growth": {"label": "Growth", "unit": "1/h"}}, {"load": {"description": "Load carried by the colony at the end; read at 3 h"}})
     assert h.axes[0].get_ylabel() == "Growth (1/h)"
     assert h.axes[1].get_ylabel() == "Load carried by the colony at the end"
-    h2 = _Host(panels=1)
+    h2 = _Host(panels=1, identity=True)
     h2.line(0, "fast", [1, 2], [1.0, 2.0], "load")
     h2.finish({}, {"load": {"unit": "kg"}})
     assert h2.axes[0].get_ylabel() == "value (kg)" and h2.axes[0].get_xlabel() == "value"
@@ -336,9 +346,9 @@ def test_label_fallback_order():
 
 
 def test_two_results_and_other_quantity_labels():
-    h = _Host(panels=2)
+    h = _Host(panels=2, identity=True)
     h.line(0, "fast", [1, 2], [1.0, 2.0], "growth")
-    h.line(0, "slow", [1, 2], [3.0, 2.0], "load")
+    h.line(0, "slow", [1, 2], [1.0, 2.0], "load")
     h.line(1, "fast", [1, 2], [1.0, 2.0], "other")
     h.finish(SPEC, INFO)
     assert h.axes[0].get_ylabel() == "Growth (1/h) / Load carried by the colony at the end"
@@ -478,8 +488,8 @@ def test_merged_legend_entry_never_shows_a_raw_id():
 
 
 def test_log_axis_ignores_nonpositive_error_bar_end():
-    h = _Host(panels=1)
-    h.line(0, "fast", [1, 2, 3], [1.0, 10.0, 100.0], "growth", yerr=[2.0, 2.0, 2.0])  # 1.0 - 2.0 is below zero
+    h = _Host(panels=1, identity=True)
+    h.line(0, "fast", [1, 10, 100], [1.0, 10.0, 100.0], "growth", yerr=[2.0, 2.0, 2.0])  # 1.0 - 2.0 is below zero
     h.finish(SPEC, {"growth": {"scale": "log"}})
     lo, hi = h.axes[0].get_ylim()
     assert h.axes[0].get_yscale() == "log" and 0 < lo < 1.0 and 100.0 < hi < 1000.0
@@ -649,3 +659,19 @@ def test_bars_are_checked_against_the_key_whose_mean_is_the_plotted_point():
     h.line(0, "fast", [1], [2.0], "growth", yerr=([1.0], [1.0]), yerr_meaning="ci95")
     h.line(0, "slow", [1], [5.0], "growth", yerr=([1.0], [1.0]), yerr_meaning="ci95")  # the widths of the other key
     assert [s["yerr_meaning"] for s in h.record()["panels"][0]["series"]] == ["ci95", "other"]
+
+
+def test_y_check_skips_gaps_and_flags_a_wrong_point():
+    h = _Host(panels=2, identity=True)
+    h.line(0, "fast", [1, 2, 3], [1.0, None, float("nan")], "growth")  # gaps are not compared
+    h.line(1, "fast", [1, 2, 3], [1.0, 2.5, 3.0], "growth")
+    p0, p1 = h.record()["panels"]
+    assert p0["series"][0]["what"] == "growth" and p1["series"][0]["what"] == "other"
+    assert p1["y"]["what"] == "other"
+
+
+def test_y_form_names_the_statistic_drawn():
+    h = _Host(panels=1, identity=True)
+    h.line(0, "fast", [1, 2], [1.0, 2.0], "growth", form="sd")  # the identity table has no spread equal to y
+    h.line(0, "slow", [1, 2], [1.0, 2.0], "growth", form="no_such_form")
+    assert [s["what"] for s in h.record()["panels"][0]["series"]] == ["other", "other"]

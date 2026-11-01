@@ -41,6 +41,9 @@ class _Table:
         assert name in self.declared, name
         return self._cells[key]["metrics"][name]["values"]
 
+    def values(self, name, key):
+        return list(self._values(name, key))
+
     def n(self, name, key):
         return len(self._values(name, key))
 

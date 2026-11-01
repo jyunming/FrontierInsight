@@ -180,10 +180,11 @@ def _axis(panel: dict[str, Any], axis: str | None) -> dict[str, Any] | None:
     return panel.get(axis) if axis in ("x", "y") and isinstance(panel.get(axis), dict) else None
 
 
-def _value_axis_ok(panel: dict[str, Any], axis: str) -> bool:
-    """Values on the y axis of an ``other`` quantity are not claimed (the label is neutral)."""
+def _value_axis_ok(panel: dict[str, Any], axis: str, series: dict[str, Any] | None = None) -> bool:
+    """Values on the y axis of an ``other`` quantity are not claimed (the label is neutral). A series FI found not to be the
+    table's value of its result carries ``what: other`` itself and states no value, whatever the panel's axis says."""
     ax = _axis(panel, axis)
-    return ax is not None and not (axis == "y" and ax.get("what") == "other")
+    return ax is not None and not (axis == "y" and (ax.get("what") == "other" or (series or {}).get("what") == "other"))
 
 
 def _x_arg(raw: str | None) -> float | None:
@@ -247,6 +248,8 @@ def _range(calls, panel, a, fmt, ctx):
         # an image's rows and columns are positions, not a quantity: only a named image gives its colour values
         chosen = [s for s in panel.get("series") or [] if isinstance(s, dict) and s.get("kind") != "image"]
         who = "the series"
+    if axis == "y" and any(not _value_axis_ok(panel, "y", s) for s in chosen):
+        return None  # one series whose y is not the table's value: the span of "the series" would state it
     if not chosen:
         return None
     if chosen[0].get("kind") == "image":
@@ -266,7 +269,7 @@ def _range(calls, panel, a, fmt, ctx):
 
 def _value_at(calls, panel, a, fmt, ctx):
     s = _series(panel, a["series"])
-    if s is None or not _value_axis_ok(panel, "y"):
+    if s is None or not _value_axis_ok(panel, "y", s):
         return None
     got = _at(s, a.get("x", ""))
     if len({y for _, y in got}) != 1:  # not a drawn x (no interpolation), or two different y at one x
@@ -290,7 +293,7 @@ def _sorted_unique(s: dict[str, Any]) -> list[tuple[float, float]] | None:
 
 def _trend(calls, panel, a, fmt, ctx):
     s = _series(panel, a["series"])
-    if s is None or s.get("step") or not _value_axis_ok(panel, "y"):
+    if s is None or s.get("step") or not _value_axis_ok(panel, "y", s):
         return None
     pts = _sorted_unique(s)
     if pts is None or len(pts) < 3:
@@ -312,7 +315,7 @@ def _trend(calls, panel, a, fmt, ctx):
 
 def _steps(calls, panel, a, fmt, ctx):
     s = _series(panel, a["series"])
-    if s is None or not s.get("step") or not _value_axis_ok(panel, "y"):
+    if s is None or not s.get("step") or not _value_axis_ok(panel, "y", s):
         return None
     pts = _sorted_unique(s)
     if pts is None or len(pts) < 2 or _tie(pts[0][1], pts[-1][1]):
@@ -330,6 +333,8 @@ def _order(calls, panel, a, fmt, ctx):
     for s in panel.get("series") or []:
         if not isinstance(s, dict) or not _plain(s):
             continue
+        if not _value_axis_ok(panel, "y", s):
+            return None  # an order that leaves a series out, or ranks its y, would state a value FI did not check
         at = _at(s, a["at"])
         if len({y for _, y in at}) > 1:
             return None
@@ -353,6 +358,8 @@ def _crossings(panel: dict[str, Any], a: dict[str, str], same_grid: bool = False
         return None
     sa, sb = _series(panel, a["a"]), _series(panel, a["b"])
     if sa is None or sb is None or not _plain(sa) or not _plain(sb):
+        return None
+    if not _value_axis_ok(panel, "y", sa) or not _value_axis_ok(panel, "y", sb):
         return None
     ya, yb = dict(_points(sa)), dict(_points(sb))
     if len(ya) != len(_points(sa)) or len(yb) != len(_points(sb)):
