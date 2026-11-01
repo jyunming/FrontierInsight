@@ -217,6 +217,68 @@ def layout_sentence(record: Any, lines_data: Any = None) -> str:
     return sentence + note
 
 
+def _finite(values: Any) -> list[float]:
+    return [float(v) for v in values if _num(v) and v == v and abs(v) != float("inf")] if isinstance(values, list) else []
+
+
+def _legend_box(ax: Any) -> list[float] | None:
+    box = ax.get("legend_box") if isinstance(ax, dict) else None
+    if not isinstance(box, dict) or not all(_num(box.get(k)) for k in ("x0", "y0", "x1", "y1")):
+        return None
+    return [float(box[k]) for k in ("x0", "y0", "x1", "y1")]
+
+
+def _panel_label(ax: Any, k: int) -> str:
+    return _panel_words(ax) or f"panel {k + 1}"
+
+
+def geometry_findings(record: Any) -> list[str]:
+    """Plain sentences for geometry problems the figure record shows: a legend box not inside the figure, a legend box over
+    another panel, error bars reaching past the panel's data limits. A record without the keys gives ``[]``."""
+    axes = record.get("axes") if isinstance(record, dict) else None
+    if not isinstance(axes, list):
+        return []
+    out: list[str] = []
+    for k, ax in enumerate(axes):
+        if not isinstance(ax, dict):
+            continue
+        name = _panel_label(ax, k)
+        box = _legend_box(ax)
+        if box is not None:
+            x0, y0, x1, y1 = box
+            if x0 < -_SAME or y0 < -_SAME or x1 > 1 + _SAME or y1 > 1 + _SAME:
+                out.append(f"The legend of {name} reaches outside the figure.")
+            place = ax.get("place")
+            own = [float(v) for v in place] if isinstance(place, list) and len(place) == 4 and all(_num(v) for v in place)                 else None
+            for j, other in enumerate(axes):
+                op = other.get("place") if isinstance(other, dict) else None
+                if j == k or not (isinstance(op, list) and len(op) == 4 and all(_num(v) for v in op)):
+                    continue
+                ox, oy, ow, oh = (float(v) for v in op)
+                if own is not None and (all(abs(a - b) < _SAME for a, b in zip(own, (ox, oy, ow, oh)))
+                                        or (own[0] - _SAME <= ox and own[1] - _SAME <= oy
+                                            and ox + ow <= own[0] + own[2] + _SAME
+                                            and oy + oh <= own[1] + own[3] + _SAME)):
+                    continue  # a twin axis, or an inset inside this panel
+                if min(x1, ox + ow) - max(x0, ox) > _SAME and min(y1, oy + oh) - max(y0, oy) > _SAME:
+                    out.append(f"The legend of {name} covers part of {_panel_label(other, j)}.")
+        limits = ax.get("data_limits")
+        lim = limits.get("y") if isinstance(limits, dict) else None
+        bars = ax.get("errorbars")
+        if _finite(lim) and len(_finite(lim)) == 2 and isinstance(bars, list):
+            lo_lim, hi_lim = sorted(_finite(lim))
+            tol = _SAME * max(1.0, hi_lim - lo_lim)
+            for bar in bars:
+                if not isinstance(bar, dict):
+                    continue
+                lows, highs = _finite(bar.get("lo")), _finite(bar.get("hi"))
+                if (lows and min(lows) < lo_lim - tol) or (highs and max(highs) > hi_lim + tol):
+                    line = bar.get("line")
+                    who = f'"{_one(line)}"' if line else "a line"
+                    out.append(f"The error bars of {who} in {name} reach past the plotted range and are cut off.")
+    return out
+
+
 def styles_drawn(lines_data: Any) -> dict[str, int]:
     """How many lines of each style (``solid``, ``dashed``, ``dotted``, ``dash-dotted``) a figure's line file holds, and
     ``markers`` for the lines that draw a marker. A line with no style and no marker draws nothing and is not counted; a

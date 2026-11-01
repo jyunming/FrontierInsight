@@ -128,3 +128,37 @@ def test_a_panel_without_a_title_is_described_by_its_axes_never_as_if_an_axis_la
     assert figure_facts.layout_sentence(record) == (
         'two panels side by side in one row (left: "Fraction of real effects = 0"; '
         'right: y axis "Realised rate", x axis "tests")')
+
+
+def _geo(legend=None, bars=None, limits=None, places=(SIDE, SIDE_RIGHT)):
+    rec = _record(*places, titles=("left", "right"))
+    rec["axes"][0]["legend_box"] = legend
+    rec["axes"][0]["errorbars"] = bars if bars is not None else []
+    rec["axes"][0]["texts"] = []
+    rec["axes"][0]["data_limits"] = limits or {"x": [0, 1], "y": [0, 10]}
+    return rec
+
+
+def test_legend_off_canvas_is_a_finding():
+    got = figure_facts.geometry_findings(_geo(legend={"x0": 0.2, "y0": 0.2, "x1": 1.3, "y1": 0.4}))
+    assert any("legend" in s and "outside the figure" in s for s in got)
+
+
+def test_legend_over_other_panel_is_a_finding():
+    got = figure_facts.geometry_findings(_geo(legend={"x0": 0.3, "y0": 0.2, "x1": 0.7, "y1": 0.4}))
+    assert any("legend" in s and '"right"' in s for s in got)
+
+
+def test_errorbar_outside_limits_is_a_finding():
+    got = figure_facts.geometry_findings(_geo(bars=[{"line": "fit", "lo": [1.0, -2.0], "hi": [3.0, 4.0]}]))
+    assert len(got) == 1 and "error bars" in got[0] and '"fit"' in got[0]
+
+
+def test_clean_record_has_no_findings():
+    rec = _geo(legend={"x0": 0.15, "y0": 0.2, "x1": 0.4, "y1": 0.4}, bars=[{"line": None, "lo": [1.0], "hi": [9.0]}])
+    assert figure_facts.geometry_findings(rec) == []
+
+
+def test_old_record_has_no_findings():
+    assert figure_facts.geometry_findings(_record(SIDE, SIDE_RIGHT)) == []
+    assert figure_facts.geometry_findings(None) == []
