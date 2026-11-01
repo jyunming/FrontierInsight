@@ -58,7 +58,7 @@ def test_a_formula_may_use_the_confidence_level_of_fi_own_intervals() -> None:
     assert t.filled and t.text == "3.182"
     z = paper_values.calc("ndtri(0.975)", plan, "")
     assert z.filled and z.text == "1.96"
-    assert paper_values.calc("ndtri(1 - (1 - 0.95) / 2)", plan, "").filled
+    assert paper_values.calc("ndtri(0.95)", plan, "").filled
     assert paper_values.calc("ndtri(0.025)", plan, "").filled
 
 
@@ -70,10 +70,11 @@ def test_only_the_level_of_fi_own_intervals_is_added_to_what_a_formula_may_use()
     assert not paper_values.calc("40 / (2.5 * 1.7) - 1", PLAN, TOPIC).filled
 
 
-def test_a_trial_count_of_the_record_is_a_number_a_formula_may_use() -> None:
-    cells = [{"metrics": {"err": [0.1 * i for i in range(1, 31)]}}]
+def test_a_trial_count_of_the_record_is_a_number_only_as_degrees_of_freedom() -> None:
+    cells = [{"ok": 30, "metrics": {"err": {"values": [0.1 * i for i in range(1, 1001)]}, "bad": 5}}]
     rec = paper_values.Records(cells=cells, protocol={"constants": {"n_points": [2, 4]}})
     got = paper_values.calc("t_quantile(0.975, 29)", rec.protocol, "", rec)
     assert got.filled and got.text == "2.045"
     assert not paper_values.calc("t_quantile(0.975, 29)", rec.protocol, "").filled  # without the record 29 is no number
-    assert not paper_values.calc("t_quantile(0.975, 28)", rec.protocol, "", rec).filled
+    for expr in ("29 * 9", "30 * 7", "0.95 * 7", "t_quantile(0.975, 999)", "t_quantile(0.975, 28)", "t_quantile(0.975, 29) * 30"):
+        assert not paper_values.calc(expr, rec.protocol, "", rec).filled, expr

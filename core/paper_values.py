@@ -1396,28 +1396,46 @@ def _calc_text(x: float) -> str:
 INTERVAL_LEVEL = "0.95"
 
 
-def _fi_own_numbers(rec: Records | None) -> frozenset[Any]:
-    """The numbers FI itself fixes for its intervals and so a formula may use without the plan stating them: the interval
-    level and the two-sided quantile levels it gives (``0.975``, ``0.025``), and, from the record, the number of trials of
-    each setting (``n``) and its degrees of freedom (``n - 1``)."""
+def _fi_own_numbers(rec: Records | None) -> tuple[frozenset[Any], frozenset[Any]]:
+    """``(levels, counts)``: the numbers FI itself fixes for its intervals. ``levels`` are the interval level and the two
+    quantile levels it gives (``0.975``, ``0.025``); ``counts`` are the numbers of trials each setting of the record ran
+    (``n``) and their degrees of freedom (``n - 1``). A formula may use them only as the argument they exist for."""
     from decimal import Decimal
 
     level = Decimal(INTERVAL_LEVEL)
     tail = (1 - level) / 2
-    found = {level, 1 - tail, tail}
+    counts: set[Any] = set()
     if rec is not None:
-        counts = rec._derived.get("trial_counts")  # worked out once: a record can hold hundreds of thousands of cells
-        if counts is None:
-            counts = rec._derived["trial_counts"] = {len(_tt._values(series)) for c in rec.cells
-                                                      for series in c.get("metrics", {}).values()}
-        for n in counts:
-            found.update((Decimal(n), Decimal(n - 1)) if n > 0 else ())
-    return frozenset(found)
+        ran = rec._derived.get("trials_per_setting")  # worked out once: a record can hold hundreds of thousands of cells
+        if ran is None:
+            ran = rec._derived["trials_per_setting"] = {
+                c["ok"] for c in rec.cells
+                if isinstance(c, dict) and isinstance(c.get("ok"), int) and not isinstance(c.get("ok"), bool) and c["ok"] > 0}
+        for n in ran:
+            counts.update((Decimal(n), Decimal(n - 1)))
+    return frozenset({level, 1 - tail, tail}), frozenset(counts)
+
+
+def _quantile_arguments(tree: ast.AST) -> tuple[set[int], set[int]]:
+    """The ids of the constants that stand directly as the probability of ``ndtri``/``t_quantile`` and as the degrees of
+    freedom of ``t_quantile``."""
+    prob: set[int] = set()
+    dof: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ("ndtri", "t_quantile"):
+            for i, arg in enumerate(node.args[:2]):
+                if isinstance(arg, ast.Constant):
+                    if i == 0:
+                        prob.add(id(arg))
+                    elif node.func.id == "t_quantile":
+                        dof.add(id(arg))
+    return prob, dof
 
 
 def calc(expression: str, protocol: dict[str, Any] | None, topic: str = "", rec: Records | None = None) -> Value:
     """``{{calc:expression}}`` computed by FI. Every number in it must be one the writer may type (a number the plan or the
-    topic states, a whole number from 0 to 10, or a number FI fixes for its own intervals, :func:`_fi_own_numbers`;
+    topic states, a whole number from 0 to 10, or, only as a quantile's probability or degrees of freedom, a number FI fixes
+    for its own intervals, :func:`_fi_own_numbers`;
     :mod:`core.typed_numbers`), so an expression can only work out what the
     plan already fixes (a quantile, a level, a reference value, a count from the grid), never carry a number of its own.
     It may call FI's calculator functions, ``ndtr``/``ndtri`` (the standard normal distribution and its quantile) and
@@ -1431,7 +1449,8 @@ def calc(expression: str, protocol: dict[str, Any] | None, topic: str = "", rec:
     try:
         if not isinstance(protocol, dict) or not protocol:
             raise _Unfilled("FI has no plan to compute it from")
-        plan = _typed.plan_numbers(protocol, topic) | _fi_own_numbers(rec)
+        plan = _typed.plan_numbers(protocol, topic)
+        levels, counts = _fi_own_numbers(rec)
         # The numbers are read from the parsed expression, not from its text: ``.97``, ``1_234`` or ``0x1F`` is a number of
         # its own however it is spelled.
         try:
@@ -1440,6 +1459,7 @@ def calc(expression: str, protocol: dict[str, Any] | None, topic: str = "", rec:
             raise _Unfilled(f"FI cannot read it ({e.__class__.__name__})") from None
         own: list[str] = []
         of_the_plan = 0
+        prob, dof = _quantile_arguments(tree)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Constant) or isinstance(node.value, bool) \
                     or not isinstance(node.value, (int, float)):
@@ -1450,7 +1470,11 @@ def calc(expression: str, protocol: dict[str, Any] | None, topic: str = "", rec:
                 d = None
             # A constant is never negative in the tree (``-0.5`` is a minus before 0.5), so a negative plan number counts.
             small = d is not None and d.is_finite() and d == d.to_integral_value() and 0 <= d <= 10
-            if d is not None and d.is_finite() and (d in plan or -d in plan):
+            if d is not None and d.is_finite() and id(node) in prob and d in levels:
+                of_the_plan += 1  # FI's own interval level, as the probability a quantile is asked for
+            elif d is not None and d.is_finite() and id(node) in dof and d in counts:
+                pass  # the trials FI ran, as degrees of freedom: a count, never a number the plan fixes
+            elif d is not None and d.is_finite() and (d in plan or -d in plan):
                 # A whole number from 0 to 10 is allowed anyway: only another plan number shows the plan fixes the value.
                 of_the_plan += 0 if small else 1
             elif not small:
