@@ -658,7 +658,12 @@ def test_fis_composed_sentence_is_never_removed_the_writers_words_in_it_are():
         (f"Intro. Beyond doubt, {claim} (Figure 1). Next.\n", f"Intro. {claim} (Figure 1). Next.\n"),
         (f"Intro. {claim} (Figure 1) It also clearly flattens. Next.\n", f"Intro. {claim} (Figure 1). Next.\n"),
         (f"Intro. Clearly {claim} and it proves the point (Figure 1). Next.\n", f"Intro. {claim} (Figure 1). Next.\n"),
-        (f"{claim} and the gain is large, see Figure 1 for that. Last.\n", f"{claim}. Last.\n"),
+        (f"{claim} and the gain is large, see Figure 1 for that. Last.\n", f"{claim} (Figure 1). Last.\n"),
+        # a sentence with FI's statement is judged although it names no figure
+        (f"Intro. {claim} and this proves the method is best. Next.\n", f"Intro. {claim} (Figure 1). Next.\n"),
+        # ... and a result mark that matches the figure does not keep the writer's words beside it
+        (f"Intro. {claim} and the signal is {_v('signal')} (Figure 1). Next.\n", f"Intro. {claim} (Figure 1). Next.\n"),
+        (f"Intro. The signal is {_v('signal')}, so {claim} (Figure 1). Next.\n", f"Intro. {claim} (Figure 1). Next.\n"),
     ):
         out, taken = fc.apply_pointer_rule(md, nums, drawn, _MENTION)
         assert out == expect, (md, out)
@@ -704,3 +709,23 @@ def test_the_pairs_of_lines_next_to_each_other_in_the_legend_are_kept_first_in_n
     pairs = [(o["args"]["a"], o["args"]["b"]) for o in capped if o["claim"] == "no_crossing"]
     assert len(pairs) == 5
     assert all(abs(int(b[1:]) - int(a[1:])) == 1 for a, b in pairs), pairs
+
+
+def test_a_result_key_fi_could_not_fill_in_a_sentence_the_figure_pass_removes_stays_on_record():
+    nums = {"fig_a.png": 1}
+    md = f"Intro. {_claim()} and the gain was {_v('gain', 'not recorded')} overall. Figure 1 shows {_v('gain', 'not recorded')}.\n"
+    out, taken = fc.apply_pointer_rule(md, nums, {1: {"signal"}}, _MENTION)
+    assert "not recorded" not in out and "Panel 1 draws a rising line." in out
+    listed = [t for t in taken if t.get("at_write")]
+    assert [t["key"] for t in listed] == ["gain@size=1", "gain@size=1"] and all(t["how"] == "sentence removed" for t in listed)
+    # a filled key is not a number lost
+    out, taken = fc.apply_pointer_rule(f"Figure 1 shows {_v('gain')}.\n", nums, {1: {"signal"}}, _MENTION)
+    assert not [t for t in taken if t.get("at_write")]
+
+
+def test_a_removed_sentence_is_attributed_to_every_checked_figure_it_names():
+    nums = {"fig_a.png": 1, "old.png": 2, "fig_c.png": 3}
+    out, taken = fc.apply_pointer_rule("Figure 2 and Figure 1 show a rise. Next.\n", nums, {1: {"s"}, 3: {"s"}}, _MENTION)
+    assert out == "Next.\n" and len(taken) == 1 and taken[0]["figures"] == [1, 2]
+    out, taken = fc.apply_pointer_rule("Figure 3 and Figure 1 differ, unlike Figure 2.\n", nums, {1: {"s"}, 3: {"s"}}, _MENTION)
+    assert taken[0]["figures"] == [1, 2, 3]

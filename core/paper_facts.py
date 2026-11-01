@@ -2197,6 +2197,11 @@ def take_out_unfilled(markdown: str, *, figures_only: bool = False) -> tuple[str
                 if not lead and (line_end == -1 or end >= original(line_end)):  # nothing is left of the line
                     start, end = original(line_start), min(end + 1, len(markdown))
             edits.append((start, end, ""))
+        if figures_only and drop:  # a result key FI could not fill goes with the sentence: it is listed like any other
+            for v in _values._MARK.finditer(markdown, original(a), original(b)):
+                if v.group(2).strip() == _values.NOT_RECORDED:
+                    taken.append({"key": v.group(1).strip(), "sentence": sentence, "how": "sentence removed",
+                                  "at_write": True})
         for i in idx:
             if is_figure[i]:
                 stem, kind, args = _figure_parts(marks[i].group(1))  # type: ignore[misc]
@@ -2343,7 +2348,9 @@ def keep_check(quest_root: Path | str, hits: list[str], paper_md: str, *, untrac
 
 
 def _is_figure_entry(d: Any) -> bool:
-    return isinstance(d, dict) and str(d.get("key", "")).startswith("figure:")
+    """A take-out made when the paper was written: a statement about a figure, or a result key FI could not fill that went
+    with a sentence the figure pass removed."""
+    return isinstance(d, dict) and (str(d.get("key", "")).startswith("figure:") or bool(d.get("at_write")))
 
 
 def _kept_figure_entries(data: dict[str, Any]) -> list[dict[str, Any]]:

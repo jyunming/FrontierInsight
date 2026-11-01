@@ -34872,11 +34872,12 @@ def _take_out_unpointed(text: str, state: QuestState) -> tuple[str, list[dict[st
     numbers = _figure_numbers(state)
     out, taken = _figure_claims.apply_pointer_rule(text, numbers, drawn, _FIGURE_MENTION_RE)
     by_number = {n: Path(name).stem for name, n in numbers.items()}
-    entries = []
+    entries: list[dict[str, str]] = []
     for t in taken:
-        number = re.sub(r"\D", "", str(t.get("key") or ""))
-        stem = by_number.get(int(number)) if number else None
-        entries.append({**t, "key": f"figure:{stem}:claim", "figure": number} if stem and int(number) in drawn else dict(t))
+        rest = {k: v for k, v in t.items() if k != "figures"}
+        checked = [n for n in t.get("figures") or [] if n in drawn and n in by_number]
+        # one entry for every figure with a call record that the sentence names, so each gets its log line and its disclosure
+        entries += [{**rest, "key": f"figure:{by_number[n]}:claim", "figure": str(n)} for n in checked] or [rest]
     return out, entries
 
 

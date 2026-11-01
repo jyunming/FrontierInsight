@@ -651,3 +651,40 @@ def test_a_sentence_naming_only_legacy_figures_stays_when_another_figure_has_a_r
     _eng, state, _ = _write(tmp_path, monkeypatch, [draft], _record(_panel()))
     assert "Figure 2 shows the time each size took, and Figure 9 is odd." in _paper(state)
     assert DISCLOSURE not in _paper(state)
+
+
+def test_a_sentence_naming_a_legacy_and_a_checked_figure_is_a_left_out_statement_of_the_checked_one(tmp_path, monkeypatch) -> None:
+    draft = ("# T\n\n## Results\n\n**Accuracy.** Figure 2 and Figure 1 show the error falls.\n\n"
+             "**Cost.** Figure 2 shows the time each size took.\n\n## Discussion\nOk.\n")
+    eng, state, _ = _write(tmp_path, monkeypatch, [draft], _record(_panel()))
+    paper = _paper(state)
+    assert "the error falls" not in paper and "Figure 2 shows the time each size took." in paper
+    assert paper.count(DISCLOSURE) == 1
+    assert any("statements about Figure 1 (error_vs_step)" in m for m in eng.said)  # type: ignore[attr-defined]
+
+
+def test_a_sentence_with_fis_statement_and_unsupported_words_keeps_only_fis_statement(tmp_path, monkeypatch) -> None:
+    draft = WRITER_DRAFT.replace(
+        FREE, "{{figure:error_vs_step:trend @ series=error, panel=1}} and this proves the method is best.")
+    _eng, state, _ = _write(tmp_path, monkeypatch, [draft], _record(_panel()))
+    paper = _paper(state)
+    assert "proves the method" not in paper and "scheme A decreases over the drawn points" in paper
+    assert paper.count(DISCLOSURE) == 1
+
+
+def test_a_result_key_removed_with_a_figure_sentence_at_write_is_kept_for_the_quality_report(tmp_path) -> None:
+    from core import paper_facts
+
+    gone = ("<!-- fi:v {{v:gain @ size=1}} -->not recorded<!-- /fi:v -->")
+    fig = "<!-- fi:fact-figure-trend-s-args00 -->not recorded<!-- /fi:fact-figure-trend-s-args00 -->"
+    text, taken = paper_facts.take_out_unfilled(f"Intro. The gain was {gone} and {fig}.\n", figures_only=True)
+    assert "not recorded" not in text, "the sentence went"
+    keys = [t["key"] for t in taken]
+    assert any(k.startswith("figure:") for k in keys) and "gain @ size=1" in keys
+    paper_facts.keep_figure_left_out(tmp_path, taken)
+    kept = paper_facts.kept_check(tmp_path)["taken_out_values"]
+    assert [d for d in kept if d.get("at_write")], "the number removed with the sentence is on record"
+    paper_facts.keep_check(tmp_path, [], "p")  # the review's own record check does not erase it
+    assert [d for d in paper_facts.kept_check(tmp_path)["taken_out_values"] if d.get("at_write")]
+    paper_facts.keep_figure_left_out(tmp_path, [])  # the next write replaces it
+    assert not paper_facts.kept_check(tmp_path).get("taken_out_values")

@@ -825,6 +825,13 @@ def _sentence_at(flat: str, line_start: int, line_end: int, pos: int) -> tuple[i
     return a, line_end
 
 
+def _unfilled_entries(marks: list[re.Match[str]], which: list[int], sentence: str) -> list[dict[str, Any]]:
+    """The result keys FI could not fill in a sentence the figure pass removed, listed as the take-out of unfilled keys lists
+    them (``key``, ``sentence``, ``how``), so that the number removed with the sentence is still on record."""
+    return [{"key": marks[i].group(1).strip(), "sentence": sentence, "how": "sentence removed", "at_write": True}
+            for i in which]
+
+
 def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, set[str]],
                        mention_re: re.Pattern[str]) -> tuple[str, list[dict[str, str]]]:
     """``markdown`` without the running sentences that point at a figure and are not FI's to stand behind:
@@ -866,7 +873,8 @@ def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, 
         own_pointer = opening is not None and mention_re.match(markdown, opening.end()) is not None
         # A statement of its own has its full stop; one the writer's words lead into is one sentence with them.
         full_stop = claim and not own_pointer and _facts._starts_sentence(markdown[:m.start()]) \
-            and markdown[m.end():m.end() + 1] not in (".", "!", "?")
+            and markdown[m.end():m.end() + 1] not in (".", "!", "?") \
+            and re.match(r"[ \t]*[a-z,;]", markdown[m.end():m.end() + 8]) is None
         token = f"\x00{i}\x00" + ("." if full_stop else "")
         parts += [before, token]
         spans.append((size + len(before), size + len(before) + len(token), m.start(), m.end()))
@@ -928,18 +936,34 @@ def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, 
             continue
         if fence is not None or _facts._NOT_PROSE.match(line):
             continue
-        for first in mention_re.finditer(line):
-            a, b = _sentence_at(flat, line_start, line_start + len(line), line_start + first.start())
+        at_claims = [sp[0] - line_start for i, sp in enumerate(spans) if kinds[i] == "claim"
+                     and line_start <= sp[0] < line_start + len(line)]
+        for pos in sorted({f.start() for f in mention_re.finditer(line)} | set(at_claims)):
+            a, b = _sentence_at(flat, line_start, line_start + len(line), line_start + pos)
             if (a, b) in seen:
                 continue
             seen.add((a, b))
             hits = [h for h in mention_re.finditer(flat, a, b)]
-            if keeps(a, b, hits):
-                continue
             lead = _facts._RUN_IN.match(flat[a:b])
             body_at = a + (lead.end() if lead else 0)
-            sentence = re.sub(r"\s+", " ", _values.without_marks(markdown[original(a):original(b)])).strip()
             own = [i for i, sp in enumerate(spans) if kinds[i] == "claim" and body_at <= sp[0] and sp[1] <= b]
+            if own:
+                # A sentence with a statement of FI's is judged whether or not it names a figure, and before any result
+                # mark can keep it: what is not FI's statement (and its closing pointer) is the writer's, and goes.
+                rest = flat[body_at:b]
+                for i in reversed(own):
+                    rest = rest[:spans[i][0] - body_at] + rest[spans[i][1] - body_at:]
+                point = _pointer(rest, mention_re)
+                if point:
+                    rest = rest[:point[0]] + rest[rest.index(")", point[0]) + 1:]
+                if not re.sub(r"[\s.,;:!?()\-\u2013\u2014]+", "", rest):
+                    continue
+            elif not hits or keeps(a, b, hits):
+                continue
+            sentence = re.sub(r"\s+", " ", _values.without_marks(markdown[original(a):original(b)])).strip()
+            figures = sorted({int(h.group(1)) for h in hits})
+            unfilled = [i for i, sp in enumerate(spans) if kinds[i] == "v" and a <= sp[0] and sp[1] <= b
+                        and marks[i].group(2).strip() == _values.NOT_RECORDED]
             if own:  # FI's own statement is never removed: only the words the writer put into its sentence go
                 said = " ".join(markdown[spans[i][2]:spans[i][3]] for i in own)
                 stems = {Path(str(n)).stem: k for n, k in numbers.items()}
@@ -955,7 +979,10 @@ def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, 
                 sentence = re.sub(r"\s+", " ", _values.without_marks(seg)).strip()
                 stop = "." if any(kinds[i] == "claim" and spans[i][3] == original(body_at) for i in range(len(spans))) else ""
                 edits.append((original(body_at), original(b), stop + gap + said + pointer + "."))
-                taken.append({"key": f"Figure {hits[0].group(1)}", "sentence": sentence, "how": "writer's words removed"})
+                figures = sorted(set(figures) | set(shown_in))
+                taken.append({"key": f"Figure {figures[0] if figures else '?'}", "sentence": sentence,
+                              "how": "writer's words removed", "figures": figures})
+                taken += _unfilled_entries(marks, unfilled, sentence)
                 continue
             start, end = original(body_at), original(b)
             if flat[line_start:body_at].strip() == "":  # it opens its line: the space it leaves goes with it
@@ -969,7 +996,9 @@ def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, 
             # FI's statement before it had no full stop of its own (the rule reads it as a sentence): it gets one
             stop = "." if any(kinds[i] == "claim" and spans[i][3] == start for i in range(len(spans))) else ""
             edits.append((start, end, stop))
-            taken.append({"key": f"Figure {hits[0].group(1)}", "sentence": sentence, "how": "sentence removed"})
+            taken.append({"key": f"Figure {hits[0].group(1)}", "sentence": sentence, "how": "sentence removed",
+                          "figures": figures})
+            taken += _unfilled_entries(marks, unfilled, sentence)
     out = markdown
     for start, end, text in sorted(edits, reverse=True):
         out = out[:start] + text + out[end:]
