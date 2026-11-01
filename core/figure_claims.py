@@ -743,15 +743,10 @@ def _pointer(text: str, mention_re: re.Pattern[str]) -> tuple[int, list[int]] | 
 
 
 def _sentence_break(flat: str, i: int) -> bool:
-    """Whether the ". " at ``i`` ends a sentence: not before a lowercase letter or a digit, not after a single letter or a
-    common abbreviation ("e.g.", "et al.", "Fig."), and always after an FI figure claim."""
+    """Whether the ". " at ``i`` ends a sentence: always, except after a single letter (an initial) or a common abbreviation
+    ("e.g.", "et al.", "Fig."). The next character is never looked at."""
     if flat[i - 1:i] == "\x00":
         return True
-    k = i + 1
-    while k < len(flat) and flat[k] == " ":
-        k += 1
-    if k < len(flat) and (flat[k].islower() or flat[k].isdigit()):
-        return False
     word = re.search(r"[A-Za-z.]+$", flat[:i])
     if word is None:
         return True
@@ -784,7 +779,7 @@ def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, 
     (FI value marks) and points at one figure in a closing parenthesis, "(Figure N)", whose record draws (``drawn[N]``) the
     metric of at least one of those marks (one figure, or several listed in it: "(Figures 2 and 3)", then the metric need only
     be drawn in one of them, and every one listed must be a figure FI issued). Every other sentence naming a figure is
-    removed. A sentence ends at ". " except before a lowercase letter or digit and after an initial or a common abbreviation
+    removed. A sentence ends at ". " except after an initial or a common abbreviation
     ("e.g.", "et al.", "Fig."). Like :func:`core.paper_facts.take_out_unfilled`, a line is read alone (a sentence wrapped over
     two lines is two) and captions, table rows, headings, list items, quotes, code and the text inside FI's own markers are
     never touched."""

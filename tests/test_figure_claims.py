@@ -594,3 +594,11 @@ def test_list_items_and_wrapped_lines_are_read_alone():
     assert _rule(md) == (md, [])
     out, _ = _rule("First part of a sentence\nthat ends here (Figure 1).\n")
     assert out == "First part of a sentence\n"
+
+
+def test_sentence_after_a_removed_pointer_sentence_survives():
+    gain = _v("gain")
+    for nxt in ("10 seeds were used.", "mm-scale runs follow.", "0.5 is the baseline.", "5% of runs failed."):
+        out, taken = _rule(f"The gain is {gain} (Figure 1). {nxt}\n")
+        assert out == f"{nxt}\n", nxt
+        assert [t["sentence"] for t in taken] == ["The gain is 0.5 (Figure 1)."], nxt
