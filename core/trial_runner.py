@@ -2959,7 +2959,7 @@ async def _measure_mean(executor: Any, python: Path | str, quest_root: Path, mod
     # A number is taken for a constant only when at least MIN_TRIALS trials agree: two or three equal draws of a random
     # number are not a constant (a starved first batch of a 0/1/2 count agreed so, and was judged on trial 0 alone). A
     # 0/1 outcome of a random simulation never is: it is judged on its binomial interval (mc_error.statistic).
-    if len(rows) >= _mc.MIN_TRIALS and not stat["varies"] and not stat.get("binary"):
+    if len(rows) >= _mc.MIN_TRIALS and not stat["varies"] and not stat.get("binary")             and not stat.get("across"):
         # The check's own number did not move: judged at once on trial 0's number, as a deterministic check is.
         check, problem = _check_from(name, measure, first)
         verdict, why_failed = _mc.failed_share_verdict(len(failed) + int(stat.get("dropped") or 0), ran, None)

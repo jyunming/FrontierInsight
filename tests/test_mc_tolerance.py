@@ -1438,3 +1438,35 @@ def test_a_measure_with_mean_names_what_the_simulation_must_return_and_is_not_as
     rows = [{"hit": 1.0, "target": 0.95, "est": float(i)} for i in range(20)]
     stat = mc.statistic(rows, "abs(mean(hit) - target)", (), 0.0, 0.02, (), repeated=True)
     assert stat["binary"] is True and mc.mean_verdict(stat, 0.0, 0.02) is None
+
+
+def test_a_moving_bare_name_beside_the_rate_takes_the_bootstrap_not_the_wilson_interval() -> None:
+    import random
+
+    rng = random.Random(3)
+    rows = [{"hit": 1.0 if rng.random() < 0.95 else 0.0, "ref": 0.95 + rng.gauss(0, 0.05)} for _ in range(400)]
+    stat = mc.statistic(rows, "abs(mean(hit) - ref)", (), 0.0, 0.05, (), repeated=True)
+    assert not stat.get("binary") and stat["se"] > 0
+    steady = [{**r, "ref": 0.95} for r in rows]
+    assert mc.statistic(steady, "abs(mean(hit) - ref)", (), 0.0, 0.05, (), repeated=True)["binary"] is True
+
+
+def test_an_sd_check_is_not_called_a_mean_and_too_few_numbers_leave_the_failed_share_to_decide() -> None:
+    rows = _trials(40)
+    stat = mc.statistic(rows, "abs(sd(est) / sd_ref - 1)", (), 0.0, 0.1, (), repeated=True)
+    words = mc.words(mc.record(stat, read_as="mean", verdict=None, why="time", failed=0, started=40))
+    assert "the mean over" not in words and "together" in words
+
+
+def test_ten_trials_with_one_number_do_not_get_the_needs_run_trial_message(tmp_path: Path) -> None:
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(
+        "def run_trial(cell, trial_id, seed):\n    return {'x': 1.0} if trial_id == 0 else {'y': 1.0}\n",
+        encoding="utf-8")
+    oracle = {"name": "s", "kind": "special_case", "case": {}, "expected": 0, "tolerance": 0.1, "measure": "abs(sd(x) - 1)",
+              "reference": "derivation: x"}
+    _checks, problems, _t = asyncio.run(trial_runner.measure_oracles(
+        SharedInterpreterExecutor(python_version="3.11"), sys.executable, root, "code/simulate.py", [oracle],
+        timeout_s=60, repeated=True))
+    assert not any("run_trial" in p and "needs the simulation" in p for p in problems), problems

@@ -412,7 +412,9 @@ def pooled_summary(rows: list[dict[str, Any]], measure: str, expected: Any = Non
             if shown is not None:
                 gap = shown if shape_now == "bound" else abs(shown) if shape_now else abs(shown - float(expected))
         declared = form.aliases[only][1] in {str(x) for x in proportions or ()}
-        if not flat or declared or gap is None or gap > 0:
+        # Another per-trial name that moves adds noise the Wilson interval does not hold: then the bootstrap reads it.
+        steady = all(_same(min(columns[b]), max(columns[b])) for b in bare)
+        if steady and (not flat or declared or gap is None or gap > 0):
             lo, hi = wilson(int(sum(columns[only])), n)
 
             def reach(text: str) -> tuple[float, float] | None:
@@ -634,7 +636,11 @@ def words(mc: dict[str, Any] | None) -> str:
         return ""
     n, se = int(mc.get("trials") or 0), mc.get("se")
     read_as = mc.get("read_as")
-    if read_as == "mean" and mc.get("varies") is not False:
+    if read_as == "mean" and mc.get("across"):
+        text = f"worked out over all {n} trial{'s' if n != 1 else ''} together"
+        if _number(se):
+            text += f", Monte Carlo error ±{_oracle.fmt_digits(float(se), 2)} (one standard error)"
+    elif read_as == "mean" and mc.get("varies") is not False:
         text = f"the mean over {n} trial{'s' if n != 1 else ''}"
         if _number(se):
             text += f", Monte Carlo error ±{_oracle.fmt_digits(float(se), 2)} (one standard error)"
@@ -693,7 +699,8 @@ def record(stat: dict[str, Any] | None, *, read_as: str, verdict: str | None, wh
         "inner": stat.get("inner"), "inner_mean": stat.get("inner_mean"), "shape": stat.get("shape") or "",
         "verdict": verdict or "undecided", "why": why if (verdict or "undecided") == "undecided" or why == "failed_trials"
         else "",
-        **({"binomial_interval": stat["interval"]} if stat.get("binary") else {}), **extra,
+        **({"binomial_interval": stat["interval"]} if stat.get("binary") else {}),
+        **({"across": True} if stat.get("across") else {}), **extra,
     }
     if failed_example:
         out["failed_example"] = failed_example
