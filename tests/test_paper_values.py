@@ -403,11 +403,47 @@ def test_vs_refuses_what_it_cannot_judge(s5):
         ("Ea_hat:se @ sigma=each, n_points=40 | vs Ea_true", "has none"),
         ("Ea_hat @ sigma=each, n_points=40 | vs Ea_hat", "measured, not set by the setting"),
         ("Ea_hat:sd @ sigma=each, n_points=40 | vs Ea_sd_theory | range", "add no reducer"),
-        ("Ea_hat:sd @ sigma=0.1, n_points=40 | vs Ea_sd_theory", "mark at least one axis =each"),
+        ("Ea_hat:sd @ sigma=0.1 | vs Ea_sd_theory", "does not name every axis"),
         ("Ea_hat:sd @ sigma=each, n_points=40 | vs @ sigma=0.1, n_points=40", "not with another setting"),
     ):
         got = pv.resolve(key, s5)
         assert not got.filled and why in got.hit.reason, key
+
+
+def test_vs_names_one_setting_when_no_axis_is_marked_each(s5):
+    one = pv.resolve("Ea_hat:sd @ sigma=0.1, n_points=40 | vs Ea_sd_theory", s5)
+    assert one.filled, one.hit
+    assert one.text.startswith("consistent with Ea_sd_theory (inside the measured 95% interval) at that setting")
+    assert " to " not in one.text.split("(")[-1]  # one setting: one ratio, not a range of ratios
+    # the same setting taken from the "each" form gives the same verdict
+    each = pv.resolve("Ea_hat:sd @ sigma=each, n_points=40 | vs Ea_sd_theory", s5)
+    assert "consistent with" in each.text
+    cells = [{"cell": {"h": h}, "key": f"h={h}", "planned": 4, "ok": 4, "failed": 0,
+              "metrics": {"err": {"values": [1.0, 1.1, 0.9, 1.0]}, "want": {"values": [5.0] * 4}}} for h in (1, 2)]
+    low = pv.resolve("err @ h=2 | vs want", pv.from_cells(cells))
+    assert low.filled and low.text.startswith("below want at that setting")
+
+
+def test_vs_with_a_varied_axis_left_unnamed_is_still_refused(s5):
+    got = pv.resolve("Ea_hat:sd @ n_points=40 | vs Ea_sd_theory", s5)
+    assert not got.filled and "does not name every axis" in got.hit.reason
+
+
+def test_vs_with_a_number_typed_as_the_operand_says_what_to_write_instead(s5):
+    for number in ("0.04", "1e-3", "50", "-2.5"):
+        got = pv.resolve(f"Ea_hat:sd @ sigma=0.1, n_points=40 | vs {number}", s5)
+        assert not got.filled
+        assert "vs ref" in got.hit.reason and "{{calc:EXPR}}" in got.hit.reason and number in got.hit.reason, number
+        assert "no trials of" not in got.hit.reason
+    # a quantity's name that merely starts with a digit-free word is still a result id
+    assert "measured, not set" in pv.resolve("Ea_hat @ sigma=each, n_points=40 | vs Ea_hat", s5).hit.reason
+
+
+def test_vs_ref_with_no_plan_reference_is_still_refused_at_one_setting():
+    cells = [{"cell": {"h": h}, "key": f"h={h}", "planned": 4, "ok": 4, "failed": 0,
+              "metrics": {"err": {"values": [1.0, 1.1, 0.9, 1.0]}}} for h in (1, 2)]
+    got = pv.resolve("err @ h=2 | vs ref", pv.from_cells(cells))
+    assert not got.filled and "not computable at h = 2" in got.hit.reason and "plan" in got.hit.reason
 
 
 def test_vs_leaves_the_existing_ratio_and_range_forms_alone(s5):

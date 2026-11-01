@@ -302,6 +302,11 @@ def parse(text: str) -> Key:
                 raise _Unfilled("at most one op")
             kw["op"] = word
             rest = rest.strip()
+            if word == VS and re.fullmatch(r"[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?%?", rest):
+                raise _Unfilled(
+                    f"vs {rest}: FI does not compare with a number typed into a key. Compare with the plan's own reference "
+                    f"with | vs ref; or, if {rest} comes from the plan's numbers, write it with {{{{calc:EXPR}}}} in words "
+                    f"next to the value")
             if rest == "ref":
                 kw["operand"] = "ref"
             elif rest.startswith("@"):
@@ -1287,8 +1292,6 @@ def _versus(rec: Records, key: Key) -> tuple[str, list[float]]:
     =each, by that setting's own 95% interval (above: the whole interval over the reference; below: under it; otherwise the
     reference is inside it), and counts the outcomes. Nothing is left to the writer's choice of word."""
     each = [a for a, p in key.where.items() if p.kind == "each"]
-    if not each:
-        raise _Unfilled("vs compares setting by setting; mark at least one axis =each")
     if key.form not in _VS_INTERVAL:
         raise _Unfilled(f"vs judges a mean, an sd or a corr by the 95% interval of the measured value; {key.form} has none "
                         f"(use form {', '.join(_VS_INTERVAL)})")
@@ -1299,11 +1302,14 @@ def _versus(rec: Records, key: Key) -> tuple[str, list[float]]:
             combos.append(combo)
     if not combos:
         raise _Unfilled(f"no trials of {key.metric}")
+    # No axis kept apart: the key names one setting (every axis a value or =all, which _check_where has ensured), and
+    # that setting is the single combination compared.
     verdicts: list[str] = []
     ratios: list[float] = []
     for combo in combos:
         fixed = {a: (Pick("value", combo[each.index(a)]) if a in each else p) for a, p in key.where.items()}
-        here = _setting_words(dict(zip(each, combo)))
+        here = _setting_words(dict(zip(each, combo)) if each else
+                              {a: p.value for a, p in key.where.items() if p.kind == "value"}) or "that setting"
         try:
             got = _measure(rec, key.metric, _VS_INTERVAL[key.form], key.form_arg, fixed)
             ref = (_reference(rec, key.metric, _matching(rec, fixed, key.metric))[0] if key.operand == "ref"
@@ -1333,7 +1339,8 @@ def _versus(rec: Records, key: Key) -> tuple[str, list[float]]:
         head = (f"{said[first]} {name} at {count[first]} of {k} {unit}, "
                 + ", ".join(f"{said[v]} it at {count[v]}" for v in rest))
     if len(ratios) == k:
-        head += f" ({sig(min(ratios), 3)} to {sig(max(ratios), 3)} times it)"
+        spread = sig(min(ratios), 3) if sig(min(ratios), 3) == sig(max(ratios), 3) else f"{sig(min(ratios), 3)} to {sig(max(ratios), 3)}"
+        head += f" ({spread} times it)"
     return head, ([min(ratios), max(ratios)] if len(ratios) == k else [])
 
 
@@ -2070,7 +2077,7 @@ write a percent. Examples: {{v:coverage @ noise=0.05, n=all}}, {{v:coverage:mean
 If FI cannot fill a key (a value the study did not record, a setting it did not run, a varied setting left out), it is sent back
 to you. Write the key; FI computes the number, so never work one out yourself from the list.
 To say how a measured value compares with a theory or reference value, place {{v:<value>:<form> @ <axis>=each, ... | vs
-<theory value>}} (or | vs ref for the plan's reference) as the comparison itself: FI writes the words ("below ... at all 5
+<theory value>}} (or | vs ref for the plan's reference; with no axis marked =each the key names one setting and the comparison is made there) as the comparison itself: FI writes the words ("below ... at all 5
 values of sigma (0.914 to 0.927 times ...)", or "consistent with" where the value's 95% interval holds it), setting by setting.
 Do not type above, below, larger, smaller, exceeds, within or equal for such a comparison; never set one pooled number beside
 another.
