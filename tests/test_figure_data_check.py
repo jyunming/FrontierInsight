@@ -268,3 +268,43 @@ def test_a_figure_function_of_fis_derive_py_is_scanned_though_it_never_saves_a_f
     assert list(found) == [code / "derive.py"] and len(found[code / "derive.py"]) == 1
     only = found[code / "derive.py"][0]
     assert only.saved_as == {"growth.png"} and fdc.figures_to_drop([only], ["growth.png", "other.png"]) == ["growth.png"]
+
+
+def test_numbers_typed_into_a_primitive_call_are_not_caught_by_the_call_record_so_the_rule_stays() -> None:
+    """Why the typed-series rule is kept for every panel: the frame's drawing calls take any numbers as y, check none of
+    them against the table, and record the panel as verified, while the rule reads plotting methods and so does not see a
+    primitive call either. The known positive for retiring the rule does not show."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from core import frame_figure
+
+    class Table:
+        declared = ["growth"]
+
+        def keys(self):
+            return ["size=1", "size=2", "size=3"]
+
+        def mean(self, name, key):
+            return 2.5
+
+        def n(self, name, key):
+            return 4
+
+        def interval(self, name, key):
+            return (1.25, 3.75)
+
+    class Host(frame_figure.FigureCalls):
+        def __init__(self):
+            self.fig, ax = plt.subplots()
+            self.axes = [ax]
+            self.table, self.x, self.settings, self.series_ids, self.references = Table(), "size", ["size"], ["fast"], {}
+            self.labels = {"growth": "Growth", "fast": "Fast", "size": "Size"}
+
+    host = Host()
+    host.line(0, "fast", [1, 2, 3], [40.0, 50.0, 60.0], "growth")  # far from every value the table holds
+    plt.close("all")
+    assert host.record()["panels"][0]["raw"] is False
+    assert fdc.typed_series('def figure_a(fig):\n    fig.line(0, "fast", [1, 2, 3], [40.0, 50.0, 60.0], "growth")\n') == []
+    # The rule still fires on the same numbers drawn with a plotting method.
+    assert len(fdc.typed_series("import matplotlib.pyplot as plt\nplt.plot([1, 2, 3], [40.0, 50.0, 60.0])\n")) == 1
