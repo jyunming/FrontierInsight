@@ -1603,9 +1603,10 @@ def calc(expression: str, protocol: dict[str, Any] | None, topic: str = "", rec:
         return Value(key, NOT_RECORDED, Hit(key, str(why)))
 
 
-def _series_value(shown: str, rec: Records | None, prose: bool = False) -> Value:
+def _series_value(shown: str, rec: Records | None, prose: bool = False, typed_stop: bool = False) -> Value:
     """A ``trend:`` or ``comparison:`` key (:mod:`core.trend`), filled or ``not recorded`` with the reason. ``prose``: the key
-    stands in the writer's running text, so it is filled as one sentence (a capital, the verb run on, a full stop)."""
+    stands as a sentence of its own in the writer's running text, so it is filled as one sentence (the verb run on, a full stop;
+    none added when the writer typed ``typed_stop`` right after the mark). The label is never re-cased."""
     from . import trend as _trend
 
     try:
@@ -1617,8 +1618,10 @@ def _series_value(shown: str, rec: Records | None, prose: bool = False) -> Value
         else:
             text, numbers, inputs = _trend.comparison_text(rec, body)
         if prose:
-            text = text[:1].upper() + text[1:]
-            text = text if text.endswith((".", "!", "?")) else text + "."
+            if typed_stop:
+                text = text[:-1] if text.endswith(".") else text
+            elif not text.endswith((".", "!", "?")):
+                text += "."
         return Value(shown, text, numbers=numbers, inputs=inputs)
     except _Unfilled as why:
         return Value(shown, NOT_RECORDED, Hit(shown, str(why)))
@@ -1626,7 +1629,7 @@ def _series_value(shown: str, rec: Records | None, prose: bool = False) -> Value
         return Value(shown, NOT_RECORDED, Hit(shown, f"the series could not be worked out ({type(why).__name__}: {why})"))
 
 
-def resolve(text: str, rec: Records | None, prose: bool = False) -> Value:
+def resolve(text: str, rec: Records | None, prose: bool = False, typed_stop: bool = False) -> Value:
     """The key's value rendered, or ``not recorded`` with a :class:`Hit` saying why. Never a guess."""
     shown = text.strip()
     if shown.startswith("{{"):
@@ -1635,7 +1638,7 @@ def resolve(text: str, rec: Records | None, prose: bool = False) -> Value:
     if shown.startswith(CALC):
         return calc(shown[len(CALC):].strip(), rec.protocol if rec else None, rec.topic if rec else "", rec)
     if shown.startswith((TREND, COMPARISON)):
-        return _series_value(shown, rec, prose)
+        return _series_value(shown, rec, prose, typed_stop)
     answer = _answer(shown, rec)
     if answer is not None:
         return answer
@@ -1696,6 +1699,23 @@ def in_prose(text: str, offset: int) -> bool:
     return not _BLOCK_LINE.match(text[start:offset + 1])
 
 
+def own_sentence(text: str, start: int, end: int) -> tuple[bool, bool]:
+    """``(the mark at text[start:end] stands as a sentence of its own, the writer typed a full stop right after it)``. Own
+    sentence: what precedes it on its line is empty or ends a sentence ('.', '!', '?'; a colon does not), and what follows is
+    the end of the line, the writer's own full stop, or a space and a capital. Anywhere else (``see {{..}}).``, ``: {{..}} as
+    stated``) the mark keeps the form it had as a fragment."""
+    start_line = text.rfind(chr(10), 0, start) + 1
+    before = text[start_line:start].rstrip().rstrip("*").rstrip()
+    if before and before[-1] not in ".!?":
+        return False, False
+    line_end = text.find(chr(10), end)
+    after = text[end:len(text) if line_end < 0 else line_end]
+    if after[:1] == "." and not after[1:2].isalnum():
+        return True, True
+    rest = after.lstrip(" 	")
+    return (not rest or (after[:1] in " 	" and rest[0].isupper())), False
+
+
 def fill_values(markdown: str, rec: Records | None, plain: Any = None, span_of: Any = None) -> tuple[str, list[Value]]:
     """``markdown`` with every ``{{v:...}}`` filled and wrapped in its marker, and each key's :class:`Value`. ``plain``:
     a function of a text offset that says the key sits where no reader sees a marker as markup (math, code); its value is
@@ -1727,7 +1747,8 @@ def fill_values(markdown: str, rec: Records | None, plain: Any = None, span_of: 
                 out += [text[pos:m.start()], bare(m)]
                 pos = m.end()
             continue
-        value = resolve(m.group(1), rec, in_prose(text, m.start()))
+        own, typed_stop = own_sentence(text, m.start(), m.end()) if in_prose(text, m.start()) else (False, False)
+        value = resolve(m.group(1), rec, own, typed_stop)
         values.append(value)
         out += [text[pos:m.start()], value.marked]
         pos = m.end()

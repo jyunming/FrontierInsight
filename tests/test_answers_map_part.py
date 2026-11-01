@@ -239,3 +239,19 @@ def test_a_condition_the_question_already_states_is_not_added_again(tmp_path, mo
     (root / ".fi" / "topic_requirements.json").write_text(json.dumps(REQ), encoding="utf-8")
     line = next(ln for ln in pf.answers_text(root).splitlines() if ln.startswith("- chance of a bloom"))
     assert "nutrient = 2)" in line and "nutrient = 1.0" in line  # a different stated value is not the pin: both are shown
+
+
+def test_a_stated_condition_is_matched_as_a_whole_name_and_a_whole_number() -> None:
+    """Before: 'beta = 2 error' counted as stating 'a = 2' (a name ending in the setting's name), 'dt = 1-3' as 'dt = 1',
+    so the pin was dropped and the line lost which setting the number belongs to."""
+    class _Rec:
+        label = short = staticmethod(lambda a: a)
+
+    pins = lambda name, at: pf._pins_not_in(name, _Rec(), at)  # noqa: E731
+    assert pins("beta = 2 error", {"a": 2}) == ["a = 2"]
+    assert pins("run = 5 error", {"n": 5}) == ["n = 5"]
+    assert pins("error at dt = 1-3", {"dt": 1}) == ["dt = 1"]
+    assert pins("error at dt = 1/2", {"dt": 1}) == ["dt = 1"]
+    assert pins("error at a = 20", {"a": 2}) == ["a = 2"]
+    assert pins("error (when a = 2)", {"a": 2}) == []  # a condition really stated is still said once
+    assert pins("error when a = 2.", {"a": 2}) == []

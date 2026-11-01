@@ -1335,7 +1335,7 @@ def _pins_not_in(name: str, rec: Any, at: dict[str, Any]) -> list[str]:
             want = None
         if want is not None:
             for word in {a, rec.label(a), rec.short(a)}:
-                for m in re.finditer(re.escape(word) + r"\s*=\s*(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)", name):
+                for m in re.finditer(r"(?<![\w.])" + re.escape(word) + r"\s*=\s*(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(?![\w/-]|\.\d)", name):
                     stated = stated or float(m.group(1)) == want
         if not stated:
             out.append(f"{rec.label(a)} = {v}")

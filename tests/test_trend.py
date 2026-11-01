@@ -252,10 +252,10 @@ def test_a_typed_trend_key_is_filled_between_markers_and_turned_back_for_the_nex
     rec = _grid(lambda s, g: 1.0 - 0.4 * (s - 10) / 30)
     typed = "The score drops: {{trend:score over size @ group=a}} as stated."
     filled, hits = pv.fill(typed, rec)
-    assert not hits and "<!-- fi:v {{v:trend:score over size @ group=a}} -->Score falls from" in filled
+    assert not hits and "<!-- fi:v {{v:trend:score over size @ group=a}} -->score over size at group = a: falls" in filled
     assert pv.to_placeholders(filled) == typed
     assert pv.keys_in(typed) == ["trend:score over size @ group=a"]
-    assert pv.without_marks(filled).startswith("The score drops: Score falls from")
+    assert pv.without_marks(filled).startswith("The score drops: score over size at group = a: falls")
 
 
 def test_a_trend_key_places_no_quantity_for_the_check_of_asked_answers() -> None:
@@ -425,7 +425,7 @@ def test_a_trend_mark_in_running_text_is_one_sentence_and_in_a_list_it_keeps_the
     mark = "{{v:trend:score over size @ group=a}}"
     filled = pv.fill_values(f"The drop is steady. {mark} It is clear.\n\n- {mark}\n", rec)[0]
     prose, listed = (pv._MARK.findall(filled)[0][1], pv._MARK.findall(filled)[1][1])
-    assert prose.startswith("Score falls from ") and prose.endswith(", for group = a.")
+    assert prose.startswith("score falls from ") and prose.endswith(", for group = a.")
     assert ": " not in prose and "the last is 0.6" in prose
     assert listed.startswith("score over size at group = a: falls, from ") and not listed.endswith(".")
 
@@ -434,3 +434,23 @@ def test_in_prose_is_read_from_the_line_structure() -> None:
     text = "A paragraph {{v:x}}\n- item {{v:y}}\n| cell {{v:z}} |\n# head {{v:w}}\n1. step {{v:u}}\n{{v:t}}"
     flags = {k: pv.in_prose(text, text.index("{{v:" + k)) for k in "xyzwut"}
     assert flags == {"x": True, "y": False, "z": False, "w": False, "u": False, "t": True}
+
+
+def test_the_sentence_form_is_used_only_where_the_mark_is_a_sentence_of_its_own() -> None:
+    """Before: any mark in a paragraph got a capital and a full stop ('The score drops: Score falls ... a. as stated.',
+    '(see Score falls ... a.).', 'a..' after the writer's own stop) and a label's first letter was upper-cased."""
+    rec = _grid(lambda s, g: 1.0 - 0.4 * (s - 10) / 30)
+    mark = "{{v:trend:score over size @ group=a}}"
+
+    def one(text: str) -> str:
+        return pv.without_marks(pv.fill_values(text, rec)[0])
+
+    for text in (f"The score drops: {mark} as stated.", f"Error (see {mark}).", f"We find that {mark}.", f"Is it so? {mark}, as stated."):
+        out = one(text)
+        assert "score over size at group = a: falls" in out and "falls from" not in out and ".." not in out, out
+    alone = one(f"The drop is steady. {mark} It is clear.")
+    assert "steady. score falls from " in alone and alone.count("a. It is clear") == 1
+    typed = one(f"The drop is steady. {mark}")
+    assert typed.endswith("for group = a.") and ".." not in one(f"{mark}.") and one(f"{mark}.").endswith("for group = a.")
+    assert one(f"{mark}\n").startswith("score falls from ")
+    assert one(f"**Finding.** {mark}").startswith("**Finding.** score falls from ")

@@ -399,8 +399,7 @@ def trend_text(rec: _pv.Records, body: str, prose: bool = False) -> tuple[str, l
     ratios = [r[3] for r in results if r[3] is not None]
     if k == 1 and prose and not order:
         where_words = at(results[0][0])
-        first = rec.label(metric)
-        text = f"{first[:1].upper()}{first[1:]} {results[0][2]}" + (f", for {where_words.replace(', ', ' and ')}" if where_words else "") + "."
+        text = f"{rec.label(metric)} {results[0][2]}" + (f", for {where_words.replace(', ', ' and ')}" if where_words else "") + "."
     elif k == 1:
         where_words = at(results[0][0])
         text = f"{rec.label(metric)} over {rec.label(axis)}" + (f" at {where_words}" if where_words else "") + f": {results[0][2]}"
