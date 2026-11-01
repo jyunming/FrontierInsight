@@ -1807,8 +1807,18 @@ def _line_key(metric: str, form: str, where: dict[str, Any], short: dict[str, st
 
 def _sheet_line(rec: Records, metric: str, where: dict[str, Any], sets: frozenset[str] = frozenset()) -> str | None:
     short = rec.aliases()
-    key = _line_key(metric, "mean" if metric in sets else "mean_ci", where, short)  # a value a setting sets has no interval
+    key = _line_key(metric, "mean" if metric in sets or not _any_interval(rec) else "mean_ci", where, short)  # a value a setting sets has no interval
     shown = resolve(key, rec)
+    if shown.hit and metric not in sets:
+        # No interval can be stated here (one trial in the setting): the mean is offered as the value itself, so the writer
+        # is never led to type an interval key FI cannot fill.
+        key = _line_key(metric, "mean", where, short)
+        shown = resolve(key, rec)
+    if shown.hit and metric not in sets:
+        # No interval can be stated here (one trial in the setting): the mean is offered as the value itself, so the writer
+        # is never led to type an interval key FI cannot fill.
+        key = _line_key(metric, "mean", where, short)
+        shown = resolve(key, rec)
     if shown.hit:
         return None
     parts = [f"{key} -> {shown.text}"]
@@ -2054,7 +2064,18 @@ def writer_block(rec: Records | None) -> str:
     varied = ", ".join(rec.short(a) for a in rec.varied()) or "none (one setting)"
     head = (f"The study's quantities: {', '.join(rec.metrics())}. The settings it varied: {varied}"
             + (f". Settings the simulation never reads, pooled by FI: {', '.join(rec.short(a) for a in rec.unread)}" if rec.unread else "") + ".")
-    return WRITER_RULES + "\n" + head + "\n\n" + sheet(rec)
+    rules = WRITER_RULES
+    if not _any_interval(rec):
+        # Every setting ran once, so no interval exists: the example and the note name only what FI can fill here.
+        rules = rules.replace("{{v:coverage:mean_ci @ noise=0.05, n=20}}", "{{v:coverage @ noise=0.05, n=20}}")
+        rules += ("\nThis study has one trial in each setting, so no interval exists: place a mean as {{v:<value> @ <where>}}, "
+                  "never with :mean_ci, :ci, :pm, :sd, :sd_ci or :se.\n")
+    return rules + "\n" + head + "\n\n" + sheet(rec)
+
+
+def _any_interval(rec: Records) -> bool:
+    """Whether any setting of the record holds two or more values of a quantity, so an interval or SD can exist."""
+    return any(len(_tt._values(m)) > 1 for c in rec.cells for m in c.get("metrics", {}).values())
 
 
 def has_keys(rec: Records | None) -> bool:

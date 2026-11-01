@@ -529,3 +529,27 @@ def test_a_result_with_no_value_in_any_trial_is_still_not_fillable() -> None:  #
     protocol = {"metrics": [{"id": "rate", "role": "result", "kind": "mean"}]}
     rec = pv.from_cells(_level_cells("T_0 = 300 (exact)", False), protocol)
     assert "rate" not in rec.fillable()
+
+
+# --- a study with one trial per setting is offered no interval key -------------------------------------------------------
+
+def _one_trial_cells() -> list[dict]:
+    return [{"cell": {"dose": d, "steps": s}, "key": f"{d}-{s}", "metrics": {"gain": {"values": [d / 10 + s / 1000]}}}
+            for d in (1, 2, 3) for s in (16, 64)]
+
+
+def test_one_trial_per_setting_offers_the_mean_not_an_interval(tmp_path):
+    rec = pv.records_of(_quest(tmp_path, _one_trial_cells()), None)
+    block = pv.writer_block(rec)
+    sheet = pv.sheet(rec)
+    assert "{{v:gain @ dose=1, steps=16}}" in sheet and "{{v:gain @ dose=1, steps=all}}" in sheet
+    assert ":mean_ci @" not in sheet and ":mean_ci @" not in block.split("The study's quantities")[0]
+    assert pv.resolve("{{v:gain @ dose=1, steps=16}}", rec).filled
+    assert not pv.resolve("{{v:gain:mean_ci @ dose=1, steps=16}}", rec).filled  # the review's handling is unchanged
+
+
+def test_a_study_with_repeated_trials_is_offered_the_interval_as_before(tmp_path):  # the known positive
+    rec = pv.records_of(_quest(tmp_path, _tiny_cells()), None)
+    assert "{{v:fdr:mean_ci @ m=20, method=all}}" in pv.sheet(rec)
+    assert "{{v:coverage:mean_ci @ noise=0.05, n=20}}" in pv.writer_block(rec)
+    assert "one trial in each setting" not in pv.writer_block(rec)
