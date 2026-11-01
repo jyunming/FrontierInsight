@@ -36,6 +36,31 @@ SIZING_PARTS = ("protocol.runs_per_setting", "protocol.min_runs_per_setting", "p
 _NEW_PROTOCOL_PARTS = ("definitions", "labels", "simplifications", "numerical_settings", "result_assertions")
 
 
+def _resolve(segs: list[str], design: Any) -> list[str]:
+    """``segs`` regrouped into the real keys of ``design``. A key may contain a dot (``figure_declarations`` is keyed by a
+    figure's file name, ``fig1.png``), so while walking, a segment that is not a key of the mapping reached is joined with
+    the segments after it, the longest run that IS a key of that mapping. When no run is a key the segment stays as it is
+    (a NEW key with a dot cannot be told from a misspelt path, so it is refused as before). A path whose keys have no
+    dots comes back as it was."""
+    out: list[str] = []
+    node: Any = design
+    i = 0
+    while i < len(segs):
+        if not isinstance(node, dict) or segs[i] in node:
+            key = segs[i]
+            i += 1
+        else:
+            j = next((j for j in range(len(segs), i + 1, -1) if ".".join(segs[i:j]) in node), 0)
+            if j:
+                key, i = ".".join(segs[i:j]), j
+            else:
+                key = segs[i]
+                i += 1
+        out.append(key)
+        node = node.get(key) if isinstance(node, dict) else None
+    return out
+
+
 def invalid_reason(path: Any, design: dict[str, Any]) -> str:
     """``""`` when ``path`` names a part of ``design`` (every step but the last must exist in it; under ``protocol`` the
     part itself must be one the protocol has or can gain), else the reason it does not. The WHOLE path is checked."""
@@ -44,6 +69,7 @@ def invalid_reason(path: Any, design: dict[str, Any]) -> str:
     segs = path.strip().split(".")
     if any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", x) for x in segs):
         return "it is not a plain path of names"
+    segs = _resolve(segs, design)
     if segs[0] not in DESIGN_KEYS and segs[0] not in design:
         return f"`{segs[0]}` is not a part of this design"
     proto = design.get("protocol")
@@ -103,7 +129,7 @@ def apply_changes(design: dict[str, Any], changes: list[tuple[str, Any]]) -> tup
         if path.strip() == "protocol" and not isinstance(value, dict):
             refused.append({"key": "protocol", "reason": "`protocol` must be a mapping"})
             continue
-        why = _set(out, path.strip().split("."), value)
+        why = _set(out, _resolve(path.strip().split("."), out), value)
         if why:
             refused.append({"key": path.strip(), "reason": why})
     return out, refused
@@ -250,7 +276,7 @@ def merge_parts(
 
 def get_part(design: dict[str, Any], path: str) -> tuple[bool, Any]:
     node: Any = design
-    for s in path.split("."):
+    for s in _resolve(path.split("."), design):
         if not isinstance(node, dict) or s not in node:
             return False, None
         node = node[s]

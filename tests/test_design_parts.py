@@ -255,3 +255,33 @@ def test_the_review_prompt_asks_for_the_parts_it_is_about() -> None:
 async def test_the_first_design_is_not_a_redesign(tmp_path: Path) -> None:
     eng = _engine(tmp_path, [])
     assert await eng._redesign_by_parts({**PRECISION_STATE, "iteration": 0}) is None
+
+
+def _figure_design() -> dict[str, Any]:
+    return {"method": "m", "protocol": {"figure_declarations": {"fig1_a.png": {"panels": 1}, "fig2_b.png": {"panels": 2}}}}
+
+
+def test_a_key_that_contains_a_dot_is_found_in_the_design() -> None:
+    out, refused = dp.apply_changes(_figure_design(), [("protocol.figure_declarations.fig1_a.png", {"panels": 2})])
+    assert refused == []
+    assert out["protocol"]["figure_declarations"]["fig1_a.png"] == {"panels": 2}
+    assert "fig1_a" not in out["protocol"]["figure_declarations"]
+
+
+def test_a_sub_key_under_a_key_that_contains_a_dot_is_set() -> None:
+    out, refused = dp.apply_changes(_figure_design(), [("protocol.figure_declarations.fig1_a.png.panels", 3)])
+    assert refused == []
+    assert out["protocol"]["figure_declarations"]["fig1_a.png"] == {"panels": 3}
+    assert dp.get_part(out, "protocol.figure_declarations.fig1_a.png.panels") == (True, 3)
+
+
+def test_a_misspelt_figure_name_is_still_refused() -> None:
+    out, refused = dp.apply_changes(_figure_design(), [("protocol.figure_declarations.fig1_x.png.panels", 3)])
+    assert len(refused) == 1 and "is not in this design" in refused[0]["reason"]
+    assert out == _figure_design()
+
+
+def test_a_new_key_with_a_dot_is_refused_as_before() -> None:
+    out, refused = dp.apply_changes(_figure_design(), [("protocol.figure_declarations.fig9_new.png", {"panels": 1})])
+    assert len(refused) == 1 and "is not in this design" in refused[0]["reason"]
+    assert out == _figure_design()
