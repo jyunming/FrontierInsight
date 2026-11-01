@@ -199,7 +199,12 @@ async def test_a_review_that_finds_nothing_changes_nothing_and_an_unreadable_one
     engine._client = model
     await engine._node_plan({"topic": engine.config.topic, "literature": []})
     assert model.revisions == [] and "answer could not be used" in _section(engine)
-    assert [r["by"] for r in plan.history(engine.quest_root)] == ["model", "engine"]
+    # The review itself writes one version, its note in plan.md, and no request to the plan. The per-trial question (asked of
+    # every check run on random trials, which this fake model does not answer) is another step with its own version.
+    versions = [(r["by"], r["note"]) for r in plan.history(engine.quest_root)]
+    review_notes = [v for v in versions if v[1] == "the checks against known answers looked at"]
+    assert versions[0][0] == "model" and review_notes == [("engine", "the checks against known answers looked at")]
+    assert all(by != "model" for by, _note in versions[1:]), "the plan's model never rewrote the plan"
 
 
 @pytest.mark.asyncio
