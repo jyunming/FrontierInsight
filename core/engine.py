@@ -23349,34 +23349,54 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                               type(e).__name__, str(e)[:200])
             return []
 
-    def _take_out_unfilled_keys(self, state: QuestState) -> list[dict[str, str]]:
+    def _take_out_unfilled_keys(self, state: QuestState, *, figures_only: bool = False) -> list[dict[str, str]]:
         """The paper with each result key FI could not fill taken out (core/paper_facts.py::take_out_unfilled), written to
         disk: ``key``, ``sentence`` and ``how`` for each. Nothing is put in their place, so no number is invented, and the
-        claim check's receipt moves to the new draft, which only lost text and added no claim."""
+        claim check's receipt moves to the new draft, which only lost text and added no claim.
+
+        ``figures_only`` (every write, not only the last round): only the statements about a figure, a figure statement FI
+        could not fill and a sentence that points at a figure FI drew and is not FI's to stand behind; the result keys wait
+        for the last round. The paper is a new draft then, with no receipt or claim list to move."""
         path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
         if not path or not Path(path).is_file():
             return []
         try:
             before = Path(path).read_bytes()
-            text, taken = _paper_facts.take_out_unfilled(before.decode("utf-8"))
+            text, taken = _paper_facts.take_out_unfilled(before.decode("utf-8"), figures_only=figures_only)
             text, pointed = _take_out_unpointed(text, state)
             taken = taken + pointed
             if not taken:
                 return []
             Path(path).write_bytes(text.encode("utf-8"))  # bytes back as bytes (bytes back as bytes: text mode writes the draft's CRLF as CR CR LF on Windows)
-            _receipts.carry_over(self.quest_root, "claim_check", "paper", before, Path(path).read_bytes(),
-                                 "FI took out values it could not fill and added no claim")
-            self._prune_ledger_after_take_out([str(t.get("sentence") or "") for t in taken], text)
+            if not figures_only:
+                _receipts.carry_over(self.quest_root, "claim_check", "paper", before, Path(path).read_bytes(),
+                                     "FI took out values it could not fill and added no claim")
+                self._prune_ledger_after_take_out([str(t.get("sentence") or "") for t in taken], text)
         except (OSError, UnicodeDecodeError) as e:
             self._log.warning("[record_check] the values FI could not fill could not be taken out of the paper (%s)", e)
             return []
-        self._log.warning("[record_check] no round is left to write the paper again, so %d value(s) FI could not fill were "
-                          "taken out (%d sentence(s) removed, the rest replaced by \"%s\") and are listed in QUALITY.md",
-                          len(taken), sum(1 for t in taken if t["how"] == "sentence removed"), _paper_facts.REPLACED)
+        if not figures_only:
+            self._log.warning("[record_check] no round is left to write the paper again, so %d value(s) FI could not fill were "
+                              "taken out (%d sentence(s) removed, the rest replaced by \"%s\") and are listed in QUALITY.md",
+                              len(taken), sum(1 for t in taken if t["how"] == "sentence removed"), _paper_facts.REPLACED)
         for stem, number in _paper_facts._figure_left_out_items(taken):
+            gone = [str(t.get("sentence") or "") for t in taken
+                    if str(t.get("key", "")).startswith(f"figure:{stem}:") or t.get("figure") == number]
             self._log.warning("[record_check] statements about Figure %s (%s) could not be checked against what it draws and "
-                              "were left out; the Limitations say so", number, stem)
+                              "were left out (%d): %s; the Limitations say so", number, stem, len(gone),
+                              "; ".join('"' + g[:80] + '"' for g in gone))
         return taken
+
+    def _take_out_figure_statements(self, state: QuestState, paper_path: Path) -> None:
+        """Every paper the write node writes (the first draft, a review's rewrite, a person's refine) has the sentences about
+        a figure FI cannot stand behind taken out before anything reads it, whatever round it is: the review, the slides and
+        the poster all read the paper as it is left here. What was left out is kept for the Limitations, which are written
+        again in the same write (the record of an earlier paper is replaced, so nothing older is said)."""
+        at = {**state, "paper_md": str(paper_path)}
+        taken = self._take_out_unfilled_keys(at, figures_only=True)
+        if _paper_facts.keep_figure_left_out(self.quest_root, taken):
+            self._restate_limitations(at, "FI said in the Limitations which statements about a figure were left out and added "
+                                          "no claim")
 
     async def _check_code_project(self) -> None:
         """Run ``code/`` as a person would (clean environment, only requirements.txt) once per version of the code and
@@ -23558,6 +23578,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._log.info("[write] %d figure(s) moved into a paragraph of their own", n_figures_moved)
         paper_path = self.quest_root / "paper" / "paper.md"
         paper_path.write_text(markdown, encoding="utf-8")
+        self._take_out_figure_statements(state, paper_path)
         self._log.info("[write] wrote %s (%d bytes)", paper_path, len(markdown))
         # Generic pause-drop-anytime: when configured, pause AFTER
         # paper.md lands so the user can drop reference papers (for
@@ -34079,7 +34100,7 @@ def _figure_list_for_prompt(state: QuestState) -> str:
                 f"{c.get('license', '')}]"
             )
         else:
-            calls = _calls_of(state, Path(str(f)).stem)
+            calls = _figure_claims.load_calls(state["quest_root"], Path(str(f)).stem) if state.get("quest_root") else None
             lines.append(f"- Figure {number}: figures/{f}" + _figure_record_note(
                 records.get(f), n_seeds=n_seeds, results=state.get("result_json"), settings=settings, calls=calls)
                 + _figure_menu_note(state, Path(str(f)).stem, calls))
@@ -34748,7 +34769,8 @@ def _place_figures(markdown: str, state: QuestState, *,
     last = -1
     for name, number in sorted(numbers.items(), key=lambda kv: kv[1]):
         caption = _figure_caption_text(name, records.get(name), n_seeds=n_seeds, facts=facts, credit=credits.get(name),
-                                       calls=_calls_of(state, Path(name).stem))
+                                       calls=(_figure_claims.load_calls(state["quest_root"], Path(name).stem)
+                                              if state.get("quest_root") else None))
         embed = f"![**Figure {number}.** {caption}](figures/{name})"
         said = _figure_minimum_sentence(lines, number, name, state)
         at = max(_figure_insertion_line(lines, number), last + 1)
@@ -34769,12 +34791,12 @@ def _place_figures(markdown: str, state: QuestState, *,
 def _figure_minimum_sentence(lines: list[str], number: int, name: str, state: QuestState) -> tuple[int | None, str] | None:
     """The one sentence FI composes for a figure whose drawing it checked, when the draft places none of the figure's marks:
     ``(line of the paragraph that first names it, sentence)``, the line being ``None`` when no paragraph names it. The
-    sentence is the figure's ``drawn`` statement (else its ``range``), a mark FI fills from its record, with no pointer
-    (a pointer after it would be a fragment the pointer rule takes out). ``None`` for a figure with no call record, one FI
+    sentence is the figure's ``drawn`` statement (else its ``range``), a mark FI fills from its record, then "(Figure N)"
+    written by FI: the pointer rule never takes out a statement of FI's with its own closing pointer. ``None`` for a figure with no call record, one FI
     drew itself from the plan's description, one with no such statement (a custom drawing alone), or one whose marks the
     draft already holds."""
     stem = Path(name).stem
-    calls = _calls_of(state, stem)
+    calls = _figure_claims.load_calls(state["quest_root"], stem) if state.get("quest_root") else None
     if not calls or calls.get("fallback"):
         return None
     text = "\n".join(lines)
@@ -34786,7 +34808,7 @@ def _figure_minimum_sentence(lines: list[str], number: int, name: str, state: Qu
     offer = next((o for kind in ("drawn", "range") for o in offers if o["claim"] == kind), None)
     if offer is None:
         return None
-    return _figure_reference_end(lines, number), offer["mark"] + "."
+    return _figure_reference_end(lines, number), f"{offer['mark']} (Figure {number})."
 
 
 def _figure_with_sentence(lines: list[str], said: tuple[int | None, str], block: list[str]) -> list[str]:
@@ -34820,20 +34842,13 @@ def _caption_safe(text: str) -> str:
     return text.replace("[", "(").replace("]", ")")
 
 
-def _calls_of(state: QuestState, stem: str) -> dict[str, Any] | None:
-    """FI's record of the drawing calls of the figure ``stem`` (:func:`core.figure_claims.load_calls`), or ``None`` when the
-    quest has none: a figure drawn by a body that does not call the primitives, or a quest from before the record."""
-    root = state.get("quest_root")
-    return _figure_claims.load_calls(root, stem) if root else None
-
-
 def _figures_drawn(state: QuestState) -> dict[int, set[str]]:
     """``{figure number: the metrics its drawing calls drew}`` for each numbered figure that has a call record: the ids of the
     series a panel FI drew itself holds, and what its y axis plots. A panel drawn by hand adds none (what it draws is not
     checked). A figure with no call record is not in it: its sentences are not judged."""
     out: dict[int, set[str]] = {}
     for name, number in _figure_numbers(state).items():
-        calls = _calls_of(state, Path(name).stem)
+        calls = _figure_claims.load_calls(state["quest_root"], Path(name).stem) if state.get("quest_root") else None
         if not calls:
             continue
         metrics: set[str] = set()
@@ -34877,7 +34892,8 @@ def _figure_plan(root: Any) -> dict[str, Any] | None:
 def _figure_offers(state: QuestState, stem: str, calls: dict[str, Any]) -> list[dict[str, Any]]:
     """The statements about the figure ``stem`` that are true of its call record (:func:`core.figure_claims.menu`), worded as
     the paper will render them."""
-    return _figure_claims.menu(calls, _figure_plan(state.get("quest_root")), _paper_values.sig, stem=stem)
+    return _figure_claims.cap_menu(
+        _figure_claims.menu(calls, _figure_plan(state.get("quest_root")), _paper_values.sig, stem=stem), calls)
 
 
 def _figure_menu_note(state: QuestState, stem: str, calls: dict[str, Any] | None) -> str:

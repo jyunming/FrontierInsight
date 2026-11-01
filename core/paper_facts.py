@@ -2120,16 +2120,17 @@ def _figure_left_out_items(taken: Any) -> list[tuple[str, str]]:
     return list(found.items())
 
 
-def take_out_unfilled(markdown: str) -> tuple[str, list[dict[str, str]]]:
+def take_out_unfilled(markdown: str, *, figures_only: bool = False) -> tuple[str, list[dict[str, str]]]:
     """``markdown`` without the result keys FI could not fill (they read "not recorded"), for a paper no round is left to
     rewrite: ``(text, taken_out)``, ``taken_out`` having ``key``, ``sentence`` (as it read) and ``how`` for each.
 
     A running sentence whose every result key is unfilled states nothing FI can stand behind, so the sentence is removed (a
     bold run-in heading before it stays). Any other place (a key beside filled ones, a table row, a figure caption, a list, a
     clause that does not read as a sentence by itself) keeps its text and the key is replaced by the same visible marker
-    that replaces a number the writer typed. Nothing is filled with a guess, and no filled key is touched."""
+    that replaces a number the writer typed. Nothing is filled with a guess, and no filled key is touched. With
+    ``figures_only`` only the figure statements are looked at (the result keys are left for the round that takes them out)."""
     # A figure statement is a mark of the second shape (<!-- fi:fact-figure-... -->): a whole sentence FI wrote or, unfilled, none.
-    marks = sorted([*_values._MARK.finditer(markdown or ""),
+    marks = sorted([*([] if figures_only else _values._MARK.finditer(markdown or "")),
                     *(m for m in _MARK.finditer(markdown or "") if _figure_parts(m.group(1)) is not None)],
                    key=lambda m: m.start())
     if not any(m.group(2).strip() == _values.NOT_RECORDED for m in marks):
@@ -2322,6 +2323,9 @@ def keep_check(quest_root: Path | str, hits: list[str], paper_md: str, *, untrac
                 unmet.append({"kind": FIGURE_LEFT_OUT, "id": ident, "name": f"figure {number} statements",
                               "text": figure_left_out_sentence(number)})
         unfilled = unfilled_in(paper_md)
+        if not any(_is_figure_entry(d) for d in dropped or []):
+            # statements about a figure were left out when the paper was written: they stay on record until it is written again
+            dropped = list(dropped or []) + [d for d in _kept_figure_entries(kept_check(quest_root))]
         if not hits and not unmet and not unfilled and not untraced and not not_filled and not dropped:
             path.unlink(missing_ok=True)
             return
@@ -2336,6 +2340,43 @@ def keep_check(quest_root: Path | str, hits: list[str], paper_md: str, *, untrac
         path.write_text(json.dumps(record, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
     except (OSError, ValueError):
         pass
+
+
+def _is_figure_entry(d: Any) -> bool:
+    return isinstance(d, dict) and str(d.get("key", "")).startswith("figure:")
+
+
+def _kept_figure_entries(data: dict[str, Any]) -> list[dict[str, Any]]:
+    values = data.get("taken_out_values")
+    return [d for d in values if _is_figure_entry(d)] if isinstance(values, list) else []
+
+
+def keep_figure_left_out(quest_root: Path | str, entries: list[dict[str, str]]) -> bool:
+    """Record, for the paper just written, the statements about a figure that were left out of it (``entries`` as
+    ``take_out_unfilled`` and the pointer rule list them): they replace those of the paper before, so the Limitations say
+    what this paper left out and nothing older. Returns whether the record changed. Never raises."""
+    path = Path(quest_root) / RECORD
+    try:
+        data = kept_check(quest_root)
+        before = _kept_figure_entries(data)
+        new = [dict(e) for e in entries if _is_figure_entry(e)]
+        if before == new:
+            return False
+        others = [d for d in (data.get("taken_out_values") or []) if not _is_figure_entry(d)]
+        record = dict(data) if data else {"at": time.time(), "hits": [], "unmet_items": [], "unfilled": []}
+        if others + new:
+            record["taken_out_values"] = others + new
+        else:
+            record.pop("taken_out_values", None)
+        if not any(record.get(k) for k in ("hits", "unmet_items", "unfilled", "untraced_numbers", "taken_out_values",
+                                           "not_filled_by_fi")):
+            path.unlink(missing_ok=True)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(record, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
 
 
 def kept_check(quest_root: Path | str) -> dict[str, Any]:

@@ -528,9 +528,10 @@ def test_whole_sentence_figure_claim_kept():
     md = f"Intro. {_claim()} Later text.\n"
     out, taken = _rule(md)
     assert out == md and taken == []
-    # a bare pointer after the claim is a fragment of its own, not a claim: it goes, the claim stays
-    out, taken = _rule(f"Intro. {_claim()} (Figure 1)\n")
-    assert out == f"Intro. {_claim()}\n" and len(taken) == 1
+    # FI's own sentence ends with its "(Figure N)": the claim and the pointer are one sentence, and it stays
+    for tail in (" (Figure 1)", " (Figure 1)."):
+        md = f"Intro. {_claim()}{tail}\n"
+        assert _rule(md) == (md, [])
 
 
 def test_figure_claim_with_other_words_is_dropped():
@@ -548,11 +549,21 @@ def test_caption_and_table_row_with_figure_number_untouched():
     assert out == md and taken == []
 
 
-def test_figure_number_not_issued_by_fi_is_dropped_sentence():
-    md = f"Good one. The signal is {_v('signal')} (Figure 7). Last.\n"
+def test_figure_number_not_issued_by_fi_is_dropped_sentence_when_it_names_a_checked_figure():
+    md = f"Good one. The signal is {_v('signal')} (Figures 1 and 7). Last.\n"
     out, taken = _rule(md)
     assert out == "Good one. Last.\n"
-    assert taken[0]["key"] == "Figure 7"
+    assert taken[0]["key"] == "Figure 1"
+
+
+def test_a_sentence_naming_only_figures_without_a_call_record_is_left_exactly_as_it_was():
+    # Figure 1 has a record; Figure 2 is legacy and Figure 9 does not exist: neither is judged (RF1)
+    md = "Figure 2 shows a curve, and Figure 9 shows another.\n\nFigure 2 (the line) rises. See also Figure 9.\n"
+    nums = {"fig_a.png": 1, "old.png": 2}
+    assert fc.apply_pointer_rule(md, nums, {1: {"signal"}}, _MENTION) == (md, [])
+    md_both = md + "Figure 1 shows a rise and Figure 2 a fall.\n"
+    out, taken = fc.apply_pointer_rule(md_both, nums, {1: {"signal"}}, _MENTION)
+    assert out == md and len(taken) == 1, "a sentence that names a figure with a record is judged"
 
 
 def test_legacy_figure_passes_through():
@@ -637,3 +648,59 @@ def test_claims_name_a_hold_by_the_plans_label_and_distinct_values_read_distinct
     p1 = _panel([_series("a", [1, 2], [3.0, 4.0])], 2, hold={"m": 1.23449}, hold_label={"m": "Mass"})
     assert fc.hold_text(p0) == "Mass = 1.23441" and fc.hold_text(p1) == "Mass = 1.23449"
     assert ev(_calls(p0, p1), "drawn", series="a", panel=2)[0] == "A is drawn in the panel at Mass = 1.23449"
+
+
+def test_fis_composed_sentence_is_never_removed_the_writers_words_in_it_are():
+    nums = {"fig_a.png": 1}
+    drawn = {1: {"signal"}}
+    claim = _claim()
+    for md, expect in (
+        (f"Intro. Beyond doubt, {claim} (Figure 1). Next.\n", f"Intro. {claim} (Figure 1). Next.\n"),
+        (f"Intro. {claim} (Figure 1) It also clearly flattens. Next.\n", f"Intro. {claim} (Figure 1). Next.\n"),
+        (f"Intro. Clearly {claim} and it proves the point (Figure 1). Next.\n", f"Intro. {claim} (Figure 1). Next.\n"),
+        (f"{claim} and the gain is large, see Figure 1 for that. Last.\n", f"{claim}. Last.\n"),
+    ):
+        out, taken = fc.apply_pointer_rule(md, nums, drawn, _MENTION)
+        assert out == expect, (md, out)
+        assert len(taken) == 1
+        assert "Panel 1 draws a rising line." in out and "proves" not in out and "flattens" not in out
+        assert "large" not in out and "see Figure" not in out and "doubt" not in out
+        assert taken[0]["sentence"] and "Panel 1" not in taken[0]["sentence"]
+    # a statement without a full stop of its own (as FI's real ones are) gets one where the sentence after it goes
+    bare = _claim(text="Panel 1 draws a rising line")
+    out, _ = fc.apply_pointer_rule(f"{bare} (Figure 1). See Figure 1 for more. Next.\n", nums, drawn, _MENTION)
+    assert out == f"{bare} (Figure 1). Next.\n"
+    out, _ = fc.apply_pointer_rule(f"{bare}. See Figure 1 for more. Next.\n", nums, drawn, _MENTION)
+    assert out == f"{bare}. Next.\n"
+    # the writer's own sentence beside FI's is judged on its own: a result mark under a closing pointer stays
+    md = f"{claim} (Figure 1). The signal is {_v('signal')} (Figure 1).\n"
+    assert fc.apply_pointer_rule(md, nums, drawn, _MENTION) == (md, [])
+
+
+def _many(n_series: int, n_points: int = 7):
+    series = [_series(f"s{i}", list(range(n_points)), [float(i + j) for j in range(n_points)]) for i in range(n_series)]
+    return _calls(_panel(series))
+
+
+def test_a_menu_is_cut_to_forty_statements_in_the_order_of_what_matters():
+    calls = _many(10)
+    full = fc.menu(calls)
+    assert len(full) > 40
+    capped = fc.cap_menu(full, calls)
+    assert len(capped) == 40 and capped == fc.cap_menu(full, calls), "deterministic"
+    kinds = [o["claim"] for o in capped]
+    assert kinds.count("drawn") == 10, "every line's drawn statement is kept"
+    assert kinds.count("no_crossing") < sum(1 for o in full if o["claim"] == "no_crossing"), "no_crossing is cut first"
+    assert [o["mark"] for o in capped] == [o["mark"] for o in full if o in capped], "the menu's own order"
+    short = _many(2)
+    assert fc.cap_menu(fc.menu(short), short) == fc.menu(short)
+
+
+def test_the_pairs_of_lines_next_to_each_other_in_the_legend_are_kept_first_in_no_crossing():
+    calls = _many(8, n_points=3)
+    full = fc.menu(calls)
+    others = len([o for o in full if o["claim"] != "no_crossing"])
+    capped = fc.cap_menu(full, calls, limit=others + 5)
+    pairs = [(o["args"]["a"], o["args"]["b"]) for o in capped if o["claim"] == "no_crossing"]
+    assert len(pairs) == 5
+    assert all(abs(int(b[1:]) - int(a[1:])) == 1 for a, b in pairs), pairs

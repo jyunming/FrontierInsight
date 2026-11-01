@@ -765,6 +765,7 @@ def menu(calls: Any, plan: dict[str, Any] | None = None, fmt: Fmt = _default_fmt
 _OPEN_PAREN = re.compile(r"\(\s*$")
 _CLOSE_PAREN = re.compile(r"^\s*\)[\s.,;:!?]*$")
 _TOKEN_AT = re.compile(r"\x00(\d+)\x00\.?")
+_OWN_POINTER = re.compile(r"[ \t]*\([ \t]*")
 #: What joins one more figure number to a pointer: "(Figures 2 and 3)", "(Figures 2, 3)", "(Figures 2-4)".
 _LIST_JOIN = re.compile(r"\s*(?:,|and|&|[-\u2013])\s*", re.IGNORECASE)
 _BARE_NUMBER = re.compile(r"\d+")
@@ -860,7 +861,13 @@ def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, 
     for i, m in enumerate(marks):
         before = markdown[last:m.start()]
         claim = m.re is _facts._MARK and m.group(1).startswith("figure-")
-        token = f"\x00{i}\x00" + ("." if claim else "")
+        # FI's sentence about a figure ends with its own "(Figure N)": the claim and that pointer are one sentence.
+        opening = _OWN_POINTER.match(markdown, m.end()) if claim else None
+        own_pointer = opening is not None and mention_re.match(markdown, opening.end()) is not None
+        # A statement of its own has its full stop; one the writer's words lead into is one sentence with them.
+        full_stop = claim and not own_pointer and _facts._starts_sentence(markdown[:m.start()]) \
+            and markdown[m.end():m.end() + 1] not in (".", "!", "?")
+        token = f"\x00{i}\x00" + ("." if full_stop else "")
         parts += [before, token]
         spans.append((size + len(before), size + len(before) + len(token), m.start(), m.end()))
         kinds.append("v" if m.re is _values._MARK else "claim" if claim else "other")
@@ -894,10 +901,10 @@ def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, 
         text = flat[a:b]
         point = _pointer(text, mention_re)
         nums = point[1] if point else [int(h.group(1)) for h in hits]
+        if all(n not in drawn for n in nums):
+            return True  # only figures with no call record (or none FI numbered): nothing is checked, as before
         if any(n not in issued for n in nums):
             return False
-        if all(n not in drawn for n in nums):
-            return True
         inside = [i for i, sp in enumerate(spans) if a <= sp[0] and sp[1] <= b]
         rest = text
         if point:
@@ -932,6 +939,24 @@ def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, 
             lead = _facts._RUN_IN.match(flat[a:b])
             body_at = a + (lead.end() if lead else 0)
             sentence = re.sub(r"\s+", " ", _values.without_marks(markdown[original(a):original(b)])).strip()
+            own = [i for i, sp in enumerate(spans) if kinds[i] == "claim" and body_at <= sp[0] and sp[1] <= b]
+            if own:  # FI's own statement is never removed: only the words the writer put into its sentence go
+                said = " ".join(markdown[spans[i][2]:spans[i][3]] for i in own)
+                stems = {Path(str(n)).stem: k for n, k in numbers.items()}
+                shown_in = sorted({stems[parts[0]] for i in own
+                                   if (parts := _facts._figure_parts(marks[i].group(1))) and parts[0] in stems})
+                pointer = ("" if not shown_in else " (Figure %d)" % shown_in[0] if len(shown_in) == 1
+                           else " (Figures %s and %d)" % (", ".join(map(str, shown_in[:-1])), shown_in[-1]))
+                gap = re.match(r"\s*", flat[body_at:b]).group(0)
+                seg_at = original(body_at)
+                seg = markdown[seg_at:original(b)]
+                for i in reversed(own):
+                    seg = seg[:spans[i][2] - seg_at] + seg[spans[i][3] - seg_at:]
+                sentence = re.sub(r"\s+", " ", _values.without_marks(seg)).strip()
+                stop = "." if any(kinds[i] == "claim" and spans[i][3] == original(body_at) for i in range(len(spans))) else ""
+                edits.append((original(body_at), original(b), stop + gap + said + pointer + "."))
+                taken.append({"key": f"Figure {hits[0].group(1)}", "sentence": sentence, "how": "writer's words removed"})
+                continue
             start, end = original(body_at), original(b)
             if flat[line_start:body_at].strip() == "":  # it opens its line: the space it leaves goes with it
                 while end < len(markdown) and markdown[end] in " \t":
@@ -941,9 +966,43 @@ def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, 
             else:  # the space before it goes with it
                 while start > 0 and markdown[start - 1] in " \t":
                     start -= 1
-            edits.append((start, end, ""))
+            # FI's statement before it had no full stop of its own (the rule reads it as a sentence): it gets one
+            stop = "." if any(kinds[i] == "claim" and spans[i][3] == start for i in range(len(spans))) else ""
+            edits.append((start, end, stop))
             taken.append({"key": f"Figure {hits[0].group(1)}", "sentence": sentence, "how": "sentence removed"})
     out = markdown
     for start, end, text in sorted(edits, reverse=True):
         out = out[:start] + text + out[end:]
     return out, taken
+
+
+#: The most statements offered to the writer for one figure.
+MENU_LIMIT = 40
+#: What is cut last is first here: the order statements are kept in when a figure offers more than MENU_LIMIT.
+_KEEP_ORDER = ("drawn", "range:x", "value_at", "steps", "range:y", "trend", "order", "crossing", "errorbars", "band", "note")
+
+
+def cap_menu(offers: list[Offer], calls: Any, limit: int = MENU_LIMIT) -> list[Offer]:
+    """At most ``limit`` of ``offers``, in their own order. What is cut is decided by the kind of statement, not by the
+    figure: kept first are ``drawn``, the x range, ``value_at``, ``steps``, the y range, ``trend``, ``order``, ``crossing``,
+    error bars and bands and notes (a statement of a kind not named there follows them), and ``no_crossing`` goes last,
+    the pairs of lines next to each other in the legend before the others. Deterministic."""
+    if len(offers) <= limit:
+        return offers
+    legend: dict[str, list[str]] = {}
+    for p in calls.get("panels") or [] if isinstance(calls, dict) else []:
+        if isinstance(p, dict):
+            legend[str(p.get("panel"))] = [str(s.get("id")) for s in p.get("series") or [] if isinstance(s, dict)]
+
+    def rank(i: int) -> tuple[int, int, int]:
+        o = offers[i]
+        name = o["claim"] + (":" + str(o["args"].get("axis")) if o["claim"] == "range" else "")
+        if o["claim"] == "no_crossing":
+            ids = legend.get(str(o["args"].get("panel")), [])
+            a, b = o["args"].get("a"), o["args"].get("b")
+            gap = abs(ids.index(b) - ids.index(a)) if a in ids and b in ids else len(ids)
+            return len(_KEEP_ORDER) + 1, gap, i
+        return (_KEEP_ORDER.index(name) if name in _KEEP_ORDER else len(_KEEP_ORDER)), 0, i
+
+    kept = sorted(sorted(range(len(offers)), key=rank)[:limit])
+    return [offers[i] for i in kept]

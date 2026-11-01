@@ -179,7 +179,9 @@ def test_policy_brief_persona_pins_three_acts() -> None:
 def test_write_md_has_no_free_figure_sentence_rule(write_md_text: str) -> None:
     """The writer describes a figure only by placing a mark from its list; FI writes the sentence."""
     assert "{{figure:" in write_md_text
-    assert "never write a sentence about what a figure shows" in write_md_text.lower()
+    assert "never write a sentence of your own about what such a figure shows" in write_md_text.lower()
     assert "result marks" in write_md_text
-    assert "State the concrete takeaway the figure supports" not in write_md_text
-    assert "describe in prose what it would have shown" not in write_md_text
+    # a figure with no marks list (no call record) keeps the instruction it always had
+    assert "state the concrete takeaway the figure supports" in write_md_text
+    assert "describe in prose what it would have shown" in write_md_text
+    assert "is mentioned by its number only" not in write_md_text

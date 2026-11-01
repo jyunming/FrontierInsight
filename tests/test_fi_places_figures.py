@@ -457,7 +457,7 @@ def test_no_selected_claim_gets_one_composed_sentence_inline(tmp_path: Path) -> 
     state = _quest(tmp_path, _record(_panel()))
     out, placed, _ = _place_figures(DRAFT, state)  # type: ignore[arg-type]
     assert "error_vs_step.png" in placed
-    sentence = "{{figure:error_vs_step:drawn @ series=error, panel=1}}."
+    sentence = "{{figure:error_vs_step:drawn @ series=error, panel=1}} (Figure 1)."
     assert out.count("{{figure:error_vs_step") == 1 and sentence in out
     lines = out.split("\n")
     # at the figure's first reference: the paragraph that names it, before the figure
@@ -533,3 +533,121 @@ def test_pointer_rule_leaves_a_paper_of_legacy_figures_alone(tmp_path: Path) -> 
     before = paper.read_bytes()
     eng._paper_record_hits(paper.read_text(encoding="utf-8"), state)  # type: ignore[arg-type]
     assert paper.read_bytes() == before
+
+
+# ---- the pointer rule and the take-out of figure statements run on every write ---------------------------------------------
+
+FREE = "Figure 1 shows that the error falls steeply, a drop of about three orders of magnitude over the whole range."
+WRITER_DRAFT = (
+    "# T\n\n## Abstract\nWe compare schemes.\n\n## Results\n\n"
+    f"**Accuracy.** {FREE}\n\n"
+    "**Cost.** Figure 2 shows the time each size took.\n\n"
+    "## Discussion\nIt is small.\n"
+)
+DISCLOSURE = "some statements about this figure could not be checked"
+
+
+def _write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, drafts: list[str], calls: dict | None, *,
+           iteration: int = 0, max_iterations: int = 3, state_extra: dict | None = None):
+    """A write node run on a quest with a call record for Figure 1 (error_vs_step) only; ``drafts`` are the writer's
+    replies in turn. Returns ``(engine, state, [state after each write])``."""
+    import json as _json
+    from tests.test_disclosure import _engine as make_engine
+
+    replies = list(drafts)
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return replies.pop(0) if len(replies) > 1 else replies[0]
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    eng = make_engine(tmp_path)
+    eng.config.engine.max_iterations = max_iterations
+    import logging
+
+    eng.said = []  # type: ignore[attr-defined]  # what the engine put in its run log
+
+    class _Keep(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            eng.said.append(record.getMessage())  # type: ignore[attr-defined]
+
+    eng._log.addHandler(_Keep())
+    state = {**_quest(tmp_path, calls), "topic": "t", "title": "t", "iteration": iteration, **(state_extra or {})}
+    outs = []
+    for _ in drafts:
+        out = asyncio.run(eng._node_write(state))  # type: ignore[arg-type]
+        state = {**state, **out}
+        outs.append(dict(state))
+    return eng, state, outs
+
+
+def _paper(state: dict) -> str:
+    return Path(state["paper_md"]).read_text(encoding="utf-8")
+
+
+def test_an_unkept_figure_sentence_is_gone_after_the_first_write_with_rounds_left(tmp_path, monkeypatch) -> None:
+    eng, state, _ = _write(tmp_path, monkeypatch, [WRITER_DRAFT], _record(_panel()))
+    paper = _paper(state)
+    assert "falls steeply" not in paper and "three orders" not in paper
+    assert "scheme A is drawn" in paper and "(Figure 1)." in paper, "FI's own sentence is there"
+    assert "Figure 2 shows the time each size took." in paper, "a figure with no call record is left as it was"
+    assert paper.count(DISCLOSURE) == 1, "the Limitations say so in the same write"
+    # one line per figure: the count and the first 80 characters of each removed sentence
+    lines = [ln for ln in eng.said if "statements about Figure 1" in ln]
+    assert len(lines) == 1 and "left out (1)" in lines[0]
+    assert '"' + ("**Accuracy.** " + FREE)[:80] + '"' in lines[0], "the first 80 characters of the sentence, as it read"
+    assert ("**Accuracy.** " + FREE)[:81] not in lines[0]
+
+
+def test_the_disclosure_survives_the_review_that_follows_and_a_clean_rewrite_clears_it(tmp_path, monkeypatch) -> None:
+    from core import paper_facts
+
+    eng, state, _ = _write(tmp_path, monkeypatch, [WRITER_DRAFT], _record(_panel()), max_iterations=3)
+    eng._paper_record_hits(_paper(state), state)  # type: ignore[arg-type]  # the review's record check, rounds left
+    assert _paper(state).count(DISCLOSURE) == 1
+    assert any(str(d.get("key")).startswith("figure:") for d in paper_facts.kept_check(tmp_path)["taken_out_values"])
+    eng._restate_limitations(state, "again")  # type: ignore[arg-type]
+    assert _paper(state).count(DISCLOSURE) == 1, "a later restatement of the Limitations still says it"
+    # the paper written again with nothing to take out says nothing older
+    clean = WRITER_DRAFT.replace(FREE, "The error is compared across the schemes.")
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return clean
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    out = asyncio.run(eng._node_write({**state, "iteration": 1}))  # type: ignore[arg-type]
+    assert DISCLOSURE not in Path(out["paper_md"]).read_text(encoding="utf-8")
+    assert not any(str(d.get("key")).startswith("figure:")
+                   for d in (paper_facts.kept_check(tmp_path).get("taken_out_values") or []))
+
+
+def test_a_rewrite_after_a_first_write_is_taken_out_too(tmp_path, monkeypatch) -> None:
+    again = WRITER_DRAFT.replace("**Cost.**", "**Cost.** Figure 1 also shows a clear bend.")
+    eng, state, outs = _write(tmp_path, monkeypatch, [WRITER_DRAFT, again], _record(_panel()), max_iterations=5)
+    assert "bend" not in _paper(outs[1]) and _paper(outs[1]).count(DISCLOSURE) == 1
+    # the last round, or not, paper_keys or not: the record check finds nothing left to take out
+    assert eng._paper_record_hits(_paper(outs[1]), outs[1]) is not None  # type: ignore[arg-type]
+    assert "bend" not in _paper(outs[1])
+
+
+def test_fis_sentence_stays_when_the_writer_puts_other_words_in_it(tmp_path, monkeypatch) -> None:
+    mixed = WRITER_DRAFT.replace(
+        FREE, "Beyond doubt, {{figure:error_vs_step:trend @ series=error, panel=1}} and so the scheme wins (Figure 1).")
+    _eng, state, _ = _write(tmp_path, monkeypatch, [mixed], _record(_panel()))
+    paper = _paper(state)
+    assert "scheme wins" not in paper and "Beyond doubt" not in paper
+    assert "(Figure 1)." in paper and "scheme A" in paper, "FI's sentence is kept, with its pointer"
+
+
+def test_a_figure_with_no_call_record_keeps_its_free_sentence_through_every_write(tmp_path, monkeypatch) -> None:
+    legacy = "# T\n\n## Results\n\nFigure 1 shows the paired gain. Figure 2 and Figure 9 differ.\n\n## Discussion\nOk.\n"
+    _eng, state, _ = _write(tmp_path, monkeypatch, [legacy], None)
+    paper = _paper(state)
+    assert "Figure 1 shows the paired gain. Figure 2 and Figure 9 differ." in paper and DISCLOSURE not in paper
+
+
+def test_a_sentence_naming_only_legacy_figures_stays_when_another_figure_has_a_record(tmp_path, monkeypatch) -> None:
+    draft = ("# T\n\n## Results\n\nThe error is compared. Figure 2 shows the time each size took, "
+             "and Figure 9 is odd.\n\n## Discussion\nOk.\n")
+    _eng, state, _ = _write(tmp_path, monkeypatch, [draft], _record(_panel()))
+    assert "Figure 2 shows the time each size took, and Figure 9 is odd." in _paper(state)
+    assert DISCLOSURE not in _paper(state)

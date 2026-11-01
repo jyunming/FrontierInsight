@@ -124,7 +124,8 @@ def test_a_range_whose_figures_are_no_longer_consecutive_is_listed() -> None:
 import json  # noqa: E402
 from pathlib import Path  # noqa: E402
 
-from core.engine import _calls_of, _figure_caption_text, _figure_record_note  # noqa: E402
+from core.engine import _figure_caption_text, _figure_record_note  # noqa: E402
+from core.figure_claims import load_calls  # noqa: E402
 
 
 def _series(ident, label, kind="line", ys=(1.0, 2.0, 3.0), yerr=None, meaning=None):
@@ -226,16 +227,16 @@ def test_record_note_without_calls_is_unchanged_and_with_calls_names_the_drawn()
     assert "Method B" not in note
 
 
-def test_calls_of_reads_the_record_beside_the_recorders_files(tmp_path: Path) -> None:
+def test_load_calls_reads_the_record_beside_the_recorders_files(tmp_path: Path) -> None:
     folder = tmp_path / ".fi" / "figure_records"
     folder.mkdir(parents=True)
-    state = {"quest_root": str(tmp_path)}
-    assert _calls_of(state, "a") is None
+    assert load_calls(tmp_path, "a") is None
     (folder / "a.calls.json").write_text(json.dumps(_calls(_panel())), encoding="utf-8")
-    assert _calls_of(state, "a")["version"] == 1
+    assert load_calls(tmp_path, "a")["version"] == 1
     (folder / "b.calls.json").write_text("not json", encoding="utf-8")
-    assert _calls_of(state, "b") is None
-    assert _calls_of({}, "a") is None
+    assert load_calls(tmp_path, "b") is None
+    from core import engine
+    assert not hasattr(engine, "_calls_of"), "the private wrapper is gone; the engine calls load_calls itself"
 
 
 def test_layout_fact_with_a_typed_title_never_reaches_a_call_caption() -> None:
