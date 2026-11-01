@@ -381,7 +381,9 @@ class Quantity:
     #: ``multiplier``: the plan's multiplier of the standard error (its t or normal quantile) and the degrees of freedom the
     #: plan declared (a whole number or ``"normal"``).
     expected: float | None = None
-    df: int | str | None = None
+    df: int | str | dict[str, dict[str, Any]] | None = None
+    #: ``multiplier`` where the plan gives its multiplier per value of a factor: the plan's multiplier at each setting (by key).
+    expected_by: dict[str, float] = field(default_factory=dict)
     #: The same number over every setting together (at 95%): what catches a moderate miss present everywhere.
     pooled: SettingCheck | None = None
     #: ``se_ratio`` only: the smallest (spread / reported error) ratio this run's trials could have flagged as a gross miss
@@ -430,13 +432,19 @@ class Quantity:
             vals = [s.value for s in self.settings]
             exp = self.expected or float("nan")
             fixes = ("the normal quantile" if self.df == "normal" else f"t with {self.df} degrees of freedom")
+            if isinstance(self.df, dict):
+                (axis, table), = self.df.items()
+                fixes = f"per `{axis}`: " + ", ".join(f"{v} {'the normal quantile' if d == 'normal' else f't with {d} degrees of freedom'}"
+                                                      for v, d in list(table.items())[:6])
             fixes += f" at the {self.level:.0%} level" if self.level else ""
-            split = any(s.gross and s.high - s.low > 0.05 * exp for s in self.settings)
+            split = any(s.gross and s.high - s.low > 0.05 * self.expected_by.get(s.key, exp) for s in self.settings)
             used = f"{min(vals):.4g} to {max(vals):.4g}" if vals else "no value"
             if split:
                 used = f"no single multiplier in a setting (trials from {min(lows):.4g} to {max(highs):.4g})"
+            fixed = (" or ".join(f"{e:.4g}" for e in sorted(set(self.expected_by.values()), reverse=True))
+                     if self.expected_by else f"{exp:.4g}")
             return (f"the multiplier of the standard error in the interval `{self.label}`: {used} over {self.judged} "
-                    f"setting(s); the plan fixes {exp:.4g} ({fixes}); not the plan's in {self.gross}")
+                    f"setting(s); the plan fixes {fixed} ({fixes}); not the plan's in {self.gross}")
         if self.kind == "missing":
             return (f"the trials do not return {', '.join(f'`{n}`' for n in self.names)}, which the plan declares for "
                     f"`{self.label}` (its estimate and its uncertainty), so FI could not measure them against the true "
@@ -469,8 +477,7 @@ class Quantity:
         if self.kind in ("bias", "no_estimate"):
             return sorted(self.settings, key=lambda s: -abs(s.value))[:n]
         if self.kind == "multiplier":
-            e = self.expected or 1.0
-            return sorted(self.settings, key=lambda s: -abs(s.value / e - 1.0))[:n]
+            return sorted(self.settings, key=lambda s: -abs(s.value / (self.expected_by.get(s.key) or self.expected or 1.0) - 1.0))[:n]
         return sorted(self.settings, key=lambda s: -abs(math.log(max(s.value, 1e-300))))[:n]
 
 
@@ -537,8 +544,8 @@ def _judge_multiplier(q: "Quantity", per: list[tuple[str, list[tuple[float, floa
     lies farther from the plan's than :data:`MULTIPLIER_TOLERANCE` plus that trial's own rounding allowance (so a half-width
     that is not a multiplier of the trial's own standard error misses too). A setting with fewer than :data:`MIN_TRIALS` trials
     is not judged."""
-    want = q.expected or 0.0
     for key, pairs in per:
+        want = q.expected_by.get(key) or q.expected or 0.0
         mults = [m for m, _a in pairs]
         if len(mults) < MIN_TRIALS or want <= 0:
             continue
@@ -548,6 +555,77 @@ def _judge_multiplier(q: "Quantity", per: list[tuple[str, list[tuple[float, floa
         med = ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2.0
         lo, hi = ordered[0], ordered[-1]
         q.settings.append(SettingCheck(key, len(ordered), med, lo, hi, gross=off > MULTIPLIER_TOLERANCE, below=False))
+
+
+def _quantile_of(df: Any, level: float) -> float:
+    return _stats.t_quantile(0.5 + level / 2.0, math.inf if df == "normal" else df)
+
+
+def _multiplier_quantity(kv: dict[str, Any], df: Any, cells: list[dict[str, Any]], spec: dict[str, Any]) -> "Quantity":
+    """The multiplier of one declared interval, judged at every setting against the plan's: the one multiplier the plan fixes,
+    or, where it gives ``degrees_of_freedom`` per value of a factor (``{factor: {value: df}}``), the multiplier of the value the
+    setting ran (a setting whose value the plan does not list is not judged)."""
+    level = kv["level"]
+    by_value = df if isinstance(df, dict) else None
+    mult = Quantity("multiplier", " .. ".join(kv["interval"]), [*kv["interval"], kv["standard_error"]], level=level,
+                    expected=None if by_value else _quantile_of(df, level), df=df)
+    per = []
+    for c in cells:
+        if _undefined_here(spec.get("undefined_when") or {}, c):
+            continue
+        key, want = str(c.get("key")), mult.expected
+        if by_value:
+            (axis, table), = by_value.items()
+            here = table.get(str((c.get("cell") or {}).get(axis)))
+            if here is None:
+                continue
+            want = mult.expected_by[key] = _quantile_of(here, level)
+        per.append((key, _multipliers(c, kv, want)))
+    if by_value:
+        mult.expected = max(mult.expected_by.values(), default=None)
+    _judge_multiplier(mult, per)
+    return mult
+
+
+def _compared_values_off_the_plan(q: "Quantity", cells: list[dict[str, Any]], ident: str) -> str:
+    """For a plan that fixes ONE multiplier while its own study compares values inside each run (``in_each_run``): when the
+    record shows that some values of the comparison kept the plan's multiplier in every setting and the others used one other
+    multiplier, the same in every trial of every setting (a method of the comparison with its own multiplier), the plan's single
+    declaration does not cover its own comparison. FI does not send the code back or stop for it: those values are taken out of
+    the multiplier check (their ``SettingCheck`` is dropped) and the returned sentence says so, with the multiplier measured.
+    Nothing is taken out unless a value of the comparison matches the plan everywhere, every setting of the others misses it
+    alike, and no setting has trials of different multipliers: a miss in some settings of a value only, or a multiplier that
+    changes from trial to trial, still faults. A plan that says the multiplier per value (``degrees_of_freedom`` as a mapping)
+    is held to it exactly instead. Returns ``""`` when nothing was taken out."""
+    level_of = {str(c.get("key")): json.dumps(c["level"], sort_keys=True, default=str) for c in cells
+                if isinstance(c.get("level"), dict) and c["level"]}
+    exp = q.expected or 0.0
+    groups: dict[str, list[SettingCheck]] = {}
+    for st in q.settings:
+        g = level_of.get(st.key)
+        if g is None:
+            if st.gross:
+                return ""
+            continue
+        groups.setdefault(g, []).append(st)
+    off = {g: ss for g, ss in groups.items() if any(x.gross for x in ss)}
+    if not off or len(off) == len(groups):
+        return ""
+    used = []
+    for ss in off.values():
+        meds = [x.value for x in ss]
+        if (not all(x.gross for x in ss) or any(x.high - x.low > 0.05 * exp for x in ss)
+                or max(meds) / min(meds) - 1.0 > MULTIPLIER_TOLERANCE):
+            return ""
+        used.append(sum(meds) / len(meds))
+    names = ", ".join("`" + ", ".join(f"{a}={v}" for a, v in json.loads(g).items()) + "`" for g in list(off)[:4])
+    q.settings = [st for st in q.settings if level_of.get(st.key) not in off]
+    return (f"`{q.label}` ({ident}): the plan fixes one multiplier, {exp:.4g}, for the interval, and the study compares "
+            f"{names} inside each run; there the interval's multiplier was {min(used):.4g}"
+            + (f" to {max(used):.4g}" if max(used) - min(used) > 0.01 else "")
+            + " in every setting, another from the plan's, while the other compared values kept the plan's. FI did not hold "
+              "those values to the plan's multiplier (to hold each compared value to its own, the plan gives "
+              "`degrees_of_freedom` per value)")
 
 
 def _grain(values: Iterable[float]) -> float:
@@ -818,10 +896,9 @@ def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = N
         df = kv.get("degrees_of_freedom")
         if df is not None and all(n in returned for n in [kv["standard_error"], *kv["interval"]]):
             # Needs the standard error and the interval only, not the true value: judged even when that names nothing.
-            mult = Quantity("multiplier", " .. ".join(kv["interval"]), [*kv["interval"], kv["standard_error"]], level=level,
-                            expected=_stats.t_quantile(0.5 + level / 2.0, math.inf if df == "normal" else df), df=df)
-            _judge_multiplier(mult, [(str(c.get("key")), _multipliers(c, kv, mult.expected)) for c in cells
-                                     if not _undefined_here(spec.get("undefined_when") or {}, c)])
+            mult = _multiplier_quantity(kv, df, cells, spec)
+            if not isinstance(df, dict) and (note := _compared_values_off_the_plan(mult, cells, ident)):
+                out.not_checked.append(note)
             if mult.judged:
                 out.quantities.append(mult)
             else:

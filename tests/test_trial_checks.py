@@ -660,3 +660,111 @@ def test_the_estimate_and_the_interval_are_paired_where_the_record_keeps_them():
     assert bias.judged == 4  # the estimate is judged once, where the record keeps it
     wrong = tc.calibration(_split_record(3.0), proto)  # an interval 3 off the estimate: a planted fault
     assert "coverage" in {q.kind for q in wrong.faults}
+
+
+# ---- a multiplier that differs between the values a study compares inside each run -----------------------------------------
+
+
+def _levelled_record(mult: dict[str, float], n: int = 60, seed: int = 5, vary: str | None = None) -> list[dict]:
+    """Three settings, each run with three interval methods compared inside it: the estimate is kept with the setting, the
+    standard error and interval ends with each method (``mult``: the multiplier of each method's interval). ``vary``: a method
+    whose half-width is one fixed number in every trial instead of a multiplier of the trial's own standard error."""
+    rng = random.Random(seed)
+    out = []
+    for i in range(3):
+        est = [rng.gauss(10, 1) for _ in range(n)]
+        trials = list(range(n))
+        out.append({"key": f"s{i}", "cell": {"s": i}, "planned": n, "failed": 0,
+                    "metrics": {"x_hat": {"values": est, "trials": trials}}})
+        for method, m in mult.items():
+            se = [rng.uniform(0.5, 1.5) for _ in range(n)]
+            half = [3.0] * n if method == vary else [m * s for s in se]
+            out.append({"key": f"s{i},method={method}", "cell": {"s": i, "method": method}, "level": {"method": method},
+                        "planned": n, "failed": 0,
+                        "metrics": {"x_se": {"values": se, "trials": trials},
+                                    "x_lo": {"values": [e - h for e, h in zip(est, half)], "trials": trials},
+                                    "x_hi": {"values": [e + h for e, h in zip(est, half)], "trials": trials}}})
+    return out
+
+
+_T3 = 3.1824463
+_METHODS = {"robust_t": _T3, "plain_z": _Z, "plain_t": _T3}
+_IN_EACH_RUN = {"method": list(_METHODS)}
+
+
+def _levelled_proto(df) -> dict:
+    return {"metrics": [known("x_hat", 10.0, se="x_se", interval=("x_lo", "x_hi"), df=df)], "thresholds": {},
+            "grid": {"s": []}, "in_each_run": _IN_EACH_RUN}
+
+
+_PER_METHOD = {"method": {"robust_t": 3, "plain_z": "normal", "plain_t": 3}}
+
+
+def test_a_plan_that_compares_methods_with_different_multipliers_is_not_stopped_for_the_method_that_differs():
+    # replay shape of a live quest: the plan fixed t with 3 degrees of freedom for the interval, and also compared a normal
+    # interval inside each run; the code was right (z for that method), and the stop sent it back three times
+    proto = _levelled_proto(3)
+    v = tc.judge(_levelled_record(_METHODS), proto, repairs_left=False)
+    assert v.action == tc.OK and not v.calibration.faults
+    [q] = _mult(v.calibration)
+    assert q.judged == 6 and q.gross == 0  # the two methods that use the plan's multiplier are still judged against it
+    assert any("method=plain_z" in n and "1.96" in n and "3.182" in n for n in v.calibration.not_checked)
+
+
+def test_the_multiplier_check_still_stops_when_no_compared_method_keeps_the_plans_multiplier():
+    v = tc.judge(_levelled_record({k: _Z for k in _METHODS}), _levelled_proto(3), repairs_left=False)
+    assert v.action == tc.STOP and "multiplier" in v.say
+
+
+def test_a_multiplier_that_misses_in_some_settings_of_a_method_only_still_stops():
+    cells = _levelled_record(_METHODS)
+    est = next(k for k in cells if k["key"] == "s0")["metrics"]["x_hat"]["values"]
+    for c in cells:  # method robust_t uses 1.96 in setting s0 only
+        if c["key"] == "s0,method=robust_t":
+            se = c["metrics"]["x_se"]["values"]
+            c["metrics"]["x_lo"]["values"] = [e - _Z * s for e, s in zip(est, se)]
+            c["metrics"]["x_hi"]["values"] = [e + _Z * s for e, s in zip(est, se)]
+    assert tc.judge(cells, _levelled_proto(3), repairs_left=False).action == tc.STOP
+
+
+def test_a_method_whose_half_width_is_not_a_multiple_of_its_standard_error_still_stops():
+    cells = _levelled_record(_METHODS, vary="plain_z")
+    assert tc.judge(cells, _levelled_proto(3), repairs_left=False).action == tc.STOP
+
+
+def test_a_study_with_no_compared_method_and_a_wrong_multiplier_still_stops():
+    v = tc.judge(_interval_cells(_Z), _proto(_DECL3), repairs_left=False)
+    assert v.action == tc.STOP and not v.calibration.not_checked
+
+
+def test_a_plan_can_give_the_multiplier_for_each_method_it_compares_and_each_is_held_to_its_own():
+    clean, why = metric_spec.normalize([known("x_hat", 10.0, se="x_se", interval=("x_lo", "x_hi"), df=_PER_METHOD)])
+    assert why is None and clean[0]["known_value"]["degrees_of_freedom"] == _PER_METHOD
+    proto = _levelled_proto(_PER_METHOD)
+    v = tc.judge(_levelled_record(_METHODS), proto, repairs_left=False)
+    assert v.action == tc.OK
+    [q] = _mult(v.calibration)
+    assert q.judged == 9 and q.gross == 0 and not v.calibration.not_checked
+    assert {round(q.expected_by[f"s0,method={m}"], 3) for m in _METHODS} == {3.182, 1.96}
+    # a method that uses another multiplier than the plan gave it is a fault, even when the others are right
+    bad = tc.judge(_levelled_record({**_METHODS, "robust_t": _Z}), proto, repairs_left=False)
+    assert bad.action == tc.STOP and "3.182" in bad.say
+    # so is the normal method given the t multiplier of the others
+    assert tc.judge(_levelled_record({k: _T3 for k in _METHODS}), proto, repairs_left=False).action == tc.STOP
+
+
+@pytest.mark.parametrize("df", [{}, {"method": {}}, {"method": {"robust_t": 0}}, {"method": {"robust_t": "t"}},
+                                {"method": {"robust_t": 3}, "other": {"a": 3}}, {1: 3}])
+def test_a_multiplier_per_method_is_checked_for_its_shape(df):
+    clean, why = metric_spec.normalize([known("x_hat", 5.0, se="x_se", interval=("x_lo", "x_hi"), df=df)])
+    assert clean is None and "degrees_of_freedom" in why
+
+
+def test_a_multiplier_per_value_of_a_factor_the_protocol_does_not_have_is_a_plan_problem():
+    proto = _levelled_proto({"fit": {"robust_t": 3}})
+    [note] = metric_spec.known_value_problems(proto)
+    assert "`fit`" in note
+    proto = _levelled_proto({"method": {"robust_t": 3, "mystery": 3}})
+    [note] = metric_spec.known_value_problems(proto)
+    assert "`mystery`" in note
+    assert metric_spec.known_value_problems(_levelled_proto(_PER_METHOD)) == []

@@ -150,7 +150,9 @@ KNOWN_VALUE_HELP = (
     "for its standard error) and/or `interval` ([the name of the lower end, the name of the upper end]), and `level` (the "
     "interval's level, for example 0.95), and, when the interval is the estimate plus and minus one multiple of its "
     "standard error in every setting, `degrees_of_freedom` (the whole number of the t distribution whose quantile is the "
-    "multiple, or \"normal\" for the normal quantile; leave it out when the multiple changes between settings)")
+    "multiple, or \"normal\" for the normal quantile; when the study compares values of a factor that give the interval "
+    "different multiples, give it per value, {<factor>: {<value>: <whole number or \"normal\">}}; leave it out when the "
+    "multiple changes between settings in any other way)")
 
 
 #: What the plan is told about declaring a known true value (spliced into the plan request by the engine, after the
@@ -166,6 +168,9 @@ PLAN_RULE = (
     "setting, ALWAYS give `degrees_of_freedom`: it is the multiplier you chose for the design, so choose it from the "
     "error model and write it down (\"normal\" when the standard error rests on a known variance or on a large "
     "sample; the whole number n-1, or whatever the estimator has, when the variance is estimated from n observations). "
+    "When the study compares values of a factor (a grid parameter, or a method compared in each run) that give the "
+    "interval different multipliers, give `degrees_of_freedom` per value instead, {<factor>: {<value>: <whole number "
+    "or \"normal\">}}, one entry for every value. "
     "FI recovers the multiplier the code used from the trials' own intervals and sends the code back when it differs "
     "from yours; a plan that leaves `degrees_of_freedom` out gets no such check. `true_value` is always a number the "
     "study itself fixes (a constant, a threshold, a grid parameter, or a formula of them). Never put there a value you "
@@ -209,14 +214,39 @@ def _known_value(ident: str, raw: Any) -> tuple[dict[str, Any] | None, str]:
     out["level"] = float(level)
     if raw.get("degrees_of_freedom") is not None:
         df = raw["degrees_of_freedom"]
-        if not (df == "normal" or isinstance(df, int) and not isinstance(df, bool) and df >= 1):
+        if isinstance(df, dict):  # one multiplier per value of a factor the study compares
+            table, why = _df_by_value(df)
+            if table is None:
+                return None, where + why
+            df = table
+        elif not _is_df(df):
             return None, (where + "`known_value.degrees_of_freedom` must be a whole number from 1 (the t distribution the "
-                          "interval's multiple comes from) or \"normal\"")
+                          "interval's multiple comes from) or \"normal\"; when the study compares several values of a factor "
+                          "that change the multiple, give it per value: {<factor>: {<value>: <whole number or \"normal\">}}")
         if "standard_error" not in out or "interval" not in out:
             return None, (where + "`known_value.degrees_of_freedom` says the interval is the estimate plus and minus a "
                           "multiple of the standard error, so it needs both `standard_error` and `interval`")
         out["degrees_of_freedom"] = df
     return out, ""
+
+
+def _is_df(df: Any) -> bool:
+    return df == "normal" or isinstance(df, int) and not isinstance(df, bool) and df >= 1
+
+
+def _df_by_value(raw: dict[Any, Any]) -> tuple[dict[str, dict[str, Any]] | None, str]:
+    """``{factor: {value: degrees of freedom}}`` of a ``degrees_of_freedom`` given per value of one factor the study compares
+    (values are keyed as text, as a record's setting values are matched), or ``(None, why)``."""
+    if len(raw) != 1:
+        return None, "`known_value.degrees_of_freedom` per value names exactly one factor: {<factor>: {<value>: <df>}}"
+    (axis, vals), = raw.items()
+    if not isinstance(axis, str) or not axis.strip() or not isinstance(vals, dict) or not vals:
+        return None, "`known_value.degrees_of_freedom` per value is {<factor>: {<value>: <whole number or \"normal\">}}"
+    bad = [str(v) for v, d in vals.items() if not _is_df(d)]
+    if bad:
+        return None, ("`known_value.degrees_of_freedom` of " + ", ".join(f"`{b}`" for b in bad[:3])
+                      + " must be a whole number from 1 or \"normal\"")
+    return {axis.strip(): {str(v): d for v, d in vals.items()}}, ""
 
 
 def fixed_numbers(protocol: dict[str, Any] | None, thresholds: dict[str, Any] | None = None) -> dict[str, float]:
@@ -256,6 +286,20 @@ def known_value_problems(protocol: dict[str, Any] | None) -> list[str]:
     axes = {str(k) for part in ("grid", "in_each_run") if isinstance(protocol.get(part), dict) for k in protocol[part]}
     out = []
     for spec in declared(protocol):
+        df = (spec.get("known_value") or {}).get("degrees_of_freedom")
+        if isinstance(df, dict):
+            (axis, table), = df.items()
+            part = next((protocol[k] for k in ("grid", "in_each_run")
+                         if isinstance(protocol.get(k), dict) and axis in protocol[k]), None)
+            if part is None:
+                out.append(f"The metric `{spec['id']}` gives its interval's `degrees_of_freedom` per value of `{axis}`, which "
+                           "is neither a grid parameter nor a value compared in each run of the protocol; name one that is.")
+            else:
+                listed = {str(v) for v in part[axis]} if isinstance(part[axis], (list, tuple)) else set()
+                gone = [v for v in table if listed and v not in listed]
+                if gone:
+                    out.append(f"The metric `{spec['id']}` gives `degrees_of_freedom` for " + ", ".join(f"`{g}`" for g in gone[:3])
+                               + f", which {'is' if len(gone) == 1 else 'are'} not among the values of `{axis}` in the protocol.")
         truth = (spec.get("known_value") or {}).get("true_value")
         if isinstance(truth, str) and truth not in axes and fixed_value(truth, fixed) is None:
             out.append(f"The metric `{spec['id']}` declares its true value as `{truth}`, which is neither a threshold, a "
