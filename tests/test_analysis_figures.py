@@ -603,7 +603,7 @@ def test_the_failure_text_survives_what_a_model_may_read_when_a_quantity_is_left
             pass
         fig.axes[0].plot([1, 2], [1, 2])
 
-    out = _shown(tmp_path, figure_x, table=_real_table(declared=(key,)))
+    out = _shown(tmp_path, figure_x, shows=(key,), table=_real_table(declared=(key,)))
     first, _nl, listed = out["said"].partition("\n")
     assert out["status"] == "failed" and key not in first and key in listed  # the declared ids are on a line of their own
     seen = eng._stderr_for_models(af.said([out]))
@@ -661,7 +661,7 @@ def test_an_undeclared_read_names_the_id_and_the_results_that_can_be_read(tmp_pa
     out = _shown(tmp_path, figure_x, table=_real_table(declared=("r1", "r2")))
     assert out["status"] == "failed"
     assert "The last read raised UnknownResult: `r1_lo` is not a result the plan declares." in out["why"]
-    assert "The results that can be read: r1, r2." in out["why"]
+    assert "The results that can be read: r1." in out["why"] and "r2" not in out["why"].split("can be read")[1]
 
 
 def test_a_known_result_is_read_by_its_coverage_from_the_record(tmp_path):
@@ -924,7 +924,10 @@ def test_default_figure_draws_two_lines_of_three_points(tmp_path, monkeypatch):
     assert len(lines) == 4 and all(len(line.get_xdata()) == 3 for line in lines)  # 2 results x 2 values of the series
     seen.clear()
     _default(tmp_path, shows=["gain", "loss"], x="size")
-    assert len(seen["axes"][0].lines) == 2
+    lines = seen["axes"][0].lines
+    # rate is neither x nor series: it is held at its first value (0.1), so a line holds one point for each size
+    assert [list(l.get_xdata()) for l in lines] == [[10, 20, 30]] * 2
+    assert [list(l.get_ydata()) for l in lines] == [[10.1, 20.1, 30.1], [20.1, 40.1, 60.1]]
 
 
 def test_default_figure_marks_fallback(tmp_path):
@@ -956,3 +959,103 @@ def test_default_figure_one_panel_per_declared_panel(tmp_path, monkeypatch):
     assert [p["title"] for p in out["panels"]] == ["learning rate = 0.1", "learning rate = 0.2"]
     assert [a.get_title() for a in seen["axes"]] == ["learning rate = 0.1", "learning rate = 0.2"]
     assert [len(a.lines) for a in seen["axes"]] == [1, 1]
+
+
+class _Levels(_Grid):
+    """``gain`` is recorded once per setting; ``lev`` once for each of two values compared inside the runs (so ``mean`` raises)."""
+
+    def mean(self, name: str, key: str) -> float:
+        if name == "lev":
+            self.last_error["lev"] = "UnknownResult: `lev` is recorded for each value"
+            raise LookupError("`lev` is recorded for each value of `mode` (a, b)")
+        return super().mean(name, key)
+
+    def per_level(self, name: str, key: str) -> list[str]:
+        return ["a", "b"] if name == "lev" else []
+
+    def level_means(self, name: str, key: str) -> dict[str, float]:
+        self.gave_values.add(name)
+        size = self._cells[key]["size"]
+        return {"a": size + 1.0, "b": size + 2.0}
+
+
+def _spy_axes(monkeypatch):
+    seen = {}
+    real = af._new_figure
+
+    def spy(panels):
+        plt, fig, axes = real(panels)
+        seen["axes"] = axes
+        return plt, fig, axes
+
+    monkeypatch.setattr(af, "_new_figure", spy)
+    return seen
+
+
+def test_default_figure_draws_a_result_recorded_per_compared_value_one_line_each(tmp_path, monkeypatch):
+    seen = _spy_axes(monkeypatch)
+    out = af.default_figure({"id": "f1", "file": "f1.png", "shows": ["lev"], "x": "size", "result_labels": {"lev": "response"}},
+                            _Levels(), str(tmp_path))
+    assert out["status"] == "ok" and out["fallback"] is True
+    lines = seen["axes"][0].lines
+    assert [l.get_label() for l in lines] == ["response, a", "response, b"]
+    assert [list(l.get_ydata()) for l in lines] == [[11.0, 21.0, 31.0], [12.0, 22.0, 32.0]]
+
+
+def test_default_figure_holds_every_other_setting_and_says_which(tmp_path, monkeypatch):
+    seen = _spy_axes(monkeypatch)
+    out = _default(tmp_path, shows=["gain"], x="size", labels={"rate": "learning rate"})
+    assert out["held"] == {"rate": 0.1}
+    ax = seen["axes"][0]
+    assert list(ax.lines[0].get_ydata()) == [10.1, 20.1, 30.1] and ax.get_title() == "learning rate = 0.1"
+    assert ax.get_ylabel() == "gain" and ax.get_legend() is not None  # one line still gets a y label and a legend
+
+
+def test_default_figure_says_when_it_has_fewer_panels_than_asked(tmp_path):
+    out = _default(tmp_path, shows=["gain"], x="size", panels=3, settings={"rate": [0.1, 0.2]})
+    assert out["status"] == "ok" and len(out["panels"]) == 2 and "2 panel(s) instead of the 3" in out["why"] and out["note"] == out["why"]
+    one = _default(tmp_path, shows=["gain"], x="size", panels=2)
+    assert "1 panel(s) instead of the 2" in one["why"]
+
+
+def test_default_figure_categorical_x_keeps_one_axis_for_every_line(tmp_path, monkeypatch):
+    seen = _spy_axes(monkeypatch)
+
+    class Cat(_Grid):
+        def __init__(self):
+            super().__init__()
+            self._cells = {"m=%s" % m: {"m": m} for m in ("p", "q", "r")}
+
+        def mean(self, name, key):
+            self.gave_values.add(name)
+            return float(len(key))
+
+    af.default_figure({"id": "f1", "file": "f1.png", "shows": ["gain", "loss"], "x": "m"}, Cat(), str(tmp_path))
+    ax = seen["axes"][0]
+    assert [t.get_text() for t in ax.get_xticklabels()] == ["p", "q", "r"] and all(list(l.get_xdata()) == [0, 1, 2] for l in ax.lines)
+
+
+def test_default_figure_drops_when_no_value_is_readable_and_does_not_leave_a_stale_error(tmp_path):
+    class Empty(_Grid):
+        def mean(self, name, key):
+            self.last_error[name] = "RuntimeError: nothing"
+            return None
+
+    table = Empty()
+    out = af.default_figure({"id": "f1", "file": "f1.png", "shows": ["gain"], "x": "size"}, table, str(tmp_path))
+    assert out["status"] == "dropped" and "no value of `gain` along `size`" in out["why"] and out["fallback"] is True
+    assert not (tmp_path / "f1.png").exists() and table.last_error == {}
+
+
+def test_default_figure_own_fault_is_fi_fault_with_fallback_and_no_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(af, "_new_figure", lambda panels: (_ for _ in ()).throw(RuntimeError("boom")))
+    out = _default(tmp_path, shows=["gain"], x="size")
+    assert out["status"] == "fi_fault" and out["fallback"] is True and "boom" in out["why"] and not (tmp_path / "f1.png").exists()
+
+
+def test_unknown_result_tail_lists_only_the_figures_own_results_uncut(tmp_path):
+    ids = ["r%03d" % i for i in range(120)]  # a tail well over the old 600 characters
+    table = _Grid("UnknownResult: `zz` is not a result the plan declares; the declared results are: " + ", ".join(ids))
+    out = af.run_figures([{"id": "x", "file": "x.png", "shows": ["r007", "r110"]}], {"figure_x": lambda fig, t: fig.axes[0].axhline(1)},
+                         table, str(tmp_path))[0]
+    assert "The results that can be read: r007, r110." in out["why"] and "r008" not in out["why"]
