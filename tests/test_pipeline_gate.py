@@ -304,3 +304,21 @@ def test_failed_trials_among_the_first_three_keep_ok_and_count_consistent(tmp_pa
     cell = json.loads((tmp_path / "s" / "raw" / "trials.json").read_text(encoding="utf-8"))["cells"][0]
     assert (cell["ok"], cell["failed"], cell["planned"]) == (2, 1, 3)
     assert cell["metrics"]["fill_s"]["count"] == cell["ok"] == len(cell["metrics"]["fill_s"]["values"])
+
+
+async def test_a_read_the_records_shape_refuses_is_a_fault_not_too_few_trials(tmp_path):
+    # FI's frame raises UnknownResult for an id the plan does not declare or a result read in a form the record does not
+    # hold; the small copy keeps the record's shape, so more trials never change it.
+    script = ("class UnknownResult(KeyError):\n    pass\n\n"
+              + OK_SCRIPT.replace('print("RESULT_JSON', 'raise UnknownResult("`x` is recorded for each value of `m`")\n    print("RESULT_JSON'))
+    got = await run_gate(tmp_path, script)
+    assert not got.ok and got.stage == "derive" and got.kind == gate.FAULT and got.exception == "UnknownResult"
+    assert gate.kind_of("UnknownResult") == gate.FAULT
+    assert gate.gate_verdict(gate.GateResult(True), got).reject
+
+
+async def test_a_division_by_zero_from_too_few_trials_stays_small_data(tmp_path):
+    script = OK_SCRIPT.replace('print("RESULT_JSON', 'print(1 / (len(data["cells"][0]["metrics"]["fill_s"]["values"]) - 3))\n    print("RESULT_JSON')
+    got = await run_gate(tmp_path, script)
+    assert not got.ok and got.kind == gate.SMALL_DATA and got.exception == "ZeroDivisionError"
+    assert not gate.gate_verdict(gate.GateResult(True), got).reject

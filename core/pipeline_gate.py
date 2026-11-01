@@ -60,9 +60,11 @@ CONFIRM_TIMEOUT_S = 40
 COPY_CAP = 1024 * 1024 * 1024  # the whole copy of the quest's folders
 DATA_CAP = 500 * 1024 * 1024  # ``data/`` alone
 FAULT, SMALL_DATA, TIME, NOT_CHECKED = "fault", "small_data", "time", "not_checked"
-#: The exceptions that say the code is wrong whatever the data.
+#: The exceptions that say the code is wrong whatever the data. ``UnknownResult`` is FI's own frame refusing a read (a result
+#: the plan does not declare, or one read in a form the record does not hold): the record's shape decides it, and the small
+#: copy keeps every setting and compared value of that shape, so more trials never change it.
 _HARD_FAULTS = frozenset({"NameError", "UnboundLocalError", "ImportError", "ModuleNotFoundError",
-                          "SyntaxError", "IndentationError", "TabError"})
+                          "SyntaxError", "IndentationError", "TabError", "UnknownResult"})
 #: The exceptions that say so only if they show on more data too (too little data can raise them).
 _MAYBE_FAULTS = frozenset({"AttributeError", "TypeError"})
 _FAULTS = _HARD_FAULTS | _MAYBE_FAULTS
