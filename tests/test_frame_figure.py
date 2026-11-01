@@ -257,7 +257,7 @@ def test_error_bars_record_their_meaning():
     h.bars(1, "fast", [1, 2], [1.0, 2.0], "growth", yerr=[-0.1, 0.2], yerr_meaning="sd")
     h.line(1, "slow", [1, 2], [1.0, 2.0], "growth")
     r = h.record()["panels"]
-    assert [s["yerr_meaning"] for s in r[0]["series"]] == ["other", "other"]  # range cannot be checked against the table
+    assert [s["yerr_meaning"] for s in r[0]["series"]] == ["range", "other"]  # range has no width in the table to check
     assert r[1]["series"][0]["yerr_meaning"] == "other" and r[1]["series"][0]["yerr"] == [0.1, 0.2]  # sd typed, table says 0
     assert r[1]["series"][1]["yerr_meaning"] is None
     with pytest.raises(ValueError) as e:
@@ -600,3 +600,34 @@ def test_note_writes_a_setting_value_and_names_the_known_settings_when_unknown()
     assert "size" in str(e.value) and "step" in str(e.value)
     with pytest.raises(ValueError):
         h.note(0, 1.0, 1.0, "size 640 is {size}", key="size=2")
+
+
+def test_a_note_refuses_a_setting_key_the_study_does_not_hold():
+    h = _host_by_x(1)
+    with pytest.raises(ValueError) as e:
+        h.note(0, 1.0, 1.0, "run at size {size}", key="size=640")
+    assert "size=1" in str(e.value) and "size=2" in str(e.value)
+    assert h.record()["panels"][0]["notes"] == []
+
+
+def test_bars_keep_ci95_only_when_every_point_matches_the_table():
+    h = _host_by_x(1)
+    h.line(0, "fast", [1, 2], [2.0, 4.0], "growth", yerr=([0.5, 9.0], [1.0, 9.0]), yerr_meaning="ci95")  # right at size 1 only
+    h.line(0, "slow", [1, 7], [2.0, 4.0], "growth", yerr=([0.5, 9.0], [1.0, 9.0]), yerr_meaning="ci95")  # size 7 has no key
+    h.points(0, "fast", [1, 2], [2.0, 4.0], "growth", yerr=([0.5, 1.0], [1.0, 2.0]), yerr_meaning="ci95")
+    assert [s["yerr_meaning"] for s in h.record()["panels"][0]["series"]] == ["other", "other", "ci95"]
+
+
+def test_sd_without_an_sd_read_is_the_sample_sd_of_the_values():
+    class _NoSd(_Table):  # no `sd` read at all
+        def keys(self):
+            return ["size=1", "size=2"]
+
+        def values(self, name, key):
+            return [1.0, 3.0] if key == "size=1" else [2.0, 4.0, 6.0]
+
+    h = _host_by_x(1)
+    h.table = _NoSd()
+    h.line(0, "fast", [1, 2], [2.0, 4.0], "growth", yerr="sd")
+    s = h.record()["panels"][0]["series"][0]
+    assert s["yerr_lo"] == pytest.approx([math.sqrt(2.0), 2.0]) and s["yerr_meaning"] == "sd"

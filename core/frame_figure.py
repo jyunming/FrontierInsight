@@ -335,24 +335,25 @@ class FigureCalls:
             hi.append(b)
         return (lo, hi) if any(v is not None for v in lo + hi) else None
 
-    def _checked_meaning(self, meaning, what, x_id, xs, lo, hi):
+    def _checked_meaning(self, meaning, what, x_id, xs, ys, lo, hi):
         """What error bars of typed widths may be called. ``ci95``/``sd`` stay only when the widths equal the table's own for
-        that meaning at the same points (``BAR_RTOL``); ``range`` cannot be checked, and a mismatch or an unreadable table both
-        give ``other`` (the bars are drawn, no claim about their meaning is offered)."""
+        that meaning at EVERY drawn point (``BAR_RTOL``): one point the table gives no width for, or one that differs, an unreadable
+        table, all give ``other`` (the bars are drawn, no claim about their meaning is offered). ``range`` has no width in the
+        table and stays as stated. The table's sd is its ``sd`` read, else the sample sd (n - 1) of its ``values``."""
         if meaning not in ("ci95", "sd"):
-            return "other"
+            return meaning  # range and other have no width in the table to check; they stay as the body stated them
         got = self._table_widths(meaning, what, x_id, xs)
         if got is None:
             return "other"
-        compared = 0
-        for mine, theirs in ((lo, got[0]), (hi, got[1])):
-            for a, b in zip(mine, theirs):
-                if b is None:
-                    continue
-                compared += 1
-                if not _close_width(a, b):
+        drawn = False
+        for i, v in enumerate(ys):
+            if v is None:  # a gap has no bar
+                continue
+            drawn = True
+            for mine, theirs in ((lo, got[0]), (hi, got[1])):
+                if theirs[i] is None or not _close_width(mine[i], theirs[i]):  # one unverifiable or unmatched bar: no claim
                     return "other"
-        return meaning if compared else "other"
+        return meaning if drawn else "other"
 
     def _add_series(self, panel, kind, series, x, y, what, yerr, yerr_meaning, step=False):
         """Check a series call and draw it; the record gets the series only if it was drawn."""
@@ -386,7 +387,7 @@ class FigureCalls:
             if len(lo) != len(ys) or len(hi) != len(ys):
                 raise ValueError("yerr has %d values and y has %d: one bar half-width for each y (a pair has one list of lower and "
                                  "one of upper widths)" % (len(lo), len(ys)))
-            yerr_meaning = self._checked_meaning(yerr_meaning, what, x_id, xs, lo, hi)
+            yerr_meaning = self._checked_meaning(yerr_meaning, what, x_id, xs, ys, lo, hi)
         legend = self._label_of(series)
         with _undone(ax, rec):
             self._set_x(rec, x_id)
@@ -541,6 +542,8 @@ class FigureCalls:
             if len(keys) != 1:
                 raise ValueError("say which setting key the note reads with `key=`; the keys are: %s" % (", ".join(keys) or "(none)"))
             key = keys[0]
+        elif key not in keys:  # a typed key would put a typed number in the figure
+            raise ValueError("`key=%r` is not a setting key of the study; the keys are: %s" % (key, ", ".join(keys) or "(none)"))
         got = None
         if hasattr(table, "setting"):
             try:
