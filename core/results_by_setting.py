@@ -483,6 +483,9 @@ class Built:
     diagnostics: list[str] = field(default_factory=list)
     #: ``notes`` as the paper shows them (a quantity by the plan's label); the files keep ``notes``.
     paper_notes: list[str] = field(default_factory=list)
+    #: The plan's sub-studies (name, vary, hold) when it runs the study as parts rather than as one full cross; the slice
+    #: of a long table is then cut part by part (:func:`_slice`).
+    sub_studies: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _quantities(protocol: dict[str, Any] | None, values: list[str]) -> tuple[list[tuple[str, str]], list[str]]:
@@ -634,7 +637,9 @@ def build(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, fil
                             name=name if name != value else "", paper_caption=paper_caption + tail))
     if not quantities:
         notes.append("The trials returned no value that varies, so there is nothing to tabulate.")
-    return Built(found, computed, tables, notes, rows, diagnostics, [paper_notes.get(n, n) for n in notes])
+    parts = (protocol or {}).get("sub_studies") if isinstance(protocol, dict) else None
+    return Built(found, computed, tables, notes, rows, diagnostics, [paper_notes.get(n, n) for n in notes],
+                 [p for p in parts if isinstance(p, dict)] if isinstance(parts, list) else [])
 
 
 # --- renderings (pure) -------------------------------------------------------------------------------------------------
@@ -657,7 +662,7 @@ def markdown(table: Table, plain: bool = False) -> str:
 
 _TEX_SPECIAL = {"\\": r"\textbackslash{}", "&": r"\&", "%": r"\%", "$": r"\$", "#": r"\#", "_": r"\_", "{": r"\{",
                 "}": r"\}", "~": r"\textasciitilde{}", "^": r"\textasciicircum{}", "±": r"$\pm$", "≤": r"$\le$",
-                "≥": r"$\ge$", "×": r"$\times$", "π": r"$\pi$"}
+                "≥": r"$\ge$", "×": r"$\times$", "π": r"$\pi$", "–": "--"}
 
 
 def tex_escape(text: str) -> str:
@@ -731,8 +736,78 @@ def reference_section_latex(built: Built) -> str:
     return r"\paragraph{Reference values.} " + tex_escape(body) + "\n"
 
 
-def _slice(built: Built) -> list[Table]:
-    """The tables cut to the settings at the first, middle and last value of each axis that takes more than three."""
+def _first_middle_last(vals: list[Any], ends_only: bool = False) -> list[Any]:
+    """The values of one axis a slice keeps: all of them when there are at most three, else the first, middle and last
+    (``ends_only``: all of them when there are at most two, else the first and last)."""
+    try:
+        ordered = sorted(vals)
+    except TypeError:
+        ordered = list(vals)
+    if ends_only:
+        return ordered if len(ordered) <= 2 else [ordered[0], ordered[-1]]
+    return ordered if len(ordered) <= 3 else [ordered[0], ordered[len(ordered) // 2], ordered[-1]]
+
+
+def _same_value(a: Any, b: Any) -> bool:
+    return json.dumps(a, default=str) == json.dumps(b, default=str) or (
+        isinstance(a, (int, float)) and isinstance(b, (int, float)) and not isinstance(a, bool) and not isinstance(b, bool)
+        and a == b)
+
+
+def _picked_by_part(built: Built, ends_only: bool = False) -> list[set[str]] | None:
+    """For a study run as sub-studies, the axes each part varies and, for each distinct setting, the parts that keep it:
+    ``[set of vary-axes of the keeping parts]`` per setting, or ``None`` when the settings are not all covered by the parts
+    (then the slice is cut as for a full cross). A part keeps the settings that hold its ``hold`` values and take, on each
+    axis it varies, the first, middle or last of that part's values; an axis it holds is not picked."""
+    settings = built.distinct.settings
+    parts = [p for p in built.sub_studies if isinstance(p.get("vary"), list) and isinstance(p.get("hold") or {}, dict)]
+    if not parts or not settings:
+        return None
+    kept_by: list[set[str]] = [set() for _ in settings]
+    member_of_any = [False] * len(settings)
+    for part in parts:
+        hold = part.get("hold") or {}
+        members = [i for i, s in enumerate(settings)
+                   if all(_same_value(s.setting[a], v) for a, v in hold.items() if a in s.setting)]
+        vary = [a for a in part["vary"] if any(a in settings[i].setting for i in members)]
+        picked: dict[str, list[Any]] = {}
+        for a in vary:
+            values: list[Any] = []
+            for i in members:
+                v = settings[i].setting.get(a)
+                if a in settings[i].setting and not any(_same_value(v, w) for w in values):
+                    values.append(v)
+            picked[a] = _first_middle_last(values, ends_only)
+        for i in members:
+            member_of_any[i] = True
+            if all(any(_same_value(settings[i].setting[a], w) for w in picked[a]) for a in vary if a in settings[i].setting):
+                kept_by[i] |= set(vary)
+                kept_by[i].add("")  # marks the setting as kept by at least one part
+    if not all(member_of_any):
+        return None
+    return kept_by
+
+
+#: What a cell of an axis a sub-study holds but does not vary shows in a slice: the value there is only the part's fixed
+#: setting, not one the part compares.
+HELD_AXIS = "–"
+
+
+def _slice(built: Built, cap: int | None = None) -> list[Table]:
+    """The tables cut to the settings at the first, middle and last value of each axis that takes more than three. A study
+    run as sub-studies is cut part by part (each part's own axes; the axes it holds show :data:`HELD_AXIS`), not as a full
+    cross, in which a whole part could be cut away; when that is more than ``cap`` rows, only the first and last value of
+    each axis a part varies are kept."""
+    more = " Only the first, middle and last value of each setting are shown here."
+    by_part = _picked_by_part(built) if built.sub_studies else None
+    if by_part is not None:
+        cut = [_slice_by_part(t, built, by_part, more) for t in built.tables]
+        if cap is not None and sum(len(t.rows) for t in cut) > cap:
+            ends = _picked_by_part(built, ends_only=True)
+            if ends is not None:
+                cut = [_slice_by_part(t, built, ends, more.replace("first, middle and last", "first and last"))
+                       for t in built.tables]
+        return cut
     keep_values: dict[str, set[str]] = {}
     axes: dict[str, list[Any]] = {}
     for s in built.distinct.settings:
@@ -741,16 +816,32 @@ def _slice(built: Built) -> list[Table]:
             if v not in axes[k]:
                 axes[k].append(v)
     for k, vals in axes.items():
-        try:
-            ordered = sorted(vals)
-        except TypeError:
-            ordered = list(vals)
-        picked = ordered if len(ordered) <= 3 else [ordered[0], ordered[len(ordered) // 2], ordered[-1]]
-        keep_values[k] = {json.dumps(v, default=str) for v in picked}
+        keep_values[k] = {json.dumps(v, default=str) for v in _first_middle_last(vals)}
     keep = [all(json.dumps(v, default=str) in keep_values[k] for k, v in s.setting.items()) for s in built.distinct.settings]
-    more = " Only the first, middle and last value of each setting are shown here."
     return [Table(t.label, t.caption + more, t.columns, t.align, [r for r, k in zip(t.rows, keep) if k], t.value, t.name,
                   t.paper_caption + more if t.paper_caption else "") for t in built.tables]
+
+
+def _slice_by_part(t: Table, built: Built, by_part: list[set[str]], more: str) -> Table:
+    """``t`` cut to the settings some sub-study keeps, in plan order, the axes a keeping part holds shown as a dash."""
+    settings = built.distinct.settings
+    n_axes = next((i - 1 for i in range(len(t.columns) - 1, 0, -1) if t.columns[i] == t.value and t.columns[i - 1] == "n"), 0)
+    axis_cols = t.columns[:n_axes]
+    # A table may leave out a setting the quantity has no value at, so a row is matched to its setting by what it shows.
+    by_text: dict[tuple[str, ...], int] = {}
+    for i, s in enumerate(settings):
+        by_text.setdefault(tuple(_axis_text(s.setting.get(a, "")) if a in s.setting else "" for a in axis_cols), i)
+    rows = []
+    for row in t.rows:
+        i = by_text.get(tuple(row[:n_axes]))
+        if i is None or "" not in by_part[i]:
+            continue
+        shown = [HELD_AXIS if (a in settings[i].setting and a not in by_part[i]) else v for a, v in zip(axis_cols, row[:n_axes])]
+        rows.append(shown + row[n_axes:])
+    dash = (f" A dash ({HELD_AXIS}) marks a setting a part of the study holds fixed rather than varies."
+            if any(HELD_AXIS in r[:n_axes] for r in rows) else "")
+    return Table(t.label, t.caption + more + dash, t.columns, t.align, rows, t.value, t.name,
+                 t.paper_caption + more + dash if t.paper_caption else "")
 
 
 def writer_note(trial_rows: list[dict[str, Any]], built: Built | None, cap: int | None = None) -> str:
@@ -770,7 +861,7 @@ def writer_note(trial_rows: list[dict[str, Any]], built: Built | None, cap: int 
     total = sum(len(t.rows) for t in built.tables)
     if total <= cap:
         return head + ("\n\n" + extra if extra else "") + "\n\n" + "\n".join(markdown(t) for t in built.tables)
-    cut = _slice(built)
+    cut = _slice(built, cap)
     if 0 < sum(len(t.rows) for t in cut) <= cap:
         return (head + f" They have {total} rows, too many for this note, so here is a slice." +
                 ("\n\n" + extra if extra else "") + "\n\n" + "\n".join(markdown(t) for t in cut))
@@ -821,7 +912,7 @@ def paper_block(built: Built | None, cap: int | None = None) -> str:
     if total <= cap:
         tables, lead = built.tables, []
     else:
-        cut = _slice(built)
+        cut = _slice(built, cap)
         if 0 < sum(len(t.rows) for t in cut) <= cap:
             tables = cut
             lead = [f"FI's tables of every setting have more rows than fit here; the full tables are in {files}."]
