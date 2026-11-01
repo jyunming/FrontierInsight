@@ -159,3 +159,33 @@ def test_the_crashed_script_repair_reads_a_sentence_before_its_object() -> None:
     from core import engine
 
     assert '_repair_reply_json(text, node="execute_reflect")' in inspect.getsource(engine.Engine)
+
+
+def test_an_object_whose_code_is_not_a_string_is_not_a_reply() -> None:
+    from core.engine import _repair_reply_json
+
+    assert _repair_reply_json('The config is {"code": 1}. Nothing else.', node="t") == {}
+    assert _repair_reply_json('{"code": 1, "functions": ""}', node="t") == {}
+    assert _repair_reply_json('See {"functions": ["a"]}.', node="t") == {}
+
+
+def test_a_give_up_quoted_in_prose_never_beats_the_fence_that_fixes() -> None:
+    from core.engine import _repair_reply_json
+
+    fix = {"functions": "def f():\n    return 1\n", "code": ""}
+    reply = 'I will not write {"give_up_reason": "cannot"} here.\n```json\n' + json.dumps(fix) + "\n```\n"
+    assert _repair_reply_json(reply, node="t") == fix
+
+
+def test_the_prompts_own_format_echoed_back_is_not_a_fix() -> None:
+    import re
+
+    from core.engine import PROMPTS_DIR, _repair_reply_json
+
+    text = (PROMPTS_DIR / "execute_reflect.md").read_text(encoding="utf-8")
+    fn = re.search(r'^\s*"functions":\s*"(<.*>)",?\s*$', text, re.MULTILINE).group(1)
+    code = re.search(r'^\s*"code":\s*"(<.*>)",?\s*$', text, re.MULTILINE).group(1)
+    echo = json.dumps({"functions": fn, "code": code, "deps": [], "patch_summary": "<one sentence>", "give_up_reason": None})
+    assert _repair_reply_json("The format is:\n" + echo, node="t") == {}
+    real = {"functions": "def f():\n    return 1\n", "code": code}
+    assert _repair_reply_json("Done.\n" + json.dumps(real), node="t")["functions"].startswith("def f")

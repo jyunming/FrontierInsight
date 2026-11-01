@@ -33774,6 +33774,16 @@ _REPAIR_REPLY_KEYS = ("functions", "code", "package_files", "oracle_change", "pa
 _CODE_FENCE_RE = re.compile(r"```[ \t]*(\w*)[^\n]*\n.*?(?:```|\Z)", re.DOTALL)
 
 
+def _repair_template_values() -> set[str]:
+    """The placeholder text FI's own repair prompt (agents/execute_reflect.md) puts in ``functions`` and ``code`` of its
+    format example, read from the prompt file so a reply that echoes the format is told from one that fixes something."""
+    try:
+        text = (PROMPTS_DIR / "execute_reflect.md").read_text(encoding="utf-8")
+    except OSError:
+        return set()
+    return {m.group(1).strip() for m in re.finditer(r'^\s*"(?:functions|code)":\s*"(<.*>)",?\s*$', text, re.MULTILINE)}
+
+
 def _repair_reply_json(text: str, *, node: str) -> dict[str, Any]:
     """The JSON object of a repair's reply, or ``{}`` when the reply holds none. A reply that is the object (bare or in one
     fence) is read as it is. A reply that opens with a sentence of the model's own ("I have not run this ...") is read from
@@ -33782,14 +33792,26 @@ def _repair_reply_json(text: str, *, node: str) -> dict[str, Any]:
     that is not JSON (a dict in the script) is not the reply, and a reply that is a whole script in a code block gives
     ``{}``, for the caller to read as code."""
     if _strip_outer_fence(text).lstrip().startswith("{"):
-        return _parse_json_lenient(text, node=node) or {}
+        parsed = _parse_json_lenient(text, node=node) or {}
+        return parsed if all(isinstance(parsed.get(k), str) or parsed.get(k) is None for k in ("functions", "code")) else {}
     prose = _CODE_FENCE_RE.sub(lambda m: m.group(0) if m.group(1).lower() in ("", "json") else "\n", text or "")
     found = [o for o in _top_level_json_objects(prose) if any(k in o for k in _REPAIR_REPLY_KEYS)]
+
+    template = _repair_template_values()
+
+    def blanked(o: dict[str, Any]) -> dict[str, Any]:
+        return {k: ("" if k in ("functions", "code") and isinstance(v, str) and v.strip() in template else v)
+                for k, v in o.items()}
 
     def carries_fix(o: dict[str, Any]) -> bool:
         return any(isinstance(o.get(k), str) and o[k].strip() for k in ("functions", "code")) or any(
             o.get(k) for k in ("oracle_change", "package_files"))
 
+    # An object whose `functions` or `code` is not a string is not a repair reply. The prompt's own format echoed back
+    # (its placeholder text in `functions` or `code`) is not a fix: the placeholder is dropped, and an object left with
+    # no fix and no give-up is not a reply either.
+    found = [blanked(o) for o in found if all(isinstance(o.get(k), str) or o.get(k) is None for k in ("functions", "code"))]
+    found = [o for o in found if carries_fix(o) or str(o.get("give_up_reason") or "").strip()]
     fixes = [o for o in found if carries_fix(o)]
     return (fixes or found or [{}])[-1]
 
