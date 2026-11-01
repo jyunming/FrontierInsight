@@ -429,6 +429,19 @@ class Records:
             return out
         return self._once("carrying", make).get(metric, [])
 
+    def same_across(self, metric: str, axis: str) -> bool:
+        """Whether ``metric``'s trial values are identical at every value of ``axis``, setting by setting over the other axes
+        (a quantity the setting does not enter). ``False`` unless at least two values of ``axis`` carry it and every group of
+        settings that differ only in ``axis`` has the same values at each of them."""
+        groups: dict[str, list[tuple[str, ...]]] = {}
+        for c in self.carrying(metric):
+            if axis not in c["cell"]:
+                return False
+            rest = json.dumps({k: v for k, v in c["cell"].items() if k != axis}, sort_keys=True, default=str)
+            groups.setdefault(rest, []).append(tuple(repr(v) for v in _trials([c], metric)))
+        return (bool(groups) and any(len(g) > 1 for g in groups.values())
+                and all(len(g) == 1 or len(set(g)) == 1 for g in groups.values()))
+
     def at_setting(self, metric: str, values: dict[str, Any]) -> list[dict[str, Any]] | None:
         """The cells carrying ``metric`` whose setting may be the one ``values`` names (an axis -> value for every axis
         those cells carry), found by lookup; ``None`` when ``values`` does not name exactly those axes. The cells are

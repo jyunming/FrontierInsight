@@ -247,3 +247,56 @@ def test_an_answer_line_names_the_setting_it_differs_with_by_the_plans_label(tmp
     monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: PROTOCOL)
     assert "it differs with dose; this is the mean" in pf.answers_text(root)
 
+
+def _compared_quest(tmp_path, monkeypatch, flat_values=True):
+    """Two results over a step size ``dt`` and an angle ``ang``; the plan compares step sizes. ``flat`` has the same trial values at
+    every step size; ``step`` does not."""
+    def met(vs):
+        return {"values": vs, "trials": list(range(len(vs))), "count": len(vs), "total": 0.0, "non_finite": 0}
+
+    cells = []
+    for dt in (1, 2, 3):
+        for ang in (10, 20):
+            flat = [0.1 * ang, 0.1 * ang + 0.01] if flat_values else [0.1 * ang * dt, 0.1 * ang * dt + 0.01]
+            cells.append({"cell": {"dt": dt, "ang": ang}, "key": f"dt={dt},ang={ang}", "planned": 2, "ok": 2, "failed": 0,
+                          "metrics": {"flat": met(flat), "step": met([0.5 * dt * ang, 0.5 * dt * ang + 0.1])}})
+    (tmp_path / "raw").mkdir(parents=True)
+    (tmp_path / "raw" / "trials.json").write_text(json.dumps({"cells": cells}), encoding="utf-8")
+    (tmp_path / ".fi").mkdir()
+    req = {"quantities": [{"name": "flat error", "main": True}, {"name": "step error", "main": True}]}
+    (tmp_path / ".fi" / "topic_requirements.json").write_text(json.dumps(req), encoding="utf-8")
+    protocol = {"metrics": [{"id": "flat", "label": "Flat error", "kind": "mean"}, {"id": "step", "label": "Step error", "kind": "mean"}],
+                "comparisons": [{"id": "c1", "result": "flat", "across": "dt", "how": "ratio"},
+                                {"id": "c2", "result": "step", "across": "dt", "how": "ratio"}],
+                "topic_map": [{"item": "Q1", "by": "metric:flat"}, {"item": "Q2", "by": "metric:step"}]}
+    monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: protocol)
+    return tmp_path
+
+
+def test_a_result_the_compared_setting_does_not_enter_gets_one_line_not_one_for_each_value(tmp_path, monkeypatch) -> None:
+    """Before: the plan compared step sizes, so the answers block wrote one line for each of the 3 step sizes for a result whose
+    values are the same at all of them. Now FI sees that in its record and writes one line; the result that does change with the
+    step size keeps one line for each value."""
+    root = _compared_quest(tmp_path, monkeypatch)
+    text = pf.answers_text(root)
+    flat = [ln for ln in text.splitlines() if ln.startswith("- flat error")]
+    step = [ln for ln in text.splitlines() if ln.startswith("- step error")]
+    assert len(flat) == 1 and "dt = " not in flat[0] and "{{v:flat @ ang=each, dt=1 | range}}" in flat[0]
+    assert "it differs with ang;" in flat[0]
+    assert len(step) == 3 and all(f"(dt = {d})" in ln for d, ln in zip((1, 2, 3), step))
+    rec = pv.records_of(root, pf.plan_protocol(root))
+    assert pv.resolve("{{v:flat @ ang=each, dt=1 | range}}", rec).filled
+
+
+def test_a_result_that_does_change_with_the_compared_setting_keeps_a_line_for_each_value(tmp_path, monkeypatch) -> None:
+    root = _compared_quest(tmp_path, monkeypatch, flat_values=False)
+    flat = [ln for ln in pf.answers_text(root).splitlines() if ln.startswith("- flat error")]
+    assert len(flat) == 3 and all(f"(dt = {d})" in ln for d, ln in zip((1, 2, 3), flat))
+
+
+def test_same_across_needs_two_values_and_every_group_equal(tmp_path, monkeypatch) -> None:
+    root = _compared_quest(tmp_path, monkeypatch)
+    rec = pv.records_of(root, pf.plan_protocol(root))
+    assert rec.same_across("flat", "dt") and not rec.same_across("step", "dt")
+    assert not rec.same_across("flat", "ang")
+    assert not rec.same_across("flat", "missing_axis")

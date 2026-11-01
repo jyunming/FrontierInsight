@@ -1378,8 +1378,17 @@ def answers_text(quest_root: Path | str) -> str:
         per_run = [a for a in varied if a in rec.in_run_axes() and a not in held and a not in at]
         each = [a for a in varied if a not in per_run and a not in at]
         split = next((a for a in each if a in compared), None)
+        # A result the compared setting does not enter has the same values at each of its values (FI's record): one line, not
+        # one for each value. It is read at the first value of that setting (the numbers are the same at all of them, and no
+        # trial is counted twice).
+        same = split is not None and rec.same_across(metric, split)
+        same_at = []
+        if same:
+            same_at = [f"{rec.short(split)}={(rec.axes().get(split) or [None])[0]}"]
+            each = [a for a in each if a != split]
+            split = None
         pinned = [f"{rec.short(a)}={v}" for a, v in at.items()]
-        fixed = pinned + [f"{rec.short(a)}=all" for a in per_run]
+        fixed = pinned + [f"{rec.short(a)}=all" for a in per_run] + same_at
         levels = [None] if split is None else list(rec.axes().get(split) or [None])
         for level in levels:
             here = [a for a in each if a != split] if level is not None else each
