@@ -368,3 +368,94 @@ def test_menu_layout_lines_and_not_drawn_need_their_inputs():
 def test_custom_formatter_is_used():
     got = fc.evaluate(_base(), "value_at", {"series": "a", "x": "3"}, lambda v: f"<{v}>")
     assert got and "<3.0>" in got[0]
+
+
+# --- fix round 1 -------------------------------------------------------------------------------------------------------
+
+def test_not_drawn_counts_a_merged_id_as_drawn():
+    c = _calls(_panel([_series("a", [1, 2], [1, 2], merged_with=["z"])]))
+    plan = {"series": ["a", "z", "ghost"]}
+    assert fc.evaluate(c, "not_drawn", {"series": "z"}, plan=plan) is None
+    assert fc.evaluate(c, "not_drawn", {"series": "ghost"}, plan=plan)
+    offered = {o["args"]["series"] for o in fc.menu(c, plan) if o["claim"] == "not_drawn"}
+    assert offered == {"ghost"}
+
+
+def _bars():
+    return _calls(_panel([_series("a", ["p", "q", "r"], [3.0, 1.0, None], kind="bars"),
+                          _series("b", ["p", "q", "r"], [2.0, 4.0, 5.0], kind="bars")]))
+
+
+def test_categorical_x_offers_drawn_value_at_order_only():
+    c = _bars()
+    assert ev(c, "drawn", series="a")
+    assert "A is 3 at size p" in ev(c, "value_at", series="a", x="p")[0]
+    assert ev(c, "value_at", series="a", x="r") is None   # a null point is skipped
+    assert ev(c, "value_at", series="a", x="zz") is None
+    assert ev(c, "order", at="q")[0].endswith("are B, A")
+    for cid, args in (("trend", {"series": "a"}), ("crossing", {"a": "a", "b": "b"}),
+                      ("no_crossing", {"a": "a", "b": "b"}), ("range", {"series": "a", "axis": "x"}),
+                      ("missing_x", {"series": "a"})):
+        assert fc.evaluate(c, cid, args, plan={"grid": [1, 2]}) is None
+    assert ev(c, "range", series="a", axis="y")[0].startswith("A spans 1 to 3")
+    claims = {o["claim"] for o in fc.menu(c)}
+    assert {"drawn", "value_at", "order"} <= claims
+    assert not claims & {"trend", "crossing", "no_crossing", "missing_x"}
+
+
+def _image(nrow=2, ncol=3):
+    z = [[float(r * ncol + k) for k in range(ncol)] for r in range(nrow)]
+    return {"id": "img", "label": "IMG", "kind": "image", "step": False, "x": list(range(ncol)),
+            "y": [100.0 * r for r in range(nrow)], "z": z, "yerr": None, "merged_with": []}
+
+
+def test_image_series_only_drawn_and_range_of_z():
+    line = _series("a", [1, 2, 3], [1.0, 2.0, 3.0])
+    c = _calls(_panel([_image(), line]))
+    assert ev(c, "drawn", series="img")           # not square: 3 columns, 2 rows
+    assert ev(c, "range", series="img", axis="y")[0].startswith("IMG has values from 0 to 5")
+    assert ev(c, "range", series="img", axis="x") is None
+    assert ev(c, "range", axis="y")[0].startswith("the series spans 1 to 3")   # the rows never feed it
+    assert ev(c, "range", axis="x")[0].startswith("the series spans 1 to 3")
+    for cid, args in (("trend", {"series": "img"}), ("value_at", {"series": "img", "x": "1"}),
+                      ("identical", {"a": "img", "b": "a"})):
+        assert fc.evaluate(c, cid, args) is None
+    assert not any(o["args"].get("series") == "img" and o["claim"] not in ("drawn", "range", "scale")
+                   for o in fc.menu(c))
+    empty = _calls(_panel([{**_image(), "z": [[None, float("nan")]]}]))
+    assert ev(empty, "drawn", series="img") is None
+
+
+def test_menu_never_raises_on_malformed_input():
+    bad = _calls(_panel([_series("a", [1, 2, 3], [1, 2, 3], merged_with=5), _series("b", [1, 2], [10 ** 400, 2])],
+                        refs="x", notes=5, bands=3))
+    assert isinstance(fc.menu(bad, {"series": 5, "grid": "x"}), list)
+    assert isinstance(fc.menu(bad, {"series": [5, {"id": 3}]}), list)
+    assert isinstance(fc.menu(_calls(_panel("nope")), None), list)
+    assert isinstance(fc.menu(_calls(_panel([{"id": "q", "x": 5, "y": 5}, "junk", None])), None), list)
+    assert fc.evaluate(bad, "not_drawn", {"series": "z"}, plan={"series": ["z"]}) is None   # unreadable merged_with
+
+
+def test_no_crossing_needs_the_same_x_points():
+    cross = _calls(_panel([_series("a", [1, 2, 3], [0.0, 10.0, 0.0]), _series("b", [1, 3], [5.0, 5.0])]))
+    assert ev(cross, "no_crossing", a="a", b="b") is None   # they visibly cross between the shared points
+    assert not any(o["claim"] == "no_crossing" for o in fc.menu(cross))
+    same = _calls(_panel([_series("a", [1, 2, 3], [0.0, 1.0, 0.0]), _series("b", [1, 2, 3], [5.0, 6.0, 5.0])]))
+    assert "do not cross" in ev(same, "no_crossing", a="a", b="b")[0]
+
+
+def test_errorbars_need_a_stated_meaning_and_band_a_known_series():
+    for meaning in (None, "other"):
+        c = _calls(_panel([_series("a", [1, 2], [1, 2], yerr=[1, 1], **({"yerr_meaning": meaning} if meaning else {}))]))
+        assert ev(c, "errorbars", series="a") is None
+    c = _calls(_panel([_series("a", [1, 2], [1, 2], yerr=[1, 1], yerr_meaning="ci95")]))
+    assert "95% confidence interval" in ev(c, "errorbars", series="a")[0]
+    band = {"series": "zz", "lo": [0, 1], "hi": [2, 3], "meaning": "sd"}
+    c = _calls(_panel([_series("a", [1, 2], [1, 2])], bands=[band]))
+    assert ev(c, "band", series="zz") is None
+
+
+def test_trend_is_not_fooled_by_a_chain_of_small_steps():
+    ys = [1.0, 0.9996, 0.9992, 0.9988, 0.9984, 1.0]
+    c = _calls(_panel([_series("a", list(range(6)), ys)]))
+    assert "does not change monotonically" in ev(c, "trend", series="a")[0]

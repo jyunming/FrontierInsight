@@ -77,16 +77,52 @@ def parse_args(text: str) -> dict[str, str]:
 # --- reading the record -------------------------------------------------------------------------------------------------
 
 def _finite(v: Any) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    try:
+        return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    except OverflowError:  # an integer too large for a float is not a drawn value
+        return False
 
 
-def _points(series: dict[str, Any]) -> list[tuple[float, float]]:
-    """The drawn (x, y) points of a series with both values finite, in drawn order. A series whose x and y differ in length
-    has no readable points."""
+def _is_cat(series: dict[str, Any]) -> bool:
+    """The series' x values are categories (text), e.g. bars over methods."""
+    xs = series.get("x")
+    return isinstance(xs, list) and any(isinstance(x, str) for x in xs)
+
+
+def _pairs(series: dict[str, Any]) -> list[tuple[Any, float]]:
+    """The drawn (x, y) pairs with a finite y and an x that is a finite number or a category; a missing (null or NaN)
+    value is skipped. A series whose x and y differ in length has no readable points."""
     xs, ys = series.get("x"), series.get("y")
     if not isinstance(xs, list) or not isinstance(ys, list) or len(xs) != len(ys):
         return []
-    return [(float(a), float(b)) for a, b in zip(xs, ys) if _finite(a) and _finite(b)]
+    return [(float(a) if _finite(a) else a, float(b)) for a, b in zip(xs, ys)
+            if _finite(b) and (_finite(a) or (isinstance(a, str) and a))]
+
+
+def _points(series: dict[str, Any]) -> list[tuple[float, float]]:
+    """The drawn (x, y) points of a series on a numeric x axis with both values finite, in drawn order. A series over
+    categories has none (it supports no claim that needs an order or a distance on x)."""
+    if series.get("kind") == "image" or _is_cat(series):
+        return []
+    return [(a, b) for a, b in _pairs(series)]
+
+
+def _at(series: dict[str, Any], raw: str) -> list[tuple[Any, float]]:
+    """The drawn pairs of a series at the x (or category) named by ``raw``; no interpolation."""
+    if series.get("kind") == "image":
+        return []
+    if _is_cat(series):
+        return [(x, y) for x, y in _pairs(series) if x == raw]
+    xv = _x_arg(raw)
+    return [(x, y) for x, y in _pairs(series) if xv is not None and _same_x(x, xv)]
+
+
+def _xtext(x: Any, fmt: Fmt) -> str:
+    return x if isinstance(x, str) else fmt(x)
+
+
+def _xarg(x: Any) -> str:
+    return x if isinstance(x, str) else "%.12g" % x
 
 
 def _same_x(a: float, b: float) -> bool:
@@ -162,20 +198,38 @@ def _x_arg(raw: str | None) -> float | None:
 
 def _drawn(calls, panel, a, fmt, ctx):
     s = _series(panel, a["series"])
-    if s is None or not _points(s):
+    if s is None:
+        return None
+    if s.get("kind") == "image":
+        if not _image_values(s):
+            return None
+    elif not _pairs(s):
         return None
     return f"{_label(s)} is drawn{_where(calls, panel)}", {}
+
+
+def _image_values(s: dict[str, Any]) -> list[float]:
+    """The finite values of an image series (its ``z`` rows: the colour quantity)."""
+    z = s.get("z")
+    return [float(v) for row in z if isinstance(row, list) for v in row if _finite(v)] if isinstance(z, list) else []
 
 
 def _not_drawn(calls, panel, a, fmt, ctx):
     plan_ids = _plan_series(ctx.get("plan"))
     if a["series"] not in plan_ids:
         return None
-    # A raw panel may draw anything, so absence cannot be stated while one exists.
+    # A raw panel may draw anything, so absence cannot be stated while one exists. An id another series absorbed
+    # (``merged_with``: identical data drawn once) is drawn. An unreadable ``merged_with`` states nothing.
     for p in calls.get("panels") or []:
-        if not isinstance(p, dict) or p.get("raw") or any(
-                isinstance(s, dict) and s.get("id") == a["series"] for s in p.get("series") or []):
+        if not isinstance(p, dict) or p.get("raw"):
             return None
+        for s in p.get("series") or []:
+            if not isinstance(s, dict):
+                return None
+            merged = s.get("merged_with")
+            if s.get("id") == a["series"] or (merged is not None and (
+                    not isinstance(merged, list) or a["series"] in merged)):
+                return None
     return f"{plan_ids[a['series']] or a['series']} is not drawn in this figure", {}
 
 
@@ -188,10 +242,20 @@ def _range(calls, panel, a, fmt, ctx):
         chosen = [s] if s is not None else []
         who = _label(s) if s is not None else ""
     else:
-        chosen = [s for s in panel.get("series") or [] if isinstance(s, dict)]
+        # an image's rows and columns are positions, not a quantity: only a named image gives its colour values
+        chosen = [s for s in panel.get("series") or [] if isinstance(s, dict) and s.get("kind") != "image"]
         who = "the series"
-    values = [p[0 if axis == "x" else 1] for s in chosen for p in _points(s)]
-    if not chosen or not values:
+    if not chosen:
+        return None
+    if chosen[0].get("kind") == "image":
+        values = _image_values(chosen[0]) if axis == "y" else []
+        if not values:
+            return None
+        return f"{who} has values from {fmt(min(values))} to {fmt(max(values))}{_where(calls, panel)}", {"axis": "y"}
+    if axis == "x" and any(_is_cat(s) for s in chosen):
+        return None
+    values = [p[0 if axis == "x" else 1] for s in chosen for p in (_points(s) if axis == "x" else _pairs(s))]
+    if not values:
         return None
     lo, hi = min(values), max(values)
     return (f"{who} spans {fmt(lo)} to {fmt(hi)} on the {axis} axis{_where(calls, panel)}",
@@ -200,15 +264,14 @@ def _range(calls, panel, a, fmt, ctx):
 
 def _value_at(calls, panel, a, fmt, ctx):
     s = _series(panel, a["series"])
-    x = _x_arg(a.get("x"))
-    if s is None or x is None or not _value_axis_ok(panel, "y"):
+    if s is None or not _value_axis_ok(panel, "y"):
         return None
-    ys = {y for px, y in _points(s) if _same_x(px, x)}
-    if len(ys) != 1:  # not a drawn x (no interpolation), or two different y at one x
+    got = _at(s, a.get("x", ""))
+    if len({y for _, y in got}) != 1:  # not a drawn x (no interpolation), or two different y at one x
         return None
-    drawn_x = next(px for px, _ in _points(s) if _same_x(px, x))
-    return (f"{_label(s)} is {fmt(next(iter(ys)))} at {_axis_name(panel, 'x')} {fmt(drawn_x)}{_where(calls, panel)}",
-            {"x": "%.12g" % drawn_x})
+    x, y = got[0]
+    return (f"{_label(s)} is {fmt(y)} at {_axis_name(panel, 'x')} {_xtext(x, fmt)}{_where(calls, panel)}",
+            {"x": _xarg(x)})
 
 
 def _axis_name(panel: dict[str, Any], axis: str) -> str:
@@ -237,7 +300,11 @@ def _trend(calls, panel, a, fmt, ctx):
         ups, downs = ups + (y1 > y0), downs + (y1 < y0)
     if not ups and not downs:
         return None  # flat to the rounding of the values: the catalogue has no word for it
-    word = "increases" if not downs else "decreases" if not ups else "does not change monotonically"
+    # A rise (fall) is only stated when the whole drawn run ends higher (lower) than it began, so a chain of steps each
+    # inside the rounding cannot hide a movement the other way.
+    first, last = pts[0][1], pts[-1][1]
+    word = ("increases" if not downs and last > first and not _tie(first, last) else
+            "decreases" if not ups and last < first and not _tie(first, last) else "does not change monotonically")
     return f"{_label(s)} {word} over the drawn points{_where(calls, panel)}", {}
 
 
@@ -255,31 +322,31 @@ def _steps(calls, panel, a, fmt, ctx):
 
 
 def _order(calls, panel, a, fmt, ctx):
-    x = _x_arg(a.get("at"))
-    if x is None or not _value_axis_ok(panel, "y"):
+    if not _value_axis_ok(panel, "y"):
         return None
-    got: list[tuple[float, dict[str, Any]]] = []
+    got: list[tuple[float, Any, dict[str, Any]]] = []
     for s in panel.get("series") or []:
         if not isinstance(s, dict) or not _plain(s):
             continue
-        ys = {y for px, y in _points(s) if _same_x(px, x)}
-        if len(ys) > 1:
+        at = _at(s, a["at"])
+        if len({y for _, y in at}) > 1:
             return None
-        if ys:
-            got.append((next(iter(ys)), s))
+        if at:
+            got.append((at[0][1], at[0][0], s))
     if len(got) < 2:
         return None
     got.sort(key=lambda t: -t[0])
     if any(_tie(p[0], q[0]) for p, q in zip(got, got[1:])):
         return None
-    drawn_x = next(px for px, _ in _points(got[0][1]) if _same_x(px, x))
-    names = ", ".join(_label(s) for _, s in got)
-    return (f"at {_axis_name(panel, 'x')} {fmt(drawn_x)} the drawn values, highest first, are {names}{_where(calls, panel)}",
-            {"at": "%.12g" % drawn_x})
+    drawn_x = got[0][1]
+    names = ", ".join(_label(s) for _, _, s in got)
+    return (f"at {_axis_name(panel, 'x')} {_xtext(drawn_x, fmt)} the drawn values, highest first, are {names}"
+            f"{_where(calls, panel)}", {"at": _xarg(drawn_x)})
 
 
-def _crossings(panel: dict[str, Any], a: dict[str, str]):
-    """(series a, series b, [(x1, x2), ...]) or None when the pair cannot be compared."""
+def _crossings(panel: dict[str, Any], a: dict[str, str], same_grid: bool = False):
+    """(series a, series b, [(x1, x2), ...]) or None when the pair cannot be compared. ``same_grid`` also requires both
+    series to be drawn at the same x points (two lines on different grids can cross between the points they share)."""
     if a["a"] == a["b"] or not _value_axis_ok(panel, "y"):
         return None
     sa, sb = _series(panel, a["a"]), _series(panel, a["b"])
@@ -289,6 +356,8 @@ def _crossings(panel: dict[str, Any], a: dict[str, str]):
     if len(ya) != len(_points(sa)) or len(yb) != len(_points(sb)):
         return None
     common = sorted(x for x in ya if x in yb)
+    if same_grid and (len(common) != len(ya) or len(common) != len(yb)):
+        return None
     if len(common) < 2:
         return None
     diffs = [ya[x] - yb[x] for x in common]
@@ -308,7 +377,7 @@ def _crossing(calls, panel, a, fmt, ctx):
 
 
 def _no_crossing(calls, panel, a, fmt, ctx):
-    got = _crossings(panel, a)
+    got = _crossings(panel, a, same_grid=True)
     if got is None or got[2]:
         return None
     return f"{_label(got[0])} and {_label(got[1])} do not cross{_where(calls, panel)}", {}
@@ -351,17 +420,19 @@ def _errorbars(calls, panel, a, fmt, ctx):
     s = _series(panel, a["series"])
     if s is None or not _plain(s) or not isinstance(s.get("yerr"), list):
         return None
-    meaning = s.get("yerr_meaning")  # optional in the pinned record; absent means the drawing call stated none
-    if meaning is not None and meaning not in _MEANING:
+    meaning = s.get("yerr_meaning")  # the drawing call states it; absent or ``other`` is not a claim
+    if meaning not in _MEANING:
         return None
     widths = [abs(float(w)) for w in s["yerr"] if _finite(w)]
     if not widths or not any(w > 0 for w in widths):
         return None
-    what = f" showing the {_MEANING[meaning]}" if meaning else ""
-    return f"{_label(s)} is drawn with error bars{what}{_where(calls, panel)}", {}
+    return f"{_label(s)} is drawn with error bars showing the {_MEANING[meaning]}{_where(calls, panel)}", {}
 
 
 def _band(calls, panel, a, fmt, ctx):
+    s = _series(panel, a["series"])
+    if s is None or not _plain(s):
+        return None
     found = [b for b in panel.get("bands") or [] if isinstance(b, dict) and b.get("series") == a["series"]]
     if not found or len({b.get("meaning") for b in found}) != 1 or found[0].get("meaning") not in _MEANING:
         return None
@@ -369,15 +440,13 @@ def _band(calls, panel, a, fmt, ctx):
     lo, hi = b.get("lo"), b.get("hi")
     if not isinstance(lo, list) or not isinstance(hi, list) or not any(_finite(v) for v in lo + hi):
         return None
-    s = _series(panel, a["series"])
-    name = _label(s) if s is not None else a["series"]
-    return f"a band showing the {_MEANING[b['meaning']]} is drawn around {name}{_where(calls, panel)}", {}
+    return f"a band showing the {_MEANING[b['meaning']]} is drawn around {_label(s)}{_where(calls, panel)}", {}
 
 
 def _missing_x(calls, panel, a, fmt, ctx):
     s = _series(panel, a["series"])
     grid = _plan_grid(ctx.get("plan"))
-    if s is None or s.get("kind") != "points" or not grid:
+    if s is None or s.get("kind") != "points" or not grid or _is_cat(s):
         return None
     drawn = [x for x, _ in _points(s)]
     gone = [g for g in grid if not any(_same_x(g, x) for x in drawn)]
@@ -424,7 +493,8 @@ def _plain(series: dict[str, Any]) -> bool:
 def _plan_series(plan: Any) -> dict[str, str]:
     """``{id: label}`` of the series a plan declares (``plan["series"]``: ids, or dicts with ``id`` and ``label``)."""
     out: dict[str, str] = {}
-    for item in (plan.get("series") if isinstance(plan, dict) else None) or []:
+    items = plan.get("series") if isinstance(plan, dict) else None
+    for item in items if isinstance(items, list) else []:
         if isinstance(item, str):
             out[item] = ""
         elif isinstance(item, dict) and isinstance(item.get("id"), str):
@@ -514,51 +584,87 @@ def evaluate(calls: Any, claim_id: str, args: dict[str, str], fmt: Fmt = _defaul
 
 # --- the menu ------------------------------------------------------------------------------------------------------------
 
+def _safe(fn, *args) -> list[tuple[str, dict[str, str]]]:
+    """The candidates one unit of the record gives, or none when that unit is malformed: the menu never raises."""
+    try:
+        return list(fn(*args))
+    except (TypeError, ValueError, KeyError, AttributeError, IndexError, ArithmeticError):
+        return []
+
+
+def _series_candidates(s: dict[str, Any], p: dict[str, str]):
+    sid = {"series": s["id"], **p}
+    yield "drawn", sid
+    for axis in ("x", "y"):
+        yield "range", {**sid, "axis": axis}
+    xs = list(dict.fromkeys(x for x, _ in _pairs(s))) if _plain(s) else []
+    xs = xs if _is_cat(s) else sorted(xs)
+    for x in (xs if len(xs) <= _MAX_VALUE_AT else [xs[0], xs[-1]]):
+        yield "value_at", {**sid, "x": _xarg(x)}
+    for cid in ("trend", "steps", "errorbars", "band", "missing_x"):
+        yield cid, sid
+
+
+def _shared_candidates(series: list[dict[str, Any]], p: dict[str, str]):
+    shared: list[list[Any]] = []   # [x, number of series drawn there]
+    for s in series:
+        if not _plain(s):
+            continue
+        for x in dict.fromkeys(x for x, _ in _pairs(s)):
+            hit = next((e for e in shared if (isinstance(x, str) and e[0] == x) or (
+                not isinstance(x, str) and not isinstance(e[0], str) and _same_x(e[0], x))), None)
+            if hit is None:
+                shared.append([x, 1])
+            else:
+                hit[1] += 1
+    common = [e[0] for e in shared if e[1] >= 2]
+    if common and not any(isinstance(x, str) for x in common):
+        common.sort()
+    for x in dict.fromkeys([common[0], common[len(common) // 2], common[-1]] if common else []):
+        yield "order", {"at": _xarg(x), **p}
+
+
+def _pair_candidates(series: list[dict[str, Any]], p: dict[str, str]):
+    for i, sa in enumerate(series):
+        for sb in series[i + 1:]:
+            for cid in ("crossing", "no_crossing", "identical"):
+                yield cid, {"a": sa["id"], "b": sb["id"], **p}
+        merged = sa.get("merged_with")
+        for other in merged if isinstance(merged, list) else []:
+            yield "identical", {"a": sa["id"], "b": str(other), **p}
+
+
+def _extras_candidates(panel: dict[str, Any], p: dict[str, str]):
+    for r in panel.get("refs") or []:
+        if isinstance(r, dict) and isinstance(r.get("id"), str):
+            yield "reference", {"ref": r["id"], **p}
+    for n in panel.get("notes") or []:
+        if isinstance(n, dict) and isinstance(n.get("id"), str):
+            yield "note", {"note": n["id"], **p}
+    for axis in ("x", "y"):
+        yield "scale", {"axis": axis, **p}
+
+
 def _candidates(calls: dict[str, Any], plan: Any, record: Any, lines_data: Any):
     """(claim id, args) to try, over the non-raw panels. The menu keeps only those that evaluate."""
     if record is not None:
         yield "layout", {}
     if lines_data is not None:
         yield "lines", {}
-    for sid in _plan_series(plan):
-        yield "not_drawn", {"series": sid}
+    for sid in _safe(lambda: [("not_drawn", {"series": k}) for k in _plan_series(plan)]):
+        yield sid
     for panel in calls.get("panels") or []:
         if not isinstance(panel, dict) or panel.get("raw"):
             continue
         p = {"panel": str(panel.get("panel"))}
-        series = [s for s in panel.get("series") or [] if isinstance(s, dict) and isinstance(s.get("id"), str)]
+        listed = panel.get("series")
+        series = [s for s in listed if isinstance(s, dict) and isinstance(s.get("id"), str)] \
+            if isinstance(listed, list) else []
         for s in series:
-            sid = {"series": s["id"], **p}
-            yield "drawn", sid
-            for axis in ("x", "y"):
-                yield "range", {**sid, "axis": axis}
-            xs = sorted({x for x, _ in _points(s)})
-            for x in (xs if len(xs) <= _MAX_VALUE_AT else [xs[0], xs[-1]]):
-                yield "value_at", {**sid, "x": "%.12g" % x}
-            for cid in ("trend", "steps", "errorbars", "band", "missing_x"):
-                yield cid, sid
-        shared: dict[float, int] = {}
-        for s in series:
-            for x in {x for x, _ in _points(s)}:
-                key = next((k for k in shared if _same_x(k, x)), x)
-                shared[key] = shared.get(key, 0) + 1
-        common = sorted(x for x, n in shared.items() if n >= 2)
-        for x in {common[0], common[len(common) // 2], common[-1]} if common else ():
-            yield "order", {"at": "%.12g" % x, **p}
-        for i, sa in enumerate(series):
-            for sb in series[i + 1:]:
-                for cid in ("crossing", "no_crossing", "identical"):
-                    yield cid, {"a": sa["id"], "b": sb["id"], **p}
-            for other in sa.get("merged_with") or []:
-                yield "identical", {"a": sa["id"], "b": str(other), **p}
-        for r in panel.get("refs") or []:
-            if isinstance(r, dict) and isinstance(r.get("id"), str):
-                yield "reference", {"ref": r["id"], **p}
-        for n in panel.get("notes") or []:
-            if isinstance(n, dict) and isinstance(n.get("id"), str):
-                yield "note", {"note": n["id"], **p}
-        for axis in ("x", "y"):
-            yield "scale", {"axis": axis, **p}
+            yield from _safe(_series_candidates, s, p)
+        yield from _safe(_shared_candidates, series, p)
+        yield from _safe(_pair_candidates, series, p)
+        yield from _safe(_extras_candidates, panel, p)
 
 
 def _mark(stem: str, claim: str, args: dict[str, str]) -> str:
@@ -575,7 +681,11 @@ def menu(calls: Any, plan: dict[str, Any] | None = None, fmt: Fmt = _default_fmt
         return []
     tried: set[tuple[str, tuple]] = set()
     found: list[Offer] = []
-    for cid, args in _candidates(calls, plan, record, lines_data):
+    try:
+        candidates = list(_candidates(calls, plan, record, lines_data))
+    except (TypeError, ValueError, KeyError, AttributeError, IndexError, ArithmeticError):
+        return []
+    for cid, args in candidates:
         key = (cid, tuple(sorted(args.items())))
         if key in tried:
             continue
@@ -584,8 +694,7 @@ def menu(calls: Any, plan: dict[str, Any] | None = None, fmt: Fmt = _default_fmt
         args = {k: v for k, v in args.items() if k in spec.required or k in spec.optional}
         got = evaluate(calls, cid, args, fmt, plan=plan, record=record, lines_data=lines_data)
         if got is not None:
-            found.append({"claim": cid, "args": got[1], "mark": _mark(stem, cid, got[1]),
-                          "text": got[0]})
+            found.append({"claim": cid, "args": got[1], "mark": _mark(stem, cid, got[1]), "text": got[0]})
     order = {cid: i for i, cid in enumerate(CLAIMS)}
     found.sort(key=lambda o: order[o["claim"]])
     return found
