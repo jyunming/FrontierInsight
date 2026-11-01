@@ -418,9 +418,9 @@ def test_legend_off_canvas_triggers_the_overlap_repair_once() -> None:
 async def test_error_bars_cut_off_are_disclosed_after_the_budget(tmp_path: Path) -> None:
     eng = _engine(tmp_path)
     chat = _ask(eng, {"code": REDRAW})
+    warned: list[Any] = []
     eng._log = SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: warned.append(a[1:]),  # type: ignore[assignment]
                                debug=lambda *a, **k: None, error=lambda *a, **k: None)
-    warned: list[Any] = []
     state = _overlapping(**_state(bars_png={"axes": [CUT_BARS], "layout": []}), figure_overlap_repaired=True)
     assert await eng._node_execute_reflect(state) == {}  # type: ignore[arg-type]
     assert chat.await_count == 0
@@ -431,3 +431,21 @@ async def test_error_bars_cut_off_are_disclosed_after_the_budget(tmp_path: Path)
 
 def test_a_record_without_the_geometry_keys_adds_nothing() -> None:
     assert _figure_overlap_findings(_state(a_png={"axes": [PANEL], "layout": []})) == []
+
+
+def test_a_legend_the_layout_already_reports_is_not_reported_twice() -> None:
+    both = {"axes": [OFF_PAGE], "layout": [{"check": "legend_off_canvas", "legend": ["a", "b"]}]}
+    found = _figure_overlap_findings(_state(wide_png=both))
+    assert len(found) == 1 and "runs past the edge of the figure" in found[0]
+    bars = {"axes": [CUT_BARS, OFF_PAGE], "layout": [{"check": "legend_over_panel", "legend": ["a"], "over": "x"}]}
+    found = _figure_overlap_findings(_state(b_png=bars))
+    assert len(found) == 2 and sum("legend" in f for f in found) == 1 and any("error bars" in f for f in found)
+
+
+def test_a_geometry_only_finding_sends_the_run_back_with_the_error_bar_remedy(tmp_path: Path) -> None:
+    from core.engine import _figure_overlap_directive
+    eng = _engine(tmp_path)
+    state = _overlapping(**_state(bars_png={"axes": [CUT_BARS], "layout": []}))
+    assert eng._figure_overlaps_to_repair(state) and eng._route_after_execute_reflect(state) == "retry"
+    text = _figure_overlap_directive(eng._figure_overlaps_to_repair(state))
+    assert "widen the y limits" in text and "error bars" in text

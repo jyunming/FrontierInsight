@@ -34318,7 +34318,11 @@ def _figure_overlap_findings(state: QuestState) -> list[str]:
                         "the lines or points it labels"
                     )
             # Geometry the recorder wrote (a legend off the page, error bars cut off): same repair round.
-            found.extend(f"figures/{name}: {sentence}" for sentence in _figure_facts.geometry_findings(record))
+            # (a legend the layout checks already report is not told twice: the prompt shows 8 findings, the disclosure 3)
+            legend_seen = any(isinstance(i, dict) and i.get("check") in ("legend_over_panel", "legend_off_canvas")
+                              for i in record.get("layout") or [])
+            found.extend(f"figures/{name}: {sentence}" for sentence in _figure_facts.geometry_findings(record)
+                         if not (legend_seen and sentence.startswith("The legend of ")))
     except Exception:  # noqa: BLE001
         return []
     return found
@@ -34384,10 +34388,12 @@ def _figure_overlap_directive(findings: list[str]) -> str:
         "fig.tight_layout(rect=(0, 0, 1, 0.94)), or a constrained layout). For tick labels that run "
         "into each other: rotate them (plt.setp(ax.get_xticklabels(), rotation=30, ha=\"right\")), "
         "or show fewer ticks. For an axis label drawn over tick labels, or a label past the edge of "
-        "the figure: make room (fig.subplots_adjust, or bbox_inches=\"tight\").\n\n"
+        "the figure: make room (fig.subplots_adjust, or bbox_inches=\"tight\"). "
+        "When error bars reach past the plotted range and are cut off: widen the y limits "
+        "(ax.set_ylim) to include them.\n\n"
         "Do NOT change any computation, data, parameter, use of the random seed, printed value, "
         "the final RESULT_JSON line, the file name of any figure, or what any panel plots: only "
-        "positions, sizes and the number of legend columns. Return only the functions you change in `functions` (each one whole; FI keeps every other line), one "
+        "positions, sizes, the number of legend columns and the y limits. Return only the functions you change in `functions` (each one whole; FI keeps every other line), one "
         "sentence in `patch_summary`, and leave `give_up_reason` empty."
     )
 
