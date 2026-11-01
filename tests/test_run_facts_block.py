@@ -151,7 +151,7 @@ def test_the_writer_is_told_about_the_paragraph_and_no_longer_about_required_pla
     text = pf.writer_section(root, topic=TOPIC)
     assert "Required" not in text and "{{seed}}" not in text and "{{run_time}}" not in text
     assert "Example (in the Methods)" not in text
-    assert "the run facts in the Methods" in text and "The 680 settings ran 16 at a time" in text
+    assert "the run facts in the Methods" not in text and "The 680 settings ran 16 at a time" in text
     assert "Do not state these facts yourself" in text
     assert pf.writer_section(_quest(tmp_path / "none", None), topic="Compare two filters.") == ""
 

@@ -95,7 +95,10 @@ def test_a_topic_that_asks_for_no_main_quantity_has_no_block(tmp_path, monkeypat
 
 def test_the_writer_is_told_about_the_block(tmp_path, monkeypatch) -> None:
     root = _quest(tmp_path, monkeypatch)
-    assert "{{answers}}" in pf.writer_section(root)
+    text = pf.writer_section(root)
+    assert "{{answers}}" in text
+    # No stand-in phrase to copy: the block has its own heading, and the writer is told not to refer to it.
+    assert "see the answers" not in text and "refer to them as" not in text and "do not refer to the block" in text
 
 
 def test_an_explicit_map_to_an_existing_metric_is_placed_and_named_whatever_the_name(tmp_path, monkeypatch) -> None:
@@ -243,3 +246,4 @@ def test_an_answer_line_names_the_setting_it_differs_with_by_the_plans_label(tmp
     assert "{{v:decay_rate @ dose=each | range}}" in text  # the key keeps the id
     monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: PROTOCOL)
     assert "it differs with dose; this is the mean" in pf.answers_text(root)
+

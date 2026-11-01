@@ -1885,8 +1885,8 @@ def writer_section(quest_root: Path | str, *, topic: str = "", fallback_s: Any =
     if run_text:
         lines.append("Run facts: FI puts a paragraph of the run's facts into the Methods when the paper is saved. It "
                      f"reads now: \"{run_text}\" Do not state these facts yourself (the number of settings and trials, "
-                     "the seed, the run time, the topic's time limit); if you need to refer to them, say \"the run facts "
-                     "in the Methods\". A seed, a run time or a count of settings or trials typed as a number is sent "
+                     "the seed, the run time, the topic's time limit), and do not refer to the paragraph: it is part of "
+                     "the Methods, in FI's own words. A seed, a run time or a count of settings or trials typed as a number is sent "
                      "back to you, and so is a claim about the topic's time limit that the record contradicts.")
     if (seed_meaning := seed_meaning_text(root)):
         lines.append(f"Seed: {seed_meaning}")
@@ -1905,7 +1905,7 @@ def writer_section(quest_root: Path | str, *, topic: str = "", fallback_s: Any =
     if has_answers:
         lines.append("{{answers}}: FI's list of the quantities the topic asks for, each with its value from FI's records "
                      "(and its interval where one exists) or said as not answered. FI puts it before the discussion when the "
-                     "paper is saved. Do not type these values; refer to them as \"the answers\" (for example \"see the answers\").")
+                     "paper is saved. The block carries its own heading: do not type these values and do not refer to the block.")
     if real:
         lines.append("Limitations: FI adds the list below to the end of your Limitations section when the paper is saved "
                      "(or where you put {{limitations}} on a line of its own), from its records. It reads now:")

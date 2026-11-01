@@ -267,7 +267,7 @@ def test_the_writer_gets_the_run_facts_paragraph_and_no_placeholders_for_them(tm
     root, topic = _quest(tmp_path, "fdr_e1")
     text = paper_facts.writer_section(root, topic=topic, fallback_s=7.4)
     assert "20261015, at code/simulate.py:106" in text and "121.3 s" in text
-    assert "Do not state these facts yourself" in text and "the run facts in the Methods" in text
+    assert "Do not state these facts yourself" in text and "the run facts in the Methods" not in text and "do not refer to the paragraph" in text
     for name in ("{{seed}}", "{{run_time}}", "{{time_limit}}", "{{time_limit_met}}", "{{trials_per_setting}}",
                  "{{settings}}", "{{trials_failed}}"):
         assert name not in text, name
