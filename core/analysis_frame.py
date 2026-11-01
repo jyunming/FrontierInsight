@@ -137,7 +137,7 @@ def plan_of(design: dict[str, Any]) -> dict[str, Any]:
         "known": _known_values(protocol, c),
         "search": c.search is not None,
         "figures": {f.id: {"file": f.file, "shows": list(f.shows), "x": f.x, "series": f.series, "panels": f.panels,
-                           **_result_labels(c, f.shows), **_panel_words(c, f.panels, (f.x, f.series))}
+                           **_result_labels(c, f.shows), **_result_info(c, f.shows), **_panel_words(c, f.panels, (f.x, f.series))}
                     for f in c.figures if f.declared},
     }
 
@@ -164,6 +164,18 @@ def _result_labels(c: Any, shows: Any) -> dict[str, Any]:
     names = {r.id: r.label for r in list(c.results) + list(c.derived) if getattr(r, "label", "")}
     got = {str(i): str(names[i]) for i in shows if i in names}
     return {"result_labels": got} if got else {}
+
+
+def _result_info(c: Any, shows: Any) -> dict[str, Any]:
+    """``{"result_info": {id: {"unit", "description"}}}`` for the declared results a figure shows that carry a unit or an estimand in
+    the plan: what FI writes an axis label from (``Figure.finish``) when the plan gives no label."""
+    got = {}
+    for r in list(c.results) + list(c.derived):
+        if str(r.id) in {str(i) for i in shows}:
+            info = {k: str(v) for k, v in (("unit", getattr(r, "unit", "")), ("description", getattr(r, "estimand", ""))) if v}
+            if info:
+                got[str(r.id)] = info
+    return {"result_info": got} if got else {}
 
 
 def _panel_words(c: Any, panels: int, axes: tuple[Any, ...] = ()) -> dict[str, Any]:

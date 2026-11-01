@@ -1262,3 +1262,91 @@ def test_calls_are_recorded_with_the_real_recorder_and_agree_with_it(tmp_path):
                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     assert done.stdout.strip() == "ok figure g: 1 of 2 panels checked by FI, panel 2 is a custom drawing", done.stdout + done.stderr[-800:]
     assert json.loads((records / "g.calls.json").read_text(encoding="utf-8"))["panels"][1]["raw"] is True
+
+
+def test_typed_text_on_a_panel_makes_it_a_custom_drawing(tmp_path, frame5):
+    def body(fig, table):
+        _drawn(fig, table, 0)
+        fig.axes[0].text(0.5, 0.5, "r = 0.9991")
+        _drawn(fig, table, 1)
+        fig.axes[1].annotate("slope 0.37", (1, 1))
+
+    out = _calls_run(tmp_path, body)
+    panels = json.loads((frame5 / "g.calls.json").read_text(encoding="utf-8"))["panels"]
+    assert [p["raw"] for p in panels] == [True, True] and panels[0]["raw_reason"] == "text placed outside FI's calls"
+    assert "r = 0.9991" in panels[0]["texts_raw"] and out["declared"]["raw_panels"] == [1, 2]
+
+
+def test_a_body_using_only_fi_notes_stays_verified(tmp_path, frame5):
+    def body(fig, table):
+        _both_panels(fig, table)
+        fig.note(0, what="mean growth: {growth}", key="size=1")
+
+    out = _calls_run(tmp_path, body)
+    assert out["status"] == "ok" and out["declared"]["raw_panels"] == []
+
+
+def test_a_figure_level_text_makes_every_panel_a_custom_drawing(tmp_path, frame5):
+    def body(fig, table):
+        _both_panels(fig, table)
+        fig.axes[0].figure.text(0.5, 0.01, "n = 12")
+
+    assert _calls_run(tmp_path, body)["declared"]["raw_panels"] == [1, 2]
+
+
+def test_a_one_panel_figure_is_labelled_from_the_plans_words_and_units(tmp_path, frame5):
+    spec = {"id": "g", "file": "g.png", "panels": 1, "x": "size", "series": "fast", "shows": ["growth"],
+            "labels": {"size": "Colony size"}, "result_labels": {"growth": "Growth"},
+            "result_info": {"growth": {"unit": "1/h", "description": "growth rate of a colony"}}}
+    ns = types.SimpleNamespace(figure_g=_both_panels, COMPARED={"speed": ["fast"]})
+    out = af.run_figures([spec], ns, _CallTable(), str(tmp_path / "figures"))[0]
+    assert out["status"] == "ok"
+    panel = json.loads((frame5 / "g.calls.json").read_text(encoding="utf-8"))["panels"][0]
+    assert panel["x"]["label"] == "Colony size" and panel["y"]["label"] == "Growth (1/h)"
+
+
+def test_result_info_reaches_the_figure_spec_from_the_plan():
+    from core import analysis_frame
+
+    c = types.SimpleNamespace(results=[types.SimpleNamespace(id="growth", unit="1/h", estimand="growth rate")], derived=[])
+    assert analysis_frame._result_info(c, ["growth", "other"]) == {"result_info": {"growth": {"unit": "1/h", "description": "growth rate"}}}
+    assert analysis_frame._result_info(types.SimpleNamespace(results=[types.SimpleNamespace(id="g", unit="", estimand="")], derived=[]), ["g"]) == {}
+
+
+@pytest.mark.parametrize("category", [True, False])
+def test_an_honest_body_the_recorder_cannot_read_is_not_a_fi_fault(tmp_path, category):
+    """A category x and a series of over 20000 points are lines the figure recorder cannot hold: the check skips them."""
+    from core import skeleton
+
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "fi_frame.py").write_text(skeleton.RUNTIME, encoding="utf-8")
+    (code / skeleton.FIGURE_CALLS_FILE).write_text(skeleton.FRAME_FIGURE_SOURCE, encoding="utf-8")
+    boot = plot_style.write_boot(tmp_path / ".fi")
+    records = tmp_path / ".fi" / plot_style.RECORDS_DIRNAME
+    records.mkdir(parents=True)
+    draw = ('fig.line(0, "fast", ["a", "b"], [1.0, 2.0], "growth")' if category else
+            'fig.line(0, "fast", list(range(20001)), [float(i % 7) for i in range(20001)], "growth")')
+    script = tmp_path / "run_one.py"
+    script.write_text(textwrap.dedent("""
+        import sys, types
+        sys.path.insert(0, %r)
+        sys.path.insert(0, %r)
+        from core import analysis_figures as af
+        class T:
+            declared = ["growth"]
+            def keys(self): return ["size=1"]
+            def setting(self, key): return {"size": 1.0}
+            def mean(self, i, k): return 1.0
+        def figure_g(fig, table):
+            table.mean("growth", "size=1")
+            %s
+        out = af.run_figures([{"id": "g", "file": "g.png", "panels": 1, "x": "size", "series": "fast"}],
+                             types.SimpleNamespace(figure_g=figure_g, COMPARED={}), T(), %r)
+        print(out[0]["status"], out[0].get("why"))
+    """) % (str(Path(__file__).resolve().parents[1]), str(code), draw, str(tmp_path / "figures")), encoding="utf-8")
+    env = {**__import__("os").environ, "PYTHONPATH": str(boot), "FI_FIGURE_RECORDS": str(records), "MPLBACKEND": "Agg"}
+    done = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, env=env, timeout=240,
+                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    assert done.stdout.split()[:1] == ["ok"], done.stdout + done.stderr[-800:]
+    assert (records / "g.calls.json").is_file()

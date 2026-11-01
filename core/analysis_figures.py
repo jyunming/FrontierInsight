@@ -361,7 +361,7 @@ def _draw_one(spec: dict[str, Any], body: Any, table: Any, out_dir: str, plan: d
         calls = _has_calls(handle)
         if calls:  # a quest on the frame with the drawing calls: what was drawn outside them is marked, FI writes the words
             _mark_raw(handle, fig, axes)
-            handle.finish((plan or {}).get("labels") or {}, {})
+            handle.finish((plan or {}).get("labels") or {}, (plan or {}).get("result_info") or {})
         panel_record = _set_panel_titles(handle, axes, spec.get("labels") or {})
         try:
             fig.savefig(os.path.join(out_dir, file))  # the recorder of the house style notes what the figure draws
@@ -526,6 +526,7 @@ def _plan_for(spec: dict[str, Any], namespace: Any, table: Any) -> dict[str, Any
             references[str(ident)] = {"value": next(iter(numbers)), "label": labels.get(str(ident), str(ident))}
     derived = _from(namespace, "DERIVED", {})
     return {"settings": settings, "series_ids": series_ids, "references": references, "labels": labels,
+            "result_info": spec.get("result_info") if isinstance(spec.get("result_info"), dict) else {},
             "fallback": bool(spec.get("fallback")), "derived_ids": [str(k) for k in derived] if isinstance(derived, dict) else []}
 
 
@@ -555,9 +556,15 @@ def _data_artists(ax: Any) -> list[Any]:
     return [a for a in list(ax.lines) + list(ax.collections) + list(ax.patches) + list(ax.images) if a.get_visible()]
 
 
+def _untagged_text(texts: Any) -> bool:
+    return any(t.get_visible() and str(t.get_text()).strip() and not str(t.get_gid() or "").startswith("fi:") for t in texts)
+
+
 def _mark_raw(handle: Any, fig: Any, axes: list[Any]) -> None:
-    """A panel with a data artist no drawing call made (it has no ``fi:`` tag) is a custom drawing: FI states nothing about it.
-    A second axes that shares a panel's place (``twinx``) counts for that panel. ``fig.raw(i)`` has marked its panel already."""
+    """A panel with a data artist no drawing call made (it has no ``fi:`` tag), or a text FI did not place (``ax.text``, an
+    annotation, a ``fig.text`` or a suptitle: FI's own notes carry the tag), is a custom drawing: FI states nothing about it. A
+    second axes that shares a panel's place (``twinx``) counts for that panel. ``fig.raw(i)`` has marked its panel already."""
+    figure_text = _untagged_text(list(getattr(fig, "texts", []) or []) + [t for t in [getattr(fig, "_suptitle", None)] if t is not None])
     for i, ax in enumerate(axes):
         _ax, rec = handle._panel(i)
         if rec["raw"]:
@@ -565,6 +572,8 @@ def _mark_raw(handle: Any, fig: Any, axes: list[Any]) -> None:
         twins = [o for o in fig.get_axes() if o is not ax and o not in axes and tuple(o.get_position().bounds) == tuple(ax.get_position().bounds)]
         if any(not str(a.get_gid() or "").startswith("fi:") for a in _data_artists(ax) + [b for t in twins for b in _data_artists(t)]):
             rec["raw"], rec["raw_reason"] = True, "drawn outside FI's calls"
+        elif figure_text or _untagged_text(list(ax.texts) + [t for o in twins for t in o.texts]):
+            rec["raw"], rec["raw_reason"] = True, "text placed outside FI's calls"
 
 
 def _read_json(path: str) -> Any:
@@ -587,13 +596,17 @@ def _disagreement(rec: dict[str, Any], axis: dict[str, Any]) -> str:
     for entry in rec["series"]:
         if entry["kind"] not in ("line", "points", "curve"):
             continue
-        want = _finite_ys(entry["y"])
+        want = [float(y) for x, y in zip(entry["x"], entry["y"]) if _number(x) and _number(y)]  # the pairs the recorder keeps
+        unread = [line for line in left if line.get("y") is None]  # the recorder cannot hold it (a category x, over 20000 points)
         for line in left:
             ys = _finite_ys(line.get("y"))
-            if ys == want or (line.get("x") is None and len(ys) == len(want)):
+            if line.get("y") is not None and ys == want:
                 left.remove(line)
                 break
         else:
+            if unread:  # compare what both sides can hold: this series is matched to a line the recorder could not read
+                left.remove(unread[0])
+                continue
             return "panel %d: the series `%s` was drawn by a call but the figure recorder holds no line for it" % (rec["panel"], entry["id"])
     stray = [line for line in left if line.get("marker") != "_"]
     if stray:
