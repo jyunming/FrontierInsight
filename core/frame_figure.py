@@ -245,6 +245,9 @@ class FigureCalls:
 
     def _series_ok(self, series):
         known = list(getattr(self, "series_ids", []) or []) + [r for r in self._results() if r not in (getattr(self, "series_ids", []) or [])]
+        if not known:
+            raise ValueError("FI did not supply the study's series and results to this figure, so no series can be drawn; this is a "
+                             "fault of FI's files, not of the figure function (series `%s`)" % (series,))
         if series not in known:
             raise ValueError("series `%s` is not an id of the plan; a series names a plan id (never legend text), and the plan's ids "
                              "are: %s" % (series, ", ".join(sorted(map(str, known))) or "(none)"))

@@ -20899,7 +20899,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             script_code = (self.quest_root / "code" / _analysis_frame.DERIVE_FILE).read_text(encoding="utf-8")
         if split:
             if repair_body:
-                split_note = _skeleton.reflect_derive(failed_body, compared=bool(_in_run.of_study(self._protocol_block(state))))
+                split_note = _skeleton.reflect_derive(failed_body, compared=bool(_in_run.of_study(self._protocol_block(state))),
+                                                       frame_version=_skeleton.quest_frame_version(self.quest_root / "code"))
             elif repair_submit:
                 script_code = (self.quest_root / "code" / _trial_runner.SUBMIT_NAME).read_text(encoding="utf-8")
                 split_note = (

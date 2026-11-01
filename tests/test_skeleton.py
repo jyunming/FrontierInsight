@@ -446,7 +446,51 @@ def test_upgrade_keeps_existing_figure_bodies(tmp_path: Path) -> None:
 def test_figure_rule_text_comes_from_agents_file() -> None:
     text = (Path(__file__).resolve().parent.parent / "agents" / "figure_primitives.md").read_text(encoding="utf-8")
     assert skeleton._BODY_RETURNS["figure"] == text.strip()
-    assert skeleton.reflect_derive("figure_fig1").count(text.strip()) == 1
+    assert skeleton.reflect_derive("figure_fig1", frame_version=5).count(text.strip()) == 1
     for call in CALLS[:-1]:
         assert f"fig.{call}(" in text
     assert "fig.raw(" in text and 'what="other"' in text and "Never type text" in text
+
+
+def test_reflect_derive_gives_the_drawing_calls_only_to_a_version_5_frame() -> None:
+    rule = skeleton._BODY_RETURNS["figure"]
+    assert rule not in skeleton.reflect_derive("figure_fig1", frame_version=4)
+    assert "fig.line(" not in skeleton.reflect_derive("figure_fig1", frame_version=4)
+    assert skeleton.reflect_derive("figure_fig1", frame_version=5).count(rule) == 1
+    assert skeleton._FIGURE_RULE_AXES in skeleton.reflect_derive("figure_fig1", frame_version=3)
+
+
+def test_quest_frame_version_reads_the_runtime_the_quest_has(tmp_path: Path) -> None:
+    assert skeleton.quest_frame_version(tmp_path) == 0
+    (tmp_path / skeleton.RUNTIME_FILE).write_text(skeleton.RUNTIME.replace("FRAME_RUNTIME_VERSION = 5", "FRAME_RUNTIME_VERSION = 4"), encoding="utf-8")
+    assert skeleton.quest_frame_version(tmp_path) == 4
+
+
+def test_a_version_5_frame_without_fi_figure_calls_fails_loudly() -> None:
+    ns: dict[str, Any] = {}
+    exec(compile(skeleton.RUNTIME, "fi_frame.py", "exec"), ns)  # no fi_figure_calls.py beside it
+    fig = ns["Figure"]([object()])
+    with pytest.raises(RuntimeError, match="fi_figure_calls.py is missing"):
+        fig.line(0, "s", [1], [1], "growth")
+    with pytest.raises(AttributeError):
+        fig._private
+
+
+def test_an_import_error_inside_fi_figure_calls_is_not_hidden(tmp_path: Path) -> None:
+    import subprocess
+
+    (tmp_path / "fi_figure_calls.py").write_text("import a_module_that_is_not_there\n", encoding="utf-8")
+    (tmp_path / "fi_frame.py").write_text(skeleton.RUNTIME, encoding="utf-8")
+    out = subprocess.run([sys.executable, "-I", "-c", "import sys; sys.path.insert(0, sys.argv[1]); import fi_frame", str(tmp_path)],
+                         capture_output=True, text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    assert out.returncode != 0 and "a_module_that_is_not_there" in out.stderr
+
+
+def test_a_figure_without_the_studys_series_says_it_is_a_fault_of_fi() -> None:
+    from core import frame_figure
+
+    class Host(frame_figure.FigureCalls):
+        axes = [object()]
+
+    with pytest.raises(ValueError, match="FI did not supply"):
+        Host()._series_ok("s")

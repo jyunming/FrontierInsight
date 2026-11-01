@@ -467,7 +467,8 @@ PINS_AT_811719AF = {
     # and again when FI's result_json also prints each compared value's trials (Table.level_rows)
     # and again when a read of a result recorded per compared value says so (Table.per_level); it was "edc62a31e304a785"
     # and again when every read of the table that returns data notes it (Table.level_rows and Table.reference); it was "1212760587b97257"
-    "run_framed": "8d9d32daf0359e89",
+    # and again when the runtime gained the figure drawing calls (VERSION 5: Figure mixes in fi_figure_calls; run.py carries the runtime); it was "8d9d32daf0359e89"
+    "run_framed": "c4b2e59bfc01db2a",
 }
 
 

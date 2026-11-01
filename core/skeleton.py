@@ -312,9 +312,18 @@ class Missing:
 
 try:
     from fi_figure_calls import FigureCalls  # core/frame_figure.py, written beside this file (version 5)
-except ImportError:  # a folder without it: the figure has its axes, and no drawing calls
+except ImportError as _err:
+    if getattr(_err, "name", None) != "fi_figure_calls":
+        raise  # the file is there and failed on an import of its own: say so, never hide it
+
     class FigureCalls:
-        pass
+        """``fi_figure_calls.py`` is not beside this file: the figure keeps its axes, and a drawing call says what is missing."""
+
+        def __getattr__(self, name):
+            if name.startswith("_"):
+                raise AttributeError(name)
+            raise RuntimeError("FI's fi_figure_calls.py is missing from the code folder, so `fig.%s` does not exist; this is a "
+                               "fault of FI's files, not of the figure function" % name)
 
 
 class Figure(FigureCalls):
@@ -1334,6 +1343,10 @@ DERIVE_LEVEL_RULE = (
 _FIGURE_RULE = string.Template(
     (Path(__file__).resolve().parent.parent / "agents" / "figure_primitives.md").read_text(encoding="utf-8")).safe_substitute().strip()
 
+#: The sentence for a figure function of a frame before version 5, whose runtime has no drawing calls.
+_FIGURE_RULE_AXES = ("It draws on `fig.axes` from `table` and returns nothing: FI makes the figure, saves it and closes it, so it never "
+                     "calls `savefig`, `show`, `close`, `figure` or `subplots`. It draws only values read from `table`.")
+
 _BODY_RETURNS = {
     "derive": ("It returns one number for the study, a mapping of setting keys to numbers, or `table.missing(\"why\")` where "
                "the number does not exist (never a stand-in such as 0, -1 or a bound, and never a bare `None`). It reads the "
@@ -1344,10 +1357,19 @@ _BODY_RETURNS = {
 }
 
 
-def reflect_derive(body: str = "", compared: bool = False) -> str:
+def quest_frame_version(code_dir: Path | str) -> int:
+    """The version of the runtime a quest's ``fi_frame.py`` has (0 when it has none)."""
+    try:
+        return runtime_version((Path(code_dir) / RUNTIME_FILE).read_text(encoding="utf-8"))
+    except OSError:
+        return 0
+
+
+def reflect_derive(body: str = "", compared: bool = False, frame_version: int = 0) -> str:
     """The text of a repair when the function ``body`` of derive.py failed (the analysis is FI's: it calls the bodies, keeps
     their record and prints the results itself). It replaces the text of the repair of an experiment.py the model wrote.
-    ``compared``: the plan compares values inside each run (:data:`DERIVE_LEVEL_RULE` is then added)."""
+    ``compared``: the plan compares values inside each run (:data:`DERIVE_LEVEL_RULE` is then added). ``frame_version``: the
+    quest's runtime version; a figure function is given the drawing calls (:data:`_FIGURE_RULE`) only from version 5 on."""
     sig = body_signature(body)
     kind = str(body).split("_", 1)[0]
     which = (f"The function `{body}` failed, or FI refused what it returned (the reason is below). Repair `{body}` (and the "
@@ -1356,7 +1378,7 @@ def reflect_derive(body: str = "", compared: bool = False) -> str:
              "the helpers it uses), each given whole with its own parameters. ")
     return ("THE ANALYSIS IS FI'S: FI wrote experiment.py, which reads its own record of the trials, calls the functions of "
             "derive.py, keeps what they return and prints the results. " + which
-            + _BODY_RETURNS.get(kind, "") + (" " + DERIVE_LEVEL_RULE if compared and kind == "derive" else "")
+            + (_FIGURE_RULE_AXES if kind == "figure" and frame_version < 5 else _BODY_RETURNS.get(kind, "")) + (" " + DERIVE_LEVEL_RULE if compared and kind == "derive" else "")
             + " Leave every other function and every line of FI's as they are, and give no experiment.py.\n")
 
 
