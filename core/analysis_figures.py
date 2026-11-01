@@ -1324,6 +1324,7 @@ def _default_with_calls(spec: dict[str, Any], table: Any, out_dir: str, namespac
                 for art in fig.line(index, rid if lone else sid, xs, ys, rid):
                     art.set_marker("o")
             if {**one, **hold}:
+                fig._panel(index)[1]["hold"] = {**one, **hold}  # FI's values from its table: `finish` titles the panel from them
                 fig.declared[index] = {**one, **hold}
 
     out = _draw_one(spec, body, table, out_dir, plan)
