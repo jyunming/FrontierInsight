@@ -19,6 +19,12 @@ import pytest  # noqa: E402
 from core import frame_figure  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _close_figures():
+    yield
+    plt.close("all")
+
+
 class _Table:
     declared = ["growth", "load"]
 
@@ -295,3 +301,142 @@ def test_carried_text_imports_nothing_of_fi(tmp_path):
     run = subprocess.run([sys.executable, "-I", "-c", "import sys; sys.path.insert(0, %r)\n%s" % (str(tmp_path), code)],
                          capture_output=True, text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     assert run.returncode == 0, run.stderr
+
+
+# ---- labels, legend, limits (finish) ---------------------------------------------------------------------------------------
+
+SPEC = {"growth": {"label": "Growth", "unit": "1/h"}, "size": {"label": "Size", "unit": "mm"}, "fast": "Fast colony", "slow": "Slow colony"}
+INFO = {"growth": {"description": "Mean growth rate of the colony, measured per hour (see plan).", "unit": "1/h", "scale": "linear"},
+        "load": {"description": "Load carried by the colony at the end"}}
+
+
+def test_label_comes_from_plan_not_body(caplog):
+    h = _Host(panels=1)
+    h.line(0, "fast", [1, 2, 3], [1.0, 2.0, 4.0], "growth")
+    h.axes[0].set_ylabel("energy drift")
+    h.axes[0].set_title("A title")
+    with caplog.at_level("WARNING", logger="frame_figure"):
+        h.finish(SPEC, INFO)
+    assert h.axes[0].get_ylabel() == "Growth (1/h)" == h.record()["panels"][0]["y"]["label"]
+    assert h.axes[0].get_xlabel() == "Size (mm)" and h.axes[0].get_title() == ""
+
+
+def test_label_fallback_order():
+    h = _Host(panels=3)
+    for i, what in enumerate(["growth", "load", "load"]):
+        h.line(i, "fast", [1, 2], [1.0, 2.0], what)
+    h.finish({"growth": {"label": "Growth", "unit": "1/h"}}, {"load": {"description": "Load carried by the colony at the end; read at 3 h"}})
+    assert h.axes[0].get_ylabel() == "Growth (1/h)"
+    assert h.axes[1].get_ylabel() == "Load carried by the colony at the end"
+    h2 = _Host(panels=1)
+    h2.line(0, "fast", [1, 2], [1.0, 2.0], "load")
+    h2.finish({}, {"load": {"unit": "kg"}})
+    assert h2.axes[0].get_ylabel() == "value (kg)" and h2.axes[0].get_xlabel() == "value"
+    assert "load" not in h2.axes[0].get_ylabel()
+
+
+def test_two_results_and_other_quantity_labels():
+    h = _Host(panels=2)
+    h.line(0, "fast", [1, 2], [1.0, 2.0], "growth")
+    h.line(0, "slow", [1, 2], [3.0, 2.0], "load")
+    h.line(1, "fast", [1, 2], [1.0, 2.0], "other")
+    h.finish(SPEC, INFO)
+    assert h.axes[0].get_ylabel() == "Growth (1/h) / Load carried by the colony at the end"
+    assert h.axes[1].get_ylabel() == "computed value"
+
+
+def test_legend_has_no_empty_entry():
+    h = _Host(panels=1)
+    ax = h.axes[0]
+    ax.plot([1, 2], [1, 2], label="_stale")  # a body's leftover artist with a private label
+    h.line(0, "fast", [1, 2, 3], [1.0, 2.0, 4.0], "growth", yerr=[0.1, 0.1, 0.1])
+    h.band(0, "fast", [1, 2, 3], [0, 1, 2], [2, 3, 5], "growth", "ci95")
+    h.ref(0, "limit")
+    ax.legend(["body legend"])
+    h.finish(SPEC, INFO)
+    texts = [t.get_text() for t in ax.get_legend().get_texts()]
+    assert texts == ["Fast colony", "upper limit"]
+    assert all(texts)
+
+
+def test_limits_include_errorbars_bands_refs():
+    h = _Host(panels=1)
+    h.line(0, "fast", [1, 2, 3], [1.0, 2.0, 3.0], "growth", yerr=[0.5, 0.5, 2.0])
+    h.band(0, "fast", [1, 2, 3], [0.0, 1.0, 2.0], [2.0, 3.0, 4.0], "growth", "ci95")
+    h.ref(0, "limit")
+    h.finish(SPEC, INFO)
+    lo, hi = h.axes[0].get_ylim()
+    assert lo < 0.0 and hi > 5.0 and lo > -1.0 and hi < 6.0  # error bar top 5.0, band floor 0.0, ref 3.0, 5% pad
+    x0, x1 = h.axes[0].get_xlim()
+    assert x0 < 1 and x1 > 3
+
+
+def test_bars_reach_their_baseline():
+    h = _Host(panels=1)
+    h.bars(0, "fast", [1, 2, 3], [5.0, 6.0, 7.0], "growth")
+    h.finish(SPEC, INFO)
+    assert h.axes[0].get_ylim()[0] <= 0.0 and h.axes[0].get_xlim()[0] <= 0.5
+
+
+def test_identical_series_are_merged_and_recorded():
+    h = _Host(panels=1)
+    h.line(0, "fast", [1, 2, 3], [1.0, 2.0, 4.0], "growth", yerr=[0.1, 0.2, 0.3])
+    h.line(0, "slow", [1, 2, 3], [1.0 + 1e-14, 2.0, 4.0], "growth", yerr=[0.1, 0.2, 0.3])
+    h.finish(SPEC, INFO)
+    s = h.record()["panels"][0]["series"]
+    assert s[0]["merged_with"] == ["slow"] and s[1]["merged_with"] == [] and len(s) == 2
+    assert [t.get_text() for t in h.axes[0].get_legend().get_texts()] == ["Fast colony = Slow colony"]
+
+
+def test_near_equal_series_are_not_merged():
+    h = _Host(panels=1)
+    h.line(0, "fast", [1, 2, 3], [1.0, 2.0, 4.0], "growth")
+    h.line(0, "slow", [1, 2, 3], [1.0 + 1e-6, 2.0, 4.0], "growth")
+    h.finish(SPEC, INFO)
+    assert [e["merged_with"] for e in h.record()["panels"][0]["series"]] == [[], []]
+    assert len(h.axes[0].get_legend().get_texts()) == 2
+    # same y but different error bars, or a different result: not identical either
+    g = _Host(panels=1)
+    g.line(0, "fast", [1, 2], [1.0, 2.0], "growth", yerr=[0.1, 0.1])
+    g.line(0, "slow", [1, 2], [1.0, 2.0], "growth", yerr=[0.2, 0.1])
+    g.finish(SPEC, INFO)
+    assert [e["merged_with"] for e in g.record()["panels"][0]["series"]] == [[], []]
+
+
+def test_body_set_limits_are_overwritten_and_logged_once(caplog):
+    h = _Host(panels=2)
+    for i in (0, 1):
+        h.line(i, "fast", [1, 2, 3], [1.0, 2.0, 4.0], "growth")
+        h.axes[i].set_ylim(-100, 100)
+        h.axes[i].set_xlabel("body x")
+        h.axes[i].set_title("body title")
+    with caplog.at_level("WARNING", logger="frame_figure"):
+        h.finish(SPEC, INFO)
+        h.finish(SPEC, INFO)
+    msgs = [r for r in caplog.records if r.name == "frame_figure"]
+    assert len(msgs) == 1 and "limits" in msgs[0].getMessage() and "label" in msgs[0].getMessage()
+    assert all(ax.get_ylim()[1] < 10 for ax in h.axes)
+    assert h.record()["panels"][0]["raw"] is False
+
+
+def test_log_axis_with_zero_in_band_keeps_finite_limits():
+    h = _Host(panels=1)
+    h.line(0, "fast", [1, 2, 3], [1.0, 10.0, 100.0], "growth")
+    h.band(0, "fast", [1, 2, 3], [0.0, 5.0, 50.0], [2.0, 20.0, 200.0], "growth", "range")
+    h.finish(SPEC, {"growth": {"scale": "log"}})
+    ax = h.axes[0]
+    lo, hi = ax.get_ylim()
+    assert ax.get_yscale() == "log" and math.isfinite(lo) and math.isfinite(hi) and 0 < lo <= 1.0 and hi >= 200.0
+    assert h.record()["panels"][0]["y"]["scale"] == "log"
+
+
+def test_legend_stays_off_the_data_and_outside_when_crowded():
+    h = _Host(panels=2)
+    h.line(0, "fast", [1, 2, 3], [1.0, 2.0, 3.0], "growth")  # rising line: upper left is free
+    h.finish(SPEC, INFO)
+    assert h.axes[0].get_legend()._loc == 2  # "upper left"
+    c = _Host(panels=1)
+    for k in range(7):
+        c.line(0, "fast" if k % 2 == 0 else "slow", [1, 2, 3], [1.0 + k, 2.0 + k, 3.0 + k], "growth")
+    c.finish(SPEC, INFO)
+    assert c.axes[0].get_position().width < 0.8 * _Host(panels=1).axes[0].get_position().width

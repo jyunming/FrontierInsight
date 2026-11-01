@@ -32,11 +32,13 @@ from __future__ import annotations
 import contextlib
 import copy
 import json
+import logging
 import math
 from pathlib import Path
 
 MEANINGS = ("ci95", "sd", "range", "other")
 NOTE_FORMS = ("mean", "n", "low", "high")
+IDENTICAL_RTOL = 1e-12  # two series equal within this relative tolerance are one line to the reader
 
 
 def _finite(v):
@@ -44,6 +46,42 @@ def _finite(v):
 
 
 _BAD = object()
+
+
+def _same(a, b):
+    """Two value lists equal within ``IDENTICAL_RTOL`` (relative); a gap equals only a gap; category names must be equal."""
+    if a is None or b is None:
+        return a is b
+    if len(a) != len(b):
+        return False
+    for u, v in zip(a, b):
+        if u is None or v is None or isinstance(u, str) or isinstance(v, str):
+            if u != v:
+                return False
+        elif abs(u - v) > IDENTICAL_RTOL * max(abs(u), abs(v)):
+            return False
+    return True
+
+
+def _short(description):
+    """A short form of a plan description: up to its first stop, colon, semicolon or bracket, at most 48 characters."""
+    text = str(description or "").strip()
+    for stop in (".", ";", ":", "(", "\n"):
+        text = text.split(stop)[0]
+    text = text.strip(" ,")
+    if len(text) > 48:
+        text = text[:48].rsplit(" ", 1)[0].rstrip(" ,")
+    return text[:1].upper() + text[1:]
+
+
+def _padded(lo, hi, scale):
+    """Axis limits around ``lo..hi``: 5% of the span on each side (in decades on a log axis); a single value gets a fixed margin."""
+    if scale == "log":
+        a, b = math.log10(lo), math.log10(hi)
+        pad = 0.05 * (b - a) if b > a else 0.08
+        return 10 ** (a - pad), 10 ** (b + pad)
+    pad = 0.05 * (hi - lo) if hi > lo else (0.1 * abs(lo) or 0.5)
+    return lo - pad, hi + pad
 
 
 def _clean(v, strict=True):
@@ -109,7 +147,13 @@ class FigureCalls:
         if not hasattr(self, "_fc_panels"):
             self._fc_panels = {}
             self._fc_gid = 0
+            self._fc_extra = {}  # panel -> {"series": [(first artist, what)], "refs": [artist]}, parallel to the record's lists
         return self._fc_panels
+
+    def _remember(self, panel, part, artist, what=None):
+        """Keep the artist of a record entry (and the result it shows) beside the record, for the legend FI builds in ``finish``."""
+        extra = self._fc_extra.setdefault(panel, {"series": [], "refs": []})
+        extra[part].append((artist, what) if part == "series" else artist)
 
     def _next_gid(self):
         self._state()
@@ -238,6 +282,7 @@ class FigureCalls:
                 self._tag(self._errorbar(ax, xs, ys, errs))
             rec["series"].append({"id": series, "label": legend, "kind": kind, "step": bool(step), "x": xs, "y": ys, "yerr": errs,
                                   "yerr_meaning": yerr_meaning if errs is not None else None, "merged_with": []})
+            self._remember(panel, "series", arts[0] if arts else None, what)
         return arts
 
     @staticmethod
@@ -282,6 +327,7 @@ class FigureCalls:
             n = sum(1 for e in rec["series"] if e["kind"] == "curve") + 1
             rec["series"].append({"id": "curve%d" % n, "label": text, "kind": "curve", "step": False, "x": x, "y": y, "yerr": None,
                                   "yerr_meaning": None, "merged_with": [], "source": str(source)})
+            self._remember(panel, "series", arts[0] if arts else None, "other")
         return arts
 
     def image(self, panel, z, x=None, y=None, what="other"):
@@ -308,6 +354,7 @@ class FigureCalls:
             self._tag(art)
             rec["series"].append({"id": what, "label": self._label_of(what), "kind": "image", "step": False, "x": cols, "y": rws,
                                   "yerr": None, "yerr_meaning": None, "merged_with": [], "z": rows})
+            self._remember(panel, "series", None, what)
         return art
 
     # ---- band, reference, note ---------------------------------------------------------------------------------------
@@ -355,6 +402,7 @@ class FigureCalls:
         art = draw(float(value), linestyle=":", color="0.2", label=label)
         self._tag(art)
         rec["refs"].append({"id": ref_id, "axis": axis, "value": float(value), "label": label})
+        self._remember(panel, "refs", art)
         return art
 
     def note(self, panel, x, y, what, form="mean", key=None):
@@ -397,6 +445,256 @@ class FigureCalls:
         self._tag(art)
         rec["notes"].append({"id": ident, "text": shown, "x": float(x), "y": float(y)})
         return art
+
+    # ---- labels, legend and limits: FI's, never the body's --------------------------------------------------------------
+
+    def finish(self, spec_labels, result_info):
+        """Write what the figure's body must not: every axis label, the legend and the limits, from the plan and the record.
+
+        Called once, after the body returned and before the figure is saved. A title, label, legend, limit or axis scale the body
+        set is replaced, and the replacement is logged once for the whole figure (never raw, never an error). A raw panel
+        (``fig.raw``) is left as the body drew it: there is no record to write from.
+
+        ``spec_labels`` is ``{id: {"label": text, "unit": text, "scale": "linear"|"log"}}`` or ``{id: text}`` (a text is a label
+        that already holds its unit), for the ids of the plan (settings, results, series); every key is optional.
+        ``result_info`` is ``{result id: {"description": text, "unit": text, "scale": "linear"|"log"}}`` (the plan's description
+        of each result, its unit and the scale the plan declares); every key is optional.
+
+        An axis label is, in this order: the plan's label of the id, with its unit ("Growth (1/h)"); else a short form of the
+        result's plan description (up to its first stop or bracket, at most 48 characters); else "value" with the unit. The id
+        itself is never a label. Two results on one axis are joined with " / "; ``what="other"`` is "computed value". The x label
+        comes from the id of the call's ``x=``. In an image panel the vertical axis is "row".
+
+        Series whose x, y, error bars, kind and result are equal within ``IDENTICAL_RTOL`` (relative) are one line to the reader:
+        the later ids go to the first one's ``merged_with`` (both entries stay in the record, since both were drawn) and the
+        legend has one entry reading "a = b".
+
+        The legend is built from the record, never from the artists' own labels, one entry per drawn series (and per reference
+        line). Placement: inside the axes, in the corner (upper right, upper left, lower right, lower left, in this order of
+        preference) that no drawn point, error bar, band or reference line reaches, a corner being 40% of the axes wide and as
+        high as its rows need; when every corner is taken or there are more than six entries, the legend stands outside the axes
+        on the right and the axes are narrowed to 72% of their width to make room.
+
+        Limits are set from the series, error bar ends, bands, reference lines and curves together (bars also reach their
+        baseline, 0, on a linear axis). A linear axis is padded by 5% of the span on both sides, a log axis by the same share of
+        the span in decades, and a single value gets a fixed margin; on a log axis only values above zero count, so a band that
+        reaches 0 still gives finite limits (a log axis with no positive value is drawn linear, and the record says so)."""
+        spec_labels, result_info = spec_labels or {}, result_info or {}
+        self._state()
+        changed = []
+        for i in range(len(getattr(self, "axes", []) or [])):
+            ax, rec = self._panel(i)
+            if rec["raw"]:
+                continue
+            self._merge_identical(i, rec)
+            self._write_labels(ax, rec, spec_labels, result_info, changed)
+            self._write_limits(ax, rec, changed)
+            self._write_legend(ax, i, rec, spec_labels, changed)
+        sup = getattr(getattr(self, "fig", None), "_suptitle", None)
+        if sup is not None and sup.get_text():
+            sup.set_text("")
+            changed.append("title")
+        if changed and not getattr(self, "_fc_logged", False):
+            self._fc_logged = True
+            logging.getLogger("frame_figure").warning(
+                "the figure's drawing code set its own %s; FI wrote them from the plan instead", ", ".join(dict.fromkeys(changed)))
+
+    def _merge_identical(self, panel, rec):
+        store = self._fc_extra.setdefault(panel, {"series": [], "refs": []})
+        store["twins"] = set()
+        extra = store["series"]
+
+        def what_of(k):
+            return extra[k][1] if k < len(extra) else None
+
+        for e in rec["series"]:
+            e["merged_with"] = []
+        firsts = []
+        for i, e in enumerate(rec["series"]):
+            if e["kind"] in ("curve", "image"):
+                continue
+            for j in firsts:
+                f = rec["series"][j]
+                if (f["kind"], f["step"], what_of(j)) == (e["kind"], e["step"], what_of(i)) \
+                        and _same(f["x"], e["x"]) and _same(f["y"], e["y"]) and _same(f["yerr"], e["yerr"]):
+                    f["merged_with"].append(e["id"])
+                    store["twins"].add(i)
+                    break
+            else:
+                firsts.append(i)
+
+    @staticmethod
+    def _name_of(ident, spec_labels, result_info):
+        sl, ri = spec_labels.get(ident), result_info.get(ident) or {}
+        sl = sl if isinstance(sl, dict) else ({"label": sl} if sl else {})
+        unit = sl.get("unit") or ri.get("unit")
+        text = str(sl.get("label") or _short(ri.get("description")) or "value")
+        return "%s (%s)" % (text, unit) if unit and str(unit) not in text else text
+
+    @staticmethod
+    def _scale_in(ident, spec_labels, result_info, default):
+        sl = spec_labels.get(ident)
+        for got in ((result_info.get(ident) or {}).get("scale"), sl.get("scale") if isinstance(sl, dict) else None):
+            if got in ("linear", "log"):
+                return got
+        return default
+
+    def _write_labels(self, ax, rec, spec_labels, result_info, changed):
+        for loc in ("center", "left", "right"):
+            if ax.get_title(loc):
+                ax.set_title("", loc=loc)
+                changed.append("title")
+        if rec["x"] is None:
+            return
+        image = any(e["kind"] == "image" for e in rec["series"])
+        x = rec["x"]
+        if not (image and x["id"] == "column" and "column" not in spec_labels):
+            x["label"] = self._name_of(x["id"], spec_labels, result_info)
+        x["scale"] = self._scale_in(x["id"], spec_labels, result_info, x["scale"])
+        if rec["y"] is not None:
+            parts = rec["y"]["what"].split(" / ")
+            names = dict.fromkeys("computed value" if w == "other" else self._name_of(w, spec_labels, result_info) for w in parts)
+            rec["y"]["label"] = " / ".join(names)
+            scales = [self._scale_in(w, spec_labels, result_info, "linear") for w in parts if w != "other"]
+            rec["y"]["scale"] = "log" if scales and all(s == "log" for s in scales) else "linear"
+        ytext = "row" if image else (rec["y"] or {}).get("label", "")
+        for old, text, setter in ((ax.get_xlabel(), x["label"], ax.set_xlabel), (ax.get_ylabel(), ytext, ax.set_ylabel)):
+            if old and old != text:
+                changed.append("label")
+            setter(text)
+
+    def _write_limits(self, ax, rec, changed):
+        if rec["x"] is None or rec["y"] is None:
+            return
+        if not ax.get_autoscalex_on() or not ax.get_autoscaley_on():
+            changed.append("limits")
+        if (ax.get_xscale(), ax.get_yscale()) not in (("linear", "linear"), (rec["x"]["scale"], rec["y"]["scale"])):
+            changed.append("scale")
+        if any(e["kind"] == "image" for e in rec["series"]):
+            return
+        series = rec["series"]
+        categorical = any(isinstance(v, str) for e in series for v in e["x"]) or any(isinstance(v, str) for b in rec["bands"] for v in b["x"])
+        yv, xv = [], []
+        for e in series:
+            yv += [v for v in e["y"] if v is not None]
+            if e["yerr"] is not None:
+                for v, d in zip(e["y"], e["yerr"]):
+                    if v is not None and d is not None:
+                        yv += [v - d, v + d]
+            xv += [v for v in e["x"] if _finite(v)]
+        for b in rec["bands"]:
+            yv += [v for v in b["lo"] + b["hi"] if v is not None]
+            xv += [v for v in b["x"] if _finite(v)]
+        for r in rec["refs"]:
+            (yv if r["axis"] == "y" else xv).append(r["value"])
+        bars = [e for e in series if e["kind"] == "bars"]
+        for axis, vals in (("x", xv), ("y", yv)):
+            if axis == "x" and categorical:
+                ax.relim()
+                ax.autoscale(enable=True, axis="x")
+                continue
+            scale = rec[axis]["scale"]
+            vals = [v for v in vals if _finite(v)]
+            if bars and axis == "y" and scale == "linear":
+                vals.append(0.0)
+            if axis == "x" and scale == "linear":  # bars have width: half the closest spacing on each side
+                for e in bars:
+                    pts = sorted({v for v in e["x"] if _finite(v)})
+                    if pts:
+                        half = min((b - a for a, b in zip(pts, pts[1:])), default=1.0) / 2
+                        vals += [pts[0] - half, pts[-1] + half]
+            if scale == "log":
+                vals = [v for v in vals if v > 0]
+                if not vals:  # nothing a log axis can show
+                    scale = rec[axis]["scale"] = "linear"
+                    vals = [v for v in (xv if axis == "x" else yv) if _finite(v)]
+            (ax.set_xscale if axis == "x" else ax.set_yscale)(scale)
+            if vals:
+                (ax.set_xlim if axis == "x" else ax.set_ylim)(*_padded(min(vals), max(vals), scale))
+
+    def _entries(self, panel, rec, spec_labels):
+        """``[(artist, text)]`` of the legend: one per drawn series (the merged ones read "a = b") and per reference line."""
+        extra = self._fc_extra.get(panel, {"series": [], "refs": []})
+        twins = extra.get("twins", set())
+
+        def name(ident, fallback):
+            sl = spec_labels.get(ident)
+            got = sl.get("label") if isinstance(sl, dict) else sl
+            return str(got or fallback or ident)
+
+        out = []
+        for k, e in enumerate(rec["series"]):
+            if e["kind"] == "image" or k >= len(extra["series"]) or extra["series"][k][0] is None or k in twins:
+                continue
+            text = " = ".join([name(e["id"], e["label"])] + [name(i, i) for i in e["merged_with"]])
+            out.append((extra["series"][k][0], text))
+        for r, art in zip(rec["refs"], extra["refs"]):
+            out.append((art, name(r["id"], r["label"])))
+        return out
+
+    def _write_legend(self, ax, panel, rec, spec_labels, changed):
+        old = ax.get_legend()
+        if old is not None:
+            changed.append("legend")
+            old.remove()
+        entries = self._entries(panel, rec, spec_labels)
+        if not entries:
+            return
+        handles, texts = [a for a, _ in entries], [t for _, t in entries]
+        corner = self._free_corner(ax, rec, len(entries)) if len(entries) <= 6 else None
+        if corner is None:
+            extra = self._fc_extra.setdefault(panel, {"series": [], "refs": []})
+            if not extra.get("narrowed"):
+                extra["narrowed"] = True
+                pos = ax.get_position()
+                ax.set_position([pos.x0, pos.y0, pos.width * 0.72, pos.height])
+            ax.legend(handles, texts, loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0, fontsize="small", frameon=False)
+        else:
+            ax.legend(handles, texts, loc=corner, fontsize="small", framealpha=0.85)
+
+    def _free_corner(self, ax, rec, rows):
+        """The first corner (upper right, upper left, lower right, lower left) the drawn data does not reach, or None."""
+        w, h = 0.4, min(0.5, 0.04 + 0.07 * rows)
+        boxes = {"upper right": (1 - w, 1, 1 - h, 1), "upper left": (0, w, 1 - h, 1),
+                 "lower right": (1 - w, 1, 0, h), "lower left": (0, w, 0, h)}
+        to_axes = ax.transAxes.inverted()
+        pts = []
+
+        def add(pairs):
+            for x, y in pairs:
+                if _finite(x) and _finite(y):
+                    fx, fy = to_axes.transform(ax.transData.transform((x, y)))
+                    if math.isfinite(fx) and math.isfinite(fy):
+                        pts.append((fx, fy))
+
+        def along(xs, ys):  # the points and the middle of each step between them
+            pairs = [(x, y) for x, y in zip(xs, ys) if _finite(x) and y is not None]
+            add(pairs)
+            add([((a[0] + b[0]) / 2, (a[1] + b[1]) / 2) for a, b in zip(pairs, pairs[1:])])
+
+        for e in rec["series"]:
+            if e["kind"] == "image":
+                return None  # an image fills its axes
+            along(e["x"], e["y"])
+            if e["yerr"] is not None:
+                along(e["x"], [None if v is None or d is None else v + d for v, d in zip(e["y"], e["yerr"])])
+                along(e["x"], [None if v is None or d is None else v - d for v, d in zip(e["y"], e["yerr"])])
+            if e["kind"] == "bars":
+                along(e["x"], [0.0] * len(e["x"]))
+        for b in rec["bands"]:
+            along(b["x"], b["lo"])
+            along(b["x"], b["hi"])
+        lines = []
+        for r in rec["refs"]:
+            point = (r["value"], 1.0) if r["axis"] == "x" else (1.0, r["value"])
+            fx, fy = to_axes.transform(ax.transData.transform(point))
+            lines.append((r["axis"], fx if r["axis"] == "x" else fy))
+        for name, (x0, x1, y0, y1) in boxes.items():
+            taken = any(x0 <= x <= x1 and y0 <= y <= y1 for x, y in pts)
+            taken = taken or any((a == "x" and x0 <= v <= x1) or (a == "y" and y0 <= v <= y1) for a, v in lines)
+            if not taken:
+                return name
+        return None
 
     # ---- raw, record -------------------------------------------------------------------------------------------------
 
