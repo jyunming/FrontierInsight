@@ -351,6 +351,12 @@ class FigureCalls:
         """The table's key of the setting where ``x_id`` is ``x``. When other settings also vary (several keys share that x), the
         key is the one whose mean of ``what`` is the plotted ``y`` (the bars belong to the point drawn); None when no key, or
         still more than one, fits."""
+        found = self._setting_keys(x_id, x, what, y)
+        return found[0] if len(found) == 1 else None
+
+    def _setting_keys(self, x_id, x, what=None, y=None):
+        """Every key of the table at ``x`` of ``x_id`` whose mean of ``what`` is the plotted ``y`` (all keys at x when ``y`` is not
+        given or only one key is there)."""
         found = self._keys_at(x_id, x)
         table = getattr(self, "table", None)
         if len(found) > 1 and what is not None and _finite(y):
@@ -363,7 +369,7 @@ class FigureCalls:
                 if _finite(m) and _close_width(float(m), float(y)):
                     fits.append(key)
             found = fits
-        return found[0] if len(found) == 1 else None
+        return found
 
     def _table_widths(self, meaning, what, x_id, xs, ys):
         """``(lower, upper)`` lists of the widths FI reads from the table for ``meaning`` (ci95 or sd) of result ``what`` at each
@@ -374,18 +380,23 @@ class FigureCalls:
         lo, hi = [], []
         for x, y in zip(xs, ys):
             a = b = None
-            key = None if x is None else self._setting_key(x_id, x, what, y)
-            if key is not None:
+            reads = []  # the widths of each key that fits; several keys that fit are one answer only when they agree
+            for key in ([] if x is None else self._setting_keys(x_id, x, what, y)):
+                c = d = None
                 try:
                     if meaning == "ci95":
                         m, (u, v) = table.mean(what, key), table.interval(what, key)
                         if _finite(m) and _finite(u) and _finite(v):
-                            a, b = m - u, v - m
+                            c, d = m - u, v - m
                     else:
                         sd = table.sd(what, key) if hasattr(table, "sd") else _sample_sd(table.values(what, key))
-                        a = b = float(sd) if _finite(sd) else None
+                        c = d = float(sd) if _finite(sd) else None
                 except Exception:  # noqa: BLE001 -- a read the table refuses is a width it does not give
-                    a = b = None
+                    c = d = None
+                reads.append((c, d))
+            if reads and all(r[0] is not None and r[1] is not None and _close_width(r[0], reads[0][0])
+                             and _close_width(r[1], reads[0][1]) for r in reads):
+                a, b = reads[0]
             lo.append(a)
             hi.append(b)
         return (lo, hi) if any(v is not None for v in lo + hi) else None
@@ -475,6 +486,62 @@ class FigureCalls:
                 if theirs[i] is None or not _close_width(mine[i], theirs[i]):  # one unverifiable or unmatched bar: no claim
                     return "other"
         return meaning if drawn else "other"
+
+    def _setting_values(self, name):
+        """The distinct values (as text) the table's keys give the setting ``name``."""
+        table = getattr(self, "table", None)
+        out = set()
+        for key in (list(table.keys()) if table is not None else []):
+            for piece in str(key).split(","):
+                k, _, text = piece.partition("=")
+                if k.strip() == name:
+                    out.add(text.strip())
+        return out
+
+    def _row_setting(self, x_id, rows):
+        """The one setting (other than ``x_id``) whose values in the table include every drawn row position; None when none or
+        more than one does (the rows are then not tied to a setting)."""
+        found = []
+        for name in (getattr(self, "settings", None) or []):
+            if name == x_id:
+                continue
+            floats = set()
+            for t in self._setting_values(name):
+                try:
+                    floats.add(float(t))
+                except ValueError:
+                    pass
+            if rows and all(r is not None and r in floats for r in rows):
+                found.append(name)
+        return found[0] if len(found) == 1 else None
+
+    def _image_matches(self, what, x_id, y_id, cols, rows, z):
+        """Whether every drawn colour value equals, within ``Y_RTOL``, the table's mean of result ``what`` at the setting where
+        ``x_id`` is the column's x and ``y_id`` the row's y (the way a line's y is checked). A cell with no such setting, or no
+        table value, cannot be compared and counts as not matching; so does an image with no finite value at all."""
+        if getattr(self, "table", None) is None:
+            return False
+        checked = 0
+        for r, line in zip(rows, z):
+            for c, v in zip(cols, line):
+                if v is None or not _finite(v):
+                    continue
+                if c is None or r is None:
+                    return False
+                keys = set(self._keys_at(x_id, c)) & set(self._keys_at(y_id, r))
+                if not any(_close_y(float(v), t) for key in keys for t in self._table_stats(what, key, "mean")):
+                    return False
+                checked += 1
+        return checked > 0
+
+    def _checked_image_what(self, what, x_id, y_id, cols, rows, z):
+        """``what`` when every cell of the image is the table's own value, else ``other`` (the image keeps its shape and states
+        no value). Whatever FI cannot tie to the table is ``other`` as well: a quantity that is not a plan result, a column or a
+        row that is not a setting of the plan."""
+        settings = getattr(self, "settings", None) or []
+        if what == "other" or what not in self._results() or x_id not in settings or y_id not in settings:
+            return "other"
+        return what if self._image_matches(what, x_id, y_id, cols, rows, z) else "other"
 
     def _add_series(self, panel, kind, series, x, y, what, yerr, yerr_meaning, step=False, form="mean"):
         """Check a series call and draw it; the record gets the series only if it was drawn."""
@@ -576,6 +643,13 @@ class FigureCalls:
         """A heat map or raster of ``z`` (rows of values); ``x`` and ``y`` are the coordinates of its columns and rows."""
         ax, rec = self._panel(panel)
         self._what_ok(what)
+        x_id = y_id = None
+        if isinstance(x, tuple) and len(x) == 2 and isinstance(x[0], str):
+            x_id, x = x
+        elif isinstance(getattr(self, "x", None), str):
+            x_id = self.x
+        if isinstance(y, tuple) and len(y) == 2 and isinstance(y[0], str):
+            y_id, y = y
         rows = [_vector(r, "z") for r in z]
         if not rows or any(len(r) != len(rows[0]) for r in rows):
             raise ValueError("`z` must be rows of equal length")
@@ -587,6 +661,9 @@ class FigureCalls:
         extent = None
         if all(_finite(v) for v in cols + rws) and cols and rws:
             extent = [min(cols), max(cols), max(rws), min(rws)]
+        if y_id is None and x is not None and y is not None:
+            y_id = self._row_setting(x_id, rws)
+        what = self._checked_image_what(what, x_id, y_id, cols, rws, rows) if x is not None and y is not None else "other"
         with _undone(ax, rec):
             if rec["x"] is None:
                 rec["x"] = {"id": "column", "kind": "setting", "label": "column", "scale": "linear"}
@@ -595,11 +672,31 @@ class FigureCalls:
                             vmin=min(nums) if nums else None, vmax=max(nums) if nums else None)
             self._tag(art)
             rec["series"].append({"id": what, "label": self._label_of(what), "kind": "image", "step": False, "x": cols, "y": rws,
-                                  "yerr": None, "yerr_lo": None, "yerr_hi": None, "yerr_meaning": None, "merged_with": [], "z": rows})
+                                  "yerr": None, "yerr_lo": None, "yerr_hi": None, "yerr_meaning": None, "merged_with": [], "z": rows, "what": what})
             self._remember(panel, "series", None, what)
         return art
 
     # ---- band, reference, note ---------------------------------------------------------------------------------------
+
+    def _checked_band_meaning(self, meaning, what, x_id, xs, los, his, drawn):
+        """What a band may be called. ``ci95``/``sd`` stay only when the band's edges are the table's own interval / sd around the
+        drawn series at EVERY x (the error-bar check, ``BAR_RTOL``): the widths below and above the drawn y are compared with the
+        table's. A band with no drawn series at its x, or an edge that is a gap where the series has a y, gives ``other``."""
+        series = [e for e in drawn if e["x"] == xs]
+        if not series:
+            return "other"
+        ys = series[0]["y"]
+        lo, hi = [], []
+        for y, a, b in zip(ys, los, his):
+            if y is None:
+                lo.append(None)
+                hi.append(None)
+            elif a is None or b is None:
+                return "other"
+            else:
+                lo.append(y - a)
+                hi.append(b - y)
+        return self._checked_meaning(meaning, what, x_id, xs, ys, lo, hi)
 
     def band(self, panel, series, x, lo, hi, what, meaning):
         """A shaded interval around ``series``; ``meaning`` says what the interval is: one of ci95, sd, range, other."""
@@ -619,6 +716,8 @@ class FigureCalls:
         if not any(e["x"] == xs for e in drawn):
             raise ValueError("the band's x does not match the x of series `%s` on panel %d: a band is drawn at the points of its "
                              "series" % (series, panel))
+        if meaning in ("ci95", "sd"):
+            meaning = self._checked_band_meaning(meaning, what, x_id, xs, los, his, drawn)
         with _undone(ax, rec):
             self._set_x(rec, x_id)
             self._set_y(rec, what)

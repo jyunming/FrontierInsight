@@ -11,12 +11,20 @@ import math
 import runpy
 from pathlib import Path
 
+import pytest
+
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 from core import figure_claims, frame_figure  # noqa: E402
+
+@pytest.fixture(autouse=True)
+def _close_figures():
+    yield
+    plt.close("all")
+
 
 FIXTURES = Path(__file__).parent / "fixtures" / "figure_claims"
 
@@ -72,14 +80,28 @@ class _Host(frame_figure.FigureCalls):
         self.labels = contract["labels"]
 
 
-def _run(name, tmp_path):
-    """The fixture's body run on its trial record; returns ``(contract, host, stem)``. The call record is written."""
+class _Shifted:
+    """The table a faulty body reads: every mean is ``by`` too high. FI's own record (``host.table``) is the true one."""
+
+    def __init__(self, table, by):
+        self._table, self._by = table, by
+
+    def __getattr__(self, name):
+        return getattr(self._table, name)
+
+    def mean(self, name, key):
+        return self._table.mean(name, key) + self._by
+
+
+def _run(name, tmp_path, *, shift=0.0):
+    """The fixture's body run on its trial record; returns ``(contract, host, stem)``. The call record is written.
+    ``shift``: the body reads means that many too high (a drawn value that is not the table's)."""
     folder = FIXTURES / name
     contract = json.loads((folder / "contract.json").read_text(encoding="utf-8"))
     cells = json.loads((folder / "trials.json").read_text(encoding="utf-8"))["cells"]
     host = _Host(contract, _Table(cells, contract["results"]))
     body = runpy.run_path(str(folder / "body.py"))[contract["figure"]["body"]]
-    body(host, host.table)
+    body(host, _Shifted(host.table, shift) if shift else host.table)
     stem = contract["figure"]["id"]
     host.write(tmp_path / ".fi" / "figure_records" / f"{stem}.png")
     return contract, host, stem
@@ -143,3 +165,47 @@ def test_bars_heatmap_draws(tmp_path):
 
 def test_bars_heatmap_claims_offered(tmp_path):
     _check_claims_offered("bars_heatmap", tmp_path)
+
+
+# ---- a heat map's range and a band's meaning are compared with FI's table ---------------------------------------------------
+
+
+def _image_range(name, tmp_path, shift):
+    contract, _h, stem = _run(name, tmp_path, shift=shift)
+    offers = figure_claims.menu(figure_claims.load_calls(tmp_path, stem), contract["plan"], stem=stem)
+    return [o["text"] for o in offers if o["claim"] == "range" and "has values" in o["text"]]
+
+
+@pytest.mark.parametrize("name", ["map", "bars_heatmap"])
+def test_a_heat_map_of_values_the_table_does_not_hold_states_no_range(name, tmp_path):
+    assert _image_range(name, tmp_path / "honest", 0.0), "the honest heat map states its range"
+    assert not _image_range(name, tmp_path / "shifted", 0.5)
+
+
+def _survival_band(tmp_path, widen):
+    folder = FIXTURES / "survival"
+    contract = json.loads((folder / "contract.json").read_text(encoding="utf-8"))
+    cells = json.loads((folder / "trials.json").read_text(encoding="utf-8"))["cells"]
+    host = _Host(contract, _Table(cells, contract["results"]))
+    times = sorted({host.table.setting(k)["time"] for k in host.table.keys()})
+    keys = [host.table.at(time=t, group="b")[0] for t in times]
+    means = [host.table.mean("survival", k) for k in keys]
+    host.line(0, "group_b", times, means, "survival", step=True)
+    if widen:
+        lo, hi = [m - 0.3 for m in means], [m + 0.3 for m in means]  # not the table's interval
+    else:
+        lo, hi = [host.table.interval("survival", k)[0] for k in keys], [host.table.interval("survival", k)[1] for k in keys]
+    host.band(0, "group_b", times, lo, hi, "survival", "ci95")
+    host.write(tmp_path / ".fi" / "figure_records" / "survival.png")
+    return figure_claims.load_calls(tmp_path, "survival")
+
+
+def test_a_band_that_is_not_the_tables_interval_states_no_meaning(tmp_path):
+    calls = _survival_band(tmp_path, widen=True)
+    assert figure_claims.evaluate(calls, "band", {"series": "group_b", "panel": "1"}) is None
+
+
+def test_a_band_that_is_the_tables_interval_keeps_its_meaning(tmp_path):
+    calls = _survival_band(tmp_path, widen=False)
+    got = figure_claims.evaluate(calls, "band", {"series": "group_b", "panel": "1"})
+    assert got is not None and "95% confidence interval" in got[0]

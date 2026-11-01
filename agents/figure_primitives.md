@@ -8,7 +8,7 @@ The calls (draw the data of a panel before its band or curve):
 - `fig.ref(panel, ref_id, axis="y")`: a reference line at a value the plan holds, named by its plan id.
 - `fig.note(panel, x, y, what, form="mean", key=None)`: words with one `{result id}` where FI writes the number it reads from `table` (`"mean growth: {growth}"`); the words hold no digits; `form` is `mean`, `n`, `low` or `high`.
 - `fig.curve(panel, label, xs, ys, source="computed in the figure")`: an analytic overlay (a theory curve, a slope, a fit); it is marked with its source.
-- `fig.image(panel, z, x=None, y=None, what="other")`: a heat map of `z` (rows of values).
+- `fig.image(panel, z, x=None, y=None, what="other")`: a heat map of `z` (rows of values); FI states its value range only when every cell is the table's mean of `what` at the setting of its column (`x`, the plan's x unless `x=("id", values)`) and its row (`y=("id", values)`, or the one setting whose values the rows are).
 
 Names:
 - `series`, `x` and `what` are ids of the plan (its results, settings and compared values), never words you make up. `what` is the result `y` shows; use `what="other"` for a quantity the plan does not declare (FI then states nothing about its value).

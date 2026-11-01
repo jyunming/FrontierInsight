@@ -110,7 +110,8 @@ def test_band_meaning_closed_list():
     h.line(0, "fast", [1, 2], [1.0, 2.0], "growth")
     for m in ("ci95", "sd", "range", "other"):
         h.band(0, "fast", [1, 2], [0, 1], [2, 3], "growth", m)
-    assert [b["meaning"] for b in h.record()["panels"][0]["bands"]] == ["ci95", "sd", "range", "other"]
+    # ci95 and sd are typed here and the table gives no such widths at these x: they are not kept; range and other stay as stated
+    assert [b["meaning"] for b in h.record()["panels"][0]["bands"]] == ["other", "other", "range", "other"]
     with pytest.raises(ValueError) as e:
         h.band(0, "fast", [1, 2], [0, 1], [2, 3], "growth", "stderr")
     assert "ci95" in str(e.value) and "range" in str(e.value)
@@ -257,7 +258,7 @@ def test_band_records_x_and_needs_its_series():
     assert h.record()["panels"][0]["bands"] == []
     h.band(0, "fast", [1, 2, 3], [0, 1, 2], [2, 3, 5], "growth", "sd")
     b = h.record()["panels"][0]["bands"][0]
-    assert b["x"] == [1.0, 2.0, 3.0] and b["lo"] == [0.0, 1.0, 2.0] and b["meaning"] == "sd"
+    assert b["x"] == [1.0, 2.0, 3.0] and b["lo"] == [0.0, 1.0, 2.0] and b["meaning"] == "other"  # typed sd, not the table's
 
 
 def test_error_bars_record_their_meaning():
@@ -495,13 +496,54 @@ def test_log_axis_ignores_nonpositive_error_bar_end():
     assert h.axes[0].get_yscale() == "log" and 0 < lo < 1.0 and 100.0 < hi < 1000.0
 
 
-def test_image_panel_labels():
+class _GridTable(_Table):
+    """Two settings; the mean of ``growth`` at size=a, step=b is 10a + b."""
+
+    def keys(self):
+        return ["size=%d,step=%d" % (a, b) for a in (1, 2) for b in (3, 4)]
+
+    def mean(self, name, key):
+        a, b = (int(p.partition("=")[2]) for p in key.split(","))
+        return float(10 * a + b)
+
+
+def _grid_host(z):
     h = _Host(panels=1)
-    h.image(0, [[1.0, 2.0], [3.0, 4.0]], what="growth")
+    h.table = _GridTable()
+    h.image(0, z, x=[1, 2], y=[3, 4], what="growth")  # columns are sizes (the plan's x); rows are the one other setting, step
+    return h
+
+
+def test_image_panel_labels():
+    h = _grid_host([[13.0, 23.0], [14.0, 24.0]])
     h.finish(SPEC, INFO)
     p = h.record()["panels"][0]
     assert h.axes[0].get_ylabel() == "row" and h.axes[0].get_xlabel() == "column"
     assert p["y"]["label"] == "Growth (1/h)" and h.axes[0].get_legend() is None
+
+
+def test_image_keeps_its_quantity_only_when_every_cell_is_the_tables():
+    honest = _grid_host([[13.0, 23.0], [14.0, 24.0]]).record()["panels"][0]
+    assert honest["series"][0]["what"] == "growth" and honest["y"]["what"] == "growth"
+    for z in ([[13.0, 23.0], [14.0, 24.5]], [[14.0, 24.0], [13.0, 23.0]]):  # one cell off; rows swapped
+        bad = _grid_host(z).record()["panels"][0]
+        assert bad["series"][0]["what"] == "other" and bad["y"]["what"] == "other"
+    unknown = _Host(panels=1)  # no ids: the rows cannot be tied to a setting of this table
+    unknown.image(0, [[1.0, 2.0], [3.0, 4.0]], what="growth")
+    assert unknown.record()["panels"][0]["series"][0]["what"] == "other"
+
+
+def test_band_keeps_ci95_or_sd_only_when_it_is_the_tables_own():
+    h = _Host(panels=1)
+    h.table = _TableByX()
+    keys = h.table.keys()
+    xs = [float(k.partition("=")[2]) for k in keys]
+    ys = [h.table.mean("growth", k) for k in keys]
+    h.line(0, "fast", xs, ys, "growth")
+    ci = [h.table.interval("growth", k) for k in keys]
+    h.band(0, "fast", xs, [a for a, _b in ci], [b for _a, b in ci], "growth", "ci95")
+    h.band(0, "fast", xs, [a - 0.5 for a, _b in ci], [b + 0.5 for _a, b in ci], "growth", "ci95")
+    assert [b["meaning"] for b in h.record()["panels"][0]["bands"]] == ["ci95", "other"]
 
 
 class _TableByX(_Table):
