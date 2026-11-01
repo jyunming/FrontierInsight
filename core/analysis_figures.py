@@ -449,7 +449,15 @@ def _panel_declarer(handle: Any, allowed: dict[str, Any]):
                                      "use are: %s" % (index, name, value, "; ".join("%s = %s" % (k, ", ".join(map(str, v)))
                                                                                       for k, v in allowed.items())))
         handle.declared[index] = dict(settings)
+        if _has_calls(handle):  # the call record keeps which setting the panel holds; FI's `finish` writes the title from it
+            handle._panel(index)[1]["hold"] = {k: _plain(v) for k, v in settings.items()}
     return panel
+
+
+def _plain(value: Any) -> Any:
+    """A setting's value as a plain number or text (a numpy scalar is unwrapped), so the call record can be written."""
+    item = getattr(value, "item", None)
+    return item() if callable(item) else value
 
 
 def _panel_title(settings: dict[str, Any], labels: dict[str, Any]) -> str:
@@ -464,6 +472,9 @@ def _set_panel_titles(handle: Any, axes: list[Any], labels: dict[str, Any]) -> l
     record = []
     for index, settings in sorted((getattr(handle, "declared", None) or {}).items()):
         if not isinstance(index, int) or not 0 <= index < len(axes) or not isinstance(settings, dict) or not settings:
+            continue
+        if _has_calls(handle) and not handle._panel(index)[1]["raw"]:
+            record.append({"panel": index + 1, "settings": settings, "title": axes[index].get_title()})  # `finish` wrote it
             continue
         title = _panel_title(settings, labels)
         for loc in ("left", "center", "right"):

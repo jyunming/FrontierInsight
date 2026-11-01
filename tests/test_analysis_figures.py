@@ -1440,3 +1440,62 @@ def test_an_honest_body_the_recorder_cannot_read_is_not_a_fi_fault(tmp_path, cat
                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     assert done.stdout.split()[:1] == ["ok"], done.stdout + done.stderr[-800:]
     assert (records / "g.calls.json").is_file()
+
+
+# ---- a panel of the drawing calls says which setting it shows, and FI writes that title --------------------------------------------
+def _hold_run(tmp_path, body, labels=None):
+    ns = types.SimpleNamespace(figure_g=body, COMPARED={"speed": ["fast", "slow"]})
+    spec = {"id": "g", "file": "g.png", "panels": 2, "x": "size", "series": "fast", "shows": ["growth"],
+            "settings": {"size": [1, 2]}, "labels": labels or {"size": "Colony size"}}
+    return af.run_figures([spec], ns, _CallTable(), str(tmp_path / "figures"))[0]
+
+
+def test_a_panel_declared_with_fig_panel_keeps_its_setting_in_the_record_and_fi_writes_its_title(tmp_path, frame5):
+    def body(fig, table):
+        fig.panel(0, size=1)
+        fig.panel(1, size=2)
+        _both_panels(fig, table)
+
+    out = _hold_run(tmp_path, body)
+    assert out["status"] == "ok", out
+    panels = json.loads((frame5 / "g.calls.json").read_text(encoding="utf-8"))["panels"]
+    assert [p["hold"] for p in panels] == [{"size": 1}, {"size": 2}]
+    assert [p["title"] for p in out["panels"]] == ["Colony size = 1", "Colony size = 2"]
+
+
+def test_a_title_typed_after_fig_panel_is_replaced_by_fi_and_a_panel_without_a_hold_has_none(tmp_path, frame5):
+    def body(fig, table):
+        _both_panels(fig, table)
+        fig.panel(0, size=2)
+        fig.axes[0].set_title("a curve this panel does not draw")
+        fig.axes[1].set_title("typed")
+
+    out = _hold_run(tmp_path, body)
+    assert out["status"] == "ok", out
+    panels = json.loads((frame5 / "g.calls.json").read_text(encoding="utf-8"))["panels"]
+    assert panels[0]["hold"] == {"size": 2} and "hold" not in panels[1]
+    assert [p["title"] for p in out["panels"]] == ["Colony size = 2"]
+
+
+def test_the_title_of_a_hold_is_written_by_finish_from_the_plans_label(tmp_path, frame5):
+    seen = {}
+
+    def body(fig, table):
+        fig.panel(0, size=1)
+        _both_panels(fig, table)
+        fig.axes[0].set_title("typed late")
+        fig.finish({"size": "Colony size"}, {})
+        seen["title"], seen["other"] = fig.axes[0].get_title(), fig.axes[1].get_title()
+
+    ns = types.SimpleNamespace(figure_g=body)
+    spec = {"id": "g", "file": "g.png", "panels": 2, "x": "size", "series": "fast", "shows": ["growth"],
+            "settings": {"size": [1, 2]}, "labels": {"size": "Colony size"}}
+    af.run_figures([spec], ns, _CallTable(), str(tmp_path / "figures"))
+    assert seen == {"title": "Colony size = 1", "other": ""}
+
+
+def test_fig_panel_with_a_setting_or_value_the_plan_does_not_have_is_refused_on_the_calls_frame(tmp_path, frame5):
+    out = _hold_run(tmp_path, lambda fig, table: fig.panel(0, speed=5))
+    assert out["status"] == "failed" and "UnknownSetting" in out["why"] and "size = 1, 2" in out["why"]
+    out = _hold_run(tmp_path, lambda fig, table: fig.panel(1, size=999))
+    assert out["status"] == "failed" and "UnknownSetting" in out["why"] and "size = 1, 2" in out["why"]

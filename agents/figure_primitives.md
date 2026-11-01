@@ -18,4 +18,6 @@ Names:
 
 Use `fig.raw(panel)` (the real axes) only for a drawing none of these calls can make. FI then states nothing about that panel, so use it as little as possible.
 
+When panels show different settings, say which on each: `fig.panel(0, m=200)` (the panel's place in `fig.axes`, then the setting and its value). FI writes that panel's title from it (`m = 200`); do not type a title for such a panel.
+
 Never type text into a figure: no title, no axis label, no legend, no number written as a string. FI writes them from the plan and from the table.

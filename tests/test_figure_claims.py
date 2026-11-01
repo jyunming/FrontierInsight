@@ -618,3 +618,15 @@ def test_sentence_after_a_removed_pointer_sentence_survives():
         out, taken = _rule(f"The gain is {gain} (Figure 1). {nxt}\n")
         assert out == f"{nxt}\n", nxt
         assert [t["sentence"] for t in taken] == ["The gain is 0.5 (Figure 1)."], nxt
+
+
+def test_a_panel_with_a_hold_is_named_by_its_setting_in_a_claim():
+    p0 = _panel([_series("a", [1, 2], [1.0, 2.0])], 1, hold={"m": 100})
+    p1 = _panel([_series("a", [1, 2], [3.0, 4.0])], 2, hold={"m": 200})
+    calls = _calls(p0, p1)
+    got = ev(calls, "drawn", series="a", panel=2)
+    assert got and got[0] == "A is drawn in the panel at m = 200"
+    assert ev(_calls(_panel([_series("a", [1, 2], [1.0, 2.0])], 1), _panel([_series("a", [1, 2], [1.0, 2.0])], 2)),
+              "drawn", series="a", panel=2)[0] == "A is drawn in panel 2"
+    assert fc.panel_name(p0) == "the panel at m = 100" and fc.panel_name(_panel([], 3)) == "panel 3"
+    assert fc.hold_text(_panel([], 1, hold={"m": 0.25, "k": "x"})) == "m = 0.25, k = x"

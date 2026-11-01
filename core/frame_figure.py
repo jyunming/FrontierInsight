@@ -849,6 +849,9 @@ class FigureCalls:
             if ax.get_title(loc):
                 ax.set_title("", loc=loc)
                 changed.append("title")
+        if rec.get("hold"):  # the setting the panel was declared to show (`fig.panel`): the plan's label and the value, FI's words
+            ax.set_title(", ".join("%s = %s" % (self._label_of(k), "%.4g" % v if isinstance(v, float) else v)
+                                   for k, v in rec["hold"].items()))
         if rec["x"] is None:
             return
         image = any(e["kind"] == "image" for e in rec["series"])

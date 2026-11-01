@@ -165,7 +165,23 @@ def _label(item: dict[str, Any]) -> str:
     return str(item.get("label") or item.get("id") or "")
 
 
+def hold_text(panel: dict[str, Any]) -> str:
+    """The setting a panel was declared to show (``fig.panel``), as "m = 200"; empty when it has none."""
+    hold = panel.get("hold")
+    if not isinstance(hold, dict):
+        return ""
+    return ", ".join(f"{k} = {'%.4g' % v if isinstance(v, float) else v}" for k, v in hold.items())
+
+
+def panel_name(panel: dict[str, Any]) -> str:
+    """How a panel is named in a sentence: by the setting it shows ("the panel at m = 200") when it has one, else "panel 2"."""
+    held = hold_text(panel)
+    return f"the panel at {held}" if held else f"panel {panel.get('panel')}"
+
+
 def _where(calls: dict[str, Any], panel: dict[str, Any]) -> str:
+    if hold_text(panel):
+        return f" in {panel_name(panel)}"
     return f" in panel {panel.get('panel')}" if len(calls.get("panels") or []) > 1 else ""
 
 

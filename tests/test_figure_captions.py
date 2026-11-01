@@ -268,3 +268,15 @@ def test_a_merged_curve_is_never_quoted_and_an_empty_primary_label_keeps_the_res
     blank, other = _series("a", ""), _series("b", "Method B")
     blank["merged_with"] = ["b"]
     assert "It draws Method B." in _figure_caption_text("a.png", None, n_seeds=None, calls=_calls(_panel(series=[blank, other])))
+
+
+def test_caption_and_note_name_a_panel_by_the_setting_it_holds() -> None:
+    from core.engine import _note_from_calls
+    calls = _calls(_panel(1, series=[_series("a", "signal")]), _panel(2, series=[_series("a", "signal")]))
+    plain = json.loads(json.dumps(calls))
+    assert "Panel 2 draws" in _figure_caption_text("a.png", None, n_seeds=None, calls=plain)
+    calls["panels"][0]["hold"], calls["panels"][1]["hold"] = {"m": 100}, {"m": 200}
+    caption = _figure_caption_text("a.png", None, n_seeds=None, calls=calls)
+    assert "The panel at m = 100 draws" in caption and "The panel at m = 200 draws" in caption and "Panel 2" not in caption
+    note = _note_from_calls(calls)
+    assert note[0].startswith("the panel at m = 100 (") and note[1].startswith("the panel at m = 200 (")

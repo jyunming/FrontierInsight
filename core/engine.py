@@ -34864,20 +34864,21 @@ def _caption_from_calls(name: str, calls: dict[str, Any], record: dict[str, Any]
     parts = [description.rstrip(" .;,") + "."]
     many = len(panels) > 1
     marks: list[str] = []
+    from .figure_claims import panel_name  # the panel's own setting, when it was declared, names it
     for p in panels:
-        k = p.get("panel")
+        who = panel_name(p)  # "panel 2", or "the panel at m = 200"
         if p.get("raw"):
-            parts.append("; ".join([f"panel {k}: custom drawing", *_call_raw_texts(p)]) + ".")
+            parts.append("; ".join([f"{who}: custom drawing", *_call_raw_texts(p)]) + ".")
             continue
         drawn = _call_drawn(p)
         bands, bars, refs = _call_extras(p)
         marks += refs
         if 1 <= len(drawn) <= 5:
-            parts.append((f"Panel {k} draws " if many else "It draws ") + ", ".join(drawn) + ".")
+            parts.append((f"{who[0].upper()}{who[1:]} draws " if many else "It draws ") + ", ".join(drawn) + ".")
         for band in bands:
-            parts.append((f"In panel {k}, " if many else "") + band + ".")
+            parts.append((f"In {who}, " if many else "") + band + ".")
         if bars:
-            parts.append((f"In panel {k}, error bars show " if many else "Error bars show ") + bars[0] + ".")
+            parts.append((f"In {who}, error bars show " if many else "Error bars show ") + bars[0] + ".")
     marks = list(dict.fromkeys(marks))
     if marks:
         parts.append("Marked: " + "; ".join(marks[:3]) + ".")
@@ -34893,10 +34894,11 @@ def _caption_from_calls(name: str, calls: dict[str, Any], record: dict[str, Any]
 def _note_from_calls(calls: dict[str, Any]) -> list[str]:
     """What each panel's calls drew, for the writer: one entry per panel that draws something."""
     out = []
+    from .figure_claims import panel_name
     for p in _call_panels(calls):
-        k = p.get("panel")
+        who = panel_name(p)
         if p.get("raw"):
-            out.append("; ".join([f"panel {k}: custom drawing", *_call_raw_texts(p)]))
+            out.append("; ".join([f"{who}: custom drawing", *_call_raw_texts(p)]))
             continue
         bits = []
         entries = [s for s in p.get("series") or [] if isinstance(s, dict)]
@@ -34910,7 +34912,7 @@ def _note_from_calls(calls: dict[str, Any]) -> list[str]:
                         else f"{_call_group(s, entries)} ({s.get('kind')}){span}")
         bands, bars, refs = _call_extras(p)
         bits += bands + [f"error bars: {b}" for b in bars] + [f"reference line {r}" for r in refs]
-        out.append(f"panel {k} ({_call_plots(p)}): " + "; ".join(bits))
+        out.append(f"{who} ({_call_plots(p)}): " + "; ".join(bits))
     return out
 
 

@@ -15,7 +15,7 @@ from tests.test_analysis_frame import _design
 AGENTS = Path(__file__).parent.parent / "agents"
 BODIES = ["derive_doubling_time", "figure_growth_curve", "figure_split"]
 RULE = skeleton._FIGURE_RULE
-AXES_WORDS = ("draws what the plan says the figure shows on `fig.axes`", "Draw on `fig.axes`", "fig.panel(", "index `fig.axes`",
+AXES_WORDS = ("draws what the plan says the figure shows on `fig.axes`", "Draw on `fig.axes`", "index `fig.axes`",
               "draws one on each of `fig.axes`")
 
 
@@ -36,6 +36,7 @@ def test_the_rules_of_a_version_5_first_write_hold_the_repair_rule_and_no_axes_d
         assert line.rstrip() == "" or ("  " + line).rstrip() in rules
     assert "fig.line(panel" in rules and "fig.band(" in rules and "fig.image(" in rules
     assert not any(w in rules for w in AXES_WORDS)
+    assert "`fig.panel(0, m=200)`" in rules and "do not type a title for such a panel" in rules
     assert "`fig.axes` (one axes" not in rules
 
 
@@ -58,7 +59,7 @@ def test_a_version_5_template_and_reply_give_the_calls_and_never_the_axes() -> N
         assert "give it a short descriptive title" not in text
     reply = run_checks._frame_reply(False, BODIES, {"figure_growth_curve": 1, "figure_split": 3}, True)
     assert "ONE panel for it, panel 0" in reply and "numbered 0 to 2" in reply
-    assert "fig.axes" not in reply and "fig.panel" not in reply
+    assert "fig.axes" not in reply and "`fig.panel(i, setting=value)`" in reply, "a panel says which setting it shows"
 
 
 def test_the_panel_statement_without_calls_is_as_it_was() -> None:
@@ -71,6 +72,7 @@ def test_the_stub_docstring_names_the_calls_under_version_5_and_is_as_it_was_oth
     assert "Draw on `fig.axes`" in old and af._stub(plan, "figure_fig1", False) == old
     new = af._stub(plan, "figure_fig1", True)
     assert "Draw on `fig.axes`" not in new and "fig.axes" not in new
+    assert ("fig.panel(0, setting=value)" in new) == (plan["figures"]["fig1"]["panels"] > 1)
     for call in ("line", "points", "bars", "band", "ref", "note", "curve", "image"):
         assert f"`fig.{call}`" in new and f"fig.{call}(" in RULE
     assert new.endswith('raise NotYet("figure_fig1 is not written yet")\n')

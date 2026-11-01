@@ -234,9 +234,11 @@ def _stub(plan: dict[str, Any], name: str, calls: bool = False) -> str:
         f = plan["figures"][ident]
         shows = ", ".join(f["shows"]) or "what the plan names"
         if calls:
+            note = ("\n    Panels that show different settings: `fig.panel(0, setting=value)` on each (FI writes the title)."
+                    if f["panels"] > 1 else "")
             return (f"def {name}(fig, table):\n"
                     f'    """Draw with FI\'s drawing calls ({_CALL_NAMES}); FI creates, labels, saves and closes the figure. '
-                    f'It shows {shows}. It has {f["panels"]} panel(s), numbered from 0 (the `panel` of a drawing call)."""\n'
+                    f'It shows {shows}. It has {f["panels"]} panel(s), numbered from 0 (the `panel` of a drawing call).{note}"""\n'
                     f'    raise NotYet("{name} is not written yet")\n')
         panel_note = ("\n    Panels that show different settings: `fig.panel(0, setting=value)` on each (FI writes the title)."
                       if f["panels"] > 1 else "")

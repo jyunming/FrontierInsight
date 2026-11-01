@@ -359,7 +359,8 @@ def panel_statement(panels: int, calls: bool = False) -> str:
             return ("FI makes ONE panel for it, panel 0: give `panel=0` to every drawing call. Draw everything the figure shows on "
                     "it (several settings, series or results are lines in that one panel, not more panels).")
         return (f"FI makes exactly {panels} panels for it, numbered 0 to {panels - 1} (the `panel` of a drawing call), no more. "
-                "The count is the plan's, not the number of values of a setting.")
+                "The count is the plan's, not the number of values of a setting. When a panel shows one setting value, say so "
+                "with `fig.panel(i, setting=value)`.")
     if panels <= 1:
         return ("FI makes ONE panel for it: `fig.axes` holds exactly one axes, `fig.axes[0]`. Draw everything the figure shows on "
                 "it (several settings, series or results are lines on that one axes, not more panels).")
