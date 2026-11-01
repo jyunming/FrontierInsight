@@ -117,3 +117,122 @@ def test_a_range_whose_figures_are_no_longer_consecutive_is_listed() -> None:
     assert _renumbered("Figs. 2-3 show it.", {2: 3, 3: 2}) == "Figs. 2-3 show it."
     assert _renumbered("Figs. 2-3 show it.", {2: 4, 3: 1, 4: 2, 1: 3}) == "Figs. 1 and 4 show it."
     assert _renumbered("Figures 2 to 3.", {2: 3, 3: 2}) == "Figures 2 to 3."
+
+
+# ---- A figure's caption from FI's record of the drawing calls ----------------------------------------------------------
+
+import json  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from core.engine import _calls_of, _figure_caption_text, _figure_record_note  # noqa: E402
+
+
+def _series(ident, label, kind="line", ys=(1.0, 2.0, 3.0), yerr=None, meaning=None):
+    return {"id": ident, "label": label, "kind": kind, "step": False, "x": [1.0, 2.0, 3.0], "y": list(ys),
+            "yerr": yerr, "yerr_meaning": meaning, "merged_with": []}
+
+
+def _panel(n=1, series=(), bands=(), refs=(), raw=False, texts=(), y_what="error", y_label="Error of the estimate"):
+    return {"panel": n, "raw": raw, "raw_reason": "an artist FI did not draw" if raw else None,
+            "x": {"id": "size", "kind": "setting", "label": "Problem size", "scale": "linear"},
+            "y": {"what": y_what, "label": y_label, "scale": "linear"},
+            "series": list(series), "bands": list(bands), "refs": list(refs), "notes": [], "texts_raw": list(texts)}
+
+
+def _calls(*panels, fallback=False):
+    return {"version": 1, "fallback": fallback, "panels": list(panels)}
+
+
+# What the old code says about a recorded panel with a body-typed series label and a stale "not drawn" list.
+_RECORD = {"axes": [{"title": "load 3", "xlabel": "Step size", "ylabel": "Error of the estimate",
+                     "series": [{"label": "Method A", "shows": "yes", "min": 0.1, "max": 0.9},
+                                {"label": "Method B", "shows": "flat", "min": 0.2, "max": 0.2}]}],
+           "replicate_mean": {"n": 4}}
+
+
+def test_caption_names_computed_quantity_as_drawn() -> None:
+    # Fault 3: the body worked out a quantity no table column holds; the call says so (what == "other"), so the caption
+    # names it neutrally and does not call it a result of the plan.
+    calls = _calls(_panel(series=[_series("other", "computed value")], y_what="other", y_label="computed value"))
+    caption = _figure_caption_text("a.png", _RECORD, n_seeds=None, calls=calls)
+    assert caption.startswith("computed value against Problem size.")
+    assert "Error of the estimate" not in caption
+
+
+def test_caption_never_quotes_body_typed_label() -> None:
+    # Fault 9: a curve carries a label the body typed; the caption states a curve, never its words.
+    curve = _series("curve1", "Exact solution (computed in the figure)", kind="curve")
+    curve["source"] = "computed in the figure"
+    calls = _calls(_panel(series=[_series("error", "Method A"), curve]))
+    record = {"axes": [{"xlabel": "Step size", "ylabel": "Typed axis words",
+                        "series": [{"label": "Exact solution (computed in the figure)", "shows": "yes", "min": 0, "max": 1}]}]}
+    caption = _figure_caption_text("a.png", record, n_seeds=None, calls=calls)
+    assert "Method A" in caption and "a curve" in caption
+    assert "Exact solution" not in caption and "Typed axis words" not in caption
+
+
+def test_caption_lists_only_drawn_series() -> None:
+    # Fault 2: the plan declared three results; the calls drew two. The record's "declared" list never adds a third.
+    calls = _calls(_panel(series=[_series("error", "Method A"), _series("cost", "Method B")]))
+    calls["declared"] = {"not_drawn": ["cost_c"], "labels": {"cost_c": "Method C"}}
+    record = dict(_RECORD, declared=calls["declared"])
+    caption = _figure_caption_text("a.png", record, n_seeds=None, calls=calls)
+    assert "It draws Method A, Method B." in caption
+    assert "Method C" not in caption
+
+
+def test_caption_states_bands_error_bars_and_references() -> None:
+    calls = _calls(_panel(
+        series=[_series("error", "Method A", yerr=[0.1, 0.1, 0.1], meaning="sd")],
+        bands=[{"series": "error", "x": [1.0, 2.0, 3.0], "lo": [0, 1, 2], "hi": [2, 3, 4], "meaning": "ci95"}],
+        refs=[{"id": "limit", "axis": "y", "value": 1.5, "label": "Target"}]))
+    caption = _figure_caption_text("a.png", None, n_seeds=None, calls=calls)
+    assert "Method A has a band: a 95% confidence interval." in caption
+    assert "Error bars show one standard deviation." in caption
+    assert "Marked: Target at 1.5." in caption
+
+
+def test_raw_panel_caption_is_custom_drawing_and_quotes_digit_text() -> None:
+    # Fault 4: a raw panel says only that it is a custom drawing, plus the digit-bearing words it prints, verbatim.
+    calls = _calls(_panel(1, series=[_series("error", "Method A")]),
+                   _panel(2, raw=True, texts=["fit slope 2.04", "label without digits"]))
+    caption = _figure_caption_text("a.png", _RECORD, n_seeds=None, calls=calls)
+    assert "panel 2: custom drawing" in caption
+    assert "text in the panel, not checked by FI: 'fit slope 2.04'" in caption
+    assert "label without digits" not in caption
+
+
+def test_fallback_caption_has_no_apology() -> None:
+    calls = _calls(_panel(series=[_series("error", "Method A")]), fallback=True)
+    caption = _figure_caption_text("a.png", None, n_seeds=None, calls=calls)
+    assert caption == "Error of the estimate against Problem size. It draws Method A."
+    assert "fallback" not in caption.lower() and "could not" not in caption.lower()
+
+
+def test_caption_without_call_record_is_unchanged() -> None:
+    # RF1: this string is what the code before the call record wrote for this record.
+    golden = ("Error of the estimate against Step size. It draws Method A, Method B. Method B is flat at this scale. "
+              "Each line is the mean of 4 seeds, shaded with its 95% confidence interval.")
+    assert _figure_caption_text("err_by_step.png", _RECORD, n_seeds=4) == golden
+    assert _figure_caption_text("err_by_step.png", _RECORD, n_seeds=4, calls=None) == golden
+
+
+def test_record_note_without_calls_is_unchanged_and_with_calls_names_the_drawn() -> None:
+    plain = _figure_record_note(_RECORD, n_seeds=4)
+    assert _figure_record_note(_RECORD, n_seeds=4, calls=None) == plain
+    calls = _calls(_panel(series=[_series("error", "Method A")]), _panel(2, raw=True, texts=["slope 2.0"]))
+    note = _figure_record_note(_RECORD, n_seeds=4, calls=calls)
+    assert "Method A" in note and "custom drawing" in note and "slope 2.0" in note
+    assert "Method B" not in note
+
+
+def test_calls_of_reads_the_record_beside_the_recorders_files(tmp_path: Path) -> None:
+    folder = tmp_path / ".fi" / "figure_records"
+    folder.mkdir(parents=True)
+    state = {"quest_root": str(tmp_path)}
+    assert _calls_of(state, "a") is None
+    (folder / "a.calls.json").write_text(json.dumps(_calls(_panel())), encoding="utf-8")
+    assert _calls_of(state, "a")["version"] == 1
+    (folder / "b.calls.json").write_text("not json", encoding="utf-8")
+    assert _calls_of(state, "b") is None
+    assert _calls_of({}, "a") is None

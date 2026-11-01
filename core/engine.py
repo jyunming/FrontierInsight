@@ -33983,7 +33983,8 @@ def _figure_list_for_prompt(state: QuestState) -> str:
             )
         else:
             lines.append(f"- Figure {number}: figures/{f}" + _figure_record_note(
-                records.get(f), n_seeds=n_seeds, results=state.get("result_json"), settings=settings))
+                records.get(f), n_seeds=n_seeds, results=state.get("result_json"), settings=settings,
+                calls=_calls_of(state, Path(str(f)).stem)))
     if any(_panel_place(ax.get("grid")) for f in figs for ax in ((records.get(f) or {}).get("axes") or [])
            if isinstance(ax, dict)):
         lines.append(
@@ -34453,12 +34454,13 @@ def _printed_in_figure(strings: Any, results: Any, settings: Any = None) -> str:
 
 
 def _figure_record_note(record: dict[str, Any] | None, *, n_seeds: int | None = None, results: Any = None,
-                        settings: Any = None) -> str:
-    """What a figure draws, for the writer: each panel's title, y axis and series.
+                        settings: Any = None, calls: dict[str, Any] | None = None) -> str:
+    """What a figure draws, for the writer: each panel's title, y axis and series. With ``calls`` (FI's record of the
+    figure's drawing calls) the panels are what the calls drew, never the saved axes' own words.
     ``n_seeds`` is how many replicate seeds ran, when known; ``results`` is the run's ``result_json``, to tell a number
     the figure prints from one the run recorded."""
-    panels = []
-    for ax in (record or {}).get("axes") or []:
+    panels = _note_from_calls(calls) if calls else []
+    for ax in [] if panels else (record or {}).get("axes") or []:
         if not isinstance(ax, dict):
             continue
         bits = [f'"{ax["title"]}"'] if ax.get("title") else []
@@ -34645,7 +34647,8 @@ def _place_figures(markdown: str, state: QuestState, *,
     placed: list[str] = []
     last = -1
     for name, number in sorted(numbers.items(), key=lambda kv: kv[1]):
-        caption = _figure_caption_text(name, records.get(name), n_seeds=n_seeds, facts=facts, credit=credits.get(name))
+        caption = _figure_caption_text(name, records.get(name), n_seeds=n_seeds, facts=facts, credit=credits.get(name),
+                                       calls=_calls_of(state, Path(name).stem))
         embed = f"![**Figure {number}.** {caption}](figures/{name})"
         at = max(_figure_insertion_line(lines, number), last + 1)
         if at >= len(lines):
@@ -34680,9 +34683,141 @@ def _caption_safe(text: str) -> str:
     return text.replace("[", "(").replace("]", ")")
 
 
+def _calls_of(state: QuestState, stem: str) -> dict[str, Any] | None:
+    """FI's record of the drawing calls of the figure ``stem`` (``<stem>.calls.json``, kept beside the recorder's
+    ``<stem>.json``), or ``None`` when the quest has none: a figure drawn by a body that does not call the primitives, or
+    a quest from before the record."""
+    root = state.get("quest_root")
+    if not root:
+        return None
+    try:
+        data = json.loads((Path(str(root)) / ".fi" / "figure_records" / f"{stem}.calls.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) and isinstance(data.get("panels"), list) else None
+
+
+#: What an error bar or a band spans, in a reader's words, by the meaning the call recorded.
+_CALL_SPANS = {"ci95": "a 95% confidence interval", "sd": "one standard deviation", "range": "the range of the values",
+               "other": "an amount the figure does not state"}
+
+
+def _call_panels(calls: dict[str, Any]) -> list[dict[str, Any]]:
+    """The panels of a call record that draw something: a custom drawing, or at least one series."""
+    return [p for p in calls.get("panels") or []
+            if isinstance(p, dict) and (p.get("raw") or [s for s in p.get("series") or [] if isinstance(s, dict)])]
+
+
+def _call_plots(p: dict[str, Any]) -> str:
+    """What a non-raw panel plots, from the labels FI's calls recorded (the plan's words, never the body's)."""
+    y, x = (_caption_words((p.get(a) or {}).get("label")) for a in ("y", "x"))
+    return f"{y} against {x}" if y and x else y or x
+
+
+def _call_raw_texts(p: dict[str, Any]) -> list[str]:
+    """The words a custom drawing prints that carry a digit, verbatim (one line each): what a reader could take for a result."""
+    texts = [" ".join(str(t).split()) for t in p.get("texts_raw") or []]
+    return [f"text in the panel, not checked by FI: '{t}'" for t in texts if any(c.isdigit() for c in t)][:3]
+
+
+def _call_drawn(p: dict[str, Any]) -> list[str]:
+    """The series a panel's calls drew, by the plan's label; a curve is "a curve": its own label is the body's words."""
+    names: list[str] = []
+    curves = 0
+    for s in p.get("series") or []:
+        if not isinstance(s, dict):
+            continue
+        if s.get("kind") == "curve":
+            curves += 1
+        elif _caption_words(s.get("label"), 60):
+            names.append(_caption_words(s.get("label"), 60))
+    names = list(dict.fromkeys(names))
+    return names + ([f"{curves} curves" if curves > 1 else "a curve"] if curves else [])
+
+
+def _call_extras(p: dict[str, Any]) -> tuple[list[str], list[str], list[str]]:
+    """``(bands, error bars, references)`` of one panel, each as a clause, from the calls only."""
+    label = {str(s.get("id")): _caption_words(s.get("label"), 60) for s in p.get("series") or [] if isinstance(s, dict)}
+    bands = [f"{label.get(str(b.get('series'))) or 'a series'} has a band: "
+             f"{_CALL_SPANS.get(str(b.get('meaning')), _CALL_SPANS['other'])}"
+             for b in p.get("bands") or [] if isinstance(b, dict)]
+    spans = list(dict.fromkeys(_CALL_SPANS.get(str(s.get("yerr_meaning")), _CALL_SPANS["other"])
+                               for s in p.get("series") or [] if isinstance(s, dict) and s.get("yerr")))
+    bars = [" and ".join(spans)] if spans else []
+    refs = [f"{_caption_words(r.get('label'), 60) or 'a reference'} at {r['value']:.3g}"
+            for r in p.get("refs") or [] if isinstance(r, dict) and isinstance(r.get("value"), (int, float))]
+    return bands, bars, refs
+
+
+def _caption_from_calls(name: str, calls: dict[str, Any], record: dict[str, Any] | None, *, n_seeds: int | None,
+                        facts: dict[str, str] | None) -> str | None:
+    """The caption of a figure whose drawing calls FI recorded: what the calls drew (the series, bands, error bars and
+    reference lines, in the plan's words) and nothing else; a series is drawn exactly when a call drew it. A panel the
+    body drew itself is "custom drawing", with the words it prints that carry a digit quoted as FI's check did not
+    reach them. ``None`` when no panel of the record draws anything."""
+    panels = _call_panels(calls)
+    if not panels:
+        return None
+    stem = " ".join(Path(name).stem.replace("_", " ").replace("-", " ").split()) or "the figure"
+    plotted = list(dict.fromkeys(t for t in (_call_plots(p) for p in panels if not p.get("raw")) if t))
+    description = f"{stem} ({len(panels)} panels)" if len(panels) > 3 else "; ".join(plotted) or stem
+    parts = [description.rstrip(" .;,") + "."]
+    many = len(panels) > 1
+    marks: list[str] = []
+    for p in panels:
+        k = p.get("panel")
+        if p.get("raw"):
+            parts.append("; ".join([f"panel {k}: custom drawing", *_call_raw_texts(p)]) + ".")
+            continue
+        drawn = _call_drawn(p)
+        bands, bars, refs = _call_extras(p)
+        marks += refs
+        if 1 <= len(drawn) <= 5:
+            parts.append((f"Panel {k} draws " if many else "It draws ") + ", ".join(drawn) + ".")
+        for band in bands:
+            parts.append((f"In panel {k}, " if many else "") + band + ".")
+        if bars:
+            parts.append((f"In panel {k}, error bars show " if many else "Error bars show ") + bars[0] + ".")
+    marks = list(dict.fromkeys(marks))
+    if marks:
+        parts.append("Marked: " + "; ".join(marks[:3]) + ".")
+    sentence = (facts or {}).get(f"{Path(name).stem}:layout", "")
+    if sentence and many and not any(p.get("raw") for p in panels):
+        parts.append(sentence[0].upper() + sentence[1:].rstrip(" .") + ".")
+    mean_of = ((record or {}).get("replicate_mean") or {}).get("n")
+    single_seed = (record or {}).get("single_seed")
+    if mean_of:
+        parts.append(f"Each line is the mean of {mean_of} seeds, shaded with its 95% confidence interval.")
+    elif single_seed is not None:
+        parts.append(f"Shows {_single_seed_note(single_seed, n_seeds)}.")
+    return _caption_safe(" ".join(parts))
+
+
+def _note_from_calls(calls: dict[str, Any]) -> list[str]:
+    """What each panel's calls drew, for the writer: one entry per panel that draws something."""
+    out = []
+    for p in _call_panels(calls):
+        k = p.get("panel")
+        if p.get("raw"):
+            out.append("; ".join([f"panel {k}: custom drawing", *_call_raw_texts(p)]))
+            continue
+        bits = []
+        for s in p.get("series") or []:
+            if not isinstance(s, dict):
+                continue
+            ys = [v for v in s.get("y") or [] if isinstance(v, (int, float)) and not isinstance(v, bool)]
+            span = f" {min(ys):.3g} to {max(ys):.3g}" if ys else " no points"
+            bits.append("a curve" if s.get("kind") == "curve"
+                        else f"{_caption_words(s.get('label'), 60)} ({s.get('kind')}){span}")
+        bands, bars, refs = _call_extras(p)
+        bits += bands + [f"error bars: {b}" for b in bars] + [f"reference line {r}" for r in refs]
+        out.append(f"panel {k} ({_call_plots(p)}): " + "; ".join(bits))
+    return out
+
+
 def _figure_caption_text(
     name: str, record: dict[str, Any] | None, *, n_seeds: int | None, facts: dict[str, str] | None = None,
-    credit: dict[str, Any] | None = None,
+    credit: dict[str, Any] | None = None, calls: dict[str, Any] | None = None,
 ) -> str:
     """The caption FI writes for a figure, from its own records only: what each panel that draws data is (its axes: what
     it plots against what, as the saved figure's axis labels say), the series it draws when there are at most five (one
@@ -34697,6 +34832,10 @@ def _figure_caption_text(
         return _caption_safe(f"{what.rstrip(' .;,')}. Source: {credit.get('source_url') or 'not recorded'}, "
                              f"{credit.get('license') or 'licence not recorded'}; an illustration from that source, not "
                              "this study's data.")
+    if calls:  # FI's record of the drawing calls: the caption says only what the calls drew
+        from_calls = _caption_from_calls(name, calls, record, n_seeds=n_seeds, facts=facts)
+        if from_calls is not None:
+            return from_calls
     # A panel keeps its place in the saved figure ("panel 3" is the third one drawn) when an empty one is left out.
     numbered = [(k, ax) for k, ax in enumerate((record or {}).get("axes") or [], start=1)
                 if isinstance(ax, dict) and not _panel_draws_nothing(ax)]
