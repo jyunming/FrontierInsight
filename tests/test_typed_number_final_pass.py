@@ -194,8 +194,8 @@ def test_calc_computes_from_the_plans_numbers_and_refuses_a_number_of_its_own() 
         "floor(0.2 * 200 + 1/2)", "ndtri(1 - 0.05)")}
     assert got == {"1 - 0.05 / 2": "0.975", "ndtri(1 - 0.05 / 2)": "1.96", "t_quantile(1 - 0.05 / 2, 3)": "3.182",
                    "(1 - 0.05) * 0.05": "0.0475", "floor(0.2 * 200 + 1/2)": "40", "ndtri(1 - 0.05)": "1.645"}
-    # A number the plan does not state, a derived level typed into the expression, a name, a value out of range.
-    for expr, why in (("0.05 * 0.97", "0.97"), ("t_quantile(0.975, 3)", "0.975"), ("1.37 * 0.42", "1.37"),
+    # A number the plan does not state, a level FI's intervals do not use, a name, a value out of range.
+    for expr, why in (("0.05 * 0.97", "0.97"), ("t_quantile(0.9, 3)", "0.9"), ("1.37 * 0.42", "1.37"),
                       ("floor(0.05 * 200 + 1/2) * 1.1", "1.1"), ("bias + 0.05", "bias"), ("ndtri(2 + 0.05)", "cannot"),
                       # spelled so a text search misses its number, or made of whole numbers alone, or too large
                       (".8473", "0.8473"), ("0.05 * .97", "0.97"), ("1_234 * 0.05", "1234"), ("0x1F * 0.05", "31"),

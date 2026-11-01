@@ -1391,9 +1391,34 @@ def _calc_text(x: float) -> str:
     return _clean(text.rstrip("0").rstrip(".")) if "." in text else text
 
 
-def calc(expression: str, protocol: dict[str, Any] | None, topic: str = "") -> Value:
+#: The confidence level of every interval FI computes itself (the Wilson and t intervals of :func:`_interval`, and
+#: :func:`core.trial_table.interval`): the paper's run facts state it, so it is FI's own number and a formula may use it.
+INTERVAL_LEVEL = "0.95"
+
+
+def _fi_own_numbers(rec: Records | None) -> frozenset[Any]:
+    """The numbers FI itself fixes for its intervals and so a formula may use without the plan stating them: the interval
+    level and the two-sided quantile levels it gives (``0.975``, ``0.025``), and, from the record, the number of trials of
+    each setting (``n``) and its degrees of freedom (``n - 1``)."""
+    from decimal import Decimal
+
+    level = Decimal(INTERVAL_LEVEL)
+    tail = (1 - level) / 2
+    found = {level, 1 - tail, tail}
+    if rec is not None:
+        counts = rec._derived.get("trial_counts")  # worked out once: a record can hold hundreds of thousands of cells
+        if counts is None:
+            counts = rec._derived["trial_counts"] = {len(_tt._values(series)) for c in rec.cells
+                                                      for series in c.get("metrics", {}).values()}
+        for n in counts:
+            found.update((Decimal(n), Decimal(n - 1)) if n > 0 else ())
+    return frozenset(found)
+
+
+def calc(expression: str, protocol: dict[str, Any] | None, topic: str = "", rec: Records | None = None) -> Value:
     """``{{calc:expression}}`` computed by FI. Every number in it must be one the writer may type (a number the plan or the
-    topic states, or a whole number from 0 to 10; :mod:`core.typed_numbers`), so an expression can only work out what the
+    topic states, a whole number from 0 to 10, or a number FI fixes for its own intervals, :func:`_fi_own_numbers`;
+    :mod:`core.typed_numbers`), so an expression can only work out what the
     plan already fixes (a quantile, a level, a reference value, a count from the grid), never carry a number of its own.
     It may call FI's calculator functions, ``ndtr``/``ndtri`` (the standard normal distribution and its quantile) and
     ``t_quantile(p, df)`` (the Student-t quantile). An expression FI does not compute reads ``not recorded`` with why."""
@@ -1406,7 +1431,7 @@ def calc(expression: str, protocol: dict[str, Any] | None, topic: str = "") -> V
     try:
         if not isinstance(protocol, dict) or not protocol:
             raise _Unfilled("FI has no plan to compute it from")
-        plan = _typed.plan_numbers(protocol, topic)
+        plan = _typed.plan_numbers(protocol, topic) | _fi_own_numbers(rec)
         # The numbers are read from the parsed expression, not from its text: ``.97``, ``1_234`` or ``0x1F`` is a number of
         # its own however it is spelled.
         try:
@@ -1473,7 +1498,7 @@ def resolve(text: str, rec: Records | None) -> Value:
         shown = shown[2:-2] if shown.endswith("}}") else shown[2:]
     shown = shown[2:] if shown.startswith("v:") else shown
     if shown.startswith(CALC):
-        return calc(shown[len(CALC):].strip(), rec.protocol if rec else None, rec.topic if rec else "")
+        return calc(shown[len(CALC):].strip(), rec.protocol if rec else None, rec.topic if rec else "", rec)
     if shown.startswith((TREND, COMPARISON)):
         return _series_value(shown, rec)
     answer = _answer(shown, rec)
