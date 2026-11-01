@@ -50,8 +50,8 @@ def _quest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, settling: float | No
 def test_each_main_quantity_gets_its_value_or_is_said_as_not_answered(tmp_path, monkeypatch) -> None:
     text = pf.answers_text(_quest(tmp_path, monkeypatch))
     assert text.startswith("**Answers to the questions asked.**")
-    assert "- decay rate (the plan's map: `decay_rate`): {{v:decay_rate @ dose=each | range}} (no single value: it differs with dose; this is the mean in each setting, lowest to highest" in text
-    assert "- settling limit (the plan's map: `settling_limit`): {{v:settling_limit}} (one value worked out by the analysis; no interval" in text
+    assert "- decay rate (the plan's map: Decay rate): {{v:decay_rate @ dose=each | range}} (no single value: it differs with dose; this is the mean in each setting, lowest to highest" in text
+    assert "- settling limit (the plan's map: Limit of the settling time (hours)): {{v:settling_limit}} (one value worked out by the analysis; no interval" in text
     assert "- colour of the sample: the plan links no result of the study to it here; see the Results" in text
     assert "- mapped to nothing real: the plan's map for it names no result the study returns" in text
     assert "not answered (the plan maps it to no result" not in text  # the run's results are not said missing
@@ -105,7 +105,7 @@ def test_an_explicit_map_to_an_existing_metric_is_placed_and_named_whatever_the_
     wrong = {**PROTOCOL, "topic_map": PROTOCOL["topic_map"] + [{"item": "Q3", "by": "metric:decay_rate"}]}
     monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: wrong)
     text = pf.answers_text(root)
-    assert "- colour of the sample (the plan's map: `decay_rate`): {{v:decay_rate" in text
+    assert "- colour of the sample (the plan's map: Decay rate): {{v:decay_rate" in text
     assert "- mapped to nothing real: the plan's map for it names no result the study returns" in text
 
 
@@ -204,7 +204,7 @@ def test_a_bias_and_a_spread_of_an_estimate_are_worked_out_and_not_the_estimates
     root = _estimate_quest(tmp_path, monkeypatch)
     text = pf.answers_text(root)
     assert "{{v:x_hat @ dose=each | diff ref | range}}" in text and "{{v:x_hat:sd @ dose=each | range}}" in text
-    assert "- x (the plan's map: `x_hat`): {{v:x_hat @ dose=each | range}} (no single value: it differs with dose; this is the mean in each setting, lowest to highest" in text
+    assert "- x (the plan's map: Estimated x): {{v:x_hat @ dose=each | range}} (no single value: it differs with dose; this is the mean in each setting, lowest to highest" in text
     rec = pv.records_of(root, ESTIMATE_PROTOCOL)
     filled = pv.fill_values(text, rec)[0]
     assert "-0.8000 to 1.000" in filled  # 9.2 - 10 and 11.0 - 10
@@ -230,5 +230,16 @@ def test_an_old_plan_with_no_statistic_prints_the_result_as_it_is(tmp_path, monk
     old = {**ESTIMATE_PROTOCOL, "topic_map": [{k: v for k, v in e.items() if k != "statistic"} for e in ESTIMATE_PROTOCOL["topic_map"]]}
     monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: old)
     text = pf.answers_text(root)
-    assert "- bias (the plan's map: `x_hat`): {{v:x_hat @ dose=each | range}}" in text
+    assert "- bias (the plan's map: Estimated x): {{v:x_hat @ dose=each | range}}" in text
     assert "diff ref" not in text and ":sd" not in text
+
+
+def test_an_answer_line_names_the_setting_it_differs_with_by_the_plans_label(tmp_path, monkeypatch) -> None:
+    root = _quest(tmp_path, monkeypatch)
+    labelled = {**PROTOCOL, "labels": {"dose": "Dose given (mg)"}}
+    monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: labelled)
+    text = pf.answers_text(root)
+    assert "it differs with Dose given (mg); this is the mean" in text
+    assert "{{v:decay_rate @ dose=each | range}}" in text  # the key keeps the id
+    monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: PROTOCOL)
+    assert "it differs with dose; this is the mean" in pf.answers_text(root)

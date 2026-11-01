@@ -76,8 +76,10 @@ class _Change:
         return "none"
 
 
-def _names(rec: _pv.Records, setting: dict[str, Any]) -> str:
-    return ", ".join(f"{rec.short(a)} = {v}" for a, v in setting.items())
+def _names(rec: _pv.Records, setting: dict[str, Any], plain: bool = True) -> str:
+    """The setting as a person reads it (the plan's label of each axis); ``plain=False`` keeps the key's own names, for a
+    message to the writer."""
+    return ", ".join(f"{rec.label(a) if plain else rec.short(a)} = {v}" for a, v in setting.items())
 
 
 def _numeric(values: list[Any]) -> bool:
@@ -202,7 +204,7 @@ def _series(rec: _pv.Records, metric: str, axis: str, where: dict[str, Pick], sc
         if not strict:
             return None
         raise _Unfilled(f"{rec.short(axis)} has fewer than two values with trials of {metric}"
-                        + (f" at {_names(rec, scope)}" if scope else ""))
+                        + (f" at {_names(rec, scope, False)}" if scope else ""))
     return points
 
 
@@ -222,7 +224,7 @@ def _not_monotone(rec: _pv.Records, axis: str, points: list[_Point]) -> str:
     if len(points) < 3 or all(s <= 0 for s in steps) or all(s >= 0 for s in steps):
         return ""
     lo, hi = min(points, key=lambda p: p.mean), max(points, key=lambda p: p.mean)
-    return f", the means are not monotone (lowest at {rec.short(axis)} = {lo.x}, highest at {rec.short(axis)} = {hi.x})"
+    return f", the means are not monotone (lowest at {rec.label(axis)} = {lo.x}, highest at {rec.label(axis)} = {hi.x})"
 
 
 def _direction(rec: _pv.Records, metric: str, axis: str, points: list[_Point]) -> tuple[str, str, float | None]:
@@ -230,7 +232,7 @@ def _direction(rec: _pv.Records, metric: str, axis: str, points: list[_Point]) -
     first, last = points[0], points[-1]
     ch = _change(rec, metric, first, last)
     ratio = last.mean / first.mean if first.mean > 0 and last.mean > 0 else None
-    ends = f"from {_pv.sig(first.mean)} at {rec.short(axis)} = {first.x} to {_pv.sig(last.mean)} at {rec.short(axis)} = {last.x}"
+    ends = f"from {_pv.sig(first.mean)} at {rec.label(axis)} = {first.x} to {_pv.sig(last.mean)} at {rec.label(axis)} = {last.x}"
     if ch.word == "point":
         lead = "changes"
         detail = (f" {ends} (the change is {_pv.sig(ch.diff)}{_ratio(first.mean, last.mean)}); {ch.how}, so there is no 95% "
@@ -277,7 +279,7 @@ def _order_words(rec: _pv.Records, axis: str, pairs: list[tuple[Any, Any, float 
     """``labels``: ``coarse`` (the writer's reading of the axis agrees with the record: coarsest and finest pair), ``lower``
     (the pairs are named by where the error is lower, no claim what the axis counts) or ``unknown`` (the record does not say
     which way the error falls: absolute orders and no verdict)."""
-    name = rec.short(axis)
+    name = rec.label(axis)
     defined = [(a, b, p) for a, b, p in pairs if p is not None]
     if not defined:
         return "no order is defined (an error is 0 or a value of the setting is not positive)", []
@@ -336,7 +338,7 @@ def trend_text(rec: _pv.Records, body: str) -> tuple[str, list[float], dict[str,
     _no_pooling(rec, where, f"{'an order' if order else 'a trend'} of {metric}", [metric])
     _pv._check_where(rec, {**where, axis: Pick("each")})
     label_axes = [a for a, p in where.items() if p.kind == "each"]
-    unit = f"values of {rec.short(label_axes[0])}" if len(label_axes) == 1 else "settings"
+    unit = f"values of {rec.label(label_axes[0])}" if len(label_axes) == 1 else "settings"
     results: list[tuple[dict[str, Any], str, str, float | None]] = []
     skipped: list[dict[str, Any]] = []
     order_numbers: list[float] = []
@@ -357,7 +359,7 @@ def trend_text(rec: _pv.Records, body: str) -> tuple[str, list[float], dict[str,
                 word, text, ratio = _direction(rec, metric, axis, points)
                 results.append((scope, word, text, ratio))
         except _Unfilled as why:
-            raise _Unfilled(f"not computable{(' at ' + _names(rec, scope)) if scope else ''}: {why}") from None
+            raise _Unfilled(f"not computable{(' at ' + _names(rec, scope, False)) if scope else ''}: {why}") from None
     if not results:
         raise _Unfilled(f"{metric} has numbers at fewer than two values of {rec.short(axis)} wherever it was run")
     k = len(results)
@@ -367,7 +369,7 @@ def trend_text(rec: _pv.Records, body: str) -> tuple[str, list[float], dict[str,
     def at(scope: dict[str, Any]) -> str:
         return _names(rec, {**fixed, **scope})
 
-    left = (f"; {metric} has no numbers at {'; '.join(at(s) for s in skipped[:3])}" + (f" and {len(skipped) - 3} more" if len(skipped) > 3 else "")
+    left = (f"; {rec.label(metric)} has no numbers at {'; '.join(at(s) for s in skipped[:3])}" + (f" and {len(skipped) - 3} more" if len(skipped) > 3 else "")
             if skipped else "")
     counts = {w: sum(1 for r in results if r[1] == w) for w in ("falls", "rises", "none", "point")}
     said = {"falls": "falls", "rises": "rises", "none": "shows no change beyond its 95% interval",
@@ -383,16 +385,16 @@ def trend_text(rec: _pv.Records, body: str) -> tuple[str, list[float], dict[str,
                       + (f"; the lowest order is {_pv.sig(low[3], 3)} at {at(low[0])}" if low else "")
                       + (f"; the error does not fall between neighbouring values at {len(falling)} of them, among them "
                          + "; ".join(at(s) for s in falling[:4]) if falling else "; at none of them does the error fail to fall"))
-        return (f"{metric} over {rec.short(axis)}, pairwise {detail}{left}", order_numbers, inputs)
+        return (f"{rec.label(metric)} over {rec.label(axis)}, pairwise {detail}{left}", order_numbers, inputs)
     ratios = [r[3] for r in results if r[3] is not None]
     if k == 1:
         where_words = at(results[0][0])
-        text = f"{metric} over {rec.short(axis)}" + (f" at {where_words}" if where_words else "") + f": {results[0][2]}"
+        text = f"{rec.label(metric)} over {rec.label(axis)}" + (f" at {where_words}" if where_words else "") + f": {results[0][2]}"
     elif k <= MAX_SCOPES_LISTED:
-        text = (f"{metric} over {rec.short(axis)}: {summary}. "
+        text = (f"{rec.label(metric)} over {rec.label(axis)}: {summary}. "
                 + "; ".join(("At" if i == 0 else "at") + f" {at(s)}: {t}" for i, (s, _w, t, _r) in enumerate(results)))
     else:
-        text = (f"{metric} over {rec.short(axis)}: {summary}"
+        text = (f"{rec.label(metric)} over {rec.label(axis)}: {summary}"
                 + (f"; the last over the first value is {_pv.sig(min(ratios), 3)} to {_pv.sig(max(ratios), 3)}" if ratios else ""))
     return text + left, ratios, inputs
 
@@ -414,7 +416,9 @@ def _form_value(rec: _pv.Records, metric: str, form: str, cells: list[dict[str, 
     return _pv._sd_of(rec, cells, metric)[0]
 
 
-def _form_name(form: str, metric: str) -> str:
+def _form_name(form: str, metric: str, rec: _pv.Records | None = None) -> str:
+    """The form of a result in words; with ``rec`` the plan's label of the result (text a person reads), else its id."""
+    metric = metric if rec is None else rec.label(metric)
     return {"mean": f"the mean of {metric}", "sd": f"the SD of {metric}", "rms": f"the root-mean-square of {metric}"}[form]
 
 
@@ -448,7 +452,7 @@ def comparison_text(rec: _pv.Records, body: str) -> tuple[str, list[float], dict
     inside = tested = 0
     for scope in _scopes(rec, [a_name, b_name], where):
         fixed = {a: (Pick("value", scope[a]) if a in scope else p) for a, p in where.items()}
-        here = _names(rec, scope)
+        here = _names(rec, scope, False)
         try:
             cells_a, cells_b = _pv._matching(rec, fixed, a_name), _pv._matching(rec, fixed, b_name)
             fa, fb = _form_value(rec, a_name, a_form, cells_a), _form_value(rec, b_name, b_form, cells_b)
@@ -468,10 +472,10 @@ def comparison_text(rec: _pv.Records, body: str) -> tuple[str, list[float], dict
                 inside += m.lower <= fb <= m.upper
     k = len(ratios)
     low, high = min(range(k), key=lambda i: ratios[i]), max(range(k), key=lambda i: ratios[i])
-    text = (f"{_form_name(a_form, a_name)} divided by {_form_name(b_form, b_name)}, setting by setting over {k} settings: "
+    text = (f"{_form_name(a_form, a_name, rec)} divided by {_form_name(b_form, b_name, rec)}, setting by setting over {k} settings: "
             f"{_pv.sig(ratios[low], 3)} to {_pv.sig(ratios[high], 3)} (lowest at {_names(rec, where_of[low])}, highest at "
             f"{_names(rec, where_of[high])})")
     if tested:
-        text += (f"; {_form_name(b_form, b_name)} lies inside the 95% interval of {_form_name(a_form, a_name)} at {inside} of "
+        text += (f"; {_form_name(b_form, b_name, rec)} lies inside the 95% interval of {_form_name(a_form, a_name, rec)} at {inside} of "
                  f"{tested} settings")
     return text, [ratios[low], ratios[high]], {"value": a_name, "against": b_name, "settings": "each"}

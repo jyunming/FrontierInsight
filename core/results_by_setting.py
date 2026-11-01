@@ -282,6 +282,21 @@ def distinct(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, 
 # --- the tables --------------------------------------------------------------------------------------------------------
 
 
+def plain_label(protocol: dict[str, Any] | None, name: str, default: str | None = None) -> str:
+    """What a reader is shown for a result or a setting: the plan's own label of it (``labels``, else the metric's
+    ``label``), else ``default`` (the name itself when none is given). Every key, record and message to the writer keeps the id;
+    only text a person reads goes through this."""
+    if isinstance(protocol, dict):
+        labels = protocol.get("labels")
+        text = labels.get(name) if isinstance(labels, dict) else None
+        if not (isinstance(text, str) and text.strip()):
+            text = next((m.get("label") for m in protocol.get("metrics") or []
+                         if isinstance(m, dict) and m.get("id") == name and isinstance(m.get("label"), str)), None)
+        if isinstance(text, str) and text.strip():
+            return " ".join(text.split())
+    return name if default is None else default
+
+
 @dataclass
 class Table:
     """A table as data, rendered by :func:`markdown` and :func:`latex`."""
@@ -292,6 +307,21 @@ class Table:
     align: list[str]
     rows: list[list[str]]
     value: str = ""
+    #: The same table as the paper shows it: the plan's label of the quantity in place of its id (``name``, ``""`` when the plan
+    #: gives none) and the caption worded with it. The files keep ``value`` and ``caption``.
+    name: str = ""
+    paper_caption: str = ""
+
+
+def plain_formula(protocol: dict[str, Any] | None, formula: Any) -> tuple[str, bool]:
+    """``(formula, changed)``: ``formula`` with each name of the plan that has a label written as that label (a whole name
+    only). ``changed`` is False when no name had one, and the text is then the formula as it is."""
+    text = str(formula)
+    labels = {k: v for k in set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", text))
+              if (v := plain_label(protocol, k, "")) }
+    if not labels:
+        return text, False
+    return re.sub(r"[A-Za-z_][A-Za-z0-9_]*", lambda m: labels.get(m.group(0), m.group(0)), text), True
 
 
 def _sig(x: float, digits: int = 4) -> str:
@@ -429,6 +459,8 @@ class Built:
     # What FI noticed about its own reading of the code. Never reader text: the caller logs it (run.log), the paper and
     # the writer's note do not carry it.
     diagnostics: list[str] = field(default_factory=list)
+    #: ``notes`` as the paper shows them (a quantity by the plan's label); the files keep ``notes``.
+    paper_notes: list[str] = field(default_factory=list)
 
 
 def _quantities(protocol: dict[str, Any] | None, values: list[str]) -> tuple[list[tuple[str, str]], list[str]]:
@@ -471,9 +503,12 @@ def build(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, fil
     at: dict[tuple[str, str], dict[str, Any]] = {}
     for r in computed["by_setting"]:
         at[(r["metric"], json.dumps(r["setting"], default=str))] = r
+    paper_notes: dict[str, str] = {}
     if left:
-        notes.append("These quantities have no table of their own, because no single trial returns them (each is worked out "
-                     "from several values of a setting): " + ", ".join(f"`{m}`" for m in left) + ".")
+        what = ("These quantities have no table of their own, because no single trial returns them (each is worked out "
+                "from several values of a setting): ")
+        notes.append(what + ", ".join(f"`{m}`" for m in left) + ".")
+        paper_notes[notes[-1]] = what + ", ".join(plain_label(protocol, m) for m in left) + "."
     axes = [a for a in _refs.grid_axes(protocol) if a not in set(found.unread)]
     levels = list(dict.fromkeys(k for s in found.settings for k in s.setting if k not in axes))
     all_levels = levels
@@ -546,26 +581,38 @@ def build(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, fil
                          "ci_lower": lower, "ci_upper": upper, "interval": method, "status": (summary or {}).get("status", ""), "reference": ref,
                          "reference_kind": kind if ref is not None else "", "comparison": verdict})
         how = " and ".join(sorted(m for m in methods if m)) or "no interval"
-        caption = (f"`{value}` at each of the {len({_run_setting(s) for s, *_ in stats})} settings: mean ± half-width of its 95% interval "
-                   f"({how}) over the n trials that returned it.")
+        name = plain_label(protocol, metric or value, plain_label(protocol, value, ""))
+
+        def caption_of(shown: str, formula_of: Any) -> str:
+            text = (f"{shown} at each of the {len({_run_setting(s) for s, *_ in stats})} settings: mean ± half-width of its 95% interval "
+                    f"({how}) over the n trials that returned it.")
+            if has_ref:
+                ref_q = q or {}
+                text += (f" Reference: {formula_of(ref_q.get('formula'))}"
+                         f"{' (' + ref_q['note'] + ')' if ref_q.get('note') else ''}, computed by FI from the plan frozen "
+                         f"before the run; {ref_q.get('checked', {}).get('why') or 'not cross-checked'}.")
+            return text
+
+        def plain_ref(formula: Any) -> str:
+            text, changed = plain_formula(protocol, formula)
+            return text if changed else f"`{formula}`"
+        caption = caption_of(f"`{value}`", lambda f: f"`{f}`")
+        paper_caption = caption_of(name if name else f"`{value}`", plain_ref)
         if has_ref:
-            ref_q = q or {}
-            caption += (f" Reference: `{ref_q.get('formula')}`"
-                        f"{' (' + ref_q['note'] + ')' if ref_q.get('note') else ''}, computed by FI from the plan frozen "
-                        f"before the run; {ref_q.get('checked', {}).get('why') or 'not cross-checked'}.")
-            caption += (" `agrees`: the reference lies inside the interval (about 1 setting in 20 differs by chance "
-                        "alone)." if kind == "value" else
-                        " A bound is a limit, not a value: `within bound` means the whole interval stays on its side, "
-                        "`within bound, within uncertainty` that the mean does and the interval reaches past it.")
-            caption += (f" `{TOO_FEW}`: fewer than {MIN_TRIALS_TO_JUDGE} trials, or an interval wider than "
-                        f"{MAX_HALF_WIDTH_SHARE:.0%} of the reference either side.")
+            tail = (" `agrees`: the reference lies inside the interval (about 1 setting in 20 differs by chance "
+                    "alone)." if kind == "value" else
+                    " A bound is a limit, not a value: `within bound` means the whole interval stays on its side, "
+                    "`within bound, within uncertainty` that the mean does and the interval reaches past it.")
+            tail += (f" `{TOO_FEW}`: fewer than {MIN_TRIALS_TO_JUDGE} trials, or an interval wider than "
+                     f"{MAX_HALF_WIDTH_SHARE:.0%} of the reference either side.")
         else:
-            caption += " It has no reference value to compare with" + (f": {why_none}." if why_none else ".")
+            tail = " It has no reference value to compare with" + (f": {why_none}." if why_none else ".")
         tables.append(Table(label=f"fi-results-{re.sub(r'[^A-Za-z0-9]+', '-', value).strip('-').lower()}",
-                            caption=caption, columns=cols, align=align, rows=body, value=value))
+                            caption=caption + tail, columns=cols, align=align, rows=body, value=value,
+                            name=name if name != value else "", paper_caption=paper_caption + tail))
     if not quantities:
         notes.append("The trials returned no value that varies, so there is nothing to tabulate.")
-    return Built(found, computed, tables, notes, rows, diagnostics)
+    return Built(found, computed, tables, notes, rows, diagnostics, [paper_notes.get(n, n) for n in notes])
 
 
 # --- renderings (pure) -------------------------------------------------------------------------------------------------
@@ -575,9 +622,11 @@ def _md_cell(text: str) -> str:
     return str(text).replace("|", "\\|").replace("\n", " ")
 
 
-def markdown(table: Table) -> str:
-    """One table in Markdown: its caption line, then the table."""
-    lines = [f"**Table ({table.value}).** {table.caption}", "",
+def markdown(table: Table, plain: bool = False) -> str:
+    """One table in Markdown: its caption line, then the table. ``plain`` words the title and caption with the plan's label
+    of the quantity (the paper); the files of the supplement keep its id."""
+    title, caption = (table.name or table.value, table.paper_caption or table.caption) if plain else (table.value, table.caption)
+    lines = [f"**Table ({title}).** {caption}", "",
              "| " + " | ".join(_md_cell(c) for c in table.columns) + " |",
              "|" + "|".join("---:" if a == "r" else "---" for a in table.align) + "|"]
     lines += ["| " + " | ".join(_md_cell(c) for c in row) + " |" for row in table.rows]
@@ -677,8 +726,9 @@ def _slice(built: Built) -> list[Table]:
         picked = ordered if len(ordered) <= 3 else [ordered[0], ordered[len(ordered) // 2], ordered[-1]]
         keep_values[k] = {json.dumps(v, default=str) for v in picked}
     keep = [all(json.dumps(v, default=str) in keep_values[k] for k, v in s.setting.items()) for s in built.distinct.settings]
-    return [Table(t.label, t.caption + " Only the first, middle and last value of each setting are shown here.",
-                  t.columns, t.align, [r for r, k in zip(t.rows, keep) if k], t.value) for t in built.tables]
+    more = " Only the first, middle and last value of each setting are shown here."
+    return [Table(t.label, t.caption + more, t.columns, t.align, [r for r, k in zip(t.rows, keep) if k], t.value, t.name,
+                  t.paper_caption + more if t.paper_caption else "") for t in built.tables]
 
 
 def writer_note(trial_rows: list[dict[str, Any]], built: Built | None, cap: int | None = None) -> str:
@@ -745,7 +795,7 @@ def paper_block(built: Built | None, cap: int | None = None) -> str:
     cap = PAPER_MAX_ROWS if cap is None else cap
     files = "`paper/results_by_setting.md`, every number in `paper/results_by_setting.csv`"
     total = sum(len(t.rows) for t in built.tables)
-    notes = [n for n in built.notes if n.strip()]
+    notes = [n for n in (built.paper_notes or built.notes) if n.strip()]
     if total <= cap:
         tables, lead = built.tables, []
     else:
@@ -764,10 +814,10 @@ def paper_block(built: Built | None, cap: int | None = None) -> str:
             if not tables:
                 return (f"Results for all {built.distinct.n_settings} settings are in the supplementary table "
                         "`paper/results_by_setting.csv`.\n")
-            left = [f"`{t.value}`" for t in built.tables if t not in tables]
+            left = [t.name or f"`{t.value}`" for t in built.tables if t not in tables]
             lead = [f"FI's tables of every setting have more rows than fit here; the tables of "
                     f"{', '.join(left)} are in {files}."]
-    return "\n\n".join([*lead, *notes, *(markdown(t).rstrip("\n") for t in tables)]) + "\n"
+    return "\n\n".join([*lead, *notes, *(markdown(t, plain=True).rstrip("\n") for t in tables)]) + "\n"
 
 
 # --- the files ------------------------------------------------------------------------------------------------------

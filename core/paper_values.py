@@ -513,6 +513,11 @@ class Records:
     def short(self, axis: str) -> str:
         return self.aliases().get(axis, axis)
 
+    def label(self, name: str) -> str:
+        """What a reader is shown for a result or a setting (:func:`plain_label`); the alias of an axis whose own name a key
+        cannot hold when the plan gives it no label."""
+        return _rbs.plain_label(self.protocol, name, self.short(name))
+
     def real(self, name: str) -> str:
         """The axis a key's axis name stands for (its own name, or the short name FI gave it)."""
         for axis, short in self.aliases().items():

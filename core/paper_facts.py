@@ -1293,9 +1293,10 @@ def _answer_line(rec: Any, name: str, metric: str, tries: list[tuple[str, str]],
     if done is None:
         why = got[-1][2].hit.reason if got[-1][2].hit else "no record"
         if plain is None:
-            return f"- {name}: not answered (FI cannot state {metric}: {why})"
+            return f"- {name}: not answered (FI cannot state {rec.label(metric)}: {why})"
         return f"- {name}: not answered (FI cannot state \"{plain(metric)}\": {why.replace(metric, plain(metric))})"
-    lead = how or "the plan's map: `" + metric + "`"
+    shown = rec.label(metric)
+    lead = how or "the plan's map: " + (shown if shown != metric else "`" + metric + "`")
     return f"- {name} ({lead}): {done[0]}{done[1]}"
 
 
@@ -1383,10 +1384,10 @@ def answers_text(quest_root: Path | str) -> str:
         for level in levels:
             here = [a for a in each if a != split] if level is not None else each
             said = [f"{rec.short(a)}=each" for a in here]
-            label = name + (f" (when {', '.join(a + ' = ' + str(v) for a, v in at.items())})" if at and level is None else "")
+            label = name + (f" (when {', '.join(rec.label(a) + ' = ' + str(v) for a, v in at.items())})" if at and level is None else "")
             if level is not None:
                 fixed_here = fixed + [f"{rec.short(split)}={level}"]
-                label = f"{name} ({split} = {level})" + (f" ({', '.join(a + ' = ' + str(v) for a, v in at.items())})" if at else "")
+                label = f"{name} ({rec.label(split)} = {level})" + (f" ({', '.join(rec.label(a) + ' = ' + str(v) for a, v in at.items())})" if at else "")
             else:
                 fixed_here = fixed
             # A bias or a standard deviation the plan's map types for the question is that statistic of the result's trials, which
@@ -1394,13 +1395,14 @@ def answers_text(quest_root: Path | str) -> str:
             how = ""
             if stat:
                 made = "the mean estimate minus the true value" if stat == "bias" else "the standard deviation over the trials"
-                how = f"the plan's map: `{metric}`, here worked out as {made}"
+                shown = rec.label(metric)
+                how = f"the plan's map: {shown if shown != metric else '`' + metric + '`'}, here worked out as {made}"
             if stat == "bias" and not estimates.get(metric):
                 lines.append(f"- {label}: not answered (the plan gives no one true value of \"{plain(metric)}\" to measure the bias from)")
                 continue
             if said:
                 where = ", ".join([*said, *fixed_here])
-                over = f" (no single value: it differs with {', '.join(rec.short(a) for a in here)}; this is the "
+                over = f" (no single value: it differs with {', '.join(rec.label(a) for a in here)}; this is the "
                 end = ", lowest to highest, and the tables give every setting)"
                 if stat == "bias":
                     tries = [(f"{{{{v:{metric} @ {where} | diff ref | range}}}}", over + "mean estimate minus the true value in each setting" + end)]
