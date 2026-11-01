@@ -505,3 +505,17 @@ def test_statistics_of_unchanged_results_are_reused_and_changed_results_are_work
     ms.statistics(changed, PROTO)
     ms.statistics(changed, PROTO)
     assert len(calls) == 13
+
+
+def test_statistics_are_worked_out_again_when_the_estimator_source_changed_and_two_inputs_alternate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[int] = []
+    real = ms._contrast
+    monkeypatch.setattr(ms, "_contrast", lambda a, b, spec: (calls.append(1), real(a, b, spec))[1])
+    one = _seeds({"1.5": (60, 0), "3.0": (120, 0)})
+    two = _seeds({"1.5": (70, 0), "3.0": (120, 0)})
+    for reps in (one, two, one, two, one):
+        ms.statistics(reps, PROTO, quest_root=tmp_path)
+    assert len(calls) == 2  # each input worked out once, then reused although the other was called in between
+    monkeypatch.setattr(ms, "_source_hash_value", "estimators changed")
+    ms.statistics(one, PROTO, quest_root=tmp_path)
+    assert len(calls) == 3

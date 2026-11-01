@@ -533,30 +533,49 @@ def _contrast(a: dict[str, Any], b: dict[str, Any], spec: dict[str, Any]) -> tup
 
 # The statistics of one set of results are worked out once. The analysis and the evidence record (written again after the
 # paper is delivered) read the same results with the same protocol; a large study takes tens of minutes to work out. The
-# last answer is kept in the quest's ``.fi`` folder under a hash of everything it was computed from; a rerun changes the
-# results, so the hash, so it is worked out again. Bump the version when the estimators change.
+# latest answers (a few, newest first) are kept in the quest's ``.fi`` folder under a hash of everything they were computed
+# from: the results, the specs, and the source of the estimators themselves, so a resumed quest never gets an answer of
+# older code. A rerun changes the results, so the hash, so it is worked out again.
 STATISTICS_RECORD = ".fi/statistics_cache.json"
-_STATISTICS_VERSION = 1
+_KEPT_ANSWERS = 4
+_source_hash_value: str | None = None
+
+
+def _source_hash() -> str:
+    """A hash of the source of this module and of the estimators it calls (computed once per process)."""
+    global _source_hash_value
+    if _source_hash_value is None:
+        digest = hashlib.sha256()
+        for path in (Path(__file__), Path(_stats.__file__)):
+            try:
+                digest.update(path.read_bytes())
+            except OSError:
+                digest.update(str(time.time()).encode())  # unreadable source: never match an older answer
+        _source_hash_value = digest.hexdigest()
+    return _source_hash_value
 
 
 def _inputs_key(replicates: list[dict[str, Any]], specs: list[dict[str, Any]], declared_contrasts: list[Any]) -> str | None:
     try:
-        text = json.dumps([_STATISTICS_VERSION, replicates, specs, declared_contrasts], sort_keys=True, default=str)
+        text = json.dumps([_source_hash(), replicates, specs, declared_contrasts], sort_keys=True, default=str)
     except (TypeError, ValueError):
         return None
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _kept_statistics(quest_root: Path | str | None, key: str | None) -> dict[str, Any] | None:
-    if quest_root is None or key is None:
-        return None
+def _kept_entries(quest_root: Path | str) -> list[dict[str, Any]]:
     try:
         record = json.loads((Path(quest_root) / STATISTICS_RECORD).read_text(encoding="utf-8"))
     except (OSError, ValueError):
+        return []
+    entries = record.get("entries") if isinstance(record, dict) else None
+    return [e for e in entries if isinstance(e, dict) and isinstance(e.get("statistics"), dict)] if isinstance(entries, list) else []
+
+
+def _kept_statistics(quest_root: Path | str | None, key: str | None) -> dict[str, Any] | None:
+    if quest_root is None or key is None:
         return None
-    if isinstance(record, dict) and record.get("key") == key and isinstance(record.get("statistics"), dict):
-        return record["statistics"]
-    return None
+    return next((e["statistics"] for e in _kept_entries(quest_root) if e.get("key") == key), None)
 
 
 def _keep_statistics(quest_root: Path | str | None, key: str | None, computed: dict[str, Any]) -> None:
@@ -564,9 +583,10 @@ def _keep_statistics(quest_root: Path | str | None, key: str | None, computed: d
         return
     path = Path(quest_root) / STATISTICS_RECORD
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    entries = [{"key": key, "statistics": computed}] + [e for e in _kept_entries(quest_root) if e.get("key") != key]
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(json.dumps({"key": key, "statistics": computed}), encoding="utf-8")
+        tmp.write_text(json.dumps({"entries": entries[:_KEPT_ANSWERS]}), encoding="utf-8")
         os.replace(tmp, path)
     except (OSError, TypeError, ValueError):
         try:
