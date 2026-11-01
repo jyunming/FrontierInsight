@@ -472,8 +472,11 @@ class FigureCalls:
         The legend is built from the record, never from the artists' own labels, one entry per drawn series (and per reference
         line). Placement: inside the axes, in the corner (upper right, upper left, lower right, lower left, in this order of
         preference) that no drawn point, error bar, band or reference line reaches, a corner being 40% of the axes wide and as
-        high as its rows need; when every corner is taken or there are more than six entries, the legend stands outside the axes
-        on the right and the axes are narrowed to 72% of their width to make room.
+        high as its rows need. When every corner is taken or there are more than six entries, the legend goes outside the axes by its
+        measured size: to the right when its width fits in the gap to the next panel (or the canvas edge) once the axes are
+        narrowed by the missing width, at most 30% of their width; otherwise below the axes (laid out in as many columns as fit
+        the axes' width), the axes losing the measured height of the legend from their bottom, at most 40% of it. Either way it
+        stays inside the canvas and clear of every other panel's labels, as far as that room exists.
 
         Limits are set from the series, error bar ends, bands, reference lines and curves together (bars also reach their
         baseline, 0, on a linear axis). A linear axis is padded by 5% of the span on both sides, a log axis by the same share of
@@ -481,7 +484,7 @@ class FigureCalls:
         reaches 0 still gives finite limits (a log axis with no positive value is drawn linear, and the record says so)."""
         spec_labels, result_info = spec_labels or {}, result_info or {}
         self._state()
-        changed = []
+        changed, outside = [], []
         for i in range(len(getattr(self, "axes", []) or [])):
             ax, rec = self._panel(i)
             if rec["raw"]:
@@ -489,7 +492,11 @@ class FigureCalls:
             self._merge_identical(i, rec)
             self._write_labels(ax, rec, spec_labels, result_info, changed)
             self._write_limits(ax, rec, changed)
-            self._write_legend(ax, i, rec, spec_labels, changed)
+            placed = self._write_legend(ax, i, rec, spec_labels, result_info, changed)
+            if placed is not None:
+                outside.append(placed)
+        for ax, handles, texts in outside:  # after every label is written, so the neighbours' extents are known
+            self._legend_outside(ax, handles, texts)
         sup = getattr(getattr(self, "fig", None), "_suptitle", None)
         if sup is not None and sup.get_text():
             sup.set_text("")
@@ -612,45 +619,97 @@ class FigureCalls:
             if vals:
                 (ax.set_xlim if axis == "x" else ax.set_ylim)(*_padded(min(vals), max(vals), scale))
 
-    def _entries(self, panel, rec, spec_labels):
-        """``[(artist, text)]`` of the legend: one per drawn series (the merged ones read "a = b") and per reference line."""
+    def _entries(self, panel, rec, spec_labels, result_info):
+        """``[(artist, text)]`` of the legend: one per drawn series (the merged ones read "a = b") and per reference line. A text
+        is the plan's label, else the record's label when it is not the bare id, else a short form of the plan's description,
+        else "value": never the id."""
         extra = self._fc_extra.get(panel, {"series": [], "refs": []})
         twins = extra.get("twins", set())
+        recorded = {}
+        for e in rec["series"]:
+            recorded.setdefault(e["id"], e["label"])
 
-        def name(ident, fallback):
+        def name(ident, record_label=None):
             sl = spec_labels.get(ident)
             got = sl.get("label") if isinstance(sl, dict) else sl
-            return str(got or fallback or ident)
+            record_label = record_label if record_label is not None else recorded.get(ident)
+            if not got and record_label and record_label != ident:
+                got = record_label
+            return str(got or _short((result_info.get(ident) or {}).get("description")) or "value")
 
         out = []
         for k, e in enumerate(rec["series"]):
             if e["kind"] == "image" or k >= len(extra["series"]) or extra["series"][k][0] is None or k in twins:
                 continue
-            text = " = ".join([name(e["id"], e["label"])] + [name(i, i) for i in e["merged_with"]])
+            text = " = ".join([name(e["id"], e["label"])] + [name(i) for i in e["merged_with"]])
             out.append((extra["series"][k][0], text))
         for r, art in zip(rec["refs"], extra["refs"]):
             out.append((art, name(r["id"], r["label"])))
         return out
 
-    def _write_legend(self, ax, panel, rec, spec_labels, changed):
+    def _write_legend(self, ax, panel, rec, spec_labels, result_info, changed):
+        """Draw the legend in a free corner; if it needs room outside, return ``(ax, handles, texts)`` for ``_legend_outside``."""
         old = ax.get_legend()
         if old is not None:
             changed.append("legend")
             old.remove()
-        entries = self._entries(panel, rec, spec_labels)
+        entries = self._entries(panel, rec, spec_labels, result_info)
         if not entries:
-            return
+            return None
         handles, texts = [a for a, _ in entries], [t for _, t in entries]
         corner = self._free_corner(ax, rec, len(entries)) if len(entries) <= 6 else None
-        if corner is None:
-            extra = self._fc_extra.setdefault(panel, {"series": [], "refs": []})
-            if not extra.get("narrowed"):
-                extra["narrowed"] = True
-                pos = ax.get_position()
-                ax.set_position([pos.x0, pos.y0, pos.width * 0.72, pos.height])
-            ax.legend(handles, texts, loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0, fontsize="small", frameon=False)
-        else:
+        if corner is not None:
             ax.legend(handles, texts, loc=corner, fontsize="small", framealpha=0.85)
+            return None
+        return ax, handles, texts
+
+    def _legend_outside(self, ax, handles, texts):
+        """Put the legend beside or below the axes by its measured size (see ``finish``)."""
+        fig = ax.figure
+        try:
+            renderer = fig.canvas.get_renderer()
+        except AttributeError:  # a canvas that cannot measure: the corner with the least data is still better than nothing
+            ax.legend(handles, texts, loc="upper right", fontsize="small", framealpha=0.85)
+            return
+        others = [a for a in fig.axes if a is not ax]
+        boxes = [a.get_tightbbox(renderer) for a in others]
+        mine = ax.get_tightbbox(renderer)
+        width_px, height_px = fig.bbox.width, fig.bbox.height
+        gap = 6.0
+
+        def make(**kw):
+            old = ax.get_legend()
+            if old is not None:
+                old.remove()
+            return ax.legend(handles, texts, fontsize="small", borderaxespad=0, frameon=False, **kw)
+
+        leg = make(loc="upper left", bbox_to_anchor=(1.02, 1.0))
+        ext = leg.get_window_extent(renderer)
+        edge = ax.bbox.x1
+        wall = min([width_px] + [b.x0 for b in boxes if b is not None and b.x0 >= ax.bbox.x0 + ax.bbox.width / 2 and b.y0 < ext.y1 and b.y1 > ext.y0])
+        need = ext.x1 - edge + gap
+        room = wall - edge
+        if need - room <= 0.3 * ax.bbox.width:
+            if need > room:  # narrow by the missing width
+                pos = ax.get_position()
+                ax.set_position([pos.x0, pos.y0, pos.width - (need - room) / width_px, pos.height])
+            return
+        # below the axes, in as many columns as fit the axes' width
+        for ncol in range(len(texts), 0, -1):
+            leg = make(loc="upper center", bbox_to_anchor=(0.5, 0.0), ncol=ncol)
+            if leg.get_window_extent(renderer).width <= ax.bbox.width or ncol == 1:
+                break
+        drop = mine.y0 - ax.bbox.y0 - gap  # the tick labels and x label hang below the axes
+        for _ in range(3):
+            leg.set_bbox_to_anchor((0.5, drop / ax.bbox.height), transform=ax.transAxes)
+            ext = leg.get_window_extent(renderer)
+            floor = max([0.0] + [b.y1 + gap for b in boxes if b is not None and b.y1 <= mine.y0 + 1 and b.x0 < ext.x1 and b.x1 > ext.x0])
+            short = floor - ext.y0
+            if short <= 0:
+                return
+            pos = ax.get_position()
+            cut = min(short, 0.4 * ax.bbox.height) / height_px
+            ax.set_position([pos.x0, pos.y0 + cut, pos.width, pos.height - cut])
 
     def _free_corner(self, ax, rec, rows):
         """The first corner (upper right, upper left, lower right, lower left) the drawn data does not reach, or None."""
@@ -660,17 +719,16 @@ class FigureCalls:
         to_axes = ax.transAxes.inverted()
         pts = []
 
-        def add(pairs):
-            for x, y in pairs:
-                if _finite(x) and _finite(y):
+        def along(xs, ys):  # the points, and 16 samples along each step between them (in the axes' own fractions)
+            fr = []
+            for x, y in zip(xs, ys):
+                if _finite(x) and y is not None and _finite(y):
                     fx, fy = to_axes.transform(ax.transData.transform((x, y)))
                     if math.isfinite(fx) and math.isfinite(fy):
-                        pts.append((fx, fy))
-
-        def along(xs, ys):  # the points and the middle of each step between them
-            pairs = [(x, y) for x, y in zip(xs, ys) if _finite(x) and y is not None]
-            add(pairs)
-            add([((a[0] + b[0]) / 2, (a[1] + b[1]) / 2) for a, b in zip(pairs, pairs[1:])])
+                        fr.append((fx, fy))
+            pts.extend(fr)
+            for a, b in zip(fr, fr[1:]):
+                pts.extend((a[0] + (b[0] - a[0]) * t / 16, a[1] + (b[1] - a[1]) * t / 16) for t in range(1, 16))
 
         for e in rec["series"]:
             if e["kind"] == "image":

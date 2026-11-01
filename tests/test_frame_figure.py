@@ -42,8 +42,8 @@ class _Table:
 
 
 class _Host(frame_figure.FigureCalls):
-    def __init__(self, panels=2):
-        self.fig, axes = plt.subplots(1, panels, squeeze=False)
+    def __init__(self, panels=2, figsize=None):
+        self.fig, axes = plt.subplots(1, panels, squeeze=False, figsize=figsize)
         self.axes = list(axes[0])
         self.table = _Table()
         self.x = "size"
@@ -435,8 +435,60 @@ def test_legend_stays_off_the_data_and_outside_when_crowded():
     h.line(0, "fast", [1, 2, 3], [1.0, 2.0, 3.0], "growth")  # rising line: upper left is free
     h.finish(SPEC, INFO)
     assert h.axes[0].get_legend()._loc == 2  # "upper left"
-    c = _Host(panels=1)
-    for k in range(7):
-        c.line(0, "fast" if k % 2 == 0 else "slow", [1, 2, 3], [1.0 + k, 2.0 + k, 3.0 + k], "growth")
-    c.finish(SPEC, INFO)
-    assert c.axes[0].get_position().width < 0.8 * _Host(panels=1).axes[0].get_position().width
+
+
+def _crowded(host, panel, n=2):
+    """Lines through every corner of the panel, so no corner is free."""
+    for k in range(n):
+        host.line(panel, "fast" if k % 2 == 0 else "slow", [1, 2, 3, 4], [1.0 + k, 4.0 + k, 1.0 + k, 4.0 + k], "growth")
+    host.line(panel, "slow", [1, 2, 3, 4], [4.0, 1.0, 4.0, 1.0], "growth")
+
+
+@pytest.mark.parametrize("columns,series", [(1, 2), (2, 2), (3, 2), (3, 8), (2, 8)])
+def test_outside_legend_clears_other_panels_and_the_canvas(columns, series):
+    h = _Host(panels=columns, figsize=(6.4 if columns == 1 else 9.6, 4.8))
+    for i in range(columns):
+        _crowded(h, i, series)
+        h.ref(i, "limit")
+    h.finish(SPEC, INFO)
+    r = h.fig.canvas.get_renderer()
+    canvas = h.fig.bbox
+    for i, ax in enumerate(h.axes):
+        ext = ax.get_legend().get_window_extent(r)
+        assert ext.x0 >= canvas.x0 and ext.x1 <= canvas.x1 and ext.y0 >= canvas.y0 and ext.y1 <= canvas.y1, (i, ext)
+        for j, other in enumerate(h.axes):
+            if j != i:
+                b = other.get_tightbbox(r)
+                assert not (ext.x0 < b.x1 and b.x0 < ext.x1 and ext.y0 < b.y1 and b.y0 < ext.y1), (i, j, ext, b)
+
+
+def test_merged_legend_entry_never_shows_a_raw_id():
+    h = _Host(panels=1)
+    h.series_ids = ["fast", "slow", "mid"]
+    h.line(0, "fast", [1, 2], [1.0, 2.0], "growth")
+    h.line(0, "mid", [1, 2], [1.0, 2.0], "growth")
+    h.finish({"growth": {"label": "Growth"}}, {"mid": {"description": "Middle colony; third arm"}})
+    assert [t.get_text() for t in h.axes[0].get_legend().get_texts()] == ["Fast colony = Middle colony"]
+    g = _Host(panels=1)
+    g.labels = {}
+    g.line(0, "slow", [1, 2], [1.0, 2.0], "growth")
+    g.line(0, "fast", [1, 2], [1.0, 2.0], "growth")
+    g.finish({}, {})
+    assert [t.get_text() for t in g.axes[0].get_legend().get_texts()] == ["value = value"]
+
+
+def test_log_axis_ignores_nonpositive_error_bar_end():
+    h = _Host(panels=1)
+    h.line(0, "fast", [1, 2, 3], [1.0, 10.0, 100.0], "growth", yerr=[2.0, 2.0, 2.0])  # 1.0 - 2.0 is below zero
+    h.finish(SPEC, {"growth": {"scale": "log"}})
+    lo, hi = h.axes[0].get_ylim()
+    assert h.axes[0].get_yscale() == "log" and 0 < lo < 1.0 and 100.0 < hi < 1000.0
+
+
+def test_image_panel_labels():
+    h = _Host(panels=1)
+    h.image(0, [[1.0, 2.0], [3.0, 4.0]], what="growth")
+    h.finish(SPEC, INFO)
+    p = h.record()["panels"][0]
+    assert h.axes[0].get_ylabel() == "row" and h.axes[0].get_xlabel() == "column"
+    assert p["y"]["label"] == "Growth (1/h)" and h.axes[0].get_legend() is None
