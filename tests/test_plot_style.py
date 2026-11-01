@@ -925,3 +925,48 @@ def test_record_holds_no_legend_box_without_a_legend(tmp_path) -> None:
 def test_record_holds_data_limits(tmp_path) -> None:
     for panel in _record_probe(tmp_path, "ax.plot([1, 2], [1, 2])\nax.set_xlim(0, 5)\nax.set_ylim(-1, 3)\n"):
         assert panel["data_limits"] == {"x": [0.0, 5.0], "y": [-1.0, 3.0]}
+
+
+def test_record_holds_no_errorbars_for_x_only_bars(tmp_path) -> None:
+    for panel in _record_probe(tmp_path, "ax.errorbar([1, 2], [1.0, 2.0], xerr=0.3)\n"):
+        assert panel["errorbars"] == []
+
+
+def test_a_zero_xerr_is_not_recorded_as_a_zero_width_y_bar(tmp_path) -> None:
+    for panel in _record_probe(tmp_path, "ax.errorbar([1, 2], [1.0, 2.0], xerr=0)\n"):
+        assert panel["errorbars"] == []
+
+
+def test_record_reads_y_bars_when_x_bars_are_drawn_too(tmp_path) -> None:
+    for panel in _record_probe(tmp_path, "ax.errorbar([1, 2], [1.0, 2.0], yerr=[0.1, 0.2], xerr=0.5)\n"):
+        assert panel["errorbars"][0]["hi"] == pytest.approx([1.1, 2.2])
+
+
+def test_a_nan_bar_keeps_the_other_bars_aligned_with_their_points(tmp_path) -> None:
+    body = "ax.errorbar([1, 2, 3], [1.0, 2.0, 3.0], yerr=[0.1, float('nan'), 0.3])\n"
+    for panel in _record_probe(tmp_path, body):
+        bars = panel["errorbars"][0]
+        assert bars["lo"][1] is None and bars["hi"][1] is None
+        assert bars["hi"][0] == pytest.approx(1.1) and bars["hi"][2] == pytest.approx(3.3)
+
+
+def test_record_holds_the_new_keys_for_each_panel_of_a_two_panel_figure(tmp_path) -> None:
+    pytest.importorskip("matplotlib")
+    boot_dir = write_boot(tmp_path, "latex")
+    records = tmp_path / "records"
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(p for p in (str(boot_dir), os.environ.get("PYTHONPATH", "")) if p),
+           "FI_FIGURE_RECORDS": str(records)}
+    probe = ("import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt\n"
+             "fig, (a, b) = plt.subplots(1, 2)\n"
+             "a.errorbar([1, 2], [1.0, 2.0], yerr=0.1, label='L'); a.legend(); a.text(0.5, 0.5, 'left note')\n"
+             "b.plot([1, 2], [3, 4]); b.set_xlim(0, 9)\n"
+             "fig.savefig('two.png')\n")
+    out = subprocess.run([sys.executable, "-c", probe], env=env, cwd=tmp_path, capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    for name in ("two.json", "two.seed0.json"):
+        left, right = json.loads((records / name).read_text(encoding="utf-8"))["axes"]
+        assert len(left["errorbars"]) == 1 and right["errorbars"] == []
+        assert left["legend_box"] is not None and right["legend_box"] is None
+        assert right["data_limits"]["x"] == [0.0, 9.0]
+    seed = json.loads((records / "two.seed0.json").read_text(encoding="utf-8"))["axes"]
+    assert seed[0]["texts"] == ["left note"] and seed[1]["texts"] == []

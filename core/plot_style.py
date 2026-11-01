@@ -523,31 +523,37 @@ try:
 
         def _fi_bar_ends(ax):
             # The ends of every y error bar, per errorbar call, in data units: what the bars reach, kept so a check can
-            # tell whether the axis holds them. [] when the panel draws none or they could not be read.
+            # tell whether the axis holds them. lo / hi hold one entry per point, in the order of the points; a bar
+            # that is not a finite number is None there, so an entry stays aligned with its point. [] when the panel
+            # draws no y bars (x bars alone are not recorded) or they could not be read.
             out = []
             try:
                 from matplotlib.container import ErrorbarContainer
 
                 for container in ax.containers:
-                    if not isinstance(container, ErrorbarContainer):
+                    if not isinstance(container, ErrorbarContainer) or not container.has_yerr:
                         continue
+                    # lines[2] holds the x bars first (when drawn), then the y bars.
+                    bars = container.lines[2][1 if container.has_xerr else 0]
                     lo, hi = [], []
-                    for bar in container.lines[2]:
-                        for segment in bar.get_segments():
-                            xs = [float(p[0]) for p in segment]
-                            ys = [float(p[1]) for p in segment]
-                            if not ys or not all(_fi_math.isfinite(v) for v in ys + xs):
-                                continue
-                            if max(xs) != min(xs):
-                                continue  # an x error bar
-                            lo.append(min(ys))
-                            hi.append(max(ys))
+                    for segment in bars.get_segments():
+                        ys = [float(p[1]) for p in segment]
+                        ok = bool(ys) and all(_fi_math.isfinite(v) for v in ys)
+                        lo.append(min(ys) if ok else None)
+                        hi.append(max(ys) if ok else None)
                     label = container.get_label()
                     out.append({"line": str(label) if label and not str(label).startswith("_") else None,
                                 "lo": lo, "hi": hi})
             except Exception:
                 return []
             return out
+
+        def _fi_text_words(ax):
+            # The strings of ax.texts in drawing order, each cut at 200 characters.
+            try:
+                return [t.get_text()[:200] for t in ax.texts if t.get_visible() and t.get_text().strip()]
+            except Exception:
+                return []
 
         def _fi_legend_frac(ax):
             # The legend's box in figure fractions (x0, y0, x1, y1), or None when the panel has no legend.
@@ -659,6 +665,8 @@ try:
                 "yscale": ax.get_yscale(), "ylim": [float(lo), float(hi)], "series": series,
                 # The words the panel itself prints besides its title: ax.text / annotate strings and the legend's
                 # entries. What the figure says is then a fact FI holds, not only what the code drew.
+                # In <stem>.json `texts` also holds the legend entries and is read for the numbers the figure prints; the
+                # plain ax.texts words of a panel are `texts` in <stem>.seed0.json.
                 "texts": _fi_texts(list(ax.texts) + (list(ax.get_legend().get_texts()) if ax.get_legend() else [])),
                 "errorbars": _fi_bar_ends(ax), "legend_box": _fi_legend_frac(ax), "data_limits": _fi_data_limits(ax),
             }
@@ -787,7 +795,9 @@ try:
                 "has_text": bool(ax.texts),
                 # The words themselves, un-truncated up to 200 characters, in drawing order; the error-bar ends, the legend
                 # box (figure fractions) and the axis limits as saved.
-                "texts": [t.get_text()[:200] for t in ax.texts if t.get_visible() and t.get_text().strip()],
+                # This `texts` (ax.texts only, 200 characters) is not the `texts` of <stem>.json, which also holds the
+                # legend entries; the words of a raw panel quoted in a caption are read from this one (<stem>.seed0.json).
+                "texts": _fi_text_words(ax),
                 "errorbars": _fi_bar_ends(ax), "legend_box": _fi_legend_frac(ax), "data_limits": _fi_data_limits(ax),
                 # Whether the panel draws anything but lines (bars, an image, a patch, a collection that has paths): a panel
                 # with no lines and nothing else is empty.
