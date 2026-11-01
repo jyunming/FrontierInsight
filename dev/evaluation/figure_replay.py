@@ -124,8 +124,10 @@ def _container(line=None):
 class _Run:
     """One body's run: the host that holds the drawing calls, and what the proxy decided."""
 
-    def __init__(self, host, table, plan, axes_grid, spec, refs):
+    def __init__(self, host, table, plan, axes_grid, spec, refs, held=()):
         self.host, self.table, self.plan, self.grid, self.spec, self.refs = host, table, plan, axes_grid, spec, refs
+        self.held = [float(v) for v in held if _number(v)]  # the setting values the study holds fixed for the figure
+        self.pending_texts = []  # (panel, index of its cause, [(number, read?)]) of the digit texts that went raw, sorted at the end
         self.reads = []          # (value, result id, setting key, "mean"|"n"|"low"|"high") of every table read the body made
         self.causes = {}         # panel index -> [(kind, call, detail), ...], every cause that made the panel raw
         self.text_classes = collections.Counter()  # what the digit-bearing texts hold
@@ -139,6 +141,37 @@ class _Run:
         if first:
             self.host.raw(i)
             self.host._state()[i]["raw_reason"] = f"{kind}: {call}"
+
+    def own_values(self, i):
+        """The setting values panel ``i`` itself shows or holds: the x values of its series that sit on a setting axis, and
+        the values held for the figure. Not the other values of the study's grid: a small round number (1, 2, 10, 0.5) is
+        on some axis of almost every study, so a match with the whole grid would call a typed number a setting value."""
+        rec = self.host._state().get(i) or {}
+        if (rec.get("x") or {}).get("kind") != "setting":
+            return list(self.held)
+        xs = [v for s in rec.get("series", []) if s.get("kind") != "curve" for v in s["x"] if _number(v)]
+        return xs + self.held
+
+    def sort_texts(self):
+        """Class every digit text that went raw, once the body has drawn all its series (a text may come before the data it
+        sits next to): a number the table gave is a read; a number equal to a setting value of the panel is a setting value;
+        any other number was typed by the body."""
+        for i, idx, call, numbers in self.pending_texts:
+            own = self.own_values(i)
+            grid = [any(_close(n, g) for g in own) for n, _r in numbers]
+            reads = [r for _n, r in numbers]
+            if any(not r and not g for r, g in zip(reads, grid)):
+                kind, label = "text with a number the body typed", "number typed by the body"
+            elif len(numbers) > 1 and any(reads):
+                kind, label = "text with several numbers (a note carries one)", "several numbers, some read from the table"
+            else:
+                kind, label = "text with a setting value in it", "number is a setting value"
+            self.text_classes[label] += 1
+            old = self.causes[i][idx]
+            self.causes[i][idx] = (kind, old[1], old[2])
+            if idx == 0:
+                self.host._state()[i]["raw_reason"] = f"{kind}: {old[1]}"
+        self.pending_texts = []
 
     def mean_reads(self):
         return [(v, r, k) for (v, r, k, f) in self.reads if f == "mean"]
@@ -414,9 +447,11 @@ class _Panel:
         self._line_at("axvline", x, "x", kw)
         return _stand_in()[0]
 
-    def _text(self, call, s, x, y):
+    def _text(self, call, s, x, y, in_data=True):
         """A text. Words only: the calls draw no such text, so the panel is raw. A text with one number that is a value the body
-        read from the table is a ``note`` (FI writes the number); any other number is typed by the body and the panel is raw."""
+        read from the table is a ``note`` (FI writes the number); any other number is typed by the body (or is a setting value
+        of the panel) and the panel is raw. ``in_data`` is False when the body placed the text in axes or figure coordinates:
+        ``note`` takes data coordinates, and the limits FI will set are not known yet, so such a note is raw."""
         run, i = self._run, self._i
         s = str(s)
         tokens = list(NUMBER.finditer(s))
@@ -424,7 +459,10 @@ class _Panel:
             run.raw(i, "words-only text", call)
             return None
         reads = [run.read_matches(m.group()) for m in tokens]
-        grid = [any(_close(float(m.group()), g) for vs in run.grid.values() for g in vs if _number(g)) for m in tokens]
+        if len(tokens) == 1 and reads[0] and not in_data:
+            run.text_classes["number read from the table, placed in axes coordinates"] += 1
+            run.raw(i, "a note placed in axes coordinates", call)
+            return None
         if len(tokens) == 1 and reads[0]:
             run.text_classes["number read from the table (a note)"] += 1
             t = tokens[0]
@@ -435,15 +473,8 @@ class _Panel:
             except (ValueError, IndexError) as err:
                 run.raw(i, "drawing call refused", call, str(err)[:120])
             return None
-        if any(not r and not g for r, g in zip(reads, grid)):
-            run.text_classes["number typed by the body"] += 1
-            run.raw(i, "text with a number the body typed", call)
-        elif len(tokens) > 1 and any(reads):
-            run.text_classes["several numbers, some read from the table"] += 1
-            run.raw(i, "text with several numbers (a note carries one)", call)
-        else:
-            run.text_classes["number is a setting value"] += 1
-            run.raw(i, "text with a setting value in it", call)
+        run.raw(i, "text with a number", call)  # which kind of number is decided by ``sort_texts``
+        run.pending_texts.append((i, len(run.causes[i]) - 1, call, [(float(m.group()), bool(r)) for m, r in zip(tokens, reads)]))
         return None
 
     @staticmethod
@@ -451,8 +482,12 @@ class _Panel:
         v = _floats(value) if value is not None else None
         return v[0] if v and len(v) == 1 and _number(v[0]) else 0.0
 
+    def _in_data(self, transform):
+        """True when a ``transform=`` keyword is absent or is the data transform of these axes."""
+        return transform is None or transform is self._ax.transData  # not ``==``: two transforms of empty axes compare equal
+
     def _m_text(self, x=None, y=None, s="", *a, **kw):
-        return self._text("text", kw.get("s", s), self._at(x), self._at(y))
+        return self._text("text", kw.get("s", s), self._at(x), self._at(y), self._in_data(kw.get("transform")))
 
     def _m_annotate(self, text="", xy=None, *a, **kw):
         xy = kw.get("xy", xy)
@@ -460,7 +495,8 @@ class _Panel:
             x, y = xy
         except (TypeError, ValueError):
             x = y = None
-        return self._text("annotate", kw.get("text", kw.get("s", text)), self._at(x), self._at(y))
+        return self._text("annotate", kw.get("text", kw.get("s", text)), self._at(x), self._at(y),
+                          str(kw.get("xycoords", "data")) == "data")
 
     def _m_legend(self, *a, **kw):
         return None
@@ -690,7 +726,7 @@ def _worker(workdir: Path, result_path: Path) -> None:
         host.labels = {}
         for r in declared:
             host.labels[r] = r
-        run = _Run(host, table, plan, grid, spec, refs)
+        run = _Run(host, table, plan, grid, spec, refs, held=list((getattr(derive, "HELD", {}) or {}).values()))
 
         class _Logged:
             def __getattr__(self, name):
@@ -719,6 +755,7 @@ def _worker(workdir: Path, result_path: Path) -> None:
         if item["status"] == "failed":
             plt.close(fig)
             continue
+        run.sort_texts()
         for i, label, xs, ys in run.curves:
             if i in run.causes or not host._state().get(i, {}).get("series"):
                 continue  # a raw panel states nothing; a panel without data stays empty (the frame replaces such a body)
