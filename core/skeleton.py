@@ -590,7 +590,9 @@ class Table:
 
         self._check(name)
         self._one_key(key)
-        return [(self._key_of(c), text, fi_table.values_of(c["metrics"].get(name))) for text, c in self._level_cells(name, key)]
+        out = [(self._key_of(c), text, fi_table.values_of(c["metrics"].get(name))) for text, c in self._level_cells(name, key)]
+        self._gave(name, any(values for _k, _t, values in out))
+        return out
 
     @_noting
     def undefined(self, name, key):
@@ -618,7 +620,9 @@ class Table:
         """The reference value of ``name`` at setting ``key`` that FI worked out from the plan; ``None`` when it has none."""
         self._check(name)
         self._one_key(key)
-        return (self._references.get(name) or {}).get(key)
+        got = (self._references.get(name) or {}).get(key)
+        self._gave(name, got is not None)
+        return got
 
     def missing(self, why):
         """What to return where the value does not exist; ``why`` says so in plain words."""

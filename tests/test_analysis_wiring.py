@@ -466,7 +466,8 @@ PINS_AT_811719AF = {
     # and again with the table's `coverage` read of a result's interval (the pairing of an interval with its trials in frame_table.hits)
     # and again when FI's result_json also prints each compared value's trials (Table.level_rows)
     # and again when a read of a result recorded per compared value says so (Table.per_level); it was "edc62a31e304a785"
-    "run_framed": "1212760587b97257",
+    # and again when every read of the table that returns data notes it (Table.level_rows and Table.reference); it was "1212760587b97257"
+    "run_framed": "8d9d32daf0359e89",
 }
 
 

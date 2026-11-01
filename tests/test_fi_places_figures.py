@@ -337,3 +337,12 @@ def test_a_caption_of_a_fully_drawn_figure_keeps_its_meaning() -> None:
     typed = {"axes": [{"ylabel": "error", "xlabel": "step size", "series": []}]}
     recorded = dict(typed, declared={"shows": ["error"], "drawn": ["error"], "not_drawn": [], "labels": {"error": "error"}})
     assert _figure_caption_text("e.png", typed, n_seeds=None) == _figure_caption_text("e.png", recorded, n_seeds=None)
+
+
+def test_a_caption_of_a_two_panel_figure_says_the_drawn_results_once_and_not_the_typed_labels() -> None:
+    record = {"axes": [{"ylabel": "typed one", "xlabel": "step", "series": []}, {"ylabel": "typed two", "xlabel": "step", "series": []}],
+              "declared": {"shows": ["first", "second"], "drawn": ["first", "second"], "not_drawn": [],
+                           "labels": {"first": "First error", "second": "Second error"}}}
+    caption = _figure_caption_text("e.png", record, n_seeds=None)
+    assert caption == "First error and Second error, in 2 panels."
+    assert "typed" not in caption

@@ -176,7 +176,7 @@ def _last_read_error(table: Any) -> tuple[str, str]:
         kind, _colon, said = last.partition(": ")
         said = said[1:-1] if len(said) > 1 and said[0] == said[-1] and said[0] in "'\"" else said  # a KeyError shows its text quoted
         head, tail = (re.split(r"; the (?:declared results|results with one) are: ", said, maxsplit=1) + [""])[:2]  # FI's own message
-        return f"{kind}: {head}", ("The results that can be read: %s." % tail.strip()[:600]) if tail.strip() else ""
+        return f"{kind}: {head.strip()[:600]}", ("The results that can be read: %s." % tail.strip()[:600]) if tail.strip() else ""
     if last.startswith(("ValueError", "KeyError")):
         return last.split(":", 1)[0], ""
     return last[:240], ""
@@ -195,23 +195,54 @@ def _read_forms(spec: dict[str, Any], table: Any) -> str:
     except Exception:  # noqa: BLE001 -- a table that cannot say is not a reason to lose the original error
         return ""
     lines = []
-    for rid in shows:
-        name, levels = str(rid), []
-        for key in keys[:200]:
-            try:
-                levels = [str(t) for t in table.per_level(name, key)]
-            except Exception:  # noqa: BLE001
-                levels = []
+    # Probing the table for a form must not change what it records of the body's own reads.
+    saved = (list(getattr(table, "served", []) or []), set(getattr(table, "gave_values", set()) or ()),
+             dict(getattr(table, "last_error", {}) or {}))
+    try:
+        for rid in shows:
+            name, levels = str(rid), []
+            for key in keys[:200]:
+                try:
+                    levels = [str(t) for t in table.per_level(name, key)]
+                except Exception:  # noqa: BLE001
+                    levels = []
+                if levels:
+                    break
             if levels:
-                break
-        if levels:
-            lines.append("- `%s` is recorded for each value compared inside the runs (%s), not once for a setting: read it with "
-                         "`table.level_rows(%r, key)` (the record key, the value and the trials' values of each) or "
-                         "`table.level_means(%r, key)`; `table.values` does not read it." % (name, ", ".join(levels), name, name))
-        else:
-            lines.append("- `%s` is recorded once for each setting: read it with `table.values(%r, key)`, `table.mean(%r, key)` or "
-                         "`table.trials(%r, key)`, with `key` one of `table.keys()`." % (name, name, name, name))
+                lines.append("- `%s` is recorded for each value compared inside the runs (%s), not once for a setting: read it with "
+                             "`table.level_rows(%r, key)` (the record key, the value and the trials' values of each) or "
+                             "`table.level_means(%r, key)`; `table.values` does not read it." % (name, ", ".join(levels), name, name))
+            elif _has(table, keys, "n", name):
+                lines.append("- `%s` is recorded once for each setting: read it with `table.values(%r, key)`, `table.mean(%r, key)` or "
+                             "`table.trials(%r, key)`, with `key` one of `table.keys()`." % (name, name, name, name))
+            elif _has(table, keys, "reference", name):
+                lines.append("- `%s` is a reference value FI works out from the plan, not a recorded result: read it with "
+                             "`table.reference(%r, key)`, with `key` one of `table.keys()`." % (name, name))
+    finally:
+        if hasattr(table, "served"):
+            table.served[:] = saved[0]
+        if isinstance(getattr(table, "gave_values", None), set):
+            table.gave_values.clear()
+            table.gave_values.update(saved[1])
+        if isinstance(getattr(table, "last_error", None), dict):
+            table.last_error.clear()
+            table.last_error.update(saved[2])
     return ("How the results this figure shows are read:\n" + "\n".join(lines)) if lines else ""
+
+
+def _has(table: Any, keys: list[Any], read: str, name: str) -> bool:
+    """Whether read ``read`` (``n`` or ``reference``) of ``name`` returns something for some setting."""
+    fn = getattr(table, read, None)
+    if not callable(fn):
+        return False
+    for key in keys[:200]:
+        try:
+            got = fn(name, key)
+        except Exception:  # noqa: BLE001
+            continue
+        if got:
+            return True
+    return False
 
 
 def _with_forms(why: str, spec: dict[str, Any], table: Any) -> str:

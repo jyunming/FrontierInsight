@@ -759,7 +759,7 @@ def test_a_figure_that_draws_nothing_is_its_own_failure_and_the_others_are_still
 
 
 # ---- the repair note and the record of what a figure drew, from the table's own tracking ------------------------------------------
-def _level_table():
+def _level_table(references=None, declared=("r1", "r2", "r3", "r4")):
     """A study whose result ``r1`` is recorded for each of several long-named methods inside each run, not once per setting."""
     from core import frame_table, skeleton
 
@@ -771,7 +771,7 @@ def _level_table():
     for m in methods:
         cells.append({"cell": {"a": 1, "method": m}, "level": {"method": m}, "key": "a=1,method=%s" % m, "planned": 2, "ok": 2,
                       "failed": 0, "metrics": {"r1": {"values": [0.5, 0.6]}}})
-    return ns["Table"](cells, ["r1", "r2"])
+    return ns["Table"](cells, list(declared), references)
 
 
 def test_the_repair_note_of_a_figure_keeps_how_each_shown_result_is_read_when_the_error_is_long(tmp_path) -> None:
@@ -828,3 +828,40 @@ def test_the_record_of_a_drawn_figure_says_which_declared_results_the_body_drew(
     want = {"shows": ["r1", "r2"], "drawn": ["r1"], "not_drawn": ["r2"], "labels": {"r1": "First quantity"}}
     assert out["declared"] == want
     assert json.loads((records / "x.json").read_text(encoding="utf-8"))["declared"] == want
+
+
+def test_a_body_that_reads_only_with_level_rows_or_reference_has_drawn_that_result(tmp_path) -> None:
+    def figure_x(fig, table):
+        rows = table.level_rows("r1", "a=1")
+        fig.axes[0].plot([v for _k, _t, vals in rows for v in vals])
+        table.reference("r3", "a=1")
+
+    table = _level_table(references={"r3": {"a=1": 0.0}})
+    out = _shown(tmp_path, figure_x, shows=("r1", "r3"), table=table)
+    assert out["status"] == "ok", out["why"]
+    assert out["declared"]["drawn"] == ["r1", "r3"] and out["declared"]["not_drawn"] == []
+
+
+def test_a_read_form_is_given_only_for_a_way_that_works_for_that_kind_of_result(tmp_path) -> None:
+    def figure_x(fig, table):
+        fig.axes[0].axvline(1.0)
+
+    out = _shown(tmp_path, figure_x, shows=("r2", "r3", "r4"), table=_level_table(references={"r3": {"a=1": 0.5}}))
+    why = out["why"]
+    assert "`r2` is recorded once for each setting" in why
+    assert "`r3` is a reference value" in why and "table.reference('r3', key)" in why
+    assert "`r4`" not in why  # recorded nowhere, no reference: FI has no way to read it, so it says none
+    assert not (set(_level_table().gave_values))
+
+
+def test_the_head_of_a_long_error_is_capped_but_the_read_forms_are_not(tmp_path) -> None:
+    def figure_x(fig, table):
+        fig.axes[0].axvline(1.0)
+        try:
+            table.values("n" * 3000, "a=1")
+        except Exception:
+            pass
+
+    out = _shown(tmp_path, figure_x, shows=("r1",), table=_level_table())
+    first = out["why"].split("\n")[0]
+    assert len(first) < 1000 and "table.level_rows('r1', key)" in out["why"]

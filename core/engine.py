@@ -34676,16 +34676,22 @@ def _figure_caption_text(
         drawn_labels = [say(r) for r in declared.get("drawn") or []]
         not_drawn_labels = [say(r) for r in declared.get("not_drawn") or []]
 
+    joined_drawn = (", ".join(drawn_labels[:-1]) + (" and " if len(drawn_labels) > 1 else "") + drawn_labels[-1]) if drawn_labels else ""
+
     def plots(ax: dict[str, Any]) -> str:
         y, x = _caption_words(ax.get("ylabel")), _caption_words(ax.get("xlabel"))
         if declared:
-            y = ", ".join(drawn_labels[:-1]) + (" and " if len(drawn_labels) > 1 else "") + drawn_labels[-1] if drawn_labels else ""
+            if len(axes) > 1:
+                return ""  # the record is of the whole figure, so the drawn results are said once below, not for each panel
+            y = joined_drawn
         return f"{y} against {x}" if y and x else y or x
 
     def named(k: int, ax: dict[str, Any]) -> str:
         return _caption_words(ax.get("ylabel")) or _caption_words(ax.get("xlabel")) or f"panel {k}"
 
     plotted = list(dict.fromkeys(t for t in (plots(ax) for ax in axes) if t))
+    if declared and len(axes) > 1 and joined_drawn:
+        plotted = [f"{joined_drawn}, in {len(axes)} panels"]
     if len(axes) > 3:
         # A grid of panels: the file's own name says what the grid shows.
         description = f"{stem} ({len(axes)} panels)"
