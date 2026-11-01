@@ -73,6 +73,8 @@ VS = "vs"
 #: The forms ``vs`` can judge, and the interval form it judges them by (a comparison is decided by the interval, never by a
 #: fixed tolerance).
 _VS_INTERVAL = {"mean": "mean_ci", "sd": "sd_ci", "corr": "corr_ci"}
+#: The forms that are a statistic with its interval already: for ``| vs`` each is the statistic it carries the interval of.
+_VS_WITH_INTERVAL = {"mean_ci": "mean", "sd_ci": "sd", "corr_ci": "corr"}
 #: Forms that are one number, so an op or a reducer can work on them.
 _SCALAR = frozenset({"mean", "sd", "se", "n", "failed", "ref", "corr"})
 _INTERVAL_FORMS = frozenset({"mean_ci", "ci", "pm", "sd_ci", "corr_ci"})
@@ -1292,6 +1294,7 @@ def _versus(rec: Records, key: Key) -> tuple[str, list[float]]:
     =each, by that setting's own 95% interval (above: the whole interval over the reference; below: under it; otherwise the
     reference is inside it), and counts the outcomes. Nothing is left to the writer's choice of word."""
     each = [a for a, p in key.where.items() if p.kind == "each"]
+    key = replace(key, form=_VS_WITH_INTERVAL.get(key.form, key.form))
     if key.form not in _VS_INTERVAL:
         raise _Unfilled(f"vs judges a mean, an sd or a corr by the 95% interval of the measured value; {key.form} has none "
                         f"(use form {', '.join(_VS_INTERVAL)})")

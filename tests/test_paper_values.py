@@ -424,6 +424,16 @@ def test_vs_names_one_setting_when_no_axis_is_marked_each(s5):
     assert low.filled and low.text.startswith("below want at that setting")
 
 
+def test_vs_takes_a_form_that_carries_its_interval_as_the_statistic_itself(s5):
+    for form, plain in (("mean_ci", "mean"), ("sd_ci", "sd")):
+        a = pv.resolve(f"Ea_hat:{form} @ sigma=each, n_points=40 | vs Ea_sd_theory", s5)
+        b = pv.resolve(f"Ea_hat:{plain} @ sigma=each, n_points=40 | vs Ea_sd_theory", s5)
+        assert a.filled and a.text == b.text, (form, a.hit)
+    one = pv.resolve("Ea_hat:sd_ci @ sigma=0.1, n_points=40 | vs Ea_sd_theory", s5)
+    assert one.filled and "at that setting" in one.text
+    assert "has none" in pv.resolve("Ea_hat:se @ sigma=each, n_points=40 | vs Ea_true", s5).hit.reason
+
+
 def test_vs_with_a_varied_axis_left_unnamed_is_still_refused(s5):
     got = pv.resolve("Ea_hat:sd @ n_points=40 | vs Ea_sd_theory", s5)
     assert not got.filled and "does not name every axis" in got.hit.reason
