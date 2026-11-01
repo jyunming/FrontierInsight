@@ -689,3 +689,20 @@ def test_a_named_check_of_this_value_still_drops_a_disagreeing_reference(measure
     problems = rv.problems(protocol)
     assert len(problems) == 1 and "disagrees with a known-answer check" in problems[0] and "'chk'" in problems[0]
     assert rv.cross_check(_named_check_plan(measure, 3.0), protocol["metrics"][0])["state"] == "agrees"
+
+
+def test_a_table_caption_quotes_the_plans_note_without_the_plans_citation_marker() -> None:
+    """The plan model wrote `[18]` in a reference's note; the paper's citation check never saw it (and the paper may drop
+    that source), so FI's own caption and Methods paragraph must not carry it. A marker the writer put in its own prose
+    is the check's to keep, so it is not touched here."""
+    protocol = P.fdr_protocol()
+    ref = next(m for m in protocol["metrics"] if m["id"] == "fdr_bh")["reference"]
+    ref["note"] = "the bound holds exactly for independent tests [18], see also [W3]."
+    built = _build("fdr_s1", protocol)
+    caption = _table(built, "fdr_bh").caption
+    assert "independent tests, see also.)" in caption
+    assert "[18]" not in caption and "[W3]" not in caption
+    assert "[18]" not in rbs.reference_section(built)
+    from core import citation_support as cs
+    kept = "BH controls the rate [18]."  # the writer's own prose, a citation the check kept
+    assert cs.CITE_RE.findall(kept) == ["18"] and cs.find_sites(kept)

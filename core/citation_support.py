@@ -89,6 +89,12 @@ def labels_in(inside: str) -> list[str]:
     return out
 
 
+def without_citations(text: str) -> str:
+    """``text`` with its citation brackets taken out (and the space left before one), for plan text FI quotes into a line
+    it writes itself: the plan's marker was never put through this check, so FI cannot vouch for it."""
+    return re.sub(r"[ 	]*" + CITE_RE.pattern, "", str(text)).strip()
+
+
 def references_start(paper: str) -> int:
     """Where the paper's ``## References`` section begins (the end of the text that cites), or its length."""
     m = _REFERENCES_RE.search(paper or "")

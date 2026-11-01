@@ -43,6 +43,7 @@ from typing import Any
 
 from . import optimise_search as _search
 from . import oracle_check as _oracle
+from . import citation_support as _cites
 from . import oracle_forms as _forms
 
 #: The kinds of reference: the value it should equal, an upper limit, a lower limit.
@@ -489,7 +490,8 @@ def compute(protocol: dict[str, Any] | None, settings: list[dict[str, Any]], tri
         ref = normalized(raw)
         checked = cross_check(protocol, {**m, "reference": ref}, judged)
         entry: dict[str, Any] = {"metric": ident, "value": name, "kind": ref["kind"], "formula": ref["formula"],
-                 "note": ref.get("note", ""), "source": "formula in the frozen plan", "checked": checked,
+                 "note": _cites.without_citations(ref.get("note", "")),
+                 "source": "formula in the frozen plan", "checked": checked,
                  "status": "computed", "why": ""}
         if checked["state"] == "disagrees":
             entry.update(status="no reference", why=f"it disagrees with a known-answer check: {checked['why']}")
