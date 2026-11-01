@@ -288,9 +288,9 @@ class _Panels(list):
         except IndexError:
             if not isinstance(index, int):
                 raise
+            advice = (", and put several settings, series or results on one axes as lines" if len(self) == 1 else "")
             raise IndexError("`fig.axes[%d]`: FI made %d panel(s) for `figure_%s` (the plan's count), so `fig.axes` holds the axes "
-                             "0 to %d; draw on those, and put several settings, series or results on one axes as lines"
-                             % (index, len(self), self.figure, len(self) - 1)) from None
+                             "0 to %d; draw on those%s" % (index, len(self), self.figure, len(self) - 1, advice)) from None
 
 
 class UnknownSetting(KeyError):

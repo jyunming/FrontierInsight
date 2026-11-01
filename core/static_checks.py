@@ -48,6 +48,24 @@ def _read_json(path: Path) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def reply_script(host: Any, text: str, old: str, script: str) -> tuple[str, dict[str, Any]]:
+    """``(the script, the parsed reply)`` of a repair reply in the format of the repair prompt: the functions to put in
+    (spliced into ``old`` the way the repair of a crashed script does, ``Engine._script_from_reply``), or a whole script in
+    ``code``. A reply that is not JSON is read as an implement-style code block."""
+    from . import engine as _e
+
+    parsed: dict[str, Any] = {}
+    if _e._strip_outer_fence(text).lstrip().startswith("{"):
+        parsed = _e._parse_json_lenient(text, node="execute_reflect") or {}
+    new_code = parsed.get("code")
+    functions = parsed.get("functions")
+    if isinstance(functions, str) and functions.strip():
+        new_code, _why = host._script_from_reply("execute", old, new_code, parsed, script)
+    if not (isinstance(new_code, str) and new_code.strip()):
+        new_code, _deps = _e._parse_implement_response(text)
+    return new_code, parsed
+
+
 class StaticChecksMixin:
     """Methods of :class:`core.engine.Engine`; see the module docstring."""
 
@@ -185,17 +203,7 @@ class StaticChecksMixin:
         except Exception as exc:  # noqa: BLE001 -- a repair is best-effort
             self._log.warning("[execute] the call to repair %s failed (%r); keeping it as written", script, exc)  # type: ignore[attr-defined]
             return False
-        parsed: dict[str, Any] = {}
-        if _e._strip_outer_fence(text).lstrip().startswith("{"):
-            parsed = _e._parse_json_lenient(text, node="execute_reflect") or {}
-        new_code = parsed.get("code")
-        functions = parsed.get("functions")
-        if isinstance(functions, str) and functions.strip():
-            # The reply format of the repair prompt: functions to put in, code only for a module-level change. The same
-            # splice as a repair of a crashed script (Engine._script_from_reply) turns it into the script.
-            new_code, _why = self._script_from_reply("execute", code, new_code, parsed, script)  # type: ignore[attr-defined]
-        if not (isinstance(new_code, str) and new_code.strip()):
-            new_code, _deps = _e._parse_implement_response(text)
+        new_code, parsed = reply_script(self, text, code, script)
         try:
             ast.parse(new_code)
             usable = bool(new_code.strip()) and all(mark in new_code for mark in _typed.KEEP_MARKS if mark in code)

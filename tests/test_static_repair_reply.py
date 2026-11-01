@@ -80,3 +80,24 @@ def test_a_reply_that_fixes_nothing_is_refused(tmp_path: Path) -> None:
 def test_an_empty_reply_is_refused(tmp_path: Path) -> None:
     ok, text = _run(tmp_path, {"functions": "", "code": ""})
     assert not ok and text == OLD
+
+
+def test_the_typed_in_results_repair_reads_a_reply_that_gives_its_fix_as_functions(tmp_path: Path, monkeypatch) -> None:
+    from core import run_checks
+    from core import typed_results as _typed
+
+    old = "def simulate(n):\n    return 42.0\n\n\nif __name__ == '__main__':\n    print(simulate(3))\n"
+    (tmp_path / "code").mkdir()
+    path = tmp_path / "code" / "sim.py"
+    path.write_text(old, encoding="utf-8")
+
+    class _Run(run_checks.RunChecksMixin, _Host):
+        def _typed_result_exempt(self, state: object) -> set:
+            return set()
+
+    host = _Run(tmp_path, json.dumps({"functions": "def simulate(n):\n    return n * 2.0\n", "code": ""}))
+    found = [_typed.TypedResult("sim.py", "simulate", "yield", 2, "42.0"), _typed.TypedResult("sim.py", "simulate", "rate", 2, "42.0")]
+    monkeypatch.setattr(_typed, "typed_results", lambda code, name, exempt=None: [] if "n * 2.0" in code else list(found))
+    ok = asyncio.run(host._repair_typed_results({}, path, found))  # type: ignore[arg-type]
+    text = path.read_text(encoding="utf-8")
+    assert ok and "n * 2.0" in text and "__main__" in text

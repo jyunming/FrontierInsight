@@ -606,6 +606,7 @@ class RunChecksMixin:
         import ast
 
         from . import engine as _e
+        from .static_checks import reply_script
 
         code = path.read_text(encoding="utf-8")
         prompt = self._prompts["execute_reflect"].substitute(  # type: ignore[attr-defined]
@@ -621,12 +622,7 @@ class RunChecksMixin:
             self._log.warning(  # type: ignore[attr-defined]
                 "[execute] the call to compute the typed-in results failed (%r); keeping %s as written", exc, path.name)
             return False
-        parsed: dict[str, Any] = {}
-        if _e._strip_outer_fence(text).lstrip().startswith("{"):
-            parsed = _e._parse_json_lenient(text, node="execute_reflect") or {}
-        new_code = parsed.get("code")
-        if not (isinstance(new_code, str) and new_code.strip()):
-            new_code, _deps = _e._parse_implement_response(text)
+        new_code, parsed = reply_script(self, text, code, path.name)
         try:
             ast.parse(new_code)
             usable = bool(new_code.strip()) and all(mark in new_code for mark in _typed.KEEP_MARKS if mark in code)

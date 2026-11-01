@@ -79,3 +79,14 @@ def test_a_body_that_stays_within_the_panels_draws_as_before(tmp_path: Any) -> N
     with pytest.raises(IndexError):
         handle.axes[5]
     assert isinstance(handle.axes[0:1], list) and len(handle.axes[0:1]) == 1
+
+
+def test_the_count_error_advises_one_axes_only_for_a_one_panel_figure() -> None:
+    one = af._figure_handle(af._new_figure(1)[2], {"id": "x"}, "x.png")
+    several = af._figure_handle(af._new_figure(3)[2], {"id": "x"}, "x.png")
+    with pytest.raises(IndexError) as e1:
+        one.axes[1]
+    with pytest.raises(IndexError) as e3:
+        several.axes[3]
+    assert "on one axes as lines" in str(e1.value)
+    assert "FI made 3 panel(s)" in str(e3.value) and "0 to 2" in str(e3.value) and "one axes" not in str(e3.value)
