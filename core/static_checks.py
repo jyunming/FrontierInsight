@@ -54,7 +54,7 @@ def reply_script(host: Any, text: str, old: str, script: str) -> tuple[str, dict
     ``code``. A reply that is not JSON is read as an implement-style code block."""
     from . import engine as _e
 
-    parsed = _e._repair_reply_or_script(text, node="execute_reflect")
+    parsed = _e._repair_reply_json(text, node="execute_reflect")
     new_code = parsed.get("code")
     functions = parsed.get("functions")
     if isinstance(functions, str) and functions.strip():

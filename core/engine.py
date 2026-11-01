@@ -20951,7 +20951,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "[execute_reflect] the figure redraw call failed (%r); keeping the figures as drawn", exc,
             )
             return spent
-        parsed = _repair_reply_or_script(text, node="execute_reflect")
+        parsed = _repair_reply_json(text, node="execute_reflect")
 
         # A run whose figures merely overlap has a result that stands, so a
         # refusal, an empty answer or a redraw that is not Python leaves the
@@ -33795,9 +33795,14 @@ def _repair_reply_json(text: str, *, node: str) -> dict[str, Any]:
 
     def blanked(o: dict[str, Any]) -> dict[str, Any]:
         # The prompt's own format echoed back (its placeholder in `functions` or `code`) is not a fix. A field that must be
-        # text (`give_up_reason`, `patch_summary`) and is not text is absent: a list there is not a reason.
-        return {k: ("" if k in ("functions", "code") and isinstance(v, str) and v.strip() in template else v)
-                for k, v in o.items() if k not in _REPAIR_TEXT_KEYS or isinstance(v, str)}
+        # text (`give_up_reason`, `patch_summary`) and is not text is absent; a list of strings in `give_up_reason` is read
+        # as one reason (the strings joined with "; "), any other value is not a reason.
+        out = {k: ("" if k in ("functions", "code") and isinstance(v, str) and v.strip() in template else v)
+               for k, v in o.items() if k not in _REPAIR_TEXT_KEYS or isinstance(v, str)}
+        listed = o.get("give_up_reason")
+        if isinstance(listed, list) and listed and all(isinstance(x, str) for x in listed) and any(x.strip() for x in listed):
+            out["give_up_reason"] = "; ".join(x.strip() for x in listed if x.strip())
+        return out
 
     if _strip_outer_fence(text).lstrip().startswith("{"):
         parsed = _parse_json_lenient(text, node=node) or {}
@@ -33818,29 +33823,6 @@ def _repair_reply_json(text: str, *, node: str) -> dict[str, Any]:
 
 
 _REPAIR_TEXT_KEYS = ("give_up_reason", "patch_summary")
-
-
-def _repair_reply_or_script(text: str, *, node: str) -> dict[str, Any]:
-    """:func:`_repair_reply_json`, except that a reply holding a fenced Python script and no fix in an object (nothing, or
-    only a give-up quoted in the model's prose) is read as that script: ``{"code": the script}``. A reply that is the object
-    itself is read as it is, and a fenced block that is not Python is not a script."""
-    parsed = _repair_reply_json(text, node=node)
-    has_fix = any(isinstance(parsed.get(k), str) and parsed[k].strip() for k in ("functions", "code")) or any(
-        parsed.get(k) for k in ("oracle_change", "package_files"))
-    if has_fix or _strip_outer_fence(text or "").lstrip().startswith("{"):
-        return parsed
-    for m in _CODE_FENCE_RE.finditer(text or ""):
-        if m.group(1).lower() not in ("python", "py"):
-            continue
-        fence = _PY_FENCE_RE.search(m.group(0))
-        code = fence.group(1).strip("\n") if fence else ""
-        try:
-            ast.parse(code)
-        except (SyntaxError, ValueError):
-            continue
-        if code.strip():
-            return {**{k: v for k, v in parsed.items() if k != "give_up_reason"}, "code": code}
-    return parsed
 
 
 def _strip_outer_fence(text: str) -> str:
