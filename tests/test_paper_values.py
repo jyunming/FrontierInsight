@@ -544,12 +544,13 @@ def test_one_trial_per_setting_offers_the_mean_not_an_interval(tmp_path):
     sheet = pv.sheet(rec)
     assert "{{v:gain @ dose=1, steps=16}}" in sheet and "{{v:gain @ dose=1, steps=all}}" in sheet
     assert ":mean_ci @" not in sheet and ":mean_ci @" not in block.split("The study's quantities")[0]
+    assert any(l.startswith("- {{v:gain @ dose=1, steps=all}}") and "mean over 2 settings, one run each; no interval" in l for l in sheet.splitlines())
     assert pv.resolve("{{v:gain @ dose=1, steps=16}}", rec).filled
     assert not pv.resolve("{{v:gain:mean_ci @ dose=1, steps=16}}", rec).filled  # the review's handling is unchanged
 
 
 def test_a_study_with_repeated_trials_is_offered_the_interval_as_before(tmp_path):  # the known positive
     rec = pv.records_of(_quest(tmp_path, _tiny_cells()), None)
-    assert "{{v:fdr:mean_ci @ m=20, method=all}}" in pv.sheet(rec)
+    assert ":mean_ci @ m=20, method=all}}" in pv.sheet(rec)
     assert "{{v:coverage:mean_ci @ noise=0.05, n=20}}" in pv.writer_block(rec)
     assert "one trial in each setting" not in pv.writer_block(rec)

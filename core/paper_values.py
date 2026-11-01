@@ -1821,7 +1821,13 @@ def _sheet_line(rec: Records, metric: str, where: dict[str, Any], sets: frozense
         shown = resolve(key, rec)
     if shown.hit:
         return None
-    parts = [f"{key} -> {shown.text}"]
+    text = shown.text
+    if key.count(":mean_ci") == 0 and metric not in sets and "=all" in key:
+        # A pooled line of a study with no interval is a mean over different settings: the line keeps saying so.
+        said = resolve(_line_key(metric, "mean_ci", where, short), rec)
+        if said.filled and said.text.startswith(text):
+            text = said.text
+    parts = [f"{key} -> {text}"]
     if metric in sets:
         return "- " + parts[0]
     sd = resolve(_line_key(metric, "sd", where, short), rec)
