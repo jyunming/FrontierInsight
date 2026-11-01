@@ -232,6 +232,44 @@ def test_a_series_that_misses_settings_the_figure_otherwise_shows_is_counted_fro
     assert "as shown in Figure N" in note and "caption" in note and "uncorrected" in note
 
 
+def _one_panel(tmp_path: Path, lines: list[dict[str, Any]]) -> Path:
+    records = tmp_path / "records"
+    records.mkdir(exist_ok=True)
+    (records / "fig.seed0.json").write_text(json.dumps({"axes": [{"title": "T", "lines": lines}]}), encoding="utf-8")
+    return records
+
+
+def _ln(label: str, x: list[float], marker: str = "o", linestyle: str = "-", **extra: Any) -> dict[str, Any]:
+    return {"kind": "data", "label": label, "x": x, "y": [float(i + 1) for i in range(len(x))], "marker": marker,
+            "linestyle": linestyle, "missing_x": [], **extra}
+
+
+STEPS = [0.05, 0.025, 0.0125, 0.00625, 0.003125, 0.0015625, 0.00078125]
+
+
+def test_a_line_without_markers_has_no_gap_between_its_ends(tmp_path: Path) -> None:
+    # a sloped dashed 2-point line over the 7 step sizes of a marker series: it passes through all of them
+    records = _one_panel(tmp_path, [_ln("data", STEPS), _ln("slope 4", [0.00078125, 0.05], marker="None", linestyle="--")])
+    assert dr.figure_gaps(records, ["fig.png"]) == []
+
+
+def test_a_line_that_ends_before_the_other_series_or_a_marker_series_or_a_missing_x_still_gives_a_gap(tmp_path: Path) -> None:
+    # the line's span ends before the last x of the marker series: the x outside it has no point
+    short = _one_panel(tmp_path, [_ln("data", STEPS), _ln("fit", [0.003125, 0.05], marker="None")])
+    (gap,) = dr.figure_gaps(short, ["fig.png"])
+    assert (gap.series, gap.absent) == ("fit", [0.00078125, 0.0015625])
+    # a series drawn with markers keeps the point-by-point comparison
+    (tmp_path / "m").mkdir()
+    marked = _one_panel(tmp_path / "m", [_ln("data", STEPS), _ln("some", [0.05, 0.0125, 0.00078125])])
+    (gap,) = dr.figure_gaps(marked, ["fig.png"])
+    assert (gap.series, gap.why, len(gap.absent)) == ("some", "not plotted", 4)
+    # a recorded missing value is a gap whatever the drawing
+    (tmp_path / "n").mkdir()
+    none = _one_panel(tmp_path / "n", [_ln("line", STEPS, marker="None", missing_x=[0.0125])])
+    (gap,) = dr.figure_gaps(none, ["fig.png"])
+    assert (gap.why, gap.absent) == ("no value", [0.0125])
+
+
 # ---- the words ------------------------------------------------------------------------------------------------------------
 
 

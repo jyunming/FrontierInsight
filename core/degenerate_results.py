@@ -116,6 +116,13 @@ def _is_reference(line: Any) -> bool:
             and len(_rs._distinct([float(v) for v in y])) == 1)
 
 
+def _is_markerless_line(line: dict[str, Any]) -> bool:
+    """A series drawn as a line with no markers: it runs unbroken between its first and last x, so its few recorded
+    points are the corners of the line, not the only places it exists."""
+    return (str(line.get("linestyle") or "None") not in ("None", "none", "", " ")
+            and str(line.get("marker") or "None") in ("None", "none", "", " "))
+
+
 def _has_data(panel: Any) -> bool:
     if not isinstance(panel, dict):
         return False
@@ -157,7 +164,8 @@ def figure_gaps(records_dir: Path, figures: list[str]) -> list[FigureGap]:
     * the series' x values are a strict part of another series' x values in the same panel, both few enough to be a grid of
       settings (at most :data:`MAX_GRID_POINTS`): the panel's other series have a point where this one has none.
 
-    Reference lines are never compared. Nothing here changes the figure or the results; it says what the figure does not show."""
+    A series drawn as a line without markers is continuous between its first and last x, so it has no point only outside
+    that span (or at its ``missing_x``). Reference lines are never compared. Nothing here changes the figure or the results; it says what the figure does not show."""
     out: list[FigureGap] = []
     for name in sorted(set(figures)):
         panels = _read(records_dir / f"{Path(name).stem}.seed0.json").get("axes")
@@ -181,6 +189,9 @@ def figure_gaps(records_dir: Path, figures: list[str]) -> list[FigureGap]:
                 for j, other in enumerate(lines):
                     if j != k and not str(other.get("label") or "").startswith("_") and xs[k] < xs[j] and len(xs[j]) <= MAX_GRID_POINTS:
                         lacking |= xs[j] - xs[k]
+                if lacking and _is_markerless_line(ln):
+                    # a line without markers is continuous between its ends: it lacks only what lies outside them
+                    lacking = {v for v in lacking if v < min(xs[k]) or v > max(xs[k])}
                 if lacking:
                     out.append(FigureGap(Path(name).name, title, label, sorted(lacking), "not plotted"))
     return out
