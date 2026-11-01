@@ -40,8 +40,10 @@ call the statistics adequate while there is one.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
 import math
 import time
 from collections.abc import Callable
@@ -529,6 +531,50 @@ def _contrast(a: dict[str, Any], b: dict[str, Any], spec: dict[str, Any]) -> tup
     return _stats.two_sample_mean_test(a["values"], b["values"]), None
 
 
+# The statistics of one set of results are worked out once. The analysis and the evidence record (written again after the
+# paper is delivered) read the same results with the same protocol; a large study takes tens of minutes to work out. The
+# last answer is kept in the quest's ``.fi`` folder under a hash of everything it was computed from; a rerun changes the
+# results, so the hash, so it is worked out again. Bump the version when the estimators change.
+STATISTICS_RECORD = ".fi/statistics_cache.json"
+_STATISTICS_VERSION = 1
+
+
+def _inputs_key(replicates: list[dict[str, Any]], specs: list[dict[str, Any]], declared_contrasts: list[Any]) -> str | None:
+    try:
+        text = json.dumps([_STATISTICS_VERSION, replicates, specs, declared_contrasts], sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return None
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _kept_statistics(quest_root: Path | str | None, key: str | None) -> dict[str, Any] | None:
+    if quest_root is None or key is None:
+        return None
+    try:
+        record = json.loads((Path(quest_root) / STATISTICS_RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if isinstance(record, dict) and record.get("key") == key and isinstance(record.get("statistics"), dict):
+        return record["statistics"]
+    return None
+
+
+def _keep_statistics(quest_root: Path | str | None, key: str | None, computed: dict[str, Any]) -> None:
+    if quest_root is None or key is None:
+        return
+    path = Path(quest_root) / STATISTICS_RECORD
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps({"key": key, "statistics": computed}), encoding="utf-8")
+        os.replace(tmp, path)
+    except (OSError, TypeError, ValueError):
+        try:
+            tmp.unlink()
+        except OSError:
+            pass  # a cache that cannot be written only costs the time again
+
+
 _PROGRESS_EVERY_SECONDS = 30.0
 _PROGRESS_EVERY_CONTRASTS = 50
 
@@ -550,6 +596,11 @@ def statistics(
     contrasts: list[dict[str, Any]] = []
     unsupported: list[dict[str, str]] = []
     declared_contrasts = protocol.get("contrasts") if isinstance(protocol, dict) and isinstance(protocol.get("contrasts"), list) else []
+    key = _inputs_key(replicates, specs, declared_contrasts) if quest_root is not None else None
+    kept = _kept_statistics(quest_root, key)
+    if kept is not None:
+        say("[evidence] statistics: the results are unchanged since they were last worked out; that answer is used")
+        return kept
     any_prespecified = False
     all_settings = [_settings(replicates, spec) for spec in specs]
     total_contrasts = 0
@@ -648,7 +699,7 @@ def statistics(
             contrasts[i]["p_holm"] = p_adj
             contrasts[i]["significant_after_holm"] = bool(p_adj < 0.05)
             contrasts[i]["comparisons_in_family"] = len(members)
-    return {
+    computed = {
         "specs": [{k: v for k, v in s.items() if k in ("id", "estimand", "kind", "unit", "cluster", "paired", "family")} for s in specs],
         "estimates": estimates,
         "contrasts": contrasts,
@@ -656,6 +707,8 @@ def statistics(
         "undeclared": undeclared(replicates, specs),
         "contrasts_prespecified": any_prespecified,
     }
+    _keep_statistics(quest_root, key, computed)
+    return computed
 
 
 def coverage_gaps(protocol: dict[str, Any] | None, replicates: list[dict[str, Any]], computed: dict[str, Any] | None) -> list[str]:

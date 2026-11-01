@@ -474,3 +474,34 @@ def test_a_metric_kept_without_a_part_is_not_said_to_be_left_out_of_the_plan() -
     assert "left out" not in notes[0]
     fixed, notes = plan.repair_protocol({"runs_per_setting": 300, "metrics": [good, unknown]})
     assert len(notes) == 1 and "left out of the plan" in notes[0]
+
+
+# --- the statistics of one set of results are worked out once ---------------------------------------------------------------
+
+
+def test_statistics_of_unchanged_results_are_reused_and_changed_results_are_worked_out_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[int] = []
+    real = ms._contrast
+
+    def counting(a: Any, b: Any, spec: Any) -> Any:
+        calls.append(1)
+        return real(a, b, spec)
+
+    monkeypatch.setattr(ms, "_contrast", counting)
+    reps = _seeds({"1.5": (60, 0), "3.0": (120, 0), "6.0": (121, 0)})
+    first = ms.statistics(reps, PROTO, quest_root=tmp_path)
+    assert len(calls) == 3
+    lines: list[str] = []
+    again = ms.statistics(json.loads(json.dumps(reps)), PROTO, quest_root=tmp_path, progress=lines.append)
+    assert len(calls) == 3 and again == json.loads(json.dumps(first)) and len(lines) == 1  # nothing recomputed
+    # known positive: a rerun changes the results, so the answer is worked out again
+    changed = _seeds({"1.5": (61, 0), "3.0": (120, 0), "6.0": (121, 0)})
+    ms.statistics(changed, PROTO, quest_root=tmp_path)
+    assert len(calls) == 6
+    # ... and so does a change of the protocol the same results are read with
+    ms.statistics(changed, {**PROTO, "contrasts": [{"metric": "outbreak_probability", "a": "1.5", "b": "3.0"}]}, quest_root=tmp_path)
+    assert len(calls) == 7
+    # without a quest folder nothing is kept
+    ms.statistics(changed, PROTO)
+    ms.statistics(changed, PROTO)
+    assert len(calls) == 13
