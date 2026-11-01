@@ -281,7 +281,7 @@ def test_a_result_the_compared_setting_does_not_enter_gets_one_line_not_one_for_
     text = pf.answers_text(root)
     flat = [ln for ln in text.splitlines() if ln.startswith("- flat error")]
     step = [ln for ln in text.splitlines() if ln.startswith("- step error")]
-    assert len(flat) == 1 and "dt = " not in flat[0] and "{{v:flat @ ang=each, dt=1 | range}}" in flat[0]
+    assert len(flat) == 1 and "(the same at every value of dt; read at dt = 1)" in flat[0] and "{{v:flat @ ang=each, dt=1 | range}}" in flat[0]
     assert "it differs with ang;" in flat[0]
     assert len(step) == 3 and all(f"(dt = {d})" in ln for d, ln in zip((1, 2, 3), step))
     rec = pv.records_of(root, pf.plan_protocol(root))
@@ -300,3 +300,48 @@ def test_same_across_needs_two_values_and_every_group_equal(tmp_path, monkeypatc
     assert rec.same_across("flat", "dt") and not rec.same_across("step", "dt")
     assert not rec.same_across("flat", "ang")
     assert not rec.same_across("flat", "missing_axis")
+
+
+def test_a_bias_line_is_not_collapsed_when_the_reference_changes_with_the_compared_setting(tmp_path, monkeypatch) -> None:
+    """Same estimates at every step size, but the true value the bias is measured from depends on the step size: one line for
+    each value, as before."""
+    def met(vs):
+        return {"values": vs, "trials": list(range(len(vs))), "count": len(vs), "total": 0.0, "non_finite": 0}
+
+    cells = [{"cell": {"dt": dt, "ang": 1}, "key": f"dt={dt},ang=1", "planned": 2, "ok": 2, "failed": 0,
+              "metrics": {"est": met([1.0, 1.2])}} for dt in (1, 2, 3)]
+    (tmp_path / "raw").mkdir(parents=True)
+    (tmp_path / "raw" / "trials.json").write_text(json.dumps({"cells": cells}), encoding="utf-8")
+    (tmp_path / ".fi").mkdir()
+    req = {"quantities": [{"name": "bias of est", "main": True}]}
+    (tmp_path / ".fi" / "topic_requirements.json").write_text(json.dumps(req), encoding="utf-8")
+
+    def protocol(truth):
+        return {"metrics": [{"id": "est", "kind": "mean", "reference": {"formula": truth, "kind": "value"}}],
+                "grid": {"dt": [1, 2, 3], "ang": [1]},
+                "comparisons": [{"id": "c1", "result": "est", "across": "dt", "how": "difference"}],
+                "topic_map": [{"item": "Q1", "by": "metric:est", "statistic": "bias"}]}
+    monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: protocol("dt"))
+    lines = [ln for ln in pf.answers_text(tmp_path).splitlines() if ln.startswith("- bias of est")]
+    assert len(lines) == 3 and all(f"(dt = {d})" in ln for d, ln in zip((1, 2, 3), lines))
+    monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: protocol("1.1"))
+    assert len([ln for ln in pf.answers_text(tmp_path).splitlines() if ln.startswith("- bias of est")]) == 1
+
+
+def test_same_across_counts_failed_and_non_finite_runs_and_needs_every_value() -> None:
+    def cell(dt, ang, vals, failed=0, non_finite=0):
+        return {"cell": {"dt": dt, "ang": ang}, "key": f"dt={dt},ang={ang}", "planned": 2, "ok": 2 - failed, "failed": failed,
+                "metrics": {"m": {"values": vals, "trials": list(range(len(vals))), "count": len(vals), "total": 0.0,
+                                  "non_finite": non_finite}}}
+    same = pv.from_cells([cell(1, 1, [1.0, 2.0]), cell(2, 1, [1.0, 2.0])])
+    assert same.same_across("m", "dt")
+    nan = pv.from_cells([cell(1, 1, [1.0, 2.0]), cell(2, 1, [1.0, 2.0], non_finite=1)])
+    assert not nan.same_across("m", "dt")
+    failed = pv.from_cells([cell(1, 1, [1.0, 2.0]), cell(2, 1, [1.0, 2.0], failed=1)])
+    assert not failed.same_across("m", "dt")
+    # one setting is carried at both step sizes, another at one only: not the same everywhere
+    partial = pv.from_cells([cell(1, 1, [1.0]), cell(2, 1, [1.0]), cell(2, 2, [5.0])])
+    assert not partial.same_across("m", "dt")
+    # the first value is the first one that carries the metric
+    later = pv.from_cells([cell(2, 1, [1.0]), cell(3, 1, [1.0])])
+    assert later.values_of("m", "dt") == [2, 3]

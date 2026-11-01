@@ -1381,10 +1381,13 @@ def answers_text(quest_root: Path | str) -> str:
         # A result the compared setting does not enter has the same values at each of its values (FI's record): one line, not
         # one for each value. It is read at the first value of that setting (the numbers are the same at all of them, and no
         # trial is counted twice).
-        same = split is not None and rec.same_across(metric, split)
-        same_at = []
+        same = split is not None and rec.same_across(metric, split, reference=(stat == "bias"))
+        same_at: list[str] = []
+        same_note = ""
         if same:
-            same_at = [f"{rec.short(split)}={(rec.axes().get(split) or [None])[0]}"]
+            first = rec.values_of(metric, split)[0]
+            same_at = [f"{rec.short(split)}={first}"]
+            same_note = f" (the same at every value of {rec.label(split)}; read at {rec.label(split)} = {first})"
             each = [a for a in each if a != split]
             split = None
         pinned = [f"{rec.short(a)}={v}" for a, v in at.items()]
@@ -1394,6 +1397,7 @@ def answers_text(quest_root: Path | str) -> str:
             here = [a for a in each if a != split] if level is not None else each
             said = [f"{rec.short(a)}=each" for a in here]
             label = name + (f" (when {', '.join(rec.label(a) + ' = ' + str(v) for a, v in at.items())})" if at and level is None else "")
+            label += same_note
             if level is not None:
                 fixed_here = fixed + [f"{rec.short(split)}={level}"]
                 label = f"{name} ({rec.label(split)} = {level})" + (f" ({', '.join(rec.label(a) + ' = ' + str(v) for a, v in at.items())})" if at else "")

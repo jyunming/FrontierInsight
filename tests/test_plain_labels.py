@@ -91,7 +91,7 @@ def test_the_paper_table_is_titled_and_captioned_by_the_plans_label_and_the_file
     paper = (root / rbs.PAPER_BLOCK).read_text(encoding="utf-8")
     assert "**Table (Hit rate).** Hit rate at each of the 2 settings" in paper
     assert "`hit`" not in paper and "Table (hit)" not in paper
-    assert "Reference: Hit share * 2" in paper and "`p * 2`" not in paper
+    assert "Reference: (Hit share) * 2" in paper and "`p * 2`" not in paper
     files = (root / "paper" / "results_by_setting.md").read_text(encoding="utf-8")
     assert "**Table (hit).** `hit` at each of the 2 settings" in files and "Reference: `p * 2`" in files
     assert "hit," in (root / "paper" / "results_by_setting.csv").read_text(encoding="utf-8")
@@ -138,3 +138,21 @@ def test_plain_label_falls_back(tmp_path: Path) -> None:
 @pytest.mark.parametrize("name", ["score_pct"])
 def test_pf_is_importable(name: str) -> None:
     assert pf.answers_text  # the answers lines are tested in test_answers_block.py
+
+
+def test_a_formula_changes_only_whole_names_not_numbers_commands_or_longer_names() -> None:
+    protocol = {"labels": {"e": "Euler", "p": "Hit share", "x": "Pos", "alpha": "Alpha", "q": "Rate"}}
+    text, changed = rbs.plain_formula(protocol, r"1e-3 * p + x**2 - 2x + lpha_p + pq + sqrt(q)")
+    assert changed
+    assert text == r"1e-3 * (Hit share) + Pos**2 - 2x + lpha_p + pq + sqrt(Rate)"
+    assert rbs.plain_formula({"labels": {"e": "Euler"}}, "1e-3") == ("1e-3", False)
+
+
+def test_two_names_with_one_label_keep_their_ids() -> None:
+    protocol = {"labels": {"a": "Score", "b": "score", "c": "Other"},
+                "metrics": [{"id": "d", "label": "Other"}]}
+    assert rbs.plain_label(protocol, "a") == "a" and rbs.plain_label(protocol, "b") == "b"
+    assert rbs.plain_label(protocol, "c") == "c" and rbs.plain_label(protocol, "d") == "d"
+    assert rbs.plain_label({"labels": {"a": "Score", "b": "Other"}}, "a") == "Score"
+    rec = pv.from_cells([_cell({"a": 1, "b": 1}, m=[1.0])], protocol)
+    assert rec.label("a") == "a"

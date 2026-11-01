@@ -282,19 +282,52 @@ def distinct(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, 
 # --- the tables --------------------------------------------------------------------------------------------------------
 
 
+def _label_of(protocol: dict[str, Any], name: str) -> str:
+    labels = protocol.get("labels")
+    text = labels.get(name) if isinstance(labels, dict) else None
+    if not (isinstance(text, str) and text.strip()):
+        text = next((m.get("label") for m in protocol.get("metrics") or []
+                     if isinstance(m, dict) and m.get("id") == name and isinstance(m.get("label"), str)), None)
+    return " ".join(text.split()) if isinstance(text, str) and text.strip() else ""
+
+
 def plain_label(protocol: dict[str, Any] | None, name: str, default: str | None = None) -> str:
     """What a reader is shown for a result or a setting: the plan's own label of it (``labels``, else the metric's
-    ``label``), else ``default`` (the name itself when none is given). Every key, record and message to the writer keeps the id;
-    only text a person reads goes through this."""
-    if isinstance(protocol, dict):
-        labels = protocol.get("labels")
-        text = labels.get(name) if isinstance(labels, dict) else None
-        if not (isinstance(text, str) and text.strip()):
-            text = next((m.get("label") for m in protocol.get("metrics") or []
-                         if isinstance(m, dict) and m.get("id") == name and isinstance(m.get("label"), str)), None)
-        if isinstance(text, str) and text.strip():
-            return " ".join(text.split())
-    return name if default is None else default
+    ``label``), else ``default`` (the name itself when none is given). A label that another result or setting of the plan
+    also has names none of them (two tables or two axes would read alike), so those keep their ids. Every key, record and
+    message to the writer keeps the id; only text a person reads goes through this."""
+    fallback = name if default is None else default
+    if not isinstance(protocol, dict):
+        return fallback
+    text = _label_of(protocol, name)
+    if not text:
+        return fallback
+    names = set(protocol["labels"]) if isinstance(protocol.get("labels"), dict) else set()
+    names |= {str(m["id"]) for m in protocol.get("metrics") or [] if isinstance(m, dict) and m.get("id")}
+    if any(other != name and _label_of(protocol, other).casefold() == text.casefold() for other in names):
+        return fallback
+    return text
+
+
+_TOKEN = re.compile(r"(?<![\w.\\])[A-Za-z_]\w*(?![\w(])")
+
+
+def plain_formula(protocol: dict[str, Any] | None, formula: Any) -> tuple[str, bool]:
+    """``(formula, changed)``: ``formula`` with each whole name of the plan that has a label written as that label, in
+    brackets when the label is more than one plain word. A name inside a number (``1e-3``, ``2x``), after a backslash (a LaTeX
+    command), part of a longer name or called as a function is left as it is. ``changed`` is False when no name had a label."""
+    text = str(formula)
+    changed = False
+
+    def swap(m: re.Match[str]) -> str:
+        nonlocal changed
+        label = plain_label(protocol, m.group(0), "")
+        if not label:
+            return m.group(0)
+        changed = True
+        return label if re.fullmatch(r"\w+", label) else f"({label})"
+    out = _TOKEN.sub(swap, text)
+    return (out, True) if changed else (text, False)
 
 
 @dataclass
@@ -311,17 +344,6 @@ class Table:
     #: gives none) and the caption worded with it. The files keep ``value`` and ``caption``.
     name: str = ""
     paper_caption: str = ""
-
-
-def plain_formula(protocol: dict[str, Any] | None, formula: Any) -> tuple[str, bool]:
-    """``(formula, changed)``: ``formula`` with each name of the plan that has a label written as that label (a whole name
-    only). ``changed`` is False when no name had one, and the text is then the formula as it is."""
-    text = str(formula)
-    labels = {k: v for k in set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", text))
-              if (v := plain_label(protocol, k, "")) }
-    if not labels:
-        return text, False
-    return re.sub(r"[A-Za-z_][A-Za-z0-9_]*", lambda m: labels.get(m.group(0), m.group(0)), text), True
 
 
 def _sig(x: float, digits: int = 4) -> str:
