@@ -532,6 +532,30 @@ class FigureCalls:
             raise ValueError("the table has no %s of `%s` at setting %s to write" % (form, ident, key))
         return value, key
 
+    def _setting_read(self, name, key):
+        """The value setting ``name`` has at setting key ``key`` (optional when the study has one), written as text: from the
+        table's ``setting(key)`` when the host has it, else from the key's own ``name=value`` pieces."""
+        table = getattr(self, "table", None)
+        keys = list(table.keys())
+        if key is None:
+            if len(keys) != 1:
+                raise ValueError("say which setting key the note reads with `key=`; the keys are: %s" % (", ".join(keys) or "(none)"))
+            key = keys[0]
+        got = None
+        if hasattr(table, "setting"):
+            try:
+                got = (table.setting(key) or {}).get(name)
+            except Exception:  # noqa: BLE001 -- fall back to the key's own text
+                got = None
+        if got is None:
+            for piece in str(key).split(","):
+                n, _, text = piece.partition("=")
+                if n.strip() == name and text.strip():
+                    got = text.strip()
+        if got is None:
+            raise ValueError("setting key %s holds no value of `%s`" % (key, name))
+        return ("%.4g" % got) if _finite(got) else str(got)
+
     def ref(self, panel, ref_id=None, axis="y", *, at=None, value=None, key=None, form="mean"):
         """A reference line, one of three: a plan reference ``ref_id`` (labelled with the plan's words); ``at=<result id>`` (FI
         reads the line's value from the table: ``form`` mean, n, low or high at setting ``key``); or ``value=<number>``, a
@@ -594,14 +618,23 @@ class FigureCalls:
         if any(ch.isdigit() for ch in words):
             raise ValueError("a note's words cannot hold digits (%r): FI writes the number from the table; write the words and "
                              "`{%s}` where the number goes" % (words.strip(), ident))
-        value, _used = self._table_read(ident, form, key)
-        number = "%d" % value if form == "n" else "%.4g" % value
+        settings = list(getattr(self, "settings", None) or [])
+        if ident in settings and ident not in self._results():
+            number = self._setting_read(ident, key)
+        else:
+            if ident not in self._results() + list(getattr(self, "derived_ids", []) or []):
+                raise ValueError("`{%s}` is neither a setting nor a result of the plan; the settings are: %s; the results are: %s"
+                                 % (ident, ", ".join(settings) or "(none)", ", ".join(sorted(self._results())) or "(none)"))
+            value, _used = self._table_read(ident, form, key)
+            number = "%d" % value if form == "n" else "%.4g" % value
         shown = text[:text.index("{")] + number + text[text.index("}") + 1:]
         art = ax.text(float(x), float(y), shown) if placed else ax.text(0.5, 0.5, shown, transform=ax.transAxes)
         self._tag(art)
         self._state()
         self._fc_extra.setdefault(panel, {"series": [], "refs": []}).setdefault("notes", []).append(art)
         entry = {"id": ident, "text": shown, "x": float(x) if placed else None, "y": float(y) if placed else None}
+        if ident in settings and ident not in self._results():
+            entry.update(source="setting", setting=ident)
         if not placed:
             entry["corner"] = None  # FI chooses it in ``finish``
         rec["notes"].append(entry)

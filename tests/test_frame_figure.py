@@ -587,3 +587,16 @@ def test_band_around_a_step_line_follows_the_steps():
     plain = h.band(0, "slow", [1, 2, 3], [0.0, 1.0, 2.0], [2.0, 3.0, 4.0], "growth", "sd")
     assert any(abs(x - 2.0) < 1e-9 and abs(y - 0.0) < 1e-9 for x, y in stepped.get_paths()[0].vertices)  # the lo of x=1 holds up to x=2
     assert not any(abs(x - 2.0) < 1e-9 and abs(y - 0.0) < 1e-9 for x, y in plain.get_paths()[0].vertices)
+
+
+def test_note_writes_a_setting_value_and_names_the_known_settings_when_unknown():
+    h = _host_by_x(1)
+    h.line(0, "fast", [1, 2], [2.0, 4.0], "growth")
+    h.note(0, 1.0, 1.0, "run at size {size}", key="size=2")
+    n = h.record()["panels"][0]["notes"][0]
+    assert n["text"] == "run at size 2" and n["source"] == "setting" and n["setting"] == "size"
+    with pytest.raises(ValueError) as e:
+        h.note(0, 1.0, 1.0, "at {width}", key="size=2")
+    assert "size" in str(e.value) and "step" in str(e.value)
+    with pytest.raises(ValueError):
+        h.note(0, 1.0, 1.0, "size 640 is {size}", key="size=2")
