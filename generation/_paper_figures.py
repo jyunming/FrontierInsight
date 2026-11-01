@@ -118,3 +118,19 @@ def prefer_paper_figures(markdown: str, root: Path, *, two_column: bool = False)
         return f"](figures/{PAPER_DIRNAME}/{stem}.pdf){attributes}"
 
     return _FIGURE_TARGET.sub(swap, markdown), swapped
+
+
+_PLACED_FIGURE = re.compile(r"!\[(?:(?!\]\()[^\n])*\]\((?:\./)?figures/([^)\s/]+)\)")
+
+
+def figures_in_paper(paper_md: str, files: list[str]) -> list[str]:
+    """The files of ``figures/`` that the paper shows, in the order of ``files``.
+
+    FI places the figures in the paper (``core/engine.py:_place_figures``) and leaves out one whose record says it draws
+    nothing, but that file stays in ``figures/``. The poster and the slides show the figures the paper shows, not every
+    file. A paper that embeds none of ``files`` (an older quest, or one written before FI placed figures) gives no list,
+    and then every file stays, as before.
+    """
+    placed = {m.group(1) for m in _PLACED_FIGURE.finditer(paper_md)}
+    kept = [name for name in files if name in placed]
+    return kept if kept else list(files)

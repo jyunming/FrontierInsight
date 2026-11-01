@@ -67,6 +67,7 @@ from core.provider import (
 from generation import _cjk
 from generation._figure_captions import without_number
 from generation._paper_context import note_prompt_fit, paper_and_claims
+from generation._paper_figures import figures_in_paper
 from generation._pdf_engine import find_pdf_engine
 from generation._pdf_measure import measure_pdf, poster_report
 from generation._unicode_fonts import find_fonts
@@ -1036,7 +1037,7 @@ class PosterGenerator:
         sheet = _SHEETS.get(output.poster_size, _SHEETS["a1_portrait"])
 
         paper_md = _paper_facts.without_marks(art.paper_md.read_text(encoding="utf-8"))  # FI's values stay, its markers go
-        figures = _figure_files(art.figures_dir)
+        figures = figures_in_paper(paper_md, _figure_files(art.figures_dir))
         captions = _paper_captions(paper_md)
         literature = art.raw_state.get("literature") or []
         # Only the references the paper ends with (what its citation check kept), numbered as the paper numbers

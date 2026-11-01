@@ -1402,3 +1402,62 @@ async def test_a_real_poster_with_a_glyph_pdflatex_cannot_set_is_typeset(
     doc = measure_pdf(result["poster_pdf"])
     text = " ".join(line.text for page in doc.pages for line in page.lines)
     assert "\ufffd" in text or fit["glyphs_not_set"]
+
+
+# ---------------------------------------------------------------------------
+# The figures the poster shows are the figures the paper places
+
+
+def _three_figures(art: QuestArtifacts) -> None:
+    for name in ("fig1_a.png", "fig2_b.png", "fig3_empty.png"):
+        (art.figures_dir / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+
+
+async def _poster_tex(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, paper: str) -> str:
+    _no_engine(monkeypatch)
+    cfg = _make_config(tmp_path, kinds=["poster"])
+    art = _make_artifacts(tmp_path)
+    _three_figures(art)
+    art.paper_md.write_text(paper, encoding="utf-8")
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return json.dumps({"headline": "A finding", "blocks": [{"type": "text", "text": "Words."}]})
+
+    _patch_endpoint(monkeypatch)
+    monkeypatch.setattr("generation.poster.LLMClient.chat", fake_chat)
+    result = await PosterGenerator(cfg).generate(art, art.quest_root)
+    return result["poster_tex"].read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_the_poster_leaves_out_a_figure_the_paper_does_not_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Three files in figures/, two placed in the paper (the third drew nothing): the poster shows two."""
+    tex = await _poster_tex(
+        tmp_path, monkeypatch,
+        "# Toy\n\n![**Figure 1.** A.](figures/fig1_a.png)\n\n![**Figure 2.** B.](figures/fig2_b.png)\n",
+    )
+    assert "fig1_a" in tex and "fig2_b" in tex
+    assert "fig3_empty" not in tex
+
+
+@pytest.mark.asyncio
+async def test_the_poster_keeps_every_figure_the_paper_places(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tex = await _poster_tex(
+        tmp_path, monkeypatch,
+        "# Toy\n\n![**Figure 1.** A.](figures/fig1_a.png)\n\n![**Figure 2.** B.](figures/fig2_b.png)\n\n"
+        "![**Figure 3.** C.](figures/fig3_empty.png)\n",
+    )
+    assert "fig1_a" in tex and "fig2_b" in tex and "fig3_empty" in tex
+
+
+@pytest.mark.asyncio
+async def test_a_paper_without_placed_figures_keeps_every_file_on_the_poster(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An older quest: the paper embeds none of the files, so the poster behaves as before."""
+    tex = await _poster_tex(tmp_path, monkeypatch, "# Toy\n\nNo figures are placed here.\n")
+    assert "fig1_a" in tex and "fig2_b" in tex and "fig3_empty" in tex

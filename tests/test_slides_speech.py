@@ -1169,3 +1169,24 @@ def test_a_closing_fence_may_have_trailing_tabs_and_a_longer_fence_is_not_closed
     assert _math_as_dollars(code) == "````\n```\n" + _paren("x") + "\n```\n````\nand $y$\n"
     with_tab = "```\n" + _paren("x") + "\n```\t\n" + _paren("y") + "\n"
     assert _math_as_dollars(with_tab) == "```\n" + _paren("x") + "\n```\t\n$y$\n"
+
+
+@pytest.mark.asyncio
+async def test_slides_are_offered_the_figures_the_paper_places(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    art = _make_artifacts(tmp_path, with_figure=True)
+    (art.figures_dir / "unplaced.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    art.paper_md.write_text("# T\n\n![**Figure 1.** R.](figures/result.png)\n", encoding="utf-8")
+    cfg = _make_config(tmp_path, kinds=["slides"])
+    captured: dict[str, str] = {}
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        captured["prompt"] = messages[-1]["content"]
+        return "---\nmarp: true\n---\n\n# Hi\n"
+
+    monkeypatch.setattr("core.provider.LLMClient.chat", fake_chat)
+    monkeypatch.setattr("generation.slides.shutil.which", lambda _n: None)
+    await SlideGenerator(cfg).generate(art, art.quest_root)
+    assert "- figures/result.png" in captured["prompt"]
+    assert "unplaced.png" not in captured["prompt"]
