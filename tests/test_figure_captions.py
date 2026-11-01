@@ -254,3 +254,17 @@ def test_merged_series_is_named_once_as_the_legend_does_and_same_label_series_st
     assert "Method A = Method B (line)" in note and note.count("(line)") == 1
     twins = _calls(_panel(series=[_series("a", "Same"), _series("b", "Same", ys=(5.0, 6.0, 7.0))]))
     assert "It draws Same, Same." in _figure_caption_text("a.png", None, n_seeds=None, calls=twins)
+
+
+def test_a_merged_curve_is_never_quoted_and_an_empty_primary_label_keeps_the_rest() -> None:
+    first = _series("a", "Method A")
+    curve = _series("curve1", "Body typed curve (Some source)", kind="curve")
+    first["merged_with"] = ["curve1"]
+    calls = _calls(_panel(series=[first, curve]))
+    caption = _figure_caption_text("a.png", None, n_seeds=None, calls=calls)
+    assert "Body typed" not in caption and "Some source" not in caption
+    assert "Method A = a curve" in caption
+    assert "Body typed" not in _figure_record_note(None, calls=calls)
+    blank, other = _series("a", ""), _series("b", "Method B")
+    blank["merged_with"] = ["b"]
+    assert "It draws Method B." in _figure_caption_text("a.png", None, n_seeds=None, calls=_calls(_panel(series=[blank, other])))

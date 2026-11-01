@@ -34720,11 +34720,23 @@ def _call_raw_texts(p: dict[str, Any]) -> list[str]:
     return [f"text in the panel, not checked by FI: '{t}'" for t in texts if any(c.isdigit() for c in t)][:3]
 
 
+def _call_group(s: dict[str, Any], entries: list[dict[str, Any]]) -> str:
+    """The name of a drawn series and the series merged into it, as the legend reads it ("a = b"). Only a series whose label
+    FI holds is named; a merged curve's label is the body's words, so it reads "a curve", and an id the record does not
+    draw is left out."""
+    by_id = {str(e.get("id")): e for e in entries}
+    names = [_caption_words(s.get("label"), 60)]
+    for m in s.get("merged_with") or []:
+        e = by_id.get(str(m))
+        if e is not None:
+            names.append("a curve" if e.get("kind") == "curve" else _caption_words(e.get("label"), 60))
+    return " = ".join(n for n in names if n)
+
+
 def _call_drawn(p: dict[str, Any]) -> list[str]:
     """The series a panel's calls drew, one name per drawn id, by the plan's label: a series merged into an identical one
     reads "a = b" (the legend's form); a curve is "a curve": its own label is the body's words."""
     entries = [s for s in p.get("series") or [] if isinstance(s, dict)]
-    labels = {str(s.get("id")): _caption_words(s.get("label"), 60) for s in entries}
     absorbed = {str(m) for s in entries for m in s.get("merged_with") or []}
     names: list[str] = []
     seen: set[str] = set()
@@ -34733,9 +34745,9 @@ def _call_drawn(p: dict[str, Any]) -> list[str]:
         ident = str(s.get("id"))
         if s.get("kind") == "curve":
             curves += 1
-        elif ident not in seen and ident not in absorbed and labels[ident]:
+        elif ident not in seen and ident not in absorbed and _call_group(s, entries):
             seen.add(ident)
-            names.append(" = ".join([labels[ident], *(labels.get(str(m)) or str(m) for m in s.get("merged_with") or [])]))
+            names.append(_call_group(s, entries))
     return names + ([f"{curves} curves" if curves > 1 else "a curve"] if curves else [])
 
 
@@ -34804,7 +34816,6 @@ def _note_from_calls(calls: dict[str, Any]) -> list[str]:
             continue
         bits = []
         entries = [s for s in p.get("series") or [] if isinstance(s, dict)]
-        labels = {str(s.get("id")): _caption_words(s.get("label"), 60) for s in entries}
         absorbed = {str(m) for s in entries for m in s.get("merged_with") or []}
         for s in entries:
             if str(s.get("id")) in absorbed:
@@ -34812,8 +34823,7 @@ def _note_from_calls(calls: dict[str, Any]) -> list[str]:
             ys = [v for v in s.get("y") or [] if isinstance(v, (int, float)) and not isinstance(v, bool)]
             span = f" {min(ys):.3g} to {max(ys):.3g}" if ys else " no points"
             bits.append("a curve" if s.get("kind") == "curve"
-                        else f"{' = '.join([labels[str(s.get('id'))], *(labels.get(str(m)) or str(m) for m in s.get('merged_with') or [])])}"
-                             f" ({s.get('kind')}){span}")
+                        else f"{_call_group(s, entries)} ({s.get('kind')}){span}")
         bands, bars, refs = _call_extras(p)
         bits += bands + [f"error bars: {b}" for b in bars] + [f"reference line {r}" for r in refs]
         out.append(f"panel {k} ({_call_plots(p)}): " + "; ".join(bits))
