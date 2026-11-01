@@ -27,7 +27,6 @@ from typing import Any, Callable
 
 from . import figure_facts
 from . import paper_values as _values
-from . import typed_numbers as _typed
 
 #: Two drawn values closer than this (relative) are equal to the rounding of a drawn value; a trend may run through them.
 TREND_TIE_RTOL = 5e-4
@@ -709,6 +708,68 @@ def menu(calls: Any, plan: dict[str, Any] | None = None, fmt: Fmt = _default_fmt
 _OPEN_PAREN = re.compile(r"\(\s*$")
 _CLOSE_PAREN = re.compile(r"^\s*\)[\s.,;:!?]*$")
 _TOKEN_AT = re.compile(r"\x00(\d+)\x00\.?")
+#: What joins one more figure number to a pointer: "(Figures 2 and 3)", "(Figures 2, 3)", "(Figures 2-4)".
+_LIST_JOIN = re.compile(r"\s*(?:,|and|&|[-\u2013])\s*", re.IGNORECASE)
+_BARE_NUMBER = re.compile(r"\d+")
+_PERIOD_SPACE = re.compile(r"\. ")
+#: A full stop after one of these (or after a single letter, an initial) does not end a sentence.
+_ABBREVIATIONS = frozenset({"e.g", "i.e", "al", "fig", "figs", "cf", "vs", "eq", "eqs", "sec", "ref", "refs", "approx"})
+
+
+def _pointer(text: str, mention_re: re.Pattern[str]) -> tuple[int, list[int]] | None:
+    """``(position of the opening bracket, figure numbers listed)`` when every figure named in ``text`` stands in one closing
+    parenthetical "(Figure N)", "(Figures N and M)", "(Fig. N and Fig. M)" at the end of the sentence, else ``None``."""
+    first = mention_re.search(text)
+    if first is None or not _OPEN_PAREN.search(text[:first.start()]):
+        return None
+    nums = [int(first.group(1))]
+    pos = first.end()
+    while True:
+        join = _LIST_JOIN.match(text, pos)
+        more = None
+        if join:
+            more = mention_re.match(text, join.end()) or _BARE_NUMBER.match(text, join.end())
+        if more is None:
+            break
+        n = int(more.group(1) if more.re is mention_re else more.group(0))
+        if join.group(0).strip() in ("-", "\u2013") and 0 < n - nums[-1] <= 50:
+            nums += list(range(nums[-1] + 1, n + 1))
+        else:
+            nums.append(n)
+        pos = more.end()
+    if not _CLOSE_PAREN.match(text[pos:]) or any(m.start() >= pos for m in mention_re.finditer(text)):
+        return None
+    return _OPEN_PAREN.search(text[:first.start()]).start(), nums
+
+
+def _sentence_break(flat: str, i: int) -> bool:
+    """Whether the ". " at ``i`` ends a sentence: not before a lowercase letter or a digit, not after a single letter or a
+    common abbreviation ("e.g.", "et al.", "Fig."), and always after an FI figure claim."""
+    if flat[i - 1:i] == "\x00":
+        return True
+    k = i + 1
+    while k < len(flat) and flat[k] == " ":
+        k += 1
+    if k < len(flat) and (flat[k].islower() or flat[k].isdigit()):
+        return False
+    word = re.search(r"[A-Za-z.]+$", flat[:i])
+    if word is None:
+        return True
+    word = word.group(0).lower().lstrip(".")
+    return len(word) > 1 and word not in _ABBREVIATIONS
+
+
+def _sentence_at(flat: str, line_start: int, line_end: int, pos: int) -> tuple[int, int]:
+    """The running sentence of the line ``flat[line_start:line_end]`` that holds ``pos``: ``(start, end)``."""
+    a = line_start
+    for m in _PERIOD_SPACE.finditer(flat, line_start, line_end):
+        if not _sentence_break(flat, m.start()):
+            continue
+        if m.start() + 1 <= pos:
+            a = m.start() + 1
+        else:
+            return a, m.start() + 1
+    return a, line_end
 
 
 def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, set[str]],
@@ -721,8 +782,12 @@ def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, 
     figure it names is one FI issued (``numbers``) and either none of them has a call record (``drawn`` lacks its number: an
     earlier version drew it, nothing is checked), or the sentence is a figure claim FI composed, or it reports results
     (FI value marks) and points at one figure in a closing parenthesis, "(Figure N)", whose record draws (``drawn[N]``) the
-    metric of at least one of those marks. Every other sentence naming a figure is removed. Captions, table rows, headings,
-    lists, code and the text inside FI's own markers are never touched."""
+    metric of at least one of those marks (one figure, or several listed in it: "(Figures 2 and 3)", then the metric need only
+    be drawn in one of them, and every one listed must be a figure FI issued). Every other sentence naming a figure is
+    removed. A sentence ends at ". " except before a lowercase letter or digit and after an initial or a common abbreviation
+    ("e.g.", "et al.", "Fig."). Like :func:`core.paper_facts.take_out_unfilled`, a line is read alone (a sentence wrapped over
+    two lines is two) and captions, table rows, headings, list items, quotes, code and the text inside FI's own markers are
+    never touched."""
     from . import paper_facts as _facts  # late: paper_facts may itself reach this module
 
     marks = [m for m in _values._MARK.finditer(markdown or "")]
@@ -775,23 +840,21 @@ def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, 
 
     def keeps(a: int, b: int, hits: list[re.Match[str]]) -> bool:
         text = flat[a:b]
-        nums = [int(h.group(1)) for h in hits]
+        point = _pointer(text, mention_re)
+        nums = point[1] if point else [int(h.group(1)) for h in hits]
         if any(n not in issued for n in nums):
             return False
         if all(n not in drawn for n in nums):
             return True
         inside = [i for i, sp in enumerate(spans) if a <= sp[0] and sp[1] <= b]
-        pointer = None
-        if len(hits) == 1:
-            h = hits[0]
-            s, e = h.start() - a, h.end() - a
-            if _OPEN_PAREN.search(text[:s]) and _CLOSE_PAREN.match(text[e:]):
-                pointer = (text[:s].rstrip()[:-1], text[e:].lstrip()[1:])
-        rest = text if pointer is None else pointer[0] + pointer[1]
+        rest = text
+        if point:
+            rest = text[:point[0]] + text[text.index(")", point[0]) + 1:]
         if any(kinds[i] == "claim" for i in inside) \
                 and not re.sub(r"[\s.,;:!?()\-\u2013\u2014]+", "", _TOKEN_AT.sub("", rest)):
             return True  # a figure claim FI composed, with at most its pointer
-        return pointer is not None and bool(metrics(a, b) & drawn.get(nums[0], set()))
+        shown = set().union(*(drawn.get(n, set()) for n in nums))
+        return point is not None and bool(metrics(a, b) & shown)
 
     edits: list[tuple[int, int, str]] = []
     taken: list[dict[str, str]] = []
@@ -807,12 +870,10 @@ def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, 
         if fence is not None or _facts._NOT_PROSE.match(line):
             continue
         for first in mention_re.finditer(line):
-            a, b = _typed._sentence(flat, line_start + first.start(), line_start + first.end())
+            a, b = _sentence_at(flat, line_start, line_start + len(line), line_start + first.start())
             if (a, b) in seen:
                 continue
             seen.add((a, b))
-            if b > a and flat[b - 1] == "\n":
-                b -= 1
             hits = [h for h in mention_re.finditer(flat, a, b)]
             if keeps(a, b, hits):
                 continue

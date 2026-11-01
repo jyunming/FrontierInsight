@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import random
+import re
 
 import pytest
 
@@ -463,8 +464,6 @@ def test_trend_is_not_fooled_by_a_chain_of_small_steps():
 
 # --- the pointer rule --------------------------------------------------------------------------------------------------
 
-import re  # noqa: E402
-
 _MENTION = re.compile(r"(?<![A-Za-z])(?:figures?|figs?\.?)\s*(\d+)", re.IGNORECASE)
 
 
@@ -551,8 +550,47 @@ def test_unfilled_mark_does_not_count_as_drawn():
     assert _rule(md)[0] == ""
 
 
+
+
 def test_run_in_heading_stays_when_sentence_dropped():
-    md = "**Result.** Figure 1 shows a rise.\n"
-    out, _ = _rule(md)
-    assert out == "**Result.**\n" or out.startswith("**Result.**")
-    assert "rise" not in out
+    out, taken = _rule("**Result.** Figure 1 shows a rise.\n")
+    assert out == "**Result.**\n"
+    assert len(taken) == 1
+
+
+def test_claim_marker_with_arguments_is_kept():
+    md = f"Intro. {_claim('fig_a-args1f')} Later text.\n"
+    assert _rule(md) == (md, [])
+
+
+def test_pointer_listing_several_figures():
+    nums = {"fig_a.png": 1, "fig_b.png": 2}
+    drawn = {1: {"signal"}, 2: {"gain"}}
+    for pointer in ("(Figures 1 and 2)", "(Figures 1, 2)", "(Figures 1–2)", "(Fig. 1 and Fig. 2)"):
+        md = f"The signal is {_v('signal')} {pointer}. Next.\n"
+        assert fc.apply_pointer_rule(md, nums, drawn, _MENTION) == (md, []), pointer
+    md = f"The gain is {_v('gain')} (Figures 1 and 2). Next.\n"
+    assert fc.apply_pointer_rule(md, nums, drawn, _MENTION)[0] == md
+    md = f"The size is {_v('size')} (Figures 1 and 2). Next.\n"
+    out, taken = fc.apply_pointer_rule(md, nums, drawn, _MENTION)
+    assert out == "Next.\n" and taken[0]["sentence"] == "The size is 0.5 (Figures 1 and 2)."
+    md = f"The signal is {_v('signal')} (Figures 1 and 5). Next.\n"
+    assert fc.apply_pointer_rule(md, nums, drawn, _MENTION)[0] == "Next.\n"
+
+
+def test_abbreviations_do_not_cut_a_removed_sentence():
+    gain = _v("gain")
+    out, taken = _rule(f"The gain is {gain} (Figure 1), e.g. at size 1. Next.\n")
+    assert out == "Next.\n" and taken[0]["sentence"] == "The gain is 0.5 (Figure 1), e.g. at size 1."
+    out, taken = _rule(f"Smith et al. report the gain {gain} (Figure 1). Next.\n")
+    assert out == "Next.\n" and taken[0]["sentence"].startswith("Smith et al. report")
+    out, taken = _rule(f"The gain is {gain} (Fig. 2 and Fig. 3). Next.\n", numbers={"a.png": 2, "b.png": 3},
+                       drawn={2: {"signal"}, 3: {"signal"}})
+    assert out == "Next.\n" and taken[0]["sentence"] == "The gain is 0.5 (Fig. 2 and Fig. 3)."
+
+
+def test_list_items_and_wrapped_lines_are_read_alone():
+    md = "- Figure 1 shows a rise.\n"
+    assert _rule(md) == (md, [])
+    out, _ = _rule("First part of a sentence\nthat ends here (Figure 1).\n")
+    assert out == "First part of a sentence\n"
