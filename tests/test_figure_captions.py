@@ -236,3 +236,21 @@ def test_calls_of_reads_the_record_beside_the_recorders_files(tmp_path: Path) ->
     (folder / "b.calls.json").write_text("not json", encoding="utf-8")
     assert _calls_of(state, "b") is None
     assert _calls_of({}, "a") is None
+
+
+def test_layout_fact_with_a_typed_title_never_reaches_a_call_caption() -> None:
+    calls = _calls(_panel(1, series=[_series("error", "Method A")]), _panel(2, series=[_series("cost", "Method B")]))
+    facts = {"a:layout": 'two panels, the left "Typed title words", the right y axis "Typed axis words"'}
+    caption = _figure_caption_text("a.png", _RECORD, n_seeds=None, facts=facts, calls=calls)
+    assert "Typed" not in caption and "Panel 1 draws Method A." in caption and "Panel 2 draws Method B." in caption
+
+
+def test_merged_series_is_named_once_as_the_legend_does_and_same_label_series_stay_two() -> None:
+    first, second = _series("a", "Method A"), _series("b", "Method B")
+    first["merged_with"] = ["b"]
+    caption = _figure_caption_text("a.png", None, n_seeds=None, calls=_calls(_panel(series=[first, second])))
+    assert "It draws Method A = Method B." in caption
+    note = _figure_record_note(None, calls=_calls(_panel(series=[first, second])))
+    assert "Method A = Method B (line)" in note and note.count("(line)") == 1
+    twins = _calls(_panel(series=[_series("a", "Same"), _series("b", "Same", ys=(5.0, 6.0, 7.0))]))
+    assert "It draws Same, Same." in _figure_caption_text("a.png", None, n_seeds=None, calls=twins)
