@@ -347,7 +347,7 @@ def test_a_measured_value_with_one_trial_per_setting_is_not_taken_for_a_referenc
               "metrics": {"err": {"values": [h * 2.0]}}} for h in (0.1, 0.2, 0.4)]
     rec = pv.from_cells(cells)
     got = pv.resolve("err @ h=all", rec)
-    assert got.filled and got.text == "0.4667"
+    assert got.filled and got.text == "0.4667 (mean over 3 settings, one run each; no interval)"
 
 
 def test_a_measured_value_that_varies_between_trials_is_not_a_reference(s5):
@@ -553,4 +553,23 @@ def test_a_study_with_repeated_trials_is_offered_the_interval_as_before(tmp_path
     rec = pv.records_of(_quest(tmp_path, _tiny_cells()), None)
     assert ":mean_ci @ m=20, method=all}}" in pv.sheet(rec)
     assert "{{v:coverage:mean_ci @ noise=0.05, n=20}}" in pv.writer_block(rec)
+    assert "one trial in each setting" not in pv.writer_block(rec)
+
+
+def test_a_pooled_plain_mean_of_one_run_settings_keeps_its_note_in_the_paper(tmp_path):
+    rec = pv.records_of(_quest(tmp_path, _one_trial_cells()), None)
+    got = pv.resolve("{{v:gain @ dose=1, steps=all}}", rec)
+    assert got.filled and got.text == "0.1400 (mean over 2 settings, one run each; no interval)", got.text
+    assert pv.resolve("{{v:gain @ dose=1, steps=16}}", rec).text == "0.1160"  # one setting: the value itself
+    sheet_line = next(l for l in pv.sheet(rec).splitlines() if l.startswith("- {{v:gain @ dose=1, steps=all}}"))
+    assert sheet_line.split(" -> ")[1].startswith(got.text)  # the sheet shows what the key fills
+
+
+def test_a_mixed_study_does_not_offer_its_single_trial_cells_as_plain_means(tmp_path):
+    cells = _one_trial_cells()
+    cells[0]["metrics"]["gain"]["values"] = [0.1, 0.12, 0.11]  # one setting repeated, five single-trial
+    rec = pv.records_of(_quest(tmp_path, cells), None)
+    sheet = pv.sheet(rec)
+    assert "{{v:gain:mean_ci @ dose=1, steps=16}}" in sheet  # the repeated setting keeps its interval key
+    assert "{{v:gain @ dose=2, steps=16}}" not in sheet and "{{v:gain:mean_ci @ dose=2, steps=16}}" not in sheet
     assert "one trial in each setting" not in pv.writer_block(rec)

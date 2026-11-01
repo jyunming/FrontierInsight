@@ -1073,14 +1073,14 @@ def _measure(rec: Records, metric: str, form: str, arg: str, where: dict[str, Pi
         if not summary["binary"]:
             raise _Unfilled(f"{metric} is not a 0/1 value, so there is no count of successes")
         return Measured(summary["mean"], "count", n=summary["n"], successes=int(summary["successes"]))
-    if form == "mean":
-        return Measured(_tt.summary(_observations(rec, cells, metric)[0])["mean"])
-    if form == "mean_ci" and (ran := _one_run_each(cells, metric)):
+    if form in ("mean", "mean_ci") and (ran := _one_run_each(cells, metric)):
         if len({sig(v) for v in values}) == 1:
             # Every setting gave the same value at the places printed: it is that one value (a deterministic result),
             # not a mean of different ones, so it is printed as it is.
             return Measured(values[0])
         return Measured(_tt.summary(values)["mean"], "over_settings", n=ran)
+    if form == "mean":
+        return Measured(_tt.summary(_observations(rec, cells, metric)[0])["mean"])
     if form in ("mean_ci", "ci", "pm"):
         mean, lo, hi, words, n, symmetric, _se = _interval(rec, cells, metric)
         if lo is None or hi is None:
@@ -1805,28 +1805,16 @@ def _line_key(metric: str, form: str, where: dict[str, Any], short: dict[str, st
         f"{short.get(a, a)}={_text_of(v) if not isinstance(v, Pick) else v.kind}" for a, v in where.items()) + "}}"
 
 
-def _sheet_line(rec: Records, metric: str, where: dict[str, Any], sets: frozenset[str] = frozenset()) -> str | None:
+def _sheet_line(rec: Records, metric: str, where: dict[str, Any], sets: frozenset[str] = frozenset(),
+                no_interval: bool = False) -> str | None:
+    """``no_interval``: the study holds no interval anywhere (one trial in every setting), so the mean is the key offered; the
+    key fills with the note that a pooled mean is over different settings, one run each. A mixed study keeps ``:mean_ci``."""
     short = rec.aliases()
-    key = _line_key(metric, "mean" if metric in sets or not _any_interval(rec) else "mean_ci", where, short)  # a value a setting sets has no interval
+    key = _line_key(metric, "mean" if metric in sets or no_interval else "mean_ci", where, short)  # a value a setting sets has no interval
     shown = resolve(key, rec)
-    if shown.hit and metric not in sets:
-        # No interval can be stated here (one trial in the setting): the mean is offered as the value itself, so the writer
-        # is never led to type an interval key FI cannot fill.
-        key = _line_key(metric, "mean", where, short)
-        shown = resolve(key, rec)
-    if shown.hit and metric not in sets:
-        # No interval can be stated here (one trial in the setting): the mean is offered as the value itself, so the writer
-        # is never led to type an interval key FI cannot fill.
-        key = _line_key(metric, "mean", where, short)
-        shown = resolve(key, rec)
     if shown.hit:
         return None
     text = shown.text
-    if key.count(":mean_ci") == 0 and metric not in sets and "=all" in key:
-        # A pooled line of a study with no interval is a mean over different settings: the line keeps saying so.
-        said = resolve(_line_key(metric, "mean_ci", where, short), rec)
-        if said.filled and said.text.startswith(text):
-            text = said.text
     parts = [f"{key} -> {text}"]
     if metric in sets:
         return "- " + parts[0]
@@ -1855,7 +1843,7 @@ def _set_by_setting_line(rec: Records, varied: list[str]) -> str:
 
 
 def _metric_lines(rec: Records, metric: str, axes: dict[str, list[Any]], varied: list[str],
-                  usable: dict[str, list[Any]], sets: frozenset[str]) -> tuple[list[str], list[str], list[tuple[str, str]]]:
+                  usable: dict[str, list[Any]], sets: frozenset[str], no_interval: bool = False) -> tuple[list[str], list[str], list[tuple[str, str]]]:
     """One quantity's part of the sheet: its line per setting (headed by its name), its lowest and highest mean (headed),
     and its pooled lines, each with the axis it is a line of (``""`` for one pinned to the values compared in a run)."""
     lines: list[tuple[float, str]] = []
@@ -1865,7 +1853,7 @@ def _metric_lines(rec: Records, metric: str, axes: dict[str, list[Any]], varied:
         if not all(_addressable(v) for v in where.values()) or json.dumps(where, default=str) in seen:
             continue
         seen.add(json.dumps(where, default=str))
-        line = _sheet_line(rec, metric, where, sets)
+        line = _sheet_line(rec, metric, where, sets, no_interval)
         if line:
             mean = _tt.summary(_trials([c], metric))["mean"] if _tt._values(c["metrics"][metric]) else 0.0
             lines.append((mean, line))
@@ -1878,7 +1866,7 @@ def _metric_lines(rec: Records, metric: str, axes: dict[str, list[Any]], varied:
     for axis in varied:
         for value in usable[axis]:
             where = {a: (value if a == axis else Pick("all")) for a in varied}
-            line = _sheet_line(rec, metric, where, sets)
+            line = _sheet_line(rec, metric, where, sets, no_interval)
             if line:
                 pooled.append((axis, line))
     if varied:
@@ -1892,7 +1880,7 @@ def _metric_lines(rec: Records, metric: str, axes: dict[str, list[Any]], varied:
         for a in inside:
             combos = [dict(base, **{a: v}) for base in combos for v in usable[a]]
         for pin in combos:
-            line = _sheet_line(rec, metric, {a: (pin[a] if a in pin else Pick("all")) for a in varied}, sets)
+            line = _sheet_line(rec, metric, {a: (pin[a] if a in pin else Pick("all")) for a in varied}, sets, no_interval)
             if line:
                 pooled.append(("", line))
     return full, extremes, pooled
@@ -1931,7 +1919,8 @@ def _answers_block(rec: Records) -> str:
     return text
 
 
-def sheet(rec: Records | None, max_lines: int = SHEET_MAX_LINES, max_shown: int = SHEET_MAX_SHOWN) -> str:
+def sheet(rec: Records | None, max_lines: int = SHEET_MAX_LINES, max_shown: int = SHEET_MAX_SHOWN,
+          no_interval: bool | None = None) -> str:
     """The "Results you can place" block: for each value the trials recorded, a line per setting (the key and the value
     as FI will write it, with its SD and the plan's reference where there are any), then the pooled line of each axis.
     A pure function of the records. Over ``max_lines``, only the pooled lines and each value's lowest and highest
@@ -1947,13 +1936,15 @@ def sheet(rec: Records | None, max_lines: int = SHEET_MAX_LINES, max_shown: int 
     usable = {a: [v for v in vs if _addressable(v)] for a, vs in axes.items()}
     names = [m for m in rec.metrics()]
     sets = frozenset(m for m in names if _setting_values(rec.carrying(m), m) is not None)
+    if no_interval is None:
+        no_interval = not _any_interval(rec)  # once per record, not per line
     planned = _planned(rec, names)
     order = planned + [m for m in names if m not in planned]
     parts: dict[str, tuple[list[str], list[str], list[tuple[str, str]]]] = {}
 
     def part(metric: str) -> tuple[list[str], list[str], list[tuple[str, str]]]:
         if metric not in parts:
-            parts[metric] = _metric_lines(rec, metric, axes, varied, usable, sets)
+            parts[metric] = _metric_lines(rec, metric, axes, varied, usable, sets, no_interval)
         return parts[metric]
 
     full_n = pooled_n = extremes_n = 0
@@ -2071,12 +2062,13 @@ def writer_block(rec: Records | None) -> str:
     head = (f"The study's quantities: {', '.join(rec.metrics())}. The settings it varied: {varied}"
             + (f". Settings the simulation never reads, pooled by FI: {', '.join(rec.short(a) for a in rec.unread)}" if rec.unread else "") + ".")
     rules = WRITER_RULES
-    if not _any_interval(rec):
+    no_interval = not _any_interval(rec)
+    if no_interval:
         # Every setting ran once, so no interval exists: the example and the note name only what FI can fill here.
         rules = rules.replace("{{v:coverage:mean_ci @ noise=0.05, n=20}}", "{{v:coverage @ noise=0.05, n=20}}")
         rules += ("\nThis study has one trial in each setting, so no interval exists: place a mean as {{v:<value> @ <where>}}, "
                   "never with :mean_ci, :ci, :pm, :sd, :sd_ci or :se.\n")
-    return rules + "\n" + head + "\n\n" + sheet(rec)
+    return rules + "\n" + head + "\n\n" + sheet(rec, no_interval=no_interval)
 
 
 def _any_interval(rec: Records) -> bool:
