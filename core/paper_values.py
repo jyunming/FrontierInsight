@@ -1603,15 +1603,22 @@ def calc(expression: str, protocol: dict[str, Any] | None, topic: str = "", rec:
         return Value(key, NOT_RECORDED, Hit(key, str(why)))
 
 
-def _series_value(shown: str, rec: Records | None) -> Value:
-    """A ``trend:`` or ``comparison:`` key (:mod:`core.trend`), filled or ``not recorded`` with the reason."""
+def _series_value(shown: str, rec: Records | None, prose: bool = False) -> Value:
+    """A ``trend:`` or ``comparison:`` key (:mod:`core.trend`), filled or ``not recorded`` with the reason. ``prose``: the key
+    stands in the writer's running text, so it is filled as one sentence (a capital, the verb run on, a full stop)."""
     from . import trend as _trend
 
     try:
         if rec is None or not rec.cells:
             raise _Unfilled("this study has no per-setting trial record")
-        make = _trend.trend_text if shown.startswith(TREND) else _trend.comparison_text
-        text, numbers, inputs = make(rec, shown.partition(":")[2])
+        body = shown.partition(":")[2]
+        if shown.startswith(TREND):
+            text, numbers, inputs = _trend.trend_text(rec, body, True) if prose else _trend.trend_text(rec, body)
+        else:
+            text, numbers, inputs = _trend.comparison_text(rec, body)
+        if prose:
+            text = text[:1].upper() + text[1:]
+            text = text if text.endswith((".", "!", "?")) else text + "."
         return Value(shown, text, numbers=numbers, inputs=inputs)
     except _Unfilled as why:
         return Value(shown, NOT_RECORDED, Hit(shown, str(why)))
@@ -1619,7 +1626,7 @@ def _series_value(shown: str, rec: Records | None) -> Value:
         return Value(shown, NOT_RECORDED, Hit(shown, f"the series could not be worked out ({type(why).__name__}: {why})"))
 
 
-def resolve(text: str, rec: Records | None) -> Value:
+def resolve(text: str, rec: Records | None, prose: bool = False) -> Value:
     """The key's value rendered, or ``not recorded`` with a :class:`Hit` saying why. Never a guess."""
     shown = text.strip()
     if shown.startswith("{{"):
@@ -1628,7 +1635,7 @@ def resolve(text: str, rec: Records | None) -> Value:
     if shown.startswith(CALC):
         return calc(shown[len(CALC):].strip(), rec.protocol if rec else None, rec.topic if rec else "", rec)
     if shown.startswith((TREND, COMPARISON)):
-        return _series_value(shown, rec)
+        return _series_value(shown, rec, prose)
     answer = _answer(shown, rec)
     if answer is not None:
         return answer
@@ -1679,6 +1686,16 @@ def resolve(text: str, rec: Records | None) -> Value:
 RECORD = Path(".fi") / "paper_values.json"
 
 
+_BLOCK_LINE = re.compile(r"\s*(?:[-*+]\s|\d+[.)]\s|\||#|>)")
+
+
+def in_prose(text: str, offset: int) -> bool:
+    """Whether the mark at ``offset`` stands in a paragraph of running text, by the structure of its line: not in a list item,
+    a table row, a heading or a quotation (the blocks FI builds are lists and tables)."""
+    start = text.rfind(chr(10), 0, offset) + 1
+    return not _BLOCK_LINE.match(text[start:offset + 1])
+
+
 def fill_values(markdown: str, rec: Records | None, plain: Any = None, span_of: Any = None) -> tuple[str, list[Value]]:
     """``markdown`` with every ``{{v:...}}`` filled and wrapped in its marker, and each key's :class:`Value`. ``plain``:
     a function of a text offset that says the key sits where no reader sees a marker as markup (math, code); its value is
@@ -1710,7 +1727,7 @@ def fill_values(markdown: str, rec: Records | None, plain: Any = None, span_of: 
                 out += [text[pos:m.start()], bare(m)]
                 pos = m.end()
             continue
-        value = resolve(m.group(1), rec)
+        value = resolve(m.group(1), rec, in_prose(text, m.start()))
         values.append(value)
         out += [text[pos:m.start()], value.marked]
         pos = m.end()

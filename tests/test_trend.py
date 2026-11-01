@@ -252,10 +252,10 @@ def test_a_typed_trend_key_is_filled_between_markers_and_turned_back_for_the_nex
     rec = _grid(lambda s, g: 1.0 - 0.4 * (s - 10) / 30)
     typed = "The score drops: {{trend:score over size @ group=a}} as stated."
     filled, hits = pv.fill(typed, rec)
-    assert not hits and "<!-- fi:v {{v:trend:score over size @ group=a}} -->score over size at group = a: falls" in filled
+    assert not hits and "<!-- fi:v {{v:trend:score over size @ group=a}} -->Score falls from" in filled
     assert pv.to_placeholders(filled) == typed
     assert pv.keys_in(typed) == ["trend:score over size @ group=a"]
-    assert pv.without_marks(filled).startswith("The score drops: score over size at group = a: falls")
+    assert pv.without_marks(filled).startswith("The score drops: Score falls from")
 
 
 def test_a_trend_key_places_no_quantity_for_the_check_of_asked_answers() -> None:
@@ -415,3 +415,22 @@ def test_a_change_between_single_runs_says_there_is_no_interval_and_no_verdict_c
     assert text.endswith("so there is no 95% interval")
     assert "more than noise" not in text
     assert "95% interval" in _say(_grid(lambda s, g: 1.0 - 0.4 * (s - 10) / 30), "score over size @ group=a").text  # an interval is still said when there is one
+
+
+def test_a_trend_mark_in_running_text_is_one_sentence_and_in_a_list_it_keeps_the_list_form() -> None:
+    """Before: a mark between two sentences was filled 'score over size at group = a: falls, from ...' (a label, a colon, a
+    fragment, no full stop). Now, standing in a paragraph, it is a sentence with a capital and a full stop; in a list item
+    (FI's own blocks are lists) it keeps its form."""
+    rec = _grid(lambda s, g: 1.0 - 0.4 * (s - 10) / 30)
+    mark = "{{v:trend:score over size @ group=a}}"
+    filled = pv.fill_values(f"The drop is steady. {mark} It is clear.\n\n- {mark}\n", rec)[0]
+    prose, listed = (pv._MARK.findall(filled)[0][1], pv._MARK.findall(filled)[1][1])
+    assert prose.startswith("Score falls from ") and prose.endswith(", for group = a.")
+    assert ": " not in prose and "the last is 0.6" in prose
+    assert listed.startswith("score over size at group = a: falls, from ") and not listed.endswith(".")
+
+
+def test_in_prose_is_read_from_the_line_structure() -> None:
+    text = "A paragraph {{v:x}}\n- item {{v:y}}\n| cell {{v:z}} |\n# head {{v:w}}\n1. step {{v:u}}\n{{v:t}}"
+    flags = {k: pv.in_prose(text, text.index("{{v:" + k)) for k in "xyzwut"}
+    assert flags == {"x": True, "y": False, "z": False, "w": False, "u": False, "t": True}

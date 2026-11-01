@@ -227,8 +227,9 @@ def _not_monotone(rec: _pv.Records, axis: str, points: list[_Point]) -> str:
     return f", the means are not monotone (lowest at {rec.label(axis)} = {lo.x}, highest at {rec.label(axis)} = {hi.x})"
 
 
-def _direction(rec: _pv.Records, metric: str, axis: str, points: list[_Point]) -> tuple[str, str, float | None]:
-    """``(word, the scope's sentence, the last-over-first ratio)``."""
+def _direction(rec: _pv.Records, metric: str, axis: str, points: list[_Point], prose: bool = False) -> tuple[str, str, float | None]:
+    """``(word, the scope's sentence, the last-over-first ratio)``. ``prose``: the words run on from the result's name as one
+    sentence (no comma after the verb, 'and the means ...'), for a mark that stands in running text."""
     first, last = points[0], points[-1]
     ch = _change(rec, metric, first, last)
     ratio = last.mean / first.mean if first.mean > 0 and last.mean > 0 else None
@@ -242,9 +243,18 @@ def _direction(rec: _pv.Records, metric: str, axis: str, points: list[_Point]) -
     if ch.exact:  # no spread on either side: the values are exact, a zero-width interval is not an interval
         lead = "no change" if ch.word == "none" else lead
         detail = f", {ends} (change {_pv.sig(ch.diff)}{_ratio(first.mean, last.mean)}; {ch.exact})"
-        return ch.word, lead + detail + _shape(rec, axis, points), ratio
+        return ch.word, _run_on(lead, detail, _shape(rec, axis, points), prose, ch.word), ratio
     detail = f", {ends} (change {_signed(ch)}, 95% interval{_ratio(first.mean, last.mean)}{ch.note})"
-    return ch.word, lead + detail + _shape(rec, axis, points), ratio
+    return ch.word, _run_on(lead, detail, _shape(rec, axis, points), prose, ch.word), ratio
+
+
+def _run_on(lead: str, detail: str, shape: str, prose: bool, word: str) -> str:
+    """The scope's words: the list form ``falls, from ..., the means decrease`` or, for ``prose``, ``falls from ..., and the
+    means decrease`` (``shows no change ...`` for a change that is none)."""
+    if not prose:
+        return lead + detail + shape
+    lead = "shows " + lead if word == "none" else lead
+    return lead + " " + detail[2:] + (", and " + shape[2:] if shape.startswith(", ") else shape)
 
 
 def _finer_is_larger(points: list[_Point]) -> bool | None:
@@ -311,7 +321,7 @@ def _order_words(rec: _pv.Records, axis: str, pairs: list[tuple[Any, Any, float 
     return text, values
 
 
-def trend_text(rec: _pv.Records, body: str) -> tuple[str, list[float], dict[str, Any]]:
+def trend_text(rec: _pv.Records, body: str, prose: bool = False) -> tuple[str, list[float], dict[str, Any]]:
     """``(the words, the numbers behind them, what they were computed from)`` for the key
     ``<result> over <axis> @ <where> [| order | order_size]`` (without its ``trend:`` prefix)."""
     head, where_text, parts = _split(body)
@@ -356,7 +366,7 @@ def trend_text(rec: _pv.Records, body: str) -> tuple[str, list[float], dict[str,
                 results.append((scope, "", text, min(nums) if nums else None))
                 order_numbers += [min(nums), max(nums)] if nums else []
             else:
-                word, text, ratio = _direction(rec, metric, axis, points)
+                word, text, ratio = _direction(rec, metric, axis, points, prose)
                 results.append((scope, word, text, ratio))
         except _Unfilled as why:
             raise _Unfilled(f"not computable{(' at ' + _names(rec, scope, False)) if scope else ''}: {why}") from None
@@ -387,7 +397,11 @@ def trend_text(rec: _pv.Records, body: str) -> tuple[str, list[float], dict[str,
                          + "; ".join(at(s) for s in falling[:4]) if falling else "; at none of them does the error fail to fall"))
         return (f"{rec.label(metric)} over {rec.label(axis)}, pairwise {detail}{left}", order_numbers, inputs)
     ratios = [r[3] for r in results if r[3] is not None]
-    if k == 1:
+    if k == 1 and prose and not order:
+        where_words = at(results[0][0])
+        first = rec.label(metric)
+        text = f"{first[:1].upper()}{first[1:]} {results[0][2]}" + (f", for {where_words.replace(', ', ' and ')}" if where_words else "") + "."
+    elif k == 1:
         where_words = at(results[0][0])
         text = f"{rec.label(metric)} over {rec.label(axis)}" + (f" at {where_words}" if where_words else "") + f": {results[0][2]}"
     elif k <= MAX_SCOPES_LISTED:
