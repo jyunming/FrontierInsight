@@ -101,3 +101,33 @@ def test_the_typed_in_results_repair_reads_a_reply_that_gives_its_fix_as_functio
     ok = asyncio.run(host._repair_typed_results({}, path, found))  # type: ignore[arg-type]
     text = path.read_text(encoding="utf-8")
     assert ok and "n * 2.0" in text and "__main__" in text
+
+
+PROSE = "I haven't run this patch; the `SCALE` line is a guess.\n\n"
+
+
+def test_a_reply_with_a_sentence_before_its_object_is_read(tmp_path: Path) -> None:
+    fixed = "def simulate(n):\n    SCALE = 2.0\n    return n * SCALE\n"
+    ok, text = _run(tmp_path, PROSE + json.dumps({"functions": fixed, "code": "", "patch_summary": "defined SCALE"}))
+    assert ok and "SCALE = 2.0" in text and "__main__" in text
+
+
+def test_the_repair_reader_takes_the_object_after_the_sentence_and_in_a_fence() -> None:
+    from core.engine import _repair_reply_json
+
+    obj = {"functions": "def f():\n    return 1\n", "code": ""}
+    assert _repair_reply_json(PROSE + json.dumps(obj), node="t") == obj
+    assert _repair_reply_json(PROSE + "```json\n" + json.dumps(obj) + "\n```\n", node="t") == obj
+    assert _repair_reply_json(json.dumps(obj), node="t") == obj
+
+
+def test_the_repair_reader_gives_nothing_for_prose_or_a_whole_script() -> None:
+    from core.engine import _repair_reply_json
+
+    assert _repair_reply_json("I cannot run code here, so I have no fix. {braces} in prose.", node="t") == {}
+    assert _repair_reply_json("Here:\n```python\nCFG = {'a': 1}\nprint(CFG)\n```\nDEPS: numpy\n", node="t") == {}
+
+
+def test_a_reply_of_prose_only_is_still_refused(tmp_path: Path) -> None:
+    ok, text = _run(tmp_path, "I could not run anything in this environment, so I have no fix to give.")
+    assert not ok and text == OLD

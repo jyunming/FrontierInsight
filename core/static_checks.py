@@ -54,9 +54,7 @@ def reply_script(host: Any, text: str, old: str, script: str) -> tuple[str, dict
     ``code``. A reply that is not JSON is read as an implement-style code block."""
     from . import engine as _e
 
-    parsed: dict[str, Any] = {}
-    if _e._strip_outer_fence(text).lstrip().startswith("{"):
-        parsed = _e._parse_json_lenient(text, node="execute_reflect") or {}
+    parsed = _e._repair_reply_json(text, node="execute_reflect")
     new_code = parsed.get("code")
     functions = parsed.get("functions")
     if isinstance(functions, str) and functions.strip():

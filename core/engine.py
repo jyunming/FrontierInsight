@@ -11962,9 +11962,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._log.warning("[execute] the call to redraw the figures from the results failed (%r); keeping %s as written",
                               exc, path.name)
             return False
-        parsed: dict[str, Any] = {}
-        if _strip_outer_fence(text).lstrip().startswith("{"):
-            parsed = _parse_json_lenient(text, node="implement_figures") or {}
+        parsed = _repair_reply_json(text, node="implement_figures")
         new_code = parsed.get("code")
         if not (isinstance(new_code, str) and new_code.strip()):
             new_code, _deps = _parse_implement_response(text)
@@ -12822,9 +12820,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         except Exception as exc:  # noqa: BLE001 -- a repair is best-effort
             self._log.warning("[protocol] the repair call failed (%r); keeping %s as written", exc, path.name)
             return code, deps, True
-        parsed: dict[str, Any] = {}
-        if _strip_outer_fence(text).lstrip().startswith("{"):
-            parsed = _parse_json_lenient(text, node="implement_protocol") or {}
+        parsed = _repair_reply_json(text, node="implement_protocol")
         new_code, new_deps = parsed.get("code"), _coerce_dep_list(parsed.get("deps"))
         if not (isinstance(new_code, str) and new_code.strip()):
             new_code, new_deps = _parse_implement_response(text)
@@ -18543,9 +18539,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         except Exception as exc:  # noqa: BLE001 -- a repair is best-effort
             self._log.warning("[oracle] the repair call failed (%r); keeping %s as written", exc, path.name)
             return None, True, "call_failed"
-        parsed: dict[str, Any] = {}
-        if _strip_outer_fence(text).lstrip().startswith("{"):
-            parsed = _parse_json_lenient(text, node="implement_oracle") or {}
+        parsed = _repair_reply_json(text, node="implement_oracle")
         self._oracle_patch_summary = " ".join(str(parsed.get("patch_summary") or "").split())[:300]
         newly_disputed = fi_value_disputed = False
         protocol_now = self._protocol_block(state)
@@ -18755,9 +18749,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             text = await self._chat(prompt, node="implement_seed")
         except Exception as exc:  # noqa: BLE001 -- a repair is best-effort
             text, why = "", f"the repair call failed ({exc!r})"
-        parsed: dict[str, Any] = {}
-        if _strip_outer_fence(text).lstrip().startswith("{"):
-            parsed = _parse_json_lenient(text, node="implement_seed") or {}
+        parsed = _repair_reply_json(text, node="implement_seed")
         new_code, new_deps = parsed.get("code"), _coerce_dep_list(parsed.get("deps"))
         if not (isinstance(new_code, str) and new_code.strip()):
             new_code, new_deps = _parse_implement_response(text)  # fence drift
@@ -33716,6 +33708,20 @@ def _format_cross_check(state: QuestState) -> str:
 
 
 _FENCE_RE = re.compile(r"^```(?:\w+)?\n(.*)\n```$", re.DOTALL)
+
+
+_REPAIR_REPLY_KEYS = ("functions", "code", "package_files", "oracle_change", "patch_summary", "give_up_reason")
+
+
+def _repair_reply_json(text: str, *, node: str) -> dict[str, Any]:
+    """The JSON object of a repair's reply, or ``{}`` when the reply holds none. A reply that is the object (bare or in one
+    fence) is read as it is; a reply that opens with a sentence of the model's own ("I have not run this ...") before the
+    object is read from the last object it holds that carries a key of the repair format. A reply that is a whole script
+    in a code block is not JSON and gives ``{}``, for the caller to read as code."""
+    if _strip_outer_fence(text).lstrip().startswith("{"):
+        return _parse_json_lenient(text, node=node) or {}
+    found = [o for o in _top_level_json_objects(text or "") if any(k in o for k in _REPAIR_REPLY_KEYS)]
+    return found[-1] if found else {}
 
 
 def _strip_outer_fence(text: str) -> str:
