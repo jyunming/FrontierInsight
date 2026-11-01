@@ -268,9 +268,29 @@ def _figure_handle(axes: list[Any], spec: dict[str, Any], file: str) -> Any:
             def __init__(self, axes, x=None, series=None, shows=None, file=None):
                 self.axes, self.x, self.series, self.shows, self.file = list(axes), x, series, shows, file
     handle = Figure(axes, x=spec.get("x"), series=spec.get("series"), shows=spec.get("shows"), file=file)
+    handle.axes = _Panels(handle.axes, str(spec.get("id")))
     handle.declared = {}
     handle.panel = _panel_declarer(handle, spec.get("settings") or {})
     return handle
+
+
+class _Panels(list):
+    """``fig.axes``: the axes FI made, one for each panel of the declared figure. A place past the last panel raises an
+    ``IndexError`` that says how many panels FI made, so the body is repaired from the count and not from a bare index."""
+
+    def __init__(self, axes: Any, figure: str):
+        super().__init__(axes)
+        self.figure = figure
+
+    def __getitem__(self, index: Any) -> Any:
+        try:
+            return super().__getitem__(index)
+        except IndexError:
+            if not isinstance(index, int):
+                raise
+            raise IndexError("`fig.axes[%d]`: FI made %d panel(s) for `figure_%s` (the plan's count), so `fig.axes` holds the axes "
+                             "0 to %d; draw on those, and put several settings, series or results on one axes as lines"
+                             % (index, len(self), self.figure, len(self) - 1)) from None
 
 
 class UnknownSetting(KeyError):

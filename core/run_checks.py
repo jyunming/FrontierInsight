@@ -335,13 +335,26 @@ def _cluster_bodies() -> str:
     return text
 
 
-def _bodies_reply(bodies: Sequence[str], cluster: bool) -> str:
+def panel_statement(panels: int) -> str:
+    """What FI tells the model of the axes it makes for a figure: how many, and that the count is the plan's, not the number of
+    values of a setting or of results the figure shows."""
+    if panels <= 1:
+        return ("FI makes ONE panel for it: `fig.axes` holds exactly one axes, `fig.axes[0]`. Draw everything the figure shows on "
+                "it (several settings, series or results are lines on that one axes, not more panels).")
+    return (f"FI makes exactly {panels} panels for it: `fig.axes[0]` to `fig.axes[{panels - 1}]`, no more. The count is the plan's, "
+            "not the number of values of a setting: index `fig.axes` by panel, and when a panel shows one setting value, say so "
+            "with `fig.panel(i, setting=value)`.")
+
+
+def _bodies_reply(bodies: Sequence[str], cluster: bool, panels: dict[str, int] | None = None) -> str:
     """The reply format when FI writes the analysis as well (experiment.py is FI's): ``trial``, then the bodies of derive.py
-    that the plan needs (none: no block), then the driver of a cluster, then the dependencies."""
+    that the plan needs (none: no block), then the driver of a cluster, then the dependencies. ``panels``: the panels FI
+    makes for each figure body (its name to the count), stated under that body's signature."""
     blocks = ["A fenced Python block starting with the line `# file: simulate.py`: the function `trial` and the imports and "
               "helper functions it needs (nothing of FI's frame)."]
     if bodies:
-        listed = "\n".join(f"   - `{_skeleton.body_signature(b) or 'def ' + b + '(...)'}`" for b in bodies)
+        listed = "\n".join(f"   - `{_skeleton.body_signature(b) or 'def ' + b + '(...)'}`"
+                           + (f" {panel_statement(panels[b])}" if panels and b in panels else "") for b in bodies)
         blocks.append("A fenced Python block starting with the line `# file: derive.py`: ONLY these functions, each given "
                       "whole with exactly the parameters shown, and the imports and helper functions they need (nothing of "
                       "FI's frame; FI writes experiment.py, you do not):\n" + listed)
@@ -354,12 +367,12 @@ def _bodies_reply(bodies: Sequence[str], cluster: bool) -> str:
             + "\n".join(f"{i}. {b}" for i, b in enumerate(blocks, 1)) + "\n\n")
 
 
-def _frame_reply(cluster: bool = False, bodies: Sequence[str] | None = None) -> str:
+def _frame_reply(cluster: bool = False, bodies: Sequence[str] | None = None, panels: dict[str, int] | None = None) -> str:
     """The reply format of a request where FI writes the frame of simulate.py; with ``cluster`` (the trials run as a job
     array) the driver `submit.py` the cluster section asks for is a block of the format too. With ``bodies`` (the functions
     of derive.py the plan needs, possibly none) FI writes experiment.py too and it is not asked for."""
     if bodies is not None:
-        return _bodies_reply(bodies, cluster)
+        return _bodies_reply(bodies, cluster, panels)
     return ("# Output format\nRespond with EXACTLY these, in this order, and nothing else:\n\n"
             "1. A fenced Python block starting with the line `# file: simulate.py`: the function `trial` and the imports and "
             "helper functions it needs (nothing of FI's frame).\n"
@@ -380,7 +393,8 @@ _FRAME_BODY_INTRO = (
     "you do NOT alter the imports or the figures-dir setup of the scaffold. The outline locked those decisions.\n\n")
 
 
-def frame_template_text(text: str, cluster: bool = False, bodies: Sequence[str] | None = None) -> str:
+def frame_template_text(text: str, cluster: bool = False, bodies: Sequence[str] | None = None,
+                        panels: dict[str, int] | None = None) -> str:
     """``text`` (a code-writing template) for a request where FI writes the frame of simulate.py: the bullets about a single
     script, the pilot, the seed and the oracle run are taken out, the reply format is the frame's, and the template does not
     say the whole scaffold is filled. ``bodies``: FI writes the analysis too (see :func:`_frame_reply`); the bullets about
@@ -404,7 +418,7 @@ def frame_template_text(text: str, cluster: bool = False, bodies: Sequence[str] 
                         "; an import is not a second file you author")
     a, b = text.find("# Output format"), text.find("# Inputs")
     if 0 <= a < b:
-        text = text[:a] + _frame_reply(cluster, bodies) + text[b:]
+        text = text[:a] + _frame_reply(cluster, bodies, panels) + text[b:]
     c = text.find("# The topic, as the person wrote it")
     if c > 0 and text.startswith("You are the **Implementation Body**"):
         text = (_FRAME_BODY_INTRO if bodies is None else _FRAME_BODY_INTRO_BODIES) + text[c:]
@@ -1258,7 +1272,20 @@ class RunChecksMixin:
 
         if not self._frame_variant(state):
             return tmpl
-        return _string.Template(frame_template_text(tmpl.template, bool(self.config.execution.background_jobs), bodies))  # type: ignore[attr-defined]
+        return _string.Template(frame_template_text(tmpl.template, bool(self.config.execution.background_jobs), bodies,
+                                                    self._figure_panels(state, bodies)))  # type: ignore[attr-defined]
+
+    def _figure_panels(self, state: Any, bodies: Sequence[str] | None) -> dict[str, int] | None:
+        """The panels FI makes for each figure body the request asks for (``figure_<id>`` to the plan's count), else ``None``."""
+        if not bodies:
+            return None
+        from . import analysis_frame as _analysis
+
+        try:
+            figures = _analysis.plan_of(state.get("design"))["figures"]
+            return {f"figure_{i}": int(f["panels"]) for i, f in figures.items() if f"figure_{i}" in bodies} or None
+        except Exception:  # noqa: BLE001 -- a plan FI cannot read gives the request as before, without the statement
+            return None
 
     def _frame_outline_template(self, state: Any, tmpl: Any, bodies: Sequence[str] | None = None) -> Any:
         """The outline request with what contradicts the frame taken out (``tmpl`` itself when there is no frame): the outline
