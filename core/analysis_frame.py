@@ -1410,8 +1410,11 @@ def _kept_figure(spec_id, quest_root):
     return None
 
 
-def _figures(table, quest_root):
-    """``(outcomes, said, exit code of the bodies, FI's own faults)`` of the figure step."""
+def _figures(table, quest_root, records=None):
+    """``(outcomes, said, exit code of the bodies, FI's own faults)`` of the figure step. ``records``: FI's record of the derived
+    quantities (this run's, or the earlier run's in the run that only draws the figures that failed), which the plan's own figure
+    draws a derived quantity from. A figure that failed is not run again in that run: its body may do anything, so the plan's own
+    figure is drawn in its place straight away."""
     if not os.path.exists(os.path.join(HERE, "fi_figures.py")):
         return [], "", 0, []
     try:
@@ -1435,13 +1438,20 @@ def _figures(table, quest_root):
             began = time.monotonic()
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
-                outcomes += fi_figures.run_figures([spec], derive, table, out_dir)
-                if os.environ.get("FI_FIGURE_FALLBACK") in ("1", "only") and outcomes[-1].get("status") in ("failed", "refused", "not_written"):
+                if only:
+                    # The body is not called: the plan's own figure is drawn from the table and the earlier record
+                    outcomes.append(fi_figures.default_figure(spec, table, out_dir, derive, records))
+                else:
+                    outcomes += fi_figures.run_figures([spec], derive, table, out_dir)
+                if not only and os.environ.get("FI_FIGURE_FALLBACK") == "1" and outcomes[-1].get("status") in (
+                        "failed", "refused", "not_written"):
                     # No repair is left for the body: the plan's own figure is drawn from the table in its place
-                    plain = fi_figures.default_figure(spec, table, out_dir, derive)
+                    plain = fi_figures.default_figure(spec, table, out_dir, derive, records)
                     if plain.get("status") in ("ok", "dropped"):
                         outcomes[-1] = plain
                     else:
+                        # FI's own drawing failed: the body's failure stays, and the fault is FI's, recorded beside it
+                        outcomes[-1] = dict(outcomes[-1], fallback_fault=str(plain.get("said") or plain.get("why")))
                         sys.stderr.write("%s\\n" % plain.get("said"))
             seen["seconds"] += time.monotonic() - began
             for w in caught:
@@ -1497,7 +1507,7 @@ def run(record_path, quest_root):
     records = earlier["derived"] if only else _derived(table, base, compared)
     _progress("fi: printing the results")
     out = {} if only else result_json(table, records, compared)
-    outcomes, said, figure_code, figure_faults = _figures(table, quest_root)
+    outcomes, said, figure_code, figure_faults = _figures(table, quest_root, records)
     not_computed = [{"id": i, "status": r["status"], "why": r.get("why") or ""} for i, r in records.items() if r["status"] != "ok"]
     not_computed += [{"id": rid, "status": "no_data", "why": "no trial gave a value for it"}
                      for rid in derive.RESULTS if rid in out and out[rid] is None]

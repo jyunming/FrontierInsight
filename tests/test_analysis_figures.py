@@ -996,7 +996,7 @@ def test_default_figure_draws_a_result_recorded_per_compared_value_one_line_each
     seen = _spy_axes(monkeypatch)
     out = af.default_figure({"id": "f1", "file": "f1.png", "shows": ["lev"], "x": "size", "result_labels": {"lev": "response"}},
                             _Levels(), str(tmp_path))
-    assert out["status"] == "ok" and out["fallback"] is True
+    assert out["status"] == "ok" and out["fallback"] is True, out
     lines = seen["axes"][0].lines
     assert [l.get_label() for l in lines] == ["response, a", "response, b"]
     assert [list(l.get_ydata()) for l in lines] == [[11.0, 21.0, 31.0], [12.0, 22.0, 32.0]]
@@ -1674,3 +1674,98 @@ def test_default_figure_holds_at_the_sub_study_hold(tmp_path, frame5):
                             types.SimpleNamespace(PARTS=parts))
     assert out["held"] == {"mode": "c"}
     assert _calls_of(frame5)["panels"][0]["series"][0]["x"] == [10, 20, 30]
+
+
+# ---- fix round 1: the hold counts drawable points, a derived y, ids made by FI ------------------------------------------------
+class _Unusable(_CallGrid):
+    """``mode`` b has the most settings along size (four) but no value of ``gain``; c has three settings with values."""
+
+    def __init__(self):
+        super().__init__()
+        self._cells = {"size=%d,mode=%s" % (s, m): {"size": s, "mode": m} for m, sizes in (("b", (10, 20, 30, 40)), ("c", (10, 20, 30)))
+                       for s in sizes}
+
+    def mean(self, name, key):
+        self.gave_values.add(name)
+        return None if self._cells[key]["mode"] == "b" else float(self._cells[key]["size"])
+
+
+def test_default_figure_hold_with_more_cells_but_no_usable_result_loses(tmp_path, frame5):
+    out = af.default_figure({"id": "f1", "file": "f1.png", "shows": ["gain"], "x": "size"}, _Unusable(), str(tmp_path))
+    assert out["status"] == "ok" and out["held"] == {"mode": "c"}
+    assert _calls_of(frame5)["panels"][0]["series"][0]["x"] == [10, 20, 30]
+
+
+class _Tied(_CallGrid):
+    """``mode`` q and p each have three drawable settings; q is the first row of the table."""
+
+    def __init__(self, order=("q", "p")):
+        super().__init__()
+        self._cells = {"size=%d,mode=%s" % (s, m): {"size": s, "mode": m} for m in order for s in (10, 20, 30)}
+
+    def mean(self, name, key):
+        self.gave_values.add(name)
+        return float(self._cells[key]["size"])
+
+
+def test_default_figure_tie_goes_to_the_first_value_of_the_plan_not_the_first_row(tmp_path, frame5):
+    spec = {"id": "f1", "file": "f1.png", "shows": ["gain"], "x": "size"}
+    for order in (("q", "p"), ("p", "q")):  # the table's row order does not matter
+        assert af.default_figure(spec, _Tied(order), str(tmp_path))["held"] == {"mode": "p"}  # no plan order: ascending
+        got = af.default_figure(spec, _Tied(order), str(tmp_path), types.SimpleNamespace(COMPARED={"mode": ["q", "p"]}))
+        assert got["held"] == {"mode": "q"}  # the plan's own order
+
+
+def test_default_figure_of_two_sub_studies_that_fit_uses_neither_hold(tmp_path, frame5):
+    parts = {"one": {"mode": "b"}, "two": {"mode": "c"}}  # both leave size free: the figure belongs to neither alone
+    out = af.default_figure({"id": "f1", "file": "f1.png", "shows": ["gain"], "x": "size"}, _Ragged(), str(tmp_path),
+                            types.SimpleNamespace(PARTS=parts))
+    assert out["held"] == {"mode": "d"}  # the value with the most points, not another part's hold
+    one = af.default_figure({"id": "f1", "file": "f1.png", "shows": ["gain"], "x": "size"}, _Ragged(), str(tmp_path),
+                            types.SimpleNamespace(PARTS={"one": {"mode": "b"}, "other": {"size": 10}}))
+    assert one["held"] == {"mode": "b"}  # a sub-study that holds x itself is not this figure's; the other one is
+
+
+_NET = {"net": {"status": "ok", "by_setting": {"size=10,rate=0.1": 1.5, "size=20,rate=0.1": 2.5, "size=30,rate=0.1": 3.5,
+                                               "size=10,rate=0.2": 9.0, "size=20,rate=0.2": 9.0, "size=30,rate=0.2": 9.0}}}
+
+
+def test_default_figure_draws_a_derived_y_from_fis_derived_values(tmp_path, frame5):
+    ns = types.SimpleNamespace(DERIVED={"net": {}})
+    out = af.default_figure({"id": "f1", "file": "f1.png", "shows": ["net"], "x": "size"}, _CallGrid(), str(tmp_path), ns, _NET)
+    assert out["status"] == "ok" and out["fallback"] is True, out
+    panel = _calls_of(frame5)["panels"][0]
+    assert panel["raw"] is False  # the derived id is the series id; what a claim may say of it is the claim check's
+    assert [(s["id"], s["y"]) for s in panel["series"]] == [("net", [1.5, 2.5, 3.5])]  # held at rate 0.1 (first, tied)
+
+
+def test_default_figure_leaves_out_a_derived_line_fi_holds_no_value_for_and_says_so(tmp_path, frame5, capsys):
+    ns = types.SimpleNamespace(DERIVED={"net": {}})
+    spec = {"id": "f1", "file": "f1.png", "shows": ["gain", "net"], "x": "size"}
+    out = af.default_figure(spec, _CallGrid(), str(tmp_path), ns, {"net": {"status": "failed", "why": "no"}})
+    assert out["status"] == "ok" and [s["id"] for s in _calls_of(frame5)["panels"][0]["series"]] == ["gain"]
+    assert "`net`" in capsys.readouterr().err
+    only = af.default_figure(dict(spec, shows=["net"]), _CallGrid(), str(tmp_path), ns, {"net": {"status": "ok", "value": 4.0}})
+    assert only["status"] == "dropped"  # one number for the whole study is no line along size; nothing is invented
+
+
+def test_default_figure_series_ids_are_made_of_plan_ids_never_labels(tmp_path, frame5):
+    spec = {"id": "f1", "file": "f1.png", "shows": ["gain"], "x": "size", "series": "rate", "result_labels": {"gain": "Net improvement"},
+            "labels": {"rate": "learning rate"}}
+    af.default_figure(spec, _CallGrid(), str(tmp_path))
+    series = _calls_of(frame5)["panels"][0]["series"]
+    assert [s["id"] for s in series] == ["gain, rate = 0.1", "gain, rate = 0.2"]
+    assert all("Net improvement" in s["label"] for s in series)  # the labels are apart from the ids
+    af.default_figure({"id": "f1", "file": "f1.png", "shows": ["lev"], "x": "size", "result_labels": {"lev": "response"}},
+                      _Levels2(), str(tmp_path))
+    assert [s["id"] for s in _calls_of(frame5)["panels"][0]["series"]] == ["lev, a", "lev, b"]
+
+
+class _Levels2(_CallGrid, _Levels):
+    declared = ["gain", "lev"]
+
+
+def test_default_figure_draws_lines_only_so_it_has_no_bars_or_error_bars(tmp_path, frame5):
+    af.default_figure({"id": "f1", "file": "f1.png", "shows": ["gain", "loss"], "x": "size", "series": "rate"}, _CallGrid(), str(tmp_path))
+    panel = _calls_of(frame5)["panels"][0]
+    assert {s["kind"] for s in panel["series"]} == {"line"} and all(not s.get("yerr") for s in panel["series"]) and panel["bands"] == []

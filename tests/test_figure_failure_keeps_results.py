@@ -462,3 +462,56 @@ def test_a_result_check_give_up_still_draws_the_failed_figure(tmp_path: Path, mo
     assert (root / "figures" / "growth.png").stat().st_size > 0
     plain = {"exec_result": {"returncode": 1, "results_produced": True}}
     assert asyncio.run(eng._result_check_gave_up_with_figures(plain)) is None  # not a run the results check sent back
+
+
+# ---- fix round 1: a fault of the default figure is FI's and is recorded; "only" never runs the failed body ----
+_SIDE_EFFECT = ("def figure_fig1(fig, table):\n    open('body_was_called.txt', 'w').write('x')\n"
+                "    raise ValueError('the body reads an id the plan does not declare')\n")
+
+
+def test_a_fault_of_the_default_figure_is_recorded_as_a_fallback_fault_not_only_printed(tmp_path: Path) -> None:
+    import os
+    import subprocess
+    import sys
+
+    from tests.test_analysis_frame import NO_WINDOW, _design, _quest
+
+    quest = _quest(tmp_path, _design(), _RAISES)
+    script = ("import json, sys\nsys.path.insert(0, '.')\nimport experiment, fi_figures, fi_table\n"
+              "def broken(*a, **k):\n    return {'id': 'fig1', 'file': 'growth.png', 'status': 'fi_fault', 'said': 'FI default stopped', "
+              "'why': 'FI default stopped', 'fallback': True}\n"
+              "fi_figures.default_figure = broken\n"
+              "import os\nquest = os.path.dirname(os.path.abspath('.'))\n"
+              "out, records, code, doc = experiment.run(fi_table.record_path(quest), quest)\n"
+              "print('GOT ' + json.dumps({'code': code, 'faults': doc['fi_faults'], 'figs': doc['figures']}))\n")
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "FI_ROOT", "FI_TRIALS")} | {"FI_FIGURE_FALLBACK": "1"}
+    done = subprocess.run([sys.executable, "-c", script], cwd=quest / "code", env=env, capture_output=True, text=True, timeout=300,
+                          creationflags=NO_WINDOW)
+    got = json.loads(next(ln for ln in done.stdout.splitlines() if ln.startswith("GOT "))[4:])
+    fig = next(o for o in got["figs"] if o["id"] == "fig1")
+    assert fig["status"] == "failed" and fig["fallback_fault"] == "FI default stopped"  # the body's failure stays, the fault beside it
+    assert got["faults"] == ["FI default stopped"] and got["code"] == 2  # FI's fault: nothing to send the model
+
+
+def test_only_mode_does_not_run_the_failed_body_and_draws_the_default_figure(tmp_path: Path) -> None:
+    import os
+    import subprocess
+    import sys
+
+    from tests.test_analysis_frame import NO_WINDOW, _design, _quest
+
+    quest = _quest(tmp_path, _design(), _SIDE_EFFECT)
+    rc, _printed, first = _analysis_run(quest, last_run=False)
+    marker = quest / "code" / "body_was_called.txt"
+    assert rc == 1 and marker.exists() and next(o for o in first["figures"] if o["id"] == "fig1")["status"] == "failed"
+    marker.unlink()
+    before = first["derived"]
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "FI_ROOT", "FI_TRIALS")} | {"FI_FIGURE_FALLBACK": "only"}
+    done = subprocess.run([sys.executable, "experiment.py"], cwd=quest / "code", env=env, capture_output=True, text=True, timeout=300,
+                          creationflags=NO_WINDOW)
+    after = json.loads((quest / frame.DERIVED_PATH).read_text(encoding="utf-8"))
+    fig = next(o for o in after["figures"] if o["id"] == "fig1")
+    assert not marker.exists(), "the failed body was run again"
+    assert done.returncode == 0, done.stderr[-500:]
+    assert fig["status"] == "ok" and fig["fallback"] is True and (quest / "figures" / "growth.png").stat().st_size > 0
+    assert after["derived"] == before  # no derived value changed

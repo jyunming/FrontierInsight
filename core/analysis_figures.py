@@ -36,6 +36,7 @@ import math
 import numbers
 import os
 import re
+import sys
 import traceback
 from typing import Any
 
@@ -1092,9 +1093,22 @@ def _plain_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
-def _default_points(table: Any, rid: str, key: str) -> dict[str, float]:
+def _derived_points(record: Any, key: str) -> dict[str, float]:
+    """The number FI holds for a derived quantity at setting ``key``: ``{"": number}`` from a record of a value for each setting
+    (``by_setting``), ``{}`` for anything else (one number for the whole study, a value for each compared value, a quantity that
+    was not worked out, a setting it gives none for): no line is made of a number that is not along the setting."""
+    if not isinstance(record, dict) or record.get("status") != "ok" or not isinstance(record.get("by_setting"), dict):
+        return {}
+    got = record["by_setting"].get(key)
+    return {"": float(got)} if _plain_number(got) else {}
+
+
+def _default_points(table: Any, rid: str, key: str, derived: Any = None) -> dict[str, float]:
     """The numbers the table holds for result ``rid`` at setting ``key``: ``{"": mean}`` for a result recorded once for the setting,
-    ``{level: mean}`` for one recorded for each value compared inside the runs (``level_means``); ``{}`` when it holds none."""
+    ``{level: mean}`` for one recorded for each value compared inside the runs (``level_means``); ``{}`` when it holds none. A
+    derived quantity (``derived``: FI's record of the derived values, ``{id: record}``) is read from that record."""
+    if isinstance(derived, dict) and rid in derived:
+        return _derived_points(derived[rid], key)
     try:
         got = table.mean(rid, key)
     except Exception:  # noqa: BLE001 -- a result recorded per compared value is read by level below
@@ -1107,10 +1121,12 @@ def _default_points(table: Any, rid: str, key: str) -> dict[str, float]:
     return {"": float(got)} if _plain_number(got) else {}
 
 
-def _default_lines(spec: dict[str, Any], table: Any, fixed: dict[str, Any]) -> list[tuple[str, list[Any], list[float], str]]:
-    """The lines of the default figure with the settings in ``fixed`` held: ``(label, x values, y values, result id)``, one per
-    result in ``shows``, per value of the ``series`` setting and, for a result recorded per compared value, per value compared.
-    No line holds points of two settings."""
+def _default_lines(spec: dict[str, Any], table: Any, fixed: dict[str, Any], derived: Any = None
+                   ) -> list[tuple[str, list[Any], list[float], str, str]]:
+    """The lines of the default figure with the settings in ``fixed`` held: ``(label, x values, y values, result id, series id)``,
+    one per result in ``shows``, per value of the ``series`` setting and, for a result recorded per compared value, per value
+    compared. No line holds points of two settings. The series id is made by FI from the plan's ids and the recorded values
+    (``gain, rate = 0.1``); the label is the plan's words and is apart from it."""
     x_name, s_name = str(spec.get("x")), spec.get("series")
     names = spec.get("result_labels") if isinstance(spec.get("result_labels"), dict) else {}
     cells = {k: dict(table.setting(k)) for k in table.keys()}
@@ -1122,22 +1138,43 @@ def _default_lines(spec: dict[str, Any], table: Any, fixed: dict[str, Any]) -> l
             for k, cell in cells.items():
                 if x_name not in cell or any(cell.get(a) != v for a, v in fixed.items()) or (s_name and cell.get(str(s_name)) != value):
                     continue
-                for level, mean in _default_points(table, rid, k).items():
+                for level, mean in _default_points(table, rid, k, derived).items():
                     by_level.setdefault(level, []).append((cell[x_name], mean))
             for level, points in by_level.items():
                 if all(_plain_number(p[0]) for p in points):
                     points.sort(key=lambda p: p[0])
-                label = ", ".join([str(names.get(rid) or rid)] + (["%s = %s" % (s_name, value)] if s_name else []) + ([level] if level else []))
-                lines.append((label, [p[0] for p in points], [p[1] for p in points], rid))
+                tail = (["%s = %s" % (s_name, value)] if s_name else []) + ([level] if level else [])
+                lines.append((", ".join([str(names.get(rid) or rid)] + tail), [p[0] for p in points], [p[1] for p in points], rid,
+                              ", ".join([rid] + tail)))
     return lines
 
 
-def _default_hold(spec: dict[str, Any], table: Any, held: list[dict[str, Any]], skip: set[str], parts: Any) -> dict[str, Any]:
+def _grid_order(name: str, values: list[Any], spec: dict[str, Any], compared: Any) -> list[Any]:
+    """The values of setting ``name`` in the plan's order: as the plan lists them for what a run compares or for the figure's own
+    settings; any other (the plan's grid is not carried) ascending, numbers first. Never in the order of the table's rows."""
+    plan: list[Any] = []
+    for source in (compared.get(name) if isinstance(compared, dict) else None,
+                   spec["settings"].get(name) if isinstance(spec.get("settings"), dict) else None):
+        if isinstance(source, (list, tuple)):
+            plan = list(source)
+            break
+
+    def rank(v: Any) -> tuple[Any, ...]:
+        if v in plan:
+            return (0, plan.index(v), 0, "")
+        return (1, 0, v, "") if _plain_number(v) else (2, 0, 0, str(v))
+
+    return sorted(values, key=rank)
+
+
+def _default_hold(spec: dict[str, Any], table: Any, held: list[dict[str, Any]], skip: set[str], namespace: Any,
+                  derived: Any = None) -> dict[str, Any]:
     """Where the default figure holds every other setting the study varies (not ``x``, the series or the panel setting). Not at the
-    first value the table records (that can be a combination nothing was run at: a blank panel): at the hold of the sub-study the
-    plan names (``parts``: each sub-study and the settings it holds; one that holds ``x``, the series or the panel setting cannot
-    show them and is not used; of several, the one that leaves the most points along ``x``), and, for a setting no sub-study holds,
-    at the value that leaves the most points along ``x`` on the panels. The earlier of two equal choices wins."""
+    first value the table records (that can be a combination nothing was run at: a blank panel). At the hold of the sub-study the
+    figure belongs to: the one sub-study of the plan (``PARTS``: each sub-study and the settings it holds) that holds none of
+    ``x``, the series or the panel setting, so that the figure can show them; when several do, or none, the figure belongs to
+    none and no sub-study's hold is used. A setting no such hold gives is held at the value that leaves the most points with a
+    value to draw (a line's points, over the panels); of two equal ones, the first in the plan's order (``_grid_order``)."""
     x_name = str(spec.get("x"))
     cells = [dict(table.setting(k)) for k in table.keys()]
     others: dict[str, list[Any]] = {}
@@ -1148,25 +1185,23 @@ def _default_hold(spec: dict[str, Any], table: Any, held: list[dict[str, Any]], 
     varied = {a: vs for a, vs in others.items() if len(vs) > 1}
     if not varied:
         return {}
-
-    def reach(hold: dict[str, Any]) -> int:
-        return sum(len({c[x_name] for c in cells if x_name in c and all(c.get(a) == v for a, v in {**one, **hold}.items())})
-                   for one in held)
-
-    chosen: dict[str, Any] = {}
-    best = -1
+    parts = _from(namespace, "PARTS", {})
+    fits = []
     for hold in (parts.values() if isinstance(parts, dict) else []):
-        if not isinstance(hold, dict) or set(map(str, hold)) & (skip | {x_name}):
-            continue
-        kept = {str(a): v for a, v in hold.items() if str(a) in varied and v in varied[str(a)]}
-        if kept and reach(kept) > best:
-            chosen, best = kept, reach(kept)
+        if isinstance(hold, dict) and not set(map(str, hold)) & (skip | {x_name}):
+            fits.append({str(a): v for a, v in hold.items() if str(a) in varied and v in varied[str(a)]})
+    chosen: dict[str, Any] = dict(fits[0]) if len(fits) == 1 else {}
+    compared = _from(namespace, "COMPARED", {})
+
+    def points(hold: dict[str, Any]) -> int:
+        return sum(len(line[1]) for one in held for line in _default_lines(spec, table, {**one, **hold}, derived))
+
     for a, vs in varied.items():
         if a in chosen:
             continue
         top, pick = -1, vs[0]
-        for v in vs:
-            got = reach({**chosen, a: v})
+        for v in _grid_order(a, vs, spec, compared):
+            got = points({**chosen, a: v})
             if got > top:
                 top, pick = got, v
         chosen[a] = pick
@@ -1182,7 +1217,7 @@ def _frame_has_calls() -> bool:
         return False
 
 
-def default_figure(spec: dict[str, Any], table: Any, out_dir: str, namespace: Any = None) -> dict[str, Any]:
+def default_figure(spec: dict[str, Any], table: Any, out_dir: str, namespace: Any = None, derived: Any = None) -> dict[str, Any]:
     """The plan's own figure, drawn by FI from the table when a figure body cannot be repaired: one line for each result the figure
     ``shows`` over its ``x`` setting, one line for each value of its ``series`` setting (and of a factor a result is recorded per) and
     one panel for each of its ``panels`` (the panel setting is the first setting the plan lets a panel show that is neither ``x`` nor
@@ -1190,7 +1225,9 @@ def default_figure(spec: dict[str, Any], table: Any, out_dir: str, namespace: An
     outcome says so). Any other setting the study varies is held (``_default_hold``: at the sub-study's hold, else where most points
     are), and the title says which. It is drawn with the calls a figure body uses (``fig.line``) when the frame has them, so its
     call record is marked ``fallback`` and holds no custom drawing; ``namespace`` is the carried plan (``COMPARED``, ``PARTS``,
-    ``DERIVED``). A plan that declares no ``shows`` or no ``x``, or a table that holds no value to draw, gives no default: the
+    ``DERIVED``). A result the plan derives is drawn from ``derived``, FI's record of the derived values (this run's, or in the
+    run that only draws the figures that failed, the earlier run's); a line FI holds no value for is left out and said on stderr,
+    never made up. The drawing is lines only: no bars and no error bars. A plan that declares no ``shows`` or no ``x``, or a table that holds no value to draw, gives no default: the
     outcome is ``dropped`` and says why, and no file is kept."""
     fid, file = str(spec.get("id")), str(spec.get("file") or "%s.png" % spec.get("id"))
     _remove(out_dir, file)
@@ -1209,12 +1246,16 @@ def default_figure(spec: dict[str, Any], table: Any, out_dir: str, namespace: An
         if wanted > 1 and panel_by:
             held = [{panel_by: v} for v in list(settings[panel_by])[:wanted]]
         by_panel = panel_by if len(held) > 1 else None
-        hold = _default_hold(spec, table, held, {a for a in (x_name, s_name, by_panel) if a}, _from(namespace, "PARTS", {}))
+        hold = _default_hold(spec, table, held, {a for a in (x_name, s_name, by_panel) if a}, namespace, derived)
         labels = spec.get("labels") if isinstance(spec.get("labels"), dict) else {}
         reset = getattr(table, "reset_reads", None)
         if callable(reset):
             reset()
-        drawn = [_default_lines(spec, table, {**one, **hold}) for one in held]
+        drawn = [_default_lines(spec, table, {**one, **hold}, derived) for one in held]
+        for rid in (str(r) for r in shows):
+            if isinstance(derived, dict) and rid in derived and not any(line[3] == rid for lines in drawn for line in lines):
+                sys.stderr.write("fi: the default figure `%s` leaves out `%s`: FI holds no value of it for each setting along `%s`\n" % (
+                    fid, rid, x_name))
         if not any(drawn):
             return dict(_outcome(fid, file, "dropped", "Figure `%s` is not drawn: the table holds no value of %s along `%s`." % (
                 fid, ", ".join("`%s`" % r for r in shows), spec["x"])), fallback=True)
@@ -1224,13 +1265,13 @@ def default_figure(spec: dict[str, Any], table: Any, out_dir: str, namespace: An
             note = "Figure `%s` has %d panel(s) instead of the %d the plan asks for: the table gives no more settings to show one on each." % (
                 fid, len(held), wanted)
         if _frame_has_calls():
-            return _default_with_calls(dict(spec, panels=len(held)), table, out_dir, namespace, held, hold, drawn, note)
+            return _default_with_calls(dict(spec, panels=len(held)), table, out_dir, namespace, held, hold, drawn, note, derived)
         plt, fig, axes = _new_figure(len(held))
         record = []
         for index, (one, lines) in enumerate(zip(held, drawn)):
             ax = axes[index]
-            cats = list(dict.fromkeys(v for _l, xs, _y, _r in lines for v in xs if not _plain_number(v)))
-            for label, xs, ys, _rid in lines:
+            cats = list(dict.fromkeys(v for _l, xs, _y, _r, _i in lines for v in xs if not _plain_number(v)))
+            for label, xs, ys, _rid, _sid in lines:
                 ax.plot([cats.index(v) if v in cats else v for v in xs], ys, marker="o", label=label)
             if cats:
                 ax.set_xticks(range(len(cats)), [str(v) for v in cats])
@@ -1265,25 +1306,29 @@ def default_figure(spec: dict[str, Any], table: Any, out_dir: str, namespace: An
 
 
 def _default_with_calls(spec: dict[str, Any], table: Any, out_dir: str, namespace: Any, held: list[dict[str, Any]],
-                        hold: dict[str, Any], drawn: list[list[tuple[str, list[Any], list[float], str]]], note: str) -> dict[str, Any]:
+                        hold: dict[str, Any], drawn: list[list[tuple[str, list[Any], list[float], str, str]]], note: str,
+                        derived: Any = None) -> dict[str, Any]:
     """Draw the default figure through ``fig.line`` as a figure body would, with the plan marked ``fallback`` so the call record is.
-    A line is a series named by the result's id when it is the only line of its result, else by an id FI makes of its label (added
-    to the ids the calls accept, with the label as its words). The held settings of a panel are declared for FI's title. The
+    A line is a series named by the result's id (or the derived quantity's) when it is the only line of that result, else by an
+    id FI makes of the plan's ids and the recorded values (``gain, rate = 0.1``; added to the ids the calls accept, with the plan's
+    words as its label). The held settings of a panel are declared for FI's title. The
     outcome is the one of ``_draw_one``, marked ``fallback``; a fault of these calls is FI's (``fi_fault``), never the model's."""
     fid, file = str(spec.get("id")), str(spec.get("file") or "%s.png" % spec.get("id"))
     plan = _plan_for(dict(spec, fallback=True), namespace, table)
     for lines in drawn:
-        for label, _x, _y, rid in lines:
-            if sum(1 for line in lines if line[3] == rid) > 1 and label not in plan["series_ids"]:
-                plan["series_ids"].append(label)
-                plan["labels"][label] = label
+        for label, _x, _y, rid, sid in lines:
+            if sum(1 for line in lines if line[3] == rid) > 1 and sid not in plan["series_ids"]:
+                plan["series_ids"].append(sid)
+                plan["labels"][sid] = label
 
     def body(fig: Any, tbl: Any) -> None:
         for index, one in enumerate(held):
-            lines = _default_lines(spec, tbl, {**one, **hold})  # read again: the reads are recorded from the start of the body
-            for label, xs, ys, rid in lines:
+            lines = _default_lines(spec, tbl, {**one, **hold}, derived)  # read again: the reads are recorded from the start of the body
+            for _label, xs, ys, rid, sid in lines:
                 lone = sum(1 for line in lines if line[3] == rid) == 1
-                for art in fig.line(index, rid if lone else label, xs, ys, rid):
+                if isinstance(derived, dict) and rid in derived and isinstance(getattr(tbl, "gave_values", None), set):
+                    tbl.gave_values.add(rid)  # FI read this value from its derived record, not from the table
+                for art in fig.line(index, rid if lone else sid, xs, ys, rid):
                     art.set_marker("o")
             if {**one, **hold}:
                 fig.declared[index] = {**one, **hold}
@@ -1318,5 +1363,7 @@ def exit_code(outcomes: list[dict[str, Any]]) -> int:
 
 
 def fi_faults(outcomes: list[dict[str, Any]]) -> list[str]:
-    """What FI's own figures could not do because of FI's own record or code: said plainly, never sent to the model."""
-    return [o["said"] for o in outcomes if o.get("status") == "fi_fault"]
+    """What FI's own figures could not do because of FI's own record or code: said plainly, never sent to the model (a figure of FI's
+    that failed, and the default figure that failed in place of a body that failed: ``fallback_fault``)."""
+    return [o["said"] for o in outcomes if o.get("status") == "fi_fault"] + [
+        o["fallback_fault"] for o in outcomes if o.get("fallback_fault")]  # FI's default figure failed beside a body that failed

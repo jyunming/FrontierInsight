@@ -277,7 +277,8 @@ class FigureCalls:
         return list(getattr(getattr(self, "table", None), "declared", []) or [])
 
     def _series_ok(self, series):
-        known = list(getattr(self, "series_ids", []) or []) + [r for r in self._results() if r not in (getattr(self, "series_ids", []) or [])]
+        ids = list(getattr(self, "series_ids", []) or [])
+        known = ids + [r for r in self._results() + list(getattr(self, "derived_ids", []) or []) if r not in ids]
         if not known:
             raise ValueError("FI did not supply the study's series and results to this figure, so no series can be drawn; this is a "
                              "fault of FI's files, not of the figure function (series `%s`)" % (series,))
