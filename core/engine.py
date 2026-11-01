@@ -34119,7 +34119,8 @@ def _unread_results(records: dict[str, Any]) -> list[str]:
         if not isinstance(declared, dict):
             continue
         names = declared.get("labels") if isinstance(declared.get("labels"), dict) else {}
-        missing = [str(names.get(str(r)) or str(r)) for r in declared.get("not_drawn") or []]
+        not_drawn = declared.get("not_drawn")
+        missing = [str(names.get(str(r)) or str(r)) for r in (not_drawn if isinstance(not_drawn, list) else [])]
         if missing:
             lines.append(f"{name}: no read of the figure's body returned a value of {', '.join(missing)}")
     return lines
@@ -34541,12 +34542,9 @@ def _planned_figure_order(state: QuestState) -> list[str]:
 
 
 def _panel_draws_nothing(ax: dict[str, Any]) -> bool:
-    """Whether FI's record of one panel says every line it was given has no point on it. A panel whose record lists no
-    series (an image, a histogram) is not known to be empty, so it is not."""
-    series = [s for s in ax.get("series") or [] if isinstance(s, dict)]
-    if ax.get("blank"):
-        return True  # no line, shape, legend or text was drawn on it (FI's record of the saved figure)
-    return bool(series) and not ax.get("unlabelled_lines") and all(s.get("shows") == "no points" for s in series)
+    """Whether FI's record of one panel says it shows no data (see :func:`core.figure_facts.panel_draws_nothing`, the one
+    rule the caption's description and its layout sentence share)."""
+    return _figure_facts.panel_draws_nothing(ax)
 
 
 def _figure_draws_nothing(record: dict[str, Any] | None) -> bool:
@@ -34678,12 +34676,13 @@ def _figure_caption_text(
     name: str, record: dict[str, Any] | None, *, n_seeds: int | None, facts: dict[str, str] | None = None,
     credit: dict[str, Any] | None = None,
 ) -> str:
-    """The caption FI writes for a figure, from its own records only: what each panel is (its axes: what it plots against
-    what, never the words of the script's own panel or figure title, which can name a line the figure does not draw), the
-    series it draws when there are at most three (one drawn flat, or outside the plotted range, said so), its reference
-    lines, the panels' layout and the line styles (``facts``, :func:`core.figure_facts.facts`), and whether a line is a
-    mean over seeds. A sourced figure (``credit``) says where it is from. Never empty: with no record at all, the file's
-    own name describes it."""
+    """The caption FI writes for a figure, from its own records only: what each panel that draws data is (its axes: what
+    it plots against what, as the saved figure's axis labels say), the series it draws when there are at most five (one
+    drawn flat, or outside the plotted range, said so), its reference lines, the panels' layout (each panel named by its
+    title, quoted, else by its axis labels) and the line styles (``facts``, :func:`core.figure_facts.facts`), and whether
+    a line is a mean over seeds. A script's title is free text and is quoted only in the layout sentence, as the figure
+    shows it. A sourced figure (``credit``) says where it is from. Never empty: with no record at all, the file's own name
+    describes it."""
     stem = " ".join(Path(name).stem.replace("_", " ").replace("-", " ").split()) or "the figure"
     if credit:
         what = _caption_words(credit.get("caption"), 200) or stem
@@ -34694,15 +34693,12 @@ def _figure_caption_text(
     numbered = [(k, ax) for k, ax in enumerate((record or {}).get("axes") or [], start=1)
                 if isinstance(ax, dict) and not _panel_draws_nothing(ax)]
     axes = [ax for _, ax in numbered]
-    # A panel is named by what it plots (its y axis, else its x axis). A panel or figure title is the script's own
-    # sentence and is not copied: it can name a line, a reference or a style the figure does not draw, and FI's record of
-    # the lines is what the caption states.
     # What a panel plots is what its saved axes say: the labels of the panels that hold drawn data, as FI measured them on
     # the figure it saved (an empty panel is left out above). Nothing is inferred from which declared results the body
     # read: a quantity the body worked out from several reads (an error from two values, a spread of a mean) is drawn
     # though it was not read under its own id, and a caption built from the reads named the wrong quantity or said a drawn
-    # one was missing. A declared result no read of the body gave is recorded in run.log (``_note_unread_results``), not
-    # claimed in the caption.
+    # one was missing. A declared result no read of the body gave is recorded in run.log (``_unread_results``), not
+    # claimed in the caption. A panel's title is quoted in the layout sentence (``core.figure_facts``), not here.
     def plots(ax: dict[str, Any]) -> str:
         y, x = _caption_words(ax.get("ylabel")), _caption_words(ax.get("xlabel"))
         return f"{y} against {x}" if y and x else y or x

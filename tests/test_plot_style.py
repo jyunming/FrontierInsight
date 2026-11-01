@@ -823,3 +823,45 @@ def test_a_percentage_of_a_result_and_a_setting_value_are_not_marked_unrecorded(
     assert note.count("not a recorded result") == 2
     # Without the settings and the percentage rule (the earlier behaviour) the two true numbers were marked.
     assert "not a recorded result: 1536" in _figure_record_note(record, results=results)
+
+
+def _recorded_axes(tmp_path, body: str) -> list[dict]:
+    """Run a figure body under the bootstrap and return the recorded axes of the figure it saves as ``f.png``."""
+    pytest.importorskip("matplotlib")
+    boot_dir = write_boot(tmp_path, "latex")
+    records = tmp_path / "records"
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(p for p in (str(boot_dir), os.environ.get("PYTHONPATH", "")) if p),
+        "FI_FIGURE_RECORDS": str(records),
+    }
+    probe = ("import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt\nimport numpy as np\n"
+             + body + "\nfig.savefig('f.png')\n")
+    out = subprocess.run([sys.executable, "-c", probe], env=env, cwd=tmp_path, capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    return json.loads((records / "f.json").read_text(encoding="utf-8"))["axes"]
+
+
+def test_a_hidden_line_is_not_recorded_as_drawn(tmp_path) -> None:
+    axes = _recorded_axes(tmp_path, (
+        "fig, a = plt.subplots(); a.plot([1,2,3],[1,2,3],label='A'); l,=a.plot([1,2,3],[3,2,1],label='Hidden')\n"
+        "l.set_visible(False)"))
+    assert [s["label"] for s in axes[0]["series"]] == ["A"]
+
+
+def test_a_hidden_panel_draws_nothing_and_a_colorbar_is_marked(tmp_path) -> None:
+    axes = _recorded_axes(tmp_path, (
+        "fig, (a, b) = plt.subplots(1, 2); a.plot([1,2],[1,2],label='A'); b.plot([1,2],[2,1],label='B')\n"
+        "b.set_visible(False)"))
+    assert not axes[0].get("hidden") and axes[1]["hidden"] and axes[1]["series"] == []
+    axes = _recorded_axes(tmp_path, (
+        "fig, a = plt.subplots(); im = a.imshow(np.random.rand(4, 4)); c = fig.colorbar(im); c.set_label('Density')"))
+    assert [bool(ax.get("colorbar")) for ax in axes] == [False, True]
+
+
+def test_a_line_whose_points_have_no_finite_x_holds_no_data(tmp_path) -> None:
+    axes = _recorded_axes(tmp_path, (
+        "fig, a = plt.subplots(); a.plot([1,2,3],[1,2,3],label='A'); a.plot([np.nan,np.nan],[1,2],label='Ghost')\n"
+        "a.plot([],[],label='Empty')"))
+    shows = {s["label"]: s["shows"] for s in axes[0]["series"]}
+    assert shows["Ghost"] == "no points" and shows["Empty"] == "no points" and shows["A"] == "yes"

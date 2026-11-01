@@ -351,3 +351,37 @@ def test_a_declared_result_no_read_returned_is_a_line_for_run_log_not_a_caption_
 
     lines = _unread_results({"e.png": {"declared": _UNREAD}, "f.png": {"declared": dict(_UNREAD, not_drawn=[])}, "g.png": {}})
     assert lines == ["e.png: no read of the figure's body returned a value of Second error"]
+
+
+def test_a_series_with_no_data_point_is_not_named_in_a_caption() -> None:
+    record = {"axes": [{"ylabel": "Error", "xlabel": "t",
+                        "series": [{"label": "A", "shows": "yes"}, {"label": "Ghost", "shows": "no points"}]}]}
+    assert "Ghost" not in _figure_caption_text("e.png", record, n_seeds=None)
+
+
+def test_a_colorbar_or_hidden_axes_is_not_a_panel_of_the_caption() -> None:
+    from core import figure_facts
+
+    record = {"axes": [{"ylabel": "y", "xlabel": "x", "series": [], "place": [0.1, 0.1, 0.6, 0.8]},
+                       {"ylabel": "Density", "series": [], "colorbar": True, "place": [0.8, 0.1, 0.05, 0.8]}]}
+    caption = _figure_caption_text("e.png", record, n_seeds=None, facts={"e:layout": figure_facts.layout_sentence(record)})
+    assert "Density" not in caption and "Two panels" not in caption
+    assert figure_facts.layout(record)["panels"] == 1
+
+
+def test_the_layout_and_the_description_leave_out_the_same_panels() -> None:
+    from core import figure_facts
+
+    full = {"ylabel": "Error", "series": [{"label": "A", "shows": "yes"}]}
+    empty = {"ylabel": "Drift", "series": [{"label": "B", "shows": "no points"}]}
+    record = {"axes": [dict(full, title="one", place=[0.05, 0.1, 0.25, 0.8]), dict(full, title="two", place=[0.37, 0.1, 0.25, 0.8]),
+                       dict(empty, title="Drift", place=[0.7, 0.1, 0.25, 0.8])]}
+    sentence = figure_facts.layout_sentence(record)
+    assert "Drift" not in sentence and "two panels" in sentence.lower()
+    assert "Drift" not in _figure_caption_text("e.png", record, n_seeds=None, facts={"e:layout": sentence})
+
+
+def test_an_unread_results_record_with_a_non_list_is_read_as_empty() -> None:
+    from core.engine import _unread_results
+
+    assert _unread_results({"e.png": {"declared": dict(_UNREAD, not_drawn=5)}}) == []

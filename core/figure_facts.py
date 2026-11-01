@@ -85,6 +85,19 @@ def blank_panels(record: Any, lines_data: Any) -> set[int]:
             and not b.get("legend") and not b.get("has_text") and not a.get("series")}
 
 
+def panel_draws_nothing(ax: Any) -> bool:
+    """Whether FI's record of one panel says it shows no data: blank (no line, shape, legend or text on it), hidden, a
+    colorbar's axes, or every line it was given has no point on it. A panel whose record lists no series (an image, a
+    histogram) is not known to be empty, so it is not. The one rule for both the caption's description and its layout
+    sentence, so they cannot disagree on which panels exist."""
+    if not isinstance(ax, dict):
+        return False
+    if ax.get("blank") or ax.get("hidden") or ax.get("colorbar"):
+        return True
+    series = [s for s in ax.get("series") or [] if isinstance(s, dict)]
+    return bool(series) and not ax.get("unlabelled_lines") and all(s.get("shows") == "no points" for s in series)
+
+
 def _panel_words(ax: Any) -> str:
     """How a caption names one panel, from the saved axes: its title, in quotes, when it has one; otherwise what its axes
     say, worded as axis labels (``y axis "..." , x axis "..."``). An axis label is never presented as a title."""
@@ -122,11 +135,19 @@ def _boxes(record: Any, skip: set[int] | None = None) -> list[dict[str, Any]]:
     return [p for p in panels if p not in insets]
 
 
+def _skipped_panels(record: Any, lines_data: Any) -> set[int]:
+    """The positions of the panels the layout does not count: those of :func:`blank_panels` and those
+    :func:`panel_draws_nothing` says show no data."""
+    axes = record.get("axes") if isinstance(record, dict) else None
+    empty = {i for i, ax in enumerate(axes) if panel_draws_nothing(ax)} if isinstance(axes, list) else set()
+    return blank_panels(record, lines_data) | empty
+
+
 def layout(record: Any, lines_data: Any = None) -> dict[str, Any] | None:
     """``{"panels", "arrangement", "rows", "cols", "names"}`` of a figure record, the panels in reading order (top row
     first, left to right); ``arrangement`` is ``single``, ``side_by_side`` (one row), ``stacked`` (one column) or
     ``grid``. ``None`` when the record holds no panel boxes (an old record), so nothing is said."""
-    panels = _boxes(record, blank_panels(record, lines_data))
+    panels = _boxes(record, _skipped_panels(record, lines_data))
     if not panels:
         return None
     for p in panels:

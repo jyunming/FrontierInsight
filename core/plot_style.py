@@ -365,6 +365,22 @@ try:
                     out.append(value)
             return out
 
+        def _fi_drawn_ys(artist):
+            # The finite y values of a line that are drawn: a point whose x is a number that is not finite is not
+            # drawn, so a line given only such points holds no data. A non-numeric x (a category) stays.
+            raw_x, raw_y = list(artist.get_xdata()), list(artist.get_ydata())
+            if len(raw_x) != len(raw_y):
+                return _fi_values(raw_y)
+            kept = []
+            for x, y in zip(raw_x, raw_y):
+                try:
+                    if not _fi_math.isfinite(float(x)):
+                        continue
+                except (TypeError, ValueError):
+                    pass
+                kept.append(y)
+            return _fi_values(kept)
+
         def _fi_series(label, ys, lo, hi, log):
             if log:
                 ys = [y for y in ys if y > 0]
@@ -509,7 +525,10 @@ try:
             lo, hi = ax.get_ylim()
             log = ax.get_yscale() == "log"
             bar_names, bar_pieces = _fi_error_bars(ax)
-            artists = [a for a in list(ax.get_lines()) + list(ax.collections) if id(a) not in bar_pieces]
+            hidden = not ax.get_visible()
+            # A line or collection hidden with set_visible(False) draws nothing, and neither does a hidden panel.
+            artists = [] if hidden else [a for a in list(ax.get_lines()) + list(ax.collections)
+                                         if id(a) not in bar_pieces and a.get_visible()]
             try:
                 names = _fi_legend_names(ax, artists)
             except Exception:
@@ -544,7 +563,7 @@ try:
                             continue
                         if kind == "other":
                             continue  # drawn in coordinates that are not the data's: nothing to read
-                        ys = _fi_values(artist.get_ydata())
+                        ys = _fi_drawn_ys(artist)
                     else:
                         ys = _fi_collection_ys(ax, artist)
                 except Exception:
@@ -583,6 +602,9 @@ try:
             # The house style puts titles on the left, where get_title() alone misses them.
             title = " ".join(t for t in (ax.get_title("left"), ax.get_title(), ax.get_title("right")) if t)
             return {
+                # A colorbar's axes and a hidden panel are not panels the figure shows.
+                **({"colorbar": True} if getattr(ax, "_colorbar", None) is not None else {}),
+                **({"hidden": True} if hidden else {}),
                 "title": title, "xlabel": ax.get_xlabel(), "ylabel": ax.get_ylabel(),
                 "yscale": ax.get_yscale(), "ylim": [float(lo), float(hi)], "series": series,
                 # The words the panel itself prints besides its title: ax.text / annotate strings and the legend's
