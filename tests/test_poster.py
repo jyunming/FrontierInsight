@@ -1461,3 +1461,90 @@ async def test_a_paper_without_placed_figures_keeps_every_file_on_the_poster(
     """An older quest: the paper embeds none of the files, so the poster behaves as before."""
     tex = await _poster_tex(tmp_path, monkeypatch, "# Toy\n\nNo figures are placed here.\n")
     assert "fig1_a" in tex and "fig2_b" in tex and "fig3_empty" in tex
+
+
+# ---------------------------------------------------------------------------
+# One figure list with the paper: the figures, numbers and captions are the paper's
+
+
+def _record_a_drawn_figure(art: QuestArtifacts, extra_files: dict[str, bool] | None = None) -> None:
+    """Give the quest the state of a finished study whose ``result.png`` has a call record, and the extra figure files
+    named (value True: it draws data, False: its own record says it draws nothing)."""
+    records_dir = art.quest_root / ".fi" / "figure_records"
+    records_dir.mkdir(parents=True)
+    (records_dir / "result.calls.json").write_text(json.dumps({
+        "version": 1, "fallback": False,
+        "panels": [{"panel": 1, "raw": False, "raw_reason": None,
+                    "x": {"id": "t", "kind": "setting", "label": "time", "scale": "linear"},
+                    "y": {"what": "energy", "label": "energy", "scale": "linear"},
+                    "series": [{"id": "energy", "label": "energy", "kind": "line", "step": False,
+                                "x": [0, 1, 2], "y": [1.0, 2.0, 3.0], "yerr": None, "merged_with": []}],
+                    "bands": []}],
+    }), encoding="utf-8")
+    drawn = {"axes": [{"series": [{"label": "energy", "shows": "line"}]}]}
+    records = {"result.png": drawn}
+    for name, draws in (extra_files or {}).items():
+        (art.figures_dir / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+        records[name] = drawn if draws else {"axes": [{"blank": True}]}
+    art.raw_state = {"figures": ["result.png", *(extra_files or {})], "figure_records": records}
+
+
+async def _checked_poster(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, art: QuestArtifacts, reply: dict):
+    _no_engine(monkeypatch)
+    cfg = _make_config(tmp_path, ["poster"])
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return json.dumps(reply)
+
+    _patch_endpoint(monkeypatch)
+    monkeypatch.setattr("generation.poster.LLMClient.chat", fake_chat)
+    monkeypatch.setattr(poster_mod, "cited_references", lambda lit, md, audience=None: list(REFS))
+    monkeypatch.setattr(poster_mod, "build_further_reading", lambda lit, audience=None: list(FURTHER))
+    result = await PosterGenerator(cfg).generate(art, art.quest_root)
+    return result["poster_tex"].read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_poster_skips_figure_the_paper_left_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A figure whose own record says it draws nothing is not in the paper's list, so the poster does not add it, even
+    when the paper embeds no figure (then every file of figures/ used to come back)."""
+    art = _make_artifacts(tmp_path)
+    art.paper_md.write_text("# Toy Paper\n\nMethods. Results show a rise.\n", encoding="utf-8")
+    _record_a_drawn_figure(art, {"blank.png": False})
+    reply = _reply()
+    reply["blocks"].insert(1, {"type": "figure", "file": "blank.png", "caption": "Nothing."})
+    tex = await _checked_poster(tmp_path, monkeypatch, art, reply)
+    assert "result.png" in tex
+    assert "blank.png" not in tex
+
+
+@pytest.mark.asyncio
+async def test_poster_caption_equals_paper_caption(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A figure FI recorded the calls of is shown with the paper's caption, not the model's. Known positive: a figure
+    with no call record keeps the model's caption."""
+    art = _make_artifacts(tmp_path)
+    _record_a_drawn_figure(art)
+    tex = await _checked_poster(tmp_path, monkeypatch, art, _reply())
+    assert r"\postercaption{1}{The toy curve against its fit.}" in tex
+    assert "The curve rises" not in tex
+    # the known positive: the same reply with no call record keeps its own caption
+    (art.quest_root / ".fi" / "figure_records" / "result.calls.json").unlink()
+    tex = await _checked_poster(tmp_path, monkeypatch, art, _reply())
+    assert r"\postercaption{1}{The curve rises as $x^2$.}" in tex
+
+
+@pytest.mark.asyncio
+async def test_poster_text_pointing_at_figure_is_filtered_by_pointer_rule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A sentence of the model's that names a drawn figure and is not FI's statement is left out (and logged); the
+    sentence beside it, which names no figure, stays."""
+    art = _make_artifacts(tmp_path)
+    _record_a_drawn_figure(art)
+    reply = _reply()
+    reply["blocks"][1] = {"type": "text", "text": "Energy drifts upward as Figure 1 shows. We study scaling [1]."}
+    with caplog.at_level("WARNING", logger="frontier_insight.poster"):
+        tex = await _checked_poster(tmp_path, monkeypatch, art, reply)
+    assert "Energy drifts upward" not in tex
+    assert "We study scaling [1]." in tex
+    assert "Energy drifts upward as Figure 1 shows" in caplog.text

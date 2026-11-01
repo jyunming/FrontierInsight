@@ -729,3 +729,11 @@ def test_a_removed_sentence_is_attributed_to_every_checked_figure_it_names():
     assert out == "Next.\n" and len(taken) == 1 and taken[0]["figures"] == [1, 2]
     out, taken = fc.apply_pointer_rule("Figure 3 and Figure 1 differ, unlike Figure 2.\n", nums, {1: {"s"}, 3: {"s"}}, _MENTION)
     assert taken[0]["figures"] == [1, 2, 3]
+
+
+def test_a_sentence_that_is_all_bold_is_removed_but_a_bold_run_in_heading_stays():
+    # a slide's lead sentence is bold from end to end: it is the sentence, not a heading before one
+    out, taken = _rule("## Result\n\n**Figure 1 shows the energy drifting upward.**\n\n![](figures/fig_a.png)\n")
+    assert "drifting" not in out and "![](figures/fig_a.png)" in out and len(taken) == 1
+    out, _ = _rule("**Result.** Figure 1 shows the energy drifting upward.\n")
+    assert out == "**Result.**\n"

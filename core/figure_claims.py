@@ -945,6 +945,8 @@ def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, 
             seen.add((a, b))
             hits = [h for h in mention_re.finditer(flat, a, b)]
             lead = _facts._RUN_IN.match(flat[a:b])
+            if lead and not flat[a + lead.end():b].strip():
+                lead = None  # all of it is bold (a slide's lead sentence): the sentence itself, not a heading before one
             body_at = a + (lead.end() if lead else 0)
             own = [i for i, sp in enumerate(spans) if kinds[i] == "claim" and body_at <= sp[0] and sp[1] <= b]
             if own:

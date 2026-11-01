@@ -52,3 +52,85 @@ def test_the_slides_prompt_still_fills_in_as_a_template() -> None:
     """It is a string.Template: a stray ``$`` in the new text would break every deck."""
     filled = string.Template(_prompt("slides.md")).substitute(paper_md="PAPER", figure_list="FIGURES", claims_rule="", claims="")
     assert "PAPER" in filled and "FIGURES" in filled
+
+
+# ---------------------------------------------------------------------------
+# Slides take the paper's own figure list and the paper's rule for sentences about a figure
+
+
+def _quest(tmp_path: Path, with_calls: bool):
+    import json
+
+    from core.engine import QuestArtifacts
+
+    root = tmp_path / "quest"
+    (root / "paper").mkdir(parents=True)
+    (root / "figures").mkdir()
+    (root / "figures" / "result.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    paper = root / "paper" / "paper.md"
+    paper.write_text("# Toy Paper\n\nMethods.\n\n![**Figure 1.** The toy curve against its fit.](figures/result.png)\n",
+                     encoding="utf-8")
+    art = QuestArtifacts(quest_id="q", quest_root=root, paper_md=paper, figures_dir=root / "figures")
+    if with_calls:
+        records = root / ".fi" / "figure_records"
+        records.mkdir(parents=True)
+        (records / "result.calls.json").write_text(json.dumps({
+            "version": 1, "fallback": False,
+            "panels": [{"panel": 1, "raw": False, "raw_reason": None,
+                        "x": {"id": "t", "kind": "setting", "label": "time", "scale": "linear"},
+                        "y": {"what": "energy", "label": "energy", "scale": "linear"},
+                        "series": [{"id": "energy", "label": "energy", "kind": "line", "step": False,
+                                    "x": [0, 1], "y": [1.0, 2.0], "yerr": None, "merged_with": []}],
+                        "bands": []}]}), encoding="utf-8")
+        art.raw_state = {"figures": ["result.png"],
+                         "figure_records": {"result.png": {"axes": [{"series": [{"label": "e", "shows": "line"}]}]}}}
+    return art
+
+
+_DECK = ("---\nmarp: true\n---\n\n# Toy\n\n---\n\n## Result\n\nEnergy drifts upward as Figure 1 shows. "
+         "The method is simple.\n\n![](figures/result.png)\n")
+
+
+async def _deck(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, with_calls: bool, prompts: list[str]) -> str:
+    from core.config import Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig
+    from generation.slides import SlideGenerator
+
+    art = _quest(tmp_path, with_calls)
+    cfg = Config(
+        topic="slides figure list", title="slides-figure-list", provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(max_iterations=1, review_loop=False),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60), knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(kinds=["slides"], output_dir=tmp_path / "outputs"),
+    )
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompts.append(messages[0]["content"])
+        return _DECK
+
+    monkeypatch.setattr("core.provider.LLMClient.chat", fake_chat)
+    monkeypatch.setattr("generation.slides.shutil.which", lambda _n: None)
+    await SlideGenerator(cfg).generate(art, art.quest_root)
+    return (art.quest_root / "slides.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_slide_text_pointing_at_figure_is_filtered_by_pointer_rule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    prompts: list[str] = []
+    with caplog.at_level("WARNING", logger="frontier_insight.slides"):
+        body = await _deck(tmp_path, monkeypatch, True, prompts)
+    assert "Energy drifts upward" not in body
+    assert "The method is simple." in body  # the known positive: a sentence naming no figure stays
+    assert "![](figures/result.png)" in body
+    assert "Energy drifts upward as Figure 1 shows" in caplog.text
+    # the model is told the paper's number and caption of the figure
+    assert "- figures/result.png: Figure 1. The toy curve against its fit." in prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_legacy_quest_slides_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    prompts: list[str] = []
+    body = await _deck(tmp_path, monkeypatch, False, prompts)
+    assert "Energy drifts upward as Figure 1 shows. The method is simple." in body
+    assert "- figures/result.png" in prompts[0] and "Figure 1. The toy" not in prompts[0]

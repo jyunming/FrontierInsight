@@ -48,6 +48,7 @@ import string
 from pathlib import Path
 
 from core import paper_facts as _paper_facts
+from generation._figure_captions import without_number
 from core.config import Config
 from core.proc_tree import AsyncProcessTree
 from core.engine import (
@@ -66,7 +67,7 @@ from core.provider import (
 )
 from generation._marp import find_marp
 from generation._paper_context import note_prompt_fit, paper_and_claims
-from generation._paper_figures import figures_in_paper
+from generation._paper_figures import paper_figure_set, take_out_unchecked
 from generation._pptx_slides import render_marp_to_pptx
 from generation._skip_md import render_skip_md
 
@@ -98,6 +99,30 @@ _CHROMIUM_SIGNATURES: tuple[str, ...] = (
     "no usable sandbox",
     "failed to download chromium",
 )
+
+
+def _figure_list(figures: list[str], paper_numbers: dict[str, int], paper_md: str) -> str:
+    """The figures the model may use, one per line. A figure FI recorded the drawing calls of is listed under the paper's
+    number and with the paper's caption, so the slide says what the paper says of it; any other is listed by its file."""
+    lines = []
+    for name in figures:
+        line = f"- figures/{name}"
+        caption = _paper_caption(paper_md, name) if name in paper_numbers else ""
+        if caption:
+            line += f": Figure {paper_numbers[name]}. {caption}"
+        lines.append(line)
+    return "\n".join(lines) or "(none)"
+
+
+def _paper_caption(paper_md: str, name: str) -> str:
+    """The caption the paper gives the figure file ``name``, without "Figure N."; empty when it has none."""
+    for m in _PAPER_FIGURE_RE.finditer(paper_md):
+        if m.group("name") == name:
+            return " ".join(without_number(m.group("alt")).replace("**", "").split())
+    return ""
+
+
+_PAPER_FIGURE_RE = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?:\./)?figures/(?P<name>[^)\s]+)")
 
 
 class SlideGenerator:
@@ -288,15 +313,16 @@ class SlideGenerator:
             figures = sorted(p.name for p in art.figures_dir.iterdir() if p.is_file())
         numbers = ", ".join(str(p) for p in pages)
         redo_paper = _paper_facts.without_marks(art.paper_md.read_text(encoding="utf-8")) if art.paper_md else ""
-        figures = figures_in_paper(redo_paper, figures)
+        figures, paper_numbers = paper_figure_set(redo_paper, figures, art.raw_state, art.quest_root)
         ctx = paper_and_claims(redo_paper, art.quest_root, art.paper_md)
         prompt = string.Template(REDO_PROMPT_PATH.read_text(encoding="utf-8")).safe_substitute(
             slide_numbers=numbers, count=str(len(pages)), deck=deck,
-            figure_list="\n".join(f"- figures/{f}" for f in figures) or "(none)",
+            figure_list=_figure_list(figures, paper_numbers, redo_paper),
             feedback=str(feedback).strip(), claims_rule=ctx.claims_rule, claims=ctx.claims,
         )
         text = await self._ask(art, prompt, supervisor=supervisor)
         reply = _math_as_dollars(_figures_as_own_paragraphs(_fences_as_slide_breaks(_strip_outer_fence(text))))
+        reply = self._take_out_unchecked(reply, art)
         pieces = [p for p in _split_slides(reply)[0] if p.strip()]
         if len(pieces) != len(pages):
             _log.warning("slides: asked for %d replacement slide(s) and got %d; the deck is unchanged",
@@ -307,6 +333,15 @@ class SlideGenerator:
         slides_md.write_text(join_deck(head, segments, breaks), encoding="utf-8")
         _log.info("slides.md: slide(s) %s written again, the other %d kept", numbers, len(segments) - len(pages))
         return slides_md
+
+    def _take_out_unchecked(self, text: str, art: QuestArtifacts) -> str:
+        """``text`` without the sentences about a figure FI does not stand behind (the paper's own rule); each removal is
+        logged, not shown on a slide."""
+        out, taken = take_out_unchecked(text, art.raw_state, art.quest_root)
+        for t in taken:
+            _log.warning('slides: a sentence about a figure FI does not stand behind was left out (%s): "%s"',
+                         t.get("key", "figure"), str(t.get("sentence", ""))[:120])
+        return out
 
     async def _ask(self, art: QuestArtifacts, prompt: str, *, supervisor: ProxySupervisor | None) -> str:
         own_supervisor = supervisor is None
@@ -343,13 +378,13 @@ class SlideGenerator:
         figures = []
         if art.figures_dir and art.figures_dir.is_dir():
             figures = sorted(p.name for p in art.figures_dir.iterdir() if p.is_file())
-        figures = figures_in_paper(paper_md, figures)
+        figures, paper_numbers = paper_figure_set(paper_md, figures, art.raw_state, art.quest_root)
         ctx = paper_and_claims(paper_md, art.quest_root, art.paper_md)
         prompt = string.Template(PROMPT_PATH.read_text(encoding="utf-8")).substitute(
             paper_md=ctx.paper,
             claims_rule=ctx.claims_rule,
             claims=ctx.claims,
-            figure_list="\n".join(f"- figures/{f}" for f in figures) or "(none)",
+            figure_list=_figure_list(figures, paper_numbers, paper_md),
         )
         note_prompt_fit(prompt, "slides", art.quest_root, ctx)
         if feedback:
@@ -378,6 +413,7 @@ class SlideGenerator:
         # with bare ``` lines is only unfenced once _fences_as_slide_breaks has run.
         content = _math_as_dollars(
             _figures_as_own_paragraphs(_fences_as_slide_breaks(_strip_outer_fence(text))))
+        content = self._take_out_unchecked(content, art)
         # Append one References slide built from the quest's actual papers,
         # guaranteed rather than left to the LLM: the deck author only saw the
         # first 8000 chars of paper.md and would usually miss the References

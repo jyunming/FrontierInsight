@@ -67,7 +67,7 @@ from core.provider import (
 from generation import _cjk
 from generation._figure_captions import without_number
 from generation._paper_context import note_prompt_fit, paper_and_claims
-from generation._paper_figures import figures_in_paper
+from generation._paper_figures import paper_figure_set, take_out_unchecked
 from generation._pdf_engine import find_pdf_engine
 from generation._pdf_measure import measure_pdf, poster_report
 from generation._unicode_fonts import find_fonts
@@ -329,14 +329,21 @@ class _Block:
     items: list[str] = field(default_factory=list)
     file: str = ""
     caption: str = ""
+    number: int = 0  # the paper's figure number, when the poster takes it from the paper's own list
 
     def texts(self) -> list[str]:
         return [self.text, self.caption, *self.items]
 
 
-def _blocks_from_reply(parsed: dict, figure_files: set[str]) -> list[_Block]:
+def _blocks_from_reply(
+    parsed: dict, figure_files: set[str], paper_numbers: dict[str, int] | None = None,
+    paper_captions: dict[str, str] | None = None,
+) -> list[_Block]:
     """The blocks of a reply. A reply in the old two-column LaTeX shape
-    (``left`` / ``right``) becomes raw blocks, one per column."""
+    (``left`` / ``right``) becomes raw blocks, one per column. A figure in ``paper_numbers`` (one FI recorded the
+    drawing calls of) is shown under the paper's number with the paper's caption, not the model's."""
+    paper_numbers = paper_numbers or {}
+    paper_captions = paper_captions or {}
     blocks: list[_Block] = []
     raw_blocks = parsed.get("blocks")
     if isinstance(raw_blocks, list):
@@ -355,7 +362,10 @@ def _blocks_from_reply(parsed: dict, figure_files: set[str]) -> list[_Block]:
             elif kind == "figure":
                 name = Path(_plain(item.get("file"))).name
                 if name in figure_files:
-                    blocks.append(_Block("figure", file=name, caption=_plain(item.get("caption"))))
+                    if name in paper_numbers and paper_captions.get(name):
+                        blocks.append(_Block("figure", file=name, caption=paper_captions[name], number=paper_numbers[name]))
+                    else:
+                        blocks.append(_Block("figure", file=name, caption=_plain(item.get("caption"))))
         return blocks
     for key in ("left", "middle", "right"):
         value = parsed.get(key)
@@ -376,6 +386,37 @@ def _paper_captions(paper_md: str) -> dict[str, str]:
     return captions
 
 
+def _take_out_unchecked_blocks(blocks: list[_Block], art: QuestArtifacts) -> list[_Block]:
+    """The poster's texts and list items without the sentences about a figure FI does not stand behind (the paper's own
+    rule); a text or item left empty goes. Each removal is logged, not shown on the poster."""
+    out: list[_Block] = []
+    for block in blocks:
+        if block.kind == "text":
+            text, taken = take_out_unchecked(block.text, art.raw_state, art.quest_root)
+            _log_taken(taken)
+            if not text.strip():
+                continue
+            block = replace(block, text=text.strip())
+        elif block.kind == "bullets":
+            items = []
+            for item in block.items:
+                text, taken = take_out_unchecked(item, art.raw_state, art.quest_root)
+                _log_taken(taken)
+                if text.strip():
+                    items.append(text.strip())
+            if not items:
+                continue
+            block = replace(block, items=items)
+        out.append(block)
+    return out
+
+
+def _log_taken(taken: list[dict[str, str]]) -> None:
+    for t in taken:
+        _log.warning('poster: a sentence about a figure FI does not stand behind was left out (%s): "%s"',
+                     t.get("key", "figure"), str(t.get("sentence", ""))[:120])
+
+
 def _figure_files(figures_dir: Path | None) -> list[str]:
     if not figures_dir or not figures_dir.is_dir():
         return []
@@ -385,14 +426,18 @@ def _figure_files(figures_dir: Path | None) -> list[str]:
     )
 
 
-def _with_every_figure(blocks: list[_Block], figures: list[str], captions: dict[str, str]) -> list[_Block]:
+def _with_every_figure(
+    blocks: list[_Block], figures: list[str], captions: dict[str, str], paper_numbers: dict[str, int] | None = None,
+) -> list[_Block]:
     """Add the figures the model left out, before the closing heading, so
-    the poster still ends on its conclusion."""
+    the poster still ends on its conclusion. ``figures`` is the paper's own list: a figure the paper left out is not in
+    it and is not added."""
     if any(b.kind == "raw" for b in blocks):
         return blocks
     used = {b.file for b in blocks if b.kind == "figure"}
     missing = [
-        _Block("figure", file=name, caption=captions.get(name) or Path(name).stem.replace("_", " "))
+        _Block("figure", file=name, caption=captions.get(name) or Path(name).stem.replace("_", " "),
+               number=(paper_numbers or {}).get(name, 0))
         for name in figures if name not in used
     ]
     if not missing:
@@ -851,7 +896,7 @@ class _Layout:
         numbers: dict[int, int] = {}
         for i, block in enumerate(self.blocks):
             if block.kind == "figure":
-                numbers[i] = len(numbers) + 1
+                numbers[i] = block.number or len(numbers) + 1
         columns = []
         for c, group in enumerate(self.groups):
             body = "\n".join(self._block_latex(i, numbers.get(i)) for i in group)
@@ -1037,7 +1082,8 @@ class PosterGenerator:
         sheet = _SHEETS.get(output.poster_size, _SHEETS["a1_portrait"])
 
         paper_md = _paper_facts.without_marks(art.paper_md.read_text(encoding="utf-8"))  # FI's values stay, its markers go
-        figures = figures_in_paper(paper_md, _figure_files(art.figures_dir))
+        figures, paper_numbers = paper_figure_set(
+            paper_md, _figure_files(art.figures_dir), art.raw_state, art.quest_root)
         captions = _paper_captions(paper_md)
         literature = art.raw_state.get("literature") or []
         # Only the references the paper ends with (what its citation check kept), numbered as the paper numbers
@@ -1126,7 +1172,9 @@ class PosterGenerator:
             headline = paper_title or _plain(parsed.get("title")) or "Untitled"
         subtitle = paper_title if paper_title and paper_title != headline else ""
 
-        blocks = _with_every_figure(_blocks_from_reply(parsed, set(figures)), figures, captions)
+        blocks = _with_every_figure(
+            _blocks_from_reply(parsed, set(figures), paper_numbers, captions), figures, captions, paper_numbers)
+        blocks = _take_out_unchecked_blocks(blocks, art)
         cited = _cited_labels(blocks, set(sources))
         blocks = [_with_citations(b, set(cited)) for b in blocks]
         if cited:

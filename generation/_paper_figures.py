@@ -134,3 +134,55 @@ def figures_in_paper(paper_md: str, files: list[str]) -> list[str]:
     placed = {m.group(1) for m in _PLACED_FIGURE.finditer(paper_md)}
     kept = [name for name in files if name in placed]
     return kept if kept else list(files)
+
+
+# -- The paper's own figure list, for the poster and the slides ------------------------------------------------------
+
+
+def _paper_state(raw_state: dict | None, quest_root: Path) -> dict:
+    """The final state of the quest with its root, as ``core.engine`` functions read it."""
+    state = dict(raw_state or {})
+    state.setdefault("quest_root", quest_root)
+    return state
+
+
+def paper_figure_set(
+    paper_md: str, files: list[str], raw_state: dict | None, quest_root: Path,
+) -> tuple[list[str], dict[str, int]]:
+    """``(files to show, {file: the paper's figure number})``: the figures the poster and the slides take from the paper's
+    own list (``core.engine._figure_numbers``, the list FI placed the paper's figures by), not a list of their own.
+
+    A figure the paper left out (its record says it draws nothing) is not in it, even when the paper embeds no figure and
+    :func:`figures_in_paper` would give every file back. The numbers returned are those of the figures with a call record
+    (FI's record of what they draw): only those get the paper's number and caption on the poster. A quest whose state holds
+    no figure record (an older one) gets :func:`figures_in_paper` and no numbers, as before."""
+    shown = figures_in_paper(paper_md, files)
+    state = _paper_state(raw_state, quest_root)
+    if not state.get("figure_records"):
+        return shown, {}
+    from core import figure_claims as _figure_claims
+    from core.engine import _figure_numbers
+
+    numbers = _figure_numbers(state)
+    shown = [name for name in shown if name in numbers]
+    checked = {
+        name: number for name, number in numbers.items()
+        if name in shown and _figure_claims.load_calls(quest_root, Path(name).stem)
+    }
+    return shown, checked
+
+
+def take_out_unchecked(text: str, raw_state: dict | None, quest_root: Path) -> tuple[str, list[dict[str, str]]]:
+    """``text`` written by a model for the poster or the slides, without the sentences about a figure FI drew that FI does
+    not stand behind (the paper's own rule, ``core.engine._take_out_unpointed``) and without a statement about a figure
+    that FI could not fill (``take_out_unfilled(figures_only=True)``): ``(text, taken_out)``. Unchanged for a quest none of
+    whose figures has a call record."""
+    from core import paper_facts as _facts
+    from core.engine import _take_out_unpointed
+
+    if not text:
+        return text, []
+    state = _paper_state(raw_state, quest_root)
+    out, taken = _facts.take_out_unfilled(text, figures_only=True)
+    out, pointed = _take_out_unpointed(out, state)
+    return out, taken + pointed
