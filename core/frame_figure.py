@@ -29,6 +29,8 @@ The mixin has no ``__init__``; it keeps its state in two private attributes it c
 
 from __future__ import annotations
 
+import contextlib
+import copy
 import json
 import math
 from pathlib import Path
@@ -41,40 +43,61 @@ def _finite(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
-def _clean(v):
-    """A value as the record keeps it: a finite number as a float, a non-finite one as None, anything else as text."""
+_BAD = object()
+
+
+def _clean(v, strict=True):
+    """A value as the record keeps it: a finite number as a float; None or a non-finite number as None (a gap); text only where
+    ``strict`` is False (an x of categories); anything else is ``_BAD``."""
+    if v is None:
+        return None
+    if isinstance(v, str):
+        return _BAD if strict else v
     if isinstance(v, bool):
-        return str(v)
-    if isinstance(v, (int, float)):
-        return float(v) if math.isfinite(v) else None
-    try:  # numpy scalars
+        return _BAD
+    try:  # numbers, numpy scalars
         f = float(v)
-        return f if math.isfinite(f) else None
     except (TypeError, ValueError):
-        return str(v)
+        return _BAD
+    return f if math.isfinite(f) else None
 
 
-def _vector(values, what):
+def _vector(values, what, strict=True):
+    """The values of a call as the record keeps them. Missing values (None, NaN, inf) stay None and are drawn as gaps; a value
+    that is not a number is refused before anything is recorded or drawn (only x, ``strict=False``, may hold category names)."""
     try:
-        out = [_clean(v) for v in values]
+        raw = list(values)
     except TypeError:
-        raise ValueError("`%s` must be a list of values, not %r" % (what, type(values).__name__)) from None
+        raise ValueError("`%s` must be a list of numbers, not %r" % (what, type(values).__name__)) from None
+    out = [_clean(v, strict) for v in raw]
+    bad = [raw[i] for i, v in enumerate(out) if v is _BAD]
+    if bad:
+        raise ValueError("`%s` must hold numbers (use None for a missing value, which is drawn as a gap); got %r" % (what, bad[0]))
     return out
 
 
-def _same(a, b, rel=1e-12):
-    if len(a) != len(b):
-        return False
-    for u, v in zip(a, b):
-        if u is None or v is None:
-            if u is not v:
-                return False
-        elif isinstance(u, str) or isinstance(v, str):
-            if u != v:
-                return False
-        elif abs(u - v) > rel * max(abs(u), abs(v), 1e-300):
-            return False
-    return True
+def _gaps(values):
+    """The values with each gap as NaN, for matplotlib."""
+    return [float("nan") if v is None else v for v in values]
+
+
+@contextlib.contextmanager
+def _undone(ax, rec):
+    """If a call fails part way, leave the record and the axes as they were: the record holds only what was drawn."""
+    saved = copy.deepcopy(rec)
+    before = {id(a) for a in ax.get_children()}
+    try:
+        yield
+    except BaseException:
+        rec.clear()
+        rec.update(saved)
+        for a in ax.get_children():
+            if id(a) not in before and hasattr(a, "remove"):
+                try:
+                    a.remove()
+                except Exception:  # noqa: BLE001 -- best effort; the record is already restored
+                    pass
+        raise
 
 
 class FigureCalls:
@@ -189,82 +212,76 @@ class FigureCalls:
             raise ValueError("this figure's plan gives no x: pass x=(\"id of a setting or a result\", values) to say what x is")
         return ident, x
 
-    def _add_series(self, panel, kind, series, x, y, what, yerr=None, step=False):
+    def _add_series(self, panel, kind, series, x, y, what, yerr, yerr_meaning, step=False):
+        """Check a series call and draw it; the record gets the series only if it was drawn."""
         ax, rec = self._panel(panel)
+        if yerr_meaning not in MEANINGS:
+            raise ValueError("`yerr_meaning=%r` is not one of: %s" % (yerr_meaning, ", ".join(MEANINGS)))
         x_id, x = self._xsplit(x)
         self._series_ok(series)
         self._what_ok(what)
-        xs, ys = _vector(x, "x"), _vector(y, "y")
+        xs, ys = _vector(x, "x", strict=False), _vector(y, "y")
         if len(xs) != len(ys):
             raise ValueError("x has %d values and y has %d: a series needs one y for each x" % (len(xs), len(ys)))
         errs = None
         if yerr is not None:
-            errs = _vector(yerr, "yerr")
+            errs = [None if e is None else abs(e) for e in _vector(yerr, "yerr")]
             if len(errs) != len(ys):
                 raise ValueError("yerr has %d values and y has %d: one bar half-width for each y" % (len(errs), len(ys)))
-        self._set_x(rec, x_id)
-        self._set_y(rec, what)
         legend = self._label_of(series)
-        for other in rec["series"]:  # identical data merges into the first legend entry (the claim `identical` is then true)
-            if other["kind"] == kind and other["step"] == step and _same(other["x"], xs) and _same(other["y"], ys):
-                if series != other["id"] and series not in other["merged_with"]:
-                    other["merged_with"].append(series)
-                return ax, rec, xs, ys, errs, legend, False
-        entry = {"id": series, "label": legend, "kind": kind, "step": bool(step), "x": xs, "y": ys, "yerr": errs, "merged_with": []}
-        rec["series"].append(entry)
-        return ax, rec, xs, ys, errs, legend, True
-
-    def _draw_x(self, x, xs):
-        return x if any(isinstance(v, str) for v in xs) else xs
-
-    def line(self, panel, series, x, y, what, yerr=None, step=False):
-        """A line (a step curve with ``step=True``) of the plan's ``series``, ``y`` being the result ``what``."""
-        ax, _rec, xs, ys, errs, legend, _new = self._add_series(panel, "line", series, x, y, what, yerr, step)
-        kw = {"drawstyle": "steps-post"} if step else {}
-        arts = ax.plot(xs, [float("nan") if v is None else v for v in ys], label=legend, **kw)
-        self._tag(arts)
-        if errs is not None:
-            self._tag(self._errorbar(ax, xs, ys, errs))
+        with _undone(ax, rec):
+            self._set_x(rec, x_id)
+            self._set_y(rec, what)
+            arts = self._draw_series(ax, kind, xs, ys, legend, step)
+            self._tag(arts)
+            if errs is not None:
+                self._tag(self._errorbar(ax, xs, ys, errs))
+            rec["series"].append({"id": series, "label": legend, "kind": kind, "step": bool(step), "x": xs, "y": ys, "yerr": errs,
+                                  "yerr_meaning": yerr_meaning if errs is not None else None, "merged_with": []})
         return arts
 
-    def points(self, panel, series, x, y, what, yerr=None):
+    @staticmethod
+    def _draw_series(ax, kind, xs, ys, legend, step):
+        if kind == "bars":
+            return list(ax.bar(xs, _gaps(ys), label=legend).patches)
+        if kind == "points":
+            return ax.plot(xs, _gaps(ys), linestyle="none", marker="o", label=legend)
+        return ax.plot(xs, _gaps(ys), label=legend, **({"drawstyle": "steps-post"} if step else {}))
+
+    def line(self, panel, series, x, y, what, yerr=None, step=False, yerr_meaning="other"):
+        """A line (a step curve with ``step=True``) of the plan's ``series``, ``y`` being the result ``what``. ``yerr`` are the
+        half-widths of error bars and ``yerr_meaning`` says what they are: one of ci95, sd, range, other."""
+        return self._add_series(panel, "line", series, x, y, what, yerr, yerr_meaning, step)
+
+    def points(self, panel, series, x, y, what, yerr=None, yerr_meaning="other"):
         """Markers only."""
-        ax, _rec, xs, ys, errs, legend, _new = self._add_series(panel, "points", series, x, y, what, yerr)
-        arts = ax.plot(xs, [float("nan") if v is None else v for v in ys], linestyle="none", marker="o", label=legend)
-        self._tag(arts)
-        if errs is not None:
-            self._tag(self._errorbar(ax, xs, ys, errs))
-        return arts
+        return self._add_series(panel, "points", series, x, y, what, yerr, yerr_meaning)
 
-    def bars(self, panel, series, x, y, what, yerr=None):
+    def bars(self, panel, series, x, y, what, yerr=None, yerr_meaning="other"):
         """Bars."""
-        ax, _rec, xs, ys, errs, legend, _new = self._add_series(panel, "bars", series, x, y, what, yerr)
-        cont = ax.bar(xs, [0.0 if v is None else v for v in ys], label=legend)
-        self._tag(list(cont.patches))
-        if errs is not None:
-            self._tag(self._errorbar(ax, xs, ys, errs))
-        return cont
+        return self._add_series(panel, "bars", series, x, y, what, yerr, yerr_meaning)
 
     @staticmethod
     def _errorbar(ax, xs, ys, errs):
         nan = float("nan")
-        return ax.errorbar(xs, [nan if v is None else v for v in ys], yerr=[0.0 if e is None else abs(e) for e in errs],
+        return ax.errorbar(xs, [nan if v is None else v for v in ys], yerr=[nan if e is None else e for e in errs],
                            fmt="none", ecolor="0.3", capsize=2)
 
     def curve(self, panel, label, xs, ys, source="computed in the figure"):
         """An analytic overlay (a theory curve, a slope, a fitted line): marked with ``source``; claims about it stay few."""
         ax, rec = self._panel(panel)
-        x, y = _vector(xs, "xs"), _vector(ys, "ys")
+        x, y = _vector(xs, "xs", strict=False), _vector(ys, "ys")
         if len(x) != len(y):
             raise ValueError("xs has %d values and ys has %d: a curve needs one y for each x" % (len(x), len(y)))
         if rec["x"] is None:
             raise ValueError("draw the data of panel %d first: a curve is drawn on the axes the data's x names" % (panel,))
         text = "%s (%s)" % (label, source)
-        arts = ax.plot(x, [float("nan") if v is None else v for v in y], linestyle="--", color="0.35", label=text)
-        self._tag(arts)
-        n = sum(1 for s in rec["series"] if s["kind"] == "curve") + 1
-        rec["series"].append({"id": "curve%d" % n, "label": text, "kind": "curve", "step": False, "x": x, "y": y, "yerr": None,
-                              "merged_with": [], "source": str(source)})
+        with _undone(ax, rec):
+            arts = ax.plot(x, _gaps(y), linestyle="--", color="0.35", label=text)
+            self._tag(arts)
+            n = sum(1 for e in rec["series"] if e["kind"] == "curve") + 1
+            rec["series"].append({"id": "curve%d" % n, "label": text, "kind": "curve", "step": False, "x": x, "y": y, "yerr": None,
+                                  "yerr_meaning": None, "merged_with": [], "source": str(source)})
         return arts
 
     def image(self, panel, z, x=None, y=None, what="other"):
@@ -274,22 +291,23 @@ class FigureCalls:
         rows = [_vector(r, "z") for r in z]
         if not rows or any(len(r) != len(rows[0]) for r in rows):
             raise ValueError("`z` must be rows of equal length")
-        cols = _vector(x, "x") if x is not None else [float(i) for i in range(len(rows[0]))]
+        cols = _vector(x, "x", strict=False) if x is not None else [float(i) for i in range(len(rows[0]))]
         rws = _vector(y, "y") if y is not None else [float(i) for i in range(len(rows))]
         if len(cols) != len(rows[0]) or len(rws) != len(rows):
             raise ValueError("`x` needs one value per column of `z` (%d) and `y` one per row (%d)" % (len(rows[0]), len(rows)))
-        if rec["x"] is None:
-            rec["x"] = {"id": "column", "kind": "setting", "label": "column", "scale": "linear"}
-        self._set_y(rec, what)
         nums = [v for r in rows for v in r if _finite(v)]
         extent = None
         if all(_finite(v) for v in cols + rws) and cols and rws:
             extent = [min(cols), max(cols), max(rws), min(rws)]
-        art = ax.imshow([[float("nan") if v is None else v for v in r] for r in rows], aspect="auto", extent=extent,
-                        vmin=min(nums) if nums else None, vmax=max(nums) if nums else None)
-        self._tag(art)
-        rec["series"].append({"id": what, "label": self._label_of(what), "kind": "image", "step": False, "x": cols, "y": rws,
-                              "yerr": None, "merged_with": [], "z": rows})
+        with _undone(ax, rec):
+            if rec["x"] is None:
+                rec["x"] = {"id": "column", "kind": "setting", "label": "column", "scale": "linear"}
+            self._set_y(rec, what)
+            art = ax.imshow([_gaps(r) for r in rows], aspect="auto", extent=extent,
+                            vmin=min(nums) if nums else None, vmax=max(nums) if nums else None)
+            self._tag(art)
+            rec["series"].append({"id": what, "label": self._label_of(what), "kind": "image", "step": False, "x": cols, "y": rws,
+                                  "yerr": None, "yerr_meaning": None, "merged_with": [], "z": rows})
         return art
 
     # ---- band, reference, note ---------------------------------------------------------------------------------------
@@ -302,16 +320,22 @@ class FigureCalls:
         self._series_ok(series)
         self._what_ok(what)
         x_id, x = self._xsplit(x)
-        xs, los, his = _vector(x, "x"), _vector(lo, "lo"), _vector(hi, "hi")
+        xs, los, his = _vector(x, "x", strict=False), _vector(lo, "lo"), _vector(hi, "hi")
         if not len(xs) == len(los) == len(his):
             raise ValueError("x, lo and hi must have the same length (%d, %d, %d)" % (len(xs), len(los), len(his)))
-        self._set_x(rec, x_id)
-        self._set_y(rec, what)
-        nan = float("nan")
-        art = ax.fill_between(xs, [nan if v is None else v for v in los], [nan if v is None else v for v in his], alpha=0.25,
-                              linewidth=0)
-        self._tag(art)
-        rec["bands"].append({"series": series, "lo": los, "hi": his, "meaning": meaning})
+        drawn = [e for e in rec["series"] if e["id"] == series and e["kind"] != "curve"]
+        if not drawn:
+            raise ValueError("series `%s` has not been drawn on panel %d: draw it with line, points or bars before its band; the "
+                             "series on this panel are: %s" % (series, panel, ", ".join(sorted({e["id"] for e in rec["series"]})) or "(none)"))
+        if not any(e["x"] == xs for e in drawn):
+            raise ValueError("the band's x does not match the x of series `%s` on panel %d: a band is drawn at the points of its "
+                             "series" % (series, panel))
+        with _undone(ax, rec):
+            self._set_x(rec, x_id)
+            self._set_y(rec, what)
+            art = ax.fill_between(xs, _gaps(los), _gaps(his), alpha=0.25, linewidth=0)
+            self._tag(art)
+            rec["bands"].append({"series": series, "x": xs, "lo": los, "hi": his, "meaning": meaning})
         return art
 
     def ref(self, panel, ref_id, axis="y"):
@@ -338,6 +362,8 @@ class FigureCalls:
         table (``"mean growth: {growth}"``); ``form`` is mean, n, low or high; ``key`` is the setting (optional when the study
         has one)."""
         ax, rec = self._panel(panel)
+        if not (_finite(x) and _finite(y)):
+            raise ValueError("a note's x and y must be finite numbers, got %r and %r" % (x, y))
         if form not in NOTE_FORMS:
             raise ValueError("`form=%r` is not one of: %s" % (form, ", ".join(NOTE_FORMS)))
         text = str(what)
@@ -393,5 +419,6 @@ class FigureCalls:
         """Write the record as ``<stem>.calls.json`` (``path`` is the figure's file or a ``.calls.json`` path); returns the path."""
         p = Path(path)
         out = p if p.name.endswith(".calls.json") else p.with_name(p.stem + ".calls.json")
+        out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(self.record(), indent=1, allow_nan=False), encoding="utf-8")
         return out

@@ -91,6 +91,7 @@ def test_x_may_be_a_result_id():
 
 def test_band_meaning_closed_list():
     h = _Host()
+    h.line(0, "fast", [1, 2], [1.0, 2.0], "growth")
     for m in ("ci95", "sd", "range", "other"):
         h.band(0, "fast", [1, 2], [0, 1], [2, 3], "growth", m)
     assert [b["meaning"] for b in h.record()["panels"][0]["bands"]] == ["ci95", "sd", "range", "other"]
@@ -175,14 +176,87 @@ def test_artist_gids_are_tagged():
     assert len(gids) >= 6  # one tag for each call
 
 
-def test_identical_series_are_merged():
+def test_equal_series_are_kept_as_drawn():
     h = _Host()
     h.line(0, "fast", [1, 2, 3], [1.0, 2.0, 4.0], "growth")
-    h.line(0, "slow", [1, 2, 3], [1.0, 2.0, 4.0 * (1 + 1e-14)], "growth")
-    h.line(0, "slow", [1, 2, 3], [1.0, 2.5, 4.0], "growth")
+    h.line(0, "slow", [1, 2, 3], [1.0, 2.0, 4.0], "growth", yerr=[0.1, 0.1, 0.1])
     s = h.record()["panels"][0]["series"]
-    assert [x["id"] for x in s] == ["fast", "slow"] and s[0]["merged_with"] == ["slow"]
-    assert len(h.axes[0].lines) == 3 and all(l.get_gid() for l in h.axes[0].lines)  # the merged one is still drawn
+    assert [x["id"] for x in s] == ["fast", "slow"] and s[0]["merged_with"] == [] and s[1]["yerr"] == [0.1, 0.1, 0.1]
+
+
+def test_missing_values_are_null_gaps_never_text():
+    h = _Host()
+    h.line(0, "fast", [1, 2, 3], [1, None, 3], "growth")
+    h.bars(1, "fast", [1, 2], [1.0, None], "growth", yerr=[None, 0.2])
+    h.image(1, [[1, None], [3, 4]], what="growth")
+    r = h.record()["panels"]
+    assert r[0]["series"][0]["y"] == [1.0, None, 3.0]
+    assert r[1]["series"][0]["y"] == [1.0, None] and r[1]["series"][0]["yerr"] == [None, 0.2]
+    assert r[1]["series"][1]["z"][0] == [1.0, None]
+    ydata = h.axes[0].lines[0].get_ydata()
+    assert len(ydata) == 3 and math.isnan(ydata[1]) and not any(isinstance(v, str) for v in ydata)
+    json.dumps(h.record(), allow_nan=False)
+
+
+def test_non_numeric_y_is_refused_before_anything_is_drawn():
+    h = _Host()
+    for bad in (["a", "b"], [True, 1.0]):
+        with pytest.raises(ValueError) as e:
+            h.line(0, "fast", [1, 2], bad, "growth")
+        assert "numbers" in str(e.value)
+    with pytest.raises(ValueError):
+        h.band(0, "fast", [1, 2], [0, "x"], [1, 2], "growth", "sd")
+    assert h.record()["panels"][0]["series"] == [] and not h.axes[0].lines
+
+
+def test_failed_draw_leaves_no_record(monkeypatch):
+    h = _Host()
+
+    def boom(*a, **k):
+        raise RuntimeError("draw failed")
+
+    monkeypatch.setattr(h.axes[0], "plot", boom)
+    with pytest.raises(RuntimeError):
+        h.line(0, "fast", [1, 2], [1.0, 2.0], "growth")
+    p = h.record()["panels"][0]
+    assert p["series"] == [] and p["x"] is None and p["y"] is None
+    monkeypatch.undo()
+    monkeypatch.setattr(h.axes[0], "errorbar", boom)  # fails after the line was drawn: the line goes too
+    with pytest.raises(RuntimeError):
+        h.line(0, "fast", [1, 2], [1.0, 2.0], "growth", yerr=[0.1, 0.1])
+    assert h.record()["panels"][0]["series"] == [] and not h.axes[0].lines
+
+
+def test_band_records_x_and_needs_its_series():
+    h = _Host()
+    with pytest.raises(ValueError) as e:
+        h.band(0, "fast", [1, 2], [0, 1], [2, 3], "growth", "sd")
+    assert "not been drawn" in str(e.value)
+    h.line(0, "fast", [1, 2, 3], [1.0, 2.0, 4.0], "growth")
+    with pytest.raises(ValueError) as e:
+        h.band(0, "fast", [1, 2, 4], [0, 1, 2], [2, 3, 5], "growth", "sd")
+    assert "does not match" in str(e.value)
+    with pytest.raises(ValueError):
+        h.band(0, "slow", [1, 2, 3], [0, 1, 2], [2, 3, 5], "growth", "sd")
+    assert h.record()["panels"][0]["bands"] == []
+    h.band(0, "fast", [1, 2, 3], [0, 1, 2], [2, 3, 5], "growth", "sd")
+    b = h.record()["panels"][0]["bands"][0]
+    assert b["x"] == [1.0, 2.0, 3.0] and b["lo"] == [0.0, 1.0, 2.0] and b["meaning"] == "sd"
+
+
+def test_error_bars_record_their_meaning():
+    h = _Host()
+    h.line(0, "fast", [1, 2], [1.0, 2.0], "growth", yerr=[0.1, 0.2], yerr_meaning="ci95")
+    h.points(0, "slow", [1, 2], [1.0, 2.5], "growth", yerr=[0.1, 0.2])
+    h.bars(1, "fast", [1, 2], [1.0, 2.0], "growth", yerr=[-0.1, 0.2], yerr_meaning="sd")
+    h.line(1, "slow", [1, 2], [1.0, 2.0], "growth")
+    r = h.record()["panels"]
+    assert [s["yerr_meaning"] for s in r[0]["series"]] == ["ci95", "other"]
+    assert r[1]["series"][0]["yerr_meaning"] == "sd" and r[1]["series"][0]["yerr"] == [0.1, 0.2]
+    assert r[1]["series"][1]["yerr_meaning"] is None
+    with pytest.raises(ValueError) as e:
+        h.line(0, "fast", [3], [1.0], "growth", yerr=[0.1], yerr_meaning="stderr")
+    assert "ci95" in str(e.value) and "range" in str(e.value)
 
 
 def test_step_and_non_finite_values():
@@ -201,7 +275,7 @@ def test_record_roundtrips_json(tmp_path):
     h.ref(0, "limit")
     h.note(0, 1, 1, "mean: {growth}")
     h.raw(1)
-    out = h.write(tmp_path / "fig1.png")
+    out = h.write(tmp_path / "sub" / "fig1.png")
     assert out.name == "fig1.calls.json"
     assert json.loads(out.read_text(encoding="utf-8")) == h.record()
     assert h.record()["version"] == 1 and h.record()["fallback"] is False
