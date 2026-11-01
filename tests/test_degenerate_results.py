@@ -636,3 +636,19 @@ async def test_a_repair_that_gives_up_on_a_crash_still_gives_up(tmp_path: Path, 
     })
     assert patch["exec_give_up_reason"].startswith("needs a device")
     assert not patch.get("exec_patch_pending")
+
+
+def test_a_declared_reference_value_is_the_same_everywhere_by_design_and_a_declared_result_is_still_caught() -> None:
+    """A derived value with the role ``reference`` and a constant formula (or a declared result with a reference formula) is
+    not a result that shows nothing; a declared result that stays put while another changes still is."""
+    plan = {"metrics": [{"id": "gain", "role": "result"}, {"id": "level", "role": "result"},
+                        {"id": "bound_ref", "reference": {"formula": "7"}}],
+            "derived": [{"id": "ratio_ref", "inputs": [], "role": "reference", "formula": "10"},
+                        {"id": "mean_gain", "inputs": ["gain"], "role": "result"}],
+            "oracles": [{"name": "r", "kind": "special_case", "measure": "ratio_ref", "expected": 10, "case": {"rate": 1}}]}
+    names = dr.expected_constants(plan)
+    assert {"ratio_ref", "bound_ref"} <= names and not ({"gain", "level", "mean_gain"} & names)
+    reported = REPORTED | {"ratio_ref", "bound_ref"}
+    cells = _cells(gain=lambda r: 3 * r, ratio_ref=10.0, bound_ref=7.0, level=2.5)
+    assert _flags(cells, reported, names) == [("level", "constant")], "only the declared result is flagged"
+    assert ("ratio_ref", "constant") in _flags(cells, reported), "without the declared role it is flagged (the old behaviour)"

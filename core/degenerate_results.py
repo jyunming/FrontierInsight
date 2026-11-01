@@ -385,6 +385,22 @@ def expected_constants(protocol: dict[str, Any] | None, design: dict[str, Any] |
         block = (protocol or {}).get(key) if isinstance(protocol, dict) else None
         if isinstance(block, dict):
             out |= {str(k) for k in block}
+    out |= _declared_references(protocol)
+    return out
+
+
+def _declared_references(protocol: dict[str, Any] | None) -> set[str]:
+    """The names the plan declares with the role ``reference`` (a theory or reference value FI computes from a formula or a
+    constant, a declared result or a derived one): the same at every setting by design, so never a result that shows nothing.
+    Read from the declared role (:func:`core.contract.raw_roles` for a result, the entry's ``role`` for a derived one), not
+    from the name."""
+    from . import contract as _contract
+
+    p = protocol if isinstance(protocol, dict) else {}
+    out = {n for n, role in _contract.raw_roles(p).items() if role == "reference"}
+    for d in p.get("derived") if isinstance(p.get("derived"), list) else []:
+        if isinstance(d, dict) and d.get("id") and d.get("role") == "reference":
+            out.add(str(d["id"]))
     return out
 
 
