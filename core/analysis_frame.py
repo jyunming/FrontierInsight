@@ -1364,6 +1364,25 @@ def _put_back(quest_root, document, why=""):
     return kept
 
 
+def _kept_figure(spec_id, quest_root):
+    """For the run that draws only what the earlier run failed to draw (``FI_FIGURE_FALLBACK=only``): the outcome of a figure the
+    earlier run drew, with its file put back where it was, else None."""
+    try:
+        with open(os.path.join(quest_root, PREVIOUS), encoding="utf-8") as f:
+            old = json.load(f)
+    except (OSError, ValueError):
+        return None
+    for o in (old.get("figures") if isinstance(old, dict) else None) or []:
+        if isinstance(o, dict) and o.get("id") == spec_id and o.get("status") == "ok":
+            name = os.path.basename(str(o.get("file") or ""))
+            src = os.path.join(quest_root, "figures", "previous", name)
+            if name in _ASIDE["files"] and os.path.exists(src):
+                os.replace(src, os.path.join(quest_root, "figures", name))
+                _ASIDE["files"].remove(name)
+                return o
+    return None
+
+
 def _figures(table, quest_root):
     """``(outcomes, said, exit code of the bodies, FI's own faults)`` of the figure step."""
     if not os.path.exists(os.path.join(HERE, "fi_figures.py")):
@@ -1377,15 +1396,20 @@ def _figures(table, quest_root):
     specs = [dict(v, id=i) for i, v in derive.FIGURES.items()]
     try:
         outcomes = []
+        only = os.environ.get("FI_FIGURE_FALLBACK") == "only"
         for spec in specs:
             by = "figure_%s" % spec["id"]
+            kept = _kept_figure(spec["id"], quest_root) if only else None
+            if kept is not None:
+                outcomes.append(kept)
+                continue
             _progress(by)
             seen = _BODIES.setdefault(by, {"seconds": 0.0, "warnings": []})
             began = time.monotonic()
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
                 outcomes += fi_figures.run_figures([spec], derive, table, out_dir)
-                if os.environ.get("FI_FIGURE_FALLBACK") == "1" and outcomes[-1].get("status") in ("failed", "refused", "not_written"):
+                if os.environ.get("FI_FIGURE_FALLBACK") in ("1", "only") and outcomes[-1].get("status") in ("failed", "refused", "not_written"):
                     # No repair is left for the body: the plan's own figure is drawn from the table in its place
                     plain = fi_figures.default_figure(spec, table, out_dir)
                     if plain.get("status") in ("ok", "dropped"):

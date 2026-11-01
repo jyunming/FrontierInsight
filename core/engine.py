@@ -11950,16 +11950,47 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._typed_figures = self._figure_scripts_with_typed_numbers()
         return used, rewrote
 
-    def _figure_fallbacks(self, figure_records: dict[str, Any]) -> None:
+    async def _figures_after_give_up(self, state: QuestState) -> dict[str, Any]:
+        """The repairs ended by a give-up (the model refused or returned no code), after a run whose results stand and whose
+        figure functions failed: the run that failed was not the one flagged for the plan's own figure, so the analysis is run
+        once more WITHOUT the simulation (``experiment.py`` reads FI's record of the trials from disk) and draws only the
+        figures that failed, in the plan's own description (``FI_FIGURE_FALLBACK=only``; a figure that was drawn keeps its file).
+        Returns the state's ``figures`` and ``figure_records`` as they are then, or nothing when there is nothing to draw."""
+        try:
+            record = _analysis_frame.read_record(self.quest_root)
+            lost = [o for o in record.get("figures") or [] if isinstance(o, dict)
+                    and o.get("status") in ("failed", "refused", "not_written")]
+            if (not lost or record.get("from_earlier_run") or not (state.get("exec_result") or {}).get("results_produced")
+                    or not self._analysis_on()):
+                return {}
+            self._log.info("[execute_reflect] the repair gave up with %d figure(s) not drawn; FI draws them from the plan's "
+                           "own description, from the results it already holds (the simulation is not run again)", len(lost))
+            env = {**(self.__dict__.get("_last_exec_env") or scrub_secrets()), "FI_FIGURE_FALLBACK": "only"}
+            await self.executor.execute(
+                [str(self.executor.python_path(self.quest_root)), str(self.quest_root / "code" / _analysis_frame.EXPERIMENT_FILE)],
+                cwd=self.quest_root, timeout_s=self.config.execution.timeout_s, env=env)
+            fig_dir = self.quest_root / "figures"
+            figures = (sorted(p.name for p in fig_dir.iterdir() if p.is_file() and p.suffix.lower() in _FIGURE_SUFFIXES)
+                       if fig_dir.is_dir() else [])
+            records = {**(state.get("figure_records") or {}), **_read_figure_records(self.fi_dir / "figure_records", figures)}
+            records = {k: v for k, v in records.items() if k in figures}
+            self._figure_fallbacks(records)
+            return {"figures": figures, "figure_records": records}
+        except Exception as exc:  # noqa: BLE001 -- the figures are best-effort; the repair's give-up stands as it was
+            self._log.warning("[execute_reflect] the plan's own figures could not be drawn after the give-up (%r)", exc)
+            return {}
+
+    def _figure_fallbacks(self, figure_records: dict[str, Any], record: dict[str, Any] | None = None) -> None:
         """What FI's analysis drew in place of a figure body no repair is left for (``FI_FIGURE_FALLBACK``, set in
         :meth:`_node_execute`; the figure is drawn by ``analysis_figures.default_figure`` from the plan's own description).
         A figure so drawn is marked ``fallback`` in its record, said in run.log. One the plan did not describe enough to draw
         is not in the paper: QUALITY.md says so (a row that stops nothing), and run.log. Both are read from FI's record of
-        the run (derived.json), so a run that drew every body itself leaves nothing here."""
-        record = _analysis_frame.read_record(self.quest_root)
-        self._clear_cannot_repair("figure_dropped")
+        the run (derived.json), so a run that drew every body itself leaves nothing here. ``record``: the primary run's, when
+        replicates have written derived.json since."""
+        record = record if record is not None else _analysis_frame.read_record(self.quest_root)
         if record.get("from_earlier_run"):
             return
+        self._clear_cannot_repair("figure_dropped")
         for outcome in record.get("figures") or []:
             if not (isinstance(outcome, dict) and outcome.get("fallback")):
                 continue
@@ -19594,6 +19625,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             p.name for p in (self.quest_root / "figures").iterdir()
             if p.is_file() and p.suffix.lower() in _FIGURE_SUFFIXES
         ) if (self.quest_root / "figures").is_dir() else []
+        # What the primary run's figures say of themselves; the replicates below write derived.json again.
+        primary_record = _analysis_frame.read_record(self.quest_root)
         raw_result_json = _extract_result_json(result.stdout)
         self._note_typed_values(raw_result_json)
         result_json = self._without_typed_results(raw_result_json)
@@ -19850,7 +19883,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 )
         figures = self._drop_typed_figures(figures, records_dir)
         figure_records = _read_figure_records(records_dir, figures)
-        self._figure_fallbacks(figure_records)
+        self._figure_fallbacks(figure_records, primary_record)
         for line in _unread_results(figure_records):
             self._log.info("[execute] declared result not read by a figure: %s (the caption states only what the saved axes "
                            "and legend label)", line)
@@ -21018,6 +21051,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "exec_give_up_reason": give_up,
                 "exec_reflect_iter": iters + bump,
                 "exec_reflect_history": history,
+                **await self._figures_after_give_up(state),
             }
 
         new_code = parsed.get("code") or ""
@@ -21043,6 +21077,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return self._manifest_repair_gave_up(state) or self._result_check_gave_up(state) or {
                 "exec_give_up_reason": "(LLM produced no patched code)",
                 "exec_reflect_iter": iters + bump,
+                **await self._figures_after_give_up(state),
             }
         if overlaps:
             try:

@@ -358,8 +358,74 @@ def test_the_fallback_flag_is_set_only_on_the_run_that_ends_the_repairs(tmp_path
     analysis = ("import json, os\nprint('RESULT_JSON: ' + json.dumps({'flag': os.environ.get('FI_FIGURE_FALLBACK', 'unset')}))\n")
     monkeypatch.setattr(Engine, "_analysis_on", lambda self: True)
     flags = {}
-    for sub, used in (("left", 0), ("spent", 99)):
+    for sub, used, more in (("left", 0, {}), ("spent", 99, {}), ("gave_up", 0, {"exec_give_up_reason": "the model gave up"})):
         eng = split_engine(tmp_path / sub, replicates=2)
         _write(eng, simulate=SIMULATE, analysis=analysis)
-        flags[sub] = asyncio.run(eng._node_execute({"deps": [], "exec_reflect_iter": used}))["result_json"]["flag"]
-    assert flags == {"left": "unset", "spent": "1"}
+        flags[sub] = asyncio.run(eng._node_execute({"deps": [], "exec_reflect_iter": used, **more}))["result_json"]["flag"]
+    assert flags == {"left": "unset", "spent": "1", "gave_up": "1"}
+
+
+# ---- the repairs end by a give-up: the figure that failed is still drawn, from the results already on disk ----
+
+
+def _give_up_quest(tmp_path: Path, monkeypatch):
+    """An engine whose quest holds FI's analysis, a record of the trials and one run (no flag) in which fig1 raised and fig2 drew."""
+    import subprocess
+    import sys
+    import types
+
+    from tests.test_analysis_frame import NO_WINDOW, RECORD, _design
+    from tests.test_analysis_frame import _derived  # noqa: F401
+
+    design = _design()
+    design["protocol"]["figures"].append({"id": "fig2", "file": "other.png", "shows": ["growth"], "x": "rate"})
+    eng = _engine(tmp_path, phased_on=False)
+    root = eng.quest_root
+    (root / "raw").mkdir(parents=True, exist_ok=True)
+    (root / "raw" / "trials.json").write_text(json.dumps(RECORD), encoding="utf-8")
+    frame.ensure_files(root / "code", design)
+    with (root / "code" / "derive.py").open("a", encoding="utf-8") as f:
+        f.write("\n\n" + _RAISES + "\n\ndef figure_fig2(fig, table):\n    fig.axes[0].plot([1, 2], [table.mean('growth', k) for k in table.keys()][:2])\n")
+    calls: list[dict] = []
+
+    async def execute(cmd, cwd=None, timeout_s=None, env=None, **_kw):
+        calls.append(dict(env or {}))
+        done = subprocess.run(cmd, cwd=root / "code", env={k: v for k, v in os.environ.items() if k != "PYTHONPATH"} | (env or {}),
+                              capture_output=True, text=True, timeout=300, creationflags=NO_WINDOW)
+        return types.SimpleNamespace(returncode=done.returncode, stdout=done.stdout, stderr=done.stderr)
+
+    monkeypatch.setattr(eng.executor, "execute", execute)
+    monkeypatch.setattr(eng.executor, "python_path", lambda _root: sys.executable)
+    first = subprocess.run([sys.executable, "experiment.py"], cwd=root / "code", capture_output=True, text=True, timeout=300,
+                           creationflags=NO_WINDOW)
+    assert first.returncode == 1
+    return eng, root, calls
+
+
+import os  # noqa: E402
+
+
+def test_a_give_up_still_draws_the_failed_figure_from_the_results_on_disk_and_leaves_the_drawn_one(tmp_path: Path, monkeypatch) -> None:
+    eng, root, calls = _give_up_quest(tmp_path, monkeypatch)
+    other = (root / "figures" / "other.png").read_bytes()
+    state = {"exec_result": {"returncode": 1, "results_produced": True},
+             "figure_records": {"other.png": {"axes": []}, "growth.png": {"axes": []}}}
+    out = asyncio.run(eng._figures_after_give_up(state))
+    assert calls and calls[0]["FI_FIGURE_FALLBACK"] == "only"
+    assert (root / "figures" / "growth.png").stat().st_size > 0
+    assert (root / "figures" / "other.png").read_bytes() == other  # the figure that drew fine is not touched
+    assert out["figures"] == ["growth.png", "other.png"]
+    assert out["figure_records"]["growth.png"]["fallback"] is True and "fallback" not in out["figure_records"]["other.png"]
+    assert eng._cannot_repair_problems() == []  # a drawn fallback is said in run.log only
+    record = frame.read_record(root)
+    assert {o["id"]: o["status"] for o in record["figures"]} == {"fig1": "ok", "fig2": "ok"}
+    assert "fallback" not in next(o for o in record["figures"] if o["id"] == "fig2")
+
+
+def test_a_give_up_runs_nothing_when_no_figure_failed_or_the_run_has_no_results(tmp_path: Path, monkeypatch) -> None:
+    eng, root, calls = _give_up_quest(tmp_path, monkeypatch)
+    assert asyncio.run(eng._figures_after_give_up({"exec_result": {"returncode": 1, "results_produced": False}})) == {}
+    assert not calls and not (root / "figures" / "growth.png").exists()
+    asyncio.run(eng._figures_after_give_up({"exec_result": {"returncode": 1, "results_produced": True}}))
+    again = asyncio.run(eng._figures_after_give_up({"exec_result": {"returncode": 0, "results_produced": True}}))
+    assert again == {} and len(calls) == 1  # nothing failed any more: no second run
