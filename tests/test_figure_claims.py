@@ -1,0 +1,370 @@
+"""The claims FI can state about a figure from its call record (core/figure_claims.py)."""
+
+from __future__ import annotations
+
+import json
+import math
+import random
+
+import pytest
+
+from core import figure_claims as fc
+
+
+def _series(sid, xs, ys, kind="line", **kw):
+    return {"id": sid, "label": sid.upper(), "kind": kind, "step": False, "x": xs, "y": ys, "yerr": None,
+            "merged_with": [], **kw}
+
+
+def _panel(series, n=1, what="signal", **kw):
+    return {"panel": n, "raw": False, "raw_reason": None,
+            "x": {"id": "size", "kind": "setting", "label": "size", "scale": "linear"},
+            "y": {"what": what, "label": "signal level", "scale": "linear"},
+            "series": series, "bands": [], "refs": [], "notes": [], "texts_raw": [], **kw}
+
+
+def _calls(*panels, fallback=False):
+    return {"version": 1, "fallback": fallback, "panels": list(panels)}
+
+
+def _base():
+    return _calls(_panel([
+        _series("a", [1, 2, 3, 4], [1.0, 2.0, 3.0, 5.0]),
+        _series("b", [1, 2, 3, 4], [4.0, 3.0, 2.5, 0.5]),
+        _series("c", [1, 2, 3, 4], [1.0, 2.0, 3.0, 5.0]),
+    ]))
+
+
+def ev(calls, cid, **args):
+    return fc.evaluate(calls, cid, {k: str(v) for k, v in args.items()})
+
+
+def test_drawn():
+    got = ev(_base(), "drawn", series="a")
+    assert got and "A is drawn" in got[0] and got[1] == {"series": "a", "panel": "1"}
+    assert ev(_base(), "drawn", series="zz") is None
+
+
+def test_not_drawn():
+    plan = {"series": ["a", "ghost"]}
+    assert fc.evaluate(_base(), "not_drawn", {"series": "ghost"}, plan=plan)
+    assert fc.evaluate(_base(), "not_drawn", {"series": "a"}, plan=plan) is None   # drawn
+    assert fc.evaluate(_base(), "not_drawn", {"series": "invented"}, plan=plan) is None  # not a plan series
+    assert fc.evaluate(_base(), "not_drawn", {"series": "ghost"}) is None
+
+
+def test_range():
+    got = ev(_base(), "range", series="b", axis="y")
+    assert got and got[0].startswith("B spans 0.5 to 4")
+    assert ev(_base(), "range", series="b", axis="x")[0].startswith("B spans 1 to 4")
+    other = _calls(_panel([_series("a", [1, 2], [1, 2])], what="other"))
+    assert ev(other, "range", series="a", axis="y") is None
+    assert ev(other, "range", series="a", axis="x")
+
+
+def test_value_at():
+    got = ev(_base(), "value_at", series="a", x=3)
+    assert got and "A is 3 at size 3" in got[0]
+    assert ev(_base(), "value_at", series="a", x=9) is None
+
+
+def test_value_at_between_drawn_points_is_not_evaluable():
+    assert ev(_base(), "value_at", series="a", x=2.5) is None
+
+
+def test_trend():
+    assert "increases" in ev(_base(), "trend", series="a")[0]
+    assert "decreases" in ev(_base(), "trend", series="b")[0]
+    mixed = _calls(_panel([_series("m", [1, 2, 3, 4], [1, 3, 2, 4])]))
+    assert "does not change monotonically" in ev(mixed, "trend", series="m")[0]
+    tied = _calls(_panel([_series("t", [1, 2, 3, 4], [1, 2, 2.0000001, 4])]))
+    assert "increases" in ev(tied, "trend", series="t")[0]
+    two = _calls(_panel([_series("t", [1, 2], [1, 2])]))
+    assert ev(two, "trend", series="t") is None
+    flat = _calls(_panel([_series("t", [1, 2, 3], [2, 2, 2])]))
+    assert ev(flat, "trend", series="t") is None
+    step = _calls(_panel([_series("t", [1, 2, 3], [3, 2, 1], step=True)]))
+    assert ev(step, "trend", series="t") is None
+
+
+def test_steps():
+    step = _calls(_panel([_series("t", [0, 5, 10], [1.0, 0.7, 0.4], step=True)]))
+    got = ev(step, "steps", series="t")
+    assert got and "falls from 1 to 0.4" in got[0]
+    assert ev(_base(), "steps", series="a") is None
+
+
+def test_order():
+    got = ev(_base(), "order", at=3)
+    assert got is None  # a and c are the same data: a tie has no order
+    assert ev(_base(), "order", at=1) is None
+    cc = _calls(_panel([_series("a", [1, 2], [1, 5]), _series("b", [1, 2], [3, 2]), _series("c", [2], [9])]))
+    assert ev(cc, "order", at=2)[0].split("are ")[1] == "C, A, B"
+    solo = _calls(_panel([_series("a", [1, 2], [1, 5]), _series("b", [1], [3])]))
+    assert ev(solo, "order", at=2) is None
+
+
+def test_crossing_and_no_crossing():
+    got = ev(_base(), "crossing", a="a", b="b")
+    assert got and "between size 2 and 3" in got[0]
+    assert ev(_base(), "no_crossing", a="a", b="b") is None
+    apart = _calls(_panel([_series("a", [1, 2, 3], [1, 2, 3]), _series("b", [1, 2, 3], [5, 6, 7])]))
+    assert "do not cross" in ev(apart, "no_crossing", a="a", b="b")[0]
+    assert ev(apart, "crossing", a="a", b="b") is None
+    one = _calls(_panel([_series("a", [1], [1]), _series("b", [1], [5])]))
+    assert ev(one, "no_crossing", a="a", b="b") is None
+
+
+def test_identical():
+    got = ev(_base(), "identical", a="a", b="c")
+    assert got and "same data" in got[0]
+    assert ev(_base(), "identical", a="a", b="b") is None
+    merged = _calls(_panel([_series("a", [1, 2], [1, 2], merged_with=["z"])]))
+    assert "drawn once" in ev(merged, "identical", a="a", b="z")[0]
+
+
+def test_reference():
+    c = _calls(_panel([_series("a", [1, 2], [1, 2])], refs=[{"id": "r1", "axis": "y", "value": 0.05, "label": "limit"}]))
+    got = ev(c, "reference", ref="r1")
+    assert got and "y = 0.05" in got[0] and "limit" in got[0]
+    assert ev(c, "reference", ref="r2") is None
+
+
+def test_errorbars():
+    c = _calls(_panel([_series("a", [1, 2], [1, 2], yerr=[0.1, 0.2], yerr_meaning="sd")]))
+    assert "standard deviation" in ev(c, "errorbars", series="a")[0]
+    zero = _calls(_panel([_series("a", [1, 2], [1, 2], yerr=[0, 0])]))
+    assert ev(zero, "errorbars", series="a") is None
+    other = _calls(_panel([_series("a", [1, 2], [1, 2], yerr=[1, 1], yerr_meaning="other")]))
+    assert ev(other, "errorbars", series="a") is None
+    none = _calls(_panel([_series("a", [1, 2], [1, 2])]))
+    assert ev(none, "errorbars", series="a") is None
+    assert ev(c, "errorbar", series="a") is None  # the id is errorbars
+
+
+def test_band():
+    band = {"series": "a", "lo": [0, 1], "hi": [2, 3], "meaning": "ci95"}
+    c = _calls(_panel([_series("a", [1, 2], [1, 2])], bands=[band]))
+    assert "95% confidence interval" in ev(c, "band", series="a")[0]
+    c2 = _calls(_panel([_series("a", [1, 2], [1, 2])], bands=[{**band, "meaning": "other"}]))
+    assert ev(c2, "band", series="a") is None
+
+
+def test_missing_x():
+    c = _calls(_panel([_series("a", [1, 2, 4], [1, 2, 4], kind="points")]))
+    got = fc.evaluate(c, "missing_x", {"series": "a"}, plan={"grid": [1, 2, 3, 4]})
+    assert got and "no point at size 3" in got[0]
+    assert fc.evaluate(c, "missing_x", {"series": "a"}) is None
+    assert fc.evaluate(c, "missing_x", {"series": "a"}, plan={"grid": [1, 2, 4]}) is None
+    line = _calls(_panel([_series("a", [1, 2, 4], [1, 2, 4])]))
+    assert fc.evaluate(line, "missing_x", {"series": "a"}, plan={"grid": [1, 2, 3]}) is None
+
+
+def test_scale():
+    c = _calls(_panel([_series("a", [1, 2], [1, 2])]))
+    c["panels"][0]["x"]["scale"] = "log"
+    assert "x axis is logarithmic" in ev(c, "scale", axis="x")[0]
+    assert "y axis is linear" in ev(c, "scale", axis="y")[0]
+    assert ev(c, "scale", axis="z") is None
+
+
+def test_layout_and_lines_delegate():
+    record = {"axes": [{"title": "A", "ylabel": "y", "place": [0.1, 0.15, 0.35, 0.7], "series": []},
+                       {"title": "B", "ylabel": "y", "place": [0.55, 0.15, 0.35, 0.7], "series": []}]}
+    lines = {"axes": [{"lines": [{"label": "s", "kind": "data", "x": [0, 1, 2], "y": [1, 2, 3], "linestyle": "-",
+                                  "marker": "None"}]}]}
+    got = fc.evaluate(_base(), "layout", {}, record=record, lines_data=lines)
+    assert got and got[0].startswith("two panels side by side")
+    got = fc.evaluate(_base(), "lines", {}, record=record, lines_data=lines)
+    assert got and "solid lines are drawn" in got[0]
+    assert fc.evaluate(_base(), "layout", {}) is None
+    assert fc.evaluate(_base(), "lines", {}) is None
+
+
+def test_note():
+    c = _calls(_panel([_series("a", [1, 2], [1, 2])], notes=[{"id": "n1", "text": "onset", "x": 1, "y": 1}]))
+    assert ev(c, "note", note="n1")[0] == "onset"
+    assert ev(c, "note", note="n2") is None
+
+
+def test_curve_supports_only_drawn_and_range():
+    c = _calls(_panel([_series("k", [1, 2, 3, 4], [1, 2, 3, 4], kind="curve"), _series("a", [1, 2, 3, 4], [4, 3, 2, 1])]))
+    assert ev(c, "drawn", series="k") and ev(c, "range", series="k", axis="y")
+    assert ev(c, "trend", series="k") is None
+    assert ev(c, "value_at", series="k", x=2) is None
+    assert ev(c, "crossing", a="k", b="a") is None
+    assert ev(c, "identical", a="k", b="a") is None
+    assert all(o["claim"] in ("drawn", "range") for o in fc.menu(c) if "series" in o["args"] and o["args"]["series"] == "k")
+
+
+def test_unknown_claim_id_is_not_evaluable():
+    assert ev(_base(), "argmax", series="a") is None
+    assert fc.evaluate(_base(), 5, {}) is None  # type: ignore[arg-type]
+    assert ev(_base(), "drawn", series="a", extra="x") is None  # an argument the claim does not take
+    assert ev(_base(), "drawn") is None
+
+
+def test_claim_on_raw_panel_is_not_evaluable():
+    raw = _panel([_series("a", [1, 2, 3], [1, 2, 3])], raw=True, raw_reason="custom artist")
+    c = _calls(raw)
+    for cid, args in (("drawn", {"series": "a"}), ("trend", {"series": "a"}), ("scale", {"axis": "x"})):
+        assert fc.evaluate(c, cid, args) is None
+    assert fc.menu(c) == []
+
+
+def test_panel_argument():
+    two = _calls(_panel([_series("a", [1, 2, 3], [1, 2, 3])], n=1), _panel([_series("b", [1, 2, 3], [3, 2, 1])], n=2))
+    assert ev(two, "drawn", series="a") is None  # which panel?
+    assert ev(two, "drawn", series="b", panel=2)[0].endswith("in panel 2")
+    assert ev(two, "drawn", series="b", panel=1) is None
+    assert ev(two, "drawn", series="b", panel="x") is None
+
+
+def test_no_call_record_is_not_evaluable():
+    assert fc.evaluate(None, "drawn", {"series": "a"}) is None
+    assert fc.evaluate({}, "drawn", {"series": "a"}) is None
+    assert fc.menu(None) == []
+
+
+def test_other_quantity_offers_no_value_claims():
+    c = _calls(_panel([_series("a", [1, 2, 3], [3, 1, 2]), _series("b", [1, 2, 3], [1, 2, 3])], what="other"))
+    claims = {o["claim"] for o in fc.menu(c)}
+    assert "drawn" in claims and "scale" in claims
+    assert not claims & {"value_at", "trend", "order", "crossing", "no_crossing"}
+    assert all(o["args"].get("axis") == "x" for o in fc.menu(c) if o["claim"] == "range")
+
+
+def test_nan_and_single_point_series_fail_closed_without_raising():
+    nan = float("nan")
+    c = _calls(_panel([_series("n", [1, 2, 3], [nan, nan, nan]), _series("s", [1], [1.0]),
+                       _series("m", [1, 2, 3], [1.0, nan, 3.0]), _series("bad", [1, 2], [1.0]),
+                       _series("str", ["p", "q"], [1.0, 2.0], kind="bars"), _series("inf", [1, 2, 3], [1, math.inf, 3])]))
+    for sid in ("n", "s", "m", "bad", "str", "inf"):
+        for cid in ("trend", "steps", "value_at", "crossing", "identical", "errorbars"):
+            args = {"series": sid, "x": "2"} if cid == "value_at" else {"a": sid, "b": "n"} if cid in (
+                "crossing", "identical") else {"series": sid}
+            assert fc.evaluate(c, cid, args) is None
+    assert ev(c, "value_at", series="s", x=1) and ev(c, "value_at", series="m", x=1)  # finite points still answer
+    assert ev(c, "drawn", series="n") is None and ev(c, "drawn", series="s")
+    fc.menu(c)  # does not raise
+    assert fc.evaluate({"panels": [None, 3, {"series": "x"}]}, "drawn", {"series": "a"}) is None
+    assert fc.evaluate({"panels": "x"}, "scale", {"axis": "x"}) is None
+
+
+def test_parse_args():
+    assert fc.parse_args("series=a, panel=1") == {"series": "a", "panel": "1"}
+    assert fc.parse_args("") == {}
+    assert fc.evaluate(_base(), "drawn", fc.parse_args("series=a, junk")) is None
+    assert fc.evaluate(_base(), "drawn", fc.parse_args("series=a, series=b")) is None
+
+
+def test_load_calls(tmp_path):
+    folder = tmp_path / ".fi" / "figure_records"
+    folder.mkdir(parents=True)
+    (folder / "fig1.calls.json").write_text(json.dumps(_base()), encoding="utf-8")
+    (folder / "bad.calls.json").write_text("{not json", encoding="utf-8")
+    (folder / "list.calls.json").write_text("[]", encoding="utf-8")
+    assert fc.load_calls(tmp_path, "fig1") == _base()
+    assert fc.load_calls(str(tmp_path), "fig1") == _base()
+    assert fc.load_calls(tmp_path, "bad") is None
+    assert fc.load_calls(tmp_path, "list") is None
+    assert fc.load_calls(tmp_path, "missing") is None
+    assert fc.load_calls(tmp_path, "../fig1") is None
+
+
+def test_catalogue_ids():
+    assert set(fc.CLAIMS) == {"drawn", "not_drawn", "range", "value_at", "trend", "order", "crossing", "no_crossing",
+                              "identical", "reference", "errorbars", "band", "missing_x", "scale", "layout", "lines",
+                              "note", "steps"}
+
+
+def _random_record(rng):
+    xs = sorted(rng.sample(range(1, 30), rng.randint(3, 7)))
+    series = []
+    for i in range(rng.randint(2, 4)):
+        ys = [round(rng.uniform(-5, 5), 3) for _ in xs]
+        series.append(_series(f"s{i}", list(xs), ys))
+    return _calls(_panel(series, refs=[{"id": "r", "axis": "y", "value": 1.5, "label": "limit"}]))
+
+
+def _recompute(calls, offer):
+    """A plain recomputation of an offered claim from the arrays, independent of the module."""
+    panel = calls["panels"][0]
+    by = {s["id"]: s for s in panel["series"]}
+    a = offer["args"]
+    cid = offer["claim"]
+    if cid == "drawn":
+        return any(math.isfinite(v) for v in by[a["series"]]["y"])
+    if cid == "range":
+        vals = by[a["series"]]["x" if a["axis"] == "x" else "y"]
+        return offer["text"].split("spans ")[1].startswith(f"{min(vals):.4g} to {max(vals):.4g}")
+    if cid == "value_at":
+        s = by[a["series"]]
+        i = s["x"].index(float(a["x"]))
+        return f"is {s['y'][i]:.4g} at" in offer["text"]
+    if cid == "trend":
+        ys = by[a["series"]]["y"]
+        d = [q - p for p, q in zip(ys, ys[1:])]
+        word = "increases" if all(v > 0 for v in d) else "decreases" if all(v < 0 for v in d) else \
+            "does not change monotonically"
+        return f" {word} " in offer["text"]
+    if cid == "order":
+        x = float(a["at"])
+        got = sorted(((s["y"][s["x"].index(x)], s["label"]) for s in by.values() if x in s["x"]), reverse=True)
+        return offer["text"].endswith("are " + ", ".join(n for _, n in got))
+    if cid in ("crossing", "no_crossing"):
+        da = [p - q for p, q in zip(by[a["a"]]["y"], by[a["b"]]["y"])]
+        crossed = any((p > 0) != (q > 0) for p, q in zip(da, da[1:]))
+        return crossed == (cid == "crossing")
+    if cid == "identical":
+        return by[a["a"]]["y"] == by[a["b"]]["y"]
+    if cid == "reference":
+        return "y = 1.5" in offer["text"]
+    if cid == "scale":
+        return offer["text"].startswith(f"the {a['axis']} axis is linear")
+    return False
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_independent_recompute_agrees_on_every_offered_claim(seed):
+    calls = _random_record(random.Random(seed))
+    offers = fc.menu(calls)
+    assert offers
+    seen = set()
+    for o in offers:
+        assert _recompute(calls, o), o
+        seen.add(o["claim"])
+    assert {"drawn", "range", "value_at", "scale", "reference"} <= seen
+
+
+def test_menu_offers_only_true_claims():
+    calls = _base()
+    offers = fc.menu(calls, stem="fig1")
+    kinds = {(o["claim"], tuple(sorted(o["args"].items()))) for o in offers}
+    assert ("trend", (("panel", "1"), ("series", "a"))) in kinds
+    assert ("trend", (("panel", "1"), ("series", "b"))) in kinds
+    assert ("identical", (("a", "a"), ("b", "c"), ("panel", "1"))) in kinds
+    assert not any(o["claim"] == "identical" and o["args"]["b"] == "b" for o in offers)
+    assert not any(o["claim"] == "no_crossing" and {o["args"]["a"], o["args"]["b"]} == {"a", "b"} for o in offers)
+    assert any(o["claim"] == "crossing" for o in offers)
+    for o in offers:
+        assert fc.evaluate(calls, o["claim"], o["args"]) == (o["text"], o["args"])
+        claim = o["claim"]
+        assert o["mark"].startswith("{{figure:fig1:" + claim) and o["mark"].endswith("}}")
+        if o["args"]:
+            assert fc.parse_args(o["mark"].split(" @ ", 1)[1][:-2]) == o["args"]
+    mark = next(o["mark"] for o in offers if o["claim"] == "trend" and o["args"]["series"] == "a")
+    assert mark == "{{figure:fig1:trend @ series=a, panel=1}}"
+
+
+def test_menu_layout_lines_and_not_drawn_need_their_inputs():
+    plain = {o["claim"] for o in fc.menu(_base())}
+    assert not plain & {"layout", "lines", "not_drawn", "missing_x"}
+    more = {o["claim"] for o in fc.menu(_base(), {"series": ["ghost"]}, record={"axes": [
+        {"title": "A", "ylabel": "y", "place": [0.1, 0.15, 0.8, 0.7], "series": []}]})}
+    assert {"layout", "not_drawn"} <= more
+
+
+def test_custom_formatter_is_used():
+    got = fc.evaluate(_base(), "value_at", {"series": "a", "x": "3"}, lambda v: f"<{v}>")
+    assert got and "<3.0>" in got[0]
