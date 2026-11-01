@@ -33,7 +33,10 @@ assertion max`` -- divergence laundered into a number the gate cannot tell
 from a genuine RMSE of 10. So a value sitting exactly on a non-zero bound is
 rejected when the script also caps values at that constant, unless every such
 cap is proven to be another value's (one written at ``train.rmse`` does not
-count for ``test.rmse``). Both halves are
+count for ``test.rmse``). A cap pins a value only from its own side: a floor
+(``max(R, 1)`` under a denominator) never pins a value to an upper bound, nor a
+ceiling to a lower one; a cap with no readable direction (``10.0 if diverged
+else x``) counts for both. Both halves are
 required: a perfect score of 1.0 is a real result, and ``np.clip(p, 0, 1)``
 inside a softmax is real code; only the two together are a capped number.
 Zero bounds are exempt, because real zeros and ``max(0, x)`` are both
@@ -325,9 +328,52 @@ def clamp_constants(code: str) -> set[float]:
     return set(_clamp_sites(tree))
 
 
-def _clamp_sites(tree: ast.AST) -> dict[float, set[int]]:
+def clamp_directions(code: str) -> dict[float, set[str]]:
+    """For each constant :func:`clamp_constants` finds, the directions it caps from: ``"up"`` (a ceiling: ``min(x, c)``,
+    ``np.minimum``, a clip's upper bound), ``"down"`` (a floor: ``max(x, c)``, ``np.maximum``, a clip's lower bound) or
+    ``"both"`` (no direction can be read: a conditional expression, an ``if`` assignment, ``where``, ``nan_to_num``, a
+    method-form clip, a reduction)."""
+    try:
+        tree = ast.parse(code or "")
+    except (SyntaxError, ValueError):
+        return {}
+    dirs: dict[float, set[str]] = {}
+    _clamp_sites(tree, dirs)
+    return dirs
+
+
+_UP_KW = ("a_max", "max", "upper", "clip_value_max")
+_DOWN_KW = ("a_min", "min", "lower", "clip_value_min")
+
+
+def _arg_direction(call: ast.Call, name: str, arg: ast.AST, keyword: str | None) -> str:
+    """The direction one argument of a min/max/clip-style call caps from (see :func:`clamp_directions`)."""
+    fn = call.func
+    if name == "min" and isinstance(fn, ast.Name):
+        return "up"
+    if name == "max" and isinstance(fn, ast.Name):
+        return "down"
+    if name in ("minimum", "fmin"):
+        return "up"
+    if name in ("maximum", "fmax"):
+        return "down"
+    if name in ("clip", "clamp", "clip_by_value"):
+        if keyword in _UP_KW:
+            return "up"
+        if keyword in _DOWN_KW:
+            return "down"
+        if keyword is None and len(call.args) >= 3:  # np.clip(x, LO, HI): the function form
+            if arg is call.args[1]:
+                return "down"
+            if arg is call.args[2]:
+                return "up"
+    return "both"
+
+
+def _clamp_sites(tree: ast.AST, dirs: dict[float, set[str]] | None = None) -> dict[float, set[int]]:
     """Each constant :func:`clamp_constants` finds, with the nodes (by ``id``) it is a cap at in ``tree``: a call, a
-    conditional expression or an ``if``."""
+    conditional expression or an ``if``. With ``dirs``, also the directions it caps from, filled in (see
+    :func:`clamp_directions`)."""
     names: dict[str, float] = {}
     for node in ast.walk(tree):
         if (isinstance(node, ast.Assign) and len(node.targets) == 1
@@ -349,21 +395,27 @@ def _clamp_sites(tree: ast.AST) -> dict[float, set[int]]:
             name = fn.id if isinstance(fn, ast.Name) else (
                 fn.attr if isinstance(fn, ast.Attribute) else "")
             if name in _CLAMP_CALLS:
-                for arg in (*node.args, *(k.value for k in node.keywords)):
+                for arg, kw in (*((a, None) for a in node.args), *((k.value, k.arg) for k in node.keywords)):
                     v = value(arg)
                     if v is not None:
                         out.setdefault(v, set()).add(id(node))
+                        if dirs is not None:
+                            dirs.setdefault(v, set()).add(_arg_direction(node, name, arg, kw))
         elif isinstance(node, ast.IfExp):
             for branch in (node.body, node.orelse):
                 v = value(branch)
                 if v is not None:
                     out.setdefault(v, set()).add(id(node))
+                    if dirs is not None:
+                        dirs.setdefault(v, set()).add("both")
         elif isinstance(node, ast.If):
             for stmt in (*node.body, *node.orelse):
                 if isinstance(stmt, (ast.Assign, ast.AnnAssign)) and stmt.value is not None:
                     v = value(stmt.value)
                     if v is not None:
                         out.setdefault(v, set()).add(id(node))
+                        if dirs is not None:
+                            dirs.setdefault(v, set()).add("both")
     return out
 
 
@@ -800,12 +852,16 @@ def _trivial_bound(bound: float, literals: set[float]) -> bool:
     )
 
 
-def _pinned(value: float, a: Assertion, clamps: set[float]) -> bool:
-    for bound in (a.min, a.max):
+def _pinned(value: float, a: Assertion, clamps: set[float], dirs: dict[float, set[str]] | None = None) -> bool:
+    """Whether a value on a non-zero bound is held there by one of ``clamps``. With ``dirs`` (:func:`clamp_directions`)
+    a cap counts only from the side the bound is on: a ceiling pins a value to the max, a floor to the min."""
+    for bound, side in ((a.min, "down"), (a.max, "up")):
         if bound is None or bound == 0:
             continue
         if math.isclose(value, bound, rel_tol=1e-9) and any(
-            math.isclose(c, bound, rel_tol=1e-9) for c in clamps
+            math.isclose(c, bound, rel_tol=1e-9)
+            and (dirs is None or c not in dirs or dirs[c] & {side, "both"})
+            for c in clamps
         ):
             return True
     return False
@@ -1307,6 +1363,7 @@ def violations(
         return []
 
     clamps = clamp_constants(code) if code else set()
+    clamp_dirs = clamp_directions(code) if code else {}
     literals = numeric_literals(code) if code else set()
     index = walk.numeric_index()
     out: list[Violation] = []
@@ -1334,7 +1391,8 @@ def violations(
                     # A cap that may be this value's, written where its place in the result cannot be shown (a loop,
                     # an append, another key): a warning, never a block (core/engine.py::_assertion_warnings).
                     out.append(Violation(path, value, a, kind="clamped_unproven"))
-            elif clamps and _pinned(value, a, clamps - caps_of_other_values(code, tokens)):
+            elif clamps and _pinned(
+                    value, a, clamps - caps_of_other_values(code, tokens), clamp_dirs):
                 # On its bound, and the script caps something at it that is not shown to be another value
                 # (a cap proven to sit at another key's whole path, say train.rmse for test.rmse, does not count).
                 out.append(Violation(path, value, a, kind="clamped"))
