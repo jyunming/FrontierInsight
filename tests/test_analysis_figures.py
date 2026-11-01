@@ -1059,3 +1059,206 @@ def test_unknown_result_tail_lists_only_the_figures_own_results_uncut(tmp_path):
     out = af.run_figures([{"id": "x", "file": "x.png", "shows": ["r007", "r110"]}], {"figure_x": lambda fig, t: fig.axes[0].axhline(1)},
                          table, str(tmp_path))[0]
     assert "The results that can be read: r007, r110." in out["why"] and "r008" not in out["why"]
+
+
+# ---- the figure handle with the drawing calls: the call record, and what is drawn outside the calls ---------------------------------
+class _CallTable:
+    """A small made-up record of a study: two sizes, one result."""
+
+    declared = ["growth"]
+
+    def __init__(self):
+        self.gave_values = set()
+
+    def keys(self):
+        return ["size=1", "size=2"]
+
+    def setting(self, key):
+        return {"size": float(key.split("=")[1])}
+
+    def mean(self, ident, key):
+        self.gave_values.add(ident)
+        return {"size=1": 1.0, "size=2": 2.0}[key]
+
+    def n(self, ident, key):
+        return 10
+
+    def interval(self, ident, key):
+        return (self.mean(ident, key) - 0.5, self.mean(ident, key) + 0.5)
+
+    def reset_reads(self):
+        self.gave_values.clear()
+
+
+@pytest.fixture
+def frame5(tmp_path, monkeypatch):
+    """The frame of the drawing calls, written beside the figure code the way a quest has it, and a records folder."""
+    from core import skeleton
+
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "fi_frame.py").write_text(skeleton.RUNTIME, encoding="utf-8")
+    (code / skeleton.FIGURE_CALLS_FILE).write_text(skeleton.FRAME_FIGURE_SOURCE, encoding="utf-8")
+    for name in ("fi_frame", "fi_figure_calls"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.syspath_prepend(str(code))
+    records = tmp_path / ".fi" / "figure_records"
+    records.mkdir(parents=True)
+    monkeypatch.setenv("FI_FIGURE_RECORDS", str(records))
+    yield records
+    for name in ("fi_frame", "fi_figure_calls"):
+        sys.modules.pop(name, None)
+
+
+def _calls_run(tmp_path, body, panels=2, table=None):
+    ns = types.SimpleNamespace(figure_g=body, COMPARED={"speed": ["fast", "slow"]})
+    spec = {"id": "g", "file": "g.png", "panels": panels, "x": "size", "series": "fast", "shows": ["growth"]}
+    return af.run_figures([spec], ns, table or _CallTable(), str(tmp_path / "figures"))[0]
+
+
+def _drawn(fig, table, i):
+    return fig.line(i, "fast", [1, 2], [table.mean("growth", "size=1"), table.mean("growth", "size=2")], "growth")
+
+
+def _both_panels(fig, table):
+    for i in range(len(fig.axes)):
+        _drawn(fig, table, i)
+
+
+def test_primitive_only_body_has_no_raw_panel(tmp_path, frame5):
+    out = _calls_run(tmp_path, _both_panels)
+    assert out["status"] == "ok", out
+    record = json.loads((frame5 / "g.calls.json").read_text(encoding="utf-8"))
+    assert [p["raw"] for p in record["panels"]] == [False, False] and record["fallback"] is False
+    assert out["declared"]["raw_panels"] == [] and out["declared"]["calls"]["series"] == 2
+
+
+def test_bare_pyplot_call_makes_panel_raw_and_figure_is_saved(tmp_path, frame5):
+    def body(fig, table):
+        _drawn(fig, table, 0)
+        fig.axes[1].plot([1, 2, 3], [3, 2, 1])
+        fig.axes[1].text(0.5, 0.5, "slope 0.37")
+
+    out = _calls_run(tmp_path, body)
+    assert out["status"] == "ok" and (tmp_path / "figures" / "g.png").is_file()
+    panels = json.loads((frame5 / "g.calls.json").read_text(encoding="utf-8"))["panels"]
+    assert [p["raw"] for p in panels] == [False, True]
+    assert panels[1]["raw_reason"] and "slope 0.37" in panels[1]["texts_raw"] and panels[0]["texts_raw"] == []
+    assert out["declared"]["raw_panels"] == [2]
+
+
+def test_fig_raw_call_makes_panel_raw_even_when_nothing_is_untagged(tmp_path, frame5):
+    def body(fig, table):
+        _drawn(fig, table, 0)
+        fig.raw(1).text(0.5, 0.5, "free text")
+
+    out = _calls_run(tmp_path, body)
+    assert out["status"] == "ok" and out["declared"]["raw_panels"] == [2]
+    assert json.loads((frame5 / "g.calls.json").read_text(encoding="utf-8"))["panels"][1]["raw_reason"] == "fig.raw"
+
+
+def test_call_record_written_beside_recorder_files(tmp_path, frame5):
+    (frame5 / "g.calls.json").write_text("{}", encoding="utf-8")  # an earlier run's record
+    assert _calls_run(tmp_path, lambda fig, table: None)["status"] == "failed"  # drew nothing: the old record goes with the old figure
+    assert not (frame5 / "g.calls.json").exists()
+    assert _calls_run(tmp_path, _both_panels)["status"] == "ok"
+    record = json.loads((frame5 / "g.calls.json").read_text(encoding="utf-8"))
+    assert record["version"] == 1 and len(record["panels"]) == 2
+    assert record["panels"][0]["series"][0]["id"] == "fast"
+
+
+def test_the_handle_is_given_the_plan_and_the_table(tmp_path, frame5):
+    seen = {}
+
+    def body(fig, table):
+        seen.update(settings=fig.settings, series=fig.series_ids, table=fig.table is table, derived=fig.derived_ids)
+        _both_panels(fig, table)
+
+    out = _calls_run(tmp_path, body)
+    assert out["status"] == "ok"
+    assert seen["settings"] == ["size", "speed"] and seen["series"] == ["fast", "slow"] and seen["table"] is True
+
+
+def test_mismatch_between_calls_and_recorder_is_fi_fault(tmp_path, frame5):
+    line = {"kind": "data", "x": [1.0, 2.0], "y": [1.0, 2.0], "marker": "None"}
+    (frame5 / "g.seed0.json").write_text(json.dumps({"axes": [{"lines": [line]}, {"lines": [line]}]}), encoding="utf-8")
+    assert _calls_run(tmp_path, _both_panels)["status"] == "ok"  # recorder and calls agree
+    (frame5 / "g.calls.json").unlink()
+    (frame5 / "g.seed0.json").write_text(json.dumps({"axes": [{"lines": [line]}, {"lines": []}]}), encoding="utf-8")
+    out = _calls_run(tmp_path, _both_panels)  # the recorder holds no line for the series of panel 2
+    assert out["status"] == "fi_fault" and "panel 2" in out["why"] and "`fast`" in out["why"]
+    assert not (frame5 / "g.calls.json").exists() and af.fi_faults([out])
+    stray = {"kind": "data", "x": [1.0], "y": [9.0], "marker": "o"}
+    (frame5 / "g.seed0.json").write_text(json.dumps({"axes": [{"lines": [line, stray]}, {"lines": [line]}]}), encoding="utf-8")
+    assert "no call drew" in _calls_run(tmp_path, _both_panels)["why"]
+
+
+def test_log_line_counts_checked_and_custom_panels(tmp_path, frame5):
+    def body(fig, table):
+        for i in (0, 1, 3):
+            _drawn(fig, table, i)
+        fig.axes[2].scatter([1, 2], [2, 1])
+
+    out = _calls_run(tmp_path, body, panels=4)
+    assert out["note"] == "figure g: 3 of 4 panels checked by FI, panel 3 is a custom drawing"
+    assert out["note"] in af.said([out])
+    assert _calls_run(tmp_path, _both_panels)["note"] == "figure g: 2 of 2 panels checked by FI"
+
+
+def test_body_without_primitives_on_old_frame_has_no_call_record(tmp_path, monkeypatch):
+    records = tmp_path / "rec"
+    records.mkdir()
+    monkeypatch.setenv("FI_FIGURE_RECORDS", str(records))
+    stub = tmp_path / "old"
+    stub.mkdir()
+    (stub / "fi_frame.py").write_text(
+        "class Figure:\n    def __init__(self, axes, x=None, series=None, shows=None, file=None):\n"
+        "        self.axes, self.x, self.series, self.shows, self.file = list(axes), x, series, shows, file\n", encoding="utf-8")
+    monkeypatch.delitem(sys.modules, "fi_frame", raising=False)
+    old = _calls_run(tmp_path, lambda fig, table: [a.plot([table.mean("growth", "size=1"), 2]) for a in fig.axes], panels=1)  # no frame at all: the plain holder
+    monkeypatch.syspath_prepend(str(stub))
+    monkeypatch.delitem(sys.modules, "fi_frame", raising=False)
+    v4 = _calls_run(tmp_path, lambda fig, table: [a.plot([table.mean("growth", "size=1"), 2]) for a in fig.axes], panels=1)  # a frame of an earlier version
+    sys.modules.pop("fi_frame", None)
+    for out in (old, v4):
+        assert out["status"] == "ok" and "note" not in out and "calls" not in out.get("declared", {})
+    assert list(records.glob("*.calls.json")) == []
+
+
+def test_calls_are_recorded_with_the_real_recorder_and_agree_with_it(tmp_path):
+    """The house-style recorder of the quest's interpreter saves the figure; error bars (their caps are lines too) do not disagree."""
+    from core import skeleton
+
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "fi_frame.py").write_text(skeleton.RUNTIME, encoding="utf-8")
+    (code / skeleton.FIGURE_CALLS_FILE).write_text(skeleton.FRAME_FIGURE_SOURCE, encoding="utf-8")
+    boot = plot_style.write_boot(tmp_path / ".fi")
+    records = tmp_path / ".fi" / plot_style.RECORDS_DIRNAME
+    records.mkdir(parents=True)
+    script = tmp_path / "run_one.py"
+    script.write_text(textwrap.dedent("""
+        import sys, types
+        sys.path.insert(0, %r)
+        sys.path.insert(0, %r)
+        from core import analysis_figures as af
+        class T:
+            declared = ["growth"]
+            def keys(self): return ["size=1", "size=2"]
+            def setting(self, key): return {"size": float(key.split("=")[1])}
+        def figure_g(fig, table):
+            fig.line(0, "fast", [1, 2], [1.0, 2.0], "growth", yerr=[0.1, 0.2])
+            fig.points(0, "slow", [1, 2], [2.0, 1.0], "growth")
+            fig.band(0, "fast", [1, 2], [0.5, 1.5], [1.5, 2.5], "growth", "other")
+            fig.ref(0, value=1.5)
+            fig.bars(1, "fast", [1, 2], [1.0, 2.0], "growth")
+            fig.axes[1].plot([0, 1], [0, 1])
+        ns = types.SimpleNamespace(figure_g=figure_g, COMPARED={"speed": ["fast", "slow"]})
+        out = af.run_figures([{"id": "g", "file": "g.png", "panels": 2, "x": "size", "series": "fast"}], ns, T(), %r)
+        print(out[0]["status"], out[0].get("note"), out[0].get("why"))
+    """) % (str(Path(__file__).resolve().parents[1]), str(code), str(tmp_path / "figures")), encoding="utf-8")
+    env = {**__import__("os").environ, "PYTHONPATH": str(boot), "FI_FIGURE_RECORDS": str(records), "MPLBACKEND": "Agg"}
+    done = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, env=env, timeout=240,
+                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    assert done.stdout.strip() == "ok figure g: 1 of 2 panels checked by FI, panel 2 is a custom drawing", done.stdout + done.stderr[-800:]
+    assert json.loads((records / "g.calls.json").read_text(encoding="utf-8"))["panels"][1]["raw"] is True

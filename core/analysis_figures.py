@@ -30,6 +30,7 @@ rules copied from ``core/optimise_search.py`` (``level_key``, ``level_says``) ar
 from __future__ import annotations
 
 import contextlib
+import inspect
 import json
 import math
 import os
@@ -268,19 +269,25 @@ def _drew_nothing(spec: dict[str, Any], table: Any) -> str:
     return _with_forms(text + (" The last read raised %s." % err.rstrip(".") if err else "") + ("\n" + readable if readable else ""), spec, table)
 
 
-def _declared_record(spec: dict[str, Any], table: Any, out_dir: str, file: str) -> dict[str, Any]:
+def _declared_record(spec: dict[str, Any], table: Any, out_dir: str, file: str, summary: dict[str, Any] | None = None) -> dict[str, Any]:
     """What the figure was declared to show next to what its body drew, from the table's own tracking of the reads that gave
     values (``Table.gave_values``): ``{"shows", "drawn", "not_drawn", "labels"}``, the labels being the plan's own for each
     declared result. It is added to the figure's record (``FI_FIGURE_RECORDS/<stem>.json``, written when the figure was saved)
-    so the caption is written from it and not from the words the body typed on an axis. Empty when the figure declares no
-    result or the table does not track its reads."""
+    so the caption is written from it and not from the words the body typed on an axis. A figure drawn through FI's calls adds
+    ``calls`` (how many series, bands, reference lines and notes were drawn) and ``raw_panels`` (the panels drawn outside the
+    calls); ``summary`` is that. Empty when the figure declares no result and was not drawn through the calls, or the table does
+    not track its reads."""
     shows, gave = spec.get("shows"), getattr(table, "gave_values", None)
-    if not isinstance(shows, (list, tuple)) or not shows or not isinstance(gave, (set, frozenset)):
+    got: dict[str, Any] = {}
+    if isinstance(shows, (list, tuple)) and shows and isinstance(gave, (set, frozenset)):
+        ids = [str(r) for r in shows]
+        labels = spec.get("result_labels") if isinstance(spec.get("result_labels"), dict) else {}
+        got = {"shows": ids, "drawn": [r for r in ids if r in gave], "not_drawn": [r for r in ids if r not in gave],
+               "labels": {r: str(labels[r]) for r in ids if labels.get(r)}}
+    if summary:
+        got = dict(got, calls=summary["calls"], raw_panels=summary["raw_panels"])
+    if not got:
         return {}
-    ids = [str(r) for r in shows]
-    labels = spec.get("result_labels") if isinstance(spec.get("result_labels"), dict) else {}
-    got = {"shows": ids, "drawn": [r for r in ids if r in gave], "not_drawn": [r for r in ids if r not in gave],
-           "labels": {r: str(labels[r]) for r in ids if labels.get(r)}}
     folder = os.environ.get("FI_FIGURE_RECORDS")
     if folder:
         path = os.path.join(folder, os.path.splitext(file)[0] + ".json")
@@ -295,18 +302,21 @@ def _declared_record(spec: dict[str, Any], table: Any, out_dir: str, file: str) 
     return got
 
 
-def _draw_one(spec: dict[str, Any], body: Any, table: Any, out_dir: str) -> dict[str, Any]:
+def _draw_one(spec: dict[str, Any], body: Any, table: Any, out_dir: str, plan: dict[str, Any] | None = None) -> dict[str, Any]:
     """Draw one declared figure. A fault of the model's body is ``failed`` / ``refused`` (its repair); a fault of FI's own lines
     (making the figure, handing it over, the folder) is ``fi_fault`` and is never sent to the model."""
     fid, file = str(spec.get("id")), str(spec.get("file") or "%s.png" % spec.get("id"))
     plt = fig = None
     try:
         _remove(out_dir, file)
+        _remove_calls(file)  # the call record of an earlier run goes with its figure
         if body is None:
             return _outcome(fid, file, "not_written")
         name = getattr(body, "__name__", "figure_%s" % fid)
         plt, fig, axes = _new_figure(spec.get("panels") or 1)
-        handle = _figure_handle(axes, spec, file)
+        handle = _figure_handle(axes, spec, file, plan, table)
+        if _has_calls(handle):
+            handle.fig = fig  # the drawing calls clear a title the body put over the figure
         reset = getattr(table, "reset_reads", None)
         if callable(reset):
             reset()  # what the reads of this one body give is recorded from here
@@ -348,28 +358,53 @@ def _draw_one(spec: dict[str, Any], body: Any, table: Any, out_dir: str) -> dict
         none_drawn = _drew_nothing(spec, table)
         if none_drawn:
             return _outcome(fid, file, "failed", none_drawn)
+        calls = _has_calls(handle)
+        if calls:  # a quest on the frame with the drawing calls: what was drawn outside them is marked, FI writes the words
+            _mark_raw(handle, fig, axes)
+            handle.finish((plan or {}).get("labels") or {}, {})
         panel_record = _set_panel_titles(handle, axes, spec.get("labels") or {})
         try:
             fig.savefig(os.path.join(out_dir, file))  # the recorder of the house style notes what the figure draws
         except Exception as err:
             return _outcome(fid, file, "failed", "`figure_%s` drew something that cannot be saved (%s: %s)." % (fid, type(err).__name__, err))
-        declared = _declared_record(spec, table, out_dir, file)
-        return dict(_outcome(fid, file, "ok"), panels=panel_record, **({"declared": declared} if declared else {}))
+        summary: dict[str, Any] = {}
+        if calls:
+            fault = _write_calls(handle, file)
+            if fault:
+                return _outcome(fid, file, "fi_fault", "FI's record of the calls of figure `%s` and its figure recorder disagree: %s." % (fid, fault))
+            summary = _calls_summary(handle.record())
+        declared = _declared_record(spec, table, out_dir, file, summary)
+        done = dict(_outcome(fid, file, "ok"), panels=panel_record, **({"declared": declared} if declared else {}))
+        if summary:
+            done["note"] = _checked_line(fid, summary)
+        return done
     except Exception as err:
         return _outcome(fid, file, "fi_fault", "FI stopped while drawing the figure `%s` (%s: %s)." % (fid, type(err).__name__, err))
     finally:
         plt.close(fig)
 
 
-def _figure_handle(axes: list[Any], spec: dict[str, Any], file: str) -> Any:
-    """What the body is given: the frame's ``Figure`` when it is carried beside this file, else a plain holder."""
+def _figure_handle(axes: list[Any], spec: dict[str, Any], file: str, plan: dict[str, Any] | None = None, table: Any = None) -> Any:
+    """What the body is given: the frame's ``Figure`` when it is carried beside this file, else a plain holder. A frame with the
+    drawing calls (version 5) is also given what the calls check against, all of it from FI's own records (``plan``, see
+    ``_plan_for``, and the ``table`` of the run); an older frame's ``Figure`` takes none of it and is built as before."""
     try:
         from fi_frame import Figure  # the frame's runtime, written beside this file in the quest's code folder
     except ImportError:
         class Figure:  # type: ignore[no-redef]
             def __init__(self, axes, x=None, series=None, shows=None, file=None):
                 self.axes, self.x, self.series, self.shows, self.file = list(axes), x, series, shows, file
-    handle = Figure(axes, x=spec.get("x"), series=spec.get("series"), shows=spec.get("shows"), file=file)
+    given: dict[str, Any] = {}
+    try:
+        takes = set(inspect.signature(Figure).parameters)
+    except (TypeError, ValueError):
+        takes = set()
+    if "series_ids" in takes:
+        plan = plan or {}
+        given = {"table": table, "settings": plan.get("settings"), "series_ids": plan.get("series_ids"),
+                 "references": plan.get("references"), "labels": plan.get("labels"), "fallback": plan.get("fallback", False),
+                 "derived_ids": plan.get("derived_ids")}
+    handle = Figure(axes, x=spec.get("x"), series=spec.get("series"), shows=spec.get("shows"), file=file, **given)
     handle.axes = _Panels(handle.axes, str(spec.get("id")))
     handle.declared = {}
     handle.panel = _panel_declarer(handle, spec.get("settings") or {})
@@ -437,6 +472,192 @@ def _set_panel_titles(handle: Any, axes: list[Any], labels: dict[str, Any]) -> l
     return record
 
 
+# ---- the drawing calls: the plan they check against, the custom-drawing mark, the call record ---------------------------------
+def _from(namespace: Any, name: str, default: Any) -> Any:
+    got = namespace.get(name) if isinstance(namespace, dict) else getattr(namespace, name, None)
+    return default if got is None else got
+
+
+def _plan_for(spec: dict[str, Any], namespace: Any, table: Any) -> dict[str, Any]:
+    """What the drawing calls of one figure check against, read from FI's own records and never from the body: the study's
+    settings (the names its trial cells carry, what each run compares, what a sub-study holds), the ids a series may name (the
+    figure's own series and the values the study compares), the plan's references that hold one number at every setting, the
+    plan's words for ids, whether FI drew the figure itself, and the quantities the study derives. Whatever a record does not
+    hold is left out: a call then checks against less and says what is missing."""
+    compared = _from(namespace, "COMPARED", {})
+    compared = compared if isinstance(compared, dict) else {}
+    parts = _from(namespace, "PARTS", {})
+    settings: list[str] = []
+
+    def add(name: Any) -> None:
+        if isinstance(name, str) and name and name not in settings:
+            settings.append(name)
+
+    keys: list[Any] = []
+    try:
+        keys = list(table.keys()) if table is not None else []
+    except Exception:  # noqa: BLE001 -- a table that cannot list its settings has none to offer
+        pass
+    for key in keys:
+        try:
+            for name in (table.setting(key) or {}):
+                add(name)
+        except Exception:  # noqa: BLE001
+            continue
+    held_by_parts = [n for hold in (parts.values() if isinstance(parts, dict) else []) if isinstance(hold, dict) for n in hold]
+    for name in list(compared) + held_by_parts + list(spec.get("settings") or {}):
+        add(name)
+    series_ids: list[str] = []
+    own = spec.get("series")
+    for item in ([own] if isinstance(own, str) else list(own) if isinstance(own, (list, tuple)) else []):
+        if isinstance(item, str) and item not in series_ids:
+            series_ids.append(item)
+    for values in compared.values():
+        for value in (values if isinstance(values, (list, tuple)) else []):
+            if str(value) not in series_ids:
+                series_ids.append(str(value))
+    results = spec.get("result_labels") if isinstance(spec.get("result_labels"), dict) else {}
+    labels: dict[str, Any] = {str(k): str(v) for k, v in {**(spec.get("labels") or {}), **results}.items() if v}
+    references: dict[str, Any] = {}
+    held = getattr(table, "_references", None)  # read only: Table.reference() would also count the result as read
+    for ident, per_setting in (held.items() if isinstance(held, dict) else []):
+        numbers = {float(v) for v in (per_setting.values() if isinstance(per_setting, dict) else []) if _number(v)}
+        if len(numbers) == 1:  # a reference that differs by setting is not one line
+            references[str(ident)] = {"value": next(iter(numbers)), "label": labels.get(str(ident), str(ident))}
+    derived = _from(namespace, "DERIVED", {})
+    return {"settings": settings, "series_ids": series_ids, "references": references, "labels": labels,
+            "fallback": bool(spec.get("fallback")), "derived_ids": [str(k) for k in derived] if isinstance(derived, dict) else []}
+
+
+def _has_calls(handle: Any) -> bool:
+    """True for the frame's ``Figure`` with the drawing calls (version 5). An older frame's, and the plain holder, have none, and
+    a quest on them gets no call record (the legacy path)."""
+    try:
+        return all(callable(getattr(handle, name)) for name in ("finish", "record", "write", "_panel"))
+    except Exception:  # noqa: BLE001 -- the frame says a missing file by raising on any call name
+        return False
+
+
+def _records_folder() -> str:
+    return os.environ.get("FI_FIGURE_RECORDS") or ""
+
+
+def _remove_calls(file: str) -> None:
+    folder = _records_folder()
+    if folder:
+        try:
+            os.remove(os.path.join(folder, os.path.splitext(file)[0] + ".calls.json"))
+        except OSError:
+            pass
+
+
+def _data_artists(ax: Any) -> list[Any]:
+    return [a for a in list(ax.lines) + list(ax.collections) + list(ax.patches) + list(ax.images) if a.get_visible()]
+
+
+def _mark_raw(handle: Any, fig: Any, axes: list[Any]) -> None:
+    """A panel with a data artist no drawing call made (it has no ``fi:`` tag) is a custom drawing: FI states nothing about it.
+    A second axes that shares a panel's place (``twinx``) counts for that panel. ``fig.raw(i)`` has marked its panel already."""
+    for i, ax in enumerate(axes):
+        _ax, rec = handle._panel(i)
+        if rec["raw"]:
+            continue
+        twins = [o for o in fig.get_axes() if o is not ax and o not in axes and tuple(o.get_position().bounds) == tuple(ax.get_position().bounds)]
+        if any(not str(a.get_gid() or "").startswith("fi:") for a in _data_artists(ax) + [b for t in twins for b in _data_artists(t)]):
+            rec["raw"], rec["raw_reason"] = True, "drawn outside FI's calls"
+
+
+def _read_json(path: str) -> Any:
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _finite_ys(values: Any) -> list[float]:
+    return [float(v) for v in (values or []) if _number(v)]
+
+
+def _disagreement(rec: dict[str, Any], axis: dict[str, Any]) -> str:
+    """How the line artists the recorder saw on a panel differ from the series the calls recorded (empty when they agree): every
+    series drawn as a line, points or curve is one data line of the recorder with the same y values, and a data line of the
+    recorder that no series accounts for is not an error-bar cap (marker ``_``)."""
+    left = [line for line in axis.get("lines") or [] if isinstance(line, dict) and line.get("kind") == "data"]
+    for entry in rec["series"]:
+        if entry["kind"] not in ("line", "points", "curve"):
+            continue
+        want = _finite_ys(entry["y"])
+        for line in left:
+            ys = _finite_ys(line.get("y"))
+            if ys == want or (line.get("x") is None and len(ys) == len(want)):
+                left.remove(line)
+                break
+        else:
+            return "panel %d: the series `%s` was drawn by a call but the figure recorder holds no line for it" % (rec["panel"], entry["id"])
+    stray = [line for line in left if line.get("marker") != "_"]
+    if stray:
+        return "panel %d: the figure recorder holds a line (%s) that no call drew" % (rec["panel"], stray[0].get("label") or "unlabelled")
+    return ""
+
+
+def _digit_texts(index: int, ax: Any, written: Any) -> list[str]:
+    """The words a custom drawing prints that hold a digit, from the figure recorder (its title, labels, texts and legend
+    entries), else read from the axes."""
+    panel = written[index] if isinstance(written, list) and index < len(written) and isinstance(written[index], dict) else None
+    if panel is not None:
+        found = [panel.get("title"), panel.get("xlabel"), panel.get("ylabel")] + list(panel.get("texts") or [])
+    else:
+        found = [ax.get_title(), ax.get_xlabel(), ax.get_ylabel()] + [t.get_text() for t in ax.texts]
+    out: list[str] = []
+    for text in found:
+        text = " ".join(str(text or "").split())
+        if text and any(ch.isdigit() for ch in text) and text not in out:
+            out.append(text)
+    return out
+
+
+def _write_calls(handle: Any, file: str) -> str:
+    """Write ``<FI_FIGURE_RECORDS>/<stem>.calls.json`` after the figure was saved: what the calls drew, and for a custom drawing
+    the digit-bearing words the recorder saw. First the record is held against the recorder's own file (``<stem>.seed<k>.json``,
+    when the house style wrote one); a disagreement is FI's own fault, nothing is written, and the text says what differs.
+    Returns that text, empty when all is well. Without a records folder there is nowhere to write and nothing to hold it to."""
+    folder = _records_folder()
+    if not folder:
+        return ""
+    stem = os.path.splitext(file)[0]
+    seed = "".join(c for c in os.environ.get("FI_REPLICATE_INDEX", "") if c.isdigit()) or "0"
+    saw = _read_json(os.path.join(folder, "%s.seed%s.json" % (stem, seed)))
+    written = (_read_json(os.path.join(folder, stem + ".json")) or {}).get("axes")
+    seen = saw.get("axes") if isinstance(saw, dict) else None
+    for i, ax in enumerate(handle.axes):
+        _ax, rec = handle._panel(i)
+        if rec["raw"]:
+            rec["texts_raw"] = _digit_texts(i, ax, written)
+        elif isinstance(seen, list) and i < len(seen) and isinstance(seen[i], dict):
+            why = _disagreement(rec, seen[i])
+            if why:
+                return why
+    handle.write(os.path.join(folder, file))
+    return ""
+
+
+def _calls_summary(record: dict[str, Any]) -> dict[str, Any]:
+    panels = record.get("panels") or []
+    return {"calls": {"series": sum(len(p["series"]) for p in panels), "bands": sum(len(p["bands"]) for p in panels),
+                      "refs": sum(len(p["refs"]) for p in panels), "notes": sum(len(p["notes"]) for p in panels)},
+            "raw_panels": [p["panel"] for p in panels if p["raw"]], "panels": len(panels)}
+
+
+def _checked_line(fid: str, summary: dict[str, Any]) -> str:
+    """The line of the run log for one figure: how many panels FI checked and which are a custom drawing."""
+    total, raw = summary["panels"], summary["raw_panels"]
+    line = "figure %s: %d of %d panels checked by FI" % (fid, total - len(raw), total)
+    if raw:
+        line += ", panel%s %s %s a custom drawing" % ("s" if len(raw) > 1 else "", " and ".join(map(str, raw)), "are" if len(raw) > 1 else "is")
+    return line
+
+
 def run_figures(figures: list[dict[str, Any]], namespace: Any, table: Any, out_dir: str) -> list[dict[str, Any]]:
     """Draw every declared figure from the body ``figure_<id>`` of ``namespace`` (a module, or a dict); a figure's failure is its
     own and the others are still drawn."""
@@ -444,7 +665,7 @@ def run_figures(figures: list[dict[str, Any]], namespace: Any, table: Any, out_d
     for spec in figures or []:
         name = "figure_%s" % spec.get("id")
         body = namespace.get(name) if isinstance(namespace, dict) else getattr(namespace, name, None)
-        out.append(_draw_one(spec, body, table, out_dir))
+        out.append(_draw_one(spec, body, table, out_dir, _plan_for(spec, namespace, table)))
     return out
 
 
