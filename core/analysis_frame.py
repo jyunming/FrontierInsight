@@ -137,7 +137,7 @@ def plan_of(design: dict[str, Any]) -> dict[str, Any]:
         "known": _known_values(protocol, c),
         "search": c.search is not None,
         "figures": {f.id: {"file": f.file, "shows": list(f.shows), "x": f.x, "series": f.series, "panels": f.panels,
-                           **_result_labels(c, f.shows), **_panel_words(c, f.panels)}
+                           **_result_labels(c, f.shows), **_panel_words(c, f.panels, (f.x, f.series))}
                     for f in c.figures if f.declared},
     }
 
@@ -166,11 +166,13 @@ def _result_labels(c: Any, shows: Any) -> dict[str, Any]:
     return {"result_labels": got} if got else {}
 
 
-def _panel_words(c: Any, panels: int) -> dict[str, Any]:
+def _panel_words(c: Any, panels: int, axes: tuple[Any, ...] = ()) -> dict[str, Any]:
     """For a figure of several panels: the settings a panel may be declared for with their values, and the plan's label for each
-    (``fig.panel``, ``core/analysis_figures.py``); nothing for a one-panel figure."""
+    (``fig.panel``, ``core/analysis_figures.py``). A one-panel figure gets only the plan's labels of its ``axes`` (the setting along
+    x and the one that makes its lines), which FI's default figure names its axes by; nothing when the plan labels neither."""
     if panels < 2:
-        return {}
+        got = {str(a): c.labels[str(a)] for a in axes if a and c.labels.get(str(a))}
+        return {"labels": got} if got else {}
     settings = {str(k): list(v) for k, v in {**c.settings.compared, **c.settings.in_each_run}.items()}
     return {"settings": settings, "labels": {k: c.labels[k] for k in settings if c.labels.get(k)}}
 
@@ -1383,6 +1385,13 @@ def _figures(table, quest_root):
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
                 outcomes += fi_figures.run_figures([spec], derive, table, out_dir)
+                if os.environ.get("FI_FIGURE_FALLBACK") == "1" and outcomes[-1].get("status") in ("failed", "refused", "not_written"):
+                    # No repair is left for the body: the plan's own figure is drawn from the table in its place
+                    plain = fi_figures.default_figure(spec, table, out_dir)
+                    if plain.get("status") in ("ok", "dropped"):
+                        outcomes[-1] = plain
+                    else:
+                        sys.stderr.write("%s\\n" % plain.get("said"))
             seen["seconds"] += time.monotonic() - began
             for w in caught:
                 said = "%s: %s" % (w.category.__name__, w.message)

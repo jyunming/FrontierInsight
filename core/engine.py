@@ -11950,6 +11950,33 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._typed_figures = self._figure_scripts_with_typed_numbers()
         return used, rewrote
 
+    def _figure_fallbacks(self, figure_records: dict[str, Any]) -> None:
+        """What FI's analysis drew in place of a figure body no repair is left for (``FI_FIGURE_FALLBACK``, set in
+        :meth:`_node_execute`; the figure is drawn by ``analysis_figures.default_figure`` from the plan's own description).
+        A figure so drawn is marked ``fallback`` in its record, said in run.log. One the plan did not describe enough to draw
+        is not in the paper: QUALITY.md says so (a row that stops nothing), and run.log. Both are read from FI's record of
+        the run (derived.json), so a run that drew every body itself leaves nothing here."""
+        record = _analysis_frame.read_record(self.quest_root)
+        self._clear_cannot_repair("figure_dropped")
+        if record.get("from_earlier_run"):
+            return
+        for outcome in record.get("figures") or []:
+            if not (isinstance(outcome, dict) and outcome.get("fallback")):
+                continue
+            fid, name = str(outcome.get("id")), Path(str(outcome.get("file") or "")).name
+            if outcome.get("status") == "ok":
+                if name in figure_records:
+                    figure_records[name]["fallback"] = True
+                self._log.warning("[execute] figure %s: its function could not be repaired, so FI drew it from the plan's own "
+                                  "description (%s)", fid, outcome.get("note") or "one line for each result it shows")
+            elif outcome.get("status") == "dropped":
+                text = (f"Figure `{fid}` could not be drawn from the run's results; its numbers are in the results table. "
+                        f"{outcome.get('why') or ''}").strip()
+                self._log.warning("[execute] %s", text)
+                self._record_cannot_repair(text, ["its function raised in every repair that was allowed",
+                                                  "drew it from the plan's own description: " + str(outcome.get("why") or "")],
+                                           source=_stop_power.READ, check="figure_dropped")
+
     async def _repair_typed_figures(self, state: QuestState, path: Path, found: list[_figdata.TypedSeries]) -> bool:
         """ONE repair of one script's plotting code: kept only if it parses and has fewer typed-in series than before."""
         code = path.read_text(encoding="utf-8")
@@ -19166,6 +19193,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
 
         if list_inputs(self.quest_root):
             exec_env = {**(exec_env or scrub_secrets()), _INPUT_ENV: str(examples_dir(self.quest_root))}
+        # The last run before the repairs are spent: a figure function that fails is then drawn from the plan's own description
+        # by FI's analysis (core/analysis_figures.py::default_figure) instead of being lost.
+        if self._analysis_on() and not self._repair_budget_left(state):
+            exec_env = {**(exec_env or scrub_secrets()), "FI_FIGURE_FALLBACK": "1"}
         # The improve loop runs the simulation in the same environment (its skills' paths, its example inputs).
         self._last_exec_env = exec_env
 
@@ -19819,6 +19850,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 )
         figures = self._drop_typed_figures(figures, records_dir)
         figure_records = _read_figure_records(records_dir, figures)
+        self._figure_fallbacks(figure_records)
         for line in _unread_results(figure_records):
             self._log.info("[execute] declared result not read by a figure: %s (the caption states only what the saved axes "
                            "and legend label)", line)

@@ -263,3 +263,103 @@ def test_the_stored_fact_is_false_for_a_result_a_check_replaced(tmp_path: Path, 
     monkeypatch.setattr(Engine, "_results_match_run", sent_back)
     _eng, out = _figure_run(tmp_path, monkeypatch, "replaced", 1, {"exec_reflect_iter": 99})
     assert out["exec_result"]["results_produced"] is False
+
+
+# ---- a figure body no repair is left for is drawn from the plan's own description instead of being lost ----
+
+
+def _analysis_run(quest: Path, *, last_run: bool) -> tuple[int, dict, dict]:
+    """FI's experiment.py in a fresh Python, with or without the flag the engine sets on the run that ends the repairs."""
+    import os
+    import subprocess
+    import sys
+
+    from tests.test_analysis_frame import NO_WINDOW
+
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "FI_ROOT", "FI_TRIALS", "FI_FIGURE_FALLBACK")}
+    if last_run:
+        env["FI_FIGURE_FALLBACK"] = "1"
+    done = subprocess.run([sys.executable, "experiment.py"], cwd=quest / "code", env=env, capture_output=True, text=True,
+                          timeout=300, creationflags=NO_WINDOW)
+    printed = [ln for ln in done.stdout.splitlines() if ln.startswith("RESULT_JSON: ")]
+    derived = json.loads((quest / frame.DERIVED_PATH).read_text(encoding="utf-8"))
+    return done.returncode, json.loads(printed[-1][len("RESULT_JSON: "):]) if printed else {}, derived
+
+
+_RAISES = "def figure_fig1(fig, table):\n    raise ValueError('the body reads an id the plan does not declare')\n"
+_DRAWS = ("def figure_fig1(fig, table):\n    fig.axes[0].plot([1, 2], [table.mean('growth', k) for k in table.keys()][:2])\n")
+
+
+def test_failed_body_gets_default_figure_after_repair_budget(tmp_path: Path) -> None:
+    from tests.test_analysis_frame import _design, _quest
+
+    quest = _quest(tmp_path, _design(), _RAISES)
+    rc, printed, derived = _analysis_run(quest, last_run=True)
+    fig = next(o for o in derived["figures"] if o["id"] == "fig1")
+    assert rc == 0, derived.get("fi_faults")
+    assert fig["status"] == "ok" and fig["fallback"] is True
+    assert (quest / "figures" / "growth.png").stat().st_size > 0
+    # the results are the same ones a run whose body drew its figure printed
+    good = _quest(tmp_path / "good", _design(), _DRAWS)
+    assert _analysis_run(good, last_run=True)[1] == printed
+
+
+def test_a_failed_body_is_still_a_failure_while_repairs_are_left(tmp_path: Path) -> None:
+    from tests.test_analysis_frame import _design, _quest
+
+    quest = _quest(tmp_path, _design(), _RAISES)
+    rc, _printed, derived = _analysis_run(quest, last_run=False)
+    fig = next(o for o in derived["figures"] if o["id"] == "fig1")
+    assert rc == 1 and fig["status"] == "failed" and "fallback" not in fig
+    assert not (quest / "figures" / "growth.png").exists()
+
+
+def test_ok_body_is_not_replaced(tmp_path: Path) -> None:
+    from tests.test_analysis_frame import _design, _quest
+
+    quest = _quest(tmp_path, _design(), _DRAWS)
+    rc, _printed, derived = _analysis_run(quest, last_run=True)
+    fig = next(o for o in derived["figures"] if o["id"] == "fig1")
+    assert rc == 0 and fig["status"] == "ok" and "fallback" not in fig
+
+
+def test_undeclared_shows_figure_is_dropped_with_quality_row(tmp_path: Path) -> None:
+    from tests.test_analysis_frame import _design, _quest
+
+    design = _design()
+    design["protocol"]["figures"] = [{"id": "fig1", "file": "growth.png", "shows": ["growth"]}]  # no x: nothing to draw in its place
+    quest = _quest(tmp_path, design, _RAISES)
+    rc, _printed, derived = _analysis_run(quest, last_run=True)
+    fig = next(o for o in derived["figures"] if o["id"] == "fig1")
+    assert rc == 0 and fig["status"] == "dropped" and fig["why"] and not (quest / "figures" / "growth.png").exists()
+    # the engine says it in QUALITY.md's record (a row that stops nothing) and marks a drawn one in its record
+    eng = _engine(tmp_path / "eng", phased_on=False)
+    (eng.quest_root / frame.DERIVED_PATH).parent.mkdir(parents=True, exist_ok=True)
+    (eng.quest_root / frame.DERIVED_PATH).write_text(json.dumps(derived), encoding="utf-8")
+    records: dict = {}
+    eng._figure_fallbacks(records)
+    rows = eng._cannot_repair_problems()
+    assert len(rows) == 1 and "fig1" in rows[0]["text"] and "could not be drawn from the run's results" in rows[0]["text"]
+    from core import stop_power
+
+    assert not stop_power.may_stop(rows[0]["source"])
+    drawn = {"schema": derived["schema"], "figures": [{"id": "fig1", "status": "ok", "file": "growth.png", "fallback": True}]}
+    (eng.quest_root / frame.DERIVED_PATH).write_text(json.dumps(drawn), encoding="utf-8")
+    records = {"growth.png": {"axes": []}, "other.png": {"axes": []}}
+    eng._figure_fallbacks(records)
+    assert records["growth.png"]["fallback"] is True and "fallback" not in records["other.png"]
+    assert eng._cannot_repair_problems() == []  # the run drew it: the earlier run's row is gone
+
+
+def test_the_fallback_flag_is_set_only_on_the_run_that_ends_the_repairs(tmp_path: Path, monkeypatch) -> None:
+    from core.engine import Engine
+    from tests.test_split_analysis import SIMULATE, _engine as split_engine, _write
+
+    analysis = ("import json, os\nprint('RESULT_JSON: ' + json.dumps({'flag': os.environ.get('FI_FIGURE_FALLBACK', 'unset')}))\n")
+    monkeypatch.setattr(Engine, "_analysis_on", lambda self: True)
+    flags = {}
+    for sub, used in (("left", 0), ("spent", 99)):
+        eng = split_engine(tmp_path / sub, replicates=2)
+        _write(eng, simulate=SIMULATE, analysis=analysis)
+        flags[sub] = asyncio.run(eng._node_execute({"deps": [], "exec_reflect_iter": used}))["result_json"]["flag"]
+    assert flags == {"left": "unset", "spent": "1"}
