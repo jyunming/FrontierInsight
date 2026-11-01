@@ -167,3 +167,14 @@ def test_a_blank_panel_is_not_counted_as_a_panel_drawn(tmp_path: Path) -> None:
     # The same record with a text on the extra panel (a note) is not blank.
     lines["axes"][1]["has_text"] = True
     assert figure_facts.blank_panels(raw, lines) == set()
+
+
+def test_old_record_without_new_keys_still_reads(tmp_path: Path) -> None:
+    """A record written before the error-bar ends, legend box and data limits were kept is read as it was."""
+    from core.figure_facts import layout
+
+    record = {"file": "old.png", "axes": [{"title": "t", "place": [0.1, 0.1, 0.8, 0.8], "series": []}]}
+    (tmp_path / "old.json").write_text(json.dumps(record), encoding="utf-8")
+    got = _read_figure_records(tmp_path, ["old.png"])["old.png"]
+    assert not {"errorbars", "legend_box", "data_limits"} & set(got["axes"][0])
+    assert layout(got)["panels"] == 1

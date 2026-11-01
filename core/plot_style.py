@@ -521,6 +521,56 @@ try:
                     out.append(words[:300])
             return out[:12]
 
+        def _fi_bar_ends(ax):
+            # The ends of every y error bar, per errorbar call, in data units: what the bars reach, kept so a check can
+            # tell whether the axis holds them. [] when the panel draws none or they could not be read.
+            out = []
+            try:
+                from matplotlib.container import ErrorbarContainer
+
+                for container in ax.containers:
+                    if not isinstance(container, ErrorbarContainer):
+                        continue
+                    lo, hi = [], []
+                    for bar in container.lines[2]:
+                        for segment in bar.get_segments():
+                            xs = [float(p[0]) for p in segment]
+                            ys = [float(p[1]) for p in segment]
+                            if not ys or not all(_fi_math.isfinite(v) for v in ys + xs):
+                                continue
+                            if max(xs) != min(xs):
+                                continue  # an x error bar
+                            lo.append(min(ys))
+                            hi.append(max(ys))
+                    label = container.get_label()
+                    out.append({"line": str(label) if label and not str(label).startswith("_") else None,
+                                "lo": lo, "hi": hi})
+            except Exception:
+                return []
+            return out
+
+        def _fi_legend_frac(ax):
+            # The legend's box in figure fractions (x0, y0, x1, y1), or None when the panel has no legend.
+            try:
+                leg = ax.get_legend()
+                if leg is None:
+                    return None
+                fig = ax.figure
+                box = leg.get_window_extent(fig.canvas.get_renderer()).transformed(fig.transFigure.inverted())
+                values = [float(box.x0), float(box.y0), float(box.x1), float(box.y1)]
+                if not all(_fi_math.isfinite(v) for v in values):
+                    return None
+                return dict(zip(("x0", "y0", "x1", "y1"), values))
+            except Exception:
+                return None
+
+        def _fi_data_limits(ax):
+            # The axis limits as they stand when the figure is saved, after FI and the script have set them.
+            try:
+                return {"x": [float(v) for v in ax.get_xlim()], "y": [float(v) for v in ax.get_ylim()]}
+            except Exception:
+                return None
+
         def _fi_axes(ax):
             lo, hi = ax.get_ylim()
             log = ax.get_yscale() == "log"
@@ -610,6 +660,7 @@ try:
                 # The words the panel itself prints besides its title: ax.text / annotate strings and the legend's
                 # entries. What the figure says is then a fact FI holds, not only what the code drew.
                 "texts": _fi_texts(list(ax.texts) + (list(ax.get_legend().get_texts()) if ax.get_legend() else [])),
+                "errorbars": _fi_bar_ends(ax), "legend_box": _fi_legend_frac(ax), "data_limits": _fi_data_limits(ax),
             }
 
         # Tick labels a redraw gets back by setting the same scale.
@@ -734,6 +785,10 @@ try:
                 "legend": ax.get_legend() is not None,
                 # Words written on the panel (a note, an annotation): a panel with text is not blank.
                 "has_text": bool(ax.texts),
+                # The words themselves, un-truncated up to 200 characters, in drawing order; the error-bar ends, the legend
+                # box (figure fractions) and the axis limits as saved.
+                "texts": [t.get_text()[:200] for t in ax.texts if t.get_visible() and t.get_text().strip()],
+                "errorbars": _fi_bar_ends(ax), "legend_box": _fi_legend_frac(ax), "data_limits": _fi_data_limits(ax),
                 # Whether the panel draws anything but lines (bars, an image, a patch, a collection that has paths): a panel
                 # with no lines and nothing else is empty.
                 "draws_other": any(_fi_draws(artist) for group in (ax.patches, ax.collections, ax.images, ax.tables,

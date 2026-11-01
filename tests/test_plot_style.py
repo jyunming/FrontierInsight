@@ -865,3 +865,63 @@ def test_a_line_whose_points_have_no_finite_x_holds_no_data(tmp_path) -> None:
         "a.plot([],[],label='Empty')"))
     shows = {s["label"]: s["shows"] for s in axes[0]["series"]}
     assert shows["Ghost"] == "no points" and shows["Empty"] == "no points" and shows["A"] == "yes"
+
+
+# ---- record additions: error-bar ends, text words, legend box, data limits -------------------------------------------
+
+
+def _record_probe(tmp_path, body: str, stem: str = "fig"):
+    """Run ``body`` (it draws on ``fig, ax`` and the probe saves it) with the recorder on; return the figure record
+    (``<stem>.json``) and the per-run plot data (``<stem>.seed0.json``)."""
+    pytest.importorskip("matplotlib")
+    boot_dir = write_boot(tmp_path, "latex")
+    records = tmp_path / "records"
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(p for p in (str(boot_dir), os.environ.get("PYTHONPATH", "")) if p),
+        "FI_FIGURE_RECORDS": str(records),
+    }
+    probe = ("import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt\n"
+             "fig, ax = plt.subplots()\n" + body + f"fig.savefig('{stem}.png')\n")
+    out = subprocess.run([sys.executable, "-c", probe], env=env, cwd=tmp_path,
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    record = json.loads((records / f"{stem}.json").read_text(encoding="utf-8"))
+    plot = json.loads((records / f"{stem}.seed0.json").read_text(encoding="utf-8"))
+    return record["axes"][0], plot["axes"][0]
+
+
+def test_record_holds_errorbar_extents(tmp_path) -> None:
+    for panel in _record_probe(tmp_path, "ax.errorbar([1, 2], [1.0, 2.0], yerr=[0.1, 0.2], label='run A')\n"):
+        (bars,) = panel["errorbars"]
+        assert bars["line"] == "run A"
+        assert bars["hi"] == pytest.approx([1.1, 2.2]) and bars["lo"] == pytest.approx([0.9, 1.8])
+
+
+def test_record_holds_no_errorbars_for_a_figure_without_any(tmp_path) -> None:
+    for panel in _record_probe(tmp_path, "ax.plot([1, 2], [1, 2], label='a')\nax.legend()\n"):
+        assert panel["errorbars"] == []
+
+
+def test_record_holds_text_words(tmp_path) -> None:
+    _, plot = _record_probe(tmp_path, "ax.plot([1, 2], [1, 2])\nax.text(0.5, 0.5, 'r = 0.9991')\n"
+                                      "ax.text(0.1, 0.1, 'x' * 300)\n")
+    assert plot["texts"][0] == "r = 0.9991"
+    assert plot["texts"][1] == "x" * 200
+    assert plot["has_text"] is True
+
+
+def test_record_holds_legend_box_inside_unit_square_for_default_legend(tmp_path) -> None:
+    for panel in _record_probe(tmp_path, "ax.plot([1, 2], [1, 2], label='a')\nax.legend()\n"):
+        box = panel["legend_box"]
+        assert 0 <= box["x0"] < box["x1"] <= 1 and 0 <= box["y0"] < box["y1"] <= 1
+
+
+def test_record_holds_no_legend_box_without_a_legend(tmp_path) -> None:
+    for panel in _record_probe(tmp_path, "ax.plot([1, 2], [1, 2])\n"):
+        assert panel["legend_box"] is None
+
+
+def test_record_holds_data_limits(tmp_path) -> None:
+    for panel in _record_probe(tmp_path, "ax.plot([1, 2], [1, 2])\nax.set_xlim(0, 5)\nax.set_ylim(-1, 3)\n"):
+        assert panel["data_limits"] == {"x": [0.0, 5.0], "y": [-1.0, 3.0]}
