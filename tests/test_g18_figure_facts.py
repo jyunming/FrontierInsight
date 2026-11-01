@@ -117,3 +117,14 @@ def test_a_figure_tells_at_most_twelve_series_then_how_many_more(tmp_path):
 
     note = _figure_record_note(record)
     assert "s11: a solid line, no markers (3 points); and 3 more; no error bars are drawn" in note
+
+
+def test_a_panel_without_a_title_is_described_by_its_axes_never_as_if_an_axis_label_were_its_title():
+    """Live fault: the layout sentence said `panel 1: "Realised rate"` where "Realised rate" was the y axis label and the
+    panel's own title (what distinguishes it from the others) was not said."""
+    record = {"file": "fig_a.png", "axes": [
+        {"title": "Fraction of real effects = 0", "ylabel": "Realised rate", "xlabel": "tests", "place": SIDE, "series": []},
+        {"title": "", "ylabel": "Realised rate", "xlabel": "tests", "place": SIDE_RIGHT, "series": []}]}
+    assert figure_facts.layout_sentence(record) == (
+        'two panels side by side in one row (left: "Fraction of real effects = 0"; '
+        'right: y axis "Realised rate", x axis "tests")')

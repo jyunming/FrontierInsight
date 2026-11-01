@@ -85,6 +85,16 @@ def blank_panels(record: Any, lines_data: Any) -> set[int]:
             and not b.get("legend") and not b.get("has_text") and not a.get("series")}
 
 
+def _panel_words(ax: Any) -> str:
+    """How a caption names one panel, from the saved axes: its title, in quotes, when it has one; otherwise what its axes
+    say, worded as axis labels (``y axis "..." , x axis "..."``). An axis label is never presented as a title."""
+    title = _one(ax.get("title")) if isinstance(ax, dict) else ""
+    if title:
+        return f'"{title}"'
+    parts = [f'{side} axis "{text}"' for side, text in (("y", _one(ax.get("ylabel"))), ("x", _one(ax.get("xlabel")))) if text]
+    return ", ".join(parts)
+
+
 def _boxes(record: Any, skip: set[int] | None = None) -> list[dict[str, Any]]:
     """The distinct panels of a figure record: ``place`` (x, y, width, height in figure coordinates, y up) and a name.
     A twin axis shares its panel's box and is one panel; a small box inside another (an inset) is not a panel."""
@@ -97,8 +107,7 @@ def _boxes(record: Any, skip: set[int] | None = None) -> list[dict[str, Any]]:
             continue
         if any(all(abs(a - b) < _SAME for a, b in zip(place, p["place"])) for p in panels):
             continue
-        panels.append({"place": [float(v) for v in place],
-                       "name": _one(ax.get("ylabel")) or _one(ax.get("xlabel")) or ""})
+        panels.append({"place": [float(v) for v in place], "name": _panel_words(ax)})
     insets = []
     for p in panels:
         x, y, w, h = p["place"]
@@ -163,7 +172,7 @@ def layout_sentence(record: Any, lines_data: Any = None) -> str:
     note = (f"; {_NUMBER_WORDS.get(blank, str(blank))} more {'place' if blank == 1 else 'places'} on the figure "
             f"{'is' if blank == 1 else 'are'} left blank") if blank else ""
     if got["arrangement"] == "single":
-        return "a single panel" + (f' ("{names[0]}")' if names[0] else "") + note
+        return "a single panel" + (f" ({names[0]})" if names[0] else "") + note
     positions = {
         "side_by_side": ["left", "centre", "right"] if n == 3 else ["left", "right"] if n == 2 else [],
         "stacked": ["top", "middle", "bottom"] if n == 3 else ["top", "bottom"] if n == 2 else [],
@@ -182,7 +191,7 @@ def layout_sentence(record: Any, lines_data: Any = None) -> str:
         if not name:
             continue
         label = positions[i] if i < len(positions) else f"panel {i + 1}"
-        shown.append(f'{label}: "{name}"')
+        shown.append(f"{label}: {name}")
     sentence = f"{head} ({'; '.join(shown)})" if shown else f"{head} ({tail})"
     return sentence + note
 

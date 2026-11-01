@@ -19819,6 +19819,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 )
         figures = self._drop_typed_figures(figures, records_dir)
         figure_records = _read_figure_records(records_dir, figures)
+        for line in _unread_results(figure_records):
+            self._log.info("[execute] declared result not read by a figure: %s (the caption states only what the saved axes "
+                           "and legend label)", line)
         for name, n_seeds in replotted.items():
             if name in figure_records:
                 figure_records[name]["replicate_mean"] = {"n": n_seeds}
@@ -34106,6 +34109,22 @@ def _restore_primary_figures(
     return restored
 
 
+def _unread_results(records: dict[str, Any]) -> list[str]:
+    """One line per figure whose body made no read that returned data of a result the plan declared it shows (``declared``
+    of its record, set by :mod:`core.analysis_figures`). It is a gap for run.log, not a claim for the caption: the body
+    may draw the quantity from other reads, and only the saved axes and legends say what is drawn."""
+    lines: list[str] = []
+    for name, record in sorted(records.items()):
+        declared = record.get("declared") if isinstance(record, dict) else None
+        if not isinstance(declared, dict):
+            continue
+        names = declared.get("labels") if isinstance(declared.get("labels"), dict) else {}
+        missing = [str(names.get(str(r)) or str(r)) for r in declared.get("not_drawn") or []]
+        if missing:
+            lines.append(f"{name}: no read of the figure's body returned a value of {', '.join(missing)}")
+    return lines
+
+
 def _read_figure_records(folder: Path, figures: list[str]) -> dict[str, Any]:
     """The plot-style bootstrap's record of what each figure draws, by file
     name. A figure saved without the bootstrap (or in a sandbox that could not
@@ -34678,46 +34697,26 @@ def _figure_caption_text(
     # A panel is named by what it plots (its y axis, else its x axis). A panel or figure title is the script's own
     # sentence and is not copied: it can name a line, a reference or a style the figure does not draw, and FI's record of
     # the lines is what the caption states.
-    # What the figure plots is, when FI recorded it, the declared results the body drew values of (their declared labels),
-    # never the words the body typed on an axis: a typed label can name a quantity the figure does not draw. A declared
-    # result the body did not draw is said not drawn.
-    declared = (record or {}).get("declared")
-    declared = declared if isinstance(declared, dict) and declared.get("shows") else None
-    drawn_labels: list[str] = []
-    not_drawn_labels: list[str] = []
-    if declared:
-        names = declared.get("labels") if isinstance(declared.get("labels"), dict) else {}
-
-        def say(rid: Any) -> str:
-            return _caption_words(names.get(str(rid)) or str(rid).replace("_", " "), 80)
-
-        drawn_labels = [say(r) for r in declared.get("drawn") or []]
-        not_drawn_labels = [say(r) for r in declared.get("not_drawn") or []]
-
-    joined_drawn = (", ".join(drawn_labels[:-1]) + (" and " if len(drawn_labels) > 1 else "") + drawn_labels[-1]) if drawn_labels else ""
-
+    # What a panel plots is what its saved axes say: the labels of the panels that hold drawn data, as FI measured them on
+    # the figure it saved (an empty panel is left out above). Nothing is inferred from which declared results the body
+    # read: a quantity the body worked out from several reads (an error from two values, a spread of a mean) is drawn
+    # though it was not read under its own id, and a caption built from the reads named the wrong quantity or said a drawn
+    # one was missing. A declared result no read of the body gave is recorded in run.log (``_note_unread_results``), not
+    # claimed in the caption.
     def plots(ax: dict[str, Any]) -> str:
         y, x = _caption_words(ax.get("ylabel")), _caption_words(ax.get("xlabel"))
-        if declared:
-            if len(axes) > 1:
-                return ""  # the record is of the whole figure, so the drawn results are said once below, not for each panel
-            y = joined_drawn
         return f"{y} against {x}" if y and x else y or x
 
     def named(k: int, ax: dict[str, Any]) -> str:
         return _caption_words(ax.get("ylabel")) or _caption_words(ax.get("xlabel")) or f"panel {k}"
 
     plotted = list(dict.fromkeys(t for t in (plots(ax) for ax in axes) if t))
-    if declared and len(axes) > 1 and joined_drawn:
-        plotted = [f"{joined_drawn}, in {len(axes)} panels"]
     if len(axes) > 3:
         # A grid of panels: the file's own name says what the grid shows.
         description = f"{stem} ({len(axes)} panels)"
     else:
         description = "; ".join(plotted) or stem
     parts = [description.rstrip(" .;,") + "."]
-    for label in not_drawn_labels:
-        parts.append(f"{label} is not drawn: no value of it was plotted.")
     appears: dict[str, list[str]] = {}
     flat: dict[str, list[str]] = {}
     outside: dict[str, list[str]] = {}

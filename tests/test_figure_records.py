@@ -163,7 +163,7 @@ def test_a_blank_panel_is_not_counted_as_a_panel_drawn(tmp_path: Path) -> None:
     lines = json.loads((tmp_path / "sweep.seed0.json").read_text(encoding="utf-8"))
     raw = json.loads((tmp_path / "sweep.json").read_text(encoding="utf-8"))
     assert figure_facts.blank_panels(raw, lines) == {1}
-    assert figure_facts.layout_sentence(raw, lines) == 'a single panel ("y"); one more place on the figure is left blank'
+    assert figure_facts.layout_sentence(raw, lines) == 'a single panel ("t"); one more place on the figure is left blank'
     # The same record with a text on the extra panel (a note) is not blank.
     lines["axes"][1]["has_text"] = True
     assert figure_facts.blank_panels(raw, lines) == set()

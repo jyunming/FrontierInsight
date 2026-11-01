@@ -314,35 +314,40 @@ def test_a_figure_title_the_paper_copy_drops_is_not_copied_into_the_caption() ->
     assert _figure_caption_text("r.png", record, n_seeds=None) == "Rate."
 
 
-# ---- what the caption says a figure plots: the declared results the body drew, not the words typed on an axis ---------------
+# ---- a caption states what the saved axes and legends say, never what FI guesses from which results the body read -------
 
-def test_a_caption_does_not_name_a_quantity_the_body_typed_but_did_not_draw() -> None:
-    record = {"axes": [{"ylabel": "Error (first, second, extra drift)", "xlabel": "step", "series": []}],
-              "declared": {"shows": ["first", "second"], "drawn": ["first", "second"], "not_drawn": [],
-                           "labels": {"first": "First error", "second": "Second error"}}}
+_UNREAD = {"shows": ["first", "second"], "drawn": ["first"], "not_drawn": ["second"], "labels": {"first": "First error", "second": "Second error"}}
+
+
+def test_a_quantity_the_body_worked_out_from_other_reads_is_not_said_missing() -> None:
+    # The body drew "Second error" from the first result and an exact formula, so no read returned it under its own id.
+    record = {"axes": [{"ylabel": "First error", "xlabel": "step", "series": [{"label": "RK4", "shows": "yes"}]},
+                       {"ylabel": "Second error", "xlabel": "step", "series": [{"label": "exact", "shows": "yes"}]}],
+              "declared": _UNREAD}
     caption = _figure_caption_text("e.png", record, n_seeds=None)
-    assert caption == "First error and Second error against step."
-    assert "drift" not in caption
+    assert "not drawn" not in caption and "no value" not in caption
+    assert caption.startswith("First error against step; Second error against step.")
 
 
-def test_a_caption_says_a_declared_result_that_was_not_drawn_is_not_drawn() -> None:
-    record = {"axes": [{"ylabel": "typed words", "xlabel": "step", "series": []}],
-              "declared": {"shows": ["first", "second"], "drawn": ["first"], "not_drawn": ["second"], "labels": {"first": "First error"}}}
+def test_a_caption_names_what_the_axis_says_not_the_declared_result_the_body_read() -> None:
+    # The body read the estimate and plotted its spread; the y axis says so, and the declared label of the read is not used.
+    record = {"axes": [{"ylabel": "Standard deviation of the estimate", "xlabel": "noise",
+                        "series": [{"label": "n=5", "shows": "yes"}]}],
+              "declared": {"shows": ["estimate"], "drawn": ["estimate"], "not_drawn": [], "labels": {"estimate": "Estimate"}}}
     caption = _figure_caption_text("e.png", record, n_seeds=None)
-    assert caption == "First error against step. second is not drawn: no value of it was plotted."
-    assert "typed words" not in caption
+    assert caption.startswith("Standard deviation of the estimate against noise.")
+    assert "Estimate against" not in caption
 
 
-def test_a_caption_of_a_fully_drawn_figure_keeps_its_meaning() -> None:
-    typed = {"axes": [{"ylabel": "error", "xlabel": "step size", "series": []}]}
-    recorded = dict(typed, declared={"shows": ["error"], "drawn": ["error"], "not_drawn": [], "labels": {"error": "error"}})
-    assert _figure_caption_text("e.png", typed, n_seeds=None) == _figure_caption_text("e.png", recorded, n_seeds=None)
-
-
-def test_a_caption_of_a_two_panel_figure_says_the_drawn_results_once_and_not_the_typed_labels() -> None:
-    record = {"axes": [{"ylabel": "typed one", "xlabel": "step", "series": []}, {"ylabel": "typed two", "xlabel": "step", "series": []}],
-              "declared": {"shows": ["first", "second"], "drawn": ["first", "second"], "not_drawn": [],
-                           "labels": {"first": "First error", "second": "Second error"}}}
+def test_the_label_of_an_empty_panel_is_not_named() -> None:
+    record = {"axes": [{"ylabel": "Error", "xlabel": "step", "series": [{"label": "RK4", "shows": "yes"}]},
+                       {"ylabel": "Energy drift", "xlabel": "step", "series": [{"label": "RK4", "shows": "no points"}]}]}
     caption = _figure_caption_text("e.png", record, n_seeds=None)
-    assert caption == "First error and Second error, in 2 panels."
-    assert "typed" not in caption
+    assert "drift" not in caption and caption.startswith("Error against step.")
+
+
+def test_a_declared_result_no_read_returned_is_a_line_for_run_log_not_a_caption_claim() -> None:
+    from core.engine import _unread_results
+
+    lines = _unread_results({"e.png": {"declared": _UNREAD}, "f.png": {"declared": dict(_UNREAD, not_drawn=[])}, "g.png": {}})
+    assert lines == ["e.png: no read of the figure's body returned a value of Second error"]
