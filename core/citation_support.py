@@ -89,10 +89,18 @@ def labels_in(inside: str) -> list[str]:
     return out
 
 
-def without_citations(text: str) -> str:
-    """``text`` with its citation brackets taken out (and the space left before one), for plan text FI quotes into a line
-    it writes itself: the plan's marker was never put through this check, so FI cannot vouch for it."""
-    return re.sub(r"[ 	]*" + CITE_RE.pattern, "", str(text)).strip()
+def without_citations(text: str, labels: set[str] | frozenset[str] | None) -> str:
+    """``text`` with the citation brackets that name one of ``labels`` (the quest's sources) taken out, with the space
+    before each, for plan text FI quotes into a line it writes itself: the plan's marker was never put through this check,
+    so FI cannot vouch for it. A bracket glued to a word (``x[0]``) or naming a label that is not a source (``[0, 1]``)
+    is not a citation and stays; without ``labels`` nothing is taken out."""
+    if not labels:
+        return str(text)
+
+    def drop(m: re.Match[str]) -> str:
+        return "" if all(lb in labels for lb in labels_in(m.group(1))) else m.group(0)
+
+    return re.sub(r"[ \t]+" + CITE_RE.pattern, drop, str(text)).strip()
 
 
 def references_start(paper: str) -> int:

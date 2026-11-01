@@ -692,17 +692,21 @@ def test_a_named_check_of_this_value_still_drops_a_disagreeing_reference(measure
 
 
 def test_a_table_caption_quotes_the_plans_note_without_the_plans_citation_marker() -> None:
-    """The plan model wrote `[18]` in a reference's note; the paper's citation check never saw it (and the paper may drop
-    that source), so FI's own caption and Methods paragraph must not carry it. A marker the writer put in its own prose
-    is the check's to keep, so it is not touched here."""
+    """The plan model wrote `[18]` in a reference's note; the paper's citation check never saw it, so FI's own caption and
+    Methods paragraph must not carry it when 18 is one of the quest's sources. A bracket that names no source, or is glued
+    to a name, is not a citation and stays; a marker the writer put in its own prose is the check's to keep."""
     protocol = P.fdr_protocol()
     ref = next(m for m in protocol["metrics"] if m["id"] == "fdr_bh")["reference"]
-    ref["note"] = "the bound holds exactly for independent tests [18], see also [W3]."
-    built = _build("fdr_s1", protocol)
+    ref["note"] = "the bound holds exactly for independent tests [18], see also [W3], on x[0], index [2] and interval [0, 1]."
+    files = grid_keys.code_files(P.FIXTURES / "fdr_s1" / "code")
+    judged = P.load("fdr_s1", "judged.json")
+    built = rbs.build(_summaries("fdr_s1"), protocol, files, judged, {"18", "W3"})
     caption = _table(built, "fdr_bh").caption
-    assert "independent tests, see also.)" in caption
     assert "[18]" not in caption and "[W3]" not in caption
+    assert "independent tests, see also, on x[0], index [2] and interval [0, 1].)" in caption
     assert "[18]" not in rbs.reference_section(built)
+    unknown = rbs.build(_summaries("fdr_s1"), protocol, files, judged)  # the quest's labels not known: nothing is taken out
+    assert "[18]" in _table(unknown, "fdr_bh").caption
     from core import citation_support as cs
     kept = "BH controls the rate [18]."  # the writer's own prose, a citation the check kept
     assert cs.CITE_RE.findall(kept) == ["18"] and cs.find_sites(kept)

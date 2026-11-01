@@ -446,7 +446,7 @@ def copies_measured(ref: dict[str, Any], measured: list[tuple[float, float | Non
 
 
 def compute(protocol: dict[str, Any] | None, settings: list[dict[str, Any]], trial_names: set[str] | None = None,
-            judged: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+            judged: list[dict[str, Any]] | None = None, labels: set[str] | None = None) -> dict[str, Any]:
     """The references of the plan's metrics at each of ``settings`` (each a mapping of setting names to values):
     ``{"quantities": [...], "by_setting": [...]}``.
 
@@ -454,7 +454,8 @@ def compute(protocol: dict[str, Any] | None, settings: list[dict[str, Any]], tri
     ("formula in the frozen plan"), ``checked`` (:func:`cross_check`), and ``status`` ("computed" or "no reference")
     with ``why``. Each entry of ``by_setting``: ``metric``, ``value``, ``setting``, ``reference`` (a number or ``None``)
     and ``why`` (empty when there is one). A metric without a reference is listed with status "no reference"; an old
-    plan without any gives every quantity "no reference"."""
+    plan without any gives every quantity "no reference". ``labels`` are the quest's citation labels: a bracket naming
+    one of them is taken out of a quantity's ``note``, which is plan text the paper's citation check never read."""
     metrics = protocol.get("metrics") if isinstance(protocol, dict) else None
     given = inputs(protocol)
     quantities: list[dict[str, Any]] = []
@@ -490,7 +491,7 @@ def compute(protocol: dict[str, Any] | None, settings: list[dict[str, Any]], tri
         ref = normalized(raw)
         checked = cross_check(protocol, {**m, "reference": ref}, judged)
         entry: dict[str, Any] = {"metric": ident, "value": name, "kind": ref["kind"], "formula": ref["formula"],
-                 "note": _cites.without_citations(ref.get("note", "")),
+                 "note": _cites.without_citations(ref.get("note", ""), labels),
                  "source": "formula in the frozen plan", "checked": checked,
                  "status": "computed", "why": ""}
         if checked["state"] == "disagrees":

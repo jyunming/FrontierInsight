@@ -450,7 +450,7 @@ def _quantities(protocol: dict[str, Any] | None, values: list[str]) -> tuple[lis
 
 
 def build(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, files: dict[str, str],
-          judged: list[dict[str, Any]] | None = None) -> Built:
+          judged: list[dict[str, Any]] | None = None, labels: set[str] | None = None) -> Built:
     """The distinct settings, the references at each and one table per quantity, from the trial record's summaries,
     the frozen protocol, the study's code and the engine's verdicts on the known-answer checks."""
     metrics = (protocol or {}).get("metrics") if isinstance(protocol, dict) else None
@@ -466,7 +466,7 @@ def build(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, fil
     if why and _refs.grid_axes(protocol):
         diagnostics.append(f"Every grid axis is treated as read: {why}.")
     quantities, left = _quantities(protocol, found.values)
-    computed = _refs.compute(protocol, [s.setting for s in found.settings], set(found.values), judged)
+    computed = _refs.compute(protocol, [s.setting for s in found.settings], set(found.values), judged, labels)
     by_metric = {q["metric"]: q for q in computed["quantities"]}
     at: dict[tuple[str, str], dict[str, Any]] = {}
     for r in computed["by_setting"]:
@@ -786,7 +786,8 @@ def _without_left_out(protocol: dict[str, Any] | None, quest_root: Path) -> dict
 
 
 def from_quest(quest_root: Path, protocol: dict[str, Any] | None,
-               judged: list[dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], Built | None]:
+               judged: list[dict[str, Any]] | None = None,
+               labels: set[str] | None = None) -> tuple[list[dict[str, Any]], Built | None]:
     """``(FI's trial table rows, what this module builds)`` from the quest's trial record, read once; ``([], None)``
     without one."""
     cells = _trial_table._record(Path(quest_root))
@@ -794,14 +795,15 @@ def from_quest(quest_root: Path, protocol: dict[str, Any] | None,
         return [], None
     summarised = _trial_table.summaries(cells)
     protocol = _without_left_out(protocol, Path(quest_root))
-    built = build(summarised, protocol, _grid_keys.code_files(Path(quest_root) / "code"), judged)
+    built = build(summarised, protocol, _grid_keys.code_files(Path(quest_root) / "code"), judged, labels)
     return _trial_table.rows_of(summarised, _diagnostics(protocol)), built
 
 
-def write(quest_root: Path, protocol: dict[str, Any] | None, judged: list[dict[str, Any]] | None = None) -> Built | None:
+def write(quest_root: Path, protocol: dict[str, Any] | None, judged: list[dict[str, Any]] | None = None,
+          labels: set[str] | None = None) -> Built | None:
     """Build from the quest's records and write ``paper/results_by_setting.md`` / ``.tex`` / ``.csv`` and
     ``paper/reference_values.json``; ``None`` without a trial record."""
-    _rows, built = from_quest(quest_root, protocol, judged)
+    _rows, built = from_quest(quest_root, protocol, judged, labels)
     block_path = Path(quest_root) / PAPER_BLOCK
     block = paper_block(built)
     if block:

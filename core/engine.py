@@ -22922,7 +22922,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         try:
             trial_rows = _trial_table.write(self.quest_root, _skeleton.diagnostic_names(self._protocol_block(state)))
             try:  # every setting with its reference value (core/results_by_setting.py), for a table too long to give
-                by_setting = _results_by_setting.write(self.quest_root, self._protocol_block(state), self._judged_checks())
+                by_setting = _results_by_setting.write(
+                    self.quest_root, self._protocol_block(state), self._judged_checks(),
+                    {lb for lb, _meta, _item in _labelled_sources(state.get("literature") or [], self.config.output.audience)})
             except Exception as e:  # noqa: BLE001 -- the same: a help, never a reason to stop
                 self._log.warning("[write] FI's table of every setting could not be written (%s)", e)
                 by_setting = None
