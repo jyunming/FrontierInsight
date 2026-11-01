@@ -11,6 +11,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 
+import matplotlib.pyplot as plt  # noqa: E402
 import pytest  # noqa: E402
 
 from core import figure_claims  # noqa: E402
@@ -19,6 +20,12 @@ from tests import test_figure_fixtures as fixtures  # noqa: E402
 _spec = importlib.util.spec_from_file_location("figure_replay", Path(__file__).resolve().parents[1] / "dev" / "evaluation" / "figure_replay.py")
 replay = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(replay)
+
+
+@pytest.fixture(autouse=True)
+def _close_figures():
+    yield
+    plt.close("all")
 
 
 def _clean_host(tmp_path):
@@ -233,3 +240,22 @@ def test_identical_and_missing_x_disagree_when_planted(tmp_path):
     pts["x"].append(gone)
     pts["y"].append(1.0)
     assert replay._agree(calls, offer, [gone], scale_of)[0] == "disagree"
+
+
+def test_a_label_that_opens_another_label_is_found_as_a_whole_item_in_the_order_sentence():
+    """The order sentence lists labels such as "S#29, S#3, S#2": "S#2" is the start of "S#29", so a plain search for it finds the
+    wrong place. The recomputation finds each label after the one before and agrees with the true sentence (a replayed figure with
+    34 lines named computed#1 ... computed#33 was reported as 3 disagreements by the plain search)."""
+    def line(sid, y):
+        return {"id": sid, "label": sid, "kind": "line", "step": False, "x": [1.0, 2.0], "y": [y, y], "yerr": None, "merged_with": []}
+
+    panel = {"panel": 1, "raw": False, "raw_reason": None, "x": {"id": "size", "kind": "setting", "label": "size", "scale": "linear"},
+             "y": {"what": "signal", "label": "signal", "scale": "linear"}, "bands": [], "refs": [], "notes": [], "texts_raw": [],
+             "series": [line("S#29", 3.0), line("S#3", 2.0), line("S#2", 1.0)]}
+    calls = {"version": 1, "fallback": False, "panels": [panel]}
+    order = next(o for o in figure_claims.menu(calls, None, stem="s") if o["claim"] == "order")
+    assert "S#29, S#3, S#2" in order["text"]
+    scale_of = lambda n, axis: "linear"  # noqa: E731
+    assert replay._agree(calls, order, [], scale_of)[0] == "agree"
+    order["text"] = order["text"].replace("S#29, S#3, S#2", "S#3, S#29, S#2")  # the planted fault: two labels swapped
+    assert replay._agree(calls, order, [], scale_of)[0] == "disagree"

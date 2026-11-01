@@ -644,8 +644,14 @@ def _agree(calls, offer, grid, scale_of):
                 if len(ys) == 1:
                     vals.append((next(iter(ys)), t["label"]))
             vals.sort(key=lambda v: -v[0])
-            where = [text.find(label) for _v, label in vals]
-            return ok(len(vals) >= 2 and all(w >= 0 for w in where) and where == sorted(where), "order of the values")
+            # the labels must follow one another in the sentence, each as a whole item of the list (one label can open another:
+            # "computed#2" opens "computed#29"), so each is searched for after the end of the one before
+            at, found = text.find("highest first, are"), len(vals) >= 2
+            for _v, label in vals:
+                hit = re.compile(re.escape(label) + r"(?=,|\s+in panel|$)").search(text, max(at, 0))
+                found = found and hit is not None
+                at = hit.end() if hit else at
+            return ok(found, "order of the values")
         if cid == "errorbars":
             e = s["yerr"] if s else None
             good = (e is not None and len(e) == len(s["y"]) and all(v is None or v >= 0 for v in e) and any((v or 0) > 0 for v in e)
@@ -727,6 +733,24 @@ def _worker(workdir: Path, result_path: Path) -> None:
         for r in declared:
             host.labels[r] = r
         run = _Run(host, table, plan, grid, spec, refs, held=list((getattr(derive, "HELD", {}) or {}).values()))
+        # what the y check does: every series call, with the result the proxy asked for and the one the frame recorded
+        y_log, pending = [], []
+        checked = host._checked_what
+
+        def counted(what, form, x_id, xs, ys):
+            pending.append(checked(what, form, x_id, xs, ys))
+            return pending[-1]
+
+        added = host._add_series
+
+        def add_series(panel, kind, series, x, y, what, *rest, **more):
+            pending.clear()
+            got = added(panel, kind, series, x, y, what, *rest, **more)
+            if pending:
+                y_log.append((panel, series, what, pending[-1]))
+            return got
+
+        host._checked_what, host._add_series = counted, add_series
 
         class _Logged:
             def __getattr__(self, name):
@@ -789,6 +813,26 @@ def _worker(workdir: Path, result_path: Path) -> None:
             item.update(status="failed", error="drew nothing on panel %s" % " and ".join(map(str, empty)))
         gridx = [float(g) for g in grid.get(spec.get("x"), []) if _number(g)]
         offers = figure_claims.menu(calls, {"series": list(spec.get("shows") or []), "grid": gridx}, _fmt, stem=fid)
+        item["offers_capped"] = len(figure_claims.cap_menu(offers, calls))
+        # the y check: the series whose result the frame set to ``other`` because the drawn y is not the table's, and the
+        # claims the same record would have offered if the result had been kept
+        asked = [(p, sid, req) for p, sid, req, got in y_log if req != "other"]
+        down = [(p, sid, req) for p, sid, req, got in y_log if req != "other" and got == "other"]
+        item["y_check"] = {"series_asked": len(asked), "downgraded": len(down)}
+        if down:
+            import copy
+
+            kept = copy.deepcopy(calls)
+            for p, sid, req in down:
+                panel = kept["panels"][p]
+                for s in panel["series"]:
+                    if s["id"] == sid:
+                        s["what"] = req
+                panel["y"]["what"] = " / ".join(dict.fromkeys(r for q, _i, r, _g in y_log if q == p))
+            key = lambda o: (o["claim"], json.dumps(o["args"], sort_keys=True))  # noqa: E731
+            now = {key(o) for o in offers}
+            more = figure_claims.menu(kept, {"series": list(spec.get("shows") or []), "grid": gridx}, _fmt, stem=fid)
+            item["withdrawn_by_y_check"] = [o["claim"] for o in more if key(o) not in now]
         for o in offers:
             verdict, why = _agree(calls, o, gridx, lambda n, axis: item["scales"][str(n)][axis])
             item["offers"].append({"claim": o["claim"], "args": o["args"], "text": o["text"], "agree": verdict, "why": why})
@@ -899,6 +943,19 @@ def main(argv=None) -> int:
         for o in f["offers"]:
             if o["agree"] == "disagree":
                 print(f"  DISAGREE {n} {f['figure']}: {o['claim']} {o['args']} -> {o['text']!r} ({o['why']})")
+    capped = sum(f.get("offers_capped", 0) for _n, f in figs)
+    sys.path.insert(0, str(ROOT))
+    from core import figure_claims
+
+    print(f"claims offered per figure, cut to the menu limit of {figure_claims.MENU_LIMIT}: {len(offers)} before, {capped} after; "
+          f"figures over the limit: {sum(1 for _n, f in figs if len(f['offers']) > figure_claims.MENU_LIMIT)}")
+    asked = sum(f.get("y_check", {}).get("series_asked", 0) for _n, f in figs)
+    down = sum(f.get("y_check", {}).get("downgraded", 0) for _n, f in figs)
+    gone = collections.Counter(c for _n, f in figs for c in f.get("withdrawn_by_y_check", []))
+    print(f"the y check: series drawn as a result of the plan {asked}; set to 'other' (drawn y is not the table's) {down}; "
+          f"claims withdrawn by it: {sum(gone.values())}" + ("".join(f"; {c} {k}" for c, k in gone.most_common())))
+    print("fi_fault: not measured here (the replay draws through the proxy, not through the figure code of a run, which is what "
+          "raises it); the nearest check is the line below")
     print(f"series whose record differs from the line really drawn: {sum(f.get('record_vs_artists_mismatches', 0) for _n, f in figs)}")
     shared = [f for _n, f in figs if f["status"] == "ok" and any(p["state"] != "empty" for p in f["panels"])]
     print(f"bodies that draw (no fallback): {len(shared)}; of them with every panel verified: "
