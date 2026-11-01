@@ -83,3 +83,36 @@ def test_a_grid_with_an_unused_place_states_the_panels_it_draws(tmp_path):
     assert figure_facts.layout_sentence(record, drawn).startswith("three panels in a grid of 2 rows by 2 columns")
     assert figure_facts.layout_sentence(record, drawn).endswith("one more place on the figure is left blank")
     assert figure_facts.layout_sentence(record).startswith("four panels")  # without the line file nothing is known
+
+
+def test_an_old_record_without_bar_lengths_says_error_bars_are_not_recorded(tmp_path):
+    """A record made before the bar lengths were kept cannot say a series has no bars: it says they are not recorded."""
+    from core.engine import _figure_record_note, _read_figure_records
+
+    record = {"file": "fig_a.png", "axes": [{"title": "", "ylabel": "gain", "place": SIDE, "ylim": [0, 10], "series": [
+        {"label": "stub", "shows": "no points"}]}]}
+    lines = {"axes": [{"lines": [
+        {"label": "A", "kind": "data", "x": [1, 2, 3], "y": [1, 2, 3], "linestyle": "None", "marker": "o"},
+        {"label": "B", "kind": "data", "x": [1, 2, 3], "y": [1, 2, 3], "linestyle": "-", "marker": "None"}]}]}
+    root = _quest(tmp_path, record, lines)
+    note = _figure_record_note(_read_figure_records(root / ".fi" / "figure_records", ["fig_a.png"])["fig_a.png"])
+    assert "A: markers only, no line joins them (3 points)" in note
+    assert "B: a solid line, no markers (3 points)" in note
+    assert "stub: a legend entry with no data" in note
+    assert "error bars: not recorded" in note and "no error bars" not in note
+
+
+def test_a_figure_tells_at_most_twelve_series_then_how_many_more(tmp_path):
+    lines = {"axes": [{"bars_recorded": True, "lines": [
+        {"label": f"s{i}", "kind": "data", "x": [1, 2, 3], "y": [1, 2, 3], "linestyle": "-", "marker": "None"}
+        for i in range(15)]}]}
+    record = {"file": "fig_a.png", "axes": [{"title": "", "ylabel": "gain", "place": SIDE, "series": []}]}
+    root = _quest(tmp_path, record, lines)
+    figure_facts.attach_series_drawn(record, root / ".fi" / "figure_records" / "fig_a.seed0.json")
+    panel = record["axes"][0]
+    assert panel["series_drawn"][:12] == [f"s{i}: a solid line, no markers (3 points)" for i in range(12)]
+    assert panel["series_drawn"][12] == "no error bars are drawn" and panel["series_drawn_more"] == 3
+    from core.engine import _figure_record_note
+
+    note = _figure_record_note(record)
+    assert "s11: a solid line, no markers (3 points); and 3 more; no error bars are drawn" in note

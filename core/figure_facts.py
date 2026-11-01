@@ -223,6 +223,100 @@ def lines_sentence(lines_data: Any) -> str:
     return text
 
 
+#: Series told per figure before "and N more".
+_MAX_SERIES = 12
+
+
+def _bars_phrase(bar: Any, span: Any) -> str:
+    """The error bars of one series as the recorder measured them: drawn (with their largest length against the axis span)
+    or none visible."""
+    n, longest = (bar.get("n"), bar.get("max")) if isinstance(bar, dict) else (None, None)
+    if not _num(longest) or not _num(n):
+        return ""
+    if n == 0:
+        return "no error bar is drawn"
+    if longest <= 0:
+        return "error bars are all zero (none visible)"
+    share = f", {longest / span * 100:.2g}% of the axis span" if _num(span) and span > 0 else ""
+    return f"error bars are drawn (largest {longest:.3g}{share})"
+
+
+def series_drawn(record_panel: Any, lines_panel: Any, budget: int = _MAX_SERIES) -> tuple[list[str], int, str]:
+    """How each named series of one panel is drawn, from the recorder's own line list (``lines_panel``, a panel of the
+    ``<stem>.seed0.json`` file) and the panel's series list (``record_panel``, a panel of ``<stem>.json``): markers only, a
+    line, a line with markers, a straight line of two points, a legend entry with no data, and its error bars. The texts
+    (at most ``budget``) come with the number left unsaid and a closing line on the panel's error bars. Lines without a legend name are not named here; a horizontal or
+    vertical reference line is told with the panel's series."""
+    texts: list[str] = []
+    ylim = record_panel.get("ylim") if isinstance(record_panel, dict) else None
+    span = abs(ylim[1] - ylim[0]) if isinstance(ylim, list) and len(ylim) == 2 and all(map(_num, ylim)) else None
+    recorded = bool(isinstance(lines_panel, dict) and lines_panel.get("bars_recorded"))
+    seen: set[str] = set()
+    for line in (lines_panel.get("lines") if isinstance(lines_panel, dict) else None) or []:
+        if not isinstance(line, dict) or line.get("kind") != "data" or not isinstance(line.get("x"), list):
+            continue
+        label = _one(line.get("label"), 60)
+        if not label or label.startswith("_"):
+            continue
+        n = len(line["x"])
+        style = str(line.get("linestyle") or "").lower()
+        has_line = style not in _NO_LINE and style != "none" and n > 1
+        marked = str(line.get("marker") or "None").lower() not in _NO_MARKER
+        word = _STYLE_WORDS.get(style, "")
+        if n == 0:
+            how = "a legend entry with no data"
+        elif has_line and n == 2 and not marked:
+            how = f"a straight {word + ' ' if word else ''}line of two points, no markers"
+        elif has_line and marked:
+            how = f"a {word + ' ' if word else ''}line with markers ({n} points)"
+        elif has_line:
+            how = f"a {word + ' ' if word else ''}line, no markers ({n} points)"
+        elif marked:
+            how = f"markers only, no line joins them ({n} point{'s' if n != 1 else ''})"
+        else:
+            how = "nothing drawn (no line, no marker)"
+        if n and recorded and "yerr" in line:
+            bars = _bars_phrase(line.get("yerr"), span)
+            how += f"; {bars}" if bars else ""
+        text = f"{label}: {how}"
+        if text not in seen:
+            seen.add(text)
+            texts.append(text)
+    named = {t.split(":", 1)[0] for t in texts}
+    for s in (record_panel.get("series") if isinstance(record_panel, dict) else None) or []:
+        label = _one(s.get("label"), 60) if isinstance(s, dict) else ""
+        if label and not label.startswith("_") and label not in named and s.get("shows") == "no points":
+            named.add(label)
+            texts.append(f"{label}: a legend entry with no data")
+    tail = ""
+    if texts:
+        if not recorded:
+            tail = "error bars: not recorded for this figure"
+        elif not any(isinstance(ln, dict) and "yerr" in ln for ln in lines_panel.get("lines") or []):
+            tail = "no error bars are drawn"
+    return texts[:budget], max(0, len(texts) - budget), tail
+
+
+def attach_series_drawn(record: Any, lines_path: Path) -> None:
+    """Add to each panel of ``record`` its ``series_drawn`` list (and ``series_drawn_more``, the number not listed), from the
+    line file ``lines_path``, for the note the writer is given about the figure. Nothing is added when the line file is
+    missing or does not match the panels, and a figure's budget of series is shared by its panels."""
+    full = _read(lines_path)
+    panels, drawn = (record.get("axes") if isinstance(record, dict) else None),         (full.get("axes") if isinstance(full, dict) else None)
+    if not isinstance(panels, list) or not isinstance(drawn, list) or len(panels) != len(drawn):
+        return
+    left = _MAX_SERIES
+    for panel, got in zip(panels, drawn):
+        if not isinstance(panel, dict) or not isinstance(got, dict):
+            continue
+        texts, more, tail = series_drawn(panel, got, left)
+        left -= len(texts)
+        if texts:
+            panel["series_drawn"] = texts + ([tail] if tail else [])
+        if more:
+            panel["series_drawn_more"] = more
+
+
 def _stem(name: str) -> str:
     return Path(str(name)).stem
 

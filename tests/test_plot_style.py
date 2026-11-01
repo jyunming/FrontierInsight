@@ -665,3 +665,43 @@ def test_bootstrap_records_text_written_in_a_panel_drawn_over_other_text(tmp_pat
     assert found["check"] == "label_overlap" and found["where"] == "labels written in the panel"
     assert {found["text"], found["over"]} == {"curve one", "curve two"} and found["share"] >= 0.2
     assert layout("apart") == []
+
+
+def test_bootstrap_records_error_bar_lengths_and_the_writer_is_told_how_each_series_is_drawn(tmp_path) -> None:
+    """A paper called a markers-only curve "piecewise linear", named a legend entry that holds no data as an overlay, and
+    wrote "mean +- SD" under bars that were all zero: the writer was told only the figure's line-style totals. FI now
+    records each error bar's length and tells the writer, per series, how it is drawn (core/figure_facts.py)."""
+    pytest.importorskip("matplotlib")
+    from core.engine import _figure_record_note, _read_figure_records
+
+    boot_dir = write_boot(tmp_path, "latex")
+    records = tmp_path / "records"
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(p for p in (str(boot_dir), os.environ.get("PYTHONPATH", "")) if p),
+        "FI_FIGURE_RECORDS": str(records),
+    }
+    probe = (
+        "import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt\n"
+        "fig, ax = plt.subplots()\n"
+        "ax.plot([1, 2, 3, 4], [1, 2, 3, 5], linestyle='None', marker='o', label='scheme A')\n"
+        "ax.plot([1, 2, 3, 4], [1, 1.5, 2.5, 4], '-', label='exact')\n"
+        "ax.plot([1, 4], [2, 3], '--', label='slope guide')\n"
+        "ax.plot([], [], label='limit')\n"
+        "ax.errorbar([1, 2, 3], [2, 3, 4], yerr=[0, 0, 0], marker='s', label='zero bars')\n"
+        "ax.errorbar([1, 2, 3], [3, 4, 5], yerr=[0.5, 1.0, 0.5], marker='^', label='real bars')\n"
+        "ax.set_ylim(0, 10)\n"
+        "fig.savefig('series.png')\n"
+    )
+    out = subprocess.run([sys.executable, "-c", probe], env=env, cwd=tmp_path,
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    got = _read_figure_records(records, ["series.png"])
+    note = _figure_record_note(got["series.png"])
+    assert "scheme A: markers only, no line joins them (4 points)" in note
+    assert "exact: a solid line, no markers (4 points)" in note
+    assert "slope guide: a straight dashed line of two points, no markers" in note
+    assert "limit: a legend entry with no data" in note
+    assert "zero bars: a solid line with markers (3 points); error bars are all zero (none visible)" in note
+    assert "real bars: a solid line with markers (3 points); error bars are drawn (largest 2, 20% of the axis span)" in note
+    assert "not recorded" not in note

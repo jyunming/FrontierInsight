@@ -34001,6 +34001,7 @@ def _read_figure_records(folder: Path, figures: list[str]) -> dict[str, Any]:
             # numbers are not the figure's, and the number check would otherwise trace a paper's "6.3" or "15" to them.
             data.pop("paper", None)
             _attach_unlabelled_lines(data, folder / f"{Path(name).stem}.seed0.json")
+            _figure_facts.attach_series_drawn(data, folder / f"{Path(name).stem}.seed0.json")
             records[name] = data
     return records
 
@@ -34299,6 +34300,13 @@ def _figure_record_note(record: dict[str, Any] | None, *, n_seeds: int | None = 
             series.append(f"{s.get('label')} {span}{tail}")
         if series:
             bits.append("series: " + "; ".join(series))
+        if ax.get("series_drawn"):
+            more = ax.get("series_drawn_more")
+            shown = [str(t) for t in ax["series_drawn"]]
+            if more:  # before the closing words on the error bars
+                shown.insert(len(shown) - 1 if shown[-1].startswith(("error bars:", "no error bars")) else len(shown),
+                             f"and {more} more")
+            bits.append("how each is drawn (FI's record): " + "; ".join(shown))
         loose = ax.get("unlabelled_curves")
         if isinstance(loose, dict) and loose.get("count"):
             bits.append(f'draws {loose["drawn"]} curves in all, of which {loose["count"]} carry no legend label '

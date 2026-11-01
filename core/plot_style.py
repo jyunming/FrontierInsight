@@ -444,6 +444,30 @@ try:
                 return {}, set()
             return names, pieces
 
+        def _fi_bar_extents(ax):
+            # The length of each y error bar of an errorbar series, by its data line, kept so the writer is told whether
+            # the bars are drawn (and how large) or are all zero. A bar that is not a finite number is not counted.
+            out = {}
+            try:
+                from matplotlib.container import ErrorbarContainer
+
+                for container in ax.containers:
+                    if not isinstance(container, ErrorbarContainer):
+                        continue
+                    data_line, caps, bars = container.lines
+                    if data_line is None or container.has_xerr:
+                        continue
+                    lengths = []
+                    for bar in bars:
+                        for segment in bar.get_segments():
+                            ys = [float(p[1]) for p in segment]
+                            if ys and all(_fi_math.isfinite(v) for v in ys):
+                                lengths.append(max(ys) - min(ys))
+                    out[id(data_line)] = {"n": len(lengths), "max": max(lengths) if lengths else 0.0}
+            except Exception:
+                return {}
+            return out
+
         def _fi_collection_ys(ax, artist):
             # The y values a collection draws, in data units: a scatter's points, the
             # ends of the segments of hlines / vlines, the corners of a fill_between
@@ -607,9 +631,11 @@ try:
             except Exception:
                 return []
 
-        def _fi_line(ax, line, names):
+        def _fi_line(ax, line, names, bars=None):
             x, y = _fi_points(line)
+            bar = (bars or {}).get(id(line))
             return {
+                **({"yerr": bar} if bar is not None else {}),
                 "missing_x": _fi_missing(line),
                 "label": names.get(id(line)) or str(line.get_label() or ""),
                 "kind": _fi_kind(ax, line), "x": x, "y": y,
@@ -649,7 +675,8 @@ try:
             except Exception:
                 names = {}
             names.update(bar_names)
-            lines = [_fi_line(ax, line, names) for line in ax.get_lines() if id(line) not in bar_pieces]
+            bars = _fi_bar_extents(ax)
+            lines = [_fi_line(ax, line, names, bars) for line in ax.get_lines() if id(line) not in bar_pieces]
             formatters = {type(axis.get_major_formatter()).__name__ for axis in (ax.xaxis, ax.yaxis)}
             others = (ax.patches, ax.collections, ax.images, ax.texts, ax.tables, ax.artists, ax.child_axes)
             return {
@@ -657,6 +684,8 @@ try:
                 "title": " ".join(t for t in (ax.get_title("left"), ax.get_title(), ax.get_title("right")) if t),
                 "xlabel": ax.get_xlabel(), "ylabel": ax.get_ylabel(),
                 "xscale": ax.get_xscale(), "yscale": ax.get_yscale(),
+                # Set only when the error-bar lengths above are kept: an older record has no key, and says "not recorded".
+                "bars_recorded": True,
                 "legend": ax.get_legend() is not None,
                 # Words written on the panel (a note, an annotation): a panel with text is not blank.
                 "has_text": bool(ax.texts),
