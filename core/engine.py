@@ -20951,7 +20951,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "[execute_reflect] the figure redraw call failed (%r); keeping the figures as drawn", exc,
             )
             return spent
-        parsed = _parse_json_lenient(text) or {}
+        parsed = _repair_reply_json(text, node="execute_reflect")
 
         # A run whose figures merely overlap has a result that stands, so a
         # refusal, an empty answer or a redraw that is not Python leaves the
@@ -33713,15 +33713,27 @@ _FENCE_RE = re.compile(r"^```(?:\w+)?\n(.*)\n```$", re.DOTALL)
 _REPAIR_REPLY_KEYS = ("functions", "code", "package_files", "oracle_change", "patch_summary", "give_up_reason")
 
 
+_CODE_FENCE_RE = re.compile(r"```[ \t]*(\w*)[^\n]*\n.*?(?:```|\Z)", re.DOTALL)
+
+
 def _repair_reply_json(text: str, *, node: str) -> dict[str, Any]:
     """The JSON object of a repair's reply, or ``{}`` when the reply holds none. A reply that is the object (bare or in one
-    fence) is read as it is; a reply that opens with a sentence of the model's own ("I have not run this ...") before the
-    object is read from the last object it holds that carries a key of the repair format. A reply that is a whole script
-    in a code block is not JSON and gives ``{}``, for the caller to read as code."""
+    fence) is read as it is. A reply that opens with a sentence of the model's own ("I have not run this ...") is read from
+    the objects it holds that carry a key of the repair format: the last one that carries a fix (functions, code, a change
+    to a check or a package file), else the last one that carries any such key (a give-up). An object inside a code block
+    that is not JSON (a dict in the script) is not the reply, and a reply that is a whole script in a code block gives
+    ``{}``, for the caller to read as code."""
     if _strip_outer_fence(text).lstrip().startswith("{"):
         return _parse_json_lenient(text, node=node) or {}
-    found = [o for o in _top_level_json_objects(text or "") if any(k in o for k in _REPAIR_REPLY_KEYS)]
-    return found[-1] if found else {}
+    prose = _CODE_FENCE_RE.sub(lambda m: m.group(0) if m.group(1).lower() in ("", "json") else "\n", text or "")
+    found = [o for o in _top_level_json_objects(prose) if any(k in o for k in _REPAIR_REPLY_KEYS)]
+
+    def carries_fix(o: dict[str, Any]) -> bool:
+        return any(isinstance(o.get(k), str) and o[k].strip() for k in ("functions", "code")) or any(
+            o.get(k) for k in ("oracle_change", "package_files"))
+
+    fixes = [o for o in found if carries_fix(o)]
+    return (fixes or found or [{}])[-1]
 
 
 def _strip_outer_fence(text: str) -> str:

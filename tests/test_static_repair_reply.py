@@ -131,3 +131,31 @@ def test_the_repair_reader_gives_nothing_for_prose_or_a_whole_script() -> None:
 def test_a_reply_of_prose_only_is_still_refused(tmp_path: Path) -> None:
     ok, text = _run(tmp_path, "I could not run anything in this environment, so I have no fix to give.")
     assert not ok and text == OLD
+
+
+def test_the_repair_reader_takes_the_last_object_that_carries_a_fix() -> None:
+    from core.engine import _repair_reply_json
+
+    fix = {"functions": "def f():\n    return 1\n", "code": "", "patch_summary": "x"}
+    template = {"functions": "", "code": "", "patch_summary": ""}
+    gave_up = {"give_up_reason": "none"}
+    assert _repair_reply_json(PROSE + json.dumps(fix) + "\nFormat: " + json.dumps(template), node="t") == fix
+    assert _repair_reply_json(PROSE + json.dumps(fix) + "\n" + json.dumps(gave_up), node="t") == fix
+    assert _repair_reply_json(PROSE + json.dumps(gave_up), node="t") == gave_up
+
+
+def test_a_dict_inside_a_script_block_is_not_the_reply() -> None:
+    from core.engine import _repair_reply_json
+
+    reply = 'Here:\n```python\nCFG = {"code": "A1", "n": 3}\nprint(CFG)\n```\nDEPS: numpy\n'
+    assert _repair_reply_json(reply, node="t") == {}
+    fix = {"functions": "def f():\n    return 1\n", "code": ""}
+    assert _repair_reply_json(reply + "```json\n" + json.dumps(fix) + "\n```\n", node="t") == fix
+
+
+def test_the_crashed_script_repair_reads_a_sentence_before_its_object() -> None:
+    import inspect
+
+    from core import engine
+
+    assert '_repair_reply_json(text, node="execute_reflect")' in inspect.getsource(engine.Engine)
