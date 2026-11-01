@@ -210,16 +210,24 @@ def _prints_new_value(paper_text: str, new: list[float], old: list[float]) -> bo
     return False
 
 
-def unrecorded_numbers(text: str, result_json: Any) -> list[str]:
-    """The numbers (two significant digits or more) that ``text`` prints and no value of ``result_json`` holds, at the
-    precision the text prints them: what a figure says that FI's own record of the run does not. ``[]`` when the
-    results hold no number (nothing to compare with)."""
+def unrecorded_numbers(text: str, result_json: Any, settings: Any = None) -> list[str]:
+    """The numbers (two significant digits or more) that ``text`` prints and FI's record of the run does not hold, at the
+    precision the text prints them: what a figure says that FI's own record does not. A number is held when it is a
+    recorded result, the same value as a percentage ("95%" for 0.95), or a value of the run's own settings
+    (``settings``: the protocol's grid, in-each-run values and constants). ``[]`` when the results hold no number
+    (nothing to compare with)."""
     values = [v for _p, v in flatten_numbers(result_json or {}, keep_zero=True)]
     if not values:
         return []
+    values += [v for _p, v in flatten_numbers(settings or {}, keep_zero=True)]
     out: list[str] = []
     for value, token in _printed_numbers(text):
-        if not _within(value, values, 0.51 * 10.0 ** -(max(_significant_digits(token), 1) - 1)) and token not in out:
+        tol = 0.51 * 10.0 ** -(max(_significant_digits(token), 1) - 1)
+        if _within(value, values, tol):
+            continue
+        if re.search(re.escape(token) + r"\s*%", text) and _within(value / 100.0, values, tol):
+            continue
+        if token not in out:
             out.append(token)
     return out
 

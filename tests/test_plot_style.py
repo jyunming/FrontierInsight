@@ -808,3 +808,18 @@ def test_bootstrap_records_text_and_legends_that_run_across_panels(tmp_path) -> 
                for f in layout("labels"))
     assert any(f["check"] == "legend_over_panel" for f in layout("legend"))
     assert layout("grid") == []
+
+
+def test_a_percentage_of_a_result_and_a_setting_value_are_not_marked_unrecorded() -> None:
+    """A figure printing "95%" for a recorded 0.95, or "N = 1536" for a setting of the run, was told to the writer as a
+    number the run did not record. A number matches a result, the same value as a percentage, or a setting of the run."""
+    from core.engine import _figure_record_note
+
+    record = {"axes": [{"title": "", "texts": ["coverage 95.0%", "N = 1536", "q = 0.9991", "gain 12.5%"]}]}
+    results = {"coverage": 0.95, "other": 3.25}
+    settings = {"grid": {"n_points": [768, 1536]}}
+    note = _figure_record_note(record, results=results, settings=settings)
+    assert "not a recorded result: 0.9991]" in note and "not a recorded result: 12.5]" in note
+    assert note.count("not a recorded result") == 2
+    # Without the settings and the percentage rule (the earlier behaviour) the two true numbers were marked.
+    assert "not a recorded result: 1536" in _figure_record_note(record, results=results)
