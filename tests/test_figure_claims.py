@@ -242,11 +242,12 @@ def test_no_call_record_is_not_evaluable():
     assert fc.menu(None) == []
 
 
-def test_other_quantity_offers_no_value_claims():
+def test_other_quantity_offers_shape_claims_but_no_value_claims():
     c = _calls(_panel([_series("a", [1, 2, 3], [3, 1, 2]), _series("b", [1, 2, 3], [1, 2, 3])], what="other"))
     claims = {o["claim"] for o in fc.menu(c)}
     assert "drawn" in claims and "scale" in claims
-    assert not claims & {"value_at", "trend", "order", "crossing", "no_crossing"}
+    assert not claims & {"value_at", "steps"}  # no y number
+    assert {"trend", "order", "crossing"} <= claims  # the shape (rising, order, crossing) is still true of the drawing
     assert all(o["args"].get("axis") == "x" for o in fc.menu(c) if o["claim"] == "range")
 
 

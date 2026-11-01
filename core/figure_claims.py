@@ -293,7 +293,7 @@ def _sorted_unique(s: dict[str, Any]) -> list[tuple[float, float]] | None:
 
 def _trend(calls, panel, a, fmt, ctx):
     s = _series(panel, a["series"])
-    if s is None or s.get("step") or not _value_axis_ok(panel, "y", s):
+    if s is None or s.get("step") or _axis(panel, "y") is None:  # a shape claim: no y number, so no checked ``what`` needed
         return None
     pts = _sorted_unique(s)
     if pts is None or len(pts) < 3:
@@ -327,14 +327,12 @@ def _steps(calls, panel, a, fmt, ctx):
 
 
 def _order(calls, panel, a, fmt, ctx):
-    if not _value_axis_ok(panel, "y"):
+    if _axis(panel, "y") is None:  # a shape claim: it names the order, never a y number
         return None
     got: list[tuple[float, Any, dict[str, Any]]] = []
     for s in panel.get("series") or []:
         if not isinstance(s, dict) or not _plain(s):
             continue
-        if not _value_axis_ok(panel, "y", s):
-            return None  # an order that leaves a series out, or ranks its y, would state a value FI did not check
         at = _at(s, a["at"])
         if len({y for _, y in at}) > 1:
             return None
@@ -354,12 +352,10 @@ def _order(calls, panel, a, fmt, ctx):
 def _crossings(panel: dict[str, Any], a: dict[str, str], same_grid: bool = False):
     """(series a, series b, [(x1, x2), ...]) or None when the pair cannot be compared. ``same_grid`` also requires both
     series to be drawn at the same x points (two lines on different grids can cross between the points they share)."""
-    if a["a"] == a["b"] or not _value_axis_ok(panel, "y"):
+    if a["a"] == a["b"] or _axis(panel, "y") is None:  # shape claims: the text names x only
         return None
     sa, sb = _series(panel, a["a"]), _series(panel, a["b"])
     if sa is None or sb is None or not _plain(sa) or not _plain(sb):
-        return None
-    if not _value_axis_ok(panel, "y", sa) or not _value_axis_ok(panel, "y", sb):
         return None
     ya, yb = dict(_points(sa)), dict(_points(sb))
     if len(ya) != len(_points(sa)) or len(yb) != len(_points(sb)):

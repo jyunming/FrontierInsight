@@ -12,7 +12,8 @@ import pytest
 from core import figure_claims
 from tests.test_figure_fixtures import FIXTURES, _Host, _Table
 
-VALUE_CLAIMS = {"value_at", "crossing", "no_crossing", "order", "trend", "steps"}
+VALUE_CLAIMS = {"value_at", "steps"}  # claims that state a y number
+SHAPE_CLAIMS = {"trend", "order", "crossing", "no_crossing"}  # claims about the shape: no y number in their text
 
 
 def _draw(name, tmp_path, old=None, new=None):
@@ -52,8 +53,7 @@ MEANS_GROWTH = 'means = [table.mean("growth", k) for k in keys]'
 def test_the_unchanged_body_keeps_its_value_claims(tmp_path):
     calls, offers = _draw("spectra", tmp_path)
     assert set(_whats(calls).values()) == {"signal"}
-    kinds = {o["claim"] for o in _states_values(offers)}
-    assert {"value_at", "order", "trend", "crossing"} <= kinds
+    assert {"value_at", "order", "trend", "crossing"} <= {o["claim"] for o in offers}
 
 
 @pytest.mark.parametrize("name, old, new", [
@@ -66,12 +66,22 @@ def test_the_unchanged_body_keeps_its_value_claims(tmp_path):
 def test_a_planted_fault_loses_its_value_claims_but_not_its_shape(tmp_path, name, old, new):
     calls, offers = _draw(name, tmp_path, old, new)
     assert set(_whats(calls).values()) == {"other"}
-    assert _states_values(offers) == []  # no value, order, trend, crossing or y range from the wrong y
+    assert _states_values(offers) == []  # no value, step value or y range from the wrong y
     assert any(o["claim"] == "drawn" for o in offers)  # the series is still drawn and its x range stated
     assert any(o["claim"] == "range" and o["args"].get("axis") == "x" for o in offers) or name == "bars_heatmap"
     panel = calls["panels"][0]
     # the axis names the quantity neutrally (a band of the real result may add its own name to it, the series stays flagged)
     assert panel["raw"] is False and panel["y"]["label"].startswith("computed value")
+
+
+def test_a_shifted_line_keeps_its_shape_claims_without_a_y_number(tmp_path):
+    calls, offers = _draw("spectra", tmp_path, MEANS_SIGNAL, 'means = [table.mean("signal", k) + 0.3 for k in keys]')
+    kinds = {o["claim"] for o in offers}
+    assert {"trend", "order", "crossing"} <= kinds and not kinds & VALUE_CLAIMS
+    ys = {"%.3g" % y for e in calls["panels"][0]["series"] for y in e["y"] if y is not None}
+    for o in offers:
+        if o["claim"] in SHAPE_CLAIMS:
+            assert not any(y in o["text"] for y in ys if "." in y), o["text"]
 
 
 def test_a_real_table_value_of_another_slice_is_a_known_gap(tmp_path):
@@ -104,7 +114,7 @@ def test_an_honestly_drawn_sd_with_its_form_keeps_its_value_claims(tmp_path):
     calls = figure_claims.load_calls(both, contract["figure"]["id"])
     offers = figure_claims.menu(calls, contract["plan"], stem=contract["figure"]["id"])
     assert set(_whats(calls).values()) == {"signal"}
-    assert {"value_at", "order", "trend"} <= {o["claim"] for o in _states_values(offers)}
+    assert {"value_at", "order", "trend"} <= {o["claim"] for o in offers}
 
 
 def test_the_same_sd_without_a_form_loses_its_value_claims_and_does_not_stop(tmp_path):
@@ -124,5 +134,11 @@ def test_a_flagged_series_stays_flagged_when_an_honest_one_is_drawn_after_it(tmp
     by = {(o["claim"], o["args"].get("series")) for o in offers}
     assert ("value_at", "sample_b") in by and ("trend", "sample_b") in by
     assert not [o for o in offers if o["args"].get("series") == "sample_a" and o["claim"] in VALUE_CLAIMS]
-    assert not [o for o in offers if o["claim"] in ("order", "crossing", "no_crossing")]  # they would rank the flagged y
+    # the shape claims stay, and name no y number
+    assert ("trend", "sample_a") in by and ("trend", "sample_b") in by
+    assert [o for o in offers if o["claim"] in ("order", "crossing")]
+    ys = {"%.3g" % y for e in calls["panels"][0]["series"] for y in e["y"] if y is not None}
+    for o in offers:  # a shape claim quotes no y value: its text holds only the x positions and names
+        if o["claim"] in SHAPE_CLAIMS:
+            assert not any(("%s" % y) in o["text"] for y in ys if "." in y), o["text"]
     assert not [o for o in offers if o["claim"] == "range" and o["args"].get("axis") == "y" and o["args"].get("series") == "sample_a"]
