@@ -280,6 +280,21 @@ _ANALYSIS_SWAPS = (
      "result pinned to a bound is rejected."),
 )
 
+#: The two figure bullets of the code template when the figure functions are given FI's drawing calls (a frame of version 5), by the
+#: start of the bullet they stand for: FI writes every label, the title and the legend, and a drawing call is given what is read
+#: from `table`.
+_CALLS_SWAPS = {
+    "- **Figure styling is automatic": (
+        "- **Figure styling is automatic - don't fight it.** FI applies a house style to every figure and writes every axis label, "
+        "the title and the legend itself. Do NOT call `plt.style.use(...)`, touch `rcParams`/`rcdefaults()`, call `seaborn.set_*`, "
+        "or hard-code colors/colormaps. A figure with several panels draws each in its own panel (the `panel` of a drawing call)."),
+    "- **Draw every figure from the run's results": (
+        "- **Draw every figure from `table`, never from numbers typed into the plotting code.** A drawing call (`fig.line`, "
+        "`fig.points`, `fig.bars`, ...) is given values read from `table` (`table.mean`, `table.across`, ...), not a list written "
+        "out in the function such as `fig.line(0, series, [1, 2, 3, 4], [4, 5, 6, 8], what)`. FI reads the function before it runs "
+        "and sends such a figure back. Reference lines (a limit, a target) are drawn with `fig.ref`."),
+}
+
 _OUTLINE_SWAPS = (
     ("- FI writes the frame of simulate.py", None),
     ("- Your scaffold MUST already include",
@@ -335,9 +350,16 @@ def _cluster_bodies() -> str:
     return text
 
 
-def panel_statement(panels: int) -> str:
+def panel_statement(panels: int, calls: bool = False) -> str:
     """What FI tells the model of the axes it makes for a figure: how many, and that the count is the plan's, not the number of
-    values of a setting or of results the figure shows."""
+    values of a setting or of results the figure shows. ``calls``: the figure is drawn with FI's drawing calls, whose first
+    argument is the panel."""
+    if calls:
+        if panels <= 1:
+            return ("FI makes ONE panel for it, panel 0: give `panel=0` to every drawing call. Draw everything the figure shows on "
+                    "it (several settings, series or results are lines in that one panel, not more panels).")
+        return (f"FI makes exactly {panels} panels for it, numbered 0 to {panels - 1} (the `panel` of a drawing call), no more. "
+                "The count is the plan's, not the number of values of a setting.")
     if panels <= 1:
         return ("FI makes ONE panel for it: `fig.axes` holds exactly one axes, `fig.axes[0]`. Draw everything the figure shows on "
                 "it (several settings, series or results are lines on that one axes, not more panels).")
@@ -346,7 +368,7 @@ def panel_statement(panels: int) -> str:
             "with `fig.panel(i, setting=value)`.")
 
 
-def _bodies_reply(bodies: Sequence[str], cluster: bool, panels: dict[str, int] | None = None) -> str:
+def _bodies_reply(bodies: Sequence[str], cluster: bool, panels: dict[str, int] | None = None, calls: bool = False) -> str:
     """The reply format when FI writes the analysis as well (experiment.py is FI's): ``trial``, then the bodies of derive.py
     that the plan needs (none: no block), then the driver of a cluster, then the dependencies. ``panels``: the panels FI
     makes for each figure body (its name to the count), stated under that body's signature."""
@@ -354,7 +376,7 @@ def _bodies_reply(bodies: Sequence[str], cluster: bool, panels: dict[str, int] |
               "helper functions it needs (nothing of FI's frame)."]
     if bodies:
         listed = "\n".join(f"   - `{_skeleton.body_signature(b) or 'def ' + b + '(...)'}`"
-                           + (f" {panel_statement(panels[b])}" if panels and b in panels else "") for b in bodies)
+                           + (f" {panel_statement(panels[b], calls)}" if panels and b in panels else "") for b in bodies)
         blocks.append("A fenced Python block starting with the line `# file: derive.py`: ONLY these functions, each given "
                       "whole with exactly the parameters shown, and the imports and helper functions they need (nothing of "
                       "FI's frame; FI writes experiment.py, you do not):\n" + listed)
@@ -367,12 +389,13 @@ def _bodies_reply(bodies: Sequence[str], cluster: bool, panels: dict[str, int] |
             + "\n".join(f"{i}. {b}" for i, b in enumerate(blocks, 1)) + "\n\n")
 
 
-def _frame_reply(cluster: bool = False, bodies: Sequence[str] | None = None, panels: dict[str, int] | None = None) -> str:
+def _frame_reply(cluster: bool = False, bodies: Sequence[str] | None = None, panels: dict[str, int] | None = None,
+                 calls: bool = False) -> str:
     """The reply format of a request where FI writes the frame of simulate.py; with ``cluster`` (the trials run as a job
     array) the driver `submit.py` the cluster section asks for is a block of the format too. With ``bodies`` (the functions
     of derive.py the plan needs, possibly none) FI writes experiment.py too and it is not asked for."""
     if bodies is not None:
-        return _bodies_reply(bodies, cluster, panels)
+        return _bodies_reply(bodies, cluster, panels, calls)
     return ("# Output format\nRespond with EXACTLY these, in this order, and nothing else:\n\n"
             "1. A fenced Python block starting with the line `# file: simulate.py`: the function `trial` and the imports and "
             "helper functions it needs (nothing of FI's frame).\n"
@@ -394,17 +417,18 @@ _FRAME_BODY_INTRO = (
 
 
 def frame_template_text(text: str, cluster: bool = False, bodies: Sequence[str] | None = None,
-                        panels: dict[str, int] | None = None) -> str:
+                        panels: dict[str, int] | None = None, calls: bool = False) -> str:
     """``text`` (a code-writing template) for a request where FI writes the frame of simulate.py: the bullets about a single
     script, the pilot, the seed and the oracle run are taken out, the reply format is the frame's, and the template does not
     say the whole scaffold is filled. ``bodies``: FI writes the analysis too (see :func:`_frame_reply`); the bullets about
-    figures and ``RESULT_JSON`` are then taken out as well."""
+    figures and ``RESULT_JSON`` are then taken out as well. ``calls``: the figure functions are given FI's drawing calls
+    (a frame of version 5), so the texts about figures give the rule of :data:`core.skeleton._FIGURE_RULE`, not ``fig.axes``."""
     drop = _FRAME_DROP_BULLETS if bodies is None else _FRAME_DROP_BULLETS + _ANALYSIS_DROP_BULLETS
     out, skipping = [], False
     for line in text.split("\n"):
         swap = next((s for s in _ANALYSIS_SWAPS if line.startswith(s[0])), None) if bodies is not None else None
         if swap is not None:
-            out.append(swap[1])
+            out.append(_CALLS_SWAPS.get(swap[0], swap[1]) if calls else swap[1])
             skipping = True
             continue
         if line.startswith("- "):
@@ -418,7 +442,7 @@ def frame_template_text(text: str, cluster: bool = False, bodies: Sequence[str] 
                         "; an import is not a second file you author")
     a, b = text.find("# Output format"), text.find("# Inputs")
     if 0 <= a < b:
-        text = text[:a] + _frame_reply(cluster, bodies, panels) + text[b:]
+        text = text[:a] + _frame_reply(cluster, bodies, panels, calls) + text[b:]
     c = text.find("# The topic, as the person wrote it")
     if c > 0 and text.startswith("You are the **Implementation Body**"):
         text = (_FRAME_BODY_INTRO if bodies is None else _FRAME_BODY_INTRO_BODIES) + text[c:]
@@ -486,6 +510,23 @@ runs on the table of FI's record and can change nothing in it:
 - If you cannot work a function out, leave it as FI wrote it (it raises `NotYet`): FI then says that number is not computed.
 
 """
+
+#: The figure bullet of :data:`_ANALYSIS_BODIES_RULES` for a figure function given FI's drawing calls (a frame of version 5): the
+#: rule is the one the repair gives (agents/figure_primitives.md), not a second copy of it.
+_FIGURE_BULLET_CALLS = (
+    "- `figure_<id>(fig, table)` draws what the plan says the figure shows (one panel for each panel of the plan), from `table`.\n"
+    "  When `fig.x` is a result id (not a setting), draw one point for each trial of a setting: `table.values(fig.x, key)` against\n"
+    "  `table.values(<shown id>, key)`, paired by `table.trials(...)` (a trial with no finite value in one is left out of both).\n"
+    + "\n".join(("  " + line).rstrip() for line in _skeleton._FIGURE_RULE.split("\n")) + "\n")
+
+
+def analysis_bodies_rules(calls: bool = False) -> str:
+    """:data:`_ANALYSIS_BODIES_RULES`; with ``calls`` its figure bullet is the rule of FI's drawing calls."""
+    if not calls:
+        return _ANALYSIS_BODIES_RULES
+    a = _ANALYSIS_BODIES_RULES.index("- `figure_<id>(fig, table)` draws")
+    b = _ANALYSIS_BODIES_RULES.index("- The table gives, for a result `id`")
+    return _ANALYSIS_BODIES_RULES[:a] + _FIGURE_BULLET_CALLS + _ANALYSIS_BODIES_RULES[b:]
 _NO_ANALYSIS_BODIES = """\
 **The analysis is FI's.** FI writes experiment.py and runs it once, after all the trials: it reads its own record of the trials,
 works out every number and figure the plan declares and prints the results. There is nothing of it for you to write.
@@ -1034,7 +1075,7 @@ class RunChecksMixin:
         except (OSError, UnicodeDecodeError):
             existing = ""
         design = state.get("design")
-        text, note = _analysis.compose(design, derive_reply, existing, keep)
+        text, note = _analysis.compose(design, derive_reply, existing, keep, calls=self._figure_calls_on())
         if note:
             self._log.warning("[implement] derive.py: %s", note)  # type: ignore[attr-defined]
         if text != existing:
@@ -1229,6 +1270,20 @@ class RunChecksMixin:
                       + _e._IN_EACH_RUN_PROTOCOL[_e._IN_EACH_RUN_PROTOCOL.index("In FI_TRIALS each setting is followed"):])
         return block
 
+    def _figure_calls_on(self) -> bool:
+        """Whether the quest's figure functions are given FI's drawing calls (a frame of version 5), as :func:`core.skeleton.
+        reflect_derive` decides it for a repair: a quest whose runtime or frame an older FI wrote keeps drawing on ``fig.axes``;
+        one with no runtime yet is written with this version's."""
+        code_dir = self.quest_root / "code"  # type: ignore[attr-defined]
+        have = _skeleton.quest_frame_version(code_dir)
+        if have:
+            return have >= _skeleton.VERSION
+        try:
+            framed = _skeleton.frame_version((code_dir / _split_run.SIMULATE_NAME).read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            framed = None
+        return framed is None or framed >= _skeleton.VERSION
+
     def _frame_protocols_bodies(self, state: Any, search: bool, inside: dict[str, Any], bodies: Sequence[str]) -> str:
         """:meth:`_frame_protocols` when FI writes the analysis: the functions of derive.py are the model's only other task."""
         from . import engine as _e
@@ -1239,7 +1294,7 @@ class RunChecksMixin:
                 "FI itself runs every trial and keeps their record, so the record of what ran is never the simulation's own "
                 "statement. Reply with the fenced Python blocks the output format names: `# file: simulate.py` (the function "
                 f"`trial`, as the start of this request says), {asked}then the `DEPS:` line.\n\n")
-        block = head + (_ANALYSIS_BODIES_RULES if bodies else _NO_ANALYSIS_BODIES)
+        block = head + (analysis_bodies_rules(self._figure_calls_on()) if bodies else _NO_ANALYSIS_BODIES)
         block += ("If an outline is given, it describes the experiment as one program: put the code of one trial in `trial`"
                   + (" and the code of the quantities and figures in the functions of derive.py" if bodies else "")
                   + ", keeping every name and signature of the outline's functions that you keep. simulate.py holds no loop over "
@@ -1269,7 +1324,7 @@ class RunChecksMixin:
         if not self._frame_variant(state):
             return tmpl
         return _string.Template(frame_template_text(tmpl.template, bool(self.config.execution.background_jobs), bodies,
-                                                    self._figure_panels(state, bodies)))  # type: ignore[attr-defined]
+                                                    self._figure_panels(state, bodies), self._figure_calls_on()))  # type: ignore[attr-defined]
 
     def _figure_panels(self, state: Any, bodies: Sequence[str] | None) -> dict[str, int] | None:
         """The panels FI makes for each figure body the request asks for (``figure_<id>`` to the plan's count), else ``None``."""

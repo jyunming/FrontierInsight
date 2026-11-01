@@ -226,11 +226,18 @@ def _frame_text(plan: dict[str, Any]) -> str:
     return body
 
 
-def _stub(plan: dict[str, Any], name: str) -> str:
+def _stub(plan: dict[str, Any], name: str, calls: bool = False) -> str:
+    """The stub of one body. ``calls``: the figure functions are given FI's drawing calls (a frame of version 5, the rule of
+    ``agents/figure_primitives.md``); the docstring of a figure's stub names them."""
     kind, ident = name.split("_", 1)
     if kind == "figure":
         f = plan["figures"][ident]
         shows = ", ".join(f["shows"]) or "what the plan names"
+        if calls:
+            return (f"def {name}(fig, table):\n"
+                    f'    """Draw with FI\'s drawing calls ({_CALL_NAMES}); FI creates, labels, saves and closes the figure. '
+                    f'It shows {shows}. It has {f["panels"]} panel(s), numbered from 0 (the `panel` of a drawing call)."""\n'
+                    f'    raise NotYet("{name} is not written yet")\n')
         panel_note = ("\n    Panels that show different settings: `fig.panel(0, setting=value)` on each (FI writes the title)."
                       if f["panels"] > 1 else "")
         return (f"def {name}(fig, table):\n"
@@ -249,10 +256,14 @@ def _stub(plan: dict[str, Any], name: str) -> str:
             f'    raise NotYet("{name} is not written yet")\n')
 
 
-def derive_source(design: dict[str, Any], existing: str = "") -> str:
+#: The drawing calls a version 5 stub names (the list agents/figure_primitives.md gives).
+_CALL_NAMES = ", ".join(f"`fig.{n}`" for n in ("line", "points", "bars", "band", "ref", "note", "curve", "image"))
+
+
+def derive_source(design: dict[str, Any], existing: str = "", calls: bool = False) -> str:
     """The text of ``derive.py``: FI's frame, then one stub per body the plan needs. With ``existing`` (the file as it is), the
     frame is written again from the plan and every body the study already wrote is kept, so a changed plan costs the study's
-    code only the bodies it no longer asks for or has not got."""
+    code only the bodies it no longer asks for or has not got. ``calls``: a figure's stub names FI's drawing calls."""
     plan = plan_of(design)
     frame = _frame_text(plan)
     wanted = body_names(plan)
@@ -261,10 +272,10 @@ def derive_source(design: dict[str, Any], existing: str = "") -> str:
     if spans is None:
         head = ('"""The study\'s own part of the analysis. FI wrote the frame between the markers; the study writes the functions\n'
                 'below it (`derive_<id>`, `reference_<id>`, `figure_<id>`). FI\'s `experiment.py` calls them."""\n\n')
-        return head + frame + "\n\n" + "\n\n".join(_stub(plan, n) for n in wanted)
+        return head + frame + "\n\n" + "\n\n".join(_stub(plan, n, calls) for n in wanted)
     rest = old[spans[1]:]
     have = _body_defs(rest)
-    stubs = [_stub(plan, n) for n in wanted if n not in have]
+    stubs = [_stub(plan, n, calls) for n in wanted if n not in have]
     return old[:spans[0]] + frame + rest.rstrip("\n") + ("\n\n\n" + "\n\n".join(stubs) if stubs else "\n")
 
 
@@ -419,7 +430,7 @@ def ensure_files(code_dir: Path | str, design: dict[str, Any], simulate_source: 
         have = (folder / DERIVE_FILE).read_text(encoding="utf-8")
     except OSError:
         have = ""
-    text = derive_source(design, have)
+    text = derive_source(design, have, (folder / _skeleton.FIGURE_CALLS_FILE).is_file())
     for name, content in (*carried_files().items(), (DERIVE_FILE, text), (EXPERIMENT_FILE, EXPERIMENT)):
         (folder / name).parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -499,14 +510,15 @@ def analysis_file(code_dir: Path | str, rel: str) -> bool:
     return carried_file(folder, rel)
 
 
-def compose(design: dict[str, Any], reply: str, existing: str = "", keep: Any = ()) -> tuple[str, str]:
+def compose(design: dict[str, Any], reply: str, existing: str = "", keep: Any = (), calls: bool = False) -> tuple[str, str]:
     """``(derive.py, note)``: FI's frame of ``derive.py`` for this plan with the study's functions from ``reply`` (the reply's
     ``# file: derive.py`` block) put into it, each through :func:`core.function_steps.replace_function_ex` (the path that puts
     the model's ``trial`` into the frame of simulate.py), with the helpers and imports they use. ``existing``: the file the quest
     has now; the bodies it holds are kept unless the reply gives them again. A reply that cannot be used leaves FI's file with the
     stubs (``note`` says why), so the run shows the functions as not written and the repair asks for them. ``keep``: the
-    functions FI keeps as they ran (core/kept_bodies.py); a reply that gives one of them again does not replace it."""
-    frame = derive_source(design, existing)
+    functions FI keeps as they ran (core/kept_bodies.py); a reply that gives one of them again does not replace it. ``calls``: a figure's stub
+    names FI's drawing calls (a frame of version 5)."""
+    frame = derive_source(design, existing, calls)
     wanted = body_names(plan_of(design))
     if not (reply or "").strip():
         return frame, ("the reply held no functions of derive.py" if [n for n in wanted if n not in keep] else "")
