@@ -386,13 +386,13 @@ def _paper_captions(paper_md: str) -> dict[str, str]:
     return captions
 
 
-def _take_out_unchecked_blocks(blocks: list[_Block], art: QuestArtifacts) -> list[_Block]:
+def _take_out_unchecked_blocks(blocks: list[_Block], art: QuestArtifacts, raw_paper: str = "") -> list[_Block]:
     """The poster's texts and list items without the sentences about a figure FI does not stand behind (the paper's own
     rule); a text or item left empty goes. Each removal is logged, not shown on the poster."""
     out: list[_Block] = []
     for block in blocks:
         if block.kind == "text":
-            text, taken = take_out_unchecked(block.text, art.raw_state, art.quest_root)
+            text, taken = take_out_unchecked(block.text, art.raw_state, art.quest_root, raw_paper)
             _log_taken(taken)
             if not text.strip():
                 continue
@@ -400,7 +400,7 @@ def _take_out_unchecked_blocks(blocks: list[_Block], art: QuestArtifacts) -> lis
         elif block.kind == "bullets":
             items = []
             for item in block.items:
-                text, taken = take_out_unchecked(item, art.raw_state, art.quest_root)
+                text, taken = take_out_unchecked(item, art.raw_state, art.quest_root, raw_paper)
                 _log_taken(taken)
                 if text.strip():
                     items.append(text.strip())
@@ -1081,7 +1081,8 @@ class PosterGenerator:
         output = self.config.output
         sheet = _SHEETS.get(output.poster_size, _SHEETS["a1_portrait"])
 
-        paper_md = _paper_facts.without_marks(art.paper_md.read_text(encoding="utf-8"))  # FI's values stay, its markers go
+        raw_paper = art.paper_md.read_text(encoding="utf-8")
+        paper_md = _paper_facts.without_marks(raw_paper)  # FI's values stay, its markers go
         figures, paper_numbers = paper_figure_set(
             paper_md, _figure_files(art.figures_dir), art.raw_state, art.quest_root)
         captions = _paper_captions(paper_md)
@@ -1174,7 +1175,7 @@ class PosterGenerator:
 
         blocks = _with_every_figure(
             _blocks_from_reply(parsed, set(figures), paper_numbers, captions), figures, captions, paper_numbers)
-        blocks = _take_out_unchecked_blocks(blocks, art)
+        blocks = _take_out_unchecked_blocks(blocks, art, raw_paper)
         cited = _cited_labels(blocks, set(sources))
         blocks = [_with_citations(b, set(cited)) for b in blocks]
         if cited:

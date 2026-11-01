@@ -1548,3 +1548,20 @@ async def test_poster_text_pointing_at_figure_is_filtered_by_pointer_rule(
     assert "Energy drifts upward" not in tex
     assert "We study scaling [1]." in tex
     assert "Energy drifts upward as Figure 1 shows" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_verbatim_fi_sentence_stays_on_the_poster_and_a_paraphrase_goes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    art = _make_artifacts(tmp_path)
+    mark = "<!-- fi:fact-figure-lines-result -->Panel 1 draws a rising line.<!-- /fi:fact-figure-lines-result -->"
+    art.paper_md.write_text(
+        "# Toy Paper" + chr(10) * 2 + mark + " (Figure 1)" + chr(10) * 2
+        + "![**Figure 1.** The toy curve against its fit.](figures/result.png)" + chr(10), encoding="utf-8")
+    _record_a_drawn_figure(art)
+    reply = _reply()
+    reply["blocks"][1] = {"type": "text", "text": "Panel 1 draws a rising line (Figure 1). Panel 1 shows a line that rises (Figure 1)."}
+    tex = await _checked_poster(tmp_path, monkeypatch, art, reply)
+    assert "Panel 1 draws a rising line (Figure 1)." in tex
+    assert "line that rises" not in tex

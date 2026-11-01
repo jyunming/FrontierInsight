@@ -172,17 +172,55 @@ def paper_figure_set(
     return shown, checked
 
 
-def take_out_unchecked(text: str, raw_state: dict | None, quest_root: Path) -> tuple[str, list[dict[str, str]]]:
+def _fi_sentences(paper_raw: str) -> list[tuple[str, str]]:
+    """``(marker key, rendered statement)`` of each figure statement FI composed in the paper (``paper_raw``, with its
+    markers): the sentences a slide or a poster may repeat."""
+    from core import paper_facts as _facts
+
+    found = []
+    for m in _facts._MARK.finditer(paper_raw or ""):
+        if _facts._figure_parts(m.group(1)) is not None and m.group(2).strip():
+            found.append((m.group(1), m.group(2).strip()))
+    return found
+
+
+def _wrap_verbatim(text: str, paper_raw: str) -> tuple[str, bool]:
+    """``text`` with each sentence that is one of FI's figure statements in the paper, word for word (whitespace and
+    ``*`` emphasis aside; a closing "(Figure N)" and the full stop may follow), put back in FI's own marker, so the
+    pointer rule knows it as FI's. Any other sentence is left as it was. ``(text, whether any was wrapped)``."""
+    wrapped = False
+    for key, statement in _fi_sentences(paper_raw):
+        words = statement.replace("*", " ").rstrip(" .!?").split()
+        if not words:
+            continue
+        star = r"\*{0,2}"
+        pattern = re.compile(
+            r"(?<![A-Za-z0-9,;])" + star + (star + r"\s+" + star).join(re.escape(w) for w in words) + star
+            + r"(?=(?:\s*\((?:Figures?|Figs?\.?)[^()]{0,30}\))?(?:[.!?]+|[ \t]*(?:\n|$)))"
+        )
+        bare = statement.rstrip(" .!?")
+        text, n = pattern.subn(lambda _m: f"<!-- fi:fact-{key} -->{bare}<!-- /fi:fact-{key} -->", text)
+        wrapped = wrapped or n > 0
+    return text, wrapped
+
+
+def take_out_unchecked(
+    text: str, raw_state: dict | None, quest_root: Path, paper_raw: str = "",
+) -> tuple[str, list[dict[str, str]]]:
     """``text`` written by a model for the poster or the slides, without the sentences about a figure FI drew that FI does
     not stand behind (the paper's own rule, ``core.engine._take_out_unpointed``) and without a statement about a figure
-    that FI could not fill (``take_out_unfilled(figures_only=True)``): ``(text, taken_out)``. Unchanged for a quest none of
-    whose figures has a call record."""
+    that FI could not fill (``take_out_unfilled(figures_only=True)``): ``(text, taken_out)``. A sentence that is one of
+    FI's own figure statements of the paper (``paper_raw``, the paper with its markers) word for word is kept; a
+    paraphrase of it goes. Unchanged for a quest none of whose figures has a call record."""
     from core import paper_facts as _facts
     from core.engine import _take_out_unpointed
 
     if not text:
         return text, []
     state = _paper_state(raw_state, quest_root)
+    text, wrapped = _wrap_verbatim(text, paper_raw)
     out, taken = _facts.take_out_unfilled(text, figures_only=True)
     out, pointed = _take_out_unpointed(out, state)
+    if wrapped:
+        out = _facts.without_marks(out)
     return out, taken + pointed

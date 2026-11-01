@@ -15,6 +15,7 @@ Quoted examples below show the form only. Never copy their wording or their subj
   3. A closing heading (such as "What it means") with 2–3 sentences on what the results imply.
 - **Headings:** 4–6 in total, each at most 5 words.
 - **Figures:** use each figure from the list at most once, as its own block. Give each a one-sentence caption that says what it shows and the number to take from it. Do not number figures; the generator does.
+- A sentence about a figure whose caption is named in the figure list must be copied word for word from the paper's sentence about it; a paraphrase of it is removed.
 - **Citations:** cite the sources listed below as [1], [2] or [W1] straight after the claim they support. Use only labels from the list and at most 8 different ones. Do not write a reference list; the generator prints the cited sources.
 - **Lead with concrete numbers, not caveats.** Limitations get at most one short sentence, about this paper's own scope. Do not narrate the pipeline ("this run", "the collector", "snippets", "auto-collected").
 

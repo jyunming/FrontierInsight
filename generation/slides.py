@@ -337,7 +337,11 @@ class SlideGenerator:
     def _take_out_unchecked(self, text: str, art: QuestArtifacts) -> str:
         """``text`` without the sentences about a figure FI does not stand behind (the paper's own rule); each removal is
         logged, not shown on a slide."""
-        out, taken = take_out_unchecked(text, art.raw_state, art.quest_root)
+        try:
+            raw_paper = art.paper_md.read_text(encoding="utf-8") if art.paper_md else ""
+        except OSError:
+            raw_paper = ""
+        out, taken = take_out_unchecked(text, art.raw_state, art.quest_root, raw_paper)
         for t in taken:
             _log.warning('slides: a sentence about a figure FI does not stand behind was left out (%s): "%s"',
                          t.get("key", "figure"), str(t.get("sentence", ""))[:120])

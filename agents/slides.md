@@ -9,6 +9,7 @@ Compress the paper into a Marp slide deck of **8–12 slides**, plus one slide o
 - **Do NOT narrate the pipeline.** Never mention "this run", "the collector", "the dataset was not recovered", "the planned analysis was not produced", "snippets", "auto-collected", or how the data was gathered. That is internal machinery, not content for an audience.
 - Caveats belong in **at most one** brief "Limitations" slide near the end, phrased as this topic's own scope, not as a confession about tooling. Quoted examples in this prompt show the form only; never copy their wording or subject into the deck.
 - When you show a figure, say what it shows and the takeaway (refer to it as "Figure N" matching the paper). Don't show a figure you don't discuss.
+- A sentence about a figure whose caption is listed as "Figure N." below must be copied word for word from the paper's sentence about it; a paraphrase of it is removed.
 
 ## Style — use the project's clean theme
 Start the deck with exactly this front-matter (`fi` is Frontier Insight's polished custom theme, applied by the renderer):

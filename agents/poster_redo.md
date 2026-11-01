@@ -9,6 +9,8 @@ $poster
 
 $figure_list
 
+A sentence about a figure whose caption is in the list above must be copied word for word from the paper's sentence about it; a paraphrase of it is removed.
+
 # Sources you may cite
 
 $source_list

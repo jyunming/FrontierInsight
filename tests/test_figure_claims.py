@@ -737,3 +737,12 @@ def test_a_sentence_that_is_all_bold_is_removed_but_a_bold_run_in_heading_stays(
     assert "drifting" not in out and "![](figures/fig_a.png)" in out and len(taken) == 1
     out, _ = _rule("**Result.** Figure 1 shows the energy drifting upward.\n")
     assert out == "**Result.**\n"
+
+
+def test_a_fully_bold_sentence_naming_a_checked_figure_is_judged_like_any_other():
+    plain, _ = _rule("The energy drifts upward (Figure 1).\n")
+    bold, taken = _rule("**The energy drifts upward (Figure 1).**\n")
+    assert plain == "" and bold == "" and len(taken) == 1
+    # one naming no figure, and a bold run-in heading that names none, are not touched
+    text = "**The method is simple.**\n\n**Power.** The sample is large.\n"
+    assert _rule(text) == (text, [])

@@ -134,3 +134,60 @@ async def test_legacy_quest_slides_unchanged(tmp_path: Path, monkeypatch: pytest
     body = await _deck(tmp_path, monkeypatch, False, prompts)
     assert "Energy drifts upward as Figure 1 shows. The method is simple." in body
     assert "- figures/result.png" in prompts[0] and "Figure 1. The toy" not in prompts[0]
+
+
+_FI_SENTENCE = "Panel 1 draws a rising line"
+_FI_MARK = "<!-- fi:fact-figure-lines-result -->" + _FI_SENTENCE + ".<!-- /fi:fact-figure-lines-result -->"
+
+
+async def _deck_from(tmp_path, monkeypatch, deck: str, with_calls: bool = True) -> str:
+    """The deck the slides keep when the model answers ``deck`` for a paper that holds FI's own statement."""
+    import generation.slides as slides_mod
+    from core.config import Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig
+
+    art = _quest(tmp_path, with_calls)
+    art.paper_md.write_text(
+        "# Toy Paper" + chr(10) * 2 + _FI_MARK + " (Figure 1)" + chr(10) * 2
+        + "![**Figure 1.** The toy curve against its fit.](figures/result.png)" + chr(10), encoding="utf-8")
+    cfg = Config(
+        topic="slides figure list", title="slides-figure-list", provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(max_iterations=1, review_loop=False),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60), knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(kinds=["slides"], output_dir=tmp_path / "outputs"),
+    )
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return deck
+
+    monkeypatch.setattr("core.provider.LLMClient.chat", fake_chat)
+    monkeypatch.setattr("generation.slides.shutil.which", lambda _n: None)
+    await slides_mod.SlideGenerator(cfg).generate(art, art.quest_root)
+    return (art.quest_root / "slides.md").read_text(encoding="utf-8")
+
+
+def _deck_with(line: str) -> str:
+    return chr(10).join(["---", "marp: true", "---", "", "# Toy", "", "---", "", "## Result", "", line, "",
+                         "Beside it the method is simple.", "", "![](figures/result.png)", ""])
+
+
+@pytest.mark.asyncio
+async def test_a_verbatim_fi_sentence_stays_on_a_slide_and_a_paraphrase_goes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kept = await _deck_from(tmp_path / "a", monkeypatch, _deck_with("**" + _FI_SENTENCE + " (Figure 1).**"))
+    assert _FI_SENTENCE + " (Figure 1)." in kept
+    assert "fi:fact" not in kept
+    plain = await _deck_from(tmp_path / "b", monkeypatch, _deck_with(_FI_SENTENCE + " (Figure 1)."))
+    assert _FI_SENTENCE in plain
+    gone = await _deck_from(tmp_path / "c", monkeypatch, _deck_with("Panel 1 shows a line that rises (Figure 1)."))
+    assert "line that rises" not in gone and "Beside it the method is simple." in gone
+    extended = await _deck_from(tmp_path / "d", monkeypatch, _deck_with(_FI_SENTENCE + " and so energy is conserved (Figure 1)."))
+    assert "conserved" not in extended
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_quest_keeps_a_paraphrase_of_a_sentence_about_a_figure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = await _deck_from(tmp_path, monkeypatch, _deck_with("Panel 1 shows a line that rises (Figure 1)."), with_calls=False)
+    assert "line that rises" in body
