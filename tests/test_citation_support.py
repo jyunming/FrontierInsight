@@ -308,7 +308,7 @@ def test_a_paper_with_both_lists_has_the_same_sites_as_before() -> None:
     assert cs.cited_text_end(both) == cs.references_start(both)
 
 
-_PROOF = "BH's proof of FDR control for independent statistics is in [2]. "
+_PROOF = "The proof of the bound for independent inputs is in [2]. "
 
 
 def test_a_citation_that_is_the_object_of_a_word_mid_sentence_does_not_leave_the_word_hanging() -> None:
@@ -325,9 +325,9 @@ def test_a_citation_that_is_the_object_of_a_word_mid_sentence_does_not_leave_the
 
 
 def test_a_mid_sentence_object_citation_in_a_sentence_with_a_result_stays_and_says_so() -> None:
-    paper = _PROOF + "The crossing is 22 degrees, above the value of [3], so it is larger. Next point.\n"
+    paper = _PROOF + "The yield is 22 grams, above the value of [3], so it is larger. Next point.\n"
     out = _drop_citation_run(paper, "drop_citation", own=cs.OwnNumbers(["22"]))
-    assert "22 degrees" in out.paper and "[3]" not in out.paper
+    assert "22 grams" in out.paper and "[3]" not in out.paper
     row = next(r for r in out.rows if r.label == "3")
     assert "nothing after it" in row.note
 
