@@ -951,8 +951,43 @@ def test_the_study_code_is_derive_without_fi_s_frame_and_none_when_the_analysis_
 
 def test_a_one_in_fi_s_own_files_is_not_a_cap_the_study_wrote(tmp_path: Path) -> None:
     # FI's experiment.py has a 1 in a conditional (its exit code) that the cap search read as a clamp of the study.
-    assert 1.0 in plausibility.clamp_constants(af.EXPERIMENT), "the premise: FI's own file holds a cap-shaped 1"
+    assert 1.0 not in plausibility.clamp_constants(af.EXPERIMENT), "a literal in both branches (the exit code) is a label, not a cap"
     assert _clamp_check(tmp_path, "") == []
+
+
+def _split_check(tmp_path: Path, derive_body: str, simulate: str, path: str) -> list[Any]:
+    """The violations the engine finds for ``path`` exactly on the top of its range, with the study's ``derive_body`` in
+    derive.py and ``simulate`` as the trial code. ``growth`` is a trial result, ``gain`` a quantity derived from it."""
+    from types import SimpleNamespace
+
+    from core.engine import Engine, _assertion_violations
+
+    design = _design([_derived("gain")])
+    design["result_assertions"] = [{"path": path, "min": 0.0, "max": 1.0, "unit": "x"}]
+    quest = _quest(tmp_path, design, derive_body)
+    (quest / "code" / "simulate.py").write_text(simulate, encoding="utf-8")
+    state = {"result_json": {"s": {path: 1.0}}, "code": (quest / "code" / "experiment.py").read_text(encoding="utf-8"), "design": design}
+    stub = SimpleNamespace(quest_root=quest, _protocol_block=lambda s: None)
+    return _assertion_violations(Engine._in_force(stub, state))
+
+
+_CAP = "def derive_gain(table):\n    return min(table.mean('growth'), 1.0)\n"
+_PLAIN_SIM = "def run_trial(x):\n    return {'growth': x / max(x, 1)}\n"
+_CAPPED_SIM = "def run_trial(x):\n    return {'growth': min(x, 1.0)}\n"
+
+
+def test_a_cap_in_derive_py_does_not_pin_a_result_the_trials_return(tmp_path: Path) -> None:
+    # The mean of a trial result is FI's, from its trial record; derive.py can only cap what derive.py returns.
+    assert _split_check(tmp_path, _CAP, _PLAIN_SIM, "growth") == []
+
+
+def test_a_cap_in_the_trial_code_pins_a_result_the_trials_return(tmp_path: Path) -> None:
+    assert [v.kind for v in _split_check(tmp_path, "", _CAPPED_SIM, "growth")] == ["clamped"]
+
+
+def test_a_cap_in_derive_py_pins_a_derived_result_and_one_in_the_trial_code_does_not(tmp_path: Path) -> None:
+    assert [v.kind for v in _split_check(tmp_path, _CAP, _PLAIN_SIM, "gain")] == ["clamped"]
+    assert _split_check(tmp_path / "other", "", _CAPPED_SIM, "gain") == []
 
 
 def test_a_cap_the_study_wrote_still_marks_a_result_on_it_as_clamped(tmp_path: Path) -> None:

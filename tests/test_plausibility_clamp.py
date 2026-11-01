@@ -159,6 +159,16 @@ def test_a_ceiling_does_not_pin_a_value_on_the_min() -> None:
     assert plausibility.check_design({"n": 2.0}, design, code="n = min(n, 2.0)") == []
 
 
+@pytest.mark.parametrize("code", [
+    "hit = 1 if v >= 1 else 0",
+    "hit = 1.0 if v >= 1 else 0.0",
+    "if v >= 1:\n    hit = 1\nelse:\n    hit = 0",
+])
+def test_a_label_written_as_a_literal_in_both_branches_is_not_a_cap(code: str) -> None:
+    design = {"result_assertions": [{"path": "share", "min": 0.0, "max": 1.0}]}
+    assert plausibility.check_design({"share": 1.0}, design, code=code) == []
+
+
 def test_the_directions_of_the_caps_are_read_from_the_same_parse() -> None:
     code = "a = min(x, 3.0)\nb = max(y, 1.0)\nc = 7.0 if z else y\nd = np.clip(w, 0.5, 9.0)"
     d = plausibility.clamp_directions(code)

@@ -11740,6 +11740,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         study = _analysis_frame.study_code(self.quest_root / "code")
         if study is not None:
             state = {**state, "code": study}
+            # A result FI works out from the trials is capped only in the trial code, a derived one only in derive.py.
+            try:
+                plan = _analysis_frame.plan_of(state["design"]) if _analysis_frame.applies(state.get("design")) == "" else None
+            except Exception:  # noqa: BLE001 - the split is an aid; without it the study's code is read for every result
+                plan = None
+            if plan is not None:
+                state["_derived_ids"] = sorted({d["id"] for d in plan["derived"]})
+                state["_trial_code"] = _trial_code(self.quest_root / "code")
         if not isinstance(protocol, dict):
             return state
         return {**state, "design": {**(state.get("design") or {}), "protocol": protocol}}
@@ -35507,6 +35515,44 @@ def _resolve_selected_skills(
     return list(usable), reasons
 
 
+def _trial_code(code_dir: Path) -> str:
+    """The code that makes the trial results: the study's scripts and package files (``grid_keys.code_files``: no tests, no
+    file of FI's that is unchanged) without FI's analysis (experiment.py, derive.py, the table reader and the figure step)."""
+    fi_files = {_code_layout.ANALYSIS_SCRIPT, _code_layout.TABLE_SCRIPT, _analysis_frame.DERIVE_FILE, "fi_frame.py",
+                f"{_analysis_frame.FIGURES_MODULE}.py"}
+    return "\n".join(text for rel, text in _grid_keys.code_files(code_dir).items()
+                     if rel not in fi_files and not rel.startswith(f"{_code_layout.FI_CORE_FOLDER}/"))
+
+
+def _checked(state: "QuestState", memo: Any = None) -> list:
+    """The findings of the range check. With FI's analysis frame a trial result is checked against the trial code and a
+    derived one against derive.py (``_in_force`` sets both); otherwise every result against ``state["code"]``."""
+    from core import plausibility
+
+    rj = state.get("result_json") or {}
+    design = _asserting_design(state)
+    args = dict(zero_expected=_zero_expected_paths(state), edge_ok=_physical_bound_paths(state))
+    seen = list(state.get("bounded_seen") or ())
+    trial, derived = state.get("_trial_code"), set(state.get("_derived_ids") or ())
+    if trial is None:
+        return plausibility.check_design(rj, design, code=state.get("code") or "", seen=seen,
+                                         walk=memo.get(rj) if memo is not None else None, **args)
+
+    def of_derived(path: str) -> bool:
+        return any(seg in derived for seg in plausibility._segments(path))
+
+    def path_of(a: Any) -> str:
+        return str(a.get("path", "") if isinstance(a, dict) else getattr(a, "path", ""))
+
+    asserted = list(design.get("result_assertions") or [])
+    out: list = []
+    for code, mine in ((state.get("code") or "", True), (trial, False)):
+        part = {**design, "result_assertions": [a for a in asserted if of_derived(path_of(a)) == mine]}
+        out += plausibility.check_design(rj, part, code=code, seen=[p for p in seen if of_derived(str(p)) == mine],
+                                         walk=memo.get(rj) if memo is not None else None, **args)
+    return out
+
+
 def _assertion_violations(state: "QuestState", memo: Any = None) -> list:
     """Range/unit assertions the run broke, as declared by its own design.
 
@@ -35525,13 +35571,7 @@ def _assertion_violations(state: "QuestState", memo: Any = None) -> list:
         # The script rides along so a value capped exactly at a non-zero
         # bound is caught too; ``seen`` so a bounded quantity an earlier run
         # reported cannot quietly disappear. See core/plausibility.py for both.
-        rj = state.get("result_json") or {}
-        found = plausibility.check_design(
-            rj, _asserting_design(state), code=state.get("code") or "",
-            seen=state.get("bounded_seen") or (), zero_expected=_zero_expected_paths(state),
-            edge_ok=_physical_bound_paths(state),
-            walk=memo.get(rj) if memo is not None else None,
-        )
+        found = _checked(state, memo)
         # A cap whose place in the result cannot be shown, and a physical_bound result on its edge in every setting, are
         # warnings (_assertion_warnings), not violations.
         return [v for v in found if getattr(v, "kind", "") not in ("clamped_unproven", "edge_everywhere")]
@@ -35546,13 +35586,7 @@ def _assertion_warnings(state: "QuestState", memo: Any = None) -> list:
     try:
         from core import plausibility
 
-        rj = state.get("result_json") or {}
-        found = plausibility.check_design(
-            rj, _asserting_design(state), code=state.get("code") or "",
-            seen=state.get("bounded_seen") or (), zero_expected=_zero_expected_paths(state),
-            edge_ok=_physical_bound_paths(state),
-            walk=memo.get(rj) if memo is not None else None,
-        )
+        found = _checked(state, memo)
         return [v for v in found if getattr(v, "kind", "") in ("clamped_unproven", "edge_everywhere")]
     except Exception:  # noqa: BLE001
         return []

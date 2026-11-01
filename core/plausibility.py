@@ -36,7 +36,8 @@ cap is proven to be another value's (one written at ``train.rmse`` does not
 count for ``test.rmse``). A cap pins a value only from its own side: a floor
 (``max(R, 1)`` under a denominator) never pins a value to an upper bound, nor a
 ceiling to a lower one; a cap with no readable direction (``10.0 if diverged
-else x``) counts for both. Both halves are
+else x``) counts for both. A literal in
+both branches of a conditional (``1 if v >= 1 else 0``) labels a case and caps nothing. Both halves are
 required: a perfect score of 1.0 is a real result, and ``np.clip(p, 0, 1)``
 inside a softmax is real code; only the two together are a capped number.
 Zero bounds are exempt, because real zeros and ``max(0, x)`` are both
@@ -402,6 +403,8 @@ def _clamp_sites(tree: ast.AST, dirs: dict[float, set[str]] | None = None) -> di
                         if dirs is not None:
                             dirs.setdefault(v, set()).add(_arg_direction(node, name, arg, kw))
         elif isinstance(node, ast.IfExp):
+            if value(node.body) is not None and value(node.orelse) is not None:
+                continue  # `1 if v >= 1 else 0` labels a case; a cap leaves the other branch to the value itself
             for branch in (node.body, node.orelse):
                 v = value(branch)
                 if v is not None:
@@ -409,7 +412,15 @@ def _clamp_sites(tree: ast.AST, dirs: dict[float, set[str]] | None = None) -> di
                     if dirs is not None:
                         dirs.setdefault(v, set()).add("both")
         elif isinstance(node, ast.If):
+            # A name given a literal in both branches (`if hit: flag = 1 else: flag = 0`) is a label, not a cap.
+            def _literal_names(stmts: list[ast.stmt]) -> set[str]:
+                return {t.id for st in stmts if isinstance(st, ast.Assign) and value(st.value) is not None
+                        for t in st.targets if isinstance(t, ast.Name)}
+
+            labels = _literal_names(node.body) & _literal_names(node.orelse)
             for stmt in (*node.body, *node.orelse):
+                if isinstance(stmt, ast.Assign) and any(isinstance(t, ast.Name) and t.id in labels for t in stmt.targets):
+                    continue
                 if isinstance(stmt, (ast.Assign, ast.AnnAssign)) and stmt.value is not None:
                     v = value(stmt.value)
                     if v is not None:
