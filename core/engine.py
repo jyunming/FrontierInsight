@@ -11950,18 +11950,31 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._typed_figures = self._figure_scripts_with_typed_numbers()
         return used, rewrote
 
-    async def _figures_after_give_up(self, state: QuestState) -> dict[str, Any]:
+    async def _result_check_gave_up_with_figures(self, state: QuestState,
+                                                 history: list[dict[str, Any]] | None = None) -> QuestState | None:
+        """:meth:`_result_check_gave_up`, and the figures that failed drawn from the plan's own description besides: the run
+        it sends back for one more run kept its results (the helper does not ask whether they were produced)."""
+        kept = self._result_check_gave_up(state, history)
+        if kept is None:
+            return None
+        return {**kept, **await self._figures_after_give_up(state, sent_back=True)}
+
+    async def _figures_after_give_up(self, state: QuestState, *, sent_back: bool = False) -> dict[str, Any]:
         """The repairs ended by a give-up (the model refused or returned no code), after a run whose results stand and whose
         figure functions failed: the run that failed was not the one flagged for the plan's own figure, so the analysis is run
         once more WITHOUT the simulation (``experiment.py`` reads FI's record of the trials from disk) and draws only the
         figures that failed, in the plan's own description (``FI_FIGURE_FALLBACK=only``; a figure that was drawn keeps its file).
-        Returns the state's ``figures`` and ``figure_records`` as they are then, or nothing when there is nothing to draw."""
+        The results and the derived values of the run are not touched: the analysis in this mode runs none of the study's
+        functions again and writes back the earlier record with only the figures changed. The figures that failed are read from
+        the primary run's record (replicates write derived.json again). ``sent_back``: the results check sent the run back, so
+        ``results_produced`` is false and one more run follows. Returns the state's ``figures`` and ``figure_records`` as they
+        are then, or nothing when there is nothing to draw."""
         try:
-            record = _analysis_frame.read_record(self.quest_root)
+            record = self.__dict__.get("_primary_figure_record") or _analysis_frame.read_record(self.quest_root)
             lost = [o for o in record.get("figures") or [] if isinstance(o, dict)
                     and o.get("status") in ("failed", "refused", "not_written")]
-            if (not lost or record.get("from_earlier_run") or not (state.get("exec_result") or {}).get("results_produced")
-                    or not self._analysis_on()):
+            if (not lost or record.get("from_earlier_run") or not self._analysis_on()
+                    or not (sent_back or (state.get("exec_result") or {}).get("results_produced"))):
                 return {}
             self._log.info("[execute_reflect] the repair gave up with %d figure(s) not drawn; FI draws them from the plan's "
                            "own description, from the results it already holds (the simulation is not run again)", len(lost))
@@ -19626,7 +19639,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             if p.is_file() and p.suffix.lower() in _FIGURE_SUFFIXES
         ) if (self.quest_root / "figures").is_dir() else []
         # What the primary run's figures say of themselves; the replicates below write derived.json again.
-        primary_record = _analysis_frame.read_record(self.quest_root)
+        primary_record = self._primary_figure_record = _analysis_frame.read_record(self.quest_root)
         raw_result_json = _extract_result_json(result.stdout)
         self._note_typed_values(raw_result_json)
         result_json = self._without_typed_results(raw_result_json)
@@ -21047,7 +21060,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "stderr_tail": exec_result.get("stderr_tail", "")[-400:],
                 "patch_summary": f"(gave up: {give_up[:120]})",
             })
-            return self._manifest_repair_gave_up(state, history) or self._result_check_gave_up(state, history) or {
+            return self._manifest_repair_gave_up(state, history) or await self._result_check_gave_up_with_figures(
+                state, history) or {
                 "exec_give_up_reason": give_up,
                 "exec_reflect_iter": iters + bump,
                 "exec_reflect_history": history,
@@ -21074,7 +21088,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             )
             if overlaps:
                 return spent
-            return self._manifest_repair_gave_up(state) or self._result_check_gave_up(state) or {
+            return self._manifest_repair_gave_up(state) or await self._result_check_gave_up_with_figures(state) or {
                 "exec_give_up_reason": "(LLM produced no patched code)",
                 "exec_reflect_iter": iters + bump,
                 **await self._figures_after_give_up(state),

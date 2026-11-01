@@ -1430,6 +1430,18 @@ def _figures(table, quest_root):
     return outcomes, fi_figures.said(outcomes), fi_figures.exit_code(outcomes), fi_figures.fi_faults(outcomes)
 
 
+def _earlier_record(quest_root):
+    """The earlier run's derived.json (set aside at the start of this run), for the run that only draws the figures that failed."""
+    try:
+        with open(os.path.join(quest_root, PREVIOUS), encoding="utf-8") as f:
+            old = json.load(f)
+    except (OSError, ValueError):
+        old = None
+    if not isinstance(old, dict) or old.get("schema") != "fi.derived/v1" or not isinstance(old.get("derived"), dict):
+        raise FIFault("there is no record of the earlier run to draw the figures beside")
+    return old
+
+
 def run(record_path, quest_root):
     """The whole analysis: ``(RESULT_JSON, records, exit code, derived.json as written)``. Writes data/results/derived.json. The
     exit code is 2 for a fault of FI's own (nothing to send the model), else 1 when a body of a counting role, or a figure body,
@@ -1447,13 +1459,17 @@ def run(record_path, quest_root):
     notes = []
     base = {**derive.FIXED, **_thresholds(record_path)}
     readable = list(derive.RESULTS) + list(derive.AFTERWARDS)
+    # ``FI_FIGURE_FALLBACK=only``: the figures that failed are drawn beside the earlier run's results, which stay as they were. No
+    # function of the study's is run again (it may draw random numbers), so no derived value, reference or result can change.
+    only = os.environ.get("FI_FIGURE_FALLBACK") == "only"
+    earlier = _earlier_record(quest_root) if only else None
     first = Table(cells, readable)
-    table = Table(cells, readable, _references(first, base, notes),
+    table = Table(cells, readable, {} if only else _references(first, base, notes),
                   {name: first.at(**hold) for name, hold in derive.PARTS.items()}, getattr(derive, "KNOWN", {}))
     compared = {k: list(v) for k, v in derive.COMPARED.items()}
-    records = _derived(table, base, compared)
+    records = earlier["derived"] if only else _derived(table, base, compared)
     _progress("fi: printing the results")
-    out = result_json(table, records, compared)
+    out = {} if only else result_json(table, records, compared)
     outcomes, said, figure_code, figure_faults = _figures(table, quest_root)
     not_computed = [{"id": i, "status": r["status"], "why": r.get("why") or ""} for i, r in records.items() if r["status"] != "ok"]
     not_computed += [{"id": rid, "status": "no_data", "why": "no trial gave a value for it"}
@@ -1464,6 +1480,10 @@ def run(record_path, quest_root):
     document = {"schema": "fi.derived/v1", "derived": records, "not_computed": not_computed, "complete": not not_computed,
                 "figures": outcomes, "figures_said": said, "fi_faults": faults, "notes": notes,
                 "bodies": _bodies(records, outcomes)}
+    if only:
+        document = dict(earlier, figures=outcomes, figures_said=said, fi_faults=list(earlier.get("fi_faults") or []) + list(figure_faults))
+        document.pop("figures_from_earlier_run", None)
+        notes = list(earlier.get("notes") or [])
     if kept_figures:
         document["figures_from_earlier_run"] = kept_figures
         document["notes"] = notes + ["%s: kept from the earlier run, this run did not draw %s" % (
@@ -1502,7 +1522,8 @@ def main():
     for text in [document["figures_said"]] + document["notes"] + document["fi_faults"]:
         if text:
             sys.stderr.write(text + "\\n")
-    sys.stdout.write("RESULT_JSON: " + json.dumps(out) + "\\n")
+    if os.environ.get("FI_FIGURE_FALLBACK") != "only":
+        sys.stdout.write("RESULT_JSON: " + json.dumps(out) + "\\n")
     return code
 
 

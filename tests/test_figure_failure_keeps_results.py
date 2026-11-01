@@ -368,7 +368,7 @@ def test_the_fallback_flag_is_set_only_on_the_run_that_ends_the_repairs(tmp_path
 # ---- the repairs end by a give-up: the figure that failed is still drawn, from the results already on disk ----
 
 
-def _give_up_quest(tmp_path: Path, monkeypatch):
+def _give_up_quest(tmp_path: Path, monkeypatch, *, random_body: bool = False):
     """An engine whose quest holds FI's analysis, a record of the trials and one run (no flag) in which fig1 raised and fig2 drew."""
     import subprocess
     import sys
@@ -377,7 +377,7 @@ def _give_up_quest(tmp_path: Path, monkeypatch):
     from tests.test_analysis_frame import NO_WINDOW, RECORD, _design
     from tests.test_analysis_frame import _derived  # noqa: F401
 
-    design = _design()
+    design = _design([_derived("peak")] if random_body else None)
     design["protocol"]["figures"].append({"id": "fig2", "file": "other.png", "shows": ["growth"], "x": "rate"})
     eng = _engine(tmp_path, phased_on=False)
     root = eng.quest_root
@@ -385,13 +385,18 @@ def _give_up_quest(tmp_path: Path, monkeypatch):
     (root / "raw" / "trials.json").write_text(json.dumps(RECORD), encoding="utf-8")
     frame.ensure_files(root / "code", design)
     with (root / "code" / "derive.py").open("a", encoding="utf-8") as f:
+        if random_body:
+            f.write("\n\ndef derive_peak(table):\n    import random\n    return random.random()\n")
         f.write("\n\n" + _RAISES + "\n\ndef figure_fig2(fig, table):\n    fig.axes[0].plot([1, 2], [table.mean('growth', k) for k in table.keys()][:2])\n")
     calls: list[dict] = []
+    outputs: list[str] = []
 
     async def execute(cmd, cwd=None, timeout_s=None, env=None, **_kw):
         calls.append(dict(env or {}))
+        outputs.append("")
         done = subprocess.run(cmd, cwd=root / "code", env={k: v for k, v in os.environ.items() if k != "PYTHONPATH"} | (env or {}),
                               capture_output=True, text=True, timeout=300, creationflags=NO_WINDOW)
+        outputs[-1] = done.stdout
         return types.SimpleNamespace(returncode=done.returncode, stdout=done.stdout, stderr=done.stderr)
 
     monkeypatch.setattr(eng.executor, "execute", execute)
@@ -399,6 +404,7 @@ def _give_up_quest(tmp_path: Path, monkeypatch):
     first = subprocess.run([sys.executable, "experiment.py"], cwd=root / "code", capture_output=True, text=True, timeout=300,
                            creationflags=NO_WINDOW)
     assert first.returncode == 1
+    eng.first_stdout, eng.only_outputs = first.stdout, outputs
     return eng, root, calls
 
 
@@ -429,3 +435,30 @@ def test_a_give_up_runs_nothing_when_no_figure_failed_or_the_run_has_no_results(
     asyncio.run(eng._figures_after_give_up({"exec_result": {"returncode": 1, "results_produced": True}}))
     again = asyncio.run(eng._figures_after_give_up({"exec_result": {"returncode": 0, "results_produced": True}}))
     assert again == {} and len(calls) == 1  # nothing failed any more: no second run
+
+
+def test_the_run_that_draws_the_failed_figures_leaves_every_derived_value_and_result_as_checked(tmp_path: Path, monkeypatch) -> None:
+    eng, root, _calls = _give_up_quest(tmp_path, monkeypatch, random_body=True)
+    before = frame.read_record(root)
+    assert before["derived"]["peak"]["status"] == "ok"
+    out = asyncio.run(eng._figures_after_give_up({"exec_result": {"returncode": 1, "results_produced": True},
+                                                  "result_json": {"peak": 1}, "figure_records": {}}))
+    after = frame.read_record(root)
+    assert (root / "figures" / "growth.png").stat().st_size > 0 and "fallback" in str(after["figures"])
+    # the study's function (a random number) was not called again: the record of every derived value is byte for byte the same
+    assert json.dumps(after["derived"], sort_keys=True) == json.dumps(before["derived"], sort_keys=True)
+    assert after["not_computed"] == before["not_computed"] and after["bodies"] == before["bodies"]
+    assert "RESULT_JSON" not in eng.only_outputs[0] and "RESULT_JSON" in eng.first_stdout
+    assert set(out) == {"figures", "figure_records"}  # the state's result_json is not in what comes back
+
+
+def test_a_result_check_give_up_still_draws_the_failed_figure(tmp_path: Path, monkeypatch) -> None:
+    eng, root, _calls = _give_up_quest(tmp_path, monkeypatch)
+    state = {"exec_result": {"returncode": 1, "results_produced": False, "result_check_sent_back": True},
+             "figure_records": {"growth.png": {"axes": []}, "other.png": {"axes": []}}}
+    patch = asyncio.run(eng._result_check_gave_up_with_figures(state))
+    assert patch["exec_patch_pending"] is True  # the run is made once more, as before
+    assert patch["figure_records"]["growth.png"]["fallback"] is True and "fallback" not in patch["figure_records"]["other.png"]
+    assert (root / "figures" / "growth.png").stat().st_size > 0
+    plain = {"exec_result": {"returncode": 1, "results_produced": True}}
+    assert asyncio.run(eng._result_check_gave_up_with_figures(plain)) is None  # not a run the results check sent back
