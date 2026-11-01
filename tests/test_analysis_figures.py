@@ -1179,18 +1179,14 @@ def test_the_handle_is_given_the_plan_and_the_table(tmp_path, frame5):
     assert seen["settings"] == ["size", "speed"] and seen["series"] == ["fast", "slow"] and seen["table"] is True
 
 
-def test_mismatch_between_calls_and_recorder_is_fi_fault(tmp_path, frame5):
-    line = {"kind": "data", "x": [1.0, 2.0], "y": [1.0, 2.0], "marker": "None"}
-    (frame5 / "g.seed0.json").write_text(json.dumps({"axes": [{"lines": [line]}, {"lines": [line]}]}), encoding="utf-8")
-    assert _calls_run(tmp_path, _both_panels)["status"] == "ok"  # recorder and calls agree
-    (frame5 / "g.calls.json").unlink()
-    (frame5 / "g.seed0.json").write_text(json.dumps({"axes": [{"lines": [line]}, {"lines": []}]}), encoding="utf-8")
-    out = _calls_run(tmp_path, _both_panels)  # the recorder holds no line for the series of panel 2
-    assert out["status"] == "fi_fault" and "panel 2" in out["why"] and "`fast`" in out["why"]
-    assert not (frame5 / "g.calls.json").exists() and af.fi_faults([out])
-    stray = {"kind": "data", "x": [1.0], "y": [9.0], "marker": "o"}
-    (frame5 / "g.seed0.json").write_text(json.dumps({"axes": [{"lines": [line, stray]}, {"lines": [line]}]}), encoding="utf-8")
-    assert "no call drew" in _calls_run(tmp_path, _both_panels)["why"]
+def test_an_inconsistency_in_FIs_own_calls_is_fi_fault(tmp_path, frame5):
+    def body(fig, table):
+        _both_panels(fig, table)
+        fig._fc_extra[1]["series"].pop()  # the calls kept one artist fewer than the record holds: FI's own fault
+
+    out = _calls_run(tmp_path, body)
+    assert out["status"] == "fi_fault" and "panel 2" in out["why"] and af.fi_faults([out])
+    assert not (frame5 / "g.calls.json").exists()
 
 
 def test_log_line_counts_checked_and_custom_panels(tmp_path, frame5):
@@ -1308,9 +1304,103 @@ def test_a_one_panel_figure_is_labelled_from_the_plans_words_and_units(tmp_path,
 def test_result_info_reaches_the_figure_spec_from_the_plan():
     from core import analysis_frame
 
-    c = types.SimpleNamespace(results=[types.SimpleNamespace(id="growth", unit="1/h", estimand="growth rate")], derived=[])
-    assert analysis_frame._result_info(c, ["growth", "other"]) == {"result_info": {"growth": {"unit": "1/h", "description": "growth rate"}}}
-    assert analysis_frame._result_info(types.SimpleNamespace(results=[types.SimpleNamespace(id="g", unit="", estimand="")], derived=[]), ["g"]) == {}
+    c = types.SimpleNamespace(results=[types.SimpleNamespace(id="growth", unit="1/h", estimand="growth rate", label="Growth")], derived=[])
+    assert analysis_frame._result_info(c) == {"result_info": {"growth": {"label": "Growth", "unit": "1/h", "description": "growth rate"}}}
+    assert analysis_frame._result_info(types.SimpleNamespace(results=[types.SimpleNamespace(id="g", unit="", estimand="")], derived=[])) == {}
+
+
+def test_a_figure_of_several_panels_names_its_x_and_series_settings():
+    from core import analysis_frame
+
+    c = types.SimpleNamespace(labels={"size": "Colony size", "speed": "Speed", "other": "Other"},
+                              settings=types.SimpleNamespace(compared={"speed": [1, 2]}, in_each_run={}))
+    got = analysis_frame._panel_words(c, 2, ("size", "speed"))
+    assert got["labels"] == {"speed": "Speed", "size": "Colony size"} and list(got["settings"]) == ["speed"]
+
+
+def test_a_two_panel_figure_is_labelled_with_the_plans_units_on_every_axis(tmp_path, frame5):
+    spec = {"id": "g", "file": "g.png", "panels": 2, "x": "size", "series": "fast", "shows": ["growth"],
+            "labels": {"size": "Colony size"}, "result_info": {"growth": {"label": "Growth", "unit": "1/h"}}}
+    ns = types.SimpleNamespace(figure_g=_both_panels, COMPARED={"speed": ["fast"]})
+    assert af.run_figures([spec], ns, _CallTable(), str(tmp_path / "figures"))[0]["status"] == "ok"
+    for panel in json.loads((frame5 / "g.calls.json").read_text(encoding="utf-8"))["panels"]:
+        assert panel["x"]["label"] == "Colony size" and panel["y"]["label"] == "Growth (1/h)"
+
+
+def _raw_after(tmp_path, frame5, extra, panels=2):
+    """Run a body that draws on every panel through FI's calls, then does ``extra(fig)``; the raw flags of the panels."""
+    def body(fig, table):
+        _both_panels(fig, table)
+        extra(fig)
+
+    out = _calls_run(tmp_path, body, panels=panels)
+    assert out["status"] == "ok", out
+    return [p["raw"] for p in json.loads((frame5 / "g.calls.json").read_text(encoding="utf-8"))["panels"]]
+
+
+@pytest.mark.parametrize("name,extra,expected", [
+    ("manual tick labels", lambda fig: (fig.axes[0].set_xticks([1, 2]), fig.axes[0].set_xticklabels(["low", "r = 0.99"])), [True, False]),
+    ("a table", lambda fig: fig.axes[1].table(cellText=[["slope 0.4"]], loc="bottom"), [False, True]),
+    ("an inset", lambda fig: fig.axes[0].inset_axes([0.5, 0.5, 0.3, 0.3]).text(0.1, 0.1, "n = 7"), [True, False]),
+    ("a twin axes title", lambda fig: fig.axes[1].twinx().set_title("p = 0.03"), [False, True]),
+    ("a twin axes legend", lambda fig: (lambda t: (t.plot([1, 2], [3, 4], label="x"), t.legend()))(fig.axes[0].twinx()), [True, False]),
+    ("a colorbar text", lambda fig: fig.axes[0].figure.colorbar(fig.axes[0].imshow([[1, 2], [3, 4]]), ax=fig.axes[0], label="bound 0.5"), [True, True]),
+    ("a figure legend", lambda fig: fig.axes[0].figure.legend(["a"], loc="upper center"), [True, True]),
+    ("a figure text", lambda fig: fig.axes[0].figure.text(0.5, 0.01, "n = 12"), [True, True]),
+    ("a suptitle", lambda fig: fig.axes[0].figure.suptitle("shown: 2.5"), [True, True]),
+    ("a spoofed tag", lambda fig: fig.axes[1].text(0.5, 0.5, "r = 0.9").set_gid("fi:1"), [False, True]),
+    ("a body line with a spoofed tag", lambda fig: fig.axes[0].plot([1, 2], [9, 9], gid="fi:2"), [True, False]),
+])
+def test_every_artist_FI_did_not_make_makes_its_panel_a_custom_drawing(tmp_path, frame5, name, extra, expected):
+    assert _raw_after(tmp_path, frame5, extra) == expected, name
+
+
+def test_a_suptitle_stays_on_a_custom_drawing(tmp_path, frame5):
+    held = []
+    _raw_after(tmp_path, frame5, lambda fig: held.append(fig.axes[0].figure) or fig.axes[0].figure.suptitle("shown: 2.5"))
+    assert held[0]._suptitle.get_text() == "shown: 2.5"  # FI clears a title only when it writes the words itself
+
+
+def test_an_fi_line_whose_data_the_body_changed_is_a_custom_drawing(tmp_path, frame5):
+    def change(fig):
+        fig.axes[0].lines[0].set_ydata([5.0, 6.0])
+
+    assert _raw_after(tmp_path, frame5, change) == [True, False]
+    reasons = [p["raw_reason"] for p in json.loads((frame5 / "g.calls.json").read_text(encoding="utf-8"))["panels"]]
+    assert reasons == ["drawing changed after FI's call", None]
+    assert _raw_after(tmp_path, frame5, lambda fig: (fig.line(1, "slow", [1, 2], [2.0, 1.0], "growth"), fig.axes[1].lines[0].remove()))         == [False, True]
+
+
+def test_categories_numeric_strings_and_large_arrays_are_verified_without_a_fault(tmp_path, frame5):
+    big = list(range(25000))
+
+    def body(fig, table):
+        table.mean("growth", "size=1")
+        fig.line(0, "fast", ["a", "b"], [1.0, 2.0], "growth")
+        fig.line(1, "fast", ["1", "2"], [1.0, 2.0], "growth")
+        fig.bars(1, "slow", ["1", "2"], [3.0, 4.0], "growth")
+
+    out = _calls_run(tmp_path, body)
+    assert out["status"] == "ok" and out["declared"]["raw_panels"] == []
+    out = _calls_run(tmp_path, lambda fig, table: (table.mean("growth", "size=1"), fig.line(0, "fast", big, [float(i % 5) for i in big], "growth"),
+                                                    fig.line(1, "fast", [1, 2], [1.0, None], "growth")))
+    assert out["status"] == "ok" and out["declared"]["raw_panels"] == []
+
+
+def test_a_body_using_only_fi_calls_stays_verified(tmp_path, frame5):
+    def body(fig, table):
+        _drawn(fig, table, 0)
+        fig.line(0, "slow", [1, 2], [2.0, 1.0], "growth", yerr=[0.1, 0.2])
+        fig.band(0, "fast", [1, 2], [0.5, 1.5], [1.5, 2.5], "growth", "other")
+        fig.curve(0, "trend", [1, 2], [1.0, 2.0])
+        fig.ref(0, value=1.5)
+        fig.note(0, what="mean growth: {growth}", key="size=1")
+        _drawn(fig, table, 1)
+        fig.bars(1, "slow", [1, 2], [1.0, 2.0], "growth")
+        fig.image(1, [[1, 2], [3, 4]])
+
+    out = _calls_run(tmp_path, body)
+    assert out["status"] == "ok" and out["declared"]["raw_panels"] == [], out
 
 
 @pytest.mark.parametrize("category", [True, False])

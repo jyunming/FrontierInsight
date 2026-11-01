@@ -185,6 +185,7 @@ class FigureCalls:
             self._fc_panels = {}
             self._fc_gid = 0
             self._fc_extra = {}  # panel -> {"series": [(first artist, what)], "refs": [artist]}, parallel to the record's lists
+            self._fc_owned = {}  # id(artist) -> (artist, the artists of the same call): everything these calls drew, by identity (never by gid)
         return self._fc_panels
 
     def _remember(self, panel, part, artist, what=None):
@@ -200,6 +201,7 @@ class FigureCalls:
     def _tag(self, *artists):
         """Give each artist the tag of one call (a list or container is walked)."""
         gid = self._next_gid()
+        group = []
 
         def walk(a):
             if a is None:
@@ -209,6 +211,7 @@ class FigureCalls:
                     walk(b)
             elif hasattr(a, "set_gid"):
                 a.set_gid(gid)
+                group.append(a)
             else:  # an errorbar or bar container
                 for b in list(getattr(a, "patches", [])) + list(getattr(a, "lines", []) or []) + list(getattr(a, "errorbar", None) or []):
                     walk(b)
@@ -218,6 +221,8 @@ class FigureCalls:
                 walk(a.lines)
             else:
                 walk(a)
+        for a in group:
+            self._fc_owned[id(a)] = (a, group)
         return gid
 
     def _panel(self, panel):
@@ -711,7 +716,7 @@ class FigureCalls:
         for ax, handles, texts in outside:  # after every label is written, so the neighbours' extents are known
             self._legend_outside(ax, handles, texts)
         sup = getattr(getattr(self, "fig", None), "_suptitle", None)
-        if sup is not None and sup.get_text():
+        if sup is not None and sup.get_text() and not any(self._panel(i)[1]["raw"] for i in range(len(self.axes))):  # a custom drawing keeps its own
             sup.set_text("")
             changed.append("title")
         if changed and not getattr(self, "_fc_logged", False):

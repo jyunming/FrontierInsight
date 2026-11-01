@@ -33,6 +33,7 @@ import contextlib
 import inspect
 import json
 import math
+import numbers
 import os
 import re
 import traceback
@@ -360,7 +361,9 @@ def _draw_one(spec: dict[str, Any], body: Any, table: Any, out_dir: str, plan: d
             return _outcome(fid, file, "failed", none_drawn)
         calls = _has_calls(handle)
         if calls:  # a quest on the frame with the drawing calls: what was drawn outside them is marked, FI writes the words
-            _mark_raw(handle, fig, axes)
+            fault = _audit(handle, fig, axes)
+            if fault:
+                return _outcome(fid, file, "fi_fault", "FI's record of the calls of figure `%s` and the calls it kept disagree: %s." % (fid, fault))
             handle.finish((plan or {}).get("labels") or {}, (plan or {}).get("result_info") or {})
         panel_record = _set_panel_titles(handle, axes, spec.get("labels") or {})
         try:
@@ -369,9 +372,7 @@ def _draw_one(spec: dict[str, Any], body: Any, table: Any, out_dir: str, plan: d
             return _outcome(fid, file, "failed", "`figure_%s` drew something that cannot be saved (%s: %s)." % (fid, type(err).__name__, err))
         summary: dict[str, Any] = {}
         if calls:
-            fault = _write_calls(handle, file)
-            if fault:
-                return _outcome(fid, file, "fi_fault", "FI's record of the calls of figure `%s` and its figure recorder disagree: %s." % (fid, fault))
+            _write_calls(handle, file)
             summary = _calls_summary(handle.record())
         declared = _declared_record(spec, table, out_dir, file, summary)
         done = dict(_outcome(fid, file, "ok"), panels=panel_record, **({"declared": declared} if declared else {}))
@@ -517,7 +518,9 @@ def _plan_for(spec: dict[str, Any], namespace: Any, table: Any) -> dict[str, Any
             if str(value) not in series_ids:
                 series_ids.append(str(value))
     results = spec.get("result_labels") if isinstance(spec.get("result_labels"), dict) else {}
-    labels: dict[str, Any] = {str(k): str(v) for k, v in {**(spec.get("labels") or {}), **results}.items() if v}
+    info = spec.get("result_info") if isinstance(spec.get("result_info"), dict) else {}
+    named = {str(k): v["label"] for k, v in info.items() if isinstance(v, dict) and v.get("label")}
+    labels: dict[str, Any] = {str(k): str(v) for k, v in {**named, **(spec.get("labels") or {}), **results}.items() if v}
     references: dict[str, Any] = {}
     held = getattr(table, "_references", None)  # read only: Table.reference() would also count the result as read
     for ident, per_setting in (held.items() if isinstance(held, dict) else []):
@@ -526,7 +529,7 @@ def _plan_for(spec: dict[str, Any], namespace: Any, table: Any) -> dict[str, Any
             references[str(ident)] = {"value": next(iter(numbers)), "label": labels.get(str(ident), str(ident))}
     derived = _from(namespace, "DERIVED", {})
     return {"settings": settings, "series_ids": series_ids, "references": references, "labels": labels,
-            "result_info": spec.get("result_info") if isinstance(spec.get("result_info"), dict) else {},
+            "result_info": info,
             "fallback": bool(spec.get("fallback")), "derived_ids": [str(k) for k in derived] if isinstance(derived, dict) else []}
 
 
@@ -552,28 +555,160 @@ def _remove_calls(file: str) -> None:
             pass
 
 
-def _data_artists(ax: Any) -> list[Any]:
-    return [a for a in list(ax.lines) + list(ax.collections) + list(ax.patches) + list(ax.images) if a.get_visible()]
+#: The tick-label formatters matplotlib picks itself (and the one a category axis gets); a tick label under any other formatter
+#: (a fixed list of words, a function) is text the body typed.
+_AUTO_FORMATTERS = frozenset({"ScalarFormatter", "LogFormatter", "LogFormatterExponent", "LogFormatterMathtext",
+                              "LogFormatterSciNotation", "LogitFormatter", "NullFormatter", "StrCategoryFormatter"})
 
 
-def _untagged_text(texts: Any) -> bool:
-    return any(t.get_visible() and str(t.get_text()).strip() and not str(t.get_gid() or "").startswith("fi:") for t in texts)
+def _all_axes(fig: Any) -> tuple[list[Any], dict[int, Any]]:
+    """Every axes of the figure, insets included, and the parent of each inset."""
+    out: list[Any] = []
+    parent: dict[int, Any] = {}
+    stack = list(fig.get_axes())
+    while stack:
+        ax = stack.pop(0)
+        if any(ax is seen for seen in out):
+            continue
+        out.append(ax)
+        for child in getattr(ax, "child_axes", None) or []:
+            parent[id(child)] = ax
+            stack.append(child)
+    return out, parent
 
 
-def _mark_raw(handle: Any, fig: Any, axes: list[Any]) -> None:
-    """A panel with a data artist no drawing call made (it has no ``fi:`` tag), or a text FI did not place (``ax.text``, an
-    annotation, a ``fig.text`` or a suptitle: FI's own notes carry the tag), is a custom drawing: FI states nothing about it. A
-    second axes that shares a panel's place (``twinx``) counts for that panel. ``fig.raw(i)`` has marked its panel already."""
-    figure_text = _untagged_text(list(getattr(fig, "texts", []) or []) + [t for t in [getattr(fig, "_suptitle", None)] if t is not None])
+def _panel_of(ax: Any, axes: list[Any], parent: dict[int, Any]) -> int | None:
+    """The panel an axes belongs to: itself, the panel it is an inset of, or the panel it shares an axis with (a twin)."""
+    while ax is not None:
+        for i, panel in enumerate(axes):
+            if ax is panel:
+                return i
+        for i, panel in enumerate(axes):
+            if any(ax is other for group in (panel.get_shared_x_axes(), panel.get_shared_y_axes())
+                                  for other in group.get_siblings(panel)):
+                return i
+        ax = parent.get(id(ax))
+    return None
+
+
+def _scaffolding(fig: Any, all_axes: list[Any], axes: list[Any], owner: dict[int, Any]) -> set[int]:
+    """The ids of what matplotlib draws by itself and FI rewrites: the figure and axes backgrounds, spines, ticks and the tick
+    labels of a default formatter, and, on a panel, the title, axis labels and legend (``Figure.finish`` writes those)."""
+    ok = {id(fig), id(fig.patch)}
+    for ax in all_axes:
+        ok.update((id(ax), id(ax.patch)))
+        ok.update(id(sp) for sp in ax.spines.values())
+        is_panel = any(ax is p for p in axes)
+        for axis in (ax.xaxis, ax.yaxis):
+            ok.update((id(axis), id(axis.offsetText)))
+            if is_panel:
+                ok.add(id(axis.label))
+            manual = {type(axis.get_major_formatter()).__name__, type(axis.get_minor_formatter()).__name__} - _AUTO_FORMATTERS
+            for tick in list(axis.get_major_ticks()) + list(axis.get_minor_ticks()):
+                ok.update((id(tick), id(tick.tick1line), id(tick.tick2line), id(tick.gridline)))
+                owner.update({id(tick.label1): ax, id(tick.label2): ax})  # a tick label does not know its axes
+                if not manual:
+                    ok.update((id(tick.label1), id(tick.label2)))
+        if is_panel:
+            ok.update(id(t) for t in (ax.title, getattr(ax, "_left_title", None), getattr(ax, "_right_title", None)) if t is not None)
+            legend = ax.get_legend()
+            if legend is not None:
+                ok.update(id(o) for o in [legend] + list(legend.findobj()))
+    return ok
+
+
+def _gap(v: Any) -> bool:
+    return v is None or (isinstance(v, numbers.Real) and math.isnan(v))
+
+
+def _same_numbers(a: Any, b: Any) -> bool:
+    """Two sequences as stored: numbers equal, a gap equal to a gap, anything else (a category, a numeric string) equal as text."""
+    a, b = list(a), list(b)
+    if len(a) != len(b):
+        return False
+    for u, v in zip(a, b):
+        if _gap(u) or _gap(v):
+            if not (_gap(u) and _gap(v)):
+                return False
+        elif isinstance(u, numbers.Real) and isinstance(v, numbers.Real) and not isinstance(u, bool) and not isinstance(v, bool):
+            if not math.isclose(float(u), float(v), rel_tol=1e-12, abs_tol=1e-300):
+                return False
+        elif str(u) != str(v):
+            return False
+    return True
+
+
+def _drawn_differently(art: Any, entry: dict[str, Any], owned: dict[int, Any], panel_ax: Any) -> bool:
+    """True when the artist a call drew no longer holds what the call recorded (the body changed it, or took it out)."""
+    try:
+        if entry["kind"] == "image":
+            return False  # compared by the caller, which knows which image belongs to which entry
+        if art is None or getattr(art, "axes", None) is None:
+            return True
+        if entry["kind"] == "bars":
+            group = [p for p in owned[id(art)][1] if hasattr(p, "get_height")]
+            return not _same_numbers([p.get_height() for p in group], [float("nan") if y is None else y for y in entry["y"]])
+        return not (_same_numbers(art.get_xdata(orig=True), entry["x"])
+                    and _same_numbers(art.get_ydata(orig=True), [float("nan") if y is None else y for y in entry["y"]]))
+    except Exception:  # noqa: BLE001 -- an artist this check cannot read is not held to the record
+        return False
+
+
+def _audit(handle: Any, fig: Any, axes: list[Any]) -> str:
+    """After the body returned, before FI writes labels, legend and limits. Every visible artist of the figure that the drawing
+    calls did not create (FI keeps their identities; a tag the body could set itself proves nothing) and that is not
+    matplotlib's own scaffolding is the body's: the panel it sits on is a custom drawing, and one that sits on no panel (a
+    ``fig.text``, ``fig.legend``, a suptitle, a colorbar) makes every panel one. A drawing call's own artist whose data the body
+    changed makes its panel one too. Returns a text only for FI's own inconsistency (the record and the calls it keeps disagree)."""
+    from matplotlib.image import AxesImage
+
+    owned = getattr(handle, "_fc_owned", None) or {}
+    all_axes, parent = _all_axes(fig)
+    where_is: dict[int, Any] = {}
+    for ax in all_axes:  # a part of a table, a legend or a tick label may not know its axes: the axes it hangs from do
+        for child in ax.get_children():
+            for obj in child.findobj():
+                where_is.setdefault(id(obj), ax)
+    ok = _scaffolding(fig, all_axes, axes, where_is) | set(owned)
+    seen: dict[int, Any] = {}
+    for root in [fig] + all_axes:
+        for obj in root.findobj():
+            seen[id(obj)] = obj
+    why: dict[Any, str] = {}
+    for obj in seen.values():
+        if id(obj) in ok or not obj.get_visible():
+            continue
+        text = hasattr(obj, "get_text")
+        if text and not str(obj.get_text()).strip():
+            continue
+        home = where_is.get(id(obj)) or getattr(obj, "axes", None)
+        where = _panel_of(home, axes, parent) if home is not None else None
+        why.setdefault(where, "text placed outside FI's calls" if text else "drawn outside FI's calls")
     for i, ax in enumerate(axes):
         _ax, rec = handle._panel(i)
-        if rec["raw"]:
-            continue
-        twins = [o for o in fig.get_axes() if o is not ax and o not in axes and tuple(o.get_position().bounds) == tuple(ax.get_position().bounds)]
-        if any(not str(a.get_gid() or "").startswith("fi:") for a in _data_artists(ax) + [b for t in twins for b in _data_artists(t)]):
-            rec["raw"], rec["raw_reason"] = True, "drawn outside FI's calls"
-        elif figure_text or _untagged_text(list(ax.texts) + [t for o in twins for t in o.texts]):
-            rec["raw"], rec["raw_reason"] = True, "text placed outside FI's calls"
+        extra = getattr(handle, "_fc_extra", {}).get(i) or {"series": [], "refs": []}
+        if len(extra["series"]) != len(rec["series"]) or len(extra["refs"]) != len(rec["refs"]):
+            return "panel %d: FI's record holds %d series and %d reference lines but the calls kept %d and %d" % (
+                i + 1, len(rec["series"]), len(rec["refs"]), len(extra["series"]), len(extra["refs"]))
+        images = [a for a, _grp in owned.values() if isinstance(a, AxesImage) and getattr(a, "axes", None) is ax]
+        for (art, _what), entry in zip(extra["series"], rec["series"]):
+            if entry["kind"] == "image":
+                shown = images.pop(0) if images else None
+                if shown is None or not _same_numbers([v for row in shown.get_array().astype(float).filled(float("nan")).tolist() for v in row],
+                                                      [float("nan") if v is None else v for row in entry["z"] for v in row]):
+                    why.setdefault(i, "drawing changed after FI's call")
+            elif _drawn_differently(art, entry, owned, ax):
+                why.setdefault(i, "drawing changed after FI's call")
+        for line, ref in zip(extra["refs"], rec["refs"]):
+            data = line.get_ydata() if ref["axis"] == "y" else line.get_xdata()
+            if getattr(line, "axes", None) is None or not len(data) or not _same_numbers([data[0]], [ref["value"]]):
+                why.setdefault(i, "drawing changed after FI's call")
+    for i in range(len(axes)):
+        _ax, rec = handle._panel(i)
+        reason = why.get(i) or why.get(None)
+        if reason and not rec["raw"]:
+            rec["raw"], rec["raw_reason"] = True, reason
+    return ""
 
 
 def _read_json(path: str) -> Any:
@@ -582,36 +717,6 @@ def _read_json(path: str) -> Any:
             return json.load(f)
     except (OSError, ValueError):
         return None
-
-
-def _finite_ys(values: Any) -> list[float]:
-    return [float(v) for v in (values or []) if _number(v)]
-
-
-def _disagreement(rec: dict[str, Any], axis: dict[str, Any]) -> str:
-    """How the line artists the recorder saw on a panel differ from the series the calls recorded (empty when they agree): every
-    series drawn as a line, points or curve is one data line of the recorder with the same y values, and a data line of the
-    recorder that no series accounts for is not an error-bar cap (marker ``_``)."""
-    left = [line for line in axis.get("lines") or [] if isinstance(line, dict) and line.get("kind") == "data"]
-    for entry in rec["series"]:
-        if entry["kind"] not in ("line", "points", "curve"):
-            continue
-        want = [float(y) for x, y in zip(entry["x"], entry["y"]) if _number(x) and _number(y)]  # the pairs the recorder keeps
-        unread = [line for line in left if line.get("y") is None]  # the recorder cannot hold it (a category x, over 20000 points)
-        for line in left:
-            ys = _finite_ys(line.get("y"))
-            if line.get("y") is not None and ys == want:
-                left.remove(line)
-                break
-        else:
-            if unread:  # compare what both sides can hold: this series is matched to a line the recorder could not read
-                left.remove(unread[0])
-                continue
-            return "panel %d: the series `%s` was drawn by a call but the figure recorder holds no line for it" % (rec["panel"], entry["id"])
-    stray = [line for line in left if line.get("marker") != "_"]
-    if stray:
-        return "panel %d: the figure recorder holds a line (%s) that no call drew" % (rec["panel"], stray[0].get("label") or "unlabelled")
-    return ""
 
 
 def _digit_texts(index: int, ax: Any, written: Any) -> list[str]:
@@ -630,29 +735,18 @@ def _digit_texts(index: int, ax: Any, written: Any) -> list[str]:
     return out
 
 
-def _write_calls(handle: Any, file: str) -> str:
+def _write_calls(handle: Any, file: str) -> None:
     """Write ``<FI_FIGURE_RECORDS>/<stem>.calls.json`` after the figure was saved: what the calls drew, and for a custom drawing
-    the digit-bearing words the recorder saw. First the record is held against the recorder's own file (``<stem>.seed<k>.json``,
-    when the house style wrote one); a disagreement is FI's own fault, nothing is written, and the text says what differs.
-    Returns that text, empty when all is well. Without a records folder there is nowhere to write and nothing to hold it to."""
+    the digit-bearing words the recorder saw. Without a records folder there is nowhere to write."""
     folder = _records_folder()
     if not folder:
-        return ""
-    stem = os.path.splitext(file)[0]
-    seed = "".join(c for c in os.environ.get("FI_REPLICATE_INDEX", "") if c.isdigit()) or "0"
-    saw = _read_json(os.path.join(folder, "%s.seed%s.json" % (stem, seed)))
-    written = (_read_json(os.path.join(folder, stem + ".json")) or {}).get("axes")
-    seen = saw.get("axes") if isinstance(saw, dict) else None
+        return
+    written = (_read_json(os.path.join(folder, os.path.splitext(file)[0] + ".json")) or {}).get("axes")
     for i, ax in enumerate(handle.axes):
         _ax, rec = handle._panel(i)
         if rec["raw"]:
             rec["texts_raw"] = _digit_texts(i, ax, written)
-        elif isinstance(seen, list) and i < len(seen) and isinstance(seen[i], dict):
-            why = _disagreement(rec, seen[i])
-            if why:
-                return why
     handle.write(os.path.join(folder, file))
-    return ""
 
 
 def _calls_summary(record: dict[str, Any]) -> dict[str, Any]:

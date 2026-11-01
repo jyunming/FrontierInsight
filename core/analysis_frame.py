@@ -137,7 +137,7 @@ def plan_of(design: dict[str, Any]) -> dict[str, Any]:
         "known": _known_values(protocol, c),
         "search": c.search is not None,
         "figures": {f.id: {"file": f.file, "shows": list(f.shows), "x": f.x, "series": f.series, "panels": f.panels,
-                           **_result_labels(c, f.shows), **_result_info(c, f.shows), **_panel_words(c, f.panels, (f.x, f.series))}
+                           **_result_labels(c, f.shows), **_result_info(c), **_panel_words(c, f.panels, (f.x, f.series))}
                     for f in c.figures if f.declared},
     }
 
@@ -166,15 +166,15 @@ def _result_labels(c: Any, shows: Any) -> dict[str, Any]:
     return {"result_labels": got} if got else {}
 
 
-def _result_info(c: Any, shows: Any) -> dict[str, Any]:
-    """``{"result_info": {id: {"unit", "description"}}}`` for the declared results a figure shows that carry a unit or an estimand in
-    the plan: what FI writes an axis label from (``Figure.finish``) when the plan gives no label."""
+def _result_info(c: Any) -> dict[str, Any]:
+    """``{"result_info": {id: {"label", "unit", "description"}}}`` for every result and derived quantity of the plan that carries
+    a label, a unit or an estimand: what FI writes an axis label from (``Figure.finish``) for any id a panel draws."""
     got = {}
     for r in list(c.results) + list(c.derived):
-        if str(r.id) in {str(i) for i in shows}:
-            info = {k: str(v) for k, v in (("unit", getattr(r, "unit", "")), ("description", getattr(r, "estimand", ""))) if v}
-            if info:
-                got[str(r.id)] = info
+        info = {k: str(v) for k, v in (("label", getattr(r, "label", "")), ("unit", getattr(r, "unit", "")),
+                                       ("description", getattr(r, "estimand", ""))) if v}
+        if info:
+            got[str(r.id)] = info
     return {"result_info": got} if got else {}
 
 
@@ -186,7 +186,8 @@ def _panel_words(c: Any, panels: int, axes: tuple[Any, ...] = ()) -> dict[str, A
         got = {str(a): c.labels[str(a)] for a in axes if a and c.labels.get(str(a))}
         return {"labels": got} if got else {}
     settings = {str(k): list(v) for k, v in {**c.settings.compared, **c.settings.in_each_run}.items()}
-    return {"settings": settings, "labels": {k: c.labels[k] for k in settings if c.labels.get(k)}}
+    named = {**settings, **{str(a): [] for a in axes if a}}
+    return {"settings": settings, "labels": {k: c.labels[k] for k in named if c.labels.get(k)}}
 
 
 def body_names(plan: dict[str, Any]) -> list[str]:
