@@ -411,6 +411,8 @@ def _reference(calls, panel, a, fmt, ctx):
     if len(found) != 1 or not _finite(found[0].get("value")) or found[0].get("axis") not in ("x", "y"):
         return None
     r = found[0]
+    if r.get("source") == "stated in the figure":  # a constant the drawing typed: where the line is, and nothing about why
+        return f"a line is drawn at {r['axis']} = {fmt(float(r['value']))}{_where(calls, panel)}", {}
     return (f"a reference line{' for ' + _label(r) if r.get('label') else ''} is drawn at "
             f"{r['axis']} = {fmt(float(r['value']))}{_where(calls, panel)}", {})
 
@@ -420,15 +422,27 @@ _MEANING = {"ci95": "95% confidence interval", "sd": "standard deviation", "rang
 
 def _errorbars(calls, panel, a, fmt, ctx):
     s = _series(panel, a["series"])
-    if s is None or not _plain(s) or not isinstance(s.get("yerr"), list):
+    if s is None or not _plain(s):
         return None
-    meaning = s.get("yerr_meaning")  # the drawing call states it; absent or ``other`` is not a claim
+    meaning = s.get("yerr_meaning")  # the drawing call states it (FI checked it against the table); absent or ``other`` is not a claim
     if meaning not in _MEANING:
         return None
-    widths = [abs(float(w)) for w in s["yerr"] if _finite(w)]
-    if not widths or not any(w > 0 for w in widths):
+    if isinstance(s.get("yerr_lo"), list) and isinstance(s.get("yerr_hi"), list):
+        lo, hi = s["yerr_lo"], s["yerr_hi"]
+    elif isinstance(s.get("yerr"), list):  # a record from before the two sides were kept
+        lo = hi = s["yerr"]
+    else:
         return None
-    return f"{_label(s)} is drawn with error bars showing the {_MEANING[meaning]}{_where(calls, panel)}", {}
+    lo_w = [abs(float(w)) for w in lo if _finite(w)]
+    hi_w = [abs(float(w)) for w in hi if _finite(w)]
+    if not any(w > 0 for w in lo_w + hi_w):
+        return None
+    base = f"{_label(s)} is drawn with error bars showing the {_MEANING[meaning]}"
+    if lo == hi:
+        return f"{base}{_where(calls, panel)}", {}
+    # uneven bars: how far they reach below and above the points, at most
+    return (f"{base}, reaching from -{fmt(max(lo_w, default=0.0))} to +{fmt(max(hi_w, default=0.0))} around the points at most"
+            f"{_where(calls, panel)}", {})
 
 
 def _band(calls, panel, a, fmt, ctx):

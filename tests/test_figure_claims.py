@@ -131,6 +131,21 @@ def test_reference():
     assert ev(c, "reference", ref="r2") is None
 
 
+def test_uneven_errorbars_and_stated_reference_lines():
+    lo_hi = {"yerr": None, "yerr_lo": [0.1, 0.2], "yerr_hi": [0.3, 0.5], "yerr_meaning": "ci95"}
+    c = _calls(_panel([_series("a", [1, 2], [1, 2], **lo_hi)]))
+    text = ev(c, "errorbars", series="a")[0]
+    assert "95% confidence interval" in text and "-0.2" in text and "+0.5" in text
+    other = _calls(_panel([_series("a", [1, 2], [1, 2], **{**lo_hi, "yerr_meaning": "other"})]))
+    assert ev(other, "errorbars", series="a") is None
+    same = _calls(_panel([_series("a", [1, 2], [1, 2], **{**lo_hi, "yerr_hi": [0.1, 0.2]})]))
+    assert "reaching" not in ev(same, "errorbars", series="a")[0]
+    ref = {"id": "refline1", "axis": "y", "value": 1.0, "label": "Reference line", "source": "stated in the figure"}
+    c = _calls(_panel([_series("a", [1, 2], [1, 2])], refs=[ref]))
+    got = ev(c, "reference", ref="refline1")[0]
+    assert "y = 1" in got and "Reference line" not in got and "limit" not in got and got.startswith("a line is drawn")
+
+
 def test_errorbars():
     c = _calls(_panel([_series("a", [1, 2], [1, 2], yerr=[0.1, 0.2], yerr_meaning="sd")]))
     assert "standard deviation" in ev(c, "errorbars", series="a")[0]

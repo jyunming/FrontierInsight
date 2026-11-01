@@ -111,7 +111,7 @@ def test_ref_unknown_id_raises_naming_known():
     h.ref(0, "limit")
     h.ref(1, "limit", axis="x")
     r = h.record()["panels"][0]["refs"][0]
-    assert r == {"id": "limit", "axis": "y", "value": 3.0, "label": "upper limit"}
+    assert r == {"id": "limit", "axis": "y", "value": 3.0, "label": "upper limit", "source": "plan"}
     assert h.axes[0].lines[-1].get_ydata()[0] == 3.0
     with pytest.raises(ValueError) as e:
         h.ref(0, "bound")
@@ -252,13 +252,13 @@ def test_band_records_x_and_needs_its_series():
 
 def test_error_bars_record_their_meaning():
     h = _Host()
-    h.line(0, "fast", [1, 2], [1.0, 2.0], "growth", yerr=[0.1, 0.2], yerr_meaning="ci95")
+    h.line(0, "fast", [1, 2], [1.0, 2.0], "growth", yerr=[0.1, 0.2], yerr_meaning="range")
     h.points(0, "slow", [1, 2], [1.0, 2.5], "growth", yerr=[0.1, 0.2])
     h.bars(1, "fast", [1, 2], [1.0, 2.0], "growth", yerr=[-0.1, 0.2], yerr_meaning="sd")
     h.line(1, "slow", [1, 2], [1.0, 2.0], "growth")
     r = h.record()["panels"]
-    assert [s["yerr_meaning"] for s in r[0]["series"]] == ["ci95", "other"]
-    assert r[1]["series"][0]["yerr_meaning"] == "sd" and r[1]["series"][0]["yerr"] == [0.1, 0.2]
+    assert [s["yerr_meaning"] for s in r[0]["series"]] == ["other", "other"]  # range cannot be checked against the table
+    assert r[1]["series"][0]["yerr_meaning"] == "other" and r[1]["series"][0]["yerr"] == [0.1, 0.2]  # sd typed, table says 0
     assert r[1]["series"][1]["yerr_meaning"] is None
     with pytest.raises(ValueError) as e:
         h.line(0, "fast", [3], [1.0], "growth", yerr=[0.1], yerr_meaning="stderr")
@@ -492,3 +492,98 @@ def test_image_panel_labels():
     p = h.record()["panels"][0]
     assert h.axes[0].get_ylabel() == "row" and h.axes[0].get_xlabel() == "column"
     assert p["y"]["label"] == "Growth (1/h)" and h.axes[0].get_legend() is None
+
+
+class _TableByX(_Table):
+    """Two settings with their own mean, 95% interval and sd (the widths a drawing's bars may be checked against)."""
+
+    def keys(self):
+        return ["size=1", "size=2"]
+
+    def mean(self, name, key):
+        return {"size=1": 2.0, "size=2": 4.0}[key]
+
+    def interval(self, name, key):
+        return {"size=1": (1.5, 3.0), "size=2": (3.0, 6.0)}[key]
+
+    def sd(self, name, key):
+        return {"size=1": 0.5, "size=2": 1.0}[key]
+
+
+def _host_by_x(panels=2):
+    h = _Host(panels)
+    h.table = _TableByX()
+    return h
+
+
+def test_uneven_error_bars_are_recorded_and_their_meaning_is_checked_against_the_table():
+    h = _host_by_x()
+    h.line(0, "fast", [1, 2], [2.0, 4.0], "growth", yerr=([0.5, 1.0], [1.0, 2.0]), yerr_meaning="ci95")
+    h.points(0, "slow", [1, 2], [2.0, 4.0], "growth", yerr=([0.1, 0.2], [0.3, 0.4]), yerr_meaning="ci95")
+    h.bars(1, "fast", [1, 2], [2.0, 4.0], "growth", yerr=[0.5, 1.0], yerr_meaning="sd")
+    h.line(1, "slow", [1, 2], [2.0, 4.0], "growth", yerr="ci95")
+    h.points(1, "fast", [1, 2], [2.0, 4.0], "growth", yerr="sd")
+    a, b = h.record()["panels"]
+    s = a["series"]
+    assert (s[0]["yerr_lo"], s[0]["yerr_hi"], s[0]["yerr"], s[0]["yerr_meaning"]) == ([0.5, 1.0], [1.0, 2.0], None, "ci95")
+    assert s[1]["yerr_meaning"] == "other" and s[1]["yerr_lo"] == [0.1, 0.2]  # widths the table does not give: no meaning claim
+    assert (b["series"][0]["yerr"], b["series"][0]["yerr_lo"], b["series"][0]["yerr_meaning"]) == ([0.5, 1.0], [0.5, 1.0], "sd")
+    assert (b["series"][1]["yerr_lo"], b["series"][1]["yerr_hi"], b["series"][1]["yerr_meaning"]) == ([0.5, 1.0], [1.0, 2.0], "ci95")
+    assert (b["series"][2]["yerr_lo"], b["series"][2]["yerr_meaning"]) == ([0.5, 1.0], "sd")
+    with pytest.raises(ValueError):
+        h.line(0, "fast", [1, 2], [2.0, 4.0], "growth", yerr="ci95", yerr_meaning="sd")
+    # the drawn bars reach the recorded sides: the y limits hold the upper ends
+    h.finish({}, {})
+    assert h.axes[0].get_ylim()[1] > 6.0
+
+
+def test_ref_has_three_sources_and_a_stated_value_gets_a_neutral_label():
+    h = _host_by_x()
+    h.ref(0, "limit")
+    h.ref(0, at="growth", key="size=2")
+    h.ref(0, value=1.5)
+    h.ref(1, value=7, axis="x")
+    refs = h.record()["panels"][0]["refs"]
+    assert [r["source"] for r in refs] == ["plan", "table", "stated in the figure"]
+    assert refs[1]["value"] == 4.0 and refs[1]["axis"] == "y"
+    assert refs[2]["value"] == 1.5 and refs[2]["label"] == "Reference line"
+    assert len({r["id"] for r in refs}) == 3
+    with pytest.raises(ValueError):
+        h.ref(0, "limit", value=1.0)
+    with pytest.raises(ValueError):
+        h.ref(0, value=math.nan)
+    with pytest.raises(ValueError):
+        h.ref(0)
+    h.bars(1, "fast", ["a", "b"], [1.0, 2.0], "growth")
+    with pytest.raises(ValueError):
+        h.ref(1, value=1.0, axis="x")  # categories have no coordinate
+
+
+def test_note_without_a_position_goes_to_a_free_corner_away_from_the_legend():
+    h = _host_by_x(1)
+    h.line(0, "fast", [1, 2, 3], [1.0, 2.0, 4.0], "growth")  # data runs from the lower left to the upper right
+    h.note(0, what="mean growth: {growth}", key="size=1")
+    h.note(0, "runs: {growth}", form="n", key="size=1")
+    n = h.record()["panels"][0]["notes"]
+    assert n[0]["x"] is None and n[0]["text"] == "mean growth: 2" and n[0]["corner"] is None
+    h.finish({}, {})
+    n = h.record()["panels"][0]["notes"]
+    legend = h._fc_extra[0]["legend_corner"]
+    assert n[0]["corner"] in ("upper left", "lower right") and n[0]["corner"] != legend
+    assert n[1]["corner"] != n[0]["corner"] and n[1]["corner"] != legend
+    pos = h._fc_extra[0]["notes"][0].get_position()
+    assert pos[0] in (0.02, 0.98) and h._fc_extra[0]["notes"][0].get_transform() is h.axes[0].transAxes
+    h.derived_ids = ["slope"]
+    h.table.mean = lambda name, key: 0.5
+    h.note(0, 1.0, 1.0, "fit: {slope}", key="size=1")
+    assert h.record()["panels"][0]["notes"][2]["text"] == "fit: 0.5"
+
+
+def test_band_around_a_step_line_follows_the_steps():
+    h = _host_by_x(1)
+    h.line(0, "fast", [1, 2, 3], [1.0, 2.0, 3.0], "growth", step=True)
+    h.line(0, "slow", [1, 2, 3], [1.0, 2.0, 3.0], "growth")
+    stepped = h.band(0, "fast", [1, 2, 3], [0.0, 1.0, 2.0], [2.0, 3.0, 4.0], "growth", "sd")
+    plain = h.band(0, "slow", [1, 2, 3], [0.0, 1.0, 2.0], [2.0, 3.0, 4.0], "growth", "sd")
+    assert any(abs(x - 2.0) < 1e-9 and abs(y - 0.0) < 1e-9 for x, y in stepped.get_paths()[0].vertices)  # the lo of x=1 holds up to x=2
+    assert not any(abs(x - 2.0) < 1e-9 and abs(y - 0.0) < 1e-9 for x, y in plain.get_paths()[0].vertices)

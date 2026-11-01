@@ -39,6 +39,8 @@ from pathlib import Path
 MEANINGS = ("ci95", "sd", "range", "other")
 NOTE_FORMS = ("mean", "n", "low", "high")
 IDENTICAL_RTOL = 1e-12  # two series equal within this relative tolerance are one line to the reader
+BAR_RTOL = 1e-3  # error-bar widths the body typed match the table's own widths within this relative tolerance (plus 1e-12 absolute)
+REF_STATED = "stated in the figure"  # the source of a reference line drawn at a literal value
 
 
 def _finite(v):
@@ -112,6 +114,41 @@ def _vector(values, what, strict=True):
     if bad:
         raise ValueError("`%s` must hold numbers (use None for a missing value, which is drawn as a gap); got %r" % (what, bad[0]))
     return out
+
+
+def _is_pair(values):
+    """True for ``(lo_widths, hi_widths)``: exactly two members that are themselves sequences (a plain two-point list is not)."""
+    try:
+        seq = list(values)
+    except TypeError:
+        return False
+    return len(seq) == 2 and all(hasattr(m, "__len__") and not isinstance(m, (str, bytes)) for m in seq)
+
+
+def _sides(entry):
+    """``(lower widths, upper widths)`` of a series' error bars from its record, ``(None, None)`` without any (an older record
+    holds only the symmetric ``yerr``)."""
+    if entry.get("yerr_lo") is not None or entry.get("yerr_hi") is not None:
+        return entry.get("yerr_lo"), entry.get("yerr_hi")
+    if entry.get("yerr") is not None:
+        return entry["yerr"], entry["yerr"]
+    return None, None
+
+
+def _close_width(a, b):
+    """Two bar widths equal within ``BAR_RTOL``; a gap equals only a gap."""
+    if a is None or b is None:
+        return a is b
+    return abs(a - b) <= BAR_RTOL * max(abs(a), abs(b)) + 1e-12
+
+
+def _sample_sd(values):
+    """Sample standard deviation (n - 1) of the finite values; None for fewer than two."""
+    v = [float(x) for x in values if _finite(x)]
+    if len(v) < 2:
+        return None
+    m = sum(v) / len(v)
+    return math.sqrt(sum((x - m) ** 2 for x in v) / (len(v) - 1))
 
 
 def _gaps(values):
@@ -256,6 +293,67 @@ class FigureCalls:
             raise ValueError("this figure's plan gives no x: pass x=(\"id of a setting or a result\", values) to say what x is")
         return ident, x
 
+    def _setting_key(self, x_id, x):
+        """The table's key of the setting where ``x_id`` is ``x`` (None when no key, or more than one, says so)."""
+        found = []
+        table = getattr(self, "table", None)
+        for key in (list(table.keys()) if table is not None else []):
+            for piece in str(key).split(","):
+                name, _, text = piece.partition("=")
+                if name.strip() != x_id:
+                    continue
+                try:
+                    same = float(text) == float(x)
+                except (TypeError, ValueError):
+                    same = text.strip() == str(x)
+                if same:
+                    found.append(key)
+        return found[0] if len(found) == 1 else None
+
+    def _table_widths(self, meaning, what, x_id, xs):
+        """``(lower, upper)`` lists of the widths FI reads from the table for ``meaning`` (ci95 or sd) of result ``what`` at each
+        x (a setting's value); an entry is None where the table gives none. ``None`` when the table cannot say at all."""
+        table = getattr(self, "table", None)
+        if table is None or what not in self._results() or x_id not in (getattr(self, "settings", None) or []):
+            return None
+        lo, hi = [], []
+        for x in xs:
+            a = b = None
+            key = None if x is None else self._setting_key(x_id, x)
+            if key is not None:
+                try:
+                    if meaning == "ci95":
+                        m, (u, v) = table.mean(what, key), table.interval(what, key)
+                        if _finite(m) and _finite(u) and _finite(v):
+                            a, b = m - u, v - m
+                    else:
+                        sd = table.sd(what, key) if hasattr(table, "sd") else _sample_sd(table.values(what, key))
+                        a = b = float(sd) if _finite(sd) else None
+                except Exception:  # noqa: BLE001 -- a read the table refuses is a width it does not give
+                    a = b = None
+            lo.append(a)
+            hi.append(b)
+        return (lo, hi) if any(v is not None for v in lo + hi) else None
+
+    def _checked_meaning(self, meaning, what, x_id, xs, lo, hi):
+        """What error bars of typed widths may be called. ``ci95``/``sd`` stay only when the widths equal the table's own for
+        that meaning at the same points (``BAR_RTOL``); ``range`` cannot be checked, and a mismatch or an unreadable table both
+        give ``other`` (the bars are drawn, no claim about their meaning is offered)."""
+        if meaning not in ("ci95", "sd"):
+            return "other"
+        got = self._table_widths(meaning, what, x_id, xs)
+        if got is None:
+            return "other"
+        compared = 0
+        for mine, theirs in ((lo, got[0]), (hi, got[1])):
+            for a, b in zip(mine, theirs):
+                if b is None:
+                    continue
+                compared += 1
+                if not _close_width(a, b):
+                    return "other"
+        return meaning if compared else "other"
+
     def _add_series(self, panel, kind, series, x, y, what, yerr, yerr_meaning, step=False):
         """Check a series call and draw it; the record gets the series only if it was drawn."""
         ax, rec = self._panel(panel)
@@ -267,21 +365,39 @@ class FigureCalls:
         xs, ys = _vector(x, "x", strict=False), _vector(y, "y")
         if len(xs) != len(ys):
             raise ValueError("x has %d values and y has %d: a series needs one y for each x" % (len(xs), len(ys)))
-        errs = None
-        if yerr is not None:
-            errs = [None if e is None else abs(e) for e in _vector(yerr, "yerr")]
-            if len(errs) != len(ys):
-                raise ValueError("yerr has %d values and y has %d: one bar half-width for each y" % (len(errs), len(ys)))
+        lo = hi = None
+        if isinstance(yerr, str):
+            if yerr not in ("ci95", "sd"):
+                raise ValueError("`yerr=%r`: pass bar widths, a (lower, upper) pair of widths, or \"ci95\" or \"sd\" for FI to read "
+                                 "them from the table" % (yerr,))
+            if yerr_meaning not in ("other", yerr):
+                raise ValueError("`yerr=%r` already says what the bars are; drop `yerr_meaning=%r`" % (yerr, yerr_meaning))
+            if what not in self._results() or x_id not in (getattr(self, "settings", None) or []):
+                raise ValueError("`yerr=%r` reads the table: `what` must be a result of the plan and x a setting; give the widths "
+                                 "yourself otherwise" % (yerr,))
+            got = self._table_widths(yerr, what, x_id, xs)
+            if got is None:
+                raise ValueError("the table gives no %s of `%s` at these x values" % (yerr, what))
+            (lo, hi), yerr_meaning = got, yerr
+        elif yerr is not None:
+            pair = _is_pair(yerr)
+            lo = [None if e is None else abs(e) for e in _vector(yerr[0] if pair else yerr, "yerr")]
+            hi = [None if e is None else abs(e) for e in _vector(yerr[1], "yerr")] if pair else list(lo)
+            if len(lo) != len(ys) or len(hi) != len(ys):
+                raise ValueError("yerr has %d values and y has %d: one bar half-width for each y (a pair has one list of lower and "
+                                 "one of upper widths)" % (len(lo), len(ys)))
+            yerr_meaning = self._checked_meaning(yerr_meaning, what, x_id, xs, lo, hi)
         legend = self._label_of(series)
         with _undone(ax, rec):
             self._set_x(rec, x_id)
             self._set_y(rec, what)
             arts = self._draw_series(ax, kind, xs, ys, legend, step)
             self._tag(arts)
-            if errs is not None:
-                self._tag(self._errorbar(ax, xs, ys, errs))
-            rec["series"].append({"id": series, "label": legend, "kind": kind, "step": bool(step), "x": xs, "y": ys, "yerr": errs,
-                                  "yerr_meaning": yerr_meaning if errs is not None else None, "merged_with": []})
+            if lo is not None:
+                self._tag(self._errorbar(ax, xs, ys, lo, hi))
+            rec["series"].append({"id": series, "label": legend, "kind": kind, "step": bool(step), "x": xs, "y": ys,
+                                  "yerr": lo if lo is not None and _same(lo, hi) else None, "yerr_lo": lo, "yerr_hi": hi,
+                                  "yerr_meaning": yerr_meaning if lo is not None else None, "merged_with": []})
             self._remember(panel, "series", arts[0] if arts else None, what)
         return arts
 
@@ -295,7 +411,9 @@ class FigureCalls:
 
     def line(self, panel, series, x, y, what, yerr=None, step=False, yerr_meaning="other"):
         """A line (a step curve with ``step=True``) of the plan's ``series``, ``y`` being the result ``what``. ``yerr`` are the
-        half-widths of error bars and ``yerr_meaning`` says what they are: one of ci95, sd, range, other."""
+        half-widths of error bars: one list (both sides), a pair ``(lower, upper)`` of lists, or ``"ci95"`` / ``"sd"`` for FI to
+        read the widths from the table at each x (x a setting). ``yerr_meaning`` says what typed widths are (ci95, sd, range,
+        other); FI keeps ci95 or sd only if the widths equal the table's own (relative 1e-3), else the meaning is ``other``."""
         return self._add_series(panel, "line", series, x, y, what, yerr, yerr_meaning, step)
 
     def points(self, panel, series, x, y, what, yerr=None, yerr_meaning="other"):
@@ -307,9 +425,10 @@ class FigureCalls:
         return self._add_series(panel, "bars", series, x, y, what, yerr, yerr_meaning)
 
     @staticmethod
-    def _errorbar(ax, xs, ys, errs):
+    def _errorbar(ax, xs, ys, lo, hi):
         nan = float("nan")
-        return ax.errorbar(xs, [nan if v is None else v for v in ys], yerr=[nan if e is None else e for e in errs],
+        return ax.errorbar(xs, [nan if v is None else v for v in ys],
+                           yerr=[[nan if e is None else e for e in lo], [nan if e is None else e for e in hi]],
                            fmt="none", ecolor="0.3", capsize=2)
 
     def curve(self, panel, label, xs, ys, source="computed in the figure"):
@@ -326,7 +445,7 @@ class FigureCalls:
             self._tag(arts)
             n = sum(1 for e in rec["series"] if e["kind"] == "curve") + 1
             rec["series"].append({"id": "curve%d" % n, "label": text, "kind": "curve", "step": False, "x": x, "y": y, "yerr": None,
-                                  "yerr_meaning": None, "merged_with": [], "source": str(source)})
+                                  "yerr_lo": None, "yerr_hi": None, "yerr_meaning": None, "merged_with": [], "source": str(source)})
             self._remember(panel, "series", arts[0] if arts else None, "other")
         return arts
 
@@ -353,7 +472,7 @@ class FigureCalls:
                             vmin=min(nums) if nums else None, vmax=max(nums) if nums else None)
             self._tag(art)
             rec["series"].append({"id": what, "label": self._label_of(what), "kind": "image", "step": False, "x": cols, "y": rws,
-                                  "yerr": None, "yerr_meaning": None, "merged_with": [], "z": rows})
+                                  "yerr": None, "yerr_lo": None, "yerr_hi": None, "yerr_meaning": None, "merged_with": [], "z": rows})
             self._remember(panel, "series", None, what)
         return art
 
@@ -380,56 +499,28 @@ class FigureCalls:
         with _undone(ax, rec):
             self._set_x(rec, x_id)
             self._set_y(rec, what)
-            art = ax.fill_between(xs, _gaps(los), _gaps(his), alpha=0.25, linewidth=0)
+            stepped = any(e["step"] for e in drawn if e["x"] == xs)  # the edges of a band follow the steps of its line
+            art = ax.fill_between(xs, _gaps(los), _gaps(his), alpha=0.25, linewidth=0, step="post" if stepped else None)
             self._tag(art)
             rec["bands"].append({"series": series, "x": xs, "lo": los, "hi": his, "meaning": meaning})
         return art
 
-    def ref(self, panel, ref_id, axis="y"):
-        """A reference line at a value FI holds (a plan reference), labelled with the plan's words."""
-        ax, rec = self._panel(panel)
-        refs = getattr(self, "references", None) or {}
-        if ref_id not in refs:
-            raise ValueError("`%s` is not a reference the plan holds; the references are: %s" % (ref_id, ", ".join(sorted(map(str, refs))) or "(none)"))
-        if axis not in ("x", "y"):
-            raise ValueError("`axis=%r` must be \"x\" or \"y\"" % (axis,))
-        got = refs[ref_id]
-        value = got.get("value") if isinstance(got, dict) else got
-        if not _finite(value):
-            raise ValueError("the reference `%s` has no number to draw" % ref_id)
-        label = str(got.get("label")) if isinstance(got, dict) and got.get("label") else self._label_of(ref_id)
-        draw = ax.axhline if axis == "y" else ax.axvline
-        art = draw(float(value), linestyle=":", color="0.2", label=label)
-        self._tag(art)
-        rec["refs"].append({"id": ref_id, "axis": axis, "value": float(value), "label": label})
-        self._remember(panel, "refs", art)
-        return art
+    def _next_line_id(self, rec):
+        return "refline%d" % (sum(1 for r in rec["refs"] if r.get("source") != "plan") + 1)
 
-    def note(self, panel, x, y, what, form="mean", key=None):
-        """Text in the figure: ``what`` is digit-free words with one ``{result id}`` where FI writes the number it reads from the
-        table (``"mean growth: {growth}"``); ``form`` is mean, n, low or high; ``key`` is the setting (optional when the study
-        has one)."""
-        ax, rec = self._panel(panel)
-        if not (_finite(x) and _finite(y)):
-            raise ValueError("a note's x and y must be finite numbers, got %r and %r" % (x, y))
+    def _table_read(self, ident, form, key):
+        """``(value, key)``: the ``form`` (mean, n, low, high) of result ``ident`` at setting ``key`` from the table (``key``
+        optional when the study has one setting); raises a plain ``ValueError`` where the table has none."""
+        table = getattr(self, "table", None)
+        known = self._results() + list(getattr(self, "derived_ids", []) or [])
+        if ident not in known:
+            raise ValueError("`%s` is not a result of the plan; the results are: %s" % (ident, ", ".join(sorted(known)) or "(none)"))
         if form not in NOTE_FORMS:
             raise ValueError("`form=%r` is not one of: %s" % (form, ", ".join(NOTE_FORMS)))
-        text = str(what)
-        if text.count("{") != 1 or text.count("}") != 1 or text.index("{") > text.index("}"):
-            raise ValueError("a note holds its words and exactly one `{result id}` where the number goes, for example "
-                             "'mean growth: {growth}'; got %r" % text)
-        ident = text[text.index("{") + 1:text.index("}")]
-        words = text[:text.index("{")] + text[text.index("}") + 1:]
-        if any(ch.isdigit() for ch in words):
-            raise ValueError("a note's words cannot hold digits (%r): FI writes the number from the table; write the words and "
-                             "`{%s}` where the number goes" % (words.strip(), ident))
-        table = getattr(self, "table", None)
-        if ident not in self._results():
-            raise ValueError("`%s` is not a result of the plan; the results are: %s" % (ident, ", ".join(sorted(self._results())) or "(none)"))
         keys = list(table.keys())
         if key is None:
             if len(keys) != 1:
-                raise ValueError("say which setting the note reads with `key=`; the settings are: %s" % (", ".join(keys) or "(none)"))
+                raise ValueError("say which setting is read with `key=`; the settings are: %s" % (", ".join(keys) or "(none)"))
             key = keys[0]
         if form == "mean":
             value = table.mean(ident, key)
@@ -439,11 +530,81 @@ class FigureCalls:
             value = table.interval(ident, key)[0 if form == "low" else 1]
         if value is None or not _finite(value):
             raise ValueError("the table has no %s of `%s` at setting %s to write" % (form, ident, key))
+        return value, key
+
+    def ref(self, panel, ref_id=None, axis="y", *, at=None, value=None, key=None, form="mean"):
+        """A reference line, one of three: a plan reference ``ref_id`` (labelled with the plan's words); ``at=<result id>`` (FI
+        reads the line's value from the table: ``form`` mean, n, low or high at setting ``key``); or ``value=<number>``, a
+        constant drawn as stated (recorded as "stated in the figure", labelled "Reference line" by FI, and claimed only as a
+        line at that coordinate)."""
+        ax, rec = self._panel(panel)
+        if axis not in ("x", "y"):
+            raise ValueError("`axis=%r` must be \"x\" or \"y\"" % (axis,))
+        if sum(v is not None for v in (ref_id, at, value)) != 1:
+            raise ValueError("a reference line is one of: a reference id of the plan, `at=<result id>` (FI reads the value from "
+                             "the table), or `value=<number>` for a constant")
+        if ref_id is not None:
+            refs = getattr(self, "references", None) or {}
+            if ref_id not in refs:
+                raise ValueError("`%s` is not a reference the plan holds; the references are: %s" % (ref_id, ", ".join(sorted(map(str, refs))) or "(none)"))
+            got = refs[ref_id]
+            number = got.get("value") if isinstance(got, dict) else got
+            if not _finite(number):
+                raise ValueError("the reference `%s` has no number to draw" % ref_id)
+            label = str(got.get("label")) if isinstance(got, dict) and got.get("label") else self._label_of(ref_id)
+            ident, source = ref_id, "plan"
+        elif at is not None:
+            number, used = self._table_read(at, form, key)
+            words = {"mean": "Mean", "n": "Number of runs", "low": "Lower 95% bound", "high": "Upper 95% bound"}[form]
+            label = "%s of %s at %s" % (words, self._label_of(at), used)
+            ident, source = self._next_line_id(rec), "table"
+        else:
+            if not _finite(value):
+                raise ValueError("`value=%r` must be a finite number" % (value,))
+            if axis == "x" and any(isinstance(v, str) for e in rec["series"] for v in e["x"]):
+                raise ValueError("panel %d has categories on its x axis, which have no coordinate to draw a line at; use axis=\"y\"" % panel)
+            number, label = value, "Reference line"
+            ident, source = self._next_line_id(rec), REF_STATED
+        draw = ax.axhline if axis == "y" else ax.axvline
+        art = draw(float(number), linestyle=":", color="0.2", label=label)
+        self._tag(art)
+        rec["refs"].append({"id": ident, "axis": axis, "value": float(number), "label": label, "source": source})
+        self._remember(panel, "refs", art)
+        return art
+
+    def note(self, panel, x=None, y=None, what=None, form="mean", key=None):
+        """Text in the figure: ``what`` is digit-free words with one ``{result id}`` where FI writes the number it reads from the
+        table (``"mean growth: {growth}"``); ``form`` is mean, n, low or high; ``key`` is the setting (optional when the study
+        has one). ``x`` and ``y`` (data coordinates) are optional: left out, FI puts the note in the corner of the axes the data
+        and the legend leave free. The id may also be a derived quantity the host lists."""
+        ax, rec = self._panel(panel)
+        if what is None and isinstance(x, str) and y is None:  # note(panel, "words {id}")
+            x, what = None, x
+        if what is None:
+            raise ValueError("a note needs its words: `what=\"mean growth: {growth}\"`")
+        placed = x is not None or y is not None
+        if placed and not (_finite(x) and _finite(y)):
+            raise ValueError("a note's x and y must be finite numbers (or both left out), got %r and %r" % (x, y))
+        text = str(what)
+        if text.count("{") != 1 or text.count("}") != 1 or text.index("{") > text.index("}"):
+            raise ValueError("a note holds its words and exactly one `{result id}` where the number goes, for example "
+                             "'mean growth: {growth}'; got %r" % text)
+        ident = text[text.index("{") + 1:text.index("}")]
+        words = text[:text.index("{")] + text[text.index("}") + 1:]
+        if any(ch.isdigit() for ch in words):
+            raise ValueError("a note's words cannot hold digits (%r): FI writes the number from the table; write the words and "
+                             "`{%s}` where the number goes" % (words.strip(), ident))
+        value, _used = self._table_read(ident, form, key)
         number = "%d" % value if form == "n" else "%.4g" % value
         shown = text[:text.index("{")] + number + text[text.index("}") + 1:]
-        art = ax.text(float(x), float(y), shown)
+        art = ax.text(float(x), float(y), shown) if placed else ax.text(0.5, 0.5, shown, transform=ax.transAxes)
         self._tag(art)
-        rec["notes"].append({"id": ident, "text": shown, "x": float(x), "y": float(y)})
+        self._state()
+        self._fc_extra.setdefault(panel, {"series": [], "refs": []}).setdefault("notes", []).append(art)
+        entry = {"id": ident, "text": shown, "x": float(x) if placed else None, "y": float(y) if placed else None}
+        if not placed:
+            entry["corner"] = None  # FI chooses it in ``finish``
+        rec["notes"].append(entry)
         return art
 
     # ---- labels, legend and limits: FI's, never the body's --------------------------------------------------------------
@@ -493,6 +654,7 @@ class FigureCalls:
             self._write_labels(ax, rec, spec_labels, result_info, changed)
             self._write_limits(ax, rec, changed)
             placed = self._write_legend(ax, i, rec, spec_labels, result_info, changed)
+            self._place_notes(ax, i, rec)
             if placed is not None:
                 outside.append(placed)
         for ax, handles, texts in outside:  # after every label is written, so the neighbours' extents are known
@@ -523,7 +685,8 @@ class FigureCalls:
             for j in firsts:
                 f = rec["series"][j]
                 if (f["kind"], f["step"], what_of(j)) == (e["kind"], e["step"], what_of(i)) \
-                        and _same(f["x"], e["x"]) and _same(f["y"], e["y"]) and _same(f["yerr"], e["yerr"]):
+                        and _same(f["x"], e["x"]) and _same(f["y"], e["y"]) \
+                        and _same(_sides(f)[0], _sides(e)[0]) and _same(_sides(f)[1], _sides(e)[1]):
                     f["merged_with"].append(e["id"])
                     store["twins"].add(i)
                     break
@@ -584,10 +747,13 @@ class FigureCalls:
         yv, xv = [], []
         for e in series:
             yv += [v for v in e["y"] if v is not None]
-            if e["yerr"] is not None:
-                for v, d in zip(e["y"], e["yerr"]):
-                    if v is not None and d is not None:
-                        yv += [v - d, v + d]
+            lo, hi = _sides(e)
+            if lo is not None:
+                for v, dl, dh in zip(e["y"], lo, hi):
+                    if v is not None and dl is not None:
+                        yv.append(v - dl)
+                    if v is not None and dh is not None:
+                        yv.append(v + dh)
             xv += [v for v in e["x"] if _finite(v)]
         for b in rec["bands"]:
             yv += [v for v in b["lo"] + b["hi"] if v is not None]
@@ -660,6 +826,7 @@ class FigureCalls:
         corner = self._free_corner(ax, rec, len(entries)) if len(entries) <= 6 else None
         if corner is not None:
             ax.legend(handles, texts, loc=corner, fontsize="small", framealpha=0.85)
+            self._fc_extra.setdefault(panel, {"series": [], "refs": []})["legend_corner"] = corner
             return None
         return ax, handles, texts
 
@@ -713,6 +880,12 @@ class FigureCalls:
 
     def _free_corner(self, ax, rec, rows):
         """The first corner (upper right, upper left, lower right, lower left) the drawn data does not reach, or None."""
+        counts = self._corner_counts(ax, rec, rows)
+        return next((name for name, n in (counts or {}).items() if n == 0), None)
+
+    def _corner_counts(self, ax, rec, rows):
+        """``{corner: how many drawn points, step samples, error-bar ends and reference lines reach it}`` in the order of
+        preference, a corner being 40% of the axes wide and as high as ``rows`` of text need; None for an image panel."""
         w, h = 0.4, min(0.5, 0.04 + 0.07 * rows)
         boxes = {"upper right": (1 - w, 1, 1 - h, 1), "upper left": (0, w, 1 - h, 1),
                  "lower right": (1 - w, 1, 0, h), "lower left": (0, w, 0, h)}
@@ -734,9 +907,10 @@ class FigureCalls:
             if e["kind"] == "image":
                 return None  # an image fills its axes
             along(e["x"], e["y"])
-            if e["yerr"] is not None:
-                along(e["x"], [None if v is None or d is None else v + d for v, d in zip(e["y"], e["yerr"])])
-                along(e["x"], [None if v is None or d is None else v - d for v, d in zip(e["y"], e["yerr"])])
+            lo, hi = _sides(e)
+            if lo is not None:
+                along(e["x"], [None if v is None or d is None else v + d for v, d in zip(e["y"], hi)])
+                along(e["x"], [None if v is None or d is None else v - d for v, d in zip(e["y"], lo)])
             if e["kind"] == "bars":
                 along(e["x"], [0.0] * len(e["x"]))
         for b in rec["bands"]:
@@ -747,12 +921,35 @@ class FigureCalls:
             point = (r["value"], 1.0) if r["axis"] == "x" else (1.0, r["value"])
             fx, fy = to_axes.transform(ax.transData.transform(point))
             lines.append((r["axis"], fx if r["axis"] == "x" else fy))
+        out = {}
         for name, (x0, x1, y0, y1) in boxes.items():
-            taken = any(x0 <= x <= x1 and y0 <= y <= y1 for x, y in pts)
-            taken = taken or any((a == "x" and x0 <= v <= x1) or (a == "y" and y0 <= v <= y1) for a, v in lines)
-            if not taken:
-                return name
-        return None
+            out[name] = sum(1 for x, y in pts if x0 <= x <= x1 and y0 <= y <= y1) \
+                + sum(1 for a, v in lines if (a == "x" and x0 <= v <= x1) or (a == "y" and y0 <= v <= y1))
+        return out
+
+    def _place_notes(self, ax, panel, rec):
+        """Put each note drawn without x and y in a corner the data and the legend leave free; with none free, in the corner
+        the fewest drawn points reach. An untaken corner is preferred; two notes in one corner stack."""
+        extra = self._fc_extra.get(panel, {})
+        arts = extra.get("notes", [])
+        taken = [extra["legend_corner"]] if extra.get("legend_corner") else []
+        for n, art in zip(rec["notes"], arts):
+            if n["x"] is not None:
+                continue
+            counts = self._corner_counts(ax, rec, 1 + str(n["text"]).count("\n"))
+            order = list(counts) if counts else ["upper right", "upper left", "lower right", "lower left"]
+            fresh = [c for c in order if c not in taken] or order
+            free = [c for c in fresh if not counts or counts[c] == 0]
+            corner = free[0] if free else min(fresh, key=lambda c: counts[c] if counts else 0)
+            stack = taken.count(corner)
+            taken.append(corner)
+            top, right = corner.startswith("upper"), corner.endswith("right")
+            step = 0.07 * stack
+            art.set_transform(ax.transAxes)
+            art.set_position((0.98 if right else 0.02, (0.97 - step) if top else (0.03 + step)))
+            art.set_ha("right" if right else "left")
+            art.set_va("top" if top else "bottom")
+            n["corner"] = corner
 
     # ---- raw, record -------------------------------------------------------------------------------------------------
 
