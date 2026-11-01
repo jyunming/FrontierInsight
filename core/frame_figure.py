@@ -257,6 +257,12 @@ class FigureCalls:
                          "refs": [], "notes": [], "texts_raw": []}
         return axes[panel], st[panel]
 
+    def _hold_title(self, rec):
+        """The title of a panel that holds a setting: the plan's label and the value, kept in the record so a claim and the
+        caption name the panel the same."""
+        rec["hold_label"] = {k: self._label_of(k) for k in rec["hold"]}
+        return hold_text(rec)
+
     def _label_of(self, ident):
         got = (getattr(self, "labels", None) or {}).get(ident)
         if isinstance(got, dict):
@@ -866,8 +872,7 @@ class FigureCalls:
                 ax.set_title("", loc=loc)
                 changed.append("title")
         if rec.get("hold"):  # the setting the panel was declared to show (`fig.panel`): the plan's label and the value, FI's words
-            rec["hold_label"] = {k: self._label_of(k) for k in rec["hold"]}  # kept in the record, so a claim names it the same
-            ax.set_title(hold_text(rec))
+            ax.set_title(self._hold_title(rec))
         if rec["x"] is None:
             return
         image = any(e["kind"] == "image" for e in rec["series"])

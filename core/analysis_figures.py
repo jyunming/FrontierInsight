@@ -457,7 +457,7 @@ def _panel_declarer(handle: Any, allowed: dict[str, Any]):
                 raise UnknownSetting(_not_a_setting(index, name, value, allowed))
             held[name] = found  # the plan's own value, not the body's object
         record = handle._panel(index)[1]  # the call record keeps which setting the panel holds; `finish` writes the title from it
-        if held and record.get("hold") not in (None, held):
+        if record.get("hold") not in (None, held):  # also a bare fig.panel(i) after a hold
             raise ValueError("panel %d was already declared to show %s; one panel shows one setting, so declare it once" %
                              (index, ", ".join("%s = %s" % kv for kv in record["hold"].items())))
         if held:
@@ -507,10 +507,11 @@ def _set_panel_titles(handle: Any, axes: list[Any], labels: dict[str, Any]) -> l
     for index, settings in sorted((getattr(handle, "declared", None) or {}).items()):
         if not isinstance(index, int) or not 0 <= index < len(axes) or not isinstance(settings, dict) or not settings:
             continue
-        if _has_calls(handle) and not handle._panel(index)[1]["raw"]:
+        rec = handle._panel(index)[1] if _has_calls(handle) else None
+        if rec is not None and not rec["raw"]:
             record.append({"panel": index + 1, "settings": settings, "title": axes[index].get_title()})  # `finish` wrote it
             continue
-        title = _panel_title(settings, labels)
+        title = handle._hold_title(rec) if rec is not None and rec.get("hold") else _panel_title(settings, labels)
         for loc in ("left", "center", "right"):
             axes[index].set_title("", loc=loc)
         axes[index].set_title(title)

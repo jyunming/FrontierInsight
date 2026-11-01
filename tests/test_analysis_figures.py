@@ -1565,3 +1565,39 @@ def test_a_second_fig_panel_with_another_hold_fails_the_same_hold_again_does_not
     assert out["status"] == "failed" and "panel 0" in out["why"], out
     out = _hold_spec_run(tmp_path, lambda fig, table: fig.panel(5, size=1), {"size": [1, 2]})
     assert out["status"] == "failed" and "IndexError" in out["why"], out
+
+
+# ---- fix round 2 ---------------------------------------------------------------------------------------------------------------------
+def test_a_raw_panel_with_a_hold_gets_the_shared_title_and_its_label_reaches_the_caption(tmp_path, frame5):
+    from core.engine import _figure_caption_text
+
+    def body(fig, table):
+        fig.panel(0, size=1.23441)
+        fig.panel(1, size=1.23449)
+        _both_panels(fig, table)
+        fig.raw(0).text(0.5, 0.5, "free text")
+        fig.raw(1).text(0.5, 0.5, "free text")
+
+    out = _hold_spec_run(tmp_path, body, {"size": [1.23441, 1.23449]})
+    assert out["status"] == "ok", out
+    assert [p["title"] for p in out["panels"]] == ["Colony size = 1.23441", "Colony size = 1.23449"]
+    calls = json.loads((frame5 / "g.calls.json").read_text(encoding="utf-8"))
+    assert [p["hold_label"] for p in calls["panels"]] == [{"size": "Colony size"}] * 2
+    assert "the panel at Colony size = 1.23449: custom drawing" in _figure_caption_text("g.png", None, n_seeds=None, calls=calls)
+
+
+def test_a_bare_fig_panel_after_a_hold_fails_and_the_same_hold_again_does_nothing(tmp_path, frame5):
+    def bare(fig, table):
+        fig.panel(0, size=1)
+        fig.panel(0)
+
+    out = _hold_spec_run(tmp_path, bare, {"size": [1, 2]})
+    assert out["status"] == "failed" and "ValueError" in out["why"] and "panel 0" in out["why"], out
+
+    def again(fig, table):
+        fig.panel(0, size=1)
+        fig.panel(0, size=1.0)
+        fig.panel(1, size=2)
+        _both_panels(fig, table)
+
+    assert _hold_spec_run(tmp_path, again, {"size": [1, 2]})["status"] == "ok"
