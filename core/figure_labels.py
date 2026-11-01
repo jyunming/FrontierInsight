@@ -134,9 +134,11 @@ def _written_by_fi(calls: dict[str, Any] | None, figure: str, index: int) -> boo
     and legend entry such a panel carries with the plan's label, so a code name cannot reach it; a panel with no call
     record (a figure of an older frame) or a custom drawing keeps the text its code typed, and is read here."""
     record = (calls or {}).get(figure)
+    # The recorder's panels are the frame's own axes, in order; an axis added later (a twin, an inset) has no panel.
     for panel in (record.get("panels") if isinstance(record, dict) else None) or []:
         if isinstance(panel, dict) and panel.get("panel") == index + 1:
-            return panel.get("raw") is False
+            # ``finish`` writes no label for a panel nothing was drawn on (no x): that one keeps its body's text.
+            return panel.get("raw") is False and bool(panel.get("x"))
     return False
 
 

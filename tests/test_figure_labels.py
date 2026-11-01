@@ -502,7 +502,7 @@ def test_code_name_label_caught_by_new_path() -> None:
     # Had the body's text stayed, the rule would have read it: the same names on a record that does not hold FI's text.
     typed = {"axes": [{"title": "Ea_hat", "xlabel": "Ea_hat", "ylabel": "Ea_hat", "series": []}]}
     assert figure_labels.findings({"f.png": saved}, ["f.png"], {}, plan_names(plan), None, {"f.png": calls}) == []
-    assert len(figure_labels.findings({"f.png": typed}, ["f.png"], {}, plan_names(plan), None, {"f.png": calls})) == 0
+    assert figure_labels.findings({"f.png": typed}, ["f.png"], {}, plan_names(plan), None, {"f.png": calls}) == []
     assert len(figure_labels.findings({"f.png": typed}, ["f.png"], {}, plan_names(plan))) == 3
 
 
@@ -530,3 +530,12 @@ def test_the_engine_reads_the_call_record_of_the_figure_on_disk(tmp_path: Path) 
     records.mkdir(parents=True)
     (records / "f.calls.json").write_text(json.dumps(calls), encoding="utf-8")
     assert _figure_label_findings(state) == []
+
+
+def test_a_code_name_on_a_recorded_panel_nothing_was_drawn_on_is_still_caught() -> None:
+    """``finish`` writes no label for a panel with no x, so the body's text stays there and the rule must read it."""
+    calls, _ = _drawn(raw=False, body_label="Ea_hat")
+    calls["panels"][0]["x"] = None  # recorded, not raw, nothing drawn
+    typed = {"axes": [{"title": "", "xlabel": "Ea_hat", "ylabel": "", "series": []}]}
+    plan = {"grid": {"size": [1]}, "metrics": [{"id": "Ea_hat", "kind": "mean"}]}
+    assert len(figure_labels.findings({"f.png": typed}, ["f.png"], {}, plan_names(plan), None, {"f.png": calls})) == 1
