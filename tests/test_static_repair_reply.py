@@ -158,7 +158,7 @@ def test_the_crashed_script_repair_reads_a_sentence_before_its_object() -> None:
 
     from core import engine
 
-    assert '_repair_reply_json(text, node="execute_reflect")' in inspect.getsource(engine.Engine)
+    assert '_repair_reply_or_script(text, node="execute_reflect")' in inspect.getsource(engine.Engine)
 
 
 def test_an_object_whose_code_is_not_a_string_is_not_a_reply() -> None:
@@ -189,3 +189,55 @@ def test_the_prompts_own_format_echoed_back_is_not_a_fix() -> None:
     assert _repair_reply_json("The format is:\n" + echo, node="t") == {}
     real = {"functions": "def f():\n    return 1\n", "code": code}
     assert _repair_reply_json("Done.\n" + json.dumps(real), node="t")["functions"].startswith("def f")
+
+
+FN = "def f():\n    return 1\n"
+
+
+def test_a_give_up_that_is_not_text_is_absent() -> None:
+    from core.engine import _repair_reply_json
+
+    for reply in ('{"give_up_reason": ["a", "b"], "functions": ' + json.dumps(FN) + "}",
+                  'Sorry. {"give_up_reason": ["a"], "functions": ' + json.dumps(FN) + "}"):
+        got = _repair_reply_json(reply, node="t")
+        assert "give_up_reason" not in got and got["functions"].startswith("def f")
+    assert _repair_reply_json('{"give_up_reason": ["cannot"], "patch_summary": {"a": 1}}', node="t").get("give_up_reason") is None
+    assert _repair_reply_json('I give up {"give_up_reason": ["cannot"]}', node="t") == {}
+    assert _repair_reply_json('{"give_up_reason": 5}', node="t").get("give_up_reason") is None
+
+
+def test_the_format_object_itself_is_blanked_too() -> None:
+    import re
+
+    from core.engine import PROMPTS_DIR, _repair_reply_json
+
+    text = (PROMPTS_DIR / "execute_reflect.md").read_text(encoding="utf-8")
+    fn = re.search(r'^\s*"functions":\s*"(<.*>)",?\s*$', text, re.MULTILINE).group(1)
+    code = re.search(r'^\s*"code":\s*"(<.*>)",?\s*$', text, re.MULTILINE).group(1)
+    fence = "`" * 3
+    for echo in (json.dumps({"functions": fn, "code": code, "patch_summary": "x"}),
+                 fence + "json\n" + json.dumps({"functions": fn, "code": code}) + "\n" + fence):
+        got = _repair_reply_json(echo, node="t")
+        assert got.get("functions") == "" and got.get("code") == ""
+
+
+def test_a_fenced_script_beats_a_give_up_quoted_in_prose() -> None:
+    from core.engine import _repair_reply_or_script
+
+    fence = "`" * 3
+    reply = ('I cannot, as in {"give_up_reason": "cannot"}; but this fixes it:\n' + fence + "python\n" + FN + fence
+             + "\nDEPS: numpy\n")
+    got = _repair_reply_or_script(reply, node="t")
+    assert got["code"].startswith("def f") and not got.get("give_up_reason")
+    # a give-up with no script stays a give-up; a bare fenced object is not a script; a fix in an object wins
+    assert _repair_reply_or_script('No. {"give_up_reason": "cannot"}', node="t")["give_up_reason"] == "cannot"
+    assert _repair_reply_or_script(fence + '\n{"give_up_reason": "cannot"}\n' + fence, node="t")["give_up_reason"] == "cannot"
+    fix = {"functions": "def g():\n    return 2\n", "code": ""}
+    assert _repair_reply_or_script("Do:\n" + json.dumps(fix) + "\n" + fence + "python\n" + FN + fence, node="t") == fix
+
+
+def test_a_static_repair_reads_a_fenced_script_over_a_quoted_give_up(tmp_path: Path) -> None:
+    fence = "`" * 3
+    reply = 'It is {"give_up_reason": "cannot"} no more:\n' + fence + "python\n" + OLD.replace("SCALE", "2") + fence + "\n"
+    new_code, parsed = sc.reply_script(_Host(tmp_path, reply), reply, OLD, "simulate.py")
+    assert "* 2" in new_code and not parsed.get("give_up_reason")
