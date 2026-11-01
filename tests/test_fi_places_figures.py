@@ -312,3 +312,28 @@ def test_a_caption_does_not_copy_a_title_that_names_a_line_the_figure_does_not_d
 def test_a_figure_title_the_paper_copy_drops_is_not_copied_into_the_caption() -> None:
     record = {"axes": [{"ylabel": "Rate", "series": []}], "paper_dropped": ["Rate, dotted: the model"]}
     assert _figure_caption_text("r.png", record, n_seeds=None) == "Rate."
+
+
+# ---- what the caption says a figure plots: the declared results the body drew, not the words typed on an axis ---------------
+
+def test_a_caption_does_not_name_a_quantity_the_body_typed_but_did_not_draw() -> None:
+    record = {"axes": [{"ylabel": "Error (first, second, extra drift)", "xlabel": "step", "series": []}],
+              "declared": {"shows": ["first", "second"], "drawn": ["first", "second"], "not_drawn": [],
+                           "labels": {"first": "First error", "second": "Second error"}}}
+    caption = _figure_caption_text("e.png", record, n_seeds=None)
+    assert caption == "First error and Second error against step."
+    assert "drift" not in caption
+
+
+def test_a_caption_says_a_declared_result_that_was_not_drawn_is_not_drawn() -> None:
+    record = {"axes": [{"ylabel": "typed words", "xlabel": "step", "series": []}],
+              "declared": {"shows": ["first", "second"], "drawn": ["first"], "not_drawn": ["second"], "labels": {"first": "First error"}}}
+    caption = _figure_caption_text("e.png", record, n_seeds=None)
+    assert caption == "First error against step. second is not drawn: no value of it was plotted."
+    assert "typed words" not in caption
+
+
+def test_a_caption_of_a_fully_drawn_figure_keeps_its_meaning() -> None:
+    typed = {"axes": [{"ylabel": "error", "xlabel": "step size", "series": []}]}
+    recorded = dict(typed, declared={"shows": ["error"], "drawn": ["error"], "not_drawn": [], "labels": {"error": "error"}})
+    assert _figure_caption_text("e.png", typed, n_seeds=None) == _figure_caption_text("e.png", recorded, n_seeds=None)

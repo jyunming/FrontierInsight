@@ -137,7 +137,7 @@ def plan_of(design: dict[str, Any]) -> dict[str, Any]:
         "known": _known_values(protocol, c),
         "search": c.search is not None,
         "figures": {f.id: {"file": f.file, "shows": list(f.shows), "x": f.x, "series": f.series, "panels": f.panels,
-                           **_panel_words(c, f.panels)}
+                           **_result_labels(c, f.shows), **_panel_words(c, f.panels)}
                     for f in c.figures if f.declared},
     }
 
@@ -156,6 +156,14 @@ def _known_values(protocol: dict[str, Any], c: Any) -> dict[str, dict[str, Any]]
         if isinstance(ends, (list, tuple)) and len(ends) == 2 and (number is not None or truth in axes):
             out[r.id] = {"interval": [str(e) for e in ends], **({"truth": number} if number is not None else {"axis": str(truth)})}
     return out
+
+
+def _result_labels(c: Any, shows: Any) -> dict[str, Any]:
+    """``{"result_labels": {id: label}}`` for the declared results a figure shows that have a label in the plan (what the caption
+    FI writes calls them); nothing when none has one."""
+    names = {r.id: r.label for r in list(c.results) + list(c.derived) if getattr(r, "label", "")}
+    got = {str(i): str(names[i]) for i in shows if i in names}
+    return {"result_labels": got} if got else {}
 
 
 def _panel_words(c: Any, panels: int) -> dict[str, Any]:

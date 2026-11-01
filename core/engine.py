@@ -20079,7 +20079,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 continue
             # Which seeds a figure shows is the engine's to say, not the record's: a redraw changes its text, not that.
             record = {**record, **{k: v for k, v in (old_records.get(name) or {}).items()
-                                   if k in ("replicate_mean", "single_seed")}}
+                                   if k in ("replicate_mean", "single_seed", "declared")}}
             records[name] = record
         if records or old_records:
             done["figure_records"] = records
@@ -34569,8 +34569,26 @@ def _figure_caption_text(
     # A panel is named by what it plots (its y axis, else its x axis). A panel or figure title is the script's own
     # sentence and is not copied: it can name a line, a reference or a style the figure does not draw, and FI's record of
     # the lines is what the caption states.
+    # What the figure plots is, when FI recorded it, the declared results the body drew values of (their declared labels),
+    # never the words the body typed on an axis: a typed label can name a quantity the figure does not draw. A declared
+    # result the body did not draw is said not drawn.
+    declared = (record or {}).get("declared")
+    declared = declared if isinstance(declared, dict) and declared.get("shows") else None
+    drawn_labels: list[str] = []
+    not_drawn_labels: list[str] = []
+    if declared:
+        names = declared.get("labels") if isinstance(declared.get("labels"), dict) else {}
+
+        def say(rid: Any) -> str:
+            return _caption_words(names.get(str(rid)) or str(rid).replace("_", " "), 80)
+
+        drawn_labels = [say(r) for r in declared.get("drawn") or []]
+        not_drawn_labels = [say(r) for r in declared.get("not_drawn") or []]
+
     def plots(ax: dict[str, Any]) -> str:
         y, x = _caption_words(ax.get("ylabel")), _caption_words(ax.get("xlabel"))
+        if declared:
+            y = ", ".join(drawn_labels[:-1]) + (" and " if len(drawn_labels) > 1 else "") + drawn_labels[-1] if drawn_labels else ""
         return f"{y} against {x}" if y and x else y or x
 
     def named(k: int, ax: dict[str, Any]) -> str:
@@ -34583,6 +34601,8 @@ def _figure_caption_text(
     else:
         description = "; ".join(plotted) or stem
     parts = [description.rstrip(" .;,") + "."]
+    for label in not_drawn_labels:
+        parts.append(f"{label} is not drawn: no value of it was plotted.")
     appears: dict[str, list[str]] = {}
     flat: dict[str, list[str]] = {}
     outside: dict[str, list[str]] = {}

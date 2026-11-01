@@ -176,10 +176,47 @@ def _last_read_error(table: Any) -> tuple[str, str]:
         kind, _colon, said = last.partition(": ")
         said = said[1:-1] if len(said) > 1 and said[0] == said[-1] and said[0] in "'\"" else said  # a KeyError shows its text quoted
         head, tail = (re.split(r"; the (?:declared results|results with one) are: ", said, maxsplit=1) + [""])[:2]  # FI's own message
-        return f"{kind}: {head}"[:240], ("The results that can be read: %s." % tail.strip()[:600]) if tail.strip() else ""
+        return f"{kind}: {head}", ("The results that can be read: %s." % tail.strip()[:600]) if tail.strip() else ""
     if last.startswith(("ValueError", "KeyError")):
         return last.split(":", 1)[0], ""
     return last[:240], ""
+
+
+def _read_forms(spec: dict[str, Any], table: Any) -> str:
+    """How each result the figure ``shows`` is read from the table, one line each, from the table's own record of the results
+    (``Table.keys`` and ``Table.per_level``, which every frame's table has); empty when the figure shows nothing or the table does
+    not say. These lines are FI's own words and are never shortened: they are what a repair needs when a body read a result the
+    wrong way."""
+    shows = spec.get("shows")
+    if not isinstance(shows, (list, tuple)) or not callable(getattr(table, "per_level", None)) or not callable(getattr(table, "keys", None)):
+        return ""
+    try:
+        keys = list(table.keys())
+    except Exception:  # noqa: BLE001 -- a table that cannot say is not a reason to lose the original error
+        return ""
+    lines = []
+    for rid in shows:
+        name, levels = str(rid), []
+        for key in keys[:200]:
+            try:
+                levels = [str(t) for t in table.per_level(name, key)]
+            except Exception:  # noqa: BLE001
+                levels = []
+            if levels:
+                break
+        if levels:
+            lines.append("- `%s` is recorded for each value compared inside the runs (%s), not once for a setting: read it with "
+                         "`table.level_rows(%r, key)` (the record key, the value and the trials' values of each) or "
+                         "`table.level_means(%r, key)`; `table.values` does not read it." % (name, ", ".join(levels), name, name))
+        else:
+            lines.append("- `%s` is recorded once for each setting: read it with `table.values(%r, key)`, `table.mean(%r, key)` or "
+                         "`table.trials(%r, key)`, with `key` one of `table.keys()`." % (name, name, name, name))
+    return ("How the results this figure shows are read:\n" + "\n".join(lines)) if lines else ""
+
+
+def _with_forms(why: str, spec: dict[str, Any], table: Any) -> str:
+    forms = _read_forms(spec, table)
+    return why + ("\n" + forms if forms and forms not in why else "")
 
 
 def _drew_nothing(spec: dict[str, Any], table: Any) -> str:
@@ -193,7 +230,34 @@ def _drew_nothing(spec: dict[str, Any], table: Any) -> str:
         return ""  # a figure that declares no result draws what it says it draws (a layout, a reference curve): not checked
     text = "`figure_%s` drew nothing from the trial record: no read of a result returned a value." % spec.get("id")
     err, readable = _last_read_error(table)
-    return text + (" The last read raised %s." % err.rstrip(".") if err else "") + ("\n" + readable if readable else "")
+    return _with_forms(text + (" The last read raised %s." % err.rstrip(".") if err else "") + ("\n" + readable if readable else ""), spec, table)
+
+
+def _declared_record(spec: dict[str, Any], table: Any, out_dir: str, file: str) -> dict[str, Any]:
+    """What the figure was declared to show next to what its body drew, from the table's own tracking of the reads that gave
+    values (``Table.gave_values``): ``{"shows", "drawn", "not_drawn", "labels"}``, the labels being the plan's own for each
+    declared result. It is added to the figure's record (``FI_FIGURE_RECORDS/<stem>.json``, written when the figure was saved)
+    so the caption is written from it and not from the words the body typed on an axis. Empty when the figure declares no
+    result or the table does not track its reads."""
+    shows, gave = spec.get("shows"), getattr(table, "gave_values", None)
+    if not isinstance(shows, (list, tuple)) or not shows or not isinstance(gave, (set, frozenset)):
+        return {}
+    ids = [str(r) for r in shows]
+    labels = spec.get("result_labels") if isinstance(spec.get("result_labels"), dict) else {}
+    got = {"shows": ids, "drawn": [r for r in ids if r in gave], "not_drawn": [r for r in ids if r not in gave],
+           "labels": {r: str(labels[r]) for r in ids if labels.get(r)}}
+    folder = os.environ.get("FI_FIGURE_RECORDS")
+    if folder:
+        path = os.path.join(folder, os.path.splitext(file)[0] + ".json")
+        try:
+            with open(path, encoding="utf-8") as handle:
+                record = json.load(handle)
+            if isinstance(record, dict):
+                with open(path, "w", encoding="utf-8") as handle:
+                    json.dump(dict(record, declared=got), handle)
+        except (OSError, ValueError):
+            pass  # a figure saved without the recorder has no record to add to; the outcome still carries it
+    return got
 
 
 def _draw_one(spec: dict[str, Any], body: Any, table: Any, out_dir: str) -> dict[str, Any]:
@@ -231,7 +295,8 @@ def _draw_one(spec: dict[str, Any], body: Any, table: Any, out_dir: str) -> dict
             if did:
                 return _outcome(fid, file, "refused", _misuse_text(name, did[0]))
             where = _last_frame(traceback.format_exc())
-            return _outcome(fid, file, "failed", "`figure_%s` stopped with %s: %s (%s)." % (fid, type(err).__name__, err, where))
+            return _outcome(fid, file, "failed", _with_forms(
+                "`figure_%s` stopped with %s: %s (%s)." % (fid, type(err).__name__, err, where), spec, table))
         if did:
             return _outcome(fid, file, "refused", _misuse_text(name, did[0]))
         after = _folder(out_dir)
@@ -243,7 +308,8 @@ def _draw_one(spec: dict[str, Any], body: Any, table: Any, out_dir: str) -> dict
                             "the axes the function is given (`fig.axes`)." % (name, ", ".join(wrote)))
         empty = _empty_panels(axes)
         if empty:
-            return _outcome(fid, file, "failed", "`figure_%s` drew nothing on panel %s." % (fid, " and ".join(map(str, empty))))
+            return _outcome(fid, file, "failed", _with_forms(
+                "`figure_%s` drew nothing on panel %s." % (fid, " and ".join(map(str, empty))), spec, table))
         none_drawn = _drew_nothing(spec, table)
         if none_drawn:
             return _outcome(fid, file, "failed", none_drawn)
@@ -252,7 +318,8 @@ def _draw_one(spec: dict[str, Any], body: Any, table: Any, out_dir: str) -> dict
             fig.savefig(os.path.join(out_dir, file))  # the recorder of the house style notes what the figure draws
         except Exception as err:
             return _outcome(fid, file, "failed", "`figure_%s` drew something that cannot be saved (%s: %s)." % (fid, type(err).__name__, err))
-        return dict(_outcome(fid, file, "ok"), panels=panel_record)
+        declared = _declared_record(spec, table, out_dir, file)
+        return dict(_outcome(fid, file, "ok"), panels=panel_record, **({"declared": declared} if declared else {}))
     except Exception as err:
         return _outcome(fid, file, "fi_fault", "FI stopped while drawing the figure `%s` (%s: %s)." % (fid, type(err).__name__, err))
     finally:

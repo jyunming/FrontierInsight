@@ -518,7 +518,7 @@ def test_a_figure_that_hides_the_error_of_its_reads_and_draws_only_curves_is_fai
 
     out = _shown(tmp_path, figure_x)
     assert out["status"] == "failed" and "drew nothing from the trial record" in out["why"]
-    assert "TypeError: " in out["why"] and "list of settings" in out["why"] and "`r1`" not in out["why"]
+    assert "TypeError: " in out["why"] and "list of settings" in out["why"] and "`r1`" not in out["why"].split("\n")[0]  # the error line names no result; the read-form lines do
     assert not (tmp_path / "x.png").exists()
 
 
@@ -756,3 +756,75 @@ def test_a_figure_that_draws_nothing_is_its_own_failure_and_the_others_are_still
     out = af.run_figures(specs, _namespace(figure_a=empty, figure_b=fine), Tbl(), str(tmp_path))
     assert [o["status"] for o in out] == ["failed", "ok"]
     assert (tmp_path / "b.png").is_file() and not (tmp_path / "a.png").exists()
+
+
+# ---- the repair note and the record of what a figure drew, from the table's own tracking ------------------------------------------
+def _level_table():
+    """A study whose result ``r1`` is recorded for each of several long-named methods inside each run, not once per setting."""
+    from core import frame_table, skeleton
+
+    sys.modules["fi_table"] = frame_table
+    ns: dict[str, Any] = {"fi_table": frame_table}
+    exec(compile(skeleton.RUNTIME, "fi_frame.py", "exec"), ns)  # noqa: S102 -- FI's own runtime text
+    methods = ["method_with_a_long_name_%d" % i for i in range(1, 7)]
+    cells = [{"cell": {"a": 1}, "key": "a=1", "planned": 2, "ok": 2, "failed": 0, "metrics": {"r2": {"values": [1.0, 2.0]}}}]
+    for m in methods:
+        cells.append({"cell": {"a": 1, "method": m}, "level": {"method": m}, "key": "a=1,method=%s" % m, "planned": 2, "ok": 2,
+                      "failed": 0, "metrics": {"r1": {"values": [0.5, 0.6]}}})
+    return ns["Table"](cells, ["r1", "r2"])
+
+
+def test_the_repair_note_of_a_figure_keeps_how_each_shown_result_is_read_when_the_error_is_long(tmp_path) -> None:
+    def figure_x(fig, table):
+        table.values("r1", "a=1")  # r1 is recorded for each method, not once for the setting
+
+    out = _shown(tmp_path, figure_x, shows=("r1", "r2"), table=_level_table())
+    assert out["status"] == "failed"
+    assert "table.level_rows('r1', key)" in out["why"] and "table.level_means('r1', key)" in out["why"]
+    assert "How the results this figure shows are read" in out["why"] and "read it with `table.values('r2', key)`" in out["why"]
+
+
+def test_a_long_read_error_that_the_body_swallowed_is_not_cut_before_it_says_how_to_read(tmp_path) -> None:
+    def figure_x(fig, table):
+        fig.axes[0].axvline(1.0)
+        try:
+            table.mean("r1", "a=1")
+        except Exception:
+            pass  # swallowed: FI's record of the last read is what the repair note is built from
+
+    out = _shown(tmp_path, figure_x, shows=("r1",), table=_level_table())
+    first = out["why"].split("\n")[0]
+    assert "drew nothing from the trial record" in first and len(first) > 240
+    assert "read it with `table.level_rows('r1', key)`" in first and "UnknownResult" in first
+
+
+def test_a_body_that_invents_a_read_is_sent_back_with_the_real_read_forms(tmp_path) -> None:
+    def figure_x(fig, table):
+        fig.axes[0].plot([1, 2])
+        table.level_ro("r1", "a=1")  # no such read
+
+    out = _shown(tmp_path, figure_x, shows=("r1",), table=_level_table())
+    assert out["status"] == "failed" and "no attribute 'level_ro'" in out["why"]
+    assert "table.level_rows('r1', key)" in out["why"]
+
+
+def test_the_record_of_a_drawn_figure_says_which_declared_results_the_body_drew(tmp_path, monkeypatch) -> None:
+    records = tmp_path / "records"
+    records.mkdir()
+    (records / "x.json").write_text(json.dumps({"file": "x.png", "axes": []}), encoding="utf-8")
+    monkeypatch.setenv("FI_FIGURE_RECORDS", str(records))
+
+    def figure_x(fig, table):
+        fig.axes[0].plot(table.values("r1", "a=1"))
+        try:
+            table.values("r2", "a=1")  # r2 has no finite value: nothing drawn
+        except Exception:
+            pass
+
+    table = _real_table()
+    spec = {"id": "x", "file": "x.png", "shows": ["r1", "r2"], "result_labels": {"r1": "First quantity"}}
+    out = af.run_figures([spec], {"figure_x": figure_x}, table, str(tmp_path / "figs"))[0]
+    assert out["status"] == "ok"
+    want = {"shows": ["r1", "r2"], "drawn": ["r1"], "not_drawn": ["r2"], "labels": {"r1": "First quantity"}}
+    assert out["declared"] == want
+    assert json.loads((records / "x.json").read_text(encoding="utf-8"))["declared"] == want
