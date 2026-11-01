@@ -531,6 +531,23 @@ def cut_off(sentence: str) -> bool:
     return bool(last) and last.group(1).lower() in _CANNOT_END and len(stripped) < len(sentence.rstrip())
 
 
+def object_dropped(sentence: str, remove: set[str]) -> bool:
+    """Whether a bracket that goes whole (every label in ``remove``) stands right after a word that cannot end a clause
+    ("a contradiction of [3], because", "the statements in [2] and ..."): the bracket was that word's object, so taking it
+    out leaves the word with nothing after it. A bracket after a complete clause ("as shown [2], and ...") is not."""
+    spans = [(m.start(), m.end()) for m in _NOT_PROSE_RE.finditer(sentence)]
+    for m in CITE_RE.finditer(sentence):
+        if sentence[m.end():m.end() + 1] == "(" or any(a <= m.start() < b for a, b in spans):
+            continue
+        labels = labels_in(m.group(1))
+        if not labels or any(x not in remove for x in labels):
+            continue
+        before = re.search(r"([A-Za-z]+)\s+$", sentence[:m.start()])
+        if before and before.group(1).lower() in _CANNOT_END:
+            return True
+    return False
+
+
 def uncut(sentence: str) -> str:
     """``sentence`` without the words it ends on that no sentence ends on (the ones that led to the citation: "above the
     rounded 22 degrees of."), with its end mark; ``""`` when fewer than three words would be left or it still ends on such a
@@ -749,7 +766,18 @@ async def check_paper(
             new_text = plan["text"]
         else:
             new_text = rewrite_brackets(site.text, remove=set(labels))
-        if (new_text and plan.get("action") in ("drop_citation", "drop_clause") and cut_off(new_text)
+        if (new_text and plan.get("action") in ("drop_citation", "drop_clause") and not cut_off(new_text)
+                and object_dropped(site.text, set(labels))):
+            # The citation was the object of a word in the middle of the sentence ("a contradiction of [3], because"):
+            # without it that word hangs, and no word can be taken out to mend it, so the sentence goes whole when it holds
+            # no result of the study.
+            if (site.kind in ("prose", "list") and not any(n in own_numbers for n in _numbers(site.text))
+                    and keeps_shape(site, "")):
+                plan, new_text = {"action": "drop_sentence", "text": ""}, ""
+                note = note or "the sentence was about the source itself and could not stand without it"
+            else:
+                note = note or "left in the paper with its citation taken out: a word in the sentence now has nothing after it"
+        elif (new_text and plan.get("action") in ("drop_citation", "drop_clause") and cut_off(new_text)
                 and cut_off(site.text) is False):
             # The citation was the object of the sentence's last words: without it the sentence stops mid-phrase and
             # cannot be repaired by taking a word out, so it goes whole when it holds no result of the study.

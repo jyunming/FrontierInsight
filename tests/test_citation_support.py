@@ -208,7 +208,7 @@ _DANGLING = ("BH's proof of FDR control for independent statistics is in [2]. "
              "We did not verify the equality itself against the text of [3]. BH power has no reference line.\n")
 
 
-def _drop_citation_run(paper: str, action: str) -> cs.Result:
+def _drop_citation_run(paper: str, action: str, own: Any = None) -> cs.Result:
     sources = {"2": _src("2", "Two", FULL, full=True), "3": _src("3", "Three", FULL + "something else", full=True)}
 
     async def judge(prompt: str) -> str:
@@ -220,7 +220,7 @@ def _drop_citation_run(paper: str, action: str) -> cs.Result:
     async def repair(prompt: str) -> str:
         return json.dumps({"fixes": [{"id": i, "action": action} for i in json.loads(prompt)]})
 
-    return _check(paper, sources, judge, repair, cs.new_record(paper, None), [])
+    return _check(paper, sources, judge, repair, cs.new_record(paper, None), [], **({"own": own} if own else {}))
 
 
 def test_a_sentence_that_cannot_stand_without_its_citation_is_not_left_cut_off() -> None:
@@ -306,3 +306,41 @@ def test_a_paper_with_both_lists_has_the_same_sites_as_before() -> None:
     both = PAPER + "\n## Further reading\n\n- [W1] A page. https://example.org\n"
     assert [s.labels for s in cs.find_sites(both)] == [["1", "3"], ["2", "3", "4", "W2"], ["5"], ["6"]]
     assert cs.cited_text_end(both) == cs.references_start(both)
+
+
+_PROOF = "BH's proof of FDR control for independent statistics is in [2]. "
+
+
+def test_a_citation_that_is_the_object_of_a_word_mid_sentence_does_not_leave_the_word_hanging() -> None:
+    """Delivered papers read 'a series of follows', 'not a contradiction of, because', 'the statements in and with ...':
+    the dropped citation was the object of the word before it, and only a sentence ENDING on such a word was mended."""
+    for action in ("drop_citation", "none"):
+        for sentence, broken in (
+                ("The leading series of [3] follows the curve at small values.", "series of follows"),
+                ("This is not a contradiction of [3], because its data differ from ours.", "contradiction of,"),
+                ("This agrees with the statements in [3] and with the proof in [2].", "statements in and")):
+            out = _drop_citation_run(_PROOF + sentence + " Next point.\n", action)
+            assert broken not in out.paper and "[3]" not in out.paper, (action, sentence, out.paper)
+            assert "Next point." in out.paper
+
+
+def test_a_mid_sentence_object_citation_in_a_sentence_with_a_result_stays_and_says_so() -> None:
+    paper = _PROOF + "The crossing is 22 degrees, above the value of [3], so it is larger. Next point.\n"
+    out = _drop_citation_run(paper, "drop_citation", own=cs.OwnNumbers(["22"]))
+    assert "22 degrees" in out.paper and "[3]" not in out.paper
+    row = next(r for r in out.rows if r.label == "3")
+    assert "nothing after it" in row.note
+
+
+def test_a_citation_after_a_complete_clause_keeps_its_sentence() -> None:
+    out = _drop_citation_run(_PROOF + "The result holds [3]. Next point.\n", "drop_citation")
+    assert "The result holds. Next point." in out.paper
+    out2 = _drop_citation_run(_PROOF + "The result holds as shown [3], and the rest follows. Next.\n", "drop_citation")
+    assert "The result holds as shown, and the rest follows." in out2.paper
+
+
+def test_object_dropped_reads_the_word_before_a_bracket_that_goes_whole() -> None:
+    assert cs.object_dropped("A contradiction of [3], because x.", {"3"})
+    assert not cs.object_dropped("A contradiction of [3], because x.", {"4"})
+    assert not cs.object_dropped("A contradiction of [3, 4], because x.", {"3"})
+    assert not cs.object_dropped("The result holds [3].", {"3"})
