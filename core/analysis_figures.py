@@ -169,17 +169,19 @@ def _folder(out_dir: str) -> dict[str, tuple[int, int]]:
 def _last_read_error(table: Any) -> tuple[str, str]:
     """The most recent exception a read of the table raised: ``(what, which results can be read)``. An ``UnknownResult`` keeps the
     id that was read (``g_lo`` is not a result the plan declares) and, apart from it, the ids the plan declares, so a repair
-    knows which name to change. A ``ValueError`` or ``KeyError`` of a read names a result in its text: only the type is kept."""
+    knows which name to change. A ``ValueError`` or ``KeyError`` of a read names a result in its text: only the type is kept. The head of
+    an ``UnknownResult`` echoes the id the body typed, so it stays capped; FI's own text (the list of results, any other error) is
+    never cut: a note shortened mid-sentence left a repair without the form it needed."""
     errors = getattr(table, "last_error", None)
     last = list(errors.values())[-1] if isinstance(errors, dict) and errors else ""
     if last.startswith("UnknownResult"):
         kind, _colon, said = last.partition(": ")
         said = said[1:-1] if len(said) > 1 and said[0] == said[-1] and said[0] in "'\"" else said  # a KeyError shows its text quoted
         head, tail = (re.split(r"; the (?:declared results|results with one) are: ", said, maxsplit=1) + [""])[:2]  # FI's own message
-        return f"{kind}: {head.strip()[:600]}", ("The results that can be read: %s." % tail.strip()[:600]) if tail.strip() else ""
+        return f"{kind}: {head.strip()[:600]}", ("The results that can be read: %s." % tail.strip()) if tail.strip() else ""
     if last.startswith(("ValueError", "KeyError")):
         return last.split(":", 1)[0], ""
-    return last[:240], ""
+    return last, ""  # FI's own message is never cut: a repair is written from it
 
 
 def _read_forms(spec: dict[str, Any], table: Any) -> str:
@@ -708,6 +710,99 @@ def search_figures(root: str, out_dir: str) -> list[dict[str, Any]]:
         if result:
             out.append(result)
     return out
+
+
+def _plain_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _default_lines(spec: dict[str, Any], table: Any, fixed: dict[str, Any]) -> list[tuple[str, list[Any], list[float]]]:
+    """The lines of the default figure for the settings in ``fixed`` held: ``(label, x values, y values)``, one per result in
+    ``shows`` and, when the plan names a ``series`` setting, one per value of it. A setting no trial gave a number for is left out."""
+    x_name, s_name = str(spec.get("x")), spec.get("series")
+    shows = [str(r) for r in spec["shows"]]
+    names = spec.get("result_labels") if isinstance(spec.get("result_labels"), dict) else {}
+    keys = list(table.keys())
+    cells = {k: dict(table.setting(k)) for k in keys}
+    values = [None]
+    if s_name:
+        values = list(dict.fromkeys(c[str(s_name)] for c in cells.values() if str(s_name) in c))
+    lines = []
+    for rid in shows:
+        for value in values:
+            points = []
+            for k, cell in cells.items():
+                if x_name not in cell or any(cell.get(a) != v for a, v in fixed.items()) or (s_name and cell.get(str(s_name)) != value):
+                    continue
+                try:
+                    got = table.mean(rid, k)
+                except Exception:  # noqa: BLE001 -- a result recorded another way has no point here; the others are still drawn
+                    continue
+                if _plain_number(got):
+                    points.append((cell[x_name], float(got)))
+            if points:
+                if all(_plain_number(p[0]) for p in points):
+                    points.sort(key=lambda p: p[0])
+                label = str(names.get(rid) or rid) + (", %s = %s" % (s_name, value) if s_name else "")
+                lines.append((label, [p[0] for p in points], [p[1] for p in points]))
+    return lines
+
+
+def default_figure(spec: dict[str, Any], table: Any, out_dir: str) -> dict[str, Any]:
+    """The plan's own figure, drawn by FI from the table when a figure body cannot be repaired: one line for each result the figure
+    ``shows`` over its ``x`` setting, one line for each value of its ``series`` setting and one panel for each of its ``panels``
+    (the panel setting is the first setting the plan lets a panel show that is neither ``x`` nor ``series``; the panels hold its values in
+    turn; without one the figure has a single panel). It is marked ``fallback`` and a panel is titled as ``fig.panel`` titles it.
+    A plan that declares no ``shows`` or no ``x`` gives no default: the outcome is ``dropped`` and says so, and no file is kept."""
+    fid, file = str(spec.get("id")), str(spec.get("file") or "%s.png" % spec.get("id"))
+    _remove(out_dir, file)
+    shows = spec.get("shows")
+    if not isinstance(shows, (list, tuple)) or not shows or not spec.get("x"):
+        return dict(_outcome(fid, file, "dropped", "Figure `%s` is not drawn: the plan does not say which results it shows over which "
+                             "setting, so there is nothing to draw in its place." % fid), fallback=True)
+    plt = fig = None
+    try:
+        settings = spec.get("settings") if isinstance(spec.get("settings"), dict) else {}
+        panel_by = next((str(k) for k in settings if str(k) not in (str(spec["x"]), str(spec.get("series")))), None)
+        wanted = int(spec.get("panels") or 1)
+        held = [{}]
+        if wanted > 1 and panel_by:
+            held = [{panel_by: v} for v in list(settings[panel_by])[:wanted]]
+        reset = getattr(table, "reset_reads", None)
+        if callable(reset):
+            reset()
+        drawn = [_default_lines(spec, table, one) for one in held]
+        if not any(drawn):
+            return dict(_outcome(fid, file, "dropped", "Figure `%s` is not drawn: the table holds no value of %s along `%s`." % (
+                fid, ", ".join("`%s`" % r for r in shows), spec["x"])), fallback=True)
+        plt, fig, axes = _new_figure(len(held))
+        labels = spec.get("labels") if isinstance(spec.get("labels"), dict) else {}
+        record = []
+        for index, (one, lines) in enumerate(zip(held, drawn)):
+            ax = axes[index]
+            for label, xs, ys in lines:
+                numeric = all(_plain_number(v) for v in xs)
+                ax.plot(xs if numeric else range(len(xs)), ys, marker="o", label=label)
+                if not numeric:
+                    ax.set_xticks(range(len(xs)), [str(v) for v in xs])
+            ax.set_xlabel(str(labels.get(str(spec["x"])) or spec["x"]))
+            if len(lines) > 1:
+                ax.legend()
+            if one:
+                title = _panel_title(one, labels)
+                ax.set_title(title)
+                record.append({"panel": index + 1, "settings": one, "title": title})
+        os.makedirs(out_dir, exist_ok=True)
+        fig.savefig(os.path.join(out_dir, file))  # the recorder of the house style notes what the figure draws
+        declared = _declared_record(spec, table, out_dir, file)
+        return dict(_outcome(fid, file, "ok"), fallback=True, **({"panels": record} if record else {}), **({"declared": declared} if declared else {}))
+    except Exception as err:
+        _remove(out_dir, file)
+        return dict(_outcome(fid, file, "fi_fault", "FI's drawing of the default figure `%s` stopped with %s: %s." % (fid, type(err).__name__, err)),
+                    fallback=True)
+    finally:
+        if plt is not None and fig is not None:
+            plt.close(fig)
 
 
 # ---- what is said and the exit code ---------------------------------------------------------------------------------------------

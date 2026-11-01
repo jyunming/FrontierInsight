@@ -865,3 +865,94 @@ def test_the_head_of_a_long_error_is_capped_but_the_read_forms_are_not(tmp_path)
     out = _shown(tmp_path, figure_x, shows=("r1",), table=_level_table())
     first = out["why"].split("\n")[0]
     assert len(first) < 1000 and "table.level_rows('r1', key)" in out["why"]
+
+
+# ---- the repair note is never cut, and the plan's default figure ----------------------------------------------------------------
+class _Grid:
+    """A table of a made-up study: settings ``size`` (3 values) and ``rate`` (2 values); results ``gain`` and ``loss`` per setting."""
+
+    def __init__(self, error: str = ""):
+        self.gave_values: set[str] = set()
+        self.last_error = {"gain": error} if error else {}
+        self._cells = {"size=%d,rate=%s" % (s, r): {"size": s, "rate": r} for r in (0.1, 0.2) for s in (10, 20, 30)}
+
+    def keys(self) -> list[str]:
+        return list(self._cells)
+
+    def setting(self, key: str) -> dict[str, Any]:
+        return dict(self._cells[key])
+
+    def mean(self, name: str, key: str) -> float:
+        self.gave_values.add(name)
+        cell = self._cells[key]
+        return cell["size"] * (1 if name == "gain" else 2) + cell["rate"]
+
+    def per_level(self, name: str, key: str) -> list[str]:
+        return []
+
+
+def _default(tmp_path, **spec):
+    return af.default_figure({"id": "f1", "file": "f1.png", **spec}, _Grid(), str(tmp_path))
+
+
+def test_repair_note_is_not_cut_at_240(tmp_path):
+    long_error = "RuntimeError: " + ", ".join("form %d reads the value of level %d" % (i, i) for i in range(30))
+    assert len(long_error) > 600
+    out = af.run_figures([{"id": "x", "file": "x.png", "shows": ["gain"]}], {"figure_x": lambda fig, table: fig.axes[0].axhline(1)},
+                         _Grid(long_error), str(tmp_path))[0]
+    assert out["status"] == "failed" and long_error.rstrip(".") in out["why"]
+
+
+def test_default_figure_draws_declared_shows_over_x(tmp_path):
+    out = _default(tmp_path, shows=["gain", "loss"], x="size")
+    assert out["status"] == "ok" and (tmp_path / "f1.png").stat().st_size > 0
+    assert out["declared"]["drawn"] == ["gain", "loss"]
+
+
+def test_default_figure_draws_two_lines_of_three_points(tmp_path, monkeypatch):
+    seen = {}
+    real = af._new_figure
+
+    def spy(panels):
+        plt, fig, axes = real(panels)
+        seen["axes"] = axes
+        return plt, fig, axes
+
+    monkeypatch.setattr(af, "_new_figure", spy)
+    _default(tmp_path, shows=["gain", "loss"], x="size", series="rate")
+    lines = seen["axes"][0].lines
+    assert len(lines) == 4 and all(len(line.get_xdata()) == 3 for line in lines)  # 2 results x 2 values of the series
+    seen.clear()
+    _default(tmp_path, shows=["gain", "loss"], x="size")
+    assert len(seen["axes"][0].lines) == 2
+
+
+def test_default_figure_marks_fallback(tmp_path):
+    out = _default(tmp_path, shows=["gain"], x="size")
+    assert out["fallback"] is True and out["status"] == "ok" and out["file"] == "f1.png" and out["id"] == "f1"
+    assert out["said"] == af._outcome("f1", "f1.png", "ok")["said"]
+
+
+@pytest.mark.parametrize("spec", [{}, {"shows": ["gain"]}, {"x": "size"}, {"shows": [], "x": "size"}])
+def test_default_figure_is_dropped_with_reason_when_shows_undeclared(tmp_path, spec):
+    (tmp_path / "f1.png").write_bytes(b"old")
+    out = _default(tmp_path, **spec)
+    assert out["status"] == "dropped" and out["why"].strip() and out["fallback"] is True
+    assert not (tmp_path / "f1.png").exists() and out["said"] == out["why"]
+
+
+def test_default_figure_one_panel_per_declared_panel(tmp_path, monkeypatch):
+    seen = {}
+    real = af._new_figure
+
+    def spy(panels):
+        plt, fig, axes = real(panels)
+        seen["axes"] = axes
+        return plt, fig, axes
+
+    monkeypatch.setattr(af, "_new_figure", spy)
+    out = _default(tmp_path, shows=["gain"], x="size", panels=2, settings={"rate": [0.1, 0.2]}, labels={"rate": "learning rate"})
+    assert out["status"] == "ok" and len(seen["axes"]) == 2
+    assert [p["title"] for p in out["panels"]] == ["learning rate = 0.1", "learning rate = 0.2"]
+    assert [a.get_title() for a in seen["axes"]] == ["learning rate = 0.1", "learning rate = 0.2"]
+    assert [len(a.lines) for a in seen["axes"]] == [1, 1]
