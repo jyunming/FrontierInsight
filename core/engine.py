@@ -11735,12 +11735,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         """``state`` with the protocol in force (the frozen one once there is one) as its design's protocol, for the
         checks of the results that read the design (:func:`_assertion_violations`)."""
         protocol = self._protocol_block(state)  # type: ignore[arg-type]
+        if isinstance(protocol, dict):
+            state = {**state, "design": {**(state.get("design") or {}), "protocol": protocol}}
         # When FI writes the analysis, state["code"] is FI's own experiment.py: what the checks read to learn what the study
         # did (a cap on a value) is the study's code, never FI's.
         study = _analysis_frame.study_code(self.quest_root / "code")
         if study is not None:
             state = {**state, "code": study}
-            # A result FI works out from the trials is capped only in the trial code, a derived one only in derive.py.
+            # A result FI works out from the trials is capped only in the trial code, a derived one only in derive.py;
+            # which is which comes from the protocol in force, merged above.
             try:
                 plan = _analysis_frame.plan_of(state["design"]) if _analysis_frame.applies(state.get("design")) == "" else None
             except Exception:  # noqa: BLE001 - the split is an aid; without it the study's code is read for every result
@@ -11748,9 +11751,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             if plan is not None:
                 state["_derived_ids"] = sorted({d["id"] for d in plan["derived"]})
                 state["_trial_code"] = _trial_code(self.quest_root / "code")
-        if not isinstance(protocol, dict):
-            return state
-        return {**state, "design": {**(state.get("design") or {}), "protocol": protocol}}
+        return state
 
     def _draft_protocol(self, state: QuestState) -> dict[str, Any] | None:
         """The protocol before it is frozen (:meth:`_draft_protocol_base`), with the worked examples the plan worked out again

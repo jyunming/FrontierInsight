@@ -976,6 +976,21 @@ _PLAIN_SIM = "def run_trial(x):\n    return {'growth': x / max(x, 1)}\n"
 _CAPPED_SIM = "def run_trial(x):\n    return {'growth': min(x, 1.0)}\n"
 
 
+def test_the_split_uses_the_protocol_in_force_when_the_design_has_none(tmp_path: Path) -> None:
+    # The state's design carries no protocol; the one in force (the frozen one) is merged in, and the split reads that.
+    from types import SimpleNamespace
+
+    from core.engine import Engine, _assertion_violations
+
+    full = _design([_derived("gain")])
+    quest = _quest(tmp_path, full)
+    (quest / "code" / "simulate.py").write_text(_CAPPED_SIM, encoding="utf-8")
+    state = {"result_json": {"s": {"growth": 1.0}}, "code": (quest / "code" / "experiment.py").read_text(encoding="utf-8"),
+             "design": {"result_assertions": [{"path": "growth", "min": 0.0, "max": 1.0, "unit": "x"}]}}
+    stub = SimpleNamespace(quest_root=quest, _protocol_block=lambda s: full["protocol"])
+    assert [v.kind for v in _assertion_violations(Engine._in_force(stub, state))] == ["clamped"]
+
+
 def test_a_cap_in_derive_py_does_not_pin_a_result_the_trials_return(tmp_path: Path) -> None:
     # The mean of a trial result is FI's, from its trial record; derive.py can only cap what derive.py returns.
     assert _split_check(tmp_path, _CAP, _PLAIN_SIM, "growth") == []
