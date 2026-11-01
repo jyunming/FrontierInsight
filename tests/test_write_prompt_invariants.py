@@ -174,3 +174,12 @@ def test_policy_brief_persona_pins_three_acts() -> None:
         assert required in txt, (
             f"write_persona_policy_brief.md must prescribe {required!r}"
         )
+
+
+def test_write_md_has_no_free_figure_sentence_rule(write_md_text: str) -> None:
+    """The writer describes a figure only by placing a mark from its list; FI writes the sentence."""
+    assert "{{figure:" in write_md_text
+    assert "never write a sentence about what a figure shows" in write_md_text.lower()
+    assert "result marks" in write_md_text
+    assert "State the concrete takeaway the figure supports" not in write_md_text
+    assert "describe in prose what it would have shown" not in write_md_text

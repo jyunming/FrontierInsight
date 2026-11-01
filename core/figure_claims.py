@@ -483,6 +483,10 @@ def _band(calls, panel, a, fmt, ctx):
 def _missing_x(calls, panel, a, fmt, ctx):
     s = _series(panel, a["series"])
     grid = _plan_grid(ctx.get("plan"))
+    plan = ctx.get("plan")
+    grid_id = plan.get("grid_id") if isinstance(plan, dict) else None
+    if grid_id is not None and (panel.get("x") or {}).get("id") != grid_id:
+        return None  # the grid is another setting's values
     if s is None or s.get("kind") != "points" or not grid or _is_cat(s):
         return None
     drawn = [x for x, _ in _points(s)]
@@ -543,6 +547,24 @@ def _plan_grid(plan: Any) -> list[float]:
     """The x values the plan declares for its settings (``plan["grid"]``), or ``[]`` when it declares none."""
     grid = plan.get("grid") if isinstance(plan, dict) else None
     return [float(g) for g in grid if _finite(g)] if isinstance(grid, list) else []
+
+
+def plan_of(protocol: Any) -> dict[str, Any] | None:
+    """The plan the claims read (``{"series": [{"id": ...}], "grid": [...], "grid_id": ...}``) from the study's protocol:
+    ``series`` are the metric ids it declares; ``grid`` is the list of values of the one numeric setting it varies
+    (``grid_id`` names it), left out when it varies none or more than one, so that no claim reads a grid it cannot place.
+    ``None`` without a protocol."""
+    if not isinstance(protocol, dict) or not protocol:
+        return None
+    metrics = protocol.get("metrics")
+    out: dict[str, Any] = {"series": [{"id": str(m["id"]), "label": ""} for m in metrics
+                                      if isinstance(m, dict) and m.get("id")] if isinstance(metrics, list) else []}
+    grid = protocol.get("grid")
+    if isinstance(grid, dict) and len(grid) == 1:
+        (name, values), = grid.items()
+        if isinstance(values, list) and values and all(_finite(v) for v in values):
+            out["grid"], out["grid_id"] = [float(v) for v in values], str(name)
+    return out
 
 
 @dataclass(frozen=True)

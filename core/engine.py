@@ -98,6 +98,7 @@ from . import attempt_memory as _memory
 from . import phased as _phased
 from . import phased_isolation as _phased_isolation
 from . import disclosure as _disclosure
+from . import figure_claims as _figure_claims
 from . import paper_facts as _paper_facts
 from . import paper_values as _paper_values
 from . import run_facts as _run_facts
@@ -23170,7 +23171,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         try:
             out = _paper_facts.render(markdown, self.quest_root, topic=str(self.config.topic or ""),
                                       fallback_s=(state.get("exec_result") or {}).get("duration_s"),
-                                      records=self._paper_records(state))
+                                      records=self._paper_records(state), plan=_figure_plan(self.quest_root))
         except Exception as e:  # noqa: BLE001
             self._log.warning("[write] FI could not fill the paper's facts of the run from its records (%s: %s)",
                               type(e).__name__, str(e)[:200])
@@ -23290,7 +23291,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # is different: once no round is left to fix it, it is the only thing taken out (a sentence that carried only such
         # keys goes, any other place reads the same marker) and listed.
         dropped: list[dict[str, str]] = []
-        if keyed and left <= 0 and not deferred and _paper_values.unfilled_in(paper_md):
+        # A figure statement FI could not fill, and a sentence that points at a figure FI drew and is not FI's to stand behind
+        # (core/figure_claims.py::apply_pointer_rule), go the same way.
+        if keyed and left <= 0 and not deferred and (_paper_facts.unfilled_in(paper_md) or _figures_drawn(state)):
             dropped = self._take_out_unfilled_keys(state)
             if dropped:
                 path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
@@ -23302,6 +23305,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         not_filled = "" if keyed else (
             "older_paper" if (self.quest_root / "raw" / "trials.json").is_file() else "no_records")
         _paper_facts.keep_check(self.quest_root, hits, paper_md, untraced=untraced, not_filled=not_filled, dropped=dropped)
+        if any(str(d.get("key", "")).startswith("figure:") for d in dropped) and self._restate_limitations(
+                state, "FI said in the Limitations that statements about a figure were left out and added no claim"):
+            # The Limitations are written before the take-out: the figure's disclosure reaches the paper in this same write.
+            paper_md = Path(_rerun_from.in_quest(state.get("paper_md"), self.quest_root)).read_text(encoding="utf-8")
+            hits = _paper_facts.check(paper_md, self.quest_root, topic=topic, fallback_s=fallback, keyed=keyed,
+                                      protocol=protocol)
+            _paper_facts.keep_check(self.quest_root, hits, paper_md, untraced=untraced, not_filled=not_filled, dropped=dropped)
         for hit in hits:
             self._log.warning("[record_check] %s", hit)
         if hits and left <= 0 and deferred:
@@ -23349,6 +23359,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         try:
             before = Path(path).read_bytes()
             text, taken = _paper_facts.take_out_unfilled(before.decode("utf-8"))
+            text, pointed = _take_out_unpointed(text, state)
+            taken = taken + pointed
             if not taken:
                 return []
             Path(path).write_bytes(text.encode("utf-8"))  # bytes back as bytes (bytes back as bytes: text mode writes the draft's CRLF as CR CR LF on Windows)
@@ -23361,6 +23373,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         self._log.warning("[record_check] no round is left to write the paper again, so %d value(s) FI could not fill were "
                           "taken out (%d sentence(s) removed, the rest replaced by \"%s\") and are listed in QUALITY.md",
                           len(taken), sum(1 for t in taken if t["how"] == "sentence removed"), _paper_facts.REPLACED)
+        for stem, number in _paper_facts._figure_left_out_items(taken):
+            self._log.warning("[record_check] statements about Figure %s (%s) could not be checked against what it draws and "
+                              "were left out; the Limitations say so", number, stem)
         return taken
 
     async def _check_code_project(self) -> None:
@@ -34064,9 +34079,10 @@ def _figure_list_for_prompt(state: QuestState) -> str:
                 f"{c.get('license', '')}]"
             )
         else:
+            calls = _calls_of(state, Path(str(f)).stem)
             lines.append(f"- Figure {number}: figures/{f}" + _figure_record_note(
-                records.get(f), n_seeds=n_seeds, results=state.get("result_json"), settings=settings,
-                calls=_calls_of(state, Path(str(f)).stem)))
+                records.get(f), n_seeds=n_seeds, results=state.get("result_json"), settings=settings, calls=calls)
+                + _figure_menu_note(state, Path(str(f)).stem, calls))
     if any(_panel_place(ax.get("grid")) for f in figs for ax in ((records.get(f) or {}).get("axes") or [])
            if isinstance(ax, dict)):
         lines.append(
@@ -34734,6 +34750,7 @@ def _place_figures(markdown: str, state: QuestState, *,
         caption = _figure_caption_text(name, records.get(name), n_seeds=n_seeds, facts=facts, credit=credits.get(name),
                                        calls=_calls_of(state, Path(name).stem))
         embed = f"![**Figure {number}.** {caption}](figures/{name})"
+        said = _figure_minimum_sentence(lines, number, name, state)
         at = max(_figure_insertion_line(lines, number), last + 1)
         if at >= len(lines):
             if not lines or lines[-1].strip():
@@ -34741,10 +34758,46 @@ def _place_figures(markdown: str, state: QuestState, *,
             at = len(lines) - 1
         before_sources = at < len(lines) and bool(_SOURCE_LIST_HEADING_RE.match(lines[at]))
         block = [embed, ""] if before_sources else ["", embed]
+        if said is not None:
+            block = _figure_with_sentence(lines, said, block)
         lines[at:at] = block
         last = at + block.index(embed)
         placed.append(name)
     return "\n".join(lines), placed, written
+
+
+def _figure_minimum_sentence(lines: list[str], number: int, name: str, state: QuestState) -> tuple[int | None, str] | None:
+    """The one sentence FI composes for a figure whose drawing it checked, when the draft places none of the figure's marks:
+    ``(line of the paragraph that first names it, sentence)``, the line being ``None`` when no paragraph names it. The
+    sentence is the figure's ``drawn`` statement (else its ``range``), a mark FI fills from its record, with no pointer
+    (a pointer after it would be a fragment the pointer rule takes out). ``None`` for a figure with no call record, one FI
+    drew itself from the plan's description, one with no such statement (a custom drawing alone), or one whose marks the
+    draft already holds."""
+    stem = Path(name).stem
+    calls = _calls_of(state, stem)
+    if not calls or calls.get("fallback"):
+        return None
+    text = "\n".join(lines)
+    held = (re.search(r"\{\{\s*figure:\s*" + re.escape(stem) + r"(?:\.\w+)?\s*:", text, re.I)
+            or re.search(r"fi:fact-figure-\w+?-" + re.escape(stem) + r"(?:-args[0-9a-f]*)?\s*-->", text))
+    if held:
+        return None
+    offers = _figure_offers(state, stem, calls)
+    offer = next((o for kind in ("drawn", "range") for o in offers if o["claim"] == kind), None)
+    if offer is None:
+        return None
+    return _figure_reference_end(lines, number), offer["mark"] + "."
+
+
+def _figure_with_sentence(lines: list[str], said: tuple[int | None, str], block: list[str]) -> list[str]:
+    """``block`` (the figure and its blank line) with the composed sentence in the paragraph that names the figure, after its
+    last sentence; with a paragraph of its own before the figure when no paragraph names it or the one that does is not
+    running prose."""
+    end, sentence = said
+    if end is not None and lines[end].rstrip().endswith((".", "!", "?")) and not _paper_facts._NOT_PROSE.match(lines[end]):
+        lines[end] = lines[end].rstrip() + " " + sentence
+        return block
+    return ["", sentence] + block
 
 
 # A figure the prose names: "Figure 2 shows", "Figures 1 and 2", "Fig. 3".
@@ -34768,17 +34821,79 @@ def _caption_safe(text: str) -> str:
 
 
 def _calls_of(state: QuestState, stem: str) -> dict[str, Any] | None:
-    """FI's record of the drawing calls of the figure ``stem`` (``<stem>.calls.json``, kept beside the recorder's
-    ``<stem>.json``), or ``None`` when the quest has none: a figure drawn by a body that does not call the primitives, or
-    a quest from before the record."""
+    """FI's record of the drawing calls of the figure ``stem`` (:func:`core.figure_claims.load_calls`), or ``None`` when the
+    quest has none: a figure drawn by a body that does not call the primitives, or a quest from before the record."""
     root = state.get("quest_root")
-    if not root:
-        return None
+    return _figure_claims.load_calls(root, stem) if root else None
+
+
+def _figures_drawn(state: QuestState) -> dict[int, set[str]]:
+    """``{figure number: the metrics its drawing calls drew}`` for each numbered figure that has a call record: the ids of the
+    series a panel FI drew itself holds, and what its y axis plots. A panel drawn by hand adds none (what it draws is not
+    checked). A figure with no call record is not in it: its sentences are not judged."""
+    out: dict[int, set[str]] = {}
+    for name, number in _figure_numbers(state).items():
+        calls = _calls_of(state, Path(name).stem)
+        if not calls:
+            continue
+        metrics: set[str] = set()
+        for p in calls.get("panels") or []:
+            if not isinstance(p, dict) or p.get("raw"):
+                continue
+            metrics.add(str((p.get("y") or {}).get("what") or ""))
+            metrics.update(str(s.get("id")) for s in p.get("series") or [] if isinstance(s, dict))
+        out[number] = metrics - {"", "other"}
+    return out
+
+
+def _take_out_unpointed(text: str, state: QuestState) -> tuple[str, list[dict[str, str]]]:
+    """``text`` without the sentences that point at a figure FI drew and are not FI's to stand behind
+    (:func:`core.figure_claims.apply_pointer_rule`), and the entries to list, shaped like those of ``take_out_unfilled`` with
+    ``key`` ``figure:<stem>:claim`` and the figure's ``figure`` number, so the figure gets one disclosure. Nothing changes for
+    a quest none of whose figures has a call record."""
+    drawn = _figures_drawn(state)
+    if not drawn:
+        return text, []
+    numbers = _figure_numbers(state)
+    out, taken = _figure_claims.apply_pointer_rule(text, numbers, drawn, _FIGURE_MENTION_RE)
+    by_number = {n: Path(name).stem for name, n in numbers.items()}
+    entries = []
+    for t in taken:
+        number = re.sub(r"\D", "", str(t.get("key") or ""))
+        stem = by_number.get(int(number)) if number else None
+        entries.append({**t, "key": f"figure:{stem}:claim", "figure": number} if stem and int(number) in drawn else dict(t))
+    return out, entries
+
+
+def _figure_plan(root: Any) -> dict[str, Any] | None:
+    """The plan the figure claims read (:func:`core.figure_claims.plan_of`), from the quest's frozen protocol; ``None``
+    without one, and then ``not_drawn`` and ``missing_x`` state nothing."""
     try:
-        data = json.loads((Path(str(root)) / ".fi" / "figure_records" / f"{stem}.calls.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        return _figure_claims.plan_of(_paper_facts.plan_protocol(root)) if root else None
+    except Exception:  # noqa: BLE001 -- no plan: those two claims fail closed
         return None
-    return data if isinstance(data, dict) and isinstance(data.get("panels"), list) else None
+
+
+def _figure_offers(state: QuestState, stem: str, calls: dict[str, Any]) -> list[dict[str, Any]]:
+    """The statements about the figure ``stem`` that are true of its call record (:func:`core.figure_claims.menu`), worded as
+    the paper will render them."""
+    return _figure_claims.menu(calls, _figure_plan(state.get("quest_root")), _paper_values.sig, stem=stem)
+
+
+def _figure_menu_note(state: QuestState, stem: str, calls: dict[str, Any] | None) -> str:
+    """What the writer may say about a figure whose drawing calls FI recorded: the marks it may place (FI writes the
+    sentence), a panel drawn by hand having none. ``""`` for a figure with no call record, which is listed as before."""
+    if not calls:
+        return ""
+    parts = ["\n    Marks FI has checked about this figure (FI writes the sentence):"]
+    if calls.get("fallback"):
+        parts.append("    this figure was drawn by FI from the plan's description")
+    for p in _call_panels(calls):
+        if p.get("raw"):
+            parts.append(f"    no statements can be made about panel {p.get('panel')} (custom drawing)")
+    for offer in _figure_offers(state, stem, calls):
+        parts.append(f'    {offer["mark"]}  FI writes: "{offer["text"]}"')
+    return "\n".join(parts)
 
 
 #: What an error bar or a band spans, in a reader's words, by the meaning the call recorded.
@@ -35024,11 +35139,9 @@ def _figure_caption_text(
     return _caption_safe(" ".join(parts))
 
 
-def _figure_insertion_line(lines: list[str], number: int) -> int:
-    """Where the figure numbered ``number`` goes: after the paragraph whose
-    prose first names it, else before the paper's source lists, else at the
-    end. Code fences and the captions of figures already in the paper are not
-    prose and are skipped."""
+def _figure_reference_end(lines: list[str], number: int) -> int | None:
+    """The last line of the paragraph whose prose first names the figure numbered ``number``, else ``None``. Code fences and
+    the captions of figures already in the paper are not prose and are skipped, and so are the source lists."""
     fence: str | None = None
     for i, line in enumerate(lines):
         fence_line = _MD_FENCE_LINE_RE.match(line)
@@ -35043,7 +35156,17 @@ def _figure_insertion_line(lines: list[str], number: int) -> int:
             end = i
             while end + 1 < len(lines) and lines[end + 1].strip():
                 end += 1
-            return end + 1
+            return end
+    return None
+
+
+def _figure_insertion_line(lines: list[str], number: int) -> int:
+    """Where the figure numbered ``number`` goes: after the paragraph whose
+    prose first names it, else before the paper's source lists, else at the
+    end."""
+    end = _figure_reference_end(lines, number)
+    if end is not None:
+        return end + 1
     for i, line in enumerate(lines):
         if _SOURCE_LIST_HEADING_RE.match(line):
             return i

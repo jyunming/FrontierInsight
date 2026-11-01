@@ -385,3 +385,151 @@ def test_an_unread_results_record_with_a_non_list_is_read_as_empty() -> None:
     from core.engine import _unread_results
 
     assert _unread_results({"e.png": {"declared": dict(_UNREAD, not_drawn=5)}}) == []
+
+
+# ---- the writer chooses among statements FI has checked -----------------------------------------------------------------
+
+import json  # noqa: E402
+
+from core import figure_claims as _claims  # noqa: E402
+
+LEGACY_LIST = ('- Figure 3: figures/spread_map.png\n- Figure 2: figures/cost_by_size.png\n'
+               '- Figure 1: figures/error_vs_step.png \u2014 series: scheme A 0.001 to 0.2')
+
+
+def _series(ident: str, label: str, ys=(3.0, 2.0, 1.0)) -> dict:
+    return {"id": ident, "label": label, "kind": "line", "step": False, "x": [1.0, 2.0, 3.0], "y": list(ys),
+            "yerr": None, "merged_with": []}
+
+
+def _panel(k: int = 1, *, raw: bool = False, series=None) -> dict:
+    return {"panel": k, "raw": raw, "raw_reason": "fig.raw" if raw else None,
+            "x": {"id": "size", "kind": "setting", "label": "size", "scale": "linear"},
+            "y": {"what": "error", "label": "error", "scale": "linear"},
+            "series": [] if raw else (series if series is not None else [_series("error", "scheme A")]),
+            "bands": [], "refs": [], "notes": [], "texts_raw": ["slope 2.0"] if raw else []}
+
+
+def _quest(tmp_path: Path, calls: dict | None, stem: str = "error_vs_step") -> dict:
+    folder = tmp_path / ".fi" / "figure_records"
+    folder.mkdir(parents=True)
+    if calls is not None:
+        (folder / f"{stem}.calls.json").write_text(json.dumps(calls), encoding="utf-8")
+    return {**STATE, "quest_root": str(tmp_path)}
+
+
+def _record(*panels: dict, fallback: bool = False) -> dict:
+    return {"version": 1, "fallback": fallback, "panels": list(panels)}
+
+
+def test_prompt_lists_true_claims_as_marks_for_verified_figure(tmp_path: Path) -> None:
+    state = _quest(tmp_path, _record(_panel()))
+    listing = _figure_list_for_prompt(state)  # type: ignore[arg-type]
+    assert "{{figure:error_vs_step:drawn @ series=error, panel=1}}" in listing
+    assert "scheme A is drawn" in listing, "the writer sees the sentence FI will write"
+    assert "{{figure:error_vs_step:trend @ series=error, panel=1}}" in listing
+    # a claim that is not true of the drawing is not offered
+    assert "{{figure:error_vs_step:crossing" not in listing and "increases" not in listing
+    # a figure with no call record keeps its old line
+    assert "- Figure 2: figures/cost_by_size.png\n" in listing + "\n"
+
+
+def test_prompt_says_raw_panel_has_none(tmp_path: Path) -> None:
+    state = _quest(tmp_path, _record(_panel(1), _panel(2, raw=True)))
+    listing = _figure_list_for_prompt(state)  # type: ignore[arg-type]
+    assert "no statements can be made about panel 2 (custom drawing)" in listing
+    assert "panel=2" not in listing
+
+
+def test_prompt_says_a_fallback_figure_is_drawn_from_the_plans_description(tmp_path: Path) -> None:
+    state = _quest(tmp_path, _record(_panel(), fallback=True))
+    assert "drawn by FI from the plan's description" in _figure_list_for_prompt(state)  # type: ignore[arg-type]
+
+
+def test_legacy_figure_prompt_is_unchanged(tmp_path: Path) -> None:
+    # RF1: golden text of the list before the menu existed (no call record), with or without a quest folder.
+    assert _figure_list_for_prompt(STATE) == LEGACY_LIST  # type: ignore[arg-type]
+    state = _quest(tmp_path, None)
+    assert _figure_list_for_prompt(state) == LEGACY_LIST  # type: ignore[arg-type]
+
+
+def test_no_selected_claim_gets_one_composed_sentence_inline(tmp_path: Path) -> None:
+    state = _quest(tmp_path, _record(_panel()))
+    out, placed, _ = _place_figures(DRAFT, state)  # type: ignore[arg-type]
+    assert "error_vs_step.png" in placed
+    sentence = "{{figure:error_vs_step:drawn @ series=error, panel=1}}."
+    assert out.count("{{figure:error_vs_step") == 1 and sentence in out
+    lines = out.split("\n")
+    # at the figure's first reference: the paragraph that names it, before the figure
+    assert sentence in _paragraph_above(lines, _embed_line(out, "error_vs_step.png"))
+    # the figures with no call record get nothing
+    assert "{{figure:cost_by_size" not in out and "{{figure:spread_map" not in out
+    # placing again adds nothing
+    again, _, _ = _place_figures(out, state)  # type: ignore[arg-type]
+    assert again == out
+
+
+def test_selected_claims_are_not_duplicated_by_minimum_sentence(tmp_path: Path) -> None:
+    state = _quest(tmp_path, _record(_panel()))
+    chosen = DRAFT.replace("for each scheme.", "and {{figure:error_vs_step:trend @ series=error, panel=1}}.")
+    out, _, _ = _place_figures(chosen, state)  # type: ignore[arg-type]
+    assert out.count("{{figure:error_vs_step") == 1 and ":drawn" not in out
+    rendered = chosen.replace("{{figure:error_vs_step:trend @ series=error, panel=1}}",
+                              "<!-- fi:fact-figure-trend-error_vs_step-args00 -->x<!-- /fi:fact-figure-trend-error_vs_step-args00 -->")
+    out, _, _ = _place_figures(rendered, state)  # type: ignore[arg-type]
+    assert "{{figure:" not in out
+
+
+def test_a_raw_only_or_fallback_figure_gets_no_minimum_sentence(tmp_path: Path) -> None:
+    for calls in (_record(_panel(1, raw=True)), _record(_panel(), fallback=True)):
+        state = _quest(tmp_path / str(len(calls["panels"])) / str(calls["fallback"]), calls)
+        out, _, _ = _place_figures(DRAFT, state)  # type: ignore[arg-type]
+        assert "{{figure:" not in out
+
+
+def test_plan_of_reads_metrics_and_a_single_numeric_grid() -> None:
+    plan = _claims.plan_of({"metrics": [{"id": "error"}, {"id": "cost"}], "grid": {"size": [1, 2, 4]}})
+    assert plan == {"series": [{"id": "error", "label": ""}, {"id": "cost", "label": ""}],
+                    "grid": [1.0, 2.0, 4.0], "grid_id": "size"}
+    assert "grid" not in _claims.plan_of({"metrics": [{"id": "e"}], "grid": {"a": [1], "b": [2]}})
+    assert _claims.plan_of(None) is None
+    calls = _record(_panel(series=[{**_series("error", "scheme A"), "kind": "points"}]))
+    gap = {"series": [], "grid": [1.0, 2.0, 3.0, 4.0], "grid_id": "size"}
+    assert "has no point at size 4" in _claims.evaluate(calls, "missing_x", {"series": "error", "panel": "1"}, plan=gap)[0]
+    other = {**gap, "grid_id": "step"}
+    assert _claims.evaluate(calls, "missing_x", {"series": "error", "panel": "1"}, plan=other) is None
+
+
+def test_pointer_rule_runs_in_write_post_processing(tmp_path: Path) -> None:
+    from tests.test_paper_line_endings import _quest as quest_with_engine
+
+    text = ("# T\n\n## Results\n\nFigure 1 shows the paired gain. Figure 1 is a placeholder.\n\n"
+            "Figure 2 shows the time each size took.\n\n## Limitations\n\nFew.\n")
+    eng, paper = quest_with_engine(tmp_path, text)
+    state = _quest(eng.quest_root, _record(_panel()))
+    state = {**state, "paper_md": str(paper), "paper_keys": True, "iteration": 1}
+    eng.config.engine.max_iterations = 2
+    hits = eng._paper_record_hits(paper.read_text(encoding="utf-8"), state)  # type: ignore[arg-type]
+    after = paper.read_bytes().decode("utf-8")
+    # Figure 1 has a call record: a sentence that points at it and is not FI's is gone; Figure 2 is legacy: untouched
+    assert "paired gain" not in after and "placeholder" not in after
+    assert "Figure 2 shows the time each size took." in after
+    from core import paper_facts
+    kept = paper_facts.kept_check(eng.quest_root)
+    left_out = [d for d in kept["taken_out_values"] if str(d.get("key", "")).startswith("figure:")]
+    assert {d["key"].split(":")[1] for d in left_out} == {"error_vs_step"} and {d["figure"] for d in left_out} == {"1"}
+    # one disclosure for the figure, in the Limitations of the same write
+    assert after.count("some statements about this figure could not be checked") == 1
+    assert not hits or all("figure" not in h.lower() for h in hits)
+
+
+def test_pointer_rule_leaves_a_paper_of_legacy_figures_alone(tmp_path: Path) -> None:
+    from tests.test_paper_line_endings import _quest as quest_with_engine
+
+    text = "# T\n\n## Results\n\nFigure 1 shows the paired gain. Figure 9 is odd.\n\n## Limitations\n\nFew.\n"
+    eng, paper = quest_with_engine(tmp_path, text)
+    state = {**STATE, "quest_root": str(eng.quest_root), "paper_md": str(paper), "paper_keys": True, "iteration": 1}
+    eng.config.engine.max_iterations = 2
+    before = paper.read_bytes()
+    eng._paper_record_hits(paper.read_text(encoding="utf-8"), state)  # type: ignore[arg-type]
+    assert paper.read_bytes() == before
