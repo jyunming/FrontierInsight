@@ -1450,7 +1450,7 @@ def _figures(table, quest_root, records=None):
                     if plain.get("status") in ("ok", "dropped"):
                         outcomes[-1] = plain
                     else:
-                        # FI's own drawing failed: the body's failure stays, and the fault is FI's, recorded beside it
+                        # FI's own drawing failed: the body's failure stays, the fault is recorded beside it and said; the figure is missing, the run goes on
                         outcomes[-1] = dict(outcomes[-1], fallback_fault=str(plain.get("said") or plain.get("why")))
                         sys.stderr.write("%s\\n" % plain.get("said"))
             seen["seconds"] += time.monotonic() - began

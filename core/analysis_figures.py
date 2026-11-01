@@ -1170,12 +1170,10 @@ def _grid_order(name: str, values: list[Any], spec: dict[str, Any], compared: An
 def _default_hold(spec: dict[str, Any], table: Any, held: list[dict[str, Any]], skip: set[str], namespace: Any,
                   derived: Any = None) -> dict[str, Any]:
     """Where the default figure holds every other setting the study varies (not ``x``, the series or the panel setting). Not at the
-    first value the table records (that can be a combination nothing was run at: a blank panel). At the hold of the sub-study the
-    figure belongs to: the one sub-study of the plan (``PARTS``: each sub-study and the settings it holds) that holds none of
-    ``x``, the series or the panel setting, so that the figure can show them; when several do, or none, the figure belongs to
-    none and no sub-study's hold is used. A setting no such hold gives is held at the value that leaves the most points with a
-    value to draw (a line's points, over the panels); of two equal ones, the first in the plan's order (``_grid_order``)."""
-    x_name = str(spec.get("x"))
+    first value the table records (that can be a combination nothing was run at: a blank panel). Each setting is held at the value
+    that leaves the most points with a value to draw (a line's points, over the panels); of two equal ones, the first in the plan's
+    order (``_grid_order``). The settings are settled in the figure's own order of them, else by name, never in the order the
+    table names them. No sub-study's hold is used: the plan does not say which sub-study a figure belongs to."""
     cells = [dict(table.setting(k)) for k in table.keys()]
     others: dict[str, list[Any]] = {}
     for cell in cells:
@@ -1185,27 +1183,22 @@ def _default_hold(spec: dict[str, Any], table: Any, held: list[dict[str, Any]], 
     varied = {a: vs for a, vs in others.items() if len(vs) > 1}
     if not varied:
         return {}
-    parts = _from(namespace, "PARTS", {})
-    fits = []
-    for hold in (parts.values() if isinstance(parts, dict) else []):
-        if isinstance(hold, dict) and not set(map(str, hold)) & (skip | {x_name}):
-            fits.append({str(a): v for a, v in hold.items() if str(a) in varied and v in varied[str(a)]})
-    chosen: dict[str, Any] = dict(fits[0]) if len(fits) == 1 else {}
     compared = _from(namespace, "COMPARED", {})
 
     def points(hold: dict[str, Any]) -> int:
         return sum(len(line[1]) for one in held for line in _default_lines(spec, table, {**one, **hold}, derived))
 
-    for a, vs in varied.items():
-        if a in chosen:
-            continue
+    chosen: dict[str, Any] = {}
+    own = [str(k) for k in (spec.get("settings") if isinstance(spec.get("settings"), dict) else {})]
+    for a in sorted(varied, key=lambda n: (own.index(n) if n in own else len(own), n)):
+        vs = varied[a]
         top, pick = -1, vs[0]
         for v in _grid_order(a, vs, spec, compared):
             got = points({**chosen, a: v})
             if got > top:
                 top, pick = got, v
         chosen[a] = pick
-    return {a: chosen[a] for a in varied}
+    return chosen
 
 
 def _frame_has_calls() -> bool:
@@ -1363,7 +1356,6 @@ def exit_code(outcomes: list[dict[str, Any]]) -> int:
 
 
 def fi_faults(outcomes: list[dict[str, Any]]) -> list[str]:
-    """What FI's own figures could not do because of FI's own record or code: said plainly, never sent to the model (a figure of FI's
-    that failed, and the default figure that failed in place of a body that failed: ``fallback_fault``)."""
-    return [o["said"] for o in outcomes if o.get("status") == "fi_fault"] + [
-        o["fallback_fault"] for o in outcomes if o.get("fallback_fault")]  # FI's default figure failed beside a body that failed
+    """What FI's own figures could not do because of FI's own record or code: said plainly, never sent to the model . The default figure that
+    failed in place of a body that failed (``fallback_fault`` on the outcome) is not one: a figure never stops the run."""
+    return [o["said"] for o in outcomes if o.get("status") == "fi_fault"]

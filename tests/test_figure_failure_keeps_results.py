@@ -469,7 +469,7 @@ _SIDE_EFFECT = ("def figure_fig1(fig, table):\n    open('body_was_called.txt', '
                 "    raise ValueError('the body reads an id the plan does not declare')\n")
 
 
-def test_a_fault_of_the_default_figure_is_recorded_as_a_fallback_fault_not_only_printed(tmp_path: Path) -> None:
+def test_a_fault_of_the_default_figure_is_recorded_but_does_not_stop_the_run(tmp_path: Path) -> None:
     import os
     import subprocess
     import sys
@@ -490,7 +490,8 @@ def test_a_fault_of_the_default_figure_is_recorded_as_a_fallback_fault_not_only_
     got = json.loads(next(ln for ln in done.stdout.splitlines() if ln.startswith("GOT "))[4:])
     fig = next(o for o in got["figs"] if o["id"] == "fig1")
     assert fig["status"] == "failed" and fig["fallback_fault"] == "FI default stopped"  # the body's failure stays, the fault beside it
-    assert got["faults"] == ["FI default stopped"] and got["code"] == 2  # FI's fault: nothing to send the model
+    assert got["faults"] == [] and got["code"] == 1  # a figure never stops the run: the exit code is the body failure's alone
+    assert "FI default stopped" in done.stderr
 
 
 def test_only_mode_does_not_run_the_failed_body_and_draws_the_default_figure(tmp_path: Path) -> None:

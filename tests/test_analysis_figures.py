@@ -1668,12 +1668,12 @@ def test_default_figure_holds_at_the_value_with_the_most_points_not_the_first(tm
     assert series[0]["x"] == [10, 20, 30, 40]
 
 
-def test_default_figure_holds_at_the_sub_study_hold(tmp_path, frame5):
-    parts = {"wide": {"size": 10}, "narrow": {"mode": "c"}}  # the first holds x itself and cannot be used
+def test_default_figure_ignores_the_sub_studies_the_plan_has_no_link_to_a_figure_for(tmp_path, frame5):
+    parts = {"wide": {"size": 10}, "narrow": {"mode": "c"}}  # a guess which one is this figure's: neither hold is used
     out = af.default_figure({"id": "f1", "file": "f1.png", "shows": ["gain"], "x": "size"}, _Ragged(), str(tmp_path),
                             types.SimpleNamespace(PARTS=parts))
-    assert out["held"] == {"mode": "c"}
-    assert _calls_of(frame5)["panels"][0]["series"][0]["x"] == [10, 20, 30]
+    assert out["held"] == {"mode": "d"}  # the value with the most points
+    assert _calls_of(frame5)["panels"][0]["series"][0]["x"] == [10, 20, 30, 40]
 
 
 # ---- fix round 1: the hold counts drawable points, a derived y, ids made by FI ------------------------------------------------
@@ -1716,14 +1716,38 @@ def test_default_figure_tie_goes_to_the_first_value_of_the_plan_not_the_first_ro
         assert got["held"] == {"mode": "q"}  # the plan's own order
 
 
-def test_default_figure_of_two_sub_studies_that_fit_uses_neither_hold(tmp_path, frame5):
-    parts = {"one": {"mode": "b"}, "two": {"mode": "c"}}  # both leave size free: the figure belongs to neither alone
+def test_default_figure_of_one_sub_study_that_fits_does_not_use_its_hold_either(tmp_path, frame5):
     out = af.default_figure({"id": "f1", "file": "f1.png", "shows": ["gain"], "x": "size"}, _Ragged(), str(tmp_path),
-                            types.SimpleNamespace(PARTS=parts))
-    assert out["held"] == {"mode": "d"}  # the value with the most points, not another part's hold
-    one = af.default_figure({"id": "f1", "file": "f1.png", "shows": ["gain"], "x": "size"}, _Ragged(), str(tmp_path),
-                            types.SimpleNamespace(PARTS={"one": {"mode": "b"}, "other": {"size": 10}}))
-    assert one["held"] == {"mode": "b"}  # a sub-study that holds x itself is not this figure's; the other one is
+                            types.SimpleNamespace(PARTS={"one": {"mode": "b"}}))
+    assert out["held"] == {"mode": "d"}
+
+
+class _TwoHeld(_CallGrid):
+    """Settings ``a`` (1-3) and ``b`` (1-2) besides ``size``. Only four combinations have a value; which setting is settled first
+    decides the hold, so the order the table names its settings in must not decide it. ``swap`` names ``b`` before ``a``."""
+
+    drawable = {(1, 1), (1, 2), (2, 2), (3, 2)}
+
+    def __init__(self, swap=False):
+        super().__init__()
+        self._cells = {}
+        for a in (1, 2, 3):
+            for b in (1, 2):
+                for s in (10, 20, 30):
+                    cell = {"size": s, "b": b, "a": a} if swap else {"size": s, "a": a, "b": b}
+                    self._cells["size=%d,a=%d,b=%d" % (s, a, b)] = cell
+
+    def mean(self, name, key):
+        self.gave_values.add(name)
+        cell = self._cells[key]
+        return float(cell["size"]) if (cell["a"], cell["b"]) in self.drawable else None
+
+
+def test_default_figure_hold_does_not_depend_on_the_order_the_table_names_its_settings(tmp_path, frame5):
+    spec = {"id": "f1", "file": "f1.png", "shows": ["gain"], "x": "size"}
+    assert af.default_figure(spec, _TwoHeld(), str(tmp_path))["held"] == af.default_figure(spec, _TwoHeld(True), str(tmp_path))["held"]
+    named = dict(spec, settings={"b": [1, 2], "a": [1, 2, 3]})  # the figure's own order is followed when it has one
+    assert af.default_figure(named, _TwoHeld(), str(tmp_path))["held"] == af.default_figure(named, _TwoHeld(True), str(tmp_path))["held"]
 
 
 _NET = {"net": {"status": "ok", "by_setting": {"size=10,rate=0.1": 1.5, "size=20,rate=0.1": 2.5, "size=30,rate=0.1": 3.5,
