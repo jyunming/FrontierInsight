@@ -462,3 +462,15 @@ def test_the_prompts_count_further_reading_toward_depth() -> None:
     assert "References or Further reading" in review
     assert "References or Further reading" in write
     assert "[W" in write and "## Further reading" in write
+
+
+def test_a_page_no_longer_cited_is_not_lost_when_there_was_no_further_reading() -> None:
+    """Every page was cited, so the paper had no Further reading; the citation check then removed the only citation of
+    [W2]. The page goes to a new Further reading instead of being in neither list."""
+    from core.engine import _finalize_after_citation_edits, _finalize_paper_sources
+    first, _o, _d = _finalize_paper_sources("# T\n\nBody [1], [W1] and [W2].\n", LIT, "external")
+    assert "## Further reading" not in first
+    out, _ordered = _finalize_after_citation_edits(first.replace(" and [W2]", ""), LIT, "external")
+    refs, further = _sections(out)
+    assert "- [W1]" in refs and "[W2]" not in refs
+    assert "- [W2] Museum of Play" in further

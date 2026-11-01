@@ -31338,6 +31338,13 @@ def _finalize_with_numbering(
         tail = after[block.end:]
         new = ("## Further reading\n\n" + "\n".join(kept) + ("\n\n" if tail else "\n")) if kept else ""
         after = after[:block.start] + new + tail
+    elif not _FURTHER_HEADING_LINE_RE.search(after):
+        # No Further reading yet (every page was cited): a page listed under References that the text no longer cites
+        # is not lost, it starts the section.
+        gone = _further_reading_lines([w for w in web if w["label"] in set(listed_before) and w["label"] not in cited_web])
+        if gone:
+            section = "## Further reading\n\n" + "\n".join(gone) + "\n"
+            after = (after.rstrip() + "\n\n" if after.strip() else "") + section
     lines = [f"{r['n']}. {_ref_citation_text(r)}" for r in refs]
     lines += _further_reading_lines([w for w in web if w["label"] in cited_web])
     text = body
