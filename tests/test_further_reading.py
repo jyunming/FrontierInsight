@@ -157,6 +157,73 @@ def test_the_paper_gets_a_further_reading_section_once() -> None:
     assert _append_further_reading(md, []) == md
 
 
+def _sections(text: str) -> tuple[str, str]:
+    """The text of the paper's References and of its Further reading (empty when it has none)."""
+    refs, _, rest = text.partition("## References")
+    refs_part, _, further = rest.partition("## Further reading")
+    return refs_part, further
+
+
+def test_a_web_page_the_text_cites_is_listed_under_references() -> None:
+    """The convention: every source the text cites is under References. A paper that cited [W2] listed it only under
+    Further reading, and a grader failed it: "[W2] is cited but is not in References"."""
+    from core.engine import _finalize_paper_sources
+    body, _ordered, _dropped = _finalize_paper_sources("# T\n\nBody [1], quoting [W2].\n", LIT, "external")
+    refs, further = _sections(body)
+    assert "- [W2] Museum of Play: the 1980s" in refs
+    assert "[W2]" not in further
+    assert "[W1] A collector's history of action figures" in further, "an uncited page stays Further reading"
+    assert refs.index("1. A. Author") < refs.index("[W2]"), "the numbered papers come first"
+
+
+def test_with_no_web_page_cited_further_reading_lists_them_all() -> None:
+    from core.engine import _finalize_paper_sources
+    body, _ordered, _dropped = _finalize_paper_sources("# T\n\nBody [1].\n", LIT, "external")
+    refs, further = _sections(body)
+    assert "[W" not in refs
+    assert "[W1]" in further and "[W2]" in further
+
+
+def test_with_every_web_page_cited_there_is_no_further_reading() -> None:
+    from core.engine import _finalize_paper_sources
+    body, _ordered, _dropped = _finalize_paper_sources("# T\n\nBody [1], [W1] and [W2].\n", LIT, "external")
+    assert "## Further reading" not in body
+    refs, _further = _sections(body)
+    assert "[W1]" in refs and "[W2]" in refs
+
+
+def test_a_paper_citing_only_web_pages_gets_a_references_section() -> None:
+    from core.engine import _finalize_paper_sources
+    body, _ordered, _dropped = _finalize_paper_sources("# T\n\nBody [W1].\n", LIT, "external")
+    refs, further = _sections(body)
+    assert "- [W1] A collector's history" in refs and "[W1]" not in further
+
+
+def test_the_lists_after_a_citation_edit_keep_the_same_rule() -> None:
+    """After the citation check cut a citation of [W1] and put one of [W2] in, [W2] is under References and [W1] is
+    back under Further reading; a page the page-limit fit had dropped stays dropped."""
+    from core.engine import _finalize_after_citation_edits, _finalize_paper_sources
+    first, _o, _d = _finalize_paper_sources("# T\n\nBody [1], [W1].\n", LIT, "external")
+    assert "## Further reading" in first and "- [W1]" in first.partition("## Further reading")[0]
+    edited = first.replace("Body [1], [W1].", "Body [1], [W2].")
+    out, _ordered = _finalize_after_citation_edits(edited, LIT, "external")
+    refs, further = _sections(out)
+    assert "- [W2] Museum of Play" in refs and "[W2]" not in further
+    assert "- [W1] A collector's history" in further and "[W1]" not in refs
+    from core.engine import _trim_further_reading
+    trimmed = _trim_further_reading(out, 0)
+    again, _ordered = _finalize_after_citation_edits(trimmed, LIT, "external")
+    assert "[W1]" not in again.partition("## References")[2] and "## Further reading" not in again
+
+
+def test_the_lists_the_paper_has_are_read_back() -> None:
+    from core.engine import _finalize_paper_sources, references_web_listed, web_pages_listed
+    body, _o, _d = _finalize_paper_sources("# T\n\nBody [1], [W2].\n", LIT, "external")
+    assert references_web_listed(body) == ["W2"]
+    assert sorted(web_pages_listed(body) or []) == ["W1", "W2"]
+    assert web_pages_listed("# T\n\nBody.\n") is None
+
+
 def test_the_written_paper_ends_with_further_reading(tmp_path: Path) -> None:
     eng = _engine(tmp_path)
     seen: dict = {}

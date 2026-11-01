@@ -99,7 +99,7 @@ Recognize this from the topic + analysis. If you're writing about a survey-shape
 
 Cite a source inline, where you use it, by its label in the prior-work block in the Inputs section: `[3]` for a scholarly source, `[W2]` for a web page, `[2, 5]` for several. Cite every source you draw on, each time you draw on it, including one you name in the text ("the Kermack–McKendrick model [4]"): a source the text does not cite is not listed.
 
-**Do not write a `## References` or a `## Further reading` section.** The engine adds both after your last section. References lists the scholarly sources your text cites, numbered in the order you first cite them, and your citations are renumbered to match. Further reading lists every web page. Anything you write under either heading is replaced.
+**Do not write a `## References` or a `## Further reading` section.** The engine adds both after your last section. References lists the scholarly sources your text cites, numbered in the order you first cite them, and your citations are renumbered to match. A web page your text cites ([W2]) is listed under References too, with its own label; Further reading lists the web pages you do not cite. Anything you write under either heading is replaced.
 
 Cite only labels that appear in the prior-work block:
 

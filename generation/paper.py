@@ -28,7 +28,14 @@ from pathlib import Path
 from core import paper_facts as _paper_facts
 from core.citations import to_bibtex, to_csl_json
 from core.config import Config, resolve_page_limit
-from core.engine import QuestArtifacts, build_further_reading, cited_references, further_reading_listed
+from core.engine import (
+    QuestArtifacts,
+    build_further_reading,
+    cited_references,
+    further_reading_listed,
+    references_web_listed,
+    web_pages_listed,
+)
 from core.proc_tree import run_tree
 from generation._pandoc import BLANK_LINE_RE, MARKDOWN_READER, MATH_SPAN_RE, find_pandoc
 from generation import _cjk
@@ -1082,10 +1089,10 @@ _MISSING_GLYPH_RE = re.compile(r"Missing character: There is no .*?\(U\+([0-9A-F
 
 
 def listed_further_reading(further: list[dict], paper_md: str, raw_state: dict | None) -> list[dict]:
-    """The web pages the paper's Further reading lists (a page dropped to keep the paper within its page limit is not
-    one). With the whole list dropped the paper has no such section, and the review's record of what was dropped says
-    which pages. Used by the bib export and the poster, so both list what the paper lists."""
-    listed = further_reading_listed(paper_md)
+    """The web pages the paper lists, under References (the ones its text cites) or Further reading (a page dropped to
+    keep the paper within its page limit is not one). With no web page listed the paper has no such section, and the
+    review's record of what was dropped says which pages. Used by the poster, so it lists what the paper lists."""
+    listed = web_pages_listed(paper_md)
     if listed is not None:
         return [w for w in further if w["label"] in listed]
     review = (raw_state or {}).get("review")
@@ -1282,11 +1289,16 @@ class PaperGenerator:
         # within its page limit is not in the export either. With the whole
         # list dropped the paper has no such section, and the review's record
         # of what was dropped says which pages.
-        further = listed_further_reading(further, cited_md, art.raw_state)
+        listed_web = listed_further_reading(further, cited_md, art.raw_state)
+        in_references = set(references_web_listed(cited_md))
+        further_only = set(further_reading_listed(cited_md) or [])
+        if further_reading_listed(cited_md) is None and not in_references:
+            further_only = {w["label"] for w in listed_web}  # no list to read: the record of what was dropped decides
         for stem, entries in (
-            # The sources the paper's References list: the ones its text cites.
-            ("references", cited_references(literature, cited_md, audience=audience)),
-            ("further_reading", further),
+            # The sources the paper's References list: the papers its text cites, then the web pages it cites.
+            ("references", cited_references(literature, cited_md, audience=audience)
+             + [w for w in listed_web if w["label"] in in_references]),
+            ("further_reading", [w for w in listed_web if w["label"] in further_only]),
         ):
             if not entries:
                 continue

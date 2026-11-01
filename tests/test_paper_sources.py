@@ -79,11 +79,9 @@ def test_cited_papers_are_numbered_in_the_order_the_text_first_cites_them() -> N
         "1. A. Author (2020). Delta. J. Tests. DOI: 10.1/d",
         "2. A. Author (2020). Beta. J. Tests. DOI: 10.1/b",
         "3. A. Author (2020). Alpha. J. Tests. DOI: 10.1/a",
-    ], "only the cited papers, in citation order; the writer's list is gone"
-    assert _section(out, "Further reading") == [
-        "- [W1] Page one. https://one.example/p",
         "- [W2] Page two. https://two.example/p",
-    ]
+    ], "only the cited sources, papers in citation order and then the cited page; the writer's list is gone"
+    assert _section(out, "Further reading") == ["- [W1] Page one. https://one.example/p"]
     assert out.count("## References") == 1 and out.index("## References") < out.index("## Further reading")
     assert dropped == []
     # The literature now numbers the same way, so every later output agrees.

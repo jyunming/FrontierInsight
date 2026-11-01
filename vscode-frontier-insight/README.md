@@ -51,8 +51,8 @@ the instruction to cite it only to say the work exists or for what its title
 states; a sentence built only on a title-only record, saying more than the title does, is marked unsupported by the
 claim check. The References are
 also exported as `paper/references.bib` (BibTeX) and `paper/references.csl.json`
-(CSL-JSON). The web pages it drew on are listed under Further reading, not
-References, and exported as `paper/further_reading.bib` / `.csl.json`. A
+(CSL-JSON). A web page the text cites is listed under References too; the others
+are listed under Further reading, and exported as `paper/further_reading.bib` / `.csl.json`. A
 `paper/CLAIMS.md` ledger records which of the paper's claims
 trace to the experiment, to words quoted from a cited source (the quote must be
 in the source, however that source's PDF rendered its mathematics or spaced its

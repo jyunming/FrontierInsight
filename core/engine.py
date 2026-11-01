@@ -24220,7 +24220,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
 
         literature = state.get("literature") or []
         audience = self.config.output.audience
-        listed = set(further_reading_listed(paper) or [])
+        listed = set(web_pages_listed(paper) or [])
         sources: dict[str, _cs.Source] = {}
         for label, meta, item in _labelled_sources(literature, audience):
             text, _readings = _split_figure_readings(_item_content(item))
@@ -31098,9 +31098,37 @@ def _further_reading_block(markdown: str) -> _FurtherReadingBlock | None:
 def further_reading_listed(markdown: str) -> list[str] | None:
     """The labels (``"W1"``…) of the web pages the paper's Further reading
     lists, in order; ``None`` when it has no such section written by the
-    engine. What the ``further_reading`` bib export follows."""
+    engine. What the ``further_reading`` bib export follows. A web page the
+    text cites is under References instead (:func:`references_web_listed`)."""
     block = _further_reading_block(markdown)
     return None if block is None else block.labels
+
+
+_REFERENCES_HEADING_LINE_RE = re.compile(r"^(#{1,6})[ \t]*references[ \t]*$", re.IGNORECASE | re.MULTILINE)
+
+
+def references_web_listed(markdown: str) -> list[str]:
+    """The labels (``"W6"``…) of the web pages listed under the paper's
+    References, in order: the pages its text cites, which the engine lists
+    there after the numbered papers, each as ``- [W6] …``."""
+    m = _REFERENCES_HEADING_LINE_RE.search(markdown)
+    if m is None:
+        return []
+    level = len(m.group(1))
+    end = next(
+        (h.start() for h in _ANY_HEADING_RE.finditer(markdown, m.end()) if len(h.group(1)) <= level),
+        len(markdown),
+    )
+    return [e.group(1) for line in markdown[m.end():end].split("\n") if (e := _FURTHER_ENTRY_RE.match(line))]
+
+
+def web_pages_listed(markdown: str) -> list[str] | None:
+    """The labels of every web page the paper lists, under References (cited
+    pages) or Further reading (the others); ``None`` when it lists none."""
+    cited, further = references_web_listed(markdown), further_reading_listed(markdown)
+    if not cited and further is None:
+        return None
+    return cited + (further or [])
 
 
 def _gate_inputs(state: Any) -> dict[str, Any]:
@@ -31232,17 +31260,22 @@ def _finalize_paper_sources(
     The writer's own References and Further reading are removed. The
     scholarly sources the text cites are numbered 1, 2, 3… in the order it
     first cites them, the citations are rewritten to those numbers, and
-    ``## References`` lists exactly those sources; ``## Further reading``
-    lists every web page. Returns the paper, the reordered literature and the
-    citation numbers that named no source."""
+    ``## References`` lists exactly the sources the text cites: the papers
+    numbered, then the web pages it cites under their own ``[W…]`` labels (a
+    source the text cites is always under References); ``## Further reading``
+    lists the web pages it does not cite. Returns the paper, the reordered
+    literature and the citation numbers that named no source."""
     n_papers = sum(1 for label, _m, _i in _labelled_sources(literature, audience) if not label.startswith("W"))
     body, mapping, dropped = _renumber_citations(_strip_source_lists(markdown), n_papers)
     ordered = _literature_in_citation_order(literature, mapping, audience)
     refs = build_references(ordered, audience=audience)[:len(mapping)]
-    if refs:
-        lines = [f"{r['n']}. {_ref_citation_text(r)}" for r in refs]
+    web = build_further_reading(ordered, audience=audience)
+    cited_web = _web_labels_cited(body)
+    lines = [f"{r['n']}. {_ref_citation_text(r)}" for r in refs]
+    lines += _further_reading_lines([w for w in web if w["label"] in cited_web])
+    if lines:
         body = body.rstrip() + "\n\n" + "\n".join(["## References", "", *lines]) + "\n"
-    body = _append_further_reading(body, build_further_reading(ordered, audience=audience))
+    body = _append_further_reading(body, [w for w in web if w["label"] not in cited_web])
     return body, ordered, dropped
 
 
@@ -31277,24 +31310,42 @@ def _finalize_with_numbering(
 ) -> tuple[str, list[Any], dict[int, int]]:
     """The paper after the citation check took citations out or put one in: the sources it cites are numbered again in
     the order the text first cites them, ``## References`` lists exactly those, and the literature is reordered to
-    match. Everything after the References (Further reading as the page-limit fit left it) is kept as it is."""
-    start = _cs.references_start(markdown)
+    match. The web pages the text cites are listed under References after the papers; Further reading (as the
+    page-limit fit left it) keeps the pages the text does not cite, and everything after it is kept as it is."""
+    start = _cs.cited_text_end(markdown)
     body, rest = markdown[:start], markdown[start:]
+    listed_before = references_web_listed(rest)
     n_papers = sum(1 for label, _m, _i in _labelled_sources(literature, audience) if not label.startswith("W"))
     body, mapping, _dropped = _renumber_citations(body.rstrip(), n_papers)
     ordered = _literature_in_citation_order(literature, mapping, audience)
     refs = build_references(ordered, audience=audience)[:len(mapping)]
+    web = build_further_reading(ordered, audience=audience)
+    cited_web = _web_labels_cited(body)
     after = ""
     if rest:
-        newline = rest.find("\n")
-        heading = _ANY_HEADING_RE.search(rest, newline) if newline >= 0 else None
-        after = rest[heading.start():] if heading else ""
+        if _REFERENCES_HEADING_LINE_RE.match(rest):
+            newline = rest.find("\n")
+            heading = _ANY_HEADING_RE.search(rest, newline) if newline >= 0 else None
+            after = rest[heading.start():] if heading else ""
+        else:
+            after = rest  # no References: the text ends at a Further reading list
+    block = _further_reading_block(after) if after else None
+    if block is not None:
+        # A page the text cites moves to References; one it no longer cites, or that a fix took out of References,
+        # goes back to Further reading; a page the page-limit fit dropped stays dropped.
+        listed = set(listed_before) | set(block.labels)
+        kept = _further_reading_lines([w for w in web if w["label"] in listed and w["label"] not in cited_web])
+        tail = after[block.end:]
+        new = ("## Further reading\n\n" + "\n".join(kept) + ("\n\n" if tail else "\n")) if kept else ""
+        after = after[:block.start] + new + tail
+    lines = [f"{r['n']}. {_ref_citation_text(r)}" for r in refs]
+    lines += _further_reading_lines([w for w in web if w["label"] in cited_web])
     text = body
-    if refs:
-        text = text + "\n\n" + "\n".join(["## References", "", *(f"{r['n']}. {_ref_citation_text(r)}" for r in refs)]) + "\n"
+    if lines:
+        text = text + "\n\n" + "\n".join(["## References", "", *lines]) + "\n"
     else:
         text = text + "\n"
-    if after:
+    if after.strip():
         text = text.rstrip() + "\n\n" + after
     return text, ordered, mapping
 
