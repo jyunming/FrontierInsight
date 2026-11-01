@@ -142,3 +142,68 @@ def test_a_flagged_series_stays_flagged_when_an_honest_one_is_drawn_after_it(tmp
         if o["claim"] in SHAPE_CLAIMS:
             assert not any(("%s" % y) in o["text"] for y in ys if "." in y), o["text"]
     assert not [o for o in offers if o["claim"] == "range" and o["args"].get("axis") == "y" and o["args"].get("series") == "sample_a"]
+
+
+# ---- fix round 2: what FI cannot compare is flagged, never kept ---------------------------------------------------------
+
+LINE_CALL = 'fig.line(0, "sample_" + sample, waves, means, "signal", yerr=halves, yerr_meaning="ci95")'
+UNEVEN = ('fig.line(0, "sample_" + sample, waves, means, "signal", yerr=([h / 2 for h in halves], [h * 2 for h in halves]), '
+          'yerr_meaning="range")')
+
+
+def _uneven_bar_claims(offers):
+    return [o for o in offers if o["claim"] == "errorbars" and "reaching" in o["text"]]
+
+
+def test_uneven_error_bars_of_a_flagged_series_state_no_number(tmp_path):
+    (tmp_path / "ok").mkdir()
+    (tmp_path / "bad").mkdir()
+    # control: the honest line with uneven bars keeps the claim that quotes their reach
+    calls, offers = _draw("spectra", tmp_path / "ok", LINE_CALL, UNEVEN)
+    assert set(_whats(calls).values()) == {"signal"} and len(_uneven_bar_claims(offers)) == 2
+    # a shifted line: no claim with a bar width, but the call is not refused and the panel is not raw
+    calls, offers = _draw("spectra", tmp_path / "bad", LINE_CALL, UNEVEN.replace("waves, means,", "waves, [m + 0.3 for m in means],"))
+    assert set(_whats(calls).values()) == {"other"} and calls["panels"][0]["raw"] is False
+    assert _uneven_bar_claims(offers) == []
+    assert any(o["claim"] == "trend" for o in offers)  # the shape stays
+
+
+def test_a_series_whose_x_is_a_result_is_flagged(tmp_path):
+    folder = FIXTURES / "spectra"
+    contract = json.loads((folder / "contract.json").read_text(encoding="utf-8"))
+    cells = json.loads((folder / "trials.json").read_text(encoding="utf-8"))["cells"]
+    host = _Host(contract, _Table(cells, contract["results"]))
+    means = [host.table.mean("signal", k) for k in host.table.at(sample="a")]
+    host.line(0, "sample_a", ("signal", means), means, "signal")
+    host.line(0, "sample_b", ("signal", means), means, "signal")
+    host.write(tmp_path / ".fi" / "figure_records" / "spectra.png")
+    calls = figure_claims.load_calls(tmp_path, "spectra")
+    assert set(_whats(calls).values()) == {"other"} and calls["panels"][0]["raw"] is False
+    assert _states_values(figure_claims.menu(calls, contract["plan"], stem="spectra")) == []
+
+
+def test_a_derived_quantity_and_a_missing_table_are_flagged(tmp_path):
+    folder = FIXTURES / "spectra"
+    contract = json.loads((folder / "contract.json").read_text(encoding="utf-8"))
+    cells = json.loads((folder / "trials.json").read_text(encoding="utf-8"))["cells"]
+    for derived, table in (("ratio", True), ("signal", False)):
+        host = _Host(contract, _Table(cells, contract["results"]))
+        host.derived_ids = ["ratio"]
+        waves = [500, 600]
+        if not table:
+            host.table = None  # nothing to compare with
+            host.derived_ids = ["signal"]
+        host.line(0, "sample_a", waves, [1.0, 2.0], derived)
+        host.line(0, "sample_b", waves, [2.0, 1.0], derived)
+        host.write(tmp_path / derived / ".fi" / "figure_records" / "spectra.png")
+        calls = figure_claims.load_calls(tmp_path / derived, "spectra")
+        assert set(_whats(calls).values()) == {"other"}, derived
+        assert calls["panels"][0]["raw"] is False
+        offers = figure_claims.menu(calls, contract["plan"], stem="spectra")
+        assert _states_values(offers) == []
+
+
+def test_a_series_with_no_finite_y_to_check_is_flagged(tmp_path):
+    calls, offers = _draw("spectra", tmp_path, 'fig.line(0, "sample_" + sample, waves, means, "signal", yerr=halves, yerr_meaning="ci95")',
+                          'fig.line(0, "sample_" + sample, waves, [None] * len(waves), "signal")')
+    assert set(_whats(calls).values()) == {"other"}

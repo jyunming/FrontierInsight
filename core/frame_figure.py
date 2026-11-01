@@ -409,26 +409,29 @@ class FigureCalls:
     def _y_matches(self, form, what, x_id, xs, ys):
         """Whether every drawn y (a gap is skipped) equals, within ``Y_RTOL``, the table's ``form`` of result ``what`` at a setting
         whose ``x_id`` is the drawn x (when other settings also vary, at any of them: a y that is a real value of another slice
-        is not told apart). A point with no x, no such setting or no table value cannot be checked, which counts as not matching.
-        ``None`` when there is no table to compare with."""
+        is not told apart). A point with no x, no such setting or no table value cannot be checked, which counts as not matching;
+        so does a series with no finite y at all (nothing was checked) and a figure with no table."""
         if getattr(self, "table", None) is None:
-            return None
+            return False
+        checked = 0
         for x, y in zip(xs, ys):
             if y is None or not _finite(y):
                 continue
             if x is None or not any(_close_y(float(y), t) for key in self._keys_at(x_id, x)
                                     for t in self._table_stats(what, key, form)):
                 return False
-        return True
+            checked += 1
+        return checked > 0
 
     def _checked_what(self, what, form, x_id, xs, ys):
         """``what`` when the drawn y is the table's own value, else ``other``: the series keeps its shape but FI states no value
-        from it. Checked when ``what`` is a result of the plan and x a setting; ``form`` (default the mean) says which statistic
-        of the trials y is. A mismatch, an unknown ``form`` or a point the table cannot say never refuses the call."""
-        if what not in self._results() or x_id not in (getattr(self, "settings", None) or []):
-            return what
-        ok = self._y_matches(form, what, x_id, xs, ys) if form in Y_FORMS else False
-        return what if ok is None or ok else "other"
+        from it. A declared ``other`` stays. Everything FI cannot compare is ``other`` as well (fail closed): a quantity that is
+        not a result of the plan (a derived one: FI holds no value of it here), an x that is a result and not a setting, a figure
+        without a table, a point the table cannot say, a series with no finite y. ``form`` (default the mean) says which statistic
+        of the trials y is. No case refuses the call."""
+        if what == "other" or what not in self._results() or x_id not in (getattr(self, "settings", None) or []):
+            return "other"
+        return what if form in Y_FORMS and self._y_matches(form, what, x_id, xs, ys) else "other"
 
     def _checked_meaning(self, meaning, what, x_id, xs, ys, lo, hi):
         """What error bars of typed widths may be called. ``ci95``/``sd`` stay only when the widths equal the table's own for

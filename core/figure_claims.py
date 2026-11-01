@@ -443,7 +443,10 @@ def _errorbars(calls, panel, a, fmt, ctx):
     base = f"{_label(s)} is drawn with error bars showing the {_MEANING[meaning]}"
     if lo == hi:
         return f"{base}{_where(calls, panel)}", {}
-    # uneven bars: how far they reach below and above the points, at most
+    # uneven bars: how far they reach below and above the points, at most. These are y numbers: a series FI found not to be the
+    # table's value of its result (``what: other``) states none.
+    if s.get("what") == "other":
+        return None
     return (f"{base}, reaching from -{fmt(max(lo_w, default=0.0))} to +{fmt(max(hi_w, default=0.0))} around the points at most"
             f"{_where(calls, panel)}", {})
 
