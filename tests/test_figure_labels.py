@@ -442,13 +442,14 @@ def test_a_redraw_cut_short_leaves_no_script_and_its_records_as_they_were(tmp_pa
 
 
 class _Table:
+    """Every result's mean at ``size=v`` is ``v``, so a line drawn at y = x is the table's own value."""
     declared = ["growth"]
 
     def keys(self):
-        return ["size=1"]
+        return ["size=1", "size=2", "size=3"]
 
     def mean(self, name, key):
-        return 2.5
+        return float(key.partition("=")[2])
 
     def n(self, name, key):
         return 4
@@ -476,7 +477,7 @@ def _drawn(raw: bool, body_label: str):
         h.raw(0)
         h.axes[0].plot([1, 2, 3], [1.0, 2.0, 4.0], label=body_label)
     else:
-        h.line(0, "fast", [1, 2, 3], [1.0, 2.0, 4.0], "growth")
+        h.line(0, "fast", [1, 2, 3], [1.0, 2.0, 3.0], "growth")
     ax = h.axes[0]
     ax.set_xlabel(body_label)
     ax.set_ylabel(body_label)
