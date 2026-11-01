@@ -40,7 +40,11 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CORPUS = Path("C:/fi_runs/suite/rounds")
 CODE_FILES = ("derive.py", "fi_frame.py", "fi_table.py", "study.json")
 STAMP = re.compile(r"^sk4")
-MAPPED = ("plot", "errorbar", "scatter", "axhline", "axvline", "annotate", "text", "legend", "loglog")
+MAPPED = ("plot", "errorbar", "scatter", "axhline", "axvline", "annotate", "text", "legend", "loglog", "semilogx", "semilogy",
+          "fill_between", "get_legend_handles_labels")
+#: attributes of an axes that are values, not drawing (a transform handed to ``text`` / ``annotate``): reading them is not a call
+PLAIN_ATTRIBUTES = ("transAxes", "transData", "transScale")
+NUMBER = re.compile(r"(?<![\w.])-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?")
 TIMEOUT_S = 240
 PANEL_NOOP = False
 
@@ -122,26 +126,43 @@ class _Run:
 
     def __init__(self, host, table, plan, axes_grid, spec, refs):
         self.host, self.table, self.plan, self.grid, self.spec, self.refs = host, table, plan, axes_grid, spec, refs
-        self.reads = []          # (mean, result id, setting key) of every table.mean the body made
-        self.raw_by = {}         # panel index -> (kind, call, detail), the first reason
+        self.reads = []          # (value, result id, setting key, "mean"|"n"|"low"|"high") of every table read the body made
+        self.causes = {}         # panel index -> [(kind, call, detail), ...], every cause that made the panel raw
+        self.text_classes = collections.Counter()  # what the digit-bearing texts hold
         self.curves = []         # (panel, label, xs, ys) analytic overlays, drawn after the data
         self.scales = {}         # (panel, "x"|"y") -> "log"
-        self.dropped_texts = 0
-        self.counter = collections.Counter()
 
     def raw(self, i, kind, call, detail=""):
-        self.counter[(kind, call)] += 1
-        if i not in self.raw_by:
-            self.raw_by[i] = (kind, call, detail)
+        """Every cause is kept; the panel is raw from the first."""
+        first = i not in self.causes
+        self.causes.setdefault(i, []).append((kind, call, detail))
+        if first:
             self.host.raw(i)
             self.host._state()[i]["raw_reason"] = f"{kind}: {call}"
+
+    def mean_reads(self):
+        return [(v, r, k) for (v, r, k, f) in self.reads if f == "mean"]
+
+    def read_matches(self, token):
+        """The table reads (value, result id, setting key, form) whose value shows as ``token`` at the token's own precision."""
+        shown = float(token)
+        mantissa = token.lower().split("e")[0]
+        digits = len(mantissa.split(".")[1]) if "." in mantissa else 0
+        out = []
+        for v, rid, key, form in self.reads:
+            if digits == 0:
+                if _close(v, shown):  # a whole number is a read only when the read is that number
+                    out.append((v, rid, key, form))
+            elif abs(round(v, digits) - shown) <= 1e-9 * max(1.0, abs(shown)):
+                out.append((v, rid, key, form))
+        return out
 
     # ---- guesses of the proxy -------------------------------------------------------------------------------------
     def what_of(self, ys):
         finite = [y for y in ys if _number(y)]
         hit = set()
         for y in finite:
-            m = next((r for (v, r, _k) in self.reads if _close(v, y)), None)
+            m = next((r for (v, r, _k) in self.mean_reads() if _close(v, y)), None)
             if m is None:
                 return "other"
             hit.add(m)
@@ -155,7 +176,7 @@ class _Run:
             if name in self.grid and all(any(_close(x, g) for g in self.grid[name] if _number(g)) for x in xs):
                 return name
         for x in xs[:1]:
-            hit = next((r for (v, r, _k) in self.reads if _close(v, x)), None)
+            hit = next((r for (v, r, _k) in self.mean_reads() if _close(v, x)), None)
             if hit:
                 return hit
         return self.spec.get("x") if self.spec.get("x") in self.grid or self.spec.get("x") in self.host._results() else (sorted(self.grid) or [None])[0]
@@ -173,18 +194,23 @@ class _Run:
         return sid
 
     def yerr_meaning(self, ys, err):
-        """``ci95`` when each half-width is the table's own 95% interval half-width of the mean it sits on."""
+        """``ci95`` when each half-width is the table's own 95% interval half-width of the mean it sits on, ``sd`` when it is
+        the standard deviation of that setting's trials, else ``other``."""
+        import statistics
+
+        kinds = {"ci95": True, "sd": True}
         try:
             for y, e in zip(ys, err):
-                if not _number(y):
+                if not _number(y) or not _number(e):
                     continue
-                rid, key = next((r, k) for (v, r, k) in self.reads if _close(v, y))
+                rid, key = next((r, k) for (v, r, k) in self.mean_reads() if _close(v, y))
                 lo, hi = self.table.interval(rid, key)
-                if lo is None or not _close((hi - lo) / 2, abs(e)):
-                    return "other"
-            return "ci95"
-        except Exception:  # noqa: BLE001
+                kinds["ci95"] &= lo is not None and _close((hi - lo) / 2, abs(e))
+                vals = self.table.values(rid, key)
+                kinds["sd"] &= len(vals) > 1 and _close(statistics.stdev(vals), abs(e))
+        except Exception:  # noqa: BLE001 -- a frame without these reads, or a value no read gave
             return "other"
+        return next((k for k, ok in kinds.items() if ok), "other")
 
 
 class _Panel:
@@ -194,15 +220,29 @@ class _Panel:
         self._run, self._i, self._ax = run, i, ax
 
     def __getattr__(self, name):
+        if name.startswith("__"):  # numpy and copy probe these; they are not drawing
+            raise AttributeError(name)
         run = self._run
         if name.startswith("set_"):
             if name in ("set_xscale", "set_yscale"):
-                return lambda scale="linear", *a, **k: run.scales.__setitem__((self._i, name[4]), scale) if scale == "log" else None
+                return lambda *a, **k: self._scale(name[4], a[0] if a else k.get("value", k.get("scale", "linear")))
             return lambda *a, **k: None
         if name in MAPPED:
             return getattr(self, "_m_" + name)
-        run.raw(self._i, "unmapped call", name)
+        if name not in PLAIN_ATTRIBUTES:
+            run.raw(self._i, "unmapped call", name)
         return getattr(self._ax, name)
+
+    def _scale(self, axis, scale):
+        """The scale the body sets on an axis: the real axes take it (the claims are checked against them) and the record
+        gets it when it is log."""
+        if scale == "linear":
+            return None
+        if scale != "log":
+            return self._run.raw(self._i, "an axis scale the calls do not hold", "set_%sscale" % axis, str(scale))
+        self._run.scales[(self._i, axis)] = "log"
+        getattr(self._ax, "set_%sscale" % axis)("log")
+        return None
 
     # ---- argument reading -----------------------------------------------------------------------------------------
     @staticmethod
@@ -284,8 +324,43 @@ class _Panel:
         return got
 
     def _m_loglog(self, *args, **kw):
-        self._run.scales[(self._i, "x")] = self._run.scales[(self._i, "y")] = "log"
+        self._scale("x", "log")
+        self._scale("y", "log")
         return self._m_plot(*args, **kw)
+
+    def _m_semilogx(self, *args, **kw):
+        self._scale("x", "log")
+        return self._m_plot(*args, **kw)
+
+    def _m_semilogy(self, *args, **kw):
+        self._scale("y", "log")
+        return self._m_plot(*args, **kw)
+
+    def _m_get_legend_handles_labels(self, *a, **kw):
+        return self._ax.get_legend_handles_labels(*a, **kw)  # FI owns the legend; reading the handles draws nothing
+
+    def _m_fill_between(self, x, y1, y2=0, *a, **kw):
+        run, i, host = self._run, self._i, self._run.host
+        xs, lo, hi = _floats(x), _floats(y1), _floats(y2)
+        if xs is None or lo is None or hi is None:
+            run.raw(i, "values that are not a plain list of numbers", "fill_between")
+            return _stand_in()[0]
+        lo = lo * len(xs) if len(lo) == 1 else lo
+        hi = hi * len(xs) if len(hi) == 1 else hi
+        drawn = [e for e in (host._state().get(i) or {"series": []})["series"] if e["kind"] != "curve" and e["x"] == xs]
+        if not drawn or len(lo) != len(xs) or len(hi) != len(xs):
+            run.raw(i, "a band without a drawn series at its x", "fill_between")
+            return _stand_in()[0]
+        s = drawn[-1]
+        half = [(h - l) / 2 if _number(h) and _number(l) else None for l, h in zip(lo, hi)]
+        centred = all(not _number(y) or h is None or _close((l + hh) / 2, y) for y, l, hh, h in zip(s["y"], lo, hi, half))
+        meaning = run.yerr_meaning(s["y"], half) if centred else "other"
+        rec = host._state()[i]
+        try:
+            host.band(i, s["id"], (rec["x"]["id"], xs), lo, hi, rec["y"]["what"].split(" / ")[0], meaning)
+        except (ValueError, IndexError) as err:
+            run.raw(i, "drawing call refused", "fill_between", str(err)[:120])
+        return _stand_in()[0]
 
     def _m_scatter(self, x, y, *a, **kw):
         if any(k in kw for k in ("c", "cmap")) and _floats(kw.get("c")) not in (None, [] ) and len(_floats(kw["c"])) > 1:
@@ -339,17 +414,53 @@ class _Panel:
         self._line_at("axvline", x, "x", kw)
         return _stand_in()[0]
 
-    def _text(self, call, s):
-        if re.search(r"\d", str(s)):
-            return self._run.raw(self._i, "text with a number in it", call)
-        self._run.dropped_texts += 1  # words only: nothing in the calls draws them, and nothing is claimed about them
+    def _text(self, call, s, x, y):
+        """A text. Words only: the calls draw no such text, so the panel is raw. A text with one number that is a value the body
+        read from the table is a ``note`` (FI writes the number); any other number is typed by the body and the panel is raw."""
+        run, i = self._run, self._i
+        s = str(s)
+        tokens = list(NUMBER.finditer(s))
+        if not tokens:
+            run.raw(i, "words-only text", call)
+            return None
+        reads = [run.read_matches(m.group()) for m in tokens]
+        grid = [any(_close(float(m.group()), g) for vs in run.grid.values() for g in vs if _number(g)) for m in tokens]
+        if len(tokens) == 1 and reads[0]:
+            run.text_classes["number read from the table (a note)"] += 1
+            t = tokens[0]
+            _v, rid, key, form = reads[0][0]
+            what = s[:t.start()] + "{" + rid + "}" + s[t.end():]
+            try:
+                run.host.note(i, x, y, what, form=form, key=key)
+            except (ValueError, IndexError) as err:
+                run.raw(i, "drawing call refused", call, str(err)[:120])
+            return None
+        if any(not r and not g for r, g in zip(reads, grid)):
+            run.text_classes["number typed by the body"] += 1
+            run.raw(i, "text with a number the body typed", call)
+        elif len(tokens) > 1 and any(reads):
+            run.text_classes["several numbers, some read from the table"] += 1
+            run.raw(i, "text with several numbers (a note carries one)", call)
+        else:
+            run.text_classes["number is a setting value"] += 1
+            run.raw(i, "text with a setting value in it", call)
         return None
 
-    def _m_text(self, x=None, y=None, s="", *a, **kw):
-        return self._text("text", kw.get("s", s))
+    @staticmethod
+    def _at(value):
+        v = _floats(value) if value is not None else None
+        return v[0] if v and len(v) == 1 and _number(v[0]) else 0.0
 
-    def _m_annotate(self, text="", *a, **kw):
-        return self._text("annotate", kw.get("text", kw.get("s", text)))
+    def _m_text(self, x=None, y=None, s="", *a, **kw):
+        return self._text("text", kw.get("s", s), self._at(x), self._at(y))
+
+    def _m_annotate(self, text="", xy=None, *a, **kw):
+        xy = kw.get("xy", xy)
+        try:
+            x, y = xy
+        except (TypeError, ValueError):
+            x = y = None
+        return self._text("annotate", kw.get("text", kw.get("s", text)), self._at(x), self._at(y))
 
     def _m_legend(self, *a, **kw):
         return None
@@ -371,65 +482,104 @@ def _fmt(v):
 
 # ---- the independent recomputation (shares no code with core/figure_claims) --------------------------------------------
 
+_MEANING_WORDS = {"ci95": "95% confidence interval", "sd": "standard deviation", "range": "range"}
+
+
 def _pairs(s):
     return [(x, y) for x, y in zip(s["x"], s["y"]) if y is not None and x is not None and not isinstance(x, str)]
 
 
-def _agree(calls, offer, grid):
-    """``("agree"|"disagree"|"not recomputed", why)`` for one offered claim, from the record's arrays alone."""
+def _numbers_in(text, calls):
+    """The numbers a sentence states: its text without the labels of the figure (which may hold digits) and without the
+    panel suffix."""
+    labels = set()
+    for p in calls["panels"]:
+        labels.update(str(s.get(k) or "") for s in p["series"] for k in ("label", "id"))
+        labels.update(str((p.get(a) or {}).get("label") or "") for a in ("x", "y"))
+        labels.update(str(r.get("label") or "") for r in p["refs"])
+    for label in sorted(labels, key=len, reverse=True):
+        if label:
+            text = text.replace(label, " ")
+    text = re.sub(r"in panel \d+", " ", text)
+    return [float(m.group()) for m in NUMBER.finditer(text)]
+
+
+def _states(tokens, wanted):
+    """True when every wanted number is stated by a distinct number of the sentence (the 4 digits the sentence prints)."""
+    pool = list(tokens)
+    for n in wanted:
+        hit = next((k for k, t in enumerate(pool) if (t == 0 if n == 0 else abs(t - n) <= 1e-3 * abs(n))), None)
+        if hit is None:
+            return False
+        pool.pop(hit)
+    return True
+
+
+def _agree(calls, offer, grid, scale_of):
+    """``("agree"|"disagree"|"not recomputed", why)`` for one offered claim, from the record's arrays alone. Numbers are matched
+    by value (relative 1e-3, the 4 digits a sentence prints) among the numbers the sentence states, each used once. ``scale_of``
+    reads the axis scale from the real axes the body set, not from the record."""
     cid, a, text = offer["claim"], offer["args"], offer["text"]
     panel = next((p for p in calls["panels"] if str(p["panel"]) == a.get("panel")), None)
     sers = {s["id"]: s for s in (panel or {}).get("series", [])}
     tol = 5e-4
+    tokens = _numbers_in(text, calls)
 
-    def has(*nums):
-        return all(_fmt(n) in text for n in nums)
+    def says(*nums):
+        return _states(tokens, nums)
 
     def tie(p, q):
         return abs(p - q) <= tol * max(abs(p), abs(q))
 
+    def ok(good, why):
+        return ("agree", "") if good else ("disagree", why)
+
     try:
         if cid == "not_drawn":
-            every = [s["id"] for p in calls["panels"] for s in p["series"]]
-            return ("agree", "") if a["series"] not in every and not any(p["raw"] for p in calls["panels"]) else ("disagree", "drawn")
+            every = {s["id"] for p in calls["panels"] for s in p["series"]} | {m for p in calls["panels"] for s in p["series"] for m in s["merged_with"]}
+            return ok(a["series"] not in every and not any(p["raw"] for p in calls["panels"]), "it is drawn, or a panel is raw")
         if cid == "scale":
-            word = "logarithmic" if panel[a["axis"]]["scale"] == "log" else "linear"
-            return ("agree", "") if word in text else ("disagree", word)
+            return ok(scale_of(int(a["panel"]), a["axis"]) == ("logarithmic" in text and "log" or "linear"), "axis scale of the real axes")
         if cid == "reference":
             r = next(r for r in panel["refs"] if r["id"] == a["ref"])
-            return ("agree", "") if has(r["value"]) else ("disagree", "value")
+            return ok(says(r["value"]) and f"{r['axis']} = " in text, "value or axis")
         if cid == "note":
             n = next(n for n in panel["notes"] if n["id"] == a["note"])
-            return ("agree", "") if n["text"] in text else ("disagree", "text")
+            return ok(n["text"] == text, "text")
         if cid == "band":
-            return ("agree", "") if any(b["series"] == a["series"] and b["meaning"] != "other" for b in panel["bands"]) else ("disagree", "no band")
+            s = sers[a["series"]]
+            b = next(b for b in panel["bands"] if b["series"] == a["series"])
+            pairs = [(l, h) for l, h in zip(b["lo"], b["hi"]) if l is not None and h is not None]
+            good = (b["x"] == s["x"] and len(b["lo"]) == len(b["hi"]) == len(s["x"]) and pairs and all(l <= h for l, h in pairs)
+                    and _MEANING_WORDS.get(b["meaning"], "\0") in text)
+            return ok(good, "band x, lo/hi or meaning")
         if cid in ("crossing", "no_crossing", "identical"):
             sa, sb = sers[a["a"]], sers[a["b"]]
             ya, yb = dict(_pairs(sa)), dict(_pairs(sb))
             if cid == "identical":
-                return ("agree", "") if ya == yb or (sorted(ya) == sorted(yb) and all(_close(ya[k], yb[k]) for k in ya)) else ("disagree", "differ")
+                return ok(sorted(ya) == sorted(yb) and all(_close(ya[k], yb[k]) for k in ya), "values differ")
             common = sorted(set(ya) & set(yb))
             signs = [(ya[x] - yb[x]) > 0 for x in common]
             crossed = any(p != q for p, q in zip(signs, signs[1:]))
-            return ("agree", "") if crossed == (cid == "crossing") else ("disagree", "sign changes %s" % crossed)
+            return ok(crossed == (cid == "crossing"), "sign changes %s" % crossed)
         s = sers.get(a.get("series", ""))
         if cid == "drawn":
-            ok = s is not None and (any(y is not None for y in s["y"]) or s["kind"] == "image")
-            return ("agree", "") if ok else ("disagree", "no values")
+            good = s is not None and text.startswith(str(s["label"])) and (
+                any(v is not None for v in s["y"]) or (s["kind"] == "image" and any(v is not None for row in s["z"] for v in row)))
+            return ok(good, "series or values")
         if cid == "range":
             if s is not None and s["kind"] == "image":
                 vals = [v for row in s["z"] for v in row if v is not None]
             else:
                 chosen = [s] if s else [t for t in panel["series"] if t["kind"] != "image"]
-                if a.get("axis", "y") == "x":
-                    vals = [x for t in chosen for x, _y in _pairs(t)]
-                else:
-                    vals = [y for t in chosen for y in t["y"] if y is not None]
-            return ("agree", "") if vals and has(min(vals), max(vals)) else ("disagree", "min/max")
+                vals = [x for t in chosen for x, _y in _pairs(t)] if a.get("axis", "y") == "x" else [y for t in chosen for y in t["y"] if y is not None]
+            return ok(vals and says(min(vals), max(vals)), "min/max")
         if cid == "value_at":
-            want = float(a["x"])
-            ys = {y for x, y in _pairs(s) if _close(x, want)}
-            return ("agree", "") if len(ys) == 1 and has(next(iter(ys))) else ("disagree", "y at x")
+            want = a["x"]
+            ys = {y for x, y in zip(s["x"], s["y"]) if y is not None and x is not None and (
+                x == want if isinstance(x, str) else _close(x, float(want)))}
+            nums = [next(iter(ys))] + ([] if isinstance(next(iter(s["x"])), str) else [float(want)]) if len(ys) == 1 else None
+            return ok(nums is not None and says(*nums), "y at x")
         if cid in ("trend", "steps"):
             pts = sorted(_pairs(s))
             if len(pts) < 2:
@@ -437,38 +587,61 @@ def _agree(calls, offer, grid):
             first, last = pts[0][1], pts[-1][1]
             if cid == "steps":
                 word = "rises" if last > first else "falls"
-                return ("agree", "") if word in text and has(first, last) else ("disagree", "first/last")
+                return ok(s["step"] and word in text and says(first, last, pts[0][0], pts[-1][0]), "step, direction or end values")
             ups = sum(1 for (_a, p), (_b, q) in zip(pts, pts[1:]) if q > p and not tie(p, q))
             downs = sum(1 for (_a, p), (_b, q) in zip(pts, pts[1:]) if q < p and not tie(p, q))
             if "increases" in text:
-                ok = ups > 0 and downs == 0 and last > first
+                good = ups > 0 and downs == 0 and last > first
             elif "decreases" in text:
-                ok = downs > 0 and ups == 0 and last < first
+                good = downs > 0 and ups == 0 and last < first
             else:
-                ok = (ups > 0 and downs > 0) or tie(first, last) or ups + downs == 0
-            return ("agree", "") if ok else ("disagree", "direction")
+                good = (ups > 0 and downs > 0) or tie(first, last) or ups + downs == 0
+            return ok(good, "direction")
         if cid == "order":
-            want = float(a["at"])
+            want = a["at"]
             vals = []
             for t in panel["series"]:
                 if t["kind"] in ("curve", "image"):
                     continue
-                ys = {y for x, y in _pairs(t) if _close(x, want)}
+                ys = {y for x, y in zip(t["x"], t["y"]) if y is not None and x is not None and (
+                    x == want if isinstance(x, str) else _close(x, float(want)))}
                 if len(ys) == 1:
                     vals.append((next(iter(ys)), t["label"]))
             vals.sort(key=lambda v: -v[0])
             where = [text.find(label) for _v, label in vals]
-            return ("agree", "") if len(vals) >= 2 and all(w >= 0 for w in where) and where == sorted(where) else ("disagree", "order")
+            return ok(len(vals) >= 2 and all(w >= 0 for w in where) and where == sorted(where), "order of the values")
         if cid == "errorbars":
-            ok = s is not None and s.get("yerr") and any((e or 0) > 0 for e in s["yerr"]) and s.get("yerr_meaning") in ("ci95", "sd", "range")
-            return ("agree", "") if ok else ("disagree", "no error bars")
+            e = s["yerr"] if s else None
+            good = (e is not None and len(e) == len(s["y"]) and all(v is None or v >= 0 for v in e) and any((v or 0) > 0 for v in e)
+                    and _MEANING_WORDS.get(s.get("yerr_meaning"), "\0") in text)
+            return ok(good, "bar widths or meaning")
         if cid == "missing_x":
             drawn = [x for x, _y in _pairs(s)]
             gone = [g for g in grid if not any(_close(g, x) for x in drawn)]
-            return ("agree", "") if gone and has(*gone) else ("disagree", "grid")
+            return ok(s["kind"] == "points" and gone and says(*gone), "grid")
     except Exception as err:  # noqa: BLE001
         return ("disagree", "recompute failed: %s" % err)
     return ("not recomputed", cid)
+
+
+def _artists_match(host):
+    """Mismatches between the record's series and the lines/bars the host really drew (by legend label): a check that the
+    record states what the axes hold."""
+    bad = 0
+    for p in host.record()["panels"]:
+        ax = host.axes[p["panel"] - 1]
+        for s in p["series"]:
+            if s["kind"] not in ("line", "points"):
+                continue
+            ys = [None if v is None else float(v) for v in s["y"]]
+            found = False
+            for ln in ax.lines:
+                if ln.get_label() != s["label"] or not str(ln.get_gid() or "").startswith("fi:"):
+                    continue
+                got = [None if v != v else float(v) for v in ln.get_ydata()]
+                found = found or got == ys
+            bad += not found
+    return bad
 
 
 # ---- the worker entry --------------------------------------------------------------------------------------------------
@@ -522,13 +695,19 @@ def _worker(workdir: Path, result_path: Path) -> None:
         class _Logged:
             def __getattr__(self, name):
                 got = getattr(table, name)
-                if name == "mean":
-                    def mean(rid, key):
+                if name in ("mean", "n"):
+                    def read(rid, key):
                         v = got(rid, key)
                         if _number(v):
-                            run.reads.append((v, rid, key))
+                            run.reads.append((float(v), rid, key, name))
                         return v
-                    return mean
+                    return read
+                if name == "interval":
+                    def interval(rid, key):
+                        lo, hi = got(rid, key)
+                        run.reads += [(float(v), rid, key, form) for v, form in ((lo, "low"), (hi, "high")) if _number(v)]
+                        return lo, hi
+                    return interval
                 return got
 
         proxy = _FigureProxy([_Panel(run, i, ax) for i, ax in enumerate(host.axes)], spec, PANEL_NOOP)
@@ -537,11 +716,11 @@ def _worker(workdir: Path, result_path: Path) -> None:
         except BaseException as err:  # noqa: BLE001 -- a body that raises is a body the frame would replace
             item.update(status="failed", error="%s: %s" % (type(err).__name__, str(err)[:160]))
             item["traceback_tail"] = traceback.format_exc().splitlines()[-3:]
-        plt.close(fig)
         if item["status"] == "failed":
+            plt.close(fig)
             continue
         for i, label, xs, ys in run.curves:
-            if i in run.raw_by or not host._state().get(i, {}).get("series"):
+            if i in run.causes or not host._state().get(i, {}).get("series"):
                 continue  # a raw panel states nothing; a panel without data stays empty (the frame replaces such a body)
             try:
                 host.curve(i, label, xs, ys)
@@ -557,25 +736,30 @@ def _worker(workdir: Path, result_path: Path) -> None:
         for p in calls["panels"]:
             i = p["panel"] - 1
             if p["raw"]:
-                kind, call, detail = run.raw_by.get(i, ("fig.raw", "", ""))
-                item["panels"].append({"panel": p["panel"], "state": "raw", "reason": kind, "call": call, "detail": detail})
+                causes = run.causes.get(i) or [("fig.raw", "", "")]
+                item["panels"].append({"panel": p["panel"], "state": "raw", "causes": sorted({(k, c) for k, c, _d in causes}),
+                                       "detail": causes[0][2]})
             elif not (p["series"] or p["refs"] or p["notes"]):
                 empty.append(p["panel"])
                 item["panels"].append({"panel": p["panel"], "state": "empty"})
             else:
                 item["panels"].append({"panel": p["panel"], "state": "verified"})
-        item["dropped_texts"] = run.dropped_texts
+        item["text_classes"] = dict(run.text_classes)
+        item["record_vs_artists_mismatches"] = _artists_match(host)
+        item["scales"] = {str(i + 1): {a: ax.get_xscale() if a == "x" else ax.get_yscale() for a in ("x", "y")}
+                          for i, ax in enumerate(host.axes)}
         if empty:
             item.update(status="failed", error="drew nothing on panel %s" % " and ".join(map(str, empty)))
         gridx = [float(g) for g in grid.get(spec.get("x"), []) if _number(g)]
         offers = figure_claims.menu(calls, {"series": list(spec.get("shows") or []), "grid": gridx}, _fmt, stem=fid)
         for o in offers:
-            verdict, why = _agree(calls, o, gridx)
+            verdict, why = _agree(calls, o, gridx, lambda n, axis: item["scales"][str(n)][axis])
             item["offers"].append({"claim": o["claim"], "args": o["args"], "text": o["text"], "agree": verdict, "why": why})
         # the same sentence must come back from evaluate (the writer's mark)
         for o, off in zip(offers, item["offers"]):
             again = figure_claims.evaluate(calls, o["claim"], dict(o["args"]), _fmt, plan={"series": list(spec.get("shows") or []), "grid": gridx})
             off["same_on_evaluate"] = bool(again) and again[0] == o["text"]
+        plt.close(fig)
     result_path.write_text(json.dumps({"figures": out, "declared": declared, "grid": {k: len(v) for k, v in grid.items()}}, indent=1), encoding="utf-8")
 
 
@@ -624,12 +808,15 @@ def main(argv=None) -> int:
                     help="let a body call fig.panel(...), which the recorded frame lacks, as a call that does nothing")
     ap.add_argument("--limit", type=int, default=0, help="run only the first N quests (a trial)")
     args = ap.parse_args(argv)
-    args.out.mkdir(parents=True, exist_ok=True)
+    corpus, out = args.corpus.resolve(), args.out.resolve()
+    if corpus == out or corpus in out.parents:
+        ap.error("--out must not be the corpus or inside it: the corpus is only read")
+    out.mkdir(parents=True, exist_ok=True)
     os.environ["FI_REPLAY_PANEL_NOOP"] = "1" if args.panel_noop else ""
-    quests = list(_quests(args.corpus))
+    quests = list(_quests(corpus))
     if args.limit:
         quests = quests[:args.limit]
-    done = [_run_quest(r, t, c, args.out) for r, t, c in quests]
+    done = [_run_quest(r, t, c, out) for r, t, c in quests]
 
     figs = [(q["name"], f) for q in done for f in q["figures"]]
     with_bodies = sum(1 for q in done if q["bodies"])
@@ -642,10 +829,20 @@ def main(argv=None) -> int:
             print(f"  {q['name']}: {q['error']}")
     panels = [(n, f["figure"], p) for n, f in figs for p in f["panels"]]
     counts = collections.Counter(p["state"] for _n, _f, p in panels)
-    print(f"panels (of bodies that ran to the end): {len(panels)}; verified {counts['verified']}; raw {counts['raw']}; empty {counts['empty']}")
-    why = collections.Counter((p["reason"], p["call"]) for _n, _f, p in panels if p["state"] == "raw")
-    for (reason, call), k in why.most_common():
-        print(f"  raw {k:3d}  {reason}" + (f" ({call})" if call else ""))
+    total = len(panels)
+    share = f" ({100 * counts['raw'] / total:.0f}%)" if total else ""
+    print(f"panels (of bodies that ran to the end): {total}; verified {counts['verified']}; raw {counts['raw']}{share}; empty {counts['empty']}")
+    raw = [p for _n, _f, p in panels if p["state"] == "raw"]
+    per_cause = collections.Counter(c for p in raw for c in {tuple(x) for x in p["causes"]})
+    alone = collections.Counter(tuple(p["causes"][0]) for p in raw if len(p["causes"]) == 1)
+    print("causes of raw panels, counted per panel (a panel may have several, so the numbers add to more than the raw panels);"
+          " 'alone' = panels whose only cause it is, which one change to it would free:")
+    for (kind, call), k in per_cause.most_common():
+        print(f"  {k:3d} panels (alone {alone[(kind, call)]:3d})  {kind}" + (f" ({call})" if call else ""))
+    classes = collections.Counter()
+    for _n, f in figs:
+        classes.update(f.get("text_classes", {}))
+    print("texts with a number, by where the number comes from: " + ("; ".join(f"{k} {v}" for k, v in classes.most_common()) or "none"))
     failing = [(n, f) for n, f in figs if f["status"] == "failed"]
     print(f"bodies that fail (the frame would draw the default figure): {len(failing)} of {len(figs)}")
     ft = collections.Counter((f["error"] or "(no message)")[:90] for _n, f in failing)
@@ -655,18 +852,21 @@ def main(argv=None) -> int:
     by = collections.Counter(o["agree"] for o in offers)
     print(f"claims offered: {len(offers)}; recomputed and agree {by['agree']}; disagree {by['disagree']}; not recomputed {by['not recomputed']}; "
           f"same sentence from evaluate: {sum(1 for o in offers if o['same_on_evaluate'])}")
+    print("  per claim: offered / agree / disagree (numbers matched by value; scale read from the real axes; band, error bars, "
+          "drawn check the arrays)")
     for claim, k in collections.Counter(o["claim"] for o in offers).most_common():
+        good = sum(1 for o in offers if o["claim"] == claim and o["agree"] == "agree")
         bad = sum(1 for o in offers if o["claim"] == claim and o["agree"] == "disagree")
-        print(f"  {claim:12s} {k:4d}" + (f"  disagree {bad}" if bad else ""))
+        print(f"  {claim:12s} {k:4d} / {good:4d} / {bad:3d}")
     for n, f in figs:
         for o in f["offers"]:
             if o["agree"] == "disagree":
                 print(f"  DISAGREE {n} {f['figure']}: {o['claim']} {o['args']} -> {o['text']!r} ({o['why']})")
+    print(f"series whose record differs from the line really drawn: {sum(f.get('record_vs_artists_mismatches', 0) for _n, f in figs)}")
     shared = [f for _n, f in figs if f["status"] == "ok" and any(p["state"] != "empty" for p in f["panels"])]
     print(f"bodies that draw (no fallback): {len(shared)}; of them with every panel verified: "
           f"{sum(1 for f in shared if all(p['state'] == 'verified' for p in f['panels']))}")
-    print(f"texts with words only that the calls do not draw: {sum(f.get('dropped_texts', 0) for _n, f in figs)}")
-    (args.out / "summary.json").write_text(json.dumps({"quests": done}, indent=1), encoding="utf-8")
+    (out / "summary.json").write_text(json.dumps({"quests": done}, indent=1), encoding="utf-8")
     return 0
 
 
