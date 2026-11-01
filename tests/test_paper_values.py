@@ -451,6 +451,38 @@ def test_vs_pooling_unlike_settings_is_refused_where_the_reference_is_the_same_a
     assert pv.resolve("err @ h=each | vs want", pv.from_cells(cells)).filled
 
 
+def _two_step_cells(first: list[float], second: list[float]) -> list[dict]:
+    return [{"cell": {"h": h}, "key": f"h={h}", "planned": len(v), "ok": len(v), "failed": 0,
+             "metrics": {"err": {"values": v}}} for h, v in ((1, first), (2, second))]
+
+
+def test_a_mean_over_all_of_an_axis_the_result_changes_with_is_refused():
+    changing = pv.from_cells(_two_step_cells([1.0, 1.1, 0.9, 1.0], [5.0, 5.1, 4.9, 5.0]))
+    got = pv.resolve("err @ h=all", changing)
+    assert not got.filled
+    assert "err changes with h (from 1.000 to 5.000 over its values)" in got.hit.reason
+    assert "describes none of them: give h one value, or mark it =each" in got.hit.reason
+    assert pv.resolve("err @ h=2", changing).filled and pv.resolve("err @ h=each | range", changing).filled
+
+
+def test_a_mean_over_all_of_an_axis_the_result_does_not_change_with_still_fills():
+    same = pv.from_cells(_two_step_cells([1.0, 1.1, 0.9, 1.0], [1.05, 0.95, 1.1, 0.9]))
+    assert pv.resolve("err @ h=all", same).filled  # the two intervals overlap
+    flat = pv.from_cells(_two_step_cells([2.0], [2.0]))
+    flat.drew = False
+    assert pv.resolve("err @ h=all", flat).filled  # a deterministic value that is the same at each setting
+
+
+def test_one_run_each_over_an_axis_is_refused_only_when_no_trial_drew_random_numbers():
+    rec = pv.from_cells(_two_step_cells([2.0], [3.0]))
+    assert rec.drew is None and pv.resolve("err @ h=all", rec).filled  # the record does not say: today's disclosed pool
+    rec.drew = True
+    assert "mean over 2 settings, one run each" in pv.resolve("err @ h=all", rec).text  # differences may be noise
+    rec.drew = False
+    got = pv.resolve("err @ h=all", rec)
+    assert not got.filled and "err changes with h (from 2.000 to 3.000 over its values)" in got.hit.reason
+
+
 def test_vs_with_each_and_all_on_another_axis_keeps_its_behaviour(s5):
     got = pv.resolve("Ea_hat:sd @ sigma=each, n_points=all | vs Ea_sd_theory", s5)
     assert "pool" not in (got.hit.reason if got.hit else "")

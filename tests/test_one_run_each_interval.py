@@ -28,7 +28,7 @@ def test_one_run_per_setting_gives_no_ci_or_se():
 
 
 def test_repeated_runs_keep_their_interval():
-    cells = [_cell(a, [0.1 * a + d for d in (0.0, 0.02, -0.02, 0.01)]) for a in range(1, 4)]
+    cells = [_cell(a, [0.1 + 0.001 * a + d for d in (0.0, 0.02, -0.02, 0.01)]) for a in range(1, 4)]  # the settings' intervals overlap
     out = _text(cells, "y:mean_ci @ a=all")
     assert "95% t interval" in out and "12 trials" in out
 

@@ -365,6 +365,9 @@ class Records:
     _derived: dict[Any, Any] = field(default_factory=dict)
     #: The seed each trial ran on, from FI's ledger: ``{setting key: {trial number: seed}}``. Empty without a ledger.
     seeds: dict[str, dict[int, int]] = field(default_factory=dict)
+    #: Whether the trials drew random numbers, from the harness row of each trial (``drew``): ``False`` when none did (the
+    #: results are deterministic), ``True`` when all did, ``None`` when the record does not say or the trials differ.
+    drew: bool | None = None
 
     def seeds_of(self, cell: dict[str, Any]) -> dict[int, int]:
         """The seeds of the trials behind ``cell``. The record of a value compared inside each run is the run's own
@@ -1153,6 +1156,51 @@ def _operand(rec: Records, key: Key, where: dict[str, Pick]) -> float:
     return _measure(rec, key.operand_metric, form, arg, where).value
 
 
+def _refuse_mean_over_changing_axis(rec: Records, key: Key) -> None:
+    """A mean over ``axis=all`` is refused when FI's own record shows the value changes with that axis, so a mean over its
+    values describes none of them. It changes when two values of the axis have 95% intervals that do not overlap; with no
+    interval (one run each) only when no trial drew random numbers (``rec.drew`` is ``False``) and the values differ by more
+    than a relative 1e-9 (or 1e-12 absolute): differences between settings that drew random numbers may be noise, and a record that does not say
+    whether they drew keeps the disclosed pool."""
+    pooled = [a for a, p in key.where.items() if p.kind == "all"]
+    if not pooled:
+        return
+    cells = _matching(rec, key.where, key.metric)
+    for axis in pooled:
+        groups: dict[Any, list[dict[str, Any]]] = {}
+        for c in cells:
+            groups.setdefault(c["cell"].get(axis), []).append(c)
+        if len(groups) < 2:
+            continue
+        found: list[tuple[float, float | None, float | None]] = []
+        for group in groups.values():
+            try:
+                try:
+                    mean, lo, hi = _interval(rec, group, key.metric)[:3]
+                except _Unfilled:
+                    values = _trials(group, key.metric)
+                    if not values:
+                        continue
+                    mean, lo, hi = _tt.summary(values)["mean"], None, None
+            except _Unfilled:
+                continue  # a setting that gave no number says nothing about a change
+            found.append((mean, lo, hi))
+        for i, (x, xl, xu) in enumerate(found):
+            for y, yl, yu in found[i + 1:]:
+                if math.isclose(x, y, rel_tol=1e-9, abs_tol=1e-12):
+                    continue  # the same value (a computed zero is not a change in the 15th place)
+                if None not in (xl, xu, yl, yu):
+                    apart = xu < yl or yu < xl  # type: ignore[operator]
+                else:
+                    apart = rec.drew is False
+                if apart:
+                    low, high = min(f[0] for f in found), max(f[0] for f in found)
+                    name = rec.short(axis)
+                    raise _Unfilled(f"{key.metric} changes with {name} (from {sig(low, 4)} to {sig(high, 4)} over its values), "
+                                    f"so a mean over all of them describes none of them: give {name} one value, or mark "
+                                    f"it =each")
+
+
 def _one(rec: Records, key: Key, where: dict[str, Pick]) -> Measured:
     got = _measure(rec, key.metric, key.form, key.form_arg, where)
     if not key.op:
@@ -1576,6 +1624,8 @@ def resolve(text: str, rec: Records | None) -> Value:
             bare = out if how == "range" and measured.parts else fmt(measured, key.form, key.percent and measured.kind != "words", bare=True)
             return Value(shown, out, numbers=measured.parts or [measured.value], inputs=_inputs(rec, key), bare=bare)
         measured = _one(rec, key, key.where)
+        if not key.op and not key.reducer and key.form in ("mean", "mean_ci", "ci", "pm"):
+            _refuse_mean_over_changing_axis(rec, key)  # after the value, so a refusal that names the cause comes first
         if key.form == "sd" and not key.op:  # a spread is written with its own interval, as a mean's is
             measured = _measure(rec, key.metric, "sd_ci", key.form_arg, key.where)
         out = fmt(measured, key.form, key.percent)
@@ -1694,6 +1744,9 @@ def records_of(quest_root: Path | str, protocol: dict[str, Any] | None) -> Recor
     rec = load(root, protocol, left_out=_checks.left_out_by_record(root))
     if rec is None or not rec.cells:
         return rec
+    from . import paper_facts as _facts
+
+    rec.drew = _facts._drew_record(root)
     # The plan's quantities no trial returned, which the analysis recorded one value for (never one FI left out); a plan in
     # the contract form names the quantities worked out from the results under ``derived``.
     planned = {str(m["id"]) for key in ("metrics", "derived")
