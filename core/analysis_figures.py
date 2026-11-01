@@ -1107,10 +1107,10 @@ def _default_points(table: Any, rid: str, key: str) -> dict[str, float]:
     return {"": float(got)} if _plain_number(got) else {}
 
 
-def _default_lines(spec: dict[str, Any], table: Any, fixed: dict[str, Any]) -> list[tuple[str, list[Any], list[float]]]:
-    """The lines of the default figure with the settings in ``fixed`` held: ``(label, x values, y values)``, one per result in
-    ``shows``, per value of the ``series`` setting and, for a result recorded per compared value, per value compared. No line
-    holds points of two settings."""
+def _default_lines(spec: dict[str, Any], table: Any, fixed: dict[str, Any]) -> list[tuple[str, list[Any], list[float], str]]:
+    """The lines of the default figure with the settings in ``fixed`` held: ``(label, x values, y values, result id)``, one per
+    result in ``shows``, per value of the ``series`` setting and, for a result recorded per compared value, per value compared.
+    No line holds points of two settings."""
     x_name, s_name = str(spec.get("x")), spec.get("series")
     names = spec.get("result_labels") if isinstance(spec.get("result_labels"), dict) else {}
     cells = {k: dict(table.setting(k)) for k in table.keys()}
@@ -1128,20 +1128,73 @@ def _default_lines(spec: dict[str, Any], table: Any, fixed: dict[str, Any]) -> l
                 if all(_plain_number(p[0]) for p in points):
                     points.sort(key=lambda p: p[0])
                 label = ", ".join([str(names.get(rid) or rid)] + (["%s = %s" % (s_name, value)] if s_name else []) + ([level] if level else []))
-                lines.append((label, [p[0] for p in points], [p[1] for p in points]))
+                lines.append((label, [p[0] for p in points], [p[1] for p in points], rid))
     return lines
 
 
-def default_figure(spec: dict[str, Any], table: Any, out_dir: str) -> dict[str, Any]:
+def _default_hold(spec: dict[str, Any], table: Any, held: list[dict[str, Any]], skip: set[str], parts: Any) -> dict[str, Any]:
+    """Where the default figure holds every other setting the study varies (not ``x``, the series or the panel setting). Not at the
+    first value the table records (that can be a combination nothing was run at: a blank panel): at the hold of the sub-study the
+    plan names (``parts``: each sub-study and the settings it holds; one that holds ``x``, the series or the panel setting cannot
+    show them and is not used; of several, the one that leaves the most points along ``x``), and, for a setting no sub-study holds,
+    at the value that leaves the most points along ``x`` on the panels. The earlier of two equal choices wins."""
+    x_name = str(spec.get("x"))
+    cells = [dict(table.setting(k)) for k in table.keys()]
+    others: dict[str, list[Any]] = {}
+    for cell in cells:
+        for a, v in cell.items():
+            if a not in skip and v not in others.setdefault(a, []):
+                others[a].append(v)
+    varied = {a: vs for a, vs in others.items() if len(vs) > 1}
+    if not varied:
+        return {}
+
+    def reach(hold: dict[str, Any]) -> int:
+        return sum(len({c[x_name] for c in cells if x_name in c and all(c.get(a) == v for a, v in {**one, **hold}.items())})
+                   for one in held)
+
+    chosen: dict[str, Any] = {}
+    best = -1
+    for hold in (parts.values() if isinstance(parts, dict) else []):
+        if not isinstance(hold, dict) or set(map(str, hold)) & (skip | {x_name}):
+            continue
+        kept = {str(a): v for a, v in hold.items() if str(a) in varied and v in varied[str(a)]}
+        if kept and reach(kept) > best:
+            chosen, best = kept, reach(kept)
+    for a, vs in varied.items():
+        if a in chosen:
+            continue
+        top, pick = -1, vs[0]
+        for v in vs:
+            got = reach({**chosen, a: v})
+            if got > top:
+                top, pick = got, v
+        chosen[a] = pick
+    return {a: chosen[a] for a in varied}
+
+
+def _frame_has_calls() -> bool:
+    """True when the frame carried beside this file has the drawing calls (version 5)."""
+    try:
+        from fi_frame import Figure
+        return all(callable(getattr(Figure, name, None)) for name in ("line", "finish", "record", "write"))
+    except Exception:  # noqa: BLE001 -- no frame, or an older one: the default is drawn without the calls
+        return False
+
+
+def default_figure(spec: dict[str, Any], table: Any, out_dir: str, namespace: Any = None) -> dict[str, Any]:
     """The plan's own figure, drawn by FI from the table when a figure body cannot be repaired: one line for each result the figure
     ``shows`` over its ``x`` setting, one line for each value of its ``series`` setting (and of a factor a result is recorded per) and
     one panel for each of its ``panels`` (the panel setting is the first setting the plan lets a panel show that is neither ``x`` nor
     ``series``; the panels hold its values in turn; without one, or with fewer values than panels, there are fewer panels and the
-    outcome says so). Any other setting the study varies is held at the first value the table records, and the title says which. It
-    is marked ``fallback``. A plan that declares no ``shows`` or no ``x``, or a table that holds no value to draw, gives no default:
-    the outcome is ``dropped`` and says why, and no file is kept."""
+    outcome says so). Any other setting the study varies is held (``_default_hold``: at the sub-study's hold, else where most points
+    are), and the title says which. It is drawn with the calls a figure body uses (``fig.line``) when the frame has them, so its
+    call record is marked ``fallback`` and holds no custom drawing; ``namespace`` is the carried plan (``COMPARED``, ``PARTS``,
+    ``DERIVED``). A plan that declares no ``shows`` or no ``x``, or a table that holds no value to draw, gives no default: the
+    outcome is ``dropped`` and says why, and no file is kept."""
     fid, file = str(spec.get("id")), str(spec.get("file") or "%s.png" % spec.get("id"))
     _remove(out_dir, file)
+    _remove_calls(file)
     shows = spec.get("shows")
     if not isinstance(shows, (list, tuple)) or not shows or not spec.get("x"):
         return dict(_outcome(fid, file, "dropped", "Figure `%s` is not drawn: the plan does not say which results it shows over which "
@@ -1155,16 +1208,8 @@ def default_figure(spec: dict[str, Any], table: Any, out_dir: str) -> dict[str, 
         held, note = [{}], ""
         if wanted > 1 and panel_by:
             held = [{panel_by: v} for v in list(settings[panel_by])[:wanted]]
-        if len(held) < wanted:
-            note = "Figure `%s` has %d panel(s) instead of the %d the plan asks for: the table gives no more settings to show one on each." % (
-                fid, len(held), wanted)
         by_panel = panel_by if len(held) > 1 else None
-        others: dict[str, list[Any]] = {}  # every other setting the study varies is held at its first recorded value
-        for k in table.keys():
-            for a, v in dict(table.setting(k)).items():
-                if a not in (x_name, s_name, by_panel) and v not in others.setdefault(a, []):
-                    others[a].append(v)
-        hold = {a: vs[0] for a, vs in others.items() if len(vs) > 1}
+        hold = _default_hold(spec, table, held, {a for a in (x_name, s_name, by_panel) if a}, _from(namespace, "PARTS", {}))
         labels = spec.get("labels") if isinstance(spec.get("labels"), dict) else {}
         reset = getattr(table, "reset_reads", None)
         if callable(reset):
@@ -1173,12 +1218,19 @@ def default_figure(spec: dict[str, Any], table: Any, out_dir: str) -> dict[str, 
         if not any(drawn):
             return dict(_outcome(fid, file, "dropped", "Figure `%s` is not drawn: the table holds no value of %s along `%s`." % (
                 fid, ", ".join("`%s`" % r for r in shows), spec["x"])), fallback=True)
+        if len(held) > 1:  # a panel the table holds nothing for is left out, and said
+            held, drawn = [h for h, d in zip(held, drawn) if d], [d for d in drawn if d]
+        if len(held) < wanted:
+            note = "Figure `%s` has %d panel(s) instead of the %d the plan asks for: the table gives no more settings to show one on each." % (
+                fid, len(held), wanted)
+        if _frame_has_calls():
+            return _default_with_calls(dict(spec, panels=len(held)), table, out_dir, namespace, held, hold, drawn, note)
         plt, fig, axes = _new_figure(len(held))
         record = []
         for index, (one, lines) in enumerate(zip(held, drawn)):
             ax = axes[index]
-            cats = list(dict.fromkeys(v for _l, xs, _y in lines for v in xs if not _plain_number(v)))
-            for label, xs, ys in lines:
+            cats = list(dict.fromkeys(v for _l, xs, _y, _r in lines for v in xs if not _plain_number(v)))
+            for label, xs, ys, _rid in lines:
                 ax.plot([cats.index(v) if v in cats else v for v in xs], ys, marker="o", label=label)
             if cats:
                 ax.set_xticks(range(len(cats)), [str(v) for v in cats])
@@ -1202,6 +1254,7 @@ def default_figure(spec: dict[str, Any], table: Any, out_dir: str) -> dict[str, 
         return out
     except Exception as err:
         _remove(out_dir, file)
+        _remove_calls(file)
         return dict(_outcome(fid, file, "fi_fault", "FI's drawing of the default figure `%s` stopped with %s: %s." % (fid, type(err).__name__, err)),
                     fallback=True)
     finally:
@@ -1209,6 +1262,42 @@ def default_figure(spec: dict[str, Any], table: Any, out_dir: str) -> dict[str, 
             table.last_error.clear()  # the reads FI made here are not the body's: a later repair note must not quote them
         if plt is not None and fig is not None:
             plt.close(fig)
+
+
+def _default_with_calls(spec: dict[str, Any], table: Any, out_dir: str, namespace: Any, held: list[dict[str, Any]],
+                        hold: dict[str, Any], drawn: list[list[tuple[str, list[Any], list[float], str]]], note: str) -> dict[str, Any]:
+    """Draw the default figure through ``fig.line`` as a figure body would, with the plan marked ``fallback`` so the call record is.
+    A line is a series named by the result's id when it is the only line of its result, else by an id FI makes of its label (added
+    to the ids the calls accept, with the label as its words). The held settings of a panel are declared for FI's title. The
+    outcome is the one of ``_draw_one``, marked ``fallback``; a fault of these calls is FI's (``fi_fault``), never the model's."""
+    fid, file = str(spec.get("id")), str(spec.get("file") or "%s.png" % spec.get("id"))
+    plan = _plan_for(dict(spec, fallback=True), namespace, table)
+    for lines in drawn:
+        for label, _x, _y, rid in lines:
+            if sum(1 for line in lines if line[3] == rid) > 1 and label not in plan["series_ids"]:
+                plan["series_ids"].append(label)
+                plan["labels"][label] = label
+
+    def body(fig: Any, tbl: Any) -> None:
+        for index, one in enumerate(held):
+            lines = _default_lines(spec, tbl, {**one, **hold})  # read again: the reads are recorded from the start of the body
+            for label, xs, ys, rid in lines:
+                lone = sum(1 for line in lines if line[3] == rid) == 1
+                for art in fig.line(index, rid if lone else label, xs, ys, rid):
+                    art.set_marker("o")
+            if {**one, **hold}:
+                fig.declared[index] = {**one, **hold}
+
+    out = _draw_one(spec, body, table, out_dir, plan)
+    if out.get("status") != "ok":
+        _remove(out_dir, file)
+        _remove_calls(file)
+        return dict(_outcome(fid, file, "fi_fault", "FI's drawing of the default figure `%s` stopped: %s" % (
+            fid, out.get("why") or out.get("said"))), fallback=True)
+    out = dict(out, fallback=True, why=note, **({"held": hold} if hold else {}))
+    if note:
+        out["note"] = note
+    return out
 
 
 # ---- what is said and the exit code ---------------------------------------------------------------------------------------------

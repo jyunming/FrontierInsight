@@ -1438,7 +1438,7 @@ def _figures(table, quest_root):
                 outcomes += fi_figures.run_figures([spec], derive, table, out_dir)
                 if os.environ.get("FI_FIGURE_FALLBACK") in ("1", "only") and outcomes[-1].get("status") in ("failed", "refused", "not_written"):
                     # No repair is left for the body: the plan's own figure is drawn from the table in its place
-                    plain = fi_figures.default_figure(spec, table, out_dir)
+                    plain = fi_figures.default_figure(spec, table, out_dir, derive)
                     if plain.get("status") in ("ok", "dropped"):
                         outcomes[-1] = plain
                     else:

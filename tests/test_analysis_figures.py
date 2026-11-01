@@ -1601,3 +1601,76 @@ def test_a_bare_fig_panel_after_a_hold_fails_and_the_same_hold_again_does_nothin
         _both_panels(fig, table)
 
     assert _hold_spec_run(tmp_path, again, {"size": [1, 2]})["status"] == "ok"
+
+
+# ---- the default figure drawn through the drawing calls ------------------------------------------------------------------------
+class _CallGrid(_Grid):
+    """The made-up study of ``_Grid`` with the results it declares, so the drawing calls accept them."""
+
+    declared = ["gain", "loss"]
+
+
+def _calls_of(records, stem="f1"):
+    return json.loads((records / ("%s.calls.json" % stem)).read_text(encoding="utf-8"))
+
+
+def test_default_figure_has_call_record_marked_fallback(tmp_path, frame5):
+    out = af.default_figure({"id": "f1", "file": "f1.png", "shows": ["gain", "loss"], "x": "size"}, _CallGrid(), str(tmp_path))
+    assert out["status"] == "ok" and out["fallback"] is True and (tmp_path / "f1.png").stat().st_size > 0
+    record = _calls_of(frame5)
+    assert record["fallback"] is True and len(record["panels"]) == 1
+    assert record["panels"][0]["x"]["id"] == "size" and out["declared"]["calls"]["series"] == 2
+
+
+def test_default_figure_series_are_plan_ids(tmp_path, frame5):
+    af.default_figure({"id": "f1", "file": "f1.png", "shows": ["gain", "loss"], "x": "size"}, _CallGrid(), str(tmp_path))
+    assert [s["id"] for s in _calls_of(frame5)["panels"][0]["series"]] == ["gain", "loss"]  # the results' own ids
+    af.default_figure({"id": "f1", "file": "f1.png", "shows": ["gain"], "x": "size", "series": "rate"}, _CallGrid(), str(tmp_path))
+    series = _calls_of(frame5)["panels"][0]["series"]
+    assert [s["id"] for s in series] == ["gain, rate = 0.1", "gain, rate = 0.2"] and [s["y"] for s in series] == [[10.1, 20.1, 30.1], [10.2, 20.2, 30.2]]
+
+
+def test_default_figure_has_no_raw_panel(tmp_path, frame5):
+    out = af.default_figure({"id": "f1", "file": "f1.png", "shows": ["gain"], "x": "size", "panels": 2, "settings": {"rate": [0.1, 0.2]}},
+                            _CallGrid(), str(tmp_path))
+    panels = _calls_of(frame5)["panels"]
+    assert len(panels) == 2 and [p["raw"] for p in panels] == [False, False] and [p["texts_raw"] for p in panels] == [[], []]
+    assert out["declared"]["raw_panels"] == [] and [p["title"] for p in out["panels"]] == ["rate = 0.1", "rate = 0.2"]
+
+
+def test_default_figure_without_a_new_frame_is_drawn_as_before_and_leaves_no_call_record(tmp_path):
+    out = _default(tmp_path, shows=["gain"], x="size")
+    assert out["status"] == "ok" and out["fallback"] is True and list(tmp_path.glob("*.calls.json")) == []
+
+
+def test_default_figure_removes_the_call_record_of_an_earlier_run(tmp_path, frame5):
+    (frame5 / "f1.calls.json").write_text("{}", encoding="utf-8")
+    out = af.default_figure({"id": "f1", "file": "f1.png", "shows": ["gain"], "x": "y_missing"}, _CallGrid(), str(tmp_path))
+    assert out["status"] == "dropped" and not (frame5 / "f1.calls.json").exists()
+
+
+class _Ragged(_CallGrid):
+    """``mode`` b is run at two sizes, c at three, d at four; b is the first value the table records."""
+
+    def __init__(self):
+        super().__init__()
+        cells = {}
+        for mode, sizes in (("b", (20, 30)), ("c", (10, 20, 30)), ("d", (10, 20, 30, 40))):
+            for s in sizes:
+                cells["size=%d,mode=%s" % (s, mode)] = {"size": s, "mode": mode, "rate": 0.1}
+        self._cells = cells
+
+
+def test_default_figure_holds_at_the_value_with_the_most_points_not_the_first(tmp_path, frame5):
+    out = af.default_figure({"id": "f1", "file": "f1.png", "shows": ["gain"], "x": "size"}, _Ragged(), str(tmp_path))
+    assert out["held"] == {"mode": "d"}  # the first value, b, would leave two points
+    series = _calls_of(frame5)["panels"][0]["series"]
+    assert series[0]["x"] == [10, 20, 30, 40]
+
+
+def test_default_figure_holds_at_the_sub_study_hold(tmp_path, frame5):
+    parts = {"wide": {"size": 10}, "narrow": {"mode": "c"}}  # the first holds x itself and cannot be used
+    out = af.default_figure({"id": "f1", "file": "f1.png", "shows": ["gain"], "x": "size"}, _Ragged(), str(tmp_path),
+                            types.SimpleNamespace(PARTS=parts))
+    assert out["held"] == {"mode": "c"}
+    assert _calls_of(frame5)["panels"][0]["series"][0]["x"] == [10, 20, 30]
