@@ -784,3 +784,27 @@ def test_figure_prints_text_is_recorded_and_the_writer_is_told_a_number_no_resul
     # A figure with no text of its own gets the note it always did.
     assert "prints" not in _figure_record_note(got["plain.png"], results={"k": 0.5123})
     assert _figure_record_note(got["plain.png"], results={"k": 0.5123}) == _figure_record_note(got["plain.png"])
+
+
+def test_bootstrap_records_text_and_legends_that_run_across_panels(tmp_path) -> None:
+    """The label check used to read one axes at a time. An x label drawn over the title of the panel below it, and
+    a legend anchored under its axes over the next panel, are findings; a tight-layout grid and a legend inside
+    its own axes are not."""
+    layout = _layout_records(tmp_path, (
+        "import matplotlib.pyplot as plt\n"
+        "fig, (a, b) = plt.subplots(2, 1)\n"
+        "a.plot([0, 1], [0, 1]); b.plot([0, 1], [0, 1])\n"
+        "a.set_xlabel('time elapsed'); b.set_title('second panel title')\n"
+        "fig.subplots_adjust(hspace=0.2); fig.savefig('labels.png')\n"
+        "fig2, (c, d) = plt.subplots(2, 1)\n"
+        "c.plot([0, 1], [0, 1], label='alpha'); d.plot([0, 1], [0, 1])\n"
+        "c.legend(loc='upper center', bbox_to_anchor=(0.5, -0.1)); fig2.savefig('legend.png')\n"
+        "fig3, axs = plt.subplots(2, 2)\n"
+        "for i, x in enumerate(axs.flat):\n"
+        "    x.plot([0, 1], [0, 1], label='s'); x.set_title(f'panel {i}'); x.set_xlabel('x'); x.set_ylabel('y')\n"
+        "axs[0, 0].legend(loc='lower right'); fig3.tight_layout(); fig3.savefig('grid.png')\n"
+    ))
+    assert any(f["check"] == "label_overlap" and f["where"] == "labels of different panels"
+               for f in layout("labels"))
+    assert any(f["check"] == "legend_over_panel" for f in layout("legend"))
+    assert layout("grid") == []

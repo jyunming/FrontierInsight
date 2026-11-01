@@ -34177,6 +34177,19 @@ def _figure_overlap_findings(state: QuestState) -> list[str]:
                         f'figures/{name}: the label "{_one_line(item.get("text"))}" runs past the edge '
                         "of the figure"
                     )
+                elif item.get("check") == "legend_over_panel":
+                    names = [_one_line(n, 30) for n in (item.get("legend") or [])[:4]]
+                    more = ", ..." if len(item.get("legend") or []) > 4 else ""
+                    found.append(
+                        f"figures/{name}: the legend ({', '.join(names)}{more}) is drawn over "
+                        f'"{_one_line(item.get("over"), 40)}" of another panel'
+                    )
+                elif item.get("check") == "legend_off_canvas":
+                    names = [_one_line(n, 30) for n in (item.get("legend") or [])[:4]]
+                    more = ", ..." if len(item.get("legend") or []) > 4 else ""
+                    found.append(
+                        f"figures/{name}: the legend ({', '.join(names)}{more}) runs past the edge of the figure"
+                    )
                 elif item.get("check") == "legend_over_data":
                     names = [_one_line(n, 30) for n in (item.get("legend") or [])[:4]]
                     more = ", ..." if len(item.get("legend") or []) > 4 else ""

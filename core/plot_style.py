@@ -751,6 +751,8 @@ try:
         # A legend's box is measured this many pixels in from its frame, so a line
         # that only grazes the frame is not "under" it.
         _FI_LEGEND_INSET = 3
+        # The most overlaps of text between panels that one figure reports.
+        _FI_CROSS_MAX = 8
 
         def _fi_share(a, b):
             # The part of the smaller of two boxes that the other one covers, 0 to 1.
@@ -906,6 +908,99 @@ try:
                         found.append({"check": "label_clipped", "text": text.get_text()})
             return found
 
+        def _fi_cross_findings(fig, renderer, cropped):
+            # What _fi_label_findings does not see, because it reads one axes at a time: a text of
+            # one panel drawn over a text of another (an x label over the title below it), and a
+            # legend that lies over another panel or past the edge of the canvas. Measured on the
+            # drawn canvas with the same share as the checks above.
+            # (an axes that is not drawn - hidden, or the blank cell of a grid - has no text and covers nothing)
+            axes_list = [a for a in fig.get_axes() if a.get_visible()]
+            boxes = {id(ax): ax.get_window_extent(renderer) for ax in axes_list}
+
+            def _fi_same_place(a, b):
+                # A twin axis or an inset sits on the panel it belongs to; that is not a neighbour.
+                return _fi_share(boxes[id(a)], boxes[id(b)]) > 0.5
+
+            def _fi_empty(ax):
+                return (not ax.axison and not ax.get_lines() and not ax.collections
+                        and not ax.images and not ax.patches)
+
+            items = []  # (owner axes or None, text, box)
+            for ax in axes_list:
+                texts = list(_fi_titles(ax))
+                if ax.axison:
+                    texts += [ax.xaxis.label, ax.yaxis.label]
+                    texts += _fi_axis_texts(ax, ax.xaxis) + _fi_axis_texts(ax, ax.yaxis)
+                texts += [t for t in ax.texts if t.get_visible()]
+                for text in texts:
+                    if not text.get_visible() or not text.get_text().strip():
+                        continue
+                    box = _FiText.get_window_extent(text, renderer)
+                    if box.width > 0 and box.height > 0:
+                        items.append((ax, text.get_text(), box))
+            # (the figure title against the panel titles is the title_overlap check above)
+            for text in [t for t in fig.texts if t is not getattr(fig, "_suptitle", None)]:
+                if text.get_visible() and text.get_text().strip():
+                    box = _FiText.get_window_extent(text, renderer)
+                    if box.width > 0 and box.height > 0:
+                        items.append((None, text.get_text(), box))
+            legends = []  # (owner axes or None, legend)
+            for ax in axes_list:
+                leg = ax.get_legend()
+                if leg is not None and leg.get_visible():
+                    legends.append((ax, leg))
+            for leg in fig.legends:
+                if leg.get_visible():
+                    legends.append((None, leg))
+            found, texts_found = [], []
+            for i, (oa, ta, a) in enumerate(items):
+                for ob, tb, b in items[i + 1:]:
+                    if oa is ob or (oa is not None and ob is not None and _fi_same_place(oa, ob)):
+                        continue
+                    if oa is None and ob is None:
+                        continue
+                    share = _fi_share(a, b)
+                    if share >= _FI_TITLE_SHARE:
+                        texts_found.append({"check": "label_overlap", "where": "labels of different panels",
+                                            "text": ta, "over": tb, "share": round(share, 2)})
+            # the worst few: a crowded grid would otherwise list every tick label
+            found.extend(sorted(texts_found, key=lambda f: -f["share"])[:_FI_CROSS_MAX])
+            figure_box = fig.bbox
+            edge = 1.0
+            for owner, leg in legends:
+                try:
+                    lb = leg.get_window_extent(renderer)
+                except Exception:
+                    continue
+                if lb.width <= 0 or lb.height <= 0:
+                    continue
+                names = [t.get_text() for t in leg.get_texts()]
+                title = " ".join(t.get_text() for t in _fi_titles(owner)) if owner is not None else ""
+                for ax in axes_list:
+                    if ax is owner or (owner is not None and _fi_same_place(owner, ax)) or _fi_empty(ax):
+                        continue
+                    # the share of the legend that lies over the other panel
+                    x0, y0 = max(lb.x0, boxes[id(ax)].x0), max(lb.y0, boxes[id(ax)].y0)
+                    x1, y1 = min(lb.x1, boxes[id(ax)].x1), min(lb.y1, boxes[id(ax)].y1)
+                    covered = (max(0.0, x1 - x0) * max(0.0, y1 - y0)) / (lb.width * lb.height)
+                    if covered >= _FI_TITLE_SHARE:
+                        found.append({"check": "legend_over_panel", "axes_title": title, "legend": names,
+                                      "over": " ".join(t.get_text() for t in _fi_titles(ax)),
+                                      "share": round(covered, 2)})
+                for ob, tb, b in items:
+                    if ob is owner and owner is not None:
+                        continue
+                    if owner is not None and ob is not None and _fi_same_place(owner, ob):
+                        continue
+                    share = _fi_share(lb, b)
+                    if share >= _FI_TITLE_SHARE:
+                        found.append({"check": "legend_over_panel", "axes_title": title, "legend": names,
+                                      "over": tb, "share": round(share, 2)})
+                if not cropped and (lb.x0 < figure_box.x0 - edge or lb.x1 > figure_box.x1 + edge
+                                    or lb.y0 < figure_box.y0 - edge or lb.y1 > figure_box.y1 + edge):
+                    found.append({"check": "legend_off_canvas", "axes_title": title, "legend": names})
+            return found
+
         def _fi_layout(fig, cropped=False):
             # Text drawn over text, and a legend drawn over the data, measured on the
             # canvas the figure was saved from. None when it could not be measured.
@@ -941,6 +1036,10 @@ try:
             # title and legend findings above.
             try:
                 found.extend(_fi_label_findings(fig, renderer, cropped))
+            except Exception:
+                pass
+            try:
+                found.extend(_fi_cross_findings(fig, renderer, cropped))
             except Exception:
                 pass
             return found
