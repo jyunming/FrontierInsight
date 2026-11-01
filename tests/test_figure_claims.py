@@ -459,3 +459,100 @@ def test_trend_is_not_fooled_by_a_chain_of_small_steps():
     ys = [1.0, 0.9996, 0.9992, 0.9988, 0.9984, 1.0]
     c = _calls(_panel([_series("a", list(range(6)), ys)]))
     assert "does not change monotonically" in ev(c, "trend", series="a")[0]
+
+
+# --- the pointer rule --------------------------------------------------------------------------------------------------
+
+import re  # noqa: E402
+
+_MENTION = re.compile(r"(?<![A-Za-z])(?:figures?|figs?\.?)\s*(\d+)", re.IGNORECASE)
+
+
+def _v(metric, text="0.5"):
+    return f"<!-- fi:v {{{{v:{metric}@size=1}}}} -->{text}<!-- /fi:v -->"
+
+
+def _claim(stem="fig_a", text="Panel 1 draws a rising line."):
+    return f"<!-- fi:fact-figure-lines-{stem} -->{text}<!-- /fi:fact-figure-lines-{stem} -->"
+
+
+def _rule(md, numbers=None, drawn=None):
+    return fc.apply_pointer_rule(md, {"fig_a.png": 1} if numbers is None else numbers,
+                                 {1: {"signal"}} if drawn is None else drawn, _MENTION)
+
+
+def test_result_mark_sentence_with_pointer_kept_when_figure_draws_it():
+    md = f"Intro text.\n\nThe signal is {_v('signal')} at size 1 (Figure 1). Next.\n"
+    out, taken = _rule(md)
+    assert out == md and taken == []
+
+
+def test_gain_sentence_pointing_at_figure_that_does_not_draw_it_is_dropped():
+    md = f"Intro text.\n\nThe gain is {_v('gain')} over the baseline (Figure 1). The signal is {_v('signal')}.\n"
+    out, taken = _rule(md)
+    assert "gain" not in out and "Figure 1" not in out
+    assert f"The signal is {_v('signal')}." in out
+    assert len(taken) == 1 and taken[0]["key"] == "Figure 1" and taken[0]["how"] == "sentence removed"
+    assert taken[0]["sentence"] == "The gain is 0.5 over the baseline (Figure 1)."
+
+
+def test_free_sentence_naming_figure_is_dropped():
+    md = "First sentence. Figure 1 shows a piecewise linear curve. Last sentence.\n"
+    out, taken = _rule(md)
+    assert out == "First sentence. Last sentence.\n"
+    assert len(taken) == 1
+
+
+def test_pointer_not_closing_the_sentence_is_dropped():
+    md = f"As (Figure 1) shows, the signal is {_v('signal')}.\n\nSee Figure 1 for the signal {_v('signal')}.\n"
+    out, taken = _rule(md)
+    assert "Figure" not in out and len(taken) == 2
+
+
+def test_whole_sentence_figure_claim_kept():
+    md = f"Intro. {_claim()} Later text.\n"
+    out, taken = _rule(md)
+    assert out == md and taken == []
+    # a bare pointer after the claim is a fragment of its own, not a claim: it goes, the claim stays
+    out, taken = _rule(f"Intro. {_claim()} (Figure 1)\n")
+    assert out == f"Intro. {_claim()}\n" and len(taken) == 1
+
+
+def test_figure_claim_with_other_words_is_dropped():
+    md = f"{_claim()} (Figure 1) It also clearly flattens.\n"
+    out, taken = _rule(md)
+    assert "flattens" not in out and "Panel 1" in out
+    assert len(taken) == 1
+
+
+def test_caption_and_table_row_with_figure_number_untouched():
+    md = ("# Figure 1 results\n\n![**Figure 1.** A caption that says Figure 1 shows a gain.](figures/fig_a.png)\n\n"
+          "| Figure 1 shows | gain |\n|---|---|\n| Figure 1 | 3 |\n\n> Figure 1 quote.\n\n```\nFigure 1 shows x.\n```\n"
+          "<!-- fi:fact-limitations -->\nFigure 1: some statements were left out.\n<!-- /fi:fact-limitations -->\n")
+    out, taken = _rule(md)
+    assert out == md and taken == []
+
+
+def test_figure_number_not_issued_by_fi_is_dropped_sentence():
+    md = f"Good one. The signal is {_v('signal')} (Figure 7). Last.\n"
+    out, taken = _rule(md)
+    assert out == "Good one. Last.\n"
+    assert taken[0]["key"] == "Figure 7"
+
+
+def test_legacy_figure_passes_through():
+    md = "Figure 2 shows a rising curve.\n"
+    out, taken = _rule(md, numbers={"fig_a.png": 1, "old.png": 2}, drawn={1: {"signal"}})
+    assert out == md and taken == []
+
+
+def test_unfilled_mark_does_not_count_as_drawn():
+    md = f"The signal is {_v('signal', 'not recorded')} (Figure 1).\n"
+    assert _rule(md)[0] == ""
+
+
+def test_run_in_heading_stays_when_sentence_dropped():
+    md = "**Result.** Figure 1 shows a rise.\n"
+    out, _ = _rule(md)
+    assert out == "**Result.**\n" or out.startswith("**Result.**")
+    assert "rise" not in out

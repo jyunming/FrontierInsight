@@ -20,11 +20,14 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 from . import figure_facts
+from . import paper_values as _values
+from . import typed_numbers as _typed
 
 #: Two drawn values closer than this (relative) are equal to the rounding of a drawn value; a trend may run through them.
 TREND_TIE_RTOL = 5e-4
@@ -698,3 +701,136 @@ def menu(calls: Any, plan: dict[str, Any] | None = None, fmt: Fmt = _default_fmt
     order = {cid: i for i, cid in enumerate(CLAIMS)}
     found.sort(key=lambda o: order[o["claim"]])
     return found
+
+
+# --- the pointer rule ------------------------------------------------------------------------------------------------
+
+#: A closing "(Figure N)" is a pointer by position: an opening bracket before the mention, the closing one after it.
+_OPEN_PAREN = re.compile(r"\(\s*$")
+_CLOSE_PAREN = re.compile(r"^\s*\)[\s.,;:!?]*$")
+_TOKEN_AT = re.compile(r"\x00(\d+)\x00\.?")
+
+
+def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, set[str]],
+                       mention_re: re.Pattern[str]) -> tuple[str, list[dict[str, str]]]:
+    """``markdown`` without the running sentences that point at a figure and are not FI's to stand behind:
+    ``(text, taken_out)``, ``taken_out`` having ``key`` (the figure the sentence named), ``sentence`` (as it read) and
+    ``how`` for each, like :func:`core.paper_facts.take_out_unfilled`.
+
+    By position and marks only, no wording. A running sentence that names a figure (``mention_re``) is kept when every
+    figure it names is one FI issued (``numbers``) and either none of them has a call record (``drawn`` lacks its number: an
+    earlier version drew it, nothing is checked), or the sentence is a figure claim FI composed, or it reports results
+    (FI value marks) and points at one figure in a closing parenthesis, "(Figure N)", whose record draws (``drawn[N]``) the
+    metric of at least one of those marks. Every other sentence naming a figure is removed. Captions, table rows, headings,
+    lists, code and the text inside FI's own markers are never touched."""
+    from . import paper_facts as _facts  # late: paper_facts may itself reach this module
+
+    marks = [m for m in _values._MARK.finditer(markdown or "")]
+    marks += [m for m in _facts._MARK.finditer(markdown or "")]
+    marks += [m for m in _values._SPAN.finditer(markdown or "")]
+    marks.sort(key=lambda m: m.start())
+    kept: list[re.Match[str]] = []  # the outermost marks: one inside another is part of it
+    for m in marks:
+        if not kept or m.start() >= kept[-1].end():
+            kept.append(m)
+    marks = kept
+    if not marks and not mention_re.search(markdown or ""):
+        return markdown, []
+    parts: list[str] = []
+    spans: list[tuple[int, int, int, int]] = []  # (token start, end, original start, end)
+    kinds: list[str] = []  # "v" | "claim" | "other"
+    last = size = 0
+    for i, m in enumerate(marks):
+        before = markdown[last:m.start()]
+        claim = m.re is _facts._MARK and m.group(1).startswith("figure-")
+        token = f"\x00{i}\x00" + ("." if claim else "")
+        parts += [before, token]
+        spans.append((size + len(before), size + len(before) + len(token), m.start(), m.end()))
+        kinds.append("v" if m.re is _values._MARK else "claim" if claim else "other")
+        size += len(before) + len(token)
+        last = m.end()
+    parts.append(markdown[last:])
+    flat = "".join(parts)
+    issued = set(numbers.values())
+
+    def original(p: int) -> int:
+        shift = 0
+        for _bs, be, _os, oe in spans:
+            if be <= p:
+                shift = oe - be
+        return p + shift
+
+    def metrics(a: int, b: int) -> set[str]:
+        found: set[str] = set()
+        for i, sp in enumerate(spans):
+            if kinds[i] != "v" or not (a <= sp[0] and sp[1] <= b):
+                continue
+            if marks[i].group(2).strip() == _values.NOT_RECORDED:
+                continue
+            try:
+                found.add(_values.parse(marks[i].group(1)).metric)
+            except Exception:  # noqa: BLE001 -- a key that does not parse reports nothing
+                pass
+        return found
+
+    def keeps(a: int, b: int, hits: list[re.Match[str]]) -> bool:
+        text = flat[a:b]
+        nums = [int(h.group(1)) for h in hits]
+        if any(n not in issued for n in nums):
+            return False
+        if all(n not in drawn for n in nums):
+            return True
+        inside = [i for i, sp in enumerate(spans) if a <= sp[0] and sp[1] <= b]
+        pointer = None
+        if len(hits) == 1:
+            h = hits[0]
+            s, e = h.start() - a, h.end() - a
+            if _OPEN_PAREN.search(text[:s]) and _CLOSE_PAREN.match(text[e:]):
+                pointer = (text[:s].rstrip()[:-1], text[e:].lstrip()[1:])
+        rest = text if pointer is None else pointer[0] + pointer[1]
+        if any(kinds[i] == "claim" for i in inside) \
+                and not re.sub(r"[\s.,;:!?()\-\u2013\u2014]+", "", _TOKEN_AT.sub("", rest)):
+            return True  # a figure claim FI composed, with at most its pointer
+        return pointer is not None and bool(metrics(a, b) & drawn.get(nums[0], set()))
+
+    edits: list[tuple[int, int, str]] = []
+    taken: list[dict[str, str]] = []
+    seen: set[tuple[int, int]] = set()
+    fence: str | None = None
+    at = 0
+    for line in flat.split("\n"):
+        line_start, at = at, at + len(line) + 1
+        fence_line = re.match(r"^\s*(```|~~~)", line)
+        if fence_line:
+            fence = None if fence == fence_line.group(1) else (fence or fence_line.group(1))
+            continue
+        if fence is not None or _facts._NOT_PROSE.match(line):
+            continue
+        for first in mention_re.finditer(line):
+            a, b = _typed._sentence(flat, line_start + first.start(), line_start + first.end())
+            if (a, b) in seen:
+                continue
+            seen.add((a, b))
+            if b > a and flat[b - 1] == "\n":
+                b -= 1
+            hits = [h for h in mention_re.finditer(flat, a, b)]
+            if keeps(a, b, hits):
+                continue
+            lead = _facts._RUN_IN.match(flat[a:b])
+            body_at = a + (lead.end() if lead else 0)
+            sentence = re.sub(r"\s+", " ", _values.without_marks(markdown[original(a):original(b)])).strip()
+            start, end = original(body_at), original(b)
+            if flat[line_start:body_at].strip() == "":  # it opens its line: the space it leaves goes with it
+                while end < len(markdown) and markdown[end] in " \t":
+                    end += 1
+                if not lead and (end >= len(markdown) or markdown[end] == "\n"):  # nothing is left of the line
+                    start, end = original(line_start), min(end + 1, len(markdown))
+            else:  # the space before it goes with it
+                while start > 0 and markdown[start - 1] in " \t":
+                    start -= 1
+            edits.append((start, end, ""))
+            taken.append({"key": f"Figure {hits[0].group(1)}", "sentence": sentence, "how": "sentence removed"})
+    out = markdown
+    for start, end, text in sorted(edits, reverse=True):
+        out = out[:start] + text + out[end:]
+    return out, taken
