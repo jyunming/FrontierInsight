@@ -342,7 +342,7 @@ def test_a_fault_inside_the_analysis_frame_is_not_taken_for_its_absence(tmp_path
 
 
 def test_with_no_analysis_by_fi_every_text_is_what_it_was(tmp_path: Path) -> None:
-    # "note" shows the frame FI writes, so it carries the frame's version line: 4 since the runtime measures whether a trial drew random numbers (skeleton.VERSION; it was 3 before);
+    # "note" shows the frame FI writes, so it carries the frame's version line: 5 (skeleton.VERSION; 4 when the runtime began to measure whether a trial drew random numbers, 5 with the figure drawing calls);
     # it differs from df4ff1ad only in that line (the frame is written only with the frame on), and in the sentences that say
     # which names a trial may return (one list for the frame and the rules; the frame is written only with the frame on).
     engine = _engine(tmp_path, skeleton_on=True)
@@ -375,7 +375,7 @@ PINS_AT_DF4FF1AD = {
     "implement": "a70893e8a2235784", "implement_cluster": "49b3f279b0a52b4b", "implement_body": "d02bdddb32e99d50",
     "implement_body_cluster": "251751d486f7962c", "outline": "fa01183231dce8c8", "reply": "71cdb845e7baa014",
     "reply_cluster": "f1e703776014745e", "protocols_plain": "dad3557413701e1d", "protocols_search": "4713448bfebdf253",
-    "protocols_inside": "2659fc6972c46c6c", "note": "c097e36a2cf46a3b", "protocols_cluster": "4a61049737d99ef8",
+    "protocols_inside": "2659fc6972c46c6c", "note": "34770fda2298471a", "protocols_cluster": "4a61049737d99ef8",
     "layout_prompt": "a8e42eea942bd234", "layout_prefilled": "3222bc6d76f04d56", "repair_problem": "75789d950a008886"}
 
 

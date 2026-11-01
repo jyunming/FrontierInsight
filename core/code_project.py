@@ -352,7 +352,7 @@ def _analysis_files() -> list[str]:
     from . import analysis_frame as _analysis
 
     tops = {rel.split("/", 1)[0] for rel in _analysis.carried_files()}
-    return sorted({_analysis.EXPERIMENT_FILE, _analysis.DERIVE_FILE, "fi_table.py", *tops})
+    return sorted({_analysis.EXPERIMENT_FILE, _analysis.DERIVE_FILE, "fi_table.py", "fi_figure_calls.py", *tops})
 
 
 def _quest_runtime(code_dir: Path | str) -> str:

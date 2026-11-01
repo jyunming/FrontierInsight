@@ -310,7 +310,7 @@ def _older(text: str) -> str:
 
 
 def test_a_new_frame_gets_the_version_3_runtime_and_the_table() -> None:
-    assert skeleton.VERSION == 4 and skeleton.runtime_version(skeleton.RUNTIME) == 4
+    assert skeleton.VERSION == 5 and skeleton.runtime_version(skeleton.RUNTIME) == 5
     for name in ("Table", "Figure", "NotYet", "UnknownResult"):
         assert f"class {name}" in skeleton.RUNTIME
 

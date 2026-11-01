@@ -378,3 +378,75 @@ def test_a_reply_the_frame_refuses_stops_the_run_with_the_reason() -> None:
     assert skeleton.has_frame(refused) and "fi_frame" in note2  # FI's frame, not the reply: a later repair is checked against it
     with pytest.raises(RuntimeError, match="fi_frame"):
         exec(compile(refused, "simulate.py", "exec"), {})
+
+
+# ---- version 5: figure functions get FI's drawing calls ---------------------------------------------------------------------
+
+CALLS = ("line", "points", "bars", "band", "ref", "note", "curve", "image", "raw")
+PROBE = '''
+import sys
+sys.path.insert(0, sys.argv[1])
+from fi_frame import Figure, FRAME_RUNTIME_VERSION
+import fi_figure_calls
+fig = Figure([object()], x="size", settings=["size"], references={"r": 1.0})
+print(FRAME_RUNTIME_VERSION, fi_figure_calls.FigureCalls in Figure.__mro__, [c for c in %r if callable(getattr(fig, c, None))],
+      fig.x, fig.settings, fig.fallback)
+'''
+
+
+def test_new_frame_is_version_5_and_writes_frame_figure(tmp_path: Path) -> None:
+    import subprocess
+
+    assert skeleton.VERSION == 5 and skeleton.runtime_version(skeleton.RUNTIME) == 5
+    assert skeleton.frame_version(_frame()) == 5
+    code = tmp_path / "code"
+    assert skeleton.ensure_runtime(code, _frame()) and skeleton.ensure_figure_calls(code, _frame())
+    assert (code / skeleton.FIGURE_CALLS_FILE).read_text(encoding="utf-8") == skeleton.FRAME_FIGURE_SOURCE
+    assert skeleton.ensure_figure_calls(code, _frame()) is False, "already written"
+    assert "from core" not in skeleton.FRAME_FIGURE_SOURCE and "import core" not in skeleton.FRAME_FIGURE_SOURCE
+    out = subprocess.run([sys.executable, "-I", "-c", PROBE % (list(CALLS),), str(code)],
+                         capture_output=True, text=True, check=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    assert out.stdout.split(" ", 1)[0] == "5" and "True" in out.stdout and str(list(CALLS)) in out.stdout
+    assert out.stdout.strip().endswith("size ['size'] False")
+
+
+def test_old_body_on_old_frame_still_runs(tmp_path: Path) -> None:
+    ns: dict[str, Any] = {}
+    exec(compile(skeleton.RUNTIME, "fi_frame.py", "exec"), ns)  # no fi_figure_calls beside it: the figure has its axes
+    fig = ns["Figure"]([object()], x="size")
+
+    def figure_old(fig, table):  # a version 3 or 4 body: it draws on fig.axes
+        return len(fig.axes)
+
+    assert figure_old(fig, None) == 1 and fig.x == "size"
+    for version in (3, 4):
+        old = _frame().replace("version 5", f"version {version}").replace("FRAME_VERSION = 5", f"FRAME_VERSION = {version}")
+        assert skeleton.frame_version(old) == version
+        code = tmp_path / f"code{version}"
+        assert skeleton.ensure_figure_calls(code, old) is False and not (code / skeleton.FIGURE_CALLS_FILE).exists()
+        assert skeleton.frame_version(skeleton.frame_for(DESIGN, stochastic=True, existing=old)) == version, "a resume keeps the frame"
+
+
+def test_upgrade_keeps_existing_figure_bodies(tmp_path: Path) -> None:
+    from core import analysis_frame as af
+
+    design = {"protocol": {**DESIGN["protocol"], "figures": [{"id": "fig1", "file": "growth.png", "shows": ["growth"], "x": "rate"}]}}
+    code = tmp_path / "code"
+    assert skeleton.FIGURE_CALLS_FILE in af.ensure_files(code, design, "")
+    body = "def figure_fig1(fig, table):\n    fig.axes[0].plot([1, 2], [3, 4])\n"
+    derive = code / af.DERIVE_FILE
+    derive.write_text(derive.read_text(encoding="utf-8").split("def figure_fig1")[0] + body, encoding="utf-8")
+    (code / skeleton.FIGURE_CALLS_FILE).write_text("# stale\n", encoding="utf-8")
+    written = af.ensure_files(code, design, "")
+    assert skeleton.FIGURE_CALLS_FILE in written and af.DERIVE_FILE not in written
+    assert body in derive.read_text(encoding="utf-8")
+    assert (code / skeleton.FIGURE_CALLS_FILE).read_text(encoding="utf-8") == skeleton.FRAME_FIGURE_SOURCE
+
+
+def test_figure_rule_text_comes_from_agents_file() -> None:
+    text = (Path(__file__).resolve().parent.parent / "agents" / "figure_primitives.md").read_text(encoding="utf-8")
+    assert skeleton._BODY_RETURNS["figure"] == text.strip()
+    assert skeleton.reflect_derive("figure_fig1").count(text.strip()) == 1
+    for call in CALLS[:-1]:
+        assert f"fig.{call}(" in text
+    assert "fig.raw(" in text and 'what="other"' in text and "Never type text" in text

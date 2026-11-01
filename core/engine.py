@@ -35676,7 +35676,8 @@ def _resolve_selected_skills(
 def _trial_code(code_dir: Path) -> str:
     """The code that makes the trial results: the study's scripts and package files (``grid_keys.code_files``: no tests, no
     file of FI's that is unchanged) without FI's analysis (experiment.py, derive.py, the table reader and the figure step)."""
-    fi_files = {_code_layout.ANALYSIS_SCRIPT, _code_layout.TABLE_SCRIPT, _analysis_frame.DERIVE_FILE, "fi_frame.py",
+    fi_files = {_code_layout.ANALYSIS_SCRIPT, _code_layout.TABLE_SCRIPT, _code_layout.FIGURE_CALLS_SCRIPT,
+                _analysis_frame.DERIVE_FILE, "fi_frame.py",
                 f"{_analysis_frame.FIGURES_MODULE}.py"}
     return "\n".join(text for rel, text in _grid_keys.code_files(code_dir).items()
                      if rel not in fi_files and not rel.startswith(f"{_code_layout.FI_CORE_FOLDER}/"))

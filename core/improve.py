@@ -194,9 +194,10 @@ def _analysis_part(code: Path, name: str) -> bool:
     from . import analysis_frame as _analysis
     from . import skeleton as _skeleton
 
-    if name == _skeleton.TABLE_FILE:
+    carried = {_skeleton.TABLE_FILE: _skeleton.TABLE_SOURCE, _skeleton.FIGURE_CALLS_FILE: _skeleton.FRAME_FIGURE_SOURCE}
+    if name in carried:
         try:
-            return (code / name).read_text(encoding="utf-8").lstrip("﻿") == _skeleton.TABLE_SOURCE
+            return (code / name).read_text(encoding="utf-8").lstrip("﻿") == carried[name]
         except OSError:
             return False
     return _analysis.analysis_file(code, name)

@@ -27,10 +27,12 @@ import ast
 import importlib
 import itertools
 import re
+import string
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from . import frame_figure as _frame_figure
 from . import frame_table as _frame_table
 from . import function_steps as _steps
 from . import metric_spec as _metric_spec
@@ -39,7 +41,7 @@ from . import oracle_forms as _oracle_forms
 from . import trial_checks as _trial_checks
 
 #: Written into the frame; a quest keeps the frame it was written with (a resume reads the files, never writes them again).
-VERSION = 4
+VERSION = 5
 RUNTIME_FILE = "fi_frame.py"
 TOP_BEGIN = f"# >>> FI frame, version {VERSION}: written by FI from the plan; a repair does not change it"
 TOP_END = "# <<< FI frame"
@@ -58,6 +60,10 @@ SLOT_SIGNATURE = "def trial(cell, ctx)"
 #: written to ``code/fi_table.py`` beside the runtime. Standard library only, so it needs nothing of FI's on the path.
 TABLE_FILE = "fi_table.py"
 TABLE_SOURCE = Path(_frame_table.__file__).read_text(encoding="utf-8")
+#: The drawing calls of a figure (``Figure`` in :data:`RUNTIME` mixes them in): the text of ``core/frame_figure.py``, written to
+#: ``code/fi_figure_calls.py`` beside the runtime. Standard library only, like the table reader.
+FIGURE_CALLS_FILE = "fi_figure_calls.py"
+FRAME_FIGURE_SOURCE = Path(_frame_figure.__file__).read_text(encoding="utf-8")
 
 #: The runtime the frame imports. Standard library only (the study's own interpreter may have nothing else).
 RUNTIME = '''"""FI's frame of simulate.py: the trial's context and its result record. Written by FI, never edited."""
@@ -304,16 +310,34 @@ class Missing:
         return "Missing(%r)" % self.why
 
 
-class Figure:
-    """What a ``figure_<id>`` body is given: ``axes`` (one per panel of the declared figure), and what the plan says it draws,
-    ``x``, ``series`` and ``shows``. FI creates it, saves it as ``file`` and closes it."""
+try:
+    from fi_figure_calls import FigureCalls  # core/frame_figure.py, written beside this file (version 5)
+except ImportError:  # a folder without it: the figure has its axes, and no drawing calls
+    class FigureCalls:
+        pass
 
-    def __init__(self, axes, x=None, series=None, shows=None, file=None):
+
+class Figure(FigureCalls):
+    """What a ``figure_<id>`` body is given: ``axes`` (one per panel of the declared figure), and what the plan says it draws,
+    ``x``, ``series`` and ``shows``. Version 5 adds the drawing calls (``fig.line``, ``fig.points``, ``fig.bars``, ``fig.band``,
+    ``fig.ref``, ``fig.note``, ``fig.curve``, ``fig.image``; ``fig.raw`` for the real axes) and what they check against: the
+    ``table``, the plan's ``settings``, ``series_ids``, ``references`` and ``labels``. FI creates it, saves it as ``file`` and
+    closes it."""
+
+    def __init__(self, axes, x=None, series=None, shows=None, file=None, table=None, settings=None, series_ids=None,
+                 references=None, labels=None, fallback=False, derived_ids=None):
         self.axes = list(axes)
         self.x = x
         self.series = series
         self.shows = shows
         self.file = file
+        self.table = table
+        self.settings = list(settings or [])
+        self.series_ids = list(series_ids or [])
+        self.references = dict(references or {})
+        self.labels = dict(labels or {})
+        self.fallback = bool(fallback)
+        self.derived_ids = list(derived_ids or [])
 
 
 def _noting(method):
@@ -1306,14 +1330,17 @@ DERIVE_LEVEL_RULE = (
     "EVERY value of that setting as a key; where the result does not exist for a value its number is `None` (a left-out key is "
     "refused).")
 
+#: The rule for a figure function (agents/figure_primitives.md): what it draws with, and what FI writes itself.
+_FIGURE_RULE = string.Template(
+    (Path(__file__).resolve().parent.parent / "agents" / "figure_primitives.md").read_text(encoding="utf-8")).safe_substitute().strip()
+
 _BODY_RETURNS = {
     "derive": ("It returns one number for the study, a mapping of setting keys to numbers, or `table.missing(\"why\")` where "
                "the number does not exist (never a stand-in such as 0, -1 or a bound, and never a bare `None`). It reads the "
                "results only through `table`."),
     "reference": ("It takes one setting (`{axis: value}`), is called once for each setting, and returns the reference value "
                   "there, or `None` where there is none."),
-    "figure": ("It draws on `fig.axes` from `table` and returns nothing: FI makes the figure, saves it and closes it, so it never "
-               "calls `savefig`, `show`, `close`, `figure` or `subplots`. It draws only values read from `table`."),
+    "figure": _FIGURE_RULE,
 }
 
 
@@ -1505,6 +1532,24 @@ def ensure_runtime(code_dir: Path | str, simulate_source: str) -> bool:
             return False  # the runtime of an older frame stays with it
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(RUNTIME, encoding="utf-8")
+    return True
+
+
+def ensure_figure_calls(code_dir: Path | str, simulate_source: str) -> bool:
+    """Write ``fi_figure_calls.py`` beside ``fi_frame.py`` when the frame is of this version (or there is no frame yet). A quest
+    whose frame an older FI wrote keeps the files it was written with: its figure bodies draw on ``fig.axes``. Returns whether
+    it was written."""
+    path = Path(code_dir) / FIGURE_CALLS_FILE
+    framed = frame_version(simulate_source)
+    if framed is not None and framed != VERSION:
+        return False
+    try:
+        if path.read_text(encoding="utf-8").lstrip("﻿") == FRAME_FIGURE_SOURCE:
+            return False
+    except OSError:
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(FRAME_FIGURE_SOURCE, encoding="utf-8")
     return True
 
 

@@ -398,6 +398,8 @@ def ensure_files(code_dir: Path | str, design: dict[str, Any], simulate_source: 
         written.append(_skeleton.RUNTIME_FILE)
     if _skeleton.ensure_table(folder, simulate_source):
         written.append(_skeleton.TABLE_FILE)
+    if _skeleton.ensure_figure_calls(folder, simulate_source):
+        written.append(_skeleton.FIGURE_CALLS_FILE)
     try:
         have = (folder / DERIVE_FILE).read_text(encoding="utf-8")
     except OSError:

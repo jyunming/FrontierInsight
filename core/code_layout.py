@@ -571,6 +571,8 @@ GENERATED_FOLDERS = ("cache", "results", "figures", "raw", "__pycache__")
 ANALYSIS_SCRIPT = "experiment.py"
 #: FI's reader of the trial record (core/frame_table.py, written beside the frame's runtime): the analysis uses it, the trials do not.
 TABLE_SCRIPT = "fi_table.py"
+#: FI's drawing calls of a figure (core/frame_figure.py, written beside the runtime of a version 5 frame): the analysis uses them.
+FIGURE_CALLS_SCRIPT = "fi_figure_calls.py"
 #: FI's own copies of its helpers under ``code/``, not the quest's code.
 SKILLS_FOLDER = "skills"
 #: FI's formula calculator, copied beside the analysis FI writes (core/analysis_frame.py ``CORE_DIR``): like the reader of the
@@ -593,7 +595,7 @@ def simulation_inputs(quest_root: Path | str, code: Path | None = None) -> list[
 
     Under ``code/`` (or ``code``, when given): every file, whatever its suffix (a helper module beside ``simulate.py``,
     a model package, a parameter table, a pickled lookup, a binary array: the simulation may read any of them), except
-    the analysis script (:data:`ANALYSIS_SCRIPT`), FI's reader of the record (:data:`TABLE_SCRIPT`), the rest of the analysis FI
+    the analysis script (:data:`ANALYSIS_SCRIPT`), FI's reader of the record (:data:`TABLE_SCRIPT`) and its drawing calls (:data:`FIGURE_CALLS_SCRIPT`), the rest of the analysis FI
     writes (``derive.py`` with FI's frame and ``fi_figures.py`` with FI's text; FI's calculator ``fi_core/`` by its name), the tests (``tests/``, ``test_*.py``), FI's copies under ``skills/``,
     notes (``.md``), caches (``__pycache__``), hidden files and folders, and what a run writes (:data:`GENERATED_FOLDERS`).
     Under ``<quest_root>/inputs/``: every file, since a simulation may read any of the person's files there. A change to
@@ -611,7 +613,7 @@ def simulation_inputs(quest_root: Path | str, code: Path | None = None) -> list[
                 continue
             if parts[0] in (TESTS_DIR, SKILLS_FOLDER, FI_CORE_FOLDER) or (path.name.startswith("test_") and path.suffix == ".py"):
                 continue
-            if parts in ((ANALYSIS_SCRIPT,), (TABLE_SCRIPT,)) or path.suffix.lower() == ".md":
+            if parts in ((ANALYSIS_SCRIPT,), (TABLE_SCRIPT,), (FIGURE_CALLS_SCRIPT,)) or path.suffix.lower() == ".md":
                 continue
             if path.suffix == ".py" and parts[0] in _ANALYSIS_PARTS and _analysis_part(code_dir, "/".join(parts)):
                 continue  # the analysis FI writes (derive.py, its figure step, its formula calculator): a repair of it runs no trial again
