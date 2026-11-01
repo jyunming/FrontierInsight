@@ -280,3 +280,51 @@ def test_taken_out_figure_sentence_keeps_bold_run_in_heading(tmp_path):
     out = paper_facts.render("**Growth.** The signal rises. {{figure:fig1:trend @ series=zzz}} Later text.\n", root)
     text, taken = paper_facts.take_out_unfilled(out.text)
     assert text == "**Growth.** The signal rises. Later text.\n" and taken[0]["how"] == "sentence removed"
+
+
+def test_mid_sentence_figure_mark_takes_the_whole_running_sentence_out(tmp_path):
+    root = _with_calls(tmp_path, _calls())
+    out = paper_facts.render("Intro. The curve {{figure:fig1:sparkle @ series=a}} here. Next one.\n", root)
+    text, taken = paper_facts.take_out_unfilled(out.text)
+    assert text == "Intro. Next one.\n" and len(taken) == 1 and taken[0]["how"] == "sentence removed"
+
+
+def test_stem_with_an_image_extension_is_taken_out_not_left_as_not_recorded(tmp_path):
+    root = _with_calls(tmp_path, _calls())
+    out = paper_facts.render("Before. {{figure:fig1.png:sparkle @ series=a}}\n\nSee {{figure:bad stem!:trend @ series=a}} now.\n", root)
+    assert "fi:fact-figure_" not in out.text
+    text, taken = paper_facts.take_out_unfilled(out.text)
+    assert "not recorded" not in text and len(taken) == 2
+    assert taken[0]["key"].startswith("figure:fig1:sparkle")
+    # with the extension dropped the claim is found
+    ok = paper_facts.render("{{figure:fig1.png:trend @ series=a}}", root)
+    assert ok.unfilled == () and "increases" in paper_facts.without_marks(ok.text)
+
+
+def test_empty_args_keep_the_stem_and_the_figure_number(tmp_path):
+    root = _with_calls(tmp_path, _calls())
+    out = paper_facts.render("![c](figures/fig1.png)\n\nA. {{figure:fig1:trend @ }}\n", root)
+    text, taken = paper_facts.take_out_unfilled(out.text)
+    assert text == "![c](figures/fig1.png)\n\nA.\n"
+    assert taken[0]["key"] == "figure:fig1:trend" and taken[0]["figure"] == "1"
+    assert paper_facts.to_placeholders(out.text).endswith("{{figure:fig1:trend @ }}\n")
+
+
+def test_plan_reaches_the_claim(tmp_path, monkeypatch):
+    seen = {}
+    def fake(calls, claim, args, fmt, *, plan=None, **kw):
+        seen["plan"] = plan
+        return "Series b is not drawn.", args
+    monkeypatch.setattr("core.figure_claims.evaluate", fake)
+    root = _with_calls(tmp_path, _calls())
+    out = paper_facts.render("{{figure:fig1:not_drawn @ series=b}}", root, plan={"series": ["a"]})
+    assert seen["plan"] == {"series": ["a"]} and out.unfilled == ()
+
+
+def test_limitations_carrying_the_figure_sentence_is_not_listed_unmet(tmp_path):
+    root = _with_calls(tmp_path, _calls())
+    out = paper_facts.render("![c](figures/fig1.png)\n\nA. {{figure:fig1:sparkle @ series=a}}\n", root)
+    text, taken = paper_facts.take_out_unfilled(out.text)
+    said = paper_facts.figure_left_out_sentence("1")
+    paper_facts.keep_check(root, [], text + "\n" + said, dropped=taken)
+    assert not [u for u in paper_facts.kept_check(root).get("unmet_items", []) if u["kind"] == paper_facts.FIGURE_LEFT_OUT]
