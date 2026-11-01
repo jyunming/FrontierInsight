@@ -34443,9 +34443,11 @@ def _figure_label_found(state: QuestState, code_dir: Path | None = None) -> list
                 except OSError:
                     continue
         protocol = (state.get("design") or {}).get("protocol")
-        return _figure_labels.findings(state.get("figure_records") or {}, list(state.get("figures") or []),
+        figures = list(state.get("figures") or [])
+        calls = {f: c for f in figures if (c := _calls_of(state, Path(str(f)).stem))}
+        return _figure_labels.findings(state.get("figure_records") or {}, figures,
                                        plan_labels(protocol), plan_names(protocol),
-                                       _figure_labels.code_identifiers(sources))
+                                       _figure_labels.code_identifiers(sources), calls)
     except Exception:  # noqa: BLE001
         return []
 

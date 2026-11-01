@@ -436,3 +436,97 @@ def test_a_redraw_cut_short_leaves_no_script_and_its_records_as_they_were(tmp_pa
     assert (eng.quest_root / "figures" / "fdr.png").read_bytes() == b"old"
     assert json.loads((records / "fdr.json").read_text(encoding="utf-8")) == SAVED_FDR
     assert not (eng.quest_root / "code" / "replot_layout.py").exists() and not backup.exists()
+
+
+# ---- a panel FI drew from its record of the drawing calls is not read: its text is FI's own ---------------------------
+
+
+class _Table:
+    declared = ["growth"]
+
+    def keys(self):
+        return ["size=1"]
+
+    def mean(self, name, key):
+        return 2.5
+
+    def n(self, name, key):
+        return 4
+
+    def interval(self, name, key):
+        return (1.25, 3.75)
+
+
+def _drawn(raw: bool, body_label: str):
+    """A figure of the frame's primitives whose body types ``body_label`` on its axis, title and legend, and its record."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from core import frame_figure
+
+    class Host(frame_figure.FigureCalls):
+        def __init__(self):
+            self.fig, ax = plt.subplots()
+            self.axes = [ax]
+            self.table, self.x, self.settings, self.series_ids, self.references = _Table(), "size", ["size"], ["fast"], {}
+            self.labels = {"growth": {"label": "Growth rate"}, "fast": "Fast colony", "size": "Colony size"}
+
+    h = Host()
+    if raw:
+        h.raw(0)
+        h.axes[0].plot([1, 2, 3], [1.0, 2.0, 4.0], label=body_label)
+    else:
+        h.line(0, "fast", [1, 2, 3], [1.0, 2.0, 4.0], "growth")
+    ax = h.axes[0]
+    ax.set_xlabel(body_label)
+    ax.set_ylabel(body_label)
+    ax.set_title(body_label)
+    ax.legend()
+    h.finish(h.labels, {})
+    legend = ax.get_legend()
+    record = {"axes": [{"title": ax.get_title(), "xlabel": ax.get_xlabel(), "ylabel": ax.get_ylabel(),
+                        "series": [{"label": t.get_text()} for t in (legend.get_texts() if legend else [])]}]}
+    plt.close("all")
+    return h.record(), record
+
+
+def test_code_name_label_caught_by_new_path() -> None:
+    """The fault the rule catches: a body types the code's name for a quantity on its axes. The frame's own finish writes
+    the plan's label over it, so the saved figure never shows it."""
+    calls, saved = _drawn(raw=False, body_label="Ea_hat")
+    assert calls["panels"][0]["raw"] is False
+    ax = saved["axes"][0]
+    assert (ax["xlabel"], ax["ylabel"], ax["title"]) == ("Colony size", "Growth rate", "")
+    assert [s["label"] for s in ax["series"]] == ["Fast colony"]
+    plan = {"grid": {"size": [1, 2]}, "metrics": [{"id": "Ea_hat", "kind": "mean"}]}
+    # Had the body's text stayed, the rule would have read it: the same names on a record that does not hold FI's text.
+    typed = {"axes": [{"title": "Ea_hat", "xlabel": "Ea_hat", "ylabel": "Ea_hat", "series": []}]}
+    assert figure_labels.findings({"f.png": saved}, ["f.png"], {}, plan_names(plan), None, {"f.png": calls}) == []
+    assert len(figure_labels.findings({"f.png": typed}, ["f.png"], {}, plan_names(plan), None, {"f.png": calls})) == 0
+    assert len(figure_labels.findings({"f.png": typed}, ["f.png"], {}, plan_names(plan))) == 3
+
+
+def test_legacy_figure_keeps_old_rule() -> None:
+    """No call record (an older frame), a custom drawing, or a panel the record does not hold: the code's typed text is
+    still read."""
+    plan = {"grid": {"size": [1, 2]}, "metrics": [{"id": "Ea_hat", "kind": "mean"}]}
+    names = plan_names(plan)
+    calls, _ = _drawn(raw=False, body_label="Ea_hat")
+    raw_calls, raw_saved = _drawn(raw=True, body_label="Ea_hat")
+    assert raw_calls["panels"][0]["raw"] is True
+    assert raw_saved["axes"][0]["xlabel"] == "Ea_hat"  # a custom drawing keeps the body's text
+    for given in ({}, {"f.png": raw_calls}, {"f.png": {"panels": []}}, {"other.png": calls}):
+        assert len(figure_labels.findings({"f.png": raw_saved}, ["f.png"], {}, names, None, given)) == 4
+    assert len(figure_labels.findings({"f.png": raw_saved}, ["f.png"], {}, names)) == 4
+
+
+def test_the_engine_reads_the_call_record_of_the_figure_on_disk(tmp_path: Path) -> None:
+    calls, _ = _drawn(raw=False, body_label="Ea_hat")
+    typed = {"axes": [{"title": "", "xlabel": "Ea_hat", "ylabel": "count", "series": []}]}
+    state = {**_state({"f.png": typed}, {"grid": {"size": [1]}, "metrics": [{"id": "Ea_hat", "kind": "mean"}]}),
+             "quest_root": str(tmp_path)}
+    assert len(_figure_label_findings(state)) == 1
+    records = tmp_path / ".fi" / "figure_records"
+    records.mkdir(parents=True)
+    (records / "f.calls.json").write_text(json.dumps(calls), encoding="utf-8")
+    assert _figure_label_findings(state) == []

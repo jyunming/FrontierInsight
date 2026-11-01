@@ -1302,7 +1302,8 @@ CHECKS: tuple[Check, ...] = (
     Check('figure_label_shows_code_name', 'core.figure_labels', 'findings',
           'write', 'own_record', 'repair',
           'axis/legend/title text showing a code variable name (Ea_hat, pi1); figures redrawn from saved '
-          "numbers with the plan's label (once per script)"),
+          "numbers with the plan's label (once per script); panels FI drew from its call record are not read, "
+          "their text is FI's own"),
     Check('figure_drawn_from_typed_numbers', 'core.figure_data_check', 'typed_series',
           'execute', 'model_code', 'strip',
           'plotting call whose data is a literal list typed into the script; script sent back twice, then those '
