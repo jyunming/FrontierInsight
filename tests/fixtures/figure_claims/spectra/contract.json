@@ -1,0 +1,114 @@
+{
+ "about": "Two samples whose signal is read at six wavelengths; a baseline the plan holds.",
+ "results": [
+  "signal"
+ ],
+ "settings": [
+  "wavelength",
+  "sample"
+ ],
+ "x": "wavelength",
+ "series_ids": [
+  "sample_a",
+  "sample_b"
+ ],
+ "references": {
+  "baseline": {
+   "value": 1.0,
+   "label": "baseline signal"
+  }
+ },
+ "labels": {
+  "signal": {
+   "label": "Signal",
+   "scale": "linear"
+  },
+  "wavelength": "Wavelength (nm)",
+  "sample_a": "Sample A",
+  "sample_b": "Sample B"
+ },
+ "figure": {
+  "id": "spectra",
+  "body": "figure_spectra",
+  "panels": 1
+ },
+ "plan": {
+  "series": [
+   "sample_a",
+   "sample_b",
+   "sample_c"
+  ],
+  "grid": [
+   400,
+   450,
+   500,
+   550,
+   600,
+   650
+  ]
+ },
+ "expected": [
+  {
+   "claim": "drawn",
+   "args": {
+    "series": "sample_a"
+   }
+  },
+  {
+   "claim": "drawn",
+   "args": {
+    "series": "sample_b"
+   }
+  },
+  {
+   "claim": "errorbars",
+   "args": {
+    "series": "sample_a"
+   }
+  },
+  {
+   "claim": "band",
+   "args": {
+    "series": "sample_b"
+   }
+  },
+  {
+   "claim": "reference",
+   "args": {
+    "ref": "baseline"
+   }
+  },
+  {
+   "claim": "note",
+   "args": {
+    "note": "signal"
+   }
+  },
+  {
+   "claim": "value_at",
+   "args": {
+    "series": "sample_a",
+    "x": "500"
+   }
+  },
+  {
+   "claim": "crossing",
+   "args": {
+    "a": "sample_a",
+    "b": "sample_b"
+   }
+  },
+  {
+   "claim": "order",
+   "args": {
+    "at": "550"
+   }
+  },
+  {
+   "claim": "not_drawn",
+   "args": {
+    "series": "sample_c"
+   }
+  }
+ ]
+}

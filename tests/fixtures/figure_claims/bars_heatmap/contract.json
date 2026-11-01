@@ -1,0 +1,92 @@
+{
+ "about": "A growth rate per method for a treated and a control arm (bars), and a method-by-dose map of the treated arm.",
+ "results": [
+  "growth"
+ ],
+ "settings": [
+  "method",
+  "arm",
+  "dose"
+ ],
+ "x": "method",
+ "series_ids": [
+  "treated",
+  "control"
+ ],
+ "references": {},
+ "labels": {
+  "growth": {
+   "label": "Growth rate",
+   "scale": "linear"
+  },
+  "method": "Method",
+  "treated": "Treated",
+  "control": "Control",
+  "dose": "Dose"
+ },
+ "figure": {
+  "id": "bars_heatmap",
+  "body": "figure_bars_heatmap",
+  "panels": 2
+ },
+ "plan": {
+  "series": [
+   "treated",
+   "control"
+  ],
+  "grid": []
+ },
+ "expected": [
+  {
+   "claim": "drawn",
+   "args": {
+    "series": "treated",
+    "panel": "1"
+   }
+  },
+  {
+   "claim": "drawn",
+   "args": {
+    "series": "control",
+    "panel": "1"
+   }
+  },
+  {
+   "claim": "errorbars",
+   "args": {
+    "series": "treated",
+    "panel": "1"
+   }
+  },
+  {
+   "claim": "value_at",
+   "args": {
+    "series": "treated",
+    "x": "m2",
+    "panel": "1"
+   }
+  },
+  {
+   "claim": "order",
+   "args": {
+    "at": "m1",
+    "panel": "1"
+   }
+  },
+  {
+   "claim": "drawn",
+   "args": {
+    "series": "growth",
+    "panel": "2"
+   }
+  },
+  {
+   "claim": "range",
+   "args": {
+    "series": "growth",
+    "axis": "y",
+    "panel": "2"
+   }
+  }
+ ]
+}

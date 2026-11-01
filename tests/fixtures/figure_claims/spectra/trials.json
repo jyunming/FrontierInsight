@@ -1,0 +1,460 @@
+{
+ "cells": [
+  {
+   "cell": {
+    "wavelength": 400,
+    "sample": "a"
+   },
+   "key": "wavelength=400,sample=a",
+   "planned": 10,
+   "ok": 10,
+   "failed": 0,
+   "metrics": {
+    "signal": {
+     "values": [
+      1.152,
+      1.176,
+      1.2,
+      1.224,
+      1.248,
+      1.248,
+      1.224,
+      1.2,
+      1.176,
+      1.152
+     ],
+     "trials": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+     ]
+    }
+   }
+  },
+  {
+   "cell": {
+    "wavelength": 400,
+    "sample": "b"
+   },
+   "key": "wavelength=400,sample=b",
+   "planned": 10,
+   "ok": 10,
+   "failed": 0,
+   "metrics": {
+    "signal": {
+     "values": [
+      0.96,
+      0.98,
+      1.0,
+      1.02,
+      1.04,
+      1.04,
+      1.02,
+      1.0,
+      0.98,
+      0.96
+     ],
+     "trials": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+     ]
+    }
+   }
+  },
+  {
+   "cell": {
+    "wavelength": 450,
+    "sample": "a"
+   },
+   "key": "wavelength=450,sample=a",
+   "planned": 10,
+   "ok": 10,
+   "failed": 0,
+   "metrics": {
+    "signal": {
+     "values": [
+      2.688,
+      2.744,
+      2.8,
+      2.856,
+      2.912,
+      2.912,
+      2.856,
+      2.8,
+      2.744,
+      2.688
+     ],
+     "trials": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+     ]
+    }
+   }
+  },
+  {
+   "cell": {
+    "wavelength": 450,
+    "sample": "b"
+   },
+   "key": "wavelength=450,sample=b",
+   "planned": 10,
+   "ok": 10,
+   "failed": 0,
+   "metrics": {
+    "signal": {
+     "values": [
+      1.824,
+      1.862,
+      1.9,
+      1.938,
+      1.976,
+      1.976,
+      1.938,
+      1.9,
+      1.862,
+      1.824
+     ],
+     "trials": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+     ]
+    }
+   }
+  },
+  {
+   "cell": {
+    "wavelength": 500,
+    "sample": "a"
+   },
+   "key": "wavelength=500,sample=a",
+   "planned": 10,
+   "ok": 10,
+   "failed": 0,
+   "metrics": {
+    "signal": {
+     "values": [
+      6.24,
+      6.37,
+      6.5,
+      6.63,
+      6.76,
+      6.76,
+      6.63,
+      6.5,
+      6.37,
+      6.24
+     ],
+     "trials": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+     ]
+    }
+   }
+  },
+  {
+   "cell": {
+    "wavelength": 500,
+    "sample": "b"
+   },
+   "key": "wavelength=500,sample=b",
+   "planned": 10,
+   "ok": 10,
+   "failed": 0,
+   "metrics": {
+    "signal": {
+     "values": [
+      3.072,
+      3.136,
+      3.2,
+      3.264,
+      3.328,
+      3.328,
+      3.264,
+      3.2,
+      3.136,
+      3.072
+     ],
+     "trials": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+     ]
+    }
+   }
+  },
+  {
+   "cell": {
+    "wavelength": 550,
+    "sample": "a"
+   },
+   "key": "wavelength=550,sample=a",
+   "planned": 10,
+   "ok": 10,
+   "failed": 0,
+   "metrics": {
+    "signal": {
+     "values": [
+      3.936,
+      4.018,
+      4.1,
+      4.182,
+      4.264,
+      4.264,
+      4.182,
+      4.1,
+      4.018,
+      3.936
+     ],
+     "trials": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+     ]
+    }
+   }
+  },
+  {
+   "cell": {
+    "wavelength": 550,
+    "sample": "b"
+   },
+   "key": "wavelength=550,sample=b",
+   "planned": 10,
+   "ok": 10,
+   "failed": 0,
+   "metrics": {
+    "signal": {
+     "values": [
+      4.608,
+      4.704,
+      4.8,
+      4.896,
+      4.992,
+      4.992,
+      4.896,
+      4.8,
+      4.704,
+      4.608
+     ],
+     "trials": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+     ]
+    }
+   }
+  },
+  {
+   "cell": {
+    "wavelength": 600,
+    "sample": "a"
+   },
+   "key": "wavelength=600,sample=a",
+   "planned": 10,
+   "ok": 10,
+   "failed": 0,
+   "metrics": {
+    "signal": {
+     "values": [
+      2.112,
+      2.156,
+      2.2,
+      2.244,
+      2.288,
+      2.288,
+      2.244,
+      2.2,
+      2.156,
+      2.112
+     ],
+     "trials": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+     ]
+    }
+   }
+  },
+  {
+   "cell": {
+    "wavelength": 600,
+    "sample": "b"
+   },
+   "key": "wavelength=600,sample=b",
+   "planned": 10,
+   "ok": 10,
+   "failed": 0,
+   "metrics": {
+    "signal": {
+     "values": [
+      3.744,
+      3.822,
+      3.9,
+      3.978,
+      4.056,
+      4.056,
+      3.978,
+      3.9,
+      3.822,
+      3.744
+     ],
+     "trials": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+     ]
+    }
+   }
+  },
+  {
+   "cell": {
+    "wavelength": 650,
+    "sample": "a"
+   },
+   "key": "wavelength=650,sample=a",
+   "planned": 10,
+   "ok": 10,
+   "failed": 0,
+   "metrics": {
+    "signal": {
+     "values": [
+      1.44,
+      1.47,
+      1.5,
+      1.53,
+      1.56,
+      1.56,
+      1.53,
+      1.5,
+      1.47,
+      1.44
+     ],
+     "trials": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+     ]
+    }
+   }
+  },
+  {
+   "cell": {
+    "wavelength": 650,
+    "sample": "b"
+   },
+   "key": "wavelength=650,sample=b",
+   "planned": 10,
+   "ok": 10,
+   "failed": 0,
+   "metrics": {
+    "signal": {
+     "values": [
+      1.728,
+      1.764,
+      1.8,
+      1.836,
+      1.872,
+      1.872,
+      1.836,
+      1.8,
+      1.764,
+      1.728
+     ],
+     "trials": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+     ]
+    }
+   }
+  }
+ ]
+}
