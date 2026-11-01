@@ -3079,9 +3079,10 @@ class RunChecksMixin:
         runner.shared_groups = grouping.groups
         runner.group_allowance_s = padded
         _run_facts.record_shared_check(self.quest_root, settings=grouping.settings, alone=grouping.alone)  # type: ignore[attr-defined]
+        # Whether the first run is kept as the study's own is said when the run starts (trial_runner.run_trials), once it is
+        # known that nothing changed after this check.
         log.info("[execute] %s Settings run %d to a process (%d processes); timed that way, FI expects about %s, within the "
-                 "limit.%s", grouping.says, n, len(grouping.groups), _estimate.plain_duration(padded),
-                 " The first of those runs is kept as the study's own results." if grouping.reuse is not None else "")
+                 "limit.", grouping.says, n, len(grouping.groups), _estimate.plain_duration(padded))
         said = ("FI runs several settings together to save start-up time; their numbers matched when they were run in either "
                 f"order. Timed that way, it expects about {_estimate.plain_duration(padded)}, within the limit.")
         return said, seconds, dataclasses.replace(est, seconds=seconds)

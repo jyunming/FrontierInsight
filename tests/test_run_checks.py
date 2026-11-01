@@ -1413,3 +1413,51 @@ async def test_a_study_sized_again_that_fits_is_not_cut_to_the_first_settings_of
     runner.run_id = "stale"
     assert await eng._size_the_run({"topic": TOPIC, "iteration": 0}, runner, sys.executable, None) is None
     assert runner.first_cells is None and runner.run_id == ""
+
+
+@pytest.mark.asyncio
+async def test_the_shared_process_check_runs_with_the_environment_the_run_is_given_so_its_first_run_is_the_runs(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=12, runs=3, grid={"n": [10, 20, 30, 40]}, sharing=True)
+    clock = {"now": 0.0}
+    monkeypatch.setattr(trial_runner, "time", SimpleNamespace(
+        monotonic=lambda: clock["now"], time=time.time, time_ns=time.time_ns, perf_counter=time.perf_counter, sleep=time.sleep))
+    started = ex.execute
+
+    async def start(cmd: list[str], **kw: Any) -> Any:
+        clock["now"] += 0.1
+        return await started(cmd, **kw)
+
+    monkeypatch.setattr(ex, "execute", start)
+    # The engine's own order: the run's environment is worked out before the size check, which is given it, and the run is
+    # given the same one (it adds the replicate's seed and index to the inherited environment).
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, eng._first_run_env(None, record=False)) is None
+    assert runner.group_reuse is not None, _log(eng)
+    assert "is kept as the study's own results" not in _log(eng), "said only when it is kept, by the run"
+    code = eng.quest_root / "code"
+    first_run = eng._first_run_env(None)
+    assert first_run["FI_REPLICATE_SEED"] == "0" and first_run["FI_REPLICATE_INDEX"] == "0"
+    await runner.execute([sys.executable, str(code / "experiment.py")], cwd=eng.quest_root, timeout_s=60, env=first_run)
+    text = _log(eng)
+    assert "was this very study with the same seeds" in text and "not used as the run" not in text, text
+
+
+@pytest.mark.asyncio
+async def test_a_check_given_another_environment_than_the_runs_is_still_refused(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The comparison stays strict: the check that ran without the replicate keys the run adds is not the run."""
+    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=12, runs=3, grid={"n": [10, 20, 30, 40]}, sharing=True)
+    clock = {"now": 0.0}
+    monkeypatch.setattr(trial_runner, "time", SimpleNamespace(
+        monotonic=lambda: clock["now"], time=time.time, time_ns=time.time_ns, perf_counter=time.perf_counter, sleep=time.sleep))
+    started = ex.execute
+
+    async def start(cmd: list[str], **kw: Any) -> Any:
+        clock["now"] += 0.1
+        return await started(cmd, **kw)
+
+    monkeypatch.setattr(ex, "execute", start)
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    await runner.execute([sys.executable, str(eng.quest_root / "code" / "experiment.py")], cwd=eng.quest_root, timeout_s=60,
+                         env=eng._first_run_env(None))
+    assert "not used as the run (its env is not the real run's)" in _log(eng)

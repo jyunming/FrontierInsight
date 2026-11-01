@@ -18895,6 +18895,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         _gate_receipt.write(self.quest_root)
         return None, repaired, rewrote
 
+    def _first_run_env(self, exec_env: dict[str, str] | None, *, record: bool = True) -> dict[str, str]:
+        """The environment the study's first run is given: ``exec_env`` with the first replicate's seed and index, and the
+        phased stage's seed. The check that runs the study in shared processes is given exactly this, so that its first run
+        can stand for the run (``GroupedRun.problem``); ``record=False`` works it out without counting a run."""
+        env = _replicate_env(exec_env, 0, max(1, int(self.config.engine.replicate_seed_stride)))
+        if _phased.enabled(self.config):
+            env = _phased.seed_env(self.quest_root, env, record=record)
+        return env
+
     async def _node_execute(self, state: QuestState) -> QuestState:
         if not self._agent_mode():
             return await self._node_execute_steps(state)
@@ -19246,7 +19255,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         _gate_receipt.write(self.quest_root)
         # The whole run is timed on a few real trials and has its runs per setting lowered by FI when it would not fit the time
         # allowed (core/run_estimate.py); one that still would not fit stops the quest here, with no paper.
-        too_long = await self._size_the_run(state, runner, py, exec_env)
+        # The run's own environment (its seed and replicate index, the phased stage's seed) is worked out once, before the
+        # check that runs the study in shared processes: that check is given exactly this, so its first run can stand for the
+        # run. Nothing is recorded for the phased stage until the run starts.
+        too_long = await self._size_the_run(state, runner, py, self._first_run_env(exec_env, record=False))
         if too_long is not None:
             return too_long
         # From here on the protocol is what the record says (core/frozen_protocol.py).
@@ -19352,9 +19364,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # apart, which for a script deriving per-trial seeds as ``base +
         # counter`` means three runs of almost exactly the same trials.
         stride = max(1, int(self.config.engine.replicate_seed_stride))
-        primary_env = _replicate_env(exec_env, 0, stride)
+        primary_env = self._first_run_env(exec_env)  # the environment the size check ran with; the run is counted now
         if _phased.enabled(self.config):
-            primary_env = _phased.seed_env(self.quest_root, primary_env)
             self._log.info("[phased] %s", "exploration stage: this run may be changed after its results are seen"
                            if _phased.stage(self.quest_root) == _phased.EXPLORE else
                            "confirm stage: running the frozen design on data or seeds exploration never saw")
