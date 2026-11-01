@@ -34317,6 +34317,8 @@ def _figure_overlap_findings(state: QuestState) -> list[str]:
                         f"figures/{name}: {panel}the legend ({', '.join(names)}{more}) is drawn over "
                         "the lines or points it labels"
                     )
+            # Geometry the recorder wrote (a legend off the page, error bars cut off): same repair round.
+            found.extend(f"figures/{name}: {sentence}" for sentence in _figure_facts.geometry_findings(record))
     except Exception:  # noqa: BLE001
         return []
     return found
