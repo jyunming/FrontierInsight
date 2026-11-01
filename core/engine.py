@@ -34481,7 +34481,8 @@ def _figure_label_found(state: QuestState, code_dir: Path | None = None) -> list
                     continue
         protocol = (state.get("design") or {}).get("protocol")
         figures = list(state.get("figures") or [])
-        calls = {f: c for f in figures if (c := _calls_of(state, Path(str(f)).stem))}
+        root = state.get("quest_root")
+        calls = {f: c for f in figures if root and (c := _figure_claims.load_calls(str(root), Path(str(f)).stem))}
         return _figure_labels.findings(state.get("figure_records") or {}, figures,
                                        plan_labels(protocol), plan_names(protocol),
                                        _figure_labels.code_identifiers(sources), calls)
