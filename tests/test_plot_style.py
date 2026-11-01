@@ -705,3 +705,39 @@ def test_bootstrap_records_error_bar_lengths_and_the_writer_is_told_how_each_ser
     assert "zero bars: a solid line with markers (3 points); error bars are all zero (none visible)" in note
     assert "real bars: a solid line with markers (3 points); error bars are drawn (largest 2, 20% of the axis span)" in note
     assert "not recorded" not in note
+
+
+def test_error_bars_FI_cannot_measure_are_not_said_to_be_absent(tmp_path) -> None:
+    """Bars drawn with fmt='none' (no data line), with both xerr and yerr, or by ax.bar(yerr=) were skipped by the
+    measurement, and the writer was told "no error bars are drawn" under a figure that draws them."""
+    pytest.importorskip("matplotlib")
+    from core.engine import _figure_record_note, _read_figure_records
+
+    boot_dir = write_boot(tmp_path, "latex")
+    records = tmp_path / "records"
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(p for p in (str(boot_dir), os.environ.get("PYTHONPATH", "")) if p),
+        "FI_FIGURE_RECORDS": str(records),
+    }
+    probe = (
+        "import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt\n"
+        "for stem, draw in (('none', lambda ax: ax.errorbar([1, 2, 3], [2, 3, 4], yerr=[1, 1, 1], fmt='none')),\n"
+        "                   ('both', lambda ax: ax.errorbar([1, 2, 3], [2, 3, 4], xerr=[.1, .1, .1], yerr=[1, 1, 1],\n"
+        "                                                   marker='o', label='both')),\n"
+        "                   ('bar', lambda ax: ax.bar([1, 2, 3], [2, 3, 4], yerr=[1, 1, 1])),\n"
+        "                   ('plain', lambda ax: None)):\n"
+        "    fig, ax = plt.subplots()\n"
+        "    ax.plot([1, 2, 3], [1, 2, 3], '-', label='line')\n"
+        "    draw(ax)\n"
+        "    fig.savefig(stem + '.png')\n"
+    )
+    out = subprocess.run([sys.executable, "-c", probe], env=env, cwd=tmp_path,
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    notes = {s: _figure_record_note(_read_figure_records(records, [s + ".png"])[s + ".png"])
+             for s in ("none", "both", "bar", "plain")}
+    for stem in ("none", "both", "bar"):
+        assert "no error bars" not in notes[stem], notes[stem]
+        assert "error bars are drawn (length not recorded)" in notes[stem], notes[stem]
+    assert "no error bars are drawn" in notes["plain"]

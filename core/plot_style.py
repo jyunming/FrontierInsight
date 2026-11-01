@@ -447,13 +447,19 @@ try:
         def _fi_bar_extents(ax):
             # The length of each y error bar of an errorbar series, by its data line, kept so the writer is told whether
             # the bars are drawn (and how large) or are all zero. A bar that is not a finite number is not counted.
-            out = {}
+            # Also how many sets of error bars the panel holds (an errorbar call, or bars drawn with yerr / xerr), whether
+            # or not their length could be read; None when the panel could not be read at all.
+            out, sets = {}, 0
             try:
-                from matplotlib.container import ErrorbarContainer
+                from matplotlib.container import BarContainer, ErrorbarContainer
 
                 for container in ax.containers:
+                    if isinstance(container, BarContainer):
+                        sets += 1 if getattr(container, "errorbar", None) is not None else 0
+                        continue
                     if not isinstance(container, ErrorbarContainer):
                         continue
+                    sets += 1
                     data_line, caps, bars = container.lines
                     if data_line is None or container.has_xerr:
                         continue
@@ -465,8 +471,8 @@ try:
                                 lengths.append(max(ys) - min(ys))
                     out[id(data_line)] = {"n": len(lengths), "max": max(lengths) if lengths else 0.0}
             except Exception:
-                return {}
-            return out
+                return {}, None
+            return out, sets
 
         def _fi_collection_ys(ax, artist):
             # The y values a collection draws, in data units: a scatter's points, the
@@ -675,7 +681,7 @@ try:
             except Exception:
                 names = {}
             names.update(bar_names)
-            bars = _fi_bar_extents(ax)
+            bars, bar_sets = _fi_bar_extents(ax)
             lines = [_fi_line(ax, line, names, bars) for line in ax.get_lines() if id(line) not in bar_pieces]
             formatters = {type(axis.get_major_formatter()).__name__ for axis in (ax.xaxis, ax.yaxis)}
             others = (ax.patches, ax.collections, ax.images, ax.texts, ax.tables, ax.artists, ax.child_axes)
@@ -685,7 +691,7 @@ try:
                 "xlabel": ax.get_xlabel(), "ylabel": ax.get_ylabel(),
                 "xscale": ax.get_xscale(), "yscale": ax.get_yscale(),
                 # Set only when the error-bar lengths above are kept: an older record has no key, and says "not recorded".
-                "bars_recorded": True,
+                **({"bars_recorded": True, "error_bar_sets": bar_sets} if bar_sets is not None else {}),
                 "legend": ax.get_legend() is not None,
                 # Words written on the panel (a note, an annotation): a panel with text is not blank.
                 "has_text": bool(ax.texts),

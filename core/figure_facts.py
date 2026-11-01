@@ -292,8 +292,16 @@ def series_drawn(record_panel: Any, lines_panel: Any, budget: int = _MAX_SERIES)
     if texts:
         if not recorded:
             tail = "error bars: not recorded for this figure"
-        elif not any(isinstance(ln, dict) and "yerr" in ln for ln in lines_panel.get("lines") or []):
-            tail = "no error bars are drawn"
+        else:
+            measured = sum(1 for ln in lines_panel.get("lines") or [] if isinstance(ln, dict) and "yerr" in ln)
+            sets = lines_panel.get("error_bar_sets")
+            if not _num(sets):
+                tail = "error bars: not recorded for this figure"
+            elif sets > measured:
+                tail = ("error bars are drawn (length not recorded)" if not measured
+                        else "some more error bars are drawn (length not recorded)")
+            elif not measured:
+                tail = "no error bars are drawn"
     return texts[:budget], max(0, len(texts) - budget), tail
 
 
@@ -312,7 +320,9 @@ def attach_series_drawn(record: Any, lines_path: Path) -> None:
         texts, more, tail = series_drawn(panel, got, left)
         left -= len(texts)
         if texts:
-            panel["series_drawn"] = texts + ([tail] if tail else [])
+            panel["series_drawn"] = texts
+            if tail:
+                panel["series_drawn_tail"] = tail
         if more:
             panel["series_drawn_more"] = more
 

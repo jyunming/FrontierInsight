@@ -103,7 +103,7 @@ def test_an_old_record_without_bar_lengths_says_error_bars_are_not_recorded(tmp_
 
 
 def test_a_figure_tells_at_most_twelve_series_then_how_many_more(tmp_path):
-    lines = {"axes": [{"bars_recorded": True, "lines": [
+    lines = {"axes": [{"bars_recorded": True, "error_bar_sets": 0, "lines": [
         {"label": f"s{i}", "kind": "data", "x": [1, 2, 3], "y": [1, 2, 3], "linestyle": "-", "marker": "None"}
         for i in range(15)]}]}
     record = {"file": "fig_a.png", "axes": [{"title": "", "ylabel": "gain", "place": SIDE, "series": []}]}
@@ -111,7 +111,8 @@ def test_a_figure_tells_at_most_twelve_series_then_how_many_more(tmp_path):
     figure_facts.attach_series_drawn(record, root / ".fi" / "figure_records" / "fig_a.seed0.json")
     panel = record["axes"][0]
     assert panel["series_drawn"][:12] == [f"s{i}: a solid line, no markers (3 points)" for i in range(12)]
-    assert panel["series_drawn"][12] == "no error bars are drawn" and panel["series_drawn_more"] == 3
+    assert len(panel["series_drawn"]) == 12 and panel["series_drawn_more"] == 3
+    assert panel["series_drawn_tail"] == "no error bars are drawn"
     from core.engine import _figure_record_note
 
     note = _figure_record_note(record)

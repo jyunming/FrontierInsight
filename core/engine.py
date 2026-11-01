@@ -34305,9 +34305,10 @@ def _figure_record_note(record: dict[str, Any] | None, *, n_seeds: int | None = 
         if ax.get("series_drawn"):
             more = ax.get("series_drawn_more")
             shown = [str(t) for t in ax["series_drawn"]]
-            if more:  # before the closing words on the error bars
-                shown.insert(len(shown) - 1 if shown[-1].startswith(("error bars:", "no error bars")) else len(shown),
-                             f"and {more} more")
+            if more:
+                shown.append(f"and {more} more")
+            if ax.get("series_drawn_tail"):
+                shown.append(str(ax["series_drawn_tail"]))
             bits.append("how each is drawn (FI's record): " + "; ".join(shown))
         loose = ax.get("unlabelled_curves")
         if isinstance(loose, dict) and loose.get("count"):
