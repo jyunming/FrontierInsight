@@ -959,9 +959,14 @@ def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
             # One metric the check refuses is left out, not the list it is in.
             from . import metric_spec
 
-            kept, dropped = metric_spec.repair(out["metrics"])
-            if kept and dropped:
+            kept, partial, dropped = metric_spec.repair_parts(out["metrics"])
+            if kept and (partial or dropped):
                 out["metrics"] = kept
+                notes.extend(
+                    f"the `protocol.metrics` entry `{ident}` is kept without its {parts}, which could not be checked "
+                    f"({reason})"
+                    for ident, parts, reason in partial
+                )
                 notes.extend(
                     f"a `protocol.metrics` entry was left out of the plan because it could not be checked ({reason}); "
                     "the metrics that could be read are used"

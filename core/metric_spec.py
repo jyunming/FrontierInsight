@@ -274,16 +274,18 @@ def multiplier_unstated(protocol: dict[str, Any] | None) -> list[str]:
     return out
 
 
-def repair(metrics: Any) -> tuple[list[dict[str, Any]], list[str]]:
-    """``(the specs that pass, a sentence per one left out)``: :func:`normalize` entry by entry, for a draft. A live
-    plan declared one metric of a kind FI has no estimator for (`count`) beside valid ones, and the strict check threw
-    the whole list away with it."""
+def repair_parts(metrics: Any) -> tuple[list[dict[str, Any]], list[tuple[str, str, str]], list[str]]:
+    """``(the specs that pass, the metrics kept without a part, a sentence per metric left out)``: :func:`normalize`
+    entry by entry, for a draft. A live plan declared one metric of a kind FI has no estimator for (`count`) beside valid
+    ones, and the strict check threw the whole list away with it. A metric whose ``known_value`` or ``undefined_when``
+    could not be read stays without that part; it is listed as ``(id, the parts left off, why)``, not as left out."""
     if isinstance(metrics, dict):
         metrics = [metrics]
     if not isinstance(metrics, list):
-        return [], [normalize(metrics)[1] or "`protocol.metrics` is not a list"]
+        return [], [], [normalize(metrics)[1] or "`protocol.metrics` is not a list"]
     kept: list[dict[str, Any]] = []
-    notes: list[str] = []
+    partial: list[tuple[str, str, str]] = []
+    dropped: list[str] = []
     # A `given` names another metric, so the metrics it can name are checked first, whatever the order they came in.
     ordered = [m for m in metrics if not (isinstance(m, dict) and m.get("given"))] + [
         m for m in metrics if isinstance(m, dict) and m.get("given")
@@ -295,14 +297,21 @@ def repair(metrics: Any) -> tuple[list[dict[str, Any]], list[str]]:
             bare = {k: v for k, v in item.items() if k not in ("known_value", "undefined_when")}
             again, _ = normalize(kept + [bare])
             if again is not None:
-                notes.append(f"{why}; the metric is kept without it")
+                parts = " and ".join(f"`{k}`" for k in ("known_value", "undefined_when") if k in item)
+                partial.append((str(item.get("id", "")), parts, why or ""))
                 clean = again
-                why = None
         if clean is None:
-            notes.append(why or "a `protocol.metrics` entry could not be checked")
+            dropped.append(why or "a `protocol.metrics` entry could not be checked")
         else:
             kept = clean
-    return kept, notes
+    return kept, partial, dropped
+
+
+def repair(metrics: Any) -> tuple[list[dict[str, Any]], list[str]]:
+    """``(the specs that pass, a sentence per problem)``: :func:`repair_parts` with the notes of the metrics kept without a
+    part and of the metrics left out in one list. Say them apart with :func:`repair_parts`."""
+    kept, partial, dropped = repair_parts(metrics)
+    return kept, [f"{why}; the metric is kept without it" for _i, _p, why in partial] + dropped
 
 
 def shares_draws(protocol: dict[str, Any] | None, quest_root: Path | str | None = None) -> bool:

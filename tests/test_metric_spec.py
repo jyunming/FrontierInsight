@@ -455,3 +455,22 @@ def test_a_paired_metric_is_not_a_cross_setting_contrast_unless_the_plan_shares_
     assert [s["paired"] for s in ms.declared({"metrics": [metric]})] == [False]
     assert [s["paired"] for s in ms.declared({"metrics": [metric], "shared_draws": True})] == [True]
     assert [s["paired"] for s in ms.declared({"metrics": [metric], "shared_draws": True, "seed_policy": "x"})] == [True]
+
+
+def test_a_metric_kept_without_a_part_is_not_said_to_be_left_out_of_the_plan() -> None:
+    """A metric whose `undefined_when` could not be read stays in the plan without that part; the note said an entry was
+    left out, which read as a lost result."""
+    good = {"id": "alpha_rate", "kind": "proportion", "estimand": "P(alpha | N)", "unit": "run"}
+    flawed = {"id": "beta_rate", "kind": "proportion", "estimand": "P(beta | N)", "unit": "run",
+              "undefined_when": "no such grid parameter"}
+    unknown = {"id": "gamma_count", "kind": "count", "estimand": "gamma runs", "unit": "run"}
+    kept, partial, dropped = ms.repair_parts([good, flawed, unknown])
+    assert [m["id"] for m in kept] == ["alpha_rate", "beta_rate"] and "undefined_when" not in kept[1]
+    assert [(i, p) for i, p, _w in partial] == [("beta_rate", "`undefined_when`")]
+    assert len(dropped) == 1 and "gamma_count" in dropped[0]
+    fixed, notes = plan.repair_protocol({"runs_per_setting": 300, "grid": {"n": [5, 10]}, "metrics": [good, flawed]})
+    assert [m["id"] for m in fixed["metrics"]] == ["alpha_rate", "beta_rate"]
+    assert len(notes) == 1 and "`beta_rate` is kept without its `undefined_when`" in notes[0]
+    assert "left out" not in notes[0]
+    fixed, notes = plan.repair_protocol({"runs_per_setting": 300, "metrics": [good, unknown]})
+    assert len(notes) == 1 and "left out of the plan" in notes[0]
