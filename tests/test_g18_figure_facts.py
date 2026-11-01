@@ -162,3 +162,21 @@ def test_clean_record_has_no_findings():
 def test_old_record_has_no_findings():
     assert figure_facts.geometry_findings(_record(SIDE, SIDE_RIGHT)) == []
     assert figure_facts.geometry_findings(None) == []
+
+
+def test_errorbar_cut_off_on_a_small_scale_is_a_finding():
+    rec = _geo(bars=[{"line": "fit", "lo": [1e-5], "hi": [2.5e-4]}], limits={"x": [0, 1], "y": [0, 2e-4]})
+    assert any("error bars" in s for s in figure_facts.geometry_findings(rec))
+
+
+def test_legend_overlapping_only_in_y_is_not_a_finding():
+    # same height as the right panel but entirely left of it
+    assert figure_facts.geometry_findings(_geo(legend={"x0": 0.12, "y0": 0.3, "x1": 0.3, "y1": 0.5})) == []
+
+
+def test_legend_over_twin_or_inset_is_not_a_finding():
+    legend = {"x0": 0.3, "y0": 0.3, "x1": 0.4, "y1": 0.4}
+    twin = _geo(legend=legend, places=(SIDE, SIDE))
+    inset = _geo(legend=legend, places=(SIDE, [0.2, 0.3, 0.15, 0.2]))
+    assert figure_facts.geometry_findings(twin) == []
+    assert figure_facts.geometry_findings(inset) == []

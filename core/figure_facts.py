@@ -249,7 +249,9 @@ def geometry_findings(record: Any) -> list[str]:
             if x0 < -_SAME or y0 < -_SAME or x1 > 1 + _SAME or y1 > 1 + _SAME:
                 out.append(f"The legend of {name} reaches outside the figure.")
             place = ax.get("place")
-            own = [float(v) for v in place] if isinstance(place, list) and len(place) == 4 and all(_num(v) for v in place)                 else None
+            own = None
+            if isinstance(place, list) and len(place) == 4 and all(_num(v) for v in place):
+                own = [float(v) for v in place]
             for j, other in enumerate(axes):
                 op = other.get("place") if isinstance(other, dict) else None
                 if j == k or not (isinstance(op, list) and len(op) == 4 and all(_num(v) for v in op)):
@@ -265,9 +267,10 @@ def geometry_findings(record: Any) -> list[str]:
         limits = ax.get("data_limits")
         lim = limits.get("y") if isinstance(limits, dict) else None
         bars = ax.get("errorbars")
-        if _finite(lim) and len(_finite(lim)) == 2 and isinstance(bars, list):
-            lo_lim, hi_lim = sorted(_finite(lim))
-            tol = _SAME * max(1.0, hi_lim - lo_lim)
+        limit_values = _finite(lim)
+        if len(limit_values) == 2 and isinstance(bars, list):
+            lo_lim, hi_lim = sorted(limit_values)
+            tol = _SAME * (hi_lim - lo_lim)
             for bar in bars:
                 if not isinstance(bar, dict):
                     continue
