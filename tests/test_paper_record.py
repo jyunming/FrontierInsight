@@ -694,3 +694,19 @@ def test_a_real_xelatex_compile_prints_no_markers(tmp_path: Path, monkeypatch: p
     text = " ".join(line.text for page in measure_pdf(pdf, max_pages=2).pages for line in page.lines)
     assert "400" in text and "223.2" in text, text
     assert "fact" not in text and "<!" not in text and "−−" not in text, text
+
+
+def test_quantities_that_failed_for_one_reason_are_one_limitations_item(tmp_path: Path, monkeypatch) -> None:
+    """Before: six quantities no trial gave a value for were six bullets, each 'The plan asks for X; no trial gave a value
+    for it, so this study does not report it'. Now one sentence names them all; a single one keeps its own."""
+    from core import analysis_frame as af
+
+    rows = [{"id": q, "status": "no_data"} for q in ("alpha", "beta", "gamma")] + [{"id": "delta", "status": "not_written"}]
+    monkeypatch.setattr(af, "not_computed", lambda record: rows)
+    items = [i for i in paper_facts.required_items(tmp_path) if i.kind == paper_facts.NOT_COMPUTED]
+    assert len(items) == 2
+    merged = next(i for i in items if "alpha" in i.sentence)
+    assert all(q in merged.sentence for q in ("alpha", "beta", "gamma")) and "for any of them" in merged.sentence
+    assert merged.sentence.count("The plan asks for") == 1
+    single = next(i for i in items if "delta" in i.sentence)
+    assert "was not written" in single.sentence and "alpha" not in single.sentence

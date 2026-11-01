@@ -225,3 +225,17 @@ def test_a_quantity_worked_out_from_the_mapped_result_replaces_the_map_and_is_an
     text = pf.answers_text(root)
     assert "- peak algae (the plan's map: `peak_ratio`): {{v:peak_ratio}} (one value worked out by the analysis" in text
     assert "peak_ratio" in cp._answers_prompt(TEMPLATES, design, asked, [], "")  # the model is shown what it is worked out from
+
+
+def test_a_condition_the_question_already_states_is_not_added_again(tmp_path, monkeypatch) -> None:
+    """Before: the question 'chance of a bloom (when nutrient = 1)' with the plan pinning nutrient to 1.0 printed
+    '(when nutrient = 1) (when nutrient = 1.0)'. 1 and 1.0 are one value, said once; a pin the words do not state is still added."""
+    monkeypatch.setitem(REQ["quantities"][1], "name", "chance of a bloom (when nutrient = 1)")
+    root = _quest(tmp_path, monkeypatch, [{"item": "Q1", "by": "metric:algae_peak", "at": {}},
+                                          {"item": "Q2", "by": "metric:bloom", "at": {"nutrient": 1.0}}])
+    line = next(ln for ln in pf.answers_text(root).splitlines() if ln.startswith("- chance of a bloom"))
+    assert line.count("nutrient = 1") == 1 and "nutrient = 1.0" not in line
+    monkeypatch.setitem(REQ["quantities"][1], "name", "chance of a bloom (when nutrient = 2)")
+    (root / ".fi" / "topic_requirements.json").write_text(json.dumps(REQ), encoding="utf-8")
+    line = next(ln for ln in pf.answers_text(root).splitlines() if ln.startswith("- chance of a bloom"))
+    assert "nutrient = 2)" in line and "nutrient = 1.0" in line  # a different stated value is not the pin: both are shown

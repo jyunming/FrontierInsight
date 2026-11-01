@@ -353,13 +353,27 @@ def required_items(quest_root: Path | str) -> list[Item]:
     # of that run (``data/results/derived.json``), never a null left silent.
     from . import analysis_frame as _analysis
 
+    reasons = {"no_data": ("no trial gave a value for it", "no trial gave a value for any of them"),
+               "not_written": ("the study's code to work it out was not written", "the study's code to work them out was not written"),
+               "blocked": ("a quantity it is worked out from was not computed", "a quantity each is worked out from was not computed")}
+    other = ("the study's code to work it out gave no usable value", "the study's code to work them out gave no usable value")
+    by_reason: dict[str, list[str]] = {}
     for item in _analysis.not_computed(_read(root, _analysis.DERIVED_PATH.as_posix()) or {}):
-        q, status = item["id"], item["status"]
-        why = ("no trial gave a value for it" if status == "no_data" else
-               "the study's code to work it out was not written" if status == "not_written" else
-               "a quantity it is worked out from was not computed" if status == "blocked" else
-               "the study's code to work it out gave no usable value")
-        add(NOT_COMPUTED, q, _sentence(f"The plan asks for {_said(root, q)}; {why}, so this study does not report it"))
+        by_reason.setdefault(item["status"] if item["status"] in reasons else "other", []).append(item["id"])
+    # One sentence for the quantities that failed for the same reason, naming each (a list of one line each repeated the
+    # same words); a single one keeps its own sentence and item.
+    for status, qs in by_reason.items():
+        qs = [q for q in qs if (NOT_COMPUTED, _one(q).lower()) not in seen]
+        if not qs:
+            continue
+        one, many = reasons.get(status, other)
+        if len(qs) == 1:
+            add(NOT_COMPUTED, qs[0], _sentence(f"The plan asks for {_said(root, qs[0])}; {one}, so this study does not report it"))
+            continue
+        said = [_said(root, q) for q in qs]
+        listed = ", ".join(said[:-1]) + f" and {said[-1]}"
+        add(NOT_COMPUTED, "; ".join(qs), _sentence(f"The plan asks for {listed}; {many}, so this study does not report them"),
+            key=f"{status}-{len(qs)}-quantities")
     checked = _read(root, "needs/RESULT_CHECK.json")
     for c in (checked.get("checks") if isinstance(checked, dict) else None) or []:
         if isinstance(c, dict) and c.get("quantity"):
@@ -1308,6 +1322,26 @@ NO_LINK = "the plan links no result of the study to it here; see the Results for
 NO_RESULT = "the plan's map for it names no result the study returns; see the Results for what the run measured"
 
 
+def _pins_not_in(name: str, rec: Any, at: dict[str, Any]) -> list[str]:
+    """``label = value`` for each setting the plan's map pins, except one the question's own words already state as
+    ``<setting> = <number>`` with the same number (``0`` and ``0.0`` are one value). This reads the person's words for a
+    condition they typed, only to avoid saying it twice; the pin itself is FI's record."""
+    out = []
+    for a, v in at.items():
+        stated = False
+        try:
+            want = float(v)
+        except (TypeError, ValueError):
+            want = None
+        if want is not None:
+            for word in {a, rec.label(a), rec.short(a)}:
+                for m in re.finditer(re.escape(word) + r"\s*=\s*(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)", name):
+                    stated = stated or float(m.group(1)) == want
+        if not stated:
+            out.append(f"{rec.label(a)} = {v}")
+    return out
+
+
 def answers_text(quest_root: Path | str) -> str:
     """The block ``{{answers}}`` stands for: one line for each quantity the topic asks for and marks main, with FI's value
     and its interval (a key FI fills), from the plan's own ``protocol.topic_map`` entry (``metric:<id>``). A quantity the
@@ -1396,11 +1430,12 @@ def answers_text(quest_root: Path | str) -> str:
         for level in levels:
             here = [a for a in each if a != split] if level is not None else each
             said = [f"{rec.short(a)}=each" for a in here]
-            label = name + (f" (when {', '.join(rec.label(a) + ' = ' + str(v) for a, v in at.items())})" if at and level is None else "")
+            unsaid = _pins_not_in(name, rec, at)
+            label = name + (f" (when {', '.join(unsaid)})" if unsaid and level is None else "")
             label += same_note
             if level is not None:
                 fixed_here = fixed + [f"{rec.short(split)}={level}"]
-                label = f"{name} ({rec.label(split)} = {level})" + (f" ({', '.join(rec.label(a) + ' = ' + str(v) for a, v in at.items())})" if at else "")
+                label = f"{name} ({rec.label(split)} = {level})" + (f" ({', '.join(_pins_not_in(name, rec, at))})" if _pins_not_in(name, rec, at) else "")
             else:
                 fixed_here = fixed
             # A bias or a standard deviation the plan's map types for the question is that statistic of the result's trials, which
