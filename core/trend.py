@@ -236,7 +236,7 @@ def _direction(rec: _pv.Records, metric: str, axis: str, points: list[_Point]) -
     if ch.word == "point":
         lead = "changes"
         detail = (f" {ends} (the change is {_pv.sig(ch.diff)}{_ratio(first.mean, last.mean)}); {ch.how}, so there is no 95% "
-                  "interval and FI does not say whether the change is more than noise")
+                  "interval")
         return "point", lead + detail, ratio
     lead = {"rises": "rises", "falls": "falls", "none": "no change beyond its 95% interval"}[ch.word]
     if ch.exact:  # no spread on either side: the values are exact, a zero-width interval is not an interval

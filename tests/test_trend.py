@@ -404,3 +404,14 @@ def test_a_statistic_that_cannot_be_worked_out_is_not_recorded_not_a_broken_writ
     monkeypatch.setattr(tr, "trend_text", boom)
     value = _say(_grid(lambda s, g: 1.0), "score over size @ group=a")
     assert not value.filled and "ZeroDivisionError" in value.hit.reason
+
+
+def test_a_change_between_single_runs_says_there_is_no_interval_and_no_verdict_clause() -> None:
+    """Before: the sentence ended 'and FI does not say whether the change is more than noise', a fact already in the run facts
+    (one run per setting). Now it says there is no interval and stops."""
+    cells = [_cell({"size": s, "group": "a"}, score=[1.0 + 0.1 * s]) for s in (10, 20, 40)]
+    text = _say(pv.from_cells(cells), "score over size @ group=a").text
+    assert text.startswith("score over size at group = a: changes from ")
+    assert text.endswith("so there is no 95% interval")
+    assert "more than noise" not in text
+    assert "95% interval" in _say(_grid(lambda s, g: 1.0 - 0.4 * (s - 10) / 30), "score over size @ group=a").text  # an interval is still said when there is one
