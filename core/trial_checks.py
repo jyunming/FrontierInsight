@@ -384,6 +384,9 @@ class Quantity:
     df: int | str | dict[str, dict[str, Any]] | None = None
     #: ``multiplier`` where the plan gives its multiplier per value of a factor: the plan's multiplier at each setting (by key).
     expected_by: dict[str, float] = field(default_factory=dict)
+    #: ``multiplier`` with a plan that gives its multiplier per value: the values the settings ran that the plan does not name
+    #: (not judged; the caller says so in ``not_checked``).
+    unlisted: list[str] = field(default_factory=list)
     #: The same number over every setting together (at 95%): what catches a moderate miss present everywhere.
     pooled: SettingCheck | None = None
     #: ``se_ratio`` only: the smallest (spread / reported error) ratio this run's trials could have flagged as a gross miss
@@ -564,7 +567,7 @@ def _quantile_of(df: Any, level: float) -> float:
 def _multiplier_quantity(kv: dict[str, Any], df: Any, cells: list[dict[str, Any]], spec: dict[str, Any]) -> "Quantity":
     """The multiplier of one declared interval, judged at every setting against the plan's: the one multiplier the plan fixes,
     or, where it gives ``degrees_of_freedom`` per value of a factor (``{factor: {value: df}}``), the multiplier of the value the
-    setting ran (a setting whose value the plan does not list is not judged)."""
+    setting ran (a value the plan does not list is not judged, and is named in ``unlisted`` so the record says so)."""
     level = kv["level"]
     by_value = df if isinstance(df, dict) else None
     mult = Quantity("multiplier", " .. ".join(kv["interval"]), [*kv["interval"], kv["standard_error"]], level=level,
@@ -578,6 +581,9 @@ def _multiplier_quantity(kv: dict[str, Any], df: Any, cells: list[dict[str, Any]
             (axis, table), = by_value.items()
             here = table.get(str((c.get("cell") or {}).get(axis)))
             if here is None:
+                shown = (c.get("cell") or {}).get(axis)
+                if shown is not None and str(shown) not in mult.unlisted and _multipliers(c, kv, 1.0):
+                    mult.unlisted.append(str(shown))
                 continue
             want = mult.expected_by[key] = _quantile_of(here, level)
         per.append((key, _multipliers(c, kv, want)))
@@ -600,6 +606,7 @@ def _compared_values_off_the_plan(q: "Quantity", cells: list[dict[str, Any]], id
     level_of = {str(c.get("key")): json.dumps(c["level"], sort_keys=True, default=str) for c in cells
                 if isinstance(c.get("level"), dict) and c["level"]}
     exp = q.expected or 0.0
+    z_or_t = [_quantile_of(d, q.level) for d in (*range(1, 201), "normal")] if q.level else []
     groups: dict[str, list[SettingCheck]] = {}
     for st in q.settings:
         g = level_of.get(st.key)
@@ -618,6 +625,8 @@ def _compared_values_off_the_plan(q: "Quantity", cells: list[dict[str, Any]], id
                 or max(meds) / min(meds) - 1.0 > MULTIPLIER_TOLERANCE):
             return ""
         used.append(sum(meds) / len(meds))
+        if not any(abs(used[-1] / c - 1.0) <= MULTIPLIER_TOLERANCE for c in z_or_t):
+            return ""  # a constant that is no t or normal quantile of the plan's level is a wrong multiplier, not a method's
     names = ", ".join("`" + ", ".join(f"{a}={v}" for a, v in json.loads(g).items()) + "`" for g in list(off)[:4])
     q.settings = [st for st in q.settings if level_of.get(st.key) not in off]
     return (f"`{q.label}` ({ident}): the plan fixes one multiplier, {exp:.4g}, for the interval, and the study compares "
@@ -899,9 +908,13 @@ def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = N
             mult = _multiplier_quantity(kv, df, cells, spec)
             if not isinstance(df, dict) and (note := _compared_values_off_the_plan(mult, cells, ident)):
                 out.not_checked.append(note)
+            if mult.unlisted:
+                out.not_checked.append(f"`{mult.label}` ({ident}): the plan's `degrees_of_freedom` does not name "
+                                       + ", ".join(f"`{u}`" for u in mult.unlisted[:4])
+                                       + ", so the multiplier of the interval there was not checked")
             if mult.judged:
                 out.quantities.append(mult)
-            else:
+            elif not mult.unlisted:
                 out.not_checked.append(f"`{mult.label}` ({ident}): no setting had {MIN_TRIALS} or more trials with an "
                                        "interval and a standard error, too few to judge the multiplier of the standard error "
                                        "in the interval")

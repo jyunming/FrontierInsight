@@ -764,7 +764,26 @@ def test_a_multiplier_per_value_of_a_factor_the_protocol_does_not_have_is_a_plan
     proto = _levelled_proto({"fit": {"robust_t": 3}})
     [note] = metric_spec.known_value_problems(proto)
     assert "`fit`" in note
-    proto = _levelled_proto({"method": {"robust_t": 3, "mystery": 3}})
+    proto = _levelled_proto({"method": {**_PER_METHOD["method"], "mystery": 3}})
     [note] = metric_spec.known_value_problems(proto)
     assert "`mystery`" in note
     assert metric_spec.known_value_problems(_levelled_proto(_PER_METHOD)) == []
+
+
+def test_a_compared_method_the_per_method_plan_does_not_name_is_never_silently_skipped():
+    plan = {"method": {"robust_t": 3, "plain_z": "normal"}}  # plain_t is left out
+    proto = _levelled_proto(plan)
+    v = tc.judge(_levelled_record({**_METHODS, "plain_t": 25.0}), proto, repairs_left=False)
+    assert any("plain_t" in n and "not checked" in n for n in v.calibration.not_checked)
+    [note] = metric_spec.known_value_problems(proto)
+    assert "`plain_t`" in note and "every value" in note
+
+
+def test_a_fallback_for_one_plan_multiplier_excuses_only_a_t_or_normal_quantile():
+    # the plan fixes t(3); the method that differs uses a constant that is no t or normal quantile: a wrong multiplier
+    wrong = tc.judge(_levelled_record({**_METHODS, "plain_z": 25.0}), _levelled_proto(3), repairs_left=False)
+    assert wrong.action == tc.STOP and "multiplier" in wrong.say
+    # a normal quantile and a t quantile of another df are still excused (disclosed)
+    for m in (_Z, 2.5705818):
+        v = tc.judge(_levelled_record({**_METHODS, "plain_z": m}), _levelled_proto(3), repairs_left=False)
+        assert v.action == tc.OK and any("method=plain_z" in n for n in v.calibration.not_checked)

@@ -297,6 +297,12 @@ def known_value_problems(protocol: dict[str, Any] | None) -> list[str]:
             else:
                 listed = {str(v) for v in part[axis]} if isinstance(part[axis], (list, tuple)) else set()
                 gone = [v for v in table if listed and v not in listed]
+                unnamed = [v for v in sorted(listed) if v not in table]
+                if unnamed:
+                    out.append(f"The metric `{spec['id']}` gives `degrees_of_freedom` per value of `{axis}` but not for "
+                               + ", ".join(f"`{u}`" for u in unnamed[:3])
+                               + f", which {'is' if len(unnamed) == 1 else 'are'} among its values in the protocol; give one "
+                                 "for every value.")
                 if gone:
                     out.append(f"The metric `{spec['id']}` gives `degrees_of_freedom` for " + ", ".join(f"`{g}`" for g in gone[:3])
                                + f", which {'is' if len(gone) == 1 else 'are'} not among the values of `{axis}` in the protocol.")
