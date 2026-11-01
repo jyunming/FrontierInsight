@@ -713,6 +713,28 @@ def failure(record: dict[str, Any], stderr: str, returncode: int, printed: bool,
     return {"kind": "body", "body": str(rec["by"]), "formula": False, "why": f"`{ident}`: {rec.get('why') or 'failed'}"}
 
 
+#: The line over a failed function's own failure in its repair prompt (the stderr below it is cut to its last 2000 characters).
+OWN_FAILURE_HEAD = "What FI's record of the run says about this function (whole):\n"
+
+
+def own_failure(record: dict[str, Any], body: str) -> str:
+    """What FI's record of the run (derived.json) says went wrong in the function ``body`` of derive.py, whole and in FI's own
+    words (a figure's sentence includes the lines on how the results it shows are read); ``""`` when the record has none for it
+    (or is an earlier run's). It is the fact itself, so a repair prompt can carry it without relying on a cut of stderr."""
+    record = record if isinstance(record, dict) else {}
+    if not body or record.get("from_earlier_run"):
+        return ""
+    said = []
+    derived = record.get("derived") if isinstance(record.get("derived"), dict) else {}
+    for ident, r in derived.items():
+        if isinstance(r, dict) and r.get("by") == body and r.get("status") in ("failed", "refused") and not r.get("fi_fault") and r.get("why"):
+            said.append(f"`{ident}`: {r['why']}")
+    for o in record.get("figures") or []:
+        if isinstance(o, dict) and f"figure_{o.get('id')}" == body and o.get("status") in ("failed", "refused") and o.get("why"):
+            said.append(str(o["why"]))
+    return "\n".join(said)
+
+
 def only_figures_failed(record: dict[str, Any], returncode: int) -> bool:
     """Whether a run of FI's experiment.py that exited 1 produced all its results and only a figure of the study's failed or was
     refused. FI's record of the run (derived.json) says it: ``run()`` exits 1 for a quantity of a counting role it could not work out

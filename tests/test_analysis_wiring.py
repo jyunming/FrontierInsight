@@ -639,3 +639,62 @@ def test_a_file_a_killed_run_left_does_not_lay_an_import_failure_to_a_function(t
                     "analysis_step": af.running_step(stderr, engine.quest_root)},  # as the run record keeps it
                    {"returncode": 1, "failed_script": af.DERIVE_FILE, "stdout_tail": "", "stderr_tail": stderr}):  # an older one
         assert engine._fis_analysis_route({"design": DESIGN, "result_json": {}}, result, 1, []) == {"body": ""}, result
+
+
+# ---- a repair prompt carries the failed function's own failure from FI's record, whatever the stderr cut keeps -----------------
+def _long_figure_why(fid: str) -> str:
+    forms = "\n".join(f"- `{fid}_r{n}` is recorded for each value compared inside the runs ({', '.join(str(v) for v in range(60))}), "
+                      f"not once for a setting: read it with `table.level_rows('{fid}_r{n}', key)`." for n in range(8))
+    return (f"`figure_{fid}` stopped with ValueError: `{fid}_ref` is not a reference the plan holds (derive.py line 3).\n"
+            f"How the results this figure shows are read:\n{forms}")
+
+
+async def _repair_prompt(tmp_path: Path, figures: list[dict[str, Any]], stderr: str, record_extra: dict[str, Any] | None = None) -> str:
+    engine = _engine(tmp_path)
+    _fis_quest(engine)
+    record = {"schema": af.DERIVED_SCHEMA, "derived": {}, "figures": figures, **(record_extra or {})}
+    (engine.quest_root / af.DERIVED_PATH).parent.mkdir(parents=True, exist_ok=True)
+    (engine.quest_root / af.DERIVED_PATH).write_text(json.dumps(record), encoding="utf-8")
+    model = _Model("{}", repair={"functions": DERIVE, "patch_summary": "x"})
+    engine._client = model
+    state = {"design": DESIGN, "result_json": {"peak": 1.0}, "exec_result": {
+        "returncode": 1, "failed_script": "experiment.py", "stdout_tail": "", "stderr_tail": stderr}}
+    await engine._node_execute_reflect(state)
+    return model.prompts[-1]
+
+
+@pytest.mark.asyncio
+async def test_with_several_figures_failing_the_repaired_figures_own_failure_is_in_its_prompt(tmp_path: Path) -> None:
+    whys = {fid: _long_figure_why(fid) for fid in ("fig1", "fig2", "fig3")}
+    figures = [{"id": f, "file": f + ".png", "status": "failed", "why": w, "said": f"Figure `{f}` was not drawn: {w}"}
+               for f, w in whys.items()]
+    stderr = "0 of 3 figure(s) drawn. " + " ".join(o["said"] for o in figures)
+    assert len(stderr) > 3 * 2000 and whys["fig1"] not in stderr[-2000:]  # the cut loses the first figure's text
+    prompt = await _repair_prompt(tmp_path, figures, stderr)
+    assert "The function `figure_fig1` of derive.py" in prompt
+    assert whys["fig1"] in prompt and "How the results this figure shows are read:" in prompt
+    assert af.OWN_FAILURE_HEAD in prompt and prompt.index(af.OWN_FAILURE_HEAD) < prompt.index(whys["fig1"]) < prompt.index(stderr[-300:])
+    assert prompt.count(whys["fig1"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failure_the_stderr_cut_already_keeps_is_not_said_twice(tmp_path: Path) -> None:
+    why = "`figure_fig1` stopped with ValueError: `x` is not a reference the plan holds (derive.py line 3)."
+    figures = [{"id": "fig1", "file": "fig1.png", "status": "failed", "why": why, "said": "Figure `fig1` was not drawn: " + why}]
+    prompt = await _repair_prompt(tmp_path, figures, "0 of 1 figure(s) drawn. Figure `fig1` was not drawn: " + why)
+    assert prompt.count(why) == 1 and af.OWN_FAILURE_HEAD not in prompt  # the same prompt as before the record was read
+
+
+@pytest.mark.asyncio
+async def test_a_failed_derive_function_gets_its_own_failure_ahead_of_a_cut_stderr(tmp_path: Path) -> None:
+    why = "`peak` could not be worked out: " + "the table has no value for the setting " * 80
+    derived = {"peak": {"status": "failed", "by": "derive_peak", "role": "result", "why": why}}
+    prompt = await _repair_prompt(tmp_path, [], "x" * 5000 + "\nTraceback tail", {"derived": derived})
+    assert "`peak`: " + why in prompt and af.OWN_FAILURE_HEAD in prompt
+
+
+@pytest.mark.asyncio
+async def test_a_record_of_an_earlier_run_adds_nothing_to_the_prompt(tmp_path: Path) -> None:
+    figures = [{"id": "fig1", "file": "fig1.png", "status": "failed", "why": _long_figure_why("fig1")}]
+    prompt = await _repair_prompt(tmp_path, figures, "y" * 5000, {"from_earlier_run": True})
+    assert af.OWN_FAILURE_HEAD not in prompt

@@ -21011,6 +21011,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return await self._reflect_by_agent(state, iters, bump, returncode_for_prompt, stdout_for_prompt,
                                                 exec_result, spent,
                                                 tag=_numeric.REPAIR_FOR if numeric_turn else "", attempt=attempt_no)
+        # The failed function's own failure comes from FI's record, whole, ahead of the stderr (cut to its last 2000 characters:
+        # with several figures failing, the cut can hold only the later ones' text); nothing is added when the cut keeps it.
+        kept_stderr = str(exec_result.get("stderr_tail", ""))
+        if not exec_result.get("directive"):
+            kept_stderr = kept_stderr[-2000:]
+        own_failure = ""
+        if repair_body and failed_body:
+            own = _analysis_frame.own_failure(_analysis_frame.read_record(self.quest_root), failed_body)
+            if own and own not in kept_stderr:
+                own_failure = _analysis_frame.OWN_FAILURE_HEAD + own + "\n\n"
         prompt = self._prompts["execute_reflect"].substitute(
             topic_block=self._topic_block(),
             # Whole, always: the reply is the full corrected script, and a model shown only the first 8000 characters
@@ -21019,8 +21029,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             previous_code=script_code,
             returncode=returncode_for_prompt,
             stdout_tail=stdout_for_prompt,
-            stderr_tail=exec_result.get("packages_note", "") + (
-                exec_result.get("stderr_tail", "") if exec_result.get("directive") else exec_result.get("stderr_tail", "")[-2000:]),
+            stderr_tail=exec_result.get("packages_note", "") + own_failure + kept_stderr,
             duration_s=f"{exec_result.get('duration_s', 0):.2f}",
             figures_count=str(len(state.get("figures") or [])),
             result_json_present=result_json_note,
