@@ -70,6 +70,9 @@ CONSTANTS: dict[str, float] = {"pi": math.pi}
 #: The functions that take any number of numbers: a name the simulation returns as one number per value each run
 #: compares (core/in_run.py) is given to them as all those numbers (``max(k_hat) / min(k_hat)``), and is read nowhere else.
 SPREAD_OVER = frozenset({"min", "max", "sum"})
+#: What a check's ``measure`` may take over the trials of its case, which FI works out once on the trials together (never on
+#: one run): ``mean(x)`` and ``sd(x)`` (the sample standard deviation) of a number or formula ``x`` each trial returns.
+ACROSS_TRIALS = ("mean", "sd")
 
 
 def _ellipk(m: float) -> float:
@@ -166,7 +169,7 @@ FUNCTION_LIST = ", ".join(sorted(FUNCTIONS))
 #: How a formula may be written, for the sentences a person and the plan read.
 LANGUAGE = (
     "numbers, the names the simulation function returns, + - * / ** %, parentheses and the functions "
-    f"{FUNCTION_LIST} (and the constant pi)"
+    f"{FUNCTION_LIST} (and the constant pi); over the trials of the case, `mean(x)` or `sd(x)` of a name each trial returns"
 )
 
 
@@ -176,10 +179,13 @@ def formula_problem(text: Any) -> str:
     return _tree(text)[1]
 
 
-def _tree(text: Any, functions: dict[str, Callable[..., float]] | None = None) -> tuple[ast.Expression | None, str]:
+def _tree(text: Any, functions: dict[str, Callable[..., float]] | None = None,
+          across: bool = False) -> tuple[ast.Expression | None, str]:
     """The parsed formula, or ``(None, why it cannot be read)``. ``functions``: the functions it may call (default
-    :data:`FUNCTIONS`)."""
-    functions = FUNCTIONS if functions is None else functions
+    :data:`FUNCTIONS`). ``across``: it is a check's measure, which may also call mean() and sd() (:data:`ACROSS_TRIALS`);
+    no other reader accepts them."""
+    if functions is None:
+        functions = {**FUNCTIONS, **dict.fromkeys(ACROSS_TRIALS)} if across else FUNCTIONS
     text = str(text if text is not None else "").strip()
     if not text:
         return None, "it is empty"
@@ -248,15 +254,19 @@ def one_number_summary(text: Any) -> str:
 
 
 def problem(text: Any) -> str | None:
-    """Why ``text`` cannot be read as a formula, or ``None`` when it can."""
-    tree, why = _tree(text)
-    return None if tree is not None else why
+    """Why ``text`` cannot be read as a check's measure (a formula that may take mean() and sd() over the trials), or
+    ``None`` when it can."""
+    tree, why = _tree(text, across=True)
+    if tree is None:
+        return why
+    return across_problem(text) or None
 
 
-def names(text: Any, functions: dict[str, Callable[..., float]] | None = None) -> list[str]:
+def names(text: Any, functions: dict[str, Callable[..., float]] | None = None, *, across: bool = False) -> list[str]:
     """The names a formula takes from what the simulation returns (not its functions or constants), in order; empty
-    when it cannot be read (with ``functions``, the functions it may call, as :func:`evaluate` reads it)."""
-    tree, _ = _tree(text, functions)
+    when it cannot be read (with ``functions``, the functions it may call, as :func:`evaluate` reads it; ``across``: a
+    check's measure, whose mean() and sd() hold names too)."""
+    tree, _ = _tree(text, functions, across)
     if tree is None:
         return []
     calls = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
@@ -265,12 +275,82 @@ def names(text: Any, functions: dict[str, Callable[..., float]] | None = None) -
     return list(dict.fromkeys(n.id for n in found))
 
 
+def across_calls(text: Any) -> list[ast.Call]:
+    """The calls of ``mean()`` and ``sd()`` a check's measure makes, outermost first; empty when it makes none or cannot
+    be parsed."""
+    try:
+        tree = ast.parse(str(text if text is not None else "").strip(), mode="eval")
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return []
+    return [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            and n.func.id in ACROSS_TRIALS]
+
+
+def across_problem(text: Any) -> str:
+    """Why a measure's ``mean()`` / ``sd()`` cannot be worked out over the trials, or ``""``: each takes ONE argument, a
+    number or formula of names the simulation returns in one run (never another mean() or sd())."""
+    for call in across_calls(text):
+        shown = ast.unparse(call)
+        if len(call.args) != 1 or call.keywords or isinstance(call.args[0], ast.Starred):
+            return f"`{shown}` must take exactly one number or formula, the value of each trial"
+        if any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in ACROSS_TRIALS
+               for n in ast.walk(call.args[0])):
+            return f"`{shown}` holds another mean() or sd(): each is taken over the trials once"
+        inner = ast.unparse(call.args[0])
+        why = _tree(inner, FUNCTIONS)[1]
+        if why:
+            return f"the value of each trial in `{shown}` cannot be read ({why})"
+        if not names(inner, FUNCTIONS):
+            return f"`{shown}` takes nothing the simulation returns"
+    return ""
+
+
+@dataclass
+class AcrossForm:
+    """A measure with its ``mean()`` / ``sd()`` calls replaced by names (:func:`across_form`): ``text`` is the measure over
+    those names and ``aliases`` maps each to ``(operator, the formula of one trial it is taken of)``."""
+    text: str
+    aliases: dict[str, tuple[str, str]]
+
+    def rewrite(self, other: str) -> str:
+        """``other`` (a part of the same measure) with its calls replaced by the same names."""
+        return _across_rewrite(other, self.aliases)[0]
+
+
+def _across_rewrite(text: str, aliases: dict[str, tuple[str, str]]) -> tuple[str, dict[str, tuple[str, str]]]:
+    by_key = {v: k for k, v in aliases.items()}
+
+    class Swap(ast.NodeTransformer):
+        def visit_Call(self, node: ast.Call) -> ast.AST:  # noqa: N802
+            if isinstance(node.func, ast.Name) and node.func.id in ACROSS_TRIALS and len(node.args) == 1:
+                key = (node.func.id, ast.unparse(node.args[0]))
+                if key not in by_key:
+                    by_key[key] = f"__{key[0]}_{len(by_key)}__"
+                    aliases[by_key[key]] = key
+                return ast.copy_location(ast.Name(id=by_key[key], ctx=ast.Load()), node)
+            return self.generic_visit(node)
+
+    tree = Swap().visit(ast.parse(text.strip(), mode="eval"))
+    return ast.unparse(ast.fix_missing_locations(tree)), aliases
+
+
+def across_form(text: Any) -> AcrossForm | None:
+    """The measure ``text`` as an :class:`AcrossForm` when it takes ``mean()`` or ``sd()`` over the trials and reads without
+    a problem; ``None`` otherwise."""
+    text = str(text if text is not None else "").strip()
+    if not across_calls(text) or problem(text) is not None:
+        return None
+    aliases: dict[str, tuple[str, str]] = {}
+    rewritten, aliases = _across_rewrite(text, aliases)
+    return AcrossForm(text=rewritten, aliases=aliases)
+
+
 def read_names(measure: Any) -> list[str]:
     """The names a check's ``measure`` may be read from, in the order FI's readers try them: the measure itself, as ONE returned
     name (``trial_runner._check_from`` and ``mc_error.measure_names`` take it verbatim first, so a measure written as plain
     words, ``error rate``, or with a hyphen, ``p-value``, is a name too), then the names of the formula it is."""
     text = str(measure or "").strip()
-    return list(dict.fromkeys([text, *names(text)])) if text else []
+    return list(dict.fromkeys([text, *names(text, across=True)])) if text else []
 
 
 def is_name(text: Any) -> bool:
@@ -297,6 +377,8 @@ def evaluate(text: Any, values: dict[str, Any], *,
     functions = {**FUNCTIONS, **extra}
     tree, why = _tree(text, functions)
     if tree is None:
+        if across_calls(text):
+            return Evaluated(unreadable="it takes mean() or sd() over trials, which have no value on one run")
         return Evaluated(unreadable=why)
     def number(v: Any) -> bool:
         return isinstance(v, (int, float)) and not isinstance(v, bool)
@@ -525,7 +607,17 @@ def enforce(protocol: dict[str, Any] | None, *, fi_runs: bool = True,
                 f"`measure` with {LANGUAGE}."
             )
             continue
-        if measure and has_case and problem(measure) is None and not names(measure):
+        if measure and has_case and across_calls(measure):
+            from . import mc_error as _mc  # a late import: core.mc_error imports this module
+
+            if _mc.per_trial_flag(oracle) is True:
+                out.requests.append(
+                    f"The check {name!r} must hold in every single trial (`per_trial: true`), but its measure `{measure}` "
+                    "takes mean() or sd() over the trials, which one trial has no value for: either drop `per_trial` (the "
+                    "check is then about the trials together) or write `measure` for one trial."
+                )
+                continue
+        if measure and has_case and problem(measure) is None and not names(measure, across=True):
             out.requests.append(
                 f"The check {name!r} computes its number as `{measure}`, which takes nothing the simulation returns, so "
                 "it would pass or fail without the simulation: write `measure` from the names the simulation returns."
@@ -1276,7 +1368,7 @@ def unit_multiple(oracle: dict[str, Any], value: Any, *, broad: bool = True) -> 
 
 def _outer_call(text: str) -> str:
     """The function the whole formula is an argument of (``abs`` for ``abs(a - b)``), or ``""``."""
-    tree, _ = _tree(text)
+    tree, _ = _tree(text, across=True)
     body = tree.body if tree is not None else None
     return body.func.id if isinstance(body, ast.Call) and isinstance(body.func, ast.Name) else ""
 

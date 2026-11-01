@@ -1262,3 +1262,179 @@ def test_an_undecided_outcome_is_described_by_the_interval_that_decided_it() -> 
     assert "0.031" in words and "0.12" in words and "standard errors" not in words, words
     plain = {"trials": 200, "se": 0.02, "why": "time"}
     assert "standard errors" in mc.undecided_words(plain, 0.01)
+
+
+# --- a rate or a spread over the trials of a case: mean() and sd() ------------------------------------------------------
+#
+# A check on a quantity that exists only across trials (the share of trials whose interval held the truth, the standard
+# deviation of an estimate) was evaluated trial by trial and averaged: ``abs(covered - 0.95)`` came out 0.095 on a simulation
+# whose coverage is exactly 0.95. A measure written with ``mean(x)`` / ``sd(x)`` of the per-trial result is worked out once on
+# the trials together; every other measure is read as before. The numbers below are made up.
+
+
+def _trials(n: int, *, cover: float = 0.95, spread: float = 10.0, seed: int = 7) -> list[dict[str, float]]:
+    import random
+
+    rng = random.Random(seed)
+    return [{"hit": 1.0 if rng.random() < cover else 0.0, "est": rng.gauss(100.0, spread), "sd_ref": 10.0,
+             "k": 4.0 + rng.random(), "zero": 0.0} for _ in range(n)]
+
+
+def test_mean_and_sd_over_trials_are_the_numbers_of_all_the_trials_together() -> None:
+    import statistics
+
+    rows = _trials(400)
+    stat = mc.pooled_summary(rows, "sd(est)")
+    assert stat["value"] == pytest.approx(statistics.stdev(r["est"] for r in rows)), "the sample sd, n - 1"
+    assert stat["trials"] == 400 and stat["on"] == "means" and stat["across"] is True
+    stat = mc.pooled_summary(rows, "sd(est) / k")  # another name is its mean over the trials
+    assert stat["value"] == pytest.approx(statistics.stdev(r["est"] for r in rows) / statistics.fmean(r["k"] for r in rows))
+    assert mc.pooled_summary(rows, "mean(est / sd_ref)")["value"] == pytest.approx(
+        statistics.fmean(r["est"] / 10 for r in rows))
+    # The error is a bootstrap with a fixed seed: repeatable, and about s / sqrt(2 (n - 1)) for the sd of n draws.
+    again = mc.pooled_summary(rows, "sd(est)")["se"]
+    assert again == mc.pooled_summary(rows, "sd(est)")["se"] and again == pytest.approx(10 / (2 * 399) ** 0.5, rel=0.3)
+    assert mc.pooled_summary(rows[:1], "sd(est)")["value"] is None, "a standard deviation needs two trials"
+    assert mc.pooled_summary(rows, "abs(est - 100)") is None, "a measure without mean() / sd() is not pooled"
+
+
+def test_a_coverage_written_with_mean_passes_a_correct_simulation_and_the_per_trial_alias_fails_it() -> None:
+    rows = _trials(4000)
+    for r in rows:
+        r["covered"] = r["hit"]
+    alias = mc.statistic(rows, "abs(covered - 0.95)", (), 0.0, 0.03, (), repeated=True)
+    assert alias["value"] == pytest.approx(0.0955, abs=0.01) and mc.mean_verdict(alias, 0.0, 0.03) == "fail"
+    stat = mc.statistic(rows, "abs(mean(covered) - 0.95)", (), 0.0, 0.03, (), repeated=True)
+    assert stat["value"] < 0.01 and stat["across"] is True and stat["binary"] is True, "a 0/1 rate keeps its Wilson interval"
+    assert mc.mean_verdict(stat, 0.0, 0.03) == "pass"
+    low = mc.statistic(_trials(4000, cover=0.88), "abs(mean(hit) - 0.95)", (), 0.0, 0.03, (), repeated=True)
+    assert mc.mean_verdict(low, 0.0, 0.03) == "fail", "a coverage that is really 0.88 fails (a known positive)"
+
+
+@pytest.mark.parametrize("limit", [0.02, 0.06])
+def test_twenty_hits_in_twenty_trials_do_not_decide_a_coverage(limit: float) -> None:
+    rows = [{"hit": 1.0, "est": float(i)} for i in range(20)]  # random study, every trial a hit
+    stat = mc.statistic(rows, "abs(mean(hit) - 0.95)", (), 0.0, limit, (), repeated=True)
+    assert stat["binary"] is True and mc.mean_verdict(stat, 0.0, limit) is None
+    big = mc.statistic(rows * 25, "abs(mean(hit) - 0.95)", (), 0.0, 0.06, (), repeated=True)
+    assert mc.mean_verdict(big, 0.0, 0.06) == "pass", "enough hits do show it"
+
+
+def test_a_spread_passes_the_right_sd_and_fails_a_planted_wrong_one_and_waits_for_thirty_trials() -> None:
+    measure = "abs(sd(est) / sd_ref - 1)"
+    right = mc.statistic(_trials(3000), measure, (), 0.0, 0.1, (), repeated=True)
+    assert right["value"] < 0.05 and mc.mean_verdict(right, 0.0, 0.1) == "pass"
+    wrong = mc.statistic(_trials(3000, spread=14.0), measure, (), 0.0, 0.1, (), repeated=True)
+    assert wrong["value"] == pytest.approx(0.4, abs=0.06) and mc.mean_verdict(wrong, 0.0, 0.1) == "fail"
+    few = mc.statistic(_trials(20, spread=40.0), measure, (), 0.0, 0.1, (), repeated=True)
+    assert few["sd_small"] is True and mc.mean_verdict(few, 0.0, 0.1) is None, "no sd() is decided on under 30 trials"
+    enough = mc.statistic(_trials(30, spread=40.0), measure, (), 0.0, 0.1, (), repeated=True)
+    assert "sd_small" not in enough and mc.mean_verdict(enough, 0.0, 0.1) == "fail"
+    # The sd of a number that never moves in a random study says nothing, and is not decided on an error of 0.
+    flat = mc.statistic([{**r, "est": 5.0} for r in _trials(60)], measure, (), 0.0, 0.1, (), repeated=True)
+    assert flat["se"] is None and mc.mean_verdict(flat, 0.0, 0.1) is None
+
+
+def test_an_exact_invariant_written_with_mean_passes_and_a_broken_one_fails() -> None:
+    rows = _trials(40)  # random study; the drift is exactly 0 in every trial
+    stat = mc.statistic(rows, "abs(mean(zero))", (), 0.0, 1e-6, (), repeated=True)
+    assert stat["value"] == 0.0 and not stat.get("binary") and stat["se"] == 0.0
+    assert mc.mean_verdict(stat, 0.0, 1e-6) == "pass"
+    broken = mc.statistic([{**r, "zero": 1.0} for r in rows], "abs(mean(zero))", (), 0.0, 1e-6, (), repeated=True)
+    assert mc.mean_verdict(broken, 0.0, 1e-6) == "fail"
+    # An exact constant that is not 0 (a mean of an integer count) is a constant as well.
+    count = mc.statistic([{**r, "n": 7.0} for r in rows], "abs(mean(n) - 7)", (), 0.0, 1e-6, (), repeated=True)
+    assert mc.mean_verdict(count, 0.0, 1e-6) == "pass"
+
+
+def test_measures_without_mean_or_sd_give_exactly_what_they_gave_before() -> None:
+    """``tests/fixtures/mc_pooled/per_trial_before.json`` is what the code before this change returned for each of these
+    (statistic, verdict, trials wanted, names read) on the same trials: it came from a ``git archive`` of ``core/`` at
+    commit df3ca309 run on exactly these cases, so it can be regenerated from that commit."""
+    rows = _trials(50)
+    cases = [("abs(est - 100)", (), 0.0, 5.0, (), True), ("est", (), 100.0, 5.0, (), True),
+             ("est", ("est",), 100.0, 5.0, (), True), ("max(0, est - 100)", ("est",), 0.0, 5.0, (), True),
+             ("abs(est / sd_ref - 10)", (), 0.0, 0.5, (), True), ("est * k", ("est", "k"), 400.0, 10.0, (), None),
+             ("hit", (), 0.95, 0.05, (), True), ("abs(hit - 0.95)", (), 0.0, 0.05, ("hit",), True),
+             ("hit", (), 0.95, 0.05, ("hit",), False), ("zero", (), 0.0, 1e-6, (), True),
+             ("abs(zero)", (), 0.0, 0.0, (), True), ("abs(zero)", (), 0.0, 1e-6, ("zero",), True),
+             ("sd_ref", (), 10.0, 0.1, (), None)]
+    now = []
+    for measure, means, expected, limit, props, rep in cases:
+        st = mc.statistic(rows, measure, means, expected, limit, props, repeated=rep)
+        now.append({"measure": measure, "stat": st, "verdict": mc.mean_verdict(st, expected, limit) if st else None,
+                    "want": mc.trials_wanted(st, expected, limit) if st else None,
+                    "names": mc.measure_names(measure, rows[0])})
+    before = json.loads((Path(__file__).parent / "fixtures" / "mc_pooled" / "per_trial_before.json").read_text(encoding="utf-8"))
+    assert json.loads(json.dumps(now)) == before
+
+
+def test_mean_and_sd_are_read_in_a_measure_and_in_no_other_formula() -> None:
+    from core import oracle_forms as forms
+
+    assert forms.problem("abs(mean(hit) - 0.95)") is None
+    assert forms.names("abs(sd(est) / sd_ref - 1)", across=True) == ["est", "sd_ref"]
+    assert forms.names("abs(mean(hit))") == [], "another reader of formulas never sees them"
+    assert forms.formula_problem("mean(x)") and forms.evaluate("mean(x)", {"x": 1.0}).unreadable
+    assert "another mean() or sd()" in forms.problem("mean(sd(x))") and "exactly one" in forms.problem("sd(a, b)")
+    assert "takes nothing the simulation returns" in forms.problem("mean(2)")
+    assert forms.names("sd * 2") == ["sd"] and forms.across_form("sd * 2") is None, "a setting called sd stays a name"
+
+
+def test_a_per_trial_check_with_mean_or_sd_is_refused_at_plan_time_with_the_reason() -> None:
+    from core import oracle_forms as forms
+
+    base = {"name": "cov", "kind": "special_case", "case": {"a": 1}, "expected": 0, "tolerance": 0.03,
+            "measure": "abs(mean(hit) - 0.95)", "reference": "derivation: x"}
+    asked = forms.enforce({"oracles": [{**base, "per_trial": True}]}).requests
+    assert len(asked) == 1 and "per_trial" in asked[0] and "mean() or sd()" in asked[0] and "'cov'" in asked[0]
+    for ok in ({**base}, {**base, "per_trial": False}, {**base, "measure": "abs(hit - 0.95)", "per_trial": True}):
+        assert not forms.enforce({"oracles": [ok]}).requests, ok
+
+
+GAUGE_SIM = '''
+import random
+
+
+def run_trial(cell: dict, trial_id: int, seed: int) -> dict:
+    rng = random.Random(seed)
+    return {"hit": 1.0 if rng.random() < float(cell.get("cover", 0.95)) else 0.0,
+            "est": rng.gauss(100.0, float(cell.get("spread", 10.0))), "sd_ref": 10.0, "drift": 0.0}
+'''
+
+
+def test_the_engine_decides_coverage_spread_and_invariant_checks_on_the_trials_of_a_real_simulation(tmp_path: Path) -> None:
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(GAUGE_SIM, encoding="utf-8")
+    coverage = {"name": "coverage", "kind": "special_case", "case": {"cover": 0.95}, "expected": 0, "tolerance": 0.04,
+                "measure": "abs(mean(hit) - 0.95)", "reference": "derivation: by construction"}
+    spread = {"name": "spread", "kind": "special_case", "case": {"spread": 10.0}, "expected": 0, "tolerance": 0.1,
+              "measure": "abs(sd(est) / sd_ref - 1)", "reference": "derivation: by construction"}
+    drift = {"name": "drift", "kind": "invariant", "case": {}, "expected": 0, "tolerance": 1e-9,
+             "measure": "abs(mean(drift))", "reference": "derivation: by construction"}
+    wrong = {**spread, "name": "wrong_spread", "case": {"spread": 15.0}}
+    low = {**coverage, "name": "low_coverage", "case": {"cover": 0.85}}
+    oracles = [coverage, spread, drift, wrong, low]
+    checks, problems, _t = asyncio.run(trial_runner.measure_oracles(
+        SharedInterpreterExecutor(python_version="3.11"), sys.executable, root, "code/simulate.py", oracles,
+        timeout_s=120, repeated=True))
+    assert not problems, problems
+    judged = {j["name"]: j for j in oc.judged(oracles, {"checks": checks, "engine_measured": True})}
+    assert [judged[n]["passed_by_engine"] for n in ("coverage", "spread", "drift", "wrong_spread", "low_coverage")] == [
+        True, True, True, False, False], judged
+    assert judged["spread"]["mc"]["trials"] >= mc.SD_MIN_TRIALS
+
+
+def test_a_measure_with_mean_names_what_the_simulation_must_return_and_is_not_asked_how_it_holds() -> None:
+    check, problem = trial_runner._check_from("cov", "abs(mean(covered) - 0.95)", {"hit": 1.0})
+    assert check is None and "'covered'" in problem and "did not return" in problem and "cannot be read" not in problem
+    check, problem = trial_runner._check_from("cov", "abs(mean(hit) - 0.95)", {"hit": 1.0})
+    assert check is None and "run_trial" in problem
+    cases = [{"name": "cov", "case": {"a": 1}, "measure": "abs(mean(hit) - 0.95)"},
+             {"name": "rule", "case": {"a": 2}, "measure": "abs(hit - 0.95)"}]
+    assert mc.unsaid_reading({"runs_per_setting": 500, "oracles": cases}) == ["rule"], "a mean over trials is not asked"
+    # a constant beside the rate does not take the 0/1 rate off its interval
+    rows = [{"hit": 1.0, "target": 0.95, "est": float(i)} for i in range(20)]
+    stat = mc.statistic(rows, "abs(mean(hit) - target)", (), 0.0, 0.02, (), repeated=True)
+    assert stat["binary"] is True and mc.mean_verdict(stat, 0.0, 0.02) is None

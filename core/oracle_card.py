@@ -188,7 +188,7 @@ def locate(script: Path, quest_root: Path, oracle: dict[str, Any], *, trial: boo
 
     if trial and own is not None:
         measure = own[1]
-        wanted = set([measure] if _forms.is_name(measure) else _forms.names(measure))
+        wanted = set([measure] if _forms.is_name(measure) else _forms.names(measure, across=True))
         have = {e for e in ("run_trial", "run_cell") if e in functions}
         entry = _entry_for(script, oracle) if have else None
         if entry is not None and wanted:

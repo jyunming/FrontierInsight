@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import ast
 import math
+import random
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +67,13 @@ PILOT_TRIALS = 20
 EVERY_TRIALS = 10 * PILOT_TRIALS
 #: Fewer trials than this give a spread too rough to decide anything by.
 MIN_TRIALS = 10
+#: The fixed seed of the bootstrap behind the error of a number taken over the trials together (:func:`pooled_summary`):
+#: the same trials always give the same error, so a verdict does not move between two runs of the checks.
+BOOTSTRAP_SEED = 20251101
+#: How many resamples of the trials that error is read from (fewer for very many trials).
+BOOTSTRAP_MAX, BOOTSTRAP_MIN = 300, 100
+#: A check with an sd() is not decided on fewer trials than this: the bootstrap error of a standard deviation is biased low.
+SD_MIN_TRIALS = 30
 #: The most trials FI runs for one check.
 MAX_TRIALS = 20000
 #: The share of a check's time the first batch may use (the rest is for the trials the spread says are needed).
@@ -140,7 +148,8 @@ ASKED_KEY = "reading_asked"
 def unsaid_reading(protocol: dict[str, Any] | None) -> list[str]:
     """The checks whose reading the plan's model has not been asked: every check FI can run on a case of its own, when the
     study repeats its trials (or the plan does not say it does not), until the focused question (``PART_RULES["per_trial"]``
-    in core/plan.py) has been answered for it (:data:`ASKED_KEY`). A ``per_trial`` the plan volunteered while writing the
+    in core/plan.py) has been answered for it (:data:`ASKED_KEY`); a check whose measure takes mean() or sd() over the trials is
+    about the trials together and is not asked. A ``per_trial`` the plan volunteered while writing the
     plan is not an answer: asked one check at a time, the model reads the check's own definition (6 plans, 53 checks: all
     answered right), while volunteered beside everything else it got 3 of 53 wrong. Whether a check holds in every single
     trial or only on average is a fact about the science, so FI asks once and never guesses it; a check still unsaid is
@@ -149,7 +158,7 @@ def unsaid_reading(protocol: dict[str, Any] | None) -> list[str]:
         return []
     return [str(o["name"]).strip() for o in protocol.get("oracles") or []
             if isinstance(o, dict) and str(o.get("name") or "").strip() and _oracle.case_of(o) is not None
-            and not o.get(ASKED_KEY)]
+            and not o.get(ASKED_KEY) and not _forms.across_calls(_oracle.case_of(o)[1])]
 
 
 def reads_a_mean(oracle: dict[str, Any]) -> bool:
@@ -167,7 +176,7 @@ def measure_names(measure: str, returned: dict[str, Any] | None = None) -> list[
     returns it under that exact name, else the formula's names."""
     if returned is not None and measure in returned:
         return [measure]
-    return _forms.names(measure)
+    return _forms.names(measure, across=True)  # (a measure with mean() / sd() over trials: the names inside them too)
 
 
 def inner(measure: str) -> tuple[str, str]:
@@ -311,6 +320,128 @@ def summarise(rows: list[dict[str, Any]], measure: str) -> dict[str, Any] | None
     return out
 
 
+def _spread(xs: list[float]) -> float | None:
+    """The sample standard deviation (n - 1) of ``xs``; ``None`` with fewer than two."""
+    n = len(xs)
+    if n < 2:
+        return None
+    m = math.fsum(xs) / n
+    return math.sqrt(math.fsum((x - m) ** 2 for x in xs) / (n - 1))
+
+
+def pooled_summary(rows: list[dict[str, Any]], measure: str, expected: Any = None, limit: Any = None,
+                   proportions: Any = (), repeated: bool | None = None) -> dict[str, Any] | None:
+    """What the trials ``rows`` say about a measure that takes ``mean()`` or ``sd()`` over the trials
+    (:func:`core.oracle_forms.across_form`), such as ``abs(mean(hit) - 0.95)`` (a coverage) or ``abs(sd(est) / sd_ref - 1)``
+    (a spread). The measure is worked out once on all the trials together: each ``mean(x)`` and ``sd(x)`` is taken over the
+    trials of the value ``x`` gives in each (``sd`` with n - 1) and any other name is its mean over the trials. Fields as
+    :func:`summarise`, plus ``across: True``. The error is, for the mean of a 0/1 outcome of a random simulation that varies
+    (or that the protocol declares a proportion), its Wilson interval mapped through the formula (:func:`statistic`'s rule for
+    a 0/1 outcome); else a bootstrap over the trials with a fixed seed, never 0 for a random study: when every trial gives the
+    same value the check is a constant (an exact invariant such as ``abs(mean(d))`` with ``d`` always 0, decided on that
+    value), except that an ``sd()`` of one is not decided. ``sd_small`` marks fewer than :data:`SD_MIN_TRIALS` trials with an
+    sd(). ``None`` when the measure takes nothing over trials or no trial has its names."""
+    measure = str(measure or "").strip()
+    form = _forms.across_form(measure)
+    if form is None:
+        return None
+    bare = [n for n in _forms.names(form.text) if n not in form.aliases]
+    columns: dict[str, list[float]] = {name: [] for name in [*form.aliases, *bare]}
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        numeric = {k: float(v) for k, v in r.items() if _number(v)}
+        got: dict[str, float] = {}
+        for alias, (_op, arg) in form.aliases.items():
+            v = numeric.get(arg) if _forms.is_name(arg) else _forms.evaluate(arg, numeric).value
+            if v is None or not math.isfinite(v):
+                break
+            got[alias] = v
+        else:
+            if all(name in numeric for name in bare):
+                for name, v in {**got, **{name: numeric[name] for name in bare}}.items():
+                    columns[name].append(v)
+    n = len(columns[next(iter(columns))])
+    if n == 0:
+        return None
+    inner_text, shape = inner(measure)
+    inner_form = form.rewrite(inner_text)
+
+    def taken(indexes: list[int] | range) -> dict[str, float] | None:
+        env: dict[str, float] = {}
+        for name, col in columns.items():
+            xs = [col[i] for i in indexes]
+            if name in form.aliases and form.aliases[name][0] == "sd":
+                got = _spread(xs)
+                if got is None:
+                    return None
+                env[name] = got
+            else:
+                env[name] = math.fsum(xs) / len(xs)
+        return env
+
+    flat = all(_same(min(col), max(col)) for col in columns.values())
+    sd_used = any(op == "sd" for op, _arg in form.aliases.values())
+    out: dict[str, Any] = {"on": "means", "trials": n, "dropped": len(rows) - n, "inner": inner_text, "shape": shape,
+                           "varies": None if n < 2 else True, "se": None, "across": True}
+    if sd_used and n < SD_MIN_TRIALS:
+        out["sd_small"] = True
+    everyone = taken(range(n))
+    if everyone is None:  # an sd() of fewer than two trials: not a fault, only too few trials
+        out["value"] = out["inner_mean"] = None
+        out["problem"] = "an sd() needs at least two trials that gave a number"
+        return out
+    out["means"] = {k: v for k, v in everyone.items() if k not in form.aliases}
+    got = _forms.evaluate(form.text, everyone)
+    out["value"] = got.value
+    if got.value is None:
+        out["problem"] = got.problem or "the formula gives no number on the trials together"
+    centre = _forms.evaluate(inner_form, everyone).value
+    out["inner_mean"] = centre
+    if n < 2 or centre is None:
+        return out
+    # A rate of 0/1 outcomes of a random simulation is judged on its binomial interval, not on a spread of the outcomes.
+    random_study = not flat or (repeated if repeated is not None else returned_varies(rows))
+    only = next(iter(form.aliases)) if len(form.aliases) == 1 else ""
+    if (only and form.aliases[only][0] == "mean" and _forms.is_name(form.aliases[only][1])
+            and all(v in (0.0, 1.0) for v in columns[only]) and random_study
+            and not (_number(limit) and float(limit) == 0.0)):
+        gap = None
+        if _number(expected):
+            shown, shape_now = _centre(out, float(expected))
+            if shown is not None:
+                gap = shown if shape_now == "bound" else abs(shown) if shape_now else abs(shown - float(expected))
+        declared = form.aliases[only][1] in {str(x) for x in proportions or ()}
+        if not flat or declared or gap is None or gap > 0:
+            lo, hi = wilson(int(sum(columns[only])), n)
+
+            def reach(text: str) -> tuple[float, float] | None:
+                found = [v for v in (_forms.evaluate(text, {**everyone, only: lo + (hi - lo) * i / 100}).value
+                                     for i in range(101)) if v is not None]
+                return (min(found), max(found)) if found else None
+
+            whole, inside = reach(form.text), reach(inner_form)
+            if whole is not None and inside is not None:
+                out.update(binary=True, successes=int(sum(columns[only])), interval=list(whole),
+                           se=(inside[1] - inside[0]) / (2 * BAND_SE))
+                return out
+    if flat:
+        # Every trial gives the same value: a constant, decided on that value, as a check that does not move is. Only a
+        # spread of it says nothing in a random study.
+        out["se"] = None if sd_used and random_study else 0.0
+        return out
+    rng = random.Random(BOOTSTRAP_SEED)
+    seen: list[float] = []
+    for _ in range(max(BOOTSTRAP_MIN, min(BOOTSTRAP_MAX, 2_000_000 // n))):
+        env = taken(rng.choices(range(n), k=n))
+        v = _forms.evaluate(inner_form, env).value if env is not None else None
+        if v is not None:
+            seen.append(v)
+    se = _spread(seen) if len(seen) >= 2 else None
+    out["se"] = se if se else None  # an error of exactly 0 from a random study decides nothing
+    return out
+
+
 def statistic(rows: list[dict[str, Any]], measure: str, means: Any = (), expected: Any = None, limit: Any = None,
               proportions: Any = (), *, repeated: bool | None = None) -> dict[str, Any] | None:
     """The mean check's number and its error (see the module docstring): the formula on the names' means when every name
@@ -321,6 +452,9 @@ def statistic(rows: list[dict[str, Any]], measure: str, means: Any = (), expecte
     first = next((r for r in rows if isinstance(r, dict)), None)
     if first is None:
         return None
+    if measure not in first and _forms.across_form(measure) is not None:
+        # mean() / sd() over the trials: the measure is worked out on all the trials together, never trial by trial.
+        return pooled_summary(rows, measure, expected, limit, proportions, repeated)
     used = measure_names(measure, first)
     stat = summarise(rows, measure) if used and set(used) <= set(means or ()) else per_trial_summary(rows, measure)
     if stat is None:
@@ -434,7 +568,7 @@ def mean_verdict(stat: dict[str, Any], expected: float | None, limit: float | No
     se, n = stat.get("se"), int(stat.get("trials") or 0)
     if centre is None or not _number(se):
         return None
-    if n < MIN_TRIALS:  # fewer trials than this show neither a spread nor a constant
+    if n < MIN_TRIALS or stat.get("sd_small"):  # too few trials to show a spread or a constant (an sd(): see SD_MIN_TRIALS)
         return None
     if stat.get("binary"):
         return binomial_verdict(stat, float(expected), float(limit))

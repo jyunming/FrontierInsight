@@ -2893,6 +2893,14 @@ def _check_from(name: str, measure: str, values: dict[str, Any]) -> tuple[dict[s
         # A number that takes nothing from the simulation (`0`, `pi - pi`) is not a measurement of it.
         return None, (f"the oracle {name!r}: its number is computed as `{measure}`, which takes nothing the "
                       "simulation returns, so it is not a measurement of the simulation")
+    if _forms.across_calls(measure) and (lacking := [n for n in _forms.names(measure, across=True) if n not in values]):
+        # mean() / sd() over the trials: it is the names inside them that the simulation must return.
+        return None, (f"the oracle {name!r}: its number is computed as `{measure}`, from "
+                      f"{', '.join(repr(n) for n in lacking)}, which the simulation did not return (it returned "
+                      f"{returned}; the simulation function must return every name the formula uses)")
+    if _forms.across_calls(measure):
+        return None, (f"the oracle {name!r}: its measure `{measure}` takes mean() or sd() over trials, which needs the "
+                      "simulation to define run_trial (one trial of a random simulation) and the check to run on trials")
     if got.unreadable or (got.missing and _forms.is_name(measure)):
         return None, (
             f"the oracle {name!r}: the simulation returned {returned} but the oracle measures {measure!r} (the "
