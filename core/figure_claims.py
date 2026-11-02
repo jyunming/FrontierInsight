@@ -763,14 +763,16 @@ def menu(calls: Any, plan: dict[str, Any] | None = None, fmt: Fmt = _default_fmt
 
 #: A closing "(Figure N)" is a pointer by position: an opening bracket before the mention, the closing one after it.
 _OPEN_PAREN = re.compile(r"\(\s*$")
-_CLOSE_PAREN = re.compile(r"^\s*\)[\s.,;:!?]*$")
+_CLOSE_PAREN = re.compile(r"^\s*\)[\s.,;:!?*]*$")
 _TOKEN_AT = re.compile(r"\x00(\d+)\x00\.?")
 _OWN_POINTER = re.compile(r"(?:\*\*)?[ \t]*\([ \t]*")
 #: What joins one more figure number to a pointer: "(Figures 2 and 3)", "(Figures 2, 3)", "(Figures 2-4)".
 _LIST_JOIN = re.compile(r"\s*(?:,|and|&|[-\u2013])\s*", re.IGNORECASE)
 _BARE_NUMBER = re.compile(r"\d+")
 #: An image embed is its own span, never part of a sentence: it is masked with a \x01 token (FI's marks use \x00).
-_IMAGE_EMBED = re.compile(r"!\[[^\]\n]*\]\([^)\n]*\)")
+#: ``![alt](target "title")``: the alt may hold one level of brackets and the target one level of parentheses, as Markdown reads it.
+_IMAGE_EMBED = re.compile(r"!\[(?:[^\[\]\n]|\[[^\[\]\n]*\])*\]\((?:[^()\n]|\([^()\n]*\))*\)")
+_TOKEN_AT_ANY = re.compile(r"\x00(\d+)\x00")
 _IMAGE_TOKEN = re.compile(r"\x01\d+\x01")
 _PERIOD_SPACE = re.compile(r"\. |[.!?]\*\*(?= )")
 #: A bold span that opens a sentence.
@@ -842,12 +844,17 @@ def _lead_heading(sentence: str, mention_re: re.Pattern[str]) -> int:
     lead = _LEAD_BOLD.match(sentence)
     if lead is None or "\x00" in lead.group(1):
         return 0
-    inner = lead.group(1).strip().rstrip(".:;,!? \t")
+    raw = lead.group(1).strip()
+    after = sentence[lead.end():lead.end() + 1]
+    if not (raw.endswith((".", ":")) or after in (".", ":")):
+        return 0  # no label closing mark: "**Figure 1** shows ..." is a sentence with a bold word, not a heading
+    reach = lead.end() + (1 if after in (".", ":") and not raw.endswith((".", ":")) else 0)
+    inner = raw.rstrip(".:;,!? \t")
     if mention_re.search(inner) is None:
-        return lead.end()
+        return reach
     left = mention_re.sub(" ", inner)
     left = _LIST_JOIN.sub(" ", _BARE_NUMBER.sub(" ", left))
-    return lead.end() if not re.sub(r"[\s.,;:&\-\u2013]+", "", left) else 0
+    return reach if not re.sub(r"[\s.,;:&\-\u2013]+", "", left) else 0
 
 
 def _unfilled_entries(marks: list[re.Match[str]], which: list[int], sentence: str) -> list[dict[str, Any]]:
@@ -963,6 +970,8 @@ def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, 
             continue
         if fence is not None or _facts._NOT_PROSE.match(line):
             continue
+        if "![" in line:  # every embed that parses is masked above: a "![" left is one that does not, and its line is left as it is
+            continue
         at_claims = [sp[0] - line_start for i, sp in enumerate(spans) if kinds[i] == "claim"
                      and line_start <= sp[0] < line_start + len(line)]
         for pos in sorted({f.start() for f in mention_re.finditer(line)} | set(at_claims)):
@@ -978,8 +987,8 @@ def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, 
                     continue
                 lead = None
                 seen.add((a, b))
-            elif lead and "\x00" not in lead.group(0):
-                lead = None  # any other bold span is part of the sentence
+            elif lead and not any(kinds[int(n)] == "claim" for n in _TOKEN_AT_ANY.findall(lead.group(0))):
+                lead = None  # any other bold span (a result mark in it too) is part of the sentence: judged and cut with it
             hits = [h for h in mention_re.finditer(flat, a, b)]
             body_at = a + (lead.end() if lead else 0)
             own = [i for i, sp in enumerate(spans) if kinds[i] == "claim" and body_at <= sp[0] and sp[1] <= b]

@@ -761,7 +761,7 @@ def test_the_plain_false_sentence_is_removed_as_before():
 
 
 def test_a_bare_figure_label_heading_stays_and_is_not_on_record():
-    for head in ("**Figure 1.**", "**Fig. 2**", "**Figures 1 and 2.**"):
+    for head in ("**Figure 1.**", "**Fig. 2.**", "**Figures 1 and 2.**"):
         md = f"{head} The study ran at several sizes.\n"
         assert _rule(md, {"fig_a.png": 1, "fig_b.png": 2}, {1: {"signal"}, 2: {"signal"}}) == (md, []), head
     out, taken = _rule("**Figure 1.** Figure 1 shows a rise. Next.\n")
@@ -788,3 +788,46 @@ def test_an_image_embed_inside_a_line_is_never_judged_and_never_cut():
     out, taken = _rule(f"Intro. {emb} Figure 1 shows a rise. Next.\n")
     assert emb in out and "shows a rise. Next" not in out and "Next." in out
     assert [t["sentence"] for t in taken] == ["Figure 1 shows a rise."]
+
+
+def test_a_bold_label_is_a_heading_only_when_it_closes_with_a_full_stop_or_colon():
+    for head in ("**Figure 1.**", "**Figure 1:**", "**Results.**", "**Figure 1**."):
+        md = f"{head} The study ran at several sizes.\n"
+        assert _rule(md) == (md, []), head
+    out, taken = _rule("Intro. **Figure 1** shows a rise. Next.\n")
+    assert out == "Intro. Next.\n" and [t["sentence"] for t in taken] == ["**Figure 1** shows a rise."]
+
+
+def test_a_bold_span_holding_a_result_mark_is_judged_and_cut_with_its_sentence():
+    wrong = f"Intro. **The signal is {_v('other')} here (Figure 1).** Next.\n"
+    out, taken = _rule(wrong)
+    assert out == "Intro. Next.\n" and len(taken) == 1
+    out, taken = _rule(f"Intro. **The signal is {_v('other')} here** and Figure 1 shows it. Next.\n")
+    assert out == "Intro. Next.\n"
+    ok = f"Intro. **The signal is {_v('signal')} here (Figure 1).** Next.\n"
+    assert _rule(ok) == (ok, [])
+
+
+def test_what_the_record_lists_as_removed_is_gone_from_the_output():
+    cases = [f"Intro. **The signal is {_v('other')} here (Figure 1).** Next.\n",
+             "Intro. **Figure 1 shows the energy drifting upward**. More words here.\n",
+             "Intro. **Figure 1 shows a rise.** More words here.\n",
+             f"**Spread.** ![**Figure 1.** cap](f/x.png) Figure 1 shows a rise. Next.\n",
+             f"**A.** {_v('other')} in Figure 1 and **bold** words. Next.\n"]
+    for md in cases:
+        out, taken = _rule(md)
+        for t in taken:
+            assert t["sentence"] not in fc._values.without_marks(out), (md, t)
+
+
+def test_an_image_embed_with_parentheses_in_its_target_or_a_title_is_whole():
+    for emb in ("![Figure 1 plot](figures/a_(b).png)", '![cap](figures/x.png "Figure 1 title")',
+                "![a [Figure 1] b](figures/x.png)"):
+        md = f"**Spread.** {emb} Figure 1 shows a rise. Next.\n"
+        out, taken = _rule(md)
+        assert emb in out and out.endswith("Next.\n") and len(taken) == 1, emb
+
+
+def test_a_line_with_an_embed_that_cannot_be_parsed_is_left_alone():
+    md = "Some words. ![cap](figures/x.png Figure 1 shows a rise. Next.\n"
+    assert _rule(md) == (md, [])
