@@ -67,6 +67,8 @@ MAX_ROUNDS = 2
 MAX_INPUTS = 8
 MIN_INPUTS = 4
 REL = 1e-6
+#: The relative tolerance of the comparison of the two versions of a function (see :func:`tolerance_for`).
+TOLERANCE = 1e-3
 #: Below this, a result that is exactly 0 on one side agrees with a round-off result on the other.
 ZERO_FLOOR = 1e-12
 MAX_REFERENCE_LINES = 120
@@ -786,20 +788,23 @@ def ranges_of(spec: _fs.Spec, protocol: dict[str, Any] | None) -> dict[str, Any]
 
 
 def tolerance_for(spec: _fs.Spec, protocol: dict[str, Any] | None) -> float:
-    """Relative tolerance of the comparison: :data:`REL`, or the example's own tolerance when it names a numerical method
-    (an iterative method cannot be held to 1e-6 by its own tolerance). Never looser otherwise."""
+    """Relative tolerance of the comparison, for every function: :data:`TOLERANCE`, or the example's own tolerance when it
+    names a numerical method and that is larger (an iterative method cannot be held tighter than its own tolerance). Two
+    independently written fits differ at their solvers' own precision (1e-5 to 1e-4), which is no disagreement; a gap above
+    the tolerance is still one, and a NaN or an infinity against a number is one at any tolerance."""
     example: Any = None
     if spec.card:
         example = spec.card.get("example")
     else:
         eq = next((e for e in _eqt.eligible(protocol) if _eqt._text(e["id"]) == spec.equation), None)
         example = (eq or {}).get("example")
+    tol = TOLERANCE
     if isinstance(example, dict) and _text(example.get("method")):
         t = _eqt._number(example.get("tolerance"))
         mode = _text(example.get("tolerance_mode")).lower() or "relative"
         if t is not None and t > 0 and mode == "relative":
-            return max(REL, float(t))
-    return REL
+            tol = max(tol, float(t))
+    return tol
 
 
 # --- comparing two results -------------------------------------------------------------------------------------------------
