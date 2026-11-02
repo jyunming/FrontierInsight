@@ -785,21 +785,40 @@ def ranges_of(spec: _fs.Spec, protocol: dict[str, Any] | None) -> dict[str, Any]
     return {}
 
 
+def plan_precision(protocol: dict[str, Any] | None) -> float | None:
+    """The relative precision the plan asks for, from FI's own record of it: ``protocol.precision.target_half_width`` when the
+    metric it is on is a proportion (a quantity between 0 and 1, so the half-width is also a bound on a relative gap). A mean's
+    half-width is in the metric's own units and gives no relative scale, so it gives ``None``, as does a plan with no target."""
+    from . import run_estimate as _run_estimate
+
+    if not isinstance(protocol, dict) or not isinstance(protocol.get("precision"), dict):
+        return None
+    target = _eqt._number(protocol["precision"].get("target_half_width"))
+    _on, kind = _run_estimate.precision_metric(protocol)
+    if target is None or kind != "proportion" or not 0 < float(target) < 1:
+        return None
+    return float(target)
+
+
 def tolerance_for(spec: _fs.Spec, protocol: dict[str, Any] | None) -> float:
-    """Relative tolerance of the comparison: :data:`REL`, or the example's own tolerance when it names a numerical method
-    (an iterative method cannot be held to 1e-6 by its own tolerance). Never looser otherwise."""
+    """Relative tolerance of the comparison, for every function: the precision the plan asks for (:func:`plan_precision`),
+    or the example's own tolerance when it names a numerical method (an iterative method cannot be held to 1e-6 by its own
+    tolerance); the larger of the two when both are stated. :data:`REL` is the floor, used when the plan states neither. Two
+    versions that differ by less than the precision the study asks for cannot change what it reports, and a gap above it is
+    still a disagreement."""
     example: Any = None
     if spec.card:
         example = spec.card.get("example")
     else:
         eq = next((e for e in _eqt.eligible(protocol) if _eqt._text(e["id"]) == spec.equation), None)
         example = (eq or {}).get("example")
+    tol = plan_precision(protocol) or REL
     if isinstance(example, dict) and _text(example.get("method")):
         t = _eqt._number(example.get("tolerance"))
         mode = _text(example.get("tolerance_mode")).lower() or "relative"
         if t is not None and t > 0 and mode == "relative":
-            return max(REL, float(t))
-    return REL
+            tol = max(tol, float(t))
+    return max(REL, tol)
 
 
 # --- comparing two results -------------------------------------------------------------------------------------------------
