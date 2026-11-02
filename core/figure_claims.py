@@ -772,7 +772,6 @@ _BARE_NUMBER = re.compile(r"\d+")
 #: An image embed is its own span, never part of a sentence: it is masked with a \x01 token (FI's marks use \x00).
 #: ``![alt](target "title")``: the alt may hold one level of brackets and the target one level of parentheses, as Markdown reads it.
 _IMAGE_EMBED = re.compile(r"!\[(?:[^\[\]\n]|\[[^\[\]\n]*\])*\]\((?:[^()\n]|\([^()\n]*\))*\)")
-_TOKEN_AT_ANY = re.compile(r"\x00(\d+)\x00")
 _IMAGE_TOKEN = re.compile(r"\x01\d+\x01")
 _PERIOD_SPACE = re.compile(r"\. |[.!?]\*\*(?= )")
 #: A bold span that opens a sentence.
@@ -987,8 +986,10 @@ def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, 
                     continue
                 lead = None
                 seen.add((a, b))
-            elif lead and not any(kinds[int(n)] == "claim" for n in _TOKEN_AT_ANY.findall(lead.group(0))):
-                lead = None  # any other bold span (a result mark in it too) is part of the sentence: judged and cut with it
+            else:
+                # any other bold span (a result mark or FI's own statement in it too) is part of the sentence: judged and cut
+                # with it, so FI's statement inside it is kept by the rule below and only the writer's words around it go
+                lead = None
             hits = [h for h in mention_re.finditer(flat, a, b)]
             body_at = a + (lead.end() if lead else 0)
             own = [i for i, sp in enumerate(spans) if kinds[i] == "claim" and body_at <= sp[0] and sp[1] <= b]

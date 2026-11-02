@@ -813,11 +813,24 @@ def test_what_the_record_lists_as_removed_is_gone_from_the_output():
              "Intro. **Figure 1 shows the energy drifting upward**. More words here.\n",
              "Intro. **Figure 1 shows a rise.** More words here.\n",
              f"**Spread.** ![**Figure 1.** cap](f/x.png) Figure 1 shows a rise. Next.\n",
-             f"**A.** {_v('other')} in Figure 1 and **bold** words. Next.\n"]
+             f"**A.** {_v('other')} in Figure 1 and **bold** words. Next.\n",
+             f"Intro. **{_claim()} plus free words** and Figure 1 rises wrongly. Next.\n",
+             f"Intro. **{_claim()} (Figure 1)** and bad extra words. Next.\n",
+             f"Intro. **{_claim()}** and Figure 1 rises wrongly. Next.\n"]
     for md in cases:
         out, taken = _rule(md)
         for t in taken:
             assert t["sentence"] not in fc._values.without_marks(out), (md, t)
+
+
+def test_fis_own_statement_in_a_bold_lead_is_kept_and_the_writers_words_in_it_go():
+    for md in (f"Intro. **{_claim()} plus free words** and Figure 1 rises wrongly. Next.\n",
+               f"Intro. **{_claim()} (Figure 1)** and bad extra words. Next.\n"):
+        out, taken = _rule(md)
+        assert _claim() in out and "free words" not in out and "rises wrongly" not in out and "bad extra" not in out, out
+        assert out.endswith("Next.\n") and taken, (md, taken)
+    md = f"Intro. **{_claim()} (Figure 1).** Next.\n"  # FI's statement alone, in bold: untouched
+    assert _rule(md) == (md, [])
 
 
 def test_an_image_embed_with_parentheses_in_its_target_or_a_title_is_whole():
