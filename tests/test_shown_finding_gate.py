@@ -463,3 +463,72 @@ async def test_a_model_that_cannot_be_asked_stops_nothing(tmp_path: Path, monkey
     monkeypatch.setattr(Engine, "_chat", down)
     assert await engine._shown_fault_verdict(STATE) is None
     assert code_review.load(engine.quest_root)["issues"]["F-1"]["gate_error"]["place"] == "test"
+
+
+# A fault shown in a declared result the run gave no number for under any name: a part not done, never a stop.
+_PLAN = {"variables": {"dependent": ["yield"]},
+         "protocol": {"metrics": [{"id": "yield", "estimand": "total"}, {"id": "per_batch_spread", "estimand": "spread"}]}}
+
+
+def _gate_record(quantity: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    issue = _issue("F-9", quantity=quantity, kind="quantity")
+    req = {"id": "R2", "kind": "metric", "name": quantity, "status": "different", "fid": "F-9",
+           "text": f"the result reports {quantity}"}
+    return issue, {"issues": {"F-9": issue}, "read_problems": [req]}
+
+
+def _outcome(engine: Engine, quantity: str, result: dict[str, Any], declared: list[str] | None) -> dict[str, Any] | None:
+    issue, record = _gate_record(quantity)
+    return engine._shown_fault_outcome([(issue, "its test still fails on it")], record, result, ["yield"], declared)
+
+
+def test_a_declared_result_with_no_key_in_the_results_is_a_part_not_done_and_stops_nothing(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    declared = code_review.declared_names(_PLAN, _PLAN["protocol"])
+    assert set(declared) == {"yield", "per_batch_spread"}
+    result = {"yield": 3.2, "runtime": 1.0}  # no key holds per_batch_spread
+    assert _outcome(engine, "per_batch_spread", result, declared) is None
+    issue, record = _gate_record("per_batch_spread")
+    assert code_review.not_obtained(record, issue, result, declared) == ["per_batch_spread"]
+    # the old behaviour, when the plan's names are not given: FI cannot tell what it changes
+    stop = _outcome(engine, "per_batch_spread", result, None)
+    assert stop and "cannot find which of the results it changes" in stop["rationale"]
+
+
+def test_a_name_the_plan_does_not_declare_still_stops(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    declared = code_review.declared_names(_PLAN, _PLAN["protocol"])
+    stop = _outcome(engine, "invented_quantity", {"yield": 3.2}, declared)
+    assert stop and "cannot find which of the results it changes" in stop["rationale"]
+
+
+def test_a_declared_result_the_results_hold_numbers_for_is_not_a_part_not_done(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    declared = code_review.declared_names(_PLAN, _PLAN["protocol"])
+    result = {"yield": 3.2, "per_batch_spread": 0.4, "contrast": 1.0}
+    issue, record = _gate_record("per_batch_spread")
+    assert code_review.not_obtained(record, issue, result, declared) == []
+    assert engine._shown_fault_outcome([(issue, "its test still fails on it")], record, result, ["yield"], declared) is None
+    assert issue["at_gate"]["outcome"] == "left_out"  # left out of the results, as before
+    # held under another name too: FI cannot leave them out, so it still stops
+    both = {"yield": 3.2, "per_batch_spread": 0.4, "per_batch_spread_raw": 0.4}
+    assert _outcome(engine, "per_batch_spread", both, declared)
+
+
+def test_a_declared_result_whose_key_holds_no_number_is_left_out_not_a_part_not_done(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    declared = code_review.declared_names(_PLAN, _PLAN["protocol"])
+    result = {"yield": 3.2, "per_batch_spread": None}
+    assert _outcome(engine, "per_batch_spread", result, declared) is None
+    issue, record = _gate_record("per_batch_spread")
+    assert code_review.not_obtained(record, issue, result, declared) == ["per_batch_spread"]  # same fact
+    assert code_review.keys_of_issue(record, issue, result) == ["per_batch_spread"]  # the key branch is tried first
+
+
+def test_the_main_quantity_absent_from_the_results_still_stops(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    declared = code_review.declared_names(_PLAN, _PLAN["protocol"])
+    issue, record = _gate_record("yield")
+    issue["headline"] = True
+    stop = engine._shown_fault_outcome([(issue, "its test still fails on it")], record, {"runtime": 1.0}, ["yield"], declared)
+    assert stop and stop["stuck_reason"] == "shown_fault_open"

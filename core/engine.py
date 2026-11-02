@@ -22675,6 +22675,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         verdicts: list[tuple[dict[str, Any], str]] = []
         errored = False
         crash_repair: dict[str, Any] | None = None
+        declared = (_code_review.declared_names(state.get("design"), self._protocol_block(state))
+                    if isinstance(state, dict) else None)
         for issue in shown:
             rel = str(issue.get("test") or "")
             saved = ((record or {}).get("issues") or {}).get(str(issue.get("id")))
@@ -22729,14 +22731,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             _code_review.save(self.quest_root, record)
         if crash_repair is not None:
             # a fault that stops the quest is not held up by a crash elsewhere; anything else waits for the repaired run
-            outcome = self._shown_fault_outcome(verdicts, record or {}, result, headline or []) if verdicts else None
+            outcome = (self._shown_fault_outcome(verdicts, record or {}, result, headline or [], declared)
+                       if verdicts else None)
             return outcome if outcome and outcome.get("stuck") else crash_repair
         if not verdicts:
             return None
-        return self._shown_fault_outcome(verdicts, record or {}, result, headline or [])
+        return self._shown_fault_outcome(verdicts, record or {}, result, headline or [], declared)
 
     def _shown_fault_outcome(self, verdicts: list[tuple[dict[str, Any], str]], record: dict[str, Any],
-                             result: Any, headline: list[str] | None = None) -> dict[str, Any] | None:
+                             result: Any, headline: list[str] | None = None,
+                             declared: list[str] | None = None) -> dict[str, Any] | None:
         """What the faults a failing test showed, and nothing showed gone, do to the quest, from the records alone. A fault
         about the study's main quantity (the plan's first dependent variable or its precision metric) stops it with no
         paper: there is nothing to report. A plan quantity the code does not compute (and the results do not hold under
@@ -22762,6 +22766,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 else:
                     stops.append((issue, how + "; the results hold its values under other names too, so FI cannot leave "
                                                "them out"))
+            elif absent := _code_review.not_obtained(record, issue, result, declared):
+                # A declared result the run gave no number for under any name: nothing of it can reach the paper.
+                not_done.append((issue, how, absent))
             else:
                 stops.append((issue, how + "; FI cannot find which of the results it changes, so it cannot leave them out"))
         if not stops and left_out:
