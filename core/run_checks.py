@@ -900,6 +900,12 @@ class RunChecksMixin:
                              "repaired again after that and this was not checked again. Say it in the limitations as "
                              "not known to be fixed, not as a fact of the results.")
                 continue
+            if p.get("check") == "figure_fi_fault":
+                # a figure FI itself could not draw: the results stand; say it plainly and as FI's fault, not as a finding about the code
+                parts.append(f"{p['text']} Say this plainly in the limitations, in these words or very close to them: the figure is "
+                             "missing because of a fault of FI's own, not because of the study, and the numbers it would have "
+                             "shown are in the results table. Do not describe, cite or draw conclusions from that figure.")
+                continue
             parts.append(f"FI's checks of the code before the run found this, and the repairs did not remove it: {p['text']}. "
                          f"It is {_stop_power.source_words(p.get('source'))}, so the run went on. Say it in the "
                          "limitations as " + ("what FI saw on a small copy of the results" if p.get("source") == _stop_power.COPY

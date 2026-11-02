@@ -158,7 +158,7 @@ def snapshot(root: Path, design: dict[str, Any]) -> list[str]:
     for name in list(bodies):
         if name != TRIAL and (name not in wanted or name not in have):
             bodies.pop(name)
-    fresh = (run.get("schema") == _analysis.DERIVED_SCHEMA and not run.get("from_earlier_run") and not run.get("fi_faults")
+    fresh = (run.get("schema") == _analysis.DERIVED_SCHEMA and not run.get("from_earlier_run") and not _analysis.stopping_faults(run)
              and _newer(derived_path, derive_path))
     noted: list[str] = []
     if fresh:

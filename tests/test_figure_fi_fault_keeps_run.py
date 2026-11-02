@@ -6,13 +6,16 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from core import analysis_frame as frame
 from tests.test_analysis_frame import NO_WINDOW, _design, _quest
-from tests.test_figure_failure_keeps_results import _DRAWS, _engine, _record
+from tests.test_figure_failure_keeps_results import _DRAWS, _engine
 
 _PLANTED = "FI's own drawing stopped on purpose"
 
@@ -66,3 +69,88 @@ def test_the_figure_not_drawn_by_fis_fault_is_disclosed_and_stops_nothing(tmp_pa
     problems = eng._cannot_repair_problems()
     assert len(problems) == 1 and "fig3" in problems[0]["text"] and "FI's own" in problems[0]["text"]
     assert eng._cannot_repair_stop() is None
+
+
+# ---- fix round 1: a crash of the whole figure step is a figure fault too ---------------------------------------------------------
+def _run_with_step_crash(quest: Path) -> tuple[int, dict, str]:
+    script = ("import sys\nsys.path.insert(0, '.')\nimport fi_figures\n"
+              "def broken(*a, **k):\n    raise RuntimeError('the figure step crashed')\n"
+              "fi_figures.run_figures = broken\nimport runpy\nrunpy.run_path('experiment.py', run_name='__main__')\n")
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "FI_ROOT", "FI_TRIALS", "FI_FIGURE_FALLBACK")}
+    done = subprocess.run([sys.executable, "-c", script], cwd=quest / "code", env=env, capture_output=True, text=True, timeout=300,
+                          creationflags=NO_WINDOW)
+    record = json.loads((quest / frame.DERIVED_PATH).read_text(encoding="utf-8"))
+    return done.returncode, record, done.stdout
+
+
+def test_a_crash_of_the_whole_figure_step_does_not_stop_the_run(tmp_path: Path) -> None:
+    code, record, out = _run_with_step_crash(_quest(tmp_path, _design(), _DRAWS))
+    assert code == 0 and "RESULT_JSON:" in out
+    fig = next(o for o in record["figures"] if o["id"] == "fig1")  # each planned figure is recorded as not drawn, FI's fault
+    assert fig["status"] == "fi_fault" and "the figure step crashed" in fig["why"]
+    assert "FI's own drawing step failed" in fig["said"] and "FI's fault, not the study's" in fig["said"]
+    assert frame.run_produced(0, True, record, True)
+
+
+def test_a_stop_of_fis_own_lines_outside_the_figure_step_still_exits_2(tmp_path: Path) -> None:  # the known positive
+    from tests.test_analysis_frame import _run
+
+    quest = _quest(tmp_path, _design(), _DRAWS)
+    shutil.rmtree(quest / "code" / frame.CORE_DIR)  # FI's formula calculator is gone: not the figure step
+    code, printed, _record, err = _run(quest)
+    assert code == 2 and printed is None and "formula calculator" in err and "not the study's" in err
+
+
+# ---- fix round 1: the same rule where a run's bodies are kept -------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_a_figure_fault_of_fi_does_not_stop_a_run_from_being_kept_but_another_fault_does(tmp_path: Path) -> None:
+    from core import kept_bodies as kb
+    from tests.test_kept_bodies import DESIGN, _first, _ran
+
+    said = "Figure `over_dose` was not drawn: FI's own drawing step failed (x); this is FI's fault, not the study's."
+
+    async def kept(sub: str, faults: list[str]) -> list[str]:
+        engine, _state = await _first(tmp_path / sub)
+        _ran(engine, {"derive_peak": "ok", "figure_over_rate": "ok"})
+        path = engine.quest_root / frame.DERIVED_PATH
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record["figures"] = [{"id": "over_dose", "status": "fi_fault", "said": said, "why": "x"}]
+        record["fi_faults"] = faults
+        path.write_text(json.dumps(record), encoding="utf-8")
+        return sorted(kb.snapshot(engine.quest_root, DESIGN))
+
+    assert await kept("figure_only", [said]) == ["derive_peak", "figure_over_rate"]
+    assert await kept("other", [said, "FI's analysis stopped inside its own lines"]) == []  # the known positive
+
+
+# ---- fix round 1: the paper and QUALITY.md say the figure was not drawn, and why ------------------------------------------------
+def test_the_paper_and_the_quality_report_say_the_figure_was_not_drawn_by_fis_fault(tmp_path: Path, monkeypatch) -> None:
+    import asyncio
+    import re
+
+    from core import quality_report
+    from tests.test_disclosure import _engine as write_engine
+
+    eng = write_engine(tmp_path)
+    record = {"schema": frame.DERIVED_SCHEMA, "derived": {}, "fi_faults": ["x"], "figures": [
+        {"id": "fig1", "file": "a.png", "status": "fi_fault", "why": "FI could not make the figure `fig1` (RuntimeError: planted)."}]}
+    eng._figure_fallbacks({}, record)  # the existing step after the run
+    sentence = ("Figure `fig1` was not drawn: FI's own drawing step failed (FI could not make the figure `fig1` "
+                "(RuntimeError: planted)); this is FI's fault, not the study's.")
+    seen: list[str] = []
+
+    async def fake_chat(self, messages, **kw):  # a writer that copies into the limitations what FI told it about the figure
+        text = " ".join(str(m.get("content") if isinstance(m, dict) else m) for m in messages)
+        seen.append(text)
+        found = re.search(r"Figure `fig1` was not drawn: FI's own drawing step failed .*?not the study's\.", text)
+        limits = found.group(0) if found else "The model is simple."
+        return ("# Title\n\n## Methods\nWe simulate a model.\n\n## Results\nThe mean was 0.5.\n\n"
+                f"## Limitations\n{limits}\n\n## References\n[1] A.\n")
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    out = asyncio.run(eng._node_write({"topic": "t", "title": "t", "iteration": 0}))
+    paper = Path(out["paper_md"]).read_text(encoding="utf-8")
+    assert sentence in " ".join(seen), "the writer was told, in FI's own sentence"
+    assert sentence in paper, "the delivered paper says the figure was not drawn and why"
+    quality = quality_report.render(quality_report.build(tmp_path, running=False))
+    assert "fig1" in quality and "FI's fault" in quality

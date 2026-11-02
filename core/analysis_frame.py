@@ -740,6 +740,14 @@ def own_failure(record: dict[str, Any], body: str, why: str = "") -> str:
     return "\n".join(parts)
 
 
+def stopping_faults(record: dict[str, Any]) -> list[str]:
+    """The faults of FI's own in a record of a run (``fi_faults``) that stop the run: all of them except a figure's own
+    (an outcome with status ``fi_fault``). That figure is missing and said so, but the results stand."""
+    record = record if isinstance(record, dict) else {}
+    drawn = {str(o.get("said")) for o in record.get("figures") or [] if isinstance(o, dict) and o.get("status") == "fi_fault"}
+    return [str(f) for f in record.get("fi_faults") or [] if str(f) not in drawn]
+
+
 def only_figures_failed(record: dict[str, Any], returncode: int) -> bool:
     """Whether a run of FI's experiment.py that exited 1 produced all its results and only a figure of the study's failed or was
     refused. FI's record of the run (derived.json) says it: ``run()`` exits 1 for a quantity of a counting role it could not work out
@@ -747,9 +755,7 @@ def only_figures_failed(record: dict[str, Any], returncode: int) -> bool:
     the analysis's, not the run's: the repair of it goes on (``failure`` names its body), but what the run produced stands."""
     if returncode != 1 or not isinstance(record, dict) or record.get("schema") != DERIVED_SCHEMA or record.get("from_earlier_run"):
         return False
-    # a fault of FI's own stops the run, except a figure's own (``fi_fault`` outcome): that figure is missing, the results stand
-    drawn = {str(o.get("said")) for o in record.get("figures") or [] if isinstance(o, dict) and o.get("status") == "fi_fault"}
-    if [f for f in record.get("fi_faults") or [] if str(f) not in drawn]:
+    if stopping_faults(record):
         return False
     derived = record.get("derived") if isinstance(record.get("derived"), dict) else {}
     status_of = {r.get("by"): r.get("status") for r in derived.values() if isinstance(r, dict)}
@@ -1439,6 +1445,20 @@ def _kept_figure(spec_id, quest_root):
     return None
 
 
+def _step_stopped(specs, outcomes, why):
+    """The figure step stopped as a whole (FI's own code): every planned figure it had not yet drawn is recorded as not drawn, FI's
+    fault, with the reason. A figure never stops the run: the results stand and the exit code is the quantities' alone."""
+    done = {o.get("id") for o in outcomes}
+    lost = [s for s in specs if s["id"] not in done] or [{"id": "figures", "file": "figures"}]  # none left: FI's own figures of the search
+    for spec in lost:
+        said = "Figure `%s` was not drawn: FI's own drawing step failed (%s); this is FI's fault, not the study's." % (spec["id"], why)
+        outcomes = outcomes + [{"id": spec["id"], "file": str(spec.get("file") or "%s.png" % spec["id"]), "status": "fi_fault",
+                                "why": why, "said": said}]
+    drawn = [o for o in outcomes if o.get("status") == "ok"]
+    summary = " ".join(["%d of %d figure(s) drawn." % (len(drawn), len(outcomes))] + [o["said"] for o in outcomes if o.get("status") != "ok" and o.get("said")])
+    return outcomes, summary, 0, [o["said"] for o in outcomes if o.get("status") == "fi_fault"]
+
+
 def _figures(table, quest_root, records=None):
     """``(outcomes, said, exit code of the bodies, FI's own faults)`` of the figure step. ``records``: FI's record of the derived
     quantities (this run's, or the earlier run's in the run that only draws the figures that failed), which the plan's own figure
@@ -1446,15 +1466,12 @@ def _figures(table, quest_root, records=None):
     figure is drawn in its place straight away."""
     if not os.path.exists(os.path.join(HERE, "fi_figures.py")):
         return [], "", 0, []
+    specs = [dict(v, id=i) for i, v in derive.FIGURES.items()]
+    outcomes = []
     try:
         import fi_figures
-    except ImportError as e:
-        raise FIFault("FI's figure step (fi_figures.py) cannot be loaded (%s)" % e)
-    out_dir = os.path.join(quest_root, "figures")
-    os.makedirs(out_dir, exist_ok=True)
-    specs = [dict(v, id=i) for i, v in derive.FIGURES.items()]
-    try:
-        outcomes = []
+        out_dir = os.path.join(quest_root, "figures")
+        os.makedirs(out_dir, exist_ok=True)
         only = os.environ.get("FI_FIGURE_FALLBACK") == "only"
         for spec in specs:
             by = "figure_%s" % spec["id"]
@@ -1492,7 +1509,7 @@ def _figures(table, quest_root, records=None):
             _progress("fi: FI's own figures of the search")
             outcomes += fi_figures.search_figures(quest_root, out_dir)
     except Exception as e:  # noqa: BLE001 -- the figure step is FI's own code
-        return [], "", 0, ["FI's figure step stopped with %s: %s" % (type(e).__name__, e)]
+        return _step_stopped(specs, outcomes, "FI's figure step stopped with %s: %s" % (type(e).__name__, e))
     return outcomes, fi_figures.said(outcomes), fi_figures.exit_code(outcomes), fi_figures.fi_faults(outcomes)
 
 
