@@ -1443,6 +1443,40 @@ def keys_of_issue(record: dict[str, Any], issue: dict[str, Any], result: Any) ->
     return sorted(keys)
 
 
+def declared_names(design: Any, protocol: Any, derived: Any = None) -> list[str]:
+    """The names of the quantities the plan declares as results: its dependent variables and its metrics (FI's own
+    reading of the plan, :func:`requirements`). With ``derived`` (FI's record of the last run of its analysis,
+    ``data/results/derived.json``), only those that record lists as not worked out (``not_computed``: no trial gave a
+    value for it, a function that failed): FI's own fact that the run holds no value for the quantity, never a guess from
+    the names of the results."""
+    reqs = requirements(design if isinstance(design, dict) else None, protocol if isinstance(protocol, dict) else None)
+    names = [str(r["name"]) for r in reqs if r.get("kind") in QUANTITY_KINDS and str(r.get("name") or "").strip()]
+    if derived is None:
+        return names
+    if isinstance(derived, dict) and derived.get("from_earlier_run"):
+        return []  # an earlier run's record says nothing about the code that ran now
+    from . import analysis_frame as _analysis_frame
+
+    none = {_norm(i["id"]) for i in _analysis_frame.not_computed(derived)}
+    return [n for n in names if _norm(n) in none]
+
+
+def not_obtained(record: dict[str, Any], issue: dict[str, Any], result: Any, declared: list[str] | None) -> list[str]:
+    """The declared results an issue is about when FI's record of the run says no value was worked out for them
+    (``declared``: :func:`declared_names` with that record) and the run's results hold no number for any of them under any
+    name (the key absent altogether, which :func:`keys_of_issue` cannot find). Such a result was not obtained: no number of it can
+    reach the paper, so a fault shown in how it is computed leaves nothing wrong that can stand, and it is a part not
+    done, which the paper states. ``[]`` when the issue names nothing, when any name it is about is not one the plan
+    declares (FI then cannot tell what it changes), or when the results hold a number for one (:func:`named_in_results`)."""
+    wanted = {_norm(n) for n in declared or []} - {""}
+    names = quantity_names(record, issue)
+    if not names or not all(_norm(n) in wanted for n in names):
+        return []
+    if any(named_in_results(n, result) for n in names):
+        return []
+    return list({_norm(n): n for n in reversed(names)}.values())[::-1]  # one entry per name, as the plan writes it
+
+
 def holds_no_number(result: Any, keys: set[str]) -> bool:
     """Whether every value under ``keys`` (at any depth of the results) holds no number: an empty list, null, a text."""
     found = False
