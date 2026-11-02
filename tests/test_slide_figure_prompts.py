@@ -267,5 +267,5 @@ async def test_a_bold_lead_sentence_followed_by_prose_on_its_line_is_read_as_a_s
     assert "drifting" not in body
     assert "More words here." in body
     assert "Panel 1 draws a rising line (Figure 1)." in body and "Kept lead prose." in body
-    assert "**Figure 1.**" in body  # the label stays (the paper's rule decides about the prose after it)
+    assert "**Figure 1.**" not in body and "label with prose" not in body  # a figure label with prose after it: both go
     assert "**Results.** Plain heading prose." in body

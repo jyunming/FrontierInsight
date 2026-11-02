@@ -1567,6 +1567,19 @@ async def test_a_verbatim_fi_sentence_stays_on_the_poster_and_a_paraphrase_goes(
     assert "line that rises" not in tex
 
 
+@pytest.mark.asyncio
+async def test_a_run_in_figure_label_and_the_prose_after_it_go_together_on_the_poster(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    art = _make_artifacts(tmp_path)
+    _record_a_drawn_figure(art)
+    reply = _reply()
+    reply["blocks"][1] = {"type": "text", "text": "**Figure 1.** The gain rises and saturates. We study scaling [1]."}
+    tex = await _checked_poster(tmp_path, monkeypatch, art, reply)
+    assert "gain rises" not in tex and "Figure 1." not in tex.replace("Figure 1. The toy", "")
+    assert "We study scaling [1]." in tex
+
+
 _POSTER_PAPER_STATEMENT = (
     "<!-- fi:fact-figure-lines-result -->Panel 1 draws a rising line.<!-- /fi:fact-figure-lines-result -->")
 

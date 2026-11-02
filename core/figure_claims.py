@@ -980,17 +980,34 @@ def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, 
             seen.add((a, b))
             lead = _facts._RUN_IN.match(flat[a:b])
             heading = _lead_heading(flat[a:b], mention_re)
-            if heading:  # a bare label ("**Results.**", "**Figure 1.**"): neither judged nor cut
+            label_at = None  # where a run-in figure label starts, when the sentence after it is judged as naming that figure
+            label_hits: list[re.Match[str]] = []
+            if heading:  # a bare label ("**Results.**", "**Figure 1.**"): neither judged nor cut on its own
+                label_hits = [h for h in mention_re.finditer(flat, a, a + heading)]
+                label_start = a
                 a += heading
                 if not flat[a:b].strip():
-                    continue
+                    # a figure label with prose after it on its line: that prose is a sentence that names the figure. A label
+                    # alone on its line (nothing after it before the line ends, or an image) stays a heading
+                    nxt = b
+                    while nxt < line_start + len(line) and flat[nxt] in " \t":
+                        nxt += 1
+                    if not label_hits or nxt >= line_start + len(line):
+                        continue
+                    na, nb = _sentence_at(flat, line_start, line_start + len(line), nxt)
+                    if not flat[na:nb].strip() or flat[nxt] == "\x01":
+                        continue
+                    a, b = na, nb
+                    seen.add((a, b))
+                if label_hits:
+                    label_at = label_start
                 lead = None
                 seen.add((a, b))
             else:
                 # any other bold span (a result mark or FI's own statement in it too) is part of the sentence: judged and cut
                 # with it, so FI's statement inside it is kept by the rule below and only the writer's words around it go
                 lead = None
-            hits = [h for h in mention_re.finditer(flat, a, b)]
+            hits = label_hits + [h for h in mention_re.finditer(flat, a, b)]
             body_at = a + (lead.end() if lead else 0)
             own = [i for i, sp in enumerate(spans) if kinds[i] == "claim" and body_at <= sp[0] and sp[1] <= b]
             if own:
@@ -1030,6 +1047,8 @@ def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, 
                               "how": "writer's words removed", "figures": figures})
                 taken += _unfilled_entries(marks, unfilled, sentence)
                 continue
+            if label_at is not None:  # the figure label goes with the sentence it led: no label is left alone
+                body_at = label_at
             start, end = original(body_at), original(b)
             if flat[line_start:body_at].strip() == "":  # it opens its line: the space it leaves goes with it
                 while end < len(markdown) and markdown[end] in " \t":

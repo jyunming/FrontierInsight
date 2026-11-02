@@ -760,12 +760,46 @@ def test_the_plain_false_sentence_is_removed_as_before():
     assert out == "Intro. More words here.\n"
 
 
-def test_a_bare_figure_label_heading_stays_and_is_not_on_record():
-    for head in ("**Figure 1.**", "**Fig. 2.**", "**Figures 1 and 2.**"):
-        md = f"{head} The study ran at several sizes.\n"
+def test_a_bare_figure_label_alone_on_its_line_stays_and_is_not_on_record():
+    for head in ("**Figure 1.**", "**Fig. 2.**", "**Figures 1 and 2.**", "**Figure 1:**"):
+        md = f"{head}\n\nThe study ran at several sizes.\n"
+        assert _rule(md, {"fig_a.png": 1, "fig_b.png": 2}, {1: {"signal"}, 2: {"signal"}}) == (md, []), head
+        md = f"{head}\n"
         assert _rule(md, {"fig_a.png": 1, "fig_b.png": 2}, {1: {"signal"}, 2: {"signal"}}) == (md, []), head
     out, taken = _rule("**Figure 1.** Figure 1 shows a rise. Next.\n")
-    assert out == "**Figure 1.** Next.\n" and [t["sentence"] for t in taken] == ["Figure 1 shows a rise."]
+    assert out == "Next.\n" and [t["sentence"] for t in taken] == ["Figure 1 shows a rise."]
+
+
+def test_a_run_in_figure_label_makes_the_sentence_after_it_a_sentence_naming_that_figure():
+    for md, want in (("**Figure 1.** The gain rises with size and saturates at large size. Next.\n", "Next.\n"),
+                     ("**Figure 1:** the gain rises with N and saturates. Next.\n", "Next.\n"),
+                     ("**Figure 1**. The gain rises with size. Next.\n", "Next.\n"),
+                     ("Intro text. **Figure 1.** The gain rises with size. Next.\n", "Intro text. Next.\n"),
+                     ("Intro text. **Figure 1.** The gain rises with N.\n", "Intro text.\n")):
+        out, taken = _rule(md)
+        assert out == want and len(taken) == 1 and taken[0]["figures"] == [1], (md, out, taken)
+        assert "gain rises" in taken[0]["sentence"]
+    out, taken = _rule("**Figures 1 and 2.** The gain rises with size. Next.\n",
+                       {"fig_a.png": 1, "fig_b.png": 2}, {1: {"signal"}, 2: {"signal"}})
+    assert out == "Next.\n" and taken[0]["figures"][0] == 1
+    # a label with a lead that is more than a label is as it was: the bold lead goes, the sentence after it is judged on its own
+    out, taken = _rule("**Results for Figure 1.** The gain rises with size. Next.\n")
+    assert "Results for Figure 1" not in out and "Next." in out
+    # a non-figure label, and a label of a figure with no call record, change nothing
+    for md in ("**Results.** The gain rises with N.\n", "**Spread:** the gain rises with N.\n"):
+        assert _rule(md) == (md, []), md
+    md = "**Figure 3.** The gain rises with N.\n"
+    assert _rule(md, {"fig_a.png": 1, "fig_c.png": 3}, {1: {"signal"}}) == (md, [])
+
+
+def test_fis_own_statement_after_a_run_in_figure_label_is_kept_with_the_label():
+    md = f"**Figure 1.** {_claim()} Next.\n"
+    out, taken = _rule(md)
+    assert out.replace("<!-- fi:fact-figure-lines-fig_a -->", "").replace("<!-- /fi:fact-figure-lines-fig_a -->", "").startswith("**Figure 1.** Panel 1 draws a rising line.") and taken == [], out
+    ok = f"**Figure 1.** The signal is {_v('signal')} at size 1 (Figure 1). Next.\n"
+    assert _rule(ok) == (ok, [])
+    out, taken = _rule(f"**Figure 1:** {_claim()} and the gain rises wrongly. Next.\n")
+    assert out.startswith("**Figure 1:** ") and "Panel 1 draws a rising line." in out and "wrongly" not in out and taken
 
 
 def test_a_run_in_heading_before_an_honest_sentence_with_a_pointer_stays():
@@ -791,7 +825,7 @@ def test_an_image_embed_inside_a_line_is_never_judged_and_never_cut():
 
 
 def test_a_bold_label_is_a_heading_only_when_it_closes_with_a_full_stop_or_colon():
-    for head in ("**Figure 1.**", "**Figure 1:**", "**Results.**", "**Figure 1**."):
+    for head in ("**Results.**", "**Spread:**"):
         md = f"{head} The study ran at several sizes.\n"
         assert _rule(md) == (md, []), head
     out, taken = _rule("Intro. **Figure 1** shows a rise. Next.\n")
@@ -816,7 +850,13 @@ def test_what_the_record_lists_as_removed_is_gone_from_the_output():
              f"**A.** {_v('other')} in Figure 1 and **bold** words. Next.\n",
              f"Intro. **{_claim()} plus free words** and Figure 1 rises wrongly. Next.\n",
              f"Intro. **{_claim()} (Figure 1)** and bad extra words. Next.\n",
-             f"Intro. **{_claim()}** and Figure 1 rises wrongly. Next.\n"]
+             f"Intro. **{_claim()}** and Figure 1 rises wrongly. Next.\n",
+             "**Figure 1.** The gain rises with size and saturates. Next.\n",
+             "**Figure 1:** the gain rises with size. Next.\n",
+             "Intro text. **Figure 1.** The gain rises with N. Next.\n",
+             "**Results for Figure 1.** The gain rises with N. Next.\n",
+             "**Figure 1.**\n\nThe gain rises with N. Next.\n",
+             f"**Figure 1.** {_claim()} Next.\n"]
     for md in cases:
         out, taken = _rule(md)
         for t in taken:
