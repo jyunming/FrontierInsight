@@ -510,7 +510,7 @@ class _GridTable(_Table):
 def _grid_host(z):
     h = _Host(panels=1)
     h.table = _GridTable()
-    h.image(0, z, x=[1, 2], y=[3, 4], what="growth")  # columns are sizes (the plan's x); rows are the one other setting, step
+    h.image(0, z, x=("size", [1, 2]), y=("step", [3, 4]), what="growth")
     return h
 
 
@@ -531,6 +531,68 @@ def test_image_keeps_its_quantity_only_when_every_cell_is_the_tables():
     unknown = _Host(panels=1)  # no ids: the rows cannot be tied to a setting of this table
     unknown.image(0, [[1.0, 2.0], [3.0, 4.0]], what="growth")
     assert unknown.record()["panels"][0]["series"][0]["what"] == "other"
+
+
+class _OneKey(_Table):
+    """One setting: mean 10, 95% interval 9 to 11, sd 1."""
+
+    def keys(self):
+        return ["size=1"]
+
+    def mean(self, name, key):
+        return 10.0
+
+    def interval(self, name, key):
+        return (9.0, 11.0)
+
+    def sd(self, name, key):
+        return 1.0
+
+
+def test_band_and_bars_compare_their_edges_with_the_table_not_only_their_widths():
+    h = _Host(panels=1)
+    h.table = _OneKey()
+    h.line(0, "fast", [1], [12.0], "growth")  # a y that is not the table's mean
+    h.band(0, "fast", [1], [11.0], [13.0], "growth", "ci95")  # the table's width, around the wrong centre
+    h.points(0, "slow", [1], [12.0], "growth", yerr=[1.0], yerr_meaning="sd")
+    r = h.record()["panels"][0]
+    assert r["bands"][0]["meaning"] == "other" and r["series"][1]["yerr_meaning"] == "other"
+    g = _Host(panels=1)
+    g.table = _OneKey()
+    g.line(0, "fast", [1], [10.0], "growth")
+    g.band(0, "fast", [1], [9.0], [11.0], "growth", "ci95")
+    g.points(0, "slow", [1], [10.0], "growth", yerr=[1.0], yerr_meaning="sd")
+    r = g.record()["panels"][0]
+    assert r["bands"][0]["meaning"] == "ci95" and r["series"][1]["yerr_meaning"] == "sd"
+
+
+class _ThreeSettings(_Table):
+    """size x step x arm; the mean is 100 * arm + 10 * size + step, so no two cells share a value."""
+
+    def keys(self):
+        return ["size=%d,step=%d,arm=%d" % (a, b, c) for a in (1, 2) for b in (3, 4) for c in (0, 1)]
+
+    def mean(self, name, key):
+        a, b, c = (int(p.partition("=")[2]) for p in key.split(","))
+        return float(100 * c + 10 * a + b)
+
+
+def _arm_host(z, x=("size", [1, 2]), y=("step", [3, 4])):
+    h = _Host(panels=1)
+    h.settings = ["size", "step", "arm"]
+    h.table = _ThreeSettings()
+    h.image(0, z, x=x, y=y, what="growth")
+    return h.record()["panels"][0]["series"][0]["what"]
+
+
+def test_image_needs_one_slice_two_different_settings_and_placed_coordinates():
+    assert _arm_host([[13.0, 23.0], [14.0, 24.0]]) == "growth"  # arm 0 throughout
+    assert _arm_host([[113.0, 123.0], [114.0, 124.0]]) == "growth"  # arm 1 throughout
+    assert _arm_host([[13.0, 123.0], [14.0, 24.0]]) == "other"  # a patchwork of two slices
+    assert _arm_host([[13.0, 23.0], [14.0, 24.0]], y=("size", [3, 4])) == "other"  # both ids name one setting
+    assert _arm_host([[23.0, 13.0], [24.0, 14.0]], x=("size", [2, 1])) == "other"  # descending columns
+    assert _arm_host([[13.0, 23.0, 33.0], [14.0, 24.0, 34.0]], x=("size", [1, 2, 4])) == "other"  # uneven columns
+    assert _arm_host([[13.0, 23.0], [14.0, 24.0]], x=[1, 2]) == "other"  # no ids
 
 
 def test_band_keeps_ci95_or_sd_only_when_it_is_the_tables_own():

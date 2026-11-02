@@ -371,9 +371,11 @@ class FigureCalls:
             found = fits
         return found
 
-    def _table_widths(self, meaning, what, x_id, xs, ys):
+    def _table_widths(self, meaning, what, x_id, xs, ys, edges=False):
         """``(lower, upper)`` lists of the widths FI reads from the table for ``meaning`` (ci95 or sd) of result ``what`` at each
-        x (a setting's value); an entry is None where the table gives none. ``None`` when the table cannot say at all."""
+        x (a setting's value); an entry is None where the table gives none. ``None`` when the table cannot say at all. With ``edges``
+        the drawn y must also be the table's mean at the key (a check of drawn bars or a band: their edges are the table's bounds
+        only around the table's own mean), else the key gives no width."""
         table = getattr(self, "table", None)
         if table is None or what not in self._results() or x_id not in (getattr(self, "settings", None) or []):
             return None
@@ -384,6 +386,9 @@ class FigureCalls:
             for key in ([] if x is None else self._setting_keys(x_id, x, what, y)):
                 c = d = None
                 try:
+                    if edges and _finite(y) and not _close_width(float(table.mean(what, key)), float(y)):
+                        reads.append((None, None))
+                        continue
                     if meaning == "ci95":
                         m, (u, v) = table.mean(what, key), table.interval(what, key)
                         if _finite(m) and _finite(u) and _finite(v):
@@ -474,7 +479,7 @@ class FigureCalls:
         table and stays as stated. The table's sd is its ``sd`` read, else the sample sd (n - 1) of its ``values``."""
         if meaning not in ("ci95", "sd"):
             return meaning  # range and other have no width in the table to check; they stay as the body stated them
-        got = self._table_widths(meaning, what, x_id, xs, ys)
+        got = self._table_widths(meaning, what, x_id, xs, ys, edges=True)
         if got is None:
             return "other"
         drawn = False
@@ -487,49 +492,49 @@ class FigureCalls:
                     return "other"
         return meaning if drawn else "other"
 
-    def _setting_values(self, name):
-        """The distinct values (as text) the table's keys give the setting ``name``."""
-        table = getattr(self, "table", None)
-        out = set()
-        for key in (list(table.keys()) if table is not None else []):
-            for piece in str(key).split(","):
-                k, _, text = piece.partition("=")
-                if k.strip() == name:
-                    out.add(text.strip())
+    @staticmethod
+    def _key_settings(key):
+        """``{setting: text}`` of a table key such as ``a=1,b=2``."""
+        out = {}
+        for piece in str(key).split(","):
+            k, _, text = piece.partition("=")
+            out[k.strip()] = text.strip()
         return out
 
-    def _row_setting(self, x_id, rows):
-        """The one setting (other than ``x_id``) whose values in the table include every drawn row position; None when none or
-        more than one does (the rows are then not tied to a setting)."""
-        found = []
-        for name in (getattr(self, "settings", None) or []):
-            if name == x_id:
-                continue
-            floats = set()
-            for t in self._setting_values(name):
-                try:
-                    floats.add(float(t))
-                except ValueError:
-                    pass
-            if rows and all(r is not None and r in floats for r in rows):
-                found.append(name)
-        return found[0] if len(found) == 1 else None
+    @staticmethod
+    def _evenly_placed(values):
+        """Whether the coordinates of a heat map's columns or rows are where ``imshow`` puts them: categories (text) by position,
+        numbers ascending and evenly spaced."""
+        if all(isinstance(v, str) for v in values):
+            return True
+        if any(not _finite(v) for v in values):
+            return False
+        steps = [b - a for a, b in zip(values, values[1:])]
+        return all(d > 0 and abs(d - steps[0]) <= 1e-6 * max(abs(d), abs(steps[0])) for d in steps)
 
     def _image_matches(self, what, x_id, y_id, cols, rows, z):
-        """Whether every drawn colour value equals, within ``Y_RTOL``, the table's mean of result ``what`` at the setting where
-        ``x_id`` is the column's x and ``y_id`` the row's y (the way a line's y is checked). A cell with no such setting, or no
-        table value, cannot be compared and counts as not matching; so does an image with no finite value at all."""
+        """Whether every drawn colour value is the table's mean of result ``what`` at the one setting its column (``x_id``) and row
+        (``y_id``) name: for each cell exactly one key at that column and row has that mean (within ``Y_RTOL``), and the keys
+        of all cells agree on every other setting (one slice of the table). A cell with no such key, or with more than one,
+        cannot be compared and counts as not matching; so does an image with no finite value at all."""
         if getattr(self, "table", None) is None:
             return False
         checked = 0
+        slice_of = None
         for r, line in zip(rows, z):
             for c, v in zip(cols, line):
                 if v is None or not _finite(v):
                     continue
                 if c is None or r is None:
                     return False
-                keys = set(self._keys_at(x_id, c)) & set(self._keys_at(y_id, r))
-                if not any(_close_y(float(v), t) for key in keys for t in self._table_stats(what, key, "mean")):
+                keys = [k for k in set(self._keys_at(x_id, c)) & set(self._keys_at(y_id, r))
+                        if any(_close_y(float(v), t) for t in self._table_stats(what, k, "mean"))]
+                if len(keys) != 1:
+                    return False
+                rest = {k: t for k, t in self._key_settings(keys[0]).items() if k not in (x_id, y_id)}
+                if slice_of is None:
+                    slice_of = rest
+                elif rest != slice_of:
                     return False
                 checked += 1
         return checked > 0
@@ -537,9 +542,11 @@ class FigureCalls:
     def _checked_image_what(self, what, x_id, y_id, cols, rows, z):
         """``what`` when every cell of the image is the table's own value, else ``other`` (the image keeps its shape and states
         no value). Whatever FI cannot tie to the table is ``other`` as well: a quantity that is not a plan result, a column or a
-        row that is not a setting of the plan."""
+        row that is not a setting of the plan (two different settings), coordinates that are not ascending and evenly spaced."""
         settings = getattr(self, "settings", None) or []
-        if what == "other" or what not in self._results() or x_id not in settings or y_id not in settings:
+        if what == "other" or what not in self._results() or x_id not in settings or y_id not in settings or x_id == y_id:
+            return "other"
+        if not (self._evenly_placed(cols) and self._evenly_placed(rows)):
             return "other"
         return what if self._image_matches(what, x_id, y_id, cols, rows, z) else "other"
 
@@ -646,8 +653,6 @@ class FigureCalls:
         x_id = y_id = None
         if isinstance(x, tuple) and len(x) == 2 and isinstance(x[0], str):
             x_id, x = x
-        elif isinstance(getattr(self, "x", None), str):
-            x_id = self.x
         if isinstance(y, tuple) and len(y) == 2 and isinstance(y[0], str):
             y_id, y = y
         rows = [_vector(r, "z") for r in z]
@@ -661,8 +666,6 @@ class FigureCalls:
         extent = None
         if all(_finite(v) for v in cols + rws) and cols and rws:
             extent = [min(cols), max(cols), max(rws), min(rws)]
-        if y_id is None and x is not None and y is not None:
-            y_id = self._row_setting(x_id, rws)
         what = self._checked_image_what(what, x_id, y_id, cols, rws, rows) if x is not None and y is not None else "other"
         with _undone(ax, rec):
             if rec["x"] is None:

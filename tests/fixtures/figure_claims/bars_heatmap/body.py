@@ -10,4 +10,4 @@ def figure_bars_heatmap(fig, table):
         fig.bars(0, arm, ("method", methods), means, "growth", yerr=sds, yerr_meaning="sd")
     doses = [1, 2, 3]
     z = [[table.mean("growth", table.at(method=m, arm="treated", dose=d)[0]) for m in methods] for d in doses]
-    fig.image(1, z, x=methods, y=doses, what="growth")
+    fig.image(1, z, x=("method", methods), y=("dose", doses), what="growth")
