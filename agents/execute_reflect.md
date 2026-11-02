@@ -53,7 +53,7 @@ $stdout_tail
 ```
 - stderr (tail):
 ```
-$stderr_tail
+$own_failure_block$stderr_tail
 ```
 - duration_s: $duration_s
 - figures produced: $figures_count

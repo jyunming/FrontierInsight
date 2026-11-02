@@ -191,6 +191,7 @@ class StaticChecksMixin:
         here = [f for f in found if f.script == script]
         prompt = self._prompts["execute_reflect"].substitute(  # type: ignore[attr-defined]
             topic_block=self._topic_block(),  # type: ignore[attr-defined]
+            own_failure_block="",
             previous_code=code, returncode="(not run yet)", stdout_tail=module.directive(here, protocol), stderr_tail="",
             duration_s="0.00", figures_count="0", result_json_present="no (not run yet)",
             reflect_history_block=_e._format_reflect_history([]),

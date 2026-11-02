@@ -713,26 +713,31 @@ def failure(record: dict[str, Any], stderr: str, returncode: int, printed: bool,
     return {"kind": "body", "body": str(rec["by"]), "formula": False, "why": f"`{ident}`: {rec.get('why') or 'failed'}"}
 
 
-#: The line over a failed function's own failure in its repair prompt (the stderr below it is cut to its last 2000 characters).
-OWN_FAILURE_HEAD = "What FI's record of the run says about this function (whole):\n"
-
-
-def own_failure(record: dict[str, Any], body: str) -> str:
-    """What FI's record of the run (derived.json) says went wrong in the function ``body`` of derive.py, whole and in FI's own
-    words (a figure's sentence includes the lines on how the results it shows are read); ``""`` when the record has none for it
-    (or is an earlier run's). It is the fact itself, so a repair prompt can carry it without relying on a cut of stderr."""
+def own_failure(record: dict[str, Any], body: str, why: str = "") -> str:
+    """What FI says went wrong in the function ``body`` of derive.py, whole and in its own words, for the repair prompt: the
+    reason :func:`failure` gave for the routed failure (``why``; else the record's reason for the body), and, for a figure,
+    FI's complete sentence about it (``said``: "Figure `id` was not drawn: ...", with the lines on how the results it shows
+    are read). ``""`` when there is none or the record is an earlier run's."""
     record = record if isinstance(record, dict) else {}
     if not body or record.get("from_earlier_run"):
         return ""
-    said = []
+    parts: list[str] = []
+    sentence = ""
     derived = record.get("derived") if isinstance(record.get("derived"), dict) else {}
-    for ident, r in derived.items():
-        if isinstance(r, dict) and r.get("by") == body and r.get("status") in ("failed", "refused") and not r.get("fi_fault") and r.get("why"):
-            said.append(f"`{ident}`: {r['why']}")
+    recorded = [f"`{i}`: {r['why']}" for i, r in derived.items() if isinstance(r, dict) and r.get("by") == body
+                and r.get("status") in ("failed", "refused") and not r.get("fi_fault") and r.get("why")]
     for o in record.get("figures") or []:
-        if isinstance(o, dict) and f"figure_{o.get('id')}" == body and o.get("status") in ("failed", "refused") and o.get("why"):
-            said.append(str(o["why"]))
-    return "\n".join(said)
+        if isinstance(o, dict) and f"figure_{o.get('id')}" == body and o.get("status") in ("failed", "refused"):
+            sentence = str(o.get("said") or "")
+            if o.get("why"):
+                recorded.append(f"`{o.get('id')}`: {o['why']}")
+    why = why or "\n".join(recorded)
+    # a reason the figure's sentence already holds whole is not said twice
+    if why and not (sentence and why.split(": ", 1)[-1] in sentence):
+        parts.append(why)
+    if sentence:
+        parts.append(sentence)
+    return "\n".join(parts)
 
 
 def only_figures_failed(record: dict[str, Any], returncode: int) -> bool:

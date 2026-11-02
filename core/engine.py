@@ -12026,7 +12026,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         """ONE repair of one script's plotting code: kept only if it parses and has fewer typed-in series than before."""
         code = path.read_text(encoding="utf-8")
         prompt = self._prompts["execute_reflect"].substitute(
-            topic_block=self._topic_block(),
+            topic_block=self._topic_block(), own_failure_block="",
             previous_code=code, returncode="(not run yet)", stdout_tail=_figdata.directive(found), stderr_tail="",
             duration_s="0.00", figures_count="0", result_json_present="no (not run yet)",
             reflect_history_block=_format_reflect_history([]),
@@ -12883,7 +12883,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         """ONE repair of one script that contradicts the protocol: ``(code, deps, the repair call itself failed)``. Kept
         only if it parses and no longer contradicts it."""
         prompt = self._prompts["execute_reflect"].substitute(
-            topic_block=self._topic_block(),
+            topic_block=self._topic_block(), own_failure_block="",
             previous_code=code,
             returncode="(not run yet)",
             stdout_tail=_protocol_directive(protocol, mismatches, frame=path.name == _split_run.SIMULATE_NAME and _skeleton.has_frame(code)),
@@ -18595,7 +18595,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         self._oracle_patch_summary = ""
         already = {str(n).strip().lower() for n in [*(disputed or []), *(passing or [])]}
         prompt = self._prompts["execute_reflect"].substitute(
-            topic_block=self._topic_block(),
+            topic_block=self._topic_block(), own_failure_block="",
             previous_code=code,
             returncode="(the oracle run did not pass)",
             # The contract of the layout this quest has: a two-script quest's simulation is a function FI calls, with
@@ -18811,7 +18811,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 code_path.name, self.config.engine.execute_replicates,
             )
         prompt = self._prompts["execute_reflect"].substitute(
-            topic_block=self._topic_block(),
+            topic_block=self._topic_block(), own_failure_block="",
             # Whole: a repair that returns the script must not lose the tail of it.
             previous_code=code,
             returncode="(not run yet)",
@@ -20676,6 +20676,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         (``findings``: its numeric warnings; ``implausible``: a declared bound broken) goes to the function FI's record lays it
         to, else to the simulation; a check that sent the run back is never a stop."""
         design = state.get("design")
+        self._routed_failure = ""  # the reason FI's record gave for the function it routes to (read by the repair prompt)
         record = _analysis_frame.read_record(self.quest_root)
         fresh = bool(state.get("result_json")) and not record.get("from_earlier_run")
         if rc == 0:
@@ -20708,6 +20709,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         found = _analysis_frame.failure(record, stderr, rc, printed or sent_back, step=step,
                                         timed_out=bool(exec_result.get("timed_out")))
         if found["kind"] == "body":
+            self._routed_failure = found["why"]
             return {"body": found["body"]}
         if found["kind"] == "module":
             return {"body": ""}
@@ -21006,30 +21008,31 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
 
         # The one round the redraw gets, spent whatever the model answers.
         spent: QuestState = {"figure_overlap_repaired": True} if overlaps else {}
+        # The failed function's own failure, whole, from FI's record, ahead of the stderr (cut to its last 2000 characters: with
+        # several figures failing, the cut can hold only the later ones' text); nothing is added when the cut keeps it.
+        kept_stderr = str(exec_result.get("stderr_tail", ""))
+        if self._agent_mode() or not exec_result.get("directive"):
+            kept_stderr = kept_stderr[-2000:]
+        own_failure_block = ""
+        if repair_body and failed_body:
+            own = _analysis_frame.own_failure(_analysis_frame.read_record(self.quest_root), failed_body, getattr(self, "_routed_failure", ""))
+            if own and own not in kept_stderr:
+                own_failure_block = self._prompts["execute_reflect_failure"].substitute(failure=own) + "\n\n"
         if self._agent_mode():
             # The coding agent fixes its own code (core/agent_build.py): one round, with what the run said.
             return await self._reflect_by_agent(state, iters, bump, returncode_for_prompt, stdout_for_prompt,
-                                                exec_result, spent,
+                                                exec_result, spent, own_failure=own_failure_block,
                                                 tag=_numeric.REPAIR_FOR if numeric_turn else "", attempt=attempt_no)
-        # The failed function's own failure comes from FI's record, whole, ahead of the stderr (cut to its last 2000 characters:
-        # with several figures failing, the cut can hold only the later ones' text); nothing is added when the cut keeps it.
-        kept_stderr = str(exec_result.get("stderr_tail", ""))
-        if not exec_result.get("directive"):
-            kept_stderr = kept_stderr[-2000:]
-        own_failure = ""
-        if repair_body and failed_body:
-            own = _analysis_frame.own_failure(_analysis_frame.read_record(self.quest_root), failed_body)
-            if own and own not in kept_stderr:
-                own_failure = _analysis_frame.OWN_FAILURE_HEAD + own + "\n\n"
         prompt = self._prompts["execute_reflect"].substitute(
             topic_block=self._topic_block(),
+            own_failure_block=own_failure_block,
             # Whole, always: the reply is the full corrected script, and a model shown only the first 8000 characters
             # has to make up the rest. A live kimi-k3 quest's 15,706-character analysis was repaired three times from
             # its first half; one repair came back with a helper cut off mid-name, and the run never recovered.
             previous_code=script_code,
             returncode=returncode_for_prompt,
             stdout_tail=stdout_for_prompt,
-            stderr_tail=exec_result.get("packages_note", "") + own_failure + kept_stderr,
+            stderr_tail=exec_result.get("packages_note", "") + kept_stderr,
             duration_s=f"{exec_result.get('duration_s', 0):.2f}",
             figures_count=str(len(state.get("figures") or [])),
             result_json_present=result_json_note,
@@ -28887,6 +28890,7 @@ def _load_prompts() -> dict[str, string.Template]:
                             # web/data content (text-only outputs otherwise)
         "second_impl_write",    # a second, independent version of a key function, from its card alone
         "second_impl_adjudicate",  # which of two versions that disagree is wrong
+        "execute_reflect_failure",  # the failed function's own failure, whole, in a repair prompt
     )
     out: dict[str, string.Template] = {}
     for n in names:

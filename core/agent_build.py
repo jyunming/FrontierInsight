@@ -560,7 +560,7 @@ class AgentBuildMixin:
     # -- after the freeze ------------------------------------------------------------------------------------------------
 
     async def _reflect_by_agent(self, state: Any, iters: int, bump: int, returncode: str, stdout: str,
-                                exec_result: dict[str, Any], spent: dict[str, Any], *, tag: str = "",
+                                exec_result: dict[str, Any], spent: dict[str, Any], *, own_failure: str = "", tag: str = "",
                                 attempt: int | None = None) -> dict[str, Any]:
         """A failed run in agent mode: one round of the agent with what the run said, in place of the chat repair. After
         the freeze the agent has :data:`AFTER_FREEZE_ROUNDS` round(s); then the failure stands, as in chat mode. ``tag``:
@@ -578,6 +578,7 @@ class AgentBuildMixin:
         feedback = (f"FI ran the code and the run did not give a usable result (exit code {returncode}).\n\n"
                     f"What it printed (end):\n{stdout[-2000:]}\n\nErrors (end):\n"
                     f"{str(exec_result.get('stderr_tail') or '')[-2000:]}")
+        feedback = own_failure + feedback  # the failed function's own failure from FI's record (worded by its template)
         scope = _agent_scope.scope_from_traceback(feedback, self.quest_root)  # type: ignore[attr-defined]
         result = await _agent_scope.scoped_continue(coder, feedback, scope, self._log)  # type: ignore[attr-defined]
         if result.exhausted:
