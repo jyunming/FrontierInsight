@@ -767,7 +767,9 @@ _CLOSE_PAREN = re.compile(r"^\s*\)[\s.,;:!?*]*$")
 _TOKEN_AT = re.compile(r"\x00(\d+)\x00\.?")
 _OWN_POINTER = re.compile(r"(?:\*\*)?[ \t]*\([ \t]*")
 #: What joins one more figure number to a pointer: "(Figures 2 and 3)", "(Figures 2, 3)", "(Figures 2-4)".
-_LIST_JOIN = re.compile(r"\s*(?:,|and|&|[-\u2013])\s*", re.IGNORECASE)
+_LIST_JOIN = re.compile(r"\s*(?:,\s*(?:and|&)|,|and|&|[-\u2013])\s*", re.IGNORECASE)
+#: No paper has this many figures: a written range wider than this still covers every figure FI could have drawn.
+_MAX_RANGE = 1000
 _BARE_NUMBER = re.compile(r"\d+")
 #: An image embed is its own span, never part of a sentence: it is masked with a \x01 token (FI's marks use \x00).
 #: ``![alt](target "title")``: the alt may hold one level of brackets and the target one level of parentheses, as Markdown reads it.
@@ -793,8 +795,9 @@ def _listed(text: str, first: re.Match[str], mention_re: re.Pattern[str]) -> tup
         if more is None:
             break
         n = int(more.group(1) if more.re is mention_re else more.group(0))
-        if join.group(0).strip() in ("-", "\u2013") and 0 < n - nums[-1] <= 50:
-            nums += list(range(nums[-1] + 1, n + 1))
+        if join.group(0).strip() in ("-", "\u2013") and n != nums[-1]:
+            lo, hi = sorted((nums[-1], n))
+            nums += [k for k in range(lo, min(hi, lo + _MAX_RANGE) + 1) if k != nums[-1]]
         else:
             nums.append(n)
         pos = more.end()

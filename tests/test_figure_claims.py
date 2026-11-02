@@ -814,6 +814,17 @@ def test_a_sentence_naming_several_figures_is_kept_only_when_it_is_kept_for_ever
     assert _rule(ok, two, {1: {"signal"}, 2: {"signal"}}) == (ok, [])
 
 
+def test_every_figure_of_a_written_list_or_range_counts():
+    three = {"fig_a.png": 1, "fig_b.png": 2, "fig_c.png": 3}
+    # a serial comma, a reversed range and a range wider than any paper still name the one checked figure
+    cases = (("Figures 1, 2, and 3", 3), ("Figures 1, 2 and 3", 3), ("Figures 1, 2, & 3", 3), ("Figures 3-1", 2),
+             ("Figures 1-60", 2), ("Figures 1–999", 2))
+    for named, checked in cases:
+        for md in (f"{named} show a rise. Next.\n", f"**{named}.** The gain rises. Next.\n"):
+            out, taken = _rule(md, three, {checked: {"signal"}})
+            assert out == "Next.\n" and taken, (named, md, out)
+
+
 def test_fis_own_statement_after_a_run_in_figure_label_is_kept_with_the_label():
     md = f"**Figure 1.** {_claim()} Next.\n"
     out, taken = _rule(md)
