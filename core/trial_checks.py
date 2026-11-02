@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import json
 import math
+import struct
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -448,8 +449,9 @@ class Quantity:
                 used = f"no single multiplier in a setting (trials from {min(lows):.4g} to {max(highs):.4g})"
             fixed = (" or ".join(f"{e:.4g}" for e in sorted(set(self.expected_by.values()), reverse=True))
                      if self.expected_by else f"{exp:.4g}")
-            scale = (f"; the intervals are symmetric on the log scale in {len(self.on_log)} setting(s) and were judged there "
-                     "(the standard error of the logarithm is the standard error over the estimate)" if self.on_log else "")
+            scale = (f"; the intervals are symmetric on the log scale in {len(self.on_log)} setting(s), as for a normal "
+                     "interval of ln(estimate), and FI judged their multiplier there (the standard error of ln(estimate) "
+                     "is the reported standard error divided by the estimate)" if self.on_log else "")
             return (f"the multiplier of the standard error in the interval `{self.label}`: {used} over {self.judged} "
                     f"setting(s); the plan fixes {fixed} ({fixes}); not the plan's in {self.gross}{scale}")
         if self.kind == "missing":
@@ -659,6 +661,19 @@ SYMMETRY_TOLERANCE = 1e-6
 OWN, LOG = "own", "log"
 
 
+def _slack(grain: float, value: float, exact32: bool) -> float:
+    """Half the unit a value was rounded to: its decimal :func:`_grain`, or, for values that are all exactly single-precision
+    numbers (none is a multiple of a decimal unit), the relative spacing of that precision."""
+    return grain / 2.0 if grain > 0 else (abs(value) * 2.0 ** -24 if exact32 else 0.0)
+
+
+def _is_float32(values: Iterable[float]) -> bool:
+    try:
+        return all(struct.unpack("f", struct.pack("f", v))[0] == v for v in values)
+    except (OverflowError, struct.error):
+        return False
+
+
 def _interval_form(cell: dict[str, Any], kv: dict[str, Any]) -> str:
     """The scale a setting's intervals are symmetric on, measured from its trials' own records: ``"log"`` when every trial
     that reports an estimate, both ends and a standard error (all positive) has an interval symmetric on the log scale,
@@ -669,15 +684,20 @@ def _interval_form(cell: dict[str, Any], kv: dict[str, Any]) -> str:
     est, se = _series(cell, kv["estimate"]), _series(cell, kv["standard_error"])
     low, high = _series(cell, lo), _series(cell, hi)
     own_all, log_all, n = True, True, 0
+    grains = [_grain(x.values()) for x in (est, low, high)]
+    f32 = [g == 0.0 and _is_float32(x.values()) for g, x in zip(grains, (est, low, high))]
     for i in se:
         if not (i in low and i in high and i in est and se[i] > 0):
             continue
         e, l, u = est[i], low[i], high[i]
         n += 1
         width = u - l
-        own = width > 0 and abs((u - e) - (e - l)) <= SYMMETRY_TOLERANCE * width
+        # What the rounding of the three values (their unit, or single precision) can move each test by is allowed for.
+        se_e, se_l, se_u = (_slack(g, v, f) for g, v, f in zip(grains, (e, l, u), f32))
+        own = width > 0 and abs((u - e) - (e - l)) <= SYMMETRY_TOLERANCE * width + se_l + se_u + 2.0 * se_e
         log = (e > 0 and l > 0 and u > 0 and u > l
-               and abs(math.log(u / e) - math.log(e / l)) <= SYMMETRY_TOLERANCE * math.log(u / l))
+               and abs(math.log(u / e) - math.log(e / l))
+               <= SYMMETRY_TOLERANCE * math.log(u / l) + se_l / l + se_u / u + 2.0 * se_e / e)
         own_all, log_all = own_all and own, log_all and log
     return LOG if n and log_all and not own_all else OWN
 
@@ -702,7 +722,9 @@ def _multipliers(cell: dict[str, Any], kv: dict[str, Any], want: float) -> list[
         # of the multiplier. A value rounded down to the unit itself says too little to judge that trial.
         smallest = se[i] - g_se / 2.0
         if i in low and i in high and se[i] > 0 and smallest > 0:
-            if on_log and i in est:
+            if on_log:
+                if i not in est:
+                    continue  # no estimate in this trial: the setting is judged on the trials that have one
                 e, l, u = est[i], low[i], high[i]
                 s = se[i] / e
                 q = math.log(u / l) / (2.0 * s)

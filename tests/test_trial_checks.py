@@ -590,6 +590,56 @@ def test_trials_of_mixed_forms_in_a_setting_fail_closed_on_the_own_scale():
     assert q.fault and not q.on_log
 
 
+def _rounded_to(cells: list[dict], how) -> list[dict]:
+    for c in cells:
+        for m in c["metrics"].values():
+            m["values"] = [how(v) for v in m["values"]]
+    return cells
+
+
+def _f32(v: float) -> float:
+    import struct
+    return struct.unpack("f", struct.pack("f", v))[0]
+
+
+@pytest.mark.parametrize("how,spread", [(lambda v: round(v, 6), 1.5), (lambda v: round(v, 6), 0.06), (_f32, 0.02)],
+                         ids=["6 decimals", "6 decimals, narrow", "float32, narrow"])
+def test_a_log_scale_interval_with_rounded_values_is_still_judged_on_the_log_scale(how, spread):
+    [q] = _mult(tc.calibration(_rounded_to(_log_interval_cells(_Z, spread=spread), how), _proto(_DECL_NORMAL)))
+    assert not q.fault and q.gross == 0 and len(q.on_log) == 3
+    [q] = _mult(tc.calibration(_rounded_to(_log_interval_cells(1.6449, spread=spread), how), _proto(_DECL_NORMAL)))
+    assert q.fault and len(q.on_log) == 3
+
+
+def test_a_trial_without_an_estimate_does_not_move_a_log_setting_to_the_own_scale():
+    cells = _log_interval_cells(_Z, n_settings=1, spread=3.0)
+    m = cells[0]["metrics"]
+    m["x_hat"]["values"] = m["x_hat"]["values"][5:]
+    m["x_hat"]["trials"] = m["x_hat"]["trials"][5:]  # the first five trials give no estimate
+    [q] = _mult(tc.calibration(cells, _proto(_DECL_NORMAL)))
+    assert not q.fault and len(q.on_log) == 1 and q.settings[0].n == 55
+
+
+def test_a_standard_error_of_the_log_reported_directly_is_a_fault():
+    cells = _log_interval_cells(_Z, spread=1.0)
+    for c in cells:
+        m = c["metrics"]
+        m["x_se"]["values"] = [se / e for se, e in zip(m["x_se"]["values"], m["x_hat"]["values"])]
+    [q] = _mult(tc.calibration(cells, _proto(_DECL_NORMAL)))
+    assert q.fault
+
+
+def test_a_non_positive_estimate_or_bound_is_never_read_on_the_log_scale():
+    cells = _log_interval_cells(_Z, n_settings=1, spread=1.0)
+    cells[0]["metrics"]["x_lo"]["values"][3] = -0.5
+    [q] = _mult(tc.calibration(cells, _proto(_DECL_NORMAL)))
+    assert q.fault and not q.on_log
+    cells = _log_interval_cells(_Z, n_settings=1, spread=1.0)
+    cells[0]["metrics"]["x_hat"]["values"][3] = -1.0
+    [q] = _mult(tc.calibration(cells, _proto(_DECL_NORMAL)))
+    assert q.fault and not q.on_log
+
+
 def test_the_repair_message_names_the_log_scale_it_judged_on():
     v = tc.judge(_log_interval_cells(1.6449), _proto(_DECL_NORMAL), None, None, repairs_left=True)
     assert v.action == tc.REPAIR and "symmetric on the log scale" in v.directive
