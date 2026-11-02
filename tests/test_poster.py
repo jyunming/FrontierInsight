@@ -1476,12 +1476,12 @@ def _record_a_drawn_figure(art: QuestArtifacts, extra_files: dict[str, bool] | N
         "version": 2, "fallback": False,
         "panels": [{"panel": 1, "raw": False, "raw_reason": None,
                     "x": {"id": "t", "kind": "setting", "label": "time", "scale": "linear"},
-                    "y": {"what": "energy", "label": "energy", "scale": "linear"},
-                    "series": [{"id": "energy", "label": "energy", "kind": "line", "step": False,
+                    "y": {"what": "yield", "label": "yield", "scale": "linear"},
+                    "series": [{"id": "yield", "label": "yield", "kind": "line", "step": False,
                                 "x": [0, 1, 2], "y": [1.0, 2.0, 3.0], "yerr": None, "merged_with": []}],
                     "bands": []}],
     }), encoding="utf-8")
-    drawn = {"axes": [{"series": [{"label": "energy", "shows": "line"}]}]}
+    drawn = {"axes": [{"series": [{"label": "yield", "shows": "line"}]}]}
     records = {"result.png": drawn}
     for name, draws in (extra_files or {}).items():
         (art.figures_dir / name).write_bytes(b"\x89PNG\r\n\x1a\n")
@@ -1542,12 +1542,12 @@ async def test_poster_text_pointing_at_figure_is_filtered_by_pointer_rule(
     art = _make_artifacts(tmp_path)
     _record_a_drawn_figure(art)
     reply = _reply()
-    reply["blocks"][1] = {"type": "text", "text": "Energy drifts upward as Figure 1 shows. We study scaling [1]."}
+    reply["blocks"][1] = {"type": "text", "text": "Yield climbs steadily as Figure 1 shows. We study scaling [1]."}
     with caplog.at_level("WARNING", logger="frontier_insight.poster"):
         tex = await _checked_poster(tmp_path, monkeypatch, art, reply)
-    assert "Energy drifts upward" not in tex
+    assert "Yield climbs steadily" not in tex
     assert "We study scaling [1]." in tex
-    assert "Energy drifts upward as Figure 1 shows" in caplog.text
+    assert "Yield climbs steadily as Figure 1 shows" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1626,14 +1626,14 @@ async def test_the_poster_headline_headings_and_raw_columns_get_the_same_rule_an
 ) -> None:
     art = _make_artifacts(tmp_path)
     _record_a_drawn_figure(art)
-    reply = _reply(headline="Energy drifts upward as Figure 1 shows.")
-    reply["blocks"][0] = {"type": "heading", "text": "Why Figure 1 shows drift"}
+    reply = _reply(headline="Yield climbs steadily as Figure 1 shows.")
+    reply["blocks"][0] = {"type": "heading", "text": "Why Figure 1 shows a climb"}
     tex = await _checked_poster(tmp_path, monkeypatch, art, reply)
-    assert "drifts upward" not in tex and "Why Figure 1" not in tex
+    assert "climbs steadily" not in tex and "Why Figure 1" not in tex
     assert "Toy Paper" in tex  # the headline gave way to the paper's title
     log = (art.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
     assert "poster: a sentence about a figure FI does not stand behind was left out" in log
-    assert "Energy drifts upward as Figure 1 shows" in log
+    assert "Yield climbs steadily as Figure 1 shows" in log
 
 
 @pytest.mark.asyncio
@@ -1646,9 +1646,9 @@ async def test_a_table_row_and_a_quote_in_a_raw_poster_column_are_read_by_the_sa
     column = chr(10).join([
         "> Figure 1 shows the colony count rising steadily", "",
         "> Panel 1 draws a rising line (Figure 1).", "",
-        "| Result | Figure 1 shows a rise in energy |"])
+        "| Result | Figure 1 shows a rise in yield |"])
     tex = await _checked_poster(tmp_path, monkeypatch, art, {"headline": "A finding", "left": column})
-    assert "drifting" not in tex and "a rise in energy" not in tex
+    assert "colony count rising" not in tex and "a rise in yield" not in tex
     assert "Panel 1 draws a rising line" in tex
     log = (art.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
     assert "Figure 1 shows the colony count rising steadily" in log

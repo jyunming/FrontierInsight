@@ -325,7 +325,7 @@ INFO = {"growth": {"description": "Mean growth rate of the colony, measured per 
 def test_label_comes_from_plan_not_body(caplog):
     h = _Host(panels=1, identity=True)
     h.line(0, "fast", [1, 2, 3], [1.0, 2.0, 3.0], "growth")
-    h.axes[0].set_ylabel("energy drift")
+    h.axes[0].set_ylabel("yield climb")
     h.axes[0].set_title("A title")
     with caplog.at_level("WARNING", logger="frame_figure"):
         h.finish(SPEC, INFO)
