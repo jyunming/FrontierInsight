@@ -780,6 +780,20 @@ def test_a_first_round_paper_whose_figure_pass_raised_says_so_in_its_limitations
     assert _paper(state).count(FIGURE_PASS_SAID) == 1, "no model call and no later round needed"
 
 
+def test_a_failure_to_say_the_figure_pass_fault_never_fails_the_write_node(tmp_path, monkeypatch) -> None:
+    from core.engine import Engine
+
+    _break_rule(monkeypatch)
+
+    def broken_restate(self, *a, **k):  # noqa: ANN001
+        raise RuntimeError("planted restate")
+
+    monkeypatch.setattr(Engine, "_restate_limitations", broken_restate)
+    eng, state, _ = _write(tmp_path, monkeypatch, [WRITER_DRAFT], _record(_panel()), max_iterations=3)
+    assert "falls steeply" in _paper(state), "the paper stays as it was written"
+    assert [p for p in eng._cannot_repair_problems() if p.get("check") == "figure_pass_fault"], "the record stays"
+
+
 def test_a_later_clean_write_clears_the_figure_pass_fault(tmp_path, monkeypatch) -> None:
     from core import paper_facts
 

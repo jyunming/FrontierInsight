@@ -23436,11 +23436,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._figure_pass_failed(e)
         # The record describes the paper as finally written: a fault of an earlier write's pass is gone when this one ran clean.
         failed = self.__dict__.get("_figure_pass_error") is not None
-        if failed or _paper_facts.keep_figure_pass_fault(self.quest_root, False):
-            if not failed:
-                self._clear_cannot_repair("figure_pass_fault")
-            self._restate_limitations(at, "FI said in the Limitations whether the sentences about the figures were checked "
-                                          "and added no claim")
+        try:
+            if failed or _paper_facts.keep_figure_pass_fault(self.quest_root, False):
+                if not failed:
+                    self._clear_cannot_repair("figure_pass_fault")
+                self._restate_limitations(at, "FI said in the Limitations whether the sentences about the figures were "
+                                              "checked and added no claim")
+        except Exception as e:  # noqa: BLE001 -- nor does saying so: the record stays for QUALITY.md and the next write
+            self._log.warning("[record_check] the Limitations could not be written again to say whether the sentences about "
+                              "the figures were checked (%s: %s)", type(e).__name__, e)
 
     def _figures_drawn_safely(self, state: QuestState) -> dict[int, set[str]]:
         """:func:`_figures_drawn` for the write node; an error in it is the figure pass's fault, never the node's."""
