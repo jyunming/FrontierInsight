@@ -207,7 +207,9 @@ def test_slides_and_poster_prompts_say_figure_statements_are_fis_words() -> None
 def test_checked_figure_rule_names_the_drawn_quantity_and_the_mark_standing_alone() -> None:
     root = Path(__file__).resolve().parent.parent
     write = (root / "agents" / "write.md").read_text(encoding="utf-8")
-    assert "is a quantity that figure draws" in write and "as a sentence on its own" in write
+    assert "Results this figure draws: ..." in write and "as a sentence on its own" in write
+    # the prompt quotes the line FI writes into the figure entry, word for word
+    assert "Results this figure draws: " in (root / "core" / "engine.py").read_text(encoding="utf-8")
     slides = (root / "agents" / "slides.md").read_text(encoding="utf-8")
     assert "**Figure N shows what is plotted" not in slides
     assert "copied word for word" in slides[slides.index("## Figures"):]
