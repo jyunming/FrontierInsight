@@ -67,6 +67,8 @@ MAX_ROUNDS = 2
 MAX_INPUTS = 8
 MIN_INPUTS = 4
 REL = 1e-6
+#: The relative tolerance of the comparison of the two versions of a function (see :func:`tolerance_for`).
+TOLERANCE = 1e-3
 #: Below this, a result that is exactly 0 on one side agrees with a round-off result on the other.
 ZERO_FLOOR = 1e-12
 MAX_REFERENCE_LINES = 120
@@ -785,40 +787,24 @@ def ranges_of(spec: _fs.Spec, protocol: dict[str, Any] | None) -> dict[str, Any]
     return {}
 
 
-def plan_precision(protocol: dict[str, Any] | None) -> float | None:
-    """The relative precision the plan asks for, from FI's own record of it: ``protocol.precision.target_half_width`` when the
-    metric it is on is a proportion (a quantity between 0 and 1, so the half-width is also a bound on a relative gap). A mean's
-    half-width is in the metric's own units and gives no relative scale, so it gives ``None``, as does a plan with no target."""
-    from . import run_estimate as _run_estimate
-
-    if not isinstance(protocol, dict) or not isinstance(protocol.get("precision"), dict):
-        return None
-    target = _eqt._number(protocol["precision"].get("target_half_width"))
-    _on, kind = _run_estimate.precision_metric(protocol)
-    if target is None or kind != "proportion" or not 0 < float(target) < 1:
-        return None
-    return float(target)
-
-
 def tolerance_for(spec: _fs.Spec, protocol: dict[str, Any] | None) -> float:
-    """Relative tolerance of the comparison, for every function: the precision the plan asks for (:func:`plan_precision`),
-    or the example's own tolerance when it names a numerical method (an iterative method cannot be held to 1e-6 by its own
-    tolerance); the larger of the two when both are stated. :data:`REL` is the floor, used when the plan states neither. Two
-    versions that differ by less than the precision the study asks for cannot change what it reports, and a gap above it is
-    still a disagreement."""
+    """Relative tolerance of the comparison, for every function: :data:`TOLERANCE`, or the example's own tolerance when it
+    names a numerical method and that is larger (an iterative method cannot be held tighter than its own tolerance). Two
+    independently written fits differ at their solvers' own precision (1e-5 to 1e-4), which is no disagreement; a gap above
+    the tolerance is still one, and a NaN or an infinity against a number is one at any tolerance."""
     example: Any = None
     if spec.card:
         example = spec.card.get("example")
     else:
         eq = next((e for e in _eqt.eligible(protocol) if _eqt._text(e["id"]) == spec.equation), None)
         example = (eq or {}).get("example")
-    tol = plan_precision(protocol) or REL
+    tol = TOLERANCE
     if isinstance(example, dict) and _text(example.get("method")):
         t = _eqt._number(example.get("tolerance"))
         mode = _text(example.get("tolerance_mode")).lower() or "relative"
         if t is not None and t > 0 and mode == "relative":
             tol = max(tol, float(t))
-    return max(REL, tol)
+    return tol
 
 
 # --- comparing two results -------------------------------------------------------------------------------------------------
