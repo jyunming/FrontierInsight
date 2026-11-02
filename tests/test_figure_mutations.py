@@ -64,7 +64,7 @@ def _offered(calls: dict, plan: dict | None = None) -> list[tuple[str, dict]]:
 
 # ---- 1. a body reads an id the plan does not declare ----------------------------------------------------------------------------
 
-UNDECLARED = "T_num/T0 - 1"
+UNDECLARED = "G_obs/G0 - 1"
 
 
 def test_mutation_1_undeclared_read_gets_default_figure(tmp_path: Path, monkeypatch) -> None:

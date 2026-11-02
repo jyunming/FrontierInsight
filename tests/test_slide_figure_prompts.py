@@ -201,7 +201,7 @@ async def test_slide_titles_bullets_bold_lead_and_captions_follow_the_paper(
     deck = nl.join([
         "---", "marp: true", "---", "", "# Toy", "", "---", "",
         "## Figure 1 shows the energy drifting", "",
-        "**Figure 1 shows the energy drifting upward.**", "",
+        "**Figure 1 shows the colony count rising steadily.**", "",
         "![The model's own caption](figures/result.png)", "",
         "**Figure 1:** the model's own caption again", "",
         "- Figure 1 shows a rise in energy",
@@ -229,7 +229,7 @@ async def test_a_table_cell_about_a_checked_figure_is_read_by_the_same_rule(
 ) -> None:
     body = await _deck_from(tmp_path / "a", monkeypatch, _slide_body(
         "| Item | Note |", "| --- | --- |",
-        "| Result | Figure 1 shows the energy drifting upward |",
+        "| Result | Figure 1 shows the colony count rising steadily |",
         "| Kept | Panel 1 draws a rising line (Figure 1). |",
         "| Plain | no figure here |"))
     assert "drifting" not in body
@@ -237,7 +237,7 @@ async def test_a_table_cell_about_a_checked_figure_is_read_by_the_same_rule(
     assert "Panel 1 draws a rising line (Figure 1)." in body and "| Plain | no figure here |" in body
     assert "| --- | --- |" in body
     log = (tmp_path / "a" / "quest" / ".fi" / "run.log").read_text(encoding="utf-8")
-    assert "Figure 1 shows the energy drifting upward" in log
+    assert "Figure 1 shows the colony count rising steadily" in log
 
 
 @pytest.mark.asyncio
@@ -245,11 +245,11 @@ async def test_a_quote_about_a_checked_figure_is_read_by_the_same_rule(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     body = await _deck_from(tmp_path / "a", monkeypatch, _slide_body(
-        "> Figure 1 shows the energy drifting upward", "", "> Panel 1 draws a rising line (Figure 1)."))
+        "> Figure 1 shows the colony count rising steadily", "", "> Panel 1 draws a rising line (Figure 1)."))
     assert "drifting" not in body
     assert "> Panel 1 draws a rising line (Figure 1)." in body
     log = (tmp_path / "a" / "quest" / ".fi" / "run.log").read_text(encoding="utf-8")
-    assert "Figure 1 shows the energy drifting upward" in log
+    assert "Figure 1 shows the colony count rising steadily" in log
 
 
 @pytest.mark.asyncio
@@ -257,7 +257,7 @@ async def test_a_bold_lead_sentence_followed_by_prose_on_its_line_is_read_as_a_s
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     body = await _deck_from(tmp_path / "a", monkeypatch, _slide_body(
-        "**Figure 1 shows the energy drifting upward.** More words here.",
+        "**Figure 1 shows the colony count rising steadily.** More words here.",
         "",
         "**Panel 1 draws a rising line (Figure 1).** Kept lead prose.",
         "",
