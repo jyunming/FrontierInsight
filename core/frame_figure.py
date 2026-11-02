@@ -1128,16 +1128,14 @@ class FigureCalls:
                 got = record_label
             return str(got or _short((result_info.get(ident) or {}).get("description")) or "value")
 
+        # FI's neutral name, never the plan's label of a series whose values FI did not find, whichever was drawn first
+        neutral_by_id = {s["id"]: s["label"] for s in rec["series"] if s.get("neutral")}
         out = []
         for k, e in enumerate(rec["series"]):
             if e["kind"] == "image" or k >= len(extra["series"]) or extra["series"][k][0] is None or k in twins:
                 continue
-            if e.get("neutral"):  # FI's neutral name, never the plan's label of a series whose values FI did not find
-                neutral_by_id = {s["id"]: s for s in rec["series"] if s.get("neutral")}
-                text = " = ".join([e["label"]] + [neutral_by_id[i]["label"] if i in neutral_by_id else name(i) for i in e["merged_with"]])
-                out.append((extra["series"][k][0], text))
-                continue
-            text = " = ".join([name(e["id"], e["label"])] + [name(i) for i in e["merged_with"]])
+            first = e["label"] if e.get("neutral") else name(e["id"], e["label"])
+            text = " = ".join([first] + [neutral_by_id.get(i) or name(i) for i in e["merged_with"]])
             out.append((extra["series"][k][0], text))
         for r, art in zip(rec["refs"], extra["refs"]):
             out.append((art, name(r["id"], r["label"])))

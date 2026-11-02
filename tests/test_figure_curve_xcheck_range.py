@@ -167,6 +167,16 @@ def test_a_series_declared_other_never_carries_a_results_plan_label(tmp_path):
     assert calls["panels"][0]["series"][0]["label"] == "Sample A"
 
 
+def test_a_merged_legend_entry_never_names_a_result_whose_values_fi_did_not_find(tmp_path):
+    # the arm's series is drawn first and kept; the result-named one with the same values merges into it
+    body = HONEST + ('fig.line(0, "sample_a", waves, [9, 7, 5, 3, 2, 1], "other")\n'
+                     'fig.line(0, "signal", waves, [9, 7, 5, 3, 2, 1], "other")\n')
+    calls, offers, host = _draw(body, tmp_path)
+    host.finish(host.labels, {})
+    legend = " | ".join(_legend(host))
+    assert "Sample A" in legend and "Signal" not in legend, legend
+
+
 def _hand(series_extra=None, **top):
     s = {"id": "a", "label": "A", "kind": "line", "step": False, "x": [1, 2, 3], "y": [1.0, 2.0, 3.0], "yerr": None,
          "merged_with": [], "what": "signal", **(series_extra or {})}
