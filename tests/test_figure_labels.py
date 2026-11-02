@@ -524,13 +524,12 @@ def test_legacy_figure_keeps_old_rule() -> None:
 def test_the_engine_reads_the_call_record_of_the_figure_on_disk(tmp_path: Path) -> None:
     calls, _ = _drawn(raw=False, body_label="Ea_hat")
     typed = {"axes": [{"title": "", "xlabel": "Ea_hat", "ylabel": "count", "series": []}]}
-    state = {**_state({"f.png": typed}, {"grid": {"size": [1]}, "metrics": [{"id": "Ea_hat", "kind": "mean"}]}),
-             "quest_root": str(tmp_path)}
-    assert len(_figure_label_findings(state)) == 1
+    state = _state({"f.png": typed}, {"grid": {"size": [1]}, "metrics": [{"id": "Ea_hat", "kind": "mean"}]})
+    assert len(_figure_label_findings(state, root=tmp_path)) == 1
     records = tmp_path / ".fi" / "figure_records"
     records.mkdir(parents=True)
     (records / "f.calls.json").write_text(json.dumps(calls), encoding="utf-8")
-    assert _figure_label_findings(state) == []
+    assert _figure_label_findings(state, root=tmp_path) == []
 
 
 def test_a_code_name_on_a_recorded_panel_nothing_was_drawn_on_is_still_caught() -> None:

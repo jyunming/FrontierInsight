@@ -196,3 +196,23 @@ def test_stopping_faults_of_a_figure_are_never_read_from_either_run() -> None:
     assert frame.stopping_faults(kept) == ["the record of the trials is missing"]  # only this run's own
     assert frame.stopping_faults({"figures": [], "fi_faults": ["FI's analysis stopped inside its own lines"]}) == [
         "FI's analysis stopped inside its own lines"]  # the known positive
+
+
+# ---- final review I7: a default figure that failed in FI's own code on the last run ---------------------------------------------
+def test_a_default_figure_that_failed_after_the_bodys_last_repair_is_disclosed(tmp_path: Path, monkeypatch) -> None:
+    from tests.test_disclosure import _engine as write_engine
+
+    eng = write_engine(tmp_path)
+    record = {"schema": frame.DERIVED_SCHEMA, "derived": {}, "fi_faults": [], "figures": [
+        {"id": "fig1", "file": "a.png", "status": "failed", "why": "its function raised",
+         "fallback_fault": "FI's drawing of the default figure `fig1` stopped with KeyError: 'k'."}]}
+    eng._figure_fallbacks({}, record)
+    problems = eng._cannot_repair_problems()
+    assert len(problems) == 1 and problems[0]["check"] == "figure_fi_fault"
+    assert "Figure `fig1` was not drawn: FI's own drawing step failed (FI's drawing of the default figure `fig1` stopped with " \
+           "KeyError: 'k')" in problems[0]["text"] and "FI's fault" in problems[0]["text"]
+    assert eng._cannot_repair_stop() is None  # it stops nothing
+    assert "Figure `fig1` was not drawn" in eng._run_checks_note()
+    # the known negative: a body that failed with no fault of the default figure is not FI's fault
+    eng._figure_fallbacks({}, {**record, "figures": [{"id": "fig1", "file": "a.png", "status": "failed", "why": "x"}]})
+    assert eng._cannot_repair_problems() == []

@@ -12007,10 +12007,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         self._clear_cannot_repair("figure_dropped")
         self._clear_cannot_repair("figure_fi_fault")
         for outcome in record.get("figures") or []:
-            if isinstance(outcome, dict) and outcome.get("status") == "fi_fault":
-                # FI's own fault while drawing this figure: the results stand, the figure is missing, and the cause is FI's
+            if isinstance(outcome, dict) and (outcome.get("status") == "fi_fault" or (
+                    outcome.get("fallback_fault") and outcome.get("status") in ("failed", "refused", "not_written"))):
+                # FI's own fault while drawing this figure: the results stand, the figure is missing, and the cause is FI's.
+                # A default figure that failed in FI's own code after the body's last repair (``fallback_fault``, beside the
+                # body's failure) is the same fault, disclosed the same way.
                 fid = str(outcome.get("id"))
-                reason = str(outcome.get("why") or "").strip().rstrip(".") or "no reason was recorded"
+                reason = (str(outcome.get("why") or "").strip().rstrip(".") if outcome.get("status") == "fi_fault"
+                          else str(outcome.get("fallback_fault") or "").strip().rstrip(".")) or "no reason was recorded"
                 text = f"Figure `{fid}` was not drawn: FI's own drawing step failed ({reason}); this is FI's fault, not the study's."
                 self._log.warning("[execute] %s", text)
                 self._record_cannot_repair(text, ["FI's own drawing of the figure stopped; the study's functions were not at fault"],
@@ -20454,7 +20458,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         labels = plan_labels((state.get("design") or {}).get("protocol"))
         renames: dict[str, dict[str, str]] = {}
         left: list[str] = []
-        for found in _figure_label_found(state, code_dir):
+        for found in _figure_label_found(state, code_dir, root=self.quest_root):
             if found.get("figure") not in figures:
                 continue
             for name in found.get("code_names") or []:
@@ -21738,7 +21742,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             stderr_tail=_function_steps.traceback_end(exec_result.get("stderr_tail", ""), 1000),
             result_json=result_json_block,
             user_data_block=user_data_block,
-            figure_list=_figure_list_for_prompt(state),
+            figure_list=_figure_list_for_prompt(state, root=self.quest_root),
             # The literature is analyze's ONLY evidence in survey / no-sim
             # mode (no experiment, and — in survey mode — no dataset either),
             # so it must reach the analyze prompt whole to be synthesised. With
@@ -23094,7 +23098,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 state.get("literature") or [], self.config.output.audience,
             ),
             novelty_block=_novelty.write_block(state.get("literature_novelty")),
-            figure_list=_figure_list_for_prompt(state),
+            figure_list=_figure_list_for_prompt(state, root=self.quest_root),
             clarify_block=_format_clarify(state),
             cross_check_block=_format_cross_check(state),
             study_mode_note=(
@@ -23315,7 +23319,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         dropped: list[dict[str, str]] = []
         # A figure statement FI could not fill, and a sentence that points at a figure FI drew and is not FI's to stand behind
         # (core/figure_claims.py::apply_pointer_rule), go the same way.
-        if keyed and left <= 0 and not deferred and (_paper_facts.unfilled_in(paper_md) or _figures_drawn(state)):
+        if keyed and left <= 0 and not deferred and (_paper_facts.unfilled_in(paper_md) or self._figures_drawn_safely(state)):
             dropped = self._take_out_unfilled_keys(state)
             if dropped:
                 path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
@@ -23385,7 +23389,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         try:
             before = Path(path).read_bytes()
             text, taken = _paper_facts.take_out_unfilled(before.decode("utf-8"), figures_only=figures_only)
-            text, pointed = _take_out_unpointed(text, state)
+            try:
+                text, pointed = _take_out_unpointed(text, state, root=self.quest_root)
+            except Exception as e:  # noqa: BLE001 -- the pointer rule never fails the write node: the paper stays as written
+                self._figure_pass_failed(e)
+                pointed = []
             taken = taken + pointed
             if not taken:
                 return []
@@ -23414,11 +23422,34 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         a figure FI cannot stand behind taken out before anything reads it, whatever round it is: the review, the slides and
         the poster all read the paper as it is left here. What was left out is kept for the Limitations, which are written
         again in the same write (the record of an earlier paper is replaced, so nothing older is said)."""
-        at = {**state, "paper_md": str(paper_path)}
-        taken = self._take_out_unfilled_keys(at, figures_only=True)
-        if _paper_facts.keep_figure_left_out(self.quest_root, taken):
-            self._restate_limitations(at, "FI said in the Limitations which statements about a figure were left out and added "
-                                          "no claim")
+        try:
+            at = {**state, "paper_md": str(paper_path)}
+            taken = self._take_out_unfilled_keys(at, figures_only=True)
+            if _paper_facts.keep_figure_left_out(self.quest_root, taken):
+                self._restate_limitations(at, "FI said in the Limitations which statements about a figure were left out and "
+                                              "added no claim")
+        except Exception as e:  # noqa: BLE001 -- the figure pass never fails the write node: the paper stays as written
+            self._figure_pass_failed(e)
+
+    def _figures_drawn_safely(self, state: QuestState) -> dict[int, set[str]]:
+        """:func:`_figures_drawn` for the write node; an error in it is the figure pass's fault, never the node's."""
+        try:
+            return _figures_drawn(state, root=self.quest_root)
+        except Exception as e:  # noqa: BLE001
+            self._figure_pass_failed(e)
+            return {}
+
+    def _figure_pass_failed(self, error: BaseException) -> None:
+        """The check of the sentences about the figures stopped with an error of FI's own: the paper stays as it was written,
+        run.log has the error, and QUALITY.md and the next Limitations say once, plainly, that those sentences were not checked."""
+        self._log.warning("[write] the check of the sentences about the figures stopped (%r); the paper stays as written", error)
+        try:
+            self._record_cannot_repair(
+                "FI could not check the sentences about the figures; the paper keeps them as written",
+                ["the check of the sentences about the figures stopped with an error of FI's own"],
+                source=_stop_power.READ, check="figure_pass_fault")
+        except Exception:  # noqa: BLE001 -- a disclosure that cannot be written is already in run.log
+            pass
 
     async def _check_code_project(self) -> None:
         """Run ``code/`` as a person would (clean environment, only requirements.txt) once per version of the code and
@@ -23567,7 +23598,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # The figures are FI's: every figure of the run goes in under the number the writer was given, with the caption
         # FI writes from its record of what the figure draws, and every image the draft wrote itself is taken out. No
         # model call; the same on every write, so a rewrite gets the same figures back.
-        markdown, placed, written = _place_figures(markdown, state, facts=_figure_facts.facts(self.quest_root))
+        markdown, placed, written = _place_figures(markdown, state, facts=_figure_facts.facts(self.quest_root), root=self.quest_root)
         if placed or written:
             self._log.info("[write] FI placed %d figure(s) with captions from its records (%s); the draft's own images "
                            "taken out: %d", len(placed), ", ".join(placed) or "-", written)
@@ -23624,7 +23655,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # Figure text that shows the code's name for a quantity (core/figure_labels.py): the figures are drawn
             # again from the saved numbers, once per script (a new script starts it over), by the same redraw as a
             # person's layout note. The experiment is not run again and no repair attempt is spent.
-            labels = _figure_label_findings(state, self.quest_root / "code")
+            labels = _figure_label_findings(state, self.quest_root / "code", root=self.quest_root)
             if labels:
                 out["refine_layout"] = list(out["refine_layout"]) + labels
                 out["figure_labels_redrawn"] = True
@@ -30765,7 +30796,7 @@ def _claim_method_block(quest_root: Path, state: QuestState) -> str:
     if oracle_note:
         parts.append(oracle_note.replace("[FI NOTE] ", "", 1).replace("the results below", "the results above"))
     if state.get("figures"):
-        parts.append("What each figure draws:\n" + _figure_list_for_prompt(state))
+        parts.append("What each figure draws:\n" + _figure_list_for_prompt(state, root=quest_root))
     else:  # a paper that says so is right: the figure list is FI's record, and an empty one is a fact too
         parts.append("What each figure draws: FI's record holds no figure from this run.")
     return "\n\n".join(parts) or "(nothing recorded)"
@@ -34090,12 +34121,23 @@ def _single_seed_note(seed: Any, n_seeds: int | None) -> str:
     )
 
 
-def _figure_list_for_prompt(state: QuestState) -> str:
+def _rooted(state: QuestState, root: Any = None) -> QuestState:
+    """``state`` with the quest's own root in it. The quest root is a fact of FI's (the engine's ``quest_root``), never
+    something a node's state is trusted to hold: the live quest state has no such key, and every figure helper that reads the
+    call records takes the root from its caller (``root=``) so that none can silently take the older path. Without ``root``
+    the state's own key is what is read (the slides and the poster put it there)."""
+    if root is None:
+        return state
+    return {**state, "quest_root": str(root)}  # type: ignore[return-value]
+
+
+def _figure_list_for_prompt(state: QuestState, *, root: Any = None) -> str:
     """The figure list for a writer/analysis prompt. Plain charts are listed
     by path; license-clean web figures (``figure_credits``) additionally
     carry their caption + source + license, and are flagged ILLUSTRATIVE so
     the writer credits them and does NOT present them as the quest's own
     results."""
+    state = _rooted(state, root)
     figs = state.get("figures") or []
     if not figs:
         return "(none)"
@@ -34471,7 +34513,7 @@ def _figure_overlap_findings(state: QuestState) -> list[str]:
     return found
 
 
-def _figure_label_findings(state: QuestState, code_dir: Path | None = None) -> list[str]:
+def _figure_label_findings(state: QuestState, code_dir: Path | None = None, *, root: Any = None) -> list[str]:
     """Axis labels, panel titles and legend entries of the run's figures that show the code's name for a quantity
     (``Ea_hat``, ``pi1``), one sentence each, with the plan's label to use when the plan gives one
     (``core/figure_labels.py``). A name counts when the plan or the experiment's code (the ``.py`` files in
@@ -34480,14 +34522,15 @@ def _figure_label_findings(state: QuestState, code_dir: Path | None = None) -> l
     try:
         from . import figure_labels as _figure_labels
 
-        return [_figure_labels.sentence(f) for f in _figure_label_found(state, code_dir)]
+        return [_figure_labels.sentence(f) for f in _figure_label_found(state, code_dir, root=root)]
     except Exception:  # noqa: BLE001
         return []
 
 
-def _figure_label_found(state: QuestState, code_dir: Path | None = None) -> list[dict[str, Any]]:
+def _figure_label_found(state: QuestState, code_dir: Path | None = None, *, root: Any = None) -> list[dict[str, Any]]:
     """The findings behind :func:`_figure_label_findings`, as ``core.figure_labels.findings`` gives them. Never
     raises."""
+    state = _rooted(state, root)
     try:
         from . import figure_labels as _figure_labels
         from .plan import plan_labels, plan_names
@@ -34772,7 +34815,7 @@ def _without_figure_embeds(markdown: str) -> tuple[str, int]:
 
 
 def _place_figures(markdown: str, state: QuestState, *,
-                   facts: dict[str, str] | None = None) -> tuple[str, list[str], int]:
+                   facts: dict[str, str] | None = None, root: Any = None) -> tuple[str, list[str], int]:
     """``markdown`` with the run's figures in it, put there by FI: ``(markdown, names placed, images the draft wrote)``.
 
     Every figure FI numbered (:func:`_figure_numbers`) goes in, under its number, with the caption FI writes from its
@@ -34781,6 +34824,7 @@ def _place_figures(markdown: str, state: QuestState, *,
     by number, and never before the figure numbered one less, so the paper shows them in number order; one the prose
     never names goes before the source lists. Idempotent: placing the figures of a paper FI placed them in gives the
     same paper."""
+    state = _rooted(state, root)
     numbers = _figure_numbers(state)
     text, written = _without_figure_embeds(markdown)
     if not numbers:
@@ -34866,10 +34910,12 @@ def _caption_safe(text: str) -> str:
     return text.replace("[", "(").replace("]", ")")
 
 
-def _figures_drawn(state: QuestState) -> dict[int, set[str]]:
-    """``{figure number: the metrics its drawing calls drew}`` for each numbered figure that has a call record: the ids of the
-    series a panel FI drew itself holds, and what its y axis plots. A panel drawn by hand adds none (what it draws is not
+def _figures_drawn(state: QuestState, *, root: Any = None) -> dict[int, set[str]]:
+    """``{figure number: the metrics its drawing calls drew}`` for each numbered figure that has a call record: the ``what``
+    FI checked of each series a panel FI drew itself holds (a joined "a / b" is each of them; "other" is none), never a series'
+    id or label. A panel drawn by hand adds none (what it draws is not
     checked). A figure with no call record is not in it: its sentences are not judged."""
+    state = _rooted(state, root)
     out: dict[int, set[str]] = {}
     for name, number in _figure_numbers(state).items():
         calls = _figure_claims.load_calls(state["quest_root"], Path(name).stem) if state.get("quest_root") else None
@@ -34879,17 +34925,20 @@ def _figures_drawn(state: QuestState) -> dict[int, set[str]]:
         for p in calls.get("panels") or []:
             if not isinstance(p, dict) or p.get("raw"):
                 continue
-            metrics.add(str((p.get("y") or {}).get("what") or ""))
-            metrics.update(str(s.get("id")) for s in p.get("series") or [] if isinstance(s, dict))
+            for s in p.get("series") or []:
+                if isinstance(s, dict):
+                    # what FI checked the series to be (a joined axis "a / b" is each of them); never its id or label
+                    metrics.update(w.strip() for w in str(s.get("what") or "").split(" / "))
         out[number] = metrics - {"", "other"}
     return out
 
 
-def _take_out_unpointed(text: str, state: QuestState) -> tuple[str, list[dict[str, str]]]:
+def _take_out_unpointed(text: str, state: QuestState, *, root: Any = None) -> tuple[str, list[dict[str, str]]]:
     """``text`` without the sentences that point at a figure FI drew and are not FI's to stand behind
     (:func:`core.figure_claims.apply_pointer_rule`), and the entries to list, shaped like those of ``take_out_unfilled`` with
     ``key`` ``figure:<stem>:claim`` and the figure's ``figure`` number, so the figure gets one disclosure. Nothing changes for
     a quest none of whose figures has a call record."""
+    state = _rooted(state, root)
     drawn = _figures_drawn(state)
     if not drawn:
         return text, []

@@ -399,7 +399,7 @@ LEGACY_LIST = ('- Figure 3: figures/spread_map.png\n- Figure 2: figures/cost_by_
 
 def _series(ident: str, label: str, ys=(3.0, 2.0, 1.0)) -> dict:
     return {"id": ident, "label": label, "kind": "line", "step": False, "x": [1.0, 2.0, 3.0], "y": list(ys),
-            "yerr": None, "merged_with": []}
+            "yerr": None, "merged_with": [], "what": "error"}
 
 
 def _panel(k: int = 1, *, raw: bool = False, series=None) -> dict:
@@ -415,7 +415,7 @@ def _quest(tmp_path: Path, calls: dict | None, stem: str = "error_vs_step") -> d
     folder.mkdir(parents=True)
     if calls is not None:
         (folder / f"{stem}.calls.json").write_text(json.dumps(calls), encoding="utf-8")
-    return {**STATE, "quest_root": str(tmp_path)}
+    return dict(STATE)  # no quest_root: the live quest state has none, the engine knows its own root
 
 
 def _record(*panels: dict, fallback: bool = False) -> dict:
@@ -424,7 +424,7 @@ def _record(*panels: dict, fallback: bool = False) -> dict:
 
 def test_prompt_lists_true_claims_as_marks_for_verified_figure(tmp_path: Path) -> None:
     state = _quest(tmp_path, _record(_panel()))
-    listing = _figure_list_for_prompt(state)  # type: ignore[arg-type]
+    listing = _figure_list_for_prompt(state, root=tmp_path)  # type: ignore[arg-type]
     assert "{{figure:error_vs_step:drawn @ series=error, panel=1}}" in listing
     assert "scheme A is drawn" in listing, "the writer sees the sentence FI will write"
     assert "{{figure:error_vs_step:trend @ series=error, panel=1}}" in listing
@@ -436,26 +436,26 @@ def test_prompt_lists_true_claims_as_marks_for_verified_figure(tmp_path: Path) -
 
 def test_prompt_says_raw_panel_has_none(tmp_path: Path) -> None:
     state = _quest(tmp_path, _record(_panel(1), _panel(2, raw=True)))
-    listing = _figure_list_for_prompt(state)  # type: ignore[arg-type]
+    listing = _figure_list_for_prompt(state, root=tmp_path)  # type: ignore[arg-type]
     assert "no statements can be made about panel 2 (custom drawing)" in listing
     assert "panel=2" not in listing
 
 
 def test_prompt_says_a_fallback_figure_is_drawn_from_the_plans_description(tmp_path: Path) -> None:
     state = _quest(tmp_path, _record(_panel(), fallback=True))
-    assert "drawn by FI from the plan's description" in _figure_list_for_prompt(state)  # type: ignore[arg-type]
+    assert "drawn by FI from the plan's description" in _figure_list_for_prompt(state, root=tmp_path)  # type: ignore[arg-type]
 
 
 def test_legacy_figure_prompt_is_unchanged(tmp_path: Path) -> None:
     # RF1: golden text of the list before the menu existed (no call record), with or without a quest folder.
     assert _figure_list_for_prompt(STATE) == LEGACY_LIST  # type: ignore[arg-type]
     state = _quest(tmp_path, None)
-    assert _figure_list_for_prompt(state) == LEGACY_LIST  # type: ignore[arg-type]
+    assert _figure_list_for_prompt(state, root=tmp_path) == LEGACY_LIST  # type: ignore[arg-type]
 
 
 def test_no_selected_claim_gets_one_composed_sentence_inline(tmp_path: Path) -> None:
     state = _quest(tmp_path, _record(_panel()))
-    out, placed, _ = _place_figures(DRAFT, state)  # type: ignore[arg-type]
+    out, placed, _ = _place_figures(DRAFT, state, root=tmp_path)  # type: ignore[arg-type]
     assert "error_vs_step.png" in placed
     sentence = "{{figure:error_vs_step:drawn @ series=error, panel=1}} (Figure 1)."
     assert out.count("{{figure:error_vs_step") == 1 and sentence in out
@@ -465,25 +465,26 @@ def test_no_selected_claim_gets_one_composed_sentence_inline(tmp_path: Path) -> 
     # the figures with no call record get nothing
     assert "{{figure:cost_by_size" not in out and "{{figure:spread_map" not in out
     # placing again adds nothing
-    again, _, _ = _place_figures(out, state)  # type: ignore[arg-type]
+    again, _, _ = _place_figures(out, state, root=tmp_path)  # type: ignore[arg-type]
     assert again == out
 
 
 def test_selected_claims_are_not_duplicated_by_minimum_sentence(tmp_path: Path) -> None:
     state = _quest(tmp_path, _record(_panel()))
     chosen = DRAFT.replace("for each scheme.", "and {{figure:error_vs_step:trend @ series=error, panel=1}}.")
-    out, _, _ = _place_figures(chosen, state)  # type: ignore[arg-type]
+    out, _, _ = _place_figures(chosen, state, root=tmp_path)  # type: ignore[arg-type]
     assert out.count("{{figure:error_vs_step") == 1 and ":drawn" not in out
     rendered = chosen.replace("{{figure:error_vs_step:trend @ series=error, panel=1}}",
                               "<!-- fi:fact-figure-trend-error_vs_step-args00 -->x<!-- /fi:fact-figure-trend-error_vs_step-args00 -->")
-    out, _, _ = _place_figures(rendered, state)  # type: ignore[arg-type]
+    out, _, _ = _place_figures(rendered, state, root=tmp_path)  # type: ignore[arg-type]
     assert "{{figure:" not in out
 
 
 def test_a_raw_only_or_fallback_figure_gets_no_minimum_sentence(tmp_path: Path) -> None:
     for calls in (_record(_panel(1, raw=True)), _record(_panel(), fallback=True)):
-        state = _quest(tmp_path / str(len(calls["panels"])) / str(calls["fallback"]), calls)
-        out, _, _ = _place_figures(DRAFT, state)  # type: ignore[arg-type]
+        root = tmp_path / str(len(calls["panels"])) / str(calls["fallback"])
+        state = _quest(root, calls)
+        out, _, _ = _place_figures(DRAFT, state, root=root)  # type: ignore[arg-type]
         assert "{{figure:" not in out
 
 
@@ -528,7 +529,7 @@ def test_pointer_rule_leaves_a_paper_of_legacy_figures_alone(tmp_path: Path) -> 
 
     text = "# T\n\n## Results\n\nFigure 1 shows the paired gain. Figure 9 is odd.\n\n## Limitations\n\nFew.\n"
     eng, paper = quest_with_engine(tmp_path, text)
-    state = {**STATE, "quest_root": str(eng.quest_root), "paper_md": str(paper), "paper_keys": True, "iteration": 1}
+    state = {**STATE, "paper_md": str(paper), "paper_keys": True, "iteration": 1}
     eng.config.engine.max_iterations = 2
     before = paper.read_bytes()
     eng._paper_record_hits(paper.read_text(encoding="utf-8"), state)  # type: ignore[arg-type]
@@ -556,11 +557,15 @@ def _write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, drafts: list[str], c
 
     replies = list(drafts)
 
+    prompts: list[str] = []
+
     async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompts.append(" ".join(str(m.get("content") if isinstance(m, dict) else m) for m in messages))
         return replies.pop(0) if len(replies) > 1 else replies[0]
 
     monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
     eng = make_engine(tmp_path)
+    eng.prompts = prompts  # type: ignore[attr-defined]  # what the writer was sent
     eng.config.engine.max_iterations = max_iterations
     import logging
 
@@ -688,3 +693,72 @@ def test_a_result_key_removed_with_a_figure_sentence_at_write_is_kept_for_the_qu
     assert [d for d in paper_facts.kept_check(tmp_path)["taken_out_values"] if d.get("at_write")]
     paper_facts.keep_figure_left_out(tmp_path, [])  # the next write replaces it
     assert not paper_facts.kept_check(tmp_path).get("taken_out_values")
+
+
+# ---- the quest root is the engine's own fact: a state that holds none still takes the paper path -------------------------------
+
+def test_the_write_node_takes_the_figure_path_from_a_state_that_holds_no_quest_root(tmp_path, monkeypatch) -> None:
+    from core.engine import QuestState
+
+    eng, state, _ = _write(tmp_path, monkeypatch, [WRITER_DRAFT], _record(_panel()))
+    assert "quest_root" not in state and "quest_root" not in QuestState.__annotations__
+    sent = " ".join(eng.prompts)  # type: ignore[attr-defined]
+    assert "Marks FI has checked about this figure" in sent and "{{figure:error_vs_step:drawn" in sent, "the writer's menu"
+    paper = _paper(state)
+    assert "falls steeply" not in paper and "three orders" not in paper, "the pointer rule removed the free sentence"
+    assert "scheme A is drawn" in paper, "FI's own sentence for the checked figure"
+    expected = _figure_caption_text("error_vs_step.png", RECORDS["error_vs_step.png"], n_seeds=None, calls=_record(_panel()))
+    legacy = _figure_caption_text("error_vs_step.png", RECORDS["error_vs_step.png"], n_seeds=None)
+    assert expected != legacy and f"**Figure 1.** {expected}](figures/error_vs_step.png)" in paper, "the caption is from the call record"
+
+
+def test_the_helpers_of_the_paper_path_need_no_key_in_the_state_when_given_the_root(tmp_path) -> None:
+    from core.engine import _figures_drawn, _take_out_unpointed
+
+    state = _quest(tmp_path, _record(_panel()))
+    assert _figures_drawn(state) == {}, "a state that holds no root and is given none is the older path (slides and poster set it)"
+    assert _figures_drawn(state, root=tmp_path) == {1: {"error"}}
+    text = "Figure 1 shows that the error falls steeply and saturates.\n"
+    assert _take_out_unpointed(text, state, root=tmp_path)[0] != text and _take_out_unpointed(text, state)[0] == text
+
+
+# ---- I2: the pointer rule reads what FI checked, not series ids or labels --------------------------------------------------------
+
+def _drawn_with(tmp_path: Path, series: list[dict]) -> dict:
+    from core.engine import _figures_drawn
+
+    panel = {**_panel(), "series": series}
+    return _figures_drawn(_quest(tmp_path, _record(panel)), root=tmp_path)
+
+
+def test_a_series_named_for_a_result_but_not_checked_as_it_does_not_license_the_sentence(tmp_path) -> None:
+    named = {**_series("gain", "gain"), "what": "other"}
+    assert _drawn_with(tmp_path, [named]) == {1: set()}
+    assert _drawn_with(tmp_path / "b", [{**_series("gain", "gain"), "what": "gain"}]) == {1: {"gain"}}
+
+
+def test_two_results_on_one_axis_each_license_a_sentence_about_it(tmp_path) -> None:
+    from core.engine import _take_out_unpointed
+
+    panel = {**_panel(), "y": {"what": "gain / loss", "label": "value", "scale": "linear"},
+             "series": [{**_series("a", "a"), "what": "gain"}, {**_series("b", "b"), "what": "loss"}]}
+    state = _quest(tmp_path, _record(panel))
+    text = "The gain reached <!-- fi:v {{v:gain @ n=10}} -->1.1<!-- /fi:v --> (Figure 1).\n"
+    out, taken = _take_out_unpointed(text, state, root=tmp_path)
+    assert out == text and taken == [], "a true sentence about the first result is kept"
+    assert _drawn_with(tmp_path / "c", panel["series"]) == {1: {"gain", "loss"}}
+
+
+# ---- M7: the figure pass never fails the write node ----------------------------------------------------------------------------
+
+def test_a_failing_pointer_rule_keeps_the_paper_and_says_so_once(tmp_path, monkeypatch) -> None:
+    def broken(*a, **k):
+        raise RuntimeError("planted")
+
+    monkeypatch.setattr("core.figure_claims.apply_pointer_rule", broken)
+    eng, state, _ = _write(tmp_path, monkeypatch, [WRITER_DRAFT], _record(_panel()), max_iterations=1)
+    assert "falls steeply" in _paper(state), "the paper stays as it was written"
+    assert any("sentences about the figures stopped" in m and "planted" in m for m in eng.said)  # type: ignore[attr-defined]
+    problems = [p for p in eng._cannot_repair_problems() if p.get("check") == "figure_pass_fault"]
+    assert len(problems) == 1 and problems[0]["text"].startswith("FI could not check the sentences about the figures")
+    assert eng._cannot_repair_stop() is None
