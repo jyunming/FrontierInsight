@@ -12007,7 +12007,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         self._clear_cannot_repair("figure_dropped")
         self._clear_cannot_repair("figure_fi_fault")
         for outcome in record.get("figures") or []:
-            if isinstance(outcome, dict) and outcome.get("status") == "fi_fault" and not outcome.get("fallback"):
+            if isinstance(outcome, dict) and outcome.get("status") == "fi_fault":
                 # FI's own fault while drawing this figure: the results stand, the figure is missing, and the cause is FI's
                 fid = str(outcome.get("id"))
                 reason = str(outcome.get("why") or "").strip().rstrip(".") or "no reason was recorded"

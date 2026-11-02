@@ -741,9 +741,13 @@ def own_failure(record: dict[str, Any], body: str, why: str = "") -> str:
 
 
 def stopping_faults(record: dict[str, Any]) -> list[str]:
-    """The faults of FI's own in a record of a run (``fi_faults``) that stop the run: all of them except a figure's own
-    (an outcome with status ``fi_fault``). That figure is missing and said so, but the results stand."""
+    """The faults of FI's own that stop the run, from this run's own record: all of ``fi_faults`` except a figure's own (an
+    outcome with status ``fi_fault``; that figure is missing and said so, but the results stand). A record that is an earlier
+    run's (a later run stopped and kept it) holds that earlier run's faults: only the reason the later run stopped counts."""
     record = record if isinstance(record, dict) else {}
+    if record.get("from_earlier_run"):
+        why = str((record.get("this_run") or {}).get("why") or "")
+        return [why] if why else []
     drawn = {str(o.get("said")) for o in record.get("figures") or [] if isinstance(o, dict) and o.get("status") == "fi_fault"}
     return [str(f) for f in record.get("fi_faults") or [] if str(f) not in drawn]
 
@@ -1525,6 +1529,15 @@ def _earlier_record(quest_root):
     return old
 
 
+def _earlier_stops(earlier):
+    """The faults of the earlier run that stop a run (all but a figure's own, which this run's figures replace); the same rule as
+    ``stopping_faults`` of core/analysis_frame.py, which this carried file cannot import."""
+    if earlier.get("from_earlier_run"):
+        return []
+    own = set(o.get("said") for o in earlier.get("figures") or [] if isinstance(o, dict) and o.get("status") == "fi_fault")
+    return [f for f in earlier.get("fi_faults") or [] if f not in own]
+
+
 def run(record_path, quest_root):
     """The whole analysis: ``(RESULT_JSON, records, exit code, derived.json as written)``. Writes data/results/derived.json. The
     exit code is 2 for a fault of FI's own (nothing to send the model), else 1 when a body of a counting role, or a figure body,
@@ -1564,7 +1577,7 @@ def run(record_path, quest_root):
                 "figures": outcomes, "figures_said": said, "fi_faults": faults, "notes": notes,
                 "bodies": _bodies(records, outcomes)}
     if only:
-        document = dict(earlier, figures=outcomes, figures_said=said, fi_faults=list(earlier.get("fi_faults") or []) + list(figure_faults))
+        document = dict(earlier, figures=outcomes, figures_said=said, fi_faults=_earlier_stops(earlier) + list(figure_faults))
         document.pop("figures_from_earlier_run", None)
         notes = list(earlier.get("notes") or [])
     if kept_figures:

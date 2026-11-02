@@ -154,3 +154,45 @@ def test_the_paper_and_the_quality_report_say_the_figure_was_not_drawn_by_fis_fa
     assert sentence in paper, "the delivered paper says the figure was not drawn and why"
     quality = quality_report.render(quality_report.build(tmp_path, running=False))
     assert "fig1" in quality and "FI's fault" in quality
+
+
+# ---- fix round 2 ------------------------------------------------------------------------------------------------------------------
+def test_a_default_figure_that_fails_in_fis_own_code_is_disclosed_like_any_other(tmp_path: Path, monkeypatch) -> None:
+    import asyncio
+
+    from tests.test_disclosure import _engine as write_engine
+
+    eng = write_engine(tmp_path)
+    record = {"schema": frame.DERIVED_SCHEMA, "derived": {}, "fi_faults": ["x"], "figures": [
+        {"id": "fig1", "file": "a.png", "status": "fi_fault", "fallback": True,
+         "why": "FI's drawing of the default figure `fig1` stopped with KeyError: 'k'."}]}
+    eng._figure_fallbacks({}, record)
+    problems = eng._cannot_repair_problems()
+    assert len(problems) == 1 and problems[0]["check"] == "figure_fi_fault"
+    assert "Figure `fig1` was not drawn: FI's own drawing step failed" in problems[0]["text"] and "FI's fault" in problems[0]["text"]
+    assert eng._cannot_repair_stop() is None  # it stops nothing
+    assert "Figure `fig1` was not drawn" in eng._run_checks_note()
+
+
+def test_faults_of_the_earlier_run_do_not_make_the_run_that_draws_only_the_figures_unproduced(tmp_path: Path) -> None:
+    quest = _quest(tmp_path, _design(), _DRAWS)
+    first = _run_with_fault(quest)  # the first run: a fault of FI's own in fig1, exit 0
+    assert first["code"] == 0 and any(_PLANTED in f for f in first["faults"])
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "FI_ROOT", "FI_TRIALS")} | {"FI_FIGURE_FALLBACK": "only"}
+    done = subprocess.run([sys.executable, "experiment.py"], cwd=quest / "code", env=env, capture_output=True, text=True, timeout=300,
+                          creationflags=NO_WINDOW)
+    record = json.loads((quest / frame.DERIVED_PATH).read_text(encoding="utf-8"))
+    assert done.returncode == 0 and next(o for o in record["figures"] if o["id"] == "fig1")["status"] == "ok"
+    assert frame.stopping_faults(record) == [], record["fi_faults"]  # the earlier run's fault is not this run's
+    assert not any(_PLANTED in f for f in record["fi_faults"])
+
+
+def test_stopping_faults_of_a_figure_are_never_read_from_either_run() -> None:
+    said = "Figure `fig1` was not drawn: FI's own drawing step failed (x); this is FI's fault, not the study's."
+    figure = {"id": "fig1", "status": "fi_fault", "said": said}
+    assert frame.stopping_faults({"figures": [figure], "fi_faults": [said]}) == []
+    kept = {"from_earlier_run": True, "figures": [figure], "fi_faults": [said, "an earlier formula fault"],
+            "this_run": {"status": "stopped", "why": "the record of the trials is missing"}}
+    assert frame.stopping_faults(kept) == ["the record of the trials is missing"]  # only this run's own
+    assert frame.stopping_faults({"figures": [], "fi_faults": ["FI's analysis stopped inside its own lines"]}) == [
+        "FI's analysis stopped inside its own lines"]  # the known positive
