@@ -56,6 +56,10 @@ NO_DIFFERENCE_RECORD = "NO_DIFFERENCE_OBSERVED.json"
 _COUNTER = "typed_results.json"
 #: How many crashes inside the code, shown by a finding's test during the code review, go to the crash repair in a quest.
 REVIEW_CRASHES = 2
+#: How many times the gate sends a fault of the analysis on the recorded results back to be repaired in a script's life. The
+#: repairs have a counter of their own (``gate_repairs``): crash repairs of the simulation never leave them with none, and
+#: they spend none of the crash repairs.
+GATE_REPAIRS = 2
 
 # A number is written precisely enough to be recognised as a value (so that a note never repeats a left-out one): three
 # significant digits, or two written to four decimals ("0.0068"). Below that a number is a round figure, a setting or a label.
@@ -2907,20 +2911,26 @@ class RunChecksMixin:
 
     async def _gate_first(self, state: Any) -> dict[str, Any] | None:
         """Before the long run, once the small run has passed: the analysis is run on the recorded results and its result
-        is the baseline. A fault goes to the repair of a failed run (while one is left) with the gate's sentence; anything
+        is the baseline. A fault goes to the repair of a failed run (while one of the gate's own repairs is left, :data:`GATE_REPAIRS`) with the gate's sentence; anything
         that stands is recorded. ``None`` to go on."""
         after = await self._analysis_gate(state)
         if after is None:
             return None
         self._gate_kept = self.__dict__.get("_gate_seen")
-        if after.kind == "fault" and int(state.get("exec_reflect_iter") or 0) < self.config.engine.exec_reflect_max_iterations:  # type: ignore[attr-defined]
+        made = int(state.get("gate_repairs") or 0)
+        # ``engine.exec_reflect_max_iterations: 0`` (no repair at all) still allows none
+        if after.kind == "fault" and made < min(GATE_REPAIRS, int(self.config.engine.exec_reflect_max_iterations)):  # type: ignore[attr-defined]
             self._log.warning("[gate] the analysis does not run on the recorded results; sending it to be repaired")  # type: ignore[attr-defined]
             if self._analysis_on():
                 # FI's analysis: the function of derive.py its record names goes to the repair, never FI's experiment.py
                 failed = self._code_review_failed_run(after.says(), script="derive.py")  # type: ignore[attr-defined]
                 failed["exec_result"]["failed_body"] = getattr(after, "body", "")
-                return failed
-            return self._code_review_failed_run(after.says(), script="experiment.py")  # type: ignore[attr-defined]
+            else:
+                failed = self._code_review_failed_run(after.says(), script="experiment.py")  # type: ignore[attr-defined]
+            # a repair of the analysis has its own counter and spends no crash repair (``execute_reflect`` reads the mark)
+            failed["exec_result"]["gate_repair"] = True
+            failed["gate_repairs"] = made + 1
+            return failed
         self._gate_standing(after)
         return None
 
