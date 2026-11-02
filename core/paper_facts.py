@@ -92,6 +92,11 @@ SHARED_SEEDS = "shared_seeds"
 UNSUPPORTED_CLAIMS = "unsupported_claims"
 UNRESOLVED_REVIEW = "unresolved_review"
 FIGURE_LEFT_OUT = "figure_left_out"
+FIGURE_PASS_FAULT = "figure_pass_fault"
+#: Kept while the check of the sentences about the figures stopped with an error of FI's own on the paper last written.
+FIGURE_PASS_RECORD = Path(".fi") / "figure_pass_fault.json"
+FIGURE_PASS_SENTENCE = ("FI could not check the sentences about the figures: its check stopped with an error of its own, so "
+                        "they stand as the writer wrote them.")
 LAST_REVIEW = "last_review"
 #: The sentences of the delivered paper the last claim check found supported by neither the run's results nor a cited
 #: source (``Engine._state_unsupported_claims``): ``{"claims": [{"claim", "evidence"}]}``. Empty when the last check found none.
@@ -112,7 +117,7 @@ _ID_PREFIX = {NOT_DONE: "topic", LEFT_OUT: "left-out", NOT_COMPUTED: "not-comput
               UNDEFINED: "undefined",
               FEWER_RUNS: "fewer", CUT_SHORT: "cut-short", RUN_DIFFERENCE: "difference", SHARED_SEEDS: "shared-seeds",
               UNSUPPORTED_CLAIMS: "unsupported", UNRESOLVED_REVIEW: "review", LAST_REVIEW: "last-review",
-              FIGURE_LEFT_OUT: "figure-left-out"}
+              FIGURE_LEFT_OUT: "figure-left-out", FIGURE_PASS_FAULT: "figure-pass-fault"}
 #: More settings left out than this are placed as one item.
 _MAX_SETTING_ITEMS = 6
 
@@ -486,6 +491,8 @@ def required_items(quest_root: Path | str) -> list[Item]:
         add(UNSUPPORTED_CLAIMS, "unsupported sentences", _sentence(said), key="claims")
     for stem, number in _figure_left_out_items(kept_check(root).get("taken_out_values")):
         add(FIGURE_LEFT_OUT, f"figure {number} statements", figure_left_out_sentence(number), key=stem)
+    if (Path(root) / FIGURE_PASS_RECORD).is_file():
+        add(FIGURE_PASS_FAULT, "figure sentences not checked", FIGURE_PASS_SENTENCE, key="figures")
     points = _disclosure.last_review_points(root)
     if points:
         add(LAST_REVIEW, "final review points", _disclosure.last_review_sentence(points, _MAX_LAST_REVIEW_LISTED), key="points")
@@ -2383,6 +2390,23 @@ def keep_figure_left_out(quest_root: Path | str, entries: list[dict[str, str]]) 
             path.write_text(json.dumps(record, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
         return True
     except (OSError, ValueError, TypeError):
+        return False
+
+
+def keep_figure_pass_fault(quest_root: Path | str, failed: bool) -> bool:
+    """Keep (``failed``) or drop the record that the check of the sentences about the figures stopped on the paper last
+    written; the Limitations block says it while it stands. Returns whether the record changed. Never raises."""
+    path = Path(quest_root) / FIGURE_PASS_RECORD
+    try:
+        if failed == path.is_file():
+            return False
+        if failed:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"at": time.time()}) + "\n", encoding="utf-8")
+        else:
+            path.unlink(missing_ok=True)
+        return True
+    except OSError:
         return False
 
 

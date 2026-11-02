@@ -698,10 +698,8 @@ def test_a_result_key_removed_with_a_figure_sentence_at_write_is_kept_for_the_qu
 # ---- the quest root is the engine's own fact: a state that holds none still takes the paper path -------------------------------
 
 def test_the_write_node_takes_the_figure_path_from_a_state_that_holds_no_quest_root(tmp_path, monkeypatch) -> None:
-    from core.engine import QuestState
-
     eng, state, _ = _write(tmp_path, monkeypatch, [WRITER_DRAFT], _record(_panel()))
-    assert "quest_root" not in state and "quest_root" not in QuestState.__annotations__
+    assert "quest_root" not in state, "the node is called with a state that holds none"
     sent = " ".join(eng.prompts)  # type: ignore[attr-defined]
     assert "Marks FI has checked about this figure" in sent and "{{figure:error_vs_step:drawn" in sent, "the writer's menu"
     paper = _paper(state)
@@ -762,3 +760,80 @@ def test_a_failing_pointer_rule_keeps_the_paper_and_says_so_once(tmp_path, monke
     problems = [p for p in eng._cannot_repair_problems() if p.get("check") == "figure_pass_fault"]
     assert len(problems) == 1 and problems[0]["text"].startswith("FI could not check the sentences about the figures")
     assert eng._cannot_repair_stop() is None
+
+
+# ---- fix round 1 --------------------------------------------------------------------------------------------------------------
+
+FIGURE_PASS_SAID = "FI could not check the sentences about the figures"
+
+
+def _break_rule(monkeypatch) -> None:
+    def broken(*a, **k):
+        raise RuntimeError("planted")
+
+    monkeypatch.setattr("core.figure_claims.apply_pointer_rule", broken)
+
+
+def test_a_first_round_paper_whose_figure_pass_raised_says_so_in_its_limitations(tmp_path, monkeypatch) -> None:
+    _break_rule(monkeypatch)
+    _eng, state, _ = _write(tmp_path, monkeypatch, [WRITER_DRAFT], _record(_panel()), max_iterations=3)
+    assert _paper(state).count(FIGURE_PASS_SAID) == 1, "no model call and no later round needed"
+
+
+def test_a_later_clean_write_clears_the_figure_pass_fault(tmp_path, monkeypatch) -> None:
+    from core import paper_facts
+
+    _break_rule(monkeypatch)
+    eng, state, _ = _write(tmp_path, monkeypatch, [WRITER_DRAFT], _record(_panel()), max_iterations=3)
+    assert FIGURE_PASS_SAID in _paper(state) and (tmp_path / paper_facts.FIGURE_PASS_RECORD).is_file()
+    monkeypatch.undo()  # the rule works again (the fake model is put back below)
+
+    async def same(self, messages, **kw):  # noqa: ANN001
+        return WRITER_DRAFT
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", same)
+    out = asyncio.run(eng._node_write({**state, "iteration": 1}))  # type: ignore[arg-type]
+    assert FIGURE_PASS_SAID not in Path(out["paper_md"]).read_text(encoding="utf-8")
+    assert not (tmp_path / paper_facts.FIGURE_PASS_RECORD).exists()
+    assert not [p for p in eng._cannot_repair_problems() if p.get("check") == "figure_pass_fault"]
+
+
+def test_a_node_wrapped_by_audited_sees_the_quest_root_without_the_caller_setting_it(tmp_path) -> None:
+    from tests.test_disclosure import _engine as make_engine
+
+    eng = make_engine(tmp_path)
+    seen: dict = {}
+
+    async def node(state):  # noqa: ANN001
+        seen.update(state)
+        return {}
+
+    asyncio.run(eng._audited("probe", node)({"topic": "t"}))  # type: ignore[arg-type]
+    assert seen.get("quest_root") == str(eng.quest_root)
+
+
+def test_the_run_checks_note_says_the_figure_sentences_were_not_checked(tmp_path) -> None:
+    from tests.test_disclosure import _engine as make_engine
+    from core import stop_power
+
+    eng = make_engine(tmp_path)
+    eng._record_cannot_repair("FI could not check the sentences about the figures; the paper keeps them as written",
+                              ["x"], source=stop_power.READ, check="figure_pass_fault")
+    note = eng._run_checks_note()
+    assert "not checked by FI" in note and "repairs did not remove it" not in note
+
+
+def test_the_writer_is_told_which_results_a_figure_draws_from_the_same_set_the_rule_uses(tmp_path) -> None:
+    from core.engine import _figures_drawn
+
+    panel = {**_panel(), "y": {"what": "gain / loss", "label": "value", "scale": "linear"},
+             "series": [{**_series("a", "a"), "what": "gain"}, {**_series("b", "b"), "what": "loss"},
+                        {**_series("gain", "gain"), "what": "other"}]}
+    state = _quest(tmp_path, _record(panel))
+    drawn = _figures_drawn(state, root=tmp_path)[1]
+    assert drawn == {"gain", "loss"}
+    listing = _figure_list_for_prompt(state, root=tmp_path)  # type: ignore[arg-type]
+    line = next(ln for ln in listing.splitlines() if "Results this figure draws" in ln)
+    assert line.strip() == "Results this figure draws: " + ", ".join(sorted(drawn)) + "."
+    plain = _quest(tmp_path / "p", _record({**_panel(), "series": [{**_series("g", "g"), "what": "other"}]}))
+    assert "Results this figure draws" not in _figure_list_for_prompt(plain, root=tmp_path / "p")  # type: ignore[arg-type]

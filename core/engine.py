@@ -328,6 +328,7 @@ class QuestArtifacts:
 
 
 class QuestState(TypedDict, total=False):
+    quest_root: str  # set by ``Engine._audited`` for every node; the engine's own root, never a node's output
     topic: str
     title: str
     iteration: int
@@ -2314,6 +2315,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
 
         @functools.wraps(fn)
         async def wrapper(state: QuestState) -> Any:
+            # The quest root is FI's own fact: every node (a resumed one too) sees it, whatever its state holds.
+            state = {**state, "quest_root": str(self.quest_root)}  # type: ignore[assignment]
             self._seed_call_counts(state)
             self.audit.event_count()      # open the chain first: after a restart it says which node was waiting for a person
             resumed = self.audit.paused_node == name
@@ -23422,14 +23425,22 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         a figure FI cannot stand behind taken out before anything reads it, whatever round it is: the review, the slides and
         the poster all read the paper as it is left here. What was left out is kept for the Limitations, which are written
         again in the same write (the record of an earlier paper is replaced, so nothing older is said)."""
+        self.__dict__.pop("_figure_pass_error", None)
+        at = {**state, "paper_md": str(paper_path)}
         try:
-            at = {**state, "paper_md": str(paper_path)}
             taken = self._take_out_unfilled_keys(at, figures_only=True)
             if _paper_facts.keep_figure_left_out(self.quest_root, taken):
                 self._restate_limitations(at, "FI said in the Limitations which statements about a figure were left out and "
                                               "added no claim")
         except Exception as e:  # noqa: BLE001 -- the figure pass never fails the write node: the paper stays as written
             self._figure_pass_failed(e)
+        # The record describes the paper as finally written: a fault of an earlier write's pass is gone when this one ran clean.
+        failed = self.__dict__.get("_figure_pass_error") is not None
+        if failed or _paper_facts.keep_figure_pass_fault(self.quest_root, False):
+            if not failed:
+                self._clear_cannot_repair("figure_pass_fault")
+            self._restate_limitations(at, "FI said in the Limitations whether the sentences about the figures were checked "
+                                          "and added no claim")
 
     def _figures_drawn_safely(self, state: QuestState) -> dict[int, set[str]]:
         """:func:`_figures_drawn` for the write node; an error in it is the figure pass's fault, never the node's."""
@@ -23443,6 +23454,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         """The check of the sentences about the figures stopped with an error of FI's own: the paper stays as it was written,
         run.log has the error, and QUALITY.md and the next Limitations say once, plainly, that those sentences were not checked."""
         self._log.warning("[write] the check of the sentences about the figures stopped (%r); the paper stays as written", error)
+        self.__dict__["_figure_pass_error"] = repr(error)
+        _paper_facts.keep_figure_pass_fault(self.quest_root, True)
         try:
             self._record_cannot_repair(
                 "FI could not check the sentences about the figures; the paper keeps them as written",
@@ -34168,7 +34181,7 @@ def _figure_list_for_prompt(state: QuestState, *, root: Any = None) -> str:
             calls = _figure_claims.load_calls(state["quest_root"], Path(str(f)).stem) if state.get("quest_root") else None
             lines.append(f"- Figure {number}: figures/{f}" + _figure_record_note(
                 records.get(f), n_seeds=n_seeds, results=state.get("result_json"), settings=settings, calls=calls)
-                + _figure_menu_note(state, Path(str(f)).stem, calls))
+                + _figure_draws_note(calls) + _figure_menu_note(state, Path(str(f)).stem, calls))
     if any(_panel_place(ax.get("grid")) for f in figs for ax in ((records.get(f) or {}).get("axes") or [])
            if isinstance(ax, dict)):
         lines.append(
@@ -34921,16 +34934,29 @@ def _figures_drawn(state: QuestState, *, root: Any = None) -> dict[int, set[str]
         calls = _figure_claims.load_calls(state["quest_root"], Path(name).stem) if state.get("quest_root") else None
         if not calls:
             continue
-        metrics: set[str] = set()
-        for p in calls.get("panels") or []:
-            if not isinstance(p, dict) or p.get("raw"):
-                continue
-            for s in p.get("series") or []:
-                if isinstance(s, dict):
-                    # what FI checked the series to be (a joined axis "a / b" is each of them); never its id or label
-                    metrics.update(w.strip() for w in str(s.get("what") or "").split(" / "))
-        out[number] = metrics - {"", "other"}
+        out[number] = _drawn_metrics(calls)
     return out
+
+
+def _drawn_metrics(calls: dict[str, Any]) -> set[str]:
+    """The results a figure's drawing calls drew, as FI checked them: the ``what`` of each series of a panel FI drew itself (a
+    joined "a / b" is each of them; "other" is none), never a series' id or label. The one function behind both the line the
+    writer reads about a figure and the pointer rule's test of "a quantity that figure draws", so they cannot disagree."""
+    metrics: set[str] = set()
+    for p in calls.get("panels") or []:
+        if not isinstance(p, dict) or p.get("raw"):
+            continue
+        for s in p.get("series") or []:
+            if isinstance(s, dict):
+                metrics.update(w.strip() for w in str(s.get("what") or "").split(" / "))
+    return metrics - {"", "other"}
+
+
+def _figure_draws_note(calls: dict[str, Any] | None) -> str:
+    """The writer's line about the results a figure FI checked draws, by the names its ``{{v:<name>}}`` marks use; ``""`` when
+    it draws none FI checked."""
+    names = sorted(_drawn_metrics(calls)) if calls else []
+    return "\n    Results this figure draws: " + ", ".join(names) + "." if names else ""
 
 
 def _take_out_unpointed(text: str, state: QuestState, *, root: Any = None) -> tuple[str, list[dict[str, str]]]:
