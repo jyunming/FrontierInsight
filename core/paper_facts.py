@@ -1357,6 +1357,22 @@ def _pins_not_in(name: str, rec: Any, at: dict[str, Any]) -> list[str]:
     return out
 
 
+def _levels_with_trials(rec: Any, metric: str, split: str, levels: list[Any], others: list[str], at: dict[str, Any]) -> list[Any]:
+    """The values of the compared axis ``split`` at which ``metric`` has a trial at every combination of the question's other
+    axes ``others`` (taken over the whole record) that the pinned settings ``at`` allow. A value with a combination missing
+    would only give a line FI cannot fill ("no trials at that combination"); the sub-studies of a plan do not cross every
+    axis, so a part measured at one value of ``split`` only has trials there. Empty when no value has them all."""
+    cells = [c for c in rec.carrying(metric)
+             if all(a not in c["cell"] or _values._same(c["cell"][a], v) for a, v in at.items())]
+    combos = {tuple(json.dumps(c["cell"].get(a), default=str) for a in others) for c in cells}
+    have: dict[str, set[tuple[str, ...]]] = {}
+    for c in cells:
+        if split in c["cell"]:
+            have.setdefault(json.dumps(c["cell"][split], default=str), set()).add(
+                tuple(json.dumps(c["cell"].get(a), default=str) for a in others))
+    return [lv for lv in levels if combos <= have.get(json.dumps(lv, default=str), set())]
+
+
 def answers_text(quest_root: Path | str) -> str:
     """The block ``{{answers}}`` stands for: one line for each quantity the topic asks for and marks main, with FI's value
     and its interval (a key FI fills), from the plan's own ``protocol.topic_map`` entry (``metric:<id>``). A quantity the
@@ -1442,6 +1458,11 @@ def answers_text(quest_root: Path | str) -> str:
         pinned = [f"{rec.short(a)}={v}" for a, v in at.items()]
         fixed = pinned + [f"{rec.short(a)}=all" for a in per_run] + same_at
         levels = [None] if split is None else list(rec.axes().get(split) or [None])
+        only_at = False
+        if split is not None and None not in levels:
+            has_trials = _levels_with_trials(rec, metric, split, levels, [a for a in each if a != split], at)
+            if has_trials and len(has_trials) < len(levels):
+                only_at, levels = len(has_trials) == 1, has_trials
         for level in levels:
             here = [a for a in each if a != split] if level is not None else each
             said = [f"{rec.short(a)}=each" for a in here]
@@ -1450,7 +1471,8 @@ def answers_text(quest_root: Path | str) -> str:
             label += same_note
             if level is not None:
                 fixed_here = fixed + [f"{rec.short(split)}={level}"]
-                label = f"{name} ({rec.label(split)} = {level})" + (f" ({', '.join(_pins_not_in(name, rec, at))})" if _pins_not_in(name, rec, at) else "")
+                label = (f"{name} (measured at {rec.label(split)} = {level} only)" if only_at else
+                         f"{name} ({rec.label(split)} = {level})") + (f" ({', '.join(_pins_not_in(name, rec, at))})" if _pins_not_in(name, rec, at) else "")
             else:
                 fixed_here = fixed
             # A bias or a standard deviation the plan's map types for the question is that statistic of the result's trials, which

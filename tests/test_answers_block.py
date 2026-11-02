@@ -345,3 +345,36 @@ def test_same_across_counts_failed_and_non_finite_runs_and_needs_every_value() -
     # the first value is the first one that carries the metric
     later = pv.from_cells([cell(2, 1, [1.0]), cell(3, 1, [1.0])])
     assert later.values_of("m", "dt") == [2, 3]
+
+
+def _parts_quest(tmp_path, monkeypatch):
+    """The plan runs two sub-studies: ``ang`` varies at the last step size only; ``dt`` varies at ``ang`` = 10 only. The plan
+    compares step sizes."""
+    def met(vs):
+        return {"values": vs, "trials": list(range(len(vs))), "count": len(vs), "total": 0.0, "non_finite": 0}
+
+    settings = [(3, ang) for ang in (10, 20, 30)] + [(dt, 10) for dt in (1, 2)]
+    cells = [{"cell": {"dt": dt, "ang": ang}, "key": f"dt={dt},ang={ang}", "planned": 2, "ok": 2, "failed": 0,
+              "metrics": {"step": met([0.5 * dt * ang, 0.5 * dt * ang + 0.1])}} for dt, ang in settings]
+    (tmp_path / "raw").mkdir(parents=True)
+    (tmp_path / "raw" / "trials.json").write_text(json.dumps({"cells": cells}), encoding="utf-8")
+    (tmp_path / ".fi").mkdir()
+    req = {"quantities": [{"name": "step error", "main": True}]}
+    (tmp_path / ".fi" / "topic_requirements.json").write_text(json.dumps(req), encoding="utf-8")
+    protocol = {"metrics": [{"id": "step", "label": "Step error", "kind": "mean"}],
+                "comparisons": [{"id": "c1", "result": "step", "across": "dt", "how": "ratio"}],
+                "topic_map": [{"item": "Q1", "by": "metric:step"}]}
+    monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: protocol)
+    return tmp_path
+
+
+def test_a_compared_value_with_no_trial_at_the_questions_other_settings_is_not_a_line_of_its_own(tmp_path, monkeypatch) -> None:
+    """Before: one line for each of the 3 step sizes, two of them "not answered ... no trials at that combination", because the
+    part that varies ``ang`` ran at the last step size only. Now one line, naming the value it was measured at."""
+    root = _parts_quest(tmp_path, monkeypatch)
+    text = pf.answers_text(root)
+    lines = [ln for ln in text.splitlines() if ln.startswith("- step error")]
+    assert len(lines) == 1 and "not answered" not in text
+    assert "(measured at dt = 3 only)" in lines[0] and "{{v:step @ ang=each, dt=3 | range}}" in lines[0]
+    rec = pv.records_of(root, pf.plan_protocol(root))
+    assert pv.resolve("{{v:step @ ang=each, dt=3 | range}}", rec).filled
