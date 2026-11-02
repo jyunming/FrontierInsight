@@ -22675,7 +22675,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         verdicts: list[tuple[dict[str, Any], str]] = []
         errored = False
         crash_repair: dict[str, Any] | None = None
-        declared = (_code_review.declared_names(state.get("design"), self._protocol_block(state))
+        declared = (_code_review.declared_names(state.get("design"), self._protocol_block(state),
+                                                _analysis_frame.read_record(self.quest_root))
                     if isinstance(state, dict) else None)
         for issue in shown:
             rel = str(issue.get("test") or "")

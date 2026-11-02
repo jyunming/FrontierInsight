@@ -470,6 +470,12 @@ _PLAN = {"variables": {"dependent": ["yield"]},
          "protocol": {"metrics": [{"id": "yield", "estimand": "total"}, {"id": "per_batch_spread", "estimand": "spread"}]}}
 
 
+def _derived(*ids: str) -> dict[str, Any]:
+    """FI's record of the last run of its analysis (data/results/derived.json) listing ``ids`` as given no value."""
+    return {"schema": "fi.derived/v1", "complete": not ids,
+            "not_computed": [{"id": i, "status": "no_data", "why": "no trial gave a value for it"} for i in ids]}
+
+
 def _gate_record(quantity: str) -> tuple[dict[str, Any], dict[str, Any]]:
     issue = _issue("F-9", quantity=quantity, kind="quantity")
     req = {"id": "R2", "kind": "metric", "name": quantity, "status": "different", "fid": "F-9",
@@ -484,8 +490,9 @@ def _outcome(engine: Engine, quantity: str, result: dict[str, Any], declared: li
 
 def test_a_declared_result_with_no_key_in_the_results_is_a_part_not_done_and_stops_nothing(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
-    declared = code_review.declared_names(_PLAN, _PLAN["protocol"])
-    assert set(declared) == {"yield", "per_batch_spread"}
+    assert set(code_review.declared_names(_PLAN, _PLAN["protocol"])) == {"yield", "per_batch_spread"}
+    declared = code_review.declared_names(_PLAN, _PLAN["protocol"], _derived("per_batch_spread"))
+    assert declared == ["per_batch_spread"]
     result = {"yield": 3.2, "runtime": 1.0}  # no key holds per_batch_spread
     assert _outcome(engine, "per_batch_spread", result, declared) is None
     issue, record = _gate_record("per_batch_spread")
@@ -504,7 +511,7 @@ def test_a_name_the_plan_does_not_declare_still_stops(tmp_path: Path) -> None:
 
 def test_a_declared_result_the_results_hold_numbers_for_is_not_a_part_not_done(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
-    declared = code_review.declared_names(_PLAN, _PLAN["protocol"])
+    declared = code_review.declared_names(_PLAN, _PLAN["protocol"], _derived("per_batch_spread"))
     result = {"yield": 3.2, "per_batch_spread": 0.4, "contrast": 1.0}
     issue, record = _gate_record("per_batch_spread")
     assert code_review.not_obtained(record, issue, result, declared) == []
@@ -517,7 +524,7 @@ def test_a_declared_result_the_results_hold_numbers_for_is_not_a_part_not_done(t
 
 def test_a_declared_result_whose_key_holds_no_number_is_left_out_not_a_part_not_done(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
-    declared = code_review.declared_names(_PLAN, _PLAN["protocol"])
+    declared = code_review.declared_names(_PLAN, _PLAN["protocol"], _derived("per_batch_spread"))
     result = {"yield": 3.2, "per_batch_spread": None}
     assert _outcome(engine, "per_batch_spread", result, declared) is None
     issue, record = _gate_record("per_batch_spread")
@@ -532,3 +539,24 @@ def test_the_main_quantity_absent_from_the_results_still_stops(tmp_path: Path) -
     issue["headline"] = True
     stop = engine._shown_fault_outcome([(issue, "its test still fails on it")], record, {"runtime": 1.0}, ["yield"], declared)
     assert stop and stop["stuck_reason"] == "shown_fault_open"
+
+
+@pytest.mark.parametrize("result", [
+    {"yield": 3.2, "spread_of_batches": 0.4},  # the value is held under another name
+    {"yield": 3.2, "table": [{"metric": "per_batch_spread", "value": 0.4}]},  # ... or as a row of a table
+])
+def test_a_value_held_under_another_name_or_in_a_row_still_stops_unless_fi_recorded_none(tmp_path: Path, result: dict) -> None:
+    """The names of the results never decide that a quantity has no value: only FI's own record of the run does."""
+    engine = _engine(tmp_path)
+    nothing_recorded = code_review.declared_names(_PLAN, _PLAN["protocol"], _derived())
+    assert nothing_recorded == []
+    stop = _outcome(engine, "per_batch_spread", result, nothing_recorded)
+    assert stop and "cannot find which of the results it changes" in stop["rationale"]
+    # and with no record of the run at all
+    assert code_review.declared_names(_PLAN, _PLAN["protocol"], {}) == []
+
+
+def test_fi_s_record_of_the_run_decides_which_declared_results_have_no_value() -> None:
+    derived = _derived("per_batch_spread", "not_a_plan_result")
+    assert code_review.declared_names(_PLAN, _PLAN["protocol"], derived) == ["per_batch_spread"]
+    assert code_review.declared_names(_PLAN, _PLAN["protocol"], {"not_computed": [{"id": "per_batch_spread"}]}) == []  # no schema
