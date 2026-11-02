@@ -747,7 +747,9 @@ def only_figures_failed(record: dict[str, Any], returncode: int) -> bool:
     the analysis's, not the run's: the repair of it goes on (``failure`` names its body), but what the run produced stands."""
     if returncode != 1 or not isinstance(record, dict) or record.get("schema") != DERIVED_SCHEMA or record.get("from_earlier_run"):
         return False
-    if record.get("fi_faults"):
+    # a fault of FI's own stops the run, except a figure's own (``fi_fault`` outcome): that figure is missing, the results stand
+    drawn = {str(o.get("said")) for o in record.get("figures") or [] if isinstance(o, dict) and o.get("status") == "fi_fault"}
+    if [f for f in record.get("fi_faults") or [] if str(f) not in drawn]:
         return False
     derived = record.get("derived") if isinstance(record.get("derived"), dict) else {}
     status_of = {r.get("by"): r.get("status") for r in derived.values() if isinstance(r, dict)}
@@ -1566,7 +1568,11 @@ def run(record_path, quest_root):
     status_of = {r.get("by"): r["status"] for r in records.values()}
     bad = [i for i, r in records.items() if r["role"] in COUNTING and not r.get("fi_fault") and (
         r["status"] in ("failed", "refused") or (r["status"] == "blocked" and status_of.get(r.get("cause")) in ("failed", "refused")))]
-    return out, records, (2 if faults else 1 if bad or figure_code else 0), document
+    # A figure's fault of FI's own (``fi_fault`` outcome) is recorded and said, but it never stops the run: every result was produced and
+    # only that figure is missing. The stop is for a formula FI could not compute, or a stop of the figure step as a whole.
+    drawn_faults = {o.get("said") for o in outcomes if o.get("status") == "fi_fault"}  # what ``fi_figures.fi_faults`` lists
+    stops = [r["why"] for r in records.values() if r.get("fi_fault")] + [f for f in figure_faults if f not in drawn_faults]
+    return out, records, (2 if stops else 1 if bad or figure_code else 0), document
 
 
 def main():

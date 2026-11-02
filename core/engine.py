@@ -12006,6 +12006,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return
         self._clear_cannot_repair("figure_dropped")
         for outcome in record.get("figures") or []:
+            if isinstance(outcome, dict) and outcome.get("status") == "fi_fault" and not outcome.get("fallback"):
+                # FI's own fault while drawing this figure: the results stand, the figure is missing, and the cause is FI's
+                fid = str(outcome.get("id"))
+                text = (f"Figure `{fid}` was not drawn because of a fault of FI's own, not of the study; its numbers are in the "
+                        f"results table. {outcome.get('why') or ''}").strip()
+                self._log.warning("[execute] %s", text)
+                self._record_cannot_repair(text, ["FI's own drawing of the figure stopped; the study's functions were not at fault"],
+                                           source=_stop_power.READ, check="figure_dropped")
+                continue
             if not (isinstance(outcome, dict) and outcome.get("fallback")):
                 continue
             fid, name = str(outcome.get("id")), Path(str(outcome.get("file") or "")).name
