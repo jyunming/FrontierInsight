@@ -46,6 +46,7 @@ import asyncio
 import base64
 import contextlib
 import contextvars
+import functools
 import json
 import logging
 import os
@@ -282,6 +283,10 @@ class _CliSpec:
     # Settings a CLI reads only from a file in the user's home (agy): written to a fresh home folder of the call's
     # own, which the CLI is pointed at through HOME / USERPROFILE, so the user's own settings are never used or changed.
     home_settings: dict[str, Any] | None = None
+    # Read a finished answer from the CLI's own record in its call home, for a CLI that can finish a turn and then print
+    # nothing and not exit (agy, on a large prompt). Takes the call home; returns (answer, usage) or None. Used only
+    # after the record has stood unchanged for ``_CLI_RECORD_STABLE_S`` while the CLI's stdout stayed silent.
+    record_reader: Callable[[str], tuple[str, dict[str, Any] | None] | None] | None = None
     # Pull real token usage out of the CLI's own output. Several CLIs report
     # what they actually consumed — including the system prompt and tool
     # schema they wrap around ours, which the char-count estimator cannot
@@ -753,6 +758,52 @@ def _extract_antigravity_response(raw: str) -> str:
     return raw.strip()
 
 
+#: How long agy's own record of a finished answer must stand unchanged, with its stdout still silent, before FI reads the
+#: answer from the record and stops the call. A normal call prints its result within a second of the record; 30 s covers
+#: a record that a later step (a refused tool) would still extend.
+_CLI_RECORD_STABLE_S = 30.0
+_CLI_RECORD_POLL_S = 5.0
+
+
+def _read_agy_record(home: str) -> tuple[str, dict[str, Any] | None] | None:
+    """The answer agy's own per-call record (``brain/<conversation>/.system_generated/logs/transcript_full.jsonl`` in the
+    call's home) holds for a call whose turn is finished, or None.
+
+    Why: on a large prompt agy has been seen to finish the turn (the record's last step is the model's reply, DONE, with
+    its token counts) and then print nothing to stdout and not exit, so FI waited out the whole timeout, four times over.
+    The record is read whole or not at all: a last step that is not a finished model reply, a reply with a truncated
+    field, a half-written line or more than one conversation gives None, never a partial answer. (The shorter
+    ``transcript.jsonl`` next to it cuts long replies; only the full one is read.)
+    """
+    try:
+        brain = Path(home) / ".gemini" / "antigravity-cli" / "brain"
+        files = list(brain.glob("*/.system_generated/logs/transcript_full.jsonl"))
+        if len(files) != 1:
+            return None
+        lines = [ln for ln in files[0].read_text(encoding="utf-8").splitlines() if ln.strip()]
+        if not lines:
+            return None
+        step = json.loads(lines[-1])
+    except (OSError, ValueError):
+        return None
+    if not isinstance(step, dict) or step.get("source") != "MODEL" or step.get("type") != "PLANNER_RESPONSE":
+        return None
+    if str(step.get("status", "")).upper() != "DONE" or step.get("truncated_fields"):
+        return None
+    content = step.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return None
+    try:
+        inp, out = int(step.get("input_tokens") or 0), int(step.get("output_tokens") or 0)
+        cached = int(step.get("cache_read_tokens") or 0)
+    except (TypeError, ValueError):
+        return content, None
+    if not (inp or out):
+        return content, None
+    return content, {"prompt_tokens": inp, "completion_tokens": out, "total_tokens": inp + out,
+                     "cached_input_tokens": cached, "estimated": False}
+
+
 # How long one line of a CLI's stdout may be. asyncio's default is 64 KiB, and a
 # claude stream-json line holds a whole message: a real call printed a 110,525-byte
 # `assistant` line carrying nothing but its thinking block. Past 64 KiB the reader
@@ -1004,6 +1055,7 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         image_input="file_ref",
         add_dir_flag="--add-dir",
         home_settings=_ANTIGRAVITY_SETTINGS,
+        record_reader=_read_agy_record,
     ),
 }
 CLI_PROVIDERS: frozenset[str] = frozenset(_CLI_SPECS)
@@ -2878,6 +2930,8 @@ async def _run_cli(
                 proc, argv, spec, stdin_bytes, tmp_out_path, timeout_s,
                 heartbeat_cb=heartbeat_cb, node=node, usage_out=usage_out,
                 tree=tree,
+                record=(functools.partial(spec.record_reader, home_dir)
+                        if spec.record_reader is not None and home_dir is not None else None),
             )
         except (RuntimeError, asyncio.TimeoutError) as exc:
             # The CLI's own log is in the call's home and goes with it: its errors go into the message first.
@@ -2990,6 +3044,7 @@ async def _collect_via_communicate(
     node: str = "",
     usage_out: dict[str, Any] | None = None,
     tree: AsyncProcessTree | None = None,
+    record: Callable[[], tuple[str, dict[str, Any] | None] | None] | None = None,
 ) -> str:
     """Legacy ``communicate()`` path. Two sub-cases:
 
@@ -3039,9 +3094,32 @@ async def _collect_via_communicate(
         _beat_task = asyncio.ensure_future(_beat())
     try:
         try:
-            stdout_b, stderr_b = await asyncio.wait_for(
-                proc.communicate(stdin_bytes), timeout=timeout_s,
-            )
+            if record is None:
+                stdout_b, stderr_b = await asyncio.wait_for(
+                    proc.communicate(stdin_bytes), timeout=timeout_s,
+                )
+            else:
+                waited = await _communicate_or_read_record(proc, stdin_bytes, timeout_s, record)
+                if isinstance(waited[0], str):
+                    # The CLI finished its turn but printed nothing and did not exit: stop it, take the answer
+                    # from its own record.
+                    answer, record_usage = waited
+                    _log.warning(
+                        "[provider] %s finished its answer but printed nothing and did not exit; the answer (%d "
+                        "chars) was read from its own record and the call stopped", spec.argv[0], len(answer),
+                    )
+                    await _kill_and_reap(proc, spec.argv[0], tree)
+                    if usage_out is not None and record_usage:
+                        usage_out.update(record_usage)
+                    final = answer.strip()
+                    gate_hit = _check_output_gates(final)
+                    if gate_hit is not None:
+                        raise _CliTransientError(
+                            f"{spec.argv[0]} tripped output gate {gate_hit[0]!r} (matched: {gate_hit[1]!r}) in an "
+                            f"answer read from its own record; treating as transient so the call is retried."
+                        )
+                    return final
+                stdout_b, stderr_b = waited
         except asyncio.TimeoutError:
             elapsed = f"{timeout_s:g}s" if timeout_s >= 1 else f"{timeout_s * 1000:g}ms"
             kill_clean = await _kill_and_reap(proc, spec.argv[0], tree)
@@ -3116,6 +3194,47 @@ async def _collect_via_communicate(
             try:
                 await _beat_task
             except asyncio.CancelledError:
+                pass
+
+
+async def _communicate_or_read_record(
+    proc: asyncio.subprocess.Process,
+    stdin_bytes: bytes | None,
+    timeout_s: float,
+    record: Callable[[], tuple[str, dict[str, Any] | None] | None],
+) -> tuple[Any, Any]:
+    """``proc.communicate()`` within ``timeout_s``, except that a finished answer in the CLI's own record, unchanged for
+    ``_CLI_RECORD_STABLE_S`` while the CLI printed nothing and did not exit, is returned as ``(answer, usage)``.
+    Raises ``asyncio.TimeoutError`` as ``wait_for`` does. Which of the two came back: a pair whose first item is a
+    ``str`` is the record's answer; the other is ``communicate()``'s ``(stdout, stderr)`` bytes."""
+    comm = asyncio.ensure_future(proc.communicate(stdin_bytes))
+    started = time.monotonic()
+    seen: str | None = None
+    seen_since = 0.0
+    try:
+        while True:
+            left = timeout_s - (time.monotonic() - started)
+            if left <= 0:
+                raise asyncio.TimeoutError()
+            done, _ = await asyncio.wait({comm}, timeout=min(_CLI_RECORD_POLL_S, left))
+            if done:
+                return comm.result()
+            try:
+                found = await asyncio.to_thread(record)
+            except Exception:  # noqa: BLE001 - a record that cannot be read just means keep waiting
+                found = None
+            now = time.monotonic()
+            if found is None or found[0] != seen:
+                seen = found[0] if found is not None else None
+                seen_since = now
+            elif now - seen_since >= _CLI_RECORD_STABLE_S:
+                return found
+    finally:
+        if not comm.done():
+            comm.cancel()
+            try:
+                await comm
+            except BaseException:  # noqa: BLE001 - the cancelled read; the caller decides what happens next
                 pass
 
 
