@@ -202,3 +202,15 @@ def test_slides_and_poster_prompts_say_figure_statements_are_fis_words() -> None
     for name in ("slides.md", "poster.md"):
         text = (root / name).read_text(encoding="utf-8")
         assert "word for word" in text and "Never write a statement of your own about what such a figure shows" in text, name
+
+
+def test_checked_figure_rule_names_the_drawn_quantity_and_the_mark_standing_alone() -> None:
+    root = Path(__file__).resolve().parent.parent
+    write = (root / "agents" / "write.md").read_text(encoding="utf-8")
+    assert "is a quantity that figure draws" in write and "as a sentence on its own" in write
+    slides = (root / "agents" / "slides.md").read_text(encoding="utf-8")
+    assert "**Figure N shows what is plotted" not in slides
+    assert "copied word for word" in slides[slides.index("## Figures"):]
+    docs = (root / "docs" / "capabilities-reference.md").read_text(encoding="utf-8")
+    assert "the paper places none of a figure's marks" in docs and "the shortest sentence" not in docs
+
