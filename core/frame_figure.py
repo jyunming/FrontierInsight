@@ -389,7 +389,8 @@ class FigureCalls:
                 if name.strip() != x_id:
                     continue
                 try:
-                    same = math.isclose(float(text), float(x), rel_tol=1e-9, abs_tol=1e-12)
+                    # Relative only: a fixed absolute tolerance would join distinct values on a small scale (1e-12 vs 3e-12).
+                    same = math.isclose(float(text), float(x), rel_tol=1e-9, abs_tol=0.0)
                 except (TypeError, ValueError):
                     same = text.strip() == str(x)
                 if same:

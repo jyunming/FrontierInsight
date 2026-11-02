@@ -202,6 +202,17 @@ def test_a_level_that_is_the_sum_of_floats_matches_the_table_level():
     assert h.record()["panels"][0]["series"][0]["level"]["text"] == "0.3"
 
 
+def test_tiny_levels_are_matched_by_their_own_scale_not_a_fixed_absolute_tolerance():
+    # Values on a 1e-12 scale: 4e-12 is no level (an absolute tolerance of 1e-12 took it for 3e-12), and 1e-12 is one level only.
+    with pytest.raises(ValueError, match="is not a value of Temperature"):
+        _Host((1e-12, 3e-12)).line(0, 4e-12, [1, 2, 3], [1.0, 2.0, 3.0], "growth")
+    h = _Host((1e-12, 3e-12))
+    h.line(0, 1e-12, [1, 2, 3], [1.0, 2.0, 3.0], "growth")
+    assert h.record()["panels"][0]["series"][0]["level"]["text"] == "1e-12"
+    assert h._keys_at("temp", 1e-12) == ["size=1,temp=1e-12", "size=2,temp=1e-12", "size=3,temp=1e-12"]
+    assert h._keys_at("temp", 0.0) == []
+
+
 def test_the_level_curve_id_has_no_comma_or_equals_sign():
     h = _Host()
     h.line(0, 10, [1, 2, 3], [1.0, 2.0, 3.0], "growth")
