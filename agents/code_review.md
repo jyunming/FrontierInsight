@@ -21,6 +21,8 @@ Read the code against the plan for these, and put each fault you find under `fin
 5. **Constants**: nothing the code reports is a constant: no returned quantity is a literal, or the same whatever the settings, unless the plan says it is. For such a finding give the name of the returned quantity in `quantity` and set `constant` to true.
 6. **The checks' cases**: the code can be run on each check's case (its settings) and returns what that check's measure uses, and the case is the plan's, not another.
 
+Some lines are FI's, not the study's: any lines between a `# >>> FI` line and its `# <<< FI` line, and the files FI writes whole (`experiment.py`, `run.py`, `fi_*.py`, the `fi_core` folder). Do not report a finding about them; read only the study's own functions. FI sets aside a finding whose place is in its lines.
+
 A finding says WHERE (file:line, such as `simulate.py:42`), WHAT is wrong, WHY it is wrong against the plan, and HOW to fix it. Name the term, the factor, the operation or the step. Do not write a value: never say what a number should be, never give an expected value or a tolerance; a fix is an operation ("divide by the cell area, not by the length"), not a result.
 
 # What to return

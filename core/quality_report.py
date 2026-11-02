@@ -1199,7 +1199,7 @@ def _issue_rows(cr: dict[str, Any], root: Path | None = None) -> list[dict[str, 
             "changes_result": bool(issue.get("changes_result")),
             "demonstrated": issue.get("demonstrated") if isinstance(issue.get("demonstrated"), bool) else None,
             "repaired": outcome == _issues.FIXED, "repaired_by": str(issue.get("fixed_by") or ""),
-            "open": still, "outcome": outcome, "plan_problem": bool(issue.get("plan_conflict")) or outcome == _issues.PLAN_PROBLEM,
+            "about_fi": bool(issue.get("fi_own")), "open": still and not issue.get("fi_own"), "outcome": outcome, "plan_problem": bool(issue.get("plan_conflict")) or outcome == _issues.PLAN_PROBLEM,
             "reason": _one(issue.get("reason"), 140), "seen_in": len(readings),
             "reported_as": [str(k) for k in _list(issue.get("reported_as"))],
             "at_gate": issue.get("at_gate") if isinstance(issue.get("at_gate"), dict) else {},
@@ -1371,7 +1371,11 @@ def _issue_lines(code: dict[str, Any]) -> list[str]:
         else:
             shown = "yes" if row["demonstrated"] else "not tested"
         repaired = f"yes, by {row['repaired_by']}" if row["repaired"] else ("no" + (f" ({row['reason']})" if row["reason"] else ""))
-        if row["plan_problem"]:
+        if row.get("about_fi"):
+            shown = "not tested"
+            repaired = "no: it is about lines FI wrote, not the study's code"
+            still = "no: it is about FI's own lines, so it is kept here for FI to fix; it was not repaired and changes nothing"
+        elif row["plan_problem"]:
             still = "plan problem: the plan contradicts itself, asked of the plan's model"
         elif row["open"] and row.get("never_run"):
             still = "yes, but the run never calls this code, so it changes nothing reported; it is kept here, not in the paper"

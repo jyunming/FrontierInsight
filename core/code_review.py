@@ -1089,6 +1089,8 @@ def note_reading(record: dict[str, Any], version_now: str, problems: list[dict[s
     if code_dir is not None:
         _issues.index_problems(problems, Path(code_dir))
         _issues.update_issues(record, problems, n, version_now)
+        _issues.set_aside_own(record, Path(code_dir), version_now)
+        problems[:] = [v for v in problems if not (record.get("issues", {}).get(v.get("fid")) or {}).get("fi_own")]
         total = len(_issues.open_issues(record))
         changing = len(_issues.changing_open(record))
         high = sum(1 for i in _issues.open_issues(record) if i.get("severity") == "high")
