@@ -271,7 +271,7 @@ def test_mutation_5_a_legend_off_the_canvas_of_a_custom_panel_is_a_finding(tmp_p
 def test_mutation_6_a_series_copied_under_a_second_name_is_merged_and_said_identical() -> None:
     """Caught: the two are one line to the reader (merged in the record, one legend entry), ``identical`` is offered, and the
     caption names them together."""
-    h = _Host(panels=1)
+    h = _Host(panels=1, identity=True)
     h.labels["slow"] = "Slow colony"
     ys = [1.0, 2.0, 3.0]
     h.line(0, "fast", [1, 2, 3], ys, "growth")

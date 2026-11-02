@@ -42,6 +42,8 @@ IDENTICAL_RTOL = 1e-12  # two series equal within this relative tolerance are on
 Y_RTOL = 1e-3  # a drawn y matches the table's value within this relative tolerance (plus 1e-12 absolute)
 Y_FORMS = ("mean", "sd", "se", "min", "max", "range", "max_abs")  # which statistic of the trials at a setting y may be (``form``)
 BAR_RTOL = 1e-3  # error-bar widths the body typed match the table's own widths within this relative tolerance (plus 1e-12 absolute)
+NEUTRAL_X = "computed x"  # the x axis of a panel that draws values FI did not find among the setting's values
+NEUTRAL_Y = "computed value"  # the neutral name of a quantity FI did not tie to a result of the table
 REF_STATED = "stated in the figure"  # the source of a reference line drawn at a literal value
 
 
@@ -295,7 +297,7 @@ class FigureCalls:
                              "declare" % (what, ", ".join(sorted(results + derived)) or "(none)"))
         return what
 
-    def _set_x(self, rec, x_id):
+    def _set_x(self, rec, x_id, checked=True):
         settings = list(getattr(self, "settings", []) or [])
         if x_id in self._results():
             kind = "result"
@@ -308,15 +310,19 @@ class FigureCalls:
         if rec["x"] is not None and rec["x"]["id"] != x_id:
             raise ValueError("panel %d already has `%s` on its x axis; one panel has one x axis (use another panel for `%s`)"
                              % (rec["panel"], rec["x"]["id"], x_id))
+        if rec["x"] is not None and rec["x"].get("neutral"):
+            return  # one series whose x FI could not tie to the setting makes the axis neutral for the whole panel
+        if not checked:
+            new.update(label=NEUTRAL_X, neutral=True)
         rec["x"] = new
 
     def _set_y(self, rec, what):
         if rec["y"] is None:
-            rec["y"] = {"what": what, "label": "computed value" if what == "other" else self._label_of(what),
+            rec["y"] = {"what": what, "label": NEUTRAL_Y if what == "other" else self._label_of(what),
                         "scale": "linear" if what == "other" else self._scale_of(what)}
         elif what not in rec["y"]["what"].split(" / "):  # two results on one axis: both are named
             rec["y"]["what"] += " / " + what
-            rec["y"]["label"] += " / " + ("computed value" if what == "other" else self._label_of(what))
+            rec["y"]["label"] += " / " + (NEUTRAL_Y if what == "other" else self._label_of(what))
 
     # ---- series ------------------------------------------------------------------------------------------------------
 
@@ -462,6 +468,15 @@ class FigureCalls:
             checked += 1
         return checked > 0
 
+    def _x_checked(self, x_id, xs):
+        """Whether every drawn x is a value of the setting ``x_id`` in FI's table (a number compared as a number): then the axis
+        may carry the setting's name and the claims that read x may be offered. An x that is a result, a transform of the setting
+        (1/N), a point with no x, a figure without a table, or no x at all cannot be checked, which counts as not (fail closed)."""
+        if getattr(self, "table", None) is None or x_id not in (getattr(self, "settings", None) or []):
+            return False
+        pts = [x for x in xs if x is not None]
+        return bool(pts) and all(self._keys_at(x_id, x) for x in pts)
+
     def _checked_what(self, what, form, x_id, xs, ys):
         """``what`` when the drawn y is the table's own value, else ``other``: the series keeps its shape but FI states no value
         from it. A declared ``other`` stays. Everything FI cannot compare is ``other`` as well (fail closed): a quantity that is
@@ -475,10 +490,12 @@ class FigureCalls:
     def _checked_meaning(self, meaning, what, x_id, xs, ys, lo, hi):
         """What error bars of typed widths may be called. ``ci95``/``sd`` stay only when the widths equal the table's own for
         that meaning at EVERY drawn point (``BAR_RTOL``): one point the table gives no width for, or one that differs, an unreadable
-        table, all give ``other`` (the bars are drawn, no claim about their meaning is offered). ``range`` has no width in the
-        table and stays as stated. The table's sd is its ``sd`` read, else the sample sd (n - 1) of its ``values``."""
-        if meaning not in ("ci95", "sd"):
-            return meaning  # range and other have no width in the table to check; they stay as the body stated them
+        table, all give ``other`` (the bars are drawn, no claim about their meaning is offered). ``range`` stays only when the
+        drawn edges are the table's minimum and maximum of the trials (``_range_matches``). The table's sd is its ``sd`` read, else the sample sd (n - 1) of its ``values``."""
+        if meaning == "range":
+            return "range" if self._range_matches(what, x_id, xs, ys, lo, hi) else "other"
+        if meaning != "ci95" and meaning != "sd":
+            return meaning  # ``other`` states nothing
         got = self._table_widths(meaning, what, x_id, xs, ys, edges=True)
         if got is None:
             return "other"
@@ -491,6 +508,29 @@ class FigureCalls:
                 if theirs[i] is None or not _close_width(mine[i], theirs[i]):  # one unverifiable or unmatched bar: no claim
                     return "other"
         return meaning if drawn else "other"
+
+    def _range_matches(self, what, x_id, xs, ys, lo, hi):
+        """Whether the drawn lower and upper edges (the drawn y less ``lo`` and plus ``hi``) are the table's minimum and maximum of
+        the trials at EVERY drawn x (``BAR_RTOL`` on the widths below and above y, as the other bar checks). A point with no key at
+        its x, no minimum and maximum, or an edge that is a gap, the keys of one x disagreeing, a result that is not the table's
+        or an x that is not a setting: not the range (no claim)."""
+        if getattr(self, "table", None) is None or what not in self._results() or x_id not in (getattr(self, "settings", None) or []):
+            return False
+        drawn = False
+        for i, (x, y) in enumerate(zip(xs, ys)):
+            if y is None:  # a gap has no bar
+                continue
+            drawn = True
+            if x is None or lo[i] is None or hi[i] is None or not _finite(y):
+                return False
+            keys = self._setting_keys(x_id, x, what, y)
+            if not keys:
+                return False
+            for key in keys:
+                lows, highs = self._table_stats(what, key, "min"), self._table_stats(what, key, "max")
+                if not any(_close_width(float(y) - a, lo[i]) and _close_width(b - float(y), hi[i]) for a, b in zip(lows, highs)):
+                    return False
+        return drawn
 
     @staticmethod
     def _key_settings(key):
@@ -583,10 +623,15 @@ class FigureCalls:
                 raise ValueError("yerr has %d values and y has %d: one bar half-width for each y (a pair has one list of lower and "
                                  "one of upper widths)" % (len(lo), len(ys)))
             yerr_meaning = self._checked_meaning(yerr_meaning, what, x_id, xs, ys, lo, hi)
+        declared = what
         what = self._checked_what(what, form, x_id, xs, ys)
-        legend = self._label_of(series)
+        x_ok = self._x_checked(x_id, xs)
+        # A series the body gave as a result of the plan that FI did not find to be the table's value of it keeps neither that
+        # result's name (nor the series' own plan label, which names the same thing): its name is the neutral one, numbered below.
+        neutral = what == "other" and declared != "other"
+        legend = NEUTRAL_Y if neutral else self._label_of(series)
         with _undone(ax, rec):
-            self._set_x(rec, x_id)
+            self._set_x(rec, x_id, x_ok)
             self._set_y(rec, what)
             arts = self._draw_series(ax, kind, xs, ys, legend, step)
             self._tag(arts)
@@ -594,7 +639,11 @@ class FigureCalls:
                 self._tag(self._errorbar(ax, xs, ys, lo, hi))
             rec["series"].append({"id": series, "label": legend, "kind": kind, "step": bool(step), "x": xs, "y": ys,
                                   "yerr": lo if lo is not None and _same(lo, hi) else None, "yerr_lo": lo, "yerr_hi": hi,
-                                  "yerr_meaning": yerr_meaning if lo is not None else None, "what": what, "merged_with": []})
+                                  "yerr_meaning": yerr_meaning if lo is not None else None, "what": what, "merged_with": [],
+                                  "x_checked": x_ok, **({"neutral": True} if neutral else {})})
+            loose = [e for e in rec["series"] if e.get("neutral")]
+            for k, e in enumerate(loose, 1):
+                e["label"] = NEUTRAL_Y if len(loose) == 1 else "%s %d" % (NEUTRAL_Y, k)
             self._remember(panel, "series", arts[0] if arts else None, what)
         return arts
 
@@ -636,13 +685,18 @@ class FigureCalls:
             raise ValueError("xs has %d values and ys has %d: a curve needs one y for each x" % (len(x), len(y)))
         if rec["x"] is None:
             raise ValueError("draw the data of panel %d first: a curve is drawn on the axes the data's x names" % (panel,))
-        text = "%s (%s)" % (label, source)
         with _undone(ax, rec):
-            arts = ax.plot(x, _gaps(y), linestyle="--", color="0.35", label=text)
+            arts = ax.plot(x, _gaps(y), linestyle="--", color="0.35", label="a curve")
             self._tag(arts)
             n = sum(1 for e in rec["series"] if e["kind"] == "curve") + 1
-            rec["series"].append({"id": "curve%d" % n, "label": text, "kind": "curve", "step": False, "x": x, "y": y, "yerr": None,
-                                  "yerr_lo": None, "yerr_hi": None, "yerr_meaning": None, "merged_with": [], "source": str(source)})
+            # The curve's name is FI's: the body's label and source are its own words (and may hold digits); they never reach a
+            # checked panel's legend or a claim. Its y is not a quantity of the table (``other``): no y number is offered for it.
+            rec["series"].append({"id": "curve%d" % n, "label": "a curve", "kind": "curve", "step": False, "x": x, "y": y, "yerr": None,
+                                  "yerr_lo": None, "yerr_hi": None, "yerr_meaning": None, "merged_with": [], "source": str(source),
+                                  "what": "other"})
+            curves = [e for e in rec["series"] if e["kind"] == "curve"]
+            for k, e in enumerate(curves, 1):
+                e["label"] = "a curve" if len(curves) == 1 else "curve %d" % k
             self._remember(panel, "series", arts[0] if arts else None, "other")
         return arts
 
@@ -674,7 +728,7 @@ class FigureCalls:
             art = ax.imshow([_gaps(r) for r in rows], aspect="auto", extent=extent,
                             vmin=min(nums) if nums else None, vmax=max(nums) if nums else None)
             self._tag(art)
-            label = "computed value" if what == "other" else self._label_of(what)  # the neutral name an unchecked quantity's axis has
+            label = NEUTRAL_Y if what == "other" else self._label_of(what)  # the neutral name an unchecked quantity's axis has
             rec["series"].append({"id": what, "label": label, "kind": "image", "step": False, "x": cols, "y": rws,
                                   "yerr": None, "yerr_lo": None, "yerr_hi": None, "yerr_meaning": None, "merged_with": [], "z": rows, "what": what})
             self._remember(panel, "series", None, what)
@@ -720,10 +774,10 @@ class FigureCalls:
         if not any(e["x"] == xs for e in drawn):
             raise ValueError("the band's x does not match the x of series `%s` on panel %d: a band is drawn at the points of its "
                              "series" % (series, panel))
-        if meaning in ("ci95", "sd"):
+        if meaning in ("ci95", "sd", "range"):
             meaning = self._checked_band_meaning(meaning, what, x_id, xs, los, his, drawn)
         with _undone(ax, rec):
-            self._set_x(rec, x_id)
+            self._set_x(rec, x_id, any(e["x"] == xs and e.get("x_checked", True) for e in drawn))
             self._set_y(rec, what)
             stepped = any(e["step"] for e in drawn if e["x"] == xs)  # the edges of a band follow the steps of its line
             art = ax.fill_between(xs, _gaps(los), _gaps(his), alpha=0.25, linewidth=0, step="post" if stepped else None)
@@ -981,12 +1035,14 @@ class FigureCalls:
             return
         image = any(e["kind"] == "image" for e in rec["series"])
         x = rec["x"]
-        if not (image and x["id"] == "column" and "column" not in spec_labels):
+        if x.get("neutral"):
+            x["label"] = NEUTRAL_X
+        elif not (image and x["id"] == "column" and "column" not in spec_labels):
             x["label"] = self._name_of(x["id"], spec_labels, result_info)
         x["scale"] = self._scale_in(x["id"], spec_labels, result_info, x["scale"])
         if rec["y"] is not None:
             parts = rec["y"]["what"].split(" / ")
-            names = dict.fromkeys("computed value" if w == "other" else self._name_of(w, spec_labels, result_info) for w in parts)
+            names = dict.fromkeys(NEUTRAL_Y if w == "other" else self._name_of(w, spec_labels, result_info) for w in parts)
             rec["y"]["label"] = " / ".join(names)
             scales = [self._scale_in(w, spec_labels, result_info, "linear") for w in parts if w != "other"]
             rec["y"]["scale"] = "log" if scales and all(s == "log" for s in scales) else "linear"
@@ -1069,6 +1125,9 @@ class FigureCalls:
         out = []
         for k, e in enumerate(rec["series"]):
             if e["kind"] == "image" or k >= len(extra["series"]) or extra["series"][k][0] is None or k in twins:
+                continue
+            if e.get("neutral"):  # FI's neutral name, never the plan's label of a series whose values FI did not find
+                out.append((extra["series"][k][0], e["label"]))
                 continue
             text = " = ".join([name(e["id"], e["label"])] + [name(i) for i in e["merged_with"]])
             out.append((extra["series"][k][0], text))
