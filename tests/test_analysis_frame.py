@@ -72,6 +72,15 @@ def _quest(tmp_path: Path, design: dict[str, Any], bodies: str = "", record: dic
     return quest
 
 
+def _late_in_frame(quest: Path, entry: str) -> None:
+    """A derive.py whose frame FI wrote with one more derived quantity (a frame written before a check of the plan existed)."""
+    path = quest / "code" / "derive.py"
+    text = path.read_text(encoding="utf-8")
+    marker = "\nDERIVED = {"
+    assert marker in text
+    path.write_text(text.replace(marker, marker + entry + ", ", 1), encoding="utf-8")
+
+
 def _run(quest: Path) -> tuple[int, dict[str, Any] | None, dict[str, Any], str]:
     """Run FI's experiment.py in a fresh Python with only the code folder on its path (nothing of FI's source is named).
     Returns the exit code, the printed RESULT_JSON, derived.json and stderr."""
@@ -351,8 +360,9 @@ def test_a_formula_over_a_name_nobody_gives_is_left_out_of_the_plan_and_fails_in
     assert [d.id for d in kept.derived] == ["fine"]
     assert any("`odd` is left out" in g and "nothing_here" in g for g in kept.gaps)
     # Should one reach the run all the same (a derive.py written before this check), it is the plan's fault, said plainly.
-    late = 'DERIVED["odd"] = {"by": "formula", "formula": "growth * nothing_here", "inputs": ["growth"], "role": "result"}\n'
-    code, _printed, record, err = _run(_quest(tmp_path, design, late))
+    quest = _quest(tmp_path, design)
+    _late_in_frame(quest, '"odd": {"by": "formula", "formula": "growth * nothing_here", "inputs": ["growth"], "role": "result"}')
+    code, _printed, record, err = _run(quest)
     odd = record["derived"]["odd"]
     assert odd["status"] == "failed" and "nothing_here" in odd["why"] and odd["fi_fault"]  # a plan fault: FI's, not a body's
     assert code == 2 and "FI's fault" in err and record["fi_faults"]
@@ -394,9 +404,9 @@ def test_a_summary_of_one_number_per_setting_is_left_out_of_the_plan_and_never_w
     assert "spread" not in {d["id"] for d in af.plan_of(design)["derived"]}
     assert [d.id for d in contract.from_design(design).derived] == ["spread", "fine"]  # without FI's analysis: as before
     # One that reaches the run all the same (a derive.py written before this check) is not worked out, and FI says so.
-    late = ('DERIVED["spread"] = {"by": "formula", "formula": "max(growth) - min(growth)", "inputs": ["growth"], '
-            '"role": "diagnostic"}\n')
-    code, _printed, record, err = _run(_quest(tmp_path, design, late))
+    quest = _quest(tmp_path, design)
+    _late_in_frame(quest, '"spread": {"by": "formula", "formula": "max(growth) - min(growth)", "inputs": ["growth"], "role": "diagnostic"}')
+    code, _printed, record, err = _run(quest)
     spread = record["derived"]["spread"]
     assert spread["status"] == "failed" and spread["fi_fault"] and "one number per setting" in spread["why"]
     assert spread.get("value") is None and not spread.get("by_setting")
@@ -1009,3 +1019,47 @@ def test_a_cap_in_derive_py_pins_a_derived_result_and_one_in_the_trial_code_does
 def test_a_cap_the_study_wrote_still_marks_a_result_on_it_as_clamped(tmp_path: Path) -> None:
     found = _clamp_check(tmp_path, "def derive_growth(table):\n    return min(1.0, table.mean('growth'))\n")
     assert [v.kind for v in found] == ["clamped"]
+
+
+# ---- the plan FI's analysis reads is the frame as FI wrote it, never the module after the study's code changed it ----------
+_PEAK = """
+def derive_peak(table):
+    {mutate}
+    return 1.0
+"""
+_MUTATE_AT_IMPORT = """
+REFERENCES.setdefault("growth", {})["when"] = "mode == 'a'"
+REFERENCES["extra"] = {"when": "mode == 'b'", "formula": "base"}
+FIXED["base"] = 99.0
+HELD["bogus"] = 1
+FIGURES["fig1"]["shows"] = []
+PARTS.clear()
+COMPARED["mode"] = []
+RESULTS = ()
+"""
+
+
+def _frame_study(tmp_path: Path, mutate_at_import: bool, mutate_when_called: bool, name: str) -> tuple[int, Any, dict[str, Any], str]:
+    design = _design([_derived("peak")])
+    call = 'REFERENCES["growth"]["when"] = "mode == \'a\'"; HELD["x"] = 2; FIGURES["fig1"] = "gone"' if mutate_when_called else "pass"
+    bodies = (_MUTATE_AT_IMPORT if mutate_at_import else "") + _PEAK.format(mutate=call)
+    return _run(_quest(tmp_path / name, design, bodies))
+
+
+def test_a_study_that_changes_the_frames_dicts_does_not_change_what_fis_analysis_reads(tmp_path: Path) -> None:
+    honest = _frame_study(tmp_path, False, False, "honest")
+    assert honest[0] == 0 and honest[1]
+    for at_import, when_called, name in ((True, False, "imp"), (False, True, "call"), (True, True, "both")):
+        code, printed, record, err = _frame_study(tmp_path, at_import, when_called, name)
+        assert code == honest[0] and not record["fi_faults"], err
+        assert printed == honest[1]
+        assert record["derived"] == honest[2]["derived"] and record["figures"] == honest[2]["figures"]
+        assert not any("inside its own lines" in line for line in err.splitlines())
+        said = [n for n in record["notes"] if "changed FI's frame value" in n]
+        assert said, record["notes"]
+        assert any("REFERENCES" in n and "FI used the value it wrote" in n for n in said)
+
+
+def test_a_study_that_leaves_the_frame_alone_says_nothing_about_it(tmp_path: Path) -> None:
+    code, _printed, record, _err = _frame_study(tmp_path, False, False, "honest")
+    assert code == 0 and not [n for n in record["notes"] if "frame value" in n]

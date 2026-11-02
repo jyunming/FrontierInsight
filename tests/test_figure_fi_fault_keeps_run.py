@@ -54,8 +54,11 @@ def test_only_figures_failed_ignores_a_figure_fault_of_fi_but_not_another_fault(
 def test_a_formula_fault_still_exits_2(tmp_path: Path) -> None:  # the known positive
     from tests.test_analysis_frame import _derived, _run
 
-    late = 'DERIVED["odd"] = {"by": "formula", "formula": "growth * nothing_here", "inputs": ["growth"], "role": "result"}\n'
-    code, _printed, record, _err = _run(_quest(tmp_path, _design([_derived("odd", formula="growth * nothing_here")]), late))
+    from tests.test_analysis_frame import _late_in_frame
+
+    quest = _quest(tmp_path, _design([_derived("odd", formula="growth * nothing_here")]))
+    _late_in_frame(quest, '"odd": {"by": "formula", "formula": "growth * nothing_here", "inputs": ["growth"], "role": "result"}')
+    code, _printed, record, _err = _run(quest)
     assert code == 2 and record["fi_faults"]
 
 

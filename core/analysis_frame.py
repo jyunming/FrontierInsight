@@ -828,10 +828,49 @@ if __name__ == "__main__":
     sys.stderr.write("[FI analysis] run: %s\\n" % RUN)
     sys.stderr.flush()
 
+
+
+def _frame_as_written():
+    """What FI wrote in the frame of derive.py, read from the text of the file before the study's code is imported: each constant
+    of the marked part, as a literal. The analysis reads the plan from here and never from the module (a function of the study's
+    can change a dict of the module when it is imported or called)."""
+    import ast
+    try:
+        with open(os.path.join(HERE, "derive.py"), encoding="utf-8") as f:
+            text = f.read()
+        start = text.index("# >>> FI analysis frame")
+        stop = text.index("# <<< FI analysis frame", start)
+        found = {}
+        for node in ast.parse(text[start:stop]).body:
+            if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)                     and node.targets[0].id.isupper():
+                found[node.targets[0].id] = ast.literal_eval(node.value)
+        return found
+    except (OSError, ValueError, SyntaxError):
+        return {}
+
+
+_FRAME = _frame_as_written()
 import derive  # noqa: E402
 import fi_table  # noqa: E402
 from fi_frame import Missing, NotYet, Table, UnknownResult  # noqa: E402
 
+
+
+class _Plan:
+    """The plan as FI wrote it: a constant of the frame comes from FI's own text of it, whatever the study's code did to the module
+    since; any other name (a function of the study's) is the module's."""
+
+    def __getattr__(self, name):
+        if name in _FRAME:
+            return _FRAME[name]
+        return getattr(derive, name)
+
+    def changed(self):
+        """The constants of the frame the study's code changed in the module (FI used the value it wrote)."""
+        return [k for k, v in _FRAME.items() if getattr(derive, k, None) != v]
+
+
+PLAN = _Plan()
 COUNTING = ("result", "reference", "physical_bound")
 
 
@@ -1059,7 +1098,7 @@ def _applies(when, table, key):
         return str(a).strip().lower() == str(b).strip().lower()
 
     def has(axis, v):
-        return same(cell[axis], v) if axis in cell else axis in derive.HELD and same(derive.HELD[axis], v)
+        return same(cell[axis], v) if axis in cell else axis in PLAN.HELD and same(PLAN.HELD[axis], v)
 
     return any(all(has(a, v) for a, v in f.items()) for f in when)
 
@@ -1068,7 +1107,7 @@ def _references(table, base, notes):
     """FI's reference of each result whose plan gives a formula: ``{id: {setting key: number}}``. A setting where the formula gives
     no number has no reference, and ``notes`` says so."""
     out = {}
-    for rid, ref in derive.REFERENCES.items():
+    for rid, ref in PLAN.REFERENCES.items():
         forms = _calculator()
         got, dropped = {}, {}
         for key in table.keys():
@@ -1110,8 +1149,8 @@ def _formula(item, table, base, done):
         return _plan_fault(item, one)
     names = forms.names(item["formula"], {**forms.FUNCTIONS, **forms.ANALYSIS_SPECIAL})
     axes = {a for k in table.keys() for a in table.setting(k)}
-    results = set(derive.RESULTS) | set(derive.AFTERWARDS)
-    unknown = [n for n in names if n not in axes and n not in results and n not in derive.DERIVED and n not in base]
+    results = set(PLAN.RESULTS) | set(PLAN.AFTERWARDS)
+    unknown = [n for n in names if n not in axes and n not in results and n not in PLAN.DERIVED and n not in base]
     if unknown:
         return _plan_fault(item, "it uses %s, which the plan does not declare" % ", ".join("`%s`" % n for n in unknown))
     for n in names:
@@ -1215,14 +1254,14 @@ def _reference_body(by, role, fn, table):
 
 def _derived(table, base, compared):
     records = {}
-    order, circle = _order(derive.DERIVED)
+    order, circle = _order(PLAN.DERIVED)
     for ident in circle:
-        item = derive.DERIVED[ident]
+        item = PLAN.DERIVED[ident]
         records[ident] = {**_plan_fault({**item, "id": ident}, "the formulas of %s name each other in a circle, so none of them "
                                         "can be worked out first" % ", ".join("`%s`" % i for i in circle)),
                           "role": item["role"], "by": "formula"}
     for ident in order:
-        item = derive.DERIVED[ident]
+        item = PLAN.DERIVED[ident]
         by, role = item["by"], item["role"]
         before = list(table.served)
         if by == "formula":
@@ -1241,7 +1280,7 @@ def _derived(table, base, compared):
         rec.update({"role": role, "by": by})
         rec.setdefault("inputs", [i for i in table.served if i not in before])
         records[ident] = rec
-    return {i: records[i] for i in derive.DERIVED}  # in the plan's order
+    return {i: records[i] for i in PLAN.DERIVED}  # in the plan's order
 
 
 def _bodies(records, outcomes):
@@ -1254,7 +1293,7 @@ def _bodies(records, outcomes):
             row = out.setdefault(by, {"status": rec.get("status"), "outputs": []})
             row["outputs"].append(ident)
     for o in outcomes:
-        if isinstance(o, dict) and o.get("id") in derive.FIGURES and str(o.get("status")) != "skipped":
+        if isinstance(o, dict) and o.get("id") in PLAN.FIGURES and str(o.get("status")) != "skipped":
             out.setdefault("figure_%s" % o["id"], {"status": o.get("status"), "outputs": ["figure:%s" % o["id"]]})
     for by, row in out.items():
         seen = _BODIES.get(by) or {}
@@ -1300,17 +1339,17 @@ def result_json(table, records, compared):
     seen = set()
     for key in table.keys():
         row = {}
-        for rid in derive.RESULTS:
+        for rid in PLAN.RESULTS:
             try:
                 vals = [] if table.per_level(rid, key) else table.values(rid, key)
                 if vals:
                     seen.add(rid)
                     row[rid] = table.mean(rid, key)
                     row[rid + "_values"] = vals
-                    if derive.KINDS.get(rid) == "proportion":
+                    if PLAN.KINDS.get(rid) == "proportion":
                         row[rid + "_count"] = int(round(sum(vals)))
                         row[rid + "_total"] = len(vals)
-                    if rid in derive.PAIRED and table.trials(rid, key):
+                    if rid in PLAN.PAIRED and table.trials(rid, key):
                         row[rid + "_pair_id"] = table.trials(rid, key)
                 else:
                     got = table.level_means(rid, key)
@@ -1327,7 +1366,7 @@ def result_json(table, records, compared):
                     row[rid + "_undefined"] = undefined
             except Exception as e:  # noqa: BLE001 -- one result's shape never stops the others
                 why[rid] = "FI could not print it at %s: %s: %s" % (key, type(e).__name__, e)
-        for rid in getattr(derive, "KNOWN", {}):
+        for rid in getattr(PLAN, "KNOWN", {}):
             try:
                 _coverage_of(table, rid, key, row, out_levels)
             except Exception as e:  # noqa: BLE001 -- one coverage never stops the others
@@ -1357,7 +1396,7 @@ def result_json(table, records, compared):
                     out.setdefault(key, {}).setdefault("why_missing", {})[ident] = reason
         elif "by_level" in rec:
             out[ident] = rec["by_level"]["values"]
-    for rid in derive.RESULTS:
+    for rid in PLAN.RESULTS:
         if rid not in seen:
             out[rid] = None
             why.setdefault(rid, "no trial gave a value for it")
@@ -1470,7 +1509,7 @@ def _figures(table, quest_root, records=None):
     figure is drawn in its place straight away."""
     if not os.path.exists(os.path.join(HERE, "fi_figures.py")):
         return [], "", 0, []
-    specs = [dict(v, id=i) for i, v in derive.FIGURES.items()]
+    specs = [dict(v, id=i) for i, v in PLAN.FIGURES.items()]
     outcomes = []
     try:
         import fi_figures
@@ -1490,13 +1529,13 @@ def _figures(table, quest_root, records=None):
                 warnings.simplefilter("always")
                 if only:
                     # The body is not called: the plan's own figure is drawn from the table and the earlier record
-                    outcomes.append(fi_figures.default_figure(spec, table, out_dir, derive, records))
+                    outcomes.append(fi_figures.default_figure(spec, table, out_dir, PLAN, records))
                 else:
-                    outcomes += fi_figures.run_figures([spec], derive, table, out_dir)
+                    outcomes += fi_figures.run_figures([spec], PLAN, table, out_dir)
                 if not only and os.environ.get("FI_FIGURE_FALLBACK") == "1" and outcomes[-1].get("status") in (
                         "failed", "refused", "not_written"):
                     # No repair is left for the body: the plan's own figure is drawn from the table in its place
-                    plain = fi_figures.default_figure(spec, table, out_dir, derive, records)
+                    plain = fi_figures.default_figure(spec, table, out_dir, PLAN, records)
                     if plain.get("status") in ("ok", "dropped"):
                         outcomes[-1] = plain
                     else:
@@ -1509,7 +1548,7 @@ def _figures(table, quest_root, records=None):
                 if said not in seen["warnings"] and len(seen["warnings"]) < 20:
                     seen["warnings"].append(said)
                     sys.stderr.write(warnings.formatwarning(w.message, w.category, w.filename, w.lineno))
-        if derive.SEARCH:
+        if PLAN.SEARCH:
             _progress("fi: FI's own figures of the search")
             outcomes += fi_figures.search_figures(quest_root, out_dir)
     except Exception as e:  # noqa: BLE001 -- the figure step is FI's own code
@@ -1553,24 +1592,26 @@ def run(record_path, quest_root):
     if not cells:
         raise FIFault("FI's record of the trials (%s) is missing or empty, so there is nothing to analyse" % record_path)
     notes = []
-    base = {**derive.FIXED, **_thresholds(record_path)}
-    readable = list(derive.RESULTS) + list(derive.AFTERWARDS)
+    base = {**PLAN.FIXED, **_thresholds(record_path)}
+    readable = list(PLAN.RESULTS) + list(PLAN.AFTERWARDS)
     # ``FI_FIGURE_FALLBACK=only``: the figures that failed are drawn beside the earlier run's results, which stay as they were. No
     # function of the study's is run again (it may draw random numbers), so no derived value, reference or result can change.
     only = os.environ.get("FI_FIGURE_FALLBACK") == "only"
     earlier = _earlier_record(quest_root) if only else None
     first = Table(cells, readable)
     table = Table(cells, readable, {} if only else _references(first, base, notes),
-                  {name: first.at(**hold) for name, hold in derive.PARTS.items()}, getattr(derive, "KNOWN", {}))
-    compared = {k: list(v) for k, v in derive.COMPARED.items()}
+                  {name: first.at(**hold) for name, hold in PLAN.PARTS.items()}, getattr(PLAN, "KNOWN", {}))
+    compared = {k: list(v) for k, v in PLAN.COMPARED.items()}
     records = earlier["derived"] if only else _derived(table, base, compared)
     _progress("fi: printing the results")
     out = {} if only else result_json(table, records, compared)
     outcomes, said, figure_code, figure_faults = _figures(table, quest_root, records)
     not_computed = [{"id": i, "status": r["status"], "why": r.get("why") or ""} for i, r in records.items() if r["status"] != "ok"]
     not_computed += [{"id": rid, "status": "no_data", "why": "no trial gave a value for it"}
-                     for rid in derive.RESULTS if rid in out and out[rid] is None]
+                     for rid in PLAN.RESULTS if rid in out and out[rid] is None]
     faults = [r["why"] for r in records.values() if r.get("fi_fault")] + list(figure_faults)
+    for name in PLAN.changed():
+        notes.append("the study's code changed FI's frame value %s; FI used the value it wrote" % name)
     _progress("fi: writing the results")
     kept_figures = _put_back(quest_root, {"figures": outcomes})
     document = {"schema": "fi.derived/v1", "derived": records, "not_computed": not_computed, "complete": not not_computed,

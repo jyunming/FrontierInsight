@@ -179,12 +179,12 @@ def _run_case(case: Case, root: Path) -> dict[str, Any]:
     (code / "simulate.py").write_text(skeleton.frame_source(design, stochastic=True), encoding="utf-8")
     af.ensure_files(code, design)
     bodies = textwrap.dedent(case.bodies)
-    if case.plant == "late_formula":  # a derive.py written before the plan was checked for it
-        bodies += ('\nDERIVED["odd"] = {"by": "formula", "formula": "growth * nothing_here", "inputs": ["growth"], '
-                   '"role": "result"}\n')
-    if case.plant == "one_number_summary":  # max(growth) - min(growth): 0 at every setting, were it worked out
-        bodies += ('\nDERIVED["spread"] = {"by": "formula", "formula": "max(growth) - min(growth)", "inputs": ["growth"], '
-                   '"role": "result"}\n')
+    late = {"late_formula": '"odd": {"by": "formula", "formula": "growth * nothing_here", "inputs": ["growth"], "role": "result"}',
+            "one_number_summary": '"spread": {"by": "formula", "formula": "max(growth) - min(growth)", "inputs": ["growth"], "role": "result"}'}
+    if case.plant in late:  # a derive.py whose frame FI wrote before the plan was checked for it (the frame is FI's text, never a body's)
+        text = (code / "derive.py").read_text(encoding="utf-8")
+        marker = "\nDERIVED = {"
+        (code / "derive.py").write_text(text.replace(marker, marker + late[case.plant] + ", ", 1), encoding="utf-8")
     if case.plant == "stale_running":
         (quest / af.RUNNING_PATH).parent.mkdir(parents=True, exist_ok=True)
         (quest / af.RUNNING_PATH).write_text(json.dumps({"step": "derive_peak", "run": "a-run-that-was-killed"}), encoding="utf-8")
