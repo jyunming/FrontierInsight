@@ -9,6 +9,7 @@ something these tests are loosened for: its test is ``xfail(strict=True)`` with 
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -25,7 +26,7 @@ import pytest  # noqa: E402
 from core import figure_claims, figure_facts, plot_style, skeleton  # noqa: E402
 from core.engine import _figure_caption_text, _figure_overlap_findings, _place_figures  # noqa: E402
 from tests.test_analysis_figures import _CallTable, _calls_run, frame5  # noqa: E402,F401  (frame5 is a fixture)
-from tests.test_fi_places_figures import DISCLOSURE, _paper, _panel, _record, _write  # noqa: E402
+from tests.test_fi_places_figures import DISCLOSURE, _paper, _write  # noqa: E402
 from tests.test_frame_figure import _Host  # noqa: E402
 
 
@@ -35,10 +36,26 @@ def _close_figures():
     plt.close("all")
 
 
+def frame_record(root: Path) -> dict:
+    from core import analysis_frame
+
+    return analysis_frame.read_record(root)
+
+
 def _calls(root: Path, stem: str = "g") -> dict:
     calls = figure_claims.load_calls(root, stem)
     assert calls is not None, "the call record of the figure was not written"
     return calls
+
+
+def _drawn_record(tmp_path: Path) -> dict:
+    """The call record of a figure drawn through the real drawing calls (``run_figures``, the ``frame5`` fixture): one panel, the
+    series ``fast``."""
+    def body(fig, table):
+        fig.line(0, "fast", [1, 2], [table.mean("growth", "size=1"), table.mean("growth", "size=2")], "growth")
+
+    assert _calls_run(tmp_path, body, panels=1)["status"] == "ok"
+    return _calls(tmp_path)
 
 
 def _offered(calls: dict, plan: dict | None = None) -> list[tuple[str, dict]]:
@@ -50,34 +67,39 @@ def _offered(calls: dict, plan: dict | None = None) -> list[tuple[str, dict]]:
 UNDECLARED = "T_num/T0 - 1"
 
 
-def test_mutation_1_undeclared_read_gets_default_figure(tmp_path: Path) -> None:
-    """Caught: the dry run records a warning that names the id; with the repair budget at 0 the default figure exists and the
-    paper has it."""
-    from tests.test_analysis_frame import _design, _quest
+def test_mutation_1_undeclared_read_gets_default_figure(tmp_path: Path, monkeypatch) -> None:
+    """Caught: the dry run records a warning that names the id; and one connected chain: the repairs are spent, the engine's last
+    run draws the figure the body lost from the plan's own description (a body that read an undeclared id), that figure's record
+    is the engine's own, and the paper has the figure under a number with its caption."""
+    from core.engine import _read_figure_records  # noqa: F401  (the engine reads the records it passes on)
+    from tests import test_figure_failure_keeps_results as keeps
     from tests.test_code_checks import GOOD_BODY, _dry, _quest_with_figures
-    from tests.test_figure_failure_keeps_results import _analysis_run, _engine
 
     # (a) before the long run: a warning, never a stop
     dry = tmp_path / "dry"
     _quest_with_figures(dry, GOOD_BODY.replace("table.mean('signal', k)", f"table.mean('{UNDECLARED}', k)"))
     got = _dry(dry)
     assert got.passed is None and got.says.startswith("warning:") and UNDECLARED in got.says, got
-    # (b) the run that ends the repairs draws the figure from the plan's own description instead of losing it
-    eng = _engine(tmp_path / "eng", phased_on=False)
+    # (b) the connected chain
+    plot = f"fig.axes[0].plot([1, 2], [table.mean('{UNDECLARED}', k) for k in table.keys()][:2])"
+    body = "def figure_fig1(fig, table):\n    " + plot + "\n"
+    monkeypatch.setattr(keeps, "_RAISES", body)
+    eng, root, calls = keeps._give_up_quest(tmp_path / "run", monkeypatch)  # the first run: fig1 failed, fig2 drew
+    first = frame_record(root)
+    assert {o["id"]: o["status"] for o in first["figures"]}["fig1"] == "failed" and UNDECLARED in str(first["figures"])
+    assert not (root / "figures" / "growth.png").exists(), "the lost figure is not there before the engine acts"
     eng.config.engine.exec_reflect_max_iterations = 0
-    assert not eng._repair_budget_left({"exec_reflect_iter": 0}), "a budget of 0 leaves no repair, so the engine sets the fallback"
-    body = f"def figure_fig1(fig, table):\n    fig.axes[0].plot([1, 2], [table.mean('{UNDECLARED}', k) for k in table.keys()][:2])\n"
-    quest = _quest(tmp_path / "run", _design(), body)
-    code, _printed, derived = _analysis_run(quest, last_run=True)
-    fig = next(o for o in derived["figures"] if o["id"] == "fig1")
-    assert code == 0 and fig["status"] == "ok" and fig["fallback"] is True, derived
-    assert (quest / "figures" / "growth.png").stat().st_size > 0
-    # (c) and the paper has it, under a number, with a caption
-    state = {"design": {"figures_planned": ["growth.png"]}, "figures": ["growth.png"],
-             "figure_records": {"growth.png": {"axes": [{"ylabel": "growth", "series": [{"label": "dose 1", "shows": "yes"}]}],
-                                               "fallback": True}}}
-    text, placed, _ = _place_figures("# T\n\n## Results\n\nFigure 1 shows the growth.\n", state)
-    assert placed == ["growth.png"] and "](figures/growth.png)" in text and "**Figure 1.**" in text
+    state = {"exec_reflect_iter": 0, "exec_result": {"returncode": 1, "results_produced": True},
+             "figure_records": {"other.png": {"axes": []}, "growth.png": {"axes": []}}}  # the records of the first run
+    assert not eng._repair_budget_left(state), "no repair is left"
+    out = asyncio.run(eng._figures_after_give_up(state))
+    assert calls and calls[0]["FI_FIGURE_FALLBACK"] == "only", "the engine's last run asks for the plan's own figure"
+    assert (root / "figures" / "growth.png").stat().st_size > 0
+    assert out["figure_records"]["growth.png"]["fallback"] is True and "fallback" not in out["figure_records"]["other.png"]
+    paper_state = {"design": {"figures_planned": ["growth.png", "other.png"]}, "quest_root": str(root), **out}
+    draft = "# T\n\n## Results\n\nFigure 1 shows the growth. Figure 2 shows another.\n"
+    text, placed, _ = _place_figures(draft, paper_state)
+    assert placed == ["growth.png", "other.png"] and "](figures/growth.png)" in text and "**Figure 1.**" in text, text
 
 
 # ---- 2. a sentence names a series the figure does not draw ----------------------------------------------------------------------
@@ -86,21 +108,21 @@ DRAFT_HEAD = "# T\n\n## Abstract\nWe compare schemes.\n\n## Results\n\n"
 DRAFT_TAIL = "\n## Discussion\nIt is small.\n"
 
 
-def test_mutation_2_a_series_the_figure_does_not_draw_is_dropped_with_the_disclosure(tmp_path: Path, monkeypatch) -> None:
+def test_mutation_2_a_series_the_figure_does_not_draw_is_dropped_with_the_disclosure(tmp_path: Path, monkeypatch, frame5) -> None:
     """Caught: the sentence is dropped, and the paper carries the disclosure; a true statement of the same figure stays."""
     ghost = "{{figure:error_vs_step:drawn @ series=ghost, panel=1}}"
-    real = "{{figure:error_vs_step:drawn @ series=error, panel=1}}"
+    real = "{{figure:error_vs_step:drawn @ series=fast, panel=1}}"
     draft = DRAFT_HEAD + f"**Accuracy.** {ghost} (Figure 1).\n\n**Cost.** {real} (Figure 1).\n" + DRAFT_TAIL
-    _eng, state, _ = _write(tmp_path, monkeypatch, [draft], _record(_panel()))
+    _eng, state, _ = _write(tmp_path / "q", monkeypatch, [draft], _drawn_record(tmp_path))
     paper = _paper(state)
     assert "ghost" not in paper and "not recorded" not in paper
-    assert "scheme A is drawn" in paper, "the same claim for a series the figure draws is filled"
+    assert "fast is drawn" in paper, "the same claim for a series the figure draws is filled"
     assert paper.count(DISCLOSURE) == 1
     from core import paper_facts
 
-    gone = [d["key"] for d in paper_facts.kept_check(tmp_path)["taken_out_values"] if str(d.get("key", "")).startswith("figure:")]
+    gone = [d["key"] for d in paper_facts.kept_check(tmp_path / "q")["taken_out_values"] if str(d.get("key", "")).startswith("figure:")]
     assert "figure:error_vs_step:drawn @ series=ghost, panel=1" in gone, gone
-    assert not [k for k in gone if "series=error" in k], gone
+    assert not [k for k in gone if "series=fast" in k], gone
 
 
 # ---- 3. a quantity worked out in the body --------------------------------------------------------------------------------------
@@ -310,18 +332,18 @@ def test_mutation_7_cut_off_error_bars_of_a_custom_panel_are_a_finding(tmp_path:
 # ---- 8. a writer sentence about a figure FI has no statement for -------------------------------------------------------------
 
 
-def test_mutation_8_a_writer_sentence_about_the_figure_is_dropped_with_the_disclosure(tmp_path: Path, monkeypatch) -> None:
+def test_mutation_8_a_writer_sentence_about_the_figure_is_dropped_with_the_disclosure(tmp_path: Path, monkeypatch, frame5) -> None:
     """Caught: the sentence is gone (the figure draws no such series), the disclosure is in the paper and in the record, and the
     figure keeps FI's own statement."""
     draft = (DRAFT_HEAD + "**Accuracy.** Figure 1 shows the paired gain between the two schemes.\n\n"
-             "**Cost.** {{figure:error_vs_step:drawn @ series=error, panel=1}} (Figure 1).\n" + DRAFT_TAIL)
-    _eng, state, _ = _write(tmp_path, monkeypatch, [draft], _record(_panel()))
+             "**Cost.** {{figure:error_vs_step:drawn @ series=fast, panel=1}} (Figure 1).\n" + DRAFT_TAIL)
+    _eng, state, _ = _write(tmp_path / "q", monkeypatch, [draft], _drawn_record(tmp_path))
     paper = _paper(state)
-    assert "paired gain" not in paper and "scheme A is drawn" in paper
+    assert "paired gain" not in paper and "fast is drawn" in paper
     assert paper.count(DISCLOSURE) == 1
     from core import paper_facts
 
-    left_out = [d for d in paper_facts.kept_check(tmp_path)["taken_out_values"] if str(d.get("key", "")).startswith("figure:")]
+    left_out = [d for d in paper_facts.kept_check(tmp_path / "q")["taken_out_values"] if str(d.get("key", "")).startswith("figure:")]
     assert left_out and {d["figure"] for d in left_out} == {"1"}
 
 

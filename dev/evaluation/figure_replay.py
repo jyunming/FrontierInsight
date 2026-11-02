@@ -814,25 +814,12 @@ def _worker(workdir: Path, result_path: Path) -> None:
         gridx = [float(g) for g in grid.get(spec.get("x"), []) if _number(g)]
         offers = figure_claims.menu(calls, {"series": list(spec.get("shows") or []), "grid": gridx}, _fmt, stem=fid)
         item["offers_capped"] = len(figure_claims.cap_menu(offers, calls))
-        # the y check: the series whose result the frame set to ``other`` because the drawn y is not the table's, and the
-        # claims the same record would have offered if the result had been kept
+        # the y check: the series whose result the frame set to ``other`` because the drawn y is not the table's. The claims it
+        # withdrew are NOT counted: a counterfactual record rebuilt from the series alone is not reliable (other calls set the
+        # panel's result too, and a series may be ``other`` on purpose)
         asked = [(p, sid, req) for p, sid, req, got in y_log if req != "other"]
         down = [(p, sid, req) for p, sid, req, got in y_log if req != "other" and got == "other"]
         item["y_check"] = {"series_asked": len(asked), "downgraded": len(down)}
-        if down:
-            import copy
-
-            kept = copy.deepcopy(calls)
-            for p, sid, req in down:
-                panel = kept["panels"][p]
-                for s in panel["series"]:
-                    if s["id"] == sid:
-                        s["what"] = req
-                panel["y"]["what"] = " / ".join(dict.fromkeys(r for q, _i, r, _g in y_log if q == p))
-            key = lambda o: (o["claim"], json.dumps(o["args"], sort_keys=True))  # noqa: E731
-            now = {key(o) for o in offers}
-            more = figure_claims.menu(kept, {"series": list(spec.get("shows") or []), "grid": gridx}, _fmt, stem=fid)
-            item["withdrawn_by_y_check"] = [o["claim"] for o in more if key(o) not in now]
         for o in offers:
             verdict, why = _agree(calls, o, gridx, lambda n, axis: item["scales"][str(n)][axis])
             item["offers"].append({"claim": o["claim"], "args": o["args"], "text": o["text"], "agree": verdict, "why": why})
@@ -951,11 +938,11 @@ def main(argv=None) -> int:
           f"figures over the limit: {sum(1 for _n, f in figs if len(f['offers']) > figure_claims.MENU_LIMIT)}")
     asked = sum(f.get("y_check", {}).get("series_asked", 0) for _n, f in figs)
     down = sum(f.get("y_check", {}).get("downgraded", 0) for _n, f in figs)
-    gone = collections.Counter(c for _n, f in figs for c in f.get("withdrawn_by_y_check", []))
     print(f"the y check: series drawn as a result of the plan {asked}; set to 'other' (drawn y is not the table's) {down}; "
-          f"claims withdrawn by it: {sum(gone.values())}" + ("".join(f"; {c} {k}" for c, k in gone.most_common())))
+          "claims withdrawn by it: not counted here")
     print("fi_fault: not measured here (the replay draws through the proxy, not through the figure code of a run, which is what "
-          "raises it); the nearest check is the line below")
+          "raises it); it is counted from the regen measurement, which ran bodies through run_figures; the nearest check here is "
+          "the line below")
     print(f"series whose record differs from the line really drawn: {sum(f.get('record_vs_artists_mismatches', 0) for _n, f in figs)}")
     shared = [f for _n, f in figs if f["status"] == "ok" and any(p["state"] != "empty" for p in f["panels"])]
     print(f"bodies that draw (no fallback): {len(shared)}; of them with every panel verified: "
