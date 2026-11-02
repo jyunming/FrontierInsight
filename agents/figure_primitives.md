@@ -20,7 +20,7 @@ If a call fails, the message says why; the usual ones and what to do instead:
 - "`name` is not a reference the plan holds": `fig.ref(panel, "id")` takes only a reference id the plan lists. For a value read from the results use `fig.ref(panel, at="result id")`; for a constant use `fig.ref(panel, value=<number>)`.
 - `table` has no `.se`, `.low` or `.high`: the table reads include `values`, `trials`, `n`, `mean`, `interval` (a `(lower, upper)` pair), `level_means` and `level_rows`. For error bars pass `yerr="ci95"` or `yerr="sd"` and let FI read them; `yerr_meaning` accepts only `ci95`, `sd`, `range` or `other`.
 - a series given as a level number (`0`, `1`) or a setting id: `series` is an id of the plan's series or results, as a string, never a position or the name of a setting.
-- "draw the data of panel N first" (a curve), or "series ... has not been drawn on panel N" (a band): draw the panel's data with `line`, `points` or `bars` first, then the curve or the band.
+- "draw the data of panel N first" (a curve), or "series `<name>` has not been drawn on panel N" (a band): draw the panel's data with `line`, `points` or `bars` first, then the curve or the band.
 
 Use `fig.raw(panel)` (the real axes) only for a drawing none of these calls can make. FI then states nothing about that panel, so use it as little as possible.
 

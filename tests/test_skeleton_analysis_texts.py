@@ -401,7 +401,7 @@ def test_with_no_analysis_by_fi_the_methods_and_the_unpinned_texts_are_what_they
 MORE_PINS_AT_DF4FF1AD = {
     "protocols_search_inside": "224963aed9fe2a67", "template_implement": "a70893e8a2235784",
     "template_implement_body": "d02bdddb32e99d50", "outline_template": "fa01183231dce8c8",
-    "repair_fi_frame": "2aca732a1c3b9c74", "reflect_prompt": "40e6696c66d0e48e"}
+    "repair_fi_frame": "2aca732a1c3b9c74", "reflect_prompt": "b1aebf41e9bdf9a8"}
 
 
 # ---- what the request says of the table is what the table does ---------------------------------------------------------------------
