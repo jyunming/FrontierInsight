@@ -470,6 +470,9 @@ class QuestState(TypedDict, total=False):
     # record per attempt, so analyze/write/review can describe what
     # was fixed.
     exec_reflect_iter: int
+    # How many times the gate sent a fault of the analysis on the recorded results back to be repaired (its own budget,
+    # ``run_checks.GATE_REPAIRS``; the crash repairs above are not spent by it and do not spend it).
+    gate_repairs: int
     exec_reflect_history: list[dict[str, Any]]
     exec_give_up_reason: str
     # The quest stopped with no paper (``needs/STUCK.json``): what it could not do and what it tried.
@@ -20837,8 +20840,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         numeric_turn = self._numeric_turn(state)
         numeric_made = _numeric.repairs_for_warnings(state.get("exec_reflect_history"))
         # Every repair is numbered in one sequence, whichever budget it is on.
-        attempt_no = iters + numeric_made + 1
-        bump = 0 if manifest_turn or numeric_turn else 1
+        # The repair of a fault the gate found in the analysis has a budget of its own too (``gate_repairs``, counted when it
+        # was sent): it neither waits for a crash repair to be left nor spends one.
+        gate_turn = rc != 0 and bool(exec_result.get("gate_repair"))
+        gate_made = int(state.get("gate_repairs") or 0)
+        attempt_no = iters + numeric_made + gate_made + (0 if gate_turn else 1)
+        bump = 0 if manifest_turn or numeric_turn or gate_turn else 1
         if numeric_turn and numeric_made >= self.config.engine.exec_reflect_max_iterations:
             stop = self._manifest_repair_gave_up(state) or self._result_check_gave_up(state)
             if stop is not None:
@@ -20865,7 +20872,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             fis_stop = self._fis_analysis_route(state, exec_result, rc, []).get("stop")
             if fis_stop is not None:
                 return fis_stop
-        if iters >= self.config.engine.exec_reflect_max_iterations and not manifest_turn and not numeric_turn:
+        if iters >= self.config.engine.exec_reflect_max_iterations and not manifest_turn and not numeric_turn and not gate_turn:
             # A run the run-manifest check sent back, with no repair left (earlier crashes spent them, or none are
             # allowed): the difference stands, and the quest stops and names it, never going on with no results.
             stop = self._manifest_repair_gave_up(state) or self._result_check_gave_up(state)
@@ -32690,7 +32697,7 @@ def _replicate_metric_kinds(state: "QuestState") -> dict[str, str]:
 # exhausted" with no repair at all, so both papers were written with no results. Redesigns stay bounded by
 # engine.max_iterations, and each script's own repairs by engine.exec_reflect_max_iterations.
 _FRESH_SCRIPT: dict[str, Any] = {
-    "exec_reflect_iter": 0, "exec_reflect_history": [], "exec_give_up_reason": "", "exec_patch_pending": False,
+    "exec_reflect_iter": 0, "gate_repairs": 0, "exec_reflect_history": [], "exec_give_up_reason": "", "exec_patch_pending": False,
     "run_manifest_failures": 0, "run_manifest_analysis_only": False, "figure_data_repairs": 0, "figure_overlap_repaired": False, "figure_labels_redrawn": False, "bounded_seen": [],
 }
 

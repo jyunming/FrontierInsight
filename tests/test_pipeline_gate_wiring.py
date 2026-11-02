@@ -305,12 +305,12 @@ async def test_a_first_version_whose_analysis_does_not_run_goes_to_the_crash_rep
     # no repair left: recorded for QUALITY.md and the paper's limitations, not a stop
     assert eng._cannot_repair_problems() == []
     with pytest.raises(_Reached):
-        await eng._gate_pass({"exec_reflect_iter": 3}, sys.executable, {}, eng.quest_root / "code" / "simulate.py")
+        await eng._gate_pass({"exec_reflect_iter": 3, "gate_repairs": 2}, sys.executable, {}, eng.quest_root / "code" / "simulate.py")
     assert [p["check"] for p in eng._cannot_repair_problems()] == ["gate"]
     assert eng._cannot_repair_stop() is None, "what rests on FI's reading goes on"
     # no repair left (again): shown, not a stop
     with pytest.raises(_Reached):
-        await eng._gate_pass({"exec_reflect_iter": 3}, sys.executable, {}, eng.quest_root / "code" / "simulate.py")
+        await eng._gate_pass({"exec_reflect_iter": 3, "gate_repairs": 2}, sys.executable, {}, eng.quest_root / "code" / "simulate.py")
     # a version that runs goes on to the next check
     (eng.quest_root / "code" / "experiment.py").write_text(EXPERIMENT, encoding="utf-8")
     with pytest.raises(_Reached):
@@ -589,3 +589,47 @@ async def test_a_gate_that_cannot_run_is_said_once_and_not_run_again_for_the_sam
     assert len(calls) == 1 and len([x for x in seen.lines if "could not be checked" in x]) == 1
     assert await eng._gate_refusal({}) == "" and len(calls) == 1
     assert "error" in json.loads((eng.fi_dir / "pipeline_gate.json").read_text(encoding="utf-8"))
+
+
+@pytest.mark.asyncio
+async def test_a_fault_of_the_analysis_is_repaired_when_the_crash_repairs_are_spent_and_has_a_budget_of_its_own(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A recorded quest reached the gate with its crash repairs spent (3 of 3): the analysis fault could not be repaired.
+    It now has its own counter: allowed with the crash budget spent, counted in ``gate_repairs``, and stopped at its own end."""
+    eng = _engine(tmp_path, gate=True)
+    _before_the_gate(eng, monkeypatch)
+    (eng.quest_root / "code" / "experiment.py").write_text(BROKEN_ANALYSIS, encoding="utf-8")
+    seed = eng.quest_root / "code" / "simulate.py"
+    spent = {"exec_reflect_iter": 3}  # the crash repairs are spent (engine.exec_reflect_max_iterations is 3)
+    first, _r, _w = await eng._gate_pass(dict(spent), sys.executable, {}, seed)
+    assert first["exec_result"]["directive"] is True and first["exec_result"]["gate_repair"] is True
+    assert first["gate_repairs"] == 1 and "exec_reflect_iter" not in first  # no crash repair spent
+    second, _r, _w = await eng._gate_pass({**spent, "gate_repairs": 1}, sys.executable, {}, seed)
+    assert second["gate_repairs"] == 2
+    # the analysis budget is spent: as before, the quest goes on and the fault is recorded (never a new stop)
+    with pytest.raises(_Reached):
+        await eng._gate_pass({**spent, "gate_repairs": 2}, sys.executable, {}, seed)
+    assert [p["check"] for p in eng._cannot_repair_problems()] == ["gate"]
+
+
+@pytest.mark.asyncio
+async def test_analysis_repairs_do_not_wait_on_the_crash_budget_in_reflect_and_spend_none(tmp_path: Path) -> None:
+    """The repair the gate sent is taken with the crash budget spent, and does not move ``exec_reflect_iter``; a crash
+    repair of the simulation still stops at its own budget."""
+    from unittest.mock import AsyncMock
+    import json as _json
+
+    eng = _engine(tmp_path, gate=True)
+    chat = AsyncMock(return_value=_json.dumps({"code": "print('RESULT_JSON: {}')", "deps": [], "patch_summary": "fixed"}))
+    eng._client = type("Stub", (), {"chat": chat})()
+    base = {"result_json": None, "code": "boom", "design": {}, "exec_reflect_iter": 3}
+    gate_sent = {**base, "gate_repairs": 1,
+                 "exec_result": {"returncode": 1, "stdout_tail": "", "stderr_tail": "boom", "directive": True, "gate_repair": True}}
+    patch = await eng._node_execute_reflect(gate_sent)
+    chat.assert_awaited()
+    assert patch["exec_reflect_iter"] == 3 and patch["exec_reflect_history"][0]["iter"] == 4
+    # known positive: a crash with the crash budget spent is not repaired
+    chat.reset_mock()
+    crash = {**base, "exec_result": {"returncode": 1, "stdout_tail": "", "stderr_tail": "boom"}}
+    assert await eng._node_execute_reflect(crash) == {}
+    chat.assert_not_awaited()
