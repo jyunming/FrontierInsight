@@ -451,9 +451,11 @@ def test_legend_stays_off_the_data_and_outside_when_crowded():
 
 def _crowded(host, panel, n=2):
     """Lines through every corner of the panel, so no corner is free."""
+    ids = ["fast", "slow"] + ["more%d" % k for k in range(2, n)]  # one name for each line: two lines of one name are an error
+    host.series_ids = list(host.series_ids) + [i for i in ids + ["last"] if i not in host.series_ids]
     for k in range(n):
-        host.line(panel, "fast" if k % 2 == 0 else "slow", [1, 2, 3, 4], [1.0 + k, 4.0 + k, 1.0 + k, 4.0 + k], "growth")
-    host.line(panel, "slow", [1, 2, 3, 4], [4.0, 1.0, 4.0, 1.0], "growth")
+        host.line(panel, ids[k], [1, 2, 3, 4], [1.0 + k, 4.0 + k, 1.0 + k, 4.0 + k], "growth")
+    host.line(panel, "last", [1, 2, 3, 4], [4.0, 1.0, 4.0, 1.0], "growth")
 
 
 @pytest.mark.parametrize("columns,series", [(1, 2), (2, 2), (3, 2), (3, 8), (2, 8)])

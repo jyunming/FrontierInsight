@@ -35083,14 +35083,41 @@ def _call_drawn(p: dict[str, Any]) -> list[str]:
     names: list[str] = []
     seen: set[str] = set()
     curves = 0
+    levelled: dict[str, list[dict[str, Any]]] = {}  # a figure with one curve per level of a setting: said once for each result
     for s in entries:
         ident = str(s.get("id"))
-        if s.get("kind") == "curve":
+        if isinstance(s.get("level"), dict):
+            levelled.setdefault(str(s["level"].get("result")), []).append(s)
+        elif s.get("kind") == "curve":
             curves += 1
         elif ident not in seen and ident not in absorbed and _call_group(s, entries):
             seen.add(ident)
             names.append(_call_group(s, entries))
-    return names + ([f"{curves} curves" if curves > 1 else "a curve"] if curves else [])
+    names += [_call_levels(group) for group in levelled.values()]
+    more = ("plus " if levelled else "") + (f"{curves} curves" if curves > 1 else "a curve")
+    return names + ([more] if curves else [])
+
+
+def _call_levels(group: list[dict[str, Any]]) -> str:
+    """What one result's curves are when the figure draws one per level of a setting, in FI's words from its own record: "34 curves
+    of X, one per Y". A level drawn as a line and as points is one curve. More levels than the legend names say their range; one
+    level says which it is."""
+    first = group[0]["level"]
+    result = _caption_words(first.get("result_label"), 60) or "the result"
+    setting = _caption_words(first.get("setting_label"), 60) or "level"
+    by_level: dict[str, dict[str, Any]] = {}
+    for g in group:
+        by_level.setdefault(str(g["level"].get("text")), g)  # one entry per level, in drawn order
+    distinct = list(by_level.values())
+    if len(distinct) == 1:
+        return f"{result} at {setting} = {_caption_words(first.get('text'), 30)}"
+    kinds = {str(g.get("kind")) for g in group}
+    unit = {"points": "series of points", "bars": "series of bars"}.get(next(iter(kinds)), "curves") if len(kinds) == 1 else "curves"
+    values = [g["level"].get("value") for g in distinct]
+    span = ""
+    if len(distinct) > 12 and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in values):
+        span = f" (from {min(values):.6g} to {max(values):.6g}; the legend names the lowest and the highest)"
+    return f"{len(distinct)} {unit} of {result}, one per {setting}{span}"
 
 
 def _call_extras(p: dict[str, Any]) -> tuple[list[str], list[str], list[str]]:
