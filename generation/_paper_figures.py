@@ -234,10 +234,6 @@ _LINE_PREFIX = re.compile(r"^(?:[ \t]*(?:\#{1,6}[ \t]+|[-*+][ \t]+|\d+[.)][ \t]+
 _ALL_BOLD = re.compile(r"^(?P<lead>[ \t]*)\*\*(?P<inner>[^*]+?)\*\*(?P<tail>[ \t]*)$")
 # A bold sentence with prose after it on the same line; "**Figure 1.**" alone, a bare label, is a heading, not a sentence.
 _BOLD_LEAD = re.compile(r"^(?P<lead>\*\*(?P<inner>[^*]+?[.!?])\*\*)(?P<rest>[ \t]+\S.*)$")
-# The caption line a deck puts under a figure ("**Figure 1.** ..." on the line after the image): the slide generator replaces
-# it by the paper's own caption, so it is left to that step and not read here.
-_CAPTION_LINE = re.compile(r"^[ \t]*\*\*[ \t]*(?:figures?|figs?\.?)[ \t]*\d+[ \t]*[.:]", re.IGNORECASE)
-_IMAGE_ONLY = re.compile(r"^[ \t]*!\[[^\]]*\]\(")
 _LABEL_ONLY = re.compile(r"^\s*(?:figures?|figs?\.?)\s*\d+\s*[.:]?\s*$", re.IGNORECASE)
 _TABLE_ROW = re.compile(r"^[ \t]*\|")
 _DELIMITER_CELL = re.compile(r"^\s*:?-{2,}:?\s*$")
@@ -300,7 +296,7 @@ def take_out_unchecked(
     other goes. A heading, a list item, a quote, a table cell and an entirely bold line that name a figure are read alone,
     since the rule leaves them as they are in the paper, and so is a bold lead sentence with prose after it on its line (a
     figure label such as "**Figure 1.**" with prose after it is left to the paper's rule, which judges that prose as naming
-    the figure and takes the label out with it; a label alone on its line, or the caption line under an image, stays); one
+    the figure and takes the label out with it; a label alone on its line stays); one
     left empty is dropped. Unchanged for a quest none of
     whose figures has a call record."""
     from core.engine import _FIGURE_MENTION_RE, _figure_numbers
@@ -320,13 +316,6 @@ def take_out_unchecked(
             continue
         if fence is not None or not _FIGURE_MENTION_RE.search(line):
             continue
-        if _CAPTION_LINE.match(line):
-            k = i - 1
-            while k >= 0 and not lines[k].strip():
-                k -= 1
-            if k >= 0 and _IMAGE_ONLY.match(lines[k]):
-                alone[i] = ("keep", line)
-                continue
         if _TABLE_ROW.match(line):
             alone[i] = ("table", line)
             continue
@@ -355,9 +344,6 @@ def take_out_unchecked(
                 rebuilt.append(line)
                 continue
             kind, original = alone[int(held.group(1))]
-            if kind == "keep":
-                rebuilt.append(original)
-                continue
             if kind == "table":
                 row, more = _filter_table_row(original, state, paper_raw, stem_numbers)
                 taken += more

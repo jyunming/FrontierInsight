@@ -780,12 +780,9 @@ _LEAD_BOLD = re.compile(r"\A\s*\*\*([^*\n]+)\*\*")
 _ABBREVIATIONS = frozenset({"e.g", "i.e", "al", "fig", "figs", "cf", "vs", "eq", "eqs", "sec", "ref", "refs", "approx"})
 
 
-def _pointer(text: str, mention_re: re.Pattern[str]) -> tuple[int, list[int]] | None:
-    """``(position of the opening bracket, figure numbers listed)`` when every figure named in ``text`` stands in one closing
-    parenthetical "(Figure N)", "(Figures N and M)", "(Fig. N and Fig. M)" at the end of the sentence, else ``None``."""
-    first = mention_re.search(text)
-    if first is None or not _OPEN_PAREN.search(text[:first.start()]):
-        return None
+def _listed(text: str, first: re.Match[str], mention_re: re.Pattern[str]) -> tuple[list[int], int]:
+    """``(the figure numbers a mention opens, where the list ends)``: "Figure 2" gives ``[2]``, "Figures 2 and 3" gives
+    ``[2, 3]``, "Figures 2-4" gives ``[2, 3, 4]``."""
     nums = [int(first.group(1))]
     pos = first.end()
     while True:
@@ -801,6 +798,16 @@ def _pointer(text: str, mention_re: re.Pattern[str]) -> tuple[int, list[int]] | 
         else:
             nums.append(n)
         pos = more.end()
+    return nums, pos
+
+
+def _pointer(text: str, mention_re: re.Pattern[str]) -> tuple[int, list[int]] | None:
+    """``(position of the opening bracket, figure numbers listed)`` when every figure named in ``text`` stands in one closing
+    parenthetical "(Figure N)", "(Figures N and M)", "(Fig. N and Fig. M)" at the end of the sentence, else ``None``."""
+    first = mention_re.search(text)
+    if first is None or not _OPEN_PAREN.search(text[:first.start()]):
+        return None
+    nums, pos = _listed(text, first, mention_re)
     if not _CLOSE_PAREN.match(text[pos:]) or any(m.start() >= pos for m in mention_re.finditer(text)):
         return None
     return _OPEN_PAREN.search(text[:first.start()]).start(), nums
@@ -941,9 +948,12 @@ def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, 
     def keeps(a: int, b: int, hits: list[re.Match[str]]) -> bool:
         text = flat[a:b]
         point = _pointer(text, mention_re)
-        nums = point[1] if point else [int(h.group(1)) for h in hits]
+        named = sorted({n for h in hits for n in _listed(flat, h, mention_re)[0]})  # "Figures 1 and 2" names both
+        nums = sorted(set(point[1] if point else []) | set(named))
         if all(n not in drawn for n in nums):
             return True  # only figures with no call record (or none FI numbered): nothing is checked, as before
+        if point and any(n in drawn and n not in point[1] for n in named):
+            return False  # a checked figure named outside the closing pointer (a run-in label): the pointer does not cover it
         if any(n not in issued for n in nums):
             return False
         inside = [i for i, sp in enumerate(spans) if a <= sp[0] and sp[1] <= b]
@@ -1024,7 +1034,7 @@ def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, 
             elif not hits or keeps(a, b, hits):
                 continue
             sentence = re.sub(r"\s+", " ", _values.without_marks(markdown[original(a):original(b)])).strip()
-            figures = sorted({int(h.group(1)) for h in hits})
+            figures = sorted({n for h in hits for n in _listed(flat, h, mention_re)[0]})
             unfilled = [i for i, sp in enumerate(spans) if kinds[i] == "v" and a <= sp[0] and sp[1] <= b
                         and marks[i].group(2).strip() == _values.NOT_RECORDED]
             if own:  # FI's own statement is never removed: only the words the writer put into its sentence go

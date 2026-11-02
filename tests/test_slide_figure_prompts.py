@@ -269,3 +269,23 @@ async def test_a_bold_lead_sentence_followed_by_prose_on_its_line_is_read_as_a_s
     assert "Panel 1 draws a rising line (Figure 1)." in body and "Kept lead prose." in body
     assert "**Figure 1.**" not in body and "label with prose" not in body  # a figure label with prose after it: both go
     assert "**Results.** Plain heading prose." in body
+
+
+@pytest.mark.asyncio
+async def test_a_caption_line_with_no_paper_caption_to_replace_it_is_the_models_text_and_is_judged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # under an image of the paper's list: replaced by the paper's caption (FI's, kept)
+    body = await _deck_from(tmp_path / "a", monkeypatch, _slide_body(
+        "![](figures/result.png)", "", "**Figure 1.** The gain rises with size."))
+    assert "**Figure 1.** The toy curve against its fit." in body and "gain rises" not in body
+    # under an image that is not in the paper's list: nothing replaces it, so it is read like any other text
+    body = await _deck_from(tmp_path / "b", monkeypatch, _slide_body(
+        "![](figures/other.png)", "", "**Figure 1.** The gain rises with size.", "", "The method is simple."))
+    assert "gain rises" not in body and "**Figure 1.**" not in body and "The method is simple." in body
+    # the paper has no caption for the figure: the same
+    monkeypatch.setattr("generation.slides._paper_caption", lambda _md, _name: "")
+    body = await _deck_from(tmp_path / "c", monkeypatch, _slide_body(
+        "![](figures/result.png)", "", "**Figure 1.** The gain rises with size.", "", "The method is simple."))
+    assert "gain rises" not in body and "The method is simple." in body
+

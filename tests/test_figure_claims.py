@@ -792,6 +792,28 @@ def test_a_run_in_figure_label_makes_the_sentence_after_it_a_sentence_naming_tha
     assert _rule(md, {"fig_a.png": 1, "fig_c.png": 3}, {1: {"signal"}}) == (md, [])
 
 
+def test_a_sentence_naming_several_figures_is_kept_only_when_it_is_kept_for_every_checked_one():
+    two = {"fig_a.png": 1, "fig_b.png": 2}
+    for drawn in ({2: {"signal"}}, {1: {"signal"}}, {1: {"signal"}, 2: {"signal"}}):
+        out, taken = _rule("**Figures 1 and 2.** The gain rises. Next.\n", two, drawn)
+        assert out == "Next.\n" and taken[0]["figures"] == [1, 2], (drawn, out, taken)
+        out, taken = _rule("**Figures 2 and 1.** The gain rises. Next.\n", two, drawn)
+        assert out == "Next.\n", (drawn, out)
+        out, taken = _rule("Figures 1 and 2 show a rise. Next.\n", two, drawn)
+        assert out == "Next.\n" and taken[0]["figures"] == [1, 2], (drawn, out, taken)
+    # figures FI did not check do not count
+    md = "**Figures 1 and 2.** The gain rises. Next.\n"
+    assert _rule(md, two, {}) == (md, [])
+    md = "Figures 1 and 2 show a rise. Next.\n"
+    assert _rule(md, two, {}) == (md, [])
+    # a label of one checked figure before a sentence closed by the pointer of another is not covered by the pointer
+    md = f"**Figure 1.** The signal is {_v('signal')} at size 1 (Figure 2). Next.\n"
+    out, _ = _rule(md, two, {1: {"signal"}, 2: {"signal"}})
+    assert "signal is" not in out
+    ok = f"**Figure 1.** The signal is {_v('signal')} at size 1 (Figures 1 and 2). Next.\n"
+    assert _rule(ok, two, {1: {"signal"}, 2: {"signal"}}) == (ok, [])
+
+
 def test_fis_own_statement_after_a_run_in_figure_label_is_kept_with_the_label():
     md = f"**Figure 1.** {_claim()} Next.\n"
     out, taken = _rule(md)
