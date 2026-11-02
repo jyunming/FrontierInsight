@@ -204,3 +204,18 @@ async def test_the_gate_does_not_stop_for_a_shown_fault_in_fis_frame(tmp_path: P
 async def test_the_gate_still_stops_for_a_shown_fault_in_the_studys_function(tmp_path: Path) -> None:
     verdict = await _gate(tmp_path, "return table.mean", cf.OPEN)
     assert verdict and verdict["stuck"] is True and verdict["stuck_reason"] == "shown_fault_open"
+
+
+def _requirement(file: str, line: int) -> dict[str, Any]:
+    """A problem of the requirement kind: it has a file and a line but no ``where``."""
+    return {"id": "R1", "kind": "metric", "text": "a plan quantity is not computed", "status": "different", "file": file,
+            "line": line, "note": "", "fix": "", "severity": "high", "name": "q", "headline": False}
+
+
+def test_a_requirement_problem_at_a_frame_line_is_set_aside_and_one_at_a_body_line_is_not(tmp_path: Path) -> None:
+    code = _code(tmp_path)
+    frame = _read(code, [_requirement("derive.py", _line(DERIVE, "REFERENCES"))])
+    assert [i["outcome"] for i in cf.issues_of(frame).values()] == [cf.ABOUT_FI] and not cf.open_issues(frame)
+    assert frame["problems"] == [] and len(frame["about_fi"]) == 1
+    body = _read(code, [_requirement("derive.py", _line(DERIVE, "return table.mean"))])
+    assert not any(i.get("fi_own") for i in cf.issues_of(body).values()) and len(cf.open_issues(body)) == 1

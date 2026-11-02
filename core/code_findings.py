@@ -175,7 +175,8 @@ def index_problems(problems: list[dict[str, Any]], code_dir: Path) -> None:
         rel = code.resolve(str(v.get("file") or ""))
         line = v.get("line") if isinstance(v.get("line"), int) else None
         # A place in FI's own lines is never the same issue as one in the study's function of that file.
-        own = place_in_fi_lines(code_dir, v["where"]) if v.get("where") else in_fi_lines(code_dir, v.get("file"), line)
+        v["place"] = place_of(v)
+        own = place_in_fi_lines(code_dir, v["place"])
         function = FI_PLACE if own else code.function_at(rel, line)
         qs = quantities(v)
         if not qs and str(v.get("kind")) == "logic":
@@ -279,6 +280,17 @@ _PLACE = re.compile(r"([\w./\-]+\.py)(?:\s*[:,]?\s*(?:lines?\s*)?(\d+)(?:\s*[-â€
 _MAX_RANGE = 500
 
 
+def place_of(v: dict[str, Any]) -> str:
+    """The place a finding names, as one string: what the reader wrote (``where``), else its file and line. The one source of
+    the place, stored on the issue and used to decide both its id and whether it is about FI's own lines."""
+    where = str(v.get("where") or "").strip()
+    if where:
+        return where
+    file = str(v.get("file") or "").strip()
+    line = v.get("line")
+    return f"{file}:{line}" if file and isinstance(line, int) and not isinstance(line, bool) else file
+
+
 def place_in_fi_lines(code_dir: Path, where: Any) -> bool:
     """Whether a place as the reader wrote it (``file:line``, a range ``file:20-30``, or several places) lies wholly in FI's
     lines: every place and every line of a range must be. Any other place is the study's (``False``)."""
@@ -312,8 +324,8 @@ def set_aside_own(record: dict[str, Any], code_dir: Path, version: str) -> list[
         last = (issue.get("readings") or [{}])[-1]
         if not version or last.get("status") != "open" or last.get("version") != version:
             continue
-        where = str(issue.get("where") or "")
-        if place_in_fi_lines(code_dir, where) if where else in_fi_lines(code_dir, issue.get("file"), None):
+        place = str(issue.get("place") or "") or place_of(issue)
+        if place and place_in_fi_lines(code_dir, place):
             issue.update(fi_own=True, outcome=ABOUT_FI,
                          reason="the place it names is in lines FI wrote, not in the study's code")
             new.append(str(fid))
@@ -389,6 +401,7 @@ def update_issues(record: dict[str, Any], problems: list[dict[str, Any]], n: int
             "headline": any(bool(g.get("headline")) for g in group),
             "plan_conflict": any(bool(g.get("plan_conflict")) for g in group),
             "where": next((g.get("where") for g in group if g.get("where")), ""),
+            "place": next((g.get("place") for g in group if g.get("place")), ""),
             "text": first.get("text", ""), "why": next((g.get("note") for g in group if g.get("note")), ""),
             "fix": next((g.get("fix") for g in group if g.get("fix")), ""),
             "problem_ids": [g.get("id") for g in group],
