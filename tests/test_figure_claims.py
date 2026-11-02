@@ -778,3 +778,13 @@ def test_a_run_in_heading_before_an_honest_sentence_with_a_pointer_stays():
 def test_fis_own_figure_claim_in_bold_with_its_pointer_stays():
     md = f"**{_claim()}** (Figure 1). Next.\n"
     assert _rule(md) == (md, [])
+
+
+def test_an_image_embed_inside_a_line_is_never_judged_and_never_cut():
+    emb = "![**Figure 1.** Bias against noise; Figure 1 shows a rise.](figures/x.png)"
+    for md in (f"**Spread.** {emb}\n", f"Some prose here. {emb}\n", f"{emb} More prose.\n"):
+        out, taken = _rule(md)
+        assert emb in out and taken == [], md
+    out, taken = _rule(f"Intro. {emb} Figure 1 shows a rise. Next.\n")
+    assert emb in out and "shows a rise. Next" not in out and "Next." in out
+    assert [t["sentence"] for t in taken] == ["Figure 1 shows a rise."]

@@ -769,6 +769,9 @@ _OWN_POINTER = re.compile(r"(?:\*\*)?[ \t]*\([ \t]*")
 #: What joins one more figure number to a pointer: "(Figures 2 and 3)", "(Figures 2, 3)", "(Figures 2-4)".
 _LIST_JOIN = re.compile(r"\s*(?:,|and|&|[-\u2013])\s*", re.IGNORECASE)
 _BARE_NUMBER = re.compile(r"\d+")
+#: An image embed is its own span, never part of a sentence: it is masked with a \x01 token (FI's marks use \x00).
+_IMAGE_EMBED = re.compile(r"!\[[^\]\n]*\]\([^)\n]*\)")
+_IMAGE_TOKEN = re.compile(r"\x01\d+\x01")
 _PERIOD_SPACE = re.compile(r"\. |[.!?]\*\*(?= )")
 #: A bold span that opens a sentence.
 _LEAD_BOLD = re.compile(r"\A\s*\*\*([^*\n]+)\*\*")
@@ -817,12 +820,16 @@ def _sentence_break(flat: str, i: int) -> bool:
 def _sentence_at(flat: str, line_start: int, line_end: int, pos: int) -> tuple[int, int]:
     """The running sentence of the line ``flat[line_start:line_end]`` that holds ``pos``: ``(start, end)``."""
     a = line_start
+    breaks: list[tuple[int, int]] = []  # (where a sentence ends, where the next one starts)
     for m in _PERIOD_SPACE.finditer(flat, line_start, line_end):
-        if not _sentence_break(flat, m.start()):
-            continue
-        end = m.end() if m.group(0).endswith("**") else m.start() + 1  # ".** ": the sentence ends after the closing "**"
-        if end <= pos:
-            a = end
+        if _sentence_break(flat, m.start()):
+            end = m.end() if m.group(0).endswith("**") else m.start() + 1  # ".** ": ends after the closing "**"
+            breaks.append((end, end))
+    for m in _IMAGE_TOKEN.finditer(flat, line_start, line_end):  # an image embed stands between two sentences
+        breaks.append((m.start(), m.end()))
+    for end, nxt in sorted(breaks):
+        if nxt <= pos:
+            a = nxt
         else:
             return a, end
     return a, line_end
@@ -871,6 +878,7 @@ def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, 
     marks = [m for m in _values._MARK.finditer(markdown or "")]
     marks += [m for m in _facts._MARK.finditer(markdown or "")]
     marks += [m for m in _values._SPAN.finditer(markdown or "")]
+    marks += [m for m in _IMAGE_EMBED.finditer(markdown or "")]
     marks.sort(key=lambda m: m.start())
     kept: list[re.Match[str]] = []  # the outermost marks: one inside another is part of it
     for m in marks:
@@ -893,10 +901,11 @@ def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, 
         full_stop = claim and not own_pointer and _facts._starts_sentence(markdown[:m.start()]) \
             and markdown[m.end():m.end() + 1] not in (".", "!", "?") \
             and re.match(r"[ \t]*[a-z,;]", markdown[m.end():m.end() + 8]) is None
-        token = f"\x00{i}\x00" + ("." if full_stop else "")
+        is_image = m.re is _IMAGE_EMBED
+        token = f"\x01{i}\x01" if is_image else f"\x00{i}\x00" + ("." if full_stop else "")
         parts += [before, token]
         spans.append((size + len(before), size + len(before) + len(token), m.start(), m.end()))
-        kinds.append("v" if m.re is _values._MARK else "claim" if claim else "other")
+        kinds.append("v" if m.re is _values._MARK else "claim" if claim else "image" if is_image else "other")
         size += len(before) + len(token)
         last = m.end()
     parts.append(markdown[last:])
