@@ -75,7 +75,7 @@ def _quest(tmp_path: Path, with_calls: bool):
         records = root / ".fi" / "figure_records"
         records.mkdir(parents=True)
         (records / "result.calls.json").write_text(json.dumps({
-            "version": 1, "fallback": False,
+            "version": 2, "fallback": False,
             "panels": [{"panel": 1, "raw": False, "raw_reason": None,
                         "x": {"id": "t", "kind": "setting", "label": "time", "scale": "linear"},
                         "y": {"what": "energy", "label": "energy", "scale": "linear"},

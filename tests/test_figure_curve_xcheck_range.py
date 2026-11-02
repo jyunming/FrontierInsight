@@ -151,3 +151,72 @@ def test_a_band_called_range_is_checked_and_an_honest_one_kept(tmp_path):
             '[max(table.values("signal", k)) for k in keys], "signal", "range")\n')
     calls, offers, _h = _draw(good, tmp_path)
     assert calls["panels"][0]["bands"][0]["meaning"] == "range" and any(o["claim"] == "band" for o in offers)
+
+
+# ---- fix round 1 -------------------------------------------------------------------------------------------------------------
+
+def test_a_series_declared_other_never_carries_a_results_plan_label(tmp_path):
+    body = HONEST + 'fig.line(0, "signal", waves, [9, 7, 5, 3, 2, 1], "other")\n'
+    calls, offers, host = _draw(body, tmp_path)
+    host.finish(host.labels, {})
+    assert calls["panels"][0]["series"][0]["label"] == "computed value"
+    assert _legend(host) == ["computed value"]
+    assert "Signal" not in _texts(offers)
+    # the known positive: an arm id (not a result) declared `other` keeps its own name
+    calls, offers, host = _draw(HONEST + 'fig.line(0, "sample_a", waves, [9, 7, 5, 3, 2, 1], "other")\n', tmp_path)
+    assert calls["panels"][0]["series"][0]["label"] == "Sample A"
+
+
+def _hand(series_extra=None, **top):
+    s = {"id": "a", "label": "A", "kind": "line", "step": False, "x": [1, 2, 3], "y": [1.0, 2.0, 3.0], "yerr": None,
+         "merged_with": [], "what": "signal", **(series_extra or {})}
+    panel = {"panel": 1, "raw": False, "raw_reason": None, "x": {"id": "size", "kind": "setting", "label": "size", "scale": "linear"},
+             "y": {"what": "signal", "label": "signal", "scale": "linear"}, "series": [s], "bands": [], "refs": [], "notes": [],
+             "texts_raw": []}
+    return {"version": 2, "fallback": False, "panels": [panel], **top}
+
+
+def test_a_series_record_without_the_x_flag_reads_as_unchecked():
+    assert figure_claims.evaluate(_hand({"x_checked": True}), "trend", {"series": "a"}) is not None
+    assert figure_claims.evaluate(_hand(), "trend", {"series": "a"}) is None
+    assert figure_claims.evaluate(_hand(), "range", {"series": "a", "axis": "x"}) is None
+    assert figure_claims.evaluate(_hand(), "drawn", {"series": "a"}) is not None
+
+
+def test_a_curve_is_named_by_fi_whatever_the_record_stores():
+    got = figure_claims.evaluate(_hand({"kind": "curve", "label": "theory says r = 0.9991 (x)", "id": "curve1"}), "drawn",
+                                 {"series": "curve1"})
+    assert got is not None and got[0].startswith("a curve is drawn") and "0.9991" not in got[0]
+
+
+def test_the_record_is_version_two_and_an_older_one_is_not_read(tmp_path):
+    calls, _o, _h = _draw(HONEST + LINE, tmp_path)
+    assert calls["version"] == 2
+    path = tmp_path / ".fi" / "figure_records" / "spectra.calls.json"
+    old = json.loads(path.read_text(encoding="utf-8"))
+    for version in (1, None):
+        if version is None:
+            old.pop("version")
+        else:
+            old["version"] = version
+        path.write_text(json.dumps(old), encoding="utf-8")
+        assert figure_claims.load_calls(tmp_path, "spectra") is None
+    old["version"] = 2
+    path.write_text(json.dumps(old), encoding="utf-8")
+    assert figure_claims.load_calls(tmp_path, "spectra") is not None
+
+
+def test_a_gap_at_an_x_off_the_grid_keeps_the_x_claims(tmp_path):
+    body = HONEST + ('xs = list(waves) + [999]\n'
+                     'fig.line(0, "sample_a", xs, means + [float("nan")], "signal")\n')
+    calls, offers, _h = _draw(body, tmp_path)
+    assert calls["panels"][0]["series"][0]["x_checked"] is True
+    assert any(o["claim"] == "trend" for o in offers)
+
+
+def test_two_identical_downgraded_series_share_one_legend_entry_naming_both(tmp_path):
+    body = HONEST + ('fig.line(0, "sample_a", waves, [m + 0.3 for m in means], "signal")\n'
+                     'fig.line(0, "sample_b", waves, [m + 0.3 for m in means], "signal")\n')
+    _c, _o, host = _draw(body, tmp_path)
+    host.finish(host.labels, {})
+    assert _legend(host) == ["computed value 1 = computed value 2"]

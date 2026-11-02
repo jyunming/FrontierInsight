@@ -399,7 +399,7 @@ LEGACY_LIST = ('- Figure 3: figures/spread_map.png\n- Figure 2: figures/cost_by_
 
 def _series(ident: str, label: str, ys=(3.0, 2.0, 1.0)) -> dict:
     return {"id": ident, "label": label, "kind": "line", "step": False, "x": [1.0, 2.0, 3.0], "y": list(ys),
-            "yerr": None, "merged_with": []}
+            "yerr": None, "merged_with": [], "x_checked": True}
 
 
 def _panel(k: int = 1, *, raw: bool = False, series=None) -> dict:
@@ -419,7 +419,7 @@ def _quest(tmp_path: Path, calls: dict | None, stem: str = "error_vs_step") -> d
 
 
 def _record(*panels: dict, fallback: bool = False) -> dict:
-    return {"version": 1, "fallback": fallback, "panels": list(panels)}
+    return {"version": 2, "fallback": fallback, "panels": list(panels)}
 
 
 def test_prompt_lists_true_claims_as_marks_for_verified_figure(tmp_path: Path) -> None:

@@ -191,9 +191,9 @@ def _calls(raw: bool = False, panels: int = 1) -> dict:
                 "x": {"id": "size", "kind": "setting", "label": "size", "scale": "linear"},
                 "y": {"what": "signal", "label": "signal", "scale": "linear"},
                 "series": [{"id": "a", "label": "a", "kind": "line", "step": False, "x": [1, 2, 3], "y": [1.0, 2.0, 3.0],
-                            "yerr": None, "merged_with": []}],
+                            "yerr": None, "merged_with": [], "x_checked": True}],
                 "bands": [], "refs": [], "notes": [], "texts_raw": []}
-    return {"version": 1, "fallback": False, "panels": [panel(k) for k in range(1, panels + 1)]}
+    return {"version": 2, "fallback": False, "panels": [panel(k) for k in range(1, panels + 1)]}
 
 
 def _with_calls(tmp_path: Path, calls: dict | None, stem: str = "fig1") -> Path:

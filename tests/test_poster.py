@@ -1473,7 +1473,7 @@ def _record_a_drawn_figure(art: QuestArtifacts, extra_files: dict[str, bool] | N
     records_dir = art.quest_root / ".fi" / "figure_records"
     records_dir.mkdir(parents=True)
     (records_dir / "result.calls.json").write_text(json.dumps({
-        "version": 1, "fallback": False,
+        "version": 2, "fallback": False,
         "panels": [{"panel": 1, "raw": False, "raw_reason": None,
                     "x": {"id": "t", "kind": "setting", "label": "time", "scale": "linear"},
                     "y": {"what": "energy", "label": "energy", "scale": "linear"},

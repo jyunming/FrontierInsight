@@ -1163,7 +1163,7 @@ def test_call_record_written_beside_recorder_files(tmp_path, frame5):
     assert not (frame5 / "g.calls.json").exists()
     assert _calls_run(tmp_path, _both_panels)["status"] == "ok"
     record = json.loads((frame5 / "g.calls.json").read_text(encoding="utf-8"))
-    assert record["version"] == 1 and len(record["panels"]) == 2
+    assert record["version"] == 2 and len(record["panels"]) == 2
     assert record["panels"][0]["series"][0]["id"] == "fast"
 
 

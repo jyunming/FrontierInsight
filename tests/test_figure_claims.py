@@ -14,7 +14,7 @@ from core import figure_claims as fc
 
 def _series(sid, xs, ys, kind="line", **kw):
     return {"id": sid, "label": sid.upper(), "kind": kind, "step": False, "x": xs, "y": ys, "yerr": None,
-            "merged_with": [], **kw}
+            "merged_with": [], "x_checked": True, **kw}
 
 
 def _panel(series, n=1, what="signal", **kw):
@@ -25,7 +25,7 @@ def _panel(series, n=1, what="signal", **kw):
 
 
 def _calls(*panels, fallback=False):
-    return {"version": 1, "fallback": fallback, "panels": list(panels)}
+    return {"version": 2, "fallback": fallback, "panels": list(panels)}
 
 
 def _base():

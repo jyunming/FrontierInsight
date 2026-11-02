@@ -296,7 +296,7 @@ def test_record_roundtrips_json(tmp_path):
     out = h.write(tmp_path / "sub" / "fig1.png")
     assert out.name == "fig1.calls.json"
     assert json.loads(out.read_text(encoding="utf-8")) == h.record()
-    assert h.record()["version"] == 1 and h.record()["fallback"] is False
+    assert h.record()["version"] == 2 and h.record()["fallback"] is False
     assert h.write(tmp_path / "other.calls.json").name == "other.calls.json"
 
 

@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import figure_facts
-from .frame_figure import hold_text as _hold_text
+from .frame_figure import RECORD_VERSION, hold_text as _hold_text
 from . import paper_values as _values
 
 #: Two drawn values closer than this (relative) are equal to the rounding of a drawn value; a trend may run through them.
@@ -56,9 +56,14 @@ def load_calls(quest_root: Path | str, stem: str) -> dict[str, Any] | None:
         data = json.loads((Path(quest_root) / figure_facts.RECORDS_DIR / f"{name}.calls.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if isinstance(data, dict) and isinstance(data.get("panels"), list):
+    if isinstance(data, dict) and isinstance(data.get("panels"), list) and _version(data) >= RECORD_VERSION:
         return data
-    return None
+    return None  # a record from before the checks of the current version is not read: the figure has no call record
+
+
+def _version(data: dict[str, Any]) -> int:
+    v = data.get("version")
+    return v if isinstance(v, int) and not isinstance(v, bool) else 0
 
 
 def parse_args(text: str) -> dict[str, str]:
@@ -163,6 +168,8 @@ def _series(panel: dict[str, Any], sid: str | None) -> dict[str, Any] | None:
 
 
 def _label(item: dict[str, Any]) -> str:
+    if item.get("kind") == "curve":  # the body's words never name a curve, whatever a record holds
+        return "a curve"
     return str(item.get("label") or item.get("id") or "")
 
 
@@ -206,8 +213,8 @@ def _value_axis_ok(panel: dict[str, Any], axis: str, series: dict[str, Any] | No
 def _x_ok(series: dict[str, Any]) -> bool:
     """Whether a series' drawn x values are values of the x setting in FI's table (``x_checked`` of the call record). A claim that
     reads x (a trend along it, an order at an x, a crossing, a span of x, a missing x, a step) is offered only then; a curve's x
-    is never FI's. A record from before the check carries no flag and reads as checked."""
-    return series.get("kind") != "curve" and series.get("x_checked", True) is not False
+    is never FI's. A series with no flag reads as unchecked (fail closed)."""
+    return series.get("kind") != "curve" and series.get("x_checked") is True
 
 
 def _x_arg(raw: str | None) -> float | None:
