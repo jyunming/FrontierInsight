@@ -35077,18 +35077,24 @@ def _call_drawn(p: dict[str, Any]) -> list[str]:
 
 def _call_levels(group: list[dict[str, Any]]) -> str:
     """What one result's curves are when the figure draws one per level of a setting, in FI's words from its own record: "34 curves
-    of X, one per Y". More levels than the legend names say their range; one level says which it is."""
+    of X, one per Y". A level drawn as a line and as points is one curve. More levels than the legend names say their range; one
+    level says which it is."""
     first = group[0]["level"]
     result = _caption_words(first.get("result_label"), 60) or "the result"
     setting = _caption_words(first.get("setting_label"), 60) or "level"
-    if len(group) == 1:
+    by_level: dict[str, dict[str, Any]] = {}
+    for g in group:
+        by_level.setdefault(str(g["level"].get("text")), g)  # one entry per level, in drawn order
+    distinct = list(by_level.values())
+    if len(distinct) == 1:
         return f"{result} at {setting} = {_caption_words(first.get('text'), 30)}"
-    unit = {"points": "series of points", "bars": "series of bars"}.get(str(group[0].get("kind")), "curves")
-    values = [g["level"].get("value") for g in group]
+    kinds = {str(g.get("kind")) for g in group}
+    unit = {"points": "series of points", "bars": "series of bars"}.get(next(iter(kinds)), "curves") if len(kinds) == 1 else "curves"
+    values = [g["level"].get("value") for g in distinct]
     span = ""
-    if len(group) > 12 and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in values):
+    if len(distinct) > 12 and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in values):
         span = f" (from {min(values):.6g} to {max(values):.6g}; the legend names the lowest and the highest)"
-    return f"{len(group)} {unit} of {result}, one per {setting}{span}"
+    return f"{len(distinct)} {unit} of {result}, one per {setting}{span}"
 
 
 def _call_extras(p: dict[str, Any]) -> tuple[list[str], list[str], list[str]]:

@@ -34,6 +34,7 @@ import copy
 import json
 import logging
 import math
+import numbers
 from pathlib import Path
 
 MEANINGS = ("ci95", "sd", "range", "other")
@@ -300,10 +301,12 @@ class FigureCalls:
 
     def _level_series(self, series, what, setting):
         """``(id, info)`` of the curve a call names by the level of the figure's series setting: the level is the call's ``series``
-        (a value of the setting in FI's table). The id is FI's (``<result>, <setting> = <level>``); a result's id or any other
+        (a value of the setting in FI's table). The id is FI's (``<result>@<setting>:<level>``: no comma or equals sign, so a claim can name it); a result's id or any other
         text is no level and says what to pass instead."""
         label = self._label_of(setting)
         levels = self._series_levels(setting)
+        if isinstance(series, numbers.Real) and not isinstance(series, bool):  # any real number, numpy's too, as a plain number
+            series = int(series) if isinstance(series, numbers.Integral) else float(series)
         numeric = isinstance(series, (int, float)) and not isinstance(series, bool)
         if (not numeric and not isinstance(series, str)) or (levels and not self._keys_at(setting, series)):
             shown = ", ".join(levels[:8]) + (", ..." if len(levels) > 8 else "")
@@ -316,7 +319,7 @@ class FigureCalls:
         text = ("%.6g" % series) if isinstance(series, float) else str(series)
         info = {"setting": setting, "setting_label": label, "value": series, "text": text, "result": what,
                 "result_label": NEUTRAL_Y if what == "other" else self._label_of(what)}
-        return "%s, %s = %s" % (what, setting, text), info
+        return "%s@%s:%s" % (what, setting, text), info
 
     def _series_ok(self, series):
         ids = list(getattr(self, "series_ids", []) or [])
@@ -386,7 +389,7 @@ class FigureCalls:
                 if name.strip() != x_id:
                     continue
                 try:
-                    same = float(text) == float(x)
+                    same = math.isclose(float(text), float(x), rel_tol=1e-9, abs_tol=1e-12)
                 except (TypeError, ValueError):
                     same = text.strip() == str(x)
                 if same:
@@ -687,7 +690,10 @@ class FigureCalls:
             arts = self._draw_series(ax, kind, xs, ys, legend, step)
             self._tag(arts)
             if lo is not None:
-                self._tag(self._errorbar(ax, xs, ys, lo, hi))
+                bars = self._errorbar(ax, xs, ys, lo, hi)
+                self._tag(bars)
+                if level:  # kept to share the curve's colour, by the position the series takes in the record
+                    self._fc_extra.setdefault(panel, {"series": [], "refs": []}).setdefault("bars", {})[len(rec["series"])] = bars
             rec["series"].append({"id": series, "label": legend, "kind": kind, "step": bool(step), "x": xs, "y": ys,
                                   "yerr": lo if lo is not None and _same(lo, hi) else None, "yerr_lo": lo, "yerr_hi": hi,
                                   "yerr_meaning": yerr_meaning if lo is not None else None, "what": what, "merged_with": [],
@@ -851,6 +857,7 @@ class FigureCalls:
             art = ax.fill_between(xs, _gaps(los), _gaps(his), alpha=0.25, linewidth=0, step="post" if stepped else None)
             self._tag(art)
             rec["bands"].append({"series": series, "x": xs, "lo": los, "hi": his, "meaning": meaning})
+            self._fc_extra.setdefault(panel, {"series": [], "refs": []}).setdefault("bands", []).append((series, art))
         return art
 
     def _next_line_id(self, rec):
@@ -1173,42 +1180,87 @@ class FigureCalls:
                 (ax.set_xlim if axis == "x" else ax.set_ylim)(*_padded(min(vals), max(vals), scale))
 
     @staticmethod
+    def _level_ident(e):
+        """The curve of a level a record entry belongs to: its result and the level's text (a curve drawn as a line and as points
+        is one curve)."""
+        return (e["level"]["result"], e["level"]["text"])
+
+    @staticmethod
     def _shown_levels(rec):
-        """The positions of the series a legend names when the panel draws more than ``LEGEND_LEVELS`` curves of a setting's levels:
+        """The positions of the series a legend names when the panel draws more than ``LEGEND_LEVELS`` distinct levels of a setting:
         the lowest and the highest level of each result (the caption says the range); None when the legend names them all."""
         levelled = [(k, e) for k, e in enumerate(rec["series"]) if e.get("level")]
-        if len(levelled) <= LEGEND_LEVELS:
+        if len({FigureCalls._level_ident(e) for _k, e in levelled}) <= LEGEND_LEVELS:
             return None
         keep = set()
         for result in {e["level"]["result"] for _k, e in levelled}:
             mine = [(k, e["level"]["value"]) for k, e in levelled if e["level"]["result"] == result]
-            nums = [(v, k) for k, v in mine if _finite(v)]
-            if len(nums) == len(mine):
-                keep |= {min(nums)[1], max(nums)[1]}
+            if all(_finite(v) for _k, v in mine):
+                ends = {min(v for _k, v in mine), max(v for _k, v in mine)}
             else:
-                keep |= {mine[0][0], mine[-1][0]}
+                ends = {mine[0][1], mine[-1][1]}
+            keep |= {k for k, v in mine if v in ends}
         return keep
 
+    @staticmethod
+    def _recolour(art, colour):
+        """Give a drawn artist, or the container or list of the artists of one call, one colour."""
+        if art is None:
+            return
+        if isinstance(art, (list, tuple)):
+            for a in art:
+                FigureCalls._recolour(a, colour)
+        elif hasattr(art, "set_color"):
+            art.set_color(colour)
+        elif hasattr(art, "set_facecolor"):
+            art.set_facecolor(colour)
+        else:  # an errorbar container: caps and bar lines (the data line is none)
+            FigureCalls._recolour(list(getattr(art, "lines", None) or []), colour)
+
     def _level_colours(self, panel, rec):
-        """Curves of many levels are coloured along one scale in the order of the level, so the two named in the legend say where
-        the rest lie. Only when the legend names two of them (numeric levels); a failing colour map leaves the default colours."""
-        if self._shown_levels(rec) is None:
-            return
-        try:
-            from matplotlib import colormaps
-            cmap = colormaps["viridis"]
-        except Exception:  # noqa: BLE001 -- no colour map: the curves keep the colours they were drawn with
-            return
+        """One colour for each level: the curve's line, its markers, error bars and band share it. More than ``LEGEND_LEVELS``
+        numeric levels are coloured along one scale in the order of the level, so the two named in the legend say where the rest
+        lie; a failing colour map leaves the default colours."""
         extra = self._fc_extra.get(panel, {"series": []})
-        for result in {e["level"]["result"] for e in rec["series"] if e.get("level")}:
-            mine = [(k, e["level"]["value"]) for k, e in enumerate(rec["series"]) if e.get("level") and e["level"]["result"] == result]
-            if not all(_finite(v) for _k, v in mine) or len({v for _k, v in mine}) < 2:
+        arts = extra["series"]
+        groups = {}
+        for k, e in enumerate(rec["series"]):
+            if e.get("level") and k < len(arts) and arts[k][0] is not None:
+                groups.setdefault(self._level_ident(e), []).append(k)
+        if not groups:
+            return
+        colour = {}
+        if self._shown_levels(rec) is not None:
+            try:
+                from matplotlib import colormaps
+                cmap = colormaps["viridis"]
+            except Exception:  # noqa: BLE001 -- no colour map: the curves keep the colours they were drawn with
+                cmap = None
+            for result in {r for r, _t in groups}:
+                mine = [(rec["series"][ks[0]]["level"]["value"], ident) for ident, ks in groups.items() if ident[0] == result]
+                if cmap is None or not all(_finite(v) for v, _i in mine) or len({v for v, _i in mine}) < 2:
+                    continue
+                lo, hi = min(v for v, _i in mine), max(v for v, _i in mine)
+                colour.update({ident: cmap((v - lo) / (hi - lo)) for v, ident in mine})
+        for ident, ks in groups.items():
+            if ident not in colour:  # the colour the first drawn of the level got from the colour cycle
+                first = arts[ks[0]][0]
+                if not hasattr(first, "get_color"):
+                    continue
+                colour[ident] = first.get_color()
+        for ident, ks in groups.items():
+            if ident not in colour:
                 continue
-            lo, hi = min(v for _k, v in mine), max(v for _k, v in mine)
-            for k, v in mine:
-                art = extra["series"][k][0] if k < len(extra["series"]) else None
-                if art is not None and rec["series"][k]["kind"] in ("line", "points") and hasattr(art, "set_color"):
-                    art.set_color(cmap((v - lo) / (hi - lo)))
+            for k in ks:
+                art = arts[k][0]
+                if rec["series"][k]["kind"] in ("line", "points") and hasattr(art, "set_color"):
+                    art.set_color(colour[ident])
+                self._recolour((extra.get("bars") or {}).get(k), colour[ident])
+        for sid, art in extra.get("bands") or []:
+            for k, e in enumerate(rec["series"]):
+                if e["id"] == sid and e.get("level") and e["kind"] != "curve":
+                    self._recolour(art, colour.get(self._level_ident(e)))
+                    break
 
     def _entries(self, panel, rec, spec_labels, result_info):
         """``[(artist, text)]`` of the legend: one per drawn series (the merged ones read "a = b") and per reference line. A text
@@ -1231,12 +1283,17 @@ class FigureCalls:
         # FI's neutral name, never the plan's label of a series whose values FI did not find, whichever was drawn first
         neutral_by_id = {s["id"]: s["label"] for s in rec["series"] if s.get("neutral")}
         shown = self._shown_levels(rec)
+        named = set()  # a level drawn as a line and as points is named once
         out = []
         for k, e in enumerate(rec["series"]):
             if e["kind"] == "image" or k >= len(extra["series"]) or extra["series"][k][0] is None or k in twins:
                 continue
             if shown is not None and e.get("level") and k not in shown:
                 continue
+            if e.get("level"):
+                if self._level_ident(e) in named:
+                    continue
+                named.add(self._level_ident(e))
             first = e["label"] if e.get("neutral") else name(e["id"], e["label"])
             text = " = ".join([first] + [neutral_by_id.get(i) or name(i) for i in e["merged_with"]])
             out.append((extra["series"][k][0], text))
