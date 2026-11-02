@@ -216,3 +216,56 @@ async def test_slide_titles_bullets_bold_lead_and_captions_follow_the_paper(
     # the removals are in the quest's run.log
     log = (tmp_path / "quest" / ".fi" / "run.log").read_text(encoding="utf-8")
     assert "slides: a sentence about a figure FI does not stand behind was left out" in log
+
+
+def _slide_body(*lines: str) -> str:
+    return chr(10).join(["---", "marp: true", "---", "", "# Toy", "", "---", "", "## Result", "", *lines, "",
+                         "![](figures/result.png)", ""])
+
+
+@pytest.mark.asyncio
+async def test_a_table_cell_about_a_checked_figure_is_read_by_the_same_rule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = await _deck_from(tmp_path / "a", monkeypatch, _slide_body(
+        "| Item | Note |", "| --- | --- |",
+        "| Result | Figure 1 shows the energy drifting upward |",
+        "| Kept | Panel 1 draws a rising line (Figure 1). |",
+        "| Plain | no figure here |"))
+    assert "drifting" not in body
+    assert "| Result |" in body or "| Result" in body  # the other cell stays, the cell is emptied
+    assert "Panel 1 draws a rising line (Figure 1)." in body and "| Plain | no figure here |" in body
+    assert "| --- | --- |" in body
+    log = (tmp_path / "a" / "quest" / ".fi" / "run.log").read_text(encoding="utf-8")
+    assert "Figure 1 shows the energy drifting upward" in log
+
+
+@pytest.mark.asyncio
+async def test_a_quote_about_a_checked_figure_is_read_by_the_same_rule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = await _deck_from(tmp_path / "a", monkeypatch, _slide_body(
+        "> Figure 1 shows the energy drifting upward", "", "> Panel 1 draws a rising line (Figure 1)."))
+    assert "drifting" not in body
+    assert "> Panel 1 draws a rising line (Figure 1)." in body
+    log = (tmp_path / "a" / "quest" / ".fi" / "run.log").read_text(encoding="utf-8")
+    assert "Figure 1 shows the energy drifting upward" in log
+
+
+@pytest.mark.asyncio
+async def test_a_bold_lead_sentence_followed_by_prose_on_its_line_is_read_as_a_sentence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = await _deck_from(tmp_path / "a", monkeypatch, _slide_body(
+        "**Figure 1 shows the energy drifting upward.** More words here.",
+        "",
+        "**Panel 1 draws a rising line (Figure 1).** Kept lead prose.",
+        "",
+        "**Figure 1.** A label with prose.",
+        "",
+        "**Results.** Plain heading prose."))
+    assert "drifting" not in body
+    assert "More words here." in body
+    assert "Panel 1 draws a rising line (Figure 1)." in body and "Kept lead prose." in body
+    assert "**Figure 1.**" in body  # the label stays (the paper's rule decides about the prose after it)
+    assert "**Results.** Plain heading prose." in body

@@ -1621,3 +1621,21 @@ async def test_the_poster_headline_headings_and_raw_columns_get_the_same_rule_an
     log = (art.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
     assert "poster: a sentence about a figure FI does not stand behind was left out" in log
     assert "Energy drifts upward as Figure 1 shows" in log
+
+
+@pytest.mark.asyncio
+async def test_a_table_row_and_a_quote_in_a_raw_poster_column_are_read_by_the_same_rule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    art = _make_artifacts(tmp_path)
+    _paper_with_statement(art)
+    _record_a_drawn_figure(art)
+    column = chr(10).join([
+        "> Figure 1 shows the energy drifting upward", "",
+        "> Panel 1 draws a rising line (Figure 1).", "",
+        "| Result | Figure 1 shows a rise in energy |"])
+    tex = await _checked_poster(tmp_path, monkeypatch, art, {"headline": "A finding", "left": column})
+    assert "drifting" not in tex and "a rise in energy" not in tex
+    assert "Panel 1 draws a rising line" in tex
+    log = (art.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
+    assert "Figure 1 shows the energy drifting upward" in log

@@ -228,10 +228,15 @@ def _wrap_verbatim(
     return text, wrapped, removed
 
 
-# A heading or a list item: its text is read alone (the pointer rule leaves both as they are); an entirely bold line is
-# a lead sentence, not a heading before one.
-_LINE_PREFIX = re.compile(r"^(?:[ \t]*(?:\#{1,6}[ \t]+|[-*+][ \t]+|\d+[.)][ \t]+))")
+# A heading, a list item or a quote: its text is read alone (the pointer rule leaves all three as they are). A table row is
+# read cell by cell, and an entirely bold line is a lead sentence, not a heading before one.
+_LINE_PREFIX = re.compile(r"^(?:[ \t]*(?:\#{1,6}[ \t]+|[-*+][ \t]+|\d+[.)][ \t]+|(?:>[ \t]*)+))")
 _ALL_BOLD = re.compile(r"^(?P<lead>[ \t]*)\*\*(?P<inner>[^*]+?)\*\*(?P<tail>[ \t]*)$")
+# A bold sentence with prose after it on the same line; "**Figure 1.**" alone, a bare label, is a heading, not a sentence.
+_BOLD_LEAD = re.compile(r"^(?P<lead>\*\*(?P<inner>[^*]+?[.!?])\*\*)(?P<rest>[ \t]+\S.*)$")
+_LABEL_ONLY = re.compile(r"^\s*(?:figures?|figs?\.?)\s*\d+\s*[.:]?\s*$", re.IGNORECASE)
+_TABLE_ROW = re.compile(r"^[ \t]*\|")
+_DELIMITER_CELL = re.compile(r"^\s*:?-{2,}:?\s*$")
 _FENCE = re.compile(r"^\s*(```|~~~)")
 _HOLD = "FIXLINEHOLD{}END"
 
@@ -249,7 +254,8 @@ def _filter_core(text: str, state: dict, paper_raw: str, stem_numbers: dict[str,
 
 
 def _filter_content(content: str, state: dict, paper_raw: str, stem_numbers: dict[str, int]):
-    """One heading's, list item's or bold line's text, filtered alone: ``(text or "" when nothing is left, taken)``."""
+    """One heading's, list item's, quote's, table cell's or bold line's text, filtered alone: ``(text or "" when nothing is
+    left, taken)``."""
     bold = _ALL_BOLD.match(content)
     if bold:
         out, taken = _filter_core(bold.group("inner"), state, paper_raw, stem_numbers)
@@ -261,6 +267,25 @@ def _filter_content(content: str, state: dict, paper_raw: str, stem_numbers: dic
     return (out.strip() if taken else content), taken
 
 
+def _filter_table_row(line: str, state: dict, paper_raw: str, stem_numbers: dict[str, int]):
+    """A table row read cell by cell: a cell about a figure that is not FI's own statement is emptied; a row left with no
+    text in any cell is dropped (``""``). ``(row, taken)``."""
+    from core.engine import _FIGURE_MENTION_RE
+
+    cells = line.split("|")
+    taken: list[dict[str, str]] = []
+    for k, cell in enumerate(cells):
+        if not cell.strip() or _DELIMITER_CELL.match(cell) or not _FIGURE_MENTION_RE.search(cell):
+            continue
+        content, more = _filter_content(cell.strip(), state, paper_raw, stem_numbers)
+        if more:
+            taken += more
+            cells[k] = " " + content + " " if content else " "
+    if taken and not any(c.strip() and not _DELIMITER_CELL.match(c) for c in cells):
+        return "", taken
+    return ("|".join(cells) if taken else line), taken
+
+
 def take_out_unchecked(
     text: str, raw_state: dict | None, quest_root: Path, paper_raw: str = "",
 ) -> tuple[str, list[dict[str, str]]]:
@@ -268,9 +293,10 @@ def take_out_unchecked(
     not stand behind (the paper's own rule, ``core.engine._take_out_unpointed``) and without a statement about a figure
     that FI could not fill (``take_out_unfilled(figures_only=True)``): ``(text, taken_out)``. A whole sentence that is one
     of FI's own figure statements of the paper (``paper_raw``, the paper with its markers) word for word is kept; any
-    other goes. A heading, a list item and an entirely bold line that name a figure are read alone, since the rule leaves
-    them as they are in the paper; one left empty is dropped. Unchanged for a quest none of whose figures has a call
-    record."""
+    other goes. A heading, a list item, a quote, a table cell and an entirely bold line that name a figure are read alone,
+    since the rule leaves them as they are in the paper, and so is a bold lead sentence with prose after it on its line (a
+    bare label such as "**Figure 1.**" is a heading and stays); one left empty is dropped. Unchanged for a quest none of
+    whose figures has a call record."""
     from core.engine import _FIGURE_MENTION_RE, _figure_numbers
 
     if not text:
@@ -278,7 +304,8 @@ def take_out_unchecked(
     state = _paper_state(raw_state, quest_root)
     stem_numbers = {Path(n).stem: k for n, k in _figure_numbers(state).items()}
     lines = text.split("\n")
-    alone: dict[int, str] = {}
+    alone: dict[int, tuple[str, str]] = {}
+    taken: list[dict[str, str]] = []
     fence = None
     for i, line in enumerate(lines):
         fenced = _FENCE.match(line)
@@ -287,12 +314,26 @@ def take_out_unchecked(
             continue
         if fence is not None or not _FIGURE_MENTION_RE.search(line):
             continue
+        if _TABLE_ROW.match(line):
+            alone[i] = ("table", line)
+            continue
         prefix = _LINE_PREFIX.match(line)
+        head = prefix.group(0) if prefix else ""
+        lead = _BOLD_LEAD.match(line[len(head):])
+        if lead and _FIGURE_MENTION_RE.search(lead.group("inner")) and not _LABEL_ONLY.match(lead.group("inner")):
+            out, more = _filter_core(lead.group("inner"), state, paper_raw, stem_numbers)
+            if more:  # the bold lead is not FI's: it goes (or keeps what is FI's), and its prose is read as usual
+                taken += more
+                kept = "**" + out.strip() + "** " if out.strip() else ""
+                line = lines[i] = head + kept + lead.group("rest").lstrip()
+                if not _FIGURE_MENTION_RE.search(line):
+                    continue
         if prefix or _ALL_BOLD.match(line):
-            alone[i] = line
+            alone[i] = ("item", line)
     if alone:
         lines = [_HOLD.format(i) if i in alone else line for i, line in enumerate(lines)]
-    out, taken = _filter_core("\n".join(lines), state, paper_raw, stem_numbers)
+    out, more = _filter_core("\n".join(lines), state, paper_raw, stem_numbers)
+    taken += more
     if alone:
         rebuilt = []
         for line in out.split("\n"):
@@ -300,7 +341,13 @@ def take_out_unchecked(
             if not held:
                 rebuilt.append(line)
                 continue
-            original = alone[int(held.group(1))]
+            kind, original = alone[int(held.group(1))]
+            if kind == "table":
+                row, more = _filter_table_row(original, state, paper_raw, stem_numbers)
+                taken += more
+                if row or not more:
+                    rebuilt.append(row or original)
+                continue
             prefix = _LINE_PREFIX.match(original)
             head = prefix.group(0) if prefix else ""
             content, more = _filter_content(original[len(head):], state, paper_raw, stem_numbers)
