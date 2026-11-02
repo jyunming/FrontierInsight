@@ -45,8 +45,6 @@ def test_a_finished_reply_is_read_whole_with_its_token_counts(tmp_path: Path) ->
 
 @pytest.mark.parametrize("last", [
     _reply("partial", status="RUNNING"),            # still being written
-    _reply("cut", truncated_fields=["content"]),    # the record itself cut the reply: never a partial answer
-    _reply("   "),                                  # nothing to return
     {"step_index": 2, "source": "MODEL", "type": "RUN_COMMAND", "status": "DONE", "content": "ls"},  # a tool step follows
 ])
 def test_an_unfinished_or_partial_record_gives_nothing(tmp_path: Path, last: dict) -> None:
@@ -54,27 +52,66 @@ def test_an_unfinished_or_partial_record_gives_nothing(tmp_path: Path, last: dic
     assert _read_agy_record(str(tmp_path)) is None
 
 
+@pytest.mark.parametrize("last", [
+    _reply("cut", truncated_fields=["content"]),    # the record itself cut the reply: never a partial answer
+    _reply("   "),                                  # nothing to return
+])
+def test_a_finished_but_unusable_reply_is_reported_not_taken(tmp_path: Path, last: dict) -> None:
+    _write_record(tmp_path, [USER, last])
+    with pytest.raises(provider._CliRecordIncomplete):
+        _read_agy_record(str(tmp_path))
+
+
 def test_a_half_written_line_or_a_missing_or_double_record_gives_nothing(tmp_path: Path) -> None:
     assert _read_agy_record(str(tmp_path / "nowhere")) is None
     path = _write_record(tmp_path, [USER, _reply("ok")])
     path.write_text(path.read_text(encoding="utf-8") + '{"step_index": 2, "source": "MO', encoding="utf-8")
     assert _read_agy_record(str(tmp_path)) is None
-    path.write_text(json.dumps(_reply("ok")) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(USER) + "\n" + json.dumps(_reply("ok")) + "\n", encoding="utf-8")
     assert _read_agy_record(str(tmp_path)) is not None
     _write_record(tmp_path, [USER, _reply("other")], conv="c2")   # two conversations: do not guess which
     assert _read_agy_record(str(tmp_path)) is None
 
 
-def _hung_proc():
-    """An agy that never prints and never exits: communicate() waits forever."""
-    proc = MagicMock()
-    proc.returncode = None
+class _FakeProc:
+    """A faked agy process with real stream readers: it prints what ``feed_out`` gives, and exits only when told."""
 
-    async def never(*_a, **_k):
-        await asyncio.sleep(3600)
+    def __init__(self) -> None:
+        self.stdout = asyncio.StreamReader()
+        self.stderr = asyncio.StreamReader()
+        self.stdin = MagicMock()
 
-    proc.communicate = never
-    return proc
+        async def drain() -> None:
+            return None
+
+        self.stdin.drain = drain
+        self.returncode = None
+        self._exited = asyncio.Event()
+
+    def exit(self, code: int = 0) -> None:
+        self.returncode = code
+        self.stdout.feed_eof()
+        self.stderr.feed_eof()
+        self._exited.set()
+
+    async def wait(self) -> int:
+        await self._exited.wait()
+        return self.returncode
+
+
+def _hung_proc() -> _FakeProc:
+    """An agy that never prints and never exits."""
+    return _FakeProc()
+
+
+def _fast(monkeypatch, stable: float = 0.1) -> None:
+    monkeypatch.setattr(provider, "_CLI_RECORD_POLL_S", 0.02)
+    monkeypatch.setattr(provider, "_CLI_RECORD_STABLE_S", stable)
+
+    async def fake_kill(*_a, **_k):
+        return True
+
+    monkeypatch.setattr(provider, "_kill_and_reap", fake_kill)
 
 
 @pytest.mark.asyncio
@@ -134,22 +171,74 @@ async def test_a_normal_call_uses_its_stdout_not_the_record(tmp_path: Path, monk
     """Known positive: a call that prints its result and exits is answered from stdout, as before."""
     out = json.dumps({"event": "result", "result": {"status": "SUCCESS", "response": "pong\n",
                                                     "usage": {"input_tokens": 10, "output_tokens": 2}}}) + "\n"
-    proc = MagicMock()
-    proc.returncode = 0
+    proc = _FakeProc()
 
-    async def comm(*_a, **_k):
+    async def later() -> None:
         await asyncio.sleep(0.05)
-        return out.encode(), b""
+        proc.stdout.feed_data(out.encode())
+        proc.exit(0)
 
-    proc.communicate = comm
+    task = asyncio.ensure_future(later())
     _write_record(tmp_path, [USER, _reply("something else")])
     usage: dict = {}
     got = await provider._collect_via_communicate(
         proc, ["agy"], _CLI_SPECS["antigravity_cli"], b"{}", None, timeout_s=30.0, usage_out=usage,
         record=lambda: _read_agy_record(str(tmp_path)),
     )
+    await task
     assert got == "pong"
     assert usage["prompt_tokens"] == 10
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_printed_something_is_never_answered_from_the_record(tmp_path: Path, monkeypatch) -> None:
+    """Finding 1: agy printed an error (or a partial result) and has not exited while its record says DONE. The record
+    must not replace what it printed: the call goes on to the normal path (here: waits, then times out)."""
+    _fast(monkeypatch, stable=0.1)
+    proc = _FakeProc()
+    proc.stdout.feed_data(b'{"event": "error", "message": "quota"}\n')
+    _write_record(tmp_path, [USER, _reply("the record answer")])
+    with pytest.raises(provider._CliTransientError, match="exceeded"):
+        await provider._collect_via_communicate(
+            proc, ["agy"], _CLI_SPECS["antigravity_cli"], b"{}", None, timeout_s=0.6,
+            record=lambda: _read_agy_record(str(tmp_path)),
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_reply_that_does_not_end_the_turn_is_not_taken(tmp_path: Path, monkeypatch) -> None:
+    """Finding 2: a model reply after a tool step is an intermediate reply, not the answer: fail fast and plain."""
+    _fast(monkeypatch, stable=0.1)
+    tool = {"step_index": 1, "source": "MODEL", "type": "RUN_COMMAND", "status": "DONE", "content": "ls"}
+    _write_record(tmp_path, [USER, tool, _reply("I will look at the files first.", step_index=2)])
+    with pytest.raises(provider._CliTransientError, match="not shown to end the turn"):
+        await asyncio.wait_for(provider._collect_via_communicate(
+            _hung_proc(), ["agy"], _CLI_SPECS["antigravity_cli"], b"{}", None, timeout_s=60.0,
+            record=lambda: _read_agy_record(str(tmp_path)),
+        ), timeout=10)
+
+
+def test_the_shape_of_a_finished_turn_is_two_steps(tmp_path: Path) -> None:
+    _write_record(tmp_path, [USER, _reply("ok")])
+    assert _read_agy_record(str(tmp_path)) is not None
+    _write_record(tmp_path, [USER, _reply("ok"), _reply("and more", step_index=2)])
+    with pytest.raises(provider._CliRecordIncomplete):
+        _read_agy_record(str(tmp_path))
+    _write_record(tmp_path, [USER, _reply("ok", tool_calls=[{"name": "x"}])])
+    with pytest.raises(provider._CliRecordIncomplete):
+        _read_agy_record(str(tmp_path))
+
+
+@pytest.mark.asyncio
+async def test_a_finished_but_cut_reply_fails_fast_not_after_the_full_timeout(tmp_path: Path, monkeypatch) -> None:
+    """Finding 3: DONE with a cut content field used to read as 'not finished', so the wait ran to the full timeout."""
+    _fast(monkeypatch, stable=0.1)
+    _write_record(tmp_path, [USER, _reply("cut", truncated_fields=["content"])])
+    with pytest.raises(provider._CliTransientError, match="cut its finished reply"):
+        await asyncio.wait_for(provider._collect_via_communicate(
+            _hung_proc(), ["agy"], _CLI_SPECS["antigravity_cli"], b"{}", None, timeout_s=60.0,
+            record=lambda: _read_agy_record(str(tmp_path)),
+        ), timeout=10)
 
 
 def test_only_agy_reads_a_record() -> None:
