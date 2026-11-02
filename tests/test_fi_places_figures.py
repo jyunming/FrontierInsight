@@ -594,8 +594,8 @@ def test_an_unkept_figure_sentence_is_gone_after_the_first_write_with_rounds_lef
     # one line per figure: the count and the first 80 characters of each removed sentence
     lines = [ln for ln in eng.said if "statements about Figure 1" in ln]
     assert len(lines) == 1 and "left out (1)" in lines[0]
-    assert '"' + ("**Accuracy.** " + FREE)[:80] + '"' in lines[0], "the first 80 characters of the sentence, as it read"
-    assert ("**Accuracy.** " + FREE)[:81] not in lines[0]
+    assert '"' + FREE[:80] + '"' in lines[0], "the first 80 characters of the sentence, as it read (a bold heading before it is not part of it)"
+    assert FREE[:81] not in lines[0]
 
 
 def test_the_disclosure_survives_the_review_that_follows_and_a_clean_rewrite_clears_it(tmp_path, monkeypatch) -> None:

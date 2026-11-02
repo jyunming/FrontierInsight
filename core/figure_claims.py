@@ -765,11 +765,13 @@ def menu(calls: Any, plan: dict[str, Any] | None = None, fmt: Fmt = _default_fmt
 _OPEN_PAREN = re.compile(r"\(\s*$")
 _CLOSE_PAREN = re.compile(r"^\s*\)[\s.,;:!?]*$")
 _TOKEN_AT = re.compile(r"\x00(\d+)\x00\.?")
-_OWN_POINTER = re.compile(r"[ \t]*\([ \t]*")
+_OWN_POINTER = re.compile(r"(?:\*\*)?[ \t]*\([ \t]*")
 #: What joins one more figure number to a pointer: "(Figures 2 and 3)", "(Figures 2, 3)", "(Figures 2-4)".
 _LIST_JOIN = re.compile(r"\s*(?:,|and|&|[-\u2013])\s*", re.IGNORECASE)
 _BARE_NUMBER = re.compile(r"\d+")
-_PERIOD_SPACE = re.compile(r"\. ")
+_PERIOD_SPACE = re.compile(r"\. |[.!?]\*\*(?= )")
+#: A bold span that opens a sentence.
+_LEAD_BOLD = re.compile(r"\A\s*\*\*([^*\n]+)\*\*")
 #: A full stop after one of these (or after a single letter, an initial) does not end a sentence.
 _ABBREVIATIONS = frozenset({"e.g", "i.e", "al", "fig", "figs", "cf", "vs", "eq", "eqs", "sec", "ref", "refs", "approx"})
 
@@ -818,11 +820,27 @@ def _sentence_at(flat: str, line_start: int, line_end: int, pos: int) -> tuple[i
     for m in _PERIOD_SPACE.finditer(flat, line_start, line_end):
         if not _sentence_break(flat, m.start()):
             continue
-        if m.start() + 1 <= pos:
-            a = m.start() + 1
+        end = m.end() if m.group(0).endswith("**") else m.start() + 1  # ".** ": the sentence ends after the closing "**"
+        if end <= pos:
+            a = end
         else:
-            return a, m.start() + 1
+            return a, end
     return a, line_end
+
+
+def _lead_heading(sentence: str, mention_re: re.Pattern[str]) -> int:
+    """How far a leading bold span reaches when it is a heading, else 0. It is a heading when, with its ``**`` and trailing
+    punctuation taken off, it names no figure or is nothing but a figure label ("Figure 1", "Figures 1 and 2"). Any other
+    leading bold span is part of the sentence. FI's own statements (a mark inside the span) are not read here."""
+    lead = _LEAD_BOLD.match(sentence)
+    if lead is None or "\x00" in lead.group(1):
+        return 0
+    inner = lead.group(1).strip().rstrip(".:;,!? \t")
+    if mention_re.search(inner) is None:
+        return lead.end()
+    left = mention_re.sub(" ", inner)
+    left = _LIST_JOIN.sub(" ", _BARE_NUMBER.sub(" ", left))
+    return lead.end() if not re.sub(r"[\s.,;:&\-\u2013]+", "", left) else 0
 
 
 def _unfilled_entries(marks: list[re.Match[str]], which: list[int], sentence: str) -> list[dict[str, Any]]:
@@ -918,7 +936,7 @@ def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, 
         if point:
             rest = text[:point[0]] + text[text.index(")", point[0]) + 1:]
         if any(kinds[i] == "claim" for i in inside) \
-                and not re.sub(r"[\s.,;:!?()\-\u2013\u2014]+", "", _TOKEN_AT.sub("", rest)):
+                and not re.sub(r"[\s.,;:!?()*\-\u2013\u2014]+", "", _TOKEN_AT.sub("", rest)):
             return True  # a figure claim FI composed, with at most its pointer
         shown = set().union(*(drawn.get(n, set()) for n in nums))
         return point is not None and bool(metrics(a, b) & shown)
@@ -943,8 +961,17 @@ def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, 
             if (a, b) in seen:
                 continue
             seen.add((a, b))
-            hits = [h for h in mention_re.finditer(flat, a, b)]
             lead = _facts._RUN_IN.match(flat[a:b])
+            heading = _lead_heading(flat[a:b], mention_re)
+            if heading:  # a bare label ("**Results.**", "**Figure 1.**"): neither judged nor cut
+                a += heading
+                if not flat[a:b].strip():
+                    continue
+                lead = None
+                seen.add((a, b))
+            elif lead and "\x00" not in lead.group(0):
+                lead = None  # any other bold span is part of the sentence
+            hits = [h for h in mention_re.finditer(flat, a, b)]
             body_at = a + (lead.end() if lead else 0)
             own = [i for i, sp in enumerate(spans) if kinds[i] == "claim" and body_at <= sp[0] and sp[1] <= b]
             if own:
@@ -956,7 +983,7 @@ def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, 
                 point = _pointer(rest, mention_re)
                 if point:
                     rest = rest[:point[0]] + rest[rest.index(")", point[0]) + 1:]
-                if not re.sub(r"[\s.,;:!?()\-\u2013\u2014]+", "", rest):
+                if not re.sub(r"[\s.,;:!?()*\-\u2013\u2014]+", "", rest):
                     continue
             elif not hits or keeps(a, b, hits):
                 continue

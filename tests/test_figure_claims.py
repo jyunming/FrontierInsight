@@ -739,3 +739,42 @@ def test_a_bold_run_in_heading_naming_a_figure_before_prose_is_not_removed():
 def test_a_fully_bold_fi_marked_statement_is_kept_as_it_was():
     text = "**" + _claim() + " (Figure 1).**\n"
     assert _rule(text)[0] == text
+
+
+# --- a leading bold span: judged and cut as one span -------------------------------------------------------------------
+
+def test_a_bold_false_sentence_closed_before_its_period_is_removed_whole():
+    out, taken = _rule("Intro. **Figure 1 shows the energy drifting upward**. More words here.\n")
+    assert out == "Intro. More words here.\n"
+    assert [t["sentence"] for t in taken] == ["**Figure 1 shows the energy drifting upward**."]
+
+
+def test_a_bold_false_sentence_closed_after_its_period_is_removed_and_the_next_one_stays():
+    out, taken = _rule("Intro. **Figure 1 shows the energy drifting upward.** More words here.\n")
+    assert out == "Intro. More words here.\n"
+    assert [t["sentence"] for t in taken] == ["**Figure 1 shows the energy drifting upward.**"]
+
+
+def test_the_plain_false_sentence_is_removed_as_before():
+    out, _ = _rule("Intro. Figure 1 shows the energy drifting upward. More words here.\n")
+    assert out == "Intro. More words here.\n"
+
+
+def test_a_bare_figure_label_heading_stays_and_is_not_on_record():
+    for head in ("**Figure 1.**", "**Fig. 2**", "**Figures 1 and 2.**"):
+        md = f"{head} The study ran at several sizes.\n"
+        assert _rule(md, {"fig_a.png": 1, "fig_b.png": 2}, {1: {"signal"}, 2: {"signal"}}) == (md, []), head
+    out, taken = _rule("**Figure 1.** Figure 1 shows a rise. Next.\n")
+    assert out == "**Figure 1.** Next.\n" and [t["sentence"] for t in taken] == ["Figure 1 shows a rise."]
+
+
+def test_a_run_in_heading_before_an_honest_sentence_with_a_pointer_stays():
+    md = f"**Results.** The signal is {_v('signal')} at size 1 (Figure 1). Next.\n"
+    assert _rule(md) == (md, [])
+    out, _ = _rule("**Results.** Figure 1 shows a rise. Next.\n")
+    assert out == "**Results.** Next.\n"
+
+
+def test_fis_own_figure_claim_in_bold_with_its_pointer_stays():
+    md = f"**{_claim()}** (Figure 1). Next.\n"
+    assert _rule(md) == (md, [])
