@@ -243,9 +243,9 @@ def _dry(root: Path) -> code_checks.Verdict:
 
 
 def test_dry_run_warns_on_undeclared_read(tmp_path: Path) -> None:
-    _quest_with_figures(tmp_path, GOOD_BODY.replace("table.mean('signal', k)", "table.mean('T_num', k) / table.mean('signal', k) - 1"))
+    _quest_with_figures(tmp_path, GOOD_BODY.replace("table.mean('signal', k)", "table.mean('G_obs', k) / table.mean('signal', k) - 1"))
     got = _dry(tmp_path)
-    assert got.passed is None and got.says.startswith("warning:") and "T_num" in got.says, got
+    assert got.passed is None and got.says.startswith("warning:") and "G_obs" in got.says, got
 
 
 def test_dry_run_passes_good_body(tmp_path: Path) -> None:

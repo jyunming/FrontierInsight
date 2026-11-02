@@ -744,19 +744,19 @@ def test_a_fully_bold_fi_marked_statement_is_kept_as_it_was():
 # --- a leading bold span: judged and cut as one span -------------------------------------------------------------------
 
 def test_a_bold_false_sentence_closed_before_its_period_is_removed_whole():
-    out, taken = _rule("Intro. **Figure 1 shows the energy drifting upward**. More words here.\n")
+    out, taken = _rule("Intro. **Figure 1 shows the colony count rising steadily**. More words here.\n")
     assert out == "Intro. More words here.\n"
-    assert [t["sentence"] for t in taken] == ["**Figure 1 shows the energy drifting upward**."]
+    assert [t["sentence"] for t in taken] == ["**Figure 1 shows the colony count rising steadily**."]
 
 
 def test_a_bold_false_sentence_closed_after_its_period_is_removed_and_the_next_one_stays():
-    out, taken = _rule("Intro. **Figure 1 shows the energy drifting upward.** More words here.\n")
+    out, taken = _rule("Intro. **Figure 1 shows the colony count rising steadily.** More words here.\n")
     assert out == "Intro. More words here.\n"
-    assert [t["sentence"] for t in taken] == ["**Figure 1 shows the energy drifting upward.**"]
+    assert [t["sentence"] for t in taken] == ["**Figure 1 shows the colony count rising steadily.**"]
 
 
 def test_the_plain_false_sentence_is_removed_as_before():
-    out, _ = _rule("Intro. Figure 1 shows the energy drifting upward. More words here.\n")
+    out, _ = _rule("Intro. Figure 1 shows the colony count rising steadily. More words here.\n")
     assert out == "Intro. More words here.\n"
 
 
@@ -810,7 +810,7 @@ def test_a_bold_span_holding_a_result_mark_is_judged_and_cut_with_its_sentence()
 
 def test_what_the_record_lists_as_removed_is_gone_from_the_output():
     cases = [f"Intro. **The signal is {_v('other')} here (Figure 1).** Next.\n",
-             "Intro. **Figure 1 shows the energy drifting upward**. More words here.\n",
+             "Intro. **Figure 1 shows the colony count rising steadily**. More words here.\n",
              "Intro. **Figure 1 shows a rise.** More words here.\n",
              f"**Spread.** ![**Figure 1.** cap](f/x.png) Figure 1 shows a rise. Next.\n",
              f"**A.** {_v('other')} in Figure 1 and **bold** words. Next.\n",

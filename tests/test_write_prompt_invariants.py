@@ -185,3 +185,20 @@ def test_write_md_has_no_free_figure_sentence_rule(write_md_text: str) -> None:
     assert "state the concrete takeaway the figure supports" in write_md_text
     assert "describe in prose what it would have shown" in write_md_text
     assert "is mentioned by its number only" not in write_md_text
+
+
+def test_write_md_states_the_one_form_kept_for_a_checked_figure_first(write_md_text: str) -> None:
+    """The checked-figure rule comes first and names the two kept forms; the old "Figure 1 shows that" is for unchecked figures."""
+    first = write_md_text.index('1. A figure whose entry has a "Marks FI has checked')
+    other = write_md_text.index("2. Any other figure")
+    rule = write_md_text[first:other]
+    assert "only statements you make about it are these two" in rule
+    assert 'ends with "(Figure N)"' in rule and "FI removes every other sentence that names that figure" in rule
+    assert "Figure 1 shows that the error falls" not in rule and "Figure 1 shows that the error falls" in write_md_text[other:]
+
+
+def test_slides_and_poster_prompts_say_figure_statements_are_fis_words() -> None:
+    root = Path(__file__).resolve().parent.parent / "agents"
+    for name in ("slides.md", "poster.md"):
+        text = (root / name).read_text(encoding="utf-8")
+        assert "word for word" in text and "Never write a statement of your own about what such a figure shows" in text, name

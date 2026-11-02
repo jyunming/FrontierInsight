@@ -450,6 +450,11 @@ def test_figure_rule_text_comes_from_agents_file() -> None:
     for call in CALLS[:-1]:
         assert f"fig.{call}(" in text
     assert "fig.raw(" in text and 'what="other"' in text and "Never type text" in text
+    # the calls as the code takes them: three forms of ref, the yerr strings and pair, a note that reads a setting, a heat map's two ids
+    assert "at=" in text and "value=" in text and '"ci95"' in text and "(lower, upper)" in text
+    assert "a setting of the plan" in text and "BOTH `x=" in text
+    for failure in ("is not a reference the plan holds", "`.se`", "a level number", "draw the data of panel N first"):
+        assert failure in text, failure
 
 
 def test_reflect_derive_gives_the_drawing_calls_only_to_a_version_5_frame() -> None:
