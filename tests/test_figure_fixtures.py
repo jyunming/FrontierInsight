@@ -218,7 +218,10 @@ def _first(offers, claim):
 
 def _check_fails_closed(name, tmp_path, monkeypatch):
     contract, stem, offers = _honest(name, tmp_path)
-    true_one, value = _first(offers, "drawn"), _first(offers, "value_at")
+    lines = {s["id"] for p in figure_claims.load_calls(tmp_path / "honest", stem)["panels"] for s in p["series"] if s["kind"] != "image"}
+    # a line keeps its own name when its values are not the table's; an image is named by its quantity, which FI then withholds
+    true_one = next(o for o in offers if o["claim"] == "drawn" and o["args"]["series"] in lines)
+    value = _first(offers, "value_at")
     series = true_one["args"]["series"]
     # (a) value_at on an `other` quantity: the body drew values that are not the table's, so FI holds no value to state
     _run(name, tmp_path / "other", shift=0.5)
@@ -227,11 +230,12 @@ def _check_fails_closed(name, tmp_path, monkeypatch):
     assert figure_claims.evaluate(other, "value_at", value["args"], plan=contract["plan"]) is None
     assert figure_claims.evaluate(other, "drawn", true_one["args"]) is not None, "the shape of the drawing is still stated"
     # (b) any claim on a raw panel: nothing is offered or evaluated for the panel the body drew itself
-    _run(name, tmp_path / "raw", raw=0)
+    shown = true_one["args"]["panel"]  # the panel of the statement the writer states below
+    _run(name, tmp_path / "raw", raw=int(shown) - 1)
     raw = figure_claims.load_calls(tmp_path / "raw", stem)
-    on_panel_1 = [o for o in offers if o["args"].get("panel") == "1"]
-    assert on_panel_1 and all(figure_claims.evaluate(raw, o["claim"], o["args"], plan=contract["plan"]) is None for o in on_panel_1)
-    assert not [o for o in figure_claims.menu(raw, contract["plan"], stem=stem) if o["args"].get("panel") == "1"]
+    on_panel = [o for o in offers if o["args"].get("panel") == shown]
+    assert on_panel and all(figure_claims.evaluate(raw, o["claim"], o["args"], plan=contract["plan"]) is None for o in on_panel)
+    assert not [o for o in figure_claims.menu(raw, contract["plan"], stem=stem) if o["args"].get("panel") == shown]
     # (c) an unknown claim id
     assert figure_claims.evaluate(other, BAD_ID, {"series": series}) is None
     assert figure_claims.evaluate(other, BAD_ID, {}) is None
@@ -305,7 +309,17 @@ def test_map_own_mutation_caught(tmp_path):
 
 
 def test_survival_own_mutation_caught(tmp_path):
-    _check_shifted_values_are_withheld("survival", tmp_path, kept_shape=[("drawn", {"series": "group_a"}), ("band", {"series": "group_b"})])
+    """Drawn values that are not the table's: the 95% band, whose edges are checked against the table's interval, is withdrawn."""
+    honest, bad = _check_shifted_values_are_withheld("survival", tmp_path, kept_shape=[("drawn", {"series": "group_a"})])
+    assert [o for o in honest if o["claim"] == "band"] and not [o for o in bad if o["claim"] == "band"]
+
+
+def test_a_heat_map_whose_values_are_not_the_tables_is_named_neutrally(tmp_path):
+    """The image keeps its shape statement, under the neutral name an axis of an unchecked quantity has, never the id `other`."""
+    contract, _h, stem = _run("map", tmp_path, shift=0.5)
+    offers = figure_claims.menu(figure_claims.load_calls(tmp_path, stem), contract["plan"], stem=stem)
+    drawn = [o["text"] for o in offers if o["claim"] == "drawn" and o["args"].get("panel") == "1"]
+    assert drawn == ["computed value is drawn in panel 1"], drawn
 
 
 def test_bars_heatmap_own_mutation_caught(tmp_path):

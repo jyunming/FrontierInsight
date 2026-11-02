@@ -674,7 +674,8 @@ class FigureCalls:
             art = ax.imshow([_gaps(r) for r in rows], aspect="auto", extent=extent,
                             vmin=min(nums) if nums else None, vmax=max(nums) if nums else None)
             self._tag(art)
-            rec["series"].append({"id": what, "label": self._label_of(what), "kind": "image", "step": False, "x": cols, "y": rws,
+            label = "computed value" if what == "other" else self._label_of(what)  # the neutral name an unchecked quantity's axis has
+            rec["series"].append({"id": what, "label": label, "kind": "image", "step": False, "x": cols, "y": rws,
                                   "yerr": None, "yerr_lo": None, "yerr_hi": None, "yerr_meaning": None, "merged_with": [], "z": rows, "what": what})
             self._remember(panel, "series", None, what)
         return art
