@@ -191,3 +191,28 @@ async def test_a_legacy_quest_keeps_a_paraphrase_of_a_sentence_about_a_figure(
 ) -> None:
     body = await _deck_from(tmp_path, monkeypatch, _deck_with("Panel 1 shows a line that rises (Figure 1)."), with_calls=False)
     assert "line that rises" in body
+
+
+@pytest.mark.asyncio
+async def test_slide_titles_bullets_bold_lead_and_captions_follow_the_paper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    nl = chr(10)
+    deck = nl.join([
+        "---", "marp: true", "---", "", "# Toy", "", "---", "",
+        "## Figure 1 shows the energy drifting", "",
+        "**Figure 1 shows the energy drifting upward.**", "",
+        "![The model's own caption](figures/result.png)", "",
+        "**Figure 1:** the model's own caption again", "",
+        "- Figure 1 shows a rise in energy",
+        "- The method is simple", "",
+    ])
+    body = await _deck_from(tmp_path, monkeypatch, deck)
+    assert "drifting" not in body and "a rise in energy" not in body
+    assert "- The method is simple" in body
+    assert "![The toy curve against its fit.](figures/result.png)" in body
+    assert "**Figure 1.** The toy curve against its fit." in body
+    assert "model's own caption" not in body
+    # the removals are in the quest's run.log
+    log = (tmp_path / "quest" / ".fi" / "run.log").read_text(encoding="utf-8")
+    assert "slides: a sentence about a figure FI does not stand behind was left out" in log

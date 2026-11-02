@@ -1509,7 +1509,7 @@ async def test_poster_skips_figure_the_paper_left_out(tmp_path: Path, monkeypatc
     """A figure whose own record says it draws nothing is not in the paper's list, so the poster does not add it, even
     when the paper embeds no figure (then every file of figures/ used to come back)."""
     art = _make_artifacts(tmp_path)
-    art.paper_md.write_text("# Toy Paper\n\nMethods. Results show a rise.\n", encoding="utf-8")
+    art.paper_md.write_text("# Toy Paper" + chr(10) * 2 + "Methods. Results show a rise." + chr(10) * 2 + "![**Figure 1.** The toy curve.](figures/result.png)" + chr(10), encoding="utf-8")
     _record_a_drawn_figure(art, {"blank.png": False})
     reply = _reply()
     reply["blocks"].insert(1, {"type": "figure", "file": "blank.png", "caption": "Nothing."})
@@ -1565,3 +1565,59 @@ async def test_a_verbatim_fi_sentence_stays_on_the_poster_and_a_paraphrase_goes(
     tex = await _checked_poster(tmp_path, monkeypatch, art, reply)
     assert "Panel 1 draws a rising line (Figure 1)." in tex
     assert "line that rises" not in tex
+
+
+_POSTER_PAPER_STATEMENT = (
+    "<!-- fi:fact-figure-lines-result -->Panel 1 draws a rising line.<!-- /fi:fact-figure-lines-result -->")
+
+
+def _paper_with_statement(art: QuestArtifacts) -> None:
+    art.paper_md.write_text(
+        "# Toy Paper" + chr(10) * 2 + _POSTER_PAPER_STATEMENT + " (Figure 1)" + chr(10) * 2
+        + "![**Figure 1.** The toy curve against its fit.](figures/result.png)" + chr(10), encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_a_statement_pointing_at_another_figure_or_with_words_added_is_removed_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    art = _make_artifacts(tmp_path)
+    _paper_with_statement(art)
+    _record_a_drawn_figure(art)
+    reply = _reply()
+    reply["blocks"][1] = {"type": "bullets", "items": [
+        "Panel 1 draws a rising line (Figure 1).",       # verbatim: kept
+        "Panel 1 draws a rising line (Figure 2).",       # the pointer names another figure: removed
+        "As shown, Panel 1 draws a rising line (Figure 1).",  # words before it: removed whole
+        "Panel 1 draws a rising line (Figure 1) at last.",    # words after it: removed whole
+    ]}
+    tex = await _checked_poster(tmp_path, monkeypatch, art, reply)
+    assert tex.count("Panel 1 draws a rising line") == 1
+    assert "As shown" not in tex and "at last" not in tex and "Figure 2" not in tex
+
+
+@pytest.mark.asyncio
+async def test_a_paper_that_embeds_no_figure_leaves_the_poster_with_none_when_the_quest_has_call_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    art = _make_artifacts(tmp_path)
+    art.paper_md.write_text("# Toy Paper\n\nMethods.\n", encoding="utf-8")
+    _record_a_drawn_figure(art)
+    tex = await _checked_poster(tmp_path, monkeypatch, art, _reply())
+    assert "result.png" not in tex
+
+
+@pytest.mark.asyncio
+async def test_the_poster_headline_headings_and_raw_columns_get_the_same_rule_and_removals_reach_run_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    art = _make_artifacts(tmp_path)
+    _record_a_drawn_figure(art)
+    reply = _reply(headline="Energy drifts upward as Figure 1 shows.")
+    reply["blocks"][0] = {"type": "heading", "text": "Why Figure 1 shows drift"}
+    tex = await _checked_poster(tmp_path, monkeypatch, art, reply)
+    assert "drifts upward" not in tex and "Why Figure 1" not in tex
+    assert "Toy Paper" in tex  # the headline gave way to the paper's title
+    log = (art.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
+    assert "poster: a sentence about a figure FI does not stand behind was left out" in log
+    assert "Energy drifts upward as Figure 1 shows" in log

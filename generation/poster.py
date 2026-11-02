@@ -67,7 +67,7 @@ from core.provider import (
 from generation import _cjk
 from generation._figure_captions import without_number
 from generation._paper_context import note_prompt_fit, paper_and_claims
-from generation._paper_figures import paper_figure_set, take_out_unchecked
+from generation._paper_figures import log_taken, paper_figure_set, take_out_unchecked
 from generation._pdf_engine import find_pdf_engine
 from generation._pdf_measure import measure_pdf, poster_report
 from generation._unicode_fonts import find_fonts
@@ -386,35 +386,33 @@ def _paper_captions(paper_md: str) -> dict[str, str]:
     return captions
 
 
+def _take_out_unchecked(text: str, art: QuestArtifacts, raw_paper: str) -> str:
+    """``text`` without the sentences about a figure FI does not stand behind (the paper's own rule), stripped; each
+    removal goes to the quest's run.log, not onto the poster."""
+    out, taken = take_out_unchecked(text, art.raw_state, art.quest_root, raw_paper)
+    log_taken(taken, art.quest_root, "poster", _log)
+    return out.strip() if taken else text
+
+
 def _take_out_unchecked_blocks(blocks: list[_Block], art: QuestArtifacts, raw_paper: str = "") -> list[_Block]:
-    """The poster's texts and list items without the sentences about a figure FI does not stand behind (the paper's own
-    rule); a text or item left empty goes. Each removal is logged, not shown on the poster."""
+    """Every model-written text of the poster (headings, texts, list items, raw columns and the captions of figures that
+    do not carry the paper's own) without the sentences about a figure FI does not stand behind; one left empty goes."""
     out: list[_Block] = []
     for block in blocks:
-        if block.kind == "text":
-            text, taken = take_out_unchecked(block.text, art.raw_state, art.quest_root, raw_paper)
-            _log_taken(taken)
+        if block.kind in ("heading", "text", "raw"):
+            text = _take_out_unchecked(block.text, art, raw_paper)
             if not text.strip():
                 continue
-            block = replace(block, text=text.strip())
+            block = replace(block, text=text)
         elif block.kind == "bullets":
-            items = []
-            for item in block.items:
-                text, taken = take_out_unchecked(item, art.raw_state, art.quest_root, raw_paper)
-                _log_taken(taken)
-                if text.strip():
-                    items.append(text.strip())
+            items = [t for t in (_take_out_unchecked(i, art, raw_paper) for i in block.items) if t.strip()]
             if not items:
                 continue
             block = replace(block, items=items)
+        elif block.kind == "figure" and not block.number:
+            block = replace(block, caption=_take_out_unchecked(block.caption, art, raw_paper))
         out.append(block)
     return out
-
-
-def _log_taken(taken: list[dict[str, str]]) -> None:
-    for t in taken:
-        _log.warning('poster: a sentence about a figure FI does not stand behind was left out (%s): "%s"',
-                     t.get("key", "figure"), str(t.get("sentence", ""))[:120])
 
 
 def _figure_files(figures_dir: Path | None) -> list[str]:
@@ -1171,6 +1169,7 @@ class PosterGenerator:
         headline = _plain(parsed.get("headline"))
         if not headline or len(headline.split()) > _MAX_HEADLINE_WORDS:
             headline = paper_title or _plain(parsed.get("title")) or "Untitled"
+        headline = _take_out_unchecked(headline, art, raw_paper) or paper_title or "Untitled"
         subtitle = paper_title if paper_title and paper_title != headline else ""
 
         blocks = _with_every_figure(

@@ -152,10 +152,10 @@ def paper_figure_set(
     """``(files to show, {file: the paper's figure number})``: the figures the poster and the slides take from the paper's
     own list (``core.engine._figure_numbers``, the list FI placed the paper's figures by), not a list of their own.
 
-    A figure the paper left out (its record says it draws nothing) is not in it, even when the paper embeds no figure and
-    :func:`figures_in_paper` would give every file back. The numbers returned are those of the figures with a call record
-    (FI's record of what they draw): only those get the paper's number and caption on the poster. A quest whose state holds
-    no figure record (an older one) gets :func:`figures_in_paper` and no numbers, as before."""
+    For a quest with call records (FI's record of what a figure draws) the list is the figures the paper itself embeds,
+    an empty list included: a figure the paper left out is not added back, and there is no "every file" fallback. The
+    numbers returned are those of the figures with a call record: only those get the paper's number and caption. A quest
+    with no call record (an older one) gets :func:`figures_in_paper` and no numbers, as before."""
     shown = figures_in_paper(paper_md, files)
     state = _paper_state(raw_state, quest_root)
     if not state.get("figure_records"):
@@ -164,12 +164,13 @@ def paper_figure_set(
     from core.engine import _figure_numbers
 
     numbers = _figure_numbers(state)
-    shown = [name for name in shown if name in numbers]
-    checked = {
-        name: number for name, number in numbers.items()
-        if name in shown and _figure_claims.load_calls(quest_root, Path(name).stem)
-    }
-    return shown, checked
+    with_calls = {name for name in numbers if _figure_claims.load_calls(quest_root, Path(name).stem)}
+    if with_calls:
+        placed = {m.group(1) for m in _PLACED_FIGURE.finditer(paper_md)}
+        shown = [name for name in files if name in placed and name in numbers]
+    else:
+        shown = [name for name in shown if name in numbers]
+    return shown, {name: numbers[name] for name in shown if name in with_calls}
 
 
 def _fi_sentences(paper_raw: str) -> list[tuple[str, str]]:
@@ -184,24 +185,80 @@ def _fi_sentences(paper_raw: str) -> list[tuple[str, str]]:
     return found
 
 
-def _wrap_verbatim(text: str, paper_raw: str) -> tuple[str, bool]:
-    """``text`` with each sentence that is one of FI's figure statements in the paper, word for word (whitespace and
-    ``*`` emphasis aside; a closing "(Figure N)" and the full stop may follow), put back in FI's own marker, so the
-    pointer rule knows it as FI's. Any other sentence is left as it was. ``(text, whether any was wrapped)``."""
+def _wrap_verbatim(
+    text: str, paper_raw: str, stem_numbers: dict[str, int],
+) -> tuple[str, bool, list[dict[str, str]]]:
+    """``text`` with each whole sentence that is one of FI's figure statements in the paper, word for word (whitespace and
+    ``*`` emphasis aside), put back in FI's own marker, so the pointer rule knows it as FI's. The sentence may close with
+    the pointer "(Figure N)" of the figure the statement is about, and no other. A sentence with anything added before or
+    after it is not wrapped, and the rule takes it out whole; FI's statement closed by the pointer of another figure is
+    taken out here (the rule leaves a pointer to a figure FI did not issue alone). ``(text, any wrapped, taken out)``."""
+    from core import paper_facts as _facts
+
     wrapped = False
+    removed: list[dict[str, str]] = []
     for key, statement in _fi_sentences(paper_raw):
+        parts = _facts._figure_parts(key)
+        number = stem_numbers.get(parts[0]) if parts else None
         words = statement.replace("*", " ").rstrip(" .!?").split()
-        if not words:
+        if not words or number is None:
             continue
         star = r"\*{0,2}"
-        pattern = re.compile(
-            r"(?<![A-Za-z0-9,;])" + star + (star + r"\s+" + star).join(re.escape(w) for w in words) + star
-            + r"(?=(?:\s*\((?:Figures?|Figs?\.?)[^()]{0,30}\))?(?:[.!?]+|[ \t]*(?:\n|$)))"
-        )
+
+        def sentence(pointer: str, words: list[str] = words) -> re.Pattern[str]:
+            return re.compile(
+                r"(?:^|(?<=[.!?] ))" + star + (star + r"\s+" + star).join(re.escape(w) for w in words) + star
+                + pointer + r"(?:(?P<end>[.!?]+)\*{0,2}(?=\s|$)|\*{0,2}(?=[ \t]*$))",
+                re.MULTILINE,
+            )
+
         bare = statement.rstrip(" .!?")
-        text, n = pattern.subn(lambda _m: f"<!-- fi:fact-{key} -->{bare}<!-- /fi:fact-{key} -->", text)
+
+        def put(m: re.Match[str], key: str = key, bare: str = bare) -> str:
+            return f"<!-- fi:fact-{key} -->{bare}<!-- /fi:fact-{key} -->{m.group('ptr') or ''}{m.group('end') or ''}"
+
+        def drop(m: re.Match[str], stem: str = parts[0]) -> str:
+            removed.append({"key": f"figure:{stem}:claim", "sentence": m.group(0).strip(), "how": "sentence removed"})
+            return ""
+
+        text, n = sentence(r"(?P<ptr>[ \t]*\((?:Figure|Fig\.?)[ \t]*" + str(number) + r"\))?").subn(put, text)
         wrapped = wrapped or n > 0
-    return text, wrapped
+        # the same words closed by the pointer of another figure
+        text = sentence(r"(?P<ptr>[ \t]*\((?:Figures?|Figs?\.?)[^()]{1,30}\))").sub(drop, text)
+    return text, wrapped, removed
+
+
+# A heading or a list item: its text is read alone (the pointer rule leaves both as they are); an entirely bold line is
+# a lead sentence, not a heading before one.
+_LINE_PREFIX = re.compile(r"^(?:[ \t]*(?:\#{1,6}[ \t]+|[-*+][ \t]+|\d+[.)][ \t]+))")
+_ALL_BOLD = re.compile(r"^(?P<lead>[ \t]*)\*\*(?P<inner>[^*]+?)\*\*(?P<tail>[ \t]*)$")
+_FENCE = re.compile(r"^\s*(```|~~~)")
+_HOLD = "FIXLINEHOLD{}END"
+
+
+def _filter_core(text: str, state: dict, paper_raw: str, stem_numbers: dict[str, int]) -> tuple[str, list[dict[str, str]]]:
+    from core import paper_facts as _facts
+    from core.engine import _take_out_unpointed
+
+    text, wrapped, dropped = _wrap_verbatim(text, paper_raw, stem_numbers)
+    out, taken = _facts.take_out_unfilled(text, figures_only=True)
+    out, pointed = _take_out_unpointed(out, state)
+    if wrapped:
+        out = _facts.without_marks(out)
+    return out, dropped + taken + pointed
+
+
+def _filter_content(content: str, state: dict, paper_raw: str, stem_numbers: dict[str, int]):
+    """One heading's, list item's or bold line's text, filtered alone: ``(text or "" when nothing is left, taken)``."""
+    bold = _ALL_BOLD.match(content)
+    if bold:
+        out, taken = _filter_core(bold.group("inner"), state, paper_raw, stem_numbers)
+        if not taken:
+            return content, []
+        out = out.strip()
+        return (bold.group("lead") + "**" + out + "**" + bold.group("tail") if out else ""), taken
+    out, taken = _filter_core(content, state, paper_raw, stem_numbers)
+    return (out.strip() if taken else content), taken
 
 
 def take_out_unchecked(
@@ -209,18 +266,60 @@ def take_out_unchecked(
 ) -> tuple[str, list[dict[str, str]]]:
     """``text`` written by a model for the poster or the slides, without the sentences about a figure FI drew that FI does
     not stand behind (the paper's own rule, ``core.engine._take_out_unpointed``) and without a statement about a figure
-    that FI could not fill (``take_out_unfilled(figures_only=True)``): ``(text, taken_out)``. A sentence that is one of
-    FI's own figure statements of the paper (``paper_raw``, the paper with its markers) word for word is kept; a
-    paraphrase of it goes. Unchanged for a quest none of whose figures has a call record."""
-    from core import paper_facts as _facts
-    from core.engine import _take_out_unpointed
+    that FI could not fill (``take_out_unfilled(figures_only=True)``): ``(text, taken_out)``. A whole sentence that is one
+    of FI's own figure statements of the paper (``paper_raw``, the paper with its markers) word for word is kept; any
+    other goes. A heading, a list item and an entirely bold line that name a figure are read alone, since the rule leaves
+    them as they are in the paper; one left empty is dropped. Unchanged for a quest none of whose figures has a call
+    record."""
+    from core.engine import _FIGURE_MENTION_RE, _figure_numbers
 
     if not text:
         return text, []
     state = _paper_state(raw_state, quest_root)
-    text, wrapped = _wrap_verbatim(text, paper_raw)
-    out, taken = _facts.take_out_unfilled(text, figures_only=True)
-    out, pointed = _take_out_unpointed(out, state)
-    if wrapped:
-        out = _facts.without_marks(out)
-    return out, taken + pointed
+    stem_numbers = {Path(n).stem: k for n, k in _figure_numbers(state).items()}
+    lines = text.split("\n")
+    alone: dict[int, str] = {}
+    fence = None
+    for i, line in enumerate(lines):
+        fenced = _FENCE.match(line)
+        if fenced:
+            fence = None if fence == fenced.group(1) else (fence or fenced.group(1))
+            continue
+        if fence is not None or not _FIGURE_MENTION_RE.search(line):
+            continue
+        prefix = _LINE_PREFIX.match(line)
+        if prefix or _ALL_BOLD.match(line):
+            alone[i] = line
+    if alone:
+        lines = [_HOLD.format(i) if i in alone else line for i, line in enumerate(lines)]
+    out, taken = _filter_core("\n".join(lines), state, paper_raw, stem_numbers)
+    if alone:
+        rebuilt = []
+        for line in out.split("\n"):
+            held = re.fullmatch(_HOLD.format(r"(\d+)"), line)
+            if not held:
+                rebuilt.append(line)
+                continue
+            original = alone[int(held.group(1))]
+            prefix = _LINE_PREFIX.match(original)
+            head = prefix.group(0) if prefix else ""
+            content, more = _filter_content(original[len(head):], state, paper_raw, stem_numbers)
+            taken += more
+            if content:
+                rebuilt.append(head + content)
+        out = "\n".join(rebuilt)
+    return out, taken
+
+
+def log_taken(taken: list[dict[str, str]], quest_root: Path, who: str, module_log) -> None:  # noqa: ANN001
+    """One line per removal, in the quest's ``.fi/run.log`` (the log the paper's removals go to) and the module's log,
+    not shown on the slide or poster."""
+    from core.provider import quest_run_log
+
+    quest_log = quest_run_log(quest_root)
+    for t in taken:
+        line = '%s: a sentence about a figure FI does not stand behind was left out (%s): "%s"' % (
+            who, t.get("key", "figure"), str(t.get("sentence", ""))[:120])
+        module_log.warning("%s", line)
+        if quest_log is not None:
+            quest_log.warning("%s", line)

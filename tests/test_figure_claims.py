@@ -731,18 +731,11 @@ def test_a_removed_sentence_is_attributed_to_every_checked_figure_it_names():
     assert taken[0]["figures"] == [1, 2, 3]
 
 
-def test_a_sentence_that_is_all_bold_is_removed_but_a_bold_run_in_heading_stays():
-    # a slide's lead sentence is bold from end to end: it is the sentence, not a heading before one
-    out, taken = _rule("## Result\n\n**Figure 1 shows the energy drifting upward.**\n\n![](figures/fig_a.png)\n")
-    assert "drifting" not in out and "![](figures/fig_a.png)" in out and len(taken) == 1
-    out, _ = _rule("**Result.** Figure 1 shows the energy drifting upward.\n")
-    assert out == "**Result.**\n"
+def test_a_bold_run_in_heading_naming_a_figure_before_prose_is_not_removed():
+    text = "**Figure 1.**\n\nThe fit is close.\n"
+    assert _rule(text)[0] == text  # the text stays (the entry it logs is a Task 16 matter, not shown here)
 
 
-def test_a_fully_bold_sentence_naming_a_checked_figure_is_judged_like_any_other():
-    plain, _ = _rule("The energy drifts upward (Figure 1).\n")
-    bold, taken = _rule("**The energy drifts upward (Figure 1).**\n")
-    assert plain == "" and bold == "" and len(taken) == 1
-    # one naming no figure, and a bold run-in heading that names none, are not touched
-    text = "**The method is simple.**\n\n**Power.** The sample is large.\n"
-    assert _rule(text) == (text, [])
+def test_a_fully_bold_fi_marked_statement_is_kept_as_it_was():
+    text = "**" + _claim() + " (Figure 1).**\n"
+    assert _rule(text)[0] == text
