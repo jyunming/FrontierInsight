@@ -295,7 +295,9 @@ def take_out_unchecked(
     of FI's own figure statements of the paper (``paper_raw``, the paper with its markers) word for word is kept; any
     other goes. A heading, a list item, a quote, a table cell and an entirely bold line that name a figure are read alone,
     since the rule leaves them as they are in the paper, and so is a bold lead sentence with prose after it on its line (a
-    bare label such as "**Figure 1.**" is a heading and stays); one left empty is dropped. Unchanged for a quest none of
+    figure label such as "**Figure 1.**" with prose after it is left to the paper's rule, which judges that prose as naming
+    the figure and takes the label out with it; a label alone on its line stays); one
+    left empty is dropped. Unchanged for a quest none of
     whose figures has a call record."""
     from core.engine import _FIGURE_MENTION_RE, _figure_numbers
 

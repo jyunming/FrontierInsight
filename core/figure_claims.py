@@ -767,7 +767,9 @@ _CLOSE_PAREN = re.compile(r"^\s*\)[\s.,;:!?*]*$")
 _TOKEN_AT = re.compile(r"\x00(\d+)\x00\.?")
 _OWN_POINTER = re.compile(r"(?:\*\*)?[ \t]*\([ \t]*")
 #: What joins one more figure number to a pointer: "(Figures 2 and 3)", "(Figures 2, 3)", "(Figures 2-4)".
-_LIST_JOIN = re.compile(r"\s*(?:,|and|&|[-\u2013])\s*", re.IGNORECASE)
+_LIST_JOIN = re.compile(r"\s*(?:,\s*(?:and|&)|,|and|&|[-\u2013])\s*", re.IGNORECASE)
+#: No paper has this many figures: a written range wider than this still covers every figure FI could have drawn.
+_MAX_RANGE = 1000
 _BARE_NUMBER = re.compile(r"\d+")
 #: An image embed is its own span, never part of a sentence: it is masked with a \x01 token (FI's marks use \x00).
 #: ``![alt](target "title")``: the alt may hold one level of brackets and the target one level of parentheses, as Markdown reads it.
@@ -780,12 +782,9 @@ _LEAD_BOLD = re.compile(r"\A\s*\*\*([^*\n]+)\*\*")
 _ABBREVIATIONS = frozenset({"e.g", "i.e", "al", "fig", "figs", "cf", "vs", "eq", "eqs", "sec", "ref", "refs", "approx"})
 
 
-def _pointer(text: str, mention_re: re.Pattern[str]) -> tuple[int, list[int]] | None:
-    """``(position of the opening bracket, figure numbers listed)`` when every figure named in ``text`` stands in one closing
-    parenthetical "(Figure N)", "(Figures N and M)", "(Fig. N and Fig. M)" at the end of the sentence, else ``None``."""
-    first = mention_re.search(text)
-    if first is None or not _OPEN_PAREN.search(text[:first.start()]):
-        return None
+def _listed(text: str, first: re.Match[str], mention_re: re.Pattern[str]) -> tuple[list[int], int]:
+    """``(the figure numbers a mention opens, where the list ends)``: "Figure 2" gives ``[2]``, "Figures 2 and 3" gives
+    ``[2, 3]``, "Figures 2-4" gives ``[2, 3, 4]``."""
     nums = [int(first.group(1))]
     pos = first.end()
     while True:
@@ -796,11 +795,22 @@ def _pointer(text: str, mention_re: re.Pattern[str]) -> tuple[int, list[int]] | 
         if more is None:
             break
         n = int(more.group(1) if more.re is mention_re else more.group(0))
-        if join.group(0).strip() in ("-", "\u2013") and 0 < n - nums[-1] <= 50:
-            nums += list(range(nums[-1] + 1, n + 1))
+        if join.group(0).strip() in ("-", "\u2013") and n != nums[-1]:
+            lo, hi = sorted((nums[-1], n))
+            nums += [k for k in range(lo, min(hi, lo + _MAX_RANGE) + 1) if k != nums[-1]]
         else:
             nums.append(n)
         pos = more.end()
+    return nums, pos
+
+
+def _pointer(text: str, mention_re: re.Pattern[str]) -> tuple[int, list[int]] | None:
+    """``(position of the opening bracket, figure numbers listed)`` when every figure named in ``text`` stands in one closing
+    parenthetical "(Figure N)", "(Figures N and M)", "(Fig. N and Fig. M)" at the end of the sentence, else ``None``."""
+    first = mention_re.search(text)
+    if first is None or not _OPEN_PAREN.search(text[:first.start()]):
+        return None
+    nums, pos = _listed(text, first, mention_re)
     if not _CLOSE_PAREN.match(text[pos:]) or any(m.start() >= pos for m in mention_re.finditer(text)):
         return None
     return _OPEN_PAREN.search(text[:first.start()]).start(), nums
@@ -941,9 +951,12 @@ def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, 
     def keeps(a: int, b: int, hits: list[re.Match[str]]) -> bool:
         text = flat[a:b]
         point = _pointer(text, mention_re)
-        nums = point[1] if point else [int(h.group(1)) for h in hits]
+        named = sorted({n for h in hits for n in _listed(flat, h, mention_re)[0]})  # "Figures 1 and 2" names both
+        nums = sorted(set(point[1] if point else []) | set(named))
         if all(n not in drawn for n in nums):
             return True  # only figures with no call record (or none FI numbered): nothing is checked, as before
+        if point and any(n in drawn and n not in point[1] for n in named):
+            return False  # a checked figure named outside the closing pointer (a run-in label): the pointer does not cover it
         if any(n not in issued for n in nums):
             return False
         inside = [i for i, sp in enumerate(spans) if a <= sp[0] and sp[1] <= b]
@@ -980,17 +993,34 @@ def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, 
             seen.add((a, b))
             lead = _facts._RUN_IN.match(flat[a:b])
             heading = _lead_heading(flat[a:b], mention_re)
-            if heading:  # a bare label ("**Results.**", "**Figure 1.**"): neither judged nor cut
+            label_at = None  # where a run-in figure label starts, when the sentence after it is judged as naming that figure
+            label_hits: list[re.Match[str]] = []
+            if heading:  # a bare label ("**Results.**", "**Figure 1.**"): neither judged nor cut on its own
+                label_hits = [h for h in mention_re.finditer(flat, a, a + heading)]
+                label_start = a
                 a += heading
                 if not flat[a:b].strip():
-                    continue
+                    # a figure label with prose after it on its line: that prose is a sentence that names the figure. A label
+                    # alone on its line (nothing after it before the line ends, or an image) stays a heading
+                    nxt = b
+                    while nxt < line_start + len(line) and flat[nxt] in " \t":
+                        nxt += 1
+                    if not label_hits or nxt >= line_start + len(line):
+                        continue
+                    na, nb = _sentence_at(flat, line_start, line_start + len(line), nxt)
+                    if not flat[na:nb].strip() or flat[nxt] == "\x01":
+                        continue
+                    a, b = na, nb
+                    seen.add((a, b))
+                if label_hits:
+                    label_at = label_start
                 lead = None
                 seen.add((a, b))
             else:
                 # any other bold span (a result mark or FI's own statement in it too) is part of the sentence: judged and cut
                 # with it, so FI's statement inside it is kept by the rule below and only the writer's words around it go
                 lead = None
-            hits = [h for h in mention_re.finditer(flat, a, b)]
+            hits = label_hits + [h for h in mention_re.finditer(flat, a, b)]
             body_at = a + (lead.end() if lead else 0)
             own = [i for i, sp in enumerate(spans) if kinds[i] == "claim" and body_at <= sp[0] and sp[1] <= b]
             if own:
@@ -1007,7 +1037,7 @@ def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, 
             elif not hits or keeps(a, b, hits):
                 continue
             sentence = re.sub(r"\s+", " ", _values.without_marks(markdown[original(a):original(b)])).strip()
-            figures = sorted({int(h.group(1)) for h in hits})
+            figures = sorted({n for h in hits for n in _listed(flat, h, mention_re)[0]})
             unfilled = [i for i, sp in enumerate(spans) if kinds[i] == "v" and a <= sp[0] and sp[1] <= b
                         and marks[i].group(2).strip() == _values.NOT_RECORDED]
             if own:  # FI's own statement is never removed: only the words the writer put into its sentence go
@@ -1030,6 +1060,8 @@ def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, 
                               "how": "writer's words removed", "figures": figures})
                 taken += _unfilled_entries(marks, unfilled, sentence)
                 continue
+            if label_at is not None:  # the figure label goes with the sentence it led: no label is left alone
+                body_at = label_at
             start, end = original(body_at), original(b)
             if flat[line_start:body_at].strip() == "":  # it opens its line: the space it leaves goes with it
                 while end < len(markdown) and markdown[end] in " \t":

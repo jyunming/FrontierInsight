@@ -130,10 +130,12 @@ _CAPTION_LINE_RE = re.compile(r"^[ 	]*(?:\*\*|\*|_)?[ 	]*(?:figure|fig\.?)[ 	]*(
 _MARP_HINT_RE = re.compile(r"^(?:bg|fit|contain|cover|left|right|center|blur|\w+:\S+|\d+%?)$")
 
 
-def _with_paper_captions(content: str, paper_numbers: dict[str, int], paper_md: str) -> str:
+def _with_paper_captions(content: str, paper_numbers: dict[str, int], paper_md: str,
+                        held: dict[str, str] | None = None) -> str:
     """``content`` with the caption of each figure of the paper's list (one FI recorded the calls of) replaced by the
     paper's: the alt text of its image when the model wrote words there, and a caption line under it that opens with
-    "Figure N". Nothing changes for a deck with no such figure."""
+    "Figure N". Nothing changes for a deck with no such figure. With ``held``, a caption line put in is written as a token and
+    its text is added to ``held`` (token -> line), so that the caption, which is FI's, is not read as the model's text."""
     if not paper_numbers:
         return content
     lines = content.split("\n")
@@ -153,7 +155,12 @@ def _with_paper_captions(content: str, paper_numbers: dict[str, int], paper_md: 
             j += 1
         under = _CAPTION_LINE_RE.match(lines[j]) if j < len(lines) else None
         if under and int(under.group("n")) == number:
-            lines[j] = f"**Figure {number}.** {caption}"
+            line = f"**Figure {number}.** {caption}"
+            if held is None:
+                lines[j] = line
+            else:
+                lines[j] = f"FICAPTIONHOLD{len(held)}END"
+                held[lines[j]] = line
     return "\n".join(lines)
 
 
@@ -374,9 +381,16 @@ class SlideGenerator:
             raw_paper = art.paper_md.read_text(encoding="utf-8") if art.paper_md else ""
         except OSError:
             raw_paper = ""
+        # A caption line under a figure of the paper's list is replaced by the paper's caption, which is FI's: it is put in first
+        # and held out of the rule. Any other line naming a figure, a caption line with no paper caption to put in included,
+        # is the model's and is read like any other text.
+        held: dict[str, str] = {}
+        text = _with_paper_captions(text, paper_numbers, paper_md, held)
         out, taken = take_out_unchecked(text, art.raw_state, art.quest_root, raw_paper)
         log_taken(taken, art.quest_root, "slides", _log)
-        return _with_paper_captions(out, paper_numbers, paper_md)
+        for token, line in held.items():
+            out = out.replace(token, line)
+        return out
 
     async def _ask(self, art: QuestArtifacts, prompt: str, *, supervisor: ProxySupervisor | None) -> str:
         own_supervisor = supervisor is None
