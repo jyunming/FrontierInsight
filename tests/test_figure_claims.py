@@ -14,7 +14,7 @@ from core import figure_claims as fc
 
 def _series(sid, xs, ys, kind="line", **kw):
     return {"id": sid, "label": sid.upper(), "kind": kind, "step": False, "x": xs, "y": ys, "yerr": None,
-            "merged_with": [], **kw}
+            "merged_with": [], "x_checked": True, **kw}
 
 
 def _panel(series, n=1, what="signal", **kw):
@@ -25,7 +25,7 @@ def _panel(series, n=1, what="signal", **kw):
 
 
 def _calls(*panels, fallback=False):
-    return {"version": 1, "fallback": fallback, "panels": list(panels)}
+    return {"version": 2, "fallback": fallback, "panels": list(panels)}
 
 
 def _base():
@@ -203,14 +203,16 @@ def test_note():
     assert ev(c, "note", note="n2") is None
 
 
-def test_curve_supports_only_drawn_and_range():
-    c = _calls(_panel([_series("k", [1, 2, 3, 4], [1, 2, 3, 4], kind="curve"), _series("a", [1, 2, 3, 4], [4, 3, 2, 1])]))
-    assert ev(c, "drawn", series="k") and ev(c, "range", series="k", axis="y")
+def test_curve_supports_only_drawn():
+    c = _calls(_panel([_series("k", [1, 2, 3, 4], [10, 20, 30, 40], kind="curve"), _series("a", [1, 2, 3, 4], [4, 3, 2, 1])]))
+    assert ev(c, "drawn", series="k")
+    assert ev(c, "range", series="k", axis="y") is None and ev(c, "range", series="k", axis="x") is None  # a curve's numbers are not FI's
     assert ev(c, "trend", series="k") is None
     assert ev(c, "value_at", series="k", x=2) is None
     assert ev(c, "crossing", a="k", b="a") is None
     assert ev(c, "identical", a="k", b="a") is None
-    assert all(o["claim"] in ("drawn", "range") for o in fc.menu(c) if "series" in o["args"] and o["args"]["series"] == "k")
+    assert [o["claim"] for o in fc.menu(c) if o["args"].get("series") == "k"] == ["drawn"]
+    assert ev(c, "range", axis="y")[0].startswith("the series spans 1 to 4")  # the span leaves the curve out
 
 
 def test_unknown_claim_id_is_not_evaluable():

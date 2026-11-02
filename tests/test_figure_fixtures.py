@@ -242,7 +242,9 @@ def _check_fails_closed(name, tmp_path, monkeypatch):
     unknown = "{{figure:%s:%s @ series=%s, panel=1}}" % (stem, BAD_ID, series)
     # through the write node: the writer states (a) and (c); the true statement stays, the others are gone with one disclosure
     paper, kept = _write_paper(tmp_path / "w1", monkeypatch, other, stem, [true_one["mark"], value["mark"], unknown])
-    assert true_one["text"] in paper, "the statement FI can check stays"
+    # the series FI did not find to be the table's result is named neutrally now, not by the result's or the plan's label
+    stays = figure_claims.evaluate(other, "drawn", true_one["args"])[0]
+    assert stays in paper, "the statement FI can check stays"
     assert value["text"] not in paper and "not recorded" not in paper and BAD_ID not in paper, paper
     assert paper.count(DISCLOSURE) == 1
     keys = [d["key"] for d in kept if str(d.get("key", "")).startswith("figure:")]

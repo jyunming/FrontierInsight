@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import figure_facts
-from .frame_figure import hold_text as _hold_text
+from .frame_figure import RECORD_VERSION, hold_text as _hold_text
 from . import paper_values as _values
 
 #: Two drawn values closer than this (relative) are equal to the rounding of a drawn value; a trend may run through them.
@@ -56,9 +56,14 @@ def load_calls(quest_root: Path | str, stem: str) -> dict[str, Any] | None:
         data = json.loads((Path(quest_root) / figure_facts.RECORDS_DIR / f"{name}.calls.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if isinstance(data, dict) and isinstance(data.get("panels"), list):
+    if isinstance(data, dict) and isinstance(data.get("panels"), list) and _version(data) >= RECORD_VERSION:
         return data
-    return None
+    return None  # a record from before the checks of the current version is not read: the figure has no call record
+
+
+def _version(data: dict[str, Any]) -> int:
+    v = data.get("version")
+    return v if isinstance(v, int) and not isinstance(v, bool) else 0
 
 
 def parse_args(text: str) -> dict[str, str]:
@@ -163,6 +168,8 @@ def _series(panel: dict[str, Any], sid: str | None) -> dict[str, Any] | None:
 
 
 def _label(item: dict[str, Any]) -> str:
+    if item.get("kind") == "curve":  # the body's words never name a curve, whatever a record holds
+        return "a curve"
     return str(item.get("label") or item.get("id") or "")
 
 
@@ -199,7 +206,15 @@ def _value_axis_ok(panel: dict[str, Any], axis: str, series: dict[str, Any] | No
     """Values on the y axis of an ``other`` quantity are not claimed (the label is neutral). A series FI found not to be the
     table's value of its result carries ``what: other`` itself and states no value, whatever the panel's axis says."""
     ax = _axis(panel, axis)
-    return ax is not None and not (axis == "y" and (ax.get("what") == "other" or (series or {}).get("what") == "other"))
+    return ax is not None and not (axis == "y" and (ax.get("what") == "other" or (series or {}).get("what") == "other"
+                                                    or (series or {}).get("kind") == "curve"))
+
+
+def _x_ok(series: dict[str, Any]) -> bool:
+    """Whether a series' drawn x values are values of the x setting in FI's table (``x_checked`` of the call record). A claim that
+    reads x (a trend along it, an order at an x, a crossing, a span of x, a missing x, a step) is offered only then; a curve's x
+    is never FI's. A series with no flag reads as unchecked (fail closed)."""
+    return series.get("kind") != "curve" and series.get("x_checked") is True
 
 
 def _x_arg(raw: str | None) -> float | None:
@@ -257,14 +272,17 @@ def _range(calls, panel, a, fmt, ctx):
         return None
     if "series" in a:
         s = _series(panel, a["series"])
-        chosen = [s] if s is not None else []
+        chosen = [s] if s is not None and s.get("kind") != "curve" else []  # a curve's numbers are not FI's
         who = _label(s) if s is not None else ""
     else:
-        # an image's rows and columns are positions, not a quantity: only a named image gives its colour values
-        chosen = [s for s in panel.get("series") or [] if isinstance(s, dict) and s.get("kind") != "image"]
+        # an image's rows and columns are positions, not a quantity: only a named image gives its colour values; a curve's
+        # numbers are the body's own, so it is never part of "the series"
+        chosen = [s for s in panel.get("series") or [] if isinstance(s, dict) and s.get("kind") not in ("image", "curve")]
         who = "the series"
     if axis == "y" and any(not _value_axis_ok(panel, "y", s) for s in chosen):
         return None  # one series whose y is not the table's value: the span of "the series" would state it
+    if axis == "x" and any(not _x_ok(s) for s in chosen):
+        return None  # one series on an x FI did not check
     if not chosen:
         return None
     if chosen[0].get("kind") == "image":
@@ -284,7 +302,7 @@ def _range(calls, panel, a, fmt, ctx):
 
 def _value_at(calls, panel, a, fmt, ctx):
     s = _series(panel, a["series"])
-    if s is None or not _value_axis_ok(panel, "y", s):
+    if s is None or not _value_axis_ok(panel, "y", s) or not _x_ok(s):
         return None
     got = _at(s, a.get("x", ""))
     if len({y for _, y in got}) != 1:  # not a drawn x (no interpolation), or two different y at one x
@@ -308,8 +326,8 @@ def _sorted_unique(s: dict[str, Any]) -> list[tuple[float, float]] | None:
 
 def _trend(calls, panel, a, fmt, ctx):
     s = _series(panel, a["series"])
-    if s is None or s.get("step") or _axis(panel, "y") is None:  # a shape claim: no y number, so no checked ``what`` needed
-        return None
+    if s is None or s.get("step") or _axis(panel, "y") is None or not _x_ok(s):
+        return None  # a shape claim: no y number, so no checked ``what`` needed; but it reads x, which FI must have checked
     pts = _sorted_unique(s)
     if pts is None or len(pts) < 3:
         return None
@@ -330,7 +348,7 @@ def _trend(calls, panel, a, fmt, ctx):
 
 def _steps(calls, panel, a, fmt, ctx):
     s = _series(panel, a["series"])
-    if s is None or not s.get("step") or not _value_axis_ok(panel, "y", s):
+    if s is None or not s.get("step") or not _value_axis_ok(panel, "y", s) or not _x_ok(s):
         return None
     pts = _sorted_unique(s)
     if pts is None or len(pts) < 2 or _tie(pts[0][1], pts[-1][1]):
@@ -348,6 +366,8 @@ def _order(calls, panel, a, fmt, ctx):
     for s in panel.get("series") or []:
         if not isinstance(s, dict) or not _plain(s):
             continue
+        if not _x_ok(s):
+            return None  # one series on an x FI did not check: the order at that x is not FI's to state
         at = _at(s, a["at"])
         if len({y for _, y in at}) > 1:
             return None
@@ -370,7 +390,7 @@ def _crossings(panel: dict[str, Any], a: dict[str, str], same_grid: bool = False
     if a["a"] == a["b"] or _axis(panel, "y") is None:  # shape claims: the text names x only
         return None
     sa, sb = _series(panel, a["a"]), _series(panel, a["b"])
-    if sa is None or sb is None or not _plain(sa) or not _plain(sb):
+    if sa is None or sb is None or not _plain(sa) or not _plain(sb) or not _x_ok(sa) or not _x_ok(sb):
         return None
     ya, yb = dict(_points(sa)), dict(_points(sb))
     if len(ya) != len(_points(sa)) or len(yb) != len(_points(sb)):
@@ -487,7 +507,7 @@ def _missing_x(calls, panel, a, fmt, ctx):
     grid_id = plan.get("grid_id") if isinstance(plan, dict) else None
     if grid_id is not None and (panel.get("x") or {}).get("id") != grid_id:
         return None  # the grid is another setting's values
-    if s is None or s.get("kind") != "points" or not grid or _is_cat(s):
+    if s is None or s.get("kind") != "points" or not grid or _is_cat(s) or not _x_ok(s):
         return None
     drawn = [x for x, _ in _points(s)]
     gone = [g for g in grid if not any(_same_x(g, x) for x in drawn)]

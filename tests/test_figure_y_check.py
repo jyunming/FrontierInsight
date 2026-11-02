@@ -150,6 +150,9 @@ LINE_CALL = 'fig.line(0, "sample_" + sample, waves, means, "signal", yerr=halves
 UNEVEN = ('fig.line(0, "sample_" + sample, waves, means, "signal", yerr=([h / 2 for h in halves], [h * 2 for h in halves]), '
           'yerr_meaning="range")')
 
+HONEST_RANGE = ('fig.line(0, "sample_" + sample, waves, means, "signal", yerr=([m - min(table.values("signal", k)) for m, k in zip(means, keys)], '
+                '[max(table.values("signal", k)) - m for m, k in zip(means, keys)]), yerr_meaning="range")')
+
 
 def _uneven_bar_claims(offers):
     return [o for o in offers if o["claim"] == "errorbars" and "reaching" in o["text"]]
@@ -158,9 +161,13 @@ def _uneven_bar_claims(offers):
 def test_uneven_error_bars_of_a_flagged_series_state_no_number(tmp_path):
     (tmp_path / "ok").mkdir()
     (tmp_path / "bad").mkdir()
-    # control: the honest line with uneven bars keeps the claim that quotes their reach
-    calls, offers = _draw("spectra", tmp_path / "ok", LINE_CALL, UNEVEN)
-    assert set(_whats(calls).values()) == {"signal"} and len(_uneven_bar_claims(offers)) == 2
+    (tmp_path / "typed").mkdir()
+    # control: the honest line with the table's own range as bars keeps its claim (their sides are even here: no reach is quoted)
+    calls, offers = _draw("spectra", tmp_path / "ok", LINE_CALL, HONEST_RANGE)
+    assert set(_whats(calls).values()) == {"signal"} and len([o for o in offers if o["claim"] == "errorbars" and "range" in o["text"]]) == 2
+    # uneven typed widths that are not the table's are not its range: no claim, no number
+    calls, offers = _draw("spectra", tmp_path / "typed", LINE_CALL, UNEVEN)
+    assert [o for o in offers if o["claim"] == "errorbars"] == []
     # a shifted line: no claim with a bar width, but the call is not refused and the panel is not raw
     calls, offers = _draw("spectra", tmp_path / "bad", LINE_CALL, UNEVEN.replace("waves, means,", "waves, [m + 0.3 for m in means],"))
     assert set(_whats(calls).values()) == {"other"} and calls["panels"][0]["raw"] is False

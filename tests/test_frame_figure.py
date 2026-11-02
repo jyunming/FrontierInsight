@@ -110,8 +110,8 @@ def test_band_meaning_closed_list():
     h.line(0, "fast", [1, 2], [1.0, 2.0], "growth")
     for m in ("ci95", "sd", "range", "other"):
         h.band(0, "fast", [1, 2], [0, 1], [2, 3], "growth", m)
-    # ci95 and sd are typed here and the table gives no such widths at these x: they are not kept; range and other stay as stated
-    assert [b["meaning"] for b in h.record()["panels"][0]["bands"]] == ["other", "other", "range", "other"]
+    # typed here, and the table gives none of these widths or edges at these x: no meaning is kept
+    assert [b["meaning"] for b in h.record()["panels"][0]["bands"]] == ["other", "other", "other", "other"]
     with pytest.raises(ValueError) as e:
         h.band(0, "fast", [1, 2], [0, 1], [2, 3], "growth", "stderr")
     assert "ci95" in str(e.value) and "range" in str(e.value)
@@ -156,8 +156,9 @@ def test_curve_recorded_as_kind_curve_with_source():
     h.curve(0, "fit", [1, 3], [1.5, 2.5], source="fitted to the drawn points")
     s = h.record()["panels"][0]["series"]
     assert [x["kind"] for x in s] == ["line", "curve", "curve"]
-    assert s[1]["source"] == "computed in the figure" and "theory" in s[1]["label"]
-    assert s[2]["source"] == "fitted to the drawn points"
+    assert s[1]["source"] == "computed in the figure" and s[2]["source"] == "fitted to the drawn points"
+    assert [x["label"] for x in s[1:]] == ["curve 1", "curve 2"]  # FI's names, never the body's words
+    assert all(x["what"] == "other" for x in s[1:])
 
 
 def test_image_is_recorded_with_its_grid():
@@ -268,7 +269,7 @@ def test_error_bars_record_their_meaning():
     h.bars(1, "fast", [1, 2], [1.0, 2.0], "growth", yerr=[-0.1, 0.2], yerr_meaning="sd")
     h.line(1, "slow", [1, 2], [1.0, 2.0], "growth")
     r = h.record()["panels"]
-    assert [s["yerr_meaning"] for s in r[0]["series"]] == ["range", "other"]  # range has no width in the table to check
+    assert [s["yerr_meaning"] for s in r[0]["series"]] == ["other", "other"]  # range is the table's min and max: typed ones are not
     assert r[1]["series"][0]["yerr_meaning"] == "other" and r[1]["series"][0]["yerr"] == [0.1, 0.2]  # sd typed, table says 0
     assert r[1]["series"][1]["yerr_meaning"] is None
     with pytest.raises(ValueError) as e:
@@ -295,7 +296,7 @@ def test_record_roundtrips_json(tmp_path):
     out = h.write(tmp_path / "sub" / "fig1.png")
     assert out.name == "fig1.calls.json"
     assert json.loads(out.read_text(encoding="utf-8")) == h.record()
-    assert h.record()["version"] == 1 and h.record()["fallback"] is False
+    assert h.record()["version"] == 2 and h.record()["fallback"] is False
     assert h.write(tmp_path / "other.calls.json").name == "other.calls.json"
 
 
@@ -357,10 +358,10 @@ def test_two_results_and_other_quantity_labels():
 
 
 def test_legend_has_no_empty_entry():
-    h = _Host(panels=1)
+    h = _Host(panels=1, identity=True)
     ax = h.axes[0]
     ax.plot([1, 2], [1, 2], label="_stale")  # a body's leftover artist with a private label
-    h.line(0, "fast", [1, 2, 3], [1.0, 2.0, 4.0], "growth", yerr=[0.1, 0.1, 0.1])
+    h.line(0, "fast", [1, 2, 3], [1.0, 2.0, 3.0], "growth", yerr=[0.1, 0.1, 0.1])
     h.band(0, "fast", [1, 2, 3], [0, 1, 2], [2, 3, 5], "growth", "ci95")
     h.ref(0, "limit")
     ax.legend(["body legend"])
@@ -390,9 +391,9 @@ def test_bars_reach_their_baseline():
 
 
 def test_identical_series_are_merged_and_recorded():
-    h = _Host(panels=1)
-    h.line(0, "fast", [1, 2, 3], [1.0, 2.0, 4.0], "growth", yerr=[0.1, 0.2, 0.3])
-    h.line(0, "slow", [1, 2, 3], [1.0 + 1e-14, 2.0, 4.0], "growth", yerr=[0.1, 0.2, 0.3])
+    h = _Host(panels=1, identity=True)
+    h.line(0, "fast", [1, 2, 3], [1.0, 2.0, 3.0], "growth", yerr=[0.1, 0.2, 0.3])
+    h.line(0, "slow", [1, 2, 3], [1.0 + 1e-14, 2.0, 3.0], "growth", yerr=[0.1, 0.2, 0.3])
     h.finish(SPEC, INFO)
     s = h.record()["panels"][0]["series"]
     assert s[0]["merged_with"] == ["slow"] and s[1]["merged_with"] == [] and len(s) == 2
@@ -474,13 +475,13 @@ def test_outside_legend_clears_other_panels_and_the_canvas(columns, series):
 
 
 def test_merged_legend_entry_never_shows_a_raw_id():
-    h = _Host(panels=1)
+    h = _Host(panels=1, identity=True)
     h.series_ids = ["fast", "slow", "mid"]
     h.line(0, "fast", [1, 2], [1.0, 2.0], "growth")
     h.line(0, "mid", [1, 2], [1.0, 2.0], "growth")
     h.finish({"growth": {"label": "Growth"}}, {"mid": {"description": "Middle colony; third arm"}})
     assert [t.get_text() for t in h.axes[0].get_legend().get_texts()] == ["Fast colony = Middle colony"]
-    g = _Host(panels=1)
+    g = _Host(panels=1, identity=True)
     g.labels = {}
     g.line(0, "slow", [1, 2], [1.0, 2.0], "growth")
     g.line(0, "fast", [1, 2], [1.0, 2.0], "growth")

@@ -130,7 +130,7 @@ from core.figure_claims import load_calls  # noqa: E402
 
 def _series(ident, label, kind="line", ys=(1.0, 2.0, 3.0), yerr=None, meaning=None):
     return {"id": ident, "label": label, "kind": kind, "step": False, "x": [1.0, 2.0, 3.0], "y": list(ys),
-            "yerr": yerr, "yerr_meaning": meaning, "merged_with": []}
+            "yerr": yerr, "yerr_meaning": meaning, "merged_with": [], "x_checked": True}
 
 
 def _panel(n=1, series=(), bands=(), refs=(), raw=False, texts=(), y_what="error", y_label="Error of the estimate"):
@@ -141,7 +141,7 @@ def _panel(n=1, series=(), bands=(), refs=(), raw=False, texts=(), y_what="error
 
 
 def _calls(*panels, fallback=False):
-    return {"version": 1, "fallback": fallback, "panels": list(panels)}
+    return {"version": 2, "fallback": fallback, "panels": list(panels)}
 
 
 # What the old code says about a recorded panel with a body-typed series label and a stale "not drawn" list.
@@ -232,7 +232,7 @@ def test_load_calls_reads_the_record_beside_the_recorders_files(tmp_path: Path) 
     folder.mkdir(parents=True)
     assert load_calls(tmp_path, "a") is None
     (folder / "a.calls.json").write_text(json.dumps(_calls(_panel())), encoding="utf-8")
-    assert load_calls(tmp_path, "a")["version"] == 1
+    assert load_calls(tmp_path, "a")["version"] == 2
     (folder / "b.calls.json").write_text("not json", encoding="utf-8")
     assert load_calls(tmp_path, "b") is None
     from core import engine
