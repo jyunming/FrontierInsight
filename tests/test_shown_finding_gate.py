@@ -560,3 +560,11 @@ def test_fi_s_record_of_the_run_decides_which_declared_results_have_no_value() -
     derived = _derived("per_batch_spread", "not_a_plan_result")
     assert code_review.declared_names(_PLAN, _PLAN["protocol"], derived) == ["per_batch_spread"]
     assert code_review.declared_names(_PLAN, _PLAN["protocol"], {"not_computed": [{"id": "per_batch_spread"}]}) == []  # no schema
+
+
+def test_an_earlier_runs_record_of_no_value_declares_nothing() -> None:
+    """A record restored from an earlier run (the run now stopped before writing its own) says nothing about the code that
+    ran: a shown fault keeps its stop, never becomes a part not done."""
+    stale = {**_derived("per_batch_spread"), "from_earlier_run": True}
+    assert code_review.declared_names(_PLAN, _PLAN["protocol"], stale) == []
+    assert code_review.declared_names(_PLAN, _PLAN["protocol"], _derived("per_batch_spread")) == ["per_batch_spread"]

@@ -1451,6 +1451,8 @@ def declared_names(design: Any, protocol: Any, derived: Any = None) -> list[str]
     names = [str(r["name"]) for r in reqs if r.get("kind") in QUANTITY_KINDS and str(r.get("name") or "").strip()]
     if derived is None:
         return names
+    if isinstance(derived, dict) and derived.get("from_earlier_run"):
+        return []  # an earlier run's record says nothing about the code that ran now
     from . import analysis_frame as _analysis_frame
 
     none = {_norm(i["id"]) for i in _analysis_frame.not_computed(derived)}
