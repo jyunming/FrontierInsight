@@ -22632,7 +22632,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if stale:
             _code_review.save(self.quest_root, record)
         aside_before = {str(x.get("id")) for x in record.get("about_fi") or [] if isinstance(x, dict)}
-        if _code_findings.set_aside_own(record, self.quest_root / "code"):  # a finding about FI's own lines stops nothing
+        if _code_findings.set_aside_own(record, self.quest_root / "code", _code_review.version(self.quest_root / "code")):  # a finding about FI's own lines stops nothing
             _code_review.save(self.quest_root, record)
         self._log_about_fi(record, aside_before)
         shown = _code_findings.shown_open(record)

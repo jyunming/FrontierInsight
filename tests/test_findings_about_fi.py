@@ -83,20 +83,71 @@ def test_a_finding_about_fis_frame_is_set_aside_and_one_about_the_studys_body_is
 
 def test_a_shown_fault_about_fis_frame_is_never_a_candidate_for_the_gates_stop(tmp_path: Path) -> None:
     code = _code(tmp_path)
-    frame_line = _line(DERIVE, "REFERENCES")
-    body_line = _line(DERIVE, "return table.mean")
-    for line, stops in ((frame_line, False), (body_line, True)):
+    for line, stops in ((_line(DERIVE, "REFERENCES"), False), (_line(DERIVE, "return table.mean"), True)):
         record = _read(code, [_problem("derive.py", line, "a fault")])
         for issue in cf.issues_of(record).values():
-            issue.update(demonstrated=True, failure_kind=cf.ASSERTION, outcome=cf.GAVE_UP)
-        # an old record (before the mark existed) is set aside from its place alone
-        for issue in cf.issues_of(record).values():
-            issue.pop("fi_own", None)
-        cf.set_aside_own(record, code)
-        for issue in cf.issues_of(record).values():
-            if issue.get("fi_own"):
-                issue["outcome"] = cf.ABOUT_FI
+            issue.update(demonstrated=True, failure_kind=cf.ASSERTION)
         assert bool(cf.shown_open(record)) is stops
+
+
+def test_a_position_is_never_judged_against_code_it_was_not_read_from(tmp_path: Path) -> None:
+    code = _code(tmp_path)
+    body = "def trial(cell, ctx):\n" + "".join(f"    x{n} = {n}\n" for n in range(30)) + "    return 1.0\n"
+    text = ("import numpy as np\n" + sk.TOP_BEGIN + "\nSETTINGS = {}\n" + sk.TOP_END + "\n\n\n" + body + "\n"
+            + sk.BOTTOM_BEGIN + "\ndef run_trial(c):\n    return trial(c, None)\n" + sk.TOP_END + "\n")
+    (code / "simulate.py").write_text(text, encoding="utf-8")
+    short = text.replace(body, "def trial(cell, ctx):\n    return 1.0\n")
+    line = _line(short, "def run_trial")  # a body line before the repair, a line of the bottom frame after it
+    assert not cf.in_fi_lines(code, "simulate.py", line)
+    version = code_review.version(code)
+    record: dict[str, Any] = {}
+    problems = [_problem("simulate.py", line, "the model body is wrong")]
+    record["problems"] = problems
+    code_review.note_reading(record, version, problems, code)
+    issue = next(iter(cf.issues_of(record).values()))
+    assert not issue.get("fi_own")
+    issue.update(demonstrated=True, failure_kind=cf.ASSERTION, outcome=cf.GAVE_UP)
+    # a later repair shortens the model body: the bottom frame now starts above the stored line
+    (code / "simulate.py").write_text(short, encoding="utf-8")
+    assert cf.in_fi_lines(code, "simulate.py", line)
+    assert cf.set_aside_own(record, code, code_review.version(code)) == []
+    issue["outcome"] = cf.OPEN
+    assert cf.set_aside_own(record, code, code_review.version(code)) == []  # still another version than the one read
+    assert not issue.get("fi_own") and cf.open_issues(record)
+
+
+def test_an_issue_with_a_final_outcome_is_never_changed(tmp_path: Path) -> None:
+    code = _code(tmp_path)
+    record = _read(code, [_problem("derive.py", _line(DERIVE, "REFERENCES"), "x")])
+    issue = next(iter(cf.issues_of(record).values()))
+    issue.pop("fi_own"), issue.update(outcome=cf.GAVE_UP)
+    assert cf.set_aside_own(record, code, "v1") == [] and issue["outcome"] == cf.GAVE_UP
+
+
+def test_a_range_or_several_places_are_fis_only_when_every_one_is(tmp_path: Path) -> None:
+    code = _code(tmp_path)
+    frame, body = _line(DERIVE, "RESULTS"), _line(DERIVE, "return table.mean")
+    assert cf.place_in_fi_lines(code, f"derive.py:{frame}-{frame + 1}")
+    assert not cf.place_in_fi_lines(code, f"derive.py:{frame}-{body}")
+    assert not cf.place_in_fi_lines(code, f"derive.py:{frame} and simulate.py:{_line(SIMULATE, 'return 1.0')}")
+    assert cf.place_in_fi_lines(code, f"derive.py:{frame} and simulate.py:{_line(SIMULATE, 'SETTINGS')}")
+
+
+def test_a_trial_harness_module_in_code_is_judged_by_its_content(tmp_path: Path) -> None:
+    code = _code(tmp_path)
+    (code / "trial_harness.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    assert not cf.in_fi_lines(code, "trial_harness.py", 2)
+    (code / "trial_harness.py").unlink()
+    assert cf.in_fi_lines(code, "trial_harness.py", 2)  # absent from code/: FI's own, in .fi/
+
+
+def test_the_convergence_summary_does_not_count_a_finding_about_fi(tmp_path: Path) -> None:
+    code = _code(tmp_path)
+    record = _read(code, [_problem("derive.py", _line(DERIVE, "REFERENCES"), "x")])
+    for issue in cf.issues_of(record).values():
+        issue.update(demonstrated=True)
+    s = cf.summary(record)
+    assert s["issues"] == 0 and s["result_changing"] == 0 and s["demonstrated"] == 0 and s["about_fi"] == 1
 
 
 def test_setting_aside_again_changes_nothing_and_the_quality_row_says_it(tmp_path: Path) -> None:
@@ -104,6 +155,52 @@ def test_setting_aside_again_changes_nothing_and_the_quality_row_says_it(tmp_pat
 
     code = _code(tmp_path)
     record = _read(code, [_problem("derive.py", _line(DERIVE, "REFERENCES"), "REFERENCES is empty")])
-    assert cf.set_aside_own(record, code) == [] and len(record["about_fi"]) == 1
+    assert cf.set_aside_own(record, code, "v1") == [] and len(record["about_fi"]) == 1
     row = qr._issue_rows(record)[0]
     assert row["about_fi"] is True and row["open"] is False
+
+
+# ---- the real gate ---------------------------------------------------------------------------------------------------------
+import pytest  # noqa: E402
+
+from core.config import Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig  # noqa: E402
+from core.engine import Engine  # noqa: E402
+
+FAILING_TEST = "import helper\n\n\ndef test_f_is_two():\n    assert helper.f() == 2, 'f is one'\n"
+STATE: dict[str, Any] = {"exec_result": {"returncode": 0}, "result_json": {"dose": 60.0}}
+
+
+async def _gate(tmp_path: Path, line_of: str, outcome: str) -> dict[str, Any] | None:
+    cfg = Config(topic="a dose to size", title="dose", provider=ProviderConfig(name="openai"),
+                 engine=EngineConfig(max_iterations=1, review_loop=False),
+                 execution=ExecutionConfig(sandbox="venv", timeout_s=60), knowledge=KnowledgeConfig(enabled=False),
+                 output=OutputConfig(output_dir=tmp_path / "outputs"))
+    engine = Engine(cfg)
+    code = engine.quest_root / "code"
+    code.mkdir(parents=True, exist_ok=True)
+    for name, text in (("derive.py", DERIVE), ("helper.py", "def f():\n    return 1\n")):
+        (code / name).write_text(text, encoding="utf-8")
+    (engine.quest_root / ".fi" / "finding_tests").mkdir(parents=True, exist_ok=True)
+    (engine.quest_root / ".fi" / "finding_tests" / "F-1_1.py").write_text(FAILING_TEST, encoding="utf-8")
+    where = f"derive.py:{_line(DERIVE, line_of)}"
+    issue = {"id": "F-1", "changes_result": True, "demonstrated": True, "failure_kind": cf.ASSERTION, "outcome": outcome,
+             "plan_conflict": False, "readings": [{"n": 1, "status": "open", "version": code_review.version(code)}],
+             "severity": "high", "first_seen": 1, "file": "derive.py", "function": "", "where": where,
+             "text": "a fault shown by a test", "test": ".fi/finding_tests/F-1_1.py"}
+    code_review.save(engine.quest_root, {"issues": {"F-1": issue}})
+    return await engine._shown_fault_verdict(STATE)
+
+
+@pytest.mark.usefixtures("this_python")
+@pytest.mark.asyncio
+async def test_the_gate_does_not_stop_for_a_shown_fault_in_fis_frame(tmp_path: Path) -> None:
+    assert await _gate(tmp_path, "REFERENCES", cf.OPEN) is None
+    record = code_review.load(next((tmp_path / "outputs").iterdir()))
+    assert record["issues"]["F-1"]["fi_own"] is True and record["about_fi"][0]["id"] == "F-1"
+
+
+@pytest.mark.usefixtures("this_python")
+@pytest.mark.asyncio
+async def test_the_gate_still_stops_for_a_shown_fault_in_the_studys_function(tmp_path: Path) -> None:
+    verdict = await _gate(tmp_path, "return table.mean", cf.OPEN)
+    assert verdict and verdict["stuck"] is True and verdict["stuck_reason"] == "shown_fault_open"

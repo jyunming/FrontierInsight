@@ -175,7 +175,8 @@ def index_problems(problems: list[dict[str, Any]], code_dir: Path) -> None:
         rel = code.resolve(str(v.get("file") or ""))
         line = v.get("line") if isinstance(v.get("line"), int) else None
         # A place in FI's own lines is never the same issue as one in the study's function of that file.
-        function = FI_PLACE if in_fi_lines(code_dir, v.get("file"), line) else code.function_at(rel, line)
+        own = place_in_fi_lines(code_dir, v["where"]) if v.get("where") else in_fi_lines(code_dir, v.get("file"), line)
+        function = FI_PLACE if own else code.function_at(rel, line)
         qs = quantities(v)
         if not qs and str(v.get("kind")) == "logic":
             qs = [code.anchor_at(rel, line)]
@@ -241,7 +242,7 @@ def _fi_whole_file(code_dir: Path, rel: str, text: str) -> bool:
             return text == Path(_search.__file__).read_text(encoding="utf-8")
         except OSError:
             return False
-    return name == "trial_harness.py"  # FI's harness of the trials (.fi/trial_harness.py): by its name, it is never in code/
+    return False
 
 
 def in_fi_lines(code_dir: Path, file: Any, line: Any) -> bool:
@@ -256,7 +257,7 @@ def in_fi_lines(code_dir: Path, file: Any, line: Any) -> bool:
         p.relative_to(base).as_posix() for p in base.rglob(Path(name).name)
         if p.is_file() and "__pycache__" not in p.parts) if base.is_dir() else []
     if not candidates and Path(name).name == "trial_harness.py":
-        return True
+        return True  # FI's harness of the trials lives in .fi/, never in code/: a file of that name in code/ is judged by its content
     if len(candidates) != 1:
         return False
     rel = candidates[0]
@@ -274,23 +275,45 @@ def in_fi_lines(code_dir: Path, file: Any, line: Any) -> bool:
         return False
 
 
-_PLACE = re.compile(r"([\w./\-]+\.py)(?:\s*[:,]?\s*(?:lines?\s*)?(\d+))?", re.I)
+_PLACE = re.compile(r"([\w./\-]+\.py)(?:\s*[:,]?\s*(?:lines?\s*)?(\d+)(?:\s*[-–]\s*(\d+))?)?", re.I)
+_MAX_RANGE = 500
 
 
-def set_aside_own(record: dict[str, Any], code_dir: Path) -> list[str]:
+def place_in_fi_lines(code_dir: Path, where: Any) -> bool:
+    """Whether a place as the reader wrote it (``file:line``, a range ``file:20-30``, or several places) lies wholly in FI's
+    lines: every place and every line of a range must be. Any other place is the study's (``False``)."""
+    places = list(_PLACE.finditer(str(where or "")))
+    if not places:
+        return False
+    for m in places:
+        first = int(m.group(2)) if m.group(2) else None
+        last = int(m.group(3)) if m.group(3) else first
+        if first is None or last is None or last < first or last - first > _MAX_RANGE:
+            if not in_fi_lines(code_dir, m.group(1), None):
+                return False
+            continue
+        if not all(in_fi_lines(code_dir, m.group(1), n) for n in range(first, last + 1)):
+            return False
+    return True
+
+
+def set_aside_own(record: dict[str, Any], code_dir: Path, version: str) -> list[str]:
     """Take the findings about FI's own lines out of the study's handling, by the place each names: an issue is marked
     (``fi_own``, outcome :data:`ABOUT_FI`) and no longer open (:func:`open_issues`), and its findings leave the record's
     ``problems`` and ``read_problems`` that the repairs, the gate and the paper's notes read. Recorded once in
-    ``record["about_fi"]`` so FI can be fixed. Only ever sets the mark; running it again changes nothing. Returns the ids
-    newly set aside."""
+    ``record["about_fi"]`` so FI can be fixed. Only ever sets the mark; running it again changes nothing. A position is
+    judged only against the code it was read from: an issue is looked at only when its latest reading is of ``version``
+    (the code as it is now) and flags it, and only while its outcome is still open (a final outcome is never changed).
+    Returns the ids newly set aside."""
     new: list[str] = []
     for fid, issue in issues_of(record).items():
-        if not isinstance(issue, dict) or issue.get("fi_own"):
+        if not isinstance(issue, dict) or issue.get("fi_own") or issue.get("outcome") not in (OPEN, REOPENED):
             continue
-        match = _PLACE.search(str(issue.get("where") or ""))
-        file = match.group(1) if match else issue.get("file")
-        line = int(match.group(2)) if match and match.group(2) else None
-        if in_fi_lines(code_dir, file, line):
+        last = (issue.get("readings") or [{}])[-1]
+        if not version or last.get("status") != "open" or last.get("version") != version:
+            continue
+        where = str(issue.get("where") or "")
+        if place_in_fi_lines(code_dir, where) if where else in_fi_lines(code_dir, issue.get("file"), None):
             issue.update(fi_own=True, outcome=ABOUT_FI,
                          reason="the place it names is in lines FI wrote, not in the study's code")
             new.append(str(fid))
@@ -459,7 +482,7 @@ def shown_open(record: dict[str, Any]) -> list[dict[str, Any]]:
 def summary(record: dict[str, Any]) -> dict[str, Any]:
     """Counts for the reports: distinct issues, those that change a result, how many a test demonstrated, how many were
     repaired (and by which models), and what is still open."""
-    every = [i for i in issues_of(record).values() if isinstance(i, dict)]
+    every = [i for i in issues_of(record).values() if isinstance(i, dict) and not i.get("fi_own")]
     opened = open_issues(record)
     changing = [i for i in every if i.get("changes_result")]
     demonstrated = [i for i in changing if i.get("demonstrated") is True or i.get("outcome") == FIXED]
@@ -473,6 +496,7 @@ def summary(record: dict[str, Any]) -> dict[str, Any]:
         "fixed": sum(1 for i in every if i.get("outcome") == FIXED), "fixed_by": models,
         "plan_problems": sum(1 for i in every if i.get("outcome") == PLAN_PROBLEM or i.get("plan_conflict")),
         "open": len(opened),
+        "about_fi": sum(1 for i in issues_of(record).values() if isinstance(i, dict) and i.get("fi_own")),
         "open_result_changing_demonstrated": sum(
             1 for i in opened if i.get("changes_result") and i.get("demonstrated") is True
             and i.get("outcome") not in (FIXED, GONE)),
