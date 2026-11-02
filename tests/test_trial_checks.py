@@ -541,6 +541,111 @@ def test_a_wrong_degrees_of_freedom_or_level_is_a_fault(used):
     assert _mult(tc.calibration(_interval_cells(used), _proto(_DECL3)))[0].fault
 
 
+def _log_interval_cells(mult: float, n_settings: int = 3, n: int = 60, seed: int = 5, spread: float = 0.9) -> list[dict]:
+    """Settings whose trials report exp(ln e -/+ mult * s) for the standard error s of ln e, and the delta-method error
+    e * s as the standard error (what a fit on the log scale returns)."""
+    rng = random.Random(seed)
+    per = {}
+    for i in range(n_settings):
+        e = [math.exp(rng.gauss(0.0, 1.0)) for _ in range(n)]
+        s = [rng.uniform(0.05, spread) for _ in range(n)]
+        per[f"s{i}"] = {"x_hat": e, "x_se": [a * b for a, b in zip(e, s)],
+                        "x_lo": [a * math.exp(-mult * b) for a, b in zip(e, s)],
+                        "x_hi": [a * math.exp(mult * b) for a, b in zip(e, s)]}
+    return _cells(per)
+
+
+_DECL_NORMAL = known("x_hat", 1.0, se="x_se", interval=("x_lo", "x_hi"), df="normal")
+
+
+def test_an_interval_symmetric_on_the_log_scale_is_judged_there_not_on_the_estimates_own_scale():
+    # the original failure: (upper - lower) / (2 * se) is sinh(1.96 s) / s, far from 1.96 where s is large
+    [q] = _mult(tc.calibration(_log_interval_cells(_Z, spread=4.0), _proto(_DECL_NORMAL)))
+    assert not q.fault and q.gross == 0 and q.judged == 3
+    assert all(abs(s.value - _Z) < 1e-6 for s in q.settings) and len(q.on_log) == 3
+    assert "symmetric on the log scale" in q.says()
+
+
+def test_a_log_scale_interval_built_with_another_multiplier_is_still_a_fault():
+    [q] = _mult(tc.calibration(_log_interval_cells(1.6449), _proto(_DECL_NORMAL)))
+    assert q.fault and q.gross == 3 and abs(q.settings[0].value - 1.6449) < 1e-4
+
+
+def test_an_own_scale_interval_is_judged_as_before():
+    cells = _interval_cells(_Z)
+    [q] = _mult(tc.calibration(cells, _proto(known("x_hat", 10.0, se="x_se", interval=("x_lo", "x_hi"), df="normal"))))
+    assert not q.fault and not q.on_log
+    [q] = _mult(tc.calibration(_interval_cells(1.6449), _proto(known("x_hat", 10.0, se="x_se", interval=("x_lo", "x_hi"),
+                                                                     df="normal"))))
+    assert q.fault and not q.on_log
+
+
+def test_trials_of_mixed_forms_in_a_setting_fail_closed_on_the_own_scale():
+    cells = _log_interval_cells(_Z, n_settings=1, spread=3.0)
+    m = cells[0]["metrics"]
+    for i in range(0, 60, 2):  # every second trial reports an own-scale interval
+        e, se = m["x_hat"]["values"][i], m["x_se"]["values"][i]
+        m["x_lo"]["values"][i], m["x_hi"]["values"][i] = e - _Z * se, e + _Z * se
+    [q] = _mult(tc.calibration(cells, _proto(_DECL_NORMAL)))
+    assert q.fault and not q.on_log
+
+
+def _rounded_to(cells: list[dict], how) -> list[dict]:
+    for c in cells:
+        for m in c["metrics"].values():
+            m["values"] = [how(v) for v in m["values"]]
+    return cells
+
+
+def _f32(v: float) -> float:
+    import struct
+    return struct.unpack("f", struct.pack("f", v))[0]
+
+
+@pytest.mark.parametrize("how,spread", [(lambda v: round(v, 6), 1.5), (lambda v: round(v, 6), 0.06), (_f32, 0.02)],
+                         ids=["6 decimals", "6 decimals, narrow", "float32, narrow"])
+def test_a_log_scale_interval_with_rounded_values_is_still_judged_on_the_log_scale(how, spread):
+    [q] = _mult(tc.calibration(_rounded_to(_log_interval_cells(_Z, spread=spread), how), _proto(_DECL_NORMAL)))
+    assert not q.fault and q.gross == 0 and len(q.on_log) == 3
+    [q] = _mult(tc.calibration(_rounded_to(_log_interval_cells(1.6449, spread=spread), how), _proto(_DECL_NORMAL)))
+    assert q.fault and len(q.on_log) == 3
+
+
+def test_a_trial_without_an_estimate_does_not_move_a_log_setting_to_the_own_scale():
+    cells = _log_interval_cells(_Z, n_settings=1, spread=3.0)
+    m = cells[0]["metrics"]
+    m["x_hat"]["values"] = m["x_hat"]["values"][5:]
+    m["x_hat"]["trials"] = m["x_hat"]["trials"][5:]  # the first five trials give no estimate
+    [q] = _mult(tc.calibration(cells, _proto(_DECL_NORMAL)))
+    assert not q.fault and len(q.on_log) == 1 and q.settings[0].n == 55
+
+
+def test_a_standard_error_of_the_log_reported_directly_is_a_fault():
+    cells = _log_interval_cells(_Z, spread=1.0)
+    for c in cells:
+        m = c["metrics"]
+        m["x_se"]["values"] = [se / e for se, e in zip(m["x_se"]["values"], m["x_hat"]["values"])]
+    [q] = _mult(tc.calibration(cells, _proto(_DECL_NORMAL)))
+    assert q.fault
+
+
+def test_a_non_positive_estimate_or_bound_is_never_read_on_the_log_scale():
+    cells = _log_interval_cells(_Z, n_settings=1, spread=1.0)
+    cells[0]["metrics"]["x_lo"]["values"][3] = -0.5
+    [q] = _mult(tc.calibration(cells, _proto(_DECL_NORMAL)))
+    assert q.fault and not q.on_log
+    cells = _log_interval_cells(_Z, n_settings=1, spread=1.0)
+    cells[0]["metrics"]["x_hat"]["values"][3] = -1.0
+    [q] = _mult(tc.calibration(cells, _proto(_DECL_NORMAL)))
+    assert q.fault and not q.on_log
+
+
+def test_the_repair_message_names_the_log_scale_it_judged_on():
+    v = tc.judge(_log_interval_cells(1.6449), _proto(_DECL_NORMAL), None, None, repairs_left=True)
+    assert v.action == tc.REPAIR and "symmetric on the log scale" in v.directive
+    assert "do not make it symmetric on the estimate's own scale" in v.directive
+
+
 def test_a_half_width_that_is_not_a_multiple_of_the_standard_error_is_a_fault():
     # the half-width comes from one spread for every trial, not from each trial's own standard error
     cells = _interval_cells(3.1824463)

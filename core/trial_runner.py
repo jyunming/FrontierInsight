@@ -2184,6 +2184,9 @@ class TrialsRunner:
             for f in stated:
                 self.log.info("[execute] %s (recorded; the paper states it)", f.says())
             for q in verdict.calibration.quantities:
+                if q.on_log:
+                    self.log.info("[execute] the intervals of %s are symmetric on the log scale; FI judged their multiplier there",
+                                  q.label)
                 if not q.fault and q.below:
                     self.log.info("[execute] %s; below the level in %d setting(s): reported, not a fault", q.says(), q.below)
             if not verdict.calibration.checked:
