@@ -33,6 +33,10 @@ ASSERTION = "assertion"
 PLAN_PROBLEM = "plan problem"
 GAVE_UP = "not repaired"
 GONE = "no longer flagged"
+#: A finding whose place lies in lines FI wrote (its frame, a file FI writes whole): it is about FI, not the study's code.
+ABOUT_FI = "about FI's own lines"
+#: The "function" of a finding whose place is in FI's own lines (it enters the finding's id).
+FI_PLACE = "<FI's lines>"
 #: Outcomes from which nothing more is tried.
 FINAL = (FIXED, NOT_DEMONSTRATED, PLAN_PROBLEM, GAVE_UP, GONE)
 
@@ -170,7 +174,8 @@ def index_problems(problems: list[dict[str, Any]], code_dir: Path) -> None:
     for v in problems:
         rel = code.resolve(str(v.get("file") or ""))
         line = v.get("line") if isinstance(v.get("line"), int) else None
-        function = code.function_at(rel, line)
+        # A place in FI's own lines is never the same issue as one in the study's function of that file.
+        function = FI_PLACE if in_fi_lines(code_dir, v.get("file"), line) else code.function_at(rel, line)
         qs = quantities(v)
         if not qs and str(v.get("kind")) == "logic":
             qs = [code.anchor_at(rel, line)]
@@ -189,6 +194,118 @@ def index_problems(problems: list[dict[str, Any]], code_dir: Path) -> None:
         v.setdefault("file_rel", rel)
         v.setdefault("function", function)
         v.setdefault("quantities", qs)
+
+
+# --- findings about FI's own lines -----------------------------------------------------------------------------------------
+
+
+def _line_spans(source: str) -> list[tuple[int, int]]:
+    """The ``(first line, last line)`` of every part of one file that FI wrote and the study's model may not change: the
+    frame of ``derive.py``, the two parts of the frame of ``simulate.py`` and the block of the plan's numbers."""
+    from . import analysis_frame as _analysis
+    from . import function_steps as _steps
+    from . import skeleton as _skeleton
+
+    chars: list[tuple[int, int]] = []
+    span = _analysis._frame_span(source)
+    if span is not None:
+        chars.append(span)
+    for part in _skeleton._spans(source) or []:
+        chars.append((part[0], part[2]))
+    chars += [(m.start(), m.end()) for m in _steps._PLAN_BLOCK_RE.finditer(source)]
+    return [(source.count("\n", 0, a) + 1, source.count("\n", 0, max(a, b - 1)) + 1) for a, b in chars]
+
+
+def _fi_whole_file(code_dir: Path, rel: str, text: str) -> bool:
+    """Whether the file ``rel`` is one FI writes whole (it holds FI's own text, so a module of the study's with the same
+    name is not): the analysis, its runtime and helpers, the runner and the search."""
+    from . import analysis_frame as _analysis
+    from . import optimise_search as _search
+    from . import skeleton as _skeleton
+
+    name = Path(rel).name
+    if rel == _analysis.EXPERIMENT_FILE:
+        return _analysis.is_fis(text)
+    if _analysis.analysis_file(code_dir, rel):
+        return rel != _analysis.DERIVE_FILE  # derive.py holds the study's functions too: only its frame is FI's
+    if rel == _skeleton.RUNTIME_FILE:
+        return text.startswith("\"\"\"FI's frame of simulate.py")
+    if rel == _skeleton.TABLE_FILE:
+        return text.lstrip("\ufeff") == _skeleton.TABLE_SOURCE
+    if rel == _skeleton.FIGURE_CALLS_FILE:
+        return text.lstrip("\ufeff") == _skeleton.FRAME_FIGURE_SOURCE
+    if rel == "run.py":
+        return "Written by Frontier Insight" in text[:300]
+    if rel == "fi_search.py":
+        try:
+            return text == Path(_search.__file__).read_text(encoding="utf-8")
+        except OSError:
+            return False
+    return name == "trial_harness.py"  # FI's harness of the trials (.fi/trial_harness.py): by its name, it is never in code/
+
+
+def in_fi_lines(code_dir: Path, file: Any, line: Any) -> bool:
+    """Whether the place a finding names (a file and a line) lies in lines FI wrote, by position. ``False`` whenever the
+    place cannot be resolved (no such file, several files of that name, no line, a line outside the file): a finding is
+    then handled as one about the study's code, as before."""
+    name = str(file or "").replace("\\", "/").strip()
+    if not name:
+        return False
+    base = Path(code_dir)
+    candidates = [name] if (base / name).is_file() else sorted(
+        p.relative_to(base).as_posix() for p in base.rglob(Path(name).name)
+        if p.is_file() and "__pycache__" not in p.parts) if base.is_dir() else []
+    if not candidates and Path(name).name == "trial_harness.py":
+        return True
+    if len(candidates) != 1:
+        return False
+    rel = candidates[0]
+    try:
+        text = (base / rel).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    try:
+        if _fi_whole_file(base, rel, text):
+            return True
+        if not isinstance(line, int) or isinstance(line, bool) or line < 1 or line > text.count("\n") + 1:
+            return False
+        return any(a <= line <= b for a, b in _line_spans(text))
+    except Exception:  # noqa: BLE001 - a place that cannot be judged is the study's, as before
+        return False
+
+
+_PLACE = re.compile(r"([\w./\-]+\.py)(?:\s*[:,]?\s*(?:lines?\s*)?(\d+))?", re.I)
+
+
+def set_aside_own(record: dict[str, Any], code_dir: Path) -> list[str]:
+    """Take the findings about FI's own lines out of the study's handling, by the place each names: an issue is marked
+    (``fi_own``, outcome :data:`ABOUT_FI`) and no longer open (:func:`open_issues`), and its findings leave the record's
+    ``problems`` and ``read_problems`` that the repairs, the gate and the paper's notes read. Recorded once in
+    ``record["about_fi"]`` so FI can be fixed. Only ever sets the mark; running it again changes nothing. Returns the ids
+    newly set aside."""
+    new: list[str] = []
+    for fid, issue in issues_of(record).items():
+        if not isinstance(issue, dict) or issue.get("fi_own"):
+            continue
+        match = _PLACE.search(str(issue.get("where") or ""))
+        file = match.group(1) if match else issue.get("file")
+        line = int(match.group(2)) if match and match.group(2) else None
+        if in_fi_lines(code_dir, file, line):
+            issue.update(fi_own=True, outcome=ABOUT_FI,
+                         reason="the place it names is in lines FI wrote, not in the study's code")
+            new.append(str(fid))
+    fi_ids = {str(i) for i, v in issues_of(record).items() if isinstance(v, dict) and v.get("fi_own")}
+    for key in ("problems", "read_problems"):
+        if isinstance(record.get(key), list):
+            record[key][:] = [v for v in record[key] if not (isinstance(v, dict) and str(v.get("fid")) in fi_ids)]
+    if new:
+        seen = [x for x in record.get("about_fi") or [] if isinstance(x, dict)]
+        for fid in new:
+            issue = issues_of(record)[fid]
+            seen.append({"id": fid, "where": str(issue.get("where") or issue.get("file") or ""),
+                         "text": " ".join(str(issue.get("text") or "").split())[:300]})
+        record["about_fi"] = seen
+    return new
 
 
 # --- the history of an issue ---------------------------------------------------------------------------------------------
@@ -284,8 +401,9 @@ def _open_now(issue: dict[str, Any]) -> bool:
 
 
 def open_issues(record: dict[str, Any]) -> list[dict[str, Any]]:
-    """The issues the latest reading flags."""
-    return [i for i in issues_of(record).values() if isinstance(i, dict) and _open_now(i)]
+    """The issues the latest reading flags in the study's own code. One about FI's own lines (:func:`set_aside_own`) is
+    never among them: it is not repaired, takes no result out and stops nothing."""
+    return [i for i in issues_of(record).values() if isinstance(i, dict) and _open_now(i) and not i.get("fi_own")]
 
 
 def rank_key(issue: dict[str, Any]) -> tuple[Any, ...]:

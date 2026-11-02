@@ -13870,7 +13870,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         record["problems"] = [*_code_review.problems(verdicts), *logic]
         record["read_problems"] = list(record["problems"])  # carried: a later reading that fails does not lose the flags
         record.pop("final", None)  # this reading's findings replace the carried ones, and may be repaired
+        aside_before = {str(x.get("id")) for x in record.get("about_fi") or [] if isinstance(x, dict)}
         _code_review.note_reading(record, version, record["problems"], code)
+        self._log_about_fi(record, aside_before)
         self._log.info("[code_review] %s; %s", _code_review.plain_lines(record), _code_review.metrics_line(record))
         if not record["problems"]:
             record["final"] = True
@@ -13878,6 +13880,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return False
         _code_review.save(self.quest_root, record)
         return True
+
+    def _log_about_fi(self, record: dict[str, Any], before: set[str]) -> None:
+        """One line in run.log for each finding of the code reader that names FI's own lines (not the study's code): it is
+        kept in the quality report so FI can be fixed, and it is not repaired and stops nothing."""
+        for row in record.get("about_fi") or []:
+            if isinstance(row, dict) and str(row.get("id")) not in before:
+                self._log.warning("[code_review] %s is about FI's own lines (%s), not the study's code: it is not repaired, "
+                                  "takes no result out and stops nothing; it is kept in QUALITY.md so FI can be fixed (%s)",
+                                  row.get("id"), row.get("where") or "?", _one_line(str(row.get("text") or ""), 160))
 
     async def _ask_reader(self, prompt: str, review_node: str, spend: Callable[[], None] | None = None) -> str:
         """One request to the reader; a request that failed is made once more (a reading that fails twice is recorded as
@@ -22620,6 +22631,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                  if isinstance(i, dict) and any([i.pop("at_gate", None), i.pop("gate_error", None)])]
         if stale:
             _code_review.save(self.quest_root, record)
+        aside_before = {str(x.get("id")) for x in record.get("about_fi") or [] if isinstance(x, dict)}
+        if _code_findings.set_aside_own(record, self.quest_root / "code"):  # a finding about FI's own lines stops nothing
+            _code_review.save(self.quest_root, record)
+        self._log_about_fi(record, aside_before)
         shown = _code_findings.shown_open(record)
         if not shown:
             return None
