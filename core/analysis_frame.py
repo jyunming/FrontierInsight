@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import ast
 import itertools
+import math
 import pprint
 import re
 from collections import Counter
@@ -197,8 +198,25 @@ def body_names(plan: dict[str, Any]) -> list[str]:
 
 
 # ---- derive.py -------------------------------------------------------------------------------------------------------------
+class _NonFinite(float):
+    """An infinite or missing number, written into derive.py as ``float('inf')`` (``inf`` alone is a name Python does not know)."""
+
+    def __repr__(self) -> str:
+        return f"float({str(float(self))!r})"
+
+
+def _writable(value: Any) -> Any:
+    if isinstance(value, float) and not math.isfinite(value):
+        return _NonFinite(value)
+    if isinstance(value, dict):
+        return {k: _writable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(_writable(v) for v in value)
+    return value
+
+
 def _literal(value: Any) -> str:
-    return pprint.pformat(value, width=118, sort_dicts=False)
+    return pprint.pformat(_writable(value), width=118, sort_dicts=False)
 
 
 def _frame_text(plan: dict[str, Any]) -> str:
@@ -810,6 +828,7 @@ EXPERIMENT = '''"""The analysis of this study. Written by FI and never edited: i
 declares (from the plan's formulas, or from the study's own functions in derive.py), keeps the numbers in
 data/results/derived.json and prints RESULT_JSON last."""
 # FI analysis, version @VERSION@
+import ast
 import json
 import math
 import numbers
@@ -830,23 +849,55 @@ if __name__ == "__main__":
 
 
 
+_UNREAD = []  # the constants of the frame FI could not read back from its own text: the module's value is used for them, and it is said
+_PLAIN = {"RESULTS": "the results", "ROLES": "the roles of the results", "KINDS": "the kinds of the results",
+          "AFTERWARDS": "the results worked out afterwards", "PAIRED": "the paired results", "DERIVED": "the derived results",
+          "REFERENCES": "the references", "HELD": "the settings held", "FIXED": "the fixed numbers",
+          "COMPARED": "what each run compares", "PARTS": "the sub-studies", "KNOWN": "the known values", "FIGURES": "the figures",
+          "SEARCH": "the search setting", "ANALYSIS_VERSION": "the version of the analysis"}
+
+
+class _Numbers(ast.NodeTransformer):
+    """FI writes an infinite or a missing number as ``float('inf')``, ``float('-inf')`` or ``float('nan')``: read them as the
+    numbers, and no other call."""
+
+    def visit_Call(self, node):
+        if (isinstance(node.func, ast.Name) and node.func.id == "float" and len(node.args) == 1 and not node.keywords
+                and isinstance(node.args[0], ast.Constant) and node.args[0].value in ("inf", "-inf", "nan")):
+            return ast.copy_location(ast.Constant(float(node.args[0].value)), node)
+        return node
+
+
 def _frame_as_written():
     """What FI wrote in the frame of derive.py, read from the text of the file before the study's code is imported: each constant
     of the marked part, as a literal. The analysis reads the plan from here and never from the module (a function of the study's
-    can change a dict of the module when it is imported or called)."""
-    import ast
+    can change a dict of the module when it is imported or called). A constant that cannot be read is left out and named in
+    ``_UNREAD``: its value is then the module's."""
     try:
         with open(os.path.join(HERE, "derive.py"), encoding="utf-8") as f:
             text = f.read()
         start = text.index("# >>> FI analysis frame")
         stop = text.index("# <<< FI analysis frame", start)
-        found = {}
-        for node in ast.parse(text[start:stop]).body:
-            if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)                     and node.targets[0].id.isupper():
-                found[node.targets[0].id] = ast.literal_eval(node.value)
-        return found
-    except (OSError, ValueError, SyntaxError):
+        body = ast.parse(text[start:stop]).body
+    except Exception as e:  # noqa: BLE001
+        _UNREAD.append("the whole plan (%s)" % type(e).__name__)
         return {}
+    found = {}
+    for node in body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)                 and node.targets[0].id.isupper():
+            try:
+                found[node.targets[0].id] = ast.literal_eval(_Numbers().visit(node.value))
+            except Exception:  # noqa: BLE001
+                _UNREAD.append(_PLAIN.get(node.targets[0].id, node.targets[0].id))
+    return found
+
+
+def _what_changed(was, now):
+    """``(added, removed, changed)`` keys, for a plan that is a dict, else empty."""
+    if not (isinstance(was, dict) and isinstance(now, dict)):
+        return [], [], []
+    return ([k for k in now if k not in was], [k for k in was if k not in now],
+            [k for k in was if k in now and now[k] != was[k]])
 
 
 _FRAME = _frame_as_written()
@@ -866,8 +917,17 @@ class _Plan:
         return getattr(derive, name)
 
     def changed(self):
-        """The constants of the frame the study's code changed in the module (FI used the value it wrote)."""
-        return [k for k, v in _FRAME.items() if getattr(derive, k, None) != v]
+        """One sentence for each constant of the frame the study's code changed in the module (FI used the value it wrote)."""
+        out = []
+        for k, v in _FRAME.items():
+            now = getattr(derive, k, None)
+            if now == v:
+                continue
+            parts = ["%s %s" % (word, ", ".join("`%s`" % x for x in ids))
+                     for word, ids in zip(("added", "removed", "changed"), _what_changed(v, now)) if ids]
+            out.append("the study's code changed %s FI wrote from the plan%s; FI used the plan's values"
+                       % (_PLAIN.get(k, k), " (%s)" % "; ".join(parts) if parts else ""))
+        return out
 
 
 PLAN = _Plan()
@@ -1610,8 +1670,10 @@ def run(record_path, quest_root):
     not_computed += [{"id": rid, "status": "no_data", "why": "no trial gave a value for it"}
                      for rid in PLAN.RESULTS if rid in out and out[rid] is None]
     faults = [r["why"] for r in records.values() if r.get("fi_fault")] + list(figure_faults)
-    for name in PLAN.changed():
-        notes.append("the study's code changed FI's frame value %s; FI used the value it wrote" % name)
+    if not only:  # the run that only draws the figures that failed carries the earlier run's notes
+        for name in _UNREAD:
+            notes.append("FI could not read back %s from the plan it wrote; the study's value was used" % name)
+        notes += PLAN.changed()
     _progress("fi: writing the results")
     kept_figures = _put_back(quest_root, {"figures": outcomes})
     document = {"schema": "fi.derived/v1", "derived": records, "not_computed": not_computed, "complete": not not_computed,

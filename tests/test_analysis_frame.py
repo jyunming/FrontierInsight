@@ -1055,11 +1055,65 @@ def test_a_study_that_changes_the_frames_dicts_does_not_change_what_fis_analysis
         assert printed == honest[1]
         assert record["derived"] == honest[2]["derived"] and record["figures"] == honest[2]["figures"]
         assert not any("inside its own lines" in line for line in err.splitlines())
-        said = [n for n in record["notes"] if "changed FI's frame value" in n]
+        said = [n for n in record["notes"] if "the study's code changed" in n]
         assert said, record["notes"]
-        assert any("REFERENCES" in n and "FI used the value it wrote" in n for n in said)
+        assert any("the references" in n and "FI used the plan's values" in n for n in said)
+        assert sum("the references" in n for n in record["notes"]) == 1  # said once, in plain words
+        assert not any("REFERENCES" in n for n in record["notes"])
 
 
 def test_a_study_that_leaves_the_frame_alone_says_nothing_about_it(tmp_path: Path) -> None:
     code, _printed, record, _err = _frame_study(tmp_path, False, False, "honest")
-    assert code == 0 and not [n for n in record["notes"] if "frame value" in n]
+    assert code == 0 and not [n for n in record["notes"] if "the study's code changed" in n or "could not read" in n]
+
+
+def test_the_note_names_the_ids_a_study_added_or_removed(tmp_path: Path) -> None:
+    design = _design([_derived("peak")])
+    bodies = """
+    DERIVED["extra"] = {"by": "derive_extra", "formula": None, "inputs": ["growth"], "role": "diagnostic"}
+    del DERIVED["peak"]
+    """
+    _code, _printed, record, _err = _run(_quest(tmp_path, design, bodies))
+    said = [n for n in record["notes"] if "the derived results" in n]
+    assert len(said) == 1 and "added `extra`" in said[0] and "removed `peak`" in said[0], record["notes"]
+
+
+def _frame_edit(quest: Path, old: str, new: str) -> None:
+    path = quest / "code" / "derive.py"
+    text = path.read_text(encoding="utf-8")
+    assert old in text
+    path.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+
+def test_an_infinite_or_missing_number_in_the_frame_is_read_back_and_stays_protected(tmp_path: Path) -> None:
+    quest = _quest(tmp_path, _design([_derived("peak")]), _PEAK.format(mutate='FIXED["big"] = 1.0; KNOWN["growth"] = (0, 0)'))
+    _frame_edit(quest, "\nFIXED = {", "\nFIXED = {'big': float('inf'), 'small': float('-inf'), 'none': float('nan'), ")
+    _frame_edit(quest, "\nKNOWN = {", "\nKNOWN = {'growth': (float('-inf'), float('nan')), ")
+    code, _printed, record, err = _run(quest)
+    assert code == 0 and "inside its own lines" not in err, err
+    assert not any("could not read" in n for n in record["notes"]), record["notes"]
+    said = [n for n in record["notes"] if "the study's code changed" in n]
+    assert any("the fixed numbers" in n for n in said) and any("the known values" in n for n in said), record["notes"]
+
+
+def test_a_constant_that_cannot_be_read_back_falls_back_for_that_name_only_and_says_so(tmp_path: Path) -> None:
+    quest = _quest(tmp_path, _design([_derived("peak")]), _MUTATE_AT_IMPORT + _PEAK.format(mutate="pass"))
+    _frame_edit(quest, "\nPARTS = ", "\nPARTS = dict(a=1)  # not a literal\n_UNUSED = ")
+    code, _printed, record, err = _run(quest)
+    assert "inside its own lines" not in err, err
+    assert any("could not read back the sub-studies" in n for n in record["notes"]), record["notes"]
+    assert any("the references" in n and "FI used the plan's values" in n for n in record["notes"])  # the others stay protected
+
+
+def test_a_frame_that_cannot_be_read_at_all_never_crashes_the_import(tmp_path: Path) -> None:
+    quest = _quest(tmp_path, _design([_derived("peak")]), _PEAK.format(mutate="pass"))
+    _frame_edit(quest, "# <<< FI analysis frame", "# the end marker is gone")
+    _code, _printed, _record, err = _run(quest)
+    assert "Traceback" not in err.split("FI's analysis")[0], err
+
+
+def test_the_frame_writer_writes_an_infinite_or_missing_number_as_python_can_read_it() -> None:
+    text = af._literal({"a": float("inf"), "b": [float("-inf"), float("nan")], "c": "inf", "d": 1.5})
+    got = eval(text, {"__builtins__": {"float": float}})
+    assert got["a"] == float("inf") and got["b"][0] == float("-inf") and got["b"][1] != got["b"][1]
+    assert got["c"] == "inf" and got["d"] == 1.5
