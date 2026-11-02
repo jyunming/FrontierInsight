@@ -413,7 +413,7 @@ same PR that adds, splits or renames one.
   `markdown` / `latex` (booktabs) / `csv_text` / `reference_section` / `reference_section_latex`, `writer_note`
   (trial table while it fits, else these tables, else a slice, else the file), `write` (`paper/results_by_setting.*`,
   `paper/reference_values.json`, and `PAPER_BLOCK` = `.fi/results_table.md` from `paper_block`: every row up to
-  `PAPER_MAX_ROWS`, else the slice, else the whole tables that fit, else one sentence naming the files; called in `Engine._write_whole_paper` beside
+  `PAPER_MAX_ROWS`, else the slice (a study run as sub-studies is sliced part by part: first, middle and last of the axes each part varies, a held axis shown as a dash), else the whole tables that fit, else one sentence naming the files; called in `Engine._write_whole_paper` beside
   `trial_table.write`), `keep_writer_note` (`WRITER_NOTE` = `.fi/writer_tables.md`, what the writer was given, kept at
   the write step) and `claim_note` (that note for `Engine._node_claim_check`'s evidence, or built again from the trial
   record for a paper written before it was kept), and
