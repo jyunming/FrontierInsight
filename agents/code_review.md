@@ -10,6 +10,8 @@ A research quest has written its plan and then generated the code that carries i
 
 Say "implemented" only after you found the line. Do not guess about code you were not shown.
 
+**The plan's frozen settings are its definition of those settings.** The `grid` and `in_each_run` sections hold the values the study runs at, and FI gives them to the code as they are. If the plan's prose (a metric's estimand, the method, an assumption) describes the same settings another way, for example as a derivation, a rounding or another number, the values in `grid` / `in_each_run` are what the plan defines: code that takes them as they are is **implemented**, not "different". Report such a disagreement once, as a finding with `plan_conflict` true (it is not a fault of the code). Code that does NOT use the frozen values as given (a value written into the code, another list, a rescaled one) is still "different", and so is any other departure from the plan, such as a different statistic.
+
 # What to judge about the logic
 
 Read the code against the plan for these, and put each fault you find under `findings`:
