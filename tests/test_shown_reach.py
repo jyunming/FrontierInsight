@@ -190,38 +190,84 @@ def test_a_value_fault_with_a_probe_for_an_absent_name_still_stops(tmp_path: Pat
     assert out and out["stuck_reason"] == "shown_fault_open"
 
 
-# ---- an assertion that fails only because the names it looks up are not returned ----------------------------------------------------
+# ---- an assertion that looks up names the trial never returned is judged by the values it reads --------------------------------------
 ABSENT_SRC = ("import simulate\n\n\ndef test_x():\n    r = simulate.trial({}, None)\n"
               "    got = r.get('est_a_signed_error', r.get('signed_error_est_a'))\n"
               "    assert got == r['est_a'] - 2.0, 'wrong'\n")
 
 
-def test_an_assertion_that_looks_a_value_up_only_under_names_the_trial_never_returns_shows_a_part_missing(tmp_path: Path) -> None:
-    out, record = _run(_engine(tmp_path), ABSENT_SRC, file="simulate.py", function="trial", quantity="signed_error_est_a", line=7)
-    assert out is None  # on the old gate: stopped, the test reads est_a
+def test_a_lookup_under_names_the_trial_never_returns_does_not_hide_the_value_the_assertion_reads(tmp_path: Path) -> None:
+    # Once such a test was a "part missing" because its lookups were absent; est_a, the main result, is read on the other side.
+    out, _ = _run(_engine(tmp_path), ABSENT_SRC, file="simulate.py", function="trial", quantity="signed_error_est_a", line=7)
+    assert _stops(out)
+
+
+def test_a_value_fault_next_to_an_absent_lookup_in_an_and_is_not_a_part_missing(tmp_path: Path) -> None:
+    src = TRIAL + "    assert r['est_a'] == 2.0 and r.get('zz_none') is not None\n"
+    out, _ = _run(_engine(tmp_path), src, file="simulate.py", function="trial", quantity="bias of est", line=6)
+    assert _stops(out)  # the quantity is the reader's words, not an id: the number is placed from the keys the test reads
+
+
+def test_an_absent_name_with_a_default_that_is_the_value_compared_is_not_a_part_missing(tmp_path: Path) -> None:
+    src = TRIAL + "    assert r['est_a'] == r.get('zz_truth', 2.0)\n"
+    out, _ = _run(_engine(tmp_path), src, file="simulate.py", function="trial", quantity="est_a_hat", line=6)
+    assert _stops(out)
+
+
+def test_a_name_only_the_absent_lookup_reads_is_a_part_not_done_when_nothing_else_is_read(tmp_path: Path) -> None:
+    src = TRIAL + "    assert r.get('zz_none') is not None\n"
+    out, record = _run(_engine(tmp_path), src, file="simulate.py", function="trial", quantity="zz_none")
+    assert out is None
     assert record["issues"]["F-1"]["at_gate"]["outcome"] == "not_computed"
 
 
-def test_the_same_assertion_without_the_failing_line_recorded_is_judged_by_the_names_it_reads(tmp_path: Path) -> None:
-    out, _ = _run(_engine(tmp_path), ABSENT_SRC, file="simulate.py", function="trial", quantity="est_a")
-    assert out and out["stuck_reason"] == "shown_fault_open"
+def test_a_presence_check_is_placed_by_the_keys_it_reads_whatever_the_reader_called_the_quantity(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    out, record = _run(engine, TRIAL + "    assert 'est_b' in r\n", file="simulate.py", function="trial", quantity="estimate b")
+    assert out is None
+    assert record["issues"]["F-1"]["at_gate"]["outcome"] == "left_out"  # on the earlier gate: "not computed", est_b stayed
+    assert "est_b" in _removed(engine)["removed_quantities"]
 
 
-def test_a_failing_assertion_on_a_returned_value_is_not_explained_by_absence(tmp_path: Path) -> None:
+def test_a_failing_assertion_on_a_returned_value_is_still_a_stop_next_to_an_absent_default(tmp_path: Path) -> None:
     src = ("import simulate\n\n\ndef test_x():\n    r = simulate.trial({}, None)\n    got = r.get('est_a_signed_error', 0.0)\n"
            "    assert r['est_a'] == 1.0, 'wrong'\n    assert got == 0.0\n")
     out, _ = _run(_engine(tmp_path), src, file="simulate.py", function="trial", quantity="est_a", line=7)
-    assert out and out["stuck_reason"] == "shown_fault_open"
+    assert _stops(out)
 
 
-def test_absence_is_read_from_the_names_in_the_record_of_the_trials() -> None:
-    absent = lambda pieces: pieces == ["gone"]  # noqa: E731
-    src = "def test_x():\n    r = trial()\n    got = r.get('gone', None)\n    assert got == 1.0\n"
-    assert shown_reach.explained_by_absence(src, 4, absent, {"trial"})
-    assert not shown_reach.explained_by_absence(src, 4, lambda pieces: False, {"trial"})
-    assert not shown_reach.explained_by_absence(src, 0, absent, {"trial"})
-    local = "def test_x():\n    r = {'a': 1}\n    got = r.get('gone', None)\n    assert got == 1.0\n"
-    assert not shown_reach.explained_by_absence(local, 4, absent, {"trial"})  # a dictionary the test built says nothing of a trial
+def test_a_derived_result_used_by_name_without_a_call_is_what_another_is_worked_out_from(tmp_path: Path) -> None:
+    for body in ("    f = derive_cover\n    return f(table) * 2\n", "    return {'c': derive_cover}['c'](table) * 2\n"):
+        files = {"derive.py": "def derive_cover(table):\n    return 1\n\n\ndef derive_corr_ab(table):\n" + body}
+        engine = _engine(tmp_path / str(abs(hash(body))))
+        out, _ = _run(engine, "import derive\n\n\ndef test_x():\n    assert derive.derive_cover(None) == 0.9, 'wrong'\n",
+                      quantity="cover", files=files)
+        assert out is None
+        assert set(_removed(engine)["removed_quantities"]) == {"corr_ab", "cover"}  # on the earlier gate: corr_ab stayed
+
+
+def test_a_figure_function_passed_on_or_aliased_is_still_used_by_the_result(tmp_path: Path) -> None:
+    for body in ("    g = figure_fig1\n    return g(None, table)\n", "    return apply(figure_fig1, table)\n"):
+        files = {"derive.py": "def figure_fig1(fig, table):\n    return 3\n\n\ndef derive_cover(table):\n" + body}
+        engine = _engine(tmp_path / str(abs(hash(body))))
+        out, _ = _run(engine, "import derive\n\n\ndef test_x():\n    assert derive.figure_fig1(None, None) == 1, 'wrong'\n",
+                      quantity="fig1", files=files)
+        assert out is None
+        assert "cover" in _removed(engine)["removed_quantities"]
+
+
+def test_a_function_the_study_defines_is_never_a_plain_call_whatever_its_name(tmp_path: Path) -> None:
+    files = {"model.py": FILES["model.py"] + "\n\ndef count(x):\n    return x\n",
+             "simulate.py": "import model\n\n\ndef trial(cell, ctx):\n    return {'est_a': model.count(1), 'est_b': 2.0}\n"}
+    src = "import derive\nfrom model import count\n\n\ndef test_x():\n    assert count(derive.ROLES['cover']) == 2, 'wrong'\n"
+    out, _ = _run(_engine(tmp_path), src, file="model.py", function="count", quantity="est_a", files=files)
+    assert _stops(out)  # on the earlier gate: kept in the quality report, as only about the plan
+
+
+def test_eval_is_not_a_plain_call(tmp_path: Path) -> None:
+    src = "import derive\nfrom model import helper_for_trial\n\n\ndef test_x():\n    assert eval(derive.ROLES['cover']) == 2, 'wrong'\n"
+    out, record = _run(_engine(tmp_path), src, file="model.py", function="helper_for_trial", quantity="est_a")
+    assert "about_plan_text" not in record["issues"]["F-1"]
 
 
 # ---- a helper ----------------------------------------------------------------------------------------------------------------------

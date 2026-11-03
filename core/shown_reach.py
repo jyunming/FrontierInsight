@@ -28,7 +28,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from . import code_review as _code_review
 
@@ -51,7 +51,7 @@ class Effect:
     cannot: bool = False  # FI cannot tell what the code reaches: the records place nothing
 
 
-_BUILTIN_NAMES = frozenset(dir(builtins))
+_BUILTIN_NAMES = frozenset(dir(builtins)) - {"eval", "exec", "compile", "open", "__import__", "input", "breakpoint"}
 #: Methods of strings and mappings: a call to one is not a call into the study's own code.
 _PLAIN_METHODS = frozenset({"get", "items", "keys", "values", "join", "lower", "upper", "strip", "split", "format", "startswith",
                             "endswith", "count", "index", "append", "extend", "copy"})
@@ -177,119 +177,6 @@ def read_test(src: str) -> TestShape | None:
     return TestShape(calls, exact, prefix, structural, frame)
 
 
-def _line_of(issue: dict[str, Any]) -> int:
-    """The line of the assertion that failed, from the record of the test's run (``assertion_at``: ``file.py:LINE``)."""
-    m = re.search(r":(\d+)\s*$", str(issue.get("assertion_at") or ""))
-    return int(m.group(1)) if m else 0
-
-
-def explained_by_absence(src: str, line: int, absent: "Callable[[list[str]], bool]",
-                         entries: "frozenset[str] | set[str]" = frozenset()) -> bool:
-    """Whether the assertion at ``line`` of a test fails only because the test looks a value up under names the trial never
-    returned (``absent(pieces)``: no name FI's record of the trials holds is those pieces in that order with anything between them): one side of a comparison (or the thing it counts
-    ``all``/``any`` over, or the bare thing it asserts) is built only from such lookups, so it holds the lookup's default or
-    nothing whatever the code computed. Such an assertion shows something missing, not a wrong number. ``False`` whenever
-    the line is not found or the assertion also reads a name the trial does return. Only a lookup on what a trial entry
-    (``entries``: the functions that return a trial's results) returned counts: a name looked up in a dictionary the test built
-    itself says nothing about the trial."""
-    try:
-        tree = ast.parse(src)
-    except (SyntaxError, ValueError):
-        return False
-    target = next((n for n in ast.walk(tree) if isinstance(n, ast.Assert) and n.lineno <= line <= (n.end_lineno or n.lineno)), None)
-    if target is None or not line:
-        return False
-    # What a name held when the assertion ran: its last assignment above the assertion and what was appended to it since.
-    events: dict[str, list[tuple[int, bool, ast.AST]]] = {}
-    for n in ast.walk(tree):
-        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and n.lineno < target.lineno:
-            events.setdefault(n.targets[0].id, []).append((n.lineno, False, n.value))
-        elif (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in ("append", "extend")
-              and isinstance(n.func.value, ast.Name) and n.args and n.lineno < target.lineno):
-            events.setdefault(n.func.value.id, []).append((n.lineno, True, n.args[0]))
-    env: dict[str, list[ast.AST]] = {}
-    for name, ev in events.items():
-        ev.sort(key=lambda t: t[0])
-        last = max((i for i, t in enumerate(ev) if not t[1]), default=-1)
-        env[name] = [t[2] for t in ev[last:]] if last >= 0 else []
-
-    def bound(e: ast.AST, depth: int = 0) -> bool:
-        """Whether ``e`` holds what a trial entry returned (directly, or through the names and lookups the test made of it)."""
-        if depth > 6:
-            return False
-        if isinstance(e, ast.Await):
-            return bound(e.value, depth + 1)
-        if isinstance(e, ast.Call):
-            return _call_name(e) in entries or (isinstance(e.func, ast.Attribute) and bound(e.func.value, depth + 1))
-        if isinstance(e, (ast.Subscript, ast.Attribute)):
-            return bound(e.value, depth + 1)
-        if isinstance(e, ast.Name):
-            return bool(env.get(e.id)) and all(bound(v, depth + 1) for v in env[e.id])
-        return False
-
-    def lookup_base(e: ast.AST) -> ast.AST | None:
-        if isinstance(e, ast.Call) and isinstance(e.func, ast.Attribute) and e.func.attr == "get" and e.args:
-            return e.func.value
-        if isinstance(e, ast.Subscript):
-            return e.value
-        return None
-
-    def key_absent(k: ast.AST) -> bool | None:
-        if isinstance(k, ast.Constant) and isinstance(k.value, str):
-            return absent([_norm(k.value)])
-        if isinstance(k, ast.JoinedStr):
-            pieces, cur = [], ""
-            for v in k.values:
-                if isinstance(v, ast.Constant):
-                    cur += _norm(v.value)
-                else:
-                    pieces.append(cur)
-                    cur = ""
-            pieces.append(cur)
-            return absent(pieces) if any(pieces) else None
-        return None
-
-    def only_absent(e: ast.AST, depth: int = 0) -> bool:
-        """The value of ``e`` is a lookup under absent names (or a list/tuple/comprehension of them)."""
-        if depth > 6:
-            return False
-        if isinstance(e, ast.Call) and isinstance(e.func, ast.Attribute) and e.func.attr == "get" and e.args:
-            if key_absent(e.args[0]) is not True or not bound(e.func.value):
-                return False
-            return only_absent(e.args[1], depth + 1) if len(e.args) > 1 and isinstance(e.args[1], (ast.Call, ast.Subscript)) else True
-        if isinstance(e, ast.Subscript):
-            return key_absent(e.slice) is True and bound(e.value)
-        if isinstance(e, (ast.List, ast.Tuple, ast.Set)):
-            return bool(e.elts) and all(only_absent(x, depth + 1) for x in e.elts)
-        if isinstance(e, (ast.ListComp, ast.GeneratorExp)) and len(e.generators) == 1:
-            gen = e.generators[0]
-            keys = gen.iter.elts if isinstance(gen.iter, (ast.Tuple, ast.List)) else []
-            base = lookup_base(e.elt)
-            if keys and isinstance(gen.target, ast.Name) and all(key_absent(k) is True for k in keys) and base is not None and bound(base):
-                return True  # the names it looks up, one by one, are all absent: the comprehension is empty or of defaults
-            return only_absent(e.elt, depth + 1)
-        if isinstance(e, ast.Name):
-            return bool(env.get(e.id)) and all(only_absent(v, depth + 1) for v in env[e.id])
-        return False
-
-    def explained(e: ast.AST, depth: int = 0) -> bool:
-        if depth > 6:
-            return False
-        if isinstance(e, ast.Compare):
-            return any(only_absent(x) for x in [e.left, *e.comparators])
-        if isinstance(e, ast.BoolOp):
-            parts = [explained(v, depth + 1) or only_absent(v) for v in e.values]
-            return any(parts) if isinstance(e.op, ast.And) else all(parts)
-        if isinstance(e, ast.Call) and _call_name(e) in ("all", "any") and len(e.args) == 1:
-            arg = e.args[0]
-            if isinstance(arg, (ast.GeneratorExp, ast.ListComp)) and len(arg.generators) == 1:
-                return only_absent(arg.generators[0].iter) or explained(arg.elt, depth + 1)
-            return only_absent(arg)
-        return only_absent(e)
-
-    return explained(target.test)
-
-
 # ---- the records ------------------------------------------------------------------------------------------------------------
 def _read_json(path: Path) -> Any:
     try:
@@ -341,16 +228,29 @@ def _strings_of(fn: ast.AST) -> tuple[set[str], set[str]]:
     return exact, prefix
 
 
+def _used_name(node: ast.AST) -> str:
+    """The name of a function a node uses: called (``f(x)``, ``m.f(x)``), or only mentioned (``g = f``, ``{"k": f}``, ``h(f)``,
+    ``from m import f as g``); ``""`` for any other node."""
+    if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+        return node.id
+    if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
+        return node.attr
+    if isinstance(node, ast.alias):
+        return node.name
+    return ""
+
+
 def _called_from(fns: dict[str, ast.AST], start: str) -> set[str]:
-    """The names called by function ``start`` and by the functions of the same file it calls, in turn."""
+    """The names used by function ``start`` and by the functions of the same file it uses, in turn."""
     seen, todo, called = {start}, [start], set()
     while todo:
         for n in ast.walk(fns[todo.pop()]):
-            if isinstance(n, ast.Call):
-                called.add(_call_name(n))
-                if _call_name(n) in fns and _call_name(n) not in seen:
-                    seen.add(_call_name(n))
-                    todo.append(_call_name(n))
+            used = _used_name(n)
+            if used:
+                called.add(used)
+                if used in fns and used not in seen:
+                    seen.add(used)
+                    todo.append(used)
     return called
 
 
@@ -439,11 +339,12 @@ class Reach:
                 self.unreadable.add(i)
                 continue
             scope, todo = [fn], [fn]
-            while todo:  # the functions of this file it calls, and those they call
+            while todo:  # the functions of this file it uses, and those they use
                 for n in ast.walk(todo.pop()):
-                    if isinstance(n, ast.Call) and _call_name(n) in fns and fns[_call_name(n)] not in scope:
-                        scope.append(fns[_call_name(n)])
-                        todo.append(fns[_call_name(n)])
+                    used = _used_name(n)
+                    if used in fns and fns[used] not in scope:
+                        scope.append(fns[used])
+                        todo.append(fns[used])
             exact: set[str] = set()
             prefix: set[str] = set()
             called: set[str] = set()
@@ -454,8 +355,8 @@ class Reach:
                 for n in ast.walk(f):
                     if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id in consts:
                         exact.add(consts[n.id])
-                    elif isinstance(n, ast.Call):
-                        called.add(_call_name(n))
+                    if _used_name(n).startswith(("derive_", "figure_")):
+                        called.add(_used_name(n))  # called, aliased, kept in a dict or passed on: it is used
             read = {self.by_norm[_norm(s)] for s in exact if _norm(s) in self.by_norm}
             read |= {j for p in prefix for j in self.ids if _norm(p) and _norm(j).startswith(_norm(p))}
             read |= {self.by_norm[_norm(c[len("derive_"):])] for c in called
@@ -531,24 +432,26 @@ class Reach:
             # number: what the test is about is left out (or stops the paper) when the run holds a value for it.
             named = [self.by_norm[_norm(x)] for x in derive_calls if _norm(x) in self.by_norm]
             names = named or _code_review.quantity_names(record, issue)[:1] or [str(issue.get("quantity") or "?")]
-            return self._settle(Effect(not_done=names, why="its test only checks that something is there"), record, issue)
+            # The results the test itself reads (not only the reader's name for the quantity) are what it shows missing.
+            read = self._test_ids(shape) | {self.by_norm[_norm(x)] for x in derive_calls if _norm(x) in self.by_norm}
+            held = {i for i in read if self._holds(i)}
+            if held:
+                eff = self._judge(Effect(incomplete=True), held, "its test only checks that something is there")
+            else:
+                eff = Effect(not_done=names, why="its test only checks that something is there")
+            return self._settle(eff, record, issue)
         parts: list[Effect | None] = []
         if derive_calls or figure_calls:
             parts.append(self._derive_effect(derive_calls, figure_calls))
             for f in figure_calls:  # a figure's function that a result's function (or a trial) calls is a helper of that result
                 parts.append(self._figure_used_by(f"figure_{f}"))
         if trial_call:
-            if (not (derive_calls or figure_calls) and self.returned
-                    and explained_by_absence(src, _line_of(issue), self._absent, entries)):
-                parts.append(Effect(not_done=_code_review.quantity_names(record, issue)[:1] or [str(issue.get("quantity") or "?")],
-                                    why="its failing assertion looks a value up only under names the trial never returns"))
-            else:
-                got = self._trial_effect(shape)
-                if got.probes and not got.stop:
-                    # Names the test looked for in what the trial returns and the plan does not declare: what is not done is the
-                    # plan's quantity the finding is about, not the probed names (they are not the plan's words).
-                    got.not_done = _code_review.quantity_names(record, issue)[:1] or got.probes[:1]
-                parts.append(got)
+            got = self._trial_effect(shape)
+            if got.probes and not got.stop:
+                # Names the test looked for in what the trial returns and the plan does not declare: what is not done is the
+                # plan's quantity the finding is about, not the probed names (they are not the plan's words).
+                got.not_done = _code_review.quantity_names(record, issue)[:1] or got.probes[:1]
+            parts.append(got)
         if not parts and shape.frame and self._plain(shape):
             # The frame is written by FI from the plan and a repair does not change it: a failing assertion about it says the
             # plan differs from what the reader wanted, never that a number the code computed is wrong.
@@ -583,7 +486,10 @@ class Reach:
     def _plain(self, shape: TestShape) -> bool:
         """Whether every call a test makes is a builtin, a plain string or mapping method, or reads a frame constant: no call
         into the study's own code."""
-        return all(c in _BUILTIN_NAMES or c in _PLAIN_METHODS for c in shape.calls)
+        defined = set(self.derive_fns)
+        for rel in self._study_files():
+            defined |= set(_function_names(self.code, rel))
+        return all((c in _BUILTIN_NAMES or c in _PLAIN_METHODS) and c not in defined for c in shape.calls)
 
     def _merge(self, parts: list[Effect]) -> Effect | None:
         """The union of what several parts of one test place (a stop in any is a stop); ``None`` when one cannot tell."""
@@ -631,11 +537,6 @@ class Reach:
             return self._judge(eff, touched, eff.why)
         return eff
 
-    def _absent(self, pieces: list[str]) -> bool:
-        """Whether the trial never returned a name made of ``pieces`` (normalised) in that order, anything between them."""
-        pattern = re.compile(".*".join(re.escape(p) for p in pieces))
-        return not any(pattern.fullmatch(r) for r in self.returned)
-
     def _trial_entries(self) -> list[str]:
         """The functions whose return is a trial's results (or the truth they are compared with)."""
         from . import code_reach as _reach
@@ -670,6 +571,32 @@ class Reach:
         return out
 
     # -- a test that calls the trial --------------------------------------------------------------------------------------
+    def _key_ids(self, name: str, prefix: bool) -> set[str]:
+        """The declared results a key a test reads stands for in what the trial returns: the result of that name, or the result
+        an interval end or a standard error belongs to (and, for those, every result of the trial: FI cannot tell which one
+        they feed)."""
+        n = _norm(name)
+        trial = self.trial_ids()
+        match = [i for i in self.ids if (_norm(i).startswith(n) if prefix else _norm(i) == n) and (i in trial or not self.returned)]
+        if match:
+            return set(match)
+        owned = {k: o for k, o in self.owner.items() if (k.startswith(n) if prefix else k == n)}
+        if not owned:
+            return set()
+        out = set(owned.values())
+        if any(k not in self.estimate for k in owned):
+            out |= trial
+        return out
+
+    def _test_ids(self, shape: TestShape) -> set[str]:
+        """The declared results the keys a test reads stand for."""
+        out: set[str] = set()
+        for name in shape.exact:
+            out |= self._key_ids(name, False) if _norm(name) else set()
+        for name in shape.prefix:
+            out |= self._key_ids(name, True) if _norm(name) else set()
+        return out
+
     def _trial_effect(self, shape: TestShape) -> Effect:
         out = Effect()
         touched: set[str] = set()
@@ -689,16 +616,9 @@ class Reach:
             n = _norm(name)
             if not n:
                 return
-            match = [i for i in self.ids if (_norm(i).startswith(n) if prefix else _norm(i) == n)]
-            match = [i for i in match if i in trial or not self.returned]
-            owners = {o for k, o in self.owner.items() if (k.startswith(n) if prefix else k == n)}
-            if match:
-                touched.update(match)
-            elif owners:
-                touched.update(owners)
-                if any(((k.startswith(n) if prefix else k == n) and k not in self.estimate) for k in self.owner):
-                    # an interval end or a standard error: FI cannot tell which of the trial's results it feeds
-                    touched.update(trial)
+            ids = self._key_ids(name, prefix)
+            if ids:
+                touched.update(ids)
             elif any((r.startswith(n) if prefix else r == n) for r in self.returned):
                 undeclared_returned(name, prefix)
             else:
