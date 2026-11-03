@@ -903,3 +903,23 @@ def test_drawn_places_reads_hold_level_and_x_from_the_record_only() -> None:
     assert list(places) == ["error"] and len(places["error"]) == 1, "a raw panel has no place"
     assert drawn_at(places["error"], {"load": 0.0, "size": 3.0}) and not drawn_at(places["error"], {"load": 1.0})
     assert drawn_at(places["error"], {"other_setting": 7}), "a setting the record does not speak of is not judged"
+
+
+def test_a_categorical_x_keeps_its_text_values_and_ignores_case(tmp_path) -> None:
+    from core.engine import _take_out_unpointed
+
+    panel = {**_panel(), "x": {"id": "method", "kind": "setting", "label": "method", "scale": "linear"},
+             "series": [{**_series("error", "e"), "x": ["alpha", "beta"]}]}
+    state = _quest(tmp_path, _record(panel))
+    ok = "It was <!-- fi:v {{v:error @ method=Beta}} -->1.1<!-- /fi:v --> (Figure 1).\n"
+    bad = "It was <!-- fi:v {{v:error @ method=gamma}} -->1.1<!-- /fi:v --> (Figure 1).\n"
+    assert _take_out_unpointed(ok, state, root=tmp_path) == (ok, [])
+    assert _take_out_unpointed(bad, state, root=tmp_path)[0] != bad
+
+
+def test_an_axis_with_no_readable_x_is_not_judged_and_a_rounded_setting_matches(tmp_path) -> None:
+    from core.figure_claims import drawn_at
+
+    assert drawn_at([{"fixed": {}, "x": ("size", [])}], {"size": 7})
+    assert drawn_at([{"fixed": {"load": 0.3333333}, "x": ("", [])}], {"load": 0.33333333})
+    assert not drawn_at([{"fixed": {"load": 0.3}, "x": ("", [])}], {"load": 0.31})

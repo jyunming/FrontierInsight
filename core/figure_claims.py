@@ -838,7 +838,8 @@ def drawn_places(calls: Any) -> dict[str, list[dict[str, Any]]]:
     setting the figure draws. A place is ``{"fixed": {setting: value}, "x": (setting, [drawn x])}``: ``fixed`` holds the
     settings its panel is held at (``hold``) and the level its curve is for (``level``); ``x`` the setting along the axis and
     the x values drawn. Series FI could not match with its table (``what: other``) and raw panels have no place. Read from
-    the record only, never from a legend or a caption."""
+    the record only, never from a legend or a caption. A categorical x keeps its text values. A series FI could not match
+    with its table (``what: other``) is not a place on purpose: it states no value."""
     out: dict[str, list[dict[str, Any]]] = {}
     for p in (calls or {}).get("panels") or []:
         if not isinstance(p, dict) or p.get("raw"):
@@ -854,7 +855,7 @@ def drawn_places(calls: Any) -> dict[str, list[dict[str, Any]]]:
                 here[str(level["setting"])] = level.get("value")
             place = {"fixed": here,
                      "x": (str(ax.get("id")) if ax.get("kind") == "setting" and ax.get("id") else "",
-                           [v for v in (s.get("x") or []) if _finite(v)])}
+                           [v for v in (s.get("x") or []) if v is not None and not (isinstance(v, float) and not math.isfinite(v))])}
             for w in str(s.get("what") or "").split(" / "):
                 if w.strip() and w.strip() != "other":
                     out.setdefault(w.strip(), []).append(place)
@@ -862,10 +863,14 @@ def drawn_places(calls: Any) -> dict[str, list[dict[str, Any]]]:
 
 
 def _same_setting(a: Any, b: Any) -> bool:
+    """Numbers agree to a relative 1e-6 (a value typed from a rounded print); any other value compares as text, ignoring
+    case and surrounding blanks, as :func:`core.paper_values._same` does."""
+    if all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (a, b)):
+        return math.isclose(a, b, rel_tol=1e-6, abs_tol=1e-12)
     try:
-        return math.isclose(float(a), float(b), rel_tol=1e-9, abs_tol=1e-12)
+        return math.isclose(float(a), float(b), rel_tol=1e-6, abs_tol=1e-12)
     except (TypeError, ValueError):
-        return str(a).strip() == str(b).strip()
+        return str(a).strip().lower() == str(b).strip().lower()
 
 
 def drawn_at(places: list[dict[str, Any]], where: dict[str, Any]) -> bool:
@@ -878,7 +883,7 @@ def drawn_at(places: list[dict[str, Any]], where: dict[str, Any]) -> bool:
         for axis, value in where.items():
             if axis in pl["fixed"]:
                 ok = _same_setting(pl["fixed"][axis], value)
-            elif axis == xid:
+            elif axis == xid and xs:  # no readable x values: that axis is not judged
                 ok = any(_same_setting(x, value) for x in xs)
             if not ok:
                 break
