@@ -1536,7 +1536,9 @@ _PLACEHOLDER = re.compile(r"\{\{[\s{]*(?!v:)([A-Za-z][^{}\n:]{0,59}?)\s*(?::\s*(
 #: ``{{figure:...}}`` as far as the first ``}}`` on its line, whatever is inside it: what is left of a figure mark after
 #: :data:`_PLACEHOLDER` has filled the ones it can read.
 _STRAY_FIGURE = re.compile(r"\{\{[\s{]*figure\s*:([^\n]*?)\}\}+", re.I)
-_MARK_TAIL = re.compile(r"(<!-- /fi:fact-figure-[\w-]+ -->)[^\n{}<]*\}\}+")
+#: The rest of a figure mark whose value held an unescaped ``}}``: text glued to the end of a filled or recorded mark (no space
+#: between them) up to the next ``}}``. Text after a space is the paper's own prose and is never touched.
+_MARK_TAIL = re.compile(r"(<!-- /fi:fact-figure-[\w-]+ -->)[^\s{}<][^\n{}<]*\}\}+")
 _STRAY_PARTS = re.compile(r"\s*([\w-]+)(?:\.\w+)?\s*:\s*([\w-]+)\s*(?:@(.*))?\Z", re.S)
 _MARK = re.compile(r"<!-- fi:fact-([\w-]+) -->(.*?)<!-- /fi:fact-\1 -->", re.S)
 _TAG = re.compile(r"<!-- /?fi:fact-[\w-]+ -->|<!-- fi:limitations-heading -->[ \t]*\n?")

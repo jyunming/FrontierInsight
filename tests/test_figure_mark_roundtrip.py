@@ -150,3 +150,11 @@ def test_no_brace_or_tail_of_a_mark_is_left_in_the_paper(tmp_path, mark):
     out, _ = pf.take_out_unfilled(pf.render(f"Before.\n\n{mark}\n\nAfter.", root).text, figures_only=True)
     shown = pf.without_marks(out)
     assert "}" not in shown and "{" not in shown and "panel=1" not in shown
+
+
+@pytest.mark.parametrize("prose", [" The set A}} is odd.", " The mean is 4.5}} units.", " Use `a}}` to close.", " | 4.5}} |"])
+def test_prose_after_a_figure_statement_is_never_removed(tmp_path, prose):
+    root = _quest(tmp_path, _calls())
+    mark = "{{figure:fig1:drawn @ series=signal@temp:20, panel=1}}"
+    out, _ = pf.take_out_unfilled(pf.render(f"Before.\n\n{mark}{prose}\n\nAfter.", root).text, figures_only=True)
+    assert prose.strip() in pf.without_marks(out)
