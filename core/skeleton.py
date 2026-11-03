@@ -535,6 +535,38 @@ class Table:
             out += got or []
         return self._gave(name, out)
 
+    def known(self):
+        """The ids of the results the plan gives a true value and an interval (``known_value``): the ones ``coverage`` and ``bias`` serve."""
+        return sorted(n for n, spec in self._known.items() if n in self.declared and isinstance(spec, dict) and len(spec.get("interval") or ()) == 2)
+
+    @_noting
+    def bias(self, name, key, **level):
+        """For a result the plan gives a true value (``known_value``): the mean of the finite values the trials of setting ``key`` gave,
+        minus the true value, counted by FI from its own record (0 when the estimate is centred on it). When a run compares a factor
+        inside it, give its value (``table.bias("id", key, factor="value")``). ``None`` where the record holds no such trials."""
+        import fi_table
+
+        self._check(name)
+        spec = self._known.get(name)
+        if not isinstance(spec, dict):
+            raise UnknownResult("`%s` is declared, but the plan gives it no true value, so it has no bias; the results with one are: %s"
+                                % (name, ", ".join(sorted(self._known)) or "(none)"))
+        self._one_key(key)
+        if level:
+            cells = [c for c in self._by_setting.get(key, []) if c.get("level") == level]
+        else:
+            cells = [self._cell(key)]
+        total, count = 0.0, 0
+        for c in cells:
+            truth = spec.get("truth", (c.get("cell") or {}).get(spec.get("axis")))
+            if not fi_table.finite(truth):
+                continue
+            for v in fi_table.values_of((c.get("metrics") or {}).get(name)):
+                total += v - truth
+                count += 1
+        self._gave(name, count)
+        return total / count if count else None
+
     def failed(self, key):
         """How many planned trials of setting ``key`` did not end well, as the record says; ``None`` if it does not."""
         got = self._cell(key).get("failed")
@@ -711,7 +743,9 @@ def table_reads(compared: dict[str, Any] | None = None, per_level: dict[str, lis
     if coverage:
         used = sorted({f for r in coverage for f in (per_level or {}).get(r, ())})
         lines.append("- `table.coverage(name, key%s)`: 1.0 or 0.0 for each trial whose reported interval holds the true value, for %s; "
-                     "the mean is the coverage." % ("".join(f", {f}=value" for f in used), ", ".join("`%s`" % r for r in coverage)))
+                     "the mean is the coverage. `table.bias(name, key%s)` is the mean of its values minus the true value. FI prints both for each of them, "
+                     "at every setting, as `<id>_coverage` and `<id>_bias`." % ("".join(f", {f}=value" for f in used), ", ".join("`%s`" % r for r in coverage),
+                                                                              "".join(f", {f}=value" for f in used)))
     return lines
 
 

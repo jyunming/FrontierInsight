@@ -499,7 +499,11 @@ runs on the table of FI's record and can change nothing in it:
 - The table gives, for a result `id` at a setting `key`: `table.mean(id, key)`, `table.interval(id, key)`, `table.n(id, key)`,
   `table.values(id, key)` (one number for each trial that ran), `table.failed(key)`, and, for a result the plan gives a true
   value and an interval, `table.coverage(id, key)` (1.0 for each trial whose interval holds the true value, else 0.0; the
-  interval's own ends are not results to read; give a factor compared inside each run as `table.coverage(id, key, factor="value")`); and `table.keys()`, `table.setting(key)`,
+  interval's own ends are not results to read; give a factor compared inside each run as `table.coverage(id, key, factor="value")`)
+  and `table.bias(id, key)` (the mean of its values minus the true value); `table.known()` lists the ids that have a true value. FI prints
+  the coverage and the bias of every such result itself, one for each parameter, as `<id>_coverage` and `<id>_bias`: a plan quantity
+  that is the coverage or the bias of those results is `table.coverage` or `table.bias` read for the result (return one number for a
+  setting, or a mapping of settings to numbers), never `NotYet`; and `table.keys()`, `table.setting(key)`,
   `table.at(**settings)` (a LIST of the keys of the settings that hold those values: pass one of them, `table.at(**settings)[0]`,
   to a read, never the list), `table.across(axis, **fixed)` (the values of one setting with their keys),
   `table.reference(id, key)` and, for a sub-study, `table.part(name)`. Name only ids the plan declares: any other id raises an error

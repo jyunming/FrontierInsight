@@ -1295,6 +1295,35 @@ def _read(path: Path) -> str:
         return ""
 
 
+def declared_block(root: Path) -> str:
+    """The names the plan declares, for the test writer: every result id with its role, the quantities derived from them, the
+    values a run compares inside it, and, for a result that carries a true value and an interval, the coverage and bias FI counts
+    from its own record of the trials. Read from the frozen plan under ``root``; ``(none stated)`` when it cannot be read."""
+    from . import contract as _contract
+
+    try:
+        data = json.loads((Path(root) / "needs" / "FROZEN_PROTOCOL.json").read_text(encoding="utf-8"))
+        protocol = data.get("protocol") if isinstance(data, dict) else None
+        if not isinstance(protocol, dict):
+            return "(none stated)"
+        c = _contract.from_design({"protocol": protocol})
+    except Exception:  # noqa: BLE001 -- a plan that cannot be read tells the writer nothing; the request is still made
+        return "(none stated)"
+    results = [f"`{r.id}` ({r.role})" for r in c.results]
+    derived = [f"`{d.id}`" for d in c.derived]
+    inside = [str(k) for k in (protocol.get("in_each_run") or {})] if isinstance(protocol.get("in_each_run"), dict) else []
+    known = [r.id for r in c.results if isinstance(r.known_value, dict) and r.known_value]
+    lines = ["Results: " + (", ".join(results) or "(none)")]
+    if derived:
+        lines.append("Worked out afterwards from them: " + ", ".join(derived))
+    if inside:
+        lines.append("Compared inside each run: " + ", ".join(f"`{i}`" for i in inside))
+    if known:
+        lines.append("FI counts from its own record, for each result that carries a true value, its coverage and its bias (the mean "
+                     "estimate minus the true value), as " + ", ".join(f"`{i}_coverage`, `{i}_bias`" for i in known) + ".")
+    return "\n".join(lines)
+
+
 def _test_prompt(env: Env, issue: dict[str, Any], rel: str, problem: str) -> str:
     source = _read(env.code / rel)
     scope = scope_function(issue, source)
@@ -1303,7 +1332,8 @@ def _test_prompt(env: Env, issue: dict[str, Any], rel: str, problem: str) -> str
         file=rel, code=(f"### {rel} (the function `{scope}`)\n```python\n{function_source(source, scope)}\n```\n\n"
                         f"The rest of {rel} offers:\n{signatures(source, scope)}" if scope else
                         f"### {rel}\n```python\n{source.rstrip()}\n```"),
-        modules=module_names(env.code, env.package), problem=problem or "(none: this is the first try)")
+        modules=module_names(env.code, env.package), declared=declared_block(env.root),
+        problem=problem or "(none: this is the first try)")
 
 
 def _error_problem(detail: str) -> str:
