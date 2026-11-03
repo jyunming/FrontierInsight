@@ -659,6 +659,9 @@ def _trial_checks_summary(q: _Quest) -> dict[str, Any] | None:
                  if disclosed else
                  ("not the multiplier the plan fixes (a fault)" if x.get("kind") == "multiplier" else "grossly wrong (a fault)")
                  if x.get("fault") else
+                 f"off in {_int(x.get('below'))} setting(s): the rows of the record may not belong together, so a statistic that pairs "
+                 "this estimate with another across trials is not presented as confirmed (not a repairable fault)"
+                 if _int(x.get("below")) and x.get("kind") == "inside" else
                  f"below the level in {_int(x.get('below'))} setting(s): reported, not a fault" if _int(x.get("below"))
                  else f"above the level in {_int(x.get('above'))} setting(s) (wider than need be): reported, not a fault"
                  if _int(x.get("above")) else "as it should be")

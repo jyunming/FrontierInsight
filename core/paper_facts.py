@@ -816,6 +816,12 @@ def _trial_check_items(root: Path, add: Any) -> None:
         elif q.get("kind") == "bias":
             said = (f"The estimates of {shown} lie off the true value in {n} of {of} settings, by more than chance "
                     "explains" + (f" (by {min(vals):+.2f} to {max(vals):+.2f} of their own spread)" if vals else ""))
+        elif q.get("kind") == "inside":
+            said = (f"The estimate {shown} lies inside the interval the same trial reported in fewer trials than it should in {n} of "
+                    f"{of} settings" + (f" (as few as {min(vals):.0%} of a setting's trials; 100% when the rows of the record belong "
+                                        "together)" if vals else "")
+                    + ", so its rows may not belong to the same trials; a correlation or any other statistic that pairs this "
+                    "estimate with another across trials is not presented as confirmed")
         elif q.get("kind") == "no_estimate":
             said = (f"{shown}, the estimate of a known true value, has no number in some trials at {n} settings"
                     + (f" (up to {max(vals):.0%} of a setting's trials)" if vals else ""))

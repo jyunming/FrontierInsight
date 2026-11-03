@@ -19,12 +19,12 @@ PROTOCOL = {
     "form": "contract", "grid": {"noise": [0.1, 0.2]}, "in_each_run": {"channel": [0, 1]}, "runs_per_setting": 20,
     "constants": {"truth_a": 2.0, "truth_b": 5.0},
     "metrics": [
-        {"id": "est_a", "kind": "mean", "role": "result", "returned": "each_run",
+        {"id": "est_a", "kind": "mean", "estimand": "the first quantity", "unit": "one trial", "role": "result", "returned": "each_run",
          "known_value": {"true_value": "truth_a", "estimate": "est_a", "standard_error": "se_a", "interval": ["lo_a", "hi_a"], "level": 0.95}},
-        {"id": "est_b", "kind": "mean", "role": "result", "returned": "each_run",
+        {"id": "est_b", "kind": "mean", "estimand": "the second quantity", "unit": "one trial", "role": "result", "returned": "each_run",
          "known_value": {"true_value": "truth_b", "estimate": "est_b", "standard_error": "se_b", "interval": ["lo_b", "hi_b"], "level": 0.95}},
-        {"id": "cover", "kind": "proportion", "role": "physical_bound", "returned": "afterwards"},
-        {"id": "corr_ab", "kind": "mean", "role": "result", "returned": "afterwards"}]}
+        {"id": "cover", "kind": "proportion", "estimand": "coverage", "unit": "one setting", "role": "physical_bound", "returned": "afterwards"},
+        {"id": "corr_ab", "kind": "mean", "estimand": "correlation", "unit": "one setting", "role": "result", "returned": "afterwards"}]}
 
 
 def _metric(values: list[float], trials: list[int] | None = None) -> dict[str, Any]:
@@ -35,7 +35,8 @@ def _cell(noise: float, est_a: list[float], est_b: list[float], width: float = 1
     cell = {"noise": noise}
     m = {"est_a": _metric(est_a, trials), "est_b": _metric(est_b, trials),
          "lo_a": _metric([v - width for v in est_a], trials), "hi_a": _metric([v + width for v in est_a], trials),
-         "lo_b": _metric([v - width for v in est_b], trials), "hi_b": _metric([v + width for v in est_b], trials)}
+         "lo_b": _metric([v - width for v in est_b], trials), "hi_b": _metric([v + width for v in est_b], trials),
+         "se_a": _metric([0.5] * len(est_a), trials), "se_b": _metric([0.5] * len(est_b), trials)}
     return {"cell": cell, "key": f"noise={noise}", "planned": len(est_a), "ok": len(est_a), "failed": 0, "metrics": m}
 
 
@@ -51,7 +52,10 @@ def _table(cells: list[dict[str, Any]], declared: tuple[str, ...] = ("est_a", "e
 
 def _root(tmp_path: Path) -> Path:
     (tmp_path / "needs").mkdir()
-    (tmp_path / "needs" / "FROZEN_PROTOCOL.json").write_text(json.dumps({"protocol": PROTOCOL}), encoding="utf-8")
+    from core import frozen_protocol
+
+    record = {"schema": frozen_protocol.FROZEN_SCHEMA, "protocol": PROTOCOL, "sha256": frozen_protocol.sha256(PROTOCOL)}
+    (tmp_path / "needs" / "FROZEN_PROTOCOL.json").write_text(json.dumps(record), encoding="utf-8")
     return tmp_path
 
 
@@ -149,3 +153,64 @@ def test_the_reads_are_declared_ids_only_and_the_writer_is_told_about_them() -> 
         assert word in rules, word
     reads = "\n".join(skeleton.table_reads())
     assert "table.paired(" in reads and "table.correlation(" in reads
+
+
+# ---- C: an estimate inside its own trial's interval -----------------------------------------------------------------------------------
+
+def _inside_protocol() -> dict[str, Any]:
+    return PROTOCOL
+
+
+def _trial_cells(shift: bool = False, n: int = 40) -> list[dict[str, Any]]:
+    cells = []
+    for noise in (0.1, 0.2):
+        a = [2.0 + 0.1 * ((i * 7) % 11 - 5) for i in range(n)]
+        b = [5.0 + 0.6 * ((i * 5) % 9 - 4) for i in range(n)]
+        cell = _cell(noise, a, b)
+        if shift:  # the estimates of trial t were written under trial t + 1; the intervals stay
+            v = cell["metrics"]["est_b"]["values"]
+            cell["metrics"]["est_b"]["values"] = v[1:] + v[:1]
+        cells.append(cell)
+    return cells
+
+
+def _calibration(cells: list[dict[str, Any]]) -> Any:
+    from core import trial_checks
+
+    return trial_checks.calibration(cells, PROTOCOL)
+
+
+def test_an_estimate_outside_its_own_interval_in_many_trials_is_reported_not_stopped() -> None:
+    from core import trial_checks
+
+    cal = _calibration(_trial_cells(shift=False))
+    assert not [q for q in cal.quantities if q.kind == "inside"], "rows that agree add nothing"
+    cal = _calibration(_trial_cells(shift=True))
+    inside = [q for q in cal.quantities if q.kind == "inside"]
+    assert [q.label for q in inside] == ["est_b"] and inside[0].below == 2 and inside[0].gross == 0
+    assert all(s.value < trial_checks.INSIDE_MIN for s in inside[0].settings)
+    assert not inside[0].fault, "a possible misplacement of rows is said, never a repair or a stop"
+    assert "inside the interval the same trial reported" in inside[0].says()
+    assert not any(q.kind == "inside" and q.label == "est_a" for q in cal.quantities)
+
+
+def test_the_paper_and_the_quality_report_say_the_statistic_is_not_confirmed(tmp_path: Path) -> None:
+    from core import paper_facts, quality_report, trial_checks
+
+    verdict = trial_checks.judge(_trial_cells(shift=True), PROTOCOL, None, repairs_left=True)
+    rec = verdict.record()
+    assert [q["kind"] for q in rec["calibration"]["quantities"] if q["kind"] == "inside"] == ["inside"]
+    inside = next(q for q in rec["calibration"]["quantities"] if q["kind"] == "inside")
+    assert inside["fault"] is False and inside["below"] == 2
+    root = _root(tmp_path)
+    trial_checks.write_record(root, rec)
+    items: list[tuple[str, str]] = []
+
+    def add(kind: str, name: str, text: str, key: str = "") -> None:
+        items.append((name, text))
+
+    paper_facts._trial_check_items(root, add)
+    said = [t for _n, t in items if "inside the interval the same trial reported" in t]
+    assert said and "not presented as confirmed" in said[0], items
+    lines = quality_report._trial_checks_summary(quality_report._Quest(root))["lines"]
+    assert any("inside the interval the same trial reported" in x and "not presented as confirmed" in x for x in lines), lines

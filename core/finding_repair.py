@@ -1300,11 +1300,11 @@ def declared_block(root: Path) -> str:
     values a run compares inside it, and, for a result that carries a true value and an interval, the coverage and bias FI counts
     from its own record of the trials. Read from the frozen plan under ``root``; ``(none stated)`` when it cannot be read."""
     from . import contract as _contract
+    from . import frozen_protocol as _frozen
 
     try:
-        data = json.loads((Path(root) / "needs" / "FROZEN_PROTOCOL.json").read_text(encoding="utf-8"))
-        protocol = data.get("protocol") if isinstance(data, dict) else None
-        if not isinstance(protocol, dict):
+        protocol = _frozen.protocol_of(Path(root))
+        if protocol is None:
             return "(none stated)"
         c = _contract.from_design({"protocol": protocol})
     except Exception:  # noqa: BLE001 -- a plan that cannot be read tells the writer nothing; the request is still made

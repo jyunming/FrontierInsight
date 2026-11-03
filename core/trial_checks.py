@@ -102,6 +102,11 @@ _GRAIN_EPS = 1e-12
 BIAS_GROSS = 1.0
 #: ... and reported (not a fault) beyond this many.
 BIAS_REPORTED = 0.5
+#: An estimate lies inside the interval its own trial reported (an interval is built around its estimate). Measured on 128 estimates
+#: of 515 recorded runs' settings: every one 1.000; one trial's estimates moved to the next trial: 0.825. Below this share of a
+#: setting's trials the rows of the record may not belong together, and a statistic that pairs this estimate with another across
+#: trials is not presented as confirmed.
+INSIDE_MIN = 0.9
 #: The reason FI's harness gives a trial its time limit cut off (core/trial_runner.OUT_OF_TIME).
 _OUT_OF_TIME = "the study's time (execution.timeout_s) ran out"
 #: Where FI keeps what the checks found on the last run of the trials (QUALITY.md and the paper's required items read it).
@@ -427,6 +432,11 @@ class Quantity:
             return (f"(mean of `{self.label}` - the true value) / the spread of the estimates: {rng} over {self.judged} "
                     f"setting(s){self._pool('+.2f')} (0 when the estimate is right); beyond {BIAS_GROSS:g} beyond sampling "
                     f"error in {self.gross}")
+        if self.kind == "inside":
+            vals = [s.value for s in self.settings]
+            return (f"the share of trials whose estimate `{self.label}` lies inside the interval the same trial reported: "
+                    f"{min(vals):.3f} to {max(vals):.3f} over {self.judged} setting(s) (1 when the rows of the record belong "
+                    f"together); below {INSIDE_MIN:g} in {self.below}")
         if self.kind == "no_estimate":
             vals = [s.value for s in self.settings]
             return (f"trials that ran but gave no number for `{self.label}`, the estimate of a declared true value: up to "
@@ -481,7 +491,7 @@ class Quantity:
                 + (" (grossly off beyond sampling error)" if p.gross else ""))
 
     def worst(self, n: int = 4) -> list[SettingCheck]:
-        if self.kind == "coverage":
+        if self.kind in ("coverage", "inside"):
             return sorted(self.settings, key=lambda s: s.value)[:n]
         if self.kind in ("bias", "no_estimate"):
             return sorted(self.settings, key=lambda s: -abs(s.value))[:n]
@@ -810,6 +820,22 @@ def _judge_bias(q: "Quantity", per: list[tuple[Any, ...]]) -> None:
         q.pooled = _bias_band(POOLED, total, sum(n * sh * b for _k, n, b, sh in found) / total)
 
 
+def _inside_share(cell: dict[str, Any], est: str, ends: list[str]) -> tuple[int, int]:
+    """``(trials, trials whose estimate lies inside their own interval)`` of one setting, over the trials that gave the estimate and both ends."""
+    e, lo, hi = _series(cell, est), _series(cell, ends[0]), _series(cell, ends[1])
+    used = [t for t in e if t in lo and t in hi]
+    return len(used), sum(1 for t in used if lo[t] <= e[t] <= hi[t])
+
+
+def _judge_inside(q: "Quantity", per: list[tuple[str, int, int]]) -> None:
+    """Each setting's share of trials whose estimate lies inside their own interval; one below :data:`INSIDE_MIN` is ``below``
+    (never ``gross``: it is a sign that the rows of the record may be misplaced, which the paper says, not a fault FI can repair)."""
+    for key, n, inside in per:
+        if n >= MIN_TRIALS:
+            share = inside / n
+            q.settings.append(SettingCheck(key, n, share, share, share, gross=False, below=share < INSIDE_MIN))
+
+
 def _judge_no_estimate(q: "Quantity", per: list[tuple[str, int, int]]) -> None:
     """Each setting's share of the trials that ran to the end and gave no number for the estimate of a declared truth: more
     than :data:`FAULT_FRACTION` is a gross miss (they are misses of the truth, not values that have no meaning there)."""
@@ -998,6 +1024,12 @@ def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = N
         if missing:
             out.quantities.append(Quantity("missing", ident, missing, level=level, truth=truth_label))
             continue
+        if ends:  # an estimate inside its own trial's interval: the rows of the record belong together (needs no true value)
+            inside = Quantity("inside", est, [est, *ends], truth=truth_label)
+            _judge_inside(inside, [(str(c.get("key")), *_inside_share(c, est, list(ends))) for c in cells
+                                   if _own_here(c, [est, *ends]) and not c.get("level")])
+            if inside.below:  # reported only where it is off: a record whose rows agree adds nothing
+                out.quantities.append(inside)
         cover = (Quantity("coverage", " .. ".join(ends), list(ends), level=level, truth=truth_label,
                           withheld=list(ends)) if ends else None)
         ratio = (Quantity("se_ratio", est, [est, spread], truth=truth_label, withheld=[spread, *(ends or [])])
