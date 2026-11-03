@@ -480,6 +480,44 @@ class Table:
         self._check(name)
         return fi_table.trials_of(self._metric(name, key))  # trial numbers are not a result's values: not a read that gave data
 
+    @_noting
+    def paired(self, name_a, name_b, key):
+        """``(xs, ys)``: the values of two results that the same trial of setting ``key`` gave, paired by the record's trial numbers
+        (never by position); a trial with no finite value in either is left out of both. Empty where the record does not say its trial numbers."""
+        import fi_table
+
+        self._check(name_a)
+        self._check(name_b)
+        xs, ys = fi_table.paired(self._metric(name_a, key), self._metric(name_b, key))
+        self._gave(name_a, xs)
+        self._gave(name_b, ys)
+        return xs, ys
+
+    @_noting
+    def correlation(self, name_a, name_b, key):
+        """The Pearson correlation, across the trials of setting ``key``, of two results, paired by trial number (:meth:`paired`); ``None``
+        for fewer than three pairs or when either has no spread."""
+        import fi_table
+
+        return fi_table.pearson(*self.paired(name_a, name_b, key))
+
+    @_noting
+    def sd(self, name, key):
+        """The sample standard deviation across the trials of setting ``key`` of ``name``; ``None`` for fewer than two values."""
+        s = self._summary(name, key)
+        self._gave(name, s["n"])
+        return s["sd"] if s["n"] >= 2 else None
+
+    @_noting
+    def quantile(self, name, key, q):
+        """The ``q`` quantile (0 to 1) across the trials of setting ``key`` of ``name``; ``None`` where no trial gave a value."""
+        import fi_table
+
+        self._check(name)
+        vals = fi_table.values_of(self._metric(name, key))
+        self._gave(name, vals)
+        return fi_table.quantile(vals, q)
+
     def _summary(self, name, key):
         import fi_table
 
@@ -705,7 +743,7 @@ BODY_EXAMPLE = '''def trial(cell, ctx):
 
 
 #: The reads of the table that tell what the trial record holds, in the order a reader needs them.
-TABLE_READS = ("values", "trials", "mean", "interval", "n", "failed")
+TABLE_READS = ("values", "trials", "mean", "interval", "n", "failed", "paired", "correlation", "sd", "quantile")
 
 
 def table_reads(compared: dict[str, Any] | None = None, per_level: dict[str, list[str]] | None = None,

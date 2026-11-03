@@ -93,3 +93,59 @@ def test_the_printed_result_has_a_bias_beside_each_coverage() -> None:
 
     src = analysis_frame.EXPERIMENT
     assert "_bias" in src and "_coverage" in src
+
+
+# ---- B: statistics across the trials, paired by trial number ----------------------------------------------------------------------------
+
+def test_paired_values_are_matched_by_trial_number_never_by_position() -> None:
+    a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    b = [2.0, 4.0, 6.0, 8.0, 10.0, 12.0]
+    cell = _cell(0.1, a, b)
+    del cell["metrics"]["est_b"]["values"][2]  # trial 2 of est_b was dropped: positions no longer line up
+    del cell["metrics"]["est_b"]["trials"][2]
+    t = _table([cell])
+    xs, ys = t.paired("est_a", "est_b", "noise=0.1")
+    assert xs == [1.0, 2.0, 4.0, 5.0, 6.0] and ys == [2.0, 4.0, 8.0, 10.0, 12.0]
+    assert t.correlation("est_a", "est_b", "noise=0.1") == pytest.approx(1.0), "positional pairing would give another number"
+
+
+def test_a_nan_trial_drops_that_pair_and_a_record_without_trial_numbers_pairs_nothing() -> None:
+    cell = _cell(0.1, [1.0, 2.0, 3.0, 4.0], [1.0, 2.0, float("nan"), 4.0])
+    assert _table([cell]).paired("est_a", "est_b", "noise=0.1") == ([1.0, 2.0, 4.0], [1.0, 2.0, 4.0])
+    bare = _cell(0.1, [1.0, 2.0, 3.0], [3.0, 2.0, 1.0])
+    for name in ("est_a", "est_b"):
+        del bare["metrics"][name]["trials"]
+    t = _table([bare])
+    assert t.paired("est_a", "est_b", "noise=0.1") == ([], []) and t.correlation("est_a", "est_b", "noise=0.1") is None
+    twice = _cell(0.1, [1.0, 2.0, 3.0], [3.0, 2.0, 1.0], trials=[0, 1, 1])
+    assert _table([twice]).paired("est_a", "est_b", "noise=0.1") == ([], []), "a repeated trial number cannot be paired"
+
+
+def test_correlation_sd_and_quantile_match_the_plain_formulas() -> None:
+    a = [1.0, 2.0, 3.0, 4.0, 10.0]
+    b = [2.0, 1.0, 4.0, 3.0, 9.0]
+    t = _table([_cell(0.1, a, b)])
+    mean_a, mean_b = sum(a) / 5, sum(b) / 5
+    expected = (sum((x - mean_a) * (y - mean_b) for x, y in zip(a, b))
+                / math.sqrt(sum((x - mean_a) ** 2 for x in a) * sum((y - mean_b) ** 2 for y in b)))
+    assert t.correlation("est_a", "est_b", "noise=0.1") == pytest.approx(expected)
+    assert t.sd("est_a", "noise=0.1") == pytest.approx(math.sqrt(sum((x - mean_a) ** 2 for x in a) / 4))
+    assert t.quantile("est_a", "noise=0.1", 0.5) == 3.0 and t.quantile("est_a", "noise=0.1", 0.0) == 1.0
+    assert t.quantile("est_a", "noise=0.1", 0.25) == 2.0 and t.quantile("est_a", "noise=0.1", 1.0) == 10.0
+    assert t.quantile("est_a", "noise=0.1", 0.125) == pytest.approx(1.5)
+    assert frame_table.pearson([1.0, 2.0], [1.0, 2.0]) is None, "two pairs say nothing"
+    assert frame_table.pearson([1.0, 1.0, 1.0], [1.0, 2.0, 3.0]) is None, "no spread"
+    assert t.sd("est_a", "noise=0.1") is not None and _table([_cell(0.1, [1.0], [1.0])]).sd("est_a", "noise=0.1") is None
+
+
+def test_the_reads_are_declared_ids_only_and_the_writer_is_told_about_them() -> None:
+    t = _table([_cell(0.1, [1.0, 2.0, 3.0], [1.0, 2.0, 3.0])], declared=("est_a",))
+    with pytest.raises(type(t).__init__.__globals__["UnknownResult"]):
+        t.correlation("est_a", "est_b", "noise=0.1")
+    from core import run_checks
+
+    rules = run_checks.analysis_bodies_rules()
+    for word in ("table.paired", "table.correlation", "table.sd", "table.quantile", "table.bias"):
+        assert word in rules, word
+    reads = "\n".join(skeleton.table_reads())
+    assert "table.paired(" in reads and "table.correlation(" in reads

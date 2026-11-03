@@ -503,7 +503,10 @@ runs on the table of FI's record and can change nothing in it:
   and `table.bias(id, key)` (the mean of its values minus the true value); `table.known()` lists the ids that have a true value. FI prints
   the coverage and the bias of every such result itself, one for each parameter, as `<id>_coverage` and `<id>_bias`: a plan quantity
   that is the coverage or the bias of those results is `table.coverage` or `table.bias` read for the result (return one number for a
-  setting, or a mapping of settings to numbers), never `NotYet`; and `table.keys()`, `table.setting(key)`,
+  setting, or a mapping of settings to numbers), never `NotYet`. Statistics across the trials of a setting are the table's too:
+  `table.paired(a, b, key)` (the values of two results that the same trial gave, paired by the record's trial numbers, never by
+  position), `table.correlation(a, b, key)` (their Pearson correlation), `table.sd(id, key)` and `table.quantile(id, key, q)`; a
+  correlation, spread or quantile of the trials is one of these, never `NotYet`; and `table.keys()`, `table.setting(key)`,
   `table.at(**settings)` (a LIST of the keys of the settings that hold those values: pass one of them, `table.at(**settings)[0]`,
   to a read, never the list), `table.across(axis, **fixed)` (the values of one setting with their keys),
   `table.reference(id, key)` and, for a sub-study, `table.part(name)`. Name only ids the plan declares: any other id raises an error
