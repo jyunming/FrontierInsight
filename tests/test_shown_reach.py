@@ -46,10 +46,10 @@ def _engine(tmp_path: Path) -> Engine:
                  output=OutputConfig(output_dir=tmp_path / "outputs"))
     engine = Engine(cfg)
 
-    async def fails(self: Any, rel: str) -> Any:  # the test is run again by the gate: here it still fails by its assertion
+    async def fails(rel: str) -> Any:  # the test is run again by the gate: here it still fails by its assertion
         return types.SimpleNamespace(status="fail", crash_in_program=False, kind="assertion", detail="", place="", at="")
 
-    Engine._rerun_finding_test = fails  # type: ignore[method-assign,assignment]
+    engine._rerun_finding_test = fails  # type: ignore[method-assign,assignment]  # this one engine only, never the class
     return engine
 
 
