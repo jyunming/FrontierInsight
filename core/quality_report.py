@@ -640,6 +640,7 @@ def _trial_checks_summary(q: _Quest) -> dict[str, Any] | None:
     left = [str(k) for k in _list(rec.get("left_out_settings"))]
     cal = _dict(rec.get("calibration"))
     quantities = [x for x in _list(cal.get("quantities")) if isinstance(x, dict)]
+    consistency = [x for x in _list(cal.get("inside")) if isinstance(x, dict)]
     lines = []
     if fails:
         lines.append(f"{len(fails)} of {_int(rec.get('settings'))} setting(s) had failed trials"
@@ -650,7 +651,7 @@ def _trial_checks_summary(q: _Quest) -> dict[str, Any] | None:
                      and isinstance(_list(f.get("reasons"))[0], list) else "") for f in fails[:8]]
     else:
         lines.append(f"no trial failed in the {_int(rec.get('settings'))} setting(s)")
-    for x in quantities:
+    for x in [*quantities, *consistency]:
         disclosed = rec.get("action") == "disclose" and x.get("fault") and x.get("kind") in ("coverage", "se_ratio")
         state = ("measured not to match the trials, and the repairs did not remove it: the study went on and the paper "
                  "says at which settings; " + ("the interval reported there is" if x.get("kind") == "coverage" else
@@ -659,6 +660,9 @@ def _trial_checks_summary(q: _Quest) -> dict[str, Any] | None:
                  if disclosed else
                  ("not the multiplier the plan fixes (a fault)" if x.get("kind") == "multiplier" else "grossly wrong (a fault)")
                  if x.get("fault") else
+                 f"off in {_int(x.get('below'))} setting(s): the rows of the record may not belong together, so a statistic that pairs "
+                 "this estimate with another across trials may not be right (not a repairable fault)"
+                 if _int(x.get("below")) and x.get("kind") == "inside" else
                  f"below the level in {_int(x.get('below'))} setting(s): reported, not a fault" if _int(x.get("below"))
                  else f"above the level in {_int(x.get('above'))} setting(s) (wider than need be): reported, not a fault"
                  if _int(x.get("above")) else "as it should be")

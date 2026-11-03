@@ -113,6 +113,49 @@ def trials_of(metric):
     return [t for v, t in zip(raw, given) if finite(v)]
 
 
+def paired(metric_a, metric_b):
+    """``(xs, ys)``: the finite values two metric records of one setting gave in the same trial, paired by the record's own trial
+    numbers and never by position, in the order of the trial numbers. A trial with no finite value in either is left out of both. Empty
+    where either record does not say its trial numbers, or says one twice (a pairing by position would be a guess)."""
+    def by_trial(metric):
+        raw = metric.get("values") if isinstance(metric, dict) else None
+        given = metric.get("trials") if isinstance(metric, dict) else None
+        if not isinstance(raw, (list, tuple)) or not isinstance(given, (list, tuple)) or len(given) != len(raw):
+            return None
+        if len(set(given)) != len(given):
+            return None
+        return {t: float(v) for v, t in zip(raw, given) if finite(v)}
+    a, b = by_trial(metric_a), by_trial(metric_b)
+    if a is None or b is None:
+        return [], []
+    common = sorted(set(a) & set(b))
+    return [a[t] for t in common], [b[t] for t in common]
+
+
+def pearson(xs, ys):
+    """The Pearson correlation of two equally long lists; ``None`` for fewer than three pairs or when either has no spread."""
+    n = len(xs)
+    if n != len(ys) or n < 3:
+        return None
+    mx, my = sum(xs) / n, sum(ys) / n
+    sxx = sum((x - mx) ** 2 for x in xs)
+    syy = sum((y - my) ** 2 for y in ys)
+    if sxx <= 0 or syy <= 0:
+        return None
+    return sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / math.sqrt(sxx * syy)
+
+
+def quantile(values, q):
+    """The ``q`` quantile (0 to 1) of ``values`` by linear interpolation between the sorted values; ``None`` for no values."""
+    vals = sorted(values)
+    if not vals or not 0.0 <= q <= 1.0:
+        return None
+    pos = q * (len(vals) - 1)
+    lo = int(math.floor(pos))
+    hi = min(lo + 1, len(vals) - 1)
+    return vals[lo] + (vals[hi] - vals[lo]) * (pos - lo)
+
+
 def summary(values):
     """``{"n", "mean", "sd", "binary", "successes"}`` of one value's trials in one setting (``binary``: every trial gave 0 or 1)."""
     mean, sd, n = mean_std(values)

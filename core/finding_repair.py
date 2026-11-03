@@ -1295,6 +1295,60 @@ def _read(path: Path) -> str:
         return ""
 
 
+def _trial_metric_names(root: Path) -> set[str]:
+    """Every name a trial returned, from FI's own record of the trials (``raw/trials.json``); empty before the first run."""
+    try:
+        data = json.loads((root / "raw" / "trials.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    cells = data.get("cells") if isinstance(data, dict) else None
+    return {str(k) for cell in (cells if isinstance(cells, list) else []) if isinstance(cell, dict)
+            for k in (cell.get("metrics") if isinstance(cell.get("metrics"), dict) else {})}
+
+
+def declared_block(root: Path) -> str:
+    """The names the plan declares, for the test writer: every result id with its role, the quantities derived from them, the
+    values a run compares inside it, and, for a result that carries a true value and an interval, the coverage and bias FI counts
+    from its own record of the trials. Read from the frozen plan under ``root``; ``(none stated)`` when it cannot be read."""
+    from . import contract as _contract
+    from . import frozen_protocol as _frozen
+
+    try:
+        protocol = _frozen.protocol_of(Path(root))
+        if protocol is None:
+            return "(none stated)"
+        c = _contract.from_design({"protocol": protocol})
+    except Exception:  # noqa: BLE001 -- a plan that cannot be read tells the writer nothing; the request is still made
+        return "(none stated)"
+    from . import analysis_frame as _frame
+
+    # What a trial returns is read from FI's own record of the trials when there is one: the plan's ``returned`` flag is the
+    # plan writer's word and is often "afterwards" for every result, estimates included. A result with a true value is the
+    # estimate a trial gives, so it is returned whatever the flag says.
+    recorded = _trial_metric_names(Path(root))
+    afterwards = {r.id for r in c.results if r.returned == "afterwards" and r.id not in recorded
+                  and not isinstance(r.known_value, dict)} | {d.id for d in c.derived if d.id not in recorded}
+    returned = [f"`{r.id}` ({r.role})" for r in c.results if r.id not in afterwards]
+    returned += [f"`{d.id}`" for d in c.derived if d.id in recorded]
+    worked_out = [f"`{i}`" for i in sorted(afterwards)]
+    inside = [str(k) for k in (protocol.get("in_each_run") or {})] if isinstance(protocol.get("in_each_run"), dict) else []
+    ends = [str(n) for r in c.results if isinstance(r.known_value, dict) for n in
+            [r.known_value.get("standard_error") or r.known_value.get("variance"), *(r.known_value.get("interval") or ())] if n]
+    counted = list(_frame._known_values(protocol, c))  # an interval and a plain true value: the ones FI can count
+    lines = ["Names the code's trial returns: " + (", ".join(returned) or "(none)")]
+    if ends:
+        lines.append("Also returned, for a result with a true value (its error and interval ends): "
+                     + ", ".join(f"`{n}`" for n in dict.fromkeys(ends)))
+    if worked_out:
+        lines.append("Worked out after the trials by derive.py, not returned by the trial: " + ", ".join(worked_out))
+    if inside:
+        lines.append("Settings of the run, not returned values: " + ", ".join(f"`{i}`" for i in inside))
+    if counted:
+        lines.append("FI counts these itself from its record of the trials; the code does not return them, and a test reads them "
+                     "through FI's table, not from a trial: " + ", ".join(f"`{i}_coverage`, `{i}_bias`" for i in counted) + ".")
+    return "\n".join(lines)
+
+
 def _test_prompt(env: Env, issue: dict[str, Any], rel: str, problem: str) -> str:
     source = _read(env.code / rel)
     scope = scope_function(issue, source)
@@ -1303,7 +1357,8 @@ def _test_prompt(env: Env, issue: dict[str, Any], rel: str, problem: str) -> str
         file=rel, code=(f"### {rel} (the function `{scope}`)\n```python\n{function_source(source, scope)}\n```\n\n"
                         f"The rest of {rel} offers:\n{signatures(source, scope)}" if scope else
                         f"### {rel}\n```python\n{source.rstrip()}\n```"),
-        modules=module_names(env.code, env.package), problem=problem or "(none: this is the first try)")
+        modules=module_names(env.code, env.package), declared=declared_block(env.root),
+        problem=problem or "(none: this is the first try)")
 
 
 def _error_problem(detail: str) -> str:

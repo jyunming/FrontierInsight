@@ -480,6 +480,44 @@ class Table:
         self._check(name)
         return fi_table.trials_of(self._metric(name, key))  # trial numbers are not a result's values: not a read that gave data
 
+    @_noting
+    def paired(self, name_a, name_b, key):
+        """``(xs, ys)``: the values of two results that the same trial of setting ``key`` gave, paired by the record's trial numbers
+        (never by position); a trial with no finite value in either is left out of both. Empty where the record does not say its trial numbers."""
+        import fi_table
+
+        self._check(name_a)
+        self._check(name_b)
+        xs, ys = fi_table.paired(self._metric(name_a, key), self._metric(name_b, key))
+        self._gave(name_a, xs)
+        self._gave(name_b, ys)
+        return xs, ys
+
+    @_noting
+    def correlation(self, name_a, name_b, key):
+        """The Pearson correlation, across the trials of setting ``key``, of two results, paired by trial number (:meth:`paired`); ``None``
+        for fewer than three pairs or when either has no spread."""
+        import fi_table
+
+        return fi_table.pearson(*self.paired(name_a, name_b, key))
+
+    @_noting
+    def sd(self, name, key):
+        """The sample standard deviation across the trials of setting ``key`` of ``name``; ``None`` for fewer than two values."""
+        s = self._summary(name, key)
+        self._gave(name, s["n"])
+        return s["sd"] if s["n"] >= 2 else None
+
+    @_noting
+    def quantile(self, name, key, q):
+        """The ``q`` quantile (0 to 1) across the trials of setting ``key`` of ``name``; ``None`` where no trial gave a value."""
+        import fi_table
+
+        self._check(name)
+        vals = fi_table.values_of(self._metric(name, key))
+        self._gave(name, vals)
+        return fi_table.quantile(vals, q)
+
     def _summary(self, name, key):
         import fi_table
 
@@ -534,6 +572,54 @@ class Table:
             got = fi_table.hits(c.get("metrics") or {}, spec["interval"], truth)  # None: this record does not hold the interval
             out += got or []
         return self._gave(name, out)
+
+    def known(self):
+        """The ids of the results the plan gives a true value and an interval (``known_value``): the ones ``coverage`` and ``bias`` serve."""
+        return sorted(n for n, spec in self._known.items() if n in self.declared and isinstance(spec, dict) and len(spec.get("interval") or ()) == 2)
+
+    @_noting
+    def bias(self, name, key, **level):
+        """For a result the plan gives a true value (``known_value``): the mean of the finite values the trials of setting ``key`` gave,
+        minus the true value, counted by FI from its own record (0 when the estimate is centred on it). When a run compares a factor
+        inside it, give its value (``table.bias("id", key, factor="value")``). A trial with no finite value is left out of the mean
+        (``coverage`` counts it as a miss); ``bias_dropped`` says how many. ``None`` where the record holds no such trials."""
+        import fi_table
+
+        self._check(name)
+        spec = self._known.get(name)
+        if not isinstance(spec, dict):
+            raise UnknownResult("`%s` is declared, but the plan gives it no true value, so it has no bias; the results with one are: %s"
+                                % (name, ", ".join(sorted(self._known)) or "(none)"))
+        self._one_key(key)
+        if level:
+            cells = [c for c in self._by_setting.get(key, []) if c.get("level") == level]
+        else:
+            cells = [self._cell(key)]
+        total, count = 0.0, 0
+        for c in cells:
+            truth = spec.get("truth", (c.get("cell") or {}).get(spec.get("axis")))
+            if not fi_table.finite(truth):
+                continue
+            for v in fi_table.values_of((c.get("metrics") or {}).get(name)):
+                total += v - truth
+                count += 1
+        self._gave(name, count)
+        return total / count if count else None
+
+    def bias_dropped(self, name, key, **level):
+        """How many trials of setting ``key`` have no finite value for ``name`` and so are left out of ``bias``."""
+        import fi_table
+
+        self._check(name)
+        self._one_key(key)
+        cells = [c for c in self._by_setting.get(key, []) if c.get("level") == level] if level else [self._cell(key)]
+        dropped = 0
+        for c in cells:
+            m = (c.get("metrics") or {}).get(name)
+            raw = m.get("values") if isinstance(m, dict) else None
+            if isinstance(raw, (list, tuple)):
+                dropped += sum(1 for v in raw if not fi_table.finite(v))
+        return dropped
 
     def failed(self, key):
         """How many planned trials of setting ``key`` did not end well, as the record says; ``None`` if it does not."""
@@ -673,7 +759,7 @@ BODY_EXAMPLE = '''def trial(cell, ctx):
 
 
 #: The reads of the table that tell what the trial record holds, in the order a reader needs them.
-TABLE_READS = ("values", "trials", "mean", "interval", "n", "failed")
+TABLE_READS = ("values", "trials", "mean", "interval", "n", "failed", "paired", "correlation", "sd", "quantile")
 
 
 def table_reads(compared: dict[str, Any] | None = None, per_level: dict[str, list[str]] | None = None,
@@ -711,7 +797,9 @@ def table_reads(compared: dict[str, Any] | None = None, per_level: dict[str, lis
     if coverage:
         used = sorted({f for r in coverage for f in (per_level or {}).get(r, ())})
         lines.append("- `table.coverage(name, key%s)`: 1.0 or 0.0 for each trial whose reported interval holds the true value, for %s; "
-                     "the mean is the coverage." % ("".join(f", {f}=value" for f in used), ", ".join("`%s`" % r for r in coverage)))
+                     "the mean is the coverage. `table.bias(name, key%s)` is the mean of its values minus the true value. FI prints both for each of them, "
+                     "at every setting, as `<id>_coverage` and `<id>_bias`." % ("".join(f", {f}=value" for f in used), ", ".join("`%s`" % r for r in coverage),
+                                                                              "".join(f", {f}=value" for f in used)))
     return lines
 
 

@@ -1376,18 +1376,29 @@ def _clean(o):
 
 def _coverage_of(table, rid, key, row, out_levels):
     """FI's own count of how often the interval the trials reported holds the true value the plan gives, printed as
-    ``<id>_coverage`` beside the result (for each compared value under its own record key). It is FI's record, so it stands
+    ``<id>_coverage`` beside the result, and the bias of the estimate against that true value (its mean minus the true value),
+    printed as ``<id>_bias`` (for each compared value under its own record key). It is FI's record, so it stands
     whether or not a function of the study's reads it, and whatever a figure of the study's does."""
     if table.per_level(rid, key):
         for _text, c in table._level_cells(rid, key):
             hits = table.coverage(rid, key, **c["level"])
             if hits:
                 out_levels.setdefault(table._key_of(c), {}).setdefault(rid + "_coverage", sum(hits) / len(hits))
+            bias = table.bias(rid, key, **c["level"])
+            if bias is not None:
+                out_levels.setdefault(table._key_of(c), {}).setdefault(rid + "_bias", bias)
+                if table.bias_dropped(rid, key, **c["level"]):  # the mean leaves out trials with no value; said, not hidden
+                    out_levels[table._key_of(c)].setdefault(rid + "_bias_dropped", table.bias_dropped(rid, key, **c["level"]))
         return
     hits = table.coverage(rid, key)
     if hits:
         # a result of the study's own under this name keeps its value: FI's count is added beside it, never over it
         row.setdefault(rid + "_coverage", sum(hits) / len(hits))
+    bias = table.bias(rid, key)
+    if bias is not None:
+        row.setdefault(rid + "_bias", bias)
+        if table.bias_dropped(rid, key):  # the mean leaves out trials with no value; said, not hidden
+            row.setdefault(rid + "_bias_dropped", table.bias_dropped(rid, key))
 
 
 def result_json(table, records, compared):

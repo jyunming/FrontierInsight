@@ -798,7 +798,7 @@ def _trial_check_items(root: Path, add: Any) -> None:
     for q in cal.get("quantities") or []:
         if isinstance(q, dict) and q.get("fault") and rec.get("action") == _trial_checks.DISCLOSE:
             _disclosed_item(root, q, add)
-    for q in cal.get("quantities") or []:
+    for q in [*(cal.get("quantities") or []), *(cal.get("inside") or [])]:
         if not isinstance(q, dict) or q.get("fault") or not q.get("below"):
             continue
         vals = [s.get("value") for s in q.get("settings") or [] if isinstance(s, dict)
@@ -816,6 +816,12 @@ def _trial_check_items(root: Path, add: Any) -> None:
         elif q.get("kind") == "bias":
             said = (f"The estimates of {shown} lie off the true value in {n} of {of} settings, by more than chance "
                     "explains" + (f" (by {min(vals):+.2f} to {max(vals):+.2f} of their own spread)" if vals else ""))
+        elif q.get("kind") == "inside":
+            said = (f"The estimate {shown} lies inside the interval the same trial reported in fewer trials than it should in {n} of "
+                    f"{of} settings" + (f" (as few as {min(vals):.0%} of a setting's trials; 100% when the rows of the record belong "
+                                        "together)" if vals else "")
+                    + ", so its rows may not belong to the same trials; a correlation or any other statistic that pairs this "
+                    "estimate with another across trials may not be right")
         elif q.get("kind") == "no_estimate":
             said = (f"{shown}, the estimate of a known true value, has no number in some trials at {n} settings"
                     + (f" (up to {max(vals):.0%} of a setting's trials)" if vals else ""))
