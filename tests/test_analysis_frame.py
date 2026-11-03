@@ -104,7 +104,7 @@ def _ids(result: dict[str, Any]) -> set[str]:
         if "=" in k and isinstance(v, dict):
             for name in v:
                 if name not in skip:
-                    found.add(next((name[: -len(s)] for s in ("_values", "_count", "_total", "_pair_id", "_undefined", "_coverage", "_bias") if name.endswith(s)), name))
+                    found.add(next((name[: -len(s)] for s in ("_values", "_count", "_total", "_pair_id", "_undefined", "_coverage", "_bias", "_bias_dropped") if name.endswith(s)), name))
         else:
             found.add(k)
     return found

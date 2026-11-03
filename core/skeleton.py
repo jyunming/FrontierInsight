@@ -581,7 +581,8 @@ class Table:
     def bias(self, name, key, **level):
         """For a result the plan gives a true value (``known_value``): the mean of the finite values the trials of setting ``key`` gave,
         minus the true value, counted by FI from its own record (0 when the estimate is centred on it). When a run compares a factor
-        inside it, give its value (``table.bias("id", key, factor="value")``). ``None`` where the record holds no such trials."""
+        inside it, give its value (``table.bias("id", key, factor="value")``). A trial with no finite value is left out of the mean
+        (``coverage`` counts it as a miss); ``bias_dropped`` says how many. ``None`` where the record holds no such trials."""
         import fi_table
 
         self._check(name)
@@ -604,6 +605,21 @@ class Table:
                 count += 1
         self._gave(name, count)
         return total / count if count else None
+
+    def bias_dropped(self, name, key, **level):
+        """How many trials of setting ``key`` have no finite value for ``name`` and so are left out of ``bias``."""
+        import fi_table
+
+        self._check(name)
+        self._one_key(key)
+        cells = [c for c in self._by_setting.get(key, []) if c.get("level") == level] if level else [self._cell(key)]
+        dropped = 0
+        for c in cells:
+            m = (c.get("metrics") or {}).get(name)
+            raw = m.get("values") if isinstance(m, dict) else None
+            if isinstance(raw, (list, tuple)):
+                dropped += sum(1 for v in raw if not fi_table.finite(v))
+        return dropped
 
     def failed(self, key):
         """How many planned trials of setting ``key`` did not end well, as the record says; ``None`` if it does not."""

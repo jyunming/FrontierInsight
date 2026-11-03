@@ -468,8 +468,8 @@ PINS_AT_811719AF = {
     # and again when a read of a result recorded per compared value says so (Table.per_level); it was "edc62a31e304a785"
     # and again when every read of the table that returns data notes it (Table.level_rows and Table.reference); it was "1212760587b97257"
     # and again when the runtime gained the figure drawing calls (VERSION 5: Figure mixes in fi_figure_calls; run.py carries the runtime); it was "8d9d32daf0359e89"
-    # and again when the table gained `bias`, `known`, `paired`, `correlation`, `sd` and `quantile`; it was "c4b2e59bfc01db2a"
-    "run_framed": "140fa8f3591b08b0",
+    # and again when the table gained `bias`, `known`, `paired`, `correlation`, `sd` and `quantile`; it was "c4b2e59bfc01db2a", then "140fa8f3591b08b0" (bias_dropped)
+    "run_framed": "22b5c692db24cc0c",
 }
 
 

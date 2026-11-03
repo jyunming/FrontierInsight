@@ -1309,22 +1309,26 @@ def declared_block(root: Path) -> str:
         c = _contract.from_design({"protocol": protocol})
     except Exception:  # noqa: BLE001 -- a plan that cannot be read tells the writer nothing; the request is still made
         return "(none stated)"
-    results = [f"`{r.id}` ({r.role})" for r in c.results]
-    derived = [f"`{d.id}`" for d in c.derived]
+    from . import analysis_frame as _frame
+
+    afterwards = {r.id for r in c.results if r.returned == "afterwards"} | {d.id for d in c.derived}
+    returned = [f"`{r.id}` ({r.role})" for r in c.results if r.id not in afterwards]
+    worked_out = [f"`{i}`" for i in sorted(afterwards)]
     inside = [str(k) for k in (protocol.get("in_each_run") or {})] if isinstance(protocol.get("in_each_run"), dict) else []
-    known = [r.id for r in c.results if isinstance(r.known_value, dict) and r.known_value]
-    lines = ["Results: " + (", ".join(results) or "(none)")]
-    if derived:
-        lines.append("Worked out afterwards from them: " + ", ".join(derived))
-    if inside:
-        lines.append("Compared inside each run: " + ", ".join(f"`{i}`" for i in inside))
     ends = [str(n) for r in c.results if isinstance(r.known_value, dict) for n in
             [r.known_value.get("standard_error") or r.known_value.get("variance"), *(r.known_value.get("interval") or ())] if n]
+    counted = list(_frame._known_values(protocol, c))  # an interval and a plain true value: the ones FI can count
+    lines = ["Names the code's trial returns: " + (", ".join(returned) or "(none)")]
     if ends:
-        lines.append("Returned beside them for a true value (its error and interval ends): " + ", ".join(f"`{n}`" for n in dict.fromkeys(ends)))
-    if known:
-        lines.append("FI counts from its own record, for each result that carries a true value, its coverage and its bias (the mean "
-                     "estimate minus the true value), as " + ", ".join(f"`{i}_coverage`, `{i}_bias`" for i in known) + ".")
+        lines.append("Also returned, for a result with a true value (its error and interval ends): "
+                     + ", ".join(f"`{n}`" for n in dict.fromkeys(ends)))
+    if worked_out:
+        lines.append("Worked out after the trials by derive.py, not returned by the trial: " + ", ".join(worked_out))
+    if inside:
+        lines.append("Settings of the run, not returned values: " + ", ".join(f"`{i}`" for i in inside))
+    if counted:
+        lines.append("FI counts these itself from its record of the trials; the code does not return them, and a test reads them "
+                     "through FI's table, not from a trial: " + ", ".join(f"`{i}_coverage`, `{i}_bias`" for i in counted) + ".")
     return "\n".join(lines)
 
 

@@ -24,7 +24,7 @@ $code
 
 $declared
 
-A test may read only these names from what the code returns. Do not invent a result name (a per-parameter `coverage_x`, `bias_x` or `correlation` key, say): the code does not return it, so a test that reads it fails for that reason and shows nothing. A coverage or a bias for each parameter, and a statistic across trials (a correlation of two estimates), are counted by FI from its own record of the trials, not by the code: when the finding is about one of those, assert on the declared estimate and interval values themselves (for example that an interval holds its own estimate, or that the estimate is centred on the true value in a small fixed-seed run), never on a new key.
+A test may read only the names the code's trial returns (the first lines above). Do not invent a result name (a per-parameter `coverage_x`, `bias_x` or `correlation` key, say): the code does not return it, so a test that reads it fails for that reason and shows nothing. The names FI counts itself, and a statistic across trials (a correlation of two estimates), are not returned by the code: when the finding is about one of those, assert on the returned estimate and interval values themselves (for example that an interval holds its own estimate, or that the estimate is centred on the true value in a small fixed-seed run), never on a new key.
 
 # How the test reaches the code
 

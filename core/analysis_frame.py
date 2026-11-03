@@ -1387,6 +1387,8 @@ def _coverage_of(table, rid, key, row, out_levels):
             bias = table.bias(rid, key, **c["level"])
             if bias is not None:
                 out_levels.setdefault(table._key_of(c), {}).setdefault(rid + "_bias", bias)
+                if table.bias_dropped(rid, key, **c["level"]):  # the mean leaves out trials with no value; said, not hidden
+                    out_levels[table._key_of(c)].setdefault(rid + "_bias_dropped", table.bias_dropped(rid, key, **c["level"]))
         return
     hits = table.coverage(rid, key)
     if hits:
@@ -1395,6 +1397,8 @@ def _coverage_of(table, rid, key, row, out_levels):
     bias = table.bias(rid, key)
     if bias is not None:
         row.setdefault(rid + "_bias", bias)
+        if table.bias_dropped(rid, key):  # the mean leaves out trials with no value; said, not hidden
+            row.setdefault(rid + "_bias_dropped", table.bias_dropped(rid, key))
 
 
 def result_json(table, records, compared):

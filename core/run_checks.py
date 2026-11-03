@@ -501,9 +501,11 @@ runs on the table of FI's record and can change nothing in it:
   value and an interval, `table.coverage(id, key)` (1.0 for each trial whose interval holds the true value, else 0.0; the
   interval's own ends are not results to read; give a factor compared inside each run as `table.coverage(id, key, factor="value")`)
   and `table.bias(id, key)` (the mean of its values minus the true value); `table.known()` lists the ids that have a true value. FI prints
-  the coverage and the bias of every such result itself, one for each parameter, as `<id>_coverage` and `<id>_bias`: a plan quantity
-  that is the coverage or the bias of those results is `table.coverage` or `table.bias` read for the result (return one number for a
-  setting, or a mapping of settings to numbers), never `NotYet`. Statistics across the trials of a setting are the table's too:
+  the coverage and the bias of every such result itself, one for each parameter, as `<id>_coverage` and `<id>_bias`. When a plan
+  quantity is the coverage or the bias of ONE named result, work it out from that result: `table.coverage` gives 1.0 and 0.0 values, so
+  take their mean for the one number a setting needs. When it spans several results, a function returns one number per setting and cannot
+  say which result it is: do not pick one or pool them, leave the function as FI wrote it (`NotYet`), and FI's per-result
+  values are the answer. Statistics across the trials of a setting are the table's too:
   `table.paired(a, b, key)` (the values of two results that the same trial gave, paired by the record's trial numbers, never by
   position), `table.correlation(a, b, key)` (their Pearson correlation), `table.sd(id, key)` and `table.quantile(id, key, q)`; a
   correlation, spread or quantile of the trials is one of these, never `NotYet`; and `table.keys()`, `table.setting(key)`,

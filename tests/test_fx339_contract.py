@@ -76,7 +76,7 @@ def test_the_rendered_finding_test_request_holds_the_declared_names(tmp_path: Pa
                           prompts={"code_finding_test": string.Template(template)})
     issue = {"id": "F-1", "file": "sim.py", "function": "run", "statement": "the coverage of each parameter is wrong"}
     prompt = finding_repair._test_prompt(env, issue, "sim.py", "")
-    assert "`est_a`" in prompt and "`corr_ab`" in prompt and "may read only these names" in prompt
+    assert "`est_a`" in prompt and "`corr_ab`" in prompt and "may read only the names the code's trial returns" in prompt
     assert "$declared" not in prompt
 
 
@@ -184,14 +184,15 @@ def test_an_estimate_outside_its_own_interval_in_many_trials_is_reported_not_sto
     from core import trial_checks
 
     cal = _calibration(_trial_cells(shift=False))
-    assert not [q for q in cal.quantities if q.kind == "inside"], "rows that agree add nothing"
+    assert not cal.inside, "rows that agree add nothing"
     cal = _calibration(_trial_cells(shift=True))
-    inside = [q for q in cal.quantities if q.kind == "inside"]
+    inside = cal.inside
     assert [q.label for q in inside] == ["est_b"] and inside[0].below == 2 and inside[0].gross == 0
     assert all(s.value < trial_checks.INSIDE_MIN for s in inside[0].settings)
     assert not inside[0].fault, "a possible misplacement of rows is said, never a repair or a stop"
     assert "inside the interval the same trial reported" in inside[0].says()
-    assert not any(q.kind == "inside" and q.label == "est_a" for q in cal.quantities)
+    assert not any(q.kind == "inside" for q in cal.quantities), "never among the quantities the stop rules read"
+    assert not any(q.label == "est_a" for q in cal.inside)
 
 
 def test_the_paper_and_the_quality_report_say_the_statistic_is_not_confirmed(tmp_path: Path) -> None:
@@ -199,8 +200,8 @@ def test_the_paper_and_the_quality_report_say_the_statistic_is_not_confirmed(tmp
 
     verdict = trial_checks.judge(_trial_cells(shift=True), PROTOCOL, None, repairs_left=True)
     rec = verdict.record()
-    assert [q["kind"] for q in rec["calibration"]["quantities"] if q["kind"] == "inside"] == ["inside"]
-    inside = next(q for q in rec["calibration"]["quantities"] if q["kind"] == "inside")
+    assert not [q for q in rec["calibration"]["quantities"] if q["kind"] == "inside"]
+    inside = next(q for q in rec["calibration"]["inside"] if q["kind"] == "inside")
     assert inside["fault"] is False and inside["below"] == 2
     root = _root(tmp_path)
     trial_checks.write_record(root, rec)
@@ -211,9 +212,9 @@ def test_the_paper_and_the_quality_report_say_the_statistic_is_not_confirmed(tmp
 
     paper_facts._trial_check_items(root, add)
     said = [t for _n, t in items if "inside the interval the same trial reported" in t]
-    assert said and "not presented as confirmed" in said[0], items
+    assert said and "may not be right" in said[0], items
     lines = quality_report._trial_checks_summary(quality_report._Quest(root))["lines"]
-    assert any("inside the interval the same trial reported" in x and "not presented as confirmed" in x for x in lines), lines
+    assert any("inside the interval the same trial reported" in x and "may not be right" in x for x in lines), lines
 
 
 # ---- A2 end to end: the printed result carries the coverage and the bias of every result with a true value -------------------------------
@@ -250,3 +251,36 @@ def test_a_plan_with_no_true_value_prints_no_coverage_and_no_bias(tmp_path: Path
     plain = {**PROTOCOL, "metrics": [{k: v for k, v in m.items() if k != "known_value"} for m in PROTOCOL["metrics"]]}
     out = _printed(tmp_path, plain, _trial_cells())
     assert not [k for row in out.values() if isinstance(row, dict) for k in row if k.endswith(("_coverage", "_bias"))]
+
+
+def test_the_declared_block_keeps_returned_names_apart_from_what_fi_counts(tmp_path: Path) -> None:
+    from core import frozen_protocol
+
+    extra = [
+        {"id": "est_c", "kind": "mean", "estimand": "third", "unit": "one trial", "role": "result", "returned": "each_run",
+         "known_value": {"true_value": "noise * 2", "estimate": "est_c", "standard_error": "se_c", "interval": ["lo_c", "hi_c"], "level": 0.95}},
+        {"id": "est_d", "kind": "mean", "estimand": "fourth", "unit": "one trial", "role": "result", "returned": "each_run",
+         "known_value": {"true_value": "truth_a", "estimate": "est_d", "standard_error": "se_d"}}]
+    protocol = {**PROTOCOL, "metrics": [*PROTOCOL["metrics"], *extra]}
+    (tmp_path / "needs").mkdir()
+    record = {"schema": frozen_protocol.FROZEN_SCHEMA, "protocol": protocol, "sha256": frozen_protocol.sha256(protocol)}
+    (tmp_path / "needs" / "FROZEN_PROTOCOL.json").write_text(json.dumps(record), encoding="utf-8")
+    lines = finding_repair.declared_block(tmp_path).splitlines()
+    returned = next(x for x in lines if x.startswith("Names the code's trial returns"))
+    assert "`est_a`" in returned and "`cover`" not in returned and "`corr_ab`" not in returned
+    assert not any("channel" in x and x.startswith("Names") for x in lines)
+    counted = next(x for x in lines if x.startswith("FI counts these itself"))
+    assert "est_a_coverage" in counted and "est_b_bias" in counted
+    assert "est_c" not in counted, "a true value that is a formula of a setting is not countable"
+    assert "est_d" not in counted, "no interval ends: no coverage"
+    assert "does not return them" in counted or "the code does not return them" in counted
+
+
+def test_bias_leaves_out_a_trial_with_no_value_and_says_how_many(tmp_path: Path) -> None:
+    cells = _trial_cells()
+    cells[0]["metrics"]["est_a"]["values"][3] = float("nan")
+    t = _table(cells)
+    assert t.bias_dropped("est_a", "noise=0.1") == 1 and t.bias_dropped("est_a", "noise=0.2") == 0
+    assert len(t.coverage("est_a", "noise=0.1")) == 40, "coverage counts that trial as a miss"
+    out = _printed(tmp_path, PROTOCOL, cells)
+    assert out["noise=0.1"]["est_a_bias_dropped"] == 1 and "est_a_bias_dropped" not in out["noise=0.2"]

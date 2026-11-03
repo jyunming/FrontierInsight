@@ -105,7 +105,7 @@ BIAS_REPORTED = 0.5
 #: An estimate lies inside the interval its own trial reported (an interval is built around its estimate). Measured on 128 estimates
 #: of 515 recorded runs' settings: every one 1.000; one trial's estimates moved to the next trial: 0.825. Below this share of a
 #: setting's trials the rows of the record may not belong together, and a statistic that pairs this estimate with another across
-#: trials is not presented as confirmed.
+#: trials may not be right.
 INSIDE_MIN = 0.9
 #: The reason FI's harness gives a trial its time limit cut off (core/trial_runner.OUT_OF_TIME).
 _OUT_OF_TIME = "the study's time (execution.timeout_s) ran out"
@@ -505,6 +505,9 @@ class Calibration:
     quantities: list[Quantity] = field(default_factory=list)
     #: Why something that looked like an interval or a standard error was not checked (one line each).
     not_checked: list[str] = field(default_factory=list)
+    #: The ``inside`` consistency findings (:func:`_judge_inside`): said in the paper and the quality report only. Kept apart from
+    #: ``quantities`` so no rule that reads which settings were judged, or whether anything was checked, counts them.
+    inside: list[Quantity] = field(default_factory=list)
 
     @property
     def faults(self) -> list[Quantity]:
@@ -1029,7 +1032,7 @@ def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = N
             _judge_inside(inside, [(str(c.get("key")), *_inside_share(c, est, list(ends))) for c in cells
                                    if _own_here(c, [est, *ends]) and not c.get("level")])
             if inside.below:  # reported only where it is off: a record whose rows agree adds nothing
-                out.quantities.append(inside)
+                out.inside.append(inside)
         cover = (Quantity("coverage", " .. ".join(ends), list(ends), level=level, truth=truth_label,
                           withheld=list(ends)) if ends else None)
         ratio = (Quantity("se_ratio", est, [est, spread], truth=truth_label, withheld=[spread, *(ends or [])])
@@ -1336,6 +1339,11 @@ def summary(fails: list[SettingFailures], cal: Calibration | None) -> dict[str, 
                            for q in cal.quantities],
             "not_checked": list(cal.not_checked),
             "checked": cal.checked,
+            "inside": [{"kind": q.kind, "label": q.label, "names": q.names, "truth": q.truth, "judged": q.judged, "gross": 0,
+                        "below": q.below, "above": 0, "fault": False, "says": q.says(), "withheld": [],
+                        "settings": [{"key": s.key, "n": s.n, "value": round(s.value, 6), "low": round(s.low, 6),
+                                      "high": round(s.high, 6), "gross": False, "below": s.below} for s in q.settings]}
+                       for q in cal.inside],
         },
     }
 
