@@ -271,8 +271,11 @@ def _check_figures(value: Any, asked: dict[str, str], design: dict[str, Any]) ->
         if not isinstance(shows, list) or not shows or not all(isinstance(s, str) for s in shows):
             out.append(f"`{name}`: `shows` must list the numbers the figure shows ({', '.join(ids)}), or answer `drop`: true")
         elif [s for s in shows if s not in ids]:
+            labels = _contract.family_labels(design.get("protocol"))
             out.append(f"`{name}` shows {', '.join('`' + s + '`' for s in shows if s not in ids)}, which the study does not "
-                       f"report or work out (it holds {', '.join(ids)})")
+                       f"report or work out (it holds {', '.join(ids)})"
+                       + "".join(f"; `{s}` is only another name for {', '.join(labels[s])}, so list those"
+                                 for s in shows if s in labels and s not in ids))
         for axis in ("x", "series"):
             used = row.get(axis)
             if axis == "x" and used in (None, ""):
@@ -538,7 +541,9 @@ def _apply_names(p: dict[str, Any], answer: dict[str, Any]) -> tuple[dict[str, A
     derived, named, temp = list(p.get("derived") or []), list(p.get("named_results") or []), []
     for name, row in answer.items():
         what = _short(row.get("what") or name, 300)
-        if row["answer"] == "derived":
+        if _contract.is_family_label(row):  # not a result: another name for results already declared
+            named.append({"id": name, "answer": "label", "what": what, "of": list(row["inputs"])})
+        elif row["answer"] == "derived":
             derived.append({"id": name, "inputs": list(row["inputs"]), "role": "result", "label": what, "asked": True})
         elif row["answer"] == "reference" and isinstance(row.get("formula"), str) and row["formula"].strip():
             formula = row["formula"].strip()
@@ -676,7 +681,8 @@ async def ask_parts(design: Any, ask: Callable[[str], Awaitable[str]], parse: Ca
                 value = got.get({"roles": "results", "names": "names", "comparisons": "comparisons", "formulas": "formulas",
                                 "figures": "figures", "answers": "answers"}[part])
                 if part == "comparisons":
-                    value = {"comparisons": value if value is not None else [], "_derived": derived_ids}
+                    value = {"comparisons": value if value is not None else [], "_derived": derived_ids,
+                             "_labels": _contract.family_labels(current["protocol"])}
                 conflicts: dict[str, str] = {}  # answers: units that still differ at the last ask (not answered, with why)
                 problems = (_check_formulas(value, faults, current) if part == "formulas" else
                             _check_figures(value, faults, current) if part == "figures" else

@@ -298,7 +298,7 @@ class Reach:
         elif declared:
             self.ids = list(dict.fromkeys(str(n) for n in declared))
         self.by_norm = {_norm(i): i for i in self.ids}
-        self.headline = _code_review.headline_ids(headline, self.ids, self.labels)
+        self.headline = _code_review.headline_ids(headline, self.ids, self.labels, _contract.family_labels(protocol))
         self.returned = {_norm(n) for n in _trial_names(self.root)}
         derived = _read_json(self.root / _frame.DERIVED_PATH)
         derived = derived if isinstance(derived, dict) else {}

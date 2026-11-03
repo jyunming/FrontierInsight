@@ -667,8 +667,9 @@ def _without_broken_links(base: dict[str, Any], parts: dict[str, Any], gaps: lis
 
 # --- asking the plan for the parts the contract needs ----------------------------------------------------------------------
 
-#: The four answers for a name the plan relies on but does not declare as a result.
-NAME_ANSWERS = ("result", "reference", "diagnostic", "derived")
+#: The answers for a name the plan relies on but does not declare as a result. ``label``: only another word for several
+#: results already declared (one per method or setting); no number is computed under it.
+NAME_ANSWERS = ("result", "reference", "diagnostic", "derived", "label")
 #: The most undeclared names asked about in one question.
 MAX_NAMES = 15
 _WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -703,6 +704,20 @@ def _declared_names(protocol: dict[str, Any]) -> set[str]:
         if isinstance(o, dict) and isinstance(o.get("case"), dict):
             names.update(str(k) for k in o["case"])
     return names
+
+
+def is_family_label(row: Any) -> bool:
+    """An answer ``label``: the name is only another word for the declared results in ``inputs``. FI never freezes it as a
+    result (nothing defines one number out of several results of one quantity); each member stays as declared and the name
+    refers to all of them (core/contract_parts.py ``_apply_names``)."""
+    return isinstance(row, dict) and row.get("answer") == "label"
+
+
+def family_labels(protocol: Any) -> dict[str, list[str]]:
+    """The names the plan's model answered as another word for several declared results: ``{name: [those results]}``."""
+    rows = protocol.get("named_results") if isinstance(protocol, dict) else None
+    return {str(n["id"]): [str(i) for i in n["of"]] for n in rows or []
+            if isinstance(n, dict) and n.get("id") and n.get("answer") == "label" and isinstance(n.get("of"), list)}
 
 
 def undeclared_names(design: Any, not_asked: list[str] | None = None) -> dict[str, str]:
@@ -836,6 +851,11 @@ def check_part(part: str, value: Any, design: Any) -> list[str]:
                 if not isinstance(inputs, list) or not inputs or not all(i in declared for i in inputs):
                     out.append(f"`{name}`: a quantity computed afterwards needs `inputs`, the declared results it is computed "
                                f"from ({', '.join(declared)})")
+            elif answer == "label":
+                inputs = row.get("inputs")
+                if not isinstance(inputs, list) or len(inputs) < 2 or not all(i in declared for i in inputs):
+                    out.append(f"`{name}`: a label needs `inputs`, two or more declared results it is another word for "
+                               f"({', '.join(declared)})")
         out += [f"`{k}` was not asked about" for k in value if k not in wanted]
     elif part == "comparisons":
         items = value.get("comparisons")
@@ -849,7 +869,9 @@ def check_part(part: str, value: Any, design: Any) -> list[str]:
                 out.append(f"comparison {i} is not a mapping")
                 continue
             if c.get("result") not in names:
-                out.append(f"comparison {i}: `result` must be a declared result")
+                of = (value.get("_labels") or {}).get(c.get("result"))
+                out.append(f"comparison {i}: `result` must be a declared result"
+                           + (f"; `{c.get('result')}` is only another name for {', '.join(of)}, so name one of them" if of else ""))
             if c.get("across") not in varied:
                 out.append(f"comparison {i}: `across` must be a setting that varies ({', '.join(varied) or 'none'})")
             if c.get("how", "difference") not in ("difference", "ratio"):
