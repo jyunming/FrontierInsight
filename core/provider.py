@@ -46,6 +46,7 @@ import asyncio
 import base64
 import contextlib
 import contextvars
+import functools
 import json
 import logging
 import os
@@ -282,6 +283,10 @@ class _CliSpec:
     # Settings a CLI reads only from a file in the user's home (agy): written to a fresh home folder of the call's
     # own, which the CLI is pointed at through HOME / USERPROFILE, so the user's own settings are never used or changed.
     home_settings: dict[str, Any] | None = None
+    # Read a finished answer from the CLI's own record in its call home, for a CLI that can finish a turn and then print
+    # nothing and not exit (agy, on a large prompt). Takes the call home; returns (answer, usage) or None. Used only
+    # after the record has stood unchanged for ``_CLI_RECORD_STABLE_S`` while the CLI's stdout stayed silent.
+    record_reader: Callable[[str], tuple[str, dict[str, Any] | None] | None] | None = None
     # Pull real token usage out of the CLI's own output. Several CLIs report
     # what they actually consumed — including the system prompt and tool
     # schema they wrap around ours, which the char-count estimator cannot
@@ -753,6 +758,80 @@ def _extract_antigravity_response(raw: str) -> str:
     return raw.strip()
 
 
+#: How long agy's own record of a finished answer must stand unchanged, with its stdout still silent, before FI reads the
+#: answer from the record and stops the call. A normal call prints its result within a second of the record; 30 s covers
+#: a record that a later step (a refused tool) would still extend.
+_CLI_RECORD_STABLE_S = 30.0
+_CLI_RECORD_POLL_S = 5.0
+
+
+class _CliRecordIncomplete(RuntimeError):
+    """The CLI's own record shows a finished model reply that cannot be taken as the whole answer (the record cut the
+    reply, or it cannot be shown that the turn is over). Plain and retryable: the caller stops the call and FI's
+    ordinary retry / fallback takes over."""
+
+
+def _read_agy_record(home: str) -> tuple[str, dict[str, Any] | None] | None:
+    """The answer agy's own per-call record (``brain/<conversation>/.system_generated/logs/transcript_full.jsonl`` in the
+    call's home) holds for a call whose turn is finished, or None while the turn is not finished yet.
+
+    Why: on a large prompt agy has been seen to finish the turn and then print nothing to stdout and not exit, so FI
+    waited out the whole timeout, four times over. Every finished call record seen has exactly two steps: the request
+    (USER_INPUT, DONE) and one model reply (PLANNER_RESPONSE, DONE, with its token counts); the record has no end
+    marker, so that shape is the proof that the turn is over. A model reply anywhere else (after a tool step, or
+    followed by other steps) does not prove it: the model may still write a tool step or a later reply.
+
+    The record is read whole or not at all. None: nothing there yet, a last step that is not a finished model reply, a
+    half-written line, or more than one conversation (keep waiting). ``_CliRecordIncomplete``: a finished model reply
+    that is cut (``truncated_fields``), empty, or not provably the end of the turn (stop and retry; never a partial or
+    guessed answer). The shorter ``transcript.jsonl`` next to the record cuts long replies; only the full one is read.
+    """
+    try:
+        brain = Path(home) / ".gemini" / "antigravity-cli" / "brain"
+        files = list(brain.glob("*/.system_generated/logs/transcript_full.jsonl"))
+        if len(files) != 1:
+            return None
+        lines = [ln for ln in files[0].read_text(encoding="utf-8").splitlines() if ln.strip()]
+        if not lines:
+            return None
+        steps = [json.loads(ln) for ln in lines]
+    except (OSError, ValueError):
+        return None
+    step = steps[-1]
+    if not isinstance(step, dict) or step.get("source") != "MODEL" or step.get("type") != "PLANNER_RESPONSE":
+        return None
+    if str(step.get("status", "")).upper() != "DONE":
+        return None
+    if step.get("truncated_fields"):
+        raise _CliRecordIncomplete(
+            f"the CLI's record cut its finished reply (cut: {step.get('truncated_fields')}), so the answer cannot be "
+            f"read whole"
+        )
+    content = step.get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise _CliRecordIncomplete("the CLI's record holds a finished reply with no text")
+    first = steps[0] if isinstance(steps[0], dict) else {}
+    one_turn = (
+        len(steps) == 2 and first.get("type") == "USER_INPUT"
+        and str(first.get("status", "")).upper() == "DONE"
+        and not any("tool" in str(k).lower() for k in step)
+    )
+    if not one_turn:
+        raise _CliRecordIncomplete(
+            f"the CLI's record has {len(steps)} steps and its last model reply is not shown to end the turn, so the "
+            f"answer is not taken"
+        )
+    try:
+        inp, out = int(step.get("input_tokens") or 0), int(step.get("output_tokens") or 0)
+        cached = int(step.get("cache_read_tokens") or 0)
+    except (TypeError, ValueError):
+        return content, None
+    if not (inp or out):
+        return content, None
+    return content, {"prompt_tokens": inp, "completion_tokens": out, "total_tokens": inp + out,
+                     "cached_input_tokens": cached, "estimated": False}
+
+
 # How long one line of a CLI's stdout may be. asyncio's default is 64 KiB, and a
 # claude stream-json line holds a whole message: a real call printed a 110,525-byte
 # `assistant` line carrying nothing but its thinking block. Past 64 KiB the reader
@@ -1004,6 +1083,7 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         image_input="file_ref",
         add_dir_flag="--add-dir",
         home_settings=_ANTIGRAVITY_SETTINGS,
+        record_reader=_read_agy_record,
     ),
 }
 CLI_PROVIDERS: frozenset[str] = frozenset(_CLI_SPECS)
@@ -2878,6 +2958,8 @@ async def _run_cli(
                 proc, argv, spec, stdin_bytes, tmp_out_path, timeout_s,
                 heartbeat_cb=heartbeat_cb, node=node, usage_out=usage_out,
                 tree=tree,
+                record=(functools.partial(spec.record_reader, home_dir)
+                        if spec.record_reader is not None and home_dir is not None else None),
             )
         except (RuntimeError, asyncio.TimeoutError) as exc:
             # The CLI's own log is in the call's home and goes with it: its errors go into the message first.
@@ -2990,6 +3072,7 @@ async def _collect_via_communicate(
     node: str = "",
     usage_out: dict[str, Any] | None = None,
     tree: AsyncProcessTree | None = None,
+    record: Callable[[], tuple[str, dict[str, Any] | None] | None] | None = None,
 ) -> str:
     """Legacy ``communicate()`` path. Two sub-cases:
 
@@ -3039,8 +3122,36 @@ async def _collect_via_communicate(
         _beat_task = asyncio.ensure_future(_beat())
     try:
         try:
-            stdout_b, stderr_b = await asyncio.wait_for(
-                proc.communicate(stdin_bytes), timeout=timeout_s,
+            if record is None:
+                stdout_b, stderr_b = await asyncio.wait_for(
+                    proc.communicate(stdin_bytes), timeout=timeout_s,
+                )
+            else:
+                waited = await _communicate_or_read_record(proc, stdin_bytes, timeout_s, record)
+                if isinstance(waited[0], str):
+                    # The CLI finished its turn but printed nothing and did not exit: stop it, take the answer
+                    # from its own record.
+                    answer, record_usage = waited
+                    _log.warning(
+                        "[provider] %s finished its answer but printed nothing and did not exit; the answer (%d "
+                        "chars) was read from its own record and the call stopped", spec.argv[0], len(answer),
+                    )
+                    await _kill_and_reap(proc, spec.argv[0], tree)
+                    if usage_out is not None and record_usage:
+                        usage_out.update(record_usage)
+                    final = answer.strip()
+                    gate_hit = _check_output_gates(final)
+                    if gate_hit is not None:
+                        raise _CliTransientError(
+                            f"{spec.argv[0]} tripped output gate {gate_hit[0]!r} (matched: {gate_hit[1]!r}) in an "
+                            f"answer read from its own record; treating as transient so the call is retried."
+                        )
+                    return final
+                stdout_b, stderr_b = waited
+        except _CliRecordIncomplete as exc:
+            await _kill_and_reap(proc, spec.argv[0], tree)
+            raise _CliTransientError(
+                f"{spec.argv[0]} printed nothing and did not exit, and {exc}; the call was stopped to be retried"
             )
         except asyncio.TimeoutError:
             elapsed = f"{timeout_s:g}s" if timeout_s >= 1 else f"{timeout_s * 1000:g}ms"
@@ -3116,6 +3227,87 @@ async def _collect_via_communicate(
             try:
                 await _beat_task
             except asyncio.CancelledError:
+                pass
+
+
+async def _communicate_or_read_record(
+    proc: asyncio.subprocess.Process,
+    stdin_bytes: bytes | None,
+    timeout_s: float,
+    record: Callable[[], tuple[str, dict[str, Any] | None] | None],
+) -> tuple[Any, Any]:
+    """``proc.communicate()`` within ``timeout_s`` (stdout is read as it comes), except that a CLI that printed NOTHING
+    on stdout for the whole wait while its own record shows a finished answer, unchanged for ``_CLI_RECORD_STABLE_S``,
+    gives ``(answer, usage)``. Once stdout has any byte the record is never used: the CLI is speaking and its output
+    (an error, a partial result) is what counts. A finished reply the record cannot show to be whole raises
+    ``_CliRecordIncomplete`` once it has stood unchanged as long. Raises ``asyncio.TimeoutError`` as ``wait_for`` does.
+    Which came back: a pair whose first item is a ``str`` is the record's answer; the other is ``(stdout, stderr)``."""
+    out, err = bytearray(), bytearray()
+
+    async def pump(stream: Any, buf: bytearray) -> None:
+        if stream is None:
+            return
+        while True:
+            chunk = await stream.read(65536)
+            if not chunk:
+                return
+            buf.extend(chunk)
+
+    async def feed() -> None:
+        if proc.stdin is None:
+            return
+        try:
+            if stdin_bytes:
+                proc.stdin.write(stdin_bytes)
+                await proc.stdin.drain()
+            proc.stdin.close()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    async def finish() -> tuple[bytes, bytes]:
+        await asyncio.gather(feed(), pump(proc.stdout, out), pump(proc.stderr, err))
+        await proc.wait()
+        return bytes(out), bytes(err)
+
+    comm = asyncio.ensure_future(finish())
+    started = time.monotonic()
+    seen: Any = None
+    seen_since = 0.0
+    try:
+        while True:
+            left = timeout_s - (time.monotonic() - started)
+            if left <= 0:
+                raise asyncio.TimeoutError()
+            done, _ = await asyncio.wait({comm}, timeout=min(_CLI_RECORD_POLL_S, left))
+            if done:
+                return comm.result()
+            if out:
+                seen = None  # the CLI printed something: the normal path decides
+                continue
+            incomplete: _CliRecordIncomplete | None = None
+            try:
+                found = await asyncio.to_thread(record)
+            except _CliRecordIncomplete as exc:
+                found, incomplete = None, exc
+            except Exception:  # noqa: BLE001 - a record that cannot be read just means keep waiting
+                found = None
+            now = time.monotonic()
+            key = found[0] if found is not None else (("incomplete", str(incomplete)) if incomplete else None)
+            if key is None or key != seen:
+                seen = key
+                seen_since = now
+            elif now - seen_since >= _CLI_RECORD_STABLE_S:
+                if out:
+                    continue
+                if incomplete is not None:
+                    raise incomplete
+                return found
+    finally:
+        if not comm.done():
+            comm.cancel()
+            try:
+                await comm
+            except BaseException:  # noqa: BLE001 - the cancelled read; the caller decides what happens next
                 pass
 
 
