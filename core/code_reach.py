@@ -33,6 +33,10 @@ HARNESS_ENTRIES = ("run_trial", "run_cell", "oracle")
 _DYNAMIC_CALLS = {"globals", "locals", "vars", "eval", "exec", "__import__", "import_module"}
 
 
+def _is_dunder(name: str) -> bool:
+    return len(name) > 4 and name.startswith("__") and name.endswith("__")
+
+
 def _is_main_guard(node: ast.AST) -> bool:
     if not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare):
         return False
@@ -169,9 +173,18 @@ def reached(code_dir: Path, *, scripts: list[str], harness: str | None = None) -
         for m in modules.values():
             reach(m, name)
 
-    def all_of(m: _Module) -> None:
-        for name in list(m.functions):
+    def all_of(m: _Module, seen: set[str] | None = None) -> None:
+        """Every function ``m`` holds, the names it imports (a package's re-exports) and, through ``from x import *``, what
+        the modules it star-imports hold."""
+        seen = set() if seen is None else seen
+        if m.rel in seen:
+            return
+        seen.add(m.rel)
+        for name in [*m.functions, *m.imports]:
             reach(m, name)
+        for module in m.star:
+            if by_name.get(module) is not None:
+                all_of(by_name[module], seen)
 
     def imported_module(m: _Module, node: ast.AST) -> _Module | None:
         """The module of the quest's code that ``node`` names in ``m`` (``import derive``), else ``None``."""
@@ -182,6 +195,9 @@ def reached(code_dir: Path, *, scripts: list[str], harness: str | None = None) -
 
     for rel, m in modules.items():
         work.append((m, _definition_time(m.tree.body, main=rel in scripts)))
+        for name in list(m.functions):
+            if _is_dunder(name):
+                reach(m, name)  # a special method runs without its name being written (Sim(3), len(s), s + s, with R():)
     # FI's harness may call these in either script, whether or not a ledger shows it did: they always count as run.
     for script in {*scripts, *([harness] if harness else [])}:
         if script in modules:
@@ -270,9 +286,11 @@ def _judged(path: Path, function: str) -> str | None:
     name is judged)."""
     if not function:
         return None
+    parts = [p for p in function.split(".") if p]
+    if any(_is_dunder(p) for p in parts):
+        return None  # a special method is run by the language, not by a name: FI cannot tell
     if _defines(path, function):
         return function
-    parts = [p for p in function.split(".") if p]
     if len(parts) < 2:
         return None
     for part in parts:

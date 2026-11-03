@@ -160,3 +160,28 @@ def test_a_harness_entry_imported_into_the_simulation_is_reached(tmp_path: Path)
                             "sim_core.py": "def run_trial(cell, trial_id, seed):\n    return step()\n\ndef step():\n    return 1\n"})
     done = code_reach.reached(code, scripts=["experiment.py"], harness="simulate.py")
     assert done is not None and {("sim_core.py", "run_trial"), ("sim_core.py", "step")} <= done
+
+
+def test_a_special_method_of_a_class_the_run_uses_is_never_judged_never_run(tmp_path: Path) -> None:
+    code = _code(tmp_path, {"experiment.py": "from sim import Sim\n\ns = Sim(3)\nprint(len(s))\nwith s:\n    pass\n",
+                            "sim.py": ("class Sim:\n    def __init__(self, n):\n        self.n = n\n\n    def __len__(self):\n"
+                                       "        return self.n\n\n    def __enter__(self):\n        return self\n\n"
+                                       "    def __exit__(self, *a):\n        return False\n\n    def never_called(self):\n"
+                                       "        return 1\n")})
+    kw = {"scripts": ["experiment.py"]}
+    for name in ("__init__", "__len__", "__enter__", "__exit__"):
+        assert not code_reach.never_run(code, "sim.py", f"Sim.{name}", **kw), name
+        assert not code_reach.never_run(code, "sim.py", name, **kw), name
+    assert code_reach.never_run(code, "sim.py", "Sim.never_called", **kw)
+
+
+def test_a_name_computed_on_a_package_reaches_what_the_package_re_exports(tmp_path: Path) -> None:
+    code = _code(tmp_path, {"experiment.py": "import pkg\n\ngetattr(pkg, 'x' + 'y')()\n",
+                            "pkg/__init__.py": "from .impl import xy\nfrom .more import *\n",
+                            "pkg/impl.py": "def xy():\n    return 1\n",
+                            "pkg/more.py": "def starred():\n    return 2\n",
+                            "pkg/lone.py": "def lone():\n    return 3\n"})
+    kw = {"scripts": ["experiment.py"]}
+    assert not code_reach.never_run(code, "pkg/impl.py", "xy", **kw)
+    assert not code_reach.never_run(code, "pkg/more.py", "starred", **kw)
+    assert code_reach.never_run(code, "pkg/lone.py", "lone", **kw)
