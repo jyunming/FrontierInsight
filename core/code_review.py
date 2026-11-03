@@ -69,6 +69,9 @@ RESERVED_FOR_FINAL = 1
 #: read too (at most one per repair, and ``engine.exec_reflect_max_iterations`` bounds the repairs; 3 by default).
 RUN_REPAIR_READS = 3
 MAX_SEND_BACKS = 2
+#: Rounds of repair that may be started again after one was cut short (a kill, a crash) before it finished: a round is counted in
+#: ``send_backs`` when it ends, so only this bounds a round that keeps dying.
+MAX_ROUND_RESTARTS = 2
 #: Every model request the finding-by-finding repair may make in a quest (a failing test asked for, a repair, the other
 #: model's one rewrite), each counted on disk before it is made. Each finding has its own smaller bounds
 #: (:mod:`core.finding_repair`).
@@ -1012,7 +1015,7 @@ def repair_problem(old: str, new: str, rel: str, *, equations: list[str], packag
 
 
 #: What a record keeps from one code version to the next (the quest-wide counters and the history of the readings).
-CARRIED = ("reviews_total", "send_backs", "repair_calls", "finding_calls", "test_calls", "readings", "converged", "repaired",
+CARRIED = ("reviews_total", "send_backs", "round_starts", "repair_calls", "finding_calls", "test_calls", "readings", "converged", "repaired",
            "read_version", "issues", "same_model", "accepted_tests", "plan_conflicts", "read_problems", "round_fixed",
            "reader_calls")
 
@@ -1051,6 +1054,8 @@ def may_repair(record: dict[str, Any]) -> str:
     pass its test (:func:`note_reading`)."""
     if int(record.get("send_backs") or 0) >= MAX_SEND_BACKS:
         return f"the {MAX_SEND_BACKS} rounds of repair allowed in a quest are spent"
+    if int(record.get("round_starts") or 0) >= MAX_SEND_BACKS + MAX_ROUND_RESTARTS:
+        return f"{MAX_ROUND_RESTARTS} rounds of repair were cut short and started again; no more are started"
     if int(record.get("finding_calls") or 0) >= MAX_FINDING_CALLS:
         return f"the {MAX_FINDING_CALLS} model requests allowed for repairing findings in a quest are spent"
     if int(record.get("reviews_total") or 0) >= MAX_REVIEWS:
