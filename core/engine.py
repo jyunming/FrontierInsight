@@ -146,6 +146,7 @@ from . import plan_steps as _plan_steps
 from . import equation_tests as _equation_tests
 from . import outside_run as _outside_run
 from . import code_reach as _code_reach
+from . import shown_reach as _shown_reach
 from . import code_review as _code_review
 from . import review_pairs as _pairs
 from . import quality_report as _quality_report
@@ -22743,6 +22744,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         declared = (_code_review.declared_names(state.get("design"), self._protocol_block(state),
                                                 _analysis_frame.read_record(self.quest_root))
                     if isinstance(state, dict) else None)
+        reach = self._shown_fault_reach(headline or [], state)
         for issue in shown:
             rel = str(issue.get("test") or "")
             saved = ((record or {}).get("issues") or {}).get(str(issue.get("id")))
@@ -22797,16 +22799,27 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             _code_review.save(self.quest_root, record)
         if crash_repair is not None:
             # a fault that stops the quest is not held up by a crash elsewhere; anything else waits for the repaired run
-            outcome = (self._shown_fault_outcome(verdicts, record or {}, result, headline or [], declared)
+            outcome = (self._shown_fault_outcome(verdicts, record or {}, result, headline or [], declared, reach=reach)
                        if verdicts else None)
             return outcome if outcome and outcome.get("stuck") else crash_repair
         if not verdicts:
             return None
-        return self._shown_fault_outcome(verdicts, record or {}, result, headline or [], declared)
+        return self._shown_fault_outcome(verdicts, record or {}, result, headline or [], declared, reach=reach)
+
+    def _shown_fault_reach(self, headline: list[str], state: Any) -> "_shown_reach.Reach | None":
+        """FI's records of the quest, read for the gate (:mod:`core.shown_reach`); ``None`` when they cannot be read, and
+        the gate then judges each finding by the results it names."""
+        try:
+            design = state.get("design") if isinstance(state, dict) else None
+            protocol = _frozen.protocol_of(self.quest_root) or (self._protocol_block(state) if isinstance(state, dict) else None)
+            return _shown_reach.Reach(self.quest_root, protocol, headline, _code_review.declared_names(design, protocol))
+        except Exception as exc:  # noqa: BLE001 - the records are an extra source: without them the gate judges as before
+            self._log.warning("[evidence_gate] FI's records could not be read for the shown faults (%r)", exc)
+            return None
 
     def _shown_fault_outcome(self, verdicts: list[tuple[dict[str, Any], str]], record: dict[str, Any],
                              result: Any, headline: list[str] | None = None,
-                             declared: list[str] | None = None) -> dict[str, Any] | None:
+                             declared: list[str] | None = None, reach: "_shown_reach.Reach | None" = None) -> dict[str, Any] | None:
         """What the faults a failing test showed, and nothing showed gone, do to the quest, from the records alone. A fault
         about the study's main quantity (the plan's first dependent variable or its precision metric) stops it with no
         paper: there is nothing to report. A plan quantity the code does not compute (and the results do not hold under
@@ -22814,13 +22827,52 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         the results the paper may use, and the paper states it. A fault whose quantity the results do not hold, or whose
         removal leaves no result, stops the quest: nothing can be left out, and a wrong number may stand. So does one
         whose values the results also hold under keys that stay (FI could not tell them apart in the paper), and one that
-        may be about the main quantity by its names or its keys (:func:`core.code_review.about_headline`)."""
+        may be about the main quantity by its names or its keys (:func:`core.code_review.about_headline`).
+
+        With ``reach`` (FI's records of the quest, :mod:`core.shown_reach`), a fault that test places by the function it
+        calls (a result worked out afterwards, a figure, a helper) or by what the test asserts is judged from those
+        records first: it stops only when the main result is among what it changes or nothing would be left; the rest
+        is left out, not done or kept in the quality report. A finding the records cannot place is judged as above."""
         from . import result_checks as _result_checks
 
         stops: list[tuple[dict[str, Any], str]] = []
-        left_out: list[tuple[dict[str, Any], str, list[str]]] = []
+        left_out: list[tuple[dict[str, Any], str, list[str], str | None]] = []
         not_done: list[tuple[dict[str, Any], str, list[str]]] = []
+        figures: list[tuple[dict[str, Any], str, list[str]]] = []
+        about_plan: list[dict[str, Any]] = []
+        incomplete: set[str] = set()  # left out because a test showed the value missing or incomplete, not computed wrongly
         for issue, how in verdicts:
+            # A fault in a function that makes one declared result, one figure or a helper they use, or a test that only
+            # checks that something is there, is placed from FI's records (core/shown_reach.py), not from the finding's words.
+            try:
+                placed = (reach.effect(record, issue, result)
+                          if reach is not None and not _code_review.missing_quantities(record, issue) else None)
+                placed_keys = (sorted({*reach.printed_keys(placed.left_out, result), *placed.extra_keys})
+                               if placed is not None and (placed.left_out or placed.extra_keys) else [])
+                placed_named = (placed.named or (placed.left_out[0] if placed.left_out else "")) if placed is not None else ""
+            except Exception as exc:  # noqa: BLE001 - the records are an extra source: without them the finding is judged as before
+                self._log.warning("[evidence_gate] %s could not be placed from FI's records (%r)", issue.get("id"), exc)
+                placed, placed_keys, placed_named = None, [], ""
+            if placed is not None:
+                if placed.stop:
+                    stops.append((issue, how + "; " + placed.stop))
+                    continue
+                if placed.plan_text:
+                    about_plan.append(issue)
+                    continue
+                if placed_keys:
+                    left_out.append((issue, how, placed_keys, placed_named or None))
+                    if placed.incomplete:
+                        incomplete.add(str(issue.get("id")))
+                files = [reach.figure_files.get(f) or "" for f in placed.figures]
+                if any(files):
+                    figures.append((issue, how, [f for f in files if f]))
+                names = [*placed.not_done, *(f"figure {f}" for f, file in zip(placed.figures, files) if not file)]
+                if names:
+                    not_done.append((issue, how, names))
+                if not (placed.left_out or placed.figures or placed.not_done):
+                    self._log.info("[evidence_gate] %s: %s; it changes no reported result", issue.get("id"), placed.why)
+                continue
             if _code_review.about_headline(record, issue, result, headline or []):
                 stops.append((issue, how))
             elif missing := _code_review.missing_quantities(record, issue):
@@ -22828,7 +22880,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             elif keys := _code_review.keys_of_issue(record, issue, result):
                 # A key that holds no number has nothing another key could hold too: leaving it out removes all of it.
                 if _result_checks._values_left_out(result, set(keys)) or _code_review.holds_no_number(result, set(keys)):
-                    left_out.append((issue, how, keys))
+                    left_out.append((issue, how, keys, None))
                 else:
                     stops.append((issue, how + "; the results hold its values under other names too, so FI cannot leave "
                                                "them out"))
@@ -22841,29 +22893,55 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             from . import numeric_oracle as _numeric_oracle
             from . import typed_results as _typed
 
-            gone = {k for _i, _h, keys in left_out for k in keys}
+            gone = {k for _i, _h, keys, _q in left_out for k in keys}
             if not any(True for _ in _numeric_oracle.flatten_numbers(_typed.strip_keys(result, gone), keep_zero=True)):
                 stops.append((left_out[0][0], left_out[0][1] + "; leaving out what it changes leaves no result"))
         if stops:
             return self._shown_fault_stop(*stops[0])
         issues = record.get("issues") if isinstance(record.get("issues"), dict) else {}
-        for issue, how, keys in left_out:
+        for issue in about_plan:
+            # Text FI wrote from the plan differs from what the reader wanted: no computed number is wrong. It stays in the
+            # quality report and changes neither the plan nor the paper's results.
+            saved = issues.get(str(issue.get("id")))
+            if isinstance(saved, dict):
+                saved["changes_result"] = False
+                saved["about_plan_text"] = True
+            self._log.warning("[evidence_gate] %s is about text FI wrote from the plan, not a number the code computed: it "
+                              "changes no reported number and does not stop the quest", issue.get("id"))
+        if about_plan and not (left_out or not_done or figures):
+            _code_review.save(self.quest_root, record)
+        for issue, how, keys, _q in left_out:
             self._log.warning("[evidence_gate] %s: %s; FI leaves %s out of the results the paper may use, and the paper says "
                               "so", issue.get("id"), how, ", ".join(keys)[:200])
+        for issue, how, files in figures:
+            self._log.warning("[evidence_gate] %s: %s; FI takes %s out of the paper's figures, and the paper says so",
+                              issue.get("id"), how, ", ".join(files)[:200])
         for issue, how, names in not_done:
             self._log.warning("[evidence_gate] %s: the code does not compute %s (%s); the paper says so, as a part not done",
                               issue.get("id"), ", ".join(names)[:200], how)
-        for issue, how, names, outcome in [*((i, h, k, "left_out") for i, h, k in left_out),
-                                           *((i, h, n, "not_computed") for i, h, n in not_done)]:
+        recorded: set[str] = set()
+        for issue, how, names, outcome, named in [*((i, h, k, "left_out", q) for i, h, k, q in left_out),
+                                                  *((i, h, f, "left_out", f[0]) for i, h, f in figures),
+                                                  *((i, h, n, "not_computed", None) for i, h, n in not_done)]:
             saved = issues.get(str(issue.get("id")))
+            if isinstance(saved, dict) and outcome == "left_out" and str(issue.get("id")) in recorded:
+                # one finding that leaves out a result and a figure: the record names both
+                saved["at_gate"]["keys"] = [*saved["at_gate"].get("keys", []), *names]
+                continue
             if isinstance(saved, dict):
+                recorded.add(str(issue.get("id")))
                 saved["at_gate"] = {"outcome": outcome, "how": how, "keys" if outcome == "left_out" else "names": names,
-                                    "quantity": (_code_review.quantity_names(record, issue) or names)[0]}
-        if left_out or not_done:
+                                    "quantity": named or (_code_review.quantity_names(record, issue) or names)[0]}
+                if str(issue.get("id")) in incomplete:
+                    saved["at_gate"]["incomplete"] = True
+        if left_out or not_done or figures:
             _code_review.save(self.quest_root, record)
             self._leave_out_shown_faults(
-                [((_code_review.quantity_names(record, i) or k)[0], k, h) for i, h, k in left_out],
-                [(n, h) for _i, h, names in not_done for n in names], result)
+                [(q or (_code_review.quantity_names(record, i) or k)[0], k, h) for i, h, k, q in left_out],
+                [(n, h) for _i, h, names in not_done for n in names], result,
+                figures=[(f, h) for _i, h, files in figures for f in files],
+                incomplete={q or (_code_review.quantity_names(record, i) or k)[0] for i, _h, k, q in left_out
+                            if str(i.get("id")) in incomplete})
         return None
 
     async def _rerun_finding_test(self, rel: str) -> Any:

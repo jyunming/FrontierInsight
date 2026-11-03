@@ -450,17 +450,22 @@ def _code_faults_sentence(quest_root: Path) -> str:
     record = _read_json(quest_root / ".fi" / "code_review.json")
     issues = record.get("issues") if isinstance(record, dict) and isinstance(record.get("issues"), dict) else {}
     wrong: list[str] = []
+    incomplete: list[str] = []
     missing: list[str] = []
+    about_plan: list[str] = []
     from . import code_findings as _code_findings
 
     for issue in issues.values():
         gate = issue.get("at_gate") if isinstance(issue, dict) else None
+        if isinstance(issue, dict) and issue.get("about_plan_text") and _code_findings.flagged_now(issue):
+            about_plan.append(str(issue.get("text") or issue.get("quantity") or "").strip()[:120])
         if not isinstance(gate, dict) or not _code_findings.flagged_now(issue):
             continue
         if gate.get("outcome") == "left_out" and str(gate.get("quantity") or "").strip():
             name = str(gate["quantity"]).strip()
-            if name not in wrong:
-                wrong.append(name)
+            bucket = incomplete if gate.get("incomplete") else wrong
+            if name not in bucket:
+                bucket.append(name)
         elif gate.get("outcome") == "not_computed":
             for n in gate.get("names") if isinstance(gate.get("names"), list) else []:
                 if str(n).strip() and str(n).strip() not in missing:
@@ -470,8 +475,17 @@ def _code_faults_sentence(quest_root: Path) -> str:
         said.append("Tests FI ran on the code that produced these results showed it computes " + _names(wrong)
                     + " wrongly, so " + ("this quantity is" if len(wrong) == 1 else "these quantities are")
                     + " left out of the results reported here.")
+    if incomplete:
+        said.append("Tests FI ran on the code that produced these results showed " + _names(incomplete)
+                    + (" is" if len(incomplete) == 1 else " are") + " missing or incomplete, so "
+                    + ("this quantity is" if len(incomplete) == 1 else "these quantities are")
+                    + " left out of the results reported here.")
     if missing:
         said.append("The code does not compute " + _names(missing) + ", which the plan asks for.")
+    about_plan = [a for a in dict.fromkeys(about_plan) if a]
+    if about_plan:
+        said.append("A test of the study's code failed on text FI wrote from the plan, not on a number the code computed; no "
+                    "reported number is changed by it (" + "; ".join(about_plan[:3]) + ").")
     return " ".join(said)
 
 
