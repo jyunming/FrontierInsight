@@ -180,8 +180,7 @@ def metric_of(key: str) -> tuple[str | None, str | None]:
     """``(metric, setting)`` a compared key is about."""
     if key.startswith("trials/"):
         parts = key.split("/")
-        # a count of trials that finished or failed belongs to no result: FI cannot say which it changes
-        return (parts[-2] if len(parts) >= 4 else None), parts[1]
+        return (parts[-2] if len(parts) >= 4 else "failed trials"), parts[1]
     m = re.match(r"derived/derived/([^/]+)/by_setting/([^/]+)", key)
     if m:
         return m.group(1), m.group(2)
@@ -409,12 +408,14 @@ async def judge(executor: Any, python: Path | str, quest_root: Path | str, copy:
                               _json(base_root / "raw" / "trials.json"), bool(redrawn))
         keys = [c["key"] for c in keep]
         loose = [k for k in keys if metric_of(k)[0] is None]
-        if loose:
-            # a number FI cannot say which result it belongs to: not shipped as "unchanged", and not left out as a guess; the
-            # gate places the fault the way it does when no rerun could be made
+        metrics = sorted({m for m in (metric_of(k)[0] for k in keys) if m})
+        if loose and not metrics:
+            # only numbers FI cannot say which result they belong to: not shipped as "unchanged", and not left out as a
+            # guess; the gate places the fault the way it does when no rerun could be made
             return Verdict("could_not", "the repair changes numbers FI cannot attribute to a result: " + ", ".join(loose[:4]),
                            keys=keys, notes=notes, mode=mode, seconds=secs, source=source, files=files)
-        metrics = sorted({m for m in (metric_of(k)[0] for k in keys) if m})
+        if loose:  # they add to what the attributed numbers say, never replace it
+            notes = [*notes, "numbers FI cannot attribute to a result also differ: " + ", ".join(loose[:4])]
         return Verdict("changed" if keep else "unchanged", "", metrics=metrics, keys=keys, notes=notes, mode=mode, seconds=secs,
                        source=source, files=files)
     finally:

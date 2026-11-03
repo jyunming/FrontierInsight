@@ -209,13 +209,36 @@ def test_a_move_of_a_millionth_counts_when_the_draws_did_not_change(tmp_path: Pa
     assert got.status == "changed" and got.metrics == ["est"]
 
 
+def _with_odd_file(tmp_path: Path, scale: float) -> Verdict:
+    root = tmp_path / "quest"
+    _delivered(root, 1.0)
+    (root / "data" / "results" / "odd.json").write_text(json.dumps({"x": 1.0}), encoding="utf-8")
+    (root / "code" / "run.py").write_text((root / "code" / "run.py").read_text(encoding="utf-8").replace(
+        "sys.exit(1)", "(out / 'data' / 'results' / 'odd.json').write_text(json.dumps({'x': 1.0}))\nsys.exit(1)"), encoding="utf-8")
+    copy = rerun_check.copy_code(root, tmp_path / "w")
+    text = (copy / "run.py").read_text(encoding="utf-8").replace("{'x': 1.0}", "{'x': 2.0}").replace("scale = 1.0", f"scale = {scale}")
+    (copy / "run.py").write_text(text, encoding="utf-8")
+    return asyncio.run(rerun_check.judge(_Local(), sys.executable, root, copy, PROTOCOL, 60, None))
+
+
 def test_a_number_that_belongs_to_no_result_is_never_delivered_as_unchanged(tmp_path: Path) -> None:
+    got = _with_odd_file(tmp_path, 1.0)
+    assert got.status == "could_not" and "cannot attribute" in got.why and "file:odd.json/x" in got.keys
+
+
+def test_numbers_that_belong_to_no_result_add_to_the_answer_and_never_replace_it(tmp_path: Path) -> None:
+    got = _with_odd_file(tmp_path, 3.0)  # a result moved too
+    assert got.status == "changed" and got.metrics == ["est"]
+    assert any("cannot attribute" in n for n in got.notes)
+
+
+def test_a_change_in_the_trials_that_finished_belongs_to_the_failed_trials(tmp_path: Path) -> None:
     root = tmp_path / "quest"
     _delivered(root, 1.0)
     copy = rerun_check.copy_code(root, tmp_path / "w")
     (copy / "run.py").write_text((copy / "run.py").read_text(encoding="utf-8").replace('"ok": 10', '"ok": 9'), encoding="utf-8")
     got = asyncio.run(rerun_check.judge(_Local(), sys.executable, root, copy, PROTOCOL, 60, None))
-    assert got.status == "could_not" and "cannot attribute" in got.why and "trials/s/ok" in got.keys
+    assert got.status == "changed" and "failed trials" in got.metrics
 
 
 def test_a_repair_that_moves_a_reported_number_is_changed_and_names_the_result(tmp_path: Path) -> None:
@@ -293,16 +316,16 @@ def test_a_change_in_a_result_the_main_result_is_worked_out_from_stops(tmp_path:
 
 def test_a_fault_that_could_not_be_rerun_leaves_results_out_and_never_stops_the_paper_alone(tmp_path: Path) -> None:
     could_not = Verdict("could_not", why="the repaired study did not finish within 300 s")
-    out, record = _gate(tmp_path, could_not, headline=("cover",), test=DERIVE_COVER)
+    out, record = _gate(tmp_path, could_not, headline=("est_a",), test=DERIVE_COVER)
     assert out is None
     gate = record["issues"]["F-1"]["at_gate"]
     assert gate["outcome"] == "left_out" and "cover" in gate["keys"] and "could not be run again" in gate["how"]
 
 
-def test_nothing_reportable_left_still_stops_when_the_rerun_could_not_be_made(tmp_path: Path) -> None:
-    # est_a, est_b, cover and corr_ab: a fault in est_a reaches corr_ab too, but est_b stays, so the paper is not empty
+def test_a_fault_in_the_main_result_stops_the_paper_even_when_the_rerun_could_not_be_made(tmp_path: Path) -> None:
+    # a fault in est_a, the main result: a paper without it is not delivered, rerun or not
     out, _ = _gate(tmp_path, Verdict("could_not", why="no run.py"), headline=("est_a",), test=DERIVE_EST, quantity="est_a")
-    assert out is None
+    assert out and out["stuck_reason"] == "shown_fault_open" and "main result" in out["rationale"]
 
 
 def test_a_changed_standard_error_is_left_out_alone_and_does_not_stop_for_the_result_it_belongs_to(tmp_path: Path) -> None:
@@ -438,12 +461,16 @@ def test_numbers_that_did_not_move_do_not_answer_a_finding_about_a_figure_or_a_m
     assert engine._unchanged_is_shown(issue, {"issues": {"F-1": issue}}, {}, [], None) is True
 
 
-def test_a_stop_for_an_empty_paper_is_told_by_a_flag_not_by_its_words(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_fault_that_could_not_be_rerun_still_stops_the_paper_when_it_leaves_out_the_main_result(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from core import shown_reach
 
+    out, _ = _gate(tmp_path, Verdict("could_not", why="no run.py"), headline=("cover",), test=DERIVE_COVER)  # left out
+    assert out and out["stuck_reason"] == "shown_fault_open" and "main result" in out["rationale"]
+
     def effect(self: Any, record: Any, issue: Any, result: Any) -> Any:
-        return shown_reach.Effect(stop="there would be nothing to report", empty=True)
+        return shown_reach.Effect(not_done=["est_a"])  # the main result is not computed
 
     monkeypatch.setattr(shown_reach.Reach, "effect", effect)
-    out, _ = _gate(tmp_path, Verdict("could_not", why="no run.py"), headline=("est_a",), test=DERIVE_COVER)
-    assert out and out["stuck_reason"] == "shown_fault_open" and "there would be nothing to report" in out["rationale"]
+    out, _ = _gate(tmp_path / "b", Verdict("could_not", why="no run.py"), headline=("est_a",), test=DERIVE_COVER)
+    assert out and out["stuck_reason"] == "shown_fault_open" and "does not compute" in out["rationale"]
