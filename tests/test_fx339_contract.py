@@ -276,6 +276,31 @@ def test_the_declared_block_keeps_returned_names_apart_from_what_fi_counts(tmp_p
     assert "does not return them" in counted or "the code does not return them" in counted
 
 
+def test_what_a_trial_returns_is_read_from_the_record_not_the_plan_flag(tmp_path: Path) -> None:
+    """A plan that flags every result 'afterwards' (estimates included) while the trials returned them: the record decides."""
+    from core import frozen_protocol
+
+    metrics = [{**m, "returned": "afterwards"} for m in PROTOCOL["metrics"]]
+    protocol = {**PROTOCOL, "metrics": metrics}
+    (tmp_path / "needs").mkdir()
+    record = {"schema": frozen_protocol.FROZEN_SCHEMA, "protocol": protocol, "sha256": frozen_protocol.sha256(protocol)}
+    (tmp_path / "needs" / "FROZEN_PROTOCOL.json").write_text(json.dumps(record), encoding="utf-8")
+
+    def returned_line() -> str:
+        return next(x for x in finding_repair.declared_block(tmp_path).splitlines() if x.startswith("Names the code's trial returns"))
+
+    before = returned_line()  # no record yet: an estimate with a true value is still what a trial returns
+    assert "`est_a`" in before and "`est_b`" in before and "`cover`" not in before
+    (tmp_path / "raw").mkdir()
+    cell = _cell(0.1, [2.0, 2.1], [5.0, 4.9])
+    cell["metrics"]["cover"] = _metric([1.0, 0.0])
+    (tmp_path / "raw" / "trials.json").write_text(json.dumps({"schema": 1, "cells": [cell]}), encoding="utf-8")
+    after = returned_line()
+    assert "`cover`" in after and "`corr_ab`" not in after
+    worked = next(x for x in finding_repair.declared_block(tmp_path).splitlines() if x.startswith("Worked out after"))
+    assert "`corr_ab`" in worked and "`est_a`" not in worked and "`cover`" not in worked
+
+
 def test_bias_leaves_out_a_trial_with_no_value_and_says_how_many(tmp_path: Path) -> None:
     cells = _trial_cells()
     cells[0]["metrics"]["est_a"]["values"][3] = float("nan")

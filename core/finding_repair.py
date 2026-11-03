@@ -1295,6 +1295,17 @@ def _read(path: Path) -> str:
         return ""
 
 
+def _trial_metric_names(root: Path) -> set[str]:
+    """Every name a trial returned, from FI's own record of the trials (``raw/trials.json``); empty before the first run."""
+    try:
+        data = json.loads((root / "raw" / "trials.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    cells = data.get("cells") if isinstance(data, dict) else None
+    return {str(k) for cell in (cells if isinstance(cells, list) else []) if isinstance(cell, dict)
+            for k in (cell.get("metrics") if isinstance(cell.get("metrics"), dict) else {})}
+
+
 def declared_block(root: Path) -> str:
     """The names the plan declares, for the test writer: every result id with its role, the quantities derived from them, the
     values a run compares inside it, and, for a result that carries a true value and an interval, the coverage and bias FI counts
@@ -1311,8 +1322,14 @@ def declared_block(root: Path) -> str:
         return "(none stated)"
     from . import analysis_frame as _frame
 
-    afterwards = {r.id for r in c.results if r.returned == "afterwards"} | {d.id for d in c.derived}
+    # What a trial returns is read from FI's own record of the trials when there is one: the plan's ``returned`` flag is the
+    # plan writer's word and is often "afterwards" for every result, estimates included. A result with a true value is the
+    # estimate a trial gives, so it is returned whatever the flag says.
+    recorded = _trial_metric_names(Path(root))
+    afterwards = {r.id for r in c.results if r.returned == "afterwards" and r.id not in recorded
+                  and not isinstance(r.known_value, dict)} | {d.id for d in c.derived if d.id not in recorded}
     returned = [f"`{r.id}` ({r.role})" for r in c.results if r.id not in afterwards]
+    returned += [f"`{d.id}`" for d in c.derived if d.id in recorded]
     worked_out = [f"`{i}`" for i in sorted(afterwards)]
     inside = [str(k) for k in (protocol.get("in_each_run") or {})] if isinstance(protocol.get("in_each_run"), dict) else []
     ends = [str(n) for r in c.results if isinstance(r.known_value, dict) for n in
