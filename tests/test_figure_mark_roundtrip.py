@@ -113,3 +113,40 @@ def test_no_raw_mark_in_paper_slides_or_poster_text(tmp_path):
     out, _taken = pf.take_out_unfilled(r.text, figures_only=True)
     for delivered in (out, pf.without_marks(out)):
         assert not re.search(r"\{\{\s*figure", delivered)
+
+
+def test_an_unclosed_long_placeholder_renders_quickly(tmp_path):
+    import time
+    root = _quest(tmp_path, _calls())
+    for text in ("{{x: a" + " " * 1000 + "b", "{{x: " + " " * 990, "{{figure:fig1:drawn @ " + " " * 990):
+        start = time.perf_counter()
+        pf.render("Before. " + text + " After.", root)
+        assert time.perf_counter() - start < 0.5
+
+
+def test_an_unfillable_stray_mark_is_recorded_under_its_own_figure_and_stays_stable(tmp_path):
+    root = _quest(tmp_path, _calls())
+    md = "![cap](figures/fig1.png)\n\nBefore.\n\n{{figure:fig1:bogus @ series=a{b, panel=1}}\n\nAfter."
+    first = pf.render(md, root)
+    assert first.unfilled == ("figure:fig1:bogus",)
+    text = first.text
+    for _ in range(3):
+        again = pf.render(text, root)
+        assert again.unfilled == ("figure:fig1:bogus",)
+        text = again.text
+    assert text == first.text
+    out, taken = pf.take_out_unfilled(text, figures_only=True)
+    assert taken and taken[0]["key"].startswith("figure:fig1:bogus") and taken[0]["figure"] == "1"
+    assert "figure:claim" not in text and "Before." in out and "After." in out
+
+
+@pytest.mark.parametrize("mark", [
+    "{{{figure:fig1:drawn @ series=signal@temp:20, panel=1}}}",
+    "{{figure:fig1:drawn @ series=signal@temp:20}}b, panel=1}}",
+    "{{figure:fig1:bogus @ series=a}}b, panel=1}}",
+])
+def test_no_brace_or_tail_of_a_mark_is_left_in_the_paper(tmp_path, mark):
+    root = _quest(tmp_path, _calls())
+    out, _ = pf.take_out_unfilled(pf.render(f"Before.\n\n{mark}\n\nAfter.", root).text, figures_only=True)
+    shown = pf.without_marks(out)
+    assert "}" not in shown and "{" not in shown and "panel=1" not in shown

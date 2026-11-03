@@ -1532,10 +1532,12 @@ def run_facts_text(quest_root: Path | str, *, topic: str = "", fallback_s: Any =
 # ---- the placeholders and their markers ------------------------------------------------------------------------------
 
 #: Any name between double braces, with extra braces around it taken in (``{{{{seed}}}}``, ``{{ {seed} }}``).
-_PLACEHOLDER = re.compile(r"\{\{[\s{]*(?!v:)([A-Za-z][^{}\n:]{0,59}?)\s*(?::\s*([^{}\n]{1,1000}?)\s*)?[\s}]*\}\}")
+_PLACEHOLDER = re.compile(r"\{\{[\s{]*(?!v:)([A-Za-z][^{}\n:]{0,59}?)\s*(?::\s*([^{}\n\s][^{}\n]{0,999}?))?[\s}]*\}\}")
 #: ``{{figure:...}}`` as far as the first ``}}`` on its line, whatever is inside it: what is left of a figure mark after
 #: :data:`_PLACEHOLDER` has filled the ones it can read.
-_STRAY_FIGURE = re.compile(r"\{\{[\s{]*figure\s*:([^\n]*?)\}\}", re.I)
+_STRAY_FIGURE = re.compile(r"\{\{[\s{]*figure\s*:([^\n]*?)\}\}+", re.I)
+_MARK_TAIL = re.compile(r"(<!-- /fi:fact-figure-[\w-]+ -->)[^\n{}<]*\}\}+")
+_STRAY_PARTS = re.compile(r"\s*([\w-]+)(?:\.\w+)?\s*:\s*([\w-]+)\s*(?:@(.*))?\Z", re.S)
 _MARK = re.compile(r"<!-- fi:fact-([\w-]+) -->(.*?)<!-- /fi:fact-\1 -->", re.S)
 _TAG = re.compile(r"<!-- /?fi:fact-[\w-]+ -->|<!-- fi:limitations-heading -->[ \t]*\n?")
 _ITEM_KEY = "not_done-"
@@ -1978,11 +1980,17 @@ def render(markdown: str, quest_root: Path | str, *, topic: str = "", fallback_s
     def stray(m: re.Match[str]) -> str:
         if _inside(m.start(), stray_hidden) or _LATEX_COMMAND_BEFORE.search(out[max(0, m.start() - 40):m.start()]):
             return m.group(0)
-        unfilled.append("figure:figure:claim")
-        key = f"{_FIGURE_KEY}claim-figure-args{m.group(1).strip().encode('utf-8').hex()}"
+        parts = _STRAY_PARTS.match(m.group(1))
+        stem, kind, args = (parts.group(1), parts.group(2), (parts.group(3) or "").strip()) \
+            if parts else ("figure", "claim", m.group(1).strip())
+        unfilled.append(f"figure:{stem}:{kind}")
+        kind_k = re.sub(r"\W+", "_", kind.lower()) or "claim"
+        key = f"{_FIGURE_KEY}{kind_k}-{stem}-args{args.encode('utf-8').hex()}"
         return f"<!-- fi:fact-{key} -->{NOT_RECORDED}<!-- /fi:fact-{key} -->"
 
     out = _STRAY_FIGURE.sub(stray, out)
+    # What an unescaped brace left of a mark's arguments (``...a}}b, panel=1}}``) is part of the mark, not of the paper.
+    out = _MARK_TAIL.sub(lambda m: m.group(1), out)
     # A placeholder for a whole sentence followed by the writer's own full stop: one full stop.
     out = re.sub(r"([.!?])(<!-- /fi:fact-[\w-]+ -->)\.", r"\1\2", out)
     # The result numbers go in last, from the trial record: a key inside math or code gets its bare value.
