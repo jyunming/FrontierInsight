@@ -61,7 +61,7 @@ def _root(tmp_path: Path) -> Path:
 
 def test_the_declared_block_names_every_result_and_what_fi_counts(tmp_path: Path) -> None:
     text = finding_repair.declared_block(_root(tmp_path))
-    for name in ("est_a", "est_b", "cover", "corr_ab", "channel", "est_a_coverage", "est_b_bias"):
+    for name in ("est_a", "est_b", "cover", "corr_ab", "channel", "est_a_coverage", "est_b_bias", "se_a", "lo_b", "hi_b"):
         assert name in text, name
     assert finding_repair.declared_block(tmp_path / "nowhere") == "(none stated)"
 
@@ -214,3 +214,39 @@ def test_the_paper_and_the_quality_report_say_the_statistic_is_not_confirmed(tmp
     assert said and "not presented as confirmed" in said[0], items
     lines = quality_report._trial_checks_summary(quality_report._Quest(root))["lines"]
     assert any("inside the interval the same trial reported" in x and "not presented as confirmed" in x for x in lines), lines
+
+
+# ---- A2 end to end: the printed result carries the coverage and the bias of every result with a true value -------------------------------
+
+def _printed(tmp_path: Path, protocol: dict[str, Any], cells: list[dict[str, Any]]) -> dict[str, Any]:
+    import os
+    import subprocess
+
+    from core import analysis_frame
+
+    quest = tmp_path / "quest"
+    (quest / "raw").mkdir(parents=True)
+    (quest / "raw" / "trials.json").write_text(json.dumps({"schema": "fi.trials/v1", "thresholds": {}, "cells": cells}), encoding="utf-8")
+    analysis_frame.ensure_files(quest / "code", {"protocol": protocol})
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "FI_ROOT", "FI_TRIALS")}
+    r = subprocess.run([sys.executable, "experiment.py"], cwd=quest / "code", env=env, capture_output=True, text=True, timeout=300,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    last = [ln for ln in r.stdout.splitlines() if ln.startswith("RESULT_JSON: ")]
+    assert last, r.stderr[-1500:]
+    return json.loads(last[-1][len("RESULT_JSON: "):])
+
+
+def test_the_printed_result_gives_one_coverage_and_one_bias_for_each_parameter(tmp_path: Path) -> None:
+    out = _printed(tmp_path, PROTOCOL, _trial_cells())
+    row = out["noise=0.1"]
+    for rid in ("est_a", "est_b"):
+        assert rid + "_coverage" in row and rid + "_bias" in row, sorted(row)
+    cells = _trial_cells()
+    a = cells[0]["metrics"]["est_a"]["values"]
+    assert row["est_a_bias"] == pytest.approx(sum(a) / len(a) - 2.0)
+
+
+def test_a_plan_with_no_true_value_prints_no_coverage_and_no_bias(tmp_path: Path) -> None:
+    plain = {**PROTOCOL, "metrics": [{k: v for k, v in m.items() if k != "known_value"} for m in PROTOCOL["metrics"]]}
+    out = _printed(tmp_path, plain, _trial_cells())
+    assert not [k for row in out.values() if isinstance(row, dict) for k in row if k.endswith(("_coverage", "_bias"))]

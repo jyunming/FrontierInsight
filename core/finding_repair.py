@@ -1318,6 +1318,10 @@ def declared_block(root: Path) -> str:
         lines.append("Worked out afterwards from them: " + ", ".join(derived))
     if inside:
         lines.append("Compared inside each run: " + ", ".join(f"`{i}`" for i in inside))
+    ends = [str(n) for r in c.results if isinstance(r.known_value, dict) for n in
+            [r.known_value.get("standard_error") or r.known_value.get("variance"), *(r.known_value.get("interval") or ())] if n]
+    if ends:
+        lines.append("Returned beside them for a true value (its error and interval ends): " + ", ".join(f"`{n}`" for n in dict.fromkeys(ends)))
     if known:
         lines.append("FI counts from its own record, for each result that carries a true value, its coverage and its bias (the mean "
                      "estimate minus the true value), as " + ", ".join(f"`{i}_coverage`, `{i}_bias`" for i in known) + ".")
