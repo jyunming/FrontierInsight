@@ -13925,7 +13925,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         ids = _oracle.generating_equations(protocol if isinstance(protocol, dict) else None)
         same = record.get("same_model")
         reader = str(record.get("reviewer") or "")
-        record["send_backs"] = int(record.get("send_backs") or 0) + 1
+        # A round is counted in ``send_backs`` when it finishes (below), so a quest killed in the middle of one gets that round
+        # again on resume. Starts are counted too, and bounded (``code_review.may_repair``): a round that keeps dying ends.
+        record["round_starts"] = int(record.get("round_starts") or 0) + 1
         _code_review.save(self.quest_root, record)
         fixed_before = sum(1 for i in _code_findings.issues_of(record).values() if i.get("outcome") == _code_findings.FIXED)
 
@@ -13976,6 +13978,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         with self._hold_code_runs():  # each try is its own commit or side reference (finding_repair.keep_try)
             changed = await _finding_repair.repair_issues(env)
         record["repaired"] = bool(changed)
+        record["send_backs"] = int(record.get("send_backs") or 0) + 1  # the round is finished
         # Progress is what FI's own test runs show: the faults a failing test showed that now pass it (code_review.note_reading).
         record["round_fixed"] = sum(1 for i in _code_findings.issues_of(record).values()
                                     if i.get("outcome") == _code_findings.FIXED) - fixed_before

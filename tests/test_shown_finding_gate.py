@@ -371,6 +371,35 @@ async def test_a_fault_in_a_function_the_run_never_calls_stops_nothing(tmp_path:
     assert verdict and verdict["stuck_reason"] == "shown_fault_open"
 
 
+@pytest.mark.asyncio
+async def test_a_nested_function_nothing_in_fi_s_frame_calls_stops_nothing_and_a_called_one_still_stops(tmp_path: Path) -> None:
+    """A quest in FI's frame (replay of a stop on an unseeded interval function that only the finding's own tests called): FI's
+    own files compute names with getattr, which made 'cannot tell' of every such quest, and the finding named a nested
+    function ('outer.inner'). The finding is kept and stops nothing; the same finding about a function the analysis calls
+    stops as before."""
+    from core import analysis_frame, skeleton
+
+    engine = _engine(tmp_path)
+    code = engine.quest_root / "code"
+    files = {"experiment.py": analysis_frame.EXPERIMENT, "fi_frame.py": skeleton.RUNTIME, "fi_table.py": skeleton.TABLE_SOURCE,
+             "fi_figure_calls.py": skeleton.FRAME_FIGURE_SOURCE, "derive.py": "def dose():\n    return 60.0\n",
+             "simulate.py": "def run_trial(cell):\n    return {}\n", "pkg/__init__.py": "",
+             "pkg/model.py": "def aggregate(rows):\n    def interval(x):\n        return sum(x)\n    return [interval(r) for r in rows]\n",
+             **analysis_frame.carried_files()}
+    for name, text in files.items():
+        (code / name).parent.mkdir(parents=True, exist_ok=True)
+        (code / name).write_text(text, encoding="utf-8")
+    (engine.quest_root / "raw").mkdir(exist_ok=True)
+    (engine.quest_root / "raw" / "ledger.jsonl").write_text("", encoding="utf-8")
+    _record(engine, _issue(file="pkg/model.py", function="aggregate.interval"))
+    assert await engine._shown_fault_verdict(STATE) is None
+    assert code_review.load(engine.quest_root)["issues"]["F-1"]["never_run"] is True
+    failing = "import derive\n\n\ndef test_dose():\n    assert derive.dose() != 60.0, 'dose is typed in'\n"
+    _record(engine, _issue(file="derive.py", function="dose"), test=failing)
+    verdict = await engine._shown_fault_verdict(STATE)
+    assert verdict and verdict["stuck_reason"] == "shown_fault_open"
+
+
 def test_a_fault_may_be_about_the_main_quantity_by_its_name_or_its_keys() -> None:
     result = {"total_yield": 3.2, "yield_ci": [3.0, 3.4], "runtime": 1.0}
     issue = {"id": "F-1", "quantity": "yield"}
