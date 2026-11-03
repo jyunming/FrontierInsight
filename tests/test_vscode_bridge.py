@@ -1085,6 +1085,7 @@ async def test_the_vendor_reaches_the_engine_s_record_of_the_call(tmp_path) -> N
 
     eng = object.__new__(Engine)
     eng._last_chat = {}
+    eng._repairs_go_to = "chat"  # (the engine sets it at init; this test builds one without init)
     eng.config = SimpleNamespace(provider=SimpleNamespace(name="vscode_extension", model="(VSCode chat default)"))
     eng._log_chat_cost = lambda **kw: None
     eng._model_for_node = lambda node: None
