@@ -22821,6 +22821,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         out: dict[str, Any] = {}
         version = _code_review.version(self.quest_root / "code")
         done: dict[str, Any] = {}  # the same repair of two findings is run once
+        allowed = _rerun_check.time_allowed(self.quest_root, self.config.execution.timeout_s)
+        budget = [_rerun_check.TOTAL_FACTOR * (allowed or 0.0)]  # all the runs of one check together
         runs = 0
         fields = _rerun_check.Verdict.__dataclass_fields__
         for issue, _how in verdicts:
@@ -22835,7 +22837,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             else:
                 runs += 1
                 try:
-                    out[fid] = await self._rerun_one(issue, record, state, done)
+                    out[fid] = await self._rerun_one(issue, record, state, done, budget)
                 except Exception as exc:  # noqa: BLE001 - a rerun that fails is "could not rerun", never a stop by itself
                     self._log.warning("[evidence_gate] the study could not be run again for %s (%s: %s)", fid,
                                       type(exc).__name__, exc)
@@ -22854,12 +22856,37 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                            v.seconds, ("reported numbers differ: " + ", ".join(v.metrics)[:160]) if v.status == "changed"
                            else "no reported number differs beyond its uncertainty")
 
-    async def _rerun_one(self, issue: dict[str, Any], record: dict[str, Any], state: Any, done: dict[str, Any]) -> Any:
+    async def _repair_passes_own_test(self, issue: dict[str, Any], copy_dir: Path) -> tuple[bool, str]:
+        """Whether the finding's own test passes on the repaired copy (a repair that does not make it pass is not a repair of
+        the fault): ``(passes, what it said otherwise)``."""
+        rel = str(issue.get("test") or "")
+        if not (rel and (self.quest_root / rel).is_file()):
+            return False, "the finding's own test is not on disk, so the repair cannot be checked"
+        try:
+            _rc, text, _err = await self._run_in_env(["-c", _finding_repair.harness_source(str(copy_dir), [rel])],
+                                                     timeout_s=_code_findings.SHOWN_TEST_TIMEOUT_S,
+                                                     env=self._finding_test_env(stand_ins=False))
+        except Exception as exc:  # noqa: BLE001 - a test that gave no answer shows nothing
+            return False, f"its test gave no answer on the repair ({type(exc).__name__})"
+        if _finding_repair.MARK not in (text or ""):
+            return False, "its test gave no answer on the repair"
+        run = _finding_repair.parse_runs(text, [rel]).get(rel)
+        if run is not None and run.status == "pass":
+            return True, ""
+        return False, "its test still " + ("fails" if run is not None and run.status == "fail" else "does not pass") + (
+            ": " + _one_line(run.detail or "", 160) if run is not None and run.detail else "")
+
+    async def _rerun_one(self, issue: dict[str, Any], record: dict[str, Any], state: Any, done: dict[str, Any],
+                         budget: list[float] | None = None) -> Any:
         """Run the study on a copy of the code with a repair of one shown fault, as :func:`core.rerun_check.judge`. The repair is
-        the last one FI tried for the finding, even one its own rules refused (kept in ``code/``'s history); a finding with none
-        that fits the code as it is is asked for one repair, with the same prompt as the code-review loop (counted in the
-        record as ``rerun_calls``)."""
+        the last one FI tried for the finding that makes its own test pass, even one its own rules refused (kept in ``code/``'s
+        history); a finding with none that fits the code as it is is asked for one repair, with the same prompt as the
+        code-review loop (counted in the record as ``rerun_calls``). A repair that does not make the finding's test pass is
+        never run: the answer is "could not rerun"."""
         code = self.quest_root / "code"
+        if str(getattr(self.config.execution, "sandbox", "venv")) == "docker":
+            # the copy would run in a container that has none of the quest's data: no rerun, and no request spent on one
+            return _rerun_check.Verdict("could_not", "the study runs in Docker, where a copy of the code has no data to run on")
         protocol = _frozen.protocol_of(self.quest_root) or (self._protocol_block(state) if isinstance(state, dict) else None)
         allowed = _rerun_check.time_allowed(self.quest_root, self.config.execution.timeout_s)
         if allowed is None:
@@ -22867,47 +22894,66 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         fid = str(issue.get("id"))
         work = Path(tempfile.mkdtemp(prefix="fi_repair_"))
         try:
-            copy_dir = await asyncio.to_thread(_rerun_check.copy_code, self.quest_root, work)
             source = ""
+            copy_dir: Path | None = None
+            problem = ""
             for number, patch in await asyncio.to_thread(_code_project.refused_patches, self.quest_root, fid, log=self._log):
-                if await asyncio.to_thread(_code_project.apply_patch, copy_dir, patch):
-                    source = f"its last repair FI tried (try {number})"
-                    break
+                trial = await asyncio.to_thread(_rerun_check.copy_code, self.quest_root, work / f"p{number}")
+                if await asyncio.to_thread(_code_project.apply_patch, trial, patch):
+                    ok, said = await self._repair_passes_own_test(issue, trial)
+                    if ok:
+                        copy_dir, source = trial, f"its last repair FI tried (try {number})"
+                        break
+                    problem = said
+                await asyncio.to_thread(shutil.rmtree, trial.parent, True)
             env: dict[str, str] = {**scrub_secrets()}
             from .example_inputs import ENV_VAR as _INPUT_ENV, examples_dir, list_inputs
 
             if list_inputs(self.quest_root):
                 env[_INPUT_ENV] = str(examples_dir(self.quest_root))
             python = self.executor.python_path(self.quest_root)
-            problem = ""
+            verdict = _rerun_check.Verdict("could_not", problem or "no repair of it could be written")
             for _round in range(2):
-                if not source:
-                    # nothing kept fits the code as it is, or the repair did not run: one repair is asked for (again), told
-                    # what went wrong with the last one
+                if copy_dir is None:
+                    # nothing kept fits the code as it is and passes its test, or the repair did not run: one repair is asked
+                    # for (again), told what went wrong with the last one
                     rel = _finding_repair.target_file(issue, code)
                     if not rel or not (code / rel).is_file():
                         return _rerun_check.Verdict("could_not", "the file it concerns is not in the code")
                     if int(record.get("rerun_calls") or 0) >= _code_review.MAX_FINDING_CALLS:
-                        return _rerun_check.Verdict("could_not", problem or "the requests allowed for repairs were spent", crashed=bool(problem))
+                        return _rerun_check.Verdict("could_not", problem or "the requests allowed for repairs were spent",
+                                                    crashed=bool(problem))
                     record["rerun_calls"] = int(record.get("rerun_calls") or 0) + 1
                     _code_review.save(self.quest_root, record)
-                    shutil.rmtree(copy_dir, ignore_errors=True)
-                    copy_dir = await asyncio.to_thread(_rerun_check.copy_code, self.quest_root, work)
-                    tried = await self._ask_repair_on_copy(issue, rel, copy_dir, protocol, state, problem)
+                    trial = await asyncio.to_thread(_rerun_check.copy_code, self.quest_root, work / f"a{_round}")
+                    tried = await self._ask_repair_on_copy(issue, rel, trial, protocol, state, problem)
                     if not tried:
                         return _rerun_check.Verdict("could_not", "no repair of it could be written")
                     for target, text in tried.items():
-                        (copy_dir / target).write_text(text, encoding="utf-8")
-                    source = "a repair asked for once more" if not problem else "a repair asked for again after the first did not run"
+                        (trial / target).write_text(text, encoding="utf-8")
+                    ok, said = await self._repair_passes_own_test(issue, trial)
+                    if not ok:
+                        problem = ("FI ran the finding's own test on your repair and " + said
+                                   + ". The repair must make that test pass.")
+                        verdict = _rerun_check.Verdict("could_not", "the repair does not make the finding's own test pass: " + said)
+                        continue
+                    copy_dir = trial
+                    source = "a repair asked for once more" if _round == 0 else "a repair asked for again after the first did not work"
                 key = _code_review.version(copy_dir)
                 if key in done:
                     return done[key]
-                verdict = await _rerun_check.judge(self.executor, python, self.quest_root, copy_dir, protocol, allowed, env,
+                left = allowed if budget is None else min(allowed, budget[0])
+                if left < _rerun_check.FLOOR_S:
+                    return _rerun_check.Verdict("could_not", "the time FI allows for running the study again in one check is spent")
+                began = time.monotonic()
+                verdict = await _rerun_check.judge(self.executor, python, self.quest_root, copy_dir, protocol, left, env,
                                                    source=source, results_root=self.quest_root)
+                if budget is not None:
+                    budget[0] -= time.monotonic() - began
                 if verdict.status == "could_not" and verdict.crashed and _round == 0:
                     problem = ("FI ran the study with your repair and it did not run to the end: " + verdict.why
                                + ". The repair may use only the results the plan declares.")
-                    source = ""
+                    copy_dir = None
                     continue
                 done[key] = verdict
                 return verdict
@@ -22983,9 +23029,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         for issue, how in verdicts:
             rerun = (reruns or {}).get(str(issue.get("id")))
             if rerun is not None and rerun.status == "unchanged":
-                # The study run again with a repair of it reports the same numbers: a difference that changes no reported number.
-                unchanged.append(issue)
-                continue
+                if self._unchanged_is_shown(issue, record, result, declared, reach):
+                    # The study run again with a repair of it reports the same numbers: a difference that changes no reported
+                    # number.
+                    unchanged.append(issue)
+                    continue
+                # A finding that a quantity is not computed, or about a figure, is not answered by numbers that did not move:
+                # it is placed as it was before a rerun
+                rerun = None
             # A fault in a function that makes one declared result, one figure or a helper they use, or a test that only
             # checks that something is there, is placed from FI's records (core/shown_reach.py), not from the finding's words.
             try:
@@ -22993,6 +23044,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     # The numbers the rerun showed changed are what is left out, and the main result among them stops the paper.
                     how = how + "; the study run again with a repair of it reports other numbers for " + ", ".join(rerun.metrics)[:160]
                     placed = reach.effect_of_changes(rerun.metrics)
+                    if not (placed.stop or placed.left_out or placed.extra_keys):
+                        # the numbers that moved are placed on no result: never delivered for that; the finding is judged as
+                        # before a rerun (what its own names and the results' keys say)
+                        placed = None
                 elif reach is not None and not _code_review.missing_quantities(record, issue):
                     # No rerun to say (it could not be made): leave out what the records place, and stop only for an empty paper.
                     keep_rule, reach.headline_stops = reach.headline_stops, rerun is None
@@ -23001,7 +23056,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     finally:
                         reach.headline_stops = keep_rule
                     if rerun is not None and placed is not None:
-                        if placed.stop and "leaves no result" not in placed.stop:
+                        if placed.stop and not placed.empty:
                             placed.stop = ""
                         how = how + "; the study could not be run again with a repair of it (" + rerun.why[:100] + ")"
                 else:
@@ -23112,6 +23167,23 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 incomplete={q or (_code_review.quantity_names(record, i) or k)[0] for i, _h, k, q in left_out
                             if str(i.get("id")) in incomplete})
         return None
+
+    def _unchanged_is_shown(self, issue: dict[str, Any], record: dict[str, Any], result: Any, declared: list[str] | None,
+                            reach: "_shown_reach.Reach | None") -> bool:
+        """Whether numbers that did not move answer the finding: only a finding about a number the code computes. A finding
+        that a quantity is not computed (or not obtained), or that is about a figure, says something no reported number can
+        show gone."""
+        try:
+            if _code_review.missing_quantities(record, issue) or _code_review.not_obtained(record, issue, result, declared):
+                return False
+            if reach is not None:
+                placed = reach.effect(record, issue, result)
+                if placed is not None and (placed.figures or placed.not_done):
+                    return False
+        except Exception as exc:  # noqa: BLE001 - what cannot be read cannot show the finding answered
+            self._log.warning("[evidence_gate] %s could not be read for the rerun's answer (%r)", issue.get("id"), exc)
+            return False
+        return True
 
     async def _rerun_finding_test(self, rel: str) -> Any:
         """One finding test run on the code as it is, in its own process: its ``TestRun``, or ``None`` when the process

@@ -1022,11 +1022,34 @@ def refused_patches(quest_root: Path, finding_id: str, *, log: Any = None) -> li
     return out
 
 
+def _in_line_endings_of(code_dir: Path, patch: bytes) -> bytes:
+    """The patch with each file's hunk lines ending the way that file in ``code_dir`` does (CRLF or LF): a patch read with
+    ``--ignore-cr-at-eol`` mixes both, and ``git apply`` matches a line's bytes. Nothing else about the lines changes."""
+    out: list[bytes] = []
+    crlf = False
+    in_hunk = False
+    for line in patch.splitlines(keepends=True):
+        if line.startswith(b"diff --git "):
+            in_hunk = False
+            target = line.split(b" b/", 1)[-1].strip().decode("utf-8", errors="surrogateescape")
+            try:
+                crlf = b"\r\n" in (Path(code_dir) / target).read_bytes()
+            except OSError:
+                crlf = False
+        elif line.startswith(b"@@"):
+            in_hunk = True
+        elif in_hunk and line[:1] in (b" ", b"-", b"+"):
+            line = line.rstrip(b"\r\n") + (b"\r\n" if crlf else b"\n")
+        out.append(line)
+    return b"".join(out)
+
+
 def apply_patch(code_dir: Path, patch: str) -> bool:
     """Apply a patch from :func:`refused_patches` to a folder of code (a copy, not the quest's own ``code/``); ``False``
-    when it does not apply there, and nothing is changed."""
-    done = _git(Path(code_dir), "apply", "--whitespace=nowarn", "--recount", "--ignore-whitespace", "-",
-                stdin=patch.encode("utf-8", errors="surrogateescape"), raw=True)
+    when it does not apply there, and nothing is changed. The lines must match exactly (a line ending of the file's own
+    kind is not a difference), so a patch never lands on text that only looks like what it was written against."""
+    done = _git(Path(code_dir), "apply", "--whitespace=nowarn", "--recount", "-",
+                stdin=_in_line_endings_of(Path(code_dir), patch.encode("utf-8", errors="surrogateescape")), raw=True)
     return done.returncode == 0
 
 

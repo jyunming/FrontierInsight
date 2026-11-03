@@ -36,9 +36,32 @@ def test_compare_counts_trials_exactly_and_values_beyond_rounding() -> None:
     assert sorted(c["key"] for c in rerun_check.compare(old, new)) == ["trials/s/failed", "trials/s/ok"]
 
 
-def test_a_number_only_the_repaired_run_has_is_not_a_change_of_a_delivered_number() -> None:
+def test_a_number_only_the_repaired_run_has_is_not_a_change_but_a_delivered_number_it_lacks_is() -> None:
     assert rerun_check.compare({"a": 1.0}, {"a": 1.0, "b": 5.0}) == []
-    assert rerun_check.compare({"a": 1.0, "c": 2.0}, {"a": 1.0}) == []
+    assert rerun_check.compare({"a": 1.0, "c": 2.0}, {"a": 1.0}) == [{"key": "c", "old": 2.0, "new": None}]
+
+
+def test_the_other_result_files_the_paper_may_read_are_compared_too(tmp_path: Path) -> None:
+    (tmp_path / "data" / "results").mkdir(parents=True)
+    (tmp_path / "data" / "results" / "derived.json").write_text(json.dumps({"derived": {"est": {"by_setting": {"s": 1.0}}}}), encoding="utf-8")
+    (tmp_path / "data" / "results" / "table_b.json").write_text(json.dumps({"rows": [{"a": 4.0}]}), encoding="utf-8")
+    got = rerun_check.results_of(tmp_path)
+    assert got["file:table_b.json/rows[0]/a"] == 4.0 and got["derived/derived/est/by_setting/s"] == 1.0
+
+
+def test_a_standard_error_or_a_coverage_is_not_called_noise_when_it_moves_by_the_error_of_a_mean() -> None:
+    values = [float(i % 7) for i in range(50)]
+    mean = sum(values) / 50
+    se = rerun_check.trial_stats(_trials(values))[0][("s", "est")][2] / math.sqrt(50)
+    est = {"key": "derived/derived/est/by_setting/s", "old": mean, "new": mean + 1.5 * se}
+    err = {"key": "derived/derived/est/by_setting/s/se", "old": se, "new": se + 1.5 * se}
+    cov = {"key": "derived/derived/est/by_setting/s/coverage", "old": 0.95, "new": 0.96}
+    end = {"key": "derived/derived/est/by_setting/s/hi", "old": mean + 2 * se, "new": mean + 2 * se + 1.5 * se}
+    kept = rerun_check.counted([est, err, cov, end], PROTOCOL, _trials(values), redrawn=True)[0]
+    assert [c["key"] for c in kept] == [err["key"], cov["key"]]  # a mean and an interval end move with the mean's error
+    # a standard error moving by a few percent of its own value is inside its own sampling error
+    small = {"key": err["key"], "old": se, "new": se * 1.05}
+    assert rerun_check.counted([small], PROTOCOL, _trials(values), redrawn=True)[0] == []
 
 
 def _trials(values: list[float], metric: str = "est", key: str = "s") -> dict[str, Any]:
@@ -179,6 +202,22 @@ def test_a_repair_that_leaves_every_reported_number_alone_is_unchanged(tmp_path:
     assert same.status == "unchanged" and same.metrics == []
 
 
+def test_a_move_of_a_millionth_counts_when_the_draws_did_not_change(tmp_path: Path) -> None:
+    root = tmp_path / "quest"
+    _delivered(root, 1.0)
+    got = _judge(root, tmp_path, 1.000001)
+    assert got.status == "changed" and got.metrics == ["est"]
+
+
+def test_a_number_that_belongs_to_no_result_is_never_delivered_as_unchanged(tmp_path: Path) -> None:
+    root = tmp_path / "quest"
+    _delivered(root, 1.0)
+    copy = rerun_check.copy_code(root, tmp_path / "w")
+    (copy / "run.py").write_text((copy / "run.py").read_text(encoding="utf-8").replace('"ok": 10', '"ok": 9'), encoding="utf-8")
+    got = asyncio.run(rerun_check.judge(_Local(), sys.executable, root, copy, PROTOCOL, 60, None))
+    assert got.status == "could_not" and "cannot attribute" in got.why and "trials/s/ok" in got.keys
+
+
 def test_a_repair_that_moves_a_reported_number_is_changed_and_names_the_result(tmp_path: Path) -> None:
     root = tmp_path / "quest"
     _delivered(root, 1.0)
@@ -273,3 +312,138 @@ def test_a_changed_standard_error_is_left_out_alone_and_does_not_stop_for_the_re
     gate = record["issues"]["F-1"]["at_gate"]
     # the coverage FI counts from that interval is wrong with it, and is left out too; the estimate itself is not
     assert gate["outcome"] == "left_out" and gate["keys"] == ["est_a_coverage", "se_a"]
+
+
+# ---- the repair is checked, the answer is placed, the time is bounded -----------------------------------------------------------------
+def _engine_with_code(tmp_path: Path) -> Any:
+    from tests.test_shown_reach import DERIVE_COVER, _engine, _quest
+
+    engine = _engine(tmp_path)
+    root = _quest(engine)
+    rel = ".fi/finding_tests/F-1_1.py"
+    (root / rel).parent.mkdir(parents=True, exist_ok=True)
+    (root / rel).write_text(DERIVE_COVER, encoding="utf-8")
+    (root / ".fi" / "run_facts.json").write_text(json.dumps({"trials_run": {"wall_s": 30.0, "settings_s": 30.0}}), encoding="utf-8")
+    issue = {"id": "F-1", "file": "derive.py", "function": "derive_cover", "quantity": "cover", "test": rel, "text": "wrong"}
+    record = {"issues": {"F-1": dict(issue)}}
+
+    async def run_in_env(argv: list[str], *, timeout_s: int = 180, env: dict[str, str] | None = None, **_k: Any) -> tuple[int, str, str]:
+        import os
+
+        done = subprocess.run([sys.executable, "-B", *argv], cwd=root, capture_output=True, text=True, timeout=timeout_s,
+                              env={**os.environ, **(env or {})})
+        return done.returncode, done.stdout, done.stderr
+
+    engine._run_in_env = run_in_env  # type: ignore[method-assign,assignment]
+    return engine, root, issue, record
+
+
+NO_FIX = "import model\n\n\ndef derive_cover(table):\n    return model.helper_for_cover(1)  # reworded only\n"
+FIX = "def derive_cover(table):\n    return 0.9\n"
+
+
+def test_a_repair_is_run_only_when_the_findings_own_test_passes_on_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine, root, issue, record = _engine_with_code(tmp_path)
+    copies: list[Path] = []
+    for text in (NO_FIX, FIX):
+        copy = rerun_check.copy_code(root, tmp_path / f"c{len(copies)}")
+        (copy / "derive.py").write_text(text, encoding="utf-8")
+        copies.append(copy)
+    assert asyncio.run(engine._repair_passes_own_test(issue, copies[0]))[0] is False
+    assert asyncio.run(engine._repair_passes_own_test(issue, copies[1]))[0] is True
+    # the whole step: a repair that leaves the test failing is never run, and never "unchanged"
+    judged: list[Any] = []
+
+    async def judge(*a: Any, **k: Any) -> Verdict:
+        judged.append(a)
+        return Verdict("unchanged")
+
+    async def ask(issue: Any, rel: str, copy_dir: Path, protocol: Any, state: Any, problem: str = "") -> dict[str, str]:
+        return {"derive.py": NO_FIX}
+
+    monkeypatch.setattr(rerun_check, "judge", judge)
+    engine._ask_repair_on_copy = ask  # type: ignore[method-assign,assignment]
+    got = asyncio.run(engine._rerun_one(issue, record, {}, {}))
+    assert got.status == "could_not" and "own test" in got.why and judged == []
+
+    async def ask_fixed(issue: Any, rel: str, copy_dir: Path, protocol: Any, state: Any, problem: str = "") -> dict[str, str]:
+        return {"derive.py": FIX}
+
+    engine._ask_repair_on_copy = ask_fixed  # type: ignore[method-assign,assignment]
+    record["rerun_calls"] = 0
+    assert asyncio.run(engine._rerun_one(issue, record, {}, {})).status == "unchanged" and len(judged) == 1
+
+
+def test_nothing_is_run_when_the_time_of_the_check_is_spent_and_no_request_is_spent_in_docker(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine, root, issue, record = _engine_with_code(tmp_path)
+    asked: list[int] = []
+    judged: list[int] = []
+
+    async def judge(*a: Any, **k: Any) -> Verdict:
+        judged.append(1)
+        return Verdict("unchanged")
+
+    async def ask(*a: Any, **k: Any) -> dict[str, str]:
+        asked.append(1)
+        return {"derive.py": FIX}
+
+    monkeypatch.setattr(rerun_check, "judge", judge)
+    engine._ask_repair_on_copy = ask  # type: ignore[method-assign,assignment]
+    got = asyncio.run(engine._rerun_one(issue, record, {}, {}, [5.0]))  # all the time one check may spend is gone
+    assert got.status == "could_not" and "spent" in got.why and judged == []
+    engine.config.execution.sandbox = "docker"
+    asked.clear()
+    got = asyncio.run(engine._rerun_one(issue, record, {}, {}))
+    assert got.status == "could_not" and "Docker" in got.why and asked == [] and judged == []
+
+
+def test_a_patch_does_not_apply_to_text_that_differs_only_in_whitespace(tmp_path: Path) -> None:
+    quest = tmp_path / "quest"
+    code = quest / "code"
+    code.mkdir(parents=True)
+    _write(code / "model.py", "def f(x):\n    return x\n")
+    _git(code, "init", "-q")
+    _git(code, "add", "-A")
+    _git(code, "commit", "-q", "-m", "start")
+    assert code_project.keep_refused(quest, "F-1-1", {"model.py": "def f(x):\n    return x + 1\n"}, "refused")
+    patch = code_project.refused_patches(quest, "F-1")[0][1]
+    copy = tmp_path / "copy"
+    copy.mkdir()
+    _write(copy / "model.py", "def f(x):\n    return  x\n")
+    assert not code_project.apply_patch(copy, patch)
+
+
+# ---- placing the answer ------------------------------------------------------------------------------------------------------------------
+def test_numbers_that_changed_but_are_placed_on_no_result_are_not_delivered(tmp_path: Path) -> None:
+    out, record = _gate(tmp_path, Verdict("changed", metrics=[], keys=["derived/derived/odd"]), headline=("est_a",), test=DERIVE_COVER)
+    # judged by what the finding names, as with no rerun: nothing says which result moved, so the paper is not delivered on it
+    assert out and out["stuck_reason"] == "shown_fault_open" and "cannot" in out["rationale"]
+
+
+def test_numbers_that_did_not_move_do_not_answer_a_finding_about_a_figure_or_a_missing_quantity(tmp_path: Path) -> None:
+    src = "import derive\n\n\ndef test_x():\n    assert derive.figure_fig1(None, None) == 1, 'wrong'\n"
+    out, record = _gate(tmp_path, Verdict("unchanged", mode="whole study"), headline=("est_a",), test=src, function="figure_fig1",
+                        quantity="figone")
+    assert out is None
+    assert "rerun_unchanged" not in record["issues"]["F-1"] and record["issues"]["F-1"].get("at_gate", {}).get("outcome") == "left_out"
+    from tests.test_shown_reach import _engine
+
+    engine = _engine(tmp_path / "m")
+    issue = {"id": "F-1", "quantity": "cover"}
+    missing = {"issues": {"F-1": dict(issue)},
+               "read_problems": [{"id": "L1", "kind": "quantity", "status": "missing", "name": "cover", "quantities": ["cover"],
+                                  "fid": "F-1", "text": "x"}]}
+    assert engine._unchanged_is_shown(issue, missing, {}, [], None) is False
+    assert engine._unchanged_is_shown(issue, {"issues": {"F-1": issue}}, {}, [], None) is True
+
+
+def test_a_stop_for_an_empty_paper_is_told_by_a_flag_not_by_its_words(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import shown_reach
+
+    def effect(self: Any, record: Any, issue: Any, result: Any) -> Any:
+        return shown_reach.Effect(stop="there would be nothing to report", empty=True)
+
+    monkeypatch.setattr(shown_reach.Reach, "effect", effect)
+    out, _ = _gate(tmp_path, Verdict("could_not", why="no run.py"), headline=("est_a",), test=DERIVE_COVER)
+    assert out and out["stuck_reason"] == "shown_fault_open" and "there would be nothing to report" in out["rationale"]

@@ -26,6 +26,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
+import logging
 import math
 import re
 import shutil
@@ -35,6 +36,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+_LOG = logging.getLogger(__name__)
+
 #: A rerun may take this much of what the study's own record says it needs.
 SLACK = 1.5
 #: The study's own entry (``run.py``) runs the settings one after another, each in a process of its own, where FI's run had
@@ -43,11 +46,16 @@ SLACK = 1.5
 SERIAL_FACTOR = 3.0
 #: Never less than this (starting the interpreter and the packages).
 FLOOR_S = 60
+#: All the reruns of one check together may take this many times what one rerun of the study is allowed.
+TOTAL_FACTOR = 2.0
 #: Standard errors a number must move by (the difference of two runs has sqrt(2) times one run's error).
 Z = 3.0
 #: A number with no uncertainty recorded counts as changed when it moves by more than this share of its value. Added
 #: exception: FI's records hold no error for it, so a smaller move is called rounding.
 REL_TOL = 5e-4
+#: The same, when the repair draws no random number differently: the rerun then repeats the delivered run, so only rounding
+#: can differ.
+EXACT_TOL = 1e-9
 #: Files whose repair cannot change the trials: only the analysis is run again, on the recorded trials.
 ANALYSIS_FILES = frozenset({"derive.py", "experiment.py", "fi_figures.py", "fi_table.py", "fi_frame.py", "fi_figure_calls.py"})
 _SKIP_KEYS = frozenset({"seconds", "bodies", "figures", "figures_said", "fi_faults", "notes", "wall_s", "elapsed_s"})
@@ -127,6 +135,12 @@ def results_of(root: Path | str, derived: str = "data/results/derived.json", tri
     d = _json(root / derived)
     if d is not None:
         out.update({"derived" + k: v for k, v in _flat(d)})
+    for extra in sorted((root / Path(derived).parent).glob("*.json")) if (root / Path(derived).parent).is_dir() else []:
+        # the other result files the paper may read (a table, a ledger): compared the same way
+        if extra.name != Path(derived).name and extra.stat().st_size <= 8_000_000:
+            doc = _json(extra)
+            if doc is not None:
+                out.update({f"file:{extra.name}" + k: v for k, v in _flat(doc)})
     t = _json(root / trials)
     for c in (t.get("cells") if isinstance(t, dict) else None) or []:
         if not isinstance(c, dict):
@@ -145,18 +159,19 @@ def _values(rec: Any) -> list[float]:
     return [float(v) for v in vs or [] if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(float(v))]
 
 
-def compare(base: dict[str, float], new: dict[str, float]) -> list[dict[str, Any]]:
-    """The numbers of ``base`` that ``new`` reports differently: ``[{key, old, new}]``. A number ``new`` does not report is not
-    compared, and neither is one only ``new`` has (a repair may add a result: nothing delivered changed)."""
+def compare(base: dict[str, float], new: dict[str, float], tol: float = REL_TOL) -> list[dict[str, Any]]:
+    """The numbers of ``base`` that ``new`` reports differently: ``[{key, old, new}]``. A delivered number the rerun does not
+    report is changed (``new`` is ``None``); one only ``new`` has is not (a repair may add a result: nothing delivered changed).
+    ``tol``: the share of its value a number may move by (rounding)."""
     out = []
     for k, b in base.items():
         n = new.get(k)
         if n is None:
-            continue
-        if k.endswith("/ok") or k.endswith("/failed"):
+            out.append({"key": k, "old": b, "new": None})
+        elif k.endswith("/ok") or k.endswith("/failed"):
             if n != b:
                 out.append({"key": k, "old": b, "new": n})
-        elif abs(n - b) > REL_TOL * max(abs(b), 1e-12):
+        elif abs(n - b) > tol * max(abs(b), 1e-12):
             out.append({"key": k, "old": b, "new": n})
     return out
 
@@ -165,7 +180,8 @@ def metric_of(key: str) -> tuple[str | None, str | None]:
     """``(metric, setting)`` a compared key is about."""
     if key.startswith("trials/"):
         parts = key.split("/")
-        return (parts[-2] if len(parts) >= 4 else "failed trials"), parts[1]
+        # a count of trials that finished or failed belongs to no result: FI cannot say which it changes
+        return (parts[-2] if len(parts) >= 4 else None), parts[1]
     m = re.match(r"derived/derived/([^/]+)/by_setting/([^/]+)", key)
     if m:
         return m.group(1), m.group(2)
@@ -224,22 +240,45 @@ def trial_stats(trials: Any) -> tuple[dict[tuple[str, str], tuple[int, float, fl
     return stats, ok
 
 
+_ESTIMATE = frozenset({"value", "mean", "estimate", "est", "proportion", "share", "rate", "median"})
+_ERROR = frozenset({"se", "sem", "stderr", "std_err", "standard_error"})
+_SPREAD = frozenset({"sd", "std", "stdev"})
+_ENDS = frozenset({"lo", "hi", "low", "high", "lower", "upper", "ci", "ci_lo", "ci_hi", "ci_low", "ci_high", "ci_lower",
+                   "ci_upper", "interval", "ci95", "ci95_lo", "ci95_hi"})
+
+
+def number_kind(key: str) -> str:
+    """What a compared number is: ``estimate`` (a mean or a share a trial's values average to), ``error`` (a standard
+    error), ``spread`` (a standard deviation), ``end`` (an end of an interval) or ``other`` (a count, a coverage, anything FI
+    knows no sampling error of)."""
+    if key.startswith("trials/"):
+        return "estimate" if key.endswith("/mean") else "other"
+    m = re.match(r"derived/derived/[^/]+(?:/by_setting/[^/]+)?(?:/([^/]+))?$", key)
+    leaf = re.sub(r"\[\d+\]$", "", (m.group(1) if m and m.group(1) else "")).lower()
+    if not leaf or leaf in _ESTIMATE:
+        return "estimate"
+    return "error" if leaf in _ERROR else "spread" if leaf in _SPREAD else "end" if leaf in _ENDS else "other"
+
+
 def uncertainty(key: str, old: float, stats: dict, ok: dict[str, float], kinds: dict[str, str]) -> float | None:
-    """The Monte Carlo standard error of the number at ``key`` in the delivered run; ``None`` when FI's records give none."""
+    """The Monte Carlo error of the number at ``key`` in the delivered run, when FI's records give one: for a mean or a share
+    its standard error, for an end of an interval the same, for a standard error or a deviation its own sampling error (its
+    value over sqrt(2(n-1))); ``None`` for a count, a coverage or anything else, which then counts as changed beyond
+    :data:`REL_TOL`."""
     metric, setting = metric_of(key)
     if metric is None or setting is None:
         return None
+    kind = number_kind(key)
     s = stats.get((setting, metric))
-    if key.startswith("trials/"):
-        return s[2] / math.sqrt(s[0]) if s else None
-    if s:  # a derived number that is a trial metric's own mean or share
-        if kinds.get(metric) == "proportion" and 0 <= old <= 1:
-            return math.sqrt(max(old * (1 - old), 1e-12) / s[0])
-        return s[2] / math.sqrt(s[0])
-    n = ok.get(setting)
-    if not n or n < 2:
+    if kind in ("error", "spread"):
+        return abs(old) / math.sqrt(2 * (s[0] - 1)) if s and s[0] > 1 else None
+    if kind not in ("estimate", "end"):
         return None
-    if kinds.get(metric) == "proportion" and 0 <= old <= 1:  # a share the plan declares: its binomial error over the trials
+    share = kind == "estimate" and not key.startswith("trials/") and kinds.get(metric) == "proportion" and 0 <= old <= 1
+    if s:
+        return math.sqrt(max(old * (1 - old), 1e-12) / s[0]) if share else s[2] / math.sqrt(s[0])
+    n = ok.get(setting)
+    if share and n and n >= 2:  # a share the plan declares: its binomial error over the trials
         return math.sqrt(max(old * (1 - old), 1e-12) / n)
     return None
 
@@ -259,7 +298,7 @@ def counted(changes: list[dict[str, Any]], protocol: Any, base_trials: Any, redr
         if metric and roles.get(metric) == "reference":
             refs += 1
             continue
-        if redrawn and not (c["key"].endswith("/ok") or c["key"].endswith("/failed")):
+        if redrawn and c["new"] is not None and not (c["key"].endswith("/ok") or c["key"].endswith("/failed")):
             se = uncertainty(c["key"], c["old"], stats, ok, kinds)
             if se is not None and abs(c["new"] - c["old"]) / (math.sqrt(2) * se) <= Z:
                 continue  # inside the Monte Carlo noise
@@ -366,10 +405,19 @@ async def judge(executor: Any, python: Path | str, quest_root: Path | str, copy:
             return Verdict("could_not", "the delivered or the repaired results hold no numbers to compare", mode=mode,
                            seconds=secs, source=source, files=files)
         redrawn = draws_changed({r: o for r, (o, _n) in changed.items()}, {r: n for r, (_o, n) in changed.items()})
-        keep, notes = counted(compare(base, new), protocol, _json(base_root / "raw" / "trials.json"), bool(redrawn))
+        keep, notes = counted(compare(base, new, REL_TOL if redrawn else EXACT_TOL), protocol,
+                              _json(base_root / "raw" / "trials.json"), bool(redrawn))
         keys = [c["key"] for c in keep]
+        loose = [k for k in keys if metric_of(k)[0] is None]
+        if loose:
+            # a number FI cannot say which result it belongs to: not shipped as "unchanged", and not left out as a guess; the
+            # gate places the fault the way it does when no rerun could be made
+            return Verdict("could_not", "the repair changes numbers FI cannot attribute to a result: " + ", ".join(loose[:4]),
+                           keys=keys, notes=notes, mode=mode, seconds=secs, source=source, files=files)
         metrics = sorted({m for m in (metric_of(k)[0] for k in keys) if m})
         return Verdict("changed" if keep else "unchanged", "", metrics=metrics, keys=keys, notes=notes, mode=mode, seconds=secs,
                        source=source, files=files)
     finally:
         shutil.rmtree(work, ignore_errors=True)
+        if work.exists():
+            _LOG.warning("the folder of a rerun could not be removed (%s)", work)
