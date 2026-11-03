@@ -1532,7 +1532,10 @@ def run_facts_text(quest_root: Path | str, *, topic: str = "", fallback_s: Any =
 # ---- the placeholders and their markers ------------------------------------------------------------------------------
 
 #: Any name between double braces, with extra braces around it taken in (``{{{{seed}}}}``, ``{{ {seed} }}``).
-_PLACEHOLDER = re.compile(r"\{\{[\s{]*(?!v:)([A-Za-z][^{}\n:]{0,59}?)\s*(?::\s*([^{}\n]{1,80}?)\s*)?[\s}]*\}\}")
+_PLACEHOLDER = re.compile(r"\{\{[\s{]*(?!v:)([A-Za-z][^{}\n:]{0,59}?)\s*(?::\s*([^{}\n]{1,1000}?)\s*)?[\s}]*\}\}")
+#: ``{{figure:...}}`` as far as the first ``}}`` on its line, whatever is inside it: what is left of a figure mark after
+#: :data:`_PLACEHOLDER` has filled the ones it can read.
+_STRAY_FIGURE = re.compile(r"\{\{[\s{]*figure\s*:([^\n]*?)\}\}", re.I)
 _MARK = re.compile(r"<!-- fi:fact-([\w-]+) -->(.*?)<!-- /fi:fact-\1 -->", re.S)
 _TAG = re.compile(r"<!-- /?fi:fact-[\w-]+ -->|<!-- fi:limitations-heading -->[ \t]*\n?")
 _ITEM_KEY = "not_done-"
@@ -1968,6 +1971,18 @@ def render(markdown: str, quest_root: Path | str, *, topic: str = "", fallback_s
         return f"<!-- fi:fact-{key} -->{NOT_RECORDED}<!-- /fi:fact-{key} -->"
 
     out = _PLACEHOLDER.sub(fill, text)
+    # A figure mark the pattern above could not read (a brace inside it, a name too long) is still a mark and never prints:
+    # it is an unfilled figure statement, so it is taken out with its sentence and listed like any other.
+    stray_hidden = _hidden_spans(out)
+
+    def stray(m: re.Match[str]) -> str:
+        if _inside(m.start(), stray_hidden) or _LATEX_COMMAND_BEFORE.search(out[max(0, m.start() - 40):m.start()]):
+            return m.group(0)
+        unfilled.append("figure:figure:claim")
+        key = f"{_FIGURE_KEY}claim-figure-args{m.group(1).strip().encode('utf-8').hex()}"
+        return f"<!-- fi:fact-{key} -->{NOT_RECORDED}<!-- /fi:fact-{key} -->"
+
+    out = _STRAY_FIGURE.sub(stray, out)
     # A placeholder for a whole sentence followed by the writer's own full stop: one full stop.
     out = re.sub(r"([.!?])(<!-- /fi:fact-[\w-]+ -->)\.", r"\1\2", out)
     # The result numbers go in last, from the trial record: a key inside math or code gets its bare value.
