@@ -1878,6 +1878,17 @@ async def repair_issue(env: Env, issue: dict[str, Any], rel: str) -> bool:
     return False
 
 
+async def repair_for_rerun(env: Env, issue: dict[str, Any], rel: str, detail: str = "") -> dict[str, str]:
+    """One repair of an issue, asked for with FI's own repair prompt, for the rerun of the study with it
+    (:mod:`core.rerun_check`): the files the model gave, ``{path: whole text}``, whether FI's own rules for keeping a repair
+    would have accepted it or not (a rule that keeps a result out of the delivered paper is not a reason to leave the number
+    unchecked). ``env.code`` is a COPY of the code: nothing of the quest is changed. Empty when the reply held no usable
+    code. Not counted as a try of the finding: the caller counts the request."""
+    env.tried = {}
+    await _attempt(env, issue, rel, "code", detail)
+    return dict(env.tried)
+
+
 async def repair_issues(env: Env) -> list[str]:
     """One pass over the open issues of the latest reading, result-changing ones first. Returns the files changed."""
     from . import code_review as _review

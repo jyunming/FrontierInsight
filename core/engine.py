@@ -27,6 +27,7 @@ import io
 import re
 import tokenize
 import shutil
+import tempfile
 import string
 import sys
 import threading
@@ -147,6 +148,7 @@ from . import equation_tests as _equation_tests
 from . import outside_run as _outside_run
 from . import code_reach as _code_reach
 from . import shown_reach as _shown_reach
+from . import rerun_check as _rerun_check
 from . import code_review as _code_review
 from . import review_pairs as _pairs
 from . import quality_report as _quality_report
@@ -22797,14 +22799,149 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                   ", inside the code" if run.crash_in_program else "")
         if errored and record:
             _code_review.save(self.quest_root, record)
+        # Whether a fault changes a reported number is shown by running the study with a repair of it, not by reasoning about
+        # the test that failed (core/rerun_check.py).
+        reruns = await self._rerun_shown(verdicts, record, state) if verdicts and record is not None else {}
         if crash_repair is not None:
             # a fault that stops the quest is not held up by a crash elsewhere; anything else waits for the repaired run
-            outcome = (self._shown_fault_outcome(verdicts, record or {}, result, headline or [], declared, reach=reach)
-                       if verdicts else None)
+            outcome = (self._shown_fault_outcome(verdicts, record or {}, result, headline or [], declared, reach=reach,
+                                                 reruns=reruns) if verdicts else None)
             return outcome if outcome and outcome.get("stuck") else crash_repair
         if not verdicts:
             return None
-        return self._shown_fault_outcome(verdicts, record or {}, result, headline or [], declared, reach=reach)
+        return self._shown_fault_outcome(verdicts, record or {}, result, headline or [], declared, reach=reach, reruns=reruns)
+
+    #: The most different repairs one pass of the gate runs the study with; a finding beyond them is "not rerun".
+    MAX_RERUNS = 6
+
+    async def _rerun_shown(self, verdicts: list[tuple[dict[str, Any], str]], record: dict[str, Any],
+                           state: Any) -> dict[str, Any]:
+        """For each fault a failing test showed and nothing showed gone: what running the study with a repair of it says
+        (:class:`core.rerun_check.Verdict`), by finding id. An answer kept for this version of the code is not asked again."""
+        out: dict[str, Any] = {}
+        version = _code_review.version(self.quest_root / "code")
+        done: dict[str, Any] = {}  # the same repair of two findings is run once
+        runs = 0
+        fields = _rerun_check.Verdict.__dataclass_fields__
+        for issue, _how in verdicts:
+            fid = str(issue.get("id"))
+            saved = (record.get("issues") or {}).get(fid)
+            kept = saved.get("rerun") if isinstance(saved, dict) else None
+            if isinstance(kept, dict) and kept.get("version") == version and kept.get("status") in ("changed", "unchanged", "could_not"):
+                out[fid] = _rerun_check.Verdict(**{k: v for k, v in kept.items() if k in fields})
+                continue
+            if runs >= self.MAX_RERUNS:
+                out[fid] = _rerun_check.Verdict("could_not", "the study was already run again for other findings in this check")
+            else:
+                runs += 1
+                try:
+                    out[fid] = await self._rerun_one(issue, record, state, done)
+                except Exception as exc:  # noqa: BLE001 - a rerun that fails is "could not rerun", never a stop by itself
+                    self._log.warning("[evidence_gate] the study could not be run again for %s (%s: %s)", fid,
+                                      type(exc).__name__, exc)
+                    out[fid] = _rerun_check.Verdict("could_not", f"{type(exc).__name__}: {exc}"[:200])
+            if isinstance(saved, dict):
+                saved["rerun"] = {**out[fid].record(), "version": version}
+            self._log_rerun(fid, out[fid])
+        _code_review.save(self.quest_root, record)
+        return out
+
+    def _log_rerun(self, fid: str, v: Any) -> None:
+        if v.status == "could_not":
+            self._log.warning("[evidence_gate] %s: the study could not be run again with a repair of it (%s)", fid, v.why)
+        else:
+            self._log.info("[evidence_gate] %s: the study was run again with a repair of it (%s, %.0f s): %s", fid, v.mode,
+                           v.seconds, ("reported numbers differ: " + ", ".join(v.metrics)[:160]) if v.status == "changed"
+                           else "no reported number differs beyond its uncertainty")
+
+    async def _rerun_one(self, issue: dict[str, Any], record: dict[str, Any], state: Any, done: dict[str, Any]) -> Any:
+        """Run the study on a copy of the code with a repair of one shown fault, as :func:`core.rerun_check.judge`. The repair is
+        the last one FI tried for the finding, even one its own rules refused (kept in ``code/``'s history); a finding with none
+        that fits the code as it is is asked for one repair, with the same prompt as the code-review loop (counted in the
+        record as ``rerun_calls``)."""
+        code = self.quest_root / "code"
+        protocol = _frozen.protocol_of(self.quest_root) or (self._protocol_block(state) if isinstance(state, dict) else None)
+        allowed = _rerun_check.time_allowed(self.quest_root, self.config.execution.timeout_s)
+        if allowed is None:
+            return _rerun_check.Verdict("could_not", "FI has no record of how long the study took, so a rerun cannot be bounded")
+        fid = str(issue.get("id"))
+        work = Path(tempfile.mkdtemp(prefix="fi_repair_"))
+        try:
+            copy_dir = await asyncio.to_thread(_rerun_check.copy_code, self.quest_root, work)
+            source = ""
+            for number, patch in await asyncio.to_thread(_code_project.refused_patches, self.quest_root, fid, log=self._log):
+                if await asyncio.to_thread(_code_project.apply_patch, copy_dir, patch):
+                    source = f"its last repair FI tried (try {number})"
+                    break
+            env: dict[str, str] = {**scrub_secrets()}
+            from .example_inputs import ENV_VAR as _INPUT_ENV, examples_dir, list_inputs
+
+            if list_inputs(self.quest_root):
+                env[_INPUT_ENV] = str(examples_dir(self.quest_root))
+            python = self.executor.python_path(self.quest_root)
+            problem = ""
+            for _round in range(2):
+                if not source:
+                    # nothing kept fits the code as it is, or the repair did not run: one repair is asked for (again), told
+                    # what went wrong with the last one
+                    rel = _finding_repair.target_file(issue, code)
+                    if not rel or not (code / rel).is_file():
+                        return _rerun_check.Verdict("could_not", "the file it concerns is not in the code")
+                    if int(record.get("rerun_calls") or 0) >= _code_review.MAX_FINDING_CALLS:
+                        return _rerun_check.Verdict("could_not", problem or "the requests allowed for repairs were spent", crashed=bool(problem))
+                    record["rerun_calls"] = int(record.get("rerun_calls") or 0) + 1
+                    _code_review.save(self.quest_root, record)
+                    shutil.rmtree(copy_dir, ignore_errors=True)
+                    copy_dir = await asyncio.to_thread(_rerun_check.copy_code, self.quest_root, work)
+                    tried = await self._ask_repair_on_copy(issue, rel, copy_dir, protocol, state, problem)
+                    if not tried:
+                        return _rerun_check.Verdict("could_not", "no repair of it could be written")
+                    for target, text in tried.items():
+                        (copy_dir / target).write_text(text, encoding="utf-8")
+                    source = "a repair asked for once more" if not problem else "a repair asked for again after the first did not run"
+                key = _code_review.version(copy_dir)
+                if key in done:
+                    return done[key]
+                verdict = await _rerun_check.judge(self.executor, python, self.quest_root, copy_dir, protocol, allowed, env,
+                                                   source=source, results_root=self.quest_root)
+                if verdict.status == "could_not" and verdict.crashed and _round == 0:
+                    problem = ("FI ran the study with your repair and it did not run to the end: " + verdict.why
+                               + ". The repair may use only the results the plan declares.")
+                    source = ""
+                    continue
+                done[key] = verdict
+                return verdict
+            return verdict
+        finally:
+            await asyncio.to_thread(shutil.rmtree, work, True)
+
+    async def _ask_repair_on_copy(self, issue: dict[str, Any], rel: str, copy_dir: Path, protocol: Any,
+                                  state: Any, problem: str = "") -> dict[str, str]:
+        """One repair of ``issue`` from the code model, written on ``copy_dir`` only: the files the model gave."""
+        values = _pairs.plan_values(protocol if isinstance(protocol, dict) else None)
+        package = self._package_in_use(state) or ""
+        ids = _oracle.generating_equations(protocol if isinstance(protocol, dict) else None)
+        scratch = copy.deepcopy(issue)
+        scratch.update(calls={"test": 0, "repair": 0, "other": 0})
+        fid = str(issue.get("id"))
+
+        async def ask(prompt: str, who: str, kind: str) -> str:
+            return await self._chat(prompt, node="implement.finding_repair")
+
+        async def passes(paths: list[str]) -> dict[str, Any]:
+            return {p: _finding_repair.TestRun("pass") for p in paths}  # the copy is not held to the finding's own test
+
+        async def nothing() -> dict[str, str]:
+            return {}
+
+        env = _finding_repair.Env(
+            root=self.quest_root, code=copy_dir, record={"finding_calls": 0, "issues": {fid: scratch}}, save=lambda: None,
+            ask=ask, run_tests=passes, snapshot=nothing, static=lambda: {},
+            keeps=lambda old, new, r: _code_review.repair_problem(old, new, r, equations=ids, package=package),
+            prompts=self._prompts, topic=_pairs.scrub(self._topic_block(), values) or "(not stated)",
+            equations=_code_review.equations_view(protocol if isinstance(protocol, dict) else None, values),
+            scrub=lambda text: _pairs.scrub(text, values), log=self._log, package=package)
+        return await _finding_repair.repair_for_rerun(env, scratch, rel, problem)
 
     def _shown_fault_reach(self, headline: list[str], state: Any) -> "_shown_reach.Reach | None":
         """FI's records of the quest, read for the gate (:mod:`core.shown_reach`); ``None`` when they cannot be read, and
@@ -22819,7 +22956,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
 
     def _shown_fault_outcome(self, verdicts: list[tuple[dict[str, Any], str]], record: dict[str, Any],
                              result: Any, headline: list[str] | None = None,
-                             declared: list[str] | None = None, reach: "_shown_reach.Reach | None" = None) -> dict[str, Any] | None:
+                             declared: list[str] | None = None, reach: "_shown_reach.Reach | None" = None,
+                             reruns: dict[str, Any] | None = None) -> dict[str, Any] | None:
         """What the faults a failing test showed, and nothing showed gone, do to the quest, from the records alone. A fault
         about the study's main quantity (the plan's first dependent variable or its precision metric) stops it with no
         paper: there is nothing to report. A plan quantity the code does not compute (and the results do not hold under
@@ -22841,12 +22979,33 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         figures: list[tuple[dict[str, Any], str, list[str]]] = []
         about_plan: list[dict[str, Any]] = []
         incomplete: set[str] = set()  # left out because a test showed the value missing or incomplete, not computed wrongly
+        unchanged: list[dict[str, Any]] = []
         for issue, how in verdicts:
+            rerun = (reruns or {}).get(str(issue.get("id")))
+            if rerun is not None and rerun.status == "unchanged":
+                # The study run again with a repair of it reports the same numbers: a difference that changes no reported number.
+                unchanged.append(issue)
+                continue
             # A fault in a function that makes one declared result, one figure or a helper they use, or a test that only
             # checks that something is there, is placed from FI's records (core/shown_reach.py), not from the finding's words.
             try:
-                placed = (reach.effect(record, issue, result)
-                          if reach is not None and not _code_review.missing_quantities(record, issue) else None)
+                if rerun is not None and rerun.status == "changed" and reach is not None:
+                    # The numbers the rerun showed changed are what is left out, and the main result among them stops the paper.
+                    how = how + "; the study run again with a repair of it reports other numbers for " + ", ".join(rerun.metrics)[:160]
+                    placed = reach.effect_of_changes(rerun.metrics)
+                elif reach is not None and not _code_review.missing_quantities(record, issue):
+                    # No rerun to say (it could not be made): leave out what the records place, and stop only for an empty paper.
+                    keep_rule, reach.headline_stops = reach.headline_stops, rerun is None
+                    try:
+                        placed = reach.effect(record, issue, result)
+                    finally:
+                        reach.headline_stops = keep_rule
+                    if rerun is not None and placed is not None:
+                        if placed.stop and "leaves no result" not in placed.stop:
+                            placed.stop = ""
+                        how = how + "; the study could not be run again with a repair of it (" + rerun.why[:100] + ")"
+                else:
+                    placed = None
                 placed_keys = (sorted({*reach.printed_keys(placed.left_out, result), *placed.extra_keys})
                                if placed is not None and (placed.left_out or placed.extra_keys) else [])
                 placed_named = (placed.named or (placed.left_out[0] if placed.left_out else "")) if placed is not None else ""
@@ -22899,6 +23058,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if stops:
             return self._shown_fault_stop(*stops[0])
         issues = record.get("issues") if isinstance(record.get("issues"), dict) else {}
+        for issue in unchanged:
+            saved = issues.get(str(issue.get("id")))
+            if isinstance(saved, dict):
+                saved["changes_result"] = False
+                saved["rerun_unchanged"] = True
+            self._log.warning("[evidence_gate] %s: its test fails, but the study run again with a repair of it reports no other "
+                              "number beyond its uncertainty: it changes no reported number and does not stop the quest",
+                              issue.get("id"))
+        if unchanged and not (left_out or not_done or figures):
+            _code_review.save(self.quest_root, record)
         for issue in about_plan:
             # Text FI wrote from the plan differs from what the reader wanted: no computed number is wrong. It stays in the
             # quality report and changes neither the plan nor the paper's results.
