@@ -53,11 +53,11 @@ def _engine(tmp_path: Path) -> Engine:
     return engine
 
 
-def _quest(engine: Engine) -> Path:
+def _quest(engine: Engine, files: dict[str, str] | None = None) -> Path:
     from core import frozen_protocol
 
     root = engine.quest_root
-    for rel, text in FILES.items():
+    for rel, text in {**FILES, **(files or {})}.items():
         (root / "code" / rel).parent.mkdir(parents=True, exist_ok=True)
         (root / "code" / rel).write_text(text, encoding="utf-8")
     (root / "needs").mkdir(parents=True, exist_ok=True)
@@ -79,12 +79,13 @@ def _quest(engine: Engine) -> Path:
 
 
 def _run(engine: Engine, test_src: str, *, file: str = "derive.py", function: str = "", quantity: str = "cover",
-         headline: tuple[str, ...] = ("est_a",), fid: str = "F-1", line: int = 0) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+         headline: tuple[str, ...] = ("est_a",), fid: str = "F-1", line: int = 0,
+         files: dict[str, str] | None = None) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """The gate's verdict for one finding whose test source is ``test_src`` (the real gate code; only the test's re-run is
     replaced)."""
     import asyncio
 
-    root = _quest(engine)
+    root = _quest(engine, files)
     rel = f".fi/finding_tests/{fid}_1.py"
     (root / rel).parent.mkdir(parents=True, exist_ok=True)
     (root / rel).write_text(test_src, encoding="utf-8")
@@ -196,8 +197,8 @@ ABSENT_SRC = ("import simulate\n\n\ndef test_x():\n    r = simulate.trial({}, No
 
 
 def test_an_assertion_that_looks_a_value_up_only_under_names_the_trial_never_returns_shows_a_part_missing(tmp_path: Path) -> None:
-    out, record = _run(_engine(tmp_path), ABSENT_SRC, file="simulate.py", function="trial", quantity="est_a", line=7)
-    assert out is None  # on the old gate: stopped, est_a is the main result and the test reads it
+    out, record = _run(_engine(tmp_path), ABSENT_SRC, file="simulate.py", function="trial", quantity="signed_error_est_a", line=7)
+    assert out is None  # on the old gate: stopped, the test reads est_a
     assert record["issues"]["F-1"]["at_gate"]["outcome"] == "not_computed"
 
 
@@ -215,10 +216,12 @@ def test_a_failing_assertion_on_a_returned_value_is_not_explained_by_absence(tmp
 
 def test_absence_is_read_from_the_names_in_the_record_of_the_trials() -> None:
     absent = lambda pieces: pieces == ["gone"]  # noqa: E731
-    src = "def test_x(r):\n    got = r.get('gone', None)\n    assert got == 1.0\n"
-    assert shown_reach.explained_by_absence(src, 3, absent)
-    assert not shown_reach.explained_by_absence(src, 3, lambda pieces: False)
-    assert not shown_reach.explained_by_absence(src, 0, absent)
+    src = "def test_x():\n    r = trial()\n    got = r.get('gone', None)\n    assert got == 1.0\n"
+    assert shown_reach.explained_by_absence(src, 4, absent, {"trial"})
+    assert not shown_reach.explained_by_absence(src, 4, lambda pieces: False, {"trial"})
+    assert not shown_reach.explained_by_absence(src, 0, absent, {"trial"})
+    local = "def test_x():\n    r = {'a': 1}\n    got = r.get('gone', None)\n    assert got == 1.0\n"
+    assert not shown_reach.explained_by_absence(local, 4, absent, {"trial"})  # a dictionary the test built says nothing of a trial
 
 
 # ---- a helper ----------------------------------------------------------------------------------------------------------------------
@@ -252,22 +255,21 @@ def test_a_helper_only_a_figure_reaches_takes_that_figure_out(tmp_path: Path) ->
 
 # ---- a test that only checks that something is there, or reads text FI wrote -------------------------------------------------------
 @pytest.mark.parametrize("assertion", [
-    "assert len(r['lo_a']) == len(r['est_a'])",
-    "assert r['lo_a'].size == 5",
     "assert r.get('est_a_error') is not None",
-    "assert all(r.get(k) is not None for k in ('est_a', 'cover'))",
-    "assert 'cover' in r",
+    "assert all(r.get(k) is not None for k in ('est_a_error', 'cover_error'))",
+    "assert 'cover_error' in r",
 ])
-def test_a_test_that_only_checks_that_something_is_there_shows_a_part_missing_not_a_wrong_number(tmp_path: Path, assertion: str) -> None:
+def test_a_test_that_only_checks_that_something_is_there_for_a_quantity_nothing_holds_is_a_part_not_done(tmp_path: Path, assertion: str) -> None:
     src = f"import simulate\n\n\ndef test_x():\n    r = simulate.trial({{}}, None)\n    {assertion}\n"
-    out, record = _run(_engine(tmp_path), src, file="simulate.py", function="trial", quantity="est_a")
-    assert out is None  # even for the main result: no value is shown wrong
+    out, record = _run(_engine(tmp_path), src, file="simulate.py", function="trial", quantity="est_a_error")
+    assert out is None  # the run holds no value for it: nothing to leave out
     assert record["issues"]["F-1"]["at_gate"]["outcome"] == "not_computed"
 
 
 @pytest.mark.parametrize("assertion,structural", [
-    ("assert len(r) == 3", True), ("assert r['a'] == r['b']", False), ("assert r['a'] == 0.5", False),
-    ("assert len(r['a']) == len(r['b']) and r['c'] is None", True), ("assert abs(r['a'] - 1) < 1e-6", False),
+    ("assert len(r) == 3", False), ("assert r['a'] == r['b']", False), ("assert r['a'] == 0.5", False),
+    ("assert r.get('a') is not None", True), ("assert isinstance(r['a'], float) and 'b' in r", True),
+    ("assert len(r['a']) == len(r['b']) and r['c'] is None", False), ("assert abs(r['a'] - 1) < 1e-6", False),
     ("assert len(r['a']) == len(r['b'])\n    assert r['a'][0] == 1.0", False),
     ("assert np.isclose(r['a'], 1.0)", False), ("assert r['a'] is not None and r['a'] > 0", False),
 ])
@@ -316,3 +318,160 @@ def test_the_main_result_is_the_declared_id_the_plans_words_name() -> None:
     assert code_review.headline_ids(["est_a"], ids) == {"est_a"}
     assert code_review.headline_ids(["something else"], ids) == set()
     assert code_review.headline_ids(["the estimated quantity of interest"], ["q1"], {"q1": "estimated quantity"}) == {"q1"}
+
+
+# ---- round 2 of the review: each fix, with the input that went wrong ----------------------------------------------------------------
+TRIAL = "import simulate\n\n\ndef test_x():\n    r = simulate.trial({}, None)\n"
+
+
+def _stops(out: dict[str, Any] | None) -> bool:
+    return bool(out and out.get("stuck_reason") == "shown_fault_open")
+
+
+def test_a_part_shown_missing_that_the_run_holds_a_value_for_is_left_out_not_kept(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    out, record = _run(engine, TRIAL + "    assert 'est_b' in r\n", file="simulate.py", function="trial", quantity="est_b")
+    assert out is None
+    gate = record["issues"]["F-1"]["at_gate"]
+    assert gate["outcome"] == "left_out" and gate["incomplete"] is True  # on the old gate: "not computed", est_b stayed in the results
+    kept = _removed(engine)
+    assert "est_b" in kept["removed_quantities"]
+    said = " ".join(c.get("say", "") + c.get("note", "") for c in kept["checks"])
+    assert "missing or incomplete" in said and "computes it wrongly" not in said
+
+
+def test_a_part_shown_missing_that_is_the_main_result_stops_the_paper(tmp_path: Path) -> None:
+    out, _ = _run(_engine(tmp_path), TRIAL + "    assert 'est_a' in r\n", file="simulate.py", function="trial", quantity="est_a")
+    assert _stops(out)
+
+
+def test_a_derived_result_shown_missing_is_left_out_with_what_is_worked_out_from_it(tmp_path: Path) -> None:
+    files = {"derive.py": FILES["derive.py"].replace("return 0.5", "return table.derived('cover') * 2")}
+    engine = _engine(tmp_path)
+    out, record = _run(engine, "import derive\n\n\ndef test_x():\n    assert derive.derive_cover(None) is not None\n",
+                       quantity="cover", files=files)
+    assert out is None
+    assert record["issues"]["F-1"]["at_gate"]["outcome"] == "left_out"
+    assert set(_removed(engine)["removed_quantities"]) >= {"cover", "corr_ab"}
+
+
+def test_the_words_said_of_a_part_shown_missing_do_not_say_the_code_computes_it_wrongly(tmp_path: Path) -> None:
+    from core import disclosure
+
+    engine = _engine(tmp_path)
+    _run(engine, TRIAL + "    assert 'est_b' in r\n", file="simulate.py", function="trial", quantity="est_b")
+    text = disclosure._code_faults_sentence(engine.quest_root)
+    assert "missing or incomplete" in text and "wrongly" not in text
+
+
+def test_a_lookup_in_a_dictionary_the_test_built_is_not_a_name_the_trial_failed_to_return(tmp_path: Path) -> None:
+    src = TRIAL + "    truth = {'theta': 2.0}\n    assert r['est_a'] == truth['theta'], 'wrong'\n"
+    out, _ = _run(_engine(tmp_path), src, file="simulate.py", function="trial", quantity="est_a", line=7)
+    assert _stops(out)  # on the earlier gate: delivered, as a part not done
+
+
+def test_a_test_that_calls_the_trial_and_a_derived_result_places_the_fault_by_both(tmp_path: Path) -> None:
+    src = "import simulate, derive\n\n\ndef test_x():\n    r = simulate.trial({}, None)\n    assert r['est_a'] == 2.0, 'wrong'\n    derive.derive_cover(None)\n"
+    out, _ = _run(_engine(tmp_path), src, file="simulate.py", function="trial", quantity="est_a", line=6)
+    assert _stops(out)  # on the earlier gate: only cover was left out and est_a stayed
+
+
+HELPER = "from model import helper_for_trial\n\n\ndef test_x():\n    assert helper_for_trial(1) == 2, 'wrong'\n"
+
+
+def test_a_helper_only_experiment_py_reaches_for_the_trial_is_not_lost(tmp_path: Path) -> None:
+    files = {"simulate.py": "", "experiment.py": "import model\n\n\ndef run_trial(cell, trial_id, seed):\n    return {'est_a': model.helper_for_trial(1)}\n"}
+    out, _ = _run(_engine(tmp_path), HELPER, file="model.py", function="helper_for_trial", quantity="est_a", files=files)
+    assert _stops(out)  # on the earlier gate: "no function reaches it", delivered
+
+
+def test_a_helper_only_the_oracle_reaches_is_not_lost(tmp_path: Path) -> None:
+    files = {"simulate.py": "import model\n\n\ndef trial(cell, ctx):\n    return {'est_a': 1.0}\n\n\ndef oracle():\n    return {'truth_a': model.helper_for_trial(1)}\n"}
+    out, _ = _run(_engine(tmp_path), HELPER, file="model.py", function="helper_for_trial", quantity="est_a", files=files)
+    assert _stops(out)
+
+
+def test_when_no_entry_of_the_study_is_found_a_helper_is_judged_as_before(tmp_path: Path) -> None:
+    files = {"simulate.py": "", "derive.py": ""}
+    out, _ = _run(_engine(tmp_path), HELPER, file="model.py", function="helper_for_trial", quantity="est_a", files=files)
+    assert _stops(out)  # nothing was asked of the call graph: it is not "reached by no result"
+
+
+def test_a_derived_result_another_derived_result_calls_is_what_it_is_worked_out_from(tmp_path: Path) -> None:
+    files = {"derive.py": "def derive_cover(table):\n    return 1\n\n\ndef derive_corr_ab(table):\n    return derive_cover(table) * 2\n"}
+    src = "import derive\n\n\ndef test_x():\n    assert derive.derive_cover(None) == 0.9, 'wrong'\n"
+    out, _ = _run(_engine(tmp_path), src, quantity="cover", headline=("corr_ab",), files=files)
+    assert _stops(out)
+
+
+def test_a_derived_result_named_by_a_module_constant_is_read_too(tmp_path: Path) -> None:
+    files = {"derive.py": "SOURCE = 'cover'\n\n\ndef derive_cover(table):\n    return 1\n\n\ndef derive_corr_ab(table):\n    return table.derived(SOURCE) * 2\n"}
+    src = "import derive\n\n\ndef test_x():\n    assert derive.derive_cover(None) == 0.9, 'wrong'\n"
+    out, _ = _run(_engine(tmp_path), src, quantity="cover", headline=("corr_ab",), files=files)
+    assert _stops(out)
+
+
+def test_what_is_worked_out_from_a_left_out_result_is_left_out_with_it(tmp_path: Path) -> None:
+    files = {"derive.py": "def derive_cover(table):\n    return 1\n\n\ndef derive_corr_ab(table):\n    return table.derived('cover') * 2\n"}
+    engine = _engine(tmp_path)
+    out, _ = _run(engine, "import derive\n\n\ndef test_x():\n    assert derive.derive_cover(None) == 0.9, 'wrong'\n", quantity="cover", files=files)
+    assert out is None
+    assert set(_removed(engine)["removed_quantities"]) == {"corr_ab", "cover"}  # on the earlier gate: corr_ab stayed
+
+
+def test_an_undeclared_returned_name_a_derived_result_reads_reaches_that_result(tmp_path: Path) -> None:
+    files = {"derive.py": "def derive_cover(table):\n    return 1\n\n\ndef derive_corr_ab(table):\n    return table.col('extra_t').mean()\n"}
+    out, _ = _run(_engine(tmp_path), TRIAL + "    assert r['extra_t'] == 7.0, 'wrong'\n", file="simulate.py", function="trial",
+                  quantity="extra_t", headline=("corr_ab",), files=files)
+    assert _stops(out)  # on the earlier gate: delivered, corr_ab is built on extra_t
+
+
+def test_a_presence_check_of_the_main_derived_result_stops(tmp_path: Path) -> None:
+    out, _ = _run(_engine(tmp_path), "import derive\n\n\ndef test_x():\n    r = derive.derive_corr_ab(None)\n    assert r is not None\n",
+                  quantity="corr_ab", headline=("corr_ab",))
+    assert _stops(out)
+
+
+def test_a_count_compared_with_a_count_is_not_a_presence_check(tmp_path: Path) -> None:
+    out, _ = _run(_engine(tmp_path), "import derive\n\n\ndef test_x():\n    r = derive.derive_corr_ab(None)\n    assert len(r) == 2\n",
+                  quantity="corr_ab", headline=("corr_ab",))
+    assert _stops(out)
+
+
+def test_a_check_that_a_trial_value_is_a_float_on_the_main_result_stops(tmp_path: Path) -> None:
+    out, _ = _run(_engine(tmp_path), TRIAL + "    assert isinstance(r['est_a'], float)\n", file="simulate.py", function="trial", quantity="est_a")
+    assert _stops(out)
+
+
+def test_a_test_that_reads_the_frame_and_calls_the_study_is_not_only_about_the_plan(tmp_path: Path) -> None:
+    src = "import derive\nfrom model import helper_for_trial\n\n\ndef test_x():\n    assert helper_for_trial(derive.ROLES['cover']) == 2, 'wrong'\n"
+    out, _ = _run(_engine(tmp_path), src, file="model.py", function="helper_for_trial", quantity="est_a")
+    assert _stops(out)  # on the earlier gate: kept in the quality report, the helper's fault ignored
+
+
+def test_a_figure_function_a_result_uses_is_a_helper_of_that_result(tmp_path: Path) -> None:
+    files = {"derive.py": "def figure_fig1(fig, table):\n    return 3\n\n\ndef derive_cover(table):\n    return figure_fig1(None, table) * 2\n\n\ndef derive_corr_ab(table):\n    return 0.5\n"}
+    engine = _engine(tmp_path)
+    out, _ = _run(engine, "import derive\n\n\ndef test_x():\n    assert derive.figure_fig1(None, None) == 1, 'wrong'\n",
+                  quantity="fig1", headline=("corr_ab",), files=files)
+    assert out is None
+    kept = _removed(engine)
+    assert "cover" in kept["removed_quantities"] and kept["removed_figures"]  # on the earlier gate: only the figure
+
+
+def test_a_record_that_cannot_be_read_for_the_keys_does_not_end_the_gate_in_an_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def broken(self: Any, ids: Any, result: Any) -> Any:
+        raise RuntimeError("unreadable")
+
+    monkeypatch.setattr(shown_reach.Reach, "printed_keys", broken)
+    out, _ = _run(_engine(tmp_path), DERIVE_COVER, quantity="cover")
+    assert out is None or _stops(out)  # judged as before, not an exception
+
+
+def test_a_finding_about_text_fi_wrote_from_the_plan_is_told_in_the_disclosure_and_the_quality_report(tmp_path: Path) -> None:
+    from core import disclosure
+
+    engine = _engine(tmp_path)
+    src = "import derive\n\n\ndef test_x():\n    assert derive.ROLES['cover'] == 'result', 'wrong role'\n"
+    _run(engine, src, quantity="cover")
+    assert "text FI wrote from the plan" in disclosure._code_faults_sentence(engine.quest_root)

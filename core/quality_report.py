@@ -1207,6 +1207,7 @@ def _issue_rows(cr: dict[str, Any], root: Path | None = None) -> list[dict[str, 
             "reason": _one(issue.get("reason"), 140), "seen_in": len(readings),
             "reported_as": [str(k) for k in _list(issue.get("reported_as"))],
             "at_gate": issue.get("at_gate") if isinstance(issue.get("at_gate"), dict) else {},
+            "about_plan_text": bool(issue.get("about_plan_text")),
             "never_run": bool(issue.get("never_run")) or never_run(issue.get("file"), issue.get("function"))})
     return rows
 
@@ -1385,7 +1386,11 @@ def _issue_lines(code: dict[str, Any]) -> list[str]:
             still = "yes, but the run never calls this code, so it changes nothing reported; it is kept here, not in the paper"
         elif row["open"] and row.get("at_gate", {}).get("outcome") == "left_out":
             keys = ", ".join(str(k) for k in _list(row["at_gate"].get("keys"))[:3])
-            still = f"yes: its test still fails, so FI left {keys} out of the results the paper uses, and the paper says so"
+            why_out = "shows it missing or incomplete" if row["at_gate"].get("incomplete") else "still fails"
+            still = f"yes: its test {why_out}, so FI left {keys} out of the results the paper uses, and the paper says so"
+        elif row["open"] and row.get("about_plan_text"):
+            still = ("yes, but its test fails on text FI wrote from the plan, not on a number the code computed; no reported "
+                     "number is changed, and it is kept here")
         elif row["open"] and row.get("at_gate", {}).get("outcome") == "not_computed":
             still = "yes: the code does not compute it, and the paper says so as a part not done"
         elif row["open"]:

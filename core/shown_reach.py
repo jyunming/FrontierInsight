@@ -23,6 +23,7 @@ the gate then judges it as before.
 from __future__ import annotations
 
 import ast
+import builtins
 import json
 import re
 from dataclasses import dataclass, field
@@ -44,6 +45,16 @@ class Effect:
     plan_text: bool = False  # the finding is about the plan's own text, not a computed number
     probes: list[str] = field(default_factory=list)  # names the test looked for that the plan does not declare
     why: str = ""
+    extra_keys: list[str] = field(default_factory=list)  # printed keys to leave out that no declared result owns
+    incomplete: bool = False  # what is left out is shown missing or incomplete by the test, not shown computed wrongly
+    named: str = ""  # the quantity the finding is about, among the left-out ones
+    cannot: bool = False  # FI cannot tell what the code reaches: the records place nothing
+
+
+_BUILTIN_NAMES = frozenset(dir(builtins))
+#: Methods of strings and mappings: a call to one is not a call into the study's own code.
+_PLAIN_METHODS = frozenset({"get", "items", "keys", "values", "join", "lower", "upper", "strip", "split", "format", "startswith",
+                            "endswith", "count", "index", "append", "extend", "copy"})
 
 
 def _norm(text: Any) -> str:
@@ -64,8 +75,6 @@ class TestShape:
     frame: set[str] = field(default_factory=set)  # constants of FI's analysis frame it reads (``derive.ROLES``)
 
 
-_SHAPE_ATTRS = frozenset({"size", "shape", "ndim"})
-_SHAPE_CALLS = frozenset({"len", "size", "ndim", "shape"})
 _PRESENCE_CALLS = frozenset({"isinstance", "hasattr", "callable"})
 _VALUE_CALLS = re.compile(r"^(assert|allclose|isclose|approx|isfinite|isnan|isinf)", re.IGNORECASE)
 
@@ -75,29 +84,11 @@ def _call_name(node: ast.Call) -> str:
     return f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
 
 
-def _is_shape(node: ast.AST, env: dict[str, ast.AST], depth: int = 0) -> bool:
-    """Whether an expression is a count or a literal: ``len(x)``, ``x.size``, ``x.shape[0]``, an integer, or a name bound to one."""
-    if depth > 4:
-        return False
-    if isinstance(node, ast.Constant):
-        return isinstance(node.value, (int, bool, type(None))) and not isinstance(node.value, float)
-    if isinstance(node, ast.Call):
-        return _call_name(node) in _SHAPE_CALLS
-    if isinstance(node, ast.Attribute):
-        return node.attr in _SHAPE_ATTRS
-    if isinstance(node, ast.Subscript):
-        return _is_shape(node.value, env, depth + 1)
-    if isinstance(node, ast.BinOp):
-        return _is_shape(node.left, env, depth + 1) and _is_shape(node.right, env, depth + 1)
-    if isinstance(node, ast.Name):
-        return node.id in env and _is_shape(env[node.id], env, depth + 1)
-    return False
-
-
 def _about_presence(node: ast.AST, env: dict[str, ast.AST], depth: int = 0) -> bool:
-    """Whether an assertion's condition is only about what is there: a count against a count or a number, ``is None``,
-    ``in`` a mapping, ``isinstance``/``hasattr``, joined by ``and``/``or``/``not``/``all``/``any``. A comparison of a value
-    the code returned is not (that is an assertion about a value)."""
+    """Whether an assertion's condition is only about what is there: ``is None`` / ``is not None``, a string ``in`` a mapping,
+    ``isinstance``/``hasattr``, joined by ``and``/``or``/``not``/``all``/``any``. A count compared with a count or a number
+    is not (a wrong number of rows is a wrong result, not a missing one), and neither is a comparison of a value the code
+    returned."""
     if depth > 6:
         return False
     if isinstance(node, ast.BoolOp):
@@ -125,9 +116,6 @@ def _about_presence(node: ast.AST, env: dict[str, ast.AST], depth: int = 0) -> b
                     return False
             elif isinstance(op, (ast.In, ast.NotIn)):
                 if not (isinstance(left, (ast.JoinedStr)) or (isinstance(left, ast.Constant) and isinstance(left.value, str))):
-                    return False
-            elif isinstance(op, (ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE)):
-                if not (_is_shape(left, env) and _is_shape(right, env)):
                     return False
             else:
                 return False
@@ -195,12 +183,15 @@ def _line_of(issue: dict[str, Any]) -> int:
     return int(m.group(1)) if m else 0
 
 
-def explained_by_absence(src: str, line: int, absent: "Callable[[list[str]], bool]") -> bool:
+def explained_by_absence(src: str, line: int, absent: "Callable[[list[str]], bool]",
+                         entries: "frozenset[str] | set[str]" = frozenset()) -> bool:
     """Whether the assertion at ``line`` of a test fails only because the test looks a value up under names the trial never
     returned (``absent(pieces)``: no name FI's record of the trials holds is those pieces in that order with anything between them): one side of a comparison (or the thing it counts
     ``all``/``any`` over, or the bare thing it asserts) is built only from such lookups, so it holds the lookup's default or
     nothing whatever the code computed. Such an assertion shows something missing, not a wrong number. ``False`` whenever
-    the line is not found or the assertion also reads a name the trial does return."""
+    the line is not found or the assertion also reads a name the trial does return. Only a lookup on what a trial entry
+    (``entries``: the functions that return a trial's results) returned counts: a name looked up in a dictionary the test built
+    itself says nothing about the trial."""
     try:
         tree = ast.parse(src)
     except (SyntaxError, ValueError):
@@ -222,6 +213,27 @@ def explained_by_absence(src: str, line: int, absent: "Callable[[list[str]], boo
         last = max((i for i, t in enumerate(ev) if not t[1]), default=-1)
         env[name] = [t[2] for t in ev[last:]] if last >= 0 else []
 
+    def bound(e: ast.AST, depth: int = 0) -> bool:
+        """Whether ``e`` holds what a trial entry returned (directly, or through the names and lookups the test made of it)."""
+        if depth > 6:
+            return False
+        if isinstance(e, ast.Await):
+            return bound(e.value, depth + 1)
+        if isinstance(e, ast.Call):
+            return _call_name(e) in entries or (isinstance(e.func, ast.Attribute) and bound(e.func.value, depth + 1))
+        if isinstance(e, (ast.Subscript, ast.Attribute)):
+            return bound(e.value, depth + 1)
+        if isinstance(e, ast.Name):
+            return bool(env.get(e.id)) and all(bound(v, depth + 1) for v in env[e.id])
+        return False
+
+    def lookup_base(e: ast.AST) -> ast.AST | None:
+        if isinstance(e, ast.Call) and isinstance(e.func, ast.Attribute) and e.func.attr == "get" and e.args:
+            return e.func.value
+        if isinstance(e, ast.Subscript):
+            return e.value
+        return None
+
     def key_absent(k: ast.AST) -> bool | None:
         if isinstance(k, ast.Constant) and isinstance(k.value, str):
             return absent([_norm(k.value)])
@@ -242,17 +254,18 @@ def explained_by_absence(src: str, line: int, absent: "Callable[[list[str]], boo
         if depth > 6:
             return False
         if isinstance(e, ast.Call) and isinstance(e.func, ast.Attribute) and e.func.attr == "get" and e.args:
-            if key_absent(e.args[0]) is not True:
+            if key_absent(e.args[0]) is not True or not bound(e.func.value):
                 return False
             return only_absent(e.args[1], depth + 1) if len(e.args) > 1 and isinstance(e.args[1], (ast.Call, ast.Subscript)) else True
         if isinstance(e, ast.Subscript):
-            return key_absent(e.slice) is True
+            return key_absent(e.slice) is True and bound(e.value)
         if isinstance(e, (ast.List, ast.Tuple, ast.Set)):
             return bool(e.elts) and all(only_absent(x, depth + 1) for x in e.elts)
         if isinstance(e, (ast.ListComp, ast.GeneratorExp)) and len(e.generators) == 1:
             gen = e.generators[0]
             keys = gen.iter.elts if isinstance(gen.iter, (ast.Tuple, ast.List)) else []
-            if keys and isinstance(gen.target, ast.Name) and all(key_absent(k) is True for k in keys):
+            base = lookup_base(e.elt)
+            if keys and isinstance(gen.target, ast.Name) and all(key_absent(k) is True for k in keys) and base is not None and bound(base):
                 return True  # the names it looks up, one by one, are all absent: the comprehension is empty or of defaults
             return only_absent(e.elt, depth + 1)
         if isinstance(e, ast.Name):
@@ -328,6 +341,19 @@ def _strings_of(fn: ast.AST) -> tuple[set[str], set[str]]:
     return exact, prefix
 
 
+def _called_from(fns: dict[str, ast.AST], start: str) -> set[str]:
+    """The names called by function ``start`` and by the functions of the same file it calls, in turn."""
+    seen, todo, called = {start}, [start], set()
+    while todo:
+        for n in ast.walk(fns[todo.pop()]):
+            if isinstance(n, ast.Call):
+                called.add(_call_name(n))
+                if _call_name(n) in fns and _call_name(n) not in seen:
+                    seen.add(_call_name(n))
+                    todo.append(_call_name(n))
+    return called
+
+
 class Reach:
     """The records of one quest, read once, and the question put to them: what does the fault a finding's test showed do to
     the results (:meth:`effect`)?"""
@@ -379,6 +405,10 @@ class Reach:
         items = derived.get("derived") if isinstance(derived.get("derived"), dict) else {}
         self.inputs: dict[str, set[str]] = {str(k): {str(x) for x in (v.get("inputs") or [])} for k, v in items.items()
                                             if isinstance(v, dict)}
+        self.raw_inputs = {k: {_norm(x) for x in v} for k, v in self.inputs.items()}  # as the analysis record lists them
+        self.derived_ok = {str(k) for k, v in items.items() if isinstance(v, dict) and (v.get("status") == "ok" or v.get("by_setting"))}
+        self.headline_raw = list(headline)
+        self.result: Any = None
         self.figure_files: dict[str, str] = {str(o["id"]): str(o.get("file") or "") for o in derived.get("figures") or []
                                              if isinstance(o, dict) and o.get("id")}
         self._read_bodies()
@@ -386,10 +416,21 @@ class Reach:
 
     # -- what the code of derive.py reads ---------------------------------------------------------------------------------
     def _read_bodies(self) -> None:
-        """Add to the dependencies of each derived result what its function in ``derive.py`` names (a result's id as a string),
-        and note the results whose function is not written yet: what they are worked out from cannot be read."""
-        fns = _function_names(self.code, "derive.py")
+        """Add to the dependencies of each derived result what its function in ``derive.py`` reads: a result's id as a string
+        (also one held by a module constant), another ``derive_<id>`` it calls, and the same of the functions of that file it
+        calls in turn. Note the results whose function is not written yet: what they are worked out from cannot be read."""
+        try:
+            tree = ast.parse((self.code / "derive.py").read_text(encoding="utf-8"))
+        except (OSError, SyntaxError, ValueError, UnicodeDecodeError):
+            tree = None
+        fns = {n.name: n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))} if tree else {}
+        consts: dict[str, str] = {}
+        for node in (tree.body if tree else []):
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                consts.update({t.id: node.value.value for t in node.targets if isinstance(t, ast.Name)})
         self.unreadable: set[str] = set()
+        self.body_calls: dict[str, set[str]] = {}  # id -> the names its function (and the file's functions it calls) calls
+        self.body_reads: dict[str, tuple[set[str], set[str]]] = {}  # id -> (strings it names, heads of its f-strings), normalised
         for i in self.ids:
             fn = fns.get(f"derive_{i}")
             if fn is None:
@@ -397,11 +438,45 @@ class Reach:
             if _unwritten(fn):
                 self.unreadable.add(i)
                 continue
-            exact, prefix = _strings_of(fn)
-            read = {self.by_norm[_norm(s)] for s in exact if _norm(s) in self.by_norm} - {i}
-            read |= {j for p in prefix for j in self.ids if j != i and _norm(j).startswith(_norm(p)) and _norm(p)}
-            self.inputs.setdefault(i, set()).update(read)
+            scope, todo = [fn], [fn]
+            while todo:  # the functions of this file it calls, and those they call
+                for n in ast.walk(todo.pop()):
+                    if isinstance(n, ast.Call) and _call_name(n) in fns and fns[_call_name(n)] not in scope:
+                        scope.append(fns[_call_name(n)])
+                        todo.append(fns[_call_name(n)])
+            exact: set[str] = set()
+            prefix: set[str] = set()
+            called: set[str] = set()
+            for f in scope:
+                e, p = _strings_of(f)
+                exact |= e
+                prefix |= p
+                for n in ast.walk(f):
+                    if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id in consts:
+                        exact.add(consts[n.id])
+                    elif isinstance(n, ast.Call):
+                        called.add(_call_name(n))
+            read = {self.by_norm[_norm(s)] for s in exact if _norm(s) in self.by_norm}
+            read |= {j for p in prefix for j in self.ids if _norm(p) and _norm(j).startswith(_norm(p))}
+            read |= {self.by_norm[_norm(c[len("derive_"):])] for c in called
+                     if c.startswith("derive_") and _norm(c[len("derive_"):]) in self.by_norm}
+            self.inputs.setdefault(i, set()).update(read - {i})
+            self.body_reads[i] = ({_norm(x) for x in exact}, {_norm(x) for x in prefix if _norm(x)})
+            self.body_calls[i] = called
         self.derive_fns = set(fns)
+
+    def _reading(self, name: str, prefix: bool) -> set[str]:
+        """The derived results whose function (or whose record in ``derived.json``) reads the trial's name ``name``."""
+        n = _norm(name)
+        out: set[str] = set()
+        if not n:
+            return out
+        for i in self.ids:
+            exact, heads = self.body_reads.get(i, (set(), set()))
+            named = exact | self.raw_inputs.get(i, set())
+            if (any(x.startswith(n) for x in named) if prefix else n in named) or any(n.startswith(h) for h in heads):
+                out.add(i)
+        return out
 
     def _closure(self, ids: set[str]) -> set[str]:
         """``ids`` and every result worked out from one of them, directly or through others."""
@@ -421,11 +496,19 @@ class Reach:
             return set(self.ids)
         return {i for i in self.ids if _norm(i) in self.returned}
 
+    def _holds(self, i: str) -> bool:
+        """Whether the run holds a value for the declared result ``i``: worked out in ``derived.json``, returned by a trial, or
+        printed."""
+        return (i in self.derived_ok or _norm(i) in self.returned
+                or (self.result is not None and bool(_code_review.named_in_results(i, self.result))))
+
     # -- the question -----------------------------------------------------------------------------------------------------
-    def effect(self, record: dict[str, Any], issue: dict[str, Any]) -> Effect | None:
-        """The effect of the fault a finding's failing test showed; ``None`` when the records cannot place the finding."""
+    def effect(self, record: dict[str, Any], issue: dict[str, Any], result: Any = None) -> Effect | None:
+        """The effect of the fault a finding's failing test showed; ``None`` when the records cannot place the finding.
+        ``result``: what the run printed (to find the keys that hold a result)."""
         if not self.ids:
             return None
+        self.result = result
         rel = str(issue.get("test") or "")
         try:
             src = (self.root / rel).read_text(encoding="utf-8") if rel else ""
@@ -441,32 +524,112 @@ class Reach:
                               | ({last[len("derive_"):]} if last.startswith("derive_") else set()))
         figure_calls = sorted({c[len("figure_"):] for c in calls if c.startswith("figure_")}
                               | ({last[len("figure_"):]} if last.startswith("figure_") else set()))
-        trial_call = bool(calls & set(self._trial_entries())) or last in self._trial_entries()
+        entries = frozenset(self._trial_entries())
+        trial_call = bool(calls & entries) or last in entries
         if shape.structural and not (figure_calls and not derive_calls):
-            # An assertion only about what is there (a count, a key, `is not None`) shows something missing, never a wrong number.
-            names = _code_review.quantity_names(record, issue)
-            return Effect(not_done=names[:1] or [str(issue.get("quantity") or "?")],
-                          why="its test only checks that something is returned, so it shows a part missing, not a wrong value")
+            # An assertion only about what is there (a key, `is not None`, `isinstance`) shows something missing, never a wrong
+            # number: what the test is about is left out (or stops the paper) when the run holds a value for it.
+            named = [self.by_norm[_norm(x)] for x in derive_calls if _norm(x) in self.by_norm]
+            names = named or _code_review.quantity_names(record, issue)[:1] or [str(issue.get("quantity") or "?")]
+            return self._settle(Effect(not_done=names, why="its test only checks that something is there"), record, issue)
+        parts: list[Effect | None] = []
         if derive_calls or figure_calls:
-            return self._derive_effect(derive_calls, figure_calls)
-        if trial_call and self.returned and explained_by_absence(src, _line_of(issue), self._absent):
-            return Effect(not_done=_code_review.quantity_names(record, issue)[:1] or [str(issue.get("quantity") or "?")],
-                          why="its failing assertion looks a value up only under names the trial never returns")
+            parts.append(self._derive_effect(derive_calls, figure_calls))
+            for f in figure_calls:  # a figure's function that a result's function (or a trial) calls is a helper of that result
+                parts.append(self._figure_used_by(f"figure_{f}"))
         if trial_call:
-            got = self._trial_effect(shape)
-            if got.probes and not got.stop:
-                # Names the test looked for in what the trial returns and the plan does not declare: what is not done is the
-                # plan's quantity the finding is about, not the probed names (they are not the plan's words).
-                got.not_done = _code_review.quantity_names(record, issue)[:1] or got.probes[:1]
-            return got
-        if shape.frame:
+            if (not (derive_calls or figure_calls) and self.returned
+                    and explained_by_absence(src, _line_of(issue), self._absent, entries)):
+                parts.append(Effect(not_done=_code_review.quantity_names(record, issue)[:1] or [str(issue.get("quantity") or "?")],
+                                    why="its failing assertion looks a value up only under names the trial never returns"))
+            else:
+                got = self._trial_effect(shape)
+                if got.probes and not got.stop:
+                    # Names the test looked for in what the trial returns and the plan does not declare: what is not done is the
+                    # plan's quantity the finding is about, not the probed names (they are not the plan's words).
+                    got.not_done = _code_review.quantity_names(record, issue)[:1] or got.probes[:1]
+                parts.append(got)
+        if not parts and shape.frame and self._plain(shape):
             # The frame is written by FI from the plan and a repair does not change it: a failing assertion about it says the
             # plan differs from what the reader wanted, never that a number the code computed is wrong.
             return Effect(plan_text=True, why="its test reads only text FI wrote from the plan (" + ", ".join(sorted(shape.frame)) + ")")
         file = str(issue.get("file") or "").replace("\\", "/")
-        if last and file and not file.endswith("derive.py"):
-            return self._helper_effect(file, function)
-        return None
+        if last and file and not file.endswith("derive.py") and not last.startswith(("derive_", "figure_")) and last not in entries:
+            parts.append(self._helper_effect(file, function))
+        known = [p for p in parts if p is not None]
+        if not known:
+            return None
+        merged = self._merge(known)
+        return None if merged is None else self._settle(merged, record, issue)
+
+    def _figure_used_by(self, fn: str) -> Effect:
+        """The results whose function calls the figure's function ``fn`` by name (a figure's function a result is worked out
+        with is a helper of that result), or the trial when a trial entry of the study calls it. Not the call graph: FI's own
+        files call every figure's function to draw it, which says nothing of the results."""
+        touched = {i for i, called in self.body_calls.items() if fn in called}
+        for rel in self._study_files():
+            names = _function_names(self.code, rel)
+            for e in self._trial_entries():
+                if e in names and fn in _called_from(names, e):
+                    touched.update(self.trial_ids() or set(self.ids))
+        return self._judge(Effect(), touched, f"{fn} is called by the function of " + ", ".join(sorted(touched))) if touched else Effect()
+
+    def _study_files(self) -> list[str]:
+        """The study's own Python files (not the tests, not FI's frame), relative to ``code/``, except ``derive.py``."""
+        return sorted(r for r in (p.relative_to(self.code).as_posix() for p in self.code.rglob("*.py"))
+                      if not any(part == "tests" or part.startswith("fi_") for part in r.split("/")[:-1])
+                      and not r.rsplit("/", 1)[-1].startswith(("test_", "fi_")) and r != "derive.py")
+
+    def _plain(self, shape: TestShape) -> bool:
+        """Whether every call a test makes is a builtin, a plain string or mapping method, or reads a frame constant: no call
+        into the study's own code."""
+        return all(c in _BUILTIN_NAMES or c in _PLAIN_METHODS for c in shape.calls)
+
+    def _merge(self, parts: list[Effect]) -> Effect | None:
+        """The union of what several parts of one test place (a stop in any is a stop); ``None`` when one cannot tell."""
+        if any(p.cannot for p in parts):
+            return None
+        out = Effect()
+        for p in parts:
+            out.left_out = list(dict.fromkeys([*out.left_out, *p.left_out]))
+            out.not_done = list(dict.fromkeys([*out.not_done, *p.not_done]))
+            out.figures = list(dict.fromkeys([*out.figures, *p.figures]))
+            out.probes = list(dict.fromkeys([*out.probes, *p.probes]))
+            out.named = out.named or p.named
+        out.stop = "; ".join(dict.fromkeys(p.stop for p in parts if p.stop))
+        out.why = "; ".join(dict.fromkeys(p.why for p in parts if p.why))
+        if not out.stop and out.left_out and not (set(self.ids) - set(out.left_out)):
+            out.stop = "leaving out what it changes leaves no result"
+        return out
+
+    def _settle(self, eff: Effect, record: dict[str, Any], issue: dict[str, Any]) -> Effect:
+        """A part "not done" that the run holds a value for is not left in the results: its value is left out, with what is
+        worked out from it, or the paper stops when it is the main result or feeds it. Only a quantity the run holds no value
+        for at all stays a part not done."""
+        if eff.stop or not eff.not_done:
+            return eff
+        touched = set(eff.left_out)
+        keep: list[str] = []
+        for n in eff.not_done:
+            # the declared result the name is (its id or its plan label); a name that only contains an id's words is another quantity
+            ids = {i for i in self.ids if _norm(i) == _norm(n) or (self.labels.get(i) and _norm(self.labels[i]) == _norm(n))}
+            held = {i for i in ids if self._holds(i)}
+            keys = _code_review.named_in_results(n, self.result) if self.result is not None else set()
+            if not held and not keys:
+                keep.append(n)
+                continue
+            eff.incomplete = True
+            touched |= held
+            eff.named = eff.named or (sorted(held)[0] if held else n)
+            if keys - {k for i in held for k in self.printed_keys([i], self.result)}:
+                if not held and _code_review.about_headline(record, issue, self.result, self.headline_raw):
+                    eff.stop = f"`{n}` is shown missing or incomplete, and it may be the main result"
+                    return eff
+                eff.extra_keys = sorted({*eff.extra_keys, *keys})
+        eff.not_done = keep
+        if touched - set(eff.left_out):
+            return self._judge(eff, touched, eff.why)
+        return eff
 
     def _absent(self, pieces: list[str]) -> bool:
         """Whether the trial never returned a name made of ``pieces`` (normalised) in that order, anything between them."""
@@ -474,9 +637,10 @@ class Reach:
         return not any(pattern.fullmatch(r) for r in self.returned)
 
     def _trial_entries(self) -> list[str]:
+        """The functions whose return is a trial's results (or the truth they are compared with)."""
         from . import code_reach as _reach
 
-        return ["trial", *_reach.HARNESS_ENTRIES[:2]]
+        return ["trial", *_reach.HARNESS_ENTRIES]
 
     # -- derive_<id> and figure_<id> --------------------------------------------------------------------------------------
     def _derive_effect(self, derive_calls: list[str], figure_calls: list[str]) -> Effect:
@@ -489,16 +653,18 @@ class Reach:
                 out.probes.append(x)  # a function for a result the plan does not declare: no declared result
         for x in figure_calls:
             out.figures.append(x)
-        out.left_out = sorted(left)
         return self._judge(out, left, f"derive_{'/'.join(derive_calls)}" if derive_calls else "")
 
     def _judge(self, out: Effect, touched: set[str], what: str) -> Effect:
-        """Stop when the main result is among what the fault reaches, or nothing would be left; else the effect stands."""
+        """Leave out what the fault reaches (the results touched and every result worked out from one of them); stop when the
+        main result is among them, or nothing would be left."""
         reached = self._closure(touched)
+        out.left_out = sorted(reached)
+        out.named = out.named or (sorted(touched)[0] if touched else "")
         hit = sorted(reached & self.headline)
         if hit:
             out.stop = f"the main result {', '.join(hit)} is among what it changes ({what})"
-        elif touched and not (set(self.ids) - reached):
+        elif reached and not (set(self.ids) - reached):
             out.stop = "leaving out what it changes leaves no result"
         out.why = what
         return out
@@ -511,11 +677,13 @@ class Reach:
         head_in_trial = bool(self.headline & trial)
         stop: list[str] = []
 
-        def undeclared_returned(name: str) -> None:
+        def undeclared_returned(name: str, prefix: bool) -> None:
+            feeds = self._reading(name, prefix)
+            touched.update(feeds)  # a derived result's function reads it: that result, and what is worked out from it
             if head_in_trial:
                 stop.append(f"the trial returns `{name}`, which the plan does not declare, in the function that returns the main result")
-            else:
-                out.probes.append(name)
+            elif not feeds:
+                out.probes.append(name + ("*" if prefix else ""))
 
         def read(name: str, prefix: bool) -> None:
             n = _norm(name)
@@ -532,7 +700,7 @@ class Reach:
                     # an interval end or a standard error: FI cannot tell which of the trial's results it feeds
                     touched.update(trial)
             elif any((r.startswith(n) if prefix else r == n) for r in self.returned):
-                undeclared_returned(name + ("*" if prefix else ""))
+                undeclared_returned(name, prefix)
             else:
                 out.probes.append(name + ("*" if prefix else ""))
 
@@ -542,8 +710,8 @@ class Reach:
             read(p, True)
         if not shape.exact and not shape.prefix:
             touched = set(trial)
-        out.left_out = sorted(touched)
         if stop:
+            out.left_out = sorted(touched)
             out.stop = "; ".join(stop)
             return out
         return self._judge(out, touched, "the trial")
@@ -559,32 +727,36 @@ class Reach:
 
     def _helper_effect(self, file: str, function: str) -> Effect | None:
         """Which results' functions reach the helper (the call graph of :mod:`core.code_reach`): the results of those
-        functions are what a fault in it changes; a helper no result's function reaches changes none."""
+        functions are what a fault in it changes; a helper no result's function reaches changes none. ``None`` when the
+        function is not found or no entry was found (the gate then judges as before); an ``Effect`` with ``cannot`` when
+        FI cannot tell what the code reaches."""
         from . import code_reach as _reach
 
         judged = _reach._judged(self.code / file, function)
         if judged is None:
             return None
-        entries: list[tuple[str, str, str]] = []  # (kind, id or "", file, function)
+        entries: list[tuple[str, str, str, str]] = []  # (kind, id or "", file, function)
         for i in self.ids:
             if f"derive_{i}" in self.derive_fns:
                 entries.append(("derive", i, "derive.py", f"derive_{i}"))
         derive_figs = sorted(f for f in self.derive_fns if f.startswith("figure_"))
         entries += [("figure", f[len("figure_"):], "derive.py", f) for f in derive_figs]
-        for rel in sorted(p.relative_to(self.code).as_posix() for p in self.code.rglob("*.py")
-                          if "tests" not in p.relative_to(self.code).parts and not p.name.startswith(("test_", "fi_"))
-                          and p.relative_to(self.code).as_posix() not in ("derive.py", "experiment.py")):
+        # Every function FI's harness calls for a trial (`trial`, `run_trial`, `run_cell`, `oracle`), in any file of the study
+        # including `experiment.py`, which may hold the whole study.
+        for rel in self._study_files():
             names = _function_names(self.code, rel)
             for e in self._trial_entries():
                 if e in names:
                     entries.append(("trial", "", rel, e))
+        if not entries:
+            return None  # no entry to ask: nothing is known of what reaches it
         out = Effect()
         touched: set[str] = set()
         reached_by: list[str] = []
         for kind, ident, rel, fn in entries:
             got = self._entry_reach(rel, fn)
             if got is None:
-                return None  # FI cannot tell what the code reaches
+                return Effect(cannot=True, why="FI cannot tell what the code reaches")
             if (file, judged) in got or (rel, fn) == (file, judged):
                 reached_by.append(fn)
                 if kind == "derive":
@@ -592,11 +764,10 @@ class Reach:
                 elif kind == "figure":
                     out.figures.append(ident)
                 else:
-                    touched.update(self.trial_ids())
+                    touched.update(self.trial_ids() or set(self.ids))
         if not reached_by:
             out.why = "no function of a result or a figure reaches it, so it changes no reported result"
             return out
-        out.left_out = sorted(touched)
         return self._judge(out, touched, "reached by " + ", ".join(sorted(set(reached_by))[:4]))
 
     # -- the names to leave out of the printed results ----------------------------------------------------------------------

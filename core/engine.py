@@ -22840,15 +22840,19 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         not_done: list[tuple[dict[str, Any], str, list[str]]] = []
         figures: list[tuple[dict[str, Any], str, list[str]]] = []
         about_plan: list[dict[str, Any]] = []
+        incomplete: set[str] = set()  # left out because a test showed the value missing or incomplete, not computed wrongly
         for issue, how in verdicts:
             # A fault in a function that makes one declared result, one figure or a helper they use, or a test that only
             # checks that something is there, is placed from FI's records (core/shown_reach.py), not from the finding's words.
             try:
-                placed = (reach.effect(record, issue) if reach is not None and not _code_review.missing_quantities(record, issue)
-                          else None)
+                placed = (reach.effect(record, issue, result)
+                          if reach is not None and not _code_review.missing_quantities(record, issue) else None)
+                placed_keys = (sorted({*reach.printed_keys(placed.left_out, result), *placed.extra_keys})
+                               if placed is not None and (placed.left_out or placed.extra_keys) else [])
+                placed_named = (placed.named or (placed.left_out[0] if placed.left_out else "")) if placed is not None else ""
             except Exception as exc:  # noqa: BLE001 - the records are an extra source: without them the finding is judged as before
                 self._log.warning("[evidence_gate] %s could not be placed from FI's records (%r)", issue.get("id"), exc)
-                placed = None
+                placed, placed_keys, placed_named = None, [], ""
             if placed is not None:
                 if placed.stop:
                     stops.append((issue, how + "; " + placed.stop))
@@ -22856,8 +22860,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 if placed.plan_text:
                     about_plan.append(issue)
                     continue
-                if placed.left_out:
-                    left_out.append((issue, how, reach.printed_keys(placed.left_out, result), placed.left_out[0]))
+                if placed_keys:
+                    left_out.append((issue, how, placed_keys, placed_named or None))
+                    if placed.incomplete:
+                        incomplete.add(str(issue.get("id")))
                 files = [reach.figure_files.get(f) or "" for f in placed.figures]
                 if any(files):
                     figures.append((issue, how, [f for f in files if f]))
@@ -22913,19 +22919,29 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         for issue, how, names in not_done:
             self._log.warning("[evidence_gate] %s: the code does not compute %s (%s); the paper says so, as a part not done",
                               issue.get("id"), ", ".join(names)[:200], how)
+        recorded: set[str] = set()
         for issue, how, names, outcome, named in [*((i, h, k, "left_out", q) for i, h, k, q in left_out),
                                                   *((i, h, f, "left_out", f[0]) for i, h, f in figures),
                                                   *((i, h, n, "not_computed", None) for i, h, n in not_done)]:
             saved = issues.get(str(issue.get("id")))
+            if isinstance(saved, dict) and outcome == "left_out" and str(issue.get("id")) in recorded:
+                # one finding that leaves out a result and a figure: the record names both
+                saved["at_gate"]["keys"] = [*saved["at_gate"].get("keys", []), *names]
+                continue
             if isinstance(saved, dict):
+                recorded.add(str(issue.get("id")))
                 saved["at_gate"] = {"outcome": outcome, "how": how, "keys" if outcome == "left_out" else "names": names,
                                     "quantity": named or (_code_review.quantity_names(record, issue) or names)[0]}
+                if str(issue.get("id")) in incomplete:
+                    saved["at_gate"]["incomplete"] = True
         if left_out or not_done or figures:
             _code_review.save(self.quest_root, record)
             self._leave_out_shown_faults(
                 [(q or (_code_review.quantity_names(record, i) or k)[0], k, h) for i, h, k, q in left_out],
                 [(n, h) for _i, h, names in not_done for n in names], result,
-                figures=[(f, h) for _i, h, files in figures for f in files])
+                figures=[(f, h) for _i, h, files in figures for f in files],
+                incomplete={q or (_code_review.quantity_names(record, i) or k)[0] for i, _h, k, q in left_out
+                            if str(i.get("id")) in incomplete})
         return None
 
     async def _rerun_finding_test(self, rel: str) -> Any:

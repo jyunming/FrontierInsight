@@ -501,7 +501,8 @@ class ResultChecksMixin:
         return _analysis.read_record(self.quest_root)  # type: ignore[attr-defined]
 
     def _leave_out_shown_faults(self, left_out: list[tuple[str, list[str], str]], not_done: list[tuple[str, str]],
-                                result_json: Any, figures: list[tuple[str, str]] | None = None) -> None:
+                                result_json: Any, figures: list[tuple[str, str]] | None = None,
+                                incomplete: set[str] | None = None) -> None:
         """At the evidence gate: the quantities a failing test showed the code computes wrongly (``(quantity, keys, how)``)
         are left out of the results the paper may use, the plan's quantities the code does not compute
         (``(quantity, how)``) are named, and the figures a failing test showed wrong (``(file, how)``) are taken out of
@@ -511,12 +512,22 @@ class ResultChecksMixin:
         record = _read_json(path)
         found: list[Found] = []
         for quantity, keys, how in left_out:
-            note = f"a test FI ran on the code that produced the results shows a fault in how it computes `{quantity}` ({how})"
-            say = (f"A test FI ran on the code that produced the results fails because of a fault in how `{quantity}` is "
-                   f"computed ({how}). FI took {', '.join('`' + k + '`' for k in keys[:6])} out of the results. Do NOT report, "
-                   f"describe or quote any value for `{quantity}`, and do not call another number by its name. Say plainly, in "
-                   f"the limitations, that `{quantity}` is left out of this paper because a test showed the code computes it "
-                   "wrongly.")
+            if quantity in (incomplete or set()):
+                # The test shows the quantity missing or incomplete; it does not show a wrong number.
+                note = f"a test FI ran on the code that produced the results shows `{quantity}` missing or incomplete ({how})"
+                say = (f"A test FI ran on the code that produced the results shows `{quantity}` is missing or incomplete "
+                       f"({how}). FI took {', '.join('`' + k + '`' for k in keys[:6])} out of the results. Do NOT report, "
+                       f"describe or quote any value for `{quantity}`, and do not call another number by its name. Say plainly, "
+                       f"in the limitations, that `{quantity}` is left out of this paper because a test of the code showed it "
+                       "is missing or incomplete.")
+            else:
+                note = (f"a test FI ran on the code that produced the results shows a fault in how it computes `{quantity}` "
+                        f"({how})")
+                say = (f"A test FI ran on the code that produced the results fails because of a fault in how `{quantity}` is "
+                       f"computed ({how}). FI took {', '.join('`' + k + '`' for k in keys[:6])} out of the results. Do NOT report, "
+                       f"describe or quote any value for `{quantity}`, and do not call another number by its name. Say plainly, in "
+                       f"the limitations, that `{quantity}` is left out of this paper because a test showed the code computes it "
+                       "wrongly.")
             found.append(Found("shown_fault", ANALYSIS, "", note, say, keys=list(keys), quantity=quantity))
         for quantity, how in not_done:
             note = f"the code does not compute the plan's `{quantity}` ({how})"
