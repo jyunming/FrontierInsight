@@ -239,10 +239,8 @@ def uncertainty(key: str, old: float, stats: dict, ok: dict[str, float], kinds: 
     n = ok.get(setting)
     if not n or n < 2:
         return None
-    if re.search(r"cover|power|any_false|fdr", metric, re.I) and 0 <= old <= 1:
+    if kinds.get(metric) == "proportion" and 0 <= old <= 1:  # a share the plan declares: its binomial error over the trials
         return math.sqrt(max(old * (1 - old), 1e-12) / n)
-    if re.search(r"(^|_)(rel_)?sd($|_)", metric):
-        return abs(old) / math.sqrt(2 * (n - 1))
     return None
 
 
