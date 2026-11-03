@@ -1222,7 +1222,10 @@ def _returns_lines(protocol: Any) -> list[str]:
                                                  + ", ".join(f"`{i}`" for i in d.get("inputs") or [])))
     for n in protocol.get("named_results") or []:
         if isinstance(n, dict) and n.get("id"):
-            lines.append(f"- `{n['id']}`: " + (f"a reference value from equation {n['equation']} of the model (not checked)"
+            lines.append(f"- `{n['id']}`: " + ("only another name for " +", ".join(f"`{i}`" for i in n.get("of") or [])
+                                              + " (each is reported as it is declared; no number of this name is computed)"
+                                              if n.get("answer") == "label" else
+                                              f"a reference value from equation {n['equation']} of the model (not checked)"
                                               if n.get("equation") else "a number the simulation is said to return (nothing requires it)"))
     for c in protocol.get("comparisons") or []:
         if isinstance(c, dict) and c.get("result"):
