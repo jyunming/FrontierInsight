@@ -851,3 +851,75 @@ def test_the_writer_is_told_which_results_a_figure_draws_from_the_same_set_the_r
     assert line.strip() == "Results this figure draws: " + ", ".join(sorted(drawn)) + "."
     plain = _quest(tmp_path / "p", _record({**_panel(), "series": [{**_series("g", "g"), "what": "other"}]}))
     assert "Results this figure draws" not in _figure_list_for_prompt(plain, root=tmp_path / "p")  # type: ignore[arg-type]
+
+
+# ---- a figure is cited for the values it draws: the setting a value is pinned to must be one the record holds ---------------------
+
+def _held_panel(held: float) -> dict:
+    return {**_panel(), "hold": {"load": held}, "hold_label": {"load": "load"}}
+
+
+def test_a_value_at_a_setting_the_panel_does_not_hold_is_not_licensed_by_the_figure(tmp_path) -> None:
+    from core.engine import _take_out_unpointed
+
+    state = _quest(tmp_path, _record(_held_panel(0.0)))
+    text = ("The error at load 0.5 was <!-- fi:v {{v:error @ size=1, load=0.5}} -->1.1<!-- /fi:v --> (Figure 1).\n")
+    out, taken = _take_out_unpointed(text, state, root=tmp_path)
+    assert out != text and taken and taken[0]["key"] == "figure:error_vs_step:claim", "the figure holds load 0 only"
+
+
+def test_a_value_at_the_held_setting_and_a_drawn_x_is_still_licensed(tmp_path) -> None:
+    from core.engine import _take_out_unpointed
+
+    state = _quest(tmp_path, _record(_held_panel(0.0)))
+    text = ("The error at load 0 was <!-- fi:v {{v:error @ size=2, load=0}} -->1.1<!-- /fi:v --> (Figure 1).\n")
+    assert _take_out_unpointed(text, state, root=tmp_path) == (text, [])
+
+
+def test_an_x_value_the_curve_does_not_draw_is_not_licensed(tmp_path) -> None:
+    from core.engine import _take_out_unpointed
+
+    state = _quest(tmp_path, _record(_held_panel(0.0)))  # drawn at size 1, 2, 3
+    text = ("The error at size 50 was <!-- fi:v {{v:error @ size=50, load=0}} -->1.1<!-- /fi:v --> (Figure 1).\n")
+    assert _take_out_unpointed(text, state, root=tmp_path)[0] != text
+
+
+def test_a_curve_level_is_a_place_too(tmp_path) -> None:
+    from core.engine import _take_out_unpointed
+
+    level = {"setting": "load", "value": 0.2, "text": "0.2", "result": "error"}
+    panel = {**_panel(), "series": [{**_series("error@load:0.2", "load = 0.2"), "level": level}]}
+    state = _quest(tmp_path, _record(panel))
+    ok = "It was <!-- fi:v {{v:error @ size=1, load=0.2}} -->1.1<!-- /fi:v --> (Figure 1).\n"
+    bad = "It was <!-- fi:v {{v:error @ size=1, load=0.9}} -->1.1<!-- /fi:v --> (Figure 1).\n"
+    assert _take_out_unpointed(ok, state, root=tmp_path) == (ok, [])
+    assert _take_out_unpointed(bad, state, root=tmp_path)[0] != bad
+
+
+def test_drawn_places_reads_hold_level_and_x_from_the_record_only() -> None:
+    from core.figure_claims import drawn_at, drawn_places
+
+    places = drawn_places(_record(_held_panel(0.0), _panel(2, raw=True)))
+    assert list(places) == ["error"] and len(places["error"]) == 1, "a raw panel has no place"
+    assert drawn_at(places["error"], {"load": 0.0, "size": 3.0}) and not drawn_at(places["error"], {"load": 1.0})
+    assert drawn_at(places["error"], {"other_setting": 7}), "a setting the record does not speak of is not judged"
+
+
+def test_a_categorical_x_keeps_its_text_values_and_ignores_case(tmp_path) -> None:
+    from core.engine import _take_out_unpointed
+
+    panel = {**_panel(), "x": {"id": "method", "kind": "setting", "label": "method", "scale": "linear"},
+             "series": [{**_series("error", "e"), "x": ["alpha", "beta"]}]}
+    state = _quest(tmp_path, _record(panel))
+    ok = "It was <!-- fi:v {{v:error @ method=Beta}} -->1.1<!-- /fi:v --> (Figure 1).\n"
+    bad = "It was <!-- fi:v {{v:error @ method=gamma}} -->1.1<!-- /fi:v --> (Figure 1).\n"
+    assert _take_out_unpointed(ok, state, root=tmp_path) == (ok, [])
+    assert _take_out_unpointed(bad, state, root=tmp_path)[0] != bad
+
+
+def test_an_axis_with_no_readable_x_is_not_judged_and_a_rounded_setting_matches(tmp_path) -> None:
+    from core.figure_claims import drawn_at
+
+    assert drawn_at([{"fixed": {}, "x": ("size", [])}], {"size": 7})
+    assert drawn_at([{"fixed": {"load": 0.3333333}, "x": ("", [])}], {"load": 0.33333333})
+    assert not drawn_at([{"fixed": {"load": 0.3}, "x": ("", [])}], {"load": 0.31})

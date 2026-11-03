@@ -35132,7 +35132,9 @@ def _take_out_unpointed(text: str, state: QuestState, *, root: Any = None) -> tu
     if not drawn:
         return text, []
     numbers = _figure_numbers(state)
-    out, taken = _figure_claims.apply_pointer_rule(text, numbers, drawn, _FIGURE_MENTION_RE)
+    places = {n: _figure_claims.drawn_places(_figure_claims.load_calls(state["quest_root"], Path(name).stem))
+              for name, n in numbers.items() if n in drawn}
+    out, taken = _figure_claims.apply_pointer_rule(text, numbers, drawn, _FIGURE_MENTION_RE, places)
     by_number = {n: Path(name).stem for name, n in numbers.items()}
     entries: list[dict[str, str]] = []
     for t in taken:
