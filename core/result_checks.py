@@ -120,11 +120,34 @@ def left_out_by_record(quest_root: Path | str) -> dict[str, str]:
     return out
 
 
-def _values_left_out(result_json: Any, keys: set[str]) -> dict[str, list[float]]:
+def _derived_numbers(derived: Any) -> dict[str, list[float]]:
+    """``{id: its numbers}`` for each quantity FI's record of its analysis (``data/results/derived.json``) worked out: its value
+    for each setting and its one value for the study. These live nowhere else: the printed results do not hold them."""
+    items = derived.get("derived") if isinstance(derived, dict) and isinstance(derived.get("derived"), dict) else {}
+    out: dict[str, list[float]] = {}
+    for ident, item in items.items():
+        if not isinstance(item, dict) or item.get("status") != "ok":
+            continue
+        by_setting = item.get("by_setting") if isinstance(item.get("by_setting"), dict) else {}
+        for v in [*by_setting.values(), item.get("value")]:
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and abs(float(v)) != float("inf"):
+                out.setdefault(str(ident), []).append(float(v))
+    return out
+
+
+def _values_left_out(result_json: Any, keys: set[str], derived: Any = None) -> dict[str, list[float]]:
     """``{key: its numbers}`` for each left-out key of ``result_json`` (at any depth), without a number that a quantity that
-    stays also holds: the paper is checked for quoting the first, and a value both hold is not one that can be told apart."""
+    stays also holds: the paper is checked for quoting the first, and a value both hold is not one that can be told apart.
+    ``derived``: FI's record of its analysis; a left-out quantity that only that record holds (worked out by
+    ``derive_<id>``, never printed) has its numbers listed from it too, or the check of the paper would have nothing to
+    look for."""
     out: dict[str, list[float]] = {}
     kept: set[float] = set()
+    for ident, vals in _derived_numbers(derived).items():
+        if ident in keys:
+            out.setdefault(ident, []).extend(vals)
+        else:
+            kept.update(vals)
 
     def walk(node: Any, inside: str | None) -> None:
         if isinstance(node, dict):
@@ -458,7 +481,7 @@ class ResultChecksMixin:
         self._drop_figures(sorted({n for f in found for n in f.figures}), {n: f.note for f in found for n in f.figures})
         keys = sorted({k for f in found for k in f.keys})
         record = {"removed_quantities": keys, "removed_figures": sorted({n for f in found for n in f.figures}),
-                  "removed_values": _values_left_out(result_json, set(keys)),
+                  "removed_values": _values_left_out(result_json, set(keys), self._derived_record()),
                   "checks": [{"kind": f.kind, "note": f.note, **({"quantity": f.quantity, "keys": f.keys} if f.quantity else {})}
                              for f in found],
                   "note": "; ".join(f.note for f in found),
@@ -471,12 +494,19 @@ class ResultChecksMixin:
         self._log.warning(  # type: ignore[attr-defined]
             "[execute] %s. The paper is told and says so in its limitations.", record["note"])
 
+    def _derived_record(self) -> dict[str, Any]:
+        """FI's record of the last run of its analysis (``data/results/derived.json``), or ``{}``."""
+        from . import analysis_frame as _analysis
+
+        return _analysis.read_record(self.quest_root)  # type: ignore[attr-defined]
+
     def _leave_out_shown_faults(self, left_out: list[tuple[str, list[str], str]], not_done: list[tuple[str, str]],
-                                result_json: Any) -> None:
+                                result_json: Any, figures: list[tuple[str, str]] | None = None) -> None:
         """At the evidence gate: the quantities a failing test showed the code computes wrongly (``(quantity, keys, how)``)
-        are left out of the results the paper may use, and the plan's quantities the code does not compute
-        (``(quantity, how)``) are named, by adding them to ``needs/RESULT_CHECK.json`` (what the run's checks left out
-        stays). The same issues found again add nothing."""
+        are left out of the results the paper may use, the plan's quantities the code does not compute
+        (``(quantity, how)``) are named, and the figures a failing test showed wrong (``(file, how)``) are taken out of
+        ``figures/``, by adding them to ``needs/RESULT_CHECK.json`` (what the run's checks left out stays). The same issues
+        found again add nothing."""
         path = self.quest_root / "needs" / RECORD  # type: ignore[attr-defined]
         record = _read_json(path)
         found: list[Found] = []
@@ -493,19 +523,29 @@ class ResultChecksMixin:
             say = (f"The code does not compute `{quantity}`, which the plan asks for ({how}). Do not report a value for it or "
                    f"call another number by its name. Say plainly, in the limitations, that `{quantity}` was not computed.")
             found.append(Found("not_computed", ANALYSIS, "", note, say, quantity=quantity))
+        for file, how in figures or []:
+            note = f"a test FI ran on the code that produced the results shows a fault in how `{file}` is drawn ({how})"
+            say = (f"A test FI ran on the code that produced the results fails because of a fault in how the figure `{file}` is "
+                   f"drawn ({how}). FI took it out of the figures. Do NOT include it, refer to it or describe what it showed. "
+                   f"Say plainly, in the limitations, that `{file}` is left out of this paper because a test showed the code "
+                   "draws it wrongly.")
+            found.append(Found("shown_fault_figure", ANALYSIS, "", note, say, figures=[file], quantity=file))
         checks = [c for c in record.get("checks") or [] if isinstance(c, dict)]
         seen = {(c.get("kind"), c.get("quantity")) for c in checks}
         new = [f for f in found if (f.kind, f.quantity) not in seen]
         if not new:
             return
+        gone_figures = sorted({n for f in new for n in f.figures})
+        if gone_figures:
+            self._drop_figures(gone_figures, {n: SHOWN_FAULT_WHY for n in gone_figures})
         keys = sorted({*(str(k) for k in record.get("removed_quantities") or []), *(k for f in new for k in f.keys)})
         why = record.get("removed_why") if isinstance(record.get("removed_why"), dict) else {}
         for f in new:
             for k in f.keys:
                 why.setdefault(k, SHOWN_FAULT_WHY)
         record.update({
-            "removed_quantities": keys, "removed_figures": list(record.get("removed_figures") or []),
-            "removed_values": _values_left_out(result_json, set(keys)), "removed_why": why,
+            "removed_quantities": keys, "removed_figures": sorted({*(record.get("removed_figures") or []), *gone_figures}),
+            "removed_values": _values_left_out(result_json, set(keys), self._derived_record()), "removed_why": why,
             "checks": [*checks, *({"kind": f.kind, "note": f.note, "quantity": f.quantity, "keys": f.keys} for f in new)],
             "note": "; ".join(x for x in [str(record.get("note") or ""), *(f.note for f in new)] if x),
             "say": "\n\n".join(x for x in [str(record.get("say") or ""), *(f.say for f in new)] if x)})

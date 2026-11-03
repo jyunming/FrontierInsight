@@ -18,7 +18,8 @@ Two computed ``getattr`` calls are read more closely than that. ``getattr(m, nam
 quest's code may call any function of ``m``, so it reaches all of them (and nothing else). In a file FI wrote itself
 (``experiment.py``, ``fi_table.py``, ``fi_figures.py``, ``fi_frame.py``, ``fi_figure_calls.py``, ``fi_core/``: see
 :func:`_fis_files`) a computed ``getattr`` on any other object reaches only the functions of FI's own files, since FI's text
-is known; in a file the study's model wrote it still means FI cannot tell.
+is known; so does one on ``table`` or ``fig``, the two objects FI hands every function of ``derive.py`` (:data:`FI_OBJECT_PARAMS`),
+in a file the study's model wrote; on any other object there it still means FI cannot tell.
 """
 
 from __future__ import annotations
@@ -64,10 +65,22 @@ def _definition_time(stmts: list[ast.stmt], *, main: bool) -> list[ast.AST]:
     return out
 
 
+#: The parameters FI gives every function of ``derive.py`` it calls (``analysis_frame.SIGNATURES``): its own table of the trials and
+#: its own figure. A computed ``getattr`` on one of them looks a name up on FI's object, whose text is FI's.
+FI_OBJECT_PARAMS = frozenset({"table", "fig"})
+
+
+def _fis_object(m: "_Module", node: ast.AST | None) -> bool:
+    """Whether ``node`` is a name the module takes as a parameter that FI gives it (:data:`FI_OBJECT_PARAMS`)."""
+    return isinstance(node, ast.Name) and node.id in m.fi_params
+
+
 class _Module:
     def __init__(self, rel: str, tree: ast.Module) -> None:
         self.rel = rel
         self.tree = tree
+        self.fi_params = {a.arg for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                          for a in [*n.args.args, *n.args.kwonlyargs] if a.arg in FI_OBJECT_PARAMS}
         self.functions: dict[str, list[ast.AST]] = {}
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -130,9 +143,12 @@ def _python_files(code_dir: Path) -> list[Path]:
                   and p.relative_to(code_dir).parts[0] != "skills" and not p.name.startswith("test_"))
 
 
-def reached(code_dir: Path, *, scripts: list[str], harness: str | None = None) -> set[tuple[str, str]] | None:
+def reached(code_dir: Path, *, scripts: list[str], harness: str | None = None,
+            start: list[tuple[str, str]] | None = None) -> set[tuple[str, str]] | None:
     """The ``(file, function)`` pairs the run reaches (``file`` relative to ``code_dir``, with ``/``), from the programs
     ``scripts`` FI runs and, when FI's trial harness ran the simulation, the harness's entries in the file ``harness``.
+    ``start``: also reach these ``(file, function)`` entries (one result's function, to ask what only that function
+    reaches: give no ``scripts`` and no ``harness``; every module's top-level code and special methods still count).
     ``None`` when FI cannot tell (see the module docstring)."""
     code_dir = Path(code_dir)
     modules: dict[str, _Module] = {}
@@ -204,6 +220,10 @@ def reached(code_dir: Path, *, scripts: list[str], harness: str | None = None) -
             for entry in HARNESS_ENTRIES:
                 reach(modules[script], entry)  # defined there, or imported into it
 
+    for rel, name in start or []:
+        if rel in modules:
+            reach(modules[rel], name)
+
     while work:
         m, nodes = work.pop()
         for top in nodes:
@@ -221,7 +241,7 @@ def reached(code_dir: Path, *, scripts: list[str], harness: str | None = None) -
                         target = imported_module(m, node.args[0]) if node.args else None
                         if target is not None:
                             all_of(target)  # a name computed on a module: any function of that module
-                        elif m.rel in fis:
+                        elif m.rel in fis or _fis_object(m, node.args[0] if node.args else None):
                             for rel in fis:  # FI's own text: only FI's own files hold what it can name
                                 all_of(modules[rel])
                         else:

@@ -1413,6 +1413,23 @@ def headline_names(design: Any, protocol: Any) -> list[str]:
     return [str(r["name"]) for r in reqs if r.get("headline") and str(r.get("name") or "").strip()]
 
 
+def headline_ids(headline: list[str], ids: list[str], labels: dict[str, str] | None = None) -> set[str]:
+    """The declared results (``ids``) that the plan's main quantity names (``headline``: :func:`headline_names`): an id that is
+    the name, an id whose words are all inside the name's words, or one whose plan label's words are. This is the same
+    reading of the plan's words as :func:`about_headline` makes of a finding's; a headline written as a sentence matches the ids
+    it spells out, and one that names no id leaves the set empty."""
+    labels = labels or {}
+    out: set[str] = set()
+    for name in headline:
+        words = set(_tokens(name))
+        for i in ids:
+            mine = set(_tokens(i))
+            label = set(_tokens(labels.get(i, "")))
+            if _norm(i) == _norm(name) or (mine and mine <= words) or (label and label <= words):
+                out.add(i)
+    return out
+
+
 def about_headline(record: dict[str, Any], issue: dict[str, Any], result: Any, headline: list[str]) -> bool:
     """Whether an issue may be about the study's main quantity: the reading says so, or one of its quantity names and a
     headline name hold one another (``yield`` and ``total_yield``), or the keys of the results it names are among the
