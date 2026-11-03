@@ -131,9 +131,10 @@ async def test_the_s1_gate_passes_every_check_with_no_repair_and_no_failed_check
     from tests.test_known_answer_self_checks import _config, _Model
 
     engine = Engine(_config(tmp_path))
-    # The checks share one time budget, a fifth of the run's timeout: 120 s here, for seven checks that need some
-    # thousands of trials between them (the test config's 120 s run timeout gives 30 s, too little to decide them all).
-    engine.config.execution.timeout_s = 600
+    # The checks share one time budget, a fifth of the run's timeout: 480 s here, for seven checks that need some
+    # thousands of trials between them. It is large so that the verdicts do not depend on how busy the machine is (at
+    # 120 s, a loaded machine ran out of time on the check that needs the most trials and left it undecided).
+    engine.config.execution.timeout_s = 2400
     model = _Model()
     engine._client = model
     protocol = {k: PROTOCOL[k] for k in ("grid", "in_each_run", "metrics", "thresholds")}
