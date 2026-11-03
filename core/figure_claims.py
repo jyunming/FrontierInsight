@@ -833,6 +833,60 @@ _MAX_RANGE = 1000
 _BARE_NUMBER = re.compile(r"\d+")
 #: An image embed is its own span, never part of a sentence: it is masked with a \x01 token (FI's marks use \x00).
 #: ``![alt](target "title")``: the alt may hold one level of brackets and the target one level of parentheses, as Markdown reads it.
+def drawn_places(calls: Any) -> dict[str, list[dict[str, Any]]]:
+    """``{result: where each drawn series of it sits}`` from a call record, so that a sentence's value can be tied to a
+    setting the figure draws. A place is ``{"fixed": {setting: value}, "x": (setting, [drawn x])}``: ``fixed`` holds the
+    settings its panel is held at (``hold``) and the level its curve is for (``level``); ``x`` the setting along the axis and
+    the x values drawn. Series FI could not match with its table (``what: other``) and raw panels have no place. Read from
+    the record only, never from a legend or a caption."""
+    out: dict[str, list[dict[str, Any]]] = {}
+    for p in (calls or {}).get("panels") or []:
+        if not isinstance(p, dict) or p.get("raw"):
+            continue
+        fixed = {str(k): v for k, v in (p.get("hold") or {}).items()} if isinstance(p.get("hold"), dict) else {}
+        ax = p.get("x") if isinstance(p.get("x"), dict) else {}
+        for s in p.get("series") or []:
+            if not isinstance(s, dict):
+                continue
+            here = dict(fixed)
+            level = s.get("level")
+            if isinstance(level, dict) and level.get("setting") is not None:
+                here[str(level["setting"])] = level.get("value")
+            place = {"fixed": here,
+                     "x": (str(ax.get("id")) if ax.get("kind") == "setting" and ax.get("id") else "",
+                           [v for v in (s.get("x") or []) if _finite(v)])}
+            for w in str(s.get("what") or "").split(" / "):
+                if w.strip() and w.strip() != "other":
+                    out.setdefault(w.strip(), []).append(place)
+    return out
+
+
+def _same_setting(a: Any, b: Any) -> bool:
+    try:
+        return math.isclose(float(a), float(b), rel_tol=1e-9, abs_tol=1e-12)
+    except (TypeError, ValueError):
+        return str(a).strip() == str(b).strip()
+
+
+def drawn_at(places: list[dict[str, Any]], where: dict[str, Any]) -> bool:
+    """Whether some drawn series among ``places`` (of one result) draws it at every setting ``where`` pins to one value
+    (``axis -> value``) that the record speaks of: a setting its panel is held at or its curve is for must be that value; the
+    setting along its x axis must be one of the x values drawn. A setting the record does not speak of is not judged."""
+    for pl in places:
+        xid, xs = pl["x"]
+        ok = True
+        for axis, value in where.items():
+            if axis in pl["fixed"]:
+                ok = _same_setting(pl["fixed"][axis], value)
+            elif axis == xid:
+                ok = any(_same_setting(x, value) for x in xs)
+            if not ok:
+                break
+        if ok:
+            return True
+    return False
+
+
 _IMAGE_EMBED = re.compile(r"!\[(?:[^\[\]\n]|\[[^\[\]\n]*\])*\]\((?:[^()\n]|\([^()\n]*\))*\)")
 _IMAGE_TOKEN = re.compile(r"\x01\d+\x01")
 _PERIOD_SPACE = re.compile(r"\. |[.!?]\*\*(?= )")
@@ -934,7 +988,8 @@ def _unfilled_entries(marks: list[re.Match[str]], which: list[int], sentence: st
 
 
 def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, set[str]],
-                       mention_re: re.Pattern[str]) -> tuple[str, list[dict[str, str]]]:
+                       mention_re: re.Pattern[str],
+                       places: dict[int, dict[str, list[dict[str, Any]]]] | None = None) -> tuple[str, list[dict[str, str]]]:
     """``markdown`` without the running sentences that point at a figure and are not FI's to stand behind:
     ``(text, taken_out)``, ``taken_out`` having ``key`` (the figure the sentence named), ``sentence`` (as it read) and
     ``how`` for each, like :func:`core.paper_facts.take_out_unfilled`.
@@ -944,8 +999,10 @@ def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, 
     earlier version drew it, nothing is checked), or the sentence is a figure claim FI composed, or it reports results
     (FI value marks) and points at one figure in a closing parenthesis, "(Figure N)", whose record draws (``drawn[N]``) the
     metric of at least one of those marks (one figure, or several listed in it: "(Figures 2 and 3)", then the metric need only
-    be drawn in one of them, and every one listed must be a figure FI issued). Every other sentence naming a figure is
-    removed. A sentence ends at ". " except after an initial or a common abbreviation
+    be drawn in one of them, and every one listed must be a figure FI issued). When ``places`` is given (:func:`drawn_places`
+    per figure number), a value of a drawn metric that the sentence pins to a setting the figure does not draw it at
+    (``pi1=0.2`` where the record holds the panel at ``pi1=0``, an x value not drawn) also removes the sentence: a figure
+    is cited for the values it draws. Every other sentence naming a figure is removed. A sentence ends at ". " except after an initial or a common abbreviation
     ("e.g.", "et al.", "Fig."). Like :func:`core.paper_facts.take_out_unfilled`, a line is read alone (a sentence wrapped over
     two lines is two) and captions, table rows, headings, list items, quotes, code and the text inside FI's own markers are
     never touched."""
@@ -1008,6 +1065,25 @@ def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, 
                 pass
         return found
 
+    def undrawn_place(a: int, b: int, nums: list[int]) -> bool:
+        """A value mark of the sentence on a metric the cited figures draw, pinned to a setting none of them draws it at."""
+        if places is None:
+            return False
+        for i, sp in enumerate(spans):
+            if kinds[i] != "v" or not (a <= sp[0] and sp[1] <= b) or marks[i].group(2).strip() == _values.NOT_RECORDED:
+                continue
+            try:
+                key = _values.parse(marks[i].group(1))
+            except Exception:  # noqa: BLE001 -- a key that does not parse pins nothing
+                continue
+            holding = [places[n][key.metric] for n in nums if key.metric in places.get(n, {})]
+            if not holding:
+                continue  # the metric is not one the cited figures draw: judged as before
+            where = {ax: pk.value for ax, pk in key.where.items() if pk.kind == "value"}
+            if not any(drawn_at(pl, where) for pl in holding):
+                return True
+        return False
+
     def keeps(a: int, b: int, hits: list[re.Match[str]]) -> bool:
         text = flat[a:b]
         point = _pointer(text, mention_re)
@@ -1027,6 +1103,8 @@ def apply_pointer_rule(markdown: str, numbers: dict[str, int], drawn: dict[int, 
                 and not re.sub(r"[\s.,;:!?()*\-\u2013\u2014]+", "", _TOKEN_AT.sub("", rest)):
             return True  # a figure claim FI composed, with at most its pointer
         shown = set().union(*(drawn.get(n, set()) for n in nums))
+        if undrawn_place(a, b, nums):
+            return False
         return point is not None and bool(metrics(a, b) & shown)
 
     edits: list[tuple[int, int, str]] = []
