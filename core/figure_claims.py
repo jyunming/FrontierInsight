@@ -66,19 +66,59 @@ def _version(data: dict[str, Any]) -> int:
     return v if isinstance(v, int) and not isinstance(v, bool) else 0
 
 
+#: A value a mark carries as it is: none of the characters the mark is built from (the comma between arguments, ``=``, a
+#: quote, a backslash, a brace, a control character) and no space at either end. What else a series id or a level can hold
+#: (``@``, ``:``, a space inside) needs no quoting.
+_PLAIN_VALUE = re.compile(r"[^,=\"\\{}\x00-\x1f\s]+(?:[ ]+[^,=\"\\{}\x00-\x1f\s]+)*")
+
+
+def _quote_value(value: str) -> str:
+    """A value as the mark carries it: as it is when plain, else a JSON string with its two braces written ``\\u007b`` and
+    ``\\u007d``, so the mark still ends at its own closing braces."""
+    if _PLAIN_VALUE.fullmatch(value):
+        return value
+    return json.dumps(value, ensure_ascii=False).replace("{", "\\u007b").replace("}", "\\u007d")
+
+
+def format_args(args: dict[str, str]) -> str:
+    """The arguments of a claim as a mark carries them, ``"series=a, panel=1"`` (the panel last): the inverse of
+    :func:`parse_args`. A value with a comma, an equals sign, a quote, a backslash, a brace or a line break is quoted, so a
+    series id of any text reads back whole; a value without them is written as it is."""
+    return ", ".join(f"{k}={_quote_value(str(v))}" for k, v in sorted(args.items(), key=lambda kv: (kv[0] == "panel", kv[0])))
+
+
 def parse_args(text: str) -> dict[str, str]:
-    """``"series=a, panel=1"`` as ``{"series": "a", "panel": "1"}``. A piece that is not ``key=value`` (or a key given twice)
-    is kept under the key ``""``, a key no claim accepts, so that :func:`evaluate` fails closed instead of ignoring it."""
+    """``"series=a, panel=1"`` as ``{"series": "a", "panel": "1"}``; a value in quotes (:func:`format_args`) is read back
+    whole. A piece that is not ``key=value`` (or a key given twice) is kept under the key ``""``, a key no claim accepts, so
+    that :func:`evaluate` fails closed instead of ignoring it."""
     out: dict[str, str] = {}
-    if not str(text).strip():
+    text = str(text)
+    if not text.strip():
         return out
-    for piece in str(text).split(","):
+    decoder = json.JSONDecoder()
+    pos, n = 0, len(text)
+    while pos <= n:
+        eq, comma = text.find("=", pos), text.find(",", pos)
+        if eq != -1 and (comma == -1 or eq < comma) and text[eq + 1:].lstrip().startswith('"'):
+            key = text[pos:eq].strip()
+            try:
+                value, end = decoder.raw_decode(text, text.index('"', eq + 1))
+            except ValueError:
+                value, end = None, n
+            rest = text[end:].lstrip()
+            if isinstance(value, str) and key and value and key not in out and (not rest or rest.startswith(",")):
+                out[key] = value
+                pos = n + 1 if not rest else text.index(",", end) + 1
+                continue
+        end = comma if comma != -1 else n
+        piece = text[pos:end]
         key, sep, value = piece.partition("=")
         key, value = key.strip(), value.strip()
         if not sep or not key or not value or key in out:
             out[""] = piece.strip()
-            continue
-        out[key] = value
+        else:
+            out[key] = value
+        pos = end + 1
     return out
 
 
@@ -747,7 +787,7 @@ def _candidates(calls: dict[str, Any], plan: Any, record: Any, lines_data: Any):
 
 
 def _mark(stem: str, claim: str, args: dict[str, str]) -> str:
-    tail = ", ".join(f"{k}={v}" for k, v in sorted(args.items(), key=lambda kv: (kv[0] == "panel", kv[0])))
+    tail = format_args(args)
     return "{{figure:%s:%s%s}}" % (stem, claim, f" @ {tail}" if tail else "")
 
 
