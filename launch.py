@@ -2874,11 +2874,16 @@ async def _revise_plan_once(
     # One model call and no retrieval: do not build the knowledge layer (the embedding model and vector indexes
     # load in-process when it is on) just to rewrite a markdown file.
     cfg.knowledge = cfg.knowledge.model_copy(update={"enabled": False})
+    from core.provider import ProviderUnusable
+
     engine = Engine(cfg, supervisor=supervisor, resume_quest_id=quest_id)
     try:
         done = await engine.revise_plan(request)
     except (FileNotFoundError, ValueError) as e:
         print(f"[FI] cannot revise the plan: {e}", file=sys.stderr)
+        return 1
+    except ProviderUnusable as u:  # the plan's model cannot be used (a usage limit, a refused sign-in): the plan is unchanged
+        print(f"[FI] cannot revise the plan: {engine._unusable_stop(u)}", file=sys.stderr)
         return 1
     print(f"[FI] plan revised (version {done['version']}): {done['path']}")
     print(

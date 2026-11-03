@@ -2032,6 +2032,49 @@ class _CliCapacityError(_CliTransientError):
     dropped connection to come back."""
 
 
+class ProviderLimitError(_CliTransientError):
+    """A CLI provider's usage limit, or its refused sign-in, that does not clear within the run (``_cli_fatal``). It is
+    not retried, and once a client has met it every later call on that model raises it again at once, without starting
+    the CLI. A subclass of ``_CliTransientError`` so every place that sorts provider failures reads it as before;
+    ``resumes_at`` is the time the provider's own text names for the limit to end (``""`` when it names none)."""
+
+    def __init__(self, message: str, *, provider: str = "", model: str = "", resumes_at: str = "") -> None:
+        super().__init__(message)
+        self.provider, self.model, self.resumes_at = provider, model, resumes_at
+
+
+class ProviderUnusable(BaseException):
+    """What the engine raises for a model call that met a limit or a refused sign-in that does not clear within the run
+    (``_is_fatal_provider_error``): ``error`` is the provider's own error. It derives from ``BaseException``, like
+    ``asyncio.CancelledError``, so no ``except Exception`` anywhere between the call and the step can take it for an
+    ordinary failure (an empty answer, a skipped check): once the model cannot be used, nothing more in the step can be
+    trusted. The step's wrapper (``Engine._audited``) and the run (``Engine.run``) turn it into the quest's one plain
+    stop; the provider's own retry rules never see it."""
+
+    def __init__(self, error: BaseException) -> None:
+        super().__init__(str(error))
+        self.error = error
+
+
+_RESUMES_AT = (re.compile(r"try again (?:at|after|on)\s+([^.\n]{3,60})", re.I),
+               re.compile(r"\bresets?\s+(?:at|on)?\s*([^.\n\u00b7()]{2,40})", re.I))
+
+
+_RELATIVE_TIME = re.compile(r"^(?:in\s+)?\d+(?:\.\d+)?\s*(?:s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?)\b|^in\s", re.I)
+
+
+def limit_resumes_at(text: str) -> str | None:
+    """The absolute time a provider's limit text says it ends ("try again at Nov 4th, 2026 10:49 AM."), as the
+    provider wrote it; ``None`` when the text names none or only a wait ("in 20s": it says nothing about when)."""
+    for pattern in _RESUMES_AT:
+        m = pattern.search(text or "")
+        if m:
+            found = m.group(1).strip(" ,;:")
+            if found and not _RELATIVE_TIME.match(found):
+                return found
+    return None
+
+
 # Matched case-insensitively against the CLI's error text.
 _CAPACITY_MARKERS: tuple[str, ...] = (
     "no capacity",
@@ -4349,6 +4392,9 @@ class LLMClient:
         # audit trace can read ``last_provider`` uniformly regardless of whether ``self._client`` is this class or
         # FallbackLLMClient (whose ``last_provider`` genuinely varies call to call).
         self.last_provider: str | None = endpoint.provider_name or endpoint.transport
+        # A limit or refused sign-in this client met, by the model asked: it does not clear within the run, so every later
+        # call on that model raises it again at once (per client, so quests in one process never share it).
+        self._unusable: dict[str, BaseException] = {}
 
     async def aclose(self) -> None:
         if self._bridge is not None:
@@ -4386,6 +4432,11 @@ class LLMClient:
         which node + which provider failed instead of just a raw
         httpx / CLI stderr stack.
         """
+        if (known := self._unusable.get(model or self.endpoint.model or "")) is not None:
+            again = self._met_again(known)
+            if again is not known:
+                again.add_note(self._error_note(node=node, model=model))  # this call's own note, not the first call's
+            raise again
         try:
             # Gate the dispatch on the process-wide concurrency cap
             # (``FI_MAX_CONCURRENT_LLM_CALLS``; no-op when unset) so a fleet of
@@ -4436,7 +4487,26 @@ class LLMClient:
                     e.add_note(auth_note)
             except AttributeError:  # pragma: no cover — needs Py<3.11
                 pass
+            if not isinstance(e, _ModelAnswerProblem) and _stays_unusable(e):
+                kept = e
+                if isinstance(e, _CliTransientError) and not isinstance(e, ProviderLimitError):
+                    kept = ProviderLimitError(
+                        str(e), provider=self.endpoint.provider_name or self.endpoint.transport,
+                        model=model or self.endpoint.model or "", resumes_at=limit_resumes_at(str(e)) or "")
+                    kept.__notes__ = list(getattr(e, "__notes__", None) or [])
+                self._unusable[model or self.endpoint.model or ""] = kept
+                if kept is not e:
+                    raise kept from e
             raise
+
+    @staticmethod
+    def _met_again(known: BaseException) -> BaseException:
+        """The error to raise for a call made after ``known`` ended the model's use: a fresh copy of a CLI limit (its
+        traceback is not stacked up), the same error otherwise."""
+        if isinstance(known, ProviderLimitError):
+            again = ProviderLimitError(str(known), provider=known.provider, model=known.model, resumes_at=known.resumes_at)
+            return again
+        return known
 
     def _error_note(self, *, node: str, model: str | None) -> str:
         """Format the FI-context note attached to LLM call exceptions.
@@ -5385,6 +5455,19 @@ class LLMClient:
 # ---------------------------------------------------------------------------
 # Provider fallback chain + per-provider circuit breaker
 # ---------------------------------------------------------------------------
+
+
+def _stays_unusable(exc: BaseException) -> bool:
+    """Whether a model stays unusable for the rest of the run, so a client remembers it and does not ask again: a CLI's
+    usage limit or refused sign-in, an exhausted quota (HTTP 402, or a 429 that names one) and a refused sign-in
+    (401). Never a bare 403 (a refusal of one request, which a fallback chain's later probe may find lifted) or anything
+    else."""
+    if isinstance(exc, _CliTransientError):
+        return _cli_fatal(str(exc))
+    if isinstance(exc, httpx.HTTPStatusError):
+        sc = getattr(getattr(exc, "response", None), "status_code", None)
+        return sc in (401, 402) or (sc == 429 and _is_exhausted_quota(exc.response))
+    return False
 
 
 def _is_fatal_provider_error(exc: BaseException) -> bool:

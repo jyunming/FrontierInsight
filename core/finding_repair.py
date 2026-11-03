@@ -41,6 +41,7 @@ from . import function_steps as _steps
 from . import optimise as _optimise
 from . import skeleton as _skeleton
 from . import trial_runner as _trials
+from .provider import ProviderUnusable
 
 #: Where a test written for an issue is kept (under the quest root).
 TEST_DIR = Path(".fi") / "finding_tests"
@@ -1212,6 +1213,7 @@ class Env:
     #: "values": [first, second]}``; ``None`` for a study without a search or when it could not be measured (see
     #: :func:`design_blind`).
     design_response: Callable[[], Awaitable[dict[str, Any] | None]] | None = None
+    last_spend: Any = None  # (issue, kind) of the request :func:`spend` counted last, for :func:`refund`
     changed: list[str] = field(default_factory=list)
     baseline: dict[str, str] = field(default_factory=dict)
     baseline_static: dict[str, int] = field(default_factory=dict)
@@ -1275,12 +1277,34 @@ def spend(env: Env, issue: dict[str, Any], kind: str) -> bool:
     key = "test_calls" if kind == "test" else "repair_calls"
     env.record[key] = int(env.record.get(key) or 0) + 1
     env.save()
+    env.last_spend = (issue, kind)
     return True
+
+
+def refund(env: Env) -> None:
+    """Give back the request :func:`spend` counted last: it was never answered (the model cannot be used), so a resumed
+    quest must not start with one try fewer."""
+    spent, env.last_spend = env.last_spend, None
+    if not spent:
+        return
+    issue, kind = spent
+    calls = issue.get("calls")
+    if isinstance(calls, dict) and int(calls.get(kind) or 0) > 0:
+        calls[kind] = int(calls[kind]) - 1
+    key = "test_calls" if kind == "test" else "repair_calls"
+    for name in ("finding_calls", key):
+        env.record[name] = max(0, int(env.record.get(name) or 0) - 1)
+    env.save()
 
 
 async def _ask(env: Env, prompt: str, who: str, kind: str) -> str:
     try:
-        return await env.ask(prompt, who, kind)
+        reply = await env.ask(prompt, who, kind)
+        env.last_spend = None  # answered: nothing to give back
+        return reply
+    except ProviderUnusable:
+        refund(env)  # the request was counted before it was made and never answered: the quest stops, and a resume has it back
+        raise
     except Exception as e:  # noqa: BLE001 -- _ModelAnswerProblem is the engine's to raise: it re-raises through ``ask``
         if type(e).__name__ == "_ModelAnswerProblem":
             raise
@@ -1378,7 +1402,15 @@ async def ask_again(env: Env, issue: dict[str, Any], rel: str, error: TestRun) -
     env.record["finding_calls"] = int(env.record.get("finding_calls") or 0) + 1
     env.record["test_calls"] = int(env.record.get("test_calls") or 0) + 1
     env.save()
-    reply = await _ask(env, _test_prompt(env, issue, rel, _error_problem(error.detail)), "code", "test")
+    env.last_spend = None  # this request is counted above, not by spend(): only its own handler gives it back
+    try:
+        reply = await _ask(env, _test_prompt(env, issue, rel, _error_problem(error.detail)), "code", "test")
+    except ProviderUnusable:
+        issue.pop("asked_again", None)  # counted above, never answered: a resume asks again
+        for name in ("finding_calls", "test_calls"):
+            env.record[name] = max(0, int(env.record.get(name) or 0) - 1)
+        env.save()
+        raise
     text = reply_test(reply)
     if not text:
         env.save()

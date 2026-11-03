@@ -217,6 +217,9 @@ from .provider import (
     is_auth_error as _provider_is_auth_error,
     sign_in_advice as _provider_sign_in_advice,
     ModelAnswerTruncated,
+    ProviderLimitError,
+    ProviderUnusable,
+    limit_resumes_at,
     resolve_endpoint_async,
     set_model_call_archive as _set_model_call_archive,
 )
@@ -1795,7 +1798,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # mask the original exception (the user wants to see the
             # real error, not "could not open file for diagnostic
             # writing").
+            _unusable = exc if isinstance(exc, ProviderUnusable) else None
+            if _unusable is not None:
+                # A call made outside any step (the run's own, before or after the graph): the same plain stop. It is an
+                # ``Exception`` from here on, so the fleet and the web and VS Code runs treat it as any quest that failed.
+                exc = self._unusable_stop(_unusable)  # its cause is the provider's error: quest_failed.md is written from it
             _ended_how = f"failed: {type(exc).__name__}"
+            if isinstance(exc, ModelUnavailable):
+                self._progress(str(exc))  # the one plain sentence: what stopped the quest and how to continue
             try:
                 self._log.error("[run] the quest stopped on an error", exc_info=exc)
             except Exception:  # noqa: BLE001 -- the log must never hide the error
@@ -1834,6 +1844,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     "context": fail_context,
                 })
                 self._audit("attempts_sealed", files=_attempts.file_digests(self.fi_dir))
+            if _unusable is not None:
+                raise exc from _unusable.error
             raise
         finally:
             self._shadow_close()
@@ -2302,15 +2314,38 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         model = served[1] if served else str(requested_model or getattr(prov, "model", "") or "")
         return _provider_sign_in_advice(name, model)
 
-    def _unavailable_message(self, gone: str) -> str:
-        """What a stop because the model could not be used says: a dead sign-in says which one and how to sign in
-        again; a usage limit says to wait for its reset. Both say how to continue."""
+    def _unavailable_message(self, gone: str = "", limit: BaseException | None = None) -> str:
+        """What a stop because the model could not be used says, in plain words: a dead sign-in says how to sign in
+        again; a usage limit says which provider and model, when it ends if the provider said so, and how to continue.
+        No step id and none of the provider's own text (its links and codes)."""
         signin = self.__dict__.pop("_provider_signin", "")
+        self.__dict__.pop("_provider_limit", None)
         if signin:
-            return (f"{signin} Nothing this step decided was kept. After signing in, continue the quest with "
-                    f"`--resume {self.quest_id}` and it runs this step again. ({gone})")
-        return (f"the model could not be used ({gone}); nothing this step decided was kept. Resume the quest "
-                "when the model can be used again (after its usage limit resets).")
+            return (f"{signin} Nothing the current step decided was kept. After signing in, continue the quest with "
+                    f"`--resume {self.quest_id}` and it runs this step again.")
+        served = _crash_kind.served_by(limit) if limit is not None else None
+        prov = getattr(getattr(self, "config", None), "provider", None)
+        name = (getattr(limit, "provider", "") or (served[0] if served else "") or str(getattr(prov, "name", "") or ""))
+        model = (getattr(limit, "model", "") or (served[1] if served else "") or str(getattr(prov, "model", "") or ""))
+        who = ", ".join(x for x in (name, model) if x)
+        when = limit_resumes_at(str(limit) if limit is not None else "") or limit_resumes_at(gone)
+        resume = f"python launch.py --config {(self.quest_root / 'config.yaml').as_posix()} --resume {self.quest_id}"
+        return (f"The model provider's usage limit was reached{f' ({who})' if who else ''}. Nothing the current step decided "
+                f"was kept. " + (f"Resume after {when} with: {resume}" if when else
+                                 f"Resume with: {resume} once the limit has reset"))
+
+    def _unavailable_stop(self, gone: str = "", error: BaseException | None = None) -> "ModelUnavailable":
+        """The quest's stop for a model that cannot be used, with the provider's own error as its cause (so the failure
+        card and quest_failed.md read the limit from it)."""
+        limit = error if error is not None else self.__dict__.get("_provider_limit")
+        stop = ModelUnavailable(self._unavailable_message(gone, limit))
+        stop.__cause__ = limit
+        return stop
+
+    def _unusable_stop(self, u: ProviderUnusable, node: str = "") -> "ModelUnavailable":
+        """The stop for a ``ProviderUnusable`` (the one plain sentence)."""
+        self.__dict__.pop("_provider_unavailable", None)
+        return self._unavailable_stop(error=u.error)
 
     def _audited(self, name: str, fn: Any) -> Any:
         """``fn`` (a graph node) with its start, end, failure or pause in the audit trace. An interrupted node is run again
@@ -2334,6 +2369,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             began = time.monotonic()
             self.__dict__.pop("_provider_unavailable", None)
             self.__dict__.pop("_provider_signin", None)
+            self.__dict__.pop("_provider_limit", None)
             try:
                 try:
                     out = await fn(state)
@@ -2345,21 +2381,27 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 if gone := self.__dict__.pop("_provider_unavailable", None):
                     # A call in this step met a usage limit or a dead login and the step went on without its answer
                     # (a "could not ask" path): what it decided is not kept, and the step runs again on resume.
-                    raise ModelUnavailable(self._unavailable_message(gone))
+                    raise self._unavailable_stop(gone)
             except GraphBubbleUp as e:
                 if isinstance(e, GraphInterrupt) and (gone := self.__dict__.pop("_provider_unavailable", None)):
                     # A pause that follows a call its model could not take (r4: "the settings to vary could not be
                     # read" after the plan's model hit its usage limit) asks a person about a question never answered:
                     # the step stops instead, and runs again on resume.
-                    error = ModelUnavailable(self._unavailable_message(gone))
+                    error = self._unavailable_stop(gone)
                     self._audit("node_failed", node=name, error=f"{type(error).__name__}: {error}")
-                    raise error from None
+                    raise error
                 if isinstance(e, GraphInterrupt):
                     self._audit("node_paused", node=name, pause=self._audit_pause)
                 raise
             except asyncio.CancelledError:
                 self._audit("node_failed", node=name, error="cancelled")
                 raise
+            except ProviderUnusable as u:
+                # A call of the step met a limit or a refused sign-in. Nothing caught it on the way (it is not an
+                # ``Exception``): the quest stops with the plain sentence, the step is not kept, and it runs again on resume.
+                error = self._unusable_stop(u, name)
+                self._audit("node_failed", node=name, error=f"{type(error).__name__}: {error}")
+                raise error from u.error
             except Exception as e:  # noqa: BLE001 -- recorded, then raised again unchanged
                 self._audit("node_failed", node=name, error=f"{type(e).__name__}: {e}")
                 raise
@@ -4444,6 +4486,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         decisive_wins = [0] * len(ideas)
         valid_matches: list[dict[str, Any]] = []
         for m in matches:
+            if isinstance(m, BaseException) and not isinstance(m, Exception):
+                raise m  # a cancellation or a model that cannot be used (ProviderUnusable) is not a failed match
             if isinstance(m, Exception):
                 self._log.warning("[ideate] tournament match raised: %s", m)
                 continue
@@ -5161,8 +5205,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             text, obj = await self._chat_json(prompt, node="design", want=("parts",),
                                               usable=lambda p: isinstance(p.get("parts"), list))
         except Exception as e:  # noqa: BLE001 -- nothing mapped: the whole design is asked for, as before
-            if _is_fatal_provider_error(e):
-                raise
             self._log.warning("[design] the notes could not be mapped to parts of the design (%r)", e)
             return []
         self._keep_plan_answer(text)
@@ -6359,8 +6401,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         try:
             obj = _parse_json_lenient(await self._chat(ask, node="plan_revise"))
         except Exception as e:  # noqa: BLE001 -- the stop that follows says what was tried
-            if _is_fatal_provider_error(e):
-                raise
             self._log.warning("[design] the plan's model could not be asked about the redesign's grid: %s", e)
             return design
         if isinstance(obj, dict) and isinstance(obj.get("protocol"), dict):
@@ -6530,12 +6570,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 if earlier_problem and last_problem == earlier_problem:
                     outcome = "same refusal again"
                     schema = False  # kept so: a resume does not ask once more for the same refusal
+            except ProviderUnusable:
+                # Never asked (a usage limit, a dead login): the ask is given back, and the step stops to be run
+                # again on resume (_audited), so the plan is not judged on a question its model never answered.
+                self._record_search_asked(count, calls, sha_before, "model could not be used", file, extra_now)
+                raise
             except Exception as e:  # noqa: BLE001 -- the stop that follows says what is missing
-                if _is_fatal_provider_error(e):
-                    # Never asked (a usage limit, a dead login): the ask is given back, and the step stops to be run
-                    # again on resume (_audited), so the plan is not judged on a question its model never answered.
-                    self._record_search_asked(count, calls, sha_before, "model could not be used", file, extra_now)
-                    raise
                 outcome = "no answer"
                 self._log.warning("[plan] the plan step could not be asked to complete %s: %s", short, e)
             count += 1
@@ -7294,10 +7334,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 obj = _parse_json_lenient(reply)
             except _ModelAnswerProblem:
                 raise
+            except ProviderUnusable:
+                save(asks - 1)  # never asked (a usage limit, a dead login): the ask is given back
+                raise
             except Exception as e:  # noqa: BLE001 -- what is still missing is decided after this
-                if _is_fatal_provider_error(e):
-                    save(asks - 1)  # never asked (a usage limit, a dead login): the ask is given back
-                    raise
                 self._log.warning("[design] the design step could not be asked to add what the topic asks for: %s", e)
                 problem = " ".join(f"the call to the model failed ({str(e)[:300] or type(e).__name__})".split())
                 schema = False  # no answer came: nothing for the form to be fixed in
@@ -26135,8 +26175,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                         text = await self._chat(base_prompt, node="review")
                     except _ModelAnswerProblem:
                         raise
-                    except Exception as e:
-                        problem = f"the review call failed ({_one_line(e, 300)})"
+                    except (Exception, ProviderUnusable) as e:  # the review's own stop for a reviewer that cannot be asked
+                        problem = f"the review call failed ({_one_line(getattr(e, 'error', e), 300)})"
                         break
                     parsed_review = _parse_json_lenient(text)
                     if _names_a_verdict(parsed_review):
@@ -26255,7 +26295,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     text = await self._chat(prompt, node=f"review_panel.{name}")
                 except _ModelAnswerProblem:
                     raise
-                except Exception as e:
+                except Exception as e:  # a model that cannot be used (ProviderUnusable) is not caught here: the gather raises it
                     self._log.warning("[review] panelist %s could not be asked (%s)", name, e)
                     return {"persona": name, "status": "call_failed", "error": _one_line(e, 300)}
                 parsed = _parse_json_lenient(text)
@@ -26306,6 +26346,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             if isinstance(r, asyncio.CancelledError):
                 raise r
             if isinstance(r, _ModelAnswerProblem):
+                raise r
+            if isinstance(r, ProviderUnusable):
                 raise r
             if isinstance(r, BaseException):
                 self._log.warning("[review] a panelist raised unexpectedly: %r", r)
@@ -26850,7 +26892,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     # A usage limit or a dead login is no answer: the step that asked is not kept, whatever it catches
                     # (see _audited), so it runs again when the quest resumes instead of deciding on a call never made.
                     self.__dict__["_provider_unavailable"] = f"{node or 'a step'}: {' '.join(str(exc).split())[:400]}"
+                    self.__dict__["_provider_limit"] = exc
                     self.__dict__["_provider_signin"] = self._sign_in_message(exc, requested_model) if _provider_is_auth_error(exc) else ""
+                    raise ProviderUnusable(exc) from exc  # not catchable as a failure: see ProviderUnusable
                 raise
             served = dict(_LAST_CALL.get() or {})
             self._record_attempts(node, messages, attempts, requested_model)
@@ -27196,6 +27240,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             except Exception as exc:
                 if _is_fatal_provider_error(exc):
                     unusable.append(f"{node}: {' '.join(str(exc).split())[:400]}")
+                    unusable_errors.append(exc)
                     if _provider_is_auth_error(exc) and not unusable_signin:
                         unusable_signin.append(self._sign_in_message(exc, model))
                 raise
@@ -27211,12 +27256,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         messages = [{"role": "user", "content": prompt}]
         unusable: list[str] = []
         unusable_signin: list[str] = []
+        unusable_errors: list[BaseException] = []
         try:
             return await self._merged_ensemble(prompt, messages, node, ensemble_cfg, _chat_fn)
         except Exception:
             if unusable:
                 self.__dict__["_provider_unavailable"] = unusable[0]  # no member answered and one met a usage limit
                 self.__dict__["_provider_signin"] = unusable_signin[0] if unusable_signin else ""
+                # the member's own error is the stop's cause, so its failure card names the limit and its time
+                self.__dict__["_provider_limit"] = unusable_errors[0]
             raise
 
     async def _merged_ensemble(self, prompt: str, messages: list[dict[str, str]], node: str,

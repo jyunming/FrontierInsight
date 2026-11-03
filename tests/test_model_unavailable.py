@@ -63,7 +63,7 @@ async def test_a_step_that_goes_on_without_the_answer_is_not_kept(tmp_path: Path
     step = eng._audited("plan", lambda state: _swallowing_step(eng))
     with pytest.raises(ModelUnavailable) as caught:
         await step({})
-    assert "usage limit" in str(caught.value) and "Resume the quest" in str(caught.value)
+    assert "usage limit" in str(caught.value) and "--resume" in str(caught.value)
 
 
 @pytest.mark.asyncio
