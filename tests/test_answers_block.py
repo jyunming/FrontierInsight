@@ -378,3 +378,39 @@ def test_a_compared_value_with_no_trial_at_the_questions_other_settings_is_not_a
     assert "(measured at dt = 3 only)" in lines[0] and "{{v:step @ ang=each, dt=3 | range}}" in lines[0]
     rec = pv.records_of(root, pf.plan_protocol(root))
     assert pv.resolve("{{v:step @ ang=each, dt=3 | range}}", rec).filled
+
+
+def _derived(root: Path, item: dict) -> None:
+    (root / "data" / "results").mkdir(parents=True)
+    (root / "data" / "results" / "derived.json").write_text(
+        json.dumps({"schema": "fi.derived/v1", "derived": {"settling_limit": item}}), encoding="utf-8")
+
+
+def test_a_derived_result_that_is_ok_is_answered_with_its_value(tmp_path, monkeypatch) -> None:
+    root = _quest(tmp_path, monkeypatch, settling=None)
+    _derived(root, {"status": "ok", "why": "", "value": 12.3456, "role": "result", "by": "derive_settling_limit", "inputs": []})
+    from core import analysis_frame as frame
+    pv.write_answers(root, frame.study_values(frame.read_record(root)), PROTOCOL, ids=["settling_limit"])
+    text = pf.answers_text(root)
+    assert "- settling limit (the plan's map: Limit of the settling time (hours)): {{v:settling_limit}}" in text
+    assert "holds no value" not in text
+
+
+def test_a_result_a_check_took_out_is_said_as_left_out_with_the_checks_reason(tmp_path, monkeypatch) -> None:
+    """Before: a quantity FI holds a value for but a check withheld read 'FI holds no value', as if nothing was computed."""
+    root = _quest(tmp_path, monkeypatch)
+    (root / "needs").mkdir()
+    (root / "needs" / "RESULT_CHECK.json").write_text(json.dumps(
+        {"removed_quantities": ["settling_limit"], "note": "the code computes it differently from the plan"}), encoding="utf-8")
+    text = pf.answers_text(root)
+    assert ('- settling limit: not answered (FI left "Limit of the settling time (hours)" out of the results: '
+            "the code computes it differently from the plan)") in text
+    assert "holds no value" not in text and "{{v:settling_limit" not in text
+
+
+def test_a_derived_result_that_failed_is_not_answered_and_says_why(tmp_path, monkeypatch) -> None:
+    root = _quest(tmp_path, monkeypatch, settling=None)
+    _derived(root, {"status": "failed", "why": "no trial reached the limit", "value": None, "role": "result"})
+    text = pf.answers_text(root)
+    assert '- settling limit: not answered (FI could not work out "Limit of the settling time (hours)": no trial reached the limit)' in text
+    assert "{{v:settling_limit" not in text

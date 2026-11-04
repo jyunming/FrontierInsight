@@ -1383,6 +1383,20 @@ def _levels_with_trials(rec: Any, metric: str, split: str, levels: list[Any], ot
     return [lv for lv in levels if combos <= have.get(json.dumps(lv, default=str), set())]
 
 
+def _no_value_reason(root: Path, rec: Any, metric: str, plain: Any) -> str:
+    """Why FI states no value for ``metric``, from FI's own records: the check that took the quantity out of the results
+    (``rec.left_out``: FI holds a value and withholds it, with the check's note), else the analysis's record of a quantity
+    it could not work out (``derived.json``: its ``why``), else that no record holds one."""
+    if metric in rec.left_out:
+        return f"FI left \"{plain(metric)}\" out of the results: {str(rec.left_out[metric]).strip() or 'a check of FI removed it'}"
+    record = _read(root, "data/results/derived.json")
+    items = record.get("derived") if isinstance(record, dict) else None
+    item = items.get(metric) if isinstance(items, dict) else None
+    if isinstance(item, dict) and item.get("status") not in (None, "ok") and str(item.get("why") or "").strip():
+        return f"FI could not work out \"{plain(metric)}\": {str(item['why']).strip()}"
+    return f"FI holds no value for \"{plain(metric)}\""
+
+
 def answers_text(quest_root: Path | str) -> str:
     """The block ``{{answers}}`` stands for: one line for each quantity the topic asks for and marks main, with FI's value
     and its interval (a key FI fills), from the plan's own ``protocol.topic_map`` entry (``metric:<id>``). A quantity the
@@ -1427,7 +1441,7 @@ def answers_text(quest_root: Path | str) -> str:
                          "so no single value stands for the study)")
             continue
         if metric not in rec.metrics() and metric not in rec.answers:
-            lines.append(f"- {name}: not answered (FI holds no value for \"{plain(metric)}\")")
+            lines.append(f"- {name}: not answered ({_no_value_reason(root, rec, metric, plain)})")
             continue
         if metric in rec.answers:
             lines.append(_answer_line(rec, name, metric, [(f"{{{{v:{metric}}}}}", " (one value worked out by the analysis; no interval is recorded for it)")]))
