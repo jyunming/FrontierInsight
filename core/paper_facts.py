@@ -93,6 +93,7 @@ UNSUPPORTED_CLAIMS = "unsupported_claims"
 UNRESOLVED_REVIEW = "unresolved_review"
 FIGURE_LEFT_OUT = "figure_left_out"
 FIGURE_PASS_FAULT = "figure_pass_fault"
+METHOD_DIFFERS = "method_differs"
 #: Kept while the check of the sentences about the figures stopped with an error of FI's own on the paper last written.
 FIGURE_PASS_RECORD = Path(".fi") / "figure_pass_fault.json"
 FIGURE_PASS_SENTENCE = ("FI could not check the sentences about the figures: its check stopped with an error of its own, so "
@@ -117,7 +118,7 @@ _ID_PREFIX = {NOT_DONE: "topic", LEFT_OUT: "left-out", NOT_COMPUTED: "not-comput
               UNDEFINED: "undefined",
               FEWER_RUNS: "fewer", CUT_SHORT: "cut-short", RUN_DIFFERENCE: "difference", SHARED_SEEDS: "shared-seeds",
               UNSUPPORTED_CLAIMS: "unsupported", UNRESOLVED_REVIEW: "review", LAST_REVIEW: "last-review",
-              FIGURE_LEFT_OUT: "figure-left-out", FIGURE_PASS_FAULT: "figure-pass-fault"}
+              FIGURE_LEFT_OUT: "figure-left-out", FIGURE_PASS_FAULT: "figure-pass-fault", METHOD_DIFFERS: "method-differs"}
 #: More settings left out than this are placed as one item.
 _MAX_SETTING_ITEMS = 6
 
@@ -399,6 +400,18 @@ def required_items(quest_root: Path | str) -> list[Item]:
                 continue
             add(LEFT_OUT, q, _sentence(f"{_said(root, q)} is not reported: a check of the results showed the value is wrong"
                                        + (f" ({note})" if note else "")))
+    for d in (checked.get("kept_differences") if isinstance(checked, dict) else None) or []:
+        if isinstance(d, dict) and d.get("quantity") and not set(map(str, d.get("keys") or [])) <= set(map(str, checked.get("removed_quantities") or [])):
+            q = _one(d["quantity"])  # a second model's finding that no measurement showed to move a number, for keys that are back
+            if (d.get("measured") or {}).get("status") == "unchanged":
+                add(METHOD_DIFFERS, q, _sentence(f"A second model claims that the code computes {_said(root, q)} by a method that "
+                                                 "differs from the plan's definition. A test written for the claim failed on the code "
+                                                 "that produced the results and passed on a repair, and the numbers reported with that "
+                                                 "repair did not move beyond their allowance, so the value is kept"))
+            else:
+                add(METHOD_DIFFERS, q, _sentence(f"A second model claims that the code computes {_said(root, q)} by a method that "
+                                                 "differs from the plan's definition; no test FI wrote could show it, so the claim is "
+                                                 "not shown and the value is kept"))
     _precision_items(root, add)
     # A key function whose second, independently written version still gives different results (not one that could not
     # be compared: that is in the quality report only).
@@ -1427,6 +1440,20 @@ def _levels_with_trials(rec: Any, metric: str, split: str, levels: list[Any], ot
     return [lv for lv in levels if combos <= have.get(json.dumps(lv, default=str), set())]
 
 
+def _no_value_reason(root: Path, rec: Any, metric: str, plain: Any) -> str:
+    """Why FI states no value for ``metric``, from FI's own records: the check that took the quantity out of the results
+    (``rec.left_out``: FI holds a value and withholds it, with the check's note), else the analysis's record of a quantity
+    it could not work out (``derived.json``: its ``why``), else that no record holds one."""
+    if metric in rec.left_out:
+        return f"FI left \"{plain(metric)}\" out of the results: {str(rec.left_out[metric]).strip() or 'a check of FI removed it'}"
+    record = _read(root, "data/results/derived.json")
+    items = record.get("derived") if isinstance(record, dict) else None
+    item = items.get(metric) if isinstance(items, dict) else None
+    if isinstance(item, dict) and item.get("status") not in (None, "ok") and str(item.get("why") or "").strip():
+        return f"FI could not work out \"{plain(metric)}\": {str(item['why']).strip()}"
+    return f"FI holds no value for \"{plain(metric)}\""
+
+
 def answers_text(quest_root: Path | str) -> str:
     """The block ``{{answers}}`` stands for: one line for each quantity the topic asks for and marks main, with FI's value
     and its interval (a key FI fills), from the plan's own ``protocol.topic_map`` entry (``metric:<id>``). A quantity the
@@ -1471,7 +1498,7 @@ def answers_text(quest_root: Path | str) -> str:
                          "so no single value stands for the study)")
             continue
         if metric not in rec.metrics() and metric not in rec.answers:
-            lines.append(f"- {name}: not answered (FI holds no value for \"{plain(metric)}\")")
+            lines.append(f"- {name}: not answered ({_no_value_reason(root, rec, metric, plain)})")
             continue
         if metric in rec.answers:
             lines.append(_answer_line(rec, name, metric, [(f"{{{{v:{metric}}}}}", " (one value worked out by the analysis; no interval is recorded for it)")]))
