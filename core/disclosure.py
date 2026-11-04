@@ -453,10 +453,13 @@ def _code_faults_sentence(quest_root: Path) -> str:
     incomplete: list[str] = []
     missing: list[str] = []
     about_plan: list[str] = []
+    same_numbers: list[str] = []
     from . import code_findings as _code_findings
 
     for issue in issues.values():
         gate = issue.get("at_gate") if isinstance(issue, dict) else None
+        if isinstance(issue, dict) and issue.get("rerun_unchanged") and _code_findings.flagged_now(issue):
+            same_numbers.append(str(issue.get("text") or issue.get("quantity") or "").strip()[:120])
         if isinstance(issue, dict) and issue.get("about_plan_text") and _code_findings.flagged_now(issue):
             about_plan.append(str(issue.get("text") or issue.get("quantity") or "").strip()[:120])
         if not isinstance(gate, dict) or not _code_findings.flagged_now(issue):
@@ -482,6 +485,11 @@ def _code_faults_sentence(quest_root: Path) -> str:
                     + " left out of the results reported here.")
     if missing:
         said.append("The code does not compute " + _names(missing) + ", which the plan asks for.")
+    same_numbers = [a for a in dict.fromkeys(same_numbers) if a]
+    if same_numbers:
+        said.append("A test of the study's code showed a difference from what the plan describes (" + "; ".join(same_numbers[:3])
+                    + "). FI ran the study again on a repaired copy of the code with the same random numbers: no reported number "
+                    "changed beyond its Monte Carlo uncertainty, so the difference changes no reported number.")
     about_plan = [a for a in dict.fromkeys(about_plan) if a]
     if about_plan:
         said.append("A test of the study's code failed on text FI wrote from the plan, not on a number the code computed; no "

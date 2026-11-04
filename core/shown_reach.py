@@ -49,6 +49,18 @@ class Effect:
     incomplete: bool = False  # what is left out is shown missing or incomplete by the test, not shown computed wrongly
     named: str = ""  # the quantity the finding is about, among the left-out ones
     cannot: bool = False  # FI cannot tell what the code reaches: the records place nothing
+    empty: bool = False  # the stop is that leaving out what it changes leaves no result at all
+
+
+def union(a: "Effect", b: "Effect") -> "Effect":
+    """The effect of two placements of one fault: a stop in either is a stop, and what either leaves out is left out."""
+    def both(x: list[str], y: list[str]) -> list[str]:
+        return list(dict.fromkeys([*x, *y]))
+
+    return Effect(stop=a.stop or b.stop, left_out=both(a.left_out, b.left_out), not_done=both(a.not_done, b.not_done),
+                  figures=both(a.figures, b.figures), plan_text=False, probes=both(a.probes, b.probes),
+                  why=a.why or b.why, extra_keys=both(a.extra_keys, b.extra_keys), incomplete=a.incomplete and b.incomplete,
+                  named=a.named or b.named, empty=a.empty or b.empty)
 
 
 _BUILTIN_NAMES = frozenset(dir(builtins)) - {"eval", "exec", "compile", "open", "__import__", "input", "breakpoint"}
@@ -308,6 +320,9 @@ class Reach:
         self.raw_inputs = {k: {_norm(x) for x in v} for k, v in self.inputs.items()}  # as the analysis record lists them
         self.derived_ok = {str(k) for k, v in items.items() if isinstance(v, dict) and (v.get("status") == "ok" or v.get("by_setting"))}
         self.headline_raw = list(headline)
+        #: Whether a fault reaching the main result stops the paper. Off for a fault no rerun could place: leaving the result
+        #: out is all FI may do then, and only an empty paper stops (:meth:`effect_of_changes` is judged by a rerun).
+        self.headline_stops = True
         self.result: Any = None
         self.figure_files: dict[str, str] = {str(o["id"]): str(o.get("file") or "") for o in derived.get("figures") or []
                                              if isinstance(o, dict) and o.get("id")}
@@ -465,6 +480,37 @@ class Reach:
         merged = self._merge(known)
         return None if merged is None else self._settle(merged, record, issue)
 
+    def effect_of_changes(self, names: list[str]) -> Effect:
+        """The effect of a repair a rerun of the study showed to change numbers: ``names`` are the results whose reported
+        numbers moved (a declared result's id, or a name a trial returns). The results they are, and every result worked out
+        from one of them, are left out; the paper stops when the main result is among them or nothing would be left. A name
+        that is no declared result (a standard error, an interval end, a count of failed trials) is left out of the printed
+        results as it is (``extra_keys``), with the derived results that read it."""
+        touched: set[str] = set()
+        extra: list[str] = []
+        for n in names:
+            if _norm(n) in self.by_norm:
+                touched.add(self.by_norm[_norm(n)])
+                continue
+            # A name a trial returns (a standard error, an interval end) that is no declared result: that number is left out as
+            # it is, with the derived results that read it. The rerun showed which numbers moved, so the result it belongs to
+            # is not left out with it (`_key_ids` takes every result of the trial for a standard error, as FI cannot tell then).
+            touched |= self._reading(n, False)
+            extra.append(n)
+            owner = self.owner.get(_norm(n))
+            if owner in self.counted:
+                # FI counts the coverage (and, for the estimate, the bias) of a result with a true value from these numbers itself
+                extra.append(f"{owner}_coverage")
+                if _norm(n) in self.estimate:
+                    extra.append(f"{owner}_bias")
+        out = Effect(incomplete=False)
+        if touched:
+            out = self._judge(out, touched, "the study run again with a repair reports other numbers for " + ", ".join(sorted(touched))[:120])
+        else:
+            out.why = "the study run again with a repair reports other numbers for " + ", ".join(extra)[:120]
+        out.extra_keys = sorted(set(extra))
+        return out
+
     def _figure_used_by(self, fn: str) -> Effect:
         """The results whose function calls the figure's function ``fn`` by name (a figure's function a result is worked out
         with is a helper of that result), or the trial when a trial entry of the study calls it. Not the call graph: FI's own
@@ -505,7 +551,7 @@ class Reach:
         out.stop = "; ".join(dict.fromkeys(p.stop for p in parts if p.stop))
         out.why = "; ".join(dict.fromkeys(p.why for p in parts if p.why))
         if not out.stop and out.left_out and not (set(self.ids) - set(out.left_out)):
-            out.stop = "leaving out what it changes leaves no result"
+            out.stop, out.empty = "leaving out what it changes leaves no result", True
         return out
 
     def _settle(self, eff: Effect, record: dict[str, Any], issue: dict[str, Any]) -> Effect:
@@ -562,11 +608,11 @@ class Reach:
         reached = self._closure(touched)
         out.left_out = sorted(reached)
         out.named = out.named or (sorted(touched)[0] if touched else "")
-        hit = sorted(reached & self.headline)
+        hit = sorted(reached & self.headline) if self.headline_stops else []
         if hit:
             out.stop = f"the main result {', '.join(hit)} is among what it changes ({what})"
         elif reached and not (set(self.ids) - reached):
-            out.stop = "leaving out what it changes leaves no result"
+            out.stop, out.empty = "leaving out what it changes leaves no result", True
         out.why = what
         return out
 

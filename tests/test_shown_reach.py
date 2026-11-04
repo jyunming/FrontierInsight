@@ -49,7 +49,11 @@ def _engine(tmp_path: Path) -> Engine:
     async def fails(rel: str) -> Any:  # the test is run again by the gate: here it still fails by its assertion
         return types.SimpleNamespace(status="fail", crash_in_program=False, kind="assertion", detail="", place="", at="")
 
+    async def no_reruns(verdicts: Any, record: Any, state: Any) -> dict[str, Any]:  # what these tests judge is the placement alone
+        return {}
+
     engine._rerun_finding_test = fails  # type: ignore[method-assign,assignment]  # this one engine only, never the class
+    engine._rerun_shown = no_reruns  # type: ignore[method-assign,assignment]
     return engine
 
 
