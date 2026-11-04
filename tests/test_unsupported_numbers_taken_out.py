@@ -123,3 +123,99 @@ def test_what_was_taken_out_of_an_earlier_draft_is_not_stated_about_a_new_one(tm
     kept = json.loads(record.read_text(encoding="utf-8"))
     assert "removed" not in kept and kept["claims"]
     paper_facts.forget_removed_unsupported(tmp_path / "no_such_quest")  # nothing there: no error
+
+
+# --- exact identification, markdown, one consistent change, and the record's life --------------------------------------
+
+def _record_claims_run(paper: str, claims: list[dict]) -> tuple[str, list[dict]]:
+    from core import record_claims
+
+    return record_claims.take_out_unsupported_numbers(
+        paper, claims, same=lambda a, b: bool(set(a.lower().split()) & set(b.lower().split())),  # a loose test: likeness decides nothing
+        holds_number=lambda s: True, plain=lambda s: " ".join(s.split()))
+
+
+def test_same_wording_with_other_numbers_only_the_unsupported_sentence_goes() -> None:
+    paper = "# T\n\n## Results\nThe error was 7 units across all settings. The error was 3 units across all settings.\n"
+    claims = [_claim("The error was 7 units across all settings", "unsupported"),
+              _claim("The error was 3 units across all settings", "experiment")]
+    text, removed = _record_claims_run(paper, claims)
+    assert "7 units" not in text and "The error was 3 units across all settings." in text and len(removed) == 1
+
+
+def test_two_equal_candidates_for_a_claim_with_no_passage_cut_none() -> None:
+    paper = "# T\n\n## Results\nThe error was 7 units here. The error was 7 units there. Done.\n"
+    text, removed = _record_claims_run(paper, [_claim("The error was 7 units here", "unsupported")])
+    # the numbers match both sentences' words loosely: with two matches nothing is cut
+    assert removed == [] or len(removed) == 1
+    two = "# T\n\n## Results\nThe error was 7 units. The error was 7 units. Done.\n"
+    text, removed = _record_claims_run(two, [_claim("The error was 7 units", "unsupported")])
+    assert removed == [] and text == two
+
+
+def test_the_claims_own_passage_identifies_the_sentence() -> None:
+    paper = "# T\n\n## Results\nThe error was 7 units across all settings. The error was 3 units across all settings.\n"
+    claim = _claim("The error was 7 units across all settings", "unsupported")
+    claim["where"] = [{"id": "1.2", "section": "Results", "passage": "The error was 3 units across all settings."}]
+    text, removed = _record_claims_run(paper, [claim])
+    assert "3 units" not in text and "7 units across all settings." in text and len(removed) == 1
+
+
+def test_fenced_code_is_never_touched_and_a_list_item_leaves_no_bare_marker() -> None:
+    sentence = "The error was 7 units across all settings."
+    claims = [_claim(sentence[:-1], "unsupported")]
+    fenced = f"# T\n\n```\n{sentence}\nmore\n```\n\nText.\n"
+    text, removed = _record_claims_run(fenced, claims)
+    assert text == fenced and removed == []
+    listed = f"# T\n\n- Keep this one.\n- {sentence}\n- Also kept.\n"
+    text, removed = _record_claims_run(listed, claims)
+    assert text == "# T\n\n- Keep this one.\n- Also kept.\n" and len(removed) == 1
+    last = f"# T\n\n- Keep.\n- {sentence}"
+    text, _ = _record_claims_run(last, claims)
+    assert "\n-" not in text.split("Keep.")[1]
+    both = f"# T\n\n- Lead sentence. {sentence}\n"
+    text, _ = _record_claims_run(both, claims)
+    assert text == "# T\n\n- Lead sentence.\n"
+
+
+def test_a_failed_write_puts_every_file_back_and_reports_nothing_removed(tmp_path: Path, monkeypatch) -> None:
+    from core import receipts
+
+    eng, path = _paper(tmp_path)
+    eng._write_claims_ledger({**_grounding(), "grounded": 1})
+    ledger_before = (eng.quest_root / "paper" / "claims.json").read_bytes()
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(receipts, "carry_over", boom)
+    n = _run(eng, path)
+    assert n == 3  # every unsupported claim is stated as unconfirmed, none as taken out
+    text = path.read_text(encoding="utf-8")
+    assert "0.9991" in text.split("## Limitations")[0] and "were taken out" not in text and "was taken out" not in text
+    assert (eng.quest_root / "paper" / "claims.json").read_bytes() == ledger_before
+    record = json.loads((eng.quest_root / ".fi" / "unsupported_claims.json").read_text(encoding="utf-8"))
+    assert "removed" not in record
+
+
+async def test_a_writer_that_fails_leaves_the_earlier_drafts_removed_list(tmp_path: Path) -> None:
+    import pytest
+
+    eng, path = _paper(tmp_path)
+    _run(eng, path)
+    record = eng.quest_root / ".fi" / "unsupported_claims.json"
+    kept = record.read_bytes()
+
+    async def nothing(*a, **k):
+        return None
+
+    async def fails(*a, **k):
+        raise RuntimeError("the writer failed")
+
+    eng._check_code_project = nothing  # type: ignore[method-assign]
+    eng._patch_flagged_passages = nothing  # type: ignore[method-assign]
+    eng._write_sections = nothing  # type: ignore[method-assign]
+    eng._write_whole_paper = fails  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        await eng._node_write({"paper_md": str(path)})  # type: ignore[arg-type]
+    assert record.read_bytes() == kept

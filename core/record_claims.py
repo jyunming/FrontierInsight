@@ -183,31 +183,80 @@ _SIZE_RATIO = 3
 _NOT_PROSE = ("|", "#", "![", "```", "~~~")
 
 
+_NUMBER = re.compile(r"\d+(?:\.\d+)?(?:[eE][-+]?\d+)?")
+_FENCE = re.compile(r"^[ \t]*(```|~~~)")
+_LIST_ITEM_LEAD = re.compile(r"^[ \t]*(?:[-*+]|\d+[.)])[ \t]+$")
+
+
+def _fenced(text: str) -> list[tuple[int, int]]:
+    """The spans of fenced code blocks (the fence lines included); an unclosed fence runs to the end."""
+    spans: list[tuple[int, int]] = []
+    open_at: int | None = None
+    marker = ""
+    pos = 0
+    for line in text.split("\n"):
+        m = _FENCE.match(line)
+        if m and open_at is None:
+            open_at, marker = pos, m.group(1)
+        elif m and open_at is not None and m.group(1) == marker:
+            spans.append((open_at, pos + len(line)))
+            open_at = None
+        pos += len(line) + 1
+    if open_at is not None:
+        spans.append((open_at, len(text)))
+    return spans
+
+
+def _numbers(text: str) -> list[str]:
+    return sorted(_NUMBER.findall(text))
+
+
+def _cut(text: str, spans: list[tuple[int, int]]) -> str:
+    """``text`` without ``spans`` (a sentence each). A sentence that is all of a list item's text takes the item's marker and
+    line with it, so no bare marker is left; any other leaves nothing but the space that set it off."""
+    from . import paper_trim
+
+    for start, end in sorted(spans, reverse=True):
+        ls = text.rfind("\n", 0, start) + 1
+        le = text.find("\n", end)
+        le = len(text) if le == -1 else le
+        if _LIST_ITEM_LEAD.match(text[ls:start]) and not text[end:le].strip():
+            text = text[:ls] + text[le + 1:] if le < len(text) else text[:max(0, ls - 1)]
+        else:
+            text = paper_trim._delete(text, [(start, end)])
+    return text
+
+
 def take_out_unsupported_numbers(
         paper_md: str, claims: list[dict[str, Any]], *, same: Callable[[str, str], bool],
-        holds_number: Callable[[str], bool], plain: Callable[[str], str]) -> tuple[str, list[dict[str, Any]]]:
+        holds_number: Callable[[str], bool], plain: Callable[[str], str],
+        keyed: Callable[[str], str] | None = None) -> tuple[str, list[dict[str, Any]]]:
     """``paper_md`` without the writer's sentences that the claim check judged ``unsupported`` and that state a number,
-    and one entry for each claim taken out (``claim``, ``evidence``, ``sentence``).
+    and one entry for each sentence taken out (``claim``, ``evidence``, ``sentence``).
 
     The claim check holds every number of a result to FI's records: a number that is not in them, or is the number of
     another setting or of the whole run where the sentence says one setting, makes the claim ``unsupported`` (the verdict is
     the check's, no wording is read here). A sentence like that is not delivered: FI cannot say which value the writer
     meant, so it does not put one in, and the Limitations say that it was taken out. An ``unsupported`` claim with no number
     (a statement no source backs, a remark the check could not tie to a result) stays, and is stated as unconfirmed in the
-    Limitations as before. Only running prose is read: FI's blocks, tables, headings and figure lines are not the writer's
-    sentences.
+    Limitations as before.
 
-    ``same(claim, sentence)`` says whether a sentence states a claim, ``holds_number(sentence)`` whether the sentence (with
-    FI's value marks still in it) states a number, and ``plain(sentence)`` is the sentence as a reader sees it."""
-    from . import paper_patch, paper_trim
+    A sentence is cut only when it is identified exactly, never by likeness of wording. First by the claim's own passage
+    (``where`` in the claim list, the writer's sentence with its keys): a sentence whose keyed text is that passage. A claim
+    with no passage in the paper is matched to a sentence of the same words (``same``) whose numbers are the claim's, and only
+    when exactly one sentence matches; with two or more, none is cut and the claim stays stated as unconfirmed. Only running
+    prose is read: FI's blocks, fenced code, tables, headings and figure lines are not the writer's sentences.
+
+    ``holds_number(sentence)``: whether the sentence (with FI's value marks still in it) states a number; ``plain(sentence)``
+    is the sentence as a reader sees it; ``keyed(sentence)`` is the sentence with FI's values as the writer's keys."""
+    from . import paper_patch
 
     wanted = [c for c in claims if isinstance(c, dict) and c.get("basis") == "unsupported" and str(c.get("claim") or "").strip()]
     if not wanted or not paper_md:
         return paper_md, []
-    blocks = [m.span() for m in _FI_BLOCK.finditer(paper_md)]
+    blocks = [m.span() for m in _FI_BLOCK.finditer(paper_md)] + _fenced(paper_md)
     masked = _FI_MARK.sub(lambda m: "\x00" * len(m.group(0)), paper_md)
-    spans: list[tuple[int, int]] = []
-    taken: list[dict[str, Any]] = []
+    units: list[tuple[int, int, str, str]] = []  # start, end, as the reader sees it, with its keys
     for start, end, _block in paper_patch.sentence_units(masked):
         raw = paper_md[start:end]
         if not raw.strip() or raw.lstrip().startswith(_NOT_PROSE) or any(a <= start < b for a, b in blocks):
@@ -215,16 +264,21 @@ def take_out_unsupported_numbers(
         # A unit that is nothing but FI's own filled text (a value mark and its punctuation) is not the writer's sentence.
         if not re.sub(r"[\s\x00.,;:!?()\-]+", "", masked[start:end]):
             continue
-        sentence = plain(raw)
-        # The claim and the sentence it is about are of one size: a long paragraph that holds the claim's words among many
-        # others is not that sentence.
-        claim = next((c for c in wanted if len(sentence.split()) <= _SIZE_RATIO * max(1, len(str(c["claim"]).split()))
-                      and same(str(c["claim"]), sentence)), None)
-        if claim is None or not holds_number(raw):
-            continue
-        spans.append((start, end))
-        taken.append({"claim": str(claim["claim"]).strip(), "evidence": str(claim.get("evidence") or "").strip(),
-                      "sentence": sentence})
-    if not spans:
+        units.append((start, end, plain(raw), " ".join((keyed(raw) if keyed else raw).split())))
+    chosen: dict[tuple[int, int], dict[str, Any]] = {}
+    for claim in wanted:
+        text = str(claim["claim"])
+        passages = {" ".join(str(w.get("passage") or "").split()) for w in claim.get("where") or [] if isinstance(w, dict)}
+        passages.discard("")
+        hits = [u for u in units if u[3] in passages]
+        if not hits:
+            near = [u for u in units if len(u[2].split()) <= _SIZE_RATIO * max(1, len(text.split()))
+                    and same(text, u[2]) and _numbers(u[2]) == _numbers(text)]
+            hits = near if len(near) == 1 else []
+        for start, end, sentence, _k in hits:
+            if holds_number(paper_md[start:end]):
+                chosen.setdefault((start, end), {"claim": text.strip(), "evidence": str(claim.get("evidence") or "").strip(),
+                                                 "sentence": sentence})
+    if not chosen:
         return paper_md, []
-    return paper_trim._delete(paper_md, spans), taken
+    return _cut(paper_md, list(chosen)), [chosen[k] for k in sorted(chosen)]
