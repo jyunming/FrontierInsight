@@ -23044,9 +23044,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     # The numbers the rerun showed changed are what is left out, and the main result among them stops the paper.
                     how = how + "; the study run again with a repair of it reports other numbers for " + ", ".join(rerun.metrics)[:160]
                     placed = reach.effect_of_changes(rerun.metrics)
-                    if not (placed.stop or placed.left_out or placed.extra_keys):
-                        # the numbers that moved are placed on no result: never delivered for that; the finding is judged as
-                        # before a rerun (what its own names and the results' keys say)
+                    if rerun.unplaced or "failed trials" in rerun.metrics:
+                        # A changed number that belongs to no result FI can name has not been cleared by the rerun: the finding
+                        # is also placed as it was before a rerun (what its test reaches), in addition to the results that moved
+                        other = reach.effect(record, issue, result)
+                        placed = None if other is None else _shown_reach.union(placed, other)
+                    if placed is not None and not (placed.stop or placed.left_out or self._in_results(placed.extra_keys, result)):
+                        # the numbers that moved leave out no result and no key of the results: never delivered for that; the
+                        # finding is judged as before a rerun (what its own names and the results' keys say)
                         placed = None
                 elif reach is not None and not _code_review.missing_quantities(record, issue):
                     # No rerun to say (it could not be made): leave out what the records place, and stop only for an empty paper.
@@ -23172,6 +23177,23 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 incomplete={q or (_code_review.quantity_names(record, i) or k)[0] for i, _h, k, q in left_out
                             if str(i.get("id")) in incomplete})
         return None
+
+    @staticmethod
+    def _in_results(names: list[str], result: Any) -> bool:
+        """Whether any of ``names`` is a key somewhere in the printed results."""
+        have: set[str] = set()
+
+        def walk(x: Any) -> None:
+            if isinstance(x, dict):
+                for k, v in x.items():
+                    have.add(_shown_reach._norm(k))
+                    walk(v)
+            elif isinstance(x, list):
+                for v in x:
+                    walk(v)
+
+        walk(result)
+        return any(_shown_reach._norm(n) in have for n in names)
 
     def _unchanged_is_shown(self, issue: dict[str, Any], record: dict[str, Any], result: Any, declared: list[str] | None,
                             reach: "_shown_reach.Reach | None") -> bool:

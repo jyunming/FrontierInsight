@@ -58,7 +58,8 @@ REL_TOL = 5e-4
 EXACT_TOL = 1e-9
 #: Files whose repair cannot change the trials: only the analysis is run again, on the recorded trials.
 ANALYSIS_FILES = frozenset({"derive.py", "experiment.py", "fi_figures.py", "fi_table.py", "fi_frame.py", "fi_figure_calls.py"})
-_SKIP_KEYS = frozenset({"seconds", "bodies", "figures", "figures_said", "fi_faults", "notes", "wall_s", "elapsed_s"})
+_SKIP_KEYS = frozenset({"seconds", "bodies", "figures", "figures_said", "fi_faults", "notes", "wall_s", "elapsed_s", "elapsed",
+                        "runtime", "run_time", "time_s", "timestamp", "wall", "wall_time", "duration"})
 _COPY_SKIP = shutil.ignore_patterns(".git", ".venv", "__pycache__", "output", "*.pyc", ".pytest_cache")
 
 
@@ -77,11 +78,12 @@ class Verdict:
     source: str = ""
     files: list[str] = field(default_factory=list)
     crashed: bool = False  # could_not because the repaired code did not run (not for time, not for a missing record)
+    unplaced: list[str] = field(default_factory=list)  # changed numbers that belong to no result FI can name
 
     def record(self) -> dict[str, Any]:
         return {"status": self.status, "why": self.why, "metrics": self.metrics[:20], "keys": self.keys[:12],
                 "notes": self.notes[:6], "mode": self.mode, "seconds": round(self.seconds, 1), "source": self.source,
-                "files": self.files, "crashed": self.crashed}
+                "files": self.files, "crashed": self.crashed, "unplaced": self.unplaced[:8]}
 
 
 # ---- how long ---------------------------------------------------------------------------------------------------------
@@ -149,9 +151,15 @@ def results_of(root: Path | str, derived: str = "data/results/derived.json", tri
         out[f"trials/{k}/ok"], out[f"trials/{k}/failed"] = float(c.get("ok") or 0), float(c.get("failed") or 0)
         for m, rec in (c.get("metrics") or {}).items():
             vs = _values(rec)
-            if vs:
+            if vs and m not in _SKIP_KEYS:
                 out[f"trials/{k}/{m}/mean"] = sum(vs) / len(vs)
     return out
+
+
+def result_files(root: Path | str, derived: str = "data/results/derived.json") -> set[str]:
+    """The names of the other result files (``file:<name>`` in :func:`results_of`) a run wrote."""
+    folder = Path(root) / Path(derived).parent
+    return {p.name for p in folder.glob("*.json")} - {Path(derived).name} if folder.is_dir() else set()
 
 
 def _values(rec: Any) -> list[float]:
@@ -271,15 +279,15 @@ def uncertainty(key: str, old: float, stats: dict, ok: dict[str, float], kinds: 
     s = stats.get((setting, metric))
     if kind in ("error", "spread"):
         return abs(old) / math.sqrt(2 * (s[0] - 1)) if s and s[0] > 1 else None
+    named = re.search(r"coverage|rate|fraction", key.split("derived/derived/")[-1], re.IGNORECASE) is not None
+    if (not key.startswith("trials/") and 0 <= old <= 1 and kind in ("estimate", "other")
+            and (kinds.get(metric) == "proportion" or named)):
+        # a share (declared, or named a coverage, rate or fraction): its binomial error over the trials
+        n = s[0] if s else ok.get(setting)
+        return math.sqrt(max(old * (1 - old), 1e-12) / n) if n and n >= 2 else None
     if kind not in ("estimate", "end"):
         return None
-    share = kind == "estimate" and not key.startswith("trials/") and kinds.get(metric) == "proportion" and 0 <= old <= 1
-    if s:
-        return math.sqrt(max(old * (1 - old), 1e-12) / s[0]) if share else s[2] / math.sqrt(s[0])
-    n = ok.get(setting)
-    if share and n and n >= 2:  # a share the plan declares: its binomial error over the trials
-        return math.sqrt(max(old * (1 - old), 1e-12) / n)
-    return None
+    return s[2] / math.sqrt(s[0]) if s else None
 
 
 def counted(changes: list[dict[str, Any]], protocol: Any, base_trials: Any, redrawn: bool) -> tuple[list[dict[str, Any]], list[str]]:
@@ -399,6 +407,10 @@ async def judge(executor: Any, python: Path | str, quest_root: Path | str, copy:
         base_root = Path(results_root or quest_root)
         base = await asyncio.to_thread(results_of, base_root, derived)
         new = await asyncio.to_thread(results_of, out)
+        # a result file the repaired run did not write is not compared (an analysis-only rerun writes only derived.json)
+        unwritten = await asyncio.to_thread(result_files, base_root, derived)
+        unwritten -= await asyncio.to_thread(result_files, out)
+        base = {k: v for k, v in base.items() if not any(k.startswith(f"file:{n}") for n in unwritten)}
         # a rerun that wrote no result at all is a rerun that could not be compared
         if not base or not new:
             return Verdict("could_not", "the delivered or the repaired results hold no numbers to compare", mode=mode,
@@ -414,10 +426,10 @@ async def judge(executor: Any, python: Path | str, quest_root: Path | str, copy:
             # guess; the gate places the fault the way it does when no rerun could be made
             return Verdict("could_not", "the repair changes numbers FI cannot attribute to a result: " + ", ".join(loose[:4]),
                            keys=keys, notes=notes, mode=mode, seconds=secs, source=source, files=files)
-        if loose:  # they add to what the attributed numbers say, never replace it
+        if loose:  # they add to what the attributed numbers say, never replace it (the gate places them as well)
             notes = [*notes, "numbers FI cannot attribute to a result also differ: " + ", ".join(loose[:4])]
         return Verdict("changed" if keep else "unchanged", "", metrics=metrics, keys=keys, notes=notes, mode=mode, seconds=secs,
-                       source=source, files=files)
+                       source=source, files=files, unplaced=loose)
     finally:
         shutil.rmtree(work, ignore_errors=True)
         if work.exists():

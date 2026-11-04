@@ -49,7 +49,7 @@ def test_the_other_result_files_the_paper_may_read_are_compared_too(tmp_path: Pa
     assert got["file:table_b.json/rows[0]/a"] == 4.0 and got["derived/derived/est/by_setting/s"] == 1.0
 
 
-def test_a_standard_error_or_a_coverage_is_not_called_noise_when_it_moves_by_the_error_of_a_mean() -> None:
+def test_a_standard_error_is_not_called_noise_when_it_moves_by_the_error_of_a_mean() -> None:
     values = [float(i % 7) for i in range(50)]
     mean = sum(values) / 50
     se = rerun_check.trial_stats(_trials(values))[0][("s", "est")][2] / math.sqrt(50)
@@ -58,7 +58,7 @@ def test_a_standard_error_or_a_coverage_is_not_called_noise_when_it_moves_by_the
     cov = {"key": "derived/derived/est/by_setting/s/coverage", "old": 0.95, "new": 0.96}
     end = {"key": "derived/derived/est/by_setting/s/hi", "old": mean + 2 * se, "new": mean + 2 * se + 1.5 * se}
     kept = rerun_check.counted([est, err, cov, end], PROTOCOL, _trials(values), redrawn=True)[0]
-    assert [c["key"] for c in kept] == [err["key"], cov["key"]]  # a mean and an interval end move with the mean's error
+    assert [c["key"] for c in kept] == [err["key"]]  # a mean, an interval end and a coverage move with their own errors
     # a standard error moving by a few percent of its own value is inside its own sampling error
     small = {"key": err["key"], "old": se, "new": se * 1.05}
     assert rerun_check.counted([small], PROTOCOL, _trials(values), redrawn=True)[0] == []
@@ -473,3 +473,52 @@ def test_a_fault_that_could_not_be_rerun_stops_the_paper_when_it_leaves_the_main
     monkeypatch.setattr(shown_reach.Reach, "effect", effect)
     out, _ = _gate(tmp_path / "b", Verdict("could_not", why="no run.py"), headline=("est_a",), test=DERIVE_COVER)
     assert out and out["stuck_reason"] == "shown_fault_open" and "does not compute" in out["rationale"]
+
+
+# ---- the second review ----------------------------------------------------------------------------------------------------------------
+def test_a_coverage_or_rate_moves_by_its_binomial_error_when_the_draws_changed() -> None:
+    trials = {"cells": [{"key": "s", "ok": 500, "failed": 0, "metrics": {}}]}
+    small = {"key": "derived/derived/Ea_coverage/by_setting/s", "old": 0.95, "new": 0.96}
+    leaf = {"key": "derived/derived/est/by_setting/s/coverage", "old": 0.95, "new": 0.96}
+    rate = {"key": "derived/derived/fail_rate/by_setting/s", "old": 0.30, "new": 0.32}
+    large = {"key": "derived/derived/Ea_coverage/by_setting/s", "old": 0.95, "new": 0.80}
+    assert rerun_check.counted([small, leaf, rate], PROTOCOL, trials, redrawn=True)[0] == []
+    assert rerun_check.counted([large], PROTOCOL, trials, redrawn=True)[0] == [large]
+    # draws that did not change: any move counts, as before
+    assert rerun_check.counted([small], PROTOCOL, trials, redrawn=False)[0] == [small]
+
+
+def test_a_result_file_the_rerun_did_not_write_and_a_time_are_not_compared(tmp_path: Path) -> None:
+    root = tmp_path / "quest"
+    _delivered(root, 1.0)
+    (root / "data" / "results" / "odd.json").write_text(json.dumps({"x": 1.0, "runtime": 3.2}), encoding="utf-8")
+    (root / "code" / "experiment.py").write_text(
+        "import json, os\nfrom pathlib import Path\nt = json.load(open(os.environ['FI_TRIALS']))\n"
+        "Path('data/results').mkdir(parents=True, exist_ok=True)\n"
+        "Path('data/results/derived.json').write_text(json.dumps({'derived': {'est': {'by_setting': {'s': 4.5}}}}))\n", encoding="utf-8")
+    copy = rerun_check.copy_code(root, tmp_path / "w")
+    (copy / "experiment.py").write_text((copy / "experiment.py").read_text(encoding="utf-8") + "# changed\n", encoding="utf-8")
+    got = asyncio.run(rerun_check.judge(_Local(), sys.executable, root, copy, PROTOCOL, 60, None))
+    assert got.mode == "analysis only" and got.status == "unchanged"  # odd.json is not written by an analysis-only rerun
+    assert "runtime" not in " ".join(rerun_check.results_of(root))
+
+
+def test_a_changed_number_that_belongs_to_no_result_is_placed_as_well_as_the_results_that_moved(tmp_path: Path) -> None:
+    from tests.test_shown_reach import DERIVE_EST
+
+    # cover moved (not the main result), and so did a number of another file: the fault, by what its test reaches, is est_a's
+    out, _ = _gate(tmp_path, Verdict("changed", metrics=["cover"], unplaced=["file:t.json/x"]), headline=("est_a",), test=DERIVE_EST,
+                   quantity="est_a")
+    assert out and out["stuck_reason"] == "shown_fault_open" and "main result" in out["rationale"]
+    out, _ = _gate(tmp_path / "b", Verdict("changed", metrics=["cover"]), headline=("est_a",), test=DERIVE_EST, quantity="est_a")
+    assert out is None  # with every moved number placed on a result, only those results are left out
+
+
+def test_a_change_named_by_no_result_and_no_key_of_the_results_leaves_nothing_out_and_is_not_delivered(tmp_path: Path) -> None:
+    from tests.test_shown_reach import DERIVE_EST
+
+    out, _ = _gate(tmp_path, Verdict("changed", metrics=["failed trials"]), headline=("est_a",), test=DERIVE_EST, quantity="est_a")
+    assert out and out["stuck_reason"] == "shown_fault_open"
+    out, _ = _gate(tmp_path / "b", Verdict("changed", metrics=["odd_name"]), headline=("est_b",), test=DERIVE_COVER)
+    # judged by the finding's own names, as with no rerun: not delivered with a "left out" key that nothing holds
+    assert out and out["stuck_reason"] == "shown_fault_open" and "cannot" in out["rationale"]

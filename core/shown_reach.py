@@ -52,6 +52,17 @@ class Effect:
     empty: bool = False  # the stop is that leaving out what it changes leaves no result at all
 
 
+def union(a: "Effect", b: "Effect") -> "Effect":
+    """The effect of two placements of one fault: a stop in either is a stop, and what either leaves out is left out."""
+    def both(x: list[str], y: list[str]) -> list[str]:
+        return list(dict.fromkeys([*x, *y]))
+
+    return Effect(stop=a.stop or b.stop, left_out=both(a.left_out, b.left_out), not_done=both(a.not_done, b.not_done),
+                  figures=both(a.figures, b.figures), plan_text=False, probes=both(a.probes, b.probes),
+                  why=a.why or b.why, extra_keys=both(a.extra_keys, b.extra_keys), incomplete=a.incomplete and b.incomplete,
+                  named=a.named or b.named, empty=a.empty or b.empty)
+
+
 _BUILTIN_NAMES = frozenset(dir(builtins)) - {"eval", "exec", "compile", "open", "__import__", "input", "breakpoint"}
 #: Methods of strings and mappings: a call to one is not a call into the study's own code.
 _PLAIN_METHODS = frozenset({"get", "items", "keys", "values", "join", "lower", "upper", "strip", "split", "format", "startswith",
