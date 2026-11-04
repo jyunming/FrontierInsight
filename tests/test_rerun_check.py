@@ -522,3 +522,51 @@ def test_a_change_named_by_no_result_and_no_key_of_the_results_leaves_nothing_ou
     out, _ = _gate(tmp_path / "b", Verdict("changed", metrics=["odd_name"]), headline=("est_b",), test=DERIVE_COVER)
     # judged by the finding's own names, as with no rerun: not delivered with a "left out" key that nothing holds
     assert out and out["stuck_reason"] == "shown_fault_open" and "cannot" in out["rationale"]
+
+
+# ---- a move inside the precision the plan holds a result to ---------------------------------------------------------------------
+PRECISE = {**PROTOCOL, "precision": {"target_half_width": 0.1, "metric": "est"}}
+
+
+def _moved(rel: float) -> list[dict[str, Any]]:
+    return [{"key": "derived/derived/est/by_setting/s", "old": 22.8138685, "new": 22.8138685 * (1 + rel)}]
+
+
+def test_a_move_inside_the_precision_the_plan_declares_is_not_counted_and_is_noted() -> None:
+    changes = [{"key": "derived/derived/est/by_setting/s", "old": 22.8138685, "new": 22.8138493}]
+    kept, notes = rerun_check.counted(changes, PRECISE, None, redrawn=False)
+    assert kept == [] and any("est moves by" in n and "inside the plan's precision 0.1" in n for n in notes)
+    # the same move with random draws changed: the larger of the two allowances applies
+    assert rerun_check.counted(changes, PRECISE, None, redrawn=True)[0] == []
+
+
+def test_a_move_larger_than_the_declared_precision_is_counted() -> None:
+    big = [{"key": "derived/derived/est/by_setting/s", "old": 22.8, "new": 22.95}]
+    assert rerun_check.counted(big, PRECISE, None, redrawn=False)[0] == big
+
+
+def test_a_result_with_no_declared_precision_still_counts_a_millionth_move() -> None:
+    changes = _moved(1e-6)
+    assert rerun_check.counted(changes, PROTOCOL, None, redrawn=False)[0] == changes  # exact rule, as before
+    assert rerun_check.compare({"derived/derived/est/by_setting/s": 22.8138685}, {"derived/derived/est/by_setting/s": 22.8138685 * (1 + 1e-6)}, 1e-9)
+    # a precision on another result does not excuse this one
+    other = {**PROTOCOL, "precision": {"target_half_width": 0.1, "metric": "cover"}}
+    assert rerun_check.counted(changes, other, None, redrawn=False)[0] == changes
+
+
+def test_the_declared_precision_does_not_excuse_a_count_or_a_coverage() -> None:
+    cnt = [{"key": "trials/s/ok", "old": 10.0, "new": 9.0}]
+    assert rerun_check.counted(cnt, PRECISE, None, redrawn=False)[0] == cnt
+    cov = [{"key": "derived/derived/est/by_setting/s/coverage", "old": 0.95, "new": 0.9}]
+    assert rerun_check.counted(cov, PRECISE, None, redrawn=False)[0] == cov
+
+
+def test_a_repair_inside_the_declared_precision_is_unchanged_end_to_end(tmp_path: Path) -> None:
+    root = tmp_path / "quest"
+    _delivered(root, 1.0)
+    copy = rerun_check.copy_code(root, tmp_path / "w")
+    (copy / "run.py").write_text((copy / "run.py").read_text(encoding="utf-8").replace("scale = 1.0", "scale = 1.01"), encoding="utf-8")
+    run = lambda proto: asyncio.run(rerun_check.judge(_Local(), sys.executable, root, copy, proto, 60, None))  # noqa: E731
+    got = run(PRECISE)  # the study's est moves by 0.045 and the trials' mean by the same: inside 0.1
+    assert got.status == "unchanged" and any("inside the plan's precision" in n for n in got.notes)
+    assert run(PROTOCOL).status == "changed"

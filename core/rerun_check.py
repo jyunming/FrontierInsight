@@ -14,6 +14,9 @@ only the analysis changed), and the numbers it reports are compared with the del
   compared exactly.
 * A number the frozen protocol declares as a reference (a known answer, an analytic value) is not computed by the code: a
   repair that changes it repairs the plan, not the code, and it does not count.
+* A result the frozen protocol holds to a precision (``precision.target_half_width`` on ``precision.metric``) is not changed by
+  a move inside that precision, with or without redrawn numbers: the plan itself accepts that difference. A result with no
+  declared precision keeps the rules above.
 * A change that only reshapes the same value (a number against ``{"value": ..., "lo": ..., "hi": ...}``) is not a change.
 * The rerun is bounded by the quest's own record of how long the study took (:func:`time_allowed`); when it does not fit,
   when the repaired code does not run, or when no result is written, the answer is "could not rerun".
@@ -290,6 +293,23 @@ def uncertainty(key: str, old: float, stats: dict, ok: dict[str, float], kinds: 
     return s[2] / math.sqrt(s[0]) if s else None
 
 
+def declared_precision(protocol: Any) -> tuple[str, float] | None:
+    """``(metric, half width)`` of the precision the frozen protocol holds a result to (``precision.target_half_width`` on
+    ``precision.metric``, or on the plan's only metric), in the unit of that result; ``None`` when the plan declares none, or
+    names no metric it declares. Read from the record only: nothing is taken from the plan's text."""
+    from . import run_estimate as _run_estimate
+
+    if not isinstance(protocol, dict) or not isinstance(protocol.get("precision"), dict):
+        return None
+    width = protocol["precision"].get("target_half_width")
+    metric, _kind = _run_estimate.precision_metric(protocol)
+    declared = {str(m.get("id")) for m in protocol.get("metrics") or [] if isinstance(m, dict)}
+    if (isinstance(width, bool) or not isinstance(width, (int, float)) or not 0 < float(width) < float("inf")
+            or not metric or metric not in declared):
+        return None
+    return metric, float(width)
+
+
 def counted(changes: list[dict[str, Any]], protocol: Any, base_trials: Any, redrawn: bool) -> tuple[list[dict[str, Any]], list[str]]:
     """Which of the compared changes count, and why the others do not (``notes``). ``redrawn``: the repair changes how random
     numbers are drawn, so every Monte Carlo number moves a little and only a move beyond its uncertainty counts."""
@@ -300,10 +320,17 @@ def counted(changes: list[dict[str, Any]], protocol: Any, base_trials: Any, redr
     notes: list[str] = []
     keep: list[dict[str, Any]] = []
     refs = 0
+    plan_precision = declared_precision(protocol)
+    inside: dict[str, float] = {}  # result -> the largest move that stayed inside the plan's precision
     for c in changes:
         metric, _setting = metric_of(c["key"])
         if metric and roles.get(metric) == "reference":
             refs += 1
+            continue
+        if (plan_precision and metric == plan_precision[0] and c["new"] is not None and number_kind(c["key"]) in ("estimate", "end")
+                and not (c["key"].endswith("/ok") or c["key"].endswith("/failed")) and abs(c["new"] - c["old"]) <= plan_precision[1]):
+            # the plan holds this result to a precision and the move is inside it (a count, a coverage or an error is not)
+            inside[metric] = max(inside.get(metric, 0.0), abs(c["new"] - c["old"]))
             continue
         if redrawn and c["new"] is not None and not (c["key"].endswith("/ok") or c["key"].endswith("/failed")):
             se = uncertainty(c["key"], c["old"], stats, ok, kinds)
@@ -312,6 +339,8 @@ def counted(changes: list[dict[str, Any]], protocol: Any, base_trials: Any, redr
         keep.append(c)
     if refs:
         notes.append(f"{refs} changed value(s) are references the plan declares: that repairs the plan, not the code")
+    for m, move in sorted(inside.items()):
+        notes.append(f"{m} moves by {move:.3g}, inside the plan's precision {plan_precision[1]:.3g}")  # type: ignore[index]
     if redrawn:
         notes.append("the repair changes how random numbers are drawn: a number counts only beyond its Monte Carlo uncertainty")
     return keep, notes
