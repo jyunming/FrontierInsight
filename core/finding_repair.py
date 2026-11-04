@@ -210,11 +210,6 @@ class TestRun:
     at: str = ""
     line: str = ""
 
-    @property
-    def crash_in_program(self) -> bool:
-        """An error raised inside the quest's own code (not the test's): a crash, for the crash repair."""
-        return self.status == "error" and self.place == "program"
-
 
 def parse_runs(stdout: str, paths: list[str]) -> dict[str, TestRun]:
     """``{path: TestRun}`` from the harness's output; every path asked for is there, an error when nothing was read."""
@@ -1391,7 +1386,7 @@ def _error_problem(detail: str) -> str:
 
 
 async def ask_again(env: Env, issue: dict[str, Any], rel: str, error: TestRun) -> TestRun | None:
-    """A shown issue's test now errors in its own code (not inside the program): the code model is asked ONCE more, shown
+    """A shown issue's test now errors (in its own code or inside the program it called on made-up data): the code model is asked ONCE more, shown
     the error, for a test written as an assertion about the values the code computes, and it is run twice. Its
     ``TestRun``: ``fail`` (a failing assertion in both runs; the new test becomes the issue's test), ``pass``, or ``error``;
     ``None`` when it was asked before for this issue, or no test came back. What happened is kept in ``issue["asked_again"]``.
@@ -1493,18 +1488,12 @@ async def demonstrate(env: Env, issue: dict[str, Any], rel: str) -> bool:
             detail = "the test did not fail on a second run, so it is not deterministic: fix the seeds and make it assert one thing"
             last = detail
             continue
-        # An error shows nothing. Where it was raised is kept; a crash inside the code itself goes to the crash repair,
-        # and a test that errors in its own code is not kept (another is asked for, within the bound).
+        # An error shows nothing, wherever it was raised: a test that calls the code on made-up data (a stub, a fixture)
+        # and crashes inside it is a fact about the test, never about the study's run. Where it was raised is kept in
+        # ``errors``; the test is not kept and another is asked for, within the bound.
         issue["errors"] = [*(issue.get("errors") or [])[-2:],
                            {"test": path, "kind": first.kind, "place": first.place, "at": first.at,
                             "detail": first.detail[:300]}]
-        if first.crash_in_program:
-            issue.update(demonstrated=False, outcome=_issues.NOT_DEMONSTRATED,
-                         crash={"at": first.at, "detail": first.detail[:300], "test": path},
-                         reason=f"its test crashed inside the code at {first.at or 'an unknown line'}: a crash, not a "
-                                "shown fault; it goes to the crash repair")
-            env.save()
-            return False
         detail = _error_problem(first.detail)
         last = first.detail
     issue.update(demonstrated=False, outcome=_issues.NOT_DEMONSTRATED, reason=f"no test showed it ({last[:160]})")

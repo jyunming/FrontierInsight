@@ -991,14 +991,6 @@ CHECKS: tuple[Check, ...] = (
           'execute', 'measured', 'stop',
           'Timed pilot trials read before the freeze: a protocol metric not a number, never moving, or an '
           'output the same everywhere; sent back, then stops'),
-    Check('review_crash_run', 'core.run_checks', 'RunChecksMixin._review_crash_run',
-          'execute', 'measured', 'repair',
-          "A reader's finding test that crashed inside the code goes to the failed-run repair (at most "
-          'REVIEW_CRASHES per quest)'),
-    Check('gate_crash_repair', 'core.run_checks', 'RunChecksMixin._gate_crash_repair',
-          'evidence_gate', 'measured', 'repair',
-          "At the gate a shown-fault test crashed inside the program: back to the run step's crash repair while "
-          'budget lasts, otherwise only recorded'),
     Check('flat_sweep', 'core.flat_output', 'flat_sweep',
           'execute', 'own_record', 'repair',
           'Every number the simulation returned is identical in every setting AND its code never lets the '
