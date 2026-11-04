@@ -184,7 +184,7 @@ _NOT_PROSE = ("|", "#", "![", "```", "~~~")
 
 
 _NUMBER = re.compile(r"\d+(?:\.\d+)?(?:[eE][-+]?\d+)?")
-_FENCE = re.compile(r"^[ \t]*(```|~~~)")
+_FENCE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})(.*)$")
 _LIST_ITEM_LEAD = re.compile(r"^[ \t]*(?:[-*+]|\d+[.)])[ \t]+$")
 
 
@@ -197,8 +197,10 @@ def _fenced(text: str) -> list[tuple[int, int]]:
     for line in text.split("\n"):
         m = _FENCE.match(line)
         if m and open_at is None:
-            open_at, marker = pos, m.group(1)
-        elif m and open_at is not None and m.group(1) == marker:
+            if not (m.group(1)[0] == "`" and "`" in m.group(2)):  # a backtick fence's info string holds no backtick
+                open_at, marker = pos, m.group(1)
+        elif (m and open_at is not None and m.group(1)[0] == marker[0] and len(m.group(1)) >= len(marker)
+              and not m.group(2).strip()):
             spans.append((open_at, pos + len(line)))
             open_at = None
         pos += len(line) + 1
@@ -241,10 +243,9 @@ def take_out_unsupported_numbers(
     (a statement no source backs, a remark the check could not tie to a result) stays, and is stated as unconfirmed in the
     Limitations as before.
 
-    A sentence is cut only when it is identified exactly, never by likeness of wording. First by the claim's own passage
-    (``where`` in the claim list, the writer's sentence with its keys): a sentence whose keyed text is that passage. A claim
-    with no passage in the paper is matched to a sentence of the same words (``same``) whose numbers are the claim's, and only
-    when exactly one sentence matches; with two or more, none is cut and the claim stays stated as unconfirmed. Only running
+    A sentence is cut only when it is identified exactly, never by likeness of wording: its keyed text must equal the claim's
+    own passage (``where`` in the claim list, the writer's sentence with its keys). A claim with no passage, or none that equals
+    a sentence of the paper, cuts nothing and stays stated as unconfirmed. Only running
     prose is read: FI's blocks, fenced code, tables, headings and figure lines are not the writer's sentences.
 
     ``holds_number(sentence)``: whether the sentence (with FI's value marks still in it) states a number; ``plain(sentence)``
@@ -270,11 +271,7 @@ def take_out_unsupported_numbers(
         text = str(claim["claim"])
         passages = {" ".join(str(w.get("passage") or "").split()) for w in claim.get("where") or [] if isinstance(w, dict)}
         passages.discard("")
-        hits = [u for u in units if u[3] in passages]
-        if not hits:
-            near = [u for u in units if len(u[2].split()) <= _SIZE_RATIO * max(1, len(text.split()))
-                    and same(text, u[2]) and _numbers(u[2]) == _numbers(text)]
-            hits = near if len(near) == 1 else []
+        hits = [u for u in units if u[3] in passages]  # no passage, or none equal to a sentence: nothing is cut
         for start, end, sentence, _k in hits:
             if holds_number(paper_md[start:end]):
                 chosen.setdefault((start, end), {"claim": text.strip(), "evidence": str(claim.get("evidence") or "").strip(),

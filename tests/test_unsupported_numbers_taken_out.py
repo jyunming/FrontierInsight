@@ -19,17 +19,19 @@ PAPER = (f"# T\n\n## Abstract\nThe study measures a period. {MARKED} {TYPED} Don
          "## Limitations\nFew settings were run.\n\n## References\n1. A.\n")
 
 
-def _claim(text: str, basis: str, evidence: str = "x") -> dict:
-    return {"claim": text, "basis": basis, "citation_index": None, "quote": "", "evidence": evidence,
-            "where": []}
+def _claim(text: str, basis: str, evidence: str = "x", passage: str | None = None) -> dict:
+    where = [{"id": "1.1", "section": "S", "passage": passage}] if passage else []
+    return {"claim": text, "basis": basis, "citation_index": None, "quote": "", "evidence": evidence, "where": where}
 
 
 def _grounding(status: str = "ok") -> dict:
     claims = [
         _claim("At a step of 0.0025 s the error was 1.374e-11 to 2.164e-07 across the settings", "unsupported",
-               "the range at that step is 1.374e-11 to 3.122e-11; this one was pooled over all steps"),
-        _claim("The fit stays above 0.9991 in every case", "unsupported", "the table shows 0.9990875"),
-        _claim(SOFT, "unsupported", "no source or result shows it"),
+               "the range at that step is 1.374e-11 to 3.122e-11; this one was pooled over all steps",
+               "At a step of 0.0025 s the error was {{v:err @ dt=all | range}} across the settings."),
+        _claim("The fit stays above 0.9991 in every case", "unsupported", "the table shows 0.9990875",
+               "The fit stays above 0.9991 in every case."),
+        _claim(SOFT, "unsupported", "no source or result shows it", SOFT + "."),
         _claim("The settle time was 4.2 s", "experiment"),
     ]
     return {"claims": claims, "total": len(claims), "status": status,
@@ -131,39 +133,47 @@ def _record_claims_run(paper: str, claims: list[dict]) -> tuple[str, list[dict]]
     from core import record_claims
 
     return record_claims.take_out_unsupported_numbers(
-        paper, claims, same=lambda a, b: bool(set(a.lower().split()) & set(b.lower().split())),  # a loose test: likeness decides nothing
-        holds_number=lambda s: True, plain=lambda s: " ".join(s.split()))
+        paper, claims, same=lambda a, b: True,  # a loose test: likeness decides nothing
+        holds_number=lambda s: True, plain=lambda s: " ".join(s.split()), keyed=lambda s: s)
 
 
 def test_same_wording_with_other_numbers_only_the_unsupported_sentence_goes() -> None:
     paper = "# T\n\n## Results\nThe error was 7 units across all settings. The error was 3 units across all settings.\n"
-    claims = [_claim("The error was 7 units across all settings", "unsupported"),
-              _claim("The error was 3 units across all settings", "experiment")]
+    claims = [_claim("The error was 7 units across all settings", "unsupported",
+                     passage="The error was 7 units across all settings."),
+              _claim("The error was 3 units across all settings", "experiment",
+                     passage="The error was 3 units across all settings.")]
     text, removed = _record_claims_run(paper, claims)
     assert "7 units" not in text and "The error was 3 units across all settings." in text and len(removed) == 1
 
 
-def test_two_equal_candidates_for_a_claim_with_no_passage_cut_none() -> None:
-    paper = "# T\n\n## Results\nThe error was 7 units here. The error was 7 units there. Done.\n"
-    text, removed = _record_claims_run(paper, [_claim("The error was 7 units here", "unsupported")])
-    # the numbers match both sentences' words loosely: with two matches nothing is cut
-    assert removed == [] or len(removed) == 1
-    two = "# T\n\n## Results\nThe error was 7 units. The error was 7 units. Done.\n"
-    text, removed = _record_claims_run(two, [_claim("The error was 7 units", "unsupported")])
-    assert removed == [] and text == two
+def test_minus_seven_is_not_taken_for_seven() -> None:
+    paper = "# T\n\n## Results\nThe shift was -7 units. The shift was 7 units.\n"
+    text, removed = _record_claims_run(paper, [_claim("The shift was 7 units", "unsupported",
+                                                      passage="The shift was 7 units.")])
+    assert text == "# T\n\n## Results\nThe shift was -7 units.\n" and len(removed) == 1
+
+
+def test_a_claim_with_no_passage_cuts_nothing() -> None:
+    paper = "# T\n\n## Results\nThe error was 7 units across all settings.\n"
+    text, removed = _record_claims_run(paper, [_claim("The error was 7 units across all settings", "unsupported")])
+    assert text == paper and removed == []
+    text, removed = _record_claims_run(paper, [_claim("The error was 7 units across all settings", "unsupported",
+                                                      passage="A different sentence entirely.")])
+    assert text == paper and removed == []
 
 
 def test_the_claims_own_passage_identifies_the_sentence() -> None:
     paper = "# T\n\n## Results\nThe error was 7 units across all settings. The error was 3 units across all settings.\n"
-    claim = _claim("The error was 7 units across all settings", "unsupported")
-    claim["where"] = [{"id": "1.2", "section": "Results", "passage": "The error was 3 units across all settings."}]
+    claim = _claim("The error was 7 units across all settings", "unsupported",
+                   passage="The error was 3 units across all settings.")
     text, removed = _record_claims_run(paper, [claim])
     assert "3 units" not in text and "7 units across all settings." in text and len(removed) == 1
 
 
 def test_fenced_code_is_never_touched_and_a_list_item_leaves_no_bare_marker() -> None:
     sentence = "The error was 7 units across all settings."
-    claims = [_claim(sentence[:-1], "unsupported")]
+    claims = [_claim(sentence[:-1], "unsupported", passage=sentence)]
     fenced = f"# T\n\n```\n{sentence}\nmore\n```\n\nText.\n"
     text, removed = _record_claims_run(fenced, claims)
     assert text == fenced and removed == []
@@ -216,6 +226,77 @@ async def test_a_writer_that_fails_leaves_the_earlier_drafts_removed_list(tmp_pa
     eng._patch_flagged_passages = nothing  # type: ignore[method-assign]
     eng._write_sections = nothing  # type: ignore[method-assign]
     eng._write_whole_paper = fails  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        await eng._node_write({"paper_md": str(path)})  # type: ignore[arg-type]
+    assert record.read_bytes() == kept
+
+
+def test_a_fence_closes_only_on_a_fence_of_its_own_kind_and_length() -> None:
+    sentence = "The error was 7 units across all settings."
+    claims = [_claim(sentence[:-1], "unsupported", passage=sentence)]
+    # a three-backtick line inside a four-backtick fence does not close it
+    paper = f"# T\n\n````\n```\n{sentence}\n```\n````\n\nText.\n"
+    text, removed = _record_claims_run(paper, claims)
+    assert text == paper and removed == []
+    # a tilde line does not close a backtick fence, and a longer fence does
+    paper = f"# T\n\n```\n~~~\n{sentence}\n`````\n\n{sentence}\n"
+    text, removed = _record_claims_run(paper, claims)
+    assert text.count(sentence) == 1 and len(removed) == 1
+
+
+def test_a_failure_at_the_claim_list_or_the_limitations_puts_every_file_back(tmp_path: Path, monkeypatch) -> None:
+    for what in ("claims_md", "restate"):
+        eng, path = _paper(tmp_path / what)
+        eng._write_claims_ledger({**_grounding(), "grounded": 1})
+        files = [path, eng.quest_root / "paper" / "claims.json", eng.quest_root / "paper" / "CLAIMS.md"]
+        before = [f.read_bytes() for f in files]
+        if what == "claims_md":
+            real = Path.write_text
+
+            def write_text(self, data, *a, **k):
+                if self.name == "CLAIMS.md":
+                    raise OSError("disk full")
+                return real(self, data, *a, **k)
+
+            monkeypatch.setattr(Path, "write_text", write_text)
+        else:
+            def restate(state, why, strict=False):
+                if strict:
+                    raise OSError("disk full")
+                return False
+
+            monkeypatch.setattr(eng, "_restate_limitations", restate)
+        eng._state_unsupported_claims({"paper_md": str(path), "claim_grounding": _grounding()})  # type: ignore[arg-type]
+        monkeypatch.undo()
+        assert [f.read_bytes() for f in files[1:]] == before[1:], what
+        kept = path.read_text(encoding="utf-8")  # the paper keeps every sentence and says none was taken out
+        assert "0.9991" in kept.split("## Limitations")[0] and "taken out of this paper" not in kept, what
+        record = json.loads((eng.quest_root / ".fi" / "unsupported_claims.json").read_text(encoding="utf-8"))
+        assert "removed" not in record, what
+
+
+async def test_a_render_that_fails_leaves_the_earlier_drafts_removed_list(tmp_path: Path) -> None:
+    import pytest
+
+    eng, path = _paper(tmp_path)
+    _run(eng, path)
+    record = eng.quest_root / ".fi" / "unsupported_claims.json"
+    kept = record.read_bytes()
+
+    async def nothing(*a, **k):
+        return None
+
+    async def writes(*a, **k):
+        return "# New draft\n\n## Abstract\nA new sentence.\n"
+
+    def render_fails(markdown, state):
+        raise RuntimeError("render failed")
+
+    eng._check_code_project = nothing  # type: ignore[method-assign]
+    eng._patch_flagged_passages = nothing  # type: ignore[method-assign]
+    eng._write_sections = nothing  # type: ignore[method-assign]
+    eng._write_whole_paper = writes  # type: ignore[method-assign]
+    eng._render_paper_facts = render_fails  # type: ignore[method-assign]
     with pytest.raises(RuntimeError):
         await eng._node_write({"paper_md": str(path)})  # type: ignore[arg-type]
     assert record.read_bytes() == kept

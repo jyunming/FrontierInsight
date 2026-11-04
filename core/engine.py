@@ -23647,7 +23647,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 self._log.warning("[write] %s", v.hit.text())
         return out.text
 
-    def _restate_limitations(self, state: QuestState, why: str) -> bool:
+    def _restate_limitations(self, state: QuestState, why: str, *, strict: bool = False) -> bool:
         """The paper's Limitations are FI's block (``{{limitations}}``, core/paper_facts.py), written from its records as
         they are now: called after a step that changed one of them, so the paper that is delivered says what the records
         say. FI's own text and no claim of its own, so the claim check's and the citation check's receipts move to the
@@ -23670,6 +23670,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 _receipts.carry_over(self.quest_root, check, "paper", checked, Path(path).read_bytes(), why)
             return True
         except (OSError, UnicodeDecodeError) as e:
+            if strict:
+                raise
             self._log.warning("[review] the paper's Limitations could not be written again from FI's records (%s)", e)
             return False
 
@@ -24071,19 +24073,29 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         (self.quest_root / _paper_facts.PAGE_RECORD).unlink(missing_ok=True)
         # The new draft exists (the writer answered): what was taken out of the earlier draft is not stated about this one.
         # Before this point a writer that fails leaves the earlier draft and its record as they were.
+        # The record is cleared for the render and put back if the new draft is not written.
+        record_file = self.quest_root / _paper_facts.UNSUPPORTED_RECORD
+        record_before = record_file.read_bytes() if record_file.is_file() else None
         _paper_facts.forget_removed_unsupported(self.quest_root)
-        # The facts of the run go in last, from FI's records, so every check after this reads the values, never a
-        # placeholder (core/paper_facts.py).
-        markdown = self._render_paper_facts(markdown, state)
-        # A figure shares its paragraph with text (a run-in label, a sentence): pandoc then draws it inline, with no
-        # caption and no float. Each goes into a paragraph of its own here, so the PDF, slides and poster all read it so.
-        from generation._figure_captions import figures_in_own_paragraph
+        try:
+            # The facts of the run go in last, from FI's records, so every check after this reads the values, never a
+            # placeholder (core/paper_facts.py).
+            markdown = self._render_paper_facts(markdown, state)
+            # A figure shares its paragraph with text (a run-in label, a sentence): pandoc then draws it inline, with no
+            # caption and no float. Each goes into a paragraph of its own here, so the PDF, slides and poster all read it so.
+            from generation._figure_captions import figures_in_own_paragraph
 
-        markdown, n_figures_moved = figures_in_own_paragraph(markdown)
-        if n_figures_moved:
-            self._log.info("[write] %d figure(s) moved into a paragraph of their own", n_figures_moved)
-        paper_path = self.quest_root / "paper" / "paper.md"
-        paper_path.write_text(markdown, encoding="utf-8")
+            markdown, n_figures_moved = figures_in_own_paragraph(markdown)
+            if n_figures_moved:
+                self._log.info("[write] %d figure(s) moved into a paragraph of their own", n_figures_moved)
+            paper_path = self.quest_root / "paper" / "paper.md"
+            paper_path.write_text(markdown, encoding="utf-8")
+        except BaseException:
+            if record_before is None:
+                record_file.unlink(missing_ok=True)
+            else:
+                record_file.write_bytes(record_before)
+            raise
         self._take_out_figure_statements(state, paper_path)
         self._log.info("[write] wrote %s (%d bytes)", paper_path, len(markdown))
         # Generic pause-drop-anytime: when configured, pause AFTER
@@ -25958,7 +25970,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         except Exception:  # noqa: BLE001 -- a hint
             return ""
 
-    def _prune_ledger_after_take_out(self, taken: list[str], paper_md: str) -> None:
+    def _prune_ledger_after_take_out(self, taken: list[str], paper_md: str, *, strict: bool = False) -> None:
         """A claim whose sentence FI took out of the paper leaves ``paper/claims.json`` with it, as with the page-limit
         trim: the slides, poster and talk read that list, and must not state what the paper no longer says. A claim
         another sentence still says stays. Best-effort."""
@@ -25966,11 +25978,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             ledger = _read_json_or_none_path(self.quest_root / "paper" / "claims.json")
             pruned = _grounding_after_trim(ledger, [t for t in taken if t], paper_md) if isinstance(ledger, dict) else None
             if pruned is not None:
-                self._write_claims_ledger(pruned)
+                self._write_claims_ledger(pruned, strict=strict)
         except Exception as e:  # noqa: BLE001 -- the ledger is a transparency record, never a reason to stop
+            if strict:
+                raise
             self._log.warning("[claims] the claim list could not be pruned after a take-out (%s)", e)
 
-    def _write_claims_ledger(self, grounding: dict[str, Any]) -> None:
+    def _write_claims_ledger(self, grounding: dict[str, Any], *, strict: bool = False) -> None:
         """Persist the claim-grounding result as a transparency ledger:
         ``paper/claims.json`` (structured) + ``paper/CLAIMS.md`` (readable).
         Best-effort; a write failure is logged, never quest-fatal."""
@@ -26002,6 +26016,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "\n".join(lines) + "\n", encoding="utf-8",
             )
         except OSError as e:
+            if strict:
+                raise
             self._log.warning("[claim_check] ledger write failed: %r", e)
 
     async def _measure_draft_pages(self, paper_path: Path, state: QuestState) -> dict[str, Any] | None:
@@ -26277,7 +26293,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     _receipts.carry_over(self.quest_root, "claim_check", "paper", snapshot[Path(paper_path)] or b"",
                                          Path(paper_path).read_bytes(),
                                          "FI took out sentences with a number its claim check found unsupported and added no claim")
-                    self._prune_ledger_after_take_out([str(r["sentence"]) for r in removed], text)
+                    self._prune_ledger_after_take_out([str(r["sentence"]) for r in removed], text, strict=True)
                     gone = {str(r["claim"]) for r in removed}
                     left = [c for c in standing if str(c.get("claim")) not in gone]
                 else:
@@ -26285,7 +26301,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 if not _paper_facts.write_unsupported_record(self.quest_root, left, removed=removed):
                     raise OSError("the record of unsupported claims could not be written")
                 self._restate_limitations(state, "FI stated the claims its own check found unsupported in the Limitations and "
-                                                 "added no claim")
+                                                 "added no claim", strict=bool(removed))
                 standing = left
             except Exception as e:  # noqa: BLE001 -- nothing is taken out unless every part could be written
                 if not removed:
@@ -26313,7 +26329,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         """The bytes of every file the take-out of unsupported sentences can change (``None``: it did not exist)."""
         root = self.quest_root
         files = [Path(paper_path), root / "paper" / "claims.json", root / "paper" / "CLAIMS.md",
-                 root / "needs" / "receipts" / "claim_check.json", root / _paper_facts.UNSUPPORTED_RECORD]
+                 root / "needs" / "receipts" / "claim_check.json", root / "needs" / "receipts" / "citation_check.json",
+                 root / ".fi" / "value_marks.json", root / _paper_facts.UNSUPPORTED_RECORD]
         return {f: (f.read_bytes() if f.is_file() else None) for f in files}
 
     @staticmethod
