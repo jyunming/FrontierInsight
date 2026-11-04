@@ -610,6 +610,15 @@ def test_an_interval_that_widens_is_counted_with_the_mean_it_belongs_to() -> Non
     assert _kept([lo, big]) == [lo, big]
 
 
+def test_an_interval_stored_as_a_pair_widens_and_is_counted() -> None:
+    lo = {"key": K + "/ci[0]", "old": 90.0, "new": 90.0 - 0.02}
+    hi = {"key": K + "/ci[1]", "old": 110.0, "new": 110.0 + 0.02}
+    assert _kept([lo]) == [] and _kept([hi]) == []
+    assert _kept([lo, hi]) == [lo, hi]  # the width moves by 0.04: beyond the allowance
+    assert rerun_check._end_side(K + "/ci[0]") == "lo" and rerun_check._end_side(K + "/interval[1]") == "hi"
+    assert rerun_check._end_side(K + "/values[0]") == ""
+
+
 def test_a_precision_that_names_no_declared_result_excuses_nothing() -> None:
     changes = [{"key": K, "old": 22.8, "new": 22.8001}]
     for precision in ({"target_half_width": 0.1, "metric": "nothing"}, {"target_half_width": 0.1}, {"target_half_width": "x", "metric": "est"}):
@@ -623,3 +632,12 @@ def test_the_original_input_is_still_excused_and_the_own_error_bounds_it() -> No
     tight = {"key": "trials/s/est/mean", "old": 4.5, "new": 4.5 + 0.02}  # beyond a quarter of 0.05, though inside its own error
     narrow = {**PROTOCOL, "precision": {"target_half_width": 0.05, "metric": "est"}}
     assert rerun_check.counted([tight], narrow, trials, redrawn=False)[0] == [tight]
+
+
+def test_a_run_whose_own_error_is_smaller_than_the_plan_allowance_is_bound_by_its_own_error() -> None:
+    trials = _trials([4.5 + 0.001 * i for i in range(10)], metric="est")  # its own error: about 0.001
+    move = {"key": "trials/s/est/mean", "old": 4.5045, "new": 4.5045 + 0.01}  # inside a quarter of 0.1 and 1% of the value
+    wide = {**PROTOCOL, "precision": {"target_half_width": 0.1, "metric": "est"}}
+    assert rerun_check.counted([move], wide, trials, redrawn=False)[0] == [move]
+    small = {**move, "new": 4.5045 + 0.0002}  # inside its own error too
+    assert rerun_check.counted([small], wide, trials, redrawn=False)[0] == []

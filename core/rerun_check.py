@@ -327,7 +327,11 @@ def plan_allowance(width: float, old: float, se: float | None) -> float:
 
 def _end_side(key: str) -> str:
     """``lo`` or ``hi`` for the key of an end of an interval, else an empty string."""
-    leaf = re.sub(r"\[\d+\]$", "", key.rsplit("/", 1)[-1]).lower()
+    last = key.rsplit("/", 1)[-1].lower()
+    indexed = re.fullmatch(r"(?:ci|ci95|ci_95|interval|ci_bounds|bounds)\[([01])\]", last)
+    if indexed:  # an interval stored as a pair: index 0 is its lower end, 1 its upper end
+        return "lo" if indexed.group(1) == "0" else "hi"
+    leaf = re.sub(r"\[\d+\]$", "", last)
     if leaf in ("lo", "low", "lower", "ci_lo", "ci_low", "ci_lower", "ci95_lo"):
         return "lo"
     return "hi" if leaf in ("hi", "high", "upper", "ci_hi", "ci_high", "ci_upper", "ci95_hi") else ""
