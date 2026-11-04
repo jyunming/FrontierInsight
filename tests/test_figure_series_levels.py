@@ -143,7 +143,7 @@ def test_a_level_drawn_as_line_and_points_is_one_curve():
     h.finish({}, {})
     assert "7 curves of Growth, one per Temperature (K)" in _caption(h)
     assert "14 curves" not in _caption(h)
-    legend = [t.get_text() for t in h.axes[0].get_legend().get_texts()]
+    legend = [t.get_text() for t in h.fig.legends[0].get_texts()]  # more than six entries: the figure's legend, outside
     assert legend == ["Temperature (K) = %d" % t for t in temps]  # not compacted at 7 levels, named once each
 
 

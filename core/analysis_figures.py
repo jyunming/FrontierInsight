@@ -116,7 +116,8 @@ def _new_figure(panels: int):
     columns = panels if panels <= 2 else 2
     rows = int(math.ceil(panels / columns))
     width, height = plt.rcParams["figure.figsize"]
-    fig, axes = plt.subplots(rows, columns, figsize=(width * (1 if columns == 1 else 1.5), height * rows), squeeze=False)
+    fig, axes = plt.subplots(rows, columns, figsize=(width * (1 if columns == 1 else 1.5), height * rows), squeeze=False,
+                             layout="constrained")  # the layout makes room for each panel's labels, titles and the legend
     flat = list(axes.flat)
     for extra in flat[panels:]:
         extra.set_visible(False)

@@ -467,8 +467,9 @@ def test_outside_legend_clears_other_panels_and_the_canvas(columns, series):
     h.finish(SPEC, INFO)
     r = h.fig.canvas.get_renderer()
     canvas = h.fig.bbox
+    assert len(h.fig.legends) == 1 and all(ax.get_legend() is None for ax in h.axes)  # one legend for the figure
+    ext = h.fig.legends[0].get_window_extent(r)
     for i, ax in enumerate(h.axes):
-        ext = ax.get_legend().get_window_extent(r)
         assert ext.x0 >= canvas.x0 and ext.x1 <= canvas.x1 and ext.y0 >= canvas.y0 and ext.y1 <= canvas.y1, (i, ext)
         for j, other in enumerate(h.axes):
             if j != i:
