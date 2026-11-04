@@ -565,8 +565,61 @@ def test_a_repair_inside_the_declared_precision_is_unchanged_end_to_end(tmp_path
     root = tmp_path / "quest"
     _delivered(root, 1.0)
     copy = rerun_check.copy_code(root, tmp_path / "w")
-    (copy / "run.py").write_text((copy / "run.py").read_text(encoding="utf-8").replace("scale = 1.0", "scale = 1.01"), encoding="utf-8")
+    (copy / "run.py").write_text((copy / "run.py").read_text(encoding="utf-8").replace("scale = 1.0", "scale = 1.001"), encoding="utf-8")
     run = lambda proto: asyncio.run(rerun_check.judge(_Local(), sys.executable, root, copy, proto, 60, None))  # noqa: E731
-    got = run(PRECISE)  # the study's est moves by 0.045 and the trials' mean by the same: inside 0.1
+    got = run(PRECISE)  # the study's est moves by 0.0045 and the trials' mean by the same: inside a quarter of 0.1 and 1% of the value
     assert got.status == "unchanged" and any("inside the plan's precision" in n for n in got.notes)
     assert run(PROTOCOL).status == "changed"
+
+
+K = "derived/derived/est/by_setting/s"
+
+
+def _kept(changes: list[dict[str, Any]], protocol: Any = PRECISE, redrawn: bool = False) -> list[dict[str, Any]]:
+    return rerun_check.counted(changes, protocol, None, redrawn)[0]
+
+
+def test_the_allowance_is_a_quarter_of_the_target_and_stops_at_it() -> None:
+    old = 100.0  # 1% of the value is 1.0: the quarter of 0.1 (0.025) is the limit
+    assert _kept([{"key": K, "old": old, "new": old + 0.02}]) == []
+    over = [{"key": K, "old": old, "new": old + 0.03}]
+    assert _kept(over) == over
+
+
+def test_a_mean_shifted_by_most_of_the_target_is_counted() -> None:
+    shifted = [{"key": K, "old": 22.8, "new": 22.8 + 0.09}]  # 0.9 x the half-width
+    assert _kept(shifted) == shifted
+    assert _kept(shifted, redrawn=False) == shifted
+
+
+def test_a_large_target_on_a_small_scale_value_does_not_excuse_a_large_share_of_it() -> None:
+    big = {**PROTOCOL, "precision": {"target_half_width": 0.9, "metric": "est"}}
+    moved = [{"key": K, "old": 0.02, "new": 0.04}]  # doubled, though far inside 0.9
+    assert _kept(moved, big) == moved
+
+
+def test_an_interval_that_widens_is_counted_with_the_mean_it_belongs_to() -> None:
+    mean = {"key": K, "old": 100.0, "new": 100.0}
+    lo = {"key": K + "/lo", "old": 90.0, "new": 90.0 - 0.02}
+    hi = {"key": K + "/hi", "old": 110.0, "new": 110.0 + 0.02}
+    assert _kept([lo]) == [] and _kept([hi]) == []  # one end alone moves the width by 0.02: inside
+    both = _kept([lo, hi])  # the width moves by 0.04: beyond the allowance, so both ends count
+    assert both == [lo, hi]
+    # a number of the setting that counts takes the allowance from the others
+    big = {"key": K + "/sd", "old": 5.0, "new": 6.0}
+    assert _kept([lo, big]) == [lo, big]
+
+
+def test_a_precision_that_names_no_declared_result_excuses_nothing() -> None:
+    changes = [{"key": K, "old": 22.8, "new": 22.8001}]
+    for precision in ({"target_half_width": 0.1, "metric": "nothing"}, {"target_half_width": 0.1}, {"target_half_width": "x", "metric": "est"}):
+        assert _kept(changes, {**PROTOCOL, "precision": precision}) == changes  # PROTOCOL has three metrics: none is "the only one"
+
+
+def test_the_original_input_is_still_excused_and_the_own_error_bounds_it() -> None:
+    real = [{"key": "derived/derived/est", "old": 22.8138685, "new": 22.8138493}]
+    assert _kept(real) == []
+    trials = _trials([float(i) for i in range(10)], metric="est")  # the delivered run's own error of "s": about 0.96
+    tight = {"key": "trials/s/est/mean", "old": 4.5, "new": 4.5 + 0.02}  # beyond a quarter of 0.05, though inside its own error
+    narrow = {**PROTOCOL, "precision": {"target_half_width": 0.05, "metric": "est"}}
+    assert rerun_check.counted([tight], narrow, trials, redrawn=False)[0] == [tight]
