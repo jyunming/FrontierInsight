@@ -919,7 +919,6 @@ def equations_view(protocol: dict[str, Any] | None, values: list[float] | None =
 
 
 _FILE_LINE = re.compile(r"^\s*#\s*file\s*:\s*([\w.\-/\\]+)\s*$", re.IGNORECASE)
-_MARK_BEFORE_FENCE = re.compile(r"^[ \t]*(#[ \t]*file[ \t]*:[^\n]*)\n([ \t]*```(?:python|py)?[ \t]*\n)", re.MULTILINE | re.IGNORECASE)
 _BLOCK = re.compile(r"```(?:python|py)?[ \t]*\n(.*?)```", re.DOTALL | re.IGNORECASE)
 
 
@@ -930,14 +929,23 @@ def parse_files(reply: str, allowed: list[str]) -> dict[str, str]:
 
     by_name = {Path(a).name.lower(): a for a in allowed}
     out: dict[str, str] = {}
-    # a file marker written on the line before the fence ("# file: x.py", then "```python") is the same marker, inside it
-    reply = _MARK_BEFORE_FENCE.sub(r"\2\1\n", reply or "")
+    reply = reply or ""
+    after = 0  # where the prose before the next fence starts (the text inside a fence is never read as prose)
     for m in _BLOCK.finditer(reply):
         lines = m.group(1).strip("\n").splitlines()
         first = next((i for i, line in enumerate(lines) if line.strip()), None)
         marker = _FILE_LINE.match(lines[first]) if first is not None else None
+        outside = False
+        if not marker:
+            # a marker written in prose, on the line right before the opening fence, names the file of that block
+            prose = reply[after:m.start()].rstrip().splitlines()
+            marker = _FILE_LINE.match(prose[-1]) if prose else None
+            outside = marker is not None
+        after = m.end()
         if not marker:
             continue
+        if outside:
+            first = -1
         name = marker.group(1).replace("\\", "/").strip("/")
         name = name[len("code/"):] if name.startswith("code/") else name
         rel = name if name in allowed else by_name.get(Path(name).name.lower())

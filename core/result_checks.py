@@ -114,10 +114,11 @@ def removed_figure_stems(quest_root: Path | str) -> set[str]:
 
 
 def _keep_measured(record: dict[str, Any], kept: list[dict[str, Any]]) -> None:
-    """Change ``record`` (``needs/RESULT_CHECK.json``) in place for the checks of a second model's finding that a rerun of the
-    study showed to change no number (``kept``, each with its ``measured`` answer): their quantities are no longer taken out of
-    the results, the paper is told the method differs (``kept_differences``), and what the other checks took out stays. A check
-    a rerun did not clear keeps its ``measured`` answer, so the record says whether anything measured the finding."""
+    """Change ``record`` (``needs/RESULT_CHECK.json``) in place for the checks of a second model's finding that no measurement
+    showed to move a number (``kept``, each with its ``measured`` answer: ``unchanged``, or ``not_shown`` when no test showed
+    the claim): their quantities are no longer taken out of the results. Only the keys that really return to the results are
+    said to (``kept_differences``, the writer's note and the Limitations item are made for those alone): a key another check
+    still takes out stays out, with that check's own words, and the kept check says nothing about it."""
     if not kept:
         return
     gone = {id(c) for c in kept}
@@ -128,18 +129,24 @@ def _keep_measured(record: dict[str, Any], kept: list[dict[str, Any]]) -> None:
     names = {str(c["quantity"]) for c in kept}
     paragraphs = [p for p in str(record.get("say") or "").split("\n\n")
                   if p.strip() and not any(f"found that `{n}` is " in p for n in names)]
-    differences = [*(record.get("kept_differences") or []),
-                   *({"quantity": c["quantity"], "keys": c.get("keys") or [], "note": c.get("note") or "",
-                      "measured": c.get("measured")} for c in kept)]
-    paragraphs += [f"A second model found that `{d['quantity']}` is computed differently from the plan ({str(d['note']).rstrip('.')}). "
-                   "FI ran the study again with a repair of that and no reported number moved beyond its allowance, so the value "
-                   f"stays in the results. Report it, and say plainly, in the limitations, that the code computes `{d['quantity']}` "
-                   "by a method that differs from the plan's definition and that a rerun with the plan's definition gave the same "
-                   "numbers." for d in differences if d["quantity"] in names]
+    returned = [{"quantity": c["quantity"], "keys": [k for k in c.get("keys") or [] if str(k) in back],
+                 "note": c.get("note") or "", "measured": c.get("measured")} for c in kept]
+    returned = [d for d in returned if d["keys"]]
+    for d in returned:
+        why = f"A second model found that `{d['quantity']}` is computed differently from the plan ({str(d['note']).rstrip('.')}). "
+        if (d["measured"] or {}).get("status") == "unchanged":
+            paragraphs.append(why + "A test shows the difference and FI ran the study again with a repair that passes it: no reported "
+                              f"number moved beyond its allowance, so the value stays in the results. Report it, and say plainly, in the "
+                              f"limitations, that the code computes `{d['quantity']}` by a method that differs from the plan's "
+                              "definition and that a rerun with the plan's definition gave the same numbers.")
+        else:
+            paragraphs.append(why + "FI asked for a test that shows it and none did, so the claim is not shown and the value stays in "
+                              f"the results. Report it, and say plainly, in the limitations, that a second model claims the code "
+                              f"computes `{d['quantity']}` differently from the plan's definition and that FI could not show it.")
     record.update({"checks": left, "removed_quantities": keys,
                    "removed_values": {k: v for k, v in (record.get("removed_values") or {}).items() if str(k) in keys},
-                   "kept_differences": differences, "note": "; ".join(str(c.get("note")) for c in left if c.get("note")),
-                   "say": "\n\n".join(paragraphs)})
+                   "kept_differences": [*(record.get("kept_differences") or []), *returned],
+                   "note": "; ".join(str(c.get("note")) for c in left if c.get("note")), "say": "\n\n".join(paragraphs)})
 
 
 def left_out_by_record(quest_root: Path | str) -> dict[str, str]:

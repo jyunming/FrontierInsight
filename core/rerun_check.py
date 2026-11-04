@@ -462,12 +462,18 @@ def _error_of(ran: Any) -> str:
     return " | ".join((named or lines)[-3:])[:400]
 
 
+def _names(key: str, quantity: str) -> bool:
+    """Whether the compared number ``key`` is of ``quantity``: its result in the record of the analysis, or its name inside the
+    key of a number of another result file."""
+    return metric_of(key)[0] == quantity or re.search(r"(?<![\w])" + re.escape(quantity) + r"(?![\w])", key) is not None
+
+
 async def judge(executor: Any, python: Path | str, quest_root: Path | str, copy: Path, protocol: Any, timeout_s: float | None,
                 env: dict[str, str] | None, *, source: str = "", results_root: Path | str | None = None,
-                derived: str = "data/results/derived.json", unmeasured_if_dropped: bool = False) -> Verdict:
+                derived: str = "data/results/derived.json", disputed: list[str] | None = None) -> Verdict:
     """Run the study of ``copy`` (the quest's code with a repair applied) and compare what it reports with what the quest
-    delivered (``results_root``, the quest folder by default). ``unmeasured_if_dropped``: a repair that leaves a delivered number
-    unwritten is "could not rerun", not "changed" (for a repair no failing test holds to the finding)."""
+    delivered (``results_root``, the quest folder by default). ``disputed``: the quantities a reader's claim is about; with it, a repair that leaves a delivered number
+    unwritten, or whose rerun never compared a disputed quantity, is "could not rerun", never "unchanged"."""
     changed = await asyncio.to_thread(changed_files, quest_root, copy)
     if not changed:
         return Verdict("could_not", "the repair changed no file", source=source)
@@ -495,15 +501,21 @@ async def judge(executor: Any, python: Path | str, quest_root: Path | str, copy:
                               _json(base_root / "raw" / "trials.json"), bool(redrawn))
         keys = [c["key"] for c in keep]
         dropped = [c["key"] for c in keep if c["new"] is None]
-        if unmeasured_if_dropped and dropped:
-            # No test holds the repair to the finding, so a repair that lost a number it was not about to change has not been
-            # measured: it is no evidence that the number moves.
+        if disputed is not None and dropped:
+            # A repair that lost a number it was not about to change has not been measured: it is no evidence that the number
+            # moves.
             items = (_json(out / derived).get("derived") if isinstance(_json(out / derived), dict) else None) or {}
             said = [f"{i}: {str(v.get('why') or v.get('status'))[:200]}" for k in dropped[:4]
                     for i, v in [(metric_of(k)[0] or k, items.get(metric_of(k)[0] or "") or {})] if isinstance(v, dict) and v.get("status") != "ok"]
             return Verdict("could_not", "the repaired study gave no number for " + ", ".join(dropped[:4])
                            + ("; its own record says " + "; ".join(said) if said else ""), keys=keys, notes=notes,
                            mode=mode, seconds=secs, source=source, files=files, crashed=True)
+        if disputed is not None and not keep:
+            absent = [q for q in disputed if not (any(_names(k, q) for k in base) and any(_names(k, q) for k in new))]
+            if absent or not disputed:
+                return Verdict("could_not", "the rerun never compared " + (", ".join(absent) or "the disputed quantity")
+                               + " (a result file of it was not written, or none holds it)", notes=notes, mode=mode, seconds=secs,
+                               source=source, files=files)
         loose = [k for k in keys if metric_of(k)[0] is None]
         metrics = sorted({m for m in (metric_of(k)[0] for k in keys) if m})
         if loose and not metrics:

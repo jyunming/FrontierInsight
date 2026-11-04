@@ -401,11 +401,16 @@ def required_items(quest_root: Path | str) -> list[Item]:
             add(LEFT_OUT, q, _sentence(f"{_said(root, q)} is not reported: a check of the results showed the value is wrong"
                                        + (f" ({note})" if note else "")))
     for d in (checked.get("kept_differences") if isinstance(checked, dict) else None) or []:
-        if isinstance(d, dict) and d.get("quantity"):  # a second model's finding that a rerun of the study showed to move no number
-            q = _one(d["quantity"])
-            add(METHOD_DIFFERS, q, _sentence(f"A second model found that the code computes {_said(root, q)} by a method that differs "
-                                             "from the plan's definition; the study run again with a repair of it reported the same "
-                                             "numbers, so the value is kept"))
+        if isinstance(d, dict) and d.get("quantity") and not set(map(str, d.get("keys") or [])) <= set(map(str, checked.get("removed_quantities") or [])):
+            q = _one(d["quantity"])  # a second model's finding that no measurement showed to move a number, for keys that are back
+            if (d.get("measured") or {}).get("status") == "unchanged":
+                add(METHOD_DIFFERS, q, _sentence(f"A second model found that the code computes {_said(root, q)} by a method that "
+                                                 "differs from the plan's definition; a test shows it, and the study run again with a "
+                                                 "repair that passes the test reported the same numbers, so the value is kept"))
+            else:
+                add(METHOD_DIFFERS, q, _sentence(f"A second model claims that the code computes {_said(root, q)} by a method that "
+                                                 "differs from the plan's definition; no test FI wrote could show it, so the claim is "
+                                                 "not shown and the value is kept"))
     _precision_items(root, add)
     # A key function whose second, independently written version still gives different results (not one that could not
     # be compared: that is in the quality report only).
