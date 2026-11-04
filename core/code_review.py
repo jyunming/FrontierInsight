@@ -1741,12 +1741,13 @@ def open_findings(quest_root: Path, code_dir: Path) -> dict[str, Any]:
     not read again), ``not_reviewed`` (requirements the reader did not check) and ``not_reviewed_headline``, ``missing`` /
     ``different`` (requirements not computed / computed differently from the plan), ``conflicts`` (the plan's parts
     disagree), ``unshown`` (flagged, and no test could show the fault), ``flagged`` (flagged logic problems, still open),
-    ``stopped`` (repairs ended because a round did not reduce what is open). A finding the run's own results contradict is
-    not in it. Everything is empty for a quest with no record."""
+    ``stopped`` (repairs ended because a round did not reduce what is open), ``not_rechecked`` (the code was changed after
+    the reading, and a finding no test could show, because every test written for it errored, was not checked again; the
+    same exclusions apply as to the others). A finding the run's own results contradict is not in it. Everything is empty for a quest with no record."""
     record = load(quest_root)
     out: dict[str, Any] = {"unread": "", "reread": False, "not_reviewed": [], "not_reviewed_headline": False,
                            "missing": [], "different": [], "conflicts": [], "unshown": [], "flagged": [], "stopped": False,
-                           "never_run": [],
+                           "never_run": [], "not_rechecked": [],
                            "second_version": second_version_sentences(quest_root),
                            "reviewed": bool(record.get("read_version"))}
     if not record:
@@ -1763,13 +1764,26 @@ def open_findings(quest_root: Path, code_dir: Path) -> dict[str, Any]:
         out["not_reviewed_headline"] = bool(record.get("not_reviewed_headline"))
     issues = record.get("issues") if isinstance(record.get("issues"), dict) else {}
     # A quantity the results hold under another name (reported_under_another_name, recorded at the evidence gate) is
-    # computed: it is not "not computed".
-    still = [v for v in not_computed(quest_root, code_dir) if not v.get("contradicted")
-             and not (issues.get(v.get("fid")) or {}).get("reported_as")]
+    # computed: it is not "not computed". A finding the run's own results contradict is not open.
+    def kept(v: dict[str, Any]) -> bool:
+        return not v.get("contradicted") and not (issues.get(v.get("fid")) or {}).get("reported_as")
+
     # A finding about a function the run never calls cannot change a reported number: it stays in FI's record
     # (QUALITY.md), not in the paper (core/code_reach.py). A quantity said to be missing is about the whole code.
     never_run = _code_reach.never_run_in(quest_root)
-    out["never_run"] = [v for v in still if v.get("status") != MISSING and never_run(v.get("file_rel"), v.get("function"))]
+
+    def never_called(v: dict[str, Any]) -> bool:
+        return v.get("status") != MISSING and never_run(v.get("file_rel"), v.get("function"))
+
+    still = [v for v in not_computed(quest_root, code_dir) if kept(v)]
+    if record.get("final") and record.get("version") != now:
+        # The code was changed after the reading: a finding no test could show (every test written for it errored) was not
+        # looked at again for this version. Same exclusions as above.
+        out["not_rechecked"] = [
+            v for v in record.get("problems") or [] if isinstance(v, dict) and kept(v) and not never_called(v)
+            and (issues.get(v.get("fid")) or {}).get("errored_only") is True
+            and (issues.get(v.get("fid")) or {}).get("demonstrated") is not True]
+    out["never_run"] = [v for v in still if never_called(v)]
     still = [v for v in still if v not in out["never_run"]]
     logic = [v for v in still if v.get("kind") == "logic"]
     left = [v for v in still if v.get("kind") != "logic"]

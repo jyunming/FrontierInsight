@@ -97,18 +97,60 @@ def test_a_replacement_test_that_fails_by_assertion_is_still_recognised(tmp_path
     assert "crash" not in issue and code_findings.shown_open(record) == [issue]
 
 
-def test_an_unshown_finding_stays_in_the_paper_when_the_code_changes_after_the_review(tmp_path: Path) -> None:
-    root, record, issue, env = _reviewed(tmp_path, [FENCED_CALL])
+def _reviewed_then_changed(tmp_path: Path, replies: list[str], *, problem: dict[str, Any] | None = None,
+                           code: str | None = None) -> tuple[Path, dict[str, Any]]:
+    """The review's tests run (``replies``), the reading is saved for this code, and then the code is changed."""
+    root, record, issue, env = _reviewed(tmp_path, replies)
+    if code is not None:
+        (root / "code" / "experiment.py").write_text(code, encoding="utf-8")
     asyncio.run(finding_repair.demonstrate(env, issue, "experiment.py"))
-    code_review.save(root, {**record, "final": True, "version": code_review.version(root / "code"),
-                            "problems": [{"fid": "F-9", "text": issue["text"], "status": "different"}]})
-    kinds = [i for i in paper_facts.required_items(root) if i.kind == paper_facts.CODE_FINDING]
-    assert len(kinds) == 1 and "flagged a problem" in kinds[0].sentence and "not checked again" not in kinds[0].sentence
-    # a later repair changes the code: the reading's list is now empty, and the finding must still be said
-    (root / "code" / "experiment.py").write_text("def dose():\n    return 59.0\n", encoding="utf-8")
-    [item] = [i for i in paper_facts.required_items(root) if i.kind == paper_facts.CODE_FINDING]
-    assert "no test could show it" in item.sentence and "not checked again" in item.sentence
-    assert "typed-in value" in item.sentence
+    found = {"fid": "F-9", "text": issue["text"], "status": "different", **(problem or {})}
+    code_review.save(root, {**record, "final": True, "version": code_review.version(root / "code"), "problems": [found]})
+    (root / "code" / "experiment.py").write_text(
+        (code or CRASHES) + "\n\ndef changed_after_the_review():\n    return 1\n", encoding="utf-8")
+    return root, issue
+
+
+def _findings(root: Path) -> list[Any]:
+    return [i for i in paper_facts.required_items(root) if i.kind == paper_facts.CODE_FINDING]
+
+
+def test_an_unshown_finding_stays_in_the_paper_when_the_code_changes_after_the_review(tmp_path: Path) -> None:
+    root, issue = _reviewed_then_changed(tmp_path, [FENCED_CALL])
+    assert issue["errored_only"] is True
+    [item] = _findings(root)
+    assert "a possible problem with the dose is a typed-in value" in item.sentence
+    assert "every test written for it failed to run" in item.sentence and "not checked again" in item.sentence
+    assert "can change a reported result" not in item.sentence
+
+
+def test_a_later_test_that_ran_and_passed_is_not_said_to_have_failed_to_run(tmp_path: Path) -> None:
+    passing = "def test_x():\n    import experiment\n    assert experiment.other() == 60.0\n"
+    root, issue = _reviewed_then_changed(
+        tmp_path, [FENCED_CALL, passing], code=CRASHES + "\n\ndef other():\n    return 60.0\n")
+    assert issue["errors"] and issue["errored_only"] is False
+    assert _findings(root) == [], "a test that ran and passed is not 'no test could show it'"
+
+
+def test_a_finding_about_a_function_the_run_never_calls_stays_out(tmp_path: Path) -> None:
+    calls_helper = FENCED_CALL.replace("dose()", "helper()")
+    root, issue = _reviewed_then_changed(
+        tmp_path, [calls_helper], problem={"file_rel": "experiment.py", "function": "helper"},
+        code="def helper():\n    return {}['missing']\n\n\ndef dose():\n    return 59.0\n\n\nprint(dose())\n")
+    assert issue["errored_only"] is True
+    # the same finding about a function the run does call is said: the exclusion is the only difference
+    record = code_review.load(root)
+    record["problems"][0]["function"] = "dose"
+    code_review.save(root, record)
+    assert len(_findings(root)) == 1
+    record["problems"][0]["function"] = "helper"
+    code_review.save(root, record)
+    assert _findings(root) == []
+
+
+def test_a_finding_the_runs_results_contradict_stays_out(tmp_path: Path) -> None:
+    root, issue = _reviewed_then_changed(tmp_path, [FENCED_CALL], problem={"contradicted": True})
+    assert _findings(root) == []
 
 
 @pytest.mark.asyncio
@@ -169,3 +211,35 @@ async def test_a_study_script_that_exits_nonzero_is_repaired_and_run_again(tmp_p
     state.update(await eng._node_execute_reflect(state))
     assert state["exec_reflect_iter"] == 1 and (eng.quest_root / "code" / "experiment.py").read_text(encoding="utf-8") == fixed
     assert eng._route_after_execute_reflect(state) == "retry"  # type: ignore[arg-type]
+
+
+@pytest.mark.slow
+@pytest.mark.timeout(900)
+@pytest.mark.asyncio
+async def test_a_study_script_that_exits_nonzero_runs_again_once_repaired_in_a_real_venv(tmp_path: Path) -> None:
+    """The same path with the real VenvExecutor: only the model's repair is stubbed; the repaired script's second run is seen."""
+    import json
+    from unittest.mock import AsyncMock
+
+    from core.config import Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig
+
+    cfg = Config(topic="a small study", title="small", provider=ProviderConfig(name="openai"),
+                 engine=EngineConfig(max_iterations=1, review_loop=False, execute_replicates=1),
+                 execution=ExecutionConfig(sandbox="venv", timeout_s=120), knowledge=KnowledgeConfig(enabled=False),
+                 output=OutputConfig(output_dir=tmp_path / "out"))
+    eng = Engine(cfg)
+    for sub in ("code", "figures"):
+        (eng.quest_root / sub).mkdir(parents=True, exist_ok=True)
+    script = eng.quest_root / "code" / "experiment.py"
+    script.write_text("import sys\nsys.exit(1)\n", encoding="utf-8")
+    state: dict[str, Any] = {"deps": [], "design": {"hypothesis": "h"}, "code": script.read_text(encoding="utf-8")}
+    state.update(await eng._node_execute(state))
+    assert state["exec_result"]["returncode"] == 1 and not state.get("result_json")
+    fixed = "print('RESULT_JSON: {\"x\": 1}')\n"
+    eng._client = type("Stub", (), {"chat": AsyncMock(return_value=json.dumps(
+        {"code": fixed, "deps": [], "patch_summary": "fixed", "give_up_reason": ""}))})()
+    state.update(await eng._node_execute_reflect(state))
+    assert eng._route_after_execute_reflect(state) == "retry"  # type: ignore[arg-type]
+    assert script.read_text(encoding="utf-8") == fixed
+    state.update(await eng._node_execute(state))  # the second execution, of the repaired script
+    assert state["exec_result"]["returncode"] == 0 and state["result_json"] == {"x": 1}
