@@ -237,3 +237,25 @@ def test_geometry_findings_check_the_figures_own_legend_box():
     assert figure_facts.geometry_findings(inside) == []
     assert any("covers part of" in s for s in figure_facts.geometry_findings(over))
     assert any("reaches outside" in s for s in figure_facts.geometry_findings(off))
+
+
+def test_a_crowded_single_panel_legend_keeps_series_and_reference_lines_that_share_a_label():
+    h = _Host(1)
+    h.references = {"cap": {"value": 5.0, "label": "Reference line"}, "floor": {"value": 0.5, "label": "Reference line"}}
+    spots = [[1], [2], [3], [1, 2], [2, 3], [1, 3], [1, 2, 3]]
+    h.series_ids = ["series%d" % k for k in range(len(spots))]
+    labels = dict(LABELS, **{"series%d" % k: "Same name" for k in range(len(spots))})
+    for k, at in enumerate(spots):
+        h.line(0, "series%d" % k, at, [float(v) for v in at], "growth")
+    h.ref(0, "cap")
+    h.ref(0, "floor")
+    h.finish(labels, {})
+    assert [t.get_text() for t in h.fig.legends[0].get_texts()] == ["Same name"] * 7 + ["Reference line"] * 2
+    assert len(h.record()["legend"]["entries"]) == 9
+
+
+def test_the_recorded_figure_texts_hold_every_legend_entry_and_each_panel_counts_as_having_a_legend(tmp_path):
+    record, _paper = _paper_copy(tmp_path, 2)
+    assert "Fast colony" in record["texts"]
+    lines = json.loads((tmp_path / "records" / "g.seed0.json").read_text(encoding="utf-8"))
+    assert all(ax["legend"] for ax in lines["axes"])

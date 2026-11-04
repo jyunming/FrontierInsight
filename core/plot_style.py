@@ -1194,8 +1194,11 @@ try:
                     record = {"file": name, "axes": [{**_fi_axes(ax), **_fi_where(ax)} for ax in self.get_axes()]}
                     # The words printed on the figure outside any panel (its title, a note), as the panels' are.
                     try:
-                        record["texts"] = _fi_texts([getattr(self, "_suptitle", None)] + list(self.texts)
-                                                    + [t for leg in getattr(self, "legends", []) for t in leg.get_texts()])[:12]
+                        record["texts"] = _fi_texts([getattr(self, "_suptitle", None)] + list(self.texts))[:12]
+                        # every entry of the figure's own legend (never cut: each is read for the numbers it prints)
+                        for words in _fi_texts([t for leg in getattr(self, "legends", []) for t in leg.get_texts()]):
+                            if words not in record["texts"]:
+                                record["texts"].append(words)
                         box = _fi_figure_legend_box(self)
                         if box is not None:
                             record["legend_box"] = box

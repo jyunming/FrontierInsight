@@ -1074,11 +1074,11 @@ class FigureCalls:
             outside = []
             for i in live:
                 ax, rec = self._panel(i)
-                placed = self._write_legend(ax, i, rec, [(a, t) for _k, a, t in keyed[i]])
+                placed = self._write_legend(ax, i, rec, keyed[i])
                 if placed is not None:
                     outside.append(placed)
-            for ax, handles, texts in outside:
-                self._legend_outside(ax, handles, texts)
+            for ax, entries in outside:
+                self._legend_outside(ax, entries)
         for i in live:
             ax, rec = self._panel(i)
             self._place_notes(ax, i, rec)
@@ -1391,21 +1391,23 @@ class FigureCalls:
                         break
 
     def _write_legend(self, ax, panel, rec, entries):
-        """Draw the legend in a free corner; if it needs room outside, return ``(ax, handles, texts)`` for ``_legend_outside``."""
+        """Draw the legend in a free corner; if it needs room outside, return ``(ax, entries)`` for ``_legend_outside``; ``entries`` are the keyed
+        entries of ``_entries_keyed``."""
         if not entries:
             return None
-        handles, texts = [a for a, _ in entries], [t for _, t in entries]
+        handles, texts = [a for _k, a, _t in entries], [t for _k, _a, t in entries]
         corner = self._free_corner(ax, rec, len(entries)) if len(entries) <= 6 else None
         if corner is not None:
             ax.legend(handles, texts, loc=corner, fontsize="small", framealpha=0.85)
             self._fc_extra.setdefault(panel, {"series": [], "refs": []})["legend_corner"] = corner
             self._fc_legend = {"scope": "panel", "panel": panel + 1, "where": corner, "entries": list(texts)}
             return None
-        return ax, handles, texts
+        return ax, entries
 
-    def _legend_outside(self, ax, handles, texts):
-        """A single panel's legend that fits in no corner goes outside the axes, as the one legend of the figure."""
-        self._figure_legend(ax.figure, [None], {None: [(None, h, t) for h, t in zip(handles, texts)]})
+    def _legend_outside(self, ax, entries):
+        """A single panel's legend that fits in no corner goes outside the axes, as the one legend of the figure; its entries keep
+        their own keys, so two series (or reference lines) that share a label stay two entries."""
+        self._figure_legend(ax.figure, [None], {None: entries})
 
     def _figure_legend(self, fig, panels, keyed):
         """One legend for the figure: the entries of every panel in ``panels``, each series once (by its key), outside the axes
@@ -1419,6 +1421,10 @@ class FigureCalls:
                 seen.add((key, text))
                 handles.append(art)
                 texts.append(text)
+                try:
+                    art.set_label(text)  # the artist carries the name the legend shows, for the recorder of the saved figure
+                except Exception:  # noqa: BLE001
+                    pass
         try:
             renderer = fig.canvas.get_renderer()
         except AttributeError:  # a canvas that cannot measure: a legend inside the first panel is still better than none
