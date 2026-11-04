@@ -487,6 +487,7 @@ async def judge(executor: Any, python: Path | str, quest_root: Path | str, copy:
             return Verdict("could_not", why, mode=mode, seconds=secs, source=source, files=files, crashed=crashed)
         base_root = Path(results_root or quest_root)
         base = await asyncio.to_thread(results_of, base_root, derived)
+        delivered = dict(base)  # every delivered number, before a file the repaired run did not write leaves the comparison
         new = await asyncio.to_thread(results_of, out)
         # a result file the repaired run did not write is not compared (an analysis-only rerun writes only derived.json)
         unwritten = await asyncio.to_thread(result_files, base_root, derived)
@@ -511,11 +512,15 @@ async def judge(executor: Any, python: Path | str, quest_root: Path | str, copy:
                            + ("; its own record says " + "; ".join(said) if said else ""), keys=keys, notes=notes,
                            mode=mode, seconds=secs, source=source, files=files, crashed=True)
         if disputed is not None and not keep:
-            absent = [q for q in disputed if not (any(_names(k, q) for k in base) and any(_names(k, q) for k in new))]
-            if absent or not disputed:
-                return Verdict("could_not", "the rerun never compared " + (", ".join(absent) or "the disputed quantity")
-                               + " (a result file of it was not written, or none holds it)", notes=notes, mode=mode, seconds=secs,
-                               source=source, files=files)
+            # every delivered number of a disputed quantity must have been compared, key by key: one left out (a setting
+            # of it in a result file the repaired run did not write, or one it no longer gives) leaves the answer open
+            left = [k for q in disputed for k in delivered if _names(k, q) and not (k in base and k in new)]
+            none = [q for q in disputed if not any(_names(k, q) for k in delivered)]
+            if left or none or not disputed:
+                return Verdict("could_not", "the rerun did not compare every delivered number of "
+                               + (", ".join(disputed) or "the disputed quantity") + (": " + ", ".join(left[:4]) if left else
+                                                                                       " (none holds it)"),
+                               notes=notes, mode=mode, seconds=secs, source=source, files=files)
         loose = [k for k in keys if metric_of(k)[0] is None]
         metrics = sorted({m for m in (metric_of(k)[0] for k in keys) if m})
         if loose and not metrics:

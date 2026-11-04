@@ -69,9 +69,10 @@ def test_a_shown_difference_whose_passing_repair_moves_no_number_gives_the_resul
     assert calls == ["demonstrate", ("rerun", True, [["cover"]])]  # the repair is held to the test; the reader's quantity is the disputed one
     rc = _rc(engine.quest_root)
     assert rc["removed_quantities"] == [] and rc["checks"] == [] and "Do NOT report" not in rc["say"]
-    assert rc["kept_differences"][0]["measured"]["status"] == "unchanged" and "A test shows the difference" in rc["say"]
+    assert rc["kept_differences"][0]["measured"]["status"] == "unchanged" and "FI observed this" in rc["say"] and "do not say that the plan's definition was run" in rc["say"]
     items = [i for i in pf.required_items(engine.quest_root) if i.kind == pf.METHOD_DIFFERS]
-    assert items and "a test shows it" in items[0].sentence
+    assert items and "failed on the code that produced the results" in items[0].sentence
+    assert "plan's definition gave" not in rc["say"] and "run again with the plan" not in items[0].sentence
     assert "cover" not in result_checks.left_out_by_record(engine.quest_root)
 
 
@@ -183,7 +184,7 @@ def test_a_result_file_the_repair_stopped_writing_is_unmeasured_for_a_reader_rep
     root, copy = _judge_quest(tmp_path, write_table=False)
     assert _run_judge(root, copy).status == "unchanged"  # the old reading, still used for a shown fault
     got = _run_judge(root, copy, disputed=["cover"])
-    assert got.status == "could_not" and "never compared cover" in got.why
+    assert got.status == "could_not" and "did not compare every delivered number of cover" in got.why
     root, copy = _judge_quest(tmp_path / "b", write_table=True)
     assert _run_judge(root, copy, disputed=["cover"]).status == "unchanged"  # compared, and the same
     assert _run_judge(root, copy, disputed=["nothing"]).status == "could_not"  # a quantity nothing holds was not compared
@@ -200,3 +201,70 @@ def test_a_repair_that_loses_a_delivered_number_is_not_a_measurement_for_a_reade
     assert asyncio.run(rerun_check.judge(_Local(), sys.executable, root, copy, P, 60, None)).status == "changed"
     new = asyncio.run(rerun_check.judge(_Local(), sys.executable, root, copy, P, 60, None, disputed=["est"]))
     assert new.status == "could_not" and "gave no number" in new.why and new.crashed
+
+
+def test_one_setting_in_a_file_the_repair_did_not_write_leaves_the_answer_open(tmp_path) -> None:
+    """Setting `s` of the disputed quantity is in derived.json and unchanged; setting `b` was in table.json, which the repair stopped writing."""
+    from tests.test_rerun_check import _delivered
+
+    root = tmp_path / "quest"
+    _delivered(root, 1.0)
+    (root / "data" / "results" / "table.json").write_text(json.dumps({"est": {"b": 1.0}}), encoding="utf-8")
+    line = "(out / 'data' / 'results' / 'table.json').write_text(json.dumps({'est': {'b': 1.0}}))\n"
+    (root / "code" / "run.py").write_text((root / "code" / "run.py").read_text(encoding="utf-8").replace("sys.exit(1)", line + "sys.exit(1)"),
+                                          encoding="utf-8")
+    copy = rerun_check.copy_code(root, tmp_path / "w")
+    (copy / "run.py").write_text((copy / "run.py").read_text(encoding="utf-8").replace(line, "") + "\n# a repair\n", encoding="utf-8")
+    got = _run_judge(root, copy, disputed=["est"])
+    assert got.status == "could_not" and "file:table.json/est/b" in got.why
+
+
+def test_a_kept_answer_is_reused_only_when_it_was_made_the_same_way(tmp_path) -> None:
+    from core import code_review as cr
+    from core.engine import Engine
+
+    engine = _engine(tmp_path)
+    root = _quest(engine)
+    ran: list[bool] = []
+
+    async def one(issue: Any, record: Any, state: Any, done: Any, budget: Any = None, strict: bool = False) -> Verdict:
+        ran.append(strict)
+        return Verdict("unchanged")
+
+    engine._rerun_one = one  # type: ignore[method-assign,assignment]
+    record = {"issues": {"F-9": dict(ISSUE)}}
+    plain = {**ISSUE, "id": "F-9"}
+    strict = {**plain, "disputed": ["cover"]}
+    asyncio.run(Engine._rerun_shown(engine, [(plain, "")], record, {}))
+    assert ran == [False]
+    asyncio.run(Engine._rerun_shown(engine, [(strict, "")], record, {}, strict=True))
+    assert ran == [False, True]  # an ordinary answer is never reused for a reader's claim
+    asyncio.run(Engine._rerun_shown(engine, [(strict, "")], record, {}, strict=True))
+    assert ran == [False, True]  # the same way, the same disputed quantity: reused
+    asyncio.run(Engine._rerun_shown(engine, [({**plain, "disputed": ["other"]}, "")], record, {}, strict=True))
+    assert ran == [False, True, True]  # another disputed set is asked again
+    asyncio.run(Engine._rerun_shown(engine, [(plain, "")], record, {}))
+    assert ran == [False, True, True]  # a strict answer also stands for an ordinary one
+    assert cr.version(root / "code")
+
+
+def test_without_records_every_changed_number_is_left_out_and_the_headline_still_stops(tmp_path, monkeypatch) -> None:
+    calls: list[Any] = []
+    engine, record = _setup(tmp_path, monkeypatch, shown=True, verdict=Verdict("changed", metrics=["cover", "corr_ab"]), calls=calls)
+    assert _measure(engine, record, ["est_a"], reach=False) is None
+    removed = _rc(engine.quest_root)["removed_quantities"]
+    assert "cover" in removed and "corr_ab" in removed and "est_a" not in removed
+
+
+def test_a_changed_number_no_result_owns_is_also_placed_by_what_the_finding_reaches(tmp_path, monkeypatch) -> None:
+    from core import shown_reach
+
+    calls: list[Any] = []
+    engine, record = _setup(tmp_path, monkeypatch, shown=True, verdict=Verdict("changed", metrics=["cover"], unplaced=["file:x/y"]), calls=calls)
+    monkeypatch.setattr(shown_reach.Reach, "effect", lambda self, rec, issue, result=None: shown_reach.Effect(left_out=["corr_ab"]))
+    assert _measure(engine, record, ["est_a"]) is None
+    assert "corr_ab" in _rc(engine.quest_root)["removed_quantities"]
+    calls2: list[Any] = []
+    engine, record = _setup(tmp_path / "b", monkeypatch, shown=True, verdict=Verdict("changed", metrics=["cover"]), calls=calls2)
+    assert _measure(engine, record, ["est_a"]) is None  # nothing unplaced: only what the changed number reaches
+    assert "corr_ab" not in _rc(engine.quest_root)["removed_quantities"]

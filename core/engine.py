@@ -22847,7 +22847,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             fid = str(issue.get("id"))
             saved = (record.get("issues") or {}).get(fid)
             kept = saved.get("rerun") if isinstance(saved, dict) else None
-            if isinstance(kept, dict) and kept.get("version") == version and kept.get("status") in ("changed", "unchanged", "could_not"):
+            disputed = sorted(str(x) for x in issue.get("disputed") or []) if strict else []
+            # an answer kept for this code is reused only when it was made in the same way: a strict answer (the disputed
+            # quantities compared key by key) also stands for an ordinary one, never the other way round
+            same_way = (bool(kept.get("strict")) and (not strict or kept.get("disputed") == disputed)) if isinstance(kept, dict) and (
+                strict or kept.get("strict")) else isinstance(kept, dict)
+            if isinstance(kept, dict) and same_way and kept.get("version") == version and kept.get("status") in ("changed", "unchanged", "could_not"):
                 out[fid] = _rerun_check.Verdict(**{k: v for k, v in kept.items() if k in fields})
                 continue
             if runs >= self.MAX_RERUNS:
@@ -22861,7 +22866,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                       type(exc).__name__, exc)
                     out[fid] = _rerun_check.Verdict("could_not", f"{type(exc).__name__}: {exc}"[:200])
             if isinstance(saved, dict):
-                saved["rerun"] = {**out[fid].record(), "version": version}
+                saved["rerun"] = {**out[fid].record(), "version": version, "strict": strict,
+                                  "disputed": sorted(str(x) for x in issue.get("disputed") or []) if strict else []}
             self._log_rerun(fid, out[fid])
         _code_review.save(self.quest_root, record)
         return out
@@ -23119,15 +23125,23 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     kept.append(c)
                 elif v is not None and v.status == "changed":
                     why = ""
-                    if reach is not None:
-                        placed = reach.effect_of_changes(v.metrics)
-                        keys = sorted({*(c.get("keys") or []), *reach.printed_keys(placed.left_out, result), *placed.extra_keys})
-                        if keys:
-                            self._leave_out_shown_faults([(c["quantity"], keys, "the study run again with a repair of it reports other "
-                                                           "numbers for " + ", ".join(v.metrics)[:160])], [], result)
+                    placed = reach.effect_of_changes(v.metrics) if reach is not None else None
+                    if placed is not None and (v.unplaced or "failed trials" in v.metrics):
+                        # a changed number that belongs to no result FI can name is not cleared by the rerun: the finding is also
+                        # placed by what it reaches, as the ordinary shown fault is
+                        other = reach.effect(record, issues[fid], result)  # type: ignore[union-attr]
+                        placed = None if other is None else _shown_reach.union(placed, other)
+                    if placed is not None:
+                        keys = sorted({*(c.get("keys") or []), *reach.printed_keys(placed.left_out, result), *placed.extra_keys})  # type: ignore[union-attr]
                         why = placed.stop
-                    elif main and any(_shown_reach._norm(m) in main for m in v.metrics):
-                        why = "the main result is among them (the plan's headline: " + ", ".join(headline or [])[:120] + ")"
+                    else:
+                        # no records to place it by: every changed number is left out, and the plan's headline names decide the stop
+                        keys = sorted({*(c.get("keys") or []), *(m for m in v.metrics if m != "failed trials")})
+                        if main and any(_shown_reach._norm(m) in main for m in v.metrics):
+                            why = "the main result is among them (the plan's headline: " + ", ".join(headline or [])[:120] + ")"
+                    if keys:
+                        self._leave_out_shown_faults([(c["quantity"], keys, "the study run again with a repair of it reports other "
+                                                       "numbers for " + ", ".join(v.metrics)[:160])], [], result)
                     if why and stop is None:
                         text = (f"a second model found `{c['quantity']}` computed differently from the plan, a test shows it, and the "
                                 f"study run again with a repair of it reports other numbers for {', '.join(v.metrics)[:160]}: {why}")

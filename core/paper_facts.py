@@ -404,9 +404,10 @@ def required_items(quest_root: Path | str) -> list[Item]:
         if isinstance(d, dict) and d.get("quantity") and not set(map(str, d.get("keys") or [])) <= set(map(str, checked.get("removed_quantities") or [])):
             q = _one(d["quantity"])  # a second model's finding that no measurement showed to move a number, for keys that are back
             if (d.get("measured") or {}).get("status") == "unchanged":
-                add(METHOD_DIFFERS, q, _sentence(f"A second model found that the code computes {_said(root, q)} by a method that "
-                                                 "differs from the plan's definition; a test shows it, and the study run again with a "
-                                                 "repair that passes the test reported the same numbers, so the value is kept"))
+                add(METHOD_DIFFERS, q, _sentence(f"A second model claims that the code computes {_said(root, q)} by a method that "
+                                                 "differs from the plan's definition. A test written for the claim failed on the code "
+                                                 "that produced the results and passed on a repair, and the numbers reported with that "
+                                                 "repair did not move beyond their allowance, so the value is kept"))
             else:
                 add(METHOD_DIFFERS, q, _sentence(f"A second model claims that the code computes {_said(root, q)} by a method that "
                                                  "differs from the plan's definition; no test FI wrote could show it, so the claim is "

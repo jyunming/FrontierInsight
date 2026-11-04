@@ -135,10 +135,11 @@ def _keep_measured(record: dict[str, Any], kept: list[dict[str, Any]]) -> None:
     for d in returned:
         why = f"A second model found that `{d['quantity']}` is computed differently from the plan ({str(d['note']).rstrip('.')}). "
         if (d["measured"] or {}).get("status") == "unchanged":
-            paragraphs.append(why + "A test shows the difference and FI ran the study again with a repair that passes it: no reported "
-                              f"number moved beyond its allowance, so the value stays in the results. Report it, and say plainly, in the "
-                              f"limitations, that the code computes `{d['quantity']}` by a method that differs from the plan's "
-                              "definition and that a rerun with the plan's definition gave the same numbers.")
+            paragraphs.append(why + "FI observed this: a test written for the claim failed on the code that produced the results, "
+                              "it passed on a repair, and the numbers the study reported with that repair did not move beyond their "
+                              f"allowance. The value of `{d['quantity']}` stays in the results. Report it, and say plainly, in the "
+                              "limitations, that a second model claims the method differs from the plan's definition and that these "
+                              "three things were observed; do not say that the plan's definition was run.")
         else:
             paragraphs.append(why + "FI asked for a test that shows it and none did, so the claim is not shown and the value stays in "
                               f"the results. Report it, and say plainly, in the limitations, that a second model claims the code "
