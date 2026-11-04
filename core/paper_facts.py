@@ -612,6 +612,18 @@ def write_unsupported_record(quest_root: Path | str, claims: list[dict[str, Any]
     return True
 
 
+def forget_removed_unsupported(quest_root: Path | str) -> None:
+    """A new draft is written: the sentences FI took out of the earlier draft (``removed`` in :data:`UNSUPPORTED_RECORD`) are
+    not stated about this one. The claims the last check found are left to the next check, which writes them again."""
+    path = Path(quest_root) / UNSUPPORTED_RECORD
+    try:
+        record = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+        if isinstance(record, dict) and record.pop("removed", None) is not None:
+            path.write_text(json.dumps(record, indent=1, ensure_ascii=False) + chr(10), encoding="utf-8")
+    except (OSError, ValueError):
+        pass
+
+
 _MAX_DIFFERENCE_CHARS = 500
 
 

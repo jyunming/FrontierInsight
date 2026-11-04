@@ -23926,6 +23926,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._log.warning("[code] could not try code/ in a clean environment: %s", exc)
 
     async def _node_write(self, state: QuestState) -> QuestState:
+        _paper_facts.forget_removed_unsupported(self.quest_root)  # what was taken out of an earlier draft is not this one's
         await self._check_code_project()
         persona_block = self._resolve_write_persona(state)
         self._log.info(

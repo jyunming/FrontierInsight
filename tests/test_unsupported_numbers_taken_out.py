@@ -111,3 +111,15 @@ def test_the_limitations_sentence_and_the_quality_report_name_the_taken_out_clai
     (item,) = [i for i in paper_facts.required_items(root) if i.kind == paper_facts.UNSUPPORTED_CLAIMS]
     assert item.sentence.startswith("One sentence of the draft") and "was taken out of this paper" in item.sentence
     assert "A number sentence" not in item.sentence
+
+
+def test_what_was_taken_out_of_an_earlier_draft_is_not_stated_about_a_new_one(tmp_path: Path) -> None:
+    """A person's refine writes a new draft after the delivery step: the removed list belongs to the draft it was made on."""
+    eng, path = _paper(tmp_path)
+    _run(eng, path)
+    record = eng.quest_root / ".fi" / "unsupported_claims.json"
+    assert json.loads(record.read_text(encoding="utf-8")).get("removed")
+    paper_facts.forget_removed_unsupported(eng.quest_root)
+    kept = json.loads(record.read_text(encoding="utf-8"))
+    assert "removed" not in kept and kept["claims"]
+    paper_facts.forget_removed_unsupported(tmp_path / "no_such_quest")  # nothing there: no error
