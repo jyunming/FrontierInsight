@@ -14,6 +14,11 @@ only the analysis changed), and the numbers it reports are compared with the del
   compared exactly.
 * A number the frozen protocol declares as a reference (a known answer, an analytic value) is not computed by the code: a
   repair that changes it repairs the plan, not the code, and it does not count.
+* A result the frozen protocol holds to a precision (``precision.target_half_width`` on ``precision.metric``) is not changed by
+  a small move of its estimate or interval ends (:func:`plan_allowance`: a quarter of the target, no more than the delivered
+  run's own standard error, no more than 1% of the value), with or without redrawn numbers. One number of a setting that
+  counts, or an interval whose width moves by more than that, takes the allowance from the whole setting. A result with no
+  declared precision keeps the rules above.
 * A change that only reshapes the same value (a number against ``{"value": ..., "lo": ..., "hi": ...}``) is not a change.
 * The rerun is bounded by the quest's own record of how long the study took (:func:`time_allowed`); when it does not fit,
   when the repaired code does not run, or when no result is written, the answer is "could not rerun".
@@ -290,6 +295,48 @@ def uncertainty(key: str, old: float, stats: dict, ok: dict[str, float], kinds: 
     return s[2] / math.sqrt(s[0]) if s else None
 
 
+def declared_precision(protocol: Any) -> tuple[str, float] | None:
+    """``(metric, half width)`` of the precision the frozen protocol holds a result to (``precision.target_half_width`` on
+    ``precision.metric``, or on the plan's only metric), in the unit of that result; ``None`` when the plan declares none, or
+    names no metric it declares. Read from the record only: nothing is taken from the plan's text."""
+    from . import run_estimate as _run_estimate
+
+    if not isinstance(protocol, dict) or not isinstance(protocol.get("precision"), dict):
+        return None
+    width = protocol["precision"].get("target_half_width")
+    metric, _kind = _run_estimate.precision_metric(protocol)
+    declared = {str(m.get("id")) for m in protocol.get("metrics") or [] if isinstance(m, dict)}
+    if (isinstance(width, bool) or not isinstance(width, (int, float)) or not 0 < float(width) < float("inf")
+            or not metric or metric not in declared):
+        return None
+    return metric, float(width)
+
+
+#: The share of the plan's precision target a rerun's move may use, and the share of the delivered value it may be at most.
+PLAN_SHARE = 0.25
+PLAN_REL = 0.01
+
+
+def plan_allowance(width: float, old: float, se: float | None) -> float:
+    """How far a number may move and still be inside the plan's precision: a quarter of the target half-width (the target is
+    what the plan needs the noise to reach, not a bias it accepts), no more than the delivered run's own standard error of the
+    number when FI's record has one, and no more than 1% of the delivered value (of the half-width when that is 0)."""
+    limit = min(PLAN_SHARE * width, PLAN_REL * (abs(old) if old else width))
+    return min(limit, se) if se is not None else limit
+
+
+def _end_side(key: str) -> str:
+    """``lo`` or ``hi`` for the key of an end of an interval, else an empty string."""
+    last = key.rsplit("/", 1)[-1].lower()
+    indexed = re.fullmatch(r"(?:ci|ci95|ci_95|interval|ci_bounds|bounds)\[([01])\]", last)
+    if indexed:  # an interval stored as a pair: index 0 is its lower end, 1 its upper end
+        return "lo" if indexed.group(1) == "0" else "hi"
+    leaf = re.sub(r"\[\d+\]$", "", last)
+    if leaf in ("lo", "low", "lower", "ci_lo", "ci_low", "ci_lower", "ci95_lo"):
+        return "lo"
+    return "hi" if leaf in ("hi", "high", "upper", "ci_hi", "ci_high", "ci_upper", "ci95_hi") else ""
+
+
 def counted(changes: list[dict[str, Any]], protocol: Any, base_trials: Any, redrawn: bool) -> tuple[list[dict[str, Any]], list[str]]:
     """Which of the compared changes count, and why the others do not (``notes``). ``redrawn``: the repair changes how random
     numbers are drawn, so every Monte Carlo number moves a little and only a move beyond its uncertainty counts."""
@@ -300,18 +347,44 @@ def counted(changes: list[dict[str, Any]], protocol: Any, base_trials: Any, redr
     notes: list[str] = []
     keep: list[dict[str, Any]] = []
     refs = 0
+    plan_precision = declared_precision(protocol)
+    pending: list[tuple[dict[str, Any], tuple[str | None, str | None], float]] = []  # inside the plan's precision, not yet excused
     for c in changes:
-        metric, _setting = metric_of(c["key"])
+        metric, setting = metric_of(c["key"])
         if metric and roles.get(metric) == "reference":
             refs += 1
             continue
-        if redrawn and c["new"] is not None and not (c["key"].endswith("/ok") or c["key"].endswith("/failed")):
+        counts = not (c["key"].endswith("/ok") or c["key"].endswith("/failed"))
+        if redrawn and c["new"] is not None and counts:
             se = uncertainty(c["key"], c["old"], stats, ok, kinds)
             if se is not None and abs(c["new"] - c["old"]) / (math.sqrt(2) * se) <= Z:
                 continue  # inside the Monte Carlo noise
+        if plan_precision and metric == plan_precision[0] and c["new"] is not None and counts and number_kind(c["key"]) in ("estimate", "end"):
+            allowed = plan_allowance(plan_precision[1], c["old"], uncertainty(c["key"], c["old"], stats, ok, kinds))
+            if abs(c["new"] - c["old"]) <= allowed:
+                pending.append((c, (metric, setting), allowed))
+                continue
         keep.append(c)
+    # One unit per (result, setting): a number of it that counts takes the plan's allowance from all the others, and so does an
+    # interval whose width moves by more than the allowance.
+    blocked = {(m, st) for c in keep for m, st in [metric_of(c["key"])] if plan_precision and m == plan_precision[0]}
+    for pair in {p for _c, p, _a in pending}:
+        ends = [(c, a) for c, q, a in pending if q == pair and _end_side(c["key"])]
+        lo = sum(c["new"] - c["old"] for c, _a in ends if _end_side(c["key"]) == "lo")
+        hi = sum(c["new"] - c["old"] for c, _a in ends if _end_side(c["key"]) == "hi")
+        if ends and abs(hi - lo) > min(a for _c, a in ends):
+            blocked.add(pair)
+    inside: dict[str, float] = {}  # result -> the largest move that stayed inside the plan's precision
+    for c, pair, _a in pending:
+        if pair in blocked:
+            keep.append(c)
+        else:
+            inside[pair[0] or ""] = max(inside.get(pair[0] or "", 0.0), abs(c["new"] - c["old"]))
+    keep.sort(key=lambda c: next((i for i, x in enumerate(changes) if x is c), 0))
     if refs:
         notes.append(f"{refs} changed value(s) are references the plan declares: that repairs the plan, not the code")
+    for m, move in sorted(inside.items()):
+        notes.append(f"{m} moves by {move:.3g}, inside the plan's precision {plan_precision[1]:.3g}")  # type: ignore[index]
     if redrawn:
         notes.append("the repair changes how random numbers are drawn: a number counts only beyond its Monte Carlo uncertainty")
     return keep, notes
