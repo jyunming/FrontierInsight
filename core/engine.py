@@ -18982,9 +18982,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if (gated := await self._gate_first(state)) is not None:  # the analysis on the recorded results (switch off: None)
             return gated, None, False
         await self._code_review_gate(state)
-        # A finding's test that crashed inside the code showed a crash, not the finding: the crash repair takes it.
-        if (crashed := await self._review_crash_run(state)) is not None:
-            return crashed, None, False
         failed_equations = await self._equation_gate(state, py, exec_env)
         if failed_equations is not None:
             return failed_equations, None, False
@@ -22371,7 +22368,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # design is written into code again (core/engine.py::_no_results_verdict).
         rewrite_code = bool(parsed.get("rewrite_code")) and status == "ok"
         no_findings = bool(parsed.get("stuck")) and status == "ok"
-        # A shown fault's test crashed inside the program: back to the run step's crash repair (RunChecksMixin._gate_crash_repair).
+        # The run step's crash repair (a search whose objective did not move, run again with no early stop).
         crash_repair = bool(parsed.get("repair_crash")) and status == "ok" and not no_findings
         assessment = {
             "verdict": verdict,
@@ -22756,7 +22753,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                  state: Any = None) -> dict[str, Any] | None:
         verdicts: list[tuple[dict[str, Any], str]] = []
         errored = False
-        crash_repair: dict[str, Any] | None = None
         declared = (_code_review.declared_names(state.get("design"), self._protocol_block(state),
                                                 _analysis_frame.read_record(self.quest_root))
                     if isinstance(state, dict) else None)
@@ -22792,35 +22788,27 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             elif run.status == "fail":
                 verdicts.append((issue, "its test still fails on it"))
             else:
-                # An error shows nothing, in the code or in the test (core/finding_repair.py): recorded, never a stop.
-                if not run.crash_in_program and record and isinstance(saved, dict):
-                    # ... but an error in the test's own code is asked for once more, as an assertion about values
+                # An error shows nothing, wherever it was raised (core/finding_repair.py): recorded, never a stop and never
+                # a crash of the study's run (a test calling the code on made-up data says something about the test).
+                if record and isinstance(saved, dict):
+                    # ... but it is asked for once more, as an assertion about values
                     again = await self._ask_finding_test_again(saved, run, record, state)
                     if again is not None and again.status == "fail":
                         verdicts.append((issue, "a test written again for it, asserting on the values, fails on it"))
                         continue
                     if again is not None and again.status == "pass":
                         continue
-                if run.crash_in_program and record and isinstance(saved, dict) and crash_repair is None:
-                    # a crash inside the program goes to the same crash repair as before the run, while it has repairs left
-                    crash_repair = self._gate_crash_repair(saved, run, rel, record, state)
                 if isinstance(saved, dict):
                     saved["gate_error"] = {"kind": run.kind, "place": run.place, "at": run.at,
                                            "detail": _one_line(run.detail or "", 300)}
                     errored = True
-                self._log.warning("[evidence_gate] the test of %s errors on the code that ran (%s%s): an error shows "
-                                  "nothing, so it does not stop the quest", issue.get("id"), _one_line(run.detail or "", 160),
-                                  ", inside the code" if run.crash_in_program else "")
+                self._log.warning("[evidence_gate] the test of %s errors on the code that ran (%s): an error shows "
+                                  "nothing, so it does not stop the quest", issue.get("id"), _one_line(run.detail or "", 160))
         if errored and record:
             _code_review.save(self.quest_root, record)
         # Whether a fault changes a reported number is shown by running the study with a repair of it, not by reasoning about
         # the test that failed (core/rerun_check.py).
         reruns = await self._rerun_shown(verdicts, record, state) if verdicts and record is not None else {}
-        if crash_repair is not None:
-            # a fault that stops the quest is not held up by a crash elsewhere; anything else waits for the repaired run
-            outcome = (self._shown_fault_outcome(verdicts, record or {}, result, headline or [], declared, reach=reach,
-                                                 reruns=reruns) if verdicts else None)
-            return outcome if outcome and outcome.get("stuck") else crash_repair
         if not verdicts:
             return None
         return self._shown_fault_outcome(verdicts, record or {}, result, headline or [], declared, reach=reach, reruns=reruns)

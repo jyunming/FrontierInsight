@@ -445,7 +445,7 @@ def required_items(quest_root: Path | str) -> list[Item]:
         from . import code_review as _code_review
 
         found = _code_review.open_findings(root, root / "code")
-        for v in [*found["missing"], *found["different"], *found["flagged"], *found["unshown"]]:
+        for v in [*found["missing"], *found["different"], *found["flagged"], *found["unshown"], *found["not_rechecked"]]:
             fid = str(v.get("fid") or "")
             if fid in gated:
                 continue
@@ -455,7 +455,13 @@ def required_items(quest_root: Path | str) -> list[Item]:
             if not changes:
                 continue
             text = _code_review._plain_text(v.get("text"))
-            if text:
+            if text and v in found["not_rechecked"]:
+                # The code was changed after the review, and every test written for it errored: only the review's word.
+                add(CODE_FINDING, text[:80], _sentence(
+                    f"A review of the code flagged a possible problem with {text}; no test could show it (every test "
+                    "written for it failed to run), and the code was changed afterwards and not checked again for it"),
+                    key=fid or text)
+            elif text:
                 add(CODE_FINDING, text[:80], _sentence("A review of the code flagged a problem that can change a "
                                                        f"reported result and was not resolved: {text}"), key=fid or text)
     except Exception:  # noqa: BLE001

@@ -4,13 +4,13 @@ its analysis as written and as they ran, the kept finding tests, the code-review
 cut to two items).
 
 * E2 stopped without a paper on F-b4bb7f48, whose test first "failed" only because it turned a crash inside the code
-  (``model.py:141``) into ``assert False``. Shown again here, that is a crash for the crash repair, not a shown fault; its
+  (``model.py:141``) into ``assert False``. Shown again here, that is an error that shows nothing, not a shown fault and not a crash of the run; its
   other shown fault (F-331a25f1) fails by its own assertion when first shown and on the code that ran, so its quantity is
   left out and the quest does not stop.
 * r14b stopped on F-27f456d7, a figure finding whose test failed by assertion when first shown but raised AttributeError in
   the test itself on the rewritten code: an error shows nothing, so the quest does not stop.
 * r12 (truly wrong code) is not caught here: both of its key finding tests only ever errored, one inside the code (the
-  solver's optimality failure, for the crash repair) and one at its own call. r12 is caught by FI's checks of the trials
+  solver's optimality failure, recorded as an error) and one at its own call. r12 is caught by FI's checks of the trials
   (tests/test_trial_checks.py, tests/test_trial_checks_run.py).
 
 The headline names are left empty (the plan's design is not in the fixtures), as the study-5 gate replay did."""
@@ -95,8 +95,9 @@ def test_replay_e2_the_crash_is_not_a_shown_fault_and_the_quest_does_not_stop(tm
     record = _gz("e2_record.json.gz")
     b4 = _first_show(tmp_path, "e2_written", record, "F-b4bb7f48")
     assert b4["demonstrated"] is False and b4["outcome"] == code_findings.NOT_DEMONSTRATED
-    assert b4["crash"]["at"] == "code/kinetics_parameter_recovery/model.py:141"
-    assert "turned it into an assertion" in b4["crash"]["detail"]
+    assert "crash" not in b4
+    assert b4["errors"][-1]["at"] == "code/kinetics_parameter_recovery/model.py:141"
+    assert "turned it into an assertion" in b4["errors"][-1]["detail"]
     f33 = _first_show(tmp_path, "e2_written", record, "F-331a25f1")
     assert f33["demonstrated"] is True and f33["failure_kind"] == code_findings.ASSERTION
     assert f33["assertion"].startswith("assert hasattr(") and f33["test"].endswith("F-331a25f1_2.py")
@@ -138,7 +139,7 @@ def test_replay_r14b_a_test_that_errors_on_the_code_that_ran_does_not_stop(tmp_p
     assert error["place"] == "test" and "has no attribute 'plt'" in error["detail"]
 
 
-def test_replay_r12_its_finding_tests_only_error_one_inside_the_code(tmp_path: Path) -> None:
+def test_replay_r12_its_finding_tests_error_one_inside_the_code_and_none_goes_to_the_run_repair(tmp_path: Path) -> None:
     root = tmp_path / "r12"
     shutil.copytree(FIX / "r12_written", root)
     record = {"issues": {fid: {"id": fid, "file": "kinetics_parameter_recovery/model.py", "function": "fit_rate",
@@ -153,33 +154,8 @@ def test_replay_r12_its_finding_tests_only_error_one_inside_the_code(tmp_path: P
         finally:
             finding_repair.TEST_CALLS = calls
     aece, b166 = record["issues"]["F-aece8568"], record["issues"]["F-b166c00c"]
-    assert aece["demonstrated"] is False and aece["crash"]["at"] == "code/kinetics_parameter_recovery/model.py:91"
+    assert aece["demonstrated"] is False and "crash" not in aece
+    assert aece["errors"][-1]["place"] == "program" and aece["errors"][-1]["at"] == "code/kinetics_parameter_recovery/model.py:91"
     assert b166["demonstrated"] is False and "crash" not in b166
     assert b166["errors"][-1]["place"] == "test" and "unexpected keyword argument" in b166["errors"][-1]["detail"]
     assert not code_findings.shown_open(record)
-
-
-@pytest.mark.usefixtures("this_python")
-def test_replay_r12_the_crash_goes_to_the_crash_repair_once(tmp_path: Path) -> None:
-    from tests.test_disclosure import _engine
-
-    root = tmp_path / "r12"
-    shutil.copytree(FIX / "r12_written", root)
-    record = {"issues": {"F-aece8568": {"id": "F-aece8568", "file": "kinetics_parameter_recovery/model.py",
-                                        "function": "fit_rate", "text": "t", "changes_result": True, "tests": 0}}}
-    replies = {"current": (root / ".fi" / "finding_tests" / "F-aece8568_1.py").read_text(encoding="utf-8")}
-    finding_repair.TEST_CALLS, calls = 1, finding_repair.TEST_CALLS
-    try:
-        asyncio.run(finding_repair.demonstrate(_env(root, record, replies), record["issues"]["F-aece8568"],
-                                               "kinetics_parameter_recovery/model.py"))
-    finally:
-        finding_repair.TEST_CALLS = calls
-    code_review.save(root, record)
-    eng = _engine(root)
-    state = {"exec_reflect_iter": 0, "design": {"split": True}}
-    sent = asyncio.run(eng._review_crash_run(state))  # type: ignore[arg-type]
-    assert sent is not None and sent["exec_result"]["returncode"] == 1
-    assert "code/kinetics_parameter_recovery/model.py:91" in sent["exec_result"]["stderr_tail"]
-    assert "Rate fit did not satisfy" in sent["exec_result"]["stderr_tail"]
-    assert asyncio.run(eng._review_crash_run(state)) is None  # sent once
-    assert code_review.load(root)["crashes_sent"] == 1

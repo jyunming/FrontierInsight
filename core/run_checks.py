@@ -54,8 +54,6 @@ TYPED_RESULT_REPAIRS = 2
 #: In ``.fi/``: the settings FI took out of the grid because the simulation never reads them.
 NO_DIFFERENCE_RECORD = "NO_DIFFERENCE_OBSERVED.json"
 _COUNTER = "typed_results.json"
-#: How many crashes inside the code, shown by a finding's test during the code review, go to the crash repair in a quest.
-REVIEW_CRASHES = 2
 #: How many times the gate sends a fault of the analysis on the recorded results back to be repaired in a script's life. The
 #: repairs have a counter of their own (``gate_repairs``): crash repairs of the simulation never leave them with none, and
 #: they spend none of the crash repairs.
@@ -2959,71 +2957,6 @@ class RunChecksMixin:
         except OSError:
             return ""
         return fault  # the analysis gate follows as ``Env.gate`` (one call for each change)
-
-    async def _review_crash_run(self, state: Any) -> dict[str, Any] | None:
-        """A test written for a reader's finding that crashed inside the code (not in the test) showed a crash, not the
-        finding: it goes to the crash repair like a failed run, with the place and the call that crashed, while a repair is
-        left and at most :data:`REVIEW_CRASHES` times a quest. The test is run again first: a crash a later repair removed
-        is not sent. ``None`` when there is nothing to send."""
-        from . import code_findings as _code_findings
-        from . import code_review as _code_review
-        from . import finding_repair as _finding_repair
-
-        record = _code_review.load(self.quest_root)  # type: ignore[attr-defined]
-        if not record or int(record.get("crashes_sent") or 0) >= REVIEW_CRASHES:
-            return None
-        if int(state.get("exec_reflect_iter") or 0) >= self.config.engine.exec_reflect_max_iterations:  # type: ignore[attr-defined]
-            return None
-        for issue in _code_findings.issues_of(record).values():
-            crash = issue.get("crash") if isinstance(issue, dict) else None
-            if not isinstance(crash, dict) or crash.get("sent"):
-                continue
-            crash["sent"] = True
-            rel = str(crash.get("test") or "")
-            _rc, text, _err = await self._run_in_env(  # type: ignore[attr-defined]
-                ["-c", _finding_repair.harness_source("code", [rel])], timeout_s=180, env=self._finding_test_env())  # type: ignore[attr-defined]
-            now = _finding_repair.parse_runs(text, [rel]).get(rel)
-            if now is None or not now.crash_in_program:
-                crash["gone"] = True
-                _code_review.save(self.quest_root, record)  # type: ignore[attr-defined]
-                continue
-            record["crashes_sent"] = int(record.get("crashes_sent") or 0) + 1
-            _code_review.save(self.quest_root, record)  # type: ignore[attr-defined]
-            try:
-                test_text = (self.quest_root / rel).read_text(encoding="utf-8")  # type: ignore[attr-defined]
-            except OSError:
-                test_text = ""
-            at = now.at or str(crash.get("at") or "")
-            self._log.warning("[code_review] a test of finding %s crashed inside the code at %s (%s); sending the code to "  # type: ignore[attr-defined]
-                              "the crash repair", issue.get("id"), at, _one(now.detail))
-            message = (f"FI called the code the way the test below does, and it crashed inside the code at {at}: "
-                       f"{now.detail}\n\nThe call (a test written to check a reader's finding about the code):\n```python\n"
-                       f"{test_text[:1500]}\n```\n\nRepair the code so that this call runs to the end and returns its values. "
-                       "Keep everything else as it is.")
-            script = ("derive.py" if at.startswith("code/derive.py") and self._analysis_on() else
-                      "experiment.py" if at.startswith("code/experiment.py") or not self._split_on(state)  # type: ignore[attr-defined]
-                      else _split_run.SIMULATE_NAME)
-            return self._code_review_failed_run(message, script=script)  # type: ignore[attr-defined]
-        return None
-
-    def _gate_crash_repair(self, issue: dict[str, Any], run: Any, rel: str, record: dict[str, Any],
-                           state: Any = None) -> dict[str, Any] | None:
-        """At the evidence gate, a shown fault's test crashed inside the program: the crash is recorded on the issue (unsent)
-        and, while the budget of the crash repair before the run is left (:data:`REVIEW_CRASHES` a quest, and the run's own
-        repairs), the gate's verdict sends the quest back to the run step (``repair_crash``), where
-        :meth:`_review_crash_run` gives it to the repair of a failed run. ``None`` when the budget is spent: it is only
-        recorded, and nothing stops."""
-        issue["crash"] = {"at": run.at, "detail": str(run.detail or "")[:300], "test": rel, "at_gate": True}
-        left = int(record.get("crashes_sent") or 0) < REVIEW_CRASHES and (
-            int((state or {}).get("exec_reflect_iter") or 0) < self.config.engine.exec_reflect_max_iterations)  # type: ignore[attr-defined]
-        if not left:
-            issue["crash"]["sent"] = True
-            issue["crash"]["not_sent"] = "the repairs of a crash are spent"
-            return None
-        why = (f"the test of {issue.get('id')} crashed inside the code at {run.at or 'an unknown line'} on the code that "
-               f"ran ({_one(str(run.detail or ''), 160)}): a crash, not a shown fault; the code goes back to the crash repair")
-        self._log.warning("[evidence_gate] %s", why)  # type: ignore[attr-defined]
-        return {"verdict": "insufficient", "rationale": why, "gaps": [why], "repair_crash": True}
 
     async def _ask_finding_test_again(self, issue: dict[str, Any], error: Any, record: dict[str, Any],
                                       state: Any = None) -> Any:
