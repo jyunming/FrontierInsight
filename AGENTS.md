@@ -51,6 +51,10 @@ over inventing a new one, and prefer a plain question over a technical field nam
 - **The open list holds only what is open.** Never leave a fixed item open with a "fixed on ..." note appended; a fix
   only on a branch still moves out, marked "not on main yet". A partly fixed item is rewritten to say only what is
   left, with one line naming what was fixed; old notes are deleted, not stacked, so the list shrinks as work is done.
+- **One item per problem.** Before adding an item to the backlog, search the open list and the done record for one
+  that already covers the same failure, root or place in the code, and update that one instead; add a new item only
+  when nothing covers it, classified when written. Duplicates found later are merged into one item with every evidence
+  pointer kept.
 
 ## Before building a new feature: check what already exists
 
