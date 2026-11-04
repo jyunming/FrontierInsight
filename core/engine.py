@@ -22416,6 +22416,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         }
         if will_broaden:
             patch["evidence_broaden_count"] = broadened + 1
+        patch.update(self._figures_after_taken_out(state))
         if rewrite_code:
             # The design stays as it is (no design iteration is spent); the new code gets its own repairs.
             patch.update(_FRESH_SCRIPT)
@@ -22439,6 +22440,19 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             patch["iteration"] = int(state.get("iteration", 0) or 0) + 1
             patch["evidence_no_result_retries"] = int(state.get("evidence_no_result_retries") or 0) + 1
         return patch
+
+    def _figures_after_taken_out(self, state: QuestState) -> QuestState:
+        """The state's ``figures`` and ``figure_records`` without the figures FI took out at the gate (the record is
+        ``needs/RESULT_CHECK.json``). The paper's numbers, captions, in-text citations, slides and poster all start from these
+        two, so a figure whose file is gone must leave them too; nothing else is changed. Nothing when none was taken out."""
+        from . import result_checks as _result_checks
+
+        gone = _result_checks.removed_figure_stems(self.quest_root)
+        figures = [f for f in state.get("figures") or []]
+        if not gone or not any(Path(str(f)).stem in gone for f in figures):
+            return {}
+        records = {k: v for k, v in (state.get("figure_records") or {}).items() if Path(str(k)).stem not in gone}
+        return {"figures": [f for f in figures if Path(str(f)).stem not in gone], "figure_records": records}
 
     def _unreadable_analysis_verdict(self, state: QuestState) -> dict[str, Any] | None:
         """The gate's verdict when the model's analysis of the results could not be read (twice): ``insufficient``, never

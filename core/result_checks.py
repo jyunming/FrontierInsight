@@ -106,6 +106,13 @@ def _read_json(path: Path) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def removed_figure_stems(quest_root: Path | str) -> set[str]:
+    """The stems of the figures FI took out of the paper's figures: ``removed_figures`` of ``needs/RESULT_CHECK.json``, the
+    one record of it. A drawing saved in several formats is one figure, so a stem names all its files."""
+    record = _read_json(Path(quest_root) / "needs" / RECORD)
+    return {Path(str(n)).stem for n in record.get("removed_figures") or [] if str(n).strip()}
+
+
 def left_out_by_record(quest_root: Path | str) -> dict[str, str]:
     """The quantities FI left out of the results, each with the check's own note: what the results check
     (``needs/RESULT_CHECK.json``) and the typed-number check (``needs/TYPED_RESULTS_CHECK.json``) wrote as
