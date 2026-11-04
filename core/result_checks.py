@@ -113,6 +113,35 @@ def removed_figure_stems(quest_root: Path | str) -> set[str]:
     return {Path(str(n)).stem for n in record.get("removed_figures") or [] if str(n).strip()}
 
 
+def _keep_measured(record: dict[str, Any], kept: list[dict[str, Any]]) -> None:
+    """Change ``record`` (``needs/RESULT_CHECK.json``) in place for the checks of a second model's finding that a rerun of the
+    study showed to change no number (``kept``, each with its ``measured`` answer): their quantities are no longer taken out of
+    the results, the paper is told the method differs (``kept_differences``), and what the other checks took out stays. A check
+    a rerun did not clear keeps its ``measured`` answer, so the record says whether anything measured the finding."""
+    if not kept:
+        return
+    gone = {id(c) for c in kept}
+    left = [c for c in record.get("checks") or [] if id(c) not in gone]
+    held = {str(k) for c in left for k in c.get("keys") or []}
+    back = {str(k) for c in kept for k in c.get("keys") or []} - held
+    keys = [k for k in record.get("removed_quantities") or [] if str(k) not in back]
+    names = {str(c["quantity"]) for c in kept}
+    paragraphs = [p for p in str(record.get("say") or "").split("\n\n")
+                  if p.strip() and not any(f"found that `{n}` is " in p for n in names)]
+    differences = [*(record.get("kept_differences") or []),
+                   *({"quantity": c["quantity"], "keys": c.get("keys") or [], "note": c.get("note") or "",
+                      "measured": c.get("measured")} for c in kept)]
+    paragraphs += [f"A second model found that `{d['quantity']}` is computed differently from the plan ({str(d['note']).rstrip('.')}). "
+                   "FI ran the study again with a repair of that and no reported number moved beyond its allowance, so the value "
+                   f"stays in the results. Report it, and say plainly, in the limitations, that the code computes `{d['quantity']}` "
+                   "by a method that differs from the plan's definition and that a rerun with the plan's definition gave the same "
+                   "numbers." for d in differences if d["quantity"] in names]
+    record.update({"checks": left, "removed_quantities": keys,
+                   "removed_values": {k: v for k, v in (record.get("removed_values") or {}).items() if str(k) in keys},
+                   "kept_differences": differences, "note": "; ".join(str(c.get("note")) for c in left if c.get("note")),
+                   "say": "\n\n".join(paragraphs)})
+
+
 def left_out_by_record(quest_root: Path | str) -> dict[str, str]:
     """The quantities FI left out of the results, each with the check's own note: what the results check
     (``needs/RESULT_CHECK.json``) and the typed-number check (``needs/TYPED_RESULTS_CHECK.json``) wrote as

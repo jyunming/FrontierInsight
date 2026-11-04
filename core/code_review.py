@@ -919,6 +919,7 @@ def equations_view(protocol: dict[str, Any] | None, values: list[float] | None =
 
 
 _FILE_LINE = re.compile(r"^\s*#\s*file\s*:\s*([\w.\-/\\]+)\s*$", re.IGNORECASE)
+_MARK_BEFORE_FENCE = re.compile(r"^[ \t]*(#[ \t]*file[ \t]*:[^\n]*)\n([ \t]*```(?:python|py)?[ \t]*\n)", re.MULTILINE | re.IGNORECASE)
 _BLOCK = re.compile(r"```(?:python|py)?[ \t]*\n(.*?)```", re.DOTALL | re.IGNORECASE)
 
 
@@ -929,7 +930,9 @@ def parse_files(reply: str, allowed: list[str]) -> dict[str, str]:
 
     by_name = {Path(a).name.lower(): a for a in allowed}
     out: dict[str, str] = {}
-    for m in _BLOCK.finditer(reply or ""):
+    # a file marker written on the line before the fence ("# file: x.py", then "```python") is the same marker, inside it
+    reply = _MARK_BEFORE_FENCE.sub(r"\2\1\n", reply or "")
+    for m in _BLOCK.finditer(reply):
         lines = m.group(1).strip("\n").splitlines()
         first = next((i for i, line in enumerate(lines) if line.strip()), None)
         marker = _FILE_LINE.match(lines[first]) if first is not None else None

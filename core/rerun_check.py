@@ -305,7 +305,8 @@ def declared_precision(protocol: Any) -> tuple[str, float] | None:
         return None
     width = protocol["precision"].get("target_half_width")
     metric, _kind = _run_estimate.precision_metric(protocol)
-    declared = {str(m.get("id")) for m in protocol.get("metrics") or [] if isinstance(m, dict)}
+    # a result worked out afterwards from the results (the plan's ``derived``) can carry the plan's precision as well
+    declared = {str(m.get("id")) for key in ("metrics", "derived") for m in protocol.get(key) or [] if isinstance(m, dict)}
     if (isinstance(width, bool) or not isinstance(width, (int, float)) or not 0 < float(width) < float("inf")
             or not metric or metric not in declared):
         return None
@@ -463,9 +464,10 @@ def _error_of(ran: Any) -> str:
 
 async def judge(executor: Any, python: Path | str, quest_root: Path | str, copy: Path, protocol: Any, timeout_s: float | None,
                 env: dict[str, str] | None, *, source: str = "", results_root: Path | str | None = None,
-                derived: str = "data/results/derived.json") -> Verdict:
+                derived: str = "data/results/derived.json", unmeasured_if_dropped: bool = False) -> Verdict:
     """Run the study of ``copy`` (the quest's code with a repair applied) and compare what it reports with what the quest
-    delivered (``results_root``, the quest folder by default)."""
+    delivered (``results_root``, the quest folder by default). ``unmeasured_if_dropped``: a repair that leaves a delivered number
+    unwritten is "could not rerun", not "changed" (for a repair no failing test holds to the finding)."""
     changed = await asyncio.to_thread(changed_files, quest_root, copy)
     if not changed:
         return Verdict("could_not", "the repair changed no file", source=source)
@@ -492,6 +494,16 @@ async def judge(executor: Any, python: Path | str, quest_root: Path | str, copy:
         keep, notes = counted(compare(base, new, REL_TOL if redrawn else EXACT_TOL), protocol,
                               _json(base_root / "raw" / "trials.json"), bool(redrawn))
         keys = [c["key"] for c in keep]
+        dropped = [c["key"] for c in keep if c["new"] is None]
+        if unmeasured_if_dropped and dropped:
+            # No test holds the repair to the finding, so a repair that lost a number it was not about to change has not been
+            # measured: it is no evidence that the number moves.
+            items = (_json(out / derived).get("derived") if isinstance(_json(out / derived), dict) else None) or {}
+            said = [f"{i}: {str(v.get('why') or v.get('status'))[:200]}" for k in dropped[:4]
+                    for i, v in [(metric_of(k)[0] or k, items.get(metric_of(k)[0] or "") or {})] if isinstance(v, dict) and v.get("status") != "ok"]
+            return Verdict("could_not", "the repaired study gave no number for " + ", ".join(dropped[:4])
+                           + ("; its own record says " + "; ".join(said) if said else ""), keys=keys, notes=notes,
+                           mode=mode, seconds=secs, source=source, files=files, crashed=True)
         loose = [k for k in keys if metric_of(k)[0] is None]
         metrics = sorted({m for m in (metric_of(k)[0] for k in keys) if m})
         if loose and not metrics:

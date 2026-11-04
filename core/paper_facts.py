@@ -93,6 +93,7 @@ UNSUPPORTED_CLAIMS = "unsupported_claims"
 UNRESOLVED_REVIEW = "unresolved_review"
 FIGURE_LEFT_OUT = "figure_left_out"
 FIGURE_PASS_FAULT = "figure_pass_fault"
+METHOD_DIFFERS = "method_differs"
 #: Kept while the check of the sentences about the figures stopped with an error of FI's own on the paper last written.
 FIGURE_PASS_RECORD = Path(".fi") / "figure_pass_fault.json"
 FIGURE_PASS_SENTENCE = ("FI could not check the sentences about the figures: its check stopped with an error of its own, so "
@@ -117,7 +118,7 @@ _ID_PREFIX = {NOT_DONE: "topic", LEFT_OUT: "left-out", NOT_COMPUTED: "not-comput
               UNDEFINED: "undefined",
               FEWER_RUNS: "fewer", CUT_SHORT: "cut-short", RUN_DIFFERENCE: "difference", SHARED_SEEDS: "shared-seeds",
               UNSUPPORTED_CLAIMS: "unsupported", UNRESOLVED_REVIEW: "review", LAST_REVIEW: "last-review",
-              FIGURE_LEFT_OUT: "figure-left-out", FIGURE_PASS_FAULT: "figure-pass-fault"}
+              FIGURE_LEFT_OUT: "figure-left-out", FIGURE_PASS_FAULT: "figure-pass-fault", METHOD_DIFFERS: "method-differs"}
 #: More settings left out than this are placed as one item.
 _MAX_SETTING_ITEMS = 6
 
@@ -399,6 +400,12 @@ def required_items(quest_root: Path | str) -> list[Item]:
                 continue
             add(LEFT_OUT, q, _sentence(f"{_said(root, q)} is not reported: a check of the results showed the value is wrong"
                                        + (f" ({note})" if note else "")))
+    for d in (checked.get("kept_differences") if isinstance(checked, dict) else None) or []:
+        if isinstance(d, dict) and d.get("quantity"):  # a second model's finding that a rerun of the study showed to move no number
+            q = _one(d["quantity"])
+            add(METHOD_DIFFERS, q, _sentence(f"A second model found that the code computes {_said(root, q)} by a method that differs "
+                                             "from the plan's definition; the study run again with a repair of it reported the same "
+                                             "numbers, so the value is kept"))
     _precision_items(root, add)
     # A key function whose second, independently written version still gives different results (not one that could not
     # be compared: that is in the quality report only).
