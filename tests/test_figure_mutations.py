@@ -189,7 +189,8 @@ def test_mutation_4_a_typed_number_in_a_note_is_refused_and_nothing_typed_surviv
 
 def _legend_inside_canvas(host) -> bool:
     host.fig.canvas.draw()
-    box = host.axes[0].get_legend().get_window_extent(host.fig.canvas.get_renderer())
+    legend = host.axes[0].get_legend() or host.fig.legends[0]
+    box = legend.get_window_extent(host.fig.canvas.get_renderer())
     return box.x0 >= -0.5 and box.y0 >= -0.5 and box.x1 <= host.fig.bbox.width + 0.5 and box.y1 <= host.fig.bbox.height + 0.5
 
 

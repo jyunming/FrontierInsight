@@ -708,6 +708,7 @@ class FigureCalls:
                 lv = e["level"]
                 e["label"] = ("%s, " % self._label_of(lv["result"]) if several else "") + "%s = %s" % (lv["setting_label"], lv["text"])
             self._remember(panel, "series", arts[0] if arts else None, what)
+            self._fc_extra[panel].setdefault("drawn", {})[len(rec["series"]) - 1] = list(arts or [])  # every artist of the call, for its colour
         return arts
 
     def _once(self, rec, panel, kind, series):
@@ -1022,13 +1023,16 @@ class FigureCalls:
         legend has one entry reading "a = b".
 
         The legend is built from the record, never from the artists' own labels, one entry per drawn series (and per reference
-        line). Placement: inside the axes, in the corner (upper right, upper left, lower right, lower left, in this order of
-        preference) that no drawn point, error bar, band or reference line reaches, a corner being 40% of the axes wide and as
-        high as its rows need. When every corner is taken or there are more than six entries, the legend goes outside the axes by its
-        measured size: to the right when its width fits in the gap to the next panel (or the canvas edge) once the axes are
-        narrowed by the missing width, at most 30% of their width; otherwise below the axes (laid out in as many columns as fit
-        the axes' width), the axes losing the measured height of the legend from their bottom, at most 40% of it. Either way it
-        stays inside the canvas and clear of every other panel's labels, as far as that room exists.
+        line). A figure with entries on more than one panel has ONE legend, outside the axes: the entries of every panel, a series
+        once (by its id, and the level of a setting for a curve of one), below the panels in as many columns as fit the width of
+        the figure, or to their right when that would be more than four rows and the legend is narrow. A figure with entries on
+        one panel has its legend inside the axes, in the corner (upper right, upper left, lower right, lower left, in this order of
+        preference) that no drawn point, error bar, band or reference line reaches, a corner being 40% of the axes wide and as high
+        as its rows need; when every corner is taken or there are more than six entries, that legend goes outside the axes like
+        the figure's. The constrained layout makes the room (the figure is given it), so no panel is moved by hand. A series is
+        one colour in every panel, along the house style's colour cycle in the order the series first appear in. A y label longer
+        than its panel and an x label or a note wider than its panel are broken between words onto as many lines as they need (no text is cut). The record's ``legend``
+        says where the legend is.
 
         Limits are set from the series, error bar ends, bands, reference lines and curves together (bars also reach their
         baseline, 0, on a linear axis). A linear axis is padded by 5% of the span on both sides, a log axis by the same share of
@@ -1036,20 +1040,49 @@ class FigureCalls:
         reaches 0 still gives finite limits (a log axis with no positive value is drawn linear, and the record says so)."""
         spec_labels, result_info = spec_labels or {}, result_info or {}
         self._state()
-        changed, outside = [], []
+        changed = []
+        live = []
         for i in range(len(getattr(self, "axes", []) or [])):
             ax, rec = self._panel(i)
             if rec["raw"]:
                 continue
+            live.append(i)
             self._merge_identical(i, rec)
             self._write_labels(ax, rec, spec_labels, result_info, changed)
             self._write_limits(ax, rec, changed)
-            placed = self._write_legend(ax, i, rec, spec_labels, result_info, changed)
+        fig = self._figure_of_panels()
+        if fig is not None and live:
+            self._use_constrained_layout(fig)
+        self._share_colours(live)
+        keyed = {}
+        for i in live:
+            ax, rec = self._panel(i)
+            old = ax.get_legend()
+            if old is not None:
+                changed.append("legend")
+                old.remove()
+            self._level_colours(i, rec)
+            keyed[i] = self._entries_keyed(i, rec, spec_labels, result_info)
+        for old in list(getattr(fig, "legends", []) or []) if fig is not None else []:
+            if getattr(old, "_fi_legend", False):
+                old.remove()
+        self._fc_legend = None
+        with_entries = [i for i in live if keyed[i]]
+        if len(with_entries) > 1 and fig is not None:  # one legend for the figure: every panel's entries, each series once
+            self._figure_legend(fig, with_entries, keyed)
+        else:
+            outside = []
+            for i in live:
+                ax, rec = self._panel(i)
+                placed = self._write_legend(ax, i, rec, keyed[i])
+                if placed is not None:
+                    outside.append(placed)
+            for ax, entries in outside:
+                self._legend_outside(ax, entries)
+        for i in live:
+            ax, rec = self._panel(i)
             self._place_notes(ax, i, rec)
-            if placed is not None:
-                outside.append(placed)
-        for ax, handles, texts in outside:  # after every label is written, so the neighbours' extents are known
-            self._legend_outside(ax, handles, texts)
+        self._wrap_to_panels(live)
         sup = getattr(getattr(self, "fig", None), "_suptitle", None)
         if sup is not None and sup.get_text() and not any(self._panel(i)[1]["raw"] for i in range(len(self.axes))):  # a custom drawing keeps its own
             sup.set_text("")
@@ -1263,8 +1296,9 @@ class FigureCalls:
                     self._recolour(art, colour.get(self._level_ident(e)))
                     break
 
-    def _entries(self, panel, rec, spec_labels, result_info):
-        """``[(artist, text)]`` of the legend: one per drawn series (the merged ones read "a = b") and per reference line. A text
+    def _entries_keyed(self, panel, rec, spec_labels, result_info):
+        """``[(key, artist, text)]`` of the legend, the key being what makes two panels' entries one (the series id, with the
+        level of a setting when the curve is one; a reference line's id). The entries are: one per drawn series (the merged ones read "a = b") and per reference line. A text
         is the plan's label, else the record's label when it is not the bare id, else a short form of the plan's description,
         else "value": never the id."""
         extra = self._fc_extra.get(panel, {"series": [], "refs": []})
@@ -1297,76 +1331,198 @@ class FigureCalls:
                 named.add(self._level_ident(e))
             first = e["label"] if e.get("neutral") else name(e["id"], e["label"])
             text = " = ".join([first] + [neutral_by_id.get(i) or name(i) for i in e["merged_with"]])
-            out.append((extra["series"][k][0], text))
+            out.append((self._colour_key(e), extra["series"][k][0], text))
         for r, art in zip(rec["refs"], extra["refs"]):
-            out.append((art, name(r["id"], r["label"])))
+            out.append((("ref", r["id"]), art, name(r["id"], r["label"])))
         return out
 
-    def _write_legend(self, ax, panel, rec, spec_labels, result_info, changed):
-        """Draw the legend in a free corner; if it needs room outside, return ``(ax, handles, texts)`` for ``_legend_outside``."""
-        old = ax.get_legend()
-        if old is not None:
-            changed.append("legend")
-            old.remove()
-        self._level_colours(panel, rec)
-        entries = self._entries(panel, rec, spec_labels, result_info)
+    @staticmethod
+    def _colour_key(e):
+        """What gives a series its colour: the curve of a level of a setting, else the series id, so one series is one colour in
+        every panel."""
+        return FigureCalls._level_ident(e) if e.get("level") else (e["id"],)
+
+    def _figure_of_panels(self):
+        fig = getattr(self, "fig", None)
+        if fig is None:
+            axes = list(getattr(self, "axes", []) or [])
+            fig = axes[0].figure if axes else None
+        return fig
+
+    @staticmethod
+    def _use_constrained_layout(fig):
+        """The layout engine that makes room for the labels, the legend and the titles of every panel (the figure is made with it;
+        a body that set another one gets this one back)."""
+        try:
+            engine = fig.get_layout_engine()
+            if engine is None or type(engine).__name__ != "ConstrainedLayoutEngine":
+                fig.set_layout_engine("constrained")
+        except Exception:  # noqa: BLE001 -- a figure that cannot take the engine keeps its own layout
+            pass
+
+    def _share_colours(self, panels):
+        """One colour for one series in every panel (a panel's colour cycle starts again, so the second panel's first series would
+        otherwise take the first panel's colour): by the order the series first appear in, along the house style's cycle. The
+        line, markers, bars and band of a series share it; a curve of a level of a setting is coloured again by
+        ``_level_colours`` after this."""
+        try:
+            import matplotlib
+            cycle = list(matplotlib.rcParams["axes.prop_cycle"].by_key().get("color") or [])
+        except Exception:  # noqa: BLE001 -- no cycle to read: the series keep the colours they were drawn with
+            return
+        if not cycle:
+            return
+        colour = {}
+        for i in panels:
+            _ax, rec = self._panel(i)
+            extra = self._fc_extra.get(i, {"series": []})
+            arts = extra["series"]
+            for k, e in enumerate(rec["series"]):
+                if e["kind"] in ("curve", "image") or k >= len(arts) or arts[k][0] is None:
+                    continue
+                key = self._colour_key(e)
+                if key not in colour:
+                    colour[key] = cycle[len(colour) % len(cycle)]
+                self._recolour((extra.get("drawn") or {}).get(k) or arts[k][0], colour[key])
+            for sid, art in extra.get("bands") or []:
+                for e in rec["series"]:
+                    if e["id"] == sid and e["kind"] != "curve" and self._colour_key(e) in colour:
+                        self._recolour(art, colour[self._colour_key(e)])
+                        break
+
+    def _write_legend(self, ax, panel, rec, entries):
+        """Draw the legend in a free corner; if it needs room outside, return ``(ax, entries)`` for ``_legend_outside``; ``entries`` are the keyed
+        entries of ``_entries_keyed``."""
         if not entries:
             return None
-        handles, texts = [a for a, _ in entries], [t for _, t in entries]
+        handles, texts = [a for _k, a, _t in entries], [t for _k, _a, t in entries]
         corner = self._free_corner(ax, rec, len(entries)) if len(entries) <= 6 else None
         if corner is not None:
             ax.legend(handles, texts, loc=corner, fontsize="small", framealpha=0.85)
             self._fc_extra.setdefault(panel, {"series": [], "refs": []})["legend_corner"] = corner
+            self._fc_legend = {"scope": "panel", "panel": panel + 1, "where": corner, "entries": list(texts)}
             return None
-        return ax, handles, texts
+        return ax, entries
 
-    def _legend_outside(self, ax, handles, texts):
-        """Put the legend beside or below the axes by its measured size (see ``finish``)."""
-        fig = ax.figure
+    def _legend_outside(self, ax, entries):
+        """A single panel's legend that fits in no corner goes outside the axes, as the one legend of the figure; its entries keep
+        their own keys, so two series (or reference lines) that share a label stay two entries."""
+        self._figure_legend(ax.figure, [None], {None: entries})
+
+    def _figure_legend(self, fig, panels, keyed):
+        """One legend for the figure: the entries of every panel in ``panels``, each series once (by its key), outside the axes
+        (below them, in as many columns as fit the width of the figure; to their right when that would be more than four rows
+        and the legend is narrow). The constrained layout makes the room, so no panel is moved by hand."""
+        seen, handles, texts = set(), [], []
+        for i in panels:
+            for key, art, text in keyed[i]:
+                if (key, text) in seen:
+                    continue
+                seen.add((key, text))
+                handles.append(art)
+                texts.append(text)
+                try:
+                    art.set_label(text)  # the artist carries the name the legend shows, for the recorder of the saved figure
+                except Exception:  # noqa: BLE001
+                    pass
         try:
             renderer = fig.canvas.get_renderer()
-        except AttributeError:  # a canvas that cannot measure: the corner with the least data is still better than nothing
-            ax.legend(handles, texts, loc="upper right", fontsize="small", framealpha=0.85)
+        except AttributeError:  # a canvas that cannot measure: a legend inside the first panel is still better than none
+            fig.axes[0].legend(handles, texts, loc="upper right", fontsize="small", framealpha=0.85)
             return
-        others = [a for a in fig.axes if a is not ax]
-        boxes = [a.get_tightbbox(renderer) for a in others]
-        mine = ax.get_tightbbox(renderer)
-        width_px, height_px = fig.bbox.width, fig.bbox.height
-        gap = 6.0
 
-        def make(**kw):
-            old = ax.get_legend()
-            if old is not None:
-                old.remove()
-            return ax.legend(handles, texts, fontsize="small", borderaxespad=0, frameon=False, **kw)
+        def make(loc, ncol):
+            for old in list(fig.legends):
+                if getattr(old, "_fi_legend", False):
+                    old.remove()
+            leg = fig.legend(handles, texts, loc=loc, ncol=ncol, fontsize="small", frameon=False)
+            leg._fi_legend = True
+            return leg
 
-        leg = make(loc="upper left", bbox_to_anchor=(1.02, 1.0))
-        ext = leg.get_window_extent(renderer)
-        edge = ax.bbox.x1
-        wall = min([width_px] + [b.x0 for b in boxes if b is not None and b.x0 >= ax.bbox.x0 + ax.bbox.width / 2 and b.y0 < ext.y1 and b.y1 > ext.y0])
-        need = ext.x1 - edge + gap
-        room = wall - edge
-        if need - room <= 0.3 * ax.bbox.width:
-            if need > room:  # narrow by the missing width
-                pos = ax.get_position()
-                ax.set_position([pos.x0, pos.y0, pos.width - (need - room) / width_px, pos.height])
-            return
-        # below the axes, in as many columns as fit the axes' width
+        room = 0.95 * fig.bbox.width
         for ncol in range(len(texts), 0, -1):
-            leg = make(loc="upper center", bbox_to_anchor=(0.5, 0.0), ncol=ncol)
-            if leg.get_window_extent(renderer).width <= ax.bbox.width or ncol == 1:
+            leg = make("outside lower center", ncol)
+            if leg.get_window_extent(renderer).width <= room or ncol == 1:
                 break
-        drop = mine.y0 - ax.bbox.y0 - gap  # the tick labels and x label hang below the axes
-        for _ in range(3):
-            leg.set_bbox_to_anchor((0.5, drop / ax.bbox.height), transform=ax.transAxes)
-            ext = leg.get_window_extent(renderer)
-            floor = max([0.0] + [b.y1 + gap for b in boxes if b is not None and b.y1 <= mine.y0 + 1 and b.x0 < ext.x1 and b.x1 > ext.x0])
-            short = floor - ext.y0
-            if short <= 0:
-                return
-            pos = ax.get_position()
-            cut = min(short, 0.4 * ax.bbox.height) / height_px
-            ax.set_position([pos.x0, pos.y0 + cut, pos.width, pos.height - cut])
+        where = "below"
+        if int(math.ceil(len(texts) / ncol)) > 4:
+            side = make("outside right upper", 1)
+            if side.get_window_extent(renderer).width <= 0.25 * fig.bbox.width:
+                where = "right"
+            else:
+                make("outside lower center", ncol)
+        self._fc_legend = {"scope": "figure", "where": where, "entries": list(texts)}
+
+    @staticmethod
+    def _wrapped(text, limit, length):
+        """``text`` broken between words onto lines no longer than ``limit`` by ``length(line)`` (a word longer than that keeps a
+        line to itself: nothing is cut); the lines it already has stay apart."""
+        out = []
+        for line in str(text).split(chr(10)):
+            current = []
+            for word in line.split():
+                if current and length(" ".join(current + [word])) > limit:
+                    out.append(" ".join(current))
+                    current = [word]
+                else:
+                    current.append(word)
+            out.append(" ".join(current))
+        return chr(10).join(out)
+
+    def _wrap_to_panels(self, panels):
+        """A y label longer than its panel's height and an x label or a note wider than its panel's width are broken between words onto as many
+        lines as they need (the text is never cut): first to the size a panel is expected to get, then, after the layout has
+        drawn the figure, to the size each panel got (unless the layout left it next to nothing), until nothing changes. A text
+        that was already wrapped is wrapped again from its words."""
+        axes = [self._panel(i)[0] for i in panels]
+        if not axes:
+            return
+        fig = axes[0].figure
+        try:
+            from matplotlib.text import Text
+            renderer = fig.canvas.get_renderer()
+            guess = {}
+            for ax in axes:  # before any layout: about 60% of the height and 80% of the width of the panel's cell in the grid
+                try:
+                    grid = ax.get_subplotspec().get_gridspec()
+                    rows, cols = grid.nrows, grid.ncols
+                except Exception:  # noqa: BLE001
+                    rows = cols = 1
+                guess[ax] = (0.8 * fig.bbox.width / max(1, cols), 0.6 * fig.bbox.height / max(1, rows))
+            room = dict(guess)
+            for turn in range(3):
+                if turn:  # the size the layout gave each panel, unless it gave one next to nothing
+                    fig.canvas.draw()
+                    renderer = fig.canvas.get_renderer()
+                    for ax in axes:
+                        box = ax.get_window_extent(renderer)
+                        room[ax] = (box.width if box.width >= 0.4 * guess[ax][0] else guess[ax][0],
+                                    box.height if box.height >= 0.4 * guess[ax][1] else guess[ax][1])
+                changed = False
+                for k, ax in enumerate(axes):
+                    texts = [(ax.yaxis.label, 90, 1), (ax.xaxis.label, 0, 0)] + [(art, 0, 0) for art in self._fc_extra.get(panels[k], {}).get("notes", [])]
+                    for art, rotation, along in texts:
+                        words = " ".join(art.get_text().split()) if rotation else art.get_text()
+                        if not words.strip():
+                            continue
+                        probe = Text(0, 0, "", fontproperties=art.get_fontproperties(), rotation=rotation)
+                        probe.set_figure(fig)
+
+                        def length(line, probe=probe, along=along):
+                            probe.set_text(line)
+                            box = probe.get_window_extent(renderer)
+                            return box.height if along else box.width
+
+                        # the width a note may take: its panel's, less a margin; the label's: the panel's height
+                        limit = room[ax][1] if along else 0.9 * room[ax][0]
+                        new = self._wrapped(words, limit, length)
+                        if new != art.get_text():
+                            art.set_text(new)
+                            changed = True
+                if turn and not changed:
+                    break
+        except Exception:  # noqa: BLE001 -- a text that cannot be measured stays as it is
+            return
 
     def _free_corner(self, ax, rec, rows):
         """The first corner (upper right, upper left, lower right, lower left) the drawn data does not reach, or None."""
@@ -1456,7 +1612,10 @@ class FigureCalls:
         for i in range(len(getattr(self, "axes", []) or [])):
             _ax, rec = self._panel(i)
             panels.append(json.loads(json.dumps(rec)))
-        return {"version": RECORD_VERSION, "fallback": bool(getattr(self, "fallback", False)), "panels": panels}
+        out = {"version": RECORD_VERSION, "fallback": bool(getattr(self, "fallback", False)), "panels": panels}
+        if getattr(self, "_fc_legend", None):  # where the figure's legend is: one for the figure, or the panel's own
+            out["legend"] = json.loads(json.dumps(self._fc_legend))
+        return out
 
     def write(self, path):
         """Write the record as ``<stem>.calls.json`` (``path`` is the figure's file or a ``.calls.json`` path); returns the path."""
