@@ -192,6 +192,7 @@ class _Quest:
         self.summary = _dict(_json(root / "frontier_insight_summary.json"))
         self.paper_check = _dict(_json(root / ".fi" / "paper_record_check.json"))
         self.record_taken_out = _list(_dict(_json(root / ".fi" / "record_claims_taken_out.json")).get("taken_out"))
+        self.unsupported_removed = _list(_dict(_json(root / ".fi" / "unsupported_claims.json")).get("removed"))
         self.numeric_warnings = _dict(_json(root / "needs" / "NUMERIC_WARNINGS.json"))
         self.receipts = {p.stem: _dict(_json(p)) for p in sorted((root / "needs" / "receipts").glob("*.json"))} \
             if (root / "needs" / "receipts").is_dir() else {}
@@ -757,6 +758,11 @@ def _paper_problems(q: _Quest) -> list[dict[str, str]]:
         out.append(_problem("paper", f"after the paper was written again, it still said what FI's records contradict, so "
                             f"this was taken out: {_one(r.get('text'), 200)} (why: {_one(r.get('why'), 300)})",
                             "FI's records", "left out", ".fi/record_claims_taken_out.json"))
+    for r in q.unsupported_removed:
+        r = _dict(r)
+        out.append(_problem("paper", f"a sentence that stated a number the claim check did not find in the run's results was "
+                            f"taken out of the paper: {_one(r.get('claim'), 200)} (why: {_one(r.get('evidence'), 300)})",
+                            "FI's claim check", "left out", ".fi/unsupported_claims.json"))
     if q.stuck and _stuck_stage(q) == "paper":
         out.append(_problem("paper", q.stuck.get("problem") or "the paper contradicts FI's records",
                             "FI's records", "not fixed", "needs/STUCK.json"))
