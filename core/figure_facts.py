@@ -239,6 +239,18 @@ def geometry_findings(record: Any) -> list[str]:
     if not isinstance(axes, list):
         return []
     out: list[str] = []
+    own_box = _legend_box(record)  # the figure's own legend (one for all its panels), when it has one
+    if own_box is not None:
+        x0, y0, x1, y1 = own_box
+        if x0 < -_SAME or y0 < -_SAME or x1 > 1 + _SAME or y1 > 1 + _SAME:
+            out.append("The legend of the figure reaches outside the figure.")
+        for j, other in enumerate(axes):
+            op = other.get("place") if isinstance(other, dict) else None
+            if not (isinstance(op, list) and len(op) == 4 and all(_num(v) for v in op)):
+                continue
+            ox, oy, ow, oh = (float(v) for v in op)
+            if min(x1, ox + ow) - max(x0, ox) > _SAME and min(y1, oy + oh) - max(y0, oy) > _SAME:
+                out.append(f"The legend of the figure covers part of {_panel_label(other, j)}.")
     for k, ax in enumerate(axes):
         if not isinstance(ax, dict):
             continue

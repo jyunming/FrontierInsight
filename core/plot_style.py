@@ -555,6 +555,31 @@ try:
             except Exception:
                 return []
 
+        def _fi_in_figure_legend(ax):
+            # Whether a legend of the figure (not of the panel) names a line of this panel.
+            try:
+                legends = list(getattr(ax.figure, "legends", []) or [])
+                if not legends:
+                    return False
+                names = {t.get_text() for leg in legends for t in leg.get_texts()}
+                return any(str(line.get_label() or "") in names for line in ax.get_lines())
+            except Exception:
+                return False
+
+        def _fi_figure_legend_box(fig):
+            # The box of the figure's own legend in figure fractions (x0, y0, x1, y1), or None when it has none.
+            try:
+                for leg in getattr(fig, "legends", []) or []:
+                    if not leg.get_visible():
+                        continue
+                    box = leg.get_window_extent(fig.canvas.get_renderer()).transformed(fig.transFigure.inverted())
+                    values = [float(box.x0), float(box.y0), float(box.x1), float(box.y1)]
+                    if all(_fi_math.isfinite(v) for v in values):
+                        return dict(zip(("x0", "y0", "x1", "y1"), values))
+            except Exception:
+                pass
+            return None
+
         def _fi_legend_frac(ax):
             # The legend's box in figure fractions (x0, y0, x1, y1), or None when the panel has no legend.
             try:
@@ -661,7 +686,7 @@ try:
                 # A colorbar's axes and a hidden panel are not panels the figure shows.
                 **({"colorbar": True} if getattr(ax, "_colorbar", None) is not None else {}),
                 **({"hidden": True} if hidden else {}),
-                "title": title, "xlabel": ax.get_xlabel(), "ylabel": ax.get_ylabel(),
+                "title": title, "xlabel": ax.get_xlabel(), "ylabel": " ".join(ax.get_ylabel().split()),
                 "yscale": ax.get_yscale(), "ylim": [float(lo), float(hi)], "series": series,
                 # The words the panel itself prints besides its title: ax.text / annotate strings and the legend's
                 # entries. What the figure says is then a fact FI holds, not only what the code drew.
@@ -786,11 +811,11 @@ try:
             return {
                 **_fi_where(ax),
                 "title": " ".join(t for t in (ax.get_title("left"), ax.get_title(), ax.get_title("right")) if t),
-                "xlabel": ax.get_xlabel(), "ylabel": ax.get_ylabel(),
+                "xlabel": ax.get_xlabel(), "ylabel": " ".join(ax.get_ylabel().split()),  # a wrapped label is one line of words
                 "xscale": ax.get_xscale(), "yscale": ax.get_yscale(),
                 # Set only when the error-bar lengths above are kept: an older record has no key, and says "not recorded".
                 **({"bars_recorded": True, "error_bar_sets": bar_sets} if bar_sets is not None else {}),
-                "legend": ax.get_legend() is not None,
+                "legend": ax.get_legend() is not None or _fi_in_figure_legend(ax),
                 # Words written on the panel (a note, an annotation): a panel with text is not blank.
                 "has_text": bool(ax.texts),
                 # The words themselves, un-truncated up to 200 characters, in drawing order; the error-bar ends, the legend
@@ -1117,6 +1142,16 @@ try:
                                       "axes_title": " ".join(t.get_text() for t in _fi_titles(ax)),
                                       "legend": [t.get_text() for t in legend.get_texts()],
                                       "line_px": round(line_px, 1), "points": points})
+                for legend in getattr(fig, "legends", []) or []:  # the figure's own legend over any panel's data
+                    if not legend.get_visible():
+                        continue
+                    for ax in fig.get_axes():
+                        line_px, points = _fi_legend_hits(ax, legend, renderer)
+                        if line_px > 0 or points > 0:
+                            found.append({"check": "legend_over_data",
+                                          "axes_title": " ".join(t.get_text() for t in _fi_titles(ax)),
+                                          "legend": [t.get_text() for t in legend.get_texts()],
+                                          "line_px": round(line_px, 1), "points": points})
             except Exception:
                 return None
             # The label checks have their own guard: a defect in them must not drop the
@@ -1159,7 +1194,11 @@ try:
                     record = {"file": name, "axes": [{**_fi_axes(ax), **_fi_where(ax)} for ax in self.get_axes()]}
                     # The words printed on the figure outside any panel (its title, a note), as the panels' are.
                     try:
-                        record["texts"] = _fi_texts([getattr(self, "_suptitle", None)] + list(self.texts))[:12]
+                        record["texts"] = _fi_texts([getattr(self, "_suptitle", None)] + list(self.texts)
+                                                    + [t for leg in getattr(self, "legends", []) for t in leg.get_texts()])[:12]
+                        box = _fi_figure_legend_box(self)
+                        if box is not None:
+                            record["legend_box"] = box
                     except Exception:
                         pass
                     # A failure here leaves the key out: a record without "tick_pt" was
@@ -1643,6 +1682,28 @@ _PAPER_SOURCE = '''\
                 leg.set_visible(False)
             return new
 
+        def _fi_flatten_figure_legends(fig, renderer):
+            # A figure legend set "outside" the panels needs the constrained layout to make room for it. Under any other
+            # layout it is set at the same side of the canvas, just beyond its edge, where the tight crop keeps it.
+            anchors = {"lower": ("upper center", (0.5, 0.0)), "upper": ("lower center", (0.5, 1.0)),
+                       "right": ("upper left", (1.0, 1.0)), "left": ("upper right", (0.0, 1.0))}
+            for leg in list(getattr(fig, "legends", [])):
+                side = getattr(leg, "_outside_loc", None)
+                if not leg.get_visible() or side not in anchors:
+                    continue
+                entries = _fi_legend_entries(leg)
+                if not entries:
+                    continue
+                labels, handles = [label for label, _ in entries], [handle for _, handle in entries]
+                loc, anchor = anchors[side]
+                columns = 6 if side in ("lower", "upper") else 1
+
+                def make(ncol):
+                    return fig.legend(handles, labels, loc=loc, bbox_to_anchor=anchor, ncol=ncol, frameon=False,
+                                      fontsize=_FI_PAPER["legend_pt"])
+                _fi_fitted_legend(make, len(labels), fig.bbox.width * 0.98, renderer, columns)
+                leg.set_visible(False)
+
         def _fi_outside_figure_legends(fig, renderer):
             # A figure legend placed off the canvas (bbox_to_anchor below it, kept by a
             # tight crop) is set "outside" the panels instead.
@@ -1652,6 +1713,14 @@ _PAPER_SOURCE = '''\
                 if not leg.get_visible():
                     continue
                 box = leg.get_window_extent(renderer)
+                # A legend FI placed under its panels (the figure's one legend), inside the canvas: set again in as many columns
+                # as the paper copy's width holds, and counted among the legends that take room of their own under the plot.
+                drawn = [a.get_window_extent(renderer) for a in fig.get_axes() if a.get_visible()]
+                if drawn and box.y0 >= fb.y0 - 1 and box.y1 <= min(b.y0 for b in drawn) + 1:
+                    new = _fi_figure_legend(fig, [leg], "outside lower center", renderer, False)
+                    if new is not None:
+                        below.append(new)
+                    continue
                 if box.y0 < fb.y0 - 1:
                     loc = "outside lower center"
                 elif box.y1 > fb.y1 + 1:
@@ -1767,6 +1836,35 @@ _PAPER_SOURCE = '''\
                     wrapped.append(text)
             return wrapped
 
+        def _fi_reflow_ylabels(fig, panels, renderer, rooms):
+            # A y label (FI wrote it on the lines that suited the panel as drawn) set again from its words, on as many lines as
+            # the paper copy's panel height needs: nothing is cut. `rooms` is {axes: height in pixels}.
+            changed, touched = [], False  # the text of each label that was on one line and is now on several; any label reset
+            for ax in panels:
+                label = ax.yaxis.label
+                words = " ".join(label.get_text().split())
+                room = rooms.get(ax)
+                if not label.get_visible() or not words or not room or room <= 0:
+                    continue
+                probe = _fi_mpl.text.Text(0, 0, "", fontproperties=label.get_fontproperties(), rotation=90)
+                probe.set_figure(fig)
+                lines, current = [], []
+                for word in words.split(" "):
+                    probe.set_text(" ".join(current + [word]))
+                    if current and probe.get_window_extent(renderer).height > room:
+                        lines.append(" ".join(current))
+                        current = [word]
+                    else:
+                        current.append(word)
+                lines.append(" ".join(current))
+                new = chr(10).join(lines)
+                if new != label.get_text():
+                    if chr(10) not in label.get_text() and chr(10) in new:
+                        changed.append(label.get_text())
+                    label.set_text(new)
+                    touched = True
+            return changed, touched
+
         def _fi_paper_attempt(fig, mode, stem, outputs):
             # Draws `fig` (a copy) as the paper copy under one layout, "constrained", or "tight" or "none" when that
             # fails, and saves it to `outputs`. Raises when it cannot.
@@ -1816,7 +1914,27 @@ _PAPER_SOURCE = '''\
                 drop(titles)
             _fi_paper_text(fig)
             rasterized = _fi_rasterize_big(fig)
+            pre_wrapped = []
+            try:
+                # Before the layout: a panel is expected to keep about 60% of the height of its row of the canvas.
+                guess = {ax: 0.6 * height * fig.dpi / max(1, rows) for ax in panels}
+                pre_wrapped += _fi_reflow_ylabels(fig, panels, fig.canvas.get_renderer(), guess)[0]
+            except Exception:
+                guess = {}
             renderer = _fi_draw(fig)
+            try:
+                # The layout has sized the panels: the labels are set again to the heights they got, unless one was left
+                # next to nothing.
+                rooms = {}
+                for ax in panels:
+                    got = ax.get_window_extent(renderer).height
+                    rooms[ax] = got if got >= 0.4 * guess.get(ax, 0) else guess.get(ax)
+                more, touched = _fi_reflow_ylabels(fig, panels, renderer, rooms)
+                pre_wrapped += more
+                if touched:
+                    renderer = _fi_draw(fig)
+            except Exception:
+                pass
             if several and titles:
                 room = {id(t): ax.get_window_extent(renderer).width for ax in panels for t in _fi_all_titles(ax)}
                 if all(t.get_window_extent(renderer).width <= room.get(id(t), 0) for t in titles):
@@ -1824,8 +1942,11 @@ _PAPER_SOURCE = '''\
                 else:
                     drop(titles)
                     renderer = _fi_draw(fig)
-            wrapped = _fi_wrap_labels(fig, panels, renderer)
+            wrapped = pre_wrapped + _fi_wrap_labels(fig, panels, renderer)
             if wrapped:
+                renderer = _fi_draw(fig)
+            if not constrained:
+                _fi_flatten_figure_legends(fig, renderer)
                 renderer = _fi_draw(fig)
             moved, below = _fi_outside_figure_legends(fig, renderer) if constrained else ([], [])
             if moved:
