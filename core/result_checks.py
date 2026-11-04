@@ -113,6 +113,43 @@ def removed_figure_stems(quest_root: Path | str) -> set[str]:
     return {Path(str(n)).stem for n in record.get("removed_figures") or [] if str(n).strip()}
 
 
+def _keep_measured(record: dict[str, Any], kept: list[dict[str, Any]]) -> None:
+    """Change ``record`` (``needs/RESULT_CHECK.json``) in place for the checks of a second model's finding that no measurement
+    showed to move a number (``kept``, each with its ``measured`` answer: ``unchanged``, or ``not_shown`` when no test showed
+    the claim): their quantities are no longer taken out of the results. Only the keys that really return to the results are
+    said to (``kept_differences``, the writer's note and the Limitations item are made for those alone): a key another check
+    still takes out stays out, with that check's own words, and the kept check says nothing about it."""
+    if not kept:
+        return
+    gone = {id(c) for c in kept}
+    left = [c for c in record.get("checks") or [] if id(c) not in gone]
+    held = {str(k) for c in left for k in c.get("keys") or []}
+    back = {str(k) for c in kept for k in c.get("keys") or []} - held
+    keys = [k for k in record.get("removed_quantities") or [] if str(k) not in back]
+    names = {str(c["quantity"]) for c in kept}
+    paragraphs = [p for p in str(record.get("say") or "").split("\n\n")
+                  if p.strip() and not any(f"found that `{n}` is " in p for n in names)]
+    returned = [{"quantity": c["quantity"], "keys": [k for k in c.get("keys") or [] if str(k) in back],
+                 "note": c.get("note") or "", "measured": c.get("measured")} for c in kept]
+    returned = [d for d in returned if d["keys"]]
+    for d in returned:
+        why = f"A second model found that `{d['quantity']}` is computed differently from the plan ({str(d['note']).rstrip('.')}). "
+        if (d["measured"] or {}).get("status") == "unchanged":
+            paragraphs.append(why + "FI observed this: a test written for the claim failed on the code that produced the results, "
+                              "it passed on a repair, and the numbers the study reported with that repair did not move beyond their "
+                              f"allowance. The value of `{d['quantity']}` stays in the results. Report it, and say plainly, in the "
+                              "limitations, that a second model claims the method differs from the plan's definition and that these "
+                              "three things were observed; do not say that the plan's definition was run.")
+        else:
+            paragraphs.append(why + "FI asked for a test that shows it and none did, so the claim is not shown and the value stays in "
+                              f"the results. Report it, and say plainly, in the limitations, that a second model claims the code "
+                              f"computes `{d['quantity']}` differently from the plan's definition and that FI could not show it.")
+    record.update({"checks": left, "removed_quantities": keys,
+                   "removed_values": {k: v for k, v in (record.get("removed_values") or {}).items() if str(k) in keys},
+                   "kept_differences": [*(record.get("kept_differences") or []), *returned],
+                   "note": "; ".join(str(c.get("note")) for c in left if c.get("note")), "say": "\n\n".join(paragraphs)})
+
+
 def left_out_by_record(quest_root: Path | str) -> dict[str, str]:
     """The quantities FI left out of the results, each with the check's own note: what the results check
     (``needs/RESULT_CHECK.json``) and the typed-number check (``needs/TYPED_RESULTS_CHECK.json``) wrote as

@@ -305,7 +305,8 @@ def declared_precision(protocol: Any) -> tuple[str, float] | None:
         return None
     width = protocol["precision"].get("target_half_width")
     metric, _kind = _run_estimate.precision_metric(protocol)
-    declared = {str(m.get("id")) for m in protocol.get("metrics") or [] if isinstance(m, dict)}
+    # a result worked out afterwards from the results (the plan's ``derived``) can carry the plan's precision as well
+    declared = {str(m.get("id")) for key in ("metrics", "derived") for m in protocol.get(key) or [] if isinstance(m, dict)}
     if (isinstance(width, bool) or not isinstance(width, (int, float)) or not 0 < float(width) < float("inf")
             or not metric or metric not in declared):
         return None
@@ -461,11 +462,18 @@ def _error_of(ran: Any) -> str:
     return " | ".join((named or lines)[-3:])[:400]
 
 
+def _names(key: str, quantity: str) -> bool:
+    """Whether the compared number ``key`` is of ``quantity``: its result in the record of the analysis, or its name inside the
+    key of a number of another result file."""
+    return metric_of(key)[0] == quantity or re.search(r"(?<![\w])" + re.escape(quantity) + r"(?![\w])", key) is not None
+
+
 async def judge(executor: Any, python: Path | str, quest_root: Path | str, copy: Path, protocol: Any, timeout_s: float | None,
                 env: dict[str, str] | None, *, source: str = "", results_root: Path | str | None = None,
-                derived: str = "data/results/derived.json") -> Verdict:
+                derived: str = "data/results/derived.json", disputed: list[str] | None = None) -> Verdict:
     """Run the study of ``copy`` (the quest's code with a repair applied) and compare what it reports with what the quest
-    delivered (``results_root``, the quest folder by default)."""
+    delivered (``results_root``, the quest folder by default). ``disputed``: the quantities a reader's claim is about; with it, a repair that leaves a delivered number
+    unwritten, or whose rerun never compared a disputed quantity, is "could not rerun", never "unchanged"."""
     changed = await asyncio.to_thread(changed_files, quest_root, copy)
     if not changed:
         return Verdict("could_not", "the repair changed no file", source=source)
@@ -479,6 +487,7 @@ async def judge(executor: Any, python: Path | str, quest_root: Path | str, copy:
             return Verdict("could_not", why, mode=mode, seconds=secs, source=source, files=files, crashed=crashed)
         base_root = Path(results_root or quest_root)
         base = await asyncio.to_thread(results_of, base_root, derived)
+        delivered = dict(base)  # every delivered number, before a file the repaired run did not write leaves the comparison
         new = await asyncio.to_thread(results_of, out)
         # a result file the repaired run did not write is not compared (an analysis-only rerun writes only derived.json)
         unwritten = await asyncio.to_thread(result_files, base_root, derived)
@@ -492,6 +501,26 @@ async def judge(executor: Any, python: Path | str, quest_root: Path | str, copy:
         keep, notes = counted(compare(base, new, REL_TOL if redrawn else EXACT_TOL), protocol,
                               _json(base_root / "raw" / "trials.json"), bool(redrawn))
         keys = [c["key"] for c in keep]
+        dropped = [c["key"] for c in keep if c["new"] is None]
+        if disputed is not None and dropped:
+            # A repair that lost a number it was not about to change has not been measured: it is no evidence that the number
+            # moves.
+            items = (_json(out / derived).get("derived") if isinstance(_json(out / derived), dict) else None) or {}
+            said = [f"{i}: {str(v.get('why') or v.get('status'))[:200]}" for k in dropped[:4]
+                    for i, v in [(metric_of(k)[0] or k, items.get(metric_of(k)[0] or "") or {})] if isinstance(v, dict) and v.get("status") != "ok"]
+            return Verdict("could_not", "the repaired study gave no number for " + ", ".join(dropped[:4])
+                           + ("; its own record says " + "; ".join(said) if said else ""), keys=keys, notes=notes,
+                           mode=mode, seconds=secs, source=source, files=files, crashed=True)
+        if disputed is not None and not keep:
+            # every delivered number of a disputed quantity must have been compared, key by key: one left out (a setting
+            # of it in a result file the repaired run did not write, or one it no longer gives) leaves the answer open
+            left = [k for q in disputed for k in delivered if _names(k, q) and not (k in base and k in new)]
+            none = [q for q in disputed if not any(_names(k, q) for k in delivered)]
+            if left or none or not disputed:
+                return Verdict("could_not", "the rerun did not compare every delivered number of "
+                               + (", ".join(disputed) or "the disputed quantity") + (": " + ", ".join(left[:4]) if left else
+                                                                                       " (none holds it)"),
+                               notes=notes, mode=mode, seconds=secs, source=source, files=files)
         loose = [k for k in keys if metric_of(k)[0] is None]
         metrics = sorted({m for m in (metric_of(k)[0] for k in keys) if m})
         if loose and not metrics:
