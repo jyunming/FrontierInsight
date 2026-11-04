@@ -21,7 +21,10 @@ inputs and which returns the equation's output as one number. The outline step n
 **The tolerance is a rule, not a guess.** A closed form agrees within a relative 1e-6 (and, only for an output that is exactly
 0, an absolute 1e-12: the size of floating-point round-off). When the plan states a numerical method for the equation
 (``"method"``), the plan's own numerical setting decides (``"tolerance"`` and ``"tolerance_mode"``, required with a
-method); a stated tolerance without a method can only make the test tighter. FI never invents a looser one.
+method); a stated tolerance without a method can only make the test tighter. FI never invents a looser one. The one
+widening is for a plan whose equation is written with rounded constants (``0.61`` for 0.6098...) and whose example is computed
+to full precision: the bar then grows to exactly the gap between the two (:func:`rounding_of` bounds it), so code that follows
+the equation as written and code that uses the full constant both pass.
 
 **An equation whose output is a random draw** (``"example": {"random": true, ...}``, the plan's own flag) is tested on the distribution, not on one call: ``expected_formula`` is the distribution's MEAN for those
 inputs (and ``variance_formula``, when the plan states it, its variance). The test calls the function ``DRAWS`` times
@@ -101,7 +104,9 @@ EXAMPLE_RULE = (
     "Each equation with role `generates` or `analyses` carries one worked example, `\"example\": {\"inputs\": "
     "{\"<name>\": <number>, ...}, \"expected_formula\": \"<the equation's output for those inputs, as a formula>\"}`. The "
     "code will have a function that implements the equation, with one parameter for each name in `inputs` (named exactly "
-    "so) returning the equation's output as one number. FI computes `expected_formula` itself (the same formula language "
+    "so) returning the equation's output as one number. Name each input as the equation writes that variable (a word "
+    "Python reserves, such as `lambda`, takes a trailing underscore: `lambda_`), because FI also computes the equation "
+    "itself from those names and holds the example to it. FI computes `expected_formula` itself (the same formula language "
     "as a check's `expected_formula`, using only the names in `inputs` and numbers) and tests that function before the "
     "study runs; so give inputs that make the equation's terms matter (no zero or one that hides a factor), and compute "
     "the output from the equation as it is written, not from the answer you expect. A closed form is held to a "
@@ -113,9 +118,15 @@ EXAMPLE_RULE = (
     "MEAN for those inputs (and, if you can state it, add `\"variance_formula\"`, its variance); the function takes one "
     "more parameter after the inputs, `rng` (a numpy random generator) or `seed`, draws with it, and FI calls it many "
     "times with fixed seeds and compares the mean (and variance) of the draws with yours, within five standard errors. "
-    "When the formula defines several named outputs (`a = ...; b = ...`), the function returns them by name (a dict with "
-    "those keys) and `expected_formula` is a mapping from each name the formula defines to its formula, one for every "
-    "name.")
+    "When the equation has several outputs (`a = ...; b = ...`, or two joined by `and`), the function returns them by name "
+    "(a dict with those keys) and `expected_formula` is a mapping from each output's name to its formula, one for every "
+    "output: the mapping is how the example says which outputs there are. An equation with one output gives one formula. "
+    "Write `expected_formula` by a DIFFERENT route from the equation's own form, so that a slip in the equation (a factor "
+    "of 2 or pi, a sign, a different convention for the same quantity, a variable that is a rate in one place and a period "
+    "in another) cannot pass: take inputs at a case whose output is known on its own (a limit, a special value, a value "
+    "the source prints for those inputs, a simpler closed form that the equation must reduce to there) and write that "
+    "known output as `expected_formula`. FI holds the equation as written to it, and a gap between the two is put back to "
+    "you. Never copy the equation's right-hand side into `expected_formula`: that can only agree with itself.")
 
 
 def _text(value: Any) -> str:
@@ -280,12 +291,20 @@ def example_rows(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
             continue
         formula = example.get("expected_formula")
         if isinstance(formula, dict):  # the plan says the equation has several outputs: one formula for each
+            # The example is what declares the outputs: when the formula's text defines several names they must be the
+            # mapping's keys; when it does not (two outputs joined by "and", or none written as `name = ...`) the keys are
+            # the declaration. FI never reads the number of outputs out of the formula's words.
+            declared = [str(k).strip() for k in formula]
+            if not names and len(declared) >= 2 and len(set(declared)) == len(declared) and all(
+                    re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", k) for k in declared):
+                names = declared
+                row["outputs"] = names
             if names:
                 _multi_output_row(row, example, good, names)
             else:
                 row.update(state="unusable", why=(
-                    "its `expected_formula` is a mapping, but the formula defines at most one name (`name = ...`); give "
-                    "`expected_formula` as one formula, or write each output in the formula as `name = ...`"))
+                    "its `expected_formula` is a mapping of fewer than two outputs, or its keys are not valid names; give "
+                    "`expected_formula` as one formula, or as a mapping from each output's name to its formula"))
             continue
         if formula is None or not _text(formula):
             row.update(state="unusable", why=(
@@ -319,6 +338,14 @@ def example_rows(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
             # too (an output near 0 is held to its size by the test, but two ways of working it out may differ there).
             if gap <= max(rel * abs(float(value)), abs_tol):
                 row["equation_agrees"] = True
+            elif (float(value) != 0.0 and not method
+                  and gap <= rounding_of(row["formula"]) * abs(float(value))):
+                # The equation is written with rounded constants (0.61 for 0.6098...) and the example with the full value:
+                # one number, two roundings. Code that follows the equation as written is right, and so is code that uses
+                # the full constant, so the test must accept both, and no more than both: its bar grows to the gap.
+                row["equation_agrees"] = True
+                row["rel"] = max(rel, 1.001 * gap / abs(float(value)))
+                row["rounded_form"] = True
             elif gap > max(rel * abs(float(value)), ABSOLUTE_FLOOR):
                 row["equation_agrees"] = False
             if row.get("equation_agrees") is False:
@@ -327,6 +354,29 @@ def example_rows(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
                     f"its `expected_formula` gives {float(value):.10g} for its inputs, but the equation as written gives "
                     f"{own:.10g} for the same inputs (FI computed both)"))
     return rows
+
+
+_DECIMAL_RE = re.compile(r"(?<![\w.])(\d+\.\d*|\.\d+)(?:[eE]([+-]?\d+))?(?![\w.])")
+
+
+def rounding_of(formula: str) -> float:
+    """The relative error the rounding of the constants written in a plan's equation can account for: the largest, over the
+    decimal numbers in ``formula`` that have two or more significant digits, of half a unit in their last written digit
+    divided by their size (``0.61`` is 0.05 in 6.1, about 0.8%). A number written as an integer or with one significant
+    digit (``2``, ``0.5``) is taken as exact. ``0.0`` when the formula writes no such number. An equation's text is
+    the topic's rounded form of a law, so a worked example computed to full precision may differ from it by this much
+    and still be the same law; a gap larger than this is a real disagreement."""
+    best = 0.0
+    for m in _DECIMAL_RE.finditer(formula):
+        mantissa = m.group(1).rstrip("0").rstrip(".") if "." in m.group(1) else m.group(1)  # "2.50" is written as 2.5
+        if "." not in mantissa:
+            continue  # nothing after the point once the trailing zeros are gone: written as an integer
+        digits = mantissa.replace(".", "").lstrip("0")
+        value = float(mantissa)
+        if len(digits) < 2 or value == 0.0:
+            continue
+        best = max(best, 0.5 * 10.0 ** (-len(mantissa.split(".")[1])) / value)
+    return best
 
 
 _DEFINITION = re.compile(r"^\s*[A-Za-z_]\w*\s*(\([^()=]*\))?\s*=(?![=<>])(.*)$", re.S)
@@ -350,9 +400,12 @@ def equation_value(formula: str, inputs: dict[str, float]) -> float | None:
     right = m.group(2).strip()
     if not right or re.search(r"[=<>~]", right) or _triage.ambiguous(right):
         return None
+    # A symbol that is a word Python reserves (`lambda`) is the input `lambda_`: the one name a function can take for it, and
+    # the one the plan is told to write (:data:`EXAMPLE_RULE`).
+    right = _forms._renamed(right)
     # `f(T) = ...`: each argument the left side names must be used on the right, or the text says two things.
     used = set(_forms.names(right, {**_forms.FUNCTIONS, **_forms.PROSE_FUNCTIONS}))
-    if m.group(1) and any(a.strip() and a.strip() not in used for a in m.group(1).strip("()").split(",")):
+    if m.group(1) and any(a.strip() and _forms._kept(a.strip()) not in used for a in m.group(1).strip("()").split(",")):
         return None
     return _forms.evaluate(right, inputs, special=_forms.PROSE_FUNCTIONS).value
 
@@ -444,13 +497,28 @@ def example_as_written(protocol: dict[str, Any] | None, eid: str) -> Any:
     return None
 
 
+def could_not_meet(status: Any, detail: Any = "") -> str:
+    """The plain reason a worked example could not be met (:data:`_COULD_NOT_MEET`), said more exactly when the failure's
+    detail shows which kind it was: a parameter the example gives no value for (the example is missing an input the
+    function needs, not names that differ), or several values returned for an example that gives one (the equation may have
+    several outputs, which the example declares as a mapping)."""
+    detail = _text(detail)
+    if status == CONTRACT and detail.startswith("the parameter "):
+        return ("the function written from the formula needs an input that the example gives no value for (" + detail
+                + "); the example's `inputs` must give a value for every input the formula uses")
+    if status == MISMATCH and "several values" in detail:
+        return ("the function written from the formula returns several values and the example gives one; if the equation "
+                "has several outputs, give `expected_formula` as a mapping from each output's name to its formula")
+    return _COULD_NOT_MEET.get(status, _text(status))
+
+
 def rederive_request(items: list[dict[str, Any]]) -> str:
     """The one request to the plan that asks it to work a worked example out again from its equation: for each item
     (``id``, ``formula``, ``example`` as written, ``why``: a key of :data:`_COULD_NOT_MEET` or a sentence) the equation, the
     example as written and the kind of failure. It never holds the value the code computed, nor the code."""
     lines = []
     for it in items:
-        why = _COULD_NOT_MEET.get(it.get("why"), _text(it.get("why")))
+        why = could_not_meet(it.get("why"), it.get("detail"))
         written = json.dumps(it.get("example"), ensure_ascii=False, default=str) if it.get("example") is not None else "none"
         names = [n for n in (it.get("names") or []) if n not in (*RNG_PARAMS, SEED_PARAM) and not n.startswith("*")]
         fixed = (f" The function for it is already planned with the parameters ({', '.join(names)}): give the example's "
@@ -520,8 +588,11 @@ def cannot_judge_note(eid: str) -> str:
             "worked example gives one value, so FI cannot tell which output the value is for")
 
 
-def untested_notes(rows: list[dict[str, Any]], located: dict[str, dict[str, str] | None]) -> list[str]:
-    """One plain sentence for each equation that will not be tested before the run, and why."""
+def untested_notes(rows: list[dict[str, Any]], located: dict[str, dict[str, str] | None],
+                   names: dict[str, str] | None = None) -> list[str]:
+    """One plain sentence for each equation that will not be tested before the run, and why. ``names``: the function the
+    outline names for each equation (:func:`locate`)."""
+    by_outline = {_text(k).upper(): _text(v) for k, v in (names or {}).items() if _text(v)}
     notes = []
     for r in rows:
         if r["state"] == "missing":
@@ -537,7 +608,10 @@ def untested_notes(rows: list[dict[str, Any]], located: dict[str, dict[str, str]
                          f"for its output ({r['why']})"
                          + (f"; the check '{r['covered_by']}' tests it instead" if r.get("covered_by") else ""))
         elif not located.get(r["id"]):
-            notes.append(f"equation {r['id']} is not tested before the run: no function of the code that can be "
+            planned = by_outline.get(_text(r["id"]).upper())
+            notes.append(f"equation {r['id']} is not tested before the run: the code has no function `{planned}`, the "
+                         "one planned for it" if planned else
+                         f"equation {r['id']} is not tested before the run: no function of the code that can be "
                          "imported is labelled with it (`# " + r["id"] + "`)")
     return notes
 
@@ -550,9 +624,12 @@ def locate(protocol: dict[str, Any] | None, sources: dict[str, str],
     """For each equation that gets an example: the importable top-level function that implements it, as
     ``{"module", "function", "file", "static"}`` (``static``: FI's own reading of it, :func:`static_facts`); ``None``
     when there is none. ``names`` (the equation's id to the function the code outline names for it, ``implements``)
-    decides when that function is there: the outline is where the function and its parameters were fixed before any
-    body was written. Otherwise it is the function labelled ``# E<n>`` (a comment on or above it, or in its docstring);
-    a label alone can name a helper the outline's function calls. ``sources``:
+    decides, whether or not that function is in the code yet: the outline is where the function and its parameters were
+    fixed before any body was written, so an equation the outline names a function for is never looked for by label (a
+    function the outline does not name for it, even if it carries the label, is not the tested one; the equation is
+    untested and :func:`untested_notes` says the outline's function is missing). For an equation the outline names no
+    function for, it is the function labelled ``# E<n>`` (a comment on or above it, or in its docstring); a label alone
+    can name a helper. ``sources``:
     ``{"<package>/model.py": text, "simulate.py": text}`` (a script that runs when imported, ``experiment.py``, is
     never one of them). A package is preferred to ``simulate.py``."""
     from . import code_layout as _layout
@@ -567,11 +644,16 @@ def locate(protocol: dict[str, Any] | None, sources: dict[str, str],
         found = None
         name = by_outline.get(eid.upper())
         if name:
+            # The outline fixed this equation's function before any body was written: it is the one source. A function
+            # of another name that a `# E<n>` comment points at is a guess about the same fact, and when it was wrong
+            # (a label that sits on a neighbour) the test called a function of another equation and failed it.
             rel = next((rel for rel, text in ordered if _steps._find(text, name) is not None), None)
             if rel is not None:
                 out[eid] = {"module": module_of(rel), "function": name, "file": rel,
                             "static": static_facts(sources[rel], name)}
-                continue
+            else:
+                out[eid] = None
+            continue
         for rel, items in labelled.items():
             for _line, text, fn in items:
                 if fn and "." not in fn and _oracle._labelled_in(eid, text):

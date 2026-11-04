@@ -464,6 +464,30 @@ def test_bootstrap_records_a_legend_drawn_over_scatter_points(tmp_path) -> None:
     assert layout("clean") == []
 
 
+def test_bootstrap_records_tick_labels_that_run_into_each_other(tmp_path) -> None:
+    """Long x tick labels on a small figure, each wider than its tick spacing:
+    neighbours are drawn over each other. The old code measured only titles and
+    legends, so this figure recorded nothing. The clean figure (short labels, a
+    roomy canvas) must record nothing."""
+    layout = _layout_records(tmp_path, (
+        "import matplotlib.pyplot as plt\n"
+        "fig, ax = plt.subplots(figsize=(3, 3))\n"
+        "ax.plot([0, 1, 2], [0, 1, 0]); ax.set_xticks([0, 1, 2])\n"
+        "ax.set_xticklabels(['settle_time_alpha_long_label', 'settle_time_beta_long_label', "
+        "'settle_time_gamma_long_label'])\n"
+        "fig.savefig('crowded.png')\n"
+        "fig2, ax2 = plt.subplots(figsize=(8, 5))\n"
+        "ax2.plot([0, 1, 2], [0, 1, 0]); ax2.set_xticks([0, 1, 2]); ax2.set_xticklabels(['a', 'b', 'c'])\n"
+        "ax2.set_xlabel('gain'); ax2.set_ylabel('hit_rate'); fig2.savefig('clean.png')\n"
+    ))
+    found = layout("crowded")
+    overlaps = [f for f in found if f["check"] == "label_overlap"]
+    assert overlaps and all(f["where"] == "x-axis tick labels" and f["share"] >= 0.2 for f in overlaps)
+    assert any(f["text"] == "settle_time_alpha_long_label" and f["over"] == "settle_time_beta_long_label"
+               for f in overlaps)
+    assert layout("clean") == []
+
+
 def test_bootstrap_measures_a_legend_on_a_log_axis_where_it_is_drawn(tmp_path) -> None:
     """On a log-log axis a diagonal line is still a diagonal: the legend is
     measured in pixels, not in data units. Data that lies past the axis limits
@@ -531,15 +555,15 @@ def test_a_vertical_reference_line_is_recorded_as_one_not_as_a_flat_series(tmp_p
 
 
 def test_the_engine_does_not_call_a_vertical_line_hidden_or_flat() -> None:
-    from core.engine import _figure_caption_findings, _figure_record_note, _hidden_series
+    from core.engine import _figure_caption_text, _figure_record_note, _hidden_series
 
     record = {"axes": [{"title": "N = 1000", "ylabel": "Count", "ylim": [0, 255.0], "series": [
         {"label": "Deterministic", "x": 0.583, "shows": "vertical line"}]}]}
     assert _hidden_series(record) == []
     note = _figure_record_note(record)
     assert "Deterministic a vertical line at x = 0.583" in note and "FLAT" not in note
-    paper = "![Final sizes with the Deterministic reference](figures/hist.png)\n"
-    assert _figure_caption_findings(paper, {"hist.png": record}) == []
+    caption = _figure_caption_text("hist.png", record, n_seeds=None)
+    assert "Marked: Deterministic at 0.583" in caption and "flat" not in caption
 
 
 def test_a_reference_line_and_a_family_of_runs_are_not_called_flat(tmp_path) -> None:
@@ -572,3 +596,377 @@ def test_a_reference_line_and_a_family_of_runs_are_not_called_flat(tmp_path) -> 
     assert series["R0=1.5 runs"]["shows"] == "yes" and series["R0=1.5 runs"]["min"] == 0.0, series
     assert series["threshold"]["shows"] == "reference line"
     assert series["known value"]["shows"] == "reference line"
+
+
+def _saved_figure_ink(tmp_path, script_body: str):
+    """Run ``script_body`` under the bootstrap and return (saved width, rightmost ink column in the bottom band)."""
+    from PIL import Image
+    import numpy as np
+
+    boot_dir = write_boot(tmp_path, "latex")
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(p for p in (str(boot_dir), os.environ.get("PYTHONPATH", "")) if p)}
+    out = subprocess.run(
+        [sys.executable, "-c", "import matplotlib; matplotlib.use('Agg')\n" + script_body],
+        env=env, cwd=tmp_path, capture_output=True, text=True, timeout=180,
+    )
+    assert out.returncode == 0, out.stderr
+    img = np.asarray(Image.open(tmp_path / "fig.png").convert("L"))
+    h, w = img.shape
+    cols = np.where((img[int(h * 0.88):, :] < 200).any(axis=0))[0]
+    return w, int(cols.max())
+
+
+_LONG_RIGHT_LABEL = (
+    "import matplotlib.pyplot as plt\nimport numpy as np\n"
+    "fig, axes = plt.subplots(1, 3, figsize=(9, 3.2))\n"
+    "xs = np.linspace(0, 1, 30)\n"
+    "for i, ax in enumerate(axes):\n"
+    "    ax.plot(xs, xs ** (i + 1)); ax.set_title('Panel %d' % (i + 1))\n"
+    "axes[2].set_xlabel('Sampling noise SD relative to the reference level, per setting')\n"
+    "fig.savefig('fig.png')\n"
+)
+
+
+def test_a_label_running_past_the_right_edge_is_kept_in_the_saved_figure(tmp_path) -> None:
+    """A long x label on the right panel of a three-panel figure used to be cut at the canvas edge: matplotlib's
+    tight box leaves it out. The saved image must now end after the label's last ink (no ink in the last two columns)."""
+    width, last_ink = _saved_figure_ink(tmp_path, _LONG_RIGHT_LABEL)
+    assert last_ink < width - 2, (width, last_ink)
+
+
+def test_a_label_that_fits_is_saved_without_change_in_the_layout_check(tmp_path) -> None:
+    """Known positive: a short label that fits inside the canvas keeps the figure's own layout; the widened box
+    adds nothing to a figure with nothing past its edge, so a single short-labelled panel keeps its ink inside."""
+    width, last_ink = _saved_figure_ink(tmp_path, (
+        "import matplotlib.pyplot as plt\nimport numpy as np\n"
+        "fig, ax = plt.subplots(figsize=(4, 3))\n"
+        "ax.plot(np.arange(5), np.arange(5)); ax.set_xlabel('Time (s)')\n"
+        "fig.savefig('fig.png')\n"
+    ))
+    assert last_ink < width - 2, (width, last_ink)
+
+
+def test_bootstrap_records_text_written_in_a_panel_drawn_over_other_text(tmp_path) -> None:
+    """Curve names written with ax.annotate at nearly one place are drawn on top of each other; names set apart are
+    not. Same share, same record, same repair route as tick labels that run into each other."""
+    layout = _layout_records(tmp_path, (
+        "import matplotlib.pyplot as plt\n"
+        "fig, ax = plt.subplots()\n"
+        "ax.plot([0, 1], [0, 1])\n"
+        "for name in ('curve one', 'curve two'):\n"
+        "    ax.annotate(name, xy=(0.5, 0.5), xytext=(4, 4), textcoords='offset points')\n"
+        "fig.savefig('piled.png')\n"
+        "fig2, ax2 = plt.subplots()\n"
+        "ax2.plot([0, 1], [0, 1])\n"
+        "ax2.annotate('curve one', xy=(0.1, 0.1)); ax2.annotate('curve two', xy=(0.6, 0.8))\n"
+        "fig2.savefig('apart.png')\n"
+    ))
+    (found,) = layout("piled")
+    assert found["check"] == "label_overlap" and found["where"] == "labels written in the panel"
+    assert {found["text"], found["over"]} == {"curve one", "curve two"} and found["share"] >= 0.2
+    assert layout("apart") == []
+
+
+def test_bootstrap_records_error_bar_lengths_and_the_writer_is_told_how_each_series_is_drawn(tmp_path) -> None:
+    """A paper called a markers-only curve "piecewise linear", named a legend entry that holds no data as an overlay, and
+    wrote "mean +- SD" under bars that were all zero: the writer was told only the figure's line-style totals. FI now
+    records each error bar's length and tells the writer, per series, how it is drawn (core/figure_facts.py)."""
+    pytest.importorskip("matplotlib")
+    from core.engine import _figure_record_note, _read_figure_records
+
+    boot_dir = write_boot(tmp_path, "latex")
+    records = tmp_path / "records"
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(p for p in (str(boot_dir), os.environ.get("PYTHONPATH", "")) if p),
+        "FI_FIGURE_RECORDS": str(records),
+    }
+    probe = (
+        "import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt\n"
+        "fig, ax = plt.subplots()\n"
+        "ax.plot([1, 2, 3, 4], [1, 2, 3, 5], linestyle='None', marker='o', label='scheme A')\n"
+        "ax.plot([1, 2, 3, 4], [1, 1.5, 2.5, 4], '-', label='exact')\n"
+        "ax.plot([1, 4], [2, 3], '--', label='slope guide')\n"
+        "ax.plot([], [], label='limit')\n"
+        "ax.errorbar([1, 2, 3], [2, 3, 4], yerr=[0, 0, 0], marker='s', label='zero bars')\n"
+        "ax.errorbar([1, 2, 3], [3, 4, 5], yerr=[0.5, 1.0, 0.5], marker='^', label='real bars')\n"
+        "ax.set_ylim(0, 10)\n"
+        "fig.savefig('series.png')\n"
+    )
+    out = subprocess.run([sys.executable, "-c", probe], env=env, cwd=tmp_path,
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    got = _read_figure_records(records, ["series.png"])
+    note = _figure_record_note(got["series.png"])
+    assert "scheme A: markers only, no line joins them (4 points)" in note
+    assert "exact: a solid line, no markers (4 points)" in note
+    assert "slope guide: a straight dashed line of two points, no markers" in note
+    assert "limit: a legend entry with no data" in note
+    assert "zero bars: a solid line with markers (3 points); error bars are all zero (none visible)" in note
+    assert "real bars: a solid line with markers (3 points); error bars are drawn (largest 2, 20% of the axis span)" in note
+    assert "not recorded" not in note
+
+
+def test_error_bars_FI_cannot_measure_are_not_said_to_be_absent(tmp_path) -> None:
+    """Bars drawn with fmt='none' (no data line), with both xerr and yerr, or by ax.bar(yerr=) were skipped by the
+    measurement, and the writer was told "no error bars are drawn" under a figure that draws them."""
+    pytest.importorskip("matplotlib")
+    from core.engine import _figure_record_note, _read_figure_records
+
+    boot_dir = write_boot(tmp_path, "latex")
+    records = tmp_path / "records"
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(p for p in (str(boot_dir), os.environ.get("PYTHONPATH", "")) if p),
+        "FI_FIGURE_RECORDS": str(records),
+    }
+    probe = (
+        "import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt\n"
+        "for stem, draw in (('none', lambda ax: ax.errorbar([1, 2, 3], [2, 3, 4], yerr=[1, 1, 1], fmt='none')),\n"
+        "                   ('both', lambda ax: ax.errorbar([1, 2, 3], [2, 3, 4], xerr=[.1, .1, .1], yerr=[1, 1, 1],\n"
+        "                                                   marker='o', label='both')),\n"
+        "                   ('bar', lambda ax: ax.bar([1, 2, 3], [2, 3, 4], yerr=[1, 1, 1])),\n"
+        "                   ('plain', lambda ax: None)):\n"
+        "    fig, ax = plt.subplots()\n"
+        "    ax.plot([1, 2, 3], [1, 2, 3], '-', label='line')\n"
+        "    draw(ax)\n"
+        "    fig.savefig(stem + '.png')\n"
+    )
+    out = subprocess.run([sys.executable, "-c", probe], env=env, cwd=tmp_path,
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    notes = {s: _figure_record_note(_read_figure_records(records, [s + ".png"])[s + ".png"])
+             for s in ("none", "both", "bar", "plain")}
+    for stem in ("none", "both", "bar"):
+        assert "no error bars" not in notes[stem], notes[stem]
+        assert "error bars are drawn (length not recorded)" in notes[stem], notes[stem]
+    assert "no error bars are drawn" in notes["plain"]
+
+
+def test_figure_prints_text_is_recorded_and_the_writer_is_told_a_number_no_result_holds(tmp_path) -> None:
+    """A figure's own code printed "fit quality q = 0.9991" inside the plot while the paper said no such quantity was
+    computed: the record kept only that a panel had text. FI now records the strings and gives them to the writer, a
+    number that is none of the run's recorded results marked as such."""
+    pytest.importorskip("matplotlib")
+    from core.engine import _figure_record_note, _read_figure_records
+
+    boot_dir = write_boot(tmp_path, "latex")
+    records = tmp_path / "records"
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(p for p in (str(boot_dir), os.environ.get("PYTHONPATH", "")) if p),
+        "FI_FIGURE_RECORDS": str(records),
+    }
+    probe = (
+        "import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt\n"
+        "fig, ax = plt.subplots()\n"
+        "ax.plot([1, 2, 3], [1, 2, 3], label='curve A')\n"
+        "ax.text(0.1, 0.8, 'fit quality q = 0.9991', transform=ax.transAxes)\n"
+        "ax.text(0.1, 0.6, 'rate k = 0.5123', transform=ax.transAxes)\n"
+        "ax.legend()\n"
+        "fig.text(0.5, 0.01, 'note: three runs')\n"
+        "fig.savefig('printed.png')\n"
+        "fig2, ax2 = plt.subplots()\n"
+        "ax2.plot([1, 2, 3], [1, 2, 3], label='curve A')\n"
+        "fig2.savefig('plain.png')\n"
+    )
+    out = subprocess.run([sys.executable, "-c", probe], env=env, cwd=tmp_path,
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    got = _read_figure_records(records, ["printed.png", "plain.png"])
+    assert "fit quality q = 0.9991" in got["printed.png"]["axes"][0]["texts"]
+    assert "curve A" in got["printed.png"]["axes"][0]["texts"]
+    assert got["printed.png"]["texts"] == ["note: three runs"]
+    note = _figure_record_note(got["printed.png"], results={"k": 0.5123})
+    assert '"fit quality q = 0.9991" [printed in the figure, not a recorded result: 0.9991]' in note
+    assert '"rate k = 0.5123"' in note and "not a recorded result: 0.5123" not in note
+    assert 'the figure itself prints: "note: three runs"' in note
+    # A figure with no text of its own gets the note it always did.
+    assert "prints" not in _figure_record_note(got["plain.png"], results={"k": 0.5123})
+    assert _figure_record_note(got["plain.png"], results={"k": 0.5123}) == _figure_record_note(got["plain.png"])
+
+
+def test_bootstrap_records_text_and_legends_that_run_across_panels(tmp_path) -> None:
+    """The label check used to read one axes at a time. An x label drawn over the title of the panel below it, and
+    a legend anchored under its axes over the next panel, are findings; a tight-layout grid and a legend inside
+    its own axes are not."""
+    layout = _layout_records(tmp_path, (
+        "import matplotlib.pyplot as plt\n"
+        "fig, (a, b) = plt.subplots(2, 1)\n"
+        "a.plot([0, 1], [0, 1]); b.plot([0, 1], [0, 1])\n"
+        "a.set_xlabel('time elapsed'); b.set_title('second panel title')\n"
+        "fig.subplots_adjust(hspace=0.2); fig.savefig('labels.png')\n"
+        "fig2, (c, d) = plt.subplots(2, 1)\n"
+        "c.plot([0, 1], [0, 1], label='alpha'); d.plot([0, 1], [0, 1])\n"
+        "c.legend(loc='upper center', bbox_to_anchor=(0.5, -0.1)); fig2.savefig('legend.png')\n"
+        "fig3, axs = plt.subplots(2, 2)\n"
+        "for i, x in enumerate(axs.flat):\n"
+        "    x.plot([0, 1], [0, 1], label='s'); x.set_title(f'panel {i}'); x.set_xlabel('x'); x.set_ylabel('y')\n"
+        "axs[0, 0].legend(loc='lower right'); fig3.tight_layout(); fig3.savefig('grid.png')\n"
+    ))
+    assert any(f["check"] == "label_overlap" and f["where"] == "labels of different panels"
+               for f in layout("labels"))
+    assert any(f["check"] == "legend_over_panel" for f in layout("legend"))
+    assert layout("grid") == []
+
+
+def test_a_percentage_of_a_result_and_a_setting_value_are_not_marked_unrecorded() -> None:
+    """A figure printing "95%" for a recorded 0.95, or "N = 1536" for a setting of the run, was told to the writer as a
+    number the run did not record. A number matches a result, the same value as a percentage, or a setting of the run."""
+    from core.engine import _figure_record_note
+
+    record = {"axes": [{"title": "", "texts": ["coverage 95.0%", "N = 1536", "q = 0.9991", "gain 12.5%"]}]}
+    results = {"coverage": 0.95, "other": 3.25}
+    settings = {"grid": {"n_points": [768, 1536]}}
+    note = _figure_record_note(record, results=results, settings=settings)
+    assert "not a recorded result: 0.9991]" in note and "not a recorded result: 12.5]" in note
+    assert note.count("not a recorded result") == 2
+    # Without the settings and the percentage rule (the earlier behaviour) the two true numbers were marked.
+    assert "not a recorded result: 1536" in _figure_record_note(record, results=results)
+
+
+def _recorded_axes(tmp_path, body: str) -> list[dict]:
+    """Run a figure body under the bootstrap and return the recorded axes of the figure it saves as ``f.png``."""
+    pytest.importorskip("matplotlib")
+    boot_dir = write_boot(tmp_path, "latex")
+    records = tmp_path / "records"
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(p for p in (str(boot_dir), os.environ.get("PYTHONPATH", "")) if p),
+        "FI_FIGURE_RECORDS": str(records),
+    }
+    probe = ("import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt\nimport numpy as np\n"
+             + body + "\nfig.savefig('f.png')\n")
+    out = subprocess.run([sys.executable, "-c", probe], env=env, cwd=tmp_path, capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    return json.loads((records / "f.json").read_text(encoding="utf-8"))["axes"]
+
+
+def test_a_hidden_line_is_not_recorded_as_drawn(tmp_path) -> None:
+    axes = _recorded_axes(tmp_path, (
+        "fig, a = plt.subplots(); a.plot([1,2,3],[1,2,3],label='A'); l,=a.plot([1,2,3],[3,2,1],label='Hidden')\n"
+        "l.set_visible(False)"))
+    assert [s["label"] for s in axes[0]["series"]] == ["A"]
+
+
+def test_a_hidden_panel_draws_nothing_and_a_colorbar_is_marked(tmp_path) -> None:
+    axes = _recorded_axes(tmp_path, (
+        "fig, (a, b) = plt.subplots(1, 2); a.plot([1,2],[1,2],label='A'); b.plot([1,2],[2,1],label='B')\n"
+        "b.set_visible(False)"))
+    assert not axes[0].get("hidden") and axes[1]["hidden"] and axes[1]["series"] == []
+    axes = _recorded_axes(tmp_path, (
+        "fig, a = plt.subplots(); im = a.imshow(np.random.rand(4, 4)); c = fig.colorbar(im); c.set_label('Density')"))
+    assert [bool(ax.get("colorbar")) for ax in axes] == [False, True]
+
+
+def test_a_line_whose_points_have_no_finite_x_holds_no_data(tmp_path) -> None:
+    axes = _recorded_axes(tmp_path, (
+        "fig, a = plt.subplots(); a.plot([1,2,3],[1,2,3],label='A'); a.plot([np.nan,np.nan],[1,2],label='Ghost')\n"
+        "a.plot([],[],label='Empty')"))
+    shows = {s["label"]: s["shows"] for s in axes[0]["series"]}
+    assert shows["Ghost"] == "no points" and shows["Empty"] == "no points" and shows["A"] == "yes"
+
+
+# ---- record additions: error-bar ends, text words, legend box, data limits -------------------------------------------
+
+
+def _record_probe(tmp_path, body: str, stem: str = "fig"):
+    """Run ``body`` (it draws on ``fig, ax`` and the probe saves it) with the recorder on; return the figure record
+    (``<stem>.json``) and the per-run plot data (``<stem>.seed0.json``)."""
+    pytest.importorskip("matplotlib")
+    boot_dir = write_boot(tmp_path, "latex")
+    records = tmp_path / "records"
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(p for p in (str(boot_dir), os.environ.get("PYTHONPATH", "")) if p),
+        "FI_FIGURE_RECORDS": str(records),
+    }
+    probe = ("import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt\n"
+             "fig, ax = plt.subplots()\n" + body + f"fig.savefig('{stem}.png')\n")
+    out = subprocess.run([sys.executable, "-c", probe], env=env, cwd=tmp_path,
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    record = json.loads((records / f"{stem}.json").read_text(encoding="utf-8"))
+    plot = json.loads((records / f"{stem}.seed0.json").read_text(encoding="utf-8"))
+    return record["axes"][0], plot["axes"][0]
+
+
+def test_record_holds_errorbar_extents(tmp_path) -> None:
+    for panel in _record_probe(tmp_path, "ax.errorbar([1, 2], [1.0, 2.0], yerr=[0.1, 0.2], label='run A')\n"):
+        (bars,) = panel["errorbars"]
+        assert bars["line"] == "run A"
+        assert bars["hi"] == pytest.approx([1.1, 2.2]) and bars["lo"] == pytest.approx([0.9, 1.8])
+
+
+def test_record_holds_no_errorbars_for_a_figure_without_any(tmp_path) -> None:
+    for panel in _record_probe(tmp_path, "ax.plot([1, 2], [1, 2], label='a')\nax.legend()\n"):
+        assert panel["errorbars"] == []
+
+
+def test_record_holds_text_words(tmp_path) -> None:
+    _, plot = _record_probe(tmp_path, "ax.plot([1, 2], [1, 2])\nax.text(0.5, 0.5, 'r = 0.9991')\n"
+                                      "ax.text(0.1, 0.1, 'x' * 300)\n")
+    assert plot["texts"][0] == "r = 0.9991"
+    assert plot["texts"][1] == "x" * 200
+    assert plot["has_text"] is True
+
+
+def test_record_holds_legend_box_inside_unit_square_for_default_legend(tmp_path) -> None:
+    for panel in _record_probe(tmp_path, "ax.plot([1, 2], [1, 2], label='a')\nax.legend()\n"):
+        box = panel["legend_box"]
+        assert 0 <= box["x0"] < box["x1"] <= 1 and 0 <= box["y0"] < box["y1"] <= 1
+
+
+def test_record_holds_no_legend_box_without_a_legend(tmp_path) -> None:
+    for panel in _record_probe(tmp_path, "ax.plot([1, 2], [1, 2])\n"):
+        assert panel["legend_box"] is None
+
+
+def test_record_holds_data_limits(tmp_path) -> None:
+    for panel in _record_probe(tmp_path, "ax.plot([1, 2], [1, 2])\nax.set_xlim(0, 5)\nax.set_ylim(-1, 3)\n"):
+        assert panel["data_limits"] == {"x": [0.0, 5.0], "y": [-1.0, 3.0]}
+
+
+def test_record_holds_no_errorbars_for_x_only_bars(tmp_path) -> None:
+    for panel in _record_probe(tmp_path, "ax.errorbar([1, 2], [1.0, 2.0], xerr=0.3)\n"):
+        assert panel["errorbars"] == []
+
+
+def test_a_zero_xerr_is_not_recorded_as_a_zero_width_y_bar(tmp_path) -> None:
+    for panel in _record_probe(tmp_path, "ax.errorbar([1, 2], [1.0, 2.0], xerr=0)\n"):
+        assert panel["errorbars"] == []
+
+
+def test_record_reads_y_bars_when_x_bars_are_drawn_too(tmp_path) -> None:
+    for panel in _record_probe(tmp_path, "ax.errorbar([1, 2], [1.0, 2.0], yerr=[0.1, 0.2], xerr=0.5)\n"):
+        assert panel["errorbars"][0]["hi"] == pytest.approx([1.1, 2.2])
+
+
+def test_a_nan_bar_keeps_the_other_bars_aligned_with_their_points(tmp_path) -> None:
+    body = "ax.errorbar([1, 2, 3], [1.0, 2.0, 3.0], yerr=[0.1, float('nan'), 0.3])\n"
+    for panel in _record_probe(tmp_path, body):
+        bars = panel["errorbars"][0]
+        assert bars["lo"][1] is None and bars["hi"][1] is None
+        assert bars["hi"][0] == pytest.approx(1.1) and bars["hi"][2] == pytest.approx(3.3)
+
+
+def test_record_holds_the_new_keys_for_each_panel_of_a_two_panel_figure(tmp_path) -> None:
+    pytest.importorskip("matplotlib")
+    boot_dir = write_boot(tmp_path, "latex")
+    records = tmp_path / "records"
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(p for p in (str(boot_dir), os.environ.get("PYTHONPATH", "")) if p),
+           "FI_FIGURE_RECORDS": str(records)}
+    probe = ("import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt\n"
+             "fig, (a, b) = plt.subplots(1, 2)\n"
+             "a.errorbar([1, 2], [1.0, 2.0], yerr=0.1, label='L'); a.legend(); a.text(0.5, 0.5, 'left note')\n"
+             "b.plot([1, 2], [3, 4]); b.set_xlim(0, 9)\n"
+             "fig.savefig('two.png')\n")
+    out = subprocess.run([sys.executable, "-c", probe], env=env, cwd=tmp_path, capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    for name in ("two.json", "two.seed0.json"):
+        left, right = json.loads((records / name).read_text(encoding="utf-8"))["axes"]
+        assert len(left["errorbars"]) == 1 and right["errorbars"] == []
+        assert left["legend_box"] is not None and right["legend_box"] is None
+        assert right["data_limits"]["x"] == [0.0, 9.0]
+    seed = json.loads((records / "two.seed0.json").read_text(encoding="utf-8"))["axes"]
+    assert seed[0]["texts"] == ["left note"] and seed[1]["texts"] == []

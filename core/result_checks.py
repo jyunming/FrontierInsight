@@ -28,6 +28,7 @@ from typing import Any
 
 from . import code_reach as _code_reach
 from . import code_review as _code_review
+from .contract import figure_file
 from . import degenerate_results as _degenerate
 from . import reported_settings as _reported
 
@@ -43,6 +44,42 @@ ANALYSIS = "analysis"
 SIMULATION = "simulation"
 
 
+def _mark_dropped_figures(quest_root: Path, names: list[str], reasons: dict[str, str], log: Any) -> None:
+    """The figures' entries in FI's record of the run (``data/results/derived.json``) become ``dropped``, with the reason FI
+    took each out (``reasons``, else a plain default). Nothing else in the record changes; a record that is not there is left."""
+    from . import analysis_frame as _analysis
+
+    path = quest_root / _analysis.DERIVED_PATH
+    if not names or not path.is_file():
+        return
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        log.warning("[execute] could not mark the dropped figures in the record (%r)", exc)
+        return
+    entries = record.get("figures") if isinstance(record, dict) else None
+    if not isinstance(entries, list):
+        return
+    changed = False
+    for name in names:
+        file_name = Path(name).name
+        why = reasons.get(name) or reasons.get(file_name) or "FI took it out of the results"
+        for entry in entries:
+            if isinstance(entry, dict) and Path(str(entry.get("file") or "")).name == file_name:
+                entry.update({"status": "dropped", "why": why,
+                              "said": f"Figure `{entry.get('id')}` was left out of the results: {why}."})
+                changed = True
+    if changed:
+        from . import analysis_figures as _figures
+
+        # The record's own sentence about the figures, built as the run builds it (so it counts the dropped one as not drawn).
+        record["figures_said"] = _figures.said(entries)
+        try:
+            path.write_text(json.dumps(record, indent=1), encoding="utf-8")
+        except OSError as exc:
+            log.warning("[execute] could not write the dropped figures to the record (%r)", exc)
+
+
 @dataclass
 class Found:
     """What one check found in the results."""
@@ -55,6 +92,10 @@ class Found:
     keys: list[str] = field(default_factory=list)  # to take out of the results
     figures: list[str] = field(default_factory=list)  # to take out of the figures
     quantity: str = ""  # the plan's name of the quantity the keys belong to, when the check is about one
+
+
+#: ``Found.kind`` of a declared result that equals an earlier declared one in every trial.
+COPY_KIND = "copy_of_result"
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -79,11 +120,34 @@ def left_out_by_record(quest_root: Path | str) -> dict[str, str]:
     return out
 
 
-def _values_left_out(result_json: Any, keys: set[str]) -> dict[str, list[float]]:
+def _derived_numbers(derived: Any) -> dict[str, list[float]]:
+    """``{id: its numbers}`` for each quantity FI's record of its analysis (``data/results/derived.json``) worked out: its value
+    for each setting and its one value for the study. These live nowhere else: the printed results do not hold them."""
+    items = derived.get("derived") if isinstance(derived, dict) and isinstance(derived.get("derived"), dict) else {}
+    out: dict[str, list[float]] = {}
+    for ident, item in items.items():
+        if not isinstance(item, dict) or item.get("status") != "ok":
+            continue
+        by_setting = item.get("by_setting") if isinstance(item.get("by_setting"), dict) else {}
+        for v in [*by_setting.values(), item.get("value")]:
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and abs(float(v)) != float("inf"):
+                out.setdefault(str(ident), []).append(float(v))
+    return out
+
+
+def _values_left_out(result_json: Any, keys: set[str], derived: Any = None) -> dict[str, list[float]]:
     """``{key: its numbers}`` for each left-out key of ``result_json`` (at any depth), without a number that a quantity that
-    stays also holds: the paper is checked for quoting the first, and a value both hold is not one that can be told apart."""
+    stays also holds: the paper is checked for quoting the first, and a value both hold is not one that can be told apart.
+    ``derived``: FI's record of its analysis; a left-out quantity that only that record holds (worked out by
+    ``derive_<id>``, never printed) has its numbers listed from it too, or the check of the paper would have nothing to
+    look for."""
     out: dict[str, list[float]] = {}
     kept: set[float] = set()
+    for ident, vals in _derived_numbers(derived).items():
+        if ident in keys:
+            out.setdefault(ident, []).extend(vals)
+        else:
+            kept.update(vals)
 
     def walk(node: Any, inside: str | None) -> None:
         if isinstance(node, dict):
@@ -152,6 +216,23 @@ class ResultChecksMixin:
         ids = sorted({w["id"] for w in wrong})
         return [Found("coverage_recount", ANALYSIS, directive, note, say, keys=ids, quantity=ids[0])]
 
+    def _result_copy_findings(self) -> list[Found]:
+        """A declared result that is the same number as an earlier declared one in every trial (FI's own comparison of the
+        trials, :func:`core.flat_output.copied_results`): it is not reported as a quantity of its own, whatever the plan says it
+        is (a half-width or an error written as a copy of the value). It is reported once, under the first. Nothing is repaired
+        or stopped: the numbers stand under the first name, and the paper says the second was the same number."""
+        from . import flat_output as _flat
+
+        found: list[Found] = []
+        for copy, (first, trials) in sorted(_flat.read_copies(self.quest_root).items()):  # type: ignore[attr-defined]
+            note = f"`{copy}` was the same number as `{first}` in every one of {trials} trials"
+            say = (f"{note[0].upper()}{note[1:]}, so it is not a second result: FI took `{copy}` out of the results. Do NOT "
+                   f"report it as a quantity of its own or under its declared meaning; its numbers are those of `{first}`. "
+                   f"Say plainly, in the limitations, that the study returned `{copy}` as a copy of `{first}` and reports it "
+                   "once.")
+            found.append(Found(COPY_KIND, ANALYSIS, "", note, say, keys=[copy], quantity=copy))
+        return found
+
     def _saved_figures(self) -> list[str]:
         from . import engine as _e
 
@@ -169,7 +250,7 @@ class ResultChecksMixin:
         """The plan has figures and the run, which finished, saved none: nothing was drawn, so the paper has no figure. Not
         sent back (the results stand); the writer is told, and the limitations say so."""
         planned = (state.get("design") or {}).get("figures_planned")
-        names = [Path(str(f)).name for f in planned if str(f).strip()] if isinstance(planned, list) else []
+        names = [figure_file(f) for f in planned if str(f).strip()] if isinstance(planned, list) else []
         if not names or self._saved_figures():
             return []
         listed = ", ".join(f"`{n}`" for n in names[:6])
@@ -245,7 +326,7 @@ class ResultChecksMixin:
         drawn = _degenerate.figure_problems(self.fi_dir / "figure_records", figures)  # type: ignore[attr-defined]
         protocol = self._protocol_block(state)  # type: ignore[attr-defined]
         found = _degenerate.quantity_problems(
-            cells, reported, self._typed_result_exempt(state) | _degenerate.expected_constants(protocol))  # type: ignore[attr-defined]
+            cells, reported, self._typed_result_exempt(state) | _degenerate.expected_constants(protocol, state.get("design")))  # type: ignore[attr-defined]
         quantities, kept = _degenerate.split_flat(found, protocol)
         self._result_kept = [_degenerate.kept_note(kept)] if kept else []
         if not (drawn or quantities):
@@ -254,16 +335,19 @@ class ResultChecksMixin:
                       _degenerate.plain_note(drawn, quantities), _degenerate.writer_note(drawn, quantities),
                       keys=[q.name for q in quantities], figures=sorted({p.figure for p in drawn}))]
 
-    def _drop_figures(self, names: list[str]) -> None:
+    def _drop_figures(self, names: list[str], reasons: dict[str, str] | None = None) -> None:
         """Take exactly the named figure files out of ``figures/``; a figure's record (shared by its formats) goes with the last
-        of them."""
+        of them. The figure's entry in FI's record of the run (derived.json) is then ``dropped`` with its reason (``reasons``:
+        figure file name -> why), so no reader takes it for a figure that was drawn."""
         folder = self.quest_root / "figures"  # type: ignore[attr-defined]
+        gone: list[str] = []
         for name in names:
             stem = Path(name).stem
             targets = [folder / Path(name).name]
             others = [p for p in (folder.iterdir() if folder.is_dir() else [])
                       if p.is_file() and p.stem == stem and p.name != Path(name).name and p.suffix.lower() != ".json"]
             if not others:
+                gone.append(name)
                 targets += [folder / f"{stem}.json", self.fi_dir / "figure_records" / f"{stem}.json",  # type: ignore[attr-defined]
                             self.fi_dir / "figure_records" / f"{stem}.seed0.json"]  # type: ignore[attr-defined]
                 # Its paper copy goes too: paper.pdf would otherwise show the figure through it.
@@ -275,6 +359,7 @@ class ResultChecksMixin:
                     target.unlink(missing_ok=True)
                 except OSError as exc:
                     self._log.warning("[execute] could not remove %s (%r)", target.name, exc)  # type: ignore[attr-defined]
+        _mark_dropped_figures(self.quest_root, gone, reasons or {}, self._log)  # type: ignore[attr-defined]
 
     def _result_counter(self, state: Any) -> int:
         record = _read_json(self.fi_dir / _COUNTER)  # type: ignore[attr-defined]
@@ -289,6 +374,25 @@ class ResultChecksMixin:
         except OSError:
             pass
 
+    def _result_check_gave_up(self, state: Any, history: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
+        """When the repair gives up (or writes no code) on a run this check sent back: the run's results are not lost
+        with it. The same code runs once more with this check's repairs counted as spent, so its results stand and what
+        is still wrong is left out and said (:meth:`_leave_out_results`), as when the repairs run out. A reading of the
+        results never ends a quest with nothing to write up. ``None`` when the last run was not sent back by this check."""
+        if not (state.get("exec_result") or {}).get("result_check_sent_back"):
+            return None
+        self._save_result_counter(state, REPAIRS)
+        self._log.warning(  # type: ignore[attr-defined]
+            "[execute_reflect] no repair of what the results check found; the run is made once more and what is "
+            "still wrong is left out of the results, as when its repairs run out")
+        patch: dict[str, Any] = {
+            "exec_patch_pending": True,
+            "exec_reflect_iter": int(state.get("exec_reflect_iter") or 0) + 1,  # the repair asked counts, so this is bounded
+        }
+        if history is not None:
+            patch["exec_reflect_history"] = history  # the repair's own reason for giving up, kept
+        return patch
+
     async def _results_match_run(self, state: Any, result: Any, failed_script: str | None, split: bool) -> tuple[Any, str | None]:
         """After a run that finished: send the results back like a failed run when they do not match what ran (at most
         :data:`REPAIRS` times, and while the quest has repairs left), else leave out what is still wrong and say so.
@@ -298,7 +402,8 @@ class ResultChecksMixin:
 
         record_path = self.quest_root / "needs" / RECORD  # type: ignore[attr-defined]
         record_path.unlink(missing_ok=True)  # an earlier pass's record is not this run's
-        if result.returncode != 0:
+        self._analysis_sendback_body = ""  # the function of derive.py this run is sent back to, when FI wrote the analysis
+        if not self._run_produced(result):  # type: ignore[attr-defined]
             return result, failed_script
         result_json = _e._extract_result_json(result.stdout or "")
         self._result_kept = []
@@ -309,8 +414,8 @@ class ResultChecksMixin:
         # A run that drew none of the planned figures still has its results: they stand, and the writer is told there is
         # no figure. Sent back like a failed run, a repair that gave up would have thrown the results away and stopped the
         # quest with nothing to write up (a false stop).
-        standing = [*self._code_reader_findings(result_json), *self._figure_gap_findings(set()),
-                    *self._no_figures_standing(state)]
+        standing = [*self._code_reader_findings(result_json), *self._result_copy_findings(),
+                    *self._figure_gap_findings(set()), *self._no_figures_standing(state)]
         if not found and not standing:
             if self._result_kept:
                 self._write_kept(record_path)
@@ -318,6 +423,17 @@ class ResultChecksMixin:
         used = self._result_counter(state)
         repair_left = (int(state.get("exec_reflect_iter", 0) or 0) < self.config.engine.exec_reflect_max_iterations  # type: ignore[attr-defined]
                        and not state.get("exec_give_up_reason"))
+        body = ""
+        if found and split and not any(f.fix == SIMULATION for f in found) and self._analysis_on():  # type: ignore[attr-defined]
+            # FI wrote the analysis (core/analysis_frame.py): what is flagged goes to the function of derive.py FI's record
+            # says made it (the figure, the derived quantity). What FI's own lines made has no function of the study's to
+            # repair it: a fault of FI's, left out of the results and said, never a stop.
+            body = self._fis_body_of(found)
+            if not body:
+                self._log.warning(  # type: ignore[attr-defined]
+                    "[execute] the results check found %s in what FI's own analysis made, not a function of the study's: "
+                    "a fault of FI's, left out of the results and said", "; ".join(f.note for f in found))
+                repair_left = False
         if found and used < REPAIRS and repair_left:
             self._save_result_counter(state, used + 1)
             self._log.warning(  # type: ignore[attr-defined]
@@ -325,24 +441,47 @@ class ResultChecksMixin:
                 "; ".join(f.note for f in found), "simulation" if any(f.fix == SIMULATION for f in found) else "analysis",
                 used + 1, REPAIRS)
             to_fix = (_split_run.SIMULATE_NAME if any(f.fix == SIMULATION for f in found) else _split_run.ANALYSIS_NAME) if split else None
+            if body:
+                from . import analysis_frame as _analysis
+
+                to_fix, self._analysis_sendback_body = _analysis.DERIVE_FILE, body
             kept = "\n".join(line for line in (result.stdout or "").splitlines() if not line.startswith("RESULT_JSON:"))
             why = "\n\n".join(f.directive for f in found[:2])
             result = _e.ExecutionResult(1, kept, (result.stderr or "") + "\n[FI] " + why, result.duration_s, result.timed_out)
             self._clear_stale_figures()  # type: ignore[attr-defined]
             return result, to_fix
         if found:  # a figure that is taken out has no gap to report
-            standing = [*self._code_reader_findings(result_json),
+            standing = [*self._code_reader_findings(result_json), *self._result_copy_findings(),
                         *self._figure_gap_findings({n for f in found for n in f.figures}), *self._no_figures_standing(state)]
         self._leave_out_results([*found, *standing], record_path, result_json)
         return result, failed_script
 
+    def _fis_body_of(self, found: list[Found]) -> str:
+        """The function of derive.py FI's record of the run (data/results/derived.json) says made what ``found`` flags: a
+        figure by its file, a derived quantity by its id (also one of the keys taken out). ``""``: FI's own lines made it."""
+        from . import analysis_frame as _analysis
+
+        record = _analysis.read_record(self.quest_root)  # type: ignore[attr-defined]
+        if record.get("from_earlier_run"):
+            return ""
+        for f in found:
+            for name in f.figures:
+                body = _analysis.made_by(record, figure=name)
+                if body:
+                    return body
+            for ident in [f.quantity, *f.keys]:
+                body = _analysis.made_by(record, quantity=str(ident).rsplit(".", 1)[-1]) if ident else ""
+                if body:
+                    return body
+        return ""
+
     def _leave_out_results(self, found: list[Found], record_path: Path, result_json: Any = None) -> None:
         """What is still wrong after the repairs is left out of the results the paper may use: written to
         ``needs/RESULT_CHECK.json`` (read for the writer's note and for the quantities the analysis no longer sees)."""
-        self._drop_figures(sorted({n for f in found for n in f.figures}))
+        self._drop_figures(sorted({n for f in found for n in f.figures}), {n: f.note for f in found for n in f.figures})
         keys = sorted({k for f in found for k in f.keys})
         record = {"removed_quantities": keys, "removed_figures": sorted({n for f in found for n in f.figures}),
-                  "removed_values": _values_left_out(result_json, set(keys)),
+                  "removed_values": _values_left_out(result_json, set(keys), self._derived_record()),
                   "checks": [{"kind": f.kind, "note": f.note, **({"quantity": f.quantity, "keys": f.keys} if f.quantity else {})}
                              for f in found],
                   "note": "; ".join(f.note for f in found),
@@ -355,41 +494,69 @@ class ResultChecksMixin:
         self._log.warning(  # type: ignore[attr-defined]
             "[execute] %s. The paper is told and says so in its limitations.", record["note"])
 
+    def _derived_record(self) -> dict[str, Any]:
+        """FI's record of the last run of its analysis (``data/results/derived.json``), or ``{}``."""
+        from . import analysis_frame as _analysis
+
+        return _analysis.read_record(self.quest_root)  # type: ignore[attr-defined]
+
     def _leave_out_shown_faults(self, left_out: list[tuple[str, list[str], str]], not_done: list[tuple[str, str]],
-                                result_json: Any) -> None:
+                                result_json: Any, figures: list[tuple[str, str]] | None = None,
+                                incomplete: set[str] | None = None) -> None:
         """At the evidence gate: the quantities a failing test showed the code computes wrongly (``(quantity, keys, how)``)
-        are left out of the results the paper may use, and the plan's quantities the code does not compute
-        (``(quantity, how)``) are named, by adding them to ``needs/RESULT_CHECK.json`` (what the run's checks left out
-        stays). The same issues found again add nothing."""
+        are left out of the results the paper may use, the plan's quantities the code does not compute
+        (``(quantity, how)``) are named, and the figures a failing test showed wrong (``(file, how)``) are taken out of
+        ``figures/``, by adding them to ``needs/RESULT_CHECK.json`` (what the run's checks left out stays). The same issues
+        found again add nothing."""
         path = self.quest_root / "needs" / RECORD  # type: ignore[attr-defined]
         record = _read_json(path)
         found: list[Found] = []
         for quantity, keys, how in left_out:
-            note = f"a test FI ran on the code that produced the results shows a fault in how it computes `{quantity}` ({how})"
-            say = (f"A test FI ran on the code that produced the results fails because of a fault in how `{quantity}` is "
-                   f"computed ({how}). FI took {', '.join('`' + k + '`' for k in keys[:6])} out of the results. Do NOT report, "
-                   f"describe or quote any value for `{quantity}`, and do not call another number by its name. Say plainly, in "
-                   f"the limitations, that `{quantity}` is left out of this paper because a test showed the code computes it "
-                   "wrongly.")
+            if quantity in (incomplete or set()):
+                # The test shows the quantity missing or incomplete; it does not show a wrong number.
+                note = f"a test FI ran on the code that produced the results shows `{quantity}` missing or incomplete ({how})"
+                say = (f"A test FI ran on the code that produced the results shows `{quantity}` is missing or incomplete "
+                       f"({how}). FI took {', '.join('`' + k + '`' for k in keys[:6])} out of the results. Do NOT report, "
+                       f"describe or quote any value for `{quantity}`, and do not call another number by its name. Say plainly, "
+                       f"in the limitations, that `{quantity}` is left out of this paper because a test of the code showed it "
+                       "is missing or incomplete.")
+            else:
+                note = (f"a test FI ran on the code that produced the results shows a fault in how it computes `{quantity}` "
+                        f"({how})")
+                say = (f"A test FI ran on the code that produced the results fails because of a fault in how `{quantity}` is "
+                       f"computed ({how}). FI took {', '.join('`' + k + '`' for k in keys[:6])} out of the results. Do NOT report, "
+                       f"describe or quote any value for `{quantity}`, and do not call another number by its name. Say plainly, in "
+                       f"the limitations, that `{quantity}` is left out of this paper because a test showed the code computes it "
+                       "wrongly.")
             found.append(Found("shown_fault", ANALYSIS, "", note, say, keys=list(keys), quantity=quantity))
         for quantity, how in not_done:
             note = f"the code does not compute the plan's `{quantity}` ({how})"
             say = (f"The code does not compute `{quantity}`, which the plan asks for ({how}). Do not report a value for it or "
                    f"call another number by its name. Say plainly, in the limitations, that `{quantity}` was not computed.")
             found.append(Found("not_computed", ANALYSIS, "", note, say, quantity=quantity))
+        for file, how in figures or []:
+            note = f"a test FI ran on the code that produced the results shows a fault in how `{file}` is drawn ({how})"
+            say = (f"A test FI ran on the code that produced the results fails because of a fault in how the figure `{file}` is "
+                   f"drawn ({how}). FI took it out of the figures. Do NOT include it, refer to it or describe what it showed. "
+                   f"Say plainly, in the limitations, that `{file}` is left out of this paper because a test showed the code "
+                   "draws it wrongly.")
+            found.append(Found("shown_fault_figure", ANALYSIS, "", note, say, figures=[file], quantity=file))
         checks = [c for c in record.get("checks") or [] if isinstance(c, dict)]
         seen = {(c.get("kind"), c.get("quantity")) for c in checks}
         new = [f for f in found if (f.kind, f.quantity) not in seen]
         if not new:
             return
+        gone_figures = sorted({n for f in new for n in f.figures})
+        if gone_figures:
+            self._drop_figures(gone_figures, {n: SHOWN_FAULT_WHY for n in gone_figures})
         keys = sorted({*(str(k) for k in record.get("removed_quantities") or []), *(k for f in new for k in f.keys)})
         why = record.get("removed_why") if isinstance(record.get("removed_why"), dict) else {}
         for f in new:
             for k in f.keys:
                 why.setdefault(k, SHOWN_FAULT_WHY)
         record.update({
-            "removed_quantities": keys, "removed_figures": list(record.get("removed_figures") or []),
-            "removed_values": _values_left_out(result_json, set(keys)), "removed_why": why,
+            "removed_quantities": keys, "removed_figures": sorted({*(record.get("removed_figures") or []), *gone_figures}),
+            "removed_values": _values_left_out(result_json, set(keys), self._derived_record()), "removed_why": why,
             "checks": [*checks, *({"kind": f.kind, "note": f.note, "quantity": f.quantity, "keys": f.keys} for f in new)],
             "note": "; ".join(x for x in [str(record.get("note") or ""), *(f.note for f in new)] if x),
             "say": "\n\n".join(x for x in [str(record.get("say") or ""), *(f.say for f in new)] if x)})

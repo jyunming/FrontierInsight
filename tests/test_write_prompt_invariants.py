@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from core.write_personas import fill
+
 AGENTS_DIR = Path(__file__).resolve().parent.parent / "agents"
 WRITE_MD = AGENTS_DIR / "write.md"
 ESSAY_PERSONA = AGENTS_DIR / "write_persona_essay.md"
@@ -130,7 +132,8 @@ def test_essay_persona_forbids_imrad_heading(forbidden_heading: str) -> None:
     """The essay persona must explicitly forbid IMRAD headings — a
     fleet run with gemini-3.1-flash-lite-preview otherwise defaults
     to IMRAD on any experimental topic and ignores the essay shape."""
-    txt = ESSAY_PERSONA.read_text(encoding="utf-8")
+    # the forbidden list is filled in from core/write_personas.py, as the writer is shown it
+    txt = fill("essay", ESSAY_PERSONA.read_text(encoding="utf-8"))
     assert "Forbidden headings" in txt, (
         "write_persona_essay.md must have an explicit 'Forbidden headings' "
         "section so the LLM can't bury IMRAD inside an essay"
@@ -155,7 +158,8 @@ def test_policy_brief_persona_forbids_imrad_and_summary_headings(
 ) -> None:
     """policy_brief is strictly Issue / Context / Recommendation; every
     other H2 (IMRAD or Exec Summary / Findings) is forbidden."""
-    txt = POLICY_PERSONA.read_text(encoding="utf-8")
+    # the forbidden list is filled in from core/write_personas.py, as the writer is shown it
+    txt = fill("policy_brief", POLICY_PERSONA.read_text(encoding="utf-8"))
     assert "Forbidden headings" in txt
     assert forbidden_heading in txt, (
         f"write_persona_policy_brief.md must name {forbidden_heading!r} as forbidden"
@@ -170,3 +174,45 @@ def test_policy_brief_persona_pins_three_acts() -> None:
         assert required in txt, (
             f"write_persona_policy_brief.md must prescribe {required!r}"
         )
+
+
+def test_write_md_has_no_free_figure_sentence_rule(write_md_text: str) -> None:
+    """The writer describes a figure only by placing a mark from its list; FI writes the sentence."""
+    assert "{{figure:" in write_md_text
+    assert "never write a sentence of your own about what such a figure shows" in write_md_text.lower()
+    assert "result marks" in write_md_text
+    # a figure with no marks list (no call record) keeps the instruction it always had
+    assert "state the concrete takeaway the figure supports" in write_md_text
+    assert "describe in prose what it would have shown" in write_md_text
+    assert "is mentioned by its number only" not in write_md_text
+
+
+def test_write_md_states_the_one_form_kept_for_a_checked_figure_first(write_md_text: str) -> None:
+    """The checked-figure rule comes first and names the two kept forms; the old "Figure 1 shows that" is for unchecked figures."""
+    first = write_md_text.index('1. A figure whose entry has a "Marks FI has checked')
+    other = write_md_text.index("2. Any other figure")
+    rule = write_md_text[first:other]
+    assert "only statements you make about it are these two" in rule
+    assert 'ends with "(Figure N)"' in rule and "FI removes every other sentence that names that figure" in rule
+    assert "Figure 1 shows that the error falls" not in rule and "Figure 1 shows that the error falls" in write_md_text[other:]
+
+
+def test_slides_and_poster_prompts_say_figure_statements_are_fis_words() -> None:
+    root = Path(__file__).resolve().parent.parent / "agents"
+    for name in ("slides.md", "poster.md"):
+        text = (root / name).read_text(encoding="utf-8")
+        assert "word for word" in text and "Never write a statement of your own about what such a figure shows" in text, name
+
+
+def test_checked_figure_rule_names_the_drawn_quantity_and_the_mark_standing_alone() -> None:
+    root = Path(__file__).resolve().parent.parent
+    write = (root / "agents" / "write.md").read_text(encoding="utf-8")
+    assert "Results this figure draws: ..." in write and "as a sentence on its own" in write
+    # the prompt quotes the line FI writes into the figure entry, word for word
+    assert "Results this figure draws: " in (root / "core" / "engine.py").read_text(encoding="utf-8")
+    slides = (root / "agents" / "slides.md").read_text(encoding="utf-8")
+    assert "**Figure N shows what is plotted" not in slides
+    assert "copied word for word" in slides[slides.index("## Figures"):]
+    docs = (root / "docs" / "capabilities-reference.md").read_text(encoding="utf-8")
+    assert "the paper places none of a figure's marks" in docs and "the shortest sentence" not in docs
+

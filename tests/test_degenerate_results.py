@@ -9,6 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -229,6 +230,44 @@ def test_a_series_that_misses_settings_the_figure_otherwise_shows_is_counted_fro
     assert "the series \"uncorrected\" has no value at x = 200, 2000" in got["none_values.png"].says()
     note = dr.gap_note(list(got.values()))
     assert "as shown in Figure N" in note and "caption" in note and "uncorrected" in note
+
+
+def _one_panel(tmp_path: Path, lines: list[dict[str, Any]]) -> Path:
+    records = tmp_path / "records"
+    records.mkdir(exist_ok=True)
+    (records / "fig.seed0.json").write_text(json.dumps({"axes": [{"title": "T", "lines": lines}]}), encoding="utf-8")
+    return records
+
+
+def _ln(label: str, x: list[float], marker: str = "o", linestyle: str = "-", **extra: Any) -> dict[str, Any]:
+    return {"kind": "data", "label": label, "x": x, "y": [float(i + 1) for i in range(len(x))], "marker": marker,
+            "linestyle": linestyle, "missing_x": [], **extra}
+
+
+STEPS = [0.05, 0.025, 0.0125, 0.00625, 0.003125, 0.0015625, 0.00078125]
+
+
+def test_a_line_without_markers_has_no_gap_between_its_ends(tmp_path: Path) -> None:
+    # a sloped dashed 2-point line over the 7 step sizes of a marker series: it passes through all of them
+    records = _one_panel(tmp_path, [_ln("data", STEPS), _ln("slope 4", [0.00078125, 0.05], marker="None", linestyle="--")])
+    assert dr.figure_gaps(records, ["fig.png"]) == []
+
+
+def test_a_line_that_ends_before_the_other_series_or_a_marker_series_or_a_missing_x_still_gives_a_gap(tmp_path: Path) -> None:
+    # the line's span ends before the last x of the marker series: the x outside it has no point
+    short = _one_panel(tmp_path, [_ln("data", STEPS), _ln("fit", [0.003125, 0.05], marker="None")])
+    (gap,) = dr.figure_gaps(short, ["fig.png"])
+    assert (gap.series, gap.absent) == ("fit", [0.00078125, 0.0015625])
+    # a series drawn with markers keeps the point-by-point comparison
+    (tmp_path / "m").mkdir()
+    marked = _one_panel(tmp_path / "m", [_ln("data", STEPS), _ln("some", [0.05, 0.0125, 0.00078125])])
+    (gap,) = dr.figure_gaps(marked, ["fig.png"])
+    assert (gap.series, gap.why, len(gap.absent)) == ("some", "not plotted", 4)
+    # a recorded missing value is a gap whatever the drawing
+    (tmp_path / "n").mkdir()
+    none = _one_panel(tmp_path / "n", [_ln("line", STEPS, marker="None", missing_x=[0.0125])])
+    (gap,) = dr.figure_gaps(none, ["fig.png"])
+    assert (gap.why, gap.absent) == ("no value", [0.0125])
 
 
 # ---- the words ------------------------------------------------------------------------------------------------------------
@@ -527,3 +566,89 @@ async def test_dropping_a_figure_removes_exactly_that_file_and_keeps_its_sibling
     assert (eng.fi_dir / "figure_records" / "empty_one.json").exists(), "the record stays while another format needs it"
     eng._drop_figures(["empty_one.svg"])
     assert not (eng.fi_dir / "figure_records" / "empty_one.json").exists() and (folder / "empty_one_other.png").exists()
+
+
+def test_a_dropped_figure_is_marked_dropped_with_its_reason_in_the_run_record_and_a_drawn_one_stays_ok(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    eng = _engine(tmp_path, monkeypatch)
+    folder = eng.quest_root / "figures"
+    (folder / "empty_two.png").write_bytes(b"png")
+    (folder / "fine_two.png").write_bytes(b"png")
+    record_path = eng.quest_root / "data" / "results" / "derived.json"
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    record_path.write_text(json.dumps({"schema": 1, "derived": {}, "figures_said": "2 of 2 figure(s) drawn.", "figures": [
+        {"id": "empty_two", "file": "empty_two.png", "status": "ok", "why": "", "said": "Figure `empty_two` was drawn (empty_two.png)."},
+        {"id": "fine_two", "file": "fine_two.png", "status": "ok", "why": "", "said": "Figure `fine_two` was drawn (fine_two.png)."},
+    ]}), encoding="utf-8")
+    eng._drop_figures(["empty_two.png"], {"empty_two.png": "the panel draws no data"})
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    entries = {e["id"]: e for e in record["figures"]}
+    assert entries["empty_two"]["status"] == "dropped" and entries["empty_two"]["why"] == "the panel draws no data"
+    assert "left out" in entries["empty_two"]["said"]
+    assert entries["fine_two"]["status"] == "ok" and not (folder / "empty_two.png").exists()
+    # figures_said is the run's own builder over the updated entries: one drawn, one dropped (counted as not drawn).
+    from core import analysis_figures
+
+    assert record["figures_said"] == analysis_figures.said(record["figures"])
+    assert record["figures_said"].startswith("1 of 2 figure(s) drawn.") and "left out" in record["figures_said"]
+
+
+@pytest.mark.asyncio
+async def test_a_repair_that_gives_up_on_a_sent_back_run_keeps_its_results_and_leaves_out_what_is_wrong(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    eng = _engine(tmp_path, monkeypatch)
+    state: dict[str, Any] = {"iteration": 0}
+    result, _ = await eng._results_match_run(state, _run(), None, True)
+    assert result.returncode == 1, "the run is sent back first"
+    give_up = json.dumps({"code": "", "deps": [], "patch_summary": "", "give_up_reason": "cannot see what to change"})
+
+    eng._client = type("Stub", (), {"chat": AsyncMock(return_value=give_up)})()
+    eng.quest_root.mkdir(parents=True, exist_ok=True)
+    reflect_state = {
+        "iteration": 0, "exec_result": {"returncode": 1, "stdout_tail": "", "stderr_tail": result.stderr,
+                        "result_check_sent_back": True},
+        "result_json": None, "code": "print(1)", "design": {},
+    }
+    patch = await eng._node_execute_reflect(reflect_state)
+    assert not patch.get("exec_give_up_reason"), "the results are not given up with the repair"
+    assert patch["exec_patch_pending"] is True
+    assert eng._route_after_execute_reflect({**reflect_state, **patch}) == "retry"
+    # the same code runs once more: its results stand, what is still wrong is left out and said
+    (eng.quest_root / "figures" / "empty_one.png").write_bytes(b"png")
+    (eng.quest_root / "figures" / "fine.png").write_bytes(b"png")
+    result, _ = await eng._results_match_run(state, _run(), None, True)
+    assert result.returncode == 0
+    record = json.loads((eng.quest_root / "needs" / "RESULT_CHECK.json").read_text(encoding="utf-8"))
+    assert record["removed_quantities"] == ["level"] and record["removed_figures"] == ["empty_one.png"]
+
+
+@pytest.mark.asyncio
+async def test_a_repair_that_gives_up_on_a_crash_still_gives_up(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    eng = _engine(tmp_path, monkeypatch)
+
+    reply = json.dumps({"code": "", "deps": [], "patch_summary": "", "give_up_reason": "needs a device this machine lacks"})
+    eng._client = type("Stub", (), {"chat": AsyncMock(return_value=reply)})()
+    patch = await eng._node_execute_reflect({
+        "iteration": 0, "exec_result": {"returncode": 1, "stdout_tail": "", "stderr_tail": "Traceback: boom"},
+        "result_json": None, "code": "print(1)", "design": {},
+    })
+    assert patch["exec_give_up_reason"].startswith("needs a device")
+    assert not patch.get("exec_patch_pending")
+
+
+def test_a_declared_reference_value_is_the_same_everywhere_by_design_and_a_declared_result_is_still_caught() -> None:
+    """A derived value with the role ``reference`` and a constant formula (or a declared result with a reference formula) is
+    not a result that shows nothing; a declared result that stays put while another changes still is."""
+    plan = {"metrics": [{"id": "gain", "role": "result"}, {"id": "level", "role": "result"},
+                        {"id": "bound_ref", "reference": {"formula": "7"}}],
+            "derived": [{"id": "ratio_ref", "inputs": [], "role": "reference", "formula": "10"},
+                        {"id": "mean_gain", "inputs": ["gain"], "role": "result"}],
+            "oracles": [{"name": "r", "kind": "special_case", "measure": "ratio_ref", "expected": 10, "case": {"rate": 1}}]}
+    names = dr.expected_constants(plan)
+    assert {"ratio_ref", "bound_ref"} <= names and not ({"gain", "level", "mean_gain"} & names)
+    reported = REPORTED | {"ratio_ref", "bound_ref"}
+    cells = _cells(gain=lambda r: 3 * r, ratio_ref=10.0, bound_ref=7.0, level=2.5)
+    assert _flags(cells, reported, names) == [("level", "constant")], "only the declared result is flagged"
+    assert ("ratio_ref", "constant") in _flags(cells, reported), "without the declared role it is flagged (the old behaviour)"

@@ -17,6 +17,7 @@ Both expose the same async `execute(cmd, cwd, timeout_s) -> ExecutionResult`.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import math
 import os
@@ -29,7 +30,7 @@ import time
 import venv
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable, Mapping, Protocol
+from typing import TYPE_CHECKING, Any, Iterable, Mapping, Protocol
 
 from core.fi_home import fi_home
 from core.proc_tree import AsyncProcessTree
@@ -63,6 +64,211 @@ def scrub_secrets(env: "Mapping[str, str] | None" = None) -> dict[str, str]:
     return {k: v for k, v in base.items() if not _SECRET_NAME.search(str(k)) and str(k).upper() not in _NEVER_PASSED}
 
 
+def threads_beside(env: "Mapping[str, str] | None", at_once: int, cores: int | None = None) -> dict[str, str] | None:
+    """The environment of one of ``at_once`` processes FI runs at the same time: each numerical library (OpenMP,
+    OpenBLAS, MKL, numexpr, numba) told to start at most its share of the cores (``cores // at_once``, at least 1), unless
+    ``env`` already says fewer. Left alone, each process starts a thread per core: a simulation whose setting took 1.7 s
+    alone took 8.5 times as long beside 7 others on 16 cores, and 1.4 times with one thread each. ``env`` (``None``: FI's
+    own environment) is returned as it is for one process at a time."""
+    if at_once <= 1:
+        return None if env is None else dict(env)
+    share = max(1, (cores or os.cpu_count() or 1) // at_once)
+    out = dict(os.environ if env is None else env)
+    for k in (*_THREAD_VARS, "NUMBA_NUM_THREADS"):
+        v = str(out.get(k, "")).strip()
+        if not (v.isdigit() and 1 <= int(v) <= share):
+            out[k] = str(share)
+    return out
+
+
+def plain_exit(returncode: int) -> str:
+    """What an exit code with no error message behind it usually means, in a few plain words (``""`` when unknown)."""
+    if returncode in (-9, 137):
+        return "the system stopped it, most often because the computer ran out of memory"
+    if returncode in (-15, 143):
+        return "it was asked to stop from outside"
+    if returncode in (-11, 139, 0xC0000005, -1073741819):
+        return "it crashed inside a compiled library (an invalid memory access)"
+    if returncode in (0xC0000409, -1073740791, -6, 134):
+        return "it aborted inside a compiled library"
+    if returncode in (0xC000013A, -1073741510, -2, 130):
+        return "it was interrupted (Ctrl-C or the window closing)"
+    return ""
+
+
+def _tree_mb(pid: int) -> float | None:
+    """The memory (MB) the process ``pid`` and everything it started hold now (resident, summed), or ``None``."""
+    try:
+        import psutil
+
+        root = psutil.Process(pid)
+        total = 0
+        for proc in (root, *root.children(recursive=True)):
+            try:
+                total += proc.memory_info().rss
+            except (psutil.Error, OSError):
+                continue
+        return total / 1_048_576
+    except Exception:  # noqa: BLE001 -- a measurement that cannot be made is not a reason to stop the run
+        return None
+
+
+async def _watch_peak(pid: int, box: list[float], every_s: float = 0.5) -> None:
+    """Sample the memory of the process tree of ``pid`` until cancelled; ``box[0]`` is the largest sample so far."""
+    while True:
+        mb = await asyncio.to_thread(_tree_mb, pid)
+        if mb is not None and mb > box[0]:
+            box[0] = mb
+        await asyncio.sleep(every_s)
+
+
+def say_silent_death(result: "ExecutionResult") -> None:
+    """One plain run-log line for a command that ended with a failing exit code and no error message at all: the fact FI
+    holds about it (the code, how long it ran, the most memory it held), as the person has nothing else to go on."""
+    if result.returncode in (0, None) or result.timed_out or (result.stderr or "").strip():
+        return
+    why = plain_exit(result.returncode)
+    mem = f"; it held up to {result.peak_mb / 1024:.1f} GB at its largest" if result.peak_mb else ""
+    _log.warning("[execute] a command ended with exit code %s after %.0f s and printed no error%s%s", result.returncode,
+                 result.duration_s, f" ({why})" if why else "", mem)
+
+
+def _free_mb() -> float | None:
+    """The memory (MB) the computer can give a new process now, or ``None`` when it cannot be told."""
+    try:
+        import psutil
+
+        return psutil.virtual_memory().available / 1_048_576
+    except Exception:  # noqa: BLE001
+        return None
+
+
+class SettingsGate:
+    """Lets at most ``at_once`` settings run together, and fewer when the computer's memory would not hold them.
+
+    The count of cores says how many settings could compute at once, not how many fit in memory: a simulation that holds
+    3 GB per setting, run on 16 cores, needs 48 GB. FI measures what each finished setting held at its largest
+    (``ExecutionResult.peak_mb``) and, before it starts the next, checks that the free memory (less a reserve) holds one
+    more of that size on top of those still starting up. Until one is measured, a new setting starts every :data:`STAGGER` seconds, so the first show their size before the rest start. One setting always runs, however little memory there is: waiting then would never end."""
+
+    #: Seconds a setting is counted at its full size: it has not finished growing.
+    RAMP_S = 6.0
+    #: Seconds between one setting starting and the next while nothing is known of their size.
+    STAGGER = 0.5
+
+    def __init__(self, at_once: int, *, log: Any = None, free_mb: Any = None, total_mb: float | None = None,
+                 poll_s: float = 0.2) -> None:
+        self.at_once = max(1, int(at_once or 1))
+        self._log = log
+        self._free = free_mb or _free_mb
+        try:
+            import psutil
+
+            total = psutil.virtual_memory().total / 1_048_576
+        except Exception:  # noqa: BLE001
+            total = 0.0
+        # What is left for the computer and everything else on it: a tenth of the memory, at least 1 GB.
+        self._reserve = max(1024.0, 0.1 * (total_mb if total_mb is not None else total))
+        self._poll_s = poll_s
+        self._started: list[float] = []  # when each running setting started
+        self._peaks: list[float] = []
+        self._free_at_start: float | None = None
+        self._held_said = False
+        self._blind = False
+        self.most_at_once = 0
+        self.held_back_s = 0.0
+        self._cond = asyncio.Condition()
+
+    @property
+    def per_setting_mb(self) -> float | None:
+        """The most memory one finished setting held (the largest, not the mean: a setting may be the big one)."""
+        return max(self._peaks) if self._peaks else None
+
+    def note(self, peak_mb: float | None) -> None:
+        """A finished run's largest memory, from the executor. A run whose memory could not be measured (a container,
+        no ``psutil``) before any could be makes the sizing blind: the cores decide, as they did before."""
+        if peak_mb and peak_mb > 0:
+            self._peaks.append(float(peak_mb))
+        elif not self._peaks:
+            self._blind = True
+
+    def _need_mb(self, free: float) -> float | None:
+        if self._peaks:
+            return 1.25 * max(self._peaks)
+        if self._free_at_start is not None and self._started:
+            grown = self._free_at_start - free
+            if grown > 0:
+                return 1.25 * max(256.0, grown / len(self._started))
+        return None
+
+    def _fits(self) -> bool:
+        if not self._started:
+            return True
+        if len(self._started) >= self.at_once:
+            return False
+        free = self._free()
+        if free is None or self._blind:
+            return True  # memory cannot be told here: the cores decide, as before
+        now = time.monotonic()
+        need = self._need_mb(free)
+        young = [t for t in self._started if now - t < self.RAMP_S]
+        if need is None:
+            # Nothing to measure from yet: one more setting every STAGGER seconds, so the first ones can show their size.
+            # A spacing, not a memory limit, so it is not reported as holding settings back.
+            return now - self._started[-1] >= self.STAGGER
+        if free - self._reserve - len(young) * need >= need:
+            return True
+        self._say_held()  # only a real memory limit is reported as holding settings back
+        return False
+
+    def _say_held(self) -> None:
+        if self._held_said or self._log is None:
+            return
+        self._held_said = True
+        free = self._free()
+        need = self.per_setting_mb
+        self._log.warning(
+            "[run] holding settings back so the computer does not run out of memory: %d could run at once, %d run now%s%s",
+            self.at_once, len(self._started),
+            f"; each holds about {need / 1024:.1f} GB" if need else "",
+            f"; {free / 1024:.1f} GB is free" if free is not None else "")
+
+    @contextlib.asynccontextmanager
+    async def slot(self):
+        waited = time.monotonic()
+        while True:
+            async with self._cond:
+                if self._fits():
+                    if not self._started:
+                        self._free_at_start = self._free()
+                    self._started.append(time.monotonic())
+                    self.most_at_once = max(self.most_at_once, len(self._started))
+                    mine = self._started[-1]
+                    break
+            await asyncio.sleep(self._poll_s) if len(self._started) < self.at_once else await self._wait_for_slot()
+        self.held_back_s += max(0.0, time.monotonic() - waited)
+        try:
+            yield self
+        finally:
+            async with self._cond:
+                self._started.remove(mine)
+                self._cond.notify_all()
+
+    async def _wait_for_slot(self) -> None:
+        async with self._cond:
+            if len(self._started) >= self.at_once:
+                try:
+                    await asyncio.wait_for(self._cond.wait(), timeout=self._poll_s)
+                except asyncio.TimeoutError:
+                    pass
+
+    def record(self) -> dict[str, Any]:
+        """What FI keeps of the sizing (``.fi/trials/at_once.json``)."""
+        return {"could_run_at_once": self.at_once, "most_run_at_once": self.most_at_once,
+                "largest_setting_mb": self.per_setting_mb, "held_back": self._held_said,
+                "waited_s": round(self.held_back_s, 1)}
+
+
 #: Never handed to code a model or an agent wrote: an older FI's pointer to the folder of its check values.
 _NEVER_PASSED = frozenset({"FI_CHECKS_DIR"})
 
@@ -78,6 +284,9 @@ class ExecutionResult:
     stderr: str
     duration_s: float
     timed_out: bool = False
+    #: The most memory (MB) the command and every process it started held at once, as FI sampled it while it ran; ``None``
+    #: when it could not be measured (a container, no ``psutil``, a command that ended before the first sample).
+    peak_mb: float | None = None
 
 
 class Executor(Protocol):
@@ -109,6 +318,10 @@ class VenvExecutor:
     Suitable for personal / trusted-topic use. For untrusted code, prefer
     `DockerExecutor`.
     """
+
+    #: Awaited before each run when set (the engine's code_project.CodeRuns.before_run: the code as it runs is a
+    #: commit in code/'s history).
+    before_run: Any = None
 
     def __init__(
         self, *, python_version: str = "3.11", system_site_packages: bool = True,
@@ -142,7 +355,7 @@ class VenvExecutor:
         # actually existing (mirrors cleanup_after_success) AND a cheap pip
         # probe (catches a partial ensurepip); rebuild a broken dir from clean.
         if (venv_dir / "pyvenv.cfg").exists() and py.is_file():
-            probe = await self.execute(
+            probe = await self._run(
                 [str(py), "-c", "import pip"], cwd=quest_root, timeout_s=30,
             )
             if probe.returncode == 0:
@@ -174,7 +387,7 @@ class VenvExecutor:
             return ExecutionResult(returncode=0, stdout="", stderr="", duration_s=0.0)
         py = self.python_path(quest_root)
         cmd = [str(py), "-m", "pip", "install", "--quiet", *pkgs]
-        result = await self.execute(cmd, cwd=quest_root, timeout_s=600)
+        result = await self._run(cmd, cwd=quest_root, timeout_s=600)
         # Retry a failed install once. Two quests installing matplotlib at the
         # same moment in one process have twice left one of them with a pip
         # that fell back to building it from source and failed ("Could not
@@ -187,7 +400,7 @@ class VenvExecutor:
                 "[install] pip install rc=%d; retrying once. %s",
                 result.returncode, pip_failure_summary(result.stderr),
             )
-            result = await self.execute(cmd, cwd=quest_root, timeout_s=600)
+            result = await self._run(cmd, cwd=quest_root, timeout_s=600)
         if result.returncode == 0:
             self._record_requested(pkgs, quest_root)
         return result
@@ -227,12 +440,26 @@ class VenvExecutor:
                 wanted.append(m.group(0))
         if not wanted:
             return ""
-        probe = await self.execute(
+        probe = await self._run(
             [str(py), "-c", _PIN_SCRIPT, *wanted], cwd=quest_root, timeout_s=60,
         )
         return probe.stdout if probe.returncode == 0 else ""
 
     async def execute(
+        self,
+        cmd: list[str],
+        *,
+        cwd: Path,
+        timeout_s: int,
+        env: dict[str, str] | None = None,
+    ) -> ExecutionResult:
+        # A run of the quest's code: what runs is committed first (before_run). FI's own setup, installs and
+        # probes go through _run and are not runs of the code.
+        if self.before_run is not None:
+            await self.before_run()
+        return await self._run(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
+
+    async def _run(
         self,
         cmd: list[str],
         *,
@@ -253,6 +480,8 @@ class VenvExecutor:
         )
         proc = tree.proc
         aborted = False
+        peak = [0.0]
+        watcher = asyncio.create_task(_watch_peak(proc.pid, peak))
         try:
             try:
                 stdout, stderr = await asyncio.wait_for(
@@ -282,6 +511,7 @@ class VenvExecutor:
             aborted = True  # the script may have exited while what it started still holds the output pipe
             raise
         finally:
+            watcher.cancel()
             await tree.aclose(aborted=aborted)
         result = ExecutionResult(
             returncode=proc.returncode if proc.returncode is not None else -1,
@@ -289,7 +519,9 @@ class VenvExecutor:
             stderr=stderr.decode("utf-8", errors="replace"),
             duration_s=time.monotonic() - start,
             timed_out=timed_out,
+            peak_mb=round(peak[0], 1) if peak[0] > 0 else None,
         )
+        say_silent_death(result)
         # Reactive diagnostic: a native-extension DLL load failure on Windows is
         # almost always the venv path crossing MAX_PATH. Surface an actionable
         # hint even on the otherwise-silent web_plots path (rc!=0 -> {} there).
@@ -345,7 +577,7 @@ class VenvExecutor:
             # happens to have installed alongside what this quest actually
             # asked for, which is not what "what did this quest need"
             # should mean. Harmless no-op when system_site_packages=False.
-            freeze = await self.execute(
+            freeze = await self._run(
                 [str(py), "-m", "pip", "freeze", "--local"],
                 cwd=quest_root,
                 timeout_s=60,
@@ -356,7 +588,7 @@ class VenvExecutor:
                 # folder was deleted (it probes each one); the venv's own
                 # distributions, read with importlib.metadata, are what
                 # ``--local`` would have listed.
-                local = await self.execute([str(py), "-c", _LOCAL_SCRIPT], cwd=quest_root, timeout_s=60)
+                local = await self._run([str(py), "-c", _LOCAL_SCRIPT], cwd=quest_root, timeout_s=60)
                 if local.returncode != 0:
                     _log.warning(
                         "cleanup_after_success: pip freeze rc=%d (%s) and the importlib.metadata "
@@ -810,6 +1042,10 @@ class DockerExecutor:
     mounted, read-only, each at ``/fi-skills/<name>`` (``set_skill_mounts``).
     """
 
+    #: Awaited before each run when set (the engine's code_project.CodeRuns.before_run: the code as it runs is a
+    #: commit in code/'s history).
+    before_run: Any = None
+
     def __init__(
         self, *, image: str = "python:3.11-slim", limits: DockerLimits | None = None,
         log: logging.Logger | None = None,
@@ -1189,13 +1425,27 @@ class DockerExecutor:
         pkgs = list(packages)
         if not pkgs:
             return ExecutionResult(returncode=0, stdout="", stderr="", duration_s=0.0)
-        return await self.execute(
+        return await self._run(
             ["python", "-m", "pip", "install", "--quiet", *pkgs],
             cwd=quest_root,
             timeout_s=600,
         )
 
     async def execute(
+        self,
+        cmd: list[str],
+        *,
+        cwd: Path,
+        timeout_s: int,
+        env: dict[str, str] | None = None,
+    ) -> ExecutionResult:
+        # A run of the quest's code: what runs is committed first (before_run). FI's own setup, installs and
+        # probes go through _run and are not runs of the code.
+        if self.before_run is not None:
+            await self.before_run()
+        return await self._run(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
+
+    async def _run(
         self,
         cmd: list[str],
         *,

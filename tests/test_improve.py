@@ -744,3 +744,46 @@ def test_a_criterion_that_stops_meeting_its_bar_is_worse_however_small_the_step(
     after = [{**before[0], "value": 0.052, "met": False}]
     (row,) = improve.compare(before, after)
     assert row["change"] == "worse" and improve.verdict([row])["best"] is False
+
+
+def test_a_cache_test_in_another_function_is_not_taken_for_a_setting_test() -> None:
+    """A live speed-up kept a matrix computed once instead of 216,000 times, and was refused as "a comparison with 0, a
+    setting a check runs on": another function of the file named a setting's value ``c``, and the cache's ``c[0] is not
+    src`` was read as that setting compared with 0. A name holds a setting only in the function that gives it, and only
+    a value the comparison writes out is tested for; a real test of the setting is still refused."""
+    sim = ('def width(cell):\n    c = cell["sigma"]\n    return 2 * c\n\n\n'
+           'def field(src, key):\n    return [v * key for v in src]\n')
+    cached = ('def field(src, key):\n    c = _CACHE.get("f")\n    if c is None or c[0] is not src or c[1] != key:\n'
+              '        c = (src, key, [v * key for v in src])\n        _CACHE["f"] = c\n    return c[2]\n')
+    files = {"simulate.py": "_CACHE = {}\n" + sim}
+    settings = {"sigma": [0, 0.5]}
+
+    def check(find: str, replace: str) -> tuple[str | None, str]:
+        edit = improve.Edit(file="simulate.py", find=find, replace=replace, why="cache")
+        return improve.check_edit(files, edit, ["simulate.py"], tried={improve.fingerprint(files)}, expected=[],
+                                  measures=set(), settings=settings)
+
+    assert check('def field(src, key):\n    return [v * key for v in src]\n', cached)[0] is not None
+    special = 'def width(cell):\n    c = cell["sigma"]\n    if c == 0:\n        return 0.0\n    return 2 * c\n'
+    text, why = check('def width(cell):\n    c = cell["sigma"]\n    return 2 * c\n', special)
+    assert text is None and "a setting a check runs on" in why
+
+
+@pytest.mark.asyncio
+async def test_a_round_that_meets_the_checks_but_leaves_the_study_without_its_results_is_not_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, _model = await _quest(tmp_path, [_edit(EULER, RK4)])
+    calls: list[str] = []
+
+    async def no_study_result(state: Any, new_code: str) -> str:
+        calls.append(new_code)
+        return "the repaired code no longer returns the study's results: run_trial() returned check_error, none of y"
+
+    monkeypatch.setattr(engine, "_simulation_repair_fault", no_study_result)
+    out = await engine._node_improve(dict(STATE))
+    assert calls and "k4" in calls[0], "the check is made on the version that met the checks"
+    assert out["improve_rerun"] is False, "no version was kept"
+    assert "euler" in (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8").lower() \
+        or "k4" not in (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")
+    assert "no longer returns the study's results" in _log(engine)

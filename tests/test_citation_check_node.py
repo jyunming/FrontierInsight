@@ -178,8 +178,9 @@ def test_a_reader_that_cannot_be_had_leaves_the_unread_citations_alone_and_stops
 def test_the_calls_have_a_cap_and_a_resume_does_not_spend_them_again(tmp_path: Path) -> None:
     eng = _engine(tmp_path)
     paper = _paper(tmp_path)
-    text = paper.read_text(encoding="utf-8")
     eng.fi_dir.mkdir(parents=True)
+    eng._refresh_paper_facts({"paper_md": str(paper)})  # type: ignore[arg-type]  # FI's Limitations are in the paper first
+    text = paper.read_text(encoding="utf-8")
     spent = cs.new_record(text, None)
     spent.update(judge_calls=cs.MAX_JUDGE_CALLS, repair_calls=cs.MAX_REPAIR_CALLS)
     (eng.fi_dir / cs.FILE).write_text(json.dumps(spent), encoding="utf-8")

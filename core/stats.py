@@ -286,7 +286,13 @@ def _clean(values: list[Any]) -> list[float]:
 # interval and p-value. The draws differ from the old pure-Python stream (same distribution, not the same numbers). Without
 # numpy the original pure-Python loops run.
 
-_CHUNK_ELEMENTS = 4_000_000
+# 250k numbers is 2 MB per array (about 5 MB at the peak); 4M asked for 32 MB arrays at once, which a machine short of memory
+# refused. A smaller chunk draws the same numbers (the generator is read row by row), so the results do not change.
+_CHUNK_ELEMENTS = 250_000
+# The two-group kernels draw group x then group y for each block of resamples. The size of that block fixes the order of the
+# random draws (so a seed gives the same interval as before), and is NOT the memory bound: inside a block each group is drawn
+# in pieces of at most ``_CHUNK_ELEMENTS`` numbers, which reads the same stream as one call.
+_STREAM_ELEMENTS = 4_000_000
 
 
 def _numpy() -> Any:
@@ -313,6 +319,20 @@ def _chunks(rounds: int, width: int) -> list[int]:
     return out
 
 
+def _stream_blocks(rounds: int, width: int) -> list[int]:
+    """The blocks of resamples in which the two-group kernels draw their groups in turn (fixed, see ``_STREAM_ELEMENTS``)."""
+    per, out, left = max(1, _STREAM_ELEMENTS // max(1, width)), [], rounds
+    while left > 0:
+        out.append(min(per, left))
+        left -= out[-1]
+    return out
+
+
+def _drawn(np: Any, gen: Any, size: int, rows: int, take: Any) -> list[Any]:
+    """``take`` applied to the ``(rows, size)`` index draw, made in pieces that fit ``_CHUNK_ELEMENTS`` (one call's stream)."""
+    return [take(gen.integers(0, size, size=(r, size))) for r in _chunks(rows, size)]
+
+
 def _resampled_means(vals: list[float], rounds: int, rng: Any) -> list[float]:
     """The mean of ``len(vals)`` values drawn with replacement, ``rounds`` times."""
     n = len(vals)
@@ -334,8 +354,10 @@ def _resampled_mean_differences(x: list[float], y: list[float], rounds: int, rng
             for _ in range(rounds)
         ]
     gen, ax, ay, out = _np_generator(np, rng), np.asarray(x, dtype=float), np.asarray(y, dtype=float), []
-    for r in _chunks(rounds, nx + ny):
-        out.append(ax[gen.integers(0, nx, size=(r, nx))].mean(axis=1) - ay[gen.integers(0, ny, size=(r, ny))].mean(axis=1))
+    for r in _stream_blocks(rounds, nx + ny):
+        mx = np.concatenate(_drawn(np, gen, nx, r, lambda i: ax[i].mean(axis=1)))
+        my = np.concatenate(_drawn(np, gen, ny, r, lambda i: ay[i].mean(axis=1)))
+        out.append(mx - my)
     return np.concatenate(out).tolist()
 
 
@@ -409,12 +431,13 @@ def _resampled_cluster_differences(ga: list[tuple[float, int]], gb: list[tuple[f
     sa, ca = np.asarray([s for s, _n in ga], dtype=float), np.asarray([n for _s, n in ga], dtype=float)
     sb, cb = np.asarray([s for s, _n in gb], dtype=float), np.asarray([n for _s, n in gb], dtype=float)
     out = []
-    for r in _chunks(rounds, len(ga) + len(gb)):
-        ia, ib = gen.integers(0, len(ga), size=(r, len(ga))), gen.integers(0, len(gb), size=(r, len(gb)))
-        na, nb = ca[ia].sum(axis=1), cb[ib].sum(axis=1)
-        ma = np.divide(sa[ia].sum(axis=1), na, out=np.zeros(r), where=na > 0)
-        mb = np.divide(sb[ib].sum(axis=1), nb, out=np.zeros(r), where=nb > 0)
-        out.append(ma - mb)
+    for r in _stream_blocks(rounds, len(ga) + len(gb)):
+        # (sum of sums, sum of counts) of each draw, group a then group b, as one call per group would give them.
+        pa = _drawn(np, gen, len(ga), r, lambda i: (sa[i].sum(axis=1), ca[i].sum(axis=1)))
+        pb = _drawn(np, gen, len(gb), r, lambda i: (sb[i].sum(axis=1), cb[i].sum(axis=1)))
+        sa_, na = np.concatenate([p[0] for p in pa]), np.concatenate([p[1] for p in pa])
+        sb_, nb = np.concatenate([p[0] for p in pb]), np.concatenate([p[1] for p in pb])
+        out.append(np.divide(sa_, na, out=np.zeros(r), where=na > 0) - np.divide(sb_, nb, out=np.zeros(r), where=nb > 0))
     return np.concatenate(out).tolist()
 
 

@@ -99,6 +99,10 @@ PAPER_ROW_MAX_IN = 2.9
 #: of panels at their least, when that is taller): the copy is placed at its own
 #: width, which bypasses the template's own cap of a third of the text height.
 PAPER_MAX_HEIGHT_IN = 3.2
+#: Each panel of a paper copy keeps at least this share of the size it had in the figure as drawn, the whole figure
+#: taken at the copy's width (a panel half as wide or half as tall as that is squeezed). A layout that leaves less is
+#: not kept.
+PAPER_PANEL_MIN_SHARE = 0.5
 #: A single panel at least this many times as wide as it is tall (a time series)
 #: prints at the full width.
 PAPER_WIDE_ASPECT = 2.0
@@ -118,7 +122,7 @@ def paper_profile() -> dict[str, object]:
         # scaled as the ticks are and kept between these sizes.
         "other_scale": round(PAPER_TICK_PT / HOUSE_TICK_PT, 4), "other_min_pt": 7.0, "other_max_pt": 9.0,
         "row_min_in": PAPER_ROW_MIN_IN, "row_max_in": PAPER_ROW_MAX_IN, "max_height_in": PAPER_MAX_HEIGHT_IN,
-        "wide_aspect": PAPER_WIDE_ASPECT, "dpi": PAPER_DPI,
+        "wide_aspect": PAPER_WIDE_ASPECT, "dpi": PAPER_DPI, "panel_min_share": PAPER_PANEL_MIN_SHARE,
         # A collection of more points or cells than this is an image inside the vector PDF.
         "raster_over": PAPER_RASTER_OVER,
         # A copy whose first layout failed tries another only within this many seconds of starting.
@@ -342,9 +346,11 @@ try:
         import json as _fi_json
         import math as _fi_math
         import time as _fi_time
+        import warnings as _fi_warnings
         import numpy as _fi_np
         from matplotlib.collections import LineCollection as _FiLineCollection
         from matplotlib.collections import PathCollection as _FiPathCollection
+        from matplotlib.text import Text as _FiText
         from matplotlib.collections import PolyCollection as _FiPolyCollection
         from matplotlib.figure import Figure as _FiFigure
 
@@ -358,6 +364,22 @@ try:
                 if _fi_math.isfinite(value):
                     out.append(value)
             return out
+
+        def _fi_drawn_ys(artist):
+            # The finite y values of a line that are drawn: a point whose x is a number that is not finite is not
+            # drawn, so a line given only such points holds no data. A non-numeric x (a category) stays.
+            raw_x, raw_y = list(artist.get_xdata()), list(artist.get_ydata())
+            if len(raw_x) != len(raw_y):
+                return _fi_values(raw_y)
+            kept = []
+            for x, y in zip(raw_x, raw_y):
+                try:
+                    if not _fi_math.isfinite(float(x)):
+                        continue
+                except (TypeError, ValueError):
+                    pass
+                kept.append(y)
+            return _fi_values(kept)
 
         def _fi_series(label, ys, lo, hi, log):
             if log:
@@ -438,6 +460,36 @@ try:
                 return {}, set()
             return names, pieces
 
+        def _fi_bar_extents(ax):
+            # The length of each y error bar of an errorbar series, by its data line, kept so the writer is told whether
+            # the bars are drawn (and how large) or are all zero. A bar that is not a finite number is not counted.
+            # Also how many sets of error bars the panel holds (an errorbar call, or bars drawn with yerr / xerr), whether
+            # or not their length could be read; None when the panel could not be read at all.
+            out, sets = {}, 0
+            try:
+                from matplotlib.container import BarContainer, ErrorbarContainer
+
+                for container in ax.containers:
+                    if isinstance(container, BarContainer):
+                        sets += 1 if getattr(container, "errorbar", None) is not None else 0
+                        continue
+                    if not isinstance(container, ErrorbarContainer):
+                        continue
+                    sets += 1
+                    data_line, caps, bars = container.lines
+                    if data_line is None or container.has_xerr:
+                        continue
+                    lengths = []
+                    for bar in bars:
+                        for segment in bar.get_segments():
+                            ys = [float(p[1]) for p in segment]
+                            if ys and all(_fi_math.isfinite(v) for v in ys):
+                                lengths.append(max(ys) - min(ys))
+                    out[id(data_line)] = {"n": len(lengths), "max": max(lengths) if lengths else 0.0}
+            except Exception:
+                return {}, None
+            return out, sets
+
         def _fi_collection_ys(ax, artist):
             # The y values a collection draws, in data units: a scatter's points, the
             # ends of the segments of hlines / vlines, the corners of a fill_between
@@ -455,11 +507,84 @@ try:
                 return _fi_values(point[1] for path in artist.get_paths() for point in path.vertices)
             return None
 
+        def _fi_texts(artists):
+            # The visible strings of text artists, whitespace folded, in drawing order, without repeats.
+            out = []
+            for artist in artists:
+                try:
+                    if not artist.get_visible():
+                        continue
+                    words = " ".join(str(artist.get_text()).split())
+                except Exception:
+                    continue
+                if words and words not in out:
+                    out.append(words[:300])
+            return out[:12]
+
+        def _fi_bar_ends(ax):
+            # The ends of every y error bar, per errorbar call, in data units: what the bars reach, kept so a check can
+            # tell whether the axis holds them. lo / hi hold one entry per point, in the order of the points; a bar
+            # that is not a finite number is None there, so an entry stays aligned with its point. [] when the panel
+            # draws no y bars (x bars alone are not recorded) or they could not be read.
+            out = []
+            try:
+                from matplotlib.container import ErrorbarContainer
+
+                for container in ax.containers:
+                    if not isinstance(container, ErrorbarContainer) or not container.has_yerr:
+                        continue
+                    # lines[2] holds the x bars first (when drawn), then the y bars.
+                    bars = container.lines[2][1 if container.has_xerr else 0]
+                    lo, hi = [], []
+                    for segment in bars.get_segments():
+                        ys = [float(p[1]) for p in segment]
+                        ok = bool(ys) and all(_fi_math.isfinite(v) for v in ys)
+                        lo.append(min(ys) if ok else None)
+                        hi.append(max(ys) if ok else None)
+                    label = container.get_label()
+                    out.append({"line": str(label) if label and not str(label).startswith("_") else None,
+                                "lo": lo, "hi": hi})
+            except Exception:
+                return []
+            return out
+
+        def _fi_text_words(ax):
+            # The strings of ax.texts in drawing order, each cut at 200 characters.
+            try:
+                return [t.get_text()[:200] for t in ax.texts if t.get_visible() and t.get_text().strip()]
+            except Exception:
+                return []
+
+        def _fi_legend_frac(ax):
+            # The legend's box in figure fractions (x0, y0, x1, y1), or None when the panel has no legend.
+            try:
+                leg = ax.get_legend()
+                if leg is None:
+                    return None
+                fig = ax.figure
+                box = leg.get_window_extent(fig.canvas.get_renderer()).transformed(fig.transFigure.inverted())
+                values = [float(box.x0), float(box.y0), float(box.x1), float(box.y1)]
+                if not all(_fi_math.isfinite(v) for v in values):
+                    return None
+                return dict(zip(("x0", "y0", "x1", "y1"), values))
+            except Exception:
+                return None
+
+        def _fi_data_limits(ax):
+            # The axis limits as they stand when the figure is saved, after FI and the script have set them.
+            try:
+                return {"x": [float(v) for v in ax.get_xlim()], "y": [float(v) for v in ax.get_ylim()]}
+            except Exception:
+                return None
+
         def _fi_axes(ax):
             lo, hi = ax.get_ylim()
             log = ax.get_yscale() == "log"
             bar_names, bar_pieces = _fi_error_bars(ax)
-            artists = [a for a in list(ax.get_lines()) + list(ax.collections) if id(a) not in bar_pieces]
+            hidden = not ax.get_visible()
+            # A line or collection hidden with set_visible(False) draws nothing, and neither does a hidden panel.
+            artists = [] if hidden else [a for a in list(ax.get_lines()) + list(ax.collections)
+                                         if id(a) not in bar_pieces and a.get_visible()]
             try:
                 names = _fi_legend_names(ax, artists)
             except Exception:
@@ -494,7 +619,7 @@ try:
                             continue
                         if kind == "other":
                             continue  # drawn in coordinates that are not the data's: nothing to read
-                        ys = _fi_values(artist.get_ydata())
+                        ys = _fi_drawn_ys(artist)
                     else:
                         ys = _fi_collection_ys(ax, artist)
                 except Exception:
@@ -533,8 +658,17 @@ try:
             # The house style puts titles on the left, where get_title() alone misses them.
             title = " ".join(t for t in (ax.get_title("left"), ax.get_title(), ax.get_title("right")) if t)
             return {
+                # A colorbar's axes and a hidden panel are not panels the figure shows.
+                **({"colorbar": True} if getattr(ax, "_colorbar", None) is not None else {}),
+                **({"hidden": True} if hidden else {}),
                 "title": title, "xlabel": ax.get_xlabel(), "ylabel": ax.get_ylabel(),
                 "yscale": ax.get_yscale(), "ylim": [float(lo), float(hi)], "series": series,
+                # The words the panel itself prints besides its title: ax.text / annotate strings and the legend's
+                # entries. What the figure says is then a fact FI holds, not only what the code drew.
+                # In <stem>.json `texts` also holds the legend entries and is read for the numbers the figure prints; the
+                # plain ax.texts words of a panel are `texts` in <stem>.seed0.json.
+                "texts": _fi_texts(list(ax.texts) + (list(ax.get_legend().get_texts()) if ax.get_legend() else [])),
+                "errorbars": _fi_bar_ends(ax), "legend_box": _fi_legend_frac(ax), "data_limits": _fi_data_limits(ax),
             }
 
         # Tick labels a redraw gets back by setting the same scale.
@@ -601,9 +735,11 @@ try:
             except Exception:
                 return []
 
-        def _fi_line(ax, line, names):
+        def _fi_line(ax, line, names, bars=None):
             x, y = _fi_points(line)
+            bar = (bars or {}).get(id(line))
             return {
+                **({"yerr": bar} if bar is not None else {}),
                 "missing_x": _fi_missing(line),
                 "label": names.get(id(line)) or str(line.get_label() or ""),
                 "kind": _fi_kind(ax, line), "x": x, "y": y,
@@ -643,7 +779,8 @@ try:
             except Exception:
                 names = {}
             names.update(bar_names)
-            lines = [_fi_line(ax, line, names) for line in ax.get_lines() if id(line) not in bar_pieces]
+            bars, bar_sets = _fi_bar_extents(ax)
+            lines = [_fi_line(ax, line, names, bars) for line in ax.get_lines() if id(line) not in bar_pieces]
             formatters = {type(axis.get_major_formatter()).__name__ for axis in (ax.xaxis, ax.yaxis)}
             others = (ax.patches, ax.collections, ax.images, ax.texts, ax.tables, ax.artists, ax.child_axes)
             return {
@@ -651,7 +788,17 @@ try:
                 "title": " ".join(t for t in (ax.get_title("left"), ax.get_title(), ax.get_title("right")) if t),
                 "xlabel": ax.get_xlabel(), "ylabel": ax.get_ylabel(),
                 "xscale": ax.get_xscale(), "yscale": ax.get_yscale(),
+                # Set only when the error-bar lengths above are kept: an older record has no key, and says "not recorded".
+                **({"bars_recorded": True, "error_bar_sets": bar_sets} if bar_sets is not None else {}),
                 "legend": ax.get_legend() is not None,
+                # Words written on the panel (a note, an annotation): a panel with text is not blank.
+                "has_text": bool(ax.texts),
+                # The words themselves, un-truncated up to 200 characters, in drawing order; the error-bar ends, the legend
+                # box (figure fractions) and the axis limits as saved.
+                # This `texts` (ax.texts only, 200 characters) is not the `texts` of <stem>.json, which also holds the
+                # legend entries; the words of a raw panel quoted in a caption are read from this one (<stem>.seed0.json).
+                "texts": _fi_text_words(ax),
+                "errorbars": _fi_bar_ends(ax), "legend_box": _fi_legend_frac(ax), "data_limits": _fi_data_limits(ax),
                 # Whether the panel draws anything but lines (bars, an image, a patch, a collection that has paths): a panel
                 # with no lines and nothing else is empty.
                 "draws_other": any(_fi_draws(artist) for group in (ax.patches, ax.collections, ax.images, ax.tables,
@@ -691,6 +838,8 @@ try:
         # A legend's box is measured this many pixels in from its frame, so a line
         # that only grazes the frame is not "under" it.
         _FI_LEGEND_INSET = 3
+        # The most overlaps of text between panels that one figure reports.
+        _FI_CROSS_MAX = 8
 
         def _fi_share(a, b):
             # The part of the smaller of two boxes that the other one covers, 0 to 1.
@@ -776,7 +925,170 @@ try:
                 points += count
             return line_px, points
 
-        def _fi_layout(fig):
+        def _fi_axis_texts(ax, axis):
+            # The tick labels of one axis that are drawn: only the ticks inside the
+            # visible range (matplotlib keeps spare tick objects beyond it), and only
+            # the labels that show text.
+            lo, hi = sorted(axis.get_view_interval())
+            texts = []
+            for tick in axis.get_major_ticks():
+                if lo <= tick.get_loc() <= hi:
+                    for label in (tick.label1, tick.label2):
+                        if label.get_visible() and label.get_text().strip():
+                            texts.append(label)
+            return texts
+
+        def _fi_label_findings(fig, renderer, cropped):
+            # Tick labels run into each other, an axis label is drawn over the tick
+            # labels, or a label runs past the edge of the figure. Measured on the drawn
+            # canvas, with the same share as a title: a little touching is not a clash.
+            # A label past the canvas edge only counts when the saved picture is that
+            # canvas: a tight crop widens to keep every label (see _fi_overflow_box).
+            found = []
+            figure_box = fig.bbox
+            for ax in fig.get_axes():
+                for axis_name, axis in (("x", ax.xaxis), ("y", ax.yaxis)):
+                    ticks = _fi_axis_texts(ax, axis)
+                    boxes = [(t, t.get_window_extent(renderer)) for t in ticks]
+                    for i, (first, a) in enumerate(boxes):
+                        for second, b in boxes[i + 1:]:
+                            share = _fi_share(a, b)
+                            if share >= _FI_TITLE_SHARE:
+                                found.append({"check": "label_overlap", "where": axis_name + "-axis tick labels",
+                                              "text": first.get_text(), "over": second.get_text(),
+                                              "share": round(share, 2)})
+                    label = axis.label
+                    if not label.get_visible() or not label.get_text().strip():
+                        continue
+                    label_box = label.get_window_extent(renderer)
+                    all_ticks = _fi_axis_texts(ax, ax.xaxis) + _fi_axis_texts(ax, ax.yaxis)
+                    for tick in all_ticks:
+                        share = _fi_share(label_box, tick.get_window_extent(renderer))
+                        if share >= _FI_TITLE_SHARE:
+                            found.append({"check": "axis_label_overlap", "axis": axis_name,
+                                          "text": label.get_text(), "over": tick.get_text(),
+                                          "share": round(share, 2)})
+            # Text the script wrote inside a panel (a curve's name, a note) drawn over another, measured as the tick
+            # labels are. An annotation is measured by its words, not by its arrow.
+            for ax in fig.get_axes():
+                notes = [(t, _FiText.get_window_extent(t, renderer)) for t in ax.texts
+                         if t.get_visible() and t.get_text().strip()]
+                for i, (first, a) in enumerate(notes):
+                    for second, b in notes[i + 1:]:
+                        share = _fi_share(a, b)
+                        if share >= _FI_TITLE_SHARE:
+                            found.append({"check": "label_overlap", "where": "labels written in the panel",
+                                          "text": first.get_text(), "over": second.get_text(),
+                                          "share": round(share, 2)})
+            # A label past the canvas edge, a pixel of rounding allowed.
+            edge = 1.0
+            for ax in ([] if cropped else fig.get_axes()):
+                texts = [ax.xaxis.label, ax.yaxis.label] + _fi_axis_texts(ax, ax.xaxis) + _fi_axis_texts(ax, ax.yaxis)
+                for text in texts:
+                    if not text.get_visible() or not text.get_text().strip():
+                        continue
+                    box = text.get_window_extent(renderer)
+                    if box.width <= 0 and box.height <= 0:
+                        continue
+                    if (box.x0 < figure_box.x0 - edge or box.x1 > figure_box.x1 + edge
+                            or box.y0 < figure_box.y0 - edge or box.y1 > figure_box.y1 + edge):
+                        found.append({"check": "label_clipped", "text": text.get_text()})
+            return found
+
+        def _fi_cross_findings(fig, renderer, cropped):
+            # What _fi_label_findings does not see, because it reads one axes at a time: a text of
+            # one panel drawn over a text of another (an x label over the title below it), and a
+            # legend that lies over another panel or past the edge of the canvas. Measured on the
+            # drawn canvas with the same share as the checks above.
+            # (an axes that is not drawn - hidden, or the blank cell of a grid - has no text and covers nothing)
+            axes_list = [a for a in fig.get_axes() if a.get_visible()]
+            boxes = {id(ax): ax.get_window_extent(renderer) for ax in axes_list}
+
+            def _fi_same_place(a, b):
+                # A twin axis or an inset sits on the panel it belongs to; that is not a neighbour.
+                return _fi_share(boxes[id(a)], boxes[id(b)]) > 0.5
+
+            def _fi_empty(ax):
+                return (not ax.axison and not ax.get_lines() and not ax.collections
+                        and not ax.images and not ax.patches)
+
+            items = []  # (owner axes or None, text, box)
+            for ax in axes_list:
+                texts = list(_fi_titles(ax))
+                if ax.axison:
+                    texts += [ax.xaxis.label, ax.yaxis.label]
+                    texts += _fi_axis_texts(ax, ax.xaxis) + _fi_axis_texts(ax, ax.yaxis)
+                texts += [t for t in ax.texts if t.get_visible()]
+                for text in texts:
+                    if not text.get_visible() or not text.get_text().strip():
+                        continue
+                    box = _FiText.get_window_extent(text, renderer)
+                    if box.width > 0 and box.height > 0:
+                        items.append((ax, text.get_text(), box))
+            # (the figure title against the panel titles is the title_overlap check above)
+            for text in [t for t in fig.texts if t is not getattr(fig, "_suptitle", None)]:
+                if text.get_visible() and text.get_text().strip():
+                    box = _FiText.get_window_extent(text, renderer)
+                    if box.width > 0 and box.height > 0:
+                        items.append((None, text.get_text(), box))
+            legends = []  # (owner axes or None, legend)
+            for ax in axes_list:
+                leg = ax.get_legend()
+                if leg is not None and leg.get_visible():
+                    legends.append((ax, leg))
+            for leg in fig.legends:
+                if leg.get_visible():
+                    legends.append((None, leg))
+            found, texts_found = [], []
+            for i, (oa, ta, a) in enumerate(items):
+                for ob, tb, b in items[i + 1:]:
+                    if oa is ob or (oa is not None and ob is not None and _fi_same_place(oa, ob)):
+                        continue
+                    if oa is None and ob is None:
+                        continue
+                    share = _fi_share(a, b)
+                    if share >= _FI_TITLE_SHARE:
+                        texts_found.append({"check": "label_overlap", "where": "labels of different panels",
+                                            "text": ta, "over": tb, "share": round(share, 2)})
+            # the worst few: a crowded grid would otherwise list every tick label
+            found.extend(sorted(texts_found, key=lambda f: -f["share"])[:_FI_CROSS_MAX])
+            figure_box = fig.bbox
+            edge = 1.0
+            for owner, leg in legends:
+                try:
+                    lb = leg.get_window_extent(renderer)
+                except Exception:
+                    continue
+                if lb.width <= 0 or lb.height <= 0:
+                    continue
+                names = [t.get_text() for t in leg.get_texts()]
+                title = " ".join(t.get_text() for t in _fi_titles(owner)) if owner is not None else ""
+                for ax in axes_list:
+                    if ax is owner or (owner is not None and _fi_same_place(owner, ax)) or _fi_empty(ax):
+                        continue
+                    # the share of the legend that lies over the other panel
+                    x0, y0 = max(lb.x0, boxes[id(ax)].x0), max(lb.y0, boxes[id(ax)].y0)
+                    x1, y1 = min(lb.x1, boxes[id(ax)].x1), min(lb.y1, boxes[id(ax)].y1)
+                    covered = (max(0.0, x1 - x0) * max(0.0, y1 - y0)) / (lb.width * lb.height)
+                    if covered >= _FI_TITLE_SHARE:
+                        found.append({"check": "legend_over_panel", "axes_title": title, "legend": names,
+                                      "over": " ".join(t.get_text() for t in _fi_titles(ax)),
+                                      "share": round(covered, 2)})
+                for ob, tb, b in items:
+                    if ob is owner and owner is not None:
+                        continue
+                    if owner is not None and ob is not None and _fi_same_place(owner, ob):
+                        continue
+                    share = _fi_share(lb, b)
+                    if share >= _FI_TITLE_SHARE:
+                        found.append({"check": "legend_over_panel", "axes_title": title, "legend": names,
+                                      "over": tb, "share": round(share, 2)})
+                if not cropped and (lb.x0 < figure_box.x0 - edge or lb.x1 > figure_box.x1 + edge
+                                    or lb.y0 < figure_box.y0 - edge or lb.y1 > figure_box.y1 + edge):
+                    found.append({"check": "legend_off_canvas", "axes_title": title, "legend": names})
+            return found
+
+        def _fi_layout(fig, cropped=False):
             # Text drawn over text, and a legend drawn over the data, measured on the
             # canvas the figure was saved from. None when it could not be measured.
             found = []
@@ -807,6 +1119,16 @@ try:
                                       "line_px": round(line_px, 1), "points": points})
             except Exception:
                 return None
+            # The label checks have their own guard: a defect in them must not drop the
+            # title and legend findings above.
+            try:
+                found.extend(_fi_label_findings(fig, renderer, cropped))
+            except Exception:
+                pass
+            try:
+                found.extend(_fi_cross_findings(fig, renderer, cropped))
+            except Exception:
+                pass
             return found
 
         _fi_savefig = _FiFigure.savefig
@@ -815,6 +1137,19 @@ try:
 
         def _fi_recording_savefig(self, fname, *args, **kwargs):
             started = _fi_time.perf_counter()
+            # Read before the crop below rewrites bbox_inches: a tight crop keeps every label.
+            cropped = kwargs.get("bbox_inches", _fi_mpl.rcParams["savefig.bbox"]) == "tight"
+            # A tight crop keeps an axis label that runs past the canvas edge: the crop is the widened box
+            # (see _fi_overflow_box), since savefig's own tight box leaves that label out.
+            if cropped:
+                try:
+                    pad = float(kwargs.get("pad_inches", _fi_mpl.rcParams["savefig.pad_inches"]))
+                    box = _fi_overflow_box(self, _fi_draw(self))
+                    kwargs["bbox_inches"] = _fi_mpl.transforms.Bbox.from_extents(
+                        box.x0 - pad, box.y0 - pad, box.x1 + pad, box.y1 + pad)
+                    kwargs["pad_inches"] = 0
+                except Exception:
+                    pass
             result = _fi_savefig(self, fname, *args, **kwargs)
             saved_in = _fi_time.perf_counter() - started
             record = plot = name = None
@@ -822,6 +1157,11 @@ try:
                 try:
                     name = _fi_os.path.basename(_fi_os.fspath(fname))
                     record = {"file": name, "axes": [{**_fi_axes(ax), **_fi_where(ax)} for ax in self.get_axes()]}
+                    # The words printed on the figure outside any panel (its title, a note), as the panels' are.
+                    try:
+                        record["texts"] = _fi_texts([getattr(self, "_suptitle", None)] + list(self.texts))[:12]
+                    except Exception:
+                        pass
                     # A failure here leaves the key out: a record without "tick_pt" was
                     # not measured, one with null draws no tick labels.
                     try:
@@ -830,7 +1170,7 @@ try:
                         pass
                     # Measuring draws the figure once more, so a figure that was slow to
                     # save is not measured.
-                    layout = _fi_layout(self) if saved_in < 10 else None
+                    layout = _fi_layout(self, cropped) if saved_in < 10 else None
                     if layout is not None:
                         record["layout"] = layout
                     # Each seed's lines, for the engine to redraw a figure as the
@@ -1056,6 +1396,34 @@ _PAPER_SOURCE = '''\
             except (AttributeError, TypeError):
                 fig.canvas.draw()
                 return fig.canvas.get_renderer()
+
+        def _fi_overflow_box(fig, renderer):
+            # The box a saved copy must keep, in inches. get_tightbbox leaves out an axis label that runs past
+            # the canvas edge (a long x label on the right panel), so the crop would cut it; the box is widened
+            # to every visible text's own extent, so a label that fits changes nothing.
+            box = fig.get_tightbbox(renderer)
+            x0, y0, x1, y1 = box.x0, box.y0, box.x1, box.y1
+            dpi = float(fig.dpi)
+            texts = list(fig.texts)
+            for ax in _fi_all_axes(fig):
+                texts += [ax.xaxis.label, ax.yaxis.label] + _fi_all_titles(ax) + list(ax.texts)
+                for axis in (ax.xaxis, ax.yaxis):
+                    # Only the ticks inside the axis range are drawn; matplotlib keeps spare tick objects beyond it.
+                    lo, hi = sorted(axis.get_view_interval())
+                    for tick in axis.get_major_ticks():
+                        if lo <= tick.get_loc() <= hi:
+                            texts += [tick.label1, tick.label2]
+            for text in texts:
+                if not text.get_visible() or not text.get_text().strip():
+                    continue
+                ext = text.get_window_extent(renderer)
+                if ext.width <= 0 and ext.height <= 0:
+                    continue
+                x0 = min(x0, ext.x0 / dpi)
+                y0 = min(y0, ext.y0 / dpi)
+                x1 = max(x1, ext.x1 / dpi)
+                y1 = max(y1, ext.y1 / dpi)
+            return _fi_mpl.transforms.Bbox.from_extents(x0, y0, x1, y1)
 
         def _fi_all_axes(fig):
             # Every Axes, an inset's (a child of its Axes) included.
@@ -1410,6 +1778,19 @@ _PAPER_SOURCE = '''\
             width, height, rule = _fi_paper_figure_size(drawn, rows, cols, p)
             info = {"file": p["dirname"] + "/" + stem + ".pdf", "png": p["dirname"] + "/" + stem + ".png",
                     "drawn_in": [round(v, 3) for v in drawn], "width": rule}
+            # The size of each panel's plotting area as the figure was drawn, in inches: what the copy is held to.
+            measure_failed = False
+            try:
+                first = _fi_draw(fig)
+                # Every visible Axes, a twin, an inset and a colorbar's included: the copy is made from this very
+                # figure, so each is the same object before and after.
+                measured_axes = [ax for ax in _fi_all_axes(fig) if ax.get_visible()]
+                drawn_panels = {id(ax): (ax.get_window_extent(first).width / fig.dpi,
+                                         ax.get_window_extent(first).height / fig.dpi) for ax in measured_axes}
+            except Exception:
+                drawn_panels = None
+                measured_axes = []
+                measure_failed = True
             fig.set_layout_engine(mode)
             constrained = mode == "constrained"
             fig.set_size_inches(width, height)
@@ -1475,7 +1856,7 @@ _PAPER_SOURCE = '''\
             # what the crop adds, so the saved copy is no wider than the paper width and no taller than the cap.
             pad = 0.02
             tight = not constrained
-            box = fig.get_tightbbox(renderer)
+            box = _fi_overflow_box(fig, renderer)
             if tight or box.x0 < -0.02 or box.x1 > width + 0.02 or box.y0 < -0.02 or box.y1 > height + 0.02:
                 tight = True
                 for _ in range(4):
@@ -1486,7 +1867,7 @@ _PAPER_SOURCE = '''\
                     w_now, h_now = (float(v) for v in fig.get_size_inches())
                     fig.set_size_inches(max(w_now - max(wide, 0.0), width * 0.5), max(h_now - max(tall, 0.0), cap * 0.3))
                     renderer = _fi_draw(fig)
-                    box = fig.get_tightbbox(renderer)
+                    box = _fi_overflow_box(fig, renderer)
                 if box.height + 2 * pad > cap + 0.05:
                     # Taller than a page allows even after shortening: no copy rather than one the page cannot hold.
                     raise ValueError("the copy is %.2f in tall, more than the %.2f in a paper figure may be"
@@ -1502,11 +1883,30 @@ _PAPER_SOURCE = '''\
                         layout.append({"check": "legend_over_data", "panel": index,
                                        "legend": [t.get_text() for t in leg.get_texts()],
                                        "line_px": round(line_px, 1), "points": points})
+            # How much of its drawn size each panel kept in the copy (both sizes taken from the drawn panels).
+            panels_in, panel_share = [], None
+            scale = width / drawn[0] if drawn[0] > 0 else 1.0
+            try:
+                for ax in (measured_axes if drawn_panels else []):
+                    box_now = ax.get_window_extent(renderer)
+                    now = (box_now.width / fig.dpi, box_now.height / fig.dpi)
+                    panels_in.append([round(now[0], 3), round(now[1], 3)])
+                    before = drawn_panels[id(ax)]
+                    if before[0] > 0 and before[1] > 0:
+                        share = min(now[0] / (before[0] * scale), now[1] / (before[1] * scale))
+                        panel_share = share if panel_share is None else min(panel_share, share)
+            except Exception:
+                measure_failed = True
+            if panel_share is not None and panel_share < p["panel_min_share"]:
+                raise ValueError("a panel is left %.0f%% of its drawn size, under the %.0f%% a copy keeps"
+                                 % (100 * panel_share, 100 * p["panel_min_share"]))
             ticks = _fi_tick_pt(fig)
             labels = [float(t.get_fontsize()) for ax in panels for t in (ax.xaxis.label, ax.yaxis.label)
                       if t.get_visible() and t.get_text().strip()]
             _fi_os.makedirs(_fi_os.path.dirname(outputs[0]), exist_ok=True)
-            kw = {"bbox_inches": "tight" if tight else None, "pad_inches": pad, "dpi": p["dpi"]}
+            # The crop is passed as the box itself: savefig's own "tight" would leave out the same label.
+            crop = _fi_mpl.transforms.Bbox.from_extents(box.x0 - pad, box.y0 - pad, box.x1 + pad, box.y1 + pad)
+            kw = {"bbox_inches": crop if tight else None, "pad_inches": 0 if tight else pad, "dpi": p["dpi"]}
             with _fi_mpl.rc_context({"pdf.fonttype": 42, "savefig.bbox": "standard"}):
                 _fi_savefig(fig, outputs[0], format="pdf", **kw)
                 _fi_savefig(fig, outputs[1], format="png", **kw)
@@ -1515,7 +1915,11 @@ _PAPER_SOURCE = '''\
                 "fit": mode + (", cropped" if tight else ""),
                 "tick_pt": ticks, "label_pt": min(labels) if labels else None,
                 "titles_dropped": dropped, "titles_kept": kept, "labels_wrapped": wrapped,
-                "legend_moved": moved, "layout": layout,
+                "legend_moved": moved, "layout": layout, "panels_in": panels_in,
+                "panel_share": None if panel_share is None else round(panel_share, 3),
+                # "ok" when every axes was measured; "failed" when a measurement was tried and not completed: the
+                # paper then does not use this copy.
+                "panel_measure": "failed" if measure_failed else "ok",
             })
             if rasterized:
                 info["rasterized"] = rasterized
@@ -1540,7 +1944,14 @@ _PAPER_SOURCE = '''\
                     failed.append("no time left for another layout")
                     break
                 try:
-                    info = _fi_paper_attempt(make(), mode, stem, outputs)
+                    # matplotlib itself says when a constrained layout gave up ("axes sizes collapsed to zero") and
+                    # drew the panels as slivers: a copy drawn that way is not kept; the next layout is tried, and
+                    # with none left the figure is placed from its PNG.
+                    with _fi_warnings.catch_warnings(record=True) as caught:
+                        _fi_warnings.simplefilter("always")
+                        info = _fi_paper_attempt(make(), mode, stem, outputs)
+                    if any("collapsed" in str(w.message) for w in caught):
+                        raise ValueError("the layout collapsed the panels")
                 except Exception as exc:
                     _fi_paper_clear(outputs)
                     failed.append(mode + ": " + repr(exc)[:200])

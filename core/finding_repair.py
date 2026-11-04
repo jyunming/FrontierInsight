@@ -25,10 +25,13 @@ Nothing here knows the engine: the model, the test runs and the regression snaps
 from __future__ import annotations
 
 import ast
+import asyncio
 import copy
 import json
+import math
 import re
 import string
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
@@ -36,7 +39,9 @@ from typing import Any, Awaitable, Callable, Iterable
 from . import code_findings as _issues
 from . import function_steps as _steps
 from . import optimise as _optimise
+from . import skeleton as _skeleton
 from . import trial_runner as _trials
+from .provider import ProviderUnusable
 
 #: Where a test written for an issue is kept (under the quest root).
 TEST_DIR = Path(".fi") / "finding_tests"
@@ -295,8 +300,200 @@ def swallowed_call(text: str) -> str:
     return ""
 
 
-def _top_functions(tree: ast.Module) -> dict[str, ast.FunctionDef]:
-    return {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+def _top_functions(tree: ast.Module) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    return {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+
+REACH_CHARS = 20000  # the most source text of reached functions a repair request shows, and so may change
+
+_OUTPUT_METHODS = {"append", "extend", "update", "write", "writelines", "dump", "add", "setdefault", "insert"}
+
+
+_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+_COMPS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+
+def _shallow(nodes: list[ast.AST]):
+    """Every node of ``nodes`` and below, not entering the body of a nested function, class or lambda (the nested scope
+    itself is yielded)."""
+    stack = list(reversed(nodes))
+    while stack:
+        n = stack.pop()
+        yield n
+        if not isinstance(n, _SCOPES):
+            stack.extend(reversed(list(ast.iter_child_nodes(n))))
+
+
+def _params(node: ast.AST) -> set[str]:
+    args = getattr(node, "args", None)
+    if not isinstance(args, ast.arguments):
+        return set()
+    names = [a.arg for a in [*args.posonlyargs, *args.args, *args.kwonlyargs]]
+    names += [a.arg for a in (args.vararg, args.kwarg) if a is not None]
+    return set(names)
+
+
+def _walk_scope(nodes: list[ast.AST]):
+    """Like ``_shallow`` and also not entering a comprehension (its own scope, as in Python 3)."""
+    stack = list(reversed(nodes))
+    while stack:
+        n = stack.pop()
+        yield n
+        if not isinstance(n, (*_SCOPES, *_COMPS)):
+            stack.extend(reversed(list(ast.iter_child_nodes(n))))
+
+
+def _scope_names(body: list[ast.AST], params: set[str]) -> set[str]:
+    """The names one scope binds itself (parameters, assignments, nested defs and classes, imports, loop and ``with`` names)."""
+    out = set(params)
+    for n in _walk_scope(body):
+        if isinstance(n, ast.MatchAs) and n.name:
+            out.add(n.name)
+        elif isinstance(n, ast.MatchStar) and n.name:
+            out.add(n.name)
+        elif isinstance(n, ast.MatchMapping) and n.rest:
+            out.add(n.rest)
+        elif isinstance(n, _SCOPES):
+            if not isinstance(n, ast.Lambda):
+                out.add(n.name)
+        elif isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+            out.add(n.id)
+        elif isinstance(n, ast.ExceptHandler) and n.name:
+            out.add(n.name)
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            out.update((a.asname or a.name.split(".")[0]) for a in n.names)
+    return out
+
+
+def _resolved_calls(fn: ast.AST, top: set[str]) -> dict[int, str]:
+    """``{id(call): name}`` for the calls inside ``fn`` that go to a top-level function of the module: a name that a scope
+    between the call and the module binds (a parameter, a local, a nested def) is that scope's own, not the module's."""
+    out: dict[int, str] = {}
+
+    def scope(body: list[ast.AST], params: set[str], shadow: set[str]) -> None:
+        shadow = shadow | _scope_names(body, params)
+        for n in _walk_scope(body):
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in top and n.func.id not in shadow:
+                out[id(n)] = n.func.id
+            if isinstance(n, _SCOPES):
+                scope([n.body] if isinstance(n, ast.Lambda) else list(n.body), _params(n), shadow)
+            elif isinstance(n, _COMPS):
+                targets = {x.id for g in n.generators for x in ast.walk(g.target) if isinstance(x, ast.Name)}
+                inner: list[ast.AST] = [n.key, n.value] if isinstance(n, ast.DictComp) else [n.elt]
+                for g in n.generators:
+                    inner += [g.iter, *g.ifs]
+                scope(inner, targets, shadow)
+
+    scope(list(fn.body), _params(fn), set())  # type: ignore[attr-defined]
+    return out
+
+
+def _live_callees(fn: ast.FunctionDef | ast.AsyncFunctionDef, top: set[str]) -> list[str]:
+    """The top-level functions ``fn`` calls whose return value flows into what ``fn`` produces: its return and yield values,
+    the values it stores into an object or file (``out[k] = v``, ``print``, ``.write``, ``.append`` ...), followed back
+    through assignments. A call used only as a statement (a check, a plot) or whose result reaches no output is not listed.
+    In the order they are called."""
+    resolved = _resolved_calls(fn, top)
+    outputs: list[ast.AST] = []
+    edges: list[tuple[set[str], ast.AST, bool]] = []  # (names set, expression, goes to an output regardless)
+
+    def names_of(target: ast.AST) -> set[str]:
+        return {n.id for n in ast.walk(target) if isinstance(n, ast.Name)}
+
+    params = _params(fn)
+    outside = params | {g for x in ast.walk(fn) if isinstance(x, ast.Global) for g in x.names}
+    # (a name the function does not bind at all is the module's own)
+    # ``outside`` is completed below with the names the function never binds, once its locals are known
+    local = _scope_names(list(fn.body), set()) - outside
+    outside |= {x.id for x in ast.walk(fn) if isinstance(x, ast.Name) and x.id not in local and x.id not in params}
+    for n in _shallow(list(fn.body)):
+        if isinstance(n, (ast.Return, ast.Yield, ast.YieldFrom)) and n.value is not None:
+            outputs.append(n.value)
+    for n in ast.walk(fn):
+        if n is not fn and isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for r in _shallow(list(n.body)):
+                if isinstance(r, ast.Return) and r.value is not None:
+                    edges.append(({n.name}, r.value, False))
+        elif isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign)) and n.value is not None:
+            targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+            plain: set[str] = set()
+            stored = False
+            for t in targets:
+                if isinstance(t, (ast.Subscript, ast.Attribute)):
+                    base = t
+                    while isinstance(base, (ast.Subscript, ast.Attribute)):
+                        base = base.value
+                    # a store is an output only when the object stored into reaches one: a parameter, a global, a name
+                    # the function does not bind, or a local that is itself returned or written
+                    if not isinstance(base, ast.Name) or base.id in outside:
+                        stored = True
+                    else:
+                        plain.add(base.id)
+                else:
+                    plain |= names_of(t)
+            edges.append((plain, n.value, stored))
+        elif isinstance(n, ast.NamedExpr):
+            edges.append((names_of(n.target), n.value, False))
+        elif isinstance(n, (ast.For, ast.AsyncFor, ast.comprehension)):
+            edges.append((names_of(n.target), n.iter, False))
+        elif isinstance(n, ast.withitem) and n.optional_vars is not None:
+            edges.append((names_of(n.optional_vars), n.context_expr, False))
+        elif isinstance(n, ast.Expr) and isinstance(n.value, ast.Call):
+            f = n.value.func
+            if (isinstance(f, ast.Name) and f.id == "print") or (isinstance(f, ast.Attribute) and f.attr in _OUTPUT_METHODS):
+                outputs.extend([*n.value.args, *(k.value for k in n.value.keywords)])
+    need: set[str] = set()
+
+    def take(expr: ast.AST) -> None:
+        need.update(x.id for x in ast.walk(expr) if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Load))
+
+    live = list(outputs)
+    for o in outputs:
+        take(o)
+    taken: set[int] = set()
+    changed = True
+    while changed:
+        changed = False
+        for i, (names, expr, always) in enumerate(edges):
+            if i not in taken and (always or names & need):
+                taken.add(i)
+                live.append(expr)
+                take(expr)
+                changed = True
+    calls = {id(c): c for e in live for c in ast.walk(e) if isinstance(c, ast.Call) and id(c) in resolved}
+    out: list[str] = []
+    for c in sorted(calls.values(), key=lambda c: (c.lineno, c.col_offset)):
+        if resolved[id(c)] not in out:
+            out.append(resolved[id(c)])
+    return out
+
+
+def reached_functions(source: str, name: str) -> list[str]:
+    """The top-level functions of ``source`` whose return value flows into what ``name`` produces, through other such
+    functions as well (nearest first, in the order they are called; until their text reaches :data:`REACH_CHARS`; ``name``
+    itself is not listed). A repair of ``name`` may need to change what computes a value ``name`` only passes on; a
+    function ``name`` only calls for its effect or whose result goes nowhere (a check, a plot) is not among them. This one
+    list is both what the request shows and what the reply may replace."""
+    try:
+        funcs = _top_functions(ast.parse(source))
+    except SyntaxError:
+        return []
+    if name not in funcs:
+        return []
+    top = set(funcs)
+    seen, order, queue, used = {name}, [], [name], 0
+    while queue:
+        for callee in _live_callees(funcs[queue.pop(0)], top):
+            if callee in seen:
+                continue
+            seen.add(callee)
+            size = len(function_source(source, callee))
+            if used + size > REACH_CHARS:
+                continue
+            used += size
+            order.append(callee)
+            queue.append(callee)
+    return order
 
 
 def params_kept(old: ast.FunctionDef | ast.AsyncFunctionDef, new: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
@@ -328,16 +525,18 @@ def params_kept(old: ast.FunctionDef | ast.AsyncFunctionDef, new: ast.FunctionDe
     return ""
 
 
-def direct_callers(code: Path, rel: str, name: str) -> dict[str, set[str]]:
+def direct_callers(code: Path, rel: str, name: str, staged: dict[str, str] | None = None) -> dict[str, set[str]]:
     """``{file under code/: the top-level functions in it that call `name` directly}`` (``name(...)`` or ``module.name(...)``),
-    in every Python file of ``code/`` but its tests; ``name`` itself is not its own caller."""
+    in every Python file of ``code/`` but its tests; ``name`` itself is not its own caller. ``staged`` (``{file: text}``) is
+    read in place of the file on disk: the code as a repair would leave it."""
     out: dict[str, set[str]] = {}
     for path in sorted(code.rglob("*.py")):
         other = path.relative_to(code).as_posix()
-        if any(part in ("tests", "__pycache__") for part in path.relative_to(code).parts[:-1]):
+        if any(part in ("tests", "__pycache__") for part in path.relative_to(code).parts[:-1]) \
+                or path.relative_to(code).parts[0] == "skills":  # FI's copy of the skills' files (not the study's code)
             continue
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            tree = ast.parse(staged[other] if staged and other in staged else path.read_text(encoding="utf-8"))
         except (OSError, SyntaxError, ValueError):
             continue
         for fname, fn in _top_functions(tree).items():
@@ -419,7 +618,7 @@ def caller_edit_problem(before: str, after: str, caller_names: set[str] | Iterab
     except SyntaxError:
         return ""
 
-    def masked(fn: ast.FunctionDef) -> str:
+    def masked(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
         fn = copy.deepcopy(fn)
         for call in _calls_to(fn, callee):
             call.args, call.keywords = [], []
@@ -468,14 +667,15 @@ def file_blocks(reply: str) -> tuple[str, dict[str, str]]:
 
 
 def splice(source: str, reply: str, scope: set[str] | None = None,
-           ignored: list[str] | None = None) -> tuple[str | None, list[str], str]:
+           ignored: list[str] | None = None, *, limit: int | None = MAX_FUNCTIONS) -> tuple[str | None, list[str], str]:
     """``(the file with the reply's functions put in, the names it replaced, why not)``. The first fenced block of the
     reply that holds a ``def`` is read: each function it defines that the file has AND that is in ``scope`` (the
     function(s) the finding is about) replaces it (the parameter names must be the same, in the same order; at most
     :data:`MAX_FUNCTIONS`); a definition of any other function the file already has is not spliced (its name is appended to
-    ``ignored``); a function the file has not is added at the end as a helper; imports it brings are added; anything else
+    ``ignored``); a function the file has not is added as a helper (above the script's ``if __name__`` block, else at the end); imports it brings are added; anything else
     in the block is ignored. ``(None, [], why)`` when nothing can be used. With no ``scope`` every function the file has
-    may be replaced."""
+    may be replaced. ``limit`` is the most functions one reply may replace (``None``: no limit, for a repair of a script
+    that is asked for functions, :mod:`core.script_reply`)."""
     block = next((m.group(1) for m in _FENCE.finditer(reply or "") if "def " in m.group(1)), "")
     if not block and "def " in (reply or ""):
         block = reply
@@ -498,7 +698,7 @@ def splice(source: str, reply: str, scope: set[str] | None = None,
         ignored.extend(n for n in existing if n not in replaced)
     if scope is not None and not replaced:
         return None, [], f"the reply does not define the function the finding is about ({', '.join(sorted(scope))})"
-    if len(replaced) > MAX_FUNCTIONS:
+    if limit is not None and len(replaced) > limit:
         return None, [], f"the reply replaces {len(replaced)} functions; change only the ones the finding is about"
     for name in replaced:
         why = params_kept(old_funcs[name], new_funcs[name])
@@ -518,13 +718,15 @@ def splice(source: str, reply: str, scope: set[str] | None = None,
     out = "".join(lines)
     added = [n for n in new_funcs if n not in old_funcs]
     if added:
-        out = out.rstrip("\n") + "\n\n\n" + "\n\n".join(_steps._segment(block_lines, new_funcs[n]).rstrip("\n") + "\n" for n in added)
+        from .code_layout import insert_before_main_guard
+
+        out = insert_before_main_guard(out, "\n\n".join(_steps._segment(block_lines, new_funcs[n]).rstrip("\n") + "\n" for n in added))
     have = {ast.dump(n) for n in old_tree.body if isinstance(n, (ast.Import, ast.ImportFrom))}
     taken: set[str] = set()
     for n in old_tree.body:
         taken |= _bound_names(n)
     imports = [_steps._segment(block_lines, n).rstrip("\n") for n in new_tree.body
-               if isinstance(n, (ast.Import, ast.ImportFrom)) and ast.dump(n) not in have and not (_bound_names(n) & taken)]
+               if ast.dump(n) not in have and _plain_new_import(n, taken)]
     if imports:
         out = _steps._with_imports(out, imports)
     try:
@@ -581,27 +783,19 @@ def _bound_names(node: ast.stmt) -> set[str]:
     return names
 
 
+def _plain_new_import(node: ast.stmt, taken: set[str]) -> bool:
+    """Whether a top-level import is one a repair may add: it binds only names the file did not bind before, and it is
+    not a star import (which would make the names the script uses unknowable to FI's own name checks)."""
+    return (isinstance(node, (ast.Import, ast.ImportFrom)) and not (_bound_names(node) & taken)
+            and not any(a.name == "*" for a in node.names))
+
+
 def _frame(tree: ast.Module) -> list[tuple[str, str]]:
     """Every statement that is not a function, as ``(where, ast.dump)``: the module's own statements (constants, imports,
     guards) and those in the body of a class (its header and its class-level assignments); the methods and functions are
-    compared apart (:func:`other_functions_changed`)."""
-    out: list[tuple[str, str]] = []
-
-    def walk(body: list[ast.stmt], where: str) -> None:
-        for node in body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            if isinstance(node, ast.ClassDef):
-                bare = copy.copy(node)
-                bare.body = []
-                header = ast.dump(bare)
-                out.append((where, header))
-                walk(node.body, f"{where}{node.name}.")
-            else:
-                out.append((where, ast.dump(node)))
-
-    walk(tree.body, "")
-    return out
+    compared apart (:func:`other_functions_changed`). A bare string (a docstring) runs nothing and is not listed
+    (:func:`_frame_nodes`)."""
+    return [(where, dump) for where, dump, _node in _frame_nodes(tree)]
 
 
 def without_main_guard(old: str, new: str) -> tuple[str, str]:
@@ -650,7 +844,7 @@ def frame_changes(old: str, new: str) -> list[str]:
     for node in after.body:
         if isinstance(node, ast.ClassDef) and node.name not in taken:
             new_classes.add(node.name)
-        elif isinstance(node, (ast.Import, ast.ImportFrom)) and not (_bound_names(node) & taken):
+        elif _plain_new_import(node, taken):
             skip.add(ast.dump(node))
     new_frame = [(w, d) for w, d in _frame(after) if d not in skip and w.split(".")[0] not in new_classes
                  and not any(f"ClassDef(name='{c}'" in d for c in new_classes)]
@@ -803,8 +997,7 @@ def _added(old: str, new: str) -> list[tuple[str, str, ast.stmt]]:
     kept = _frame_nodes(before)
     out = []
     for where, dump, node in _frame_nodes(after):
-        if (isinstance(node, (ast.Import, ast.ImportFrom)) and where == "" and not (_bound_names(node) & taken)
-                and not any(a.name == "*" for a in node.names)):
+        if where == "" and _plain_new_import(node, taken):
             continue
         if where.split(".")[0] in new_classes or (isinstance(node, ast.ClassDef) and where == "" and node.name in new_classes):
             if _plain_class_statement(node):
@@ -831,13 +1024,16 @@ def _plain_class_statement(node: ast.stmt) -> bool:
 
 
 def _frame_nodes(tree: ast.Module) -> list[tuple[str, str, ast.stmt]]:
-    """:func:`_frame` with the statement node of each item."""
+    """The statements of :func:`_frame`, each with its node: every statement that is not a function, at module level and
+    in the body of a class; a bare string (a docstring) is not one."""
     out: list[tuple[str, str, ast.stmt]] = []
 
     def walk(body: list[ast.stmt], where: str) -> None:
         for node in body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
+            if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                continue  # a bare string (a docstring) runs nothing, so changing it does not change what the file does
             if isinstance(node, ast.ClassDef):
                 bare = copy.copy(node)
                 bare.body = []
@@ -912,15 +1108,21 @@ def other_functions_changed(old: str, new: str, allowed: str) -> list[str]:
 
 def target_file(issue: dict[str, Any], code_dir: Path) -> str:
     """The file an issue is repaired in: the one it names, else by what it is about (the simulation or the analysis, as
-    :func:`core.code_review.files_for` decides)."""
+    :func:`core.code_review.files_for` decides). When FI writes the analysis (core/analysis_frame.py), an issue of the
+    analysis is repaired in the study's ``derive.py``: ``experiment.py`` is FI's own and no repair edits it."""
+    from . import analysis_frame as _analysis
     from . import code_review as _review
 
     if issue.get("file"):
-        return str(issue["file"])
-    probe = {"kind": "logic" if issue.get("kind") == "logic" else str(issue.get("kinds", ["requirement"])[0]),
-             "file": "", "severity": issue.get("severity", "medium"), "headline": issue.get("headline", False)}
-    got = _review.files_for([probe], code_dir)
-    return next(iter(got), "")
+        got = str(issue["file"])
+    else:
+        probe = {"kind": "logic" if issue.get("kind") == "logic" else str(issue.get("kinds", ["requirement"])[0]),
+                 "file": "", "severity": issue.get("severity", "medium"), "headline": issue.get("headline", False)}
+        got = next(iter(_review.files_for([probe], code_dir)), "")
+    if got.replace("\\", "/").rsplit("/", 1)[-1] == _analysis.EXPERIMENT_FILE and _analysis.is_fis_file(Path(code_dir) / got) \
+            and (Path(code_dir) / _analysis.DERIVE_FILE).is_file():
+        return _analysis.DERIVE_FILE
+    return got
 
 
 def scope_function(issue: dict[str, Any], source: str) -> str:
@@ -934,7 +1136,7 @@ def scope_function(issue: dict[str, Any], source: str) -> str:
         return ""
 
 
-def signatures(source: str, skip: str = "") -> str:
+def signatures(source: str, skip: str = "", also_skip: Iterable[str] = ()) -> str:
     """One line per top-level function of ``source`` (its ``def`` line): what the rest of the file offers."""
     try:
         tree = ast.parse(source)
@@ -942,7 +1144,7 @@ def signatures(source: str, skip: str = "") -> str:
         return "(the file does not parse)"
     out = []
     for n in tree.body:
-        if isinstance(n, ast.FunctionDef) and n.name != skip:
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name != skip and n.name not in also_skip:
             out.append(f"def {n.name}({', '.join(_steps._param_names(n))})")
     return "\n".join(out) or "(none)"
 
@@ -1001,9 +1203,55 @@ class Env:
     #: FI's small run of the simulation on the code as it is: ``""`` when it ran, else why not (a repair that breaks it is
     #: not kept); ``None`` when there is none to make.
     small_run: Callable[[], Awaitable[str]] | None = None
+    #: The analysis gate on the code as it is (core/pipeline_gate.py): ``""`` when the analysis still runs from start to end on
+    #: the recorded results, else why not (the repair is not kept); ``None`` when there is no gate.
+    gate: Callable[[], Awaitable[str]] | None = None
+    #: FI's own run of the plan's known-answer checks on the code as it is: ``{check: {"passed": True/False/None, "value":
+    #: number or None}}``; ``None`` when they cannot be run here (see :func:`answers_lost`).
+    known_answers: Callable[[], Awaitable[dict[str, dict[str, Any]] | None]] | None = None
+    #: For a search for the best design: the objective the study's entry gives on two designs FI picks, ``{"quantity": name,
+    #: "values": [first, second]}``; ``None`` for a study without a search or when it could not be measured (see
+    #: :func:`design_blind`).
+    design_response: Callable[[], Awaitable[dict[str, Any] | None]] | None = None
+    last_spend: Any = None  # (issue, kind) of the request :func:`spend` counted last, for :func:`refund`
     changed: list[str] = field(default_factory=list)
     baseline: dict[str, str] = field(default_factory=dict)
     baseline_static: dict[str, int] = field(default_factory=dict)
+    #: What :attr:`known_answers` and :attr:`design_response` gave on the code immediately before the repair being tried:
+    #: measured when a repair is about to be written and the value is ``None``, and replaced by what the last accepted
+    #: repair was measured to give. When that measure was not available the value becomes ``None``, so the next repair is
+    #: compared with a fresh measure of the code as it is, never with the code before the one accepted.
+    baseline_answers: dict[str, dict[str, Any]] | None = None
+    baseline_response: dict[str, Any] | None = None
+    #: What the last :func:`_attempt` measured, for the record of the try (seconds, and the values compared).
+    measured: dict[str, Any] = field(default_factory=dict)
+    #: What went wrong while measuring (a measure that could not be made, a copy that could not be made or deleted): filled by
+    #: the measures (the engine passes the same list to both), cleared at the start of each try, kept in ``measured``.
+    notes: list[str] = field(default_factory=list)
+    #: The files the last :func:`_attempt` took from the model's reply (path -> text; empty: it gave none), for
+    #: :func:`keep_try`.
+    tried: dict[str, str] = field(default_factory=dict)
+
+
+def keep_try(env: "Env", issue: dict[str, Any], rel: str, number: int, accepted: bool, why: str) -> None:
+    """Keep one repair try in ``code/``'s git history so a later change to the checks can be replayed on it: an accepted
+    one is a commit on the branch (:func:`core.code_project.record_change`); a refused one is a commit of the model's file
+    on the side reference ``refs/fi/refused/<finding id>-<try>`` (:func:`core.code_project.keep_refused`), the branch not
+    moved. Never stops or changes the repair: a git failure is dropped."""
+    try:
+        from . import code_project as _project
+
+        who = f"{issue.get('id')} ({issue.get('function') or 'no function'}; {issue.get('quantity') or 'no quantity'})"
+        if accepted:
+            _project.record_change(env.root, env.scrub(f"finding repair accepted: {who}"), category="fixed", log=env.log)
+        elif env.tried:
+            _project.keep_refused(env.root, f"{issue.get('id')}-{number}", dict(env.tried),
+                                  env.scrub(f"finding repair refused: {who}: {why[:300]}"),
+                                  extras={"result.json": env.scrub(json.dumps({"path": "finding_repair", "finding": issue.get("id"),
+                                                                              "try": number, "reason": why}))},
+                                  log=env.log)
+    except Exception:  # noqa: BLE001 -- the record is a convenience; the repair goes on whatever happens to it
+        pass
 
 
 def _accepted(record: dict[str, Any]) -> list[str]:
@@ -1029,12 +1277,34 @@ def spend(env: Env, issue: dict[str, Any], kind: str) -> bool:
     key = "test_calls" if kind == "test" else "repair_calls"
     env.record[key] = int(env.record.get(key) or 0) + 1
     env.save()
+    env.last_spend = (issue, kind)
     return True
+
+
+def refund(env: Env) -> None:
+    """Give back the request :func:`spend` counted last: it was never answered (the model cannot be used), so a resumed
+    quest must not start with one try fewer."""
+    spent, env.last_spend = env.last_spend, None
+    if not spent:
+        return
+    issue, kind = spent
+    calls = issue.get("calls")
+    if isinstance(calls, dict) and int(calls.get(kind) or 0) > 0:
+        calls[kind] = int(calls[kind]) - 1
+    key = "test_calls" if kind == "test" else "repair_calls"
+    for name in ("finding_calls", key):
+        env.record[name] = max(0, int(env.record.get(name) or 0) - 1)
+    env.save()
 
 
 async def _ask(env: Env, prompt: str, who: str, kind: str) -> str:
     try:
-        return await env.ask(prompt, who, kind)
+        reply = await env.ask(prompt, who, kind)
+        env.last_spend = None  # answered: nothing to give back
+        return reply
+    except ProviderUnusable:
+        refund(env)  # the request was counted before it was made and never answered: the quest stops, and a resume has it back
+        raise
     except Exception as e:  # noqa: BLE001 -- _ModelAnswerProblem is the engine's to raise: it re-raises through ``ask``
         if type(e).__name__ == "_ModelAnswerProblem":
             raise
@@ -1049,6 +1319,60 @@ def _read(path: Path) -> str:
         return ""
 
 
+def _trial_metric_names(root: Path) -> set[str]:
+    """Every name a trial returned, from FI's own record of the trials (``raw/trials.json``); empty before the first run."""
+    try:
+        data = json.loads((root / "raw" / "trials.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    cells = data.get("cells") if isinstance(data, dict) else None
+    return {str(k) for cell in (cells if isinstance(cells, list) else []) if isinstance(cell, dict)
+            for k in (cell.get("metrics") if isinstance(cell.get("metrics"), dict) else {})}
+
+
+def declared_block(root: Path) -> str:
+    """The names the plan declares, for the test writer: every result id with its role, the quantities derived from them, the
+    values a run compares inside it, and, for a result that carries a true value and an interval, the coverage and bias FI counts
+    from its own record of the trials. Read from the frozen plan under ``root``; ``(none stated)`` when it cannot be read."""
+    from . import contract as _contract
+    from . import frozen_protocol as _frozen
+
+    try:
+        protocol = _frozen.protocol_of(Path(root))
+        if protocol is None:
+            return "(none stated)"
+        c = _contract.from_design({"protocol": protocol})
+    except Exception:  # noqa: BLE001 -- a plan that cannot be read tells the writer nothing; the request is still made
+        return "(none stated)"
+    from . import analysis_frame as _frame
+
+    # What a trial returns is read from FI's own record of the trials when there is one: the plan's ``returned`` flag is the
+    # plan writer's word and is often "afterwards" for every result, estimates included. A result with a true value is the
+    # estimate a trial gives, so it is returned whatever the flag says.
+    recorded = _trial_metric_names(Path(root))
+    afterwards = {r.id for r in c.results if r.returned == "afterwards" and r.id not in recorded
+                  and not isinstance(r.known_value, dict)} | {d.id for d in c.derived if d.id not in recorded}
+    returned = [f"`{r.id}` ({r.role})" for r in c.results if r.id not in afterwards]
+    returned += [f"`{d.id}`" for d in c.derived if d.id in recorded]
+    worked_out = [f"`{i}`" for i in sorted(afterwards)]
+    inside = [str(k) for k in (protocol.get("in_each_run") or {})] if isinstance(protocol.get("in_each_run"), dict) else []
+    ends = [str(n) for r in c.results if isinstance(r.known_value, dict) for n in
+            [r.known_value.get("standard_error") or r.known_value.get("variance"), *(r.known_value.get("interval") or ())] if n]
+    counted = list(_frame._known_values(protocol, c))  # an interval and a plain true value: the ones FI can count
+    lines = ["Names the code's trial returns: " + (", ".join(returned) or "(none)")]
+    if ends:
+        lines.append("Also returned, for a result with a true value (its error and interval ends): "
+                     + ", ".join(f"`{n}`" for n in dict.fromkeys(ends)))
+    if worked_out:
+        lines.append("Worked out after the trials by derive.py, not returned by the trial: " + ", ".join(worked_out))
+    if inside:
+        lines.append("Settings of the run, not returned values: " + ", ".join(f"`{i}`" for i in inside))
+    if counted:
+        lines.append("FI counts these itself from its record of the trials; the code does not return them, and a test reads them "
+                     "through FI's table, not from a trial: " + ", ".join(f"`{i}_coverage`, `{i}_bias`" for i in counted) + ".")
+    return "\n".join(lines)
+
+
 def _test_prompt(env: Env, issue: dict[str, Any], rel: str, problem: str) -> str:
     source = _read(env.code / rel)
     scope = scope_function(issue, source)
@@ -1057,7 +1381,8 @@ def _test_prompt(env: Env, issue: dict[str, Any], rel: str, problem: str) -> str
         file=rel, code=(f"### {rel} (the function `{scope}`)\n```python\n{function_source(source, scope)}\n```\n\n"
                         f"The rest of {rel} offers:\n{signatures(source, scope)}" if scope else
                         f"### {rel}\n```python\n{source.rstrip()}\n```"),
-        modules=module_names(env.code, env.package), problem=problem or "(none: this is the first try)")
+        modules=module_names(env.code, env.package), declared=declared_block(env.root),
+        problem=problem or "(none: this is the first try)")
 
 
 def _error_problem(detail: str) -> str:
@@ -1077,7 +1402,15 @@ async def ask_again(env: Env, issue: dict[str, Any], rel: str, error: TestRun) -
     env.record["finding_calls"] = int(env.record.get("finding_calls") or 0) + 1
     env.record["test_calls"] = int(env.record.get("test_calls") or 0) + 1
     env.save()
-    reply = await _ask(env, _test_prompt(env, issue, rel, _error_problem(error.detail)), "code", "test")
+    env.last_spend = None  # this request is counted above, not by spend(): only its own handler gives it back
+    try:
+        reply = await _ask(env, _test_prompt(env, issue, rel, _error_problem(error.detail)), "code", "test")
+    except ProviderUnusable:
+        issue.pop("asked_again", None)  # counted above, never answered: a resume asks again
+        for name in ("finding_calls", "test_calls"):
+            env.record[name] = max(0, int(env.record.get(name) or 0) - 1)
+        env.save()
+        raise
     text = reply_test(reply)
     if not text:
         env.save()
@@ -1197,6 +1530,95 @@ def _callers_block(env: Env, callers: dict[str, set[str]]) -> str:
     return "\n\n".join(parts[:4])
 
 
+def _shown(value: Any) -> str:
+    return "no number" if not isinstance(value, (int, float)) or isinstance(value, bool) else f"{value:.6g}"
+
+
+def answers_lost(before: dict[str, dict[str, Any]] | None, after: dict[str, dict[str, Any]] | None) -> list[str]:
+    """The known-answer checks a repair broke: the ones that passed on the code before it and do not on the code after it,
+    each as one sentence naming the check and the value it now measures. A check that did not pass before (it failed, or could not be
+    decided) is never held against the repair, and neither is one the run did not report at all."""
+    if not before or not after:
+        return []
+    out: list[str] = []
+    for name, was in before.items():
+        now = after.get(name)
+        if was.get("passed") is not True or now is None:
+            continue
+        if now.get("passed") is False or (now.get("passed") is None and not now.get("undecided")):
+            # What the check measured before is its expected value to within the tolerance: kept out of this sentence, which
+            # the next try of the code model is shown (both values are in the record of the try, ``measured``)
+            out.append(f"the known-answer check `{name}` passed before the repair and "
+                       + (f"fails after it (measured {_shown(now.get('value'))})" if now.get("value") is not None
+                          else "could not be measured after it"))
+    return out
+
+
+def _same_number(a: float, b: float) -> bool:
+    return abs(float(a) - float(b)) <= 1e-9 * max(abs(float(a)), abs(float(b)))
+
+
+def _compared(numbers: Any) -> dict[str, bool]:
+    """For each path (``m[1].left``) the entry returned a number at on both designs, finite on both: whether the two designs
+    gave different numbers there. A path only one design has (a list of another length, another key) and a path with a number
+    that is not finite (NaN, an infinity) are not here: they are not evidence either way (two designs that both give NaN have
+    not been shown to give one answer, and a longer list is not a different answer by itself)."""
+    if not isinstance(numbers, list) or len(numbers) != 2 or not all(isinstance(n, dict) for n in numbers):
+        return {}
+    first, second = numbers
+    out: dict[str, bool] = {}
+    for path in sorted(set(first) & set(second)):
+        a, b = first[path], second[path]
+        if not all(isinstance(x, (int, float)) and math.isfinite(x) for x in (a, b)):
+            continue
+        out[path] = not _same_number(a, b)
+    return out
+
+
+def _differ(numbers: Any) -> list[str]:
+    """The names (see :func:`_compared`) whose numbers differ between the two designs."""
+    return [n for n, differs in _compared(numbers).items() if differs]
+
+
+def _count(numbers: Any) -> str:
+    done = _compared(numbers)
+    return f"{sum(done.values())} of {len(done)} compared"
+
+
+def design_blind(before: dict[str, Any] | None, after: dict[str, Any] | None) -> str:
+    """Why a repair is refused for what it did to a search for the best design, else ``""``: a number the study's entry
+    returned finite on both designs differed between them before the repair, and after it the entry returns at least one such
+    number and none of them differs (the code no longer depends on the design, so a search over it finds nothing). The test
+    is on every such number, not on the objective alone: an objective that is flat on most designs
+    (zero outside a small region) says nothing of a design it does not reach. A number that is not finite is not evidence
+    either way. The same on both before is a property of the code, not of the repair: never a reason to refuse."""
+    if not before or not after:
+        return ""
+    was, now = _compared(before.get("numbers")), _compared(after.get("numbers"))
+    shown = [n for n, differs in was.items() if differs]
+    if not shown or not now or any(now.values()):  # no difference before, nothing finite to compare after, or still different
+        return ""
+    a, b = before.get("values") or [], after.get("values") or []
+    return (f"after it the study's entry returns the same numbers on two different designs ({len(shown)} of its values "
+            f"differed between them before; the objective `{after.get('quantity')}` was {_shown(a[0] if a else None)} and "
+            f"{_shown(a[1] if len(a) > 1 else None)}, and is {_shown(b[0] if b else None)} on both now): the repair made "
+            "the study blind to the design")
+
+
+async def _measure_behaviour(env: Env, which: str) -> Any:
+    """One of FI's own measures of the code as it is (``known_answers`` or ``design_response``); ``None`` when there is none
+    or it could not be made (a measure that cannot be made judges nothing, and never stops a repair)."""
+    hook = getattr(env, which)
+    if hook is None:
+        return None
+    try:
+        return await hook()
+    except Exception as e:  # noqa: BLE001
+        env.log.warning("[code_review] %s could not be measured on the code (%r); not judged", which, e)
+        env.notes.append(f"{which} could not be measured: {e!r}"[:300])
+        return None
+
+
 async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: str) -> tuple[bool, str]:
     """One repair request and its checks. ``(accepted, why not)``; a rejected change is undone, in every file it touched.
 
@@ -1212,11 +1634,16 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
     failure = issue.get("failure") or ""
     callers = direct_callers(env.code, rel, scope) if scope else {}
     shown = _callers_block(env, callers)
-    code_block = (f"### {rel} (the function `{scope}`)\n```python\n{function_source(old, scope)}\n```\n\nThe rest of {rel} "
-                  f"offers (do not change these unless the finding is about them):\n{signatures(old, scope)}"
+    reach = reached_functions(old, scope) if scope else []
+    reach_block = "".join(f"\n\n### {rel} (the function `{n}`, which `{scope}` reaches by calls)\n```python\n"
+                          f"{function_source(old, n)}\n```" for n in reach)
+    may = (f"You may change `{scope}`" + (" and, where the fix is there, " + ", ".join(f"`{n}`" for n in reach)
+                                          + " (each with the same parameters or more with defaults)" if reach else "") + ". ")
+    code_block = (f"### {rel} (the function `{scope}`)\n```python\n{function_source(old, scope)}\n```{reach_block}\n\n{may}"
+                  f"The rest of {rel} offers (do not change these):\n{signatures(old, scope, reach)}"
                   + (f"\n\nIt is called by:\n\n{shown}" if shown else "")
                   if scope else f"### {rel}\n```python\n{old.rstrip()}\n```")
-    how = ("Reply with ONE fenced Python block holding the corrected function(s), each whole, with the same names and "
+    how = ("Reply with ONE fenced Python block holding the corrected function(s) (only ones named above as yours to change), each whole, with the same names and "
            "parameters (you may add small helper functions and import lines). If the fix needs a value the function is not "
            "given, add it as a parameter AFTER the existing ones, with a default value, and change each function that "
            "calls it (shown above) to pass it: that function whole, in its own fenced block whose first line is "
@@ -1227,19 +1654,22 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
         topic=env.topic or "(not stated)", equations=env.equations, finding=finding_block(issue, env.scrub),
         test=_read(env.root / test) if test else "(none)", failure=failure or "(none)", code=code_block,
         package=env.package or "(none)", how=how, problem=detail or "(none: this is the first try)")
-    reply = await _ask(env, prompt, who, "repair")
+    framed = _skeleton.has_frame(old)
+    if framed:  # the handling of the pilot and the seed is in FI's frame, which a repair keeps as it is
+        prompt = prompt.replace(", the handling of `FI_PILOT` and `FI_REPLICATE_SEED`, and the final `RESULT_JSON: {...}` line.",
+                                " and the frame.")
+    reply = await _ask(env, _skeleton.repair_note(old, whole=not scope) + prompt, who, "repair")
     dotted = str(issue.get("function") or "")
     edits: dict[str, tuple[str, str]] = {}  # file -> (old text, new text)
     if scope:
         main, marked = file_blocks(reply)
         mine_too = callers.get(rel, set())
         skipped: list[str] = []
-        new, names, why = splice(old, f"```python\n{main or marked.get(rel, '')}\n```", {scope, *mine_too}, skipped)
+        new, names, why = splice(old, f"```python\n{main or marked.get(rel, '')}\n```", {scope, *reach, *mine_too}, skipped)
+        env.tried = {rel: new} if new is not None else {}  # the model's files as they came, kept even when refused
         if skipped:
-            env.log.warning("[code_review] %s: the reply also defined %s, which the finding is not about; not used",
-                            issue.get("id"), ", ".join(f"`{n}`" for n in skipped))
-        if new is not None and scope not in names:
-            new, why = None, f"the reply does not define the function the finding is about ({scope})"
+            env.log.warning("[code_review] %s: the reply also defined %s, which `%s` does not reach; not used",
+                            issue.get("id"), ", ".join(f"`{n}`" for n in skipped), scope)
         for other, text in marked.items():
             if new is None or other == rel:
                 continue
@@ -1254,11 +1684,13 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
                 new, why = None, f"its change to {target}: {why_not}"
             elif changed != before:
                 edits[target] = (before, changed)
+                env.tried[target] = changed
                 names = [*names, *(f"{target}:{n}" for n in done)]
     else:
         from . import code_review as _review
 
         new = _review.parse_files(reply, [rel]).get(rel)
+        env.tried = {rel: new} if new else {}  # the model's file as it came, kept even when a check below refuses it
         names, why = [rel], "" if new else "the reply held no whole file"
         # moving what runs on import under a main guard is not a change of the module the finding must speak of
         was, now = without_main_guard(old, new) if new else (old, new)
@@ -1286,6 +1718,7 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
                                   + ", which the finding does not speak of")
     if new is None or not new.strip():
         return False, why or "the reply held no usable code"
+    new = _skeleton.without_raise(new)
     if new != old:
         edits[rel] = (old, new)
     if not edits:
@@ -1302,14 +1735,35 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
                                    callers)
         if unpassed:
             return False, unpassed
+    if scope and rel in edits:
+        # a changed function the scope function reaches: every function that calls it, in any file, as the repair leaves the
+        # code (the reply's own new callers included), must pass on a parameter the repair added
+        staged = {t: after_text for t, (_b, after_text) in edits.items()}
+        for changed in [n for n in names if n in reach]:
+            its = direct_callers(env.code, rel, changed, staged)
+            final = {c: (staged[c] if c in staged else _read(env.code / c)) for c in its}
+            unpassed = unpassed_params(function_source(old, changed), function_source(edits[rel][1], changed), changed,
+                                       final, its)
+            if unpassed:
+                return False, unpassed
     for target, (before, after_text) in edits.items():
-        problem = env.keeps(before, after_text, target)
+        problem = _skeleton.repair_problem(before, after_text, target) or env.keeps(before, after_text, target)
         if problem:
             return False, problem if target == rel else f"its change to {target}: {problem}"
 
     def put_back() -> None:
         for target, (before, _a) in edits.items():
             (env.code / target).write_text(before, encoding="utf-8")
+
+    # on the code as it is, before this repair is written
+    env.notes.clear()
+    if env.baseline_answers is None:
+        env.baseline_answers = await _measure_behaviour(env, "known_answers")
+    if env.baseline_response is None:
+        env.baseline_response = await _measure_behaviour(env, "design_response")
+    env.measured = {}
+    answers: dict[str, dict[str, Any]] | None = None
+    response: dict[str, Any] | None = None
 
     for target, (_b, after_text) in edits.items():
         (env.code / target).write_text(after_text, encoding="utf-8")
@@ -1328,6 +1782,46 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
             stopped = await env.small_run()
             if stopped:
                 raise _Rejected("FI's small run of the simulation no longer runs: " + stopped)
+        if env.gate is not None:
+            if refused := await env.gate():
+                raise _Rejected(refused)
+        began = time.monotonic()
+        answers = await _measure_behaviour(env, "known_answers")
+        response = await _measure_behaviour(env, "design_response")
+        lost = answers_lost(env.baseline_answers, answers)
+        blind = design_blind(env.baseline_response, response)
+        if answers or response or env.notes:
+            env.measured = {"seconds": round(time.monotonic() - began, 1)}
+            if env.notes:  # a measure that was unavailable is undecided, and said
+                env.measured["not_measured"] = list(env.notes)
+            if answers:
+                env.measured["known_answers"] = {n: [(env.baseline_answers or {}).get(n, {}).get("value"), a.get("value")]
+                                                 for n, a in answers.items()}
+                undecided = sorted(n for n, a in answers.items() if a.get("undecided") and a.get("passed") is None
+                                   and (env.baseline_answers or {}).get(n, {}).get("passed") is True)
+                if undecided:  # not measured after the repair (cut off by the clock): neither held against it nor counted for it
+                    env.measured["not_decided"] = {n: str(answers[n].get("not_run") or "the trials could not decide it")[:160]
+                                                   for n in undecided}
+                    env.log.warning("[code_review] %s: known-answer check(s) %s could not be decided after this repair "
+                                    "(%s); they are not held against it", issue.get("id"), ", ".join(undecided),
+                                    "; ".join(env.measured["not_decided"].values()))
+            if response:
+                env.measured["design_response"] = {
+                    "objective_before": (env.baseline_response or {}).get("values"), "objective_after": response.get("values"),
+                    "values_that_differ_before": _count((env.baseline_response or {}).get("numbers")),
+                    "values_that_differ_after": _count(response.get("numbers"))}
+            env.log.info("[code_review] %s: the known-answer and design checks of this repair took %.0f s",
+                         issue.get("id"), env.measured["seconds"])
+            if env.notes:
+                env.log.warning("[code_review] %s: not measured or not cleaned up: %s", issue.get("id"), "; ".join(env.notes))
+        if env.baseline_response and _compared(env.baseline_response.get("numbers")) and not _differ(
+                env.baseline_response.get("numbers")):
+            env.log.info("[code_review] the study's entry returns the same numbers on two different designs in the code as it "
+                         "is (a property of the code, not of this repair): a search over the design finds nothing")
+        if lost:
+            raise _Rejected("it broke known-answer checks that passed before: " + "; ".join(lost[:3]))
+        if blind:
+            raise _Rejected(blind)
     except _Rejected as e:
         put_back()
         return False, str(e)
@@ -1339,6 +1833,7 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
             env.on_accept(target, before, after_text, issue)
     env.baseline = {**after, f"finding:{test}": "pass"}
     env.baseline_static = env.static()
+    env.baseline_answers, env.baseline_response = answers, response  # None: measured fresh before the next repair
     if test not in _accepted(env.record):
         _accepted(env.record).append(test)
     for target in edits:
@@ -1362,10 +1857,13 @@ async def repair_issue(env: Env, issue: dict[str, Any], rel: str) -> bool:
         if not spend(env, issue, kind):
             continue
         number = len(issue.setdefault("repairs", [])) + 1
+        env.tried = {}
         accepted, why = await _attempt(env, issue, rel, who, detail)
+        await asyncio.to_thread(keep_try, env, issue, rel, number, accepted, why)
         by = env.other if who == "other" else env.code_model
         issue["repairs"].append({"try": number, "by": who, "model": by or who, "outcome": "accepted" if accepted else "rejected",
-                                 **({} if accepted else {"why": why[:300]})})
+                                 **({} if accepted else {"why": why[:300]}),
+                                 **({"measured": dict(env.measured)} if env.measured else {})})
         env.log.info("[code_review] %s: %s repair %s%s", issue["id"], who, "accepted" if accepted else "rejected",
                      "" if accepted else f" ({why[:140]})")
         if accepted:
@@ -1378,6 +1876,17 @@ async def repair_issue(env: Env, issue: dict[str, Any], rel: str) -> bool:
     issue["reason"] = f"no repair passed its test and kept the earlier checks passing ({detail[:160]})" if detail else "no repair was made"
     env.save()
     return False
+
+
+async def repair_for_rerun(env: Env, issue: dict[str, Any], rel: str, detail: str = "") -> dict[str, str]:
+    """One repair of an issue, asked for with FI's own repair prompt, for the rerun of the study with it
+    (:mod:`core.rerun_check`): the files the model gave, ``{path: whole text}``, whether FI's own rules for keeping a repair
+    would have accepted it or not (a rule that keeps a result out of the delivered paper is not a reason to leave the number
+    unchecked). ``env.code`` is a COPY of the code: nothing of the quest is changed. Empty when the reply held no usable
+    code. Not counted as a try of the finding: the caller counts the request."""
+    env.tried = {}
+    await _attempt(env, issue, rel, "code", detail)
+    return dict(env.tried)
 
 
 async def repair_issues(env: Env) -> list[str]:

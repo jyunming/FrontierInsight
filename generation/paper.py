@@ -28,7 +28,14 @@ from pathlib import Path
 from core import paper_facts as _paper_facts
 from core.citations import to_bibtex, to_csl_json
 from core.config import Config, resolve_page_limit
-from core.engine import QuestArtifacts, build_further_reading, cited_references, further_reading_listed
+from core.engine import (
+    QuestArtifacts,
+    build_further_reading,
+    cited_references,
+    further_reading_listed,
+    references_web_listed,
+    web_pages_listed,
+)
 from core.proc_tree import run_tree
 from generation._pandoc import BLANK_LINE_RE, MARKDOWN_READER, MATH_SPAN_RE, find_pandoc
 from generation import _cjk
@@ -399,6 +406,14 @@ _PDFLATEX_ONLY: dict[str, str] = {
 for _glyph, _latex in _PDFLATEX_ONLY.items():
     _LATEX_UNICODE_REPLACEMENTS.setdefault(_glyph, _latex)
 
+# A private-use code point (U+E000..U+F8FF) is assigned no character by Unicode: it means
+# something only inside the font of the file it was copied from (a scraped page title can
+# carry a copyright sign of a symbol font as U+F6D9), so no font here can set it and LaTeX
+# has no form for it. It is left off the typeset copy and listed in the render record
+# like any other invisible character; the paper's own paper.md keeps it.
+for _cp in range(0xE000, 0xF900):
+    _LATEX_UNICODE_REPLACEMENTS.setdefault(chr(_cp), "")
+
 # Pre-compile a translator for str.translate — that path is faster
 # than a chained str.replace and Python's translate handles multi-
 # char destination strings transparently.
@@ -594,7 +609,7 @@ def _sanitize_unicode_for_latex(markdown: str, *, rewrite_code: bool = True) -> 
 
 # Where a URL or an HTML comment sits in the text: a glyph there is never wrapped in a
 # font command, which would change the address.
-_NO_WRAP_RE = re.compile(r"\]\([^)\s]*|<https?://[^>]*>|https?://[^\s)>\]]+|<!--.*?-->", re.DOTALL)
+_NO_WRAP_RE = re.compile(r"\\includegraphics(?:\[[^\]]*\])?\{[^}]*\}|\]\([^)\s]*|<https?://[^>]*>|https?://[^\s)>\]]+|<!--.*?-->", re.DOTALL)
 _FONT_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 _BRACE_AFTER_GLYPH_RE = re.compile(r"(?<=[^\x00-\x7f])\{")
 
@@ -735,7 +750,7 @@ def _prepare_unicode(
                     # braces of ``𝟙{X>0}`` vanished. Escaped, it is the same literal brace.
                     piece = _BRACE_AFTER_GLYPH_RE.sub(r"\\{", piece)
                 piece = _translate_counted(piece, text_table, counts, where)
-            if unicode_engine and not is_code:
+            if unicode_engine and (not is_code or rewrite_code):
                 piece = _wrap_for_fonts(piece, fonts, cjk, used, not_set, counts, where)
             out.append(piece)
     text = "".join(out)
@@ -1073,6 +1088,21 @@ _STOPPED_GLYPH_RE = re.compile(r"Unicode char(?:acter)?[^\n]*?\(U\+([0-9A-Fa-f]{
 _MISSING_GLYPH_RE = re.compile(r"Missing character: There is no .*?\(U\+([0-9A-Fa-f]{4,6})\)")
 
 
+def listed_further_reading(further: list[dict], paper_md: str, raw_state: dict | None) -> list[dict]:
+    """The web pages the paper lists, under References (the ones its text cites) or Further reading (a page dropped to
+    keep the paper within its page limit is not one). With no web page listed the paper has no such section, and the
+    review's record of what was dropped says which pages. Used by the poster, so it lists what the paper lists."""
+    listed = web_pages_listed(paper_md)
+    if listed is not None:
+        return [w for w in further if w["label"] in listed]
+    review = (raw_state or {}).get("review")
+    record = review.get("page_limit") if isinstance(review, dict) else None
+    gone = record.get("further_reading_dropped") if isinstance(record, dict) else None
+    if gone:
+        return [w for w in further if w["label"] not in gone]
+    return further
+
+
 def _glyphs_named(log: str, pattern: "re.Pattern[str]") -> list[str]:
     found: list[str] = []
     for m in pattern.finditer(log):
@@ -1259,19 +1289,16 @@ class PaperGenerator:
         # within its page limit is not in the export either. With the whole
         # list dropped the paper has no such section, and the review's record
         # of what was dropped says which pages.
-        listed = further_reading_listed(cited_md)
-        if listed is not None:
-            further = [w for w in further if w["label"] in listed]
-        else:
-            review = (art.raw_state or {}).get("review")
-            record = review.get("page_limit") if isinstance(review, dict) else None
-            gone = record.get("further_reading_dropped") if isinstance(record, dict) else None
-            if gone:
-                further = [w for w in further if w["label"] not in gone]
+        listed_web = listed_further_reading(further, cited_md, art.raw_state)
+        in_references = set(references_web_listed(cited_md))
+        further_only = set(further_reading_listed(cited_md) or [])
+        if further_reading_listed(cited_md) is None and not in_references:
+            further_only = {w["label"] for w in listed_web}  # no list to read: the record of what was dropped decides
         for stem, entries in (
-            # The sources the paper's References list: the ones its text cites.
-            ("references", cited_references(literature, cited_md, audience=audience)),
-            ("further_reading", further),
+            # The sources the paper's References list: the papers its text cites, then the web pages it cites.
+            ("references", cited_references(literature, cited_md, audience=audience)
+             + [w for w in listed_web if w["label"] in in_references]),
+            ("further_reading", [w for w in listed_web if w["label"] in further_only]),
         ):
             if not entries:
                 continue

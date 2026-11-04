@@ -46,11 +46,12 @@ from core.skills.base import Skill, SkillState
 
 _log = logging.getLogger("fi.skills")
 
-#: How many domain-tagged skills may join the general layer. A cap rather than
-#: a score threshold: thresholds need tuning per corpus and fail silently when
-#: a topic's vocabulary happens to sit far from every description, while a cap
-#: has a predictable worst-case token cost, which is the whole point.
-MAX_DOMAIN_SKILLS = 15
+#: How many domain-tagged skills may join the general layer; ``None``: every one, ordered by how close it reads to
+#: the topic. It was 15: on a real library that held 51 of 66 domain skills out of the selector's sight by word
+#: overlap with the topic alone (a skill for checking a numerical method among them, which a topic's words rarely
+#: name), while showing all 107 skills cost about 2,700 more tokens, once per quest. The selector reads each entry's
+#: scope and decides; the order still puts the closest first.
+MAX_DOMAIN_SKILLS: int | None = None
 
 
 def domains_of(skill: Skill) -> list[str]:
@@ -92,7 +93,7 @@ def split_layers(states: list[SkillState]) -> tuple[list[SkillState], list[Skill
 
 
 def rank_domain_skills(
-    tagged: list[SkillState], topic: str, *, limit: int = MAX_DOMAIN_SKILLS,
+    tagged: list[SkillState], topic: str, *, limit: int | None = MAX_DOMAIN_SKILLS,
 ) -> tuple[list[SkillState], bool]:
     """Most topic-relevant tagged skills, plus whether ranking actually ran.
 
@@ -124,7 +125,7 @@ def rank_domain_skills(
 
 
 def select_layers(
-    states: list[SkillState], topic: str, *, limit: int = MAX_DOMAIN_SKILLS,
+    states: list[SkillState], topic: str, *, limit: int | None = MAX_DOMAIN_SKILLS,
 ) -> tuple[list[SkillState], dict[str, Any]]:
     """The states a catalogue should be built from, plus an account of why.
 
@@ -163,7 +164,8 @@ def render_layer_report(report: dict[str, Any]) -> str:
     if report.get("ranked"):
         lines.append(
             f"Domain layer: {len(admitted)} of {len(avail)} admitted by topic "
-            f"relevance (cap {report.get('limit')})."
+            f"relevance (cap {report.get('limit')})." if report.get("limit") is not None else
+            f"Domain layer: all {len(avail)} admitted, closest to the topic first."
         )
     else:
         lines.append(

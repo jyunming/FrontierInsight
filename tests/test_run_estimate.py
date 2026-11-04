@@ -271,7 +271,8 @@ def test_a_trial_that_runs_out_of_its_allowance_is_a_lower_bound_and_the_rest_is
     ex = _NeverFinishes()
     grid = {"n": [1, 2, 4]}
     probes, why = _measure(root, grid, 1000, False, limit_s=3600.0, executor=ex)
-    assert why == "" and probes is not None and len(probes) == 1 and ex.calls == 1
+    # cut at its allowance, then given a twentieth of the time allowed once more, and cut again: a lower bound
+    assert why == "" and probes is not None and len(probes) == 1 and ex.calls == 2
     e = est.estimate(grid, 1000, False, probes)
     assert e is not None and e.at_least and not e.complete
     assert est.known_too_long(e, 3600.0)
@@ -398,7 +399,8 @@ def test_replay_a_part_that_never_finishes_makes_the_estimate_a_lower_bound_over
     probes, why = asyncio.run(est.measure(ex, sys.executable, root, "code/simulate.py", grid, runs=1, deterministic=True,
                                           limit_s=600.0, budget_s=600.0))
     assert why == "" and probes is not None
-    assert sorted(p.index for p in probes if p.axis == est.PART) == [0, 1, 2], "a setting of every part was timed"
+    # each part is timed (a part whose costliest-looking setting differs from its middle one is timed at both)
+    assert sorted({p.index for p in probes if p.axis == est.PART}) == [0, 1, 2], "a setting of every part was timed"
     e = est.estimate(grid, 1, True, probes)
     assert e is not None and e.at_least and est.known_too_long(e, 600.0)
     # timed as before (no setting of the parts), the same study looks small: the slow part is never reached
@@ -438,3 +440,115 @@ def test_each_setting_s_expected_cost_follows_the_timed_ones() -> None:
     assert cost is not None
     assert abs(cost({"mesh": 32, "damping": 0.1}) - 80.0) < 1e-9 and abs(cost({"mesh": 16, "damping": 0.5}) - 10.0) < 1e-9
     assert est.setting_cost(grid, probes[1:]) is None, "no cost without the base"
+
+
+def test_a_setting_of_many_values_is_timed_at_its_quarter_points_too() -> None:
+    grid = {"length": list(range(12)), "rate": [1, 2, 3]}
+    timed = sorted(i for axis, i, _c in est.probe_cells(grid) if axis == "length")
+    assert timed == [0, 3, 9, 11], "the ends and the quarter points; the middle is the base"
+    assert sorted(i for axis, i, _c in est.probe_cells(grid) if axis == "rate") == [0, 2]
+
+
+def _warm(axis, index, cell, seconds, first=None):  # noqa: ANN001, ANN202
+    return est.Probe(axis, index, dict(cell), seconds, first_s=first)
+
+
+def test_what_a_new_value_pays_once_is_counted_once_per_value_not_at_every_setting() -> None:
+    # 7 values of "material" x 9 of "size": each new material costs 100 s once, every setting 10 s after that.
+    grid = {"material": list(range(7)), "size": list(range(9))}
+    base = {"material": 3, "size": 4}
+    probes = [_warm(None, None, base, 10.0, 110.0),
+              _warm("material", 0, {**base, "material": 0}, 10.0, 110.0), _warm("material", 6, {**base, "material": 6}, 10.0, 110.0),
+              *[_warm("size", i, {**base, "size": i}, 10.0) for i in (0, 2, 6, 8)]]
+    e = est.estimate(grid, 1, True, probes)
+    assert e is not None and e.once_axes == ["material"]
+    assert abs(e.once_s - 700.0) < 1 and abs(e.seconds - (63 * 10.0 + 700.0)) < 1, "7 x 100 once, 63 x 10 per setting"
+    old = est.estimate(grid, 1, True, [est.Probe(p.axis, p.index, p.cell, p.first_s or p.seconds) for p in probes])
+    assert old is not None and old.seconds > 1.2 * e.seconds, "each material's first time counted at all its sizes"
+    assert "paid once by each new value of material" in est.says(e, 3600)
+
+
+def test_a_simulation_that_shares_nothing_between_settings_is_timed_as_before() -> None:
+    grid = {"a": [1, 2, 3], "b": [1, 2, 3]}
+    probes = [est.Probe(None, None, {"a": 2, "b": 2}, 10.0), est.Probe("a", 0, {"a": 1, "b": 2}, 10.0),
+              est.Probe("a", 2, {"a": 3, "b": 2}, 10.0), est.Probe("b", 0, {"a": 2, "b": 1}, 10.0),
+              est.Probe("b", 2, {"a": 2, "b": 3}, 10.0)]
+    e = est.estimate(grid, 1, True, probes)
+    assert e is not None and e.once_s == 0 and e.once_axes == [] and abs(e.seconds - 90.0) < 1e-6
+
+
+def test_a_cost_paid_once_for_the_whole_study_is_counted_once() -> None:
+    grid = {"a": [1, 2, 3]}
+    probes = [est.Probe(None, None, {"a": 2}, 1.0, first_s=31.0), est.Probe("a", 0, {"a": 1}, 1.0),
+              est.Probe("a", 2, {"a": 3}, 1.0)]
+    e = est.estimate(grid, 1, True, probes)
+    assert e is not None and e.once_axes == [] and abs(e.seconds - 33.0) < 1e-6
+
+
+CACHED = '''
+import json, time
+from pathlib import Path
+
+def run_cell(cell):
+    store = Path("cache_{}.json".format(cell["material"]))
+    if not store.exists():
+        time.sleep(3.0)
+        store.write_text("{}")
+    time.sleep(0.05)
+    return {"y": float(cell["material"] + cell["size"])}
+'''
+
+
+def test_a_simulation_whose_settings_share_a_cache_is_timed_for_what_a_new_value_pays_once(tmp_path: Path) -> None:
+    root = _quest(tmp_path, CACHED)
+    grid = {"material": [1, 2, 3], "size": list(range(10))}
+    probes, why = _measure(root, grid, 1, True)
+    assert why == "" and probes is not None
+    base = probes[0]
+    assert base.first_s is not None and base.once_s > 1.0, "the base was run again and took far less"
+    e = est.estimate(grid, 1, True, probes)
+    assert e is not None and e.once_axes == ["material"]
+    # 3 new materials at 3 s once, 30 settings at 0.05 s plus a process start each; without the split every setting
+    # with a timed material would count its 1.5 s
+    assert 4.5 < e.once_s < 13.5, "about 3 x 3 s"
+    first = est.estimate(grid, 1, True, [est.Probe(p.axis, p.index, p.cell, p.first_s or p.seconds) for p in probes])
+    assert first is not None and e.seconds < first.seconds
+
+
+def test_a_base_past_its_allowance_is_given_longer_before_the_study_is_called_too_long(monkeypatch) -> None:  # noqa: ANN001
+    """A first run that fills a cache took longer than its share of the time allowed: cut there, the study looked many times
+    longer than it takes. The base is run again with up to a twentieth of the time allowed, then split as usual."""
+    calls: list[int] = []
+
+    async def fake(executor, python, root, module, cell, *, runs, deterministic, timeout_s, **_k):  # noqa: ANN001, ANN202
+        calls.append(timeout_s)
+        if len(calls) == 1:
+            return est.Probe(None, None, dict(cell), float(timeout_s), at_least=True), ""
+        if len(calls) == 2:
+            return est.Probe(None, None, dict(cell), 400.0), ""
+        return est.Probe(None, None, dict(cell), 12.0), ""
+
+    monkeypatch.setattr(est, "_time_one", fake)
+    probes, why = asyncio.run(est.measure(None, sys.executable, Path("."), "code/simulate.py", {"a": list(range(240))}, runs=1,
+                                          deterministic=True, limit_s=28800.0, budget_s=3600.0))
+    assert why == "" and probes is not None
+    assert calls[:2] == [360, 1440], "the allowance (3 x 8 h / 240) first, then a twentieth of 8 h"
+    base = probes[0]
+    assert not base.at_least and base.seconds == 12.0 and base.first_s == 400.0
+
+
+def test_the_slowdown_beside_others_is_timed_with_each_process_on_its_share_of_the_cores(monkeypatch) -> None:  # noqa: ANN001
+    """What running settings at once costs is timed as the study runs them: alone as the setting was timed, beside the
+    others each with its share of the cores."""
+    seen: list[str | None] = []
+
+    async def timed(*a, name, env, **k):  # noqa: ANN001, ANN003
+        seen.append((env or {}).get("OMP_NUM_THREADS"))
+        return est.Probe(None, None, {}, 1.0), ""
+
+    monkeypatch.setattr(est, "_time_one", timed)
+    monkeypatch.setattr("os.cpu_count", lambda: 16)
+    factor, _ = asyncio.run(est.slowdown_at_once(None, sys.executable, Path("."), "m.py", {}, at_once=4, runs=1,
+                                                 deterministic=True, timeout_s=10, env={"PATH": "p"}, thresholds={}))
+    assert factor == 1.0 and seen == [None, "4", "4", "4", "4"]
+

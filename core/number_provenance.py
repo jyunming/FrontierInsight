@@ -210,6 +210,28 @@ def _prints_new_value(paper_text: str, new: list[float], old: list[float]) -> bo
     return False
 
 
+def unrecorded_numbers(text: str, result_json: Any, settings: Any = None) -> list[str]:
+    """The numbers (two significant digits or more) that ``text`` prints and FI's record of the run does not hold, at the
+    precision the text prints them: what a figure says that FI's own record does not. A number is held when it is a
+    recorded result, the same value as a percentage ("95%" for 0.95), or a value of the run's own settings
+    (``settings``: the protocol's grid, in-each-run values and constants). ``[]`` when the results hold no number
+    (nothing to compare with)."""
+    values = [v for _p, v in flatten_numbers(result_json or {}, keep_zero=True)]
+    if not values:
+        return []
+    values += [v for _p, v in flatten_numbers(settings or {}, keep_zero=True)]
+    out: list[str] = []
+    for value, token in _printed_numbers(text):
+        tol = 0.51 * 10.0 ** -(max(_significant_digits(token), 1) - 1)
+        if _within(value, values, tol):
+            continue
+        if re.search(re.escape(token) + r"\s*%", text) and _within(value / 100.0, values, tol):
+            continue
+        if token not in out:
+            out.append(token)
+    return out
+
+
 def _keyed_names(paper_text: str) -> list[list[str]]:
     """The words of the quantity each key of the paper names (``{{v:Ea_rel_bias:sd @ ...}}`` -> ``["rel", "bias"]``)."""
     from . import paper_values as _values

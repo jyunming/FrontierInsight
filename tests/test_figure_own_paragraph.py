@@ -91,9 +91,12 @@ def test_label_with_no_prose_after_it_stays_before_the_figure():
     assert _paragraphs(out) == ["**Spread.**", CAP1, "## Next section"]
 
 
-def test_figure_check_still_finds_the_captions():
-    from core.engine import _embedded_figure_names
+def test_every_figure_is_still_in_the_paper():
+    import re
+
+    def embedded(md: str) -> set[str]:
+        return set(re.findall(r"\]\(figures/([^)\s]+)\)", md))
 
     out, _ = figures_in_own_paragraph(LIVE)
-    assert _embedded_figure_names(out) == _embedded_figure_names(LIVE) == {
+    assert embedded(out) == embedded(LIVE) == {
         "fig1_Ea_vs_noise.png", "fig2_methods_vs_npoints.png", "fig3_Ea_lnA_correlation.png"}

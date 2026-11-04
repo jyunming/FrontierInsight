@@ -186,13 +186,21 @@ def main(record):
 '''
 UNTRUSTED_LISTS = (
     'def f(cells):\n    return [1 for cell in cells if cell["missing"]]\n',
-    'def f(grid):\n    cells = []\n    cells.extend(grid)\n    cells.append(1)\n    return [1 for cell in cells if cell["missing"]]\n',
-    'def f(grid):\n    cells = []\n    cells = grid\n    cells.append(1)\n    return [1 for cell in cells if cell["missing"]]\n',
+    'def f(grid):\n    cells = []\n    cells.extend(grid)\n    cells.append({"missing": 1})\n    return [1 for cell in cells if cell["missing"]]\n',
+    'def f(grid):\n    cells = []\n    cells = grid\n    cells.append({"missing": 1})\n    return [1 for cell in cells if cell["missing"]]\n',
 )
 
 
 def test_a_loop_variable_over_the_scripts_own_summaries_is_not_a_setting() -> None:
     assert _names({"experiment.py": KINETICS}) == []
+
+
+def test_an_annotated_list_of_the_scripts_own_summaries_is_not_a_setting() -> None:
+    annotated = KINETICS.replace("cells = []", "cells: list[dict] = []", 1)
+    assert annotated != KINETICS
+    assert _names({"experiment.py": annotated}) == []
+    assert _names({"a.py": 'def f(grid):\n    cells: list = grid\n    return [1 for cell in cells if cell["missing"]]\n'}) == [
+        ("a.py", ("missing",))]
 
 
 def test_a_loop_over_the_record_or_a_parameter_called_cell_is_still_read_as_a_setting() -> None:
@@ -265,27 +273,28 @@ async def test_a_misread_name_is_sent_back_and_a_repair_that_reads_the_right_one
 
 
 @pytest.mark.asyncio
-async def test_a_misread_name_that_stays_ends_in_the_honest_stop_without_asking_a_person(
+async def test_a_misread_name_that_stays_is_recorded_and_the_quest_goes_on_without_asking_a_person(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     eng, asked = _engine(tmp_path, monkeypatch, [json.dumps({"code": SIM_BAD, "patch_summary": "no change"})])
     stop = await eng._static_gate({})
     assert len(asked) == 2, "asked twice, the code kept as written"
-    assert stop is not None and stop["exec_give_up_reason"]
-    assert "the study does not have" in stop["exec_result"]["cannot_repair"]
-    assert "`rate_hz`" in stop["exec_result"]["cannot_repair"]
+    # A name read from the code is a reading (core/stop_power.py): recorded and said in the paper, never a stop.
+    assert stop is None
+    note = eng._run_checks_note()
+    assert "the study does not have" in note and "`rate_hz`" in note
     record = json.loads((eng.quest_root / "needs" / "grid_keys_check.json").read_text(encoding="utf-8"))
     assert record["reads"][0]["names"] == ["rate_hz", "freq"] and record["settings_of_the_study"] == ["rate", "size"]
-    # A resume of the same text asks nothing more and stops the same way.
+    # A resume of the same text asks nothing more and goes on the same way.
     again = await eng._static_gate({})
-    assert again is not None and len(asked) == 2
+    assert again is None and len(asked) == 2
 
 
 @pytest.mark.asyncio
 async def test_a_repair_that_is_not_the_same_code_is_not_used(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     for i, reply in enumerate(("{}", json.dumps({"code": "def broken(:\n"}), json.dumps({"code": SIM_BAD}))):
         eng, asked = _engine(tmp_path / str(i), monkeypatch, [reply])
-        assert await eng._static_gate({}) is not None
+        assert await eng._static_gate({}) is None
         assert (eng.quest_root / "code" / "simulate.py").read_text(encoding="utf-8") == SIM_BAD, reply
 
 
@@ -389,3 +398,73 @@ def test_a_summary_dict_filled_by_item_assignment_is_not_trusted() -> None:
         for tail in ('    return [1 for cell in cells if cell["missing"]]\n',
                      '    for cell in cells:\n        print(cell["missing"])\n'):
             assert _names({"a.py": base + tail}) == [("a.py", ("missing",))], (body, tail)
+
+
+# A search for the best design keeps its fixed conditions, grid, search settings, sub-studies and design variables in
+# protocol.optimisation; the names the code may read are the ones its cells are built from.
+SEARCH_PROTOCOL = {"optimisation": {
+    "fixed": {"gain": 3.0, "mode": "a", "width": 1, "tilt": 1},
+    "grid": {"mode": ["a", "b"], "width": [1, 2]},
+    "sub_studies": [{"name": "s", "vary": ["width"], "hold": {"mode": "a", "tilt": 1}}],
+    "design_variables": [{"name": "layout", "shape": [2, 2], "kind": "continuous", "low": 0, "high": 1}],
+    "baseline": {"values": {"layout": [[0, 1], [1, 0]]}},
+    "numerical_settings": {"steps": {"search": 4, "check": [8, 16], "finer": "larger"}},
+    "in_each_run": {"levels": [1, 2]},
+}}
+SEARCH_SIM = '''\
+def run_cell(cell):
+    return {"y": cell["gain"] * cell["width"] + cell["steps"] + sum(map(sum, cell["layout"])) + len(cell["levels"])
+            + cell["tilt"] + (1 if cell["mode"] == "a" else 0)}
+'''
+
+
+def test_names_a_search_for_the_best_design_supplies_are_not_faults() -> None:
+    assert gk.problems({"simulate.py": SEARCH_SIM}, SEARCH_PROTOCOL) == []
+
+
+def test_a_name_a_search_never_supplies_is_still_a_fault() -> None:
+    found = gk.problems({"simulate.py": SEARCH_SIM + "\ndef other(cell):\n    return cell['nothing_gives_this']\n"}, SEARCH_PROTOCOL)
+    assert [r.keys for r in found] == [("nothing_gives_this",)]
+
+
+def test_a_name_only_the_top_level_of_the_plan_gives_is_not_supplied_to_a_search() -> None:
+    plan = {"constants": {"ghost": 1}, "optimisation": {"design_variables": [{"name": "x", "kind": "continuous", "low": 0, "high": 1}],
+                                                        "baseline": {"values": {"x": 0.5}}}}
+    sim = "def run_cell(cell):\n    return {'y': cell['x'] + cell['ghost']}\n"
+    assert [r.keys for r in gk.problems({"simulate.py": sim}, plan)] == [("ghost",)]
+
+
+def test_every_key_the_cell_builders_emit_is_supplied_and_nothing_else_is() -> None:
+    from core import optimise_search as search
+
+    block = SEARCH_PROTOCOL["optimisation"]
+    emitted: set[str] = set()
+    emitted.update(search.cell_of(block, {"layout": [[0, 1], [1, 0]]}))
+    for cell in search.iter_grid_cells(search.scan_grid(block)):
+        emitted.update(cell)
+    for level in range(2):
+        emitted.update({n: v[level] for n, v in search.check_settings(block).items()})
+    axes, names = gk.supplied_names(SEARCH_PROTOCOL)
+    assert emitted <= names
+    assert names - emitted <= {"level", "compared_in_each_run"}
+
+
+def _project_with(tmp_path: Path, name: str, text: str, recorded: str | None) -> Path:
+    from core import code_project
+
+    code = tmp_path / "code"
+    code.mkdir(parents=True)
+    (code / name).write_text(text, encoding="utf-8")
+    if recorded is not None:
+        (tmp_path / ".fi").mkdir()
+        (tmp_path / code_project.RECORD).write_text(json.dumps({name: code_project._sha(recorded)}), encoding="utf-8")
+    return code
+
+
+def test_a_script_is_skipped_only_when_fi_recorded_writing_it_unchanged(tmp_path: Path) -> None:
+    own = "def rows(cell):\n    return cell['missing']\n"
+    # FI's own copy, unchanged: its reads are FI's record, not settings.
+    assert gk.code_files(_project_with(tmp_path / "a", "fi_search.py", own, own)) == {}
+    # The same name in a study that FI did not write, or that was changed after FI wrote it: the study's code.
+    assert list(gk.code_files(_project_with(tmp_path / "b", "fi_search.py", own, None))) == ["fi_search.py"]
+    assert list(gk.code_files(_project_with(tmp_path / "c", "fi_search.py", own + "# edited\n", own))) == ["fi_search.py"]

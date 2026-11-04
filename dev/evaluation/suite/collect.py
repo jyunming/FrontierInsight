@@ -134,7 +134,8 @@ def record_contradiction(facts: dict[str, Any]) -> str:
 
 
 def paper_status(outcome: str, grade: dict[str, Any] | None, contradiction: str) -> str | None:
-    """``trustworthy`` (G1-G3 pass, no contradiction), ``fake`` (G1 fails or the record contradicts the paper),
+    """``trustworthy`` (G1-G3 pass, no contradiction), ``fake`` (G1 fails, or the record contradicts the paper AND a grade exists: the collector never marks a paper
+    fake from the record alone, before any grade; ``render_round`` prints that observation as "not graded yet"),
     ``flawed`` (a grade was given and is not a pass, and G1 is not the one failing), ``ungraded`` (some of G1-G3 is not
     graded yet and none has failed: the missing grades may still decide it either way); ``None`` when no paper was
     delivered. A paper is ``flawed`` only on a grade that is actually there: a missing grade is never read as a failure."""
@@ -145,6 +146,10 @@ def paper_status(outcome: str, grade: dict[str, Any] | None, contradiction: str)
         return "fake"
     # A contradiction from an unfixed problem makes the paper fake only if the grader says it changes a reported number.
     # If the grader says unfixed_changes_numbers is False, the paper is judged by its grades like any other paper.
+    if contradiction and not any(_given(g.get(k)) for k in _PASS):
+        # Nothing is graded yet: the collector's own reading of FI's record is an observation, not a verdict. Only a grade
+        # (G1 failing, or the grader saying an unfixed problem changes a number) makes a paper fake.
+        contradiction = ""
     if contradiction:
         # The "not executed" case is always fake, regardless of the unfixed_changes_numbers judgment.
         if contradiction.startswith("EVIDENCE.json says the experiment was not executed"):
@@ -323,7 +328,8 @@ def render_round(data: dict[str, Any]) -> str:
             lines.append(f"- Class: {taxonomy.CLASSES.get(c['class'])} at stage `{c['stage'] or '?'}` ({c['rule']}): {c['evidence']}")
             lines += [f"- Also: {a}" for a in c.get("also", [])]
         if t.get("contradiction"):
-            lines.append(f"- Record contradiction: {t['contradiction']}")
+            graded = any(_given((t.get("grade") or {}).get(k)) for k in _PASS)
+            lines.append(f"- Record contradiction: {t['contradiction']}" + ("" if graded else "; not graded yet"))
         code = t.get("code") or {}
         if code.get("functions_total") or code.get("open_per_reading"):
             lines.append(f"- Code: functions written {code.get('functions_done')}/{code.get('functions_total')}; final version read: "

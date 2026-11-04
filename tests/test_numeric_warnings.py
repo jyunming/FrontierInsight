@@ -297,3 +297,279 @@ async def test_the_stop_offers_the_setting_and_running_again_with_it_goes_on_wit
     artifacts = await second.run(from_step="run")
     assert artifacts.paper_md is not None and artifacts.paper_md.exists()
     assert _recorded(second)[-1]["mode"] == "warn", "the warnings are on record"
+
+
+# --- the warnings' own repair budget: repairs spent on crashes never leave them with none ------------------------------
+
+_CRASHES = _BODY + "raise RuntimeError('the first version crashes')\n"
+
+
+def _fake_crash_then(calls: list[str], *, after_crash: str, numeric_repair: str):
+    """The first script crashes; its crash repair gives ``after_crash``; a repair for the warnings gives ``numeric_repair``."""
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        kind = _classify(prompt)
+        calls.append(kind)
+        if kind == "Implementation":
+            return json.dumps({"code": _CRASHES, "deps": ["matplotlib"]})
+        if kind == "ExecuteReflect" and "its numerics reported problems" in prompt:
+            calls.append("NumericRepair")
+            return json.dumps({"code": numeric_repair, "deps": [], "patch_summary": "used atol and rtol"})
+        if kind == "ExecuteReflect":
+            calls.append("CrashRepair")
+            return json.dumps({"code": after_crash, "deps": [], "patch_summary": "removed the raise"})
+        return _fake_response_for(prompt)
+
+    return fake_chat
+
+
+@pytest.mark.asyncio
+async def test_warnings_after_the_crash_repairs_are_spent_get_a_repair_of_their_own_and_the_quest_goes_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The recorded case: a crash repair used the last repair, the repaired run then warned, and the quest stopped saying
+    the repairs did not remove the warnings, though none was made for them."""
+    calls: list[str] = []
+    monkeypatch.setattr("core.engine.LLMClient.chat", _fake_crash_then(calls, after_crash=_WARNS, numeric_repair=_QUIET))
+    engine = Engine(_cfg(tmp_path, exec_reflect_max_iterations=1))
+    artifacts = await engine.run()
+    assert calls.count("CrashRepair") == 1 and calls.count("NumericRepair") == 1
+    assert not (engine.quest_root / "needs" / "STUCK.json").exists()
+    assert artifacts.paper_md is not None and artifacts.paper_md.exists()
+
+
+@pytest.mark.asyncio
+async def test_a_stop_for_warnings_counts_only_the_repairs_made_for_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr("core.engine.LLMClient.chat", _fake_crash_then(calls, after_crash=_WARNS, numeric_repair=_WARNS))
+    engine = Engine(_cfg(tmp_path, exec_reflect_max_iterations=1))
+    await engine.run()
+    assert calls.count("CrashRepair") == 1 and calls.count("NumericRepair") == 1
+    record = json.loads((engine.quest_root / "needs" / "STUCK.json").read_text(encoding="utf-8"))
+    assert "an argument had no effect" in record["problem"]
+    assert any("repaired 1 time(s) for these warnings; they stood" in t for t in record["tried"]), record["tried"]
+    assert not (engine.quest_root / "paper" / "paper.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_repair_for_the_warnings_after_the_crash_repairs_are_spent_never_goes_on_to_the_analysis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The repair for the warnings is not Python, so it is not used: the run is not taken on to a paper with its warnings
+    standing because the crash repairs are spent; the warnings' own budget ends in the stop."""
+    calls: list[str] = []
+    monkeypatch.setattr("core.engine.LLMClient.chat",
+                        _fake_crash_then(calls, after_crash=_WARNS, numeric_repair="def broken(:\n"))
+    engine = Engine(_cfg(tmp_path, exec_reflect_max_iterations=1))
+    artifacts = await engine.run()
+    assert calls.count("CrashRepair") == 1 and calls.count("NumericRepair") == 1
+    assert artifacts.paper_md is None and (engine.quest_root / "needs" / "STUCK.json").is_file()
+
+
+def test_every_repair_made_is_counted_whichever_budget_it_is_on() -> None:
+    history = [{"iter": 1, "returncode": 1}, {"for": nw.REPAIR_FOR, "iter": 2, "returncode": 0},
+               {"for": nw.REPAIR_FOR, "iter": 3, "returncode": 0}]
+    assert nw.repairs_for_warnings(history) == 2
+    assert nw.repairs_made({"exec_reflect_iter": 1, "exec_reflect_history": history}) == 3
+    assert nw.repairs_made({}) == 0 and nw.repairs_for_warnings(None) == 0
+
+
+
+# ---- a NaN in a number the plan does not report is disclosed, not repaired for (-172 part b, option B) ----------------
+
+_PROTOCOL = {"metrics": [{"id": "rate"}, {"id": "spread"}]}
+
+
+def test_a_nan_in_a_declared_result_counts_and_one_in_a_diagnostic_does_not() -> None:
+    result = {"by_setting": {"low": {"rate": math.nan, "spread": 0.2}}, "debug_ratio": math.nan, "timing": [math.inf]}
+    found = nw.scan("", result, results=nw.declared_results(_PROTOCOL))
+    assert [(w.kind, w.text) for w in found] == [("non_finite", "by_setting.low.rate is nan")]
+    assert nw.disclosed_non_finite(result, nw.declared_results(_PROTOCOL)) == ["debug_ratio is nan", "timing[0] is inf"]
+
+
+def test_a_plan_that_declares_no_result_keeps_every_non_finite_number() -> None:
+    result = {"debug_ratio": math.nan}
+    assert [w.text for w in nw.scan("", result, results=nw.declared_results({}))] == ["debug_ratio is nan"]
+    assert nw.disclosed_non_finite(result, nw.declared_results({})) == []
+
+
+def test_a_nan_only_in_a_diagnostic_asks_for_no_repair_and_is_disclosed_in_the_evidence(tmp_path: Path) -> None:
+    from core import evidence
+
+    engine = Engine(_cfg(tmp_path))
+    state: dict[str, Any] = {"design": {"protocol": _PROTOCOL}}
+    assert engine._scan_numeric_warnings(state, "", {"rate": 0.5, "debug_ratio": math.nan}) == []  # type: ignore[arg-type]
+    assert _recorded(engine)[-1]["disclosed"] == ["debug_ratio is nan"]
+    got = evidence.assess(engine.quest_root, {}, settings={"numeric_warnings": "block"})
+    assert any("debug_ratio is nan" in g and "not stored under the name of one of the plan's results" in g
+               for g in got["all_gaps"]["protocol_runtime_matched"])
+    # The next run prints it finite: the disclosure is no longer the last word.
+    assert engine._scan_numeric_warnings(state, "", {"rate": 0.5, "debug_ratio": 1.0}) == []  # type: ignore[arg-type]
+    assert _recorded(engine)[-1] == {"warnings": [], "mode": "block"}
+    got = evidence.assess(engine.quest_root, {}, settings={"numeric_warnings": "block"})
+    assert not any("debug_ratio" in g for g in got["all_gaps"]["protocol_runtime_matched"])
+
+
+def test_a_nan_in_a_declared_result_still_asks_for_the_repair(tmp_path: Path) -> None:
+    engine = Engine(_cfg(tmp_path))
+    state: dict[str, Any] = {"design": {"protocol": _PROTOCOL}}
+    got = engine._scan_numeric_warnings(state, "", {"rate": math.nan, "debug_ratio": math.nan})  # type: ignore[arg-type]
+    assert got == [{"kind": "non_finite", "text": "rate is nan"}]
+    assert _recorded(engine)[-1]["disclosed"] == ["debug_ratio is nan"]
+
+
+def test_a_key_is_matched_whole_even_when_it_holds_a_dot_or_a_bracket() -> None:
+    results = nw.declared_results({"metrics": [{"id": "a.b"}, {"id": "rate"}]})
+    found = nw.scan("", {"a.b": math.nan, "rate[nm]": math.nan, "x": {"rate": [1.0, math.inf]}}, results=results)
+    assert [w.text for w in found] == ["a.b is nan", "x.rate[1] is inf"]
+    assert nw.disclosed_non_finite({"rate[nm]": math.nan}, results) == ["rate[nm] is nan"]
+
+
+def test_a_top_level_list_of_results_is_read_by_its_keys() -> None:
+    found = nw.scan("", [{"rate": math.nan}, {"other": math.nan}], results={"rate"})
+    assert [w.text for w in found] == ["[0].rate is nan"]
+
+
+def test_a_clean_scan_after_a_warning_with_a_disclosure_ends_the_disclosure(tmp_path: Path) -> None:
+    engine = Engine(_cfg(tmp_path))
+    state: dict[str, Any] = {"design": {"protocol": _PROTOCOL}}
+    assert engine._scan_numeric_warnings(state, "", {"rate": math.nan, "debug_ratio": math.nan})  # type: ignore[arg-type]
+    assert engine._scan_numeric_warnings(state, "", {"rate": 0.5, "debug_ratio": 1.0}) == []  # type: ignore[arg-type]
+    record = _recorded(engine)
+    assert record[0]["warnings"] and record[0]["disclosed"] == ["debug_ratio is nan"]
+    assert record[-1] == {"warnings": [], "mode": "block"}
+
+
+def test_the_frozen_protocol_names_the_results_when_there_is_one(tmp_path: Path) -> None:
+    from core import frozen_protocol
+
+    engine = Engine(_cfg(tmp_path))
+    frozen_path = frozen_protocol.frozen_path(engine.quest_root)
+    frozen_path.parent.mkdir(parents=True, exist_ok=True)
+    protocol = {"metrics": [{"id": "debug_ratio"}]}
+    frozen_path.write_text(json.dumps({"schema": frozen_protocol.FROZEN_SCHEMA, "protocol": protocol,
+                                       "sha256": frozen_protocol.sha256(protocol)}), encoding="utf-8")
+    assert frozen_protocol.load(engine.quest_root) is not None
+    state: dict[str, Any] = {"design": {"protocol": _PROTOCOL}}
+    got = engine._scan_numeric_warnings(state, "", {"rate": math.nan, "debug_ratio": math.nan})  # type: ignore[arg-type]
+    assert got == [{"kind": "non_finite", "text": "debug_ratio is nan"}]
+
+
+def test_the_uncertainty_a_script_prints_beside_a_declared_result_is_disclosed_not_repaired_for() -> None:
+    """The maintainer's decision (2026-10-27): only a key equal to a declared result's id counts; rate_se beside the
+    declared rate is disclosed (FI's own intervals come from its records, and FI fills no non-finite number)."""
+    results = nw.declared_results(_PROTOCOL)
+    assert nw.scan("", {"rate": 0.4, "rate_se": math.nan}, results=results) == []
+    assert nw.disclosed_non_finite({"rate": 0.4, "rate_se": math.nan}, results) == ["rate_se is nan"]
+
+
+def test_a_frozen_protocol_with_no_results_keeps_every_non_finite_number(tmp_path: Path) -> None:
+    from core import frozen_protocol
+
+    engine = Engine(_cfg(tmp_path))
+    frozen_path = frozen_protocol.frozen_path(engine.quest_root)
+    frozen_path.parent.mkdir(parents=True, exist_ok=True)
+    frozen_path.write_text(json.dumps({"schema": frozen_protocol.FROZEN_SCHEMA, "protocol": {},
+                                       "sha256": frozen_protocol.sha256({})}), encoding="utf-8")
+    state: dict[str, Any] = {"design": {"protocol": _PROTOCOL}}
+    got = engine._scan_numeric_warnings(state, "", {"debug_ratio": math.nan})  # type: ignore[arg-type]
+    assert got == [{"kind": "non_finite", "text": "debug_ratio is nan"}]
+
+
+# ---- the role of a result decides which non-finite number stops (contract roles) ---------------------------------------
+
+_ROLES = {"metrics": [{"id": "gain"}, {"id": "ideal", "reference": {"formula": "2 * x"}},
+                      {"id": "agreement"}, {"id": "wall", "role": "timing"}, {"id": "edge", "role": "physical_bound"}],
+          "oracles": [{"name": "agree_a", "kind": "second_implementation", "measure": "agreement"},
+                      {"name": "agree_b", "kind": "invariant", "metric": "agreement"}]}
+
+
+def test_only_a_result_a_reference_and_a_physical_bound_ask_for_a_repair() -> None:
+    assert nw.declared_results(_ROLES) == {"gain", "ideal", "edge"}
+    result = {"gain": math.nan, "ideal": math.inf, "edge": math.nan, "agreement": math.nan, "wall": math.nan}
+    found = nw.scan("", result, results=nw.declared_results(_ROLES))
+    assert [w.text for w in found] == ["gain is nan", "ideal is inf", "edge is nan"]
+    assert nw.disclosed_non_finite(result, nw.declared_results(_ROLES)) == ["agreement is nan", "wall is nan"]
+
+
+def test_a_plan_whose_results_are_all_diagnostics_stops_for_none_of_them() -> None:
+    protocol = {"metrics": [{"id": "agreement"}], "oracles": [{"name": "agree", "kind": "symmetry", "measure": "agreement"}]}
+    results = nw.declared_results(protocol)
+    assert results == set()
+    assert nw.scan("", {"agreement": math.nan, "other": math.nan}, results=results) == []
+
+
+def test_a_check_s_measure_printed_as_nan_is_disclosed_with_fi_s_own_value(tmp_path: Path) -> None:
+    engine = Engine(_cfg(tmp_path))
+    record = {"attempts": [{"checks": [{"name": "agree_a", "value": 2.3e-15, "measured_by": "engine"},
+                                       {"name": "agree_b", "value": 9.0, "measured_by": "script"}]}]}
+    (engine.quest_root / "needs").mkdir(parents=True, exist_ok=True)
+    (engine.quest_root / "needs" / "ORACLE_CHECK.json").write_text(json.dumps(record), encoding="utf-8")
+    state: dict[str, Any] = {"design": {"protocol": _ROLES}}
+    assert engine._scan_numeric_warnings(state, "", {"gain": 0.5, "agreement": math.nan}) == []  # type: ignore[arg-type]
+    assert _recorded(engine)[-1]["disclosed"] == [
+        "agreement is nan (FI's own run of the check `agree_a` measured 2.3e-15)"]
+
+
+def test_the_contract_is_built_when_the_protocol_is_read_and_its_gaps_are_kept(tmp_path: Path) -> None:
+    from core import disclosure
+
+    engine = Engine(_cfg(tmp_path))
+    design = {"protocol": {"metrics": [{"id": "gain"}, {"id": "gap"}],
+                           "oracles": [{"name": "agree", "kind": "invariant", "measure": "gap"}]}}
+    state: dict[str, Any] = {"design": design, "iteration": 1}
+    protocol = engine._protocol_block(state)  # type: ignore[arg-type]
+    assert "role" not in protocol["metrics"][0]  # never written back
+    record = json.loads((engine.quest_root / ".fi" / "contract.json").read_text(encoding="utf-8"))
+    assert any("no role for" in g for g in record["gaps"])
+    assert all("no role" not in g and "older plan" not in g for g in record["shown"]) and len(record["shown"]) == 1
+    text = disclosure.run_record(engine.quest_root)
+    assert "In reading the plan, FI noted: result `gap` is the measure of the check `agree`" in text
+    assert "no role" not in text and "older plan" not in text
+
+
+def test_a_plan_with_only_the_default_gaps_adds_nothing_to_the_run_record(tmp_path: Path) -> None:
+    from core import disclosure
+
+    engine = Engine(_cfg(tmp_path))
+    engine._protocol_block({"design": {"protocol": {"metrics": [{"id": "gain"}]}}, "iteration": 1})  # type: ignore[arg-type]
+    record = json.loads((engine.quest_root / ".fi" / "contract.json").read_text(encoding="utf-8"))
+    assert record["gaps"] and record["shown"] == []
+    assert "In reading the plan" not in disclosure.run_record(engine.quest_root)
+
+
+def test_a_candidate_design_does_not_write_the_contract_file(tmp_path: Path) -> None:
+    engine = Engine(_cfg(tmp_path))
+    state: dict[str, Any] = {"design": {"protocol": {"metrics": [{"id": "gain"}]}}, "iteration": 1}
+    engine._protocol_block(state, adopted=False)  # type: ignore[arg-type]
+    assert not (engine.quest_root / ".fi" / "contract.json").exists()
+    engine._protocol_block(state)  # type: ignore[arg-type]
+    assert (engine.quest_root / ".fi" / "contract.json").is_file()
+
+
+def test_a_headline_result_that_a_special_case_check_measures_still_stops_on_a_nan() -> None:
+    protocol = {"metrics": [{"id": "gain"}, {"id": "other"}],
+                "oracles": [{"name": "limit", "kind": "special_case", "measure": "gain", "case": {"x": 0}}]}
+    results = nw.declared_results(protocol)
+    assert results == {"gain", "other"}
+    assert [w.text for w in nw.scan("", {"gain": math.nan}, results=results)] == ["gain is nan"]
+
+
+def test_a_declared_result_the_contract_cannot_place_still_counts_as_a_result() -> None:
+    protocol = {"metrics": [{"id": "gain"}, {"id": "rate", "kind": "ratio"}, {"id": "ideal", "reference": "theory"}]}
+    assert nw.declared_results(protocol) == {"gain", "rate", "ideal"}
+    only_odd = {"metrics": [{"id": "rate", "kind": "ratio"}]}
+    assert nw.declared_results(only_odd) == {"rate"}
+    assert [w.text for w in nw.scan("", {"rate": math.nan}, results=nw.declared_results(only_odd))] == ["rate is nan"]
+
+
+def test_a_result_on_its_bound_in_every_setting_reaches_the_run_record(tmp_path: Path) -> None:
+    from core import disclosure
+
+    engine = Engine(_cfg(tmp_path))
+    (engine.quest_root / ".fi").mkdir(parents=True, exist_ok=True)
+    text = "share is on its bound in every setting; the result may carry no information"
+    (engine.quest_root / ".fi" / "edge_everywhere.json").write_text(json.dumps({"results": [text]}), encoding="utf-8")
+    assert text + "." in disclosure.run_record(engine.quest_root)

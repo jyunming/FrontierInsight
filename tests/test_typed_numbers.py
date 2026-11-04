@@ -70,8 +70,15 @@ def test_the_fi_marker_is_not_the_writers_text():
     assert "0.9312" not in tn.writers_text(text)
 
 
+def test_a_run_figure_and_the_caption_fi_wrote_for_it_are_not_the_writers_text():
+    text = ("Text.\n\n![**Figure 1.** Marked: limit at 0.4375.](figures/a.png){width=80%}\n\n"
+            "![An image of 0.8125 elsewhere](other/b.png)\n")
+    assert "0.4375" not in tn.writers_text(text)
+    assert _typed(text) == ["0.8125"], "an image that is not one of the run's figures is still read"
+
+
 def test_code_urls_references_and_html_comments_are_left_out():
-    text = "Run `x = 4321`. See https://x.org/9876. <!-- 5555 -->\n\n## References\n\n1. Smith 2019, vol 3456."
+    text = "See https://x.org/9876. <!-- 5555 -->\n\n## References\n\n1. Smith 2019, vol 3456."
     assert _typed(text) == []
 
 
@@ -95,11 +102,12 @@ def test_many_sentences_give_a_further_hit_without_a_quote():
     assert "a further 3 typed number" in out[-1] and "“" not in out[-1]
 
 
-def test_remove_replaces_each_number_and_lists_it():
+def test_untraced_lists_each_number_with_its_sentence_and_changes_nothing():
     text = "The bias was 0.8244 at noise 0.05."
-    out, taken = tn.remove(text, _plan())
-    assert out == f"The bias was {tn.REMOVED} at noise 0.05."
-    assert taken == [("0.8244", text)]
+    assert tn.untraced(text, _plan()) == [("0.8244", text)]
+    assert not hasattr(tn, "remove")
+    # Known positive: a number of the plan is traced, so it is not listed.
+    assert tn.untraced("Noise 0.05 and n = 10.", _plan()) == []
 
 
 def test_a_paper_with_only_plan_numbers_has_no_hits():
@@ -134,8 +142,8 @@ def _typed_empty_plan(text: str) -> list[str]:
 def test_enumeration_labels_of_a_real_limitations_paragraph_are_not_numbers():
     left = _typed_empty_plan(LIMITATIONS)
     assert left == ["1", "1e-12"], left  # "1/T" and the tolerance are the paragraph's own numbers, the ten labels are not
-    out, taken = tn.remove(LIMITATIONS, frozenset())
-    assert all(f"({i})" in out for i in range(1, 11)), out
+    taken = tn.untraced(LIMITATIONS, frozenset())
+    assert not any(tok == str(i) and f"({i})" in sent for i in range(2, 11) for tok, sent in taken)
     assert "1e-12" in " ".join(tok for tok, _ in taken)  # a real number of the paragraph is still checked
 
 
@@ -164,3 +172,123 @@ def test_a_run_that_is_not_consecutive_is_not_structure():
 def test_a_label_run_does_not_cross_paragraphs():
     text = "(1) First point here.\n\nUnrelated text (2) with a count."
     assert _typed_empty_plan(text) == ["1", "2"]
+
+
+# --- the rule was too loose at four places and too strict at two -----------------------------------------------------------
+
+
+def test_a_number_in_inline_code_is_checked():
+    """Old code blanked inline code, so a typed result in backticks reached the paper unflagged."""
+    assert _typed("The hit rate was `94.3%` overall.") == ["94.3%"]
+
+
+def test_a_closed_fence_is_skipped_and_an_unclosed_fence_hides_only_its_paragraph():
+    """Old code blanked everything after an unclosed fence, so a later typed result went unflagged."""
+    assert _typed("```\nfor i in range(1000): seed = 42\n```") == []
+    assert _typed("```\nsetup 5555\n\nLater the gain was 7.7 here.") == ["7.7"]
+    assert _typed("```\nfor i in range(1000):\n```\n\nThe gain was 7.7.") == ["7.7"]
+
+
+def test_a_section_after_the_references_is_checked_but_the_list_is_not():
+    """Old code skipped everything after the References heading, appendix included."""
+    text = "## References\n\n1. Smith 2019, vol 3456.\n\n## Appendix\n\nThe bias was 0.8244."
+    assert _typed(text) == ["0.8244"]
+    assert _typed("## References\n\n1. Smith 2019, vol 3456.\n\n### Books\n\n2. Lee 2001, p 77.") == []
+
+
+def test_only_the_number_before_the_citation_in_its_clause_is_left_to_the_claim_check():
+    """Old code exempted every number of a sentence that holds a citation."""
+    text = "Prior work gets 80% [3]; we get 94.3%."
+    assert _typed(text) == ["94.3%"]
+    assert tn.report(text, _plan()).left_to_claim_check == 1
+
+
+def test_a_citation_before_the_number_in_its_clause_covers_it():
+    """A review finding: searching only after the number made "As reported in [W1], the rate was 25%." a typed result."""
+    assert _typed("As reported in [W1], the rate was 25%.") == []
+    assert _typed("As reported in [W1]; the rate was 35%.") == ["35%"]
+
+
+def test_a_semicolon_inside_a_citation_is_not_a_clause_boundary():
+    """A review finding: the ";" of "[W1; W2]" or "(Smith 2020; Lee 2021)" cut the clause, so the cited number looked uncited."""
+    assert _typed("As reported in [W1; W2], the rate was 35%.") == []
+    assert tn._clause_breaks("As reported (Smith 2020; Lee 2021), then [3]; and more.", []) == [len("As reported (Smith 2020; Lee 2021), then [3]")]
+    assert _typed("As reported in [W1; W2]; the rate was 35%.") == ["35%"]
+
+
+def test_a_cited_prior_number_before_its_marker_is_still_exempt():
+    assert _typed("Prior work found a barrier of 71.3 kJ/mol [3].") == []
+
+
+def test_a_typed_result_in_plain_prose_is_still_found():
+    assert _typed("The mean gain was 12.7 in the main grid.") == ["12.7"]
+
+
+def test_a_listed_number_is_the_number_not_its_operator_or_neighbour():
+    """Old code took the operator and the space before the number with it ("a - 2.5", "7-13")."""
+    taken = tn.untraced("Value a - 2.5 and range 7-13 and 12 %.", _plan())
+    assert [t for t, _s in taken] == ["2.5", "7", "13", "12 %"]
+
+
+def test_a_quantile_level_named_in_the_method_is_not_a_typed_result():
+    """Old code removed the 97.5 of "the 97.5th percentile". (A critical value the plan does not state stays flagged.)"""
+    assert _typed("We take the 97.5th percentile of the errors.") == []
+    assert _typed("The gain was 97.5 here.") == ["97.5"]
+
+
+# --- numbers of FI's own records, the level of its intervals, rounded plan constants, powers of ten ---------------------------
+
+def _ledger(root, cells=3, trials=40):
+    import json
+
+    (root / "raw").mkdir(parents=True, exist_ok=True)
+    rows = []
+    for c in range(cells):
+        rows.append({"event": "planned", "cell": f"c{c}", "trials": trials})
+        rows += [{"event": "trial", "cell": f"c{c}", "trial": t, "status": "ok", "seed": 7 + t} for t in range(trials)]
+    (root / "raw" / "ledger.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+
+def test_a_comma_list_of_values_is_not_read_as_one_grouped_number():
+    toks = [n.token for n in tn.numbers("The grid is m in {20,200,2000} and 1,234,567 trials were not run.")]
+    assert toks == ["20", "200", "2000", "1,234,567"]
+
+
+def test_the_trials_and_settings_of_the_ledger_and_the_plans_own_run_size_may_be_stated(tmp_path):
+    from core import paper_facts
+
+    _ledger(tmp_path, cells=3, trials=40)
+    plan = {**PROTOCOL, "runs_per_setting": 500}
+    facts = paper_facts.run_numbers(tmp_path, plan)
+    text = "Each of the 3 settings ran 40 trials, though the plan asked for 500 trials."
+    assert {Decimal(3), Decimal(40), Decimal(500)} <= facts
+    assert tn.typed_outside_the_plan(text, tn.plan_numbers(plan, TOPIC), facts) == []
+    # without FI's records the same sentence is flagged, as before
+    assert {"40", "500"} <= {n.token for n in tn.typed_outside_the_plan(text, tn.plan_numbers(plan, TOPIC))}
+    assert paper_facts.run_numbers(None, plan) == frozenset()
+
+
+def test_a_number_that_is_only_a_run_fact_in_name_is_still_flagged(tmp_path):
+    from core import paper_facts
+
+    _ledger(tmp_path, cells=3, trials=40)
+    facts = paper_facts.run_numbers(tmp_path, PROTOCOL)
+    assert [n.token for n in tn.typed_outside_the_plan("The bias was 41 percent of the truth.", _plan(), facts)] == ["41 percent"]
+
+
+def test_the_level_of_fis_intervals_may_be_named_but_another_level_may_not():
+    empty = tn.plan_numbers({}, "")
+    assert tn.typed_outside_the_plan("They are normal-approximation 95% intervals.", empty) == []
+    assert [n.token for n in tn.typed_outside_the_plan("They are 97% intervals.", empty)] == ["97%"]
+
+
+def test_a_plan_constant_written_to_fewer_places_is_the_plans_number_but_a_close_result_is_not():
+    plan = tn.plan_numbers({"constants": {"lnA": 16.11809565, "R": 0.008314462618}}, "")
+    for text, flagged in (("ln A = 16.118", []), ("R = 0.008314", []), ("ln A = 16.119", ["16.119"]), ("ln A = 16.1", ["16.1"])):
+        assert [n.token for n in tn.typed_outside_the_plan(text, plan)] == flagged
+
+
+def test_a_power_of_ten_is_read_as_the_number_it_writes():
+    plan = tn.plan_numbers({"constants": {"tol": 1e-12}}, "")
+    assert [n.token for n in tn.typed_outside_the_plan("A tolerance of $10^{-12}$ was used.", plan)] == []
+    assert [n.token for n in tn.typed_outside_the_plan("An error floor of $10^{-11}$ was assumed.", plan)] == ["-11"]

@@ -162,7 +162,7 @@ def _fake(prompts: list[str], *, second_design: dict[str, Any], first_protocol: 
             body = json.loads(_FAKE_RESPONSES["design"])
             body["protocol"] = critique_protocol if critique_protocol and seen["critique"] > 1 else (first_protocol or P1)
             body.update({k: v for k, v in second_design.items() if v is not None})
-            return json.dumps({"objections_addressed": ["a precision target is missing"], "amended_design": body})
+            return json.dumps({"objections_addressed": [{"check": "precision", "where": "protocol.runs_per_setting, protocol.seed_policy", "objection": "a precision target is missing"}], "amended_design": body})
         if kind == "Experiment Design":
             seen["design"] += 1
             body = json.loads(_FAKE_RESPONSES["design"])

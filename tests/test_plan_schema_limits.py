@@ -176,14 +176,14 @@ def test_the_plan_step_stops_asking_when_the_model_repeats_an_answer_that_was_re
 # 6. a stop decided before anything ran ends the quest ----------------------------------------------------------------
 
 
-def test_a_stop_for_the_topic_goes_straight_to_the_end_without_analysis_or_redesign(tmp_path: Path) -> None:
+def test_a_stop_for_no_search_goes_straight_to_the_end_without_analysis_or_redesign(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
-    state = {"exec_result": {"topic_unmet": "the plan leaves out a", "returncode": 0}, "result_json": {}}
+    state = {"exec_result": {"no_search": "the plan's search cannot be run", "returncode": 0}, "result_json": {}}
     assert engine._route_after_execute_reflect(state) == "stuck"
     assert engine._route_after_execute_reflect({"exec_result": {"returncode": 0}, "result_json": {"x": 1}}) == "proceed"
     verdict = engine._no_results_verdict({**state})
-    assert verdict and verdict["stuck"] is True and verdict["stuck_reason"] == "topic_unmet"
-    assert "leaves out a" in verdict["rationale"]
+    assert verdict and verdict["stuck"] is True and verdict["stuck_reason"] == "no_search"
+    assert "cannot be run" in verdict["rationale"]
 
 
 def test_the_graph_sends_a_topic_stop_from_the_reflect_step_to_the_gate() -> None:

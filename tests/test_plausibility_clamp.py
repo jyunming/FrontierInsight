@@ -100,6 +100,81 @@ def test_a_floor_cap_on_a_nonzero_min_is_rejected_too() -> None:
     assert [x.kind for x in v] == ["clamped"]
 
 
+# A cap pins a value only from its own side: a floor never pins a value to a max, a ceiling never to a min.
+
+PROPORTION = {"result_assertions": [{"path": "share", "min": 0.0, "max": 1.0, "unit": "dimensionless"}]}
+FLOOR_ON_A_DENOMINATOR = """
+FRAC = V / max(R, 1)
+print("RESULT_JSON: " + json.dumps({"share": float(FRAC.mean())}))
+"""
+
+
+def test_a_floor_on_a_denominator_is_not_a_cap_of_a_value_on_the_max() -> None:
+    # A proportion that really is 1 in every trial; ``max(R, 1)`` only keeps the division defined at R = 0.
+    assert plausibility.check_design({"share": 1.0}, PROPORTION, code=FLOOR_ON_A_DENOMINATOR) == []
+
+
+@pytest.mark.parametrize("code", [
+    "FRAC = V / np.maximum(R, 1)",
+    "FRAC = V / np.fmax(R, 1.0)",
+    "FRAC = V / np.clip(R, 1, None)",
+    "FRAC = V / np.clip(R, a_min=1, a_max=None)",
+])
+def test_every_floor_spelling_leaves_the_max_alone(code: str) -> None:
+    assert plausibility.check_design({"share": 1.0}, PROPORTION, code=code) == []
+
+
+@pytest.mark.parametrize("code", [
+    "rmse = min(rmse, 10.0)",
+    "rmse = np.minimum(rmse, 10.0)",
+    "rmse = np.clip(rmse, 0, 10.0)",
+    "rmse = np.clip(rmse, a_min=0, a_max=10.0)",
+    "rmse = torch.clamp(rmse, max=10.0)",
+    "rmse = 10.0 if diverged else rmse",
+    "if rmse > 1e6:\n    rmse = 10.0",
+])
+def test_a_cap_from_above_still_pins_a_value_on_the_max(code: str) -> None:
+    assert [x.kind for x in plausibility.check_design({"rmse": 10.0}, RMSE_MAX, code=code)] == ["clamped"]
+
+
+def test_a_clip_to_the_unit_interval_still_pins_a_value_on_one() -> None:
+    v = plausibility.check_design({"share": 1.0}, PROPORTION, code="p = np.clip(p, 0, 1)")
+    assert [x.kind for x in v] == ["clamped"]
+
+
+@pytest.mark.parametrize("code", [
+    "n = max(n, 2.0)",
+    "n = np.maximum(n, 2.0)",
+    "n = np.clip(n, 2.0, 50)",
+    "n = n.clip(2.0, 50)",   # method form: the direction of two positional arguments cannot be read
+    "n = 2.0 if tiny else n",
+])
+def test_a_floor_still_pins_a_value_on_the_min(code: str) -> None:
+    design = {"result_assertions": [{"path": "n", "min": 2.0, "max": 50.0}]}
+    assert [x.kind for x in plausibility.check_design({"n": 2.0}, design, code=code)] == ["clamped"]
+
+
+def test_a_ceiling_does_not_pin_a_value_on_the_min() -> None:
+    design = {"result_assertions": [{"path": "n", "min": 2.0, "max": 50.0}]}
+    assert plausibility.check_design({"n": 2.0}, design, code="n = min(n, 2.0)") == []
+
+
+@pytest.mark.parametrize("code", [
+    "hit = 1 if v >= 1 else 0",
+    "hit = 1.0 if v >= 1 else 0.0",
+    "if v >= 1:\n    hit = 1\nelse:\n    hit = 0",
+])
+def test_a_label_written_as_a_literal_in_both_branches_is_not_a_cap(code: str) -> None:
+    design = {"result_assertions": [{"path": "share", "min": 0.0, "max": 1.0}]}
+    assert plausibility.check_design({"share": 1.0}, design, code=code) == []
+
+
+def test_the_directions_of_the_caps_are_read_from_the_same_parse() -> None:
+    code = "a = min(x, 3.0)\nb = max(y, 1.0)\nc = 7.0 if z else y\nd = np.clip(w, 0.5, 9.0)"
+    d = plausibility.clamp_directions(code)
+    assert d == {3.0: {"up"}, 1.0: {"down"}, 7.0: {"both"}, 0.5: {"down"}, 9.0: {"up"}}
+
+
 def test_without_code_the_check_is_unchanged() -> None:
     assert plausibility.check_design({"rmse": 10.0}, RMSE_MAX) == []
     assert [x.kind for x in plausibility.check_design({"rmse": 11.0}, RMSE_MAX)] == [

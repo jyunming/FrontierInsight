@@ -127,9 +127,10 @@ async def test_a_repair_that_also_swaps_the_constant_for_the_swept_setting_is_no
     swapped = fixed.replace(READ_TEXT, REWRITE_LINE)
     eng = _engine(tmp_path, monkeypatch, flagged, json.dumps({"code": swapped, "patch_summary": "both"}))
     assert _flagged_keys(flagged, DESIGN) != [], "the other read is a fault"
-    stop = await eng._static_gate({})
-    assert stop is not None, "the swapped rewrite was refused, so the fault stands"
+    # The swapped rewrite is refused, so the fault stands: recorded as FI's reading of the code, and the quest goes on.
+    assert await eng._static_gate({}) is None
     assert (eng.quest_root / "code" / "simulate.py").read_text(encoding="utf-8") == flagged
+    assert [p for p in eng._cannot_repair_problems() if p["source"] == "read"], "the fault that stands is recorded"
     eng2 = _engine(tmp_path / "ok", monkeypatch, flagged, json.dumps({"code": fixed, "patch_summary": "only the fault"}))
     assert await eng2._static_gate({}) is None
     assert (eng2.quest_root / "code" / "simulate.py").read_text(encoding="utf-8") == fixed

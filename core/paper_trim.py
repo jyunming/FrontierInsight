@@ -55,7 +55,7 @@ _MIN_WORDS = 6  # a shorter sentence is not worth a place in the list
 # placeholder (core/paper_facts.py: `<!-- fi:fact-NAME -->value<!-- /fi:fact-NAME -->`), markers included: never offered.
 # (A paper of an earlier version may still carry the blocks of core/disclosure.py; the write step takes them out.)
 _ENGINE_NOTE_RE = re.compile(
-    r"<!-- fi:v \{\{v:.*?\}\} -->.*?<!-- /fi:v -->|<!-- fi:([\w-]+)(?::[0-9a-f]+)? -->.*?<!-- /fi:\1 -->", re.S)
+    r"<!-- fi:v \{\{v:.*?\}\} -->.*?<!-- /fi:v -->|<!-- fi:v-span .*? -->.*?<!-- /fi:v-span -->|<!-- fi:([\w-]+)(?::[0-9a-f]+)? -->.*?<!-- /fi:\1 -->", re.S)
 _CITE_BRACKET_RE = re.compile(r"\[((?:W?\d+(?:\s*[–-]\s*\d+)?)(?:\s*[,;]\s*W?\d+(?:\s*[–-]\s*\d+)?)*)\]")
 _FIGURE_OR_TABLE_RE = re.compile(r"\b(?:figures?|figs?\.?|tables?)\b", re.IGNORECASE)
 # A sentence that introduces a term, a symbol or an abbreviation the text may use

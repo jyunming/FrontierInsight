@@ -255,9 +255,35 @@ def save(quest_root: Path, decision: dict[str, Any]) -> None:
 # --- what the code-writing step is asked for, and what it returns ------------------------------------------------------
 
 
-def prompt_block(package: str, equations: list[str]) -> str:
-    """The layout the code-writing prompts ask for, after the two-script contract."""
+def _others(analysis: bool) -> str:
+    """The sentence that keeps the model's other file apart from the package."""
+    if analysis:
+        return "The functions of derive.py never import the package: they read only the table FI hands them, as the contract above says."
+    return "experiment.py never imports the package: it reads only the records FI hands it, as the contract above says."
+
+
+def prompt_block(package: str, equations: list[str], frame: str = "", analysis: bool = False) -> str:
+    """The layout the code-writing prompts ask for, after the two-script contract. ``frame``: ``"prompt"`` when
+    FI writes the frame of simulate.py (core/skeleton.py): the request then names no entry point of simulate.py.
+    ``analysis``: FI writes experiment.py too (core/analysis_frame.py), and the model's other file is derive.py."""
     labels = ", ".join(equations) if equations else "each equation of the plan's model"
+    if frame:
+        beside = "the function `trial` and the functions of derive.py" if analysis else "the function `trial` and experiment.py"
+        sim = ("- `trial` reads the setting from `cell` and computes it by calling the package (`from {package} import model`).\n"
+               "  The mathematics is in the package.\n").format(package=package)
+        return f"""
+THE CODE AS A SMALL RESEARCH TOOL. Besides {beside}, write the model as a package, each file its own
+fenced Python block whose first line is `# file: <path>`:
+- `# file: {package}/__init__.py`: one line saying what the package computes (it may import the model's functions).
+- `# file: {package}/{MODEL_NAME}`: the model's equations and nothing else: one function per equation (or per small group),
+  every parameter an argument. No scenario values in the package (no grid values, sizes, thresholds or file paths)
+  and no loop over settings, no random generator created at module level (a function that draws random numbers takes
+  the generator or the seed as an argument). Put each equation's id in a comment (`# E1`) on or above the function that
+  computes it: {labels}.
+{sim}- {_others(analysis)}
+Do not write tests, a README or a command-line entry: FI writes the unit tests from the plan's checks
+(`tests/{TEST_NAME}`), the equation list (`{METHODS_NAME}`) and `run.py` itself.
+"""
     return f"""
 THE CODE AS A SMALL RESEARCH TOOL. Besides simulate.py and experiment.py, write the model as a package, each file its own
 fenced Python block whose first line is `# file: <path>`:
@@ -288,10 +314,30 @@ def steps_block(steps: list[tuple[str, str, str]] | None) -> str:
             "simpler version of a step into simulate.py:\n" + lines + "\n")
 
 
-def prefilled_block(package: str, model_source: str, steps: list[tuple[str, str, str]] | None = None) -> str:
+def prefilled_block(package: str, model_source: str, steps: list[tuple[str, str, str]] | None = None, frame: str = "",
+                    analysis: bool = False) -> str:
     """The layout the code-writing prompts ask for when FI has already written and checked the package, function by
     function (:mod:`core.function_steps`): only the two scripts are asked for. ``steps``: the package's functions that are
-    steps of the method, which the scripts call and do not write again."""
+    steps of the method, which the scripts call and do not write again. ``frame``: ``"prompt"`` when FI writes
+    the frame of simulate.py (what is asked for is then ``trial`` and experiment.py). ``analysis``: FI writes experiment.py
+    too, and the other file is derive.py."""
+    if frame:
+        only = ("Write only the function `trial` (with the helpers it needs) and the functions of derive.py." if analysis else
+                "Write only the function `trial` (with the helpers it needs) and experiment.py.")
+        sim = (f"- `trial` reads the setting from `cell` and computes it by calling the package (`from {package} import model`, "
+               "then `model.<function>(...)`, with the signatures\n  below). The mathematics is in the package.\n")
+        exp = f"- {_others(analysis)}\n"
+        return f"""
+THE CODE AS A SMALL RESEARCH TOOL. The model's package `{package}/` is ALREADY WRITTEN AND TESTED: FI wrote it one function
+at a time, one function per equation, and checked each function against the plan's equation. Do NOT write any file of the
+package and do not write its equations again: import them. {only}
+{sim}{exp}Do not write tests, a README or a command-line entry: FI writes the unit tests, the equation list (`{METHODS_NAME}`) and `run.py`
+itself. The package's `{package}/{MODEL_NAME}` as it is:
+
+```python
+{model_source.rstrip()}
+```
+{steps_block(steps)}"""
     return f"""
 THE CODE AS A SMALL RESEARCH TOOL. The model's package `{package}/` is ALREADY WRITTEN AND TESTED: FI wrote it one function
 at a time, one function per equation, and checked each function against the plan's equation. Do NOT write any file of the
@@ -309,7 +355,13 @@ itself. The package's `{package}/{MODEL_NAME}` as it is:
 {steps_block(steps)}"""
 
 
-def reminder(package: str) -> str:
+def reminder(package: str, analysis: bool = False) -> str:
+    """The request again for a reply that left out the package. ``analysis``: FI writes experiment.py (core/analysis_frame.py),
+    so the reply's own files are simulate.py and the functions of derive.py the reply format lists."""
+    if analysis:
+        return (f"\n\nREMINDER: the reply did not hold the package. Give every block of the output format again, each in its "
+                f"own fenced block (`# file: simulate.py`, and `# file: derive.py` when the format lists functions of it), "
+                f"with `# file: {package}/__init__.py` and `# file: {package}/{MODEL_NAME}`.\n")
     return (f"\n\nREMINDER: the reply did not hold the package. Give every file again, each in its own fenced block: "
             f"`# file: simulate.py`, `# file: experiment.py`, `# file: {package}/__init__.py` and "
             f"`# file: {package}/{MODEL_NAME}`.\n")
@@ -445,7 +497,7 @@ def repair_note(package: str, sources: dict[str, str]) -> str:
         f"\nTHE MODEL'S PACKAGE: simulate.py computes with the package code/{package}/, which holds the model's equations. "
         "Its files are below. If the fault is in an equation, fix it there: add to your JSON "
         f"`\"package_files\": {{\"{package}/{MODEL_NAME}\": \"<the whole corrected file>\"}}` beside `code` (the whole "
-        "of simulate.py; when only the package needed a fix, give simulate.py back unchanged). Keep the equations in the "
+        "of simulate.py; when only the package needed a fix, leave `code` empty and simulate.py is kept as it is; never put a stand-in word in `code`). Keep the equations in the "
         "package (do not copy them into simulate.py) and keep every equation label (`# E1`). Leave `package_files` out "
         "when the package is right.\n\n"
         + sources_block(sources) + "\n"
@@ -489,12 +541,13 @@ def write_package(code_dir: Path, files: dict[str, str], *, same: Any = None) ->
 
 
 def package_dirs(code_dir: Path) -> list[Path]:
-    """The Python packages in ``code/`` (a folder with ``__init__.py``), not the tests."""
+    """The Python packages of the study's in ``code/`` (a folder with ``__init__.py``), not the tests and not FI's own formula
+    calculator (:data:`FI_CORE_FOLDER`)."""
     code_dir = Path(code_dir)
     if not code_dir.is_dir():
         return []
     return sorted(p for p in code_dir.iterdir()
-                  if p.is_dir() and (p / "__init__.py").is_file() and p.name not in (TESTS_DIR, "__pycache__"))
+                  if p.is_dir() and (p / "__init__.py").is_file() and p.name not in (TESTS_DIR, "__pycache__", FI_CORE_FOLDER))
 
 
 def package_sources(code_dir: Path) -> dict[str, str]:
@@ -509,6 +562,74 @@ def package_sources(code_dir: Path) -> dict[str, str]:
             except (OSError, UnicodeDecodeError):
                 continue
     return out
+
+
+#: Folders a run writes into (caches, results, figures). They are never a simulation's input: a key that covered them
+#: would change with every run and never be reused.
+GENERATED_FOLDERS = ("cache", "results", "figures", "raw", "__pycache__")
+#: The analysis script, which reads what the simulation wrote and changes nothing the simulation computes.
+ANALYSIS_SCRIPT = "experiment.py"
+#: FI's reader of the trial record (core/frame_table.py, written beside the frame's runtime): the analysis uses it, the trials do not.
+TABLE_SCRIPT = "fi_table.py"
+#: FI's drawing calls of a figure (core/frame_figure.py, written beside the runtime of a version 5 frame): the analysis uses them.
+FIGURE_CALLS_SCRIPT = "fi_figure_calls.py"
+#: FI's own copies of its helpers under ``code/``, not the quest's code.
+SKILLS_FOLDER = "skills"
+#: FI's formula calculator, copied beside the analysis FI writes (core/analysis_frame.py ``CORE_DIR``): like the reader of the
+#: record, FI's by its name, never a package of the study's, an input of the trials, or code the reader is shown.
+FI_CORE_FOLDER = "fi_core"
+
+
+#: The names under ``code/`` the analysis FI writes may use (core/analysis_frame.py); only a file that holds FI's text is its.
+_ANALYSIS_PARTS = ("derive.py", "fi_figures.py", "fi_core")
+
+
+def _analysis_part(code_dir: Path, rel: str) -> bool:
+    from . import analysis_frame as _analysis
+
+    return _analysis.analysis_file(code_dir, rel)
+
+
+def simulation_inputs(quest_root: Path | str, code: Path | None = None) -> list[Path]:
+    """Every file the simulation may depend on, in a stable sorted order (by path relative to ``quest_root``).
+
+    Under ``code/`` (or ``code``, when given): every file, whatever its suffix (a helper module beside ``simulate.py``,
+    a model package, a parameter table, a pickled lookup, a binary array: the simulation may read any of them), except
+    the analysis script (:data:`ANALYSIS_SCRIPT`), FI's reader of the record (:data:`TABLE_SCRIPT`) and its drawing calls (:data:`FIGURE_CALLS_SCRIPT`), the rest of the analysis FI
+    writes (``derive.py`` with FI's frame and ``fi_figures.py`` with FI's text; FI's calculator ``fi_core/`` by its name), the tests (``tests/``, ``test_*.py``), FI's copies under ``skills/``,
+    notes (``.md``), caches (``__pycache__``), hidden files and folders, and what a run writes (:data:`GENERATED_FOLDERS`).
+    Under ``<quest_root>/inputs/``: every file, since a simulation may read any of the person's files there. A change to
+    any listed file is a change to the simulation, so a cached result of the old version must not be reused (:func:`core.outside_run.code_version`,
+    :func:`core.trial_runner._run_key`, :func:`core.optimise._run_key` all hash these files)."""
+    root = Path(quest_root)
+    code_dir = Path(code) if code is not None else root / "code"
+    out: list[Path] = []
+    if code_dir.is_dir():
+        for path in code_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            parts = path.relative_to(code_dir).parts
+            if any(p.startswith(".") or p in GENERATED_FOLDERS for p in parts):
+                continue
+            if parts[0] in (TESTS_DIR, SKILLS_FOLDER, FI_CORE_FOLDER) or (path.name.startswith("test_") and path.suffix == ".py"):
+                continue
+            if parts in ((ANALYSIS_SCRIPT,), (TABLE_SCRIPT,), (FIGURE_CALLS_SCRIPT,)) or path.suffix.lower() == ".md":
+                continue
+            if path.suffix == ".py" and parts[0] in _ANALYSIS_PARTS and _analysis_part(code_dir, "/".join(parts)):
+                continue  # the analysis FI writes (derive.py, its figure step, its formula calculator): a repair of it runs no trial again
+            out.append(path)
+    inputs = root / "inputs"
+    if inputs.is_dir():
+        out.extend(p for p in inputs.rglob("*") if p.is_file())
+    return sorted(out, key=lambda p: input_label(p, root))
+
+
+def input_label(path: Path, quest_root: Path | str) -> str:
+    """A listed file's name in a key: its path relative to the quest's folder, in forward slashes."""
+    try:
+        return Path(path).relative_to(Path(quest_root)).as_posix()
+    except ValueError:
+        return Path(path).as_posix()
 
 
 def _functions(tree: ast.AST) -> list[tuple[int, int, str]]:
@@ -575,7 +696,9 @@ def equation_map(protocol: dict[str, Any] | None, sources: dict[str, str],
         name = by_outline.get(eid.upper())
         node = next(((rel, n) for rel, text in sorted(sources.items())
                      for n in [_steps._find(text, name) if name else None] if n is not None), None)
-        where = (node[0], name, node[1].lineno) if node else next(
+        # The outline's function is the one source when it names one (as in core.equation_tests.locate): a label is read
+        # only for an equation the outline names no function for.
+        where = (node[0], name, node[1].lineno) if node else None if name else next(
             ((rel, fn, line) for rel, found in labelled.items() for line, text, fn in found
              if fn and _oracle._labelled_in(eid, text)), None)
         rows.append({"id": eid, "formula": str((equations.get(eid) or {}).get("formula") or ""),
@@ -680,6 +803,7 @@ def _measure(check):
         assert value is not None, f"{{check['name']}}: simulate.oracle() does not return this check"
         return value
     case = dict(check["case"])
+    os.environ["FI_CELL_KIND"] = "check"  # as FI calls the function for a case of a check
     # With both functions the study runs only run_trial: a check that holds in every single trial runs on it, and so does any
     # other check unless run_cell really calls run_trial (its mean then comes from the study's own trials), as Frontier
     # Insight does.
@@ -871,9 +995,11 @@ def _imports(source: str, package: str) -> bool:
     return False
 
 
-def check(code_dir: Path, protocol: dict[str, Any] | None, package: str) -> list[str]:
+def check(code_dir: Path, protocol: dict[str, Any] | None, package: str,
+          names: dict[str, str] | None = None) -> list[str]:
     """What the research-tool layout is missing, one plain sentence each (empty when nothing is): the package and its
-    use by simulate.py, the unit tests, and the equation list with a function for every equation."""
+    use by simulate.py, the unit tests, and the equation list with a function for every equation. ``names``: the
+    function the code outline names for each equation (a function the outline names is not also asked to carry a label)."""
     code_dir = Path(code_dir)
     problems: list[str] = []
     pkg = code_dir / package
@@ -911,12 +1037,20 @@ def check(code_dir: Path, protocol: dict[str, Any] | None, package: str) -> list
             problems.append(f"code/{rel} makes random numbers when it is loaded (line {', '.join(map(str, made))}), so "
                             "the seed FI gives each trial does not reach them: take the generator or the seed as an "
                             "argument instead")
-    unmapped = [row["id"] for row in equation_map(protocol, sources) if not row["function"]]
+    unmapped = [row["id"] for row in equation_map(protocol, sources, names) if not row["function"]]
     if unmapped:
-        problems.append(f"equation{'s' if len(unmapped) > 1 else ''} {', '.join(unmapped)} of the model "
-                        f"{'are' if len(unmapped) > 1 else 'is'} not labelled on a function of code/{package}/ "
-                        f"(a comment such as `# {unmapped[0]}` on or above it), so {METHODS_NAME} cannot say where "
-                        f"{'they are' if len(unmapped) > 1 else 'it is'} computed")
+        planned = {str(k).strip().upper() for k, v in (names or {}).items() if str(v or "").strip()}
+        unlabelled = [u for u in unmapped if u.upper() not in planned]
+        absent = [u for u in unmapped if u.upper() in planned]
+        if unlabelled:
+            problems.append(f"equation{'s' if len(unlabelled) > 1 else ''} {', '.join(unlabelled)} of the model "
+                            f"{'are' if len(unlabelled) > 1 else 'is'} not labelled on a function of code/{package}/ "
+                            f"(a comment such as `# {unlabelled[0]}` on or above it), so {METHODS_NAME} cannot say where "
+                            f"{'they are' if len(unlabelled) > 1 else 'it is'} computed")
+        if absent:
+            problems.append(f"the function{'s' if len(absent) > 1 else ''} planned for equation{'s' if len(absent) > 1 else ''} "
+                            f"{', '.join(absent)} of the model {'are' if len(absent) > 1 else 'is'} not in code/{package}/, "
+                            f"so {METHODS_NAME} cannot say where {'they are' if len(absent) > 1 else 'it is'} computed")
     return problems
 
 
@@ -954,6 +1088,27 @@ def _is_main_guard(stmt: ast.AST) -> bool:
     sides = [stmt.test.left, *stmt.test.comparators]
     return (isinstance(stmt.test.ops[0], ast.Eq) and any(isinstance(x, ast.Name) and x.id == "__name__" for x in sides)
             and any(isinstance(x, ast.Constant) and x.value == "__main__" for x in sides))
+
+
+def insert_before_main_guard(source: str, text: str) -> str:
+    """``source`` with the top-level unit(s) ``text`` added where a script can still find them: just above the first
+    ``if __name__ == "__main__":`` block (and the comment lines directly above it), because the guarded call runs while the
+    module is being read and a ``def`` that comes after it does not exist yet. A file without such a block, or one that does
+    not parse, gets ``text`` at the end."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return source.rstrip("\n") + "\n\n\n" + text
+    index = next((i for i, n in enumerate(tree.body) if _is_main_guard(n)), None)
+    if index is None:
+        return source.rstrip("\n") + "\n\n\n" + text
+    lines = source.splitlines(keepends=True)
+    at = tree.body[index].lineno - 1
+    floor = (tree.body[index - 1].end_lineno or 0) if index else 0  # a '#' line inside the statement before is not a comment
+    while at > floor and lines[at - 1].lstrip().startswith("#"):
+        at -= 1
+    head = "".join(lines[:at]).rstrip("\n")
+    return (head + "\n\n\n" if head else "") + text.rstrip("\n") + "\n\n\n" + "".join(lines[at:])
 
 
 def _makes_rng(node: ast.AST) -> bool:

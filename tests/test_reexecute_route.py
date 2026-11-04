@@ -1,11 +1,14 @@
-"""A must-flag about something the run computed sends the experiment back to be
-written and run again, instead of rewriting the paper around a wrong value.
+"""A review's prose never sends the experiment back to be written and run again.
 
-The case this is built from is real: a quest's review asked to "ensure the
-solver is correctly integrated so the 'deterministic_final_size' is not
-reported as 0.0", the router answered "all about the text", only ``write``
-re-ran, and the paper shipped claiming convergence to a limit whose value was
-0.0 at every R0.
+It used to: a must-flag review whose free text merely contained the name of a result key, a figure file or
+``experiment.py`` went to ``implement``, so a caption or a source attribution that mentioned a seed, a check or a figure
+file ran the whole study again (eight real quests; the last lost three working figures). The name match was a guess
+from free text. Every check that measures a computed number as wrong runs before the review (the results check, the
+known-answer checks, the run manifest), so a review adds no measurement and goes to ``write``.
+
+The plumbing of the route (``re_execute``, its cap, the count the review node keeps, the prompt ``implement`` is
+given) stays, for a measured finding that may be returned by ``_review_sends_the_experiment_back`` later; those tests
+make the function return a name.
 """
 
 from __future__ import annotations
@@ -21,9 +24,9 @@ from core.config import (
     Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig,
     PausesConfig, ProviderConfig,
 )
+import core.engine as engine_mod
 from core.engine import (
-    _CODE_REEXECUTES, Engine, _format_review_for_writer, _rerun_evidence,
-    _review_sends_the_experiment_back,
+    _CODE_REEXECUTES, Engine, _format_review_for_writer, _review_sends_the_experiment_back,
 )
 
 TOPIC = "Extinction times in a stochastic SIR model"
@@ -112,60 +115,61 @@ def _state(review: dict[str, Any], **extra: Any) -> dict[str, Any]:
 
 # --- the route -----------------------------------------------------------------
 
-def test_a_flag_about_a_computed_value_runs_the_experiment_again(tmp_path: Path) -> None:
-    state = _state(XG3_REVIEW)
-    assert _rerun_evidence(XG3_REVIEW, state) == "deterministic_final_size"  # type: ignore[arg-type]
-    assert _engine(tmp_path)._route_after_review(state) == "re_execute"  # type: ignore[arg-type]
+@pytest.fixture
+def measured_fault(monkeypatch: pytest.MonkeyPatch) -> str:
+    """A finding that a check of FI's measured returns as the reason to run the experiment again."""
+    monkeypatch.setattr(engine_mod, "_review_sends_the_experiment_back", lambda review, state: "deterministic_final_size")
+    return "deterministic_final_size"
 
 
-def test_a_flag_about_the_experiment_file_runs_the_experiment_again(tmp_path: Path) -> None:
+def _names(kind: str) -> str:
+    return {"key": "deterministic_final_size", "figure": "stochastic_vs_deterministic_convergence.png",
+            "file": "experiment.py", "seed": "base_seed"}[kind]
+
+
+@pytest.mark.parametrize("kind", ["key", "figure", "file", "seed"])
+def test_a_review_that_only_names_a_result_key_a_figure_or_the_script_rewrites_the_paper(
+    tmp_path: Path, kind: str,
+) -> None:
+    """The name of a result key, a figure file or experiment.py in the review's prose is no measurement: the paper is
+    written again, the study is not run again (the first review of XG3_REVIEW named a key, and so on)."""
     review = {**CITATION_REVIEW,
-              "suggestions": ["Fix the bracketing in experiment.py so the root "
-                              "solver does not return the trivial root."]}
-    assert _rerun_evidence(review, _state(review)) == "experiment.py"  # type: ignore[arg-type]
-    assert _engine(tmp_path)._route_after_review(_state(review)) == "re_execute"  # type: ignore[arg-type]
+              "suggestions": [f"Say in the text what {_names(kind)} is, and state the seed the paper uses."]}
+    state = _state(review, result_json={**RESULTS, "base_seed": 7})
+    assert _review_sends_the_experiment_back(review, state) == ""  # type: ignore[arg-type]
+    assert _engine(tmp_path)._route_after_review(state) == "rewrite"  # type: ignore[arg-type]
 
 
-def test_a_flag_about_a_figures_underlying_data_runs_the_experiment_again(tmp_path: Path) -> None:
-    review = {**CAPTION_REVIEW,
-              "suggestions": ["Regenerate stochastic_vs_deterministic_convergence.png "
-                              "from all 300 trials instead of one seed."]}
-    named = _rerun_evidence(review, _state(review))  # type: ignore[arg-type]
-    assert named == "stochastic_vs_deterministic_convergence.png"
-    assert _engine(tmp_path)._route_after_review(_state(review)) == "re_execute"  # type: ignore[arg-type]
+def test_the_review_that_once_sent_the_experiment_back_over_a_key_now_rewrites(tmp_path: Path) -> None:
+    """XG3_REVIEW is the real input the old rule was built from; the fault it names (a quantity that is 0.0 at every
+    setting) is found by FI's own results check before the review (see the next test)."""
+    state = _state(XG3_REVIEW)
+    assert _review_sends_the_experiment_back(XG3_REVIEW, state) == ""  # type: ignore[arg-type]
+    assert _engine(tmp_path)._route_after_review(state) == "rewrite"  # type: ignore[arg-type]
+
+
+def test_the_measured_check_still_finds_a_quantity_that_is_the_same_at_every_setting() -> None:
+    """The known positive: the fault in XG3 (``deterministic_final_size`` 0.0 at every R0) is found by a measurement
+    FI makes of the run before the review, not by reading the review's words."""
+    from core import degenerate_results as dr
+
+    cells = [{"cell": {"r0": r, "n": n},
+              "metrics": {"outbreak_probability": [p], "deterministic_final_size": [0.0], "mean_final_size_major": [m]}}
+             for r, n, p, m in [(0.9, 100, 0.21, 0.16), (2.0, 100, 0.5, 0.7), (3.0, 5000, 0.66, 0.94), (1.5, 500, 0.4, 0.5)]]
+    found = dr.quantity_problems(cells, {"outbreak_probability", "deterministic_final_size", "mean_final_size_major"})
+    assert [(q.name, q.kind) for q in found] == [("deterministic_final_size", "constant")]
+
+
+def test_a_measured_finding_sends_the_experiment_back(tmp_path: Path, measured_fault: str) -> None:
+    state = _state(XG3_REVIEW)
+    assert _engine(tmp_path)._route_after_review(state) == "re_execute"  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("review", [CITATION_REVIEW, CAPTION_REVIEW])
 def test_a_citation_or_caption_flag_still_rewrites_the_paper(
     tmp_path: Path, review: dict[str, Any],
 ) -> None:
-    assert _rerun_evidence(review, _state(review)) == ""  # type: ignore[arg-type]
-    assert _engine(tmp_path)._route_after_review(_state(review)) == "rewrite"  # type: ignore[arg-type]
-
-
-def test_a_leaf_key_that_is_also_an_english_word_does_not_run_the_experiment_again(
-    tmp_path: Path,
-) -> None:
-    """``mean`` / ``n`` / ``ci_upper`` are results keys AND ordinary words; only a
-    compound name is evidence that the review meant the value."""
-    state = _state(CITATION_REVIEW, result_json={"mean": 0.5, "n": 300, "ci_upper": 0.9},
-                   figure_records={})
-    review = {**CITATION_REVIEW,
-              "suggestions": ["Say what the mean is over, and how many runs n is."]}
-    state["review"] = review
-    assert _rerun_evidence(review, state) == ""  # type: ignore[arg-type]
-    assert _engine(tmp_path)._route_after_review(state) == "rewrite"  # type: ignore[arg-type]
-
-
-def test_an_advisory_numeric_finding_never_forces_a_re_run(tmp_path: Path) -> None:
-    """Every numeric-oracle finding quotes a result path. They are advisory
-    because a pattern match over prose misreads a DOI, so the scan must not
-    read them — otherwise every flagged number would re-run the experiment."""
-    review = {**CITATION_REVIEW, "numeric_oracle_warnings": [
-        "near_miss: paper says 1 but `by_r0_3.0.by_n_5000."
-        "mean_final_size_major` = 0.9404 (off by 5.7%)",
-    ]}
-    assert _rerun_evidence(review, _state(review)) == ""  # type: ignore[arg-type]
+    assert _review_sends_the_experiment_back(review, _state(review)) == ""  # type: ignore[arg-type]
     assert _engine(tmp_path)._route_after_review(_state(review)) == "rewrite"  # type: ignore[arg-type]
 
 
@@ -174,7 +178,7 @@ def test_a_quest_with_no_experiment_is_never_sent_back_to_implement(tmp_path: Pa
     again, whatever the review names."""
     state = _state(XG3_REVIEW)
     del state["code"]
-    assert _rerun_evidence(XG3_REVIEW, state) == ""  # type: ignore[arg-type]
+    assert _review_sends_the_experiment_back(XG3_REVIEW, state) == ""  # type: ignore[arg-type]
     assert _engine(tmp_path)._route_after_review(state) == "rewrite"  # type: ignore[arg-type]
 
 
@@ -218,22 +222,13 @@ def test_a_flaw_in_the_design_no_check_confirms_is_stated_not_redesigned(tmp_pat
     assert _engine(tmp_path)._route_after_review(_state(review)) == "rewrite"  # type: ignore[arg-type]
 
 
-def test_a_draft_over_the_page_limit_does_not_spend_the_re_execute(tmp_path: Path) -> None:
-    """The shortening rewrites have their own route and their own counter."""
-    review = {**XG3_REVIEW,
-              "must_flag_hits": ["over_page_limit: 5 pages against a limit of 4"]}
-    assert _review_sends_the_experiment_back(review, _state(review)) == ""  # type: ignore[arg-type]
-    state = _state(review, page_limit_rewrites=1)
-    assert _engine(tmp_path)._route_after_review(state) == "rewrite"  # type: ignore[arg-type]
-
-
 # --- the cost cap ---------------------------------------------------------------
 
 @pytest.mark.parametrize(("done", "route"), [
     (0, "re_execute"), (1, "re_execute"), (2, "rewrite"), (3, "rewrite"),
 ])
 def test_one_re_execute_a_quest_then_the_flag_takes_the_text_route(
-    tmp_path: Path, done: int, route: str,
+    tmp_path: Path, done: int, route: str, measured_fault: str,
 ) -> None:
     """The review node counts the re-execute before the router reads it, so the
     first flagged review sees 1. A flag that survives the re-run falls back to
@@ -243,7 +238,7 @@ def test_one_re_execute_a_quest_then_the_flag_takes_the_text_route(
     assert _engine(tmp_path)._route_after_review(state) == route  # type: ignore[arg-type]
 
 
-def test_the_review_node_counts_the_re_execute(tmp_path: Path) -> None:
+def test_the_review_node_counts_the_re_execute(tmp_path: Path, measured_fault: str) -> None:
     eng = _engine(tmp_path)
     (tmp_path / "paper" / "paper.md").write_text("# T\n\nThe limit is 0.0.\n", encoding="utf-8")
 
@@ -279,7 +274,7 @@ def test_the_review_node_counts_nothing_when_the_flags_are_about_the_text(
 # --- a mixed set ----------------------------------------------------------------
 
 def test_a_mixed_set_runs_the_experiment_again_and_keeps_the_text_flag(
-    tmp_path: Path,
+    tmp_path: Path, measured_fault: str,
 ) -> None:
     """One code flag and one text flag: the experiment runs again (the text flag
     cannot be fixed around a wrong value either), and the re-run ends at
@@ -299,7 +294,7 @@ def test_a_mixed_set_runs_the_experiment_again_and_keeps_the_text_flag(
 
 # --- what implement is told -----------------------------------------------------
 
-def test_the_implement_prompt_carries_what_the_review_named(tmp_path: Path) -> None:
+def test_the_implement_prompt_carries_what_the_review_named(tmp_path: Path, measured_fault: str) -> None:
     """``implement``'s own prompt has the design and no review, so a re-execute
     would regenerate the same code without this."""
     eng = _engine(tmp_path)
@@ -333,7 +328,7 @@ def test_a_first_implement_is_told_nothing_extra(tmp_path: Path) -> None:
 # --- the graph ------------------------------------------------------------------
 
 def test_the_graph_runs_the_experiment_again_and_comes_back_to_review(
-    tmp_path: Path,
+    tmp_path: Path, measured_fault: str,
 ) -> None:
     eng = _engine(tmp_path)
     visits: list[str] = []

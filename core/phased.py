@@ -793,9 +793,12 @@ def _pick_confirm_base(explore_bases: list[int], stride: int, replicates: int) -
     return k * stride
 
 
-def seed_env(quest_root: Path, env: dict[str, str]) -> dict[str, str]:
+def seed_env(quest_root: Path, env: dict[str, str], *, record: bool = True) -> dict[str, str]:
     """The environment a run is given: in the confirm stage (or after it) the replicate's seed is moved to the confirm
-    seed base; in exploration the seed is kept and remembered, so the confirm base can be chosen apart from it."""
+    seed base; in exploration the seed is kept and remembered, so the confirm base can be chosen apart from it.
+    With ``record=False`` the environment is only worked out (a check that must run with the real run's environment
+    before the run starts); nothing is written, so the run is counted once, when it starts."""
+    saves = record
     record = load(quest_root)
     if record is None:
         return env
@@ -806,7 +809,7 @@ def seed_env(quest_root: Path, env: dict[str, str]) -> dict[str, str]:
         return env
     if record.get("stage") == EXPLORE:
         bases = list(record.get("explore_seed_bases") or [])
-        if seed not in bases or index == 0:
+        if saves and (seed not in bases or index == 0):
             record["explore_seed_bases"] = sorted({*bases, seed})
             if index == 0:
                 record["explore_runs"] = int(record.get("explore_runs") or 0) + 1
@@ -815,7 +818,7 @@ def seed_env(quest_root: Path, env: dict[str, str]) -> dict[str, str]:
     base = record.get("confirm_seed_base")
     if base is None:
         return env
-    if index == 0:
+    if index == 0 and saves:
         # Every run on the confirm data or seeds is counted: the evidence gate records a confirm result only after one
         # (``confirm_run_started``), so a gate run again on a resume cannot take exploration's result for it; and more
         # than one (a repair of the confirm run, a re-run after its result was seen) means the confirm data was looked

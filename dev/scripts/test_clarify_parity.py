@@ -13,7 +13,7 @@ the returned ``clarify_answers`` satisfies the documented contract:
   (generic / article / neurips / iclr / ieee_access / nature_mi / essay /
   report / policy_brief / whitepaper).
 
-Out of scope: ``copilot_cli`` (agentic, broken as a chat backend) and
+Out of scope: ``copilot_cli`` (slow; billed to a subscription quota) and
 ``github_copilot_cli`` (third-party proxy with ToS risk). VSCode
 extension covered by its own typescript round-trip test.
 
@@ -222,8 +222,8 @@ def render_report(results: list[dict[str, Any]], topic: str) -> str:
     lines.append(f"**Topic:** {_md_escape(topic)}")
     lines.append("")
     lines.append(
-        "Excluded by policy: `copilot_cli` (agentic, broken as a chat "
-        "backend) and `github_copilot_cli` (third-party proxy). VSCode "
+        "Excluded by policy: `copilot_cli` (slow; billed to a subscription "
+        "quota) and `github_copilot_cli` (third-party proxy). VSCode "
         "extension parity is covered by `tests/test_vscode_extension_typescript.py`."
     )
     lines.append("")

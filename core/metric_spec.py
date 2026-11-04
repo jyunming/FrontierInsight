@@ -40,10 +40,14 @@ call the statistics adequate while there is one.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import os
 import math
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from . import stats as _stats
@@ -146,7 +150,34 @@ KNOWN_VALUE_HELP = (
     "for its standard error) and/or `interval` ([the name of the lower end, the name of the upper end]), and `level` (the "
     "interval's level, for example 0.95), and, when the interval is the estimate plus and minus one multiple of its "
     "standard error in every setting, `degrees_of_freedom` (the whole number of the t distribution whose quantile is the "
-    "multiple, or \"normal\" for the normal quantile; leave it out when the multiple changes between settings)")
+    "multiple, or \"normal\" for the normal quantile; when the study compares values of a factor that give the interval "
+    "different multiples, give it per value, {<factor>: {<value>: <whole number or \"normal\">}}; leave it out when the "
+    "multiple changes between settings in any other way)")
+
+
+#: What the plan is told about declaring a known true value (spliced into the plan request by the engine, after the
+#: paragraph that describes the fields). Real plans left the field out, so the calibration and quantile checks never ran:
+#: the ask is therefore one per metric, with the reason each part is there.
+PLAN_RULE = (
+    "Go through EVERY metric in `metrics` and ask of each one: does the simulation know its true value because it "
+    "builds it in (a parameter the data are generated with and then recovered, a rate or probability the simulation "
+    "sets)? If so it gets a `known_value`, not only the headline metric; a metric without one is never checked against "
+    "the truth, and the paper has to say so. For an estimate that comes with an uncertainty, name both the standard "
+    "error and the interval's two ends, so that FI can count how often the interval covers the truth. When the "
+    "interval is the estimate plus and minus one multiplier times the standard error with the same multiplier in every "
+    "setting, ALWAYS give `degrees_of_freedom`: it is the multiplier you chose for the design, so choose it from the "
+    "error model and write it down (\"normal\" when the standard error rests on a known variance or on a large "
+    "sample; the whole number n-1, or whatever the estimator has, when the variance is estimated from n observations). "
+    "When the study compares values of a factor (a grid parameter, or a method compared in each run) that give the "
+    "interval different multipliers, give `degrees_of_freedom` per value instead, {<factor>: {<value>: <whole number "
+    "or \"normal\">}}, one entry for every value. "
+    "FI recovers the multiplier the code used from the trials' own intervals and sends the code back when it differs "
+    "from yours; a plan that leaves `degrees_of_freedom` out gets no such check. `true_value` is always a number the "
+    "study itself fixes (a constant, a threshold, a grid parameter, or a formula of them). Never put there a value you "
+    "worked out for a quantity that comes out of the simulation (a rate you derived, a limit you recalled): that is a "
+    "derivation, it belongs in `oracles` with a `derivation:` reference, and FI reports it as unverified without "
+    "gating the run on it."
+)
 
 
 def _known_value(ident: str, raw: Any) -> tuple[dict[str, Any] | None, str]:
@@ -183,14 +214,39 @@ def _known_value(ident: str, raw: Any) -> tuple[dict[str, Any] | None, str]:
     out["level"] = float(level)
     if raw.get("degrees_of_freedom") is not None:
         df = raw["degrees_of_freedom"]
-        if not (df == "normal" or isinstance(df, int) and not isinstance(df, bool) and df >= 1):
+        if isinstance(df, dict):  # one multiplier per value of a factor the study compares
+            table, why = _df_by_value(df)
+            if table is None:
+                return None, where + why
+            df = table
+        elif not _is_df(df):
             return None, (where + "`known_value.degrees_of_freedom` must be a whole number from 1 (the t distribution the "
-                          "interval's multiple comes from) or \"normal\"")
+                          "interval's multiple comes from) or \"normal\"; when the study compares several values of a factor "
+                          "that change the multiple, give it per value: {<factor>: {<value>: <whole number or \"normal\">}}")
         if "standard_error" not in out or "interval" not in out:
             return None, (where + "`known_value.degrees_of_freedom` says the interval is the estimate plus and minus a "
                           "multiple of the standard error, so it needs both `standard_error` and `interval`")
         out["degrees_of_freedom"] = df
     return out, ""
+
+
+def _is_df(df: Any) -> bool:
+    return df == "normal" or isinstance(df, int) and not isinstance(df, bool) and df >= 1
+
+
+def _df_by_value(raw: dict[Any, Any]) -> tuple[dict[str, dict[str, Any]] | None, str]:
+    """``{factor: {value: degrees of freedom}}`` of a ``degrees_of_freedom`` given per value of one factor the study compares
+    (values are keyed as text, as a record's setting values are matched), or ``(None, why)``."""
+    if len(raw) != 1:
+        return None, "`known_value.degrees_of_freedom` per value names exactly one factor: {<factor>: {<value>: <df>}}"
+    (axis, vals), = raw.items()
+    if not isinstance(axis, str) or not axis.strip() or not isinstance(vals, dict) or not vals:
+        return None, "`known_value.degrees_of_freedom` per value is {<factor>: {<value>: <whole number or \"normal\">}}"
+    bad = [str(v) for v, d in vals.items() if not _is_df(d)]
+    if bad:
+        return None, ("`known_value.degrees_of_freedom` of " + ", ".join(f"`{b}`" for b in bad[:3])
+                      + " must be a whole number from 1 or \"normal\"")
+    return {axis.strip(): {str(v): d for v, d in vals.items()}}, ""
 
 
 def fixed_numbers(protocol: dict[str, Any] | None, thresholds: dict[str, Any] | None = None) -> dict[str, float]:
@@ -230,6 +286,26 @@ def known_value_problems(protocol: dict[str, Any] | None) -> list[str]:
     axes = {str(k) for part in ("grid", "in_each_run") if isinstance(protocol.get(part), dict) for k in protocol[part]}
     out = []
     for spec in declared(protocol):
+        df = (spec.get("known_value") or {}).get("degrees_of_freedom")
+        if isinstance(df, dict):
+            (axis, table), = df.items()
+            part = next((protocol[k] for k in ("grid", "in_each_run")
+                         if isinstance(protocol.get(k), dict) and axis in protocol[k]), None)
+            if part is None:
+                out.append(f"The metric `{spec['id']}` gives its interval's `degrees_of_freedom` per value of `{axis}`, which "
+                           "is neither a grid parameter nor a value compared in each run of the protocol; name one that is.")
+            else:
+                listed = {str(v) for v in part[axis]} if isinstance(part[axis], (list, tuple)) else set()
+                gone = [v for v in table if listed and v not in listed]
+                unnamed = [v for v in sorted(listed) if v not in table]
+                if unnamed:
+                    out.append(f"The metric `{spec['id']}` gives `degrees_of_freedom` per value of `{axis}` but not for "
+                               + ", ".join(f"`{u}`" for u in unnamed[:3])
+                               + f", which {'is' if len(unnamed) == 1 else 'are'} among its values in the protocol; give one "
+                                 "for every value.")
+                if gone:
+                    out.append(f"The metric `{spec['id']}` gives `degrees_of_freedom` for " + ", ".join(f"`{g}`" for g in gone[:3])
+                               + f", which {'is' if len(gone) == 1 else 'are'} not among the values of `{axis}` in the protocol.")
         truth = (spec.get("known_value") or {}).get("true_value")
         if isinstance(truth, str) and truth not in axes and fixed_value(truth, fixed) is None:
             out.append(f"The metric `{spec['id']}` declares its true value as `{truth}`, which is neither a threshold, a "
@@ -238,16 +314,30 @@ def known_value_problems(protocol: dict[str, Any] | None) -> list[str]:
     return out
 
 
-def repair(metrics: Any) -> tuple[list[dict[str, Any]], list[str]]:
-    """``(the specs that pass, a sentence per one left out)``: :func:`normalize` entry by entry, for a draft. A live
-    plan declared one metric of a kind FI has no estimator for (`count`) beside valid ones, and the strict check threw
-    the whole list away with it."""
+def multiplier_unstated(protocol: dict[str, Any] | None) -> list[str]:
+    """The ids of the metrics that declare a standard error and an interval for a known true value but no
+    ``degrees_of_freedom``: FI counts their coverage, but it cannot hold the interval's multiplier (t or normal) to the
+    one the design chose, so a multiplier that does not match the error model passes. One id each, in the declared order."""
+    out = []
+    for spec in declared(protocol):
+        kv = spec.get("known_value") or {}
+        if kv and "standard_error" in kv and "interval" in kv and "degrees_of_freedom" not in kv:
+            out.append(str(spec["id"]))
+    return out
+
+
+def repair_parts(metrics: Any) -> tuple[list[dict[str, Any]], list[tuple[str, str, str]], list[str]]:
+    """``(the specs that pass, the metrics kept without a part, a sentence per metric left out)``: :func:`normalize`
+    entry by entry, for a draft. A live plan declared one metric of a kind FI has no estimator for (`count`) beside valid
+    ones, and the strict check threw the whole list away with it. A metric whose ``known_value`` or ``undefined_when``
+    could not be read stays without that part; it is listed as ``(id, the parts left off, why)``, not as left out."""
     if isinstance(metrics, dict):
         metrics = [metrics]
     if not isinstance(metrics, list):
-        return [], [normalize(metrics)[1] or "`protocol.metrics` is not a list"]
+        return [], [], [normalize(metrics)[1] or "`protocol.metrics` is not a list"]
     kept: list[dict[str, Any]] = []
-    notes: list[str] = []
+    partial: list[tuple[str, str, str]] = []
+    dropped: list[str] = []
     # A `given` names another metric, so the metrics it can name are checked first, whatever the order they came in.
     ordered = [m for m in metrics if not (isinstance(m, dict) and m.get("given"))] + [
         m for m in metrics if isinstance(m, dict) and m.get("given")
@@ -259,21 +349,57 @@ def repair(metrics: Any) -> tuple[list[dict[str, Any]], list[str]]:
             bare = {k: v for k, v in item.items() if k not in ("known_value", "undefined_when")}
             again, _ = normalize(kept + [bare])
             if again is not None:
-                notes.append(f"{why}; the metric is kept without it")
+                parts = " and ".join(f"`{k}`" for k in ("known_value", "undefined_when") if k in item)
+                partial.append((str(item.get("id", "")), parts, why or ""))
                 clean = again
-                why = None
         if clean is None:
-            notes.append(why or "a `protocol.metrics` entry could not be checked")
+            dropped.append(why or "a `protocol.metrics` entry could not be checked")
         else:
             kept = clean
-    return kept, notes
+    return kept, partial, dropped
 
 
-def declared(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """The valid metric specs of a protocol (an entry that is not a mapping with an id and a kind is left out)."""
+def repair(metrics: Any) -> tuple[list[dict[str, Any]], list[str]]:
+    """``(the specs that pass, a sentence per problem)``: :func:`repair_parts` with the notes of the metrics kept without a
+    part and of the metrics left out in one list. Say them apart with :func:`repair_parts`."""
+    kept, partial, dropped = repair_parts(metrics)
+    return kept, [f"{why}; the metric is kept without it" for _i, _p, why in partial] + dropped
+
+
+def shares_draws(protocol: dict[str, Any] | None, quest_root: Path | str | None = None) -> bool:
+    """Whether trial ``t`` of every setting runs on one seed (common random numbers): the plan says so with
+    ``protocol.shared_draws: true``. That alone decides it (the metric marked ``paired`` only says the analysis
+    compares the settings trial by trial, and that is read only when the draws are shared). A missing ``shared_draws``
+    is false, except for a quest begun before the field existed: its ``code/study.json`` was written with
+    ``paired: true`` and records the seeds it ran, which a resumed quest keeps (``quest_root`` names the quest)."""
+    if not isinstance(protocol, dict):
+        return False
+    if protocol.get("shared_draws") is not None:
+        return protocol["shared_draws"] is True
+    if quest_root is None:
+        return False
+    try:
+        study = json.loads((Path(quest_root) / "code" / "study.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(study, dict) and study.get("paired") is True
+
+
+def result_forms(ident: str) -> tuple[str, ...]:
+    """The names a run may return a metric under: the number itself, or the counts or values it is estimated from (the
+    forms :func:`_settings` reads)."""
+    return (ident, f"{ident}_count", f"{ident}_total", f"{ident}_values")
+
+
+def declared(protocol: dict[str, Any] | None, quest_root: Path | str | None = None) -> list[dict[str, Any]]:
+    """The valid metric specs of a protocol (an entry that is not a mapping with an id and a kind is left out). A spec is
+    ``paired`` (a contrast joins the settings' trials by number) only when the settings share their draws
+    (:func:`shares_draws`, the same answer the trial seeds follow); otherwise their trials are independent and are not
+    joined."""
     items = protocol.get("metrics") if isinstance(protocol, dict) else None
     clean, _why = normalize(items) if items is not None else ([], None)
-    return clean or []
+    shared = shares_draws(protocol, quest_root)
+    return [{**spec, "paired": bool(spec.get("paired")) and shared} for spec in clean or []]
 
 
 def _cluster_key(spec: dict[str, Any]) -> str | None:
@@ -328,7 +454,7 @@ def _settings(replicates: list[dict[str, Any]], spec: dict[str, Any]) -> dict[tu
     walked = [_walk(r) for r in replicates]
     parents: set[tuple[str, ...]] = set()
     for path in walked[0]:
-        if path[-1] in (ident, f"{ident}_count", f"{ident}_total", f"{ident}_values"):
+        if path[-1] in result_forms(ident):
             parents.add(path[:-1])
     out: dict[tuple[str, ...], dict[str, Any]] = {}
     for parent in sorted(parents):
@@ -455,19 +581,84 @@ def _contrast(a: dict[str, Any], b: dict[str, Any], spec: dict[str, Any]) -> tup
     return _stats.two_sample_mean_test(a["values"], b["values"]), None
 
 
+# The statistics of one set of results are worked out once. The analysis and the evidence record (written again after the
+# paper is delivered) read the same results with the same protocol; a large study takes tens of minutes to work out. The
+# latest answers (a few, newest first) are kept in the quest's ``.fi`` folder under a hash of everything they were computed
+# from: the results, the specs, and the source of the estimators themselves, so a resumed quest never gets an answer of
+# older code. A rerun changes the results, so the hash, so it is worked out again.
+STATISTICS_RECORD = ".fi/statistics_cache.json"
+_KEPT_ANSWERS = 4
+_source_hash_value: str | None = None
+
+
+def _source_hash() -> str:
+    """A hash of the source of this module and of the estimators it calls (computed once per process)."""
+    global _source_hash_value
+    if _source_hash_value is None:
+        digest = hashlib.sha256()
+        for path in (Path(__file__), Path(_stats.__file__)):
+            try:
+                digest.update(path.read_bytes())
+            except OSError:
+                digest.update(str(time.time()).encode())  # unreadable source: never match an older answer
+        _source_hash_value = digest.hexdigest()
+    return _source_hash_value
+
+
+def _inputs_key(replicates: list[dict[str, Any]], specs: list[dict[str, Any]], declared_contrasts: list[Any]) -> str | None:
+    try:
+        text = json.dumps([_source_hash(), replicates, specs, declared_contrasts], sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return None
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _kept_entries(quest_root: Path | str) -> list[dict[str, Any]]:
+    try:
+        record = json.loads((Path(quest_root) / STATISTICS_RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    entries = record.get("entries") if isinstance(record, dict) else None
+    return [e for e in entries if isinstance(e, dict) and isinstance(e.get("statistics"), dict)] if isinstance(entries, list) else []
+
+
+def _kept_statistics(quest_root: Path | str | None, key: str | None) -> dict[str, Any] | None:
+    if quest_root is None or key is None:
+        return None
+    return next((e["statistics"] for e in _kept_entries(quest_root) if e.get("key") == key), None)
+
+
+def _keep_statistics(quest_root: Path | str | None, key: str | None, computed: dict[str, Any]) -> None:
+    if quest_root is None or key is None:
+        return
+    path = Path(quest_root) / STATISTICS_RECORD
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    entries = [{"key": key, "statistics": computed}] + [e for e in _kept_entries(quest_root) if e.get("key") != key]
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps({"entries": entries[:_KEPT_ANSWERS]}), encoding="utf-8")
+        os.replace(tmp, path)
+    except (OSError, TypeError, ValueError):
+        try:
+            tmp.unlink()
+        except OSError:
+            pass  # a cache that cannot be written only costs the time again
+
+
 _PROGRESS_EVERY_SECONDS = 30.0
 _PROGRESS_EVERY_CONTRASTS = 50
 
 
 def statistics(
     replicates: list[dict[str, Any]], protocol: dict[str, Any] | None, *, progress: Callable[[str], None] | None = None,
+    quest_root: Path | str | None = None,
 ) -> dict[str, Any]:
     """What the declared metrics estimate, and every pairwise contrast between the settings of a factor, with the p-values of
     each family adjusted together. ``{}`` when the protocol declares no metric.
 
     ``progress`` receives one plain line ("[evidence] statistics: k of n contrasts") at most every ~30 seconds or 50
     contrasts, so a long run is not silent; without it the line goes to the ``frontier_insight.metric_spec`` logger."""
-    specs = declared(protocol)
+    specs = declared(protocol, quest_root)
     if not specs or not replicates or not all(isinstance(r, dict) for r in replicates):
         return {}
     say = progress or logging.getLogger("frontier_insight.metric_spec").info
@@ -475,6 +666,11 @@ def statistics(
     contrasts: list[dict[str, Any]] = []
     unsupported: list[dict[str, str]] = []
     declared_contrasts = protocol.get("contrasts") if isinstance(protocol, dict) and isinstance(protocol.get("contrasts"), list) else []
+    key = _inputs_key(replicates, specs, declared_contrasts) if quest_root is not None else None
+    kept = _kept_statistics(quest_root, key)
+    if kept is not None:
+        say("[evidence] statistics: the results are unchanged since they were last worked out; that answer is used")
+        return kept
     any_prespecified = False
     all_settings = [_settings(replicates, spec) for spec in specs]
     total_contrasts = 0
@@ -573,7 +769,7 @@ def statistics(
             contrasts[i]["p_holm"] = p_adj
             contrasts[i]["significant_after_holm"] = bool(p_adj < 0.05)
             contrasts[i]["comparisons_in_family"] = len(members)
-    return {
+    computed = {
         "specs": [{k: v for k, v in s.items() if k in ("id", "estimand", "kind", "unit", "cluster", "paired", "family")} for s in specs],
         "estimates": estimates,
         "contrasts": contrasts,
@@ -581,6 +777,8 @@ def statistics(
         "undeclared": undeclared(replicates, specs),
         "contrasts_prespecified": any_prespecified,
     }
+    _keep_statistics(quest_root, key, computed)
+    return computed
 
 
 def coverage_gaps(protocol: dict[str, Any] | None, replicates: list[dict[str, Any]], computed: dict[str, Any] | None) -> list[str]:
@@ -617,11 +815,11 @@ def coverage_gaps(protocol: dict[str, Any] | None, replicates: list[dict[str, An
     return gaps
 
 
-def missing_pair_ids(protocol: dict[str, Any] | None, result_json: Any) -> list[str]:
+def missing_pair_ids(protocol: dict[str, Any] | None, result_json: Any, quest_root: Path | str | None = None) -> list[str]:
     """The paired metrics whose per-trial values the results print with no ``<id>_pair_id`` beside them: one sentence
     each. Without an id a paired comparison can only join trials by position (``rigor_profile: research`` stops for
     this; otherwise it is a gap in the evidence)."""
-    paired = [spec["id"] for spec in declared(protocol) if spec.get("paired")]
+    paired = [spec["id"] for spec in declared(protocol, quest_root) if spec.get("paired")]
     lacking: set[str] = set()
 
     def walk(node: Any) -> None:

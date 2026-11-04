@@ -575,3 +575,87 @@ def test_two_million_values_are_walked_once_and_quickly() -> None:
         check_design(result, design, seen=["gone"], walk=walk)
     assert time.monotonic() - started < max(first, 1.0)  # a repeat reads the kept walk instead of walking again
     assert first < 30
+
+
+# ---- a result the plan declares as physical_bound may sit on its range edge --------------------------------------------
+
+def _edge_state(role: str | None) -> dict:
+    metric = {"id": "share", **({"role": role} if role else {})}
+    result = {"by_setting": {f"s{i}": {"share": 0.0 if i < 4 else 0.1 * i} for i in range(1, 7)}}
+    design = {"result_assertions": [{"path": "share", "min": 0, "max": 1}], "protocol": {"metrics": [metric]}}
+    return {"design": design, "result_json": result, "code": ""}
+
+
+def test_a_physical_bound_result_on_its_edge_in_several_settings_is_kept() -> None:
+    from core.engine import _assertion_violations, _physical_bound_paths
+
+    state = _edge_state("physical_bound")
+    assert _physical_bound_paths(state) == {"share"}
+    assert _assertion_violations(state) == []
+
+
+def test_the_same_edge_without_the_role_is_still_sent_back_and_a_value_outside_the_range_never_passes() -> None:
+    from core.engine import _assertion_violations, _physical_bound_paths
+
+    state = _edge_state(None)
+    assert _physical_bound_paths(state) == set()
+    assert [v.kind for v in _assertion_violations(state)] == ["at_bound"]
+    outside = _edge_state("physical_bound")
+    outside["result_json"]["by_setting"]["s6"]["share"] = 1.5
+    assert [v.kind for v in _assertion_violations(outside)] == ["out_of_range"]
+
+
+def test_a_physical_bound_result_on_its_edge_in_every_setting_is_said_not_stopped() -> None:
+    from core.engine import _assertion_violations, _assertion_warnings
+
+    state = _edge_state("physical_bound")
+    state["result_json"] = {"by_setting": {f"s{i}": {"share": 0.0} for i in range(1, 7)}}
+    assert _assertion_violations(state) == []
+    said = _assertion_warnings(state)
+    assert [v.kind for v in said] == ["edge_everywhere"]
+    assert said[0].describe() == "share is on its bound in every setting; the result may carry no information"
+    assert _assertion_warnings(_edge_state("physical_bound")) == []  # on the edge in some settings only: silent
+
+
+def test_the_prose_of_the_failure_policy_is_read_only_when_no_result_declares_a_role() -> None:
+    from core.engine import _zero_expected_paths
+
+    design = {"result_assertions": [{"path": "failed_run_count", "min": 0, "max": 100}],
+              "protocol": {"failure_policy": "A trial that fails is counted in `failed_run_count`.",
+                           "metrics": [{"id": "failed_run_count"}]}}
+    state = {"design": design, "manifest_failed_trials": 0}
+    assert _zero_expected_paths(state) == {"failed_run_count"}
+    with_role = {"design": {**design, "protocol": {**design["protocol"], "metrics": [
+        {"id": "failed_run_count", "role": "result"}]}}, "manifest_failed_trials": 0}
+    assert _zero_expected_paths(with_role) == set()
+
+
+def test_a_physical_bound_result_exempts_the_assertion_paths_that_end_in_its_whole_name() -> None:
+    from core.engine import _physical_bound_paths
+
+    design = {"result_assertions": [{"path": "share", "min": 0, "max": 1}, {"path": "other_group.share", "min": 0, "max": 1},
+                                    {"path": "vote_share", "min": 0, "max": 1}],
+              "protocol": {"metrics": [{"id": "share", "role": "physical_bound"}]}}
+    assert _physical_bound_paths({"design": design}) == {"share", "other_group.share"}
+
+
+def test_a_dotted_assertion_path_that_ends_in_the_physical_bound_result_is_exempt() -> None:
+    from core.engine import _assertion_violations, _physical_bound_paths
+
+    design = {"result_assertions": [{"path": "by_setting.share", "min": 0, "max": 1},
+                                    {"path": "vote_share", "min": 0, "max": 1}],
+              "protocol": {"metrics": [{"id": "share", "role": "physical_bound"}]}}
+    assert _physical_bound_paths({"design": design}) == {"by_setting.share"}
+    state = _edge_state("physical_bound")
+    state["design"]["result_assertions"] = [{"path": "by_setting.share", "min": 0, "max": 1}]
+    state["result_json"] = {"by_setting": {"share": 0.0, "s2": {"share": 0.0}, "s3": {"share": 0.0}, "s4": {"share": 0.5}}}
+    assert _assertion_violations(state) == []
+
+
+def test_a_role_on_one_result_keeps_the_failure_policy_exemption_of_the_others() -> None:
+    from core.engine import _zero_expected_paths
+
+    design = {"result_assertions": [{"path": "failed_run_count", "min": 0, "max": 100}, {"path": "wall", "min": 0, "max": 9e9}],
+              "protocol": {"failure_policy": "A trial that fails is counted in `failed_run_count` and in `wall`.",
+                           "metrics": [{"id": "wall", "role": "timing"}, {"id": "failed_run_count"}]}}
+    assert _zero_expected_paths({"design": design, "manifest_failed_trials": 0}) == {"failed_run_count"}

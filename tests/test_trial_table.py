@@ -126,3 +126,38 @@ def test_without_a_left_out_record_the_same_quantity_is_tabulated(tmp_path: Path
     root = _left_out_quest(tmp_path)
     (root / "needs" / "RESULT_CHECK.json").unlink()
     assert {r["metric"] for r in trial_table.rows(root)} == {"est", "gone"}
+
+
+def _one_trial_per_setting(root: Path) -> Path:
+    """A deterministic study: 6 settings, one trial each; ``score`` varies across settings, ``unit`` is 3.5 everywhere."""
+    cells = [{"cell": {"size": k}, "key": f"size={k}", "metrics": {"score": {"values": [2 + k * 0.25]}, "unit": {"values": [3.5]}}}
+             for k in (1, 2, 3, 4, 5, 6)]
+    (root / "raw").mkdir(parents=True, exist_ok=True)
+    (root / "raw" / "trials.json").write_text(json.dumps({"cells": cells}), encoding="utf-8")
+    return root
+
+
+def test_one_trial_per_setting_is_tabulated_without_an_interval(tmp_path: Path) -> None:
+    table = trial_table.rows(_one_trial_per_setting(tmp_path))
+    assert {r["metric"] for r in table} == {"score"}  # 'unit' is the same number in every trial of every setting
+    assert [r["n"] for r in table] == [1] * 6 and [r["mean"] for r in table] == [2 + 0.25 * k for k in (1, 2, 3, 4, 5, 6)]
+    assert all(r["ci_lower"] is None and r["ci_upper"] is None for r in table)  # no interval is invented
+
+
+def test_a_value_constant_in_every_setting_is_left_out_of_the_per_setting_tables(tmp_path: Path) -> None:
+    from core import results_by_setting
+
+    root = _one_trial_per_setting(tmp_path)
+    _rows, built = results_by_setting.from_quest(root, None)
+    assert built is not None and [t.value for t in built.tables] == ["score"]
+    text = results_by_setting.markdown(built.tables[0])
+    assert "| 3 | 1 | 2.75 |  |" in text  # the value with no interval, and no SD of one trial
+    assert "no table of their own" not in "\n".join(built.notes)
+    assert results_by_setting.paper_block(built) != ""
+
+
+def test_several_trials_per_setting_that_agree_inside_each_setting_are_still_left_out(tmp_path: Path) -> None:
+    cells = [{"cell": {"size": k}, "key": f"size={k}", "metrics": {"echo": {"values": [float(k)] * 3}}} for k in (1, 2, 3)]
+    (tmp_path / "raw").mkdir()
+    (tmp_path / "raw" / "trials.json").write_text(json.dumps({"cells": cells}), encoding="utf-8")
+    assert trial_table.rows(tmp_path) == []

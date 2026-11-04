@@ -38,7 +38,8 @@ LITERATURE = [{"content": SOURCE_TEXT, "metadata": {"title": "Heat sinks", "doi"
 def _draft(**protocol: Any) -> dict[str, Any]:
     draft = copy.deepcopy(HEAT_SINK)
     draft["study_type"] = "measure"
-    draft["protocol"] = {"oracles": copy.deepcopy(HEAT_SINK["protocol"]["oracles"]), "grid": GOOD_GRID, **protocol}
+    draft["protocol"] = {"oracles": copy.deepcopy(HEAT_SINK["protocol"]["oracles"]), "grid": GOOD_GRID,
+                         "topic_map": [{"item": "F1", "by": "setting:fin_spacing"}], **protocol}
     return draft
 
 
@@ -127,7 +128,7 @@ async def test_the_plan_is_shown_what_the_topic_asks_for_and_the_reading_is_made
     assert kinds.index("reading") < kinds.index("plan"), "the topic is read before the plan is asked for"
     plan_prompt = dict(model.prompts)["plan"]
     assert "What the topic asks for (each item must appear as a setting, a metric or an equation" in plan_prompt
-    assert "- vary or compare fin spacing: 2 to 4" in plan_prompt and "- report base temperature" in plan_prompt
+    assert "- F1: vary or compare fin spacing: 2 to 4" in plan_prompt and "- Q1: report base temperature" in plan_prompt
     assert plan_prompt.index("What the topic asks for (") < plan_prompt.index("Also write the plan")
     assert kinds.count("reading") == 1, "read once; the cover step reuses the kept reading"
 
@@ -150,7 +151,7 @@ async def test_the_design_prompt_has_the_list_only_when_the_quest_runs_code(tmp_
     eng = _engine(tmp_path, [])
     Model(eng, [], _draft())
     await eng._read_topic_before_the_prompt(_state())
-    assert "- vary or compare fin spacing" in eng._design_prompt(_state())
+    assert "- F1: vary or compare fin spacing" in eng._design_prompt(_state())
     assert "What the topic asks for (" not in eng._design_prompt(_state(no_simulation_resolved=True))
 
 
@@ -322,6 +323,33 @@ def _texts(eng: Any, **protocol: Any) -> tuple[str, dict[str, Any]]:
     return before, block
 
 
+def _checks_and_criteria(n: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    oracles = [{"name": f"limit_{i}", "kind": "special_case", "check": f"base temperature at a fin spacing of {i} mm",
+                "expected": 0.0, "tolerance": 1e-6, "case": {"fin_spacing": float(i)}, "measure": "error",
+                "reference": "derivation: one-dimensional conduction gives a linear profile"} for i in range(1, n + 1)]
+    criteria = [{"name": f"agreement_{i}", "oracle": f"limit_{i}", "direction": "lower", "target": 1e-6, "tolerance": 1e-7}
+                for i in range(1, n + 1)]
+    return oracles, criteria
+
+
+@pytest.mark.asyncio
+async def test_a_criteria_list_over_the_limit_keeps_the_first_five_in_the_models_order(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    Model(eng, [], _draft(metrics=[METRIC]))
+    await eng._node_plan(_state(literature=LITERATURE))
+    oracles, criteria = _checks_and_criteria(9)
+    before, after = _texts(eng, oracles=oracles, criteria=criteria)
+    kept = eng._keep_only_the_parts(before, after, ["oracles", "criteria"])
+    assert kept is not None, "nine criteria were refused whole (the plan then had none of the model's own)"
+    got = [c["name"] for c in plan.raw_design_block(kept)["protocol"]["criteria"]]
+    assert got == [f"agreement_{i}" for i in range(1, 6)]
+    # a known positive: five or fewer are taken exactly as written
+    oracles, criteria = _checks_and_criteria(4)
+    before, after = _texts(eng, oracles=oracles, criteria=criteria)
+    kept = eng._keep_only_the_parts(before, after, ["oracles", "criteria"])
+    assert [c["name"] for c in plan.raw_design_block(kept)["protocol"]["criteria"]] == [f"agreement_{i}" for i in range(1, 5)]
+
+
 @pytest.mark.asyncio
 async def test_an_answer_whose_ledger_parts_are_malformed_is_not_taken_and_the_exact_reason_goes_back(tmp_path: Path) -> None:
     eng = _engine(tmp_path, [])
@@ -377,6 +405,17 @@ async def test_ledger_parts_are_asked_afresh_for_a_new_plan_or_round_and_not_for
     assert len(model.asked) == 2, "a plan with another problem (a revised plan, --from plan) is asked afresh"
     await eng._ask_plan_for_the_parts(_state(iteration=1), design, sha)
     assert len(model.asked) == 3, "another design round is asked afresh"
+
+
+def test_a_ledger_record_whose_iteration_is_not_a_number_is_unreadable_and_does_not_crash(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    eng.fi_dir.mkdir(parents=True, exist_ok=True)
+    record = {"iteration": "x", "model": eng._plan_model_name(), "seen": {"base_temperature": "abc"}}
+    (eng.fi_dir / engine_mod._LEDGER_ASKED).write_text(json.dumps(record), encoding="utf-8")
+    assert eng._ledger_seen(0) == {}, "a record that cannot be read is treated as no record"
+    record["iteration"] = 0
+    (eng.fi_dir / engine_mod._LEDGER_ASKED).write_text(json.dumps(record), encoding="utf-8")
+    assert eng._ledger_seen(0) == {"base_temperature": "abc"}, "a valid record is still read as before"
 
 
 def test_the_plan_step_rerun_clears_the_ledger_and_the_parts_records() -> None:
@@ -453,7 +492,7 @@ async def test_scripted_replies_with_the_topic_read_first_and_a_resume_that_read
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
     prompts = [c.args[0][-1]["content"] for c in eng._client.chat.await_args_list]
     assert prompts[0].lstrip().startswith("# What a Research Topic Asks For")
-    assert "What the topic asks for (" in prompts[1] and "- vary or compare fin spacing" in prompts[1]
+    assert "What the topic asks for (" in prompts[1] and "- F1: vary or compare fin spacing" in prompts[1]
     assert (eng.fi_dir / "topic_requirements.json").is_file()
     calls = eng._client.chat.await_count
     await eng._node_plan({"topic": TOPIC, "iteration": 0})  # a resume: plan.md is read, nothing is asked again
@@ -465,7 +504,7 @@ async def test_design_critique_style_replies_with_the_topic_read_first(tmp_path:
     from tests.test_design_self_critique import _AMENDED_DESIGN, _DRAFT_DESIGN, _mk_cfg
     eng = engine_mod.Engine(_mk_cfg(tmp_path))
     replies = [json.dumps(READING), json.dumps(_DRAFT_DESIGN),
-               json.dumps({"objections_addressed": [{"check": "other", "objection": "o", "fix": "f"}],
+               json.dumps({"objections_addressed": [{"check": "other", "where": "hypothesis and method", "objection": "o", "fix": "f"}],
                            "amended_design": _AMENDED_DESIGN})]
     eng._client = type("Stub", (), {"chat": AsyncMock(side_effect=replies)})()
     patch = await eng._node_design({"topic": "OPC", "iteration": 0})
@@ -474,3 +513,67 @@ async def test_design_critique_style_replies_with_the_topic_read_first(tmp_path:
     eng._client = type("Stub", (), {"chat": AsyncMock(side_effect=[json.dumps(_DRAFT_DESIGN), json.dumps({})])})()
     await eng._node_design({"topic": "OPC", "iteration": 1})  # the reading is kept: the next design round asks no reading
     assert not any("A Research Topic Asks For" in c.args[0][-1]["content"] for c in eng._client.chat.await_args_list)
+
+
+# -- a rewrite of a check after the test run reads only names that exist ---------------------------------------------------
+
+
+def _check(name: str, measure: str) -> dict[str, Any]:
+    return {"name": name, "kind": "special_case", "check": "base temperature at the widest fin spacing", "expected": 0.0,
+            "tolerance": 1e-6, "case": {"fin_spacing": 4.0}, "measure": measure,
+            "reference": "derivation: one-dimensional conduction gives a linear profile"}
+
+
+def test_unknown_measure_names_holds_a_changed_measure_to_declared_and_returned_names() -> None:
+    from core import contract
+
+    old = {"metrics": [METRIC], "grid": GOOD_GRID, "oracles": [_check("gap", "abs(base_temperature - plate_alt)")]}
+    returned = ["base_temperature", "plate_alt"]
+    same = {**old}
+    assert contract.unknown_measure_names(old, same, returned) == {}, "an unchanged measure is not judged again"
+    invented = {**old, "oracles": [_check("gap", "plate_gap")]}
+    assert contract.unknown_measure_names(old, invented, returned) == {"gap": ["plate_gap"]}
+    # known positives: a formula of returned names, a declared result, and a setting are all taken
+    ok = {**old, "oracles": [_check("gap", "abs(base_temperature - plate_alt) / fin_spacing")]}
+    assert contract.unknown_measure_names(old, ok, returned) == {}
+    # nothing returned on the test run: nothing to hold a name to
+    assert contract.unknown_measure_names(old, invented, []) == {}
+
+
+@pytest.mark.asyncio
+async def test_a_rewrite_after_the_test_run_that_invents_a_measure_name_is_refused_with_the_names_the_run_returned(
+        tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    Model(eng, [], _draft(metrics=[METRIC], form="contract", oracles=[_check("gap", "abs(base_temperature - plate_alt)")]))
+    await eng._node_plan(_state(literature=LITERATURE))
+    before = _plan_text(eng)
+    _, invented = _texts(eng, oracles=[_check("gap", "plate_gap")])
+    # outside a test-run rewrite the part is read as it always was
+    assert eng._keep_only_the_parts(before, invented, ["oracles"]) is not None
+    eng._test_run_returned = {"base_temperature", "plate_alt"}
+    with pytest.raises(ValueError, match="plate_gap.*did not return.*base_temperature"):
+        eng._keep_only_the_parts(before, invented, ["oracles"])
+    # a known positive: a measure written from the returned names is taken
+    _, honest = _texts(eng, oracles=[_check("gap", "abs(base_temperature - plate_alt) / 2")])
+    kept = eng._keep_only_the_parts(before, honest, ["oracles"])
+    assert kept is not None and "abs(base_temperature - plate_alt) / 2" in kept
+
+
+def test_the_paper_leaves_out_what_the_reader_called_covered_and_keeps_what_it_called_missing(tmp_path: Path) -> None:
+    """A cup-cooling study: the reader called the spread over repeats covered, then missing; it called the heat loss missing every
+    time. The limitations say the plan lacks the heat loss and say nothing of the spread."""
+    eng = _engine(tmp_path, [])
+    req = tr.parse({"quantities": [{"name": "spread over repeats", "main": True}, {"name": "heat lost", "main": True}]})
+    eng.fi_dir.mkdir(parents=True, exist_ok=True)
+    (eng.fi_dir / "topic_requirements.json").write_text(json.dumps(req), encoding="utf-8")
+    eng._topic_covered_write(judged={"a": {"Q1": "covered", "Q2": "missing"}, "b": {"Q1": "missing", "Q2": "missing"}})
+    design = {"protocol": {"grid": {"lid": [1, 2]}, "metrics": [{"id": "t60", "estimand": "time to sixty degrees"}]}}
+    head = "`protocol.simplifications` is incomplete: "
+    asked = [head + "the topic asks for spread over repeats, which the plan neither includes nor names in `simplifications`; "
+             "the topic asks for heat lost, which the plan neither includes nor names in `simplifications`"]
+    eng._note_the_ledger_for_the_writer(design, asked)
+    kept = eng._topic_covered_read()["ledger_left"]
+    assert len(kept) == 1 and "heat lost" in kept[0] and "spread over repeats" not in kept[0]
+    gaps = [{"kind": "quantity", "id": "Q1", "name": "spread over repeats", "judged": True},
+            {"kind": "quantity", "id": "Q2", "name": "heat lost", "judged": True}]
+    assert [g["name"] for g in eng._gaps_to_say(gaps)] == ["heat lost"]

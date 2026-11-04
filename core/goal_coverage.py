@@ -16,7 +16,7 @@ topic is prose, a number in it may not be a parameter, and sending the experimen
 * :func:`asked_figure_count` reads how many figures a topic asks for, and whether that is exact.
 * :func:`notes` compares them.
 
-A number counts as present when the script, or the keys of its results, holds that value. A number the topic gives
+A number counts as present when the script, or the keys and values of its results, holds that value. A number the topic gives
 with a unit or a percent sign (193 nm, 5%) also counts at any power of ten, since a script works in metres or in
 fractions: 193 nm is 1.93e-7, and 5% is 0.05.
 """
@@ -175,7 +175,8 @@ def code_numbers(source: str) -> set[float]:
 
 
 def result_key_numbers(result: Any) -> set[float]:
-    """The numbers in the keys of a results dictionary, at any depth (``R0_1.5_N_1000``)."""
+    """The numbers a results dictionary holds, at any depth: the numbers in its keys (``R0_1.5_N_1000``) and the numeric
+    values it stores (a run that records ``"m": 2000`` used m = 2000)."""
     values: set[float] = set()
 
     def walk(node: Any) -> None:
@@ -187,6 +188,8 @@ def result_key_numbers(result: Any) -> set[float]:
         elif isinstance(node, list):
             for child in node[:200]:
                 walk(child)
+        elif isinstance(node, (int, float)) and not isinstance(node, bool) and math.isfinite(node):
+            values.add(float(node))
 
     walk(result)
     return values
@@ -220,7 +223,7 @@ def asked_figure_count(topic: str) -> tuple[int, str] | None:
 def notes(topic: str, scripts: list[str], result: Any = None, figure_count: int | None = None) -> list[str]:
     """What the experiment does differently from what the topic asks, one line each; empty when it follows the topic
     or the topic asks for nothing checkable. ``scripts`` are the experiment's Python sources: a number the topic
-    states that appears in none of them, nor in the keys of ``result``, is reported, and so is a figure count that
+    states that appears in none of them, nor in the keys or values of ``result``, is reported, and so is a figure count that
     differs from what the topic asks for."""
     out: list[str] = []
     if scripts:
@@ -231,8 +234,8 @@ def notes(topic: str, scripts: list[str], result: Any = None, figure_count: int 
         missing = [a for a in asked_numbers(topic) if not _present(a, present)]
         for a in missing[:8]:
             out.append(
-                f"The topic gives {a.text} (\"...{a.where}...\"), and neither the experiment's code nor the keys of "
-                "its results contain that number."
+                f"The topic gives {a.text} (\"...{a.where}...\"), and neither the experiment's code nor its results "
+                "contain that number."
             )
         if len(missing) > 8:
             out.append(f"{len(missing) - 8} more numbers of the topic are not in the experiment either.")
@@ -244,4 +247,36 @@ def notes(topic: str, scripts: list[str], result: Any = None, figure_count: int 
         ):
             what = {"exact": "", "at least": "at least ", "at most": "at most "}[kind]
             out.append(f"The topic asks for {what}{n} figure{'s' if n != 1 else ''}; the run drew {figure_count}.")
+    return out
+
+
+def unplaced_answers(req: dict[str, Any] | None, protocol: dict[str, Any] | None, held: set[str],
+                     placed: set[str]) -> list[dict[str, str]]:
+    """The quantities the topic asks for, that FI holds a value for and the paper never places.
+
+    All from FI's own records, no wording compared: ``req`` is what the topic asks for (``.fi/topic_requirements.json``),
+    the plan's own ``protocol.topic_map`` names the metric that answers each quantity, ``held`` is the metrics FI has a
+    value for (the trials' and the analysis's recorded ones, by name), and ``placed`` is the metrics the paper places with a
+    key FI filled (:func:`core.paper_values.placed_metrics`). Only a quantity the topic's reading marks as main is held to
+    this. One ``{"name", "metric", "sentence"}`` per quantity, in the topic's order."""
+    from . import topic_requirements as _topic_req
+
+    if not isinstance(req, dict) or not isinstance(protocol, dict):
+        return []
+    plan = _topic_req.view({}, protocol)
+    labels = {str(m.get("id")): str(m.get("label") or "") for m in protocol.get("metrics") or [] if isinstance(m, dict)}
+    out: list[dict[str, str]] = []
+    for item in req.get("quantities") or []:
+        if not isinstance(item, dict) or item.get("main") is not True:
+            continue
+        mapped = _topic_req.mapping_of(req, plan, "quantities", item)
+        if mapped is None or mapped[0] not in ("ok", "judge"):
+            continue
+        metric = mapped[1]
+        if metric not in held or metric in placed:
+            continue
+        name = str(item.get("name") or metric)
+        what = f" ({labels[metric]})" if labels.get(metric) else ""
+        out.append({"name": name, "metric": metric, "sentence": (
+            f"The topic asks for {name}; FI has a value for it (`{metric}`{what}) and the paper never gives it.")})
     return out

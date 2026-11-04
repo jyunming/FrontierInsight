@@ -25,7 +25,6 @@ from core.engine import (
     Engine,
     QuestArtifacts,
     _further_reading_block,
-    _page_limit_hit,
     _trim_further_reading,
     _web_labels_cited,
     further_reading_listed,
@@ -34,9 +33,6 @@ from generation.paper import PaperGenerator
 from tests.test_page_limit import _engine, _quiet_log, _review
 
 ENTRY = re.compile(r"^- \[(W\d+)\] ", re.MULTILINE)
-# What the review forces for a 5-page draft over the limit of 4 whose last page
-# is 90% empty (the stand-in render below): about 100 words to cut.
-OVER = _page_limit_hit(5, 4, 100)
 
 
 def _entries(n: int) -> str:
@@ -150,7 +146,7 @@ def test_a_list_that_alone_overflows_is_trimmed_and_nothing_is_sent_back(
     assert patch["review"]["must_flag_hits"] == []
     assert "page_limit_rewrites" not in patch and "iteration" not in patch
     assert patch["review"]["page_limit"] == {
-        "pages": 4, "limit": 4, "rewrites": 0, "further_reading_dropped": ["W2", "W3"],
+        "pages": 4, "limit": 4, "further_reading_dropped": ["W2", "W3"],
     }
     assert eng._route_after_review({"review": patch["review"], "iteration": 0}) == "done"  # type: ignore[arg-type]
     # The paper on disk lost those two entries and nothing else.
@@ -196,7 +192,7 @@ def test_a_list_that_fits_only_with_none_of_it_is_removed_whole(tmp_path: Path, 
 
 
 @pytest.mark.parametrize("panel", [False, True])
-def test_a_body_that_alone_is_over_the_limit_is_left_to_the_shortening(
+def test_a_body_that_alone_is_over_the_limit_is_recorded_and_not_sent_back(
     tmp_path: Path, monkeypatch, panel: bool,
 ) -> None:
     eng = _engine(tmp_path, panel=panel)
@@ -205,8 +201,8 @@ def test_a_body_that_alone_is_over_the_limit_is_left_to_the_shortening(
     seen = _by_entries(monkeypatch, spills_at=0)  # 5 pages however few entries it lists
     patch = _review(eng, tmp_path)
     assert paper.read_text(encoding="utf-8") == written
-    assert patch["review"]["must_flag_hits"] == [OVER]
-    assert patch["page_limit_rewrites"] == 1
+    assert patch["review"]["must_flag_hits"] == []
+    assert "page_limit_rewrites" not in patch and "iteration" not in patch
     assert "further_reading_dropped" not in patch["review"]["page_limit"]
     assert [len(_labels(t)) for _, t in seen] == [3, 0], "one render to find that out, and no more"
 
@@ -220,7 +216,7 @@ def test_a_draft_within_the_limit_is_not_touched_and_rendered_once(tmp_path: Pat
     patch = _review(eng, tmp_path)
     assert paper.read_text(encoding="utf-8") == written
     assert len(seen) == 1
-    assert patch["review"]["page_limit"] == {"pages": 4, "limit": 4, "rewrites": 0}
+    assert patch["review"]["page_limit"] == {"pages": 4, "limit": 4}
     assert patch["review"]["must_flag_hits"] == []
 
 
@@ -231,7 +227,7 @@ def test_a_paper_without_further_reading_costs_no_extra_render(tmp_path: Path, m
     seen = _by_entries(monkeypatch, spills_at=0)
     patch = _review(eng, tmp_path)
     assert len(seen) == 1 and paper.read_text(encoding="utf-8") == written
-    assert patch["review"]["must_flag_hits"] == [OVER]
+    assert patch["review"]["must_flag_hits"] == []
 
 
 def test_an_entry_the_text_cites_is_never_dropped(tmp_path: Path, monkeypatch) -> None:
@@ -243,7 +239,7 @@ def test_an_entry_the_text_cites_is_never_dropped(tmp_path: Path, monkeypatch) -
     seen = _by_entries(monkeypatch, spills_at=2)
     patch = _review(eng, tmp_path)
     assert paper.read_text(encoding="utf-8") == written and len(seen) == 1
-    assert patch["review"]["must_flag_hits"] == [OVER]
+    assert patch["review"]["must_flag_hits"] == []
 
     # W2 is cited: only W3, after it, may go.
     written = _paper(3, cites=" As in [1, W2].")
@@ -288,7 +284,7 @@ def test_a_render_that_fails_midway_leaves_the_paper_as_written(tmp_path: Path, 
     patch = _review(eng, tmp_path)
     assert paper.read_text(encoding="utf-8") == written
     assert not (tmp_path / ".fi" / "page_check_trial.md").exists()
-    assert patch["review"]["must_flag_hits"] == [OVER]
+    assert patch["review"]["must_flag_hits"] == []
 
 
 # --- the exports follow the paper -------------------------------------------------
@@ -353,9 +349,9 @@ def test_a_real_render_drops_only_entries_and_the_pdf_lists_what_paper_md_does(t
     )
     written = f"# A Draft\n\n## Abstract\n\nShort.\n\n## Results\n\n{body}\n\n## Further reading\n\n{entries}\n"
     paper = _put(tmp_path, written)
-    hits, record = asyncio.run(eng._page_limit_review({}, paper))  # type: ignore[arg-type]
+    record = asyncio.run(eng._page_limit_review({}, paper))  # type: ignore[arg-type]
     assert record is not None and record.get("further_reading_dropped"), record
-    assert hits == [] and record["pages"] <= 2 and resolve_page_limit(eng.config) == 2
+    assert record["pages"] <= 2 and resolve_page_limit(eng.config) == 2
     now = paper.read_text(encoding="utf-8")
     kept = _labels(now)
     assert kept == [f"W{i}" for i in range(1, len(kept) + 1)]  # a prefix: dropped from the end

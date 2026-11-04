@@ -185,9 +185,10 @@ def test_fdr_check_agreement_and_what_each_check_confirms() -> None:
     checked = {q["metric"]: q.get("checked", {}) for q in computed["quantities"]}
     assert checked["power_bonferroni"]["state"] == "agrees"  # by its measure: bonferroni_power_exact, passed
     assert checked["power_bonferroni"]["check"] == "bonferroni_power_exact"
-    assert checked["any_false_discovery_uncorrected"]["state"] == "agrees"  # through checked_by (another measure name)
-    assert checked["any_false_discovery_bh"]["state"] == "agrees"
-    assert checked["fdr_bh"]["state"] == "not_confirmed"  # bh_fdr_upper_bound failed: it confirms nothing
+    # checked_by names a check that measures another name (`p_any_false_uncorrected`): it says nothing about this value
+    assert checked["any_false_discovery_uncorrected"]["state"] == "unchecked"
+    assert checked["any_false_discovery_bh"]["state"] == "unchecked"
+    assert checked["fdr_bh"]["state"] == "unchecked"  # bh_fdr_upper_bound measures a formula of fdr_bh, not fdr_bh itself
     assert checked["any_false_discovery_bonferroni"]["state"] == "unchecked"
     # at plan time (no verdicts yet) the same reference agrees with the expected value of the check
     assert rv.cross_check(protocol, next(m for m in protocol["metrics"] if m["id"] == "power_bonferroni"))["state"] == "agrees"
@@ -571,3 +572,141 @@ def test_a_reference_that_evaluates_to_the_measured_value_is_dropped(formula: st
     copied = P.with_references(protocol, {"fdr_uncorrected": {"formula": formula, "when": {"m": 20, "pi1": 0.2}}})
     table = _table(_build("fdr_s1", copied), "fdr_uncorrected")
     assert "reference" not in table.columns and "read off the run" in table.caption
+
+
+def test_an_integer_written_copy_is_dropped_the_old_code_missed_it() -> None:
+    """Old code: ``_LITERAL`` matched only numbers with a decimal point and whole numbers were never counted, so a
+    reference written ``1849`` gave no written precision and was never taken for a value copied from the run, although
+    its last written digit (the units) is known to plus or minus 0.5, far finer than a half-width of 30."""
+    measured = [(1849.02, 30.0, 1849.0), (1848.7, 30.0, 1849.0), (1851.4, 30.0, 1849.0)]
+    assert rv.copies_measured({"formula": "1849"}, measured) is True
+    assert rv.copies_measured({"formula": "1849 + 0*n"}, measured) is True
+
+
+def test_a_round_whole_number_is_not_taken_for_a_copy() -> None:
+    """Known positive for the negative side: ``1800`` writes only its hundreds digit, so it is known to plus or minus 50
+    (trailing zeros are not written digits), which is coarser than the half-width of 30; it is not a copy."""
+    measured = [(1800.4, 30.0, 1800.0), (1799.1, 30.0, 1800.0), (1801.2, 30.0, 1800.0)]
+    assert rv.copies_measured({"formula": "1800"}, measured) is False
+
+
+def test_a_decimal_copy_is_still_caught_and_a_short_formula_is_not() -> None:
+    """Known positive: a decimal written to 5 places that equals the mean is still a copy; a formula of the settings
+    with short numbers and a nominal 0.95 are still not copies (the behaviour the integer rule must not change)."""
+    assert rv.copies_measured({"formula": "0.17748"}, [(0.17748, 0.01, 0.17748)]) is True
+    assert rv.copies_measured({"formula": "1 - (1 - 0.05/m)**m"}, [(0.0488, 0.01, 0.0488)]) is False
+    assert rv.copies_measured({"formula": "0.95"}, [(0.95, 0.01, 0.95)]) is False
+
+
+def test_a_missing_reference_value_does_not_raise_and_is_no_copy_evidence() -> None:
+    """Old code (the first version of this change): ``float(v).is_integer()`` was called on every reference value, so
+    one ``None`` value raised TypeError. Now a missing value at one setting is skipped (no copy there), and the whole-number
+    rule is off for the whole run, so the function returns a verdict instead of raising."""
+    decimal = [(0.17748, 0.01, None), (0.17748, 0.01, 0.17748), (0.17748, 0.01, 0.17748)]
+    assert rv.copies_measured({"formula": "0.17748"}, decimal) is True  # two of three settings still copy
+    whole = [(1849.02, 30.0, None), (1848.7, 30.0, 1849.0), (1851.4, 30.0, 1849.0)]
+    assert rv.copies_measured({"formula": "1849"}, whole) is False  # not every value is a whole number: no precision
+
+
+def test_an_honest_formula_with_an_integer_parameter_is_not_a_copy() -> None:
+    """Old code (the first version of this change): every whole number in a formula gave a precision, so ``400`` in
+    ``sqrt(2/400)`` (±0.5/400 = 0.125%) made a mean within 0.1% of the honest theory a copy, although the run's half-width
+    is 2%. Now a whole number counts only when the reference is that same whole number at every setting; here the
+    value is not whole, and in the varying case the value changes with the setting, so neither is a copy."""
+    honest = math.sqrt(2 / 400)
+    assert rv.copies_measured({"formula": "sqrt(2/400)"}, [(honest * 1.0005, 0.02, honest)]) is False
+    assert rv.copies_measured({"formula": "sqrt(2/n_trials)"}, [(honest * 1.0005, 0.02, honest)],
+                              {"n_trials": 400}) is False
+    varying = [(1800.0 + n + 0.2, 30.0, 1800.0 + n) for n in (10, 20, 30)]
+    assert rv.copies_measured({"formula": "1800 + n"}, varying) is False
+
+
+# --- a reference may name a setting the study holds constant -----------------------------------------------------------
+
+def _alpha_protocol(grid: dict[str, Any], constants: dict[str, Any] | None, when: dict[str, Any]) -> dict[str, Any]:
+    protocol: dict[str, Any] = {"grid": grid,
+                                "metrics": [{"id": "level", "estimand": "e", "kind": "mean", "unit": "a run", "reference": {"formula": "0.5", "when": when}}]}
+    if constants is not None:
+        protocol["constants"] = constants
+    return protocol
+
+
+def test_a_reference_may_name_a_setting_moved_from_the_grid_to_the_constants() -> None:
+    assert rv.problems(_alpha_protocol({"n": [10, 20]}, {"alpha": 0.5}, {"alpha": 0.5})) == []
+    protocol = _alpha_protocol({"n": [10, 20]}, {"alpha": 0.5}, {"alpha": 0.5})
+    assert plan.normalize_protocol(protocol)[1] is None
+    assert [s for s in rv.grid_settings(protocol) if rv.applies(protocol["metrics"][0]["reference"], s)] == []  # no held
+    assert all(rv.applies(protocol["metrics"][0]["reference"], s, rv.held_values(protocol))
+               for s in rv.grid_settings(protocol))
+
+
+def test_a_reference_naming_a_setting_the_study_does_not_have_is_still_refused() -> None:
+    (why,) = rv.problems(_alpha_protocol({"n": [10, 20]}, {"beta": 1}, {"alpha": 0.5}))
+    assert "not a setting of `protocol.grid`" in why
+
+
+def test_a_reference_naming_a_value_a_constant_no_longer_holds_is_refused_in_plain_words() -> None:
+    (why,) = rv.problems(_alpha_protocol({"n": [10, 20]}, {"alpha": 0.1}, {"alpha": 0.5}))
+    assert "a value the study no longer runs" in why and "'alpha' is held at 0.1" in why
+
+
+def test_a_reference_naming_a_grid_value_is_accepted_as_before() -> None:
+    assert rv.problems(_alpha_protocol({"alpha": [0.1, 0.5], "n": [10]}, None, {"alpha": 0.5})) == []
+    assert "holds for no setting" in rv.problems(_alpha_protocol({"alpha": [0.1, 0.2], "n": [10]}, None, {"alpha": 0.5}))[0]
+
+
+def test_a_reference_on_a_constant_gives_a_reference_at_every_setting_and_an_or_filter_reads_the_grid() -> None:
+    protocol = _alpha_protocol({"n": [10, 20]}, {"alpha": 0.5}, {"alpha": 0.5})
+    rows = [r for r in rv.compute(protocol, rv.grid_settings(protocol))["by_setting"] if r["metric"] == "level"]
+    assert len(rows) == 2 and all(r["reference"] == 0.5 for r in rows)
+    # either a constant the study no longer holds at that value, or a grid value: the grid value still covers a setting
+    either = _alpha_protocol({"n": [10, 20]}, {"alpha": 0.1}, [{"alpha": 0.5}, {"n": 20}])
+    assert rv.problems(either) == []
+    rows = [r for r in rv.compute(either, rv.grid_settings(either))["by_setting"] if r["metric"] == "level"]
+    assert [r["reference"] for r in rows] == [None, 0.5]
+
+
+def _named_check_plan(measure: str, expected: float) -> dict[str, Any]:
+    """A neutral plan: one metric `err` whose reference (value `err_exact`, formula `x**2 - 1`) names the check `chk`."""
+    return {"grid": {"x": [1.0, 2.0, 3.0]},
+            "metrics": [{"id": "err", "reference": {"value": "err_exact", "formula": "x**2 - 1", "checked_by": "chk"}}],
+            "oracles": [{"name": "chk", "measure": measure, "case": {"x": 2.0}, "expected": expected, "tolerance": 1e-6}]}
+
+
+def test_a_named_check_of_another_quantity_neither_confirms_nor_drops_the_reference() -> None:
+    protocol = _named_check_plan("ratio", 4.0)  # the formula gives 3.0 at x = 2; the check measures `ratio`, not `err_exact`
+    assert rv.problems(protocol) == []
+    checked = rv.cross_check(protocol, protocol["metrics"][0])
+    assert checked["state"] == "unchecked" and "`ratio`, not this value" in checked["why"]
+    computed = rv.compute(protocol, rv.grid_settings(protocol))
+    assert computed["quantities"][0]["status"] == "computed"
+    assert [r["reference"] for r in computed["by_setting"]] == [0.0, 3.0, 8.0]
+
+
+@pytest.mark.parametrize("measure", ["err_exact", "err"])
+def test_a_named_check_of_this_value_still_drops_a_disagreeing_reference(measure: str) -> None:
+    protocol = _named_check_plan(measure, 4.0)
+    problems = rv.problems(protocol)
+    assert len(problems) == 1 and "disagrees with a known-answer check" in problems[0] and "'chk'" in problems[0]
+    assert rv.cross_check(_named_check_plan(measure, 3.0), protocol["metrics"][0])["state"] == "agrees"
+
+
+def test_a_table_caption_quotes_the_plans_note_without_the_plans_citation_marker() -> None:
+    """The plan model wrote `[18]` in a reference's note; the paper's citation check never saw it, so FI's own caption and
+    Methods paragraph must not carry it when 18 is one of the quest's sources. A bracket that names no source, or is glued
+    to a name, is not a citation and stays; a marker the writer put in its own prose is the check's to keep."""
+    protocol = P.fdr_protocol()
+    ref = next(m for m in protocol["metrics"] if m["id"] == "fdr_bh")["reference"]
+    ref["note"] = "the bound holds exactly for independent tests [18], see also [W3], on x[0], index [2] and interval [0, 1]."
+    files = grid_keys.code_files(P.FIXTURES / "fdr_s1" / "code")
+    judged = P.load("fdr_s1", "judged.json")
+    built = rbs.build(_summaries("fdr_s1"), protocol, files, judged, {"18", "W3"})
+    caption = _table(built, "fdr_bh").caption
+    assert "[18]" not in caption and "[W3]" not in caption
+    assert "independent tests, see also, on x[0], index [2] and interval [0, 1].)" in caption
+    assert "[18]" not in rbs.reference_section(built)
+    unknown = rbs.build(_summaries("fdr_s1"), protocol, files, judged)  # the quest's labels not known: nothing is taken out
+    assert "[18]" in _table(unknown, "fdr_bh").caption
+    from core import citation_support as cs
+    kept = "BH controls the rate [18]."  # the writer's own prose, a citation the check kept
+    assert cs.CITE_RE.findall(kept) == ["18"] and cs.find_sites(kept)

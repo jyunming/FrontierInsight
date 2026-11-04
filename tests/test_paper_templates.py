@@ -260,6 +260,55 @@ def test_template_does_not_pair_authblk_and_titling(fmt: str) -> None:
     )
 
 
+def test_nature_mi_template_does_not_load_microtype() -> None:
+    """microtype's font expansion stops the pdflatex compile on non-scalable
+    (bitmap) fonts, so the nature_mi stand-in must not load it."""
+    txt = (TEMPLATE_DIR / "nature_mi" / "template.tex").read_text(encoding="utf-8")
+    non_comment = "\n".join(line for line in txt.splitlines() if not line.lstrip().startswith("%"))
+    assert r"\usepackage{microtype}" not in non_comment
+
+
+@pytest.mark.slow
+def test_nature_mi_paper_compiles_with_pdflatex(tmp_path: Path, monkeypatch) -> None:
+    """A short paper in the nature_mi format compiles with pdflatex, the engine
+    where microtype's font expansion applies (XeLaTeX never expands fonts).
+    Text only: the failing fonts of the original report are not reproduced here."""
+    import shutil
+
+    from core.config import Config
+    from generation._pandoc import find_pandoc
+    from generation.paper import PaperGenerator
+
+    pdflatex = shutil.which("pdflatex")
+    if find_pandoc(REPO_ROOT) is None or pdflatex is None:
+        pytest.skip("needs pandoc and pdflatex")
+    monkeypatch.setattr(
+        PaperGenerator, "_find_pdf_engine", lambda self: ("pdflatex", pdflatex),
+    )
+    md = tmp_path / "paper.md"
+    md.write_text(
+        "# Cooling Probe\n\n## Abstract\n\nA heat sink cools a chip in a short neutral test.\n\n"
+        "## Introduction\n\nText with a unit 25 °C and a ratio 0.5 ± 0.1.\n\n"
+        "| a | b |\n|---|---|\n| 1 | 2 |\n\nEnd.\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "out"
+    out.mkdir()
+    config = Config.model_validate({
+        "topic": "t",
+        "title": "t",
+        "output": {
+            "kinds": ["paper_md", "paper_pdf"],
+            "output_dir": str(tmp_path / "outputs"),
+            "paper_format": "nature_mi",
+            "html_pdf_fallback": False,
+        },
+    })
+    pdf, skip = PaperGenerator(config)._compile_pdf(md, out)
+    assert skip is None, skip.summary if skip else ""
+    assert pdf is not None and pdf.exists()
+
+
 def test_no_template_narrates_the_engine() -> None:
     """A rendered paper/poster must read as a standalone document, never as
     a report on the tool that produced it. Templates have hardcoded engine

@@ -25,7 +25,7 @@ DRAFT = {
     "dependencies": ["numpy"],
     "protocol": {"runs_per_setting": 300},
 }
-OBJECTION = {"check": "precision", "objection": "300 runs give about +-0.057", "fix": "raised the runs to 1000"}
+OBJECTION = {"check": "precision", "where": "method, protocol.runs_per_setting, protocol.optimisation", "objection": "300 runs give about +-0.057", "fix": "raised the runs to 1000"}
 
 
 def _engine(tmp_path: Path, replies: list[str]) -> Engine:
@@ -111,7 +111,7 @@ def test_the_audit_asks_about_precision_the_estimand_thresholds_streams_converge
     text = (AGENTS / "design_self_critique.md").read_text(encoding="utf-8")
     for check in ("precision", "estimand", "threshold_sensitivity", "rng_independence", "numerical_convergence", "oracle", "failed_runs"):
         assert check in text, check
-    for words in ("0.98/sqrt(n)", "not a sample size", "common-random-numbers", "protocol.oracles", "Never drop a key the draft has"):
+    for words in ("0.98/sqrt(n)", "not a sample size", "common-random-numbers", "protocol.oracles", "Do not repeat parts you do not change"):
         assert words in text, words
 
 
@@ -158,9 +158,9 @@ async def test_a_repair_that_breaks_the_search_block_is_not_applied_and_is_recor
     assert plan.normalize_design(SEARCH_DRAFT)[0] is not None
     broken = _with_baseline([[0.1, 0.1], [0.0, 0.0]])  # a baseline outside what the variable takes
     assert plan.normalize_design(broken)[0] is None  # the plan step would drop the whole block over it
-    objection = {"check": "baseline", "objection": "the baseline is a single number", "fix": "made it a grid"}
+    objection = {"check": "baseline", "where": "protocol.optimisation.baseline", "objection": "the baseline is a single number", "fix": "made it a grid"}
     eng = _engine(tmp_path, [json.dumps({"objections_addressed": [objection], "amended_design": broken})])
-    design, objections = await eng._audit_design({"topic": "OPC", "iteration": 0}, json.loads(json.dumps(SEARCH_DRAFT)))
+    design, objections = await eng._audit_design({"topic": "a topic", "iteration": 0}, json.loads(json.dumps(SEARCH_DRAFT)))
     assert design["protocol"]["optimisation"]["baseline"]["values"] == {"w": 0.0}  # the block and its baseline stay
     assert objections == [objection]  # the objection is still reported
     (entry,) = _record(eng)
@@ -176,7 +176,7 @@ async def test_a_repair_that_breaks_the_search_block_is_not_applied_and_is_recor
 async def test_a_repair_that_passes_the_same_checks_is_still_applied(tmp_path: Path) -> None:
     fixed = _with_baseline(0.5)
     eng = _engine(tmp_path, [json.dumps({"objections_addressed": [OBJECTION], "amended_design": fixed})])
-    design, _ = await eng._audit_design({"topic": "OPC", "iteration": 0}, json.loads(json.dumps(SEARCH_DRAFT)))
+    design, _ = await eng._audit_design({"topic": "a topic", "iteration": 0}, json.loads(json.dumps(SEARCH_DRAFT)))
     assert design["protocol"]["optimisation"]["baseline"]["values"] == {"w": 0.5}
     (entry,) = _record(eng)
     assert entry["changed_keys"] == ["protocol"] and "not_applied" not in entry
@@ -200,7 +200,7 @@ async def test_a_part_the_audit_left_out_is_put_back_and_recorded(tmp_path: Path
 async def test_a_repair_that_cannot_be_applied_fails_the_receipt_even_when_no_objection_was_named(tmp_path: Path) -> None:
     broken = _with_baseline([[0.1, 0.1], [0.0, 0.0]])
     eng = _engine(tmp_path, [json.dumps({"objections_addressed": [], "amended_design": broken})])
-    await eng._audit_design({"topic": "OPC", "iteration": 0}, json.loads(json.dumps(SEARCH_DRAFT)))
+    await eng._audit_design({"topic": "a topic", "iteration": 0}, json.loads(json.dumps(SEARCH_DRAFT)))
     status, record, _problem = receipts.read(eng.quest_root, "design_audit")
     assert status == "fail" and "could not be applied" in json.dumps(record)
 
@@ -226,3 +226,79 @@ async def test_swapping_one_unreadable_part_for_another_is_not_a_repair(tmp_path
     assert design["protocol"]["thresholds"]["rule"] == "prose one"
     (entry,) = _record(eng)
     assert [n["key"] for n in entry["not_applied"]] == ["protocol.thresholds"]
+
+
+SCANNED = {**SEARCH, "fixed": {"a": 1, "b": 3}, "grid": {"a": [1, 2]}, "sub_studies": [{"name": "scan a", "vary": ["a"], "hold": {}}]}
+SCANNED_DRAFT = {**DRAFT, "study_type": "find_best_design", "protocol": {"optimisation": SCANNED}}
+
+
+def _scan_amended(entry_vary: str) -> dict:
+    """The audit's change: a new baseline, and a scan entry that varies ``entry_vary`` (not a setting of the grid unless "a")."""
+    opt = {**SCANNED, "baseline": {"values": {"w": 0.5}, "source": "the audit"},
+           "sub_studies": [{"name": "scan a", "vary": ["a"], "hold": {}}, {"name": "scan b", "vary": [entry_vary], "hold": {"a": 1}}]}
+    return {**SCANNED_DRAFT, "protocol": {"optimisation": opt}}
+
+
+@pytest.mark.asyncio
+async def test_one_unreadable_part_of_a_change_does_not_cost_the_rest_and_is_asked_for_again_with_the_reason(tmp_path: Path) -> None:
+    amended = _scan_amended("b")
+    assert plan.normalize_design(SCANNED_DRAFT)[0] is not None
+    fixed_opt = {**amended["protocol"]["optimisation"], "grid": {"a": [1, 2], "b": [3, 4]},
+                 "sub_studies": [{"name": "scan a", "vary": ["a"], "hold": {"b": 3}}, {"name": "scan b", "vary": ["b"], "hold": {"a": 1}}]}
+    replies = [json.dumps({"objections_addressed": [OBJECTION], "amended_design": amended}),
+               json.dumps({"protocol": {"optimisation": fixed_opt}})]
+    eng = _engine(tmp_path, replies)
+    design, _ = await eng._audit_design({"topic": "a topic", "iteration": 0}, json.loads(json.dumps(SCANNED_DRAFT)))
+    asked = eng._client.chat.call_args_list[1].args[0][-1]["content"]
+    assert "varies `b`" in asked and "protocol.optimisation" in asked, "the second call carries FI's exact reason"
+    assert eng._client.chat.call_count == 2, "asked once"
+    opt = design["protocol"]["optimisation"]
+    assert opt["baseline"]["values"] == {"w": 0.5} and [s["name"] for s in opt["sub_studies"]] == ["scan a", "scan b"]
+    (entry,) = _record(eng)
+    assert "not_applied" not in entry, "the corrected part is read in full: nothing is left out"
+
+
+@pytest.mark.asyncio
+async def test_a_part_still_unreadable_after_the_ask_is_left_out_alone_and_named(tmp_path: Path) -> None:
+    amended = _scan_amended("b")
+    replies = [json.dumps({"objections_addressed": [OBJECTION], "amended_design": amended}),
+               json.dumps({"protocol": {"optimisation": amended["protocol"]["optimisation"]}})]  # answers with no change
+    eng = _engine(tmp_path, replies)
+    design, _ = await eng._audit_design({"topic": "a topic", "iteration": 0}, json.loads(json.dumps(SCANNED_DRAFT)))
+    opt = design["protocol"]["optimisation"]
+    assert opt["baseline"]["values"] == {"w": 0.5}, "the readable part of the change is made"
+    assert [x["name"] for x in opt["sub_studies"]] == ["scan a"], "only the entry that cannot be read is left out"
+    (entry,) = _record(eng)
+    (item,) = entry["not_applied"]
+    assert item["key"] == "protocol.optimisation" and "sub_studies" in item["reason"] and item["applied"]
+    summary = " ".join(eng._critique_summary())
+    assert "applied except a part FI could not read" in summary and "did not apply it" not in summary
+    assert eng._client.chat.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_change_nothing_of_which_can_be_read_is_still_not_applied_and_not_asked_again(tmp_path: Path) -> None:
+    broken = _with_baseline([[0.1, 0.1], [0.0, 0.0]])
+    eng = _engine(tmp_path, [json.dumps({"objections_addressed": [OBJECTION], "amended_design": broken})])
+    design, _ = await eng._audit_design({"topic": "a topic", "iteration": 0}, json.loads(json.dumps(SEARCH_DRAFT)))
+    assert design["protocol"]["optimisation"]["baseline"]["values"] == {"w": 0.0}
+    assert eng._client.chat.call_count == 1
+    (entry,) = _record(eng)
+    assert [n["key"] for n in entry["not_applied"]] == ["protocol.optimisation"] and "applied" not in entry["not_applied"][0]
+
+
+@pytest.mark.asyncio
+async def test_the_audit_answers_are_kept_and_the_plan_says_beside_the_design_what_was_not_applied(tmp_path: Path) -> None:
+    amended = _scan_amended("b")
+    eng = _engine(tmp_path, [json.dumps({"objections_addressed": [OBJECTION], "amended_design": amended}),
+                             json.dumps({"protocol": {"optimisation": amended["protocol"]["optimisation"]}})])
+    await eng._audit_design({"topic": "a topic", "iteration": 0}, json.loads(json.dumps(SCANNED_DRAFT)))
+    kept = sorted((eng.fi_dir / "plan_answers").glob("*.txt"))
+    assert len(kept) == 2 and "amended_design" in kept[0].read_text(encoding="utf-8"), "the audit's reply and the correction"
+    (sentence,) = eng._audit_changes_held_back()
+    assert "except one part" in sentence and "`protocol.optimisation`" in sentence
+    text = plan.render("a topic", {}, SCANNED_DRAFT, held_back=[sentence])
+    head = text.index("## " + plan.DESIGN_HEADING)
+    assert sentence in text[:head] and sentence in text[head:], "beside the design and under the summary"
+    assert plan.parse(text).design is not None, "the added sentence does not disturb reading the block"
+    assert "FI applied" not in plan.render("a topic", {}, SCANNED_DRAFT)

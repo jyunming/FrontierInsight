@@ -128,13 +128,28 @@ def _texts(ax: dict[str, Any]) -> list[tuple[str, str]]:
     return [(where, text.strip()) for where, text in out if text.strip() and not text.strip().startswith("_")]
 
 
+def _written_by_fi(calls: dict[str, Any] | None, figure: str, index: int) -> bool:
+    """Whether FI wrote the text of the panel at ``index`` of ``figure`` itself: the panel has a record of the drawing
+    calls and is not a custom drawing. ``FigureCalls.finish`` (core/frame_figure.py) replaces every axis label, title
+    and legend entry such a panel carries with the plan's label, so a code name cannot reach it; a panel with no call
+    record (a figure of an older frame) or a custom drawing keeps the text its code typed, and is read here."""
+    record = (calls or {}).get(figure)
+    # The recorder's panels are the frame's own axes, in order; an axis added later (a twin, an inset) has no panel.
+    for panel in (record.get("panels") if isinstance(record, dict) else None) or []:
+        if isinstance(panel, dict) and panel.get("panel") == index + 1:
+            # ``finish`` writes no label for a panel nothing was drawn on (no x): that one keeps its body's text.
+            return panel.get("raw") is False and bool(panel.get("x"))
+    return False
+
+
 def findings(records: dict[str, Any], figures: list[str], labels: dict[str, str], names: set[str],
-             code: set[str] | None = None) -> list[dict[str, Any]]:
+             code: set[str] | None = None, calls: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """One finding per axis label, panel title or legend entry that shows a code name: ``figure``, ``panel`` (its
     title, or its place), ``where`` (``x axis label``, ``y axis label``, ``title`` or ``legend entry``), ``label`` (the
     text), ``code_names`` and ``rename_to`` (the plan's label, or ``None`` when the plan has none). ``names`` are the
     plan's names, ``code`` those of the experiment's code (:func:`code_identifiers`). A figure without a record has
-    nothing to read."""
+    nothing to read. ``calls`` maps a figure to its record of the drawing calls; a panel that record shows FI drew
+    (:func:`_written_by_fi`) is not read."""
     out: list[dict[str, Any]] = []
     plan = set(names) | set(labels)
     tied = plan | set(code or ())
@@ -144,6 +159,8 @@ def findings(records: dict[str, Any], figures: list[str], labels: dict[str, str]
             continue
         axes = [ax for ax in record.get("axes") or [] if isinstance(ax, dict)]
         for index, ax in enumerate(axes):
+            if _written_by_fi(calls, figure, index):
+                continue
             seen: set[tuple[str, str]] = set()
             for where, label in _texts(ax):
                 if (where, label) in seen:

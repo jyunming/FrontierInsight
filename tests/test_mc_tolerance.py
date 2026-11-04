@@ -131,9 +131,10 @@ async def test_the_s1_gate_passes_every_check_with_no_repair_and_no_failed_check
     from tests.test_known_answer_self_checks import _config, _Model
 
     engine = Engine(_config(tmp_path))
-    # The checks share one time budget, a fifth of the run's timeout: 120 s here, for seven checks that need some
-    # thousands of trials between them (the test config's 120 s run timeout gives 30 s, too little to decide them all).
-    engine.config.execution.timeout_s = 600
+    # The checks share one time budget, a fifth of the run's timeout: 480 s here, for seven checks that need some
+    # thousands of trials between them. It is large so that the verdicts do not depend on how busy the machine is (at
+    # 120 s, a loaded machine ran out of time on the check that needs the most trials and left it undecided).
+    engine.config.execution.timeout_s = 2400
     model = _Model()
     engine._client = model
     protocol = {k: PROTOCOL[k] for k in ("grid", "in_each_run", "metrics", "thresholds")}
@@ -253,7 +254,8 @@ def test_a_twice_biased_random_simulation_fails(tmp_path: Path) -> None:
     _c, _p, wrong, found = _rate(tmp_path / "wrong", 0.10, larger)
     assert right[0]["passed_by_engine"] is True and right[0]["mc"]["verdict"] == "pass"
     assert wrong[0]["passed_by_engine"] is False and found and wrong[0]["mc"]["verdict"] == "fail"
-    assert wrong[0]["mc"]["trials"] <= mc.PILOT_TRIALS, "a 2x bias is decided by the first batch"
+    assert wrong[0]["mc"]["trials"] <= 2 * mc.PILOT_TRIALS, "a 2x bias is decided by the first batch"
+    assert wrong[0]["mc"]["confirm"]["verdict"] == "fail", "and shown again on as many fresh trials"
 
 
 @pytest.mark.parametrize("most", [5, 40])
@@ -1055,11 +1057,32 @@ def test_the_checks_on_a_declared_average_with_no_reading_are_the_ones_asked_abo
     average over trials and says nothing of how it holds; a check that says it is not. A check of a quantity (the
     Bonferroni power, a special case on ``power_bonferroni``) is read on the mean already and is not asked about:
     ``per_trial: true`` would only make a random quantity a rule of every trial (review pass 2, P2)."""
-    assert mc.unsaid_reading(PROTOCOL) == ["bh_fdr_upper_bound"]
-    assert mc.unsaid_reading({**PROTOCOL, "oracles": S1_CHECKS}) == []
+    cased = [o["name"] for o in PROTOCOL["oracles"] if o.get("case") and o.get("measure")]
+    assert mc.unsaid_reading(PROTOCOL) == cased and "bh_fdr_upper_bound" in cased
+    # A reading the plan volunteered while writing it is not an answer to the question: still unsaid.
+    assert mc.unsaid_reading({**PROTOCOL, "oracles": S1_CHECKS}) == cased
     every = [{**o, "per_trial": True} for o in PROTOCOL["oracles"]]
-    assert mc.unsaid_reading({**PROTOCOL, "oracles": every}) == []
+    assert mc.unsaid_reading({**PROTOCOL, "oracles": every}) == cased
+    # Answered to the focused question: not asked again.
+    answered = [{**o, "per_trial": False, mc.ASKED_KEY: True} for o in PROTOCOL["oracles"]]
+    assert mc.unsaid_reading({**PROTOCOL, "oracles": answered}) == []
+    # A study that runs one trial per setting has nothing to ask.
+    assert mc.unsaid_reading({**PROTOCOL, "runs_per_setting": 1, "min_runs_per_setting": 1}) == []
     assert mc.unsaid_reading(None) == []
+
+
+def test_a_volunteered_reading_on_a_check_of_a_quantity_is_not_an_answer() -> None:
+    """The fault: a plan wrote ``per_trial: true`` on checks whose own definition is a mean (a mean squared standardised
+    error, a coverage fraction), so each was judged on its worst trial and failed. The old code asked about no
+    check of a quantity and took the volunteered flag; now the flag counts for nothing until the question is answered."""
+    quantity = {"name": "coverage", "kind": "special_case", "case": {"n": 20}, "measure": "covered", "per_trial": True,
+                "expected": 0.95, "tolerance": 0.06}
+    protocol = {"runs_per_setting": 200, "oracles": [quantity]}
+    assert mc.unsaid_reading(protocol) == ["coverage"]
+    answered = {**quantity, "per_trial": False, mc.ASKED_KEY: True}
+    assert mc.unsaid_reading({**protocol, "oracles": [answered]}) == [] and mc.reads_a_mean(answered)
+    kept_true = {**quantity, mc.ASKED_KEY: True}  # the known positive: answered "every trial" stays a worst-trial rule
+    assert mc.unsaid_reading({**protocol, "oracles": [kept_true]}) == [] and not mc.reads_a_mean(kept_true)
 
 
 @pytest.mark.asyncio
@@ -1081,17 +1104,17 @@ async def test_the_plan_is_asked_once_and_the_s1_bound_ends_up_declared_on_the_a
     assert len(model.asked) == 1
     assert READING_ASK in model.asked[0]
     # The s1 plan's metric definitions ride in the same request; its opening says both.
-    assert "also do not say whether they hold in every single trial or only on average" in model.asked[0]
-    assert "the checks 'bh_fdr_upper_bound' use fdr_bh, which" in model.asked[0]
+    assert "has also not yet said, for its known-answer checks, whether each holds in every single trial or only on average" in model.asked[0]
+    assert "'bh_fdr_upper_bound'" in model.asked[0] and "has not been asked whether" in model.asked[0]
     checks = _plan_checks(engine)
-    assert checks["bh_fdr_upper_bound"]["per_trial"] is False
-    for name in ("bonferroni_power_exact", "bh_superset_of_bonferroni"):
-        assert "per_trial" not in checks[name], f"{name}, not asked about, keeps its own reading"
+    assert checks["bh_fdr_upper_bound"]["per_trial"] is False and checks["bh_fdr_upper_bound"][mc.ASKED_KEY] is True
+    # Every check run on a case of its own is asked about, a quantity too: its answer is taken and marked answered.
+    answered = [c for c in checks.values() if c.get(mc.ASKED_KEY)]
+    assert sorted(c["per_trial"] for c in answered) == [False, False, True]  # the three answers, a quantity's included
     for key in ("tolerance", "expected", "measure", "kind"):
         assert checks["bh_fdr_upper_bound"].get(key) == BOUND.get(key), key
-    assert mc.unsaid_reading(engine._design_from_plan()[0]["protocol"]) == []
-    from core import plan
-    assert "every such check says it now" in plan.plan_path(engine.quest_root).read_text(encoding="utf-8")
+    left = mc.unsaid_reading(engine._design_from_plan()[0]["protocol"])
+    assert len(left) == len(checks) - 3  # the checks the answer left out are still unsaid
     # Asked again (the design step of the same run): nothing is left to ask, and nothing is asked.
     design, sha = engine._design_from_plan()
     await engine._ask_plan_for_the_parts(state, design, sha)
@@ -1099,6 +1122,7 @@ async def test_the_plan_is_asked_once_and_the_s1_bound_ends_up_declared_on_the_a
     engine._freeze_protocol_if_due({"iteration": 0})
     frozen_bound = {o["name"]: o for o in frozen.protocol_of(engine.quest_root)["oracles"]}["bh_fdr_upper_bound"]
     assert frozen_bound["per_trial"] is False and mc.reads_a_mean(frozen_bound)
+    assert frozen_bound[mc.ASKED_KEY] is True, "the frozen protocol keeps that the question was answered"
 
 
 @pytest.mark.asyncio
@@ -1120,7 +1144,7 @@ async def test_an_answer_that_does_not_say_leaves_the_check_judged_on_every_tria
         assert "`per_trial` true or false" in model.asked[1]
     checks = _plan_checks(engine)
     assert "per_trial" not in checks["bh_fdr_upper_bound"] and mc.reads_a_mean(checks["bh_fdr_upper_bound"])
-    assert "a check still does not say" in plan.plan_path(engine.quest_root).read_text(encoding="utf-8")
+    assert "a check is still unanswered" in plan.plan_path(engine.quest_root).read_text(encoding="utf-8")
     design, sha = engine._design_from_plan()
     await engine._ask_plan_for_the_parts(state, design, sha)
     assert len(model.asked) == first, "the same problem is not asked about again"
@@ -1140,7 +1164,7 @@ async def test_how_a_check_holds_is_asked_only_before_the_first_run(tmp_path: Pa
 def test_the_answer_sets_per_trial_only_on_the_checks_the_question_named(tmp_path: Path) -> None:
     """Review pass 2, P1-4: the request asks for the metrics and for how ``fdp_le_one`` holds. The answer adds two
     metrics declared as means and, with them, sets ``per_trial: false`` on ``counts_agree``, a second implementation
-    with a tolerance of 0 that was never asked about: that would read ``abs(count_a - count_b)`` on the means, where
+    with a tolerance of 0 and no case of its own, that was never asked about: that would read ``abs(count_a - count_b)`` on the means, where
     the two counters may disagree by one in every trial. Only the checks named in the question take ``per_trial``."""
     import logging
     import types
@@ -1152,9 +1176,9 @@ def test_the_answer_sets_per_trial_only_on_the_checks_the_question_named(tmp_pat
     oracles = [
         {"name": "fdp_le_one", "kind": "invariant", "expected": 0, "tolerance": 0, "case": {"m": 10},
          "measure": "max(0, fdr_bh - 1)", "reference": "derivation: V <= R"},
-        {"name": "counts_agree", "kind": "second_implementation", "expected": 0, "tolerance": 0, "case": {"m": 10},
+        {"name": "counts_agree", "kind": "second_implementation", "expected": 0, "tolerance": 0,
          "measure": "abs(count_a - count_b)", "reference": "second implementation: independent counter"},
-    ]
+    ]  # no `case` of its own: FI cannot run it by itself, so the question does not name it
     before = plan.render("topic", {}, {"hypothesis": "h", "protocol": {"grid": {"m": [10]}, "metrics": metrics,
                                                                       "oracles": oracles}})
     more = metrics + [{"id": "count_a", "estimand": "E[count a]", "kind": "mean", "unit": "a repeat"},
@@ -1168,3 +1192,307 @@ def test_the_answer_sets_per_trial_only_on_the_checks_the_question_named(tmp_pat
     assert after["fdp_le_one"]["per_trial"] is True
     assert "per_trial" not in after["counts_agree"], after["counts_agree"]
     assert mc.reads_a_mean(after["counts_agree"]), "unset: the mean"
+
+
+def test_a_volunteered_reading_is_dropped_when_the_answer_leaves_the_check_out() -> None:
+    """A check asked about that the model does not answer loses the reading it volunteered while writing the plan (it
+    was not an answer to this question) and is not marked answered, so it is read as an average and said unsaid."""
+    import logging
+    import types
+
+    from core import plan
+    from core.engine import Engine
+
+    oracles = [{"name": "rate", "kind": "special_case", "expected": 0.05, "tolerance": 0.01, "case": {"m": 10},
+                "measure": "rate_hat", "per_trial": True, "reference": "derivation: rate = alpha"},
+               {"name": "other", "kind": "special_case", "expected": 1, "tolerance": 0.1, "case": {"m": 10},
+                "measure": "x_hat", "reference": "derivation: x = 1"}]
+    before = plan.render("topic", {}, {"hypothesis": "h", "protocol": {"grid": {"m": [10]}, "runs_per_setting": 100,
+                                                                      "oracles": oracles}})
+    answer = {"protocol": {"oracles": [{"name": "other", "per_trial": True}]}}
+    owner = types.SimpleNamespace(_log=logging.getLogger("test"), _ledger_problems=lambda *a, **k: {})
+    kept = Engine._keep_only_the_parts(owner, before, answer, ["per_trial"])  # type: ignore[arg-type]
+    assert kept is not None
+    after = {o["name"]: o for o in plan.raw_design_block(kept)["protocol"]["oracles"]}
+    assert "per_trial" not in after["rate"] and mc.ASKED_KEY not in after["rate"] and mc.reads_a_mean(after["rate"])
+    assert after["other"]["per_trial"] is True and after["other"][mc.ASKED_KEY] is True
+
+
+UNLUCKY = '''
+import random
+
+def run_trial(cell, trial_id, seed):
+    rng = random.Random(seed)
+    hit = 1.0 if (trial_id < UNLUCKY_FIRST or rng.random() < P) else 0.0
+    return {"event": hit, "noise": rng.random()}
+'''
+
+
+@pytest.mark.parametrize("first, p, passes", [(6, 0.05, True), (0, 0.3, False)])
+def test_a_fail_of_the_first_trials_counts_only_when_fresh_trials_show_it_again(
+        tmp_path: Path, first: int, p: float, passes: bool) -> None:
+    """The trials' seeds are fixed, so a rare draw of the first batch (6 events in 20 of a rate of 0.05, as the seeds of
+    a real run gave) would fail correct code at every run of the checks. A fail is confirmed on as many fresh trials;
+    a real fault (a rate of 0.3 in every trial) fails there too."""
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(f"P = {p}\nUNLUCKY_FIRST = {first}\n" + UNLUCKY, encoding="utf-8")
+    check = {**RARE_CHECK, "name": "error_rate_bound", "expected": 0.05, "tolerance": 0.05}
+    _c, _p, judged, found = _measure(root, [check], mean_names=frozenset(), in_each_run=None)
+    (j,) = judged
+    assert j["mc"]["verdict"] == ("pass" if passes else "fail") and j["passed_by_engine"] is passes, j
+    assert bool(found) is not passes
+    confirm = j["mc"].get("confirm") or (_c[0].get("mc") or {}).get("confirm")
+    assert confirm and confirm["trials"] == mc.PILOT_TRIALS
+    assert (confirm["verdict"] == "fail") is (not passes)
+
+
+@pytest.mark.parametrize(
+    "written, expected",
+    [(1, True), (0, False), (2, None), (True, True), (False, False), ("yes", True), (None, None), (1.0, None)],
+)
+def test_a_per_trial_flag_written_as_a_whole_number_is_read(written: Any, expected: Any) -> None:
+    oracle = {"name": "rule", "per_trial": written} if written is not None else {"name": "rule"}
+    assert mc.per_trial_flag(oracle) is expected
+
+
+def test_an_undecided_outcome_is_described_by_the_interval_that_decided_it() -> None:
+    # A 0/1 outcome is decided on its binomial interval, so the message shows that interval, not a three-standard-error band.
+    record = {"trials": 200, "se": 0.02, "why": "time", "binomial_interval": [0.031, 0.12]}
+    words = mc.undecided_words(record, 0.01)
+    assert "0.031" in words and "0.12" in words and "standard errors" not in words, words
+    plain = {"trials": 200, "se": 0.02, "why": "time"}
+    assert "standard errors" in mc.undecided_words(plain, 0.01)
+
+
+# --- a rate or a spread over the trials of a case: mean() and sd() ------------------------------------------------------
+#
+# A check on a quantity that exists only across trials (the share of trials whose interval held the truth, the standard
+# deviation of an estimate) was evaluated trial by trial and averaged: ``abs(covered - 0.95)`` came out 0.095 on a simulation
+# whose coverage is exactly 0.95. A measure written with ``mean(x)`` / ``sd(x)`` of the per-trial result is worked out once on
+# the trials together; every other measure is read as before. The numbers below are made up.
+
+
+def _trials(n: int, *, cover: float = 0.95, spread: float = 10.0, seed: int = 7) -> list[dict[str, float]]:
+    import random
+
+    rng = random.Random(seed)
+    return [{"hit": 1.0 if rng.random() < cover else 0.0, "est": rng.gauss(100.0, spread), "sd_ref": 10.0,
+             "k": 4.0 + rng.random(), "zero": 0.0} for _ in range(n)]
+
+
+def test_mean_and_sd_over_trials_are_the_numbers_of_all_the_trials_together() -> None:
+    import statistics
+
+    rows = _trials(400)
+    stat = mc.pooled_summary(rows, "sd(est)")
+    assert stat["value"] == pytest.approx(statistics.stdev(r["est"] for r in rows)), "the sample sd, n - 1"
+    assert stat["trials"] == 400 and stat["on"] == "means" and stat["across"] is True
+    stat = mc.pooled_summary(rows, "sd(est) / k")  # another name is its mean over the trials
+    assert stat["value"] == pytest.approx(statistics.stdev(r["est"] for r in rows) / statistics.fmean(r["k"] for r in rows))
+    assert mc.pooled_summary(rows, "mean(est / sd_ref)")["value"] == pytest.approx(
+        statistics.fmean(r["est"] / 10 for r in rows))
+    # The error is a bootstrap with a fixed seed: repeatable, and about s / sqrt(2 (n - 1)) for the sd of n draws.
+    again = mc.pooled_summary(rows, "sd(est)")["se"]
+    assert again == mc.pooled_summary(rows, "sd(est)")["se"] and again == pytest.approx(10 / (2 * 399) ** 0.5, rel=0.3)
+    assert mc.pooled_summary(rows[:1], "sd(est)")["value"] is None, "a standard deviation needs two trials"
+    assert mc.pooled_summary(rows, "abs(est - 100)") is None, "a measure without mean() / sd() is not pooled"
+
+
+def test_a_coverage_written_with_mean_passes_a_correct_simulation_and_the_per_trial_alias_fails_it() -> None:
+    rows = _trials(4000)
+    for r in rows:
+        r["covered"] = r["hit"]
+    alias = mc.statistic(rows, "abs(covered - 0.95)", (), 0.0, 0.03, (), repeated=True)
+    assert alias["value"] == pytest.approx(0.0955, abs=0.01) and mc.mean_verdict(alias, 0.0, 0.03) == "fail"
+    stat = mc.statistic(rows, "abs(mean(covered) - 0.95)", (), 0.0, 0.03, (), repeated=True)
+    assert stat["value"] < 0.01 and stat["across"] is True and stat["binary"] is True, "a 0/1 rate keeps its Wilson interval"
+    assert mc.mean_verdict(stat, 0.0, 0.03) == "pass"
+    low = mc.statistic(_trials(4000, cover=0.88), "abs(mean(hit) - 0.95)", (), 0.0, 0.03, (), repeated=True)
+    assert mc.mean_verdict(low, 0.0, 0.03) == "fail", "a coverage that is really 0.88 fails (a known positive)"
+
+
+@pytest.mark.parametrize("limit", [0.02, 0.06])
+def test_twenty_hits_in_twenty_trials_do_not_decide_a_coverage(limit: float) -> None:
+    rows = [{"hit": 1.0, "est": float(i)} for i in range(20)]  # random study, every trial a hit
+    stat = mc.statistic(rows, "abs(mean(hit) - 0.95)", (), 0.0, limit, (), repeated=True)
+    assert stat["binary"] is True and mc.mean_verdict(stat, 0.0, limit) is None
+    big = mc.statistic(rows * 25, "abs(mean(hit) - 0.95)", (), 0.0, 0.06, (), repeated=True)
+    assert mc.mean_verdict(big, 0.0, 0.06) == "pass", "enough hits do show it"
+
+
+def test_a_spread_passes_the_right_sd_and_fails_a_planted_wrong_one_and_waits_for_thirty_trials() -> None:
+    measure = "abs(sd(est) / sd_ref - 1)"
+    right = mc.statistic(_trials(3000), measure, (), 0.0, 0.1, (), repeated=True)
+    assert right["value"] < 0.05 and mc.mean_verdict(right, 0.0, 0.1) == "pass"
+    wrong = mc.statistic(_trials(3000, spread=14.0), measure, (), 0.0, 0.1, (), repeated=True)
+    assert wrong["value"] == pytest.approx(0.4, abs=0.06) and mc.mean_verdict(wrong, 0.0, 0.1) == "fail"
+    few = mc.statistic(_trials(20, spread=40.0), measure, (), 0.0, 0.1, (), repeated=True)
+    assert few["sd_small"] is True and mc.mean_verdict(few, 0.0, 0.1) is None, "no sd() is decided on under 30 trials"
+    enough = mc.statistic(_trials(30, spread=40.0), measure, (), 0.0, 0.1, (), repeated=True)
+    assert "sd_small" not in enough and mc.mean_verdict(enough, 0.0, 0.1) == "fail"
+    # The sd of a number that never moves in a random study says nothing, and is not decided on an error of 0.
+    flat = mc.statistic([{**r, "est": 5.0} for r in _trials(60)], measure, (), 0.0, 0.1, (), repeated=True)
+    assert flat["se"] is None and mc.mean_verdict(flat, 0.0, 0.1) is None
+
+
+def test_an_exact_invariant_written_with_mean_passes_and_a_broken_one_fails() -> None:
+    rows = _trials(40)  # random study; the drift is exactly 0 in every trial
+    stat = mc.statistic(rows, "abs(mean(zero))", (), 0.0, 1e-6, (), repeated=True)
+    assert stat["value"] == 0.0 and not stat.get("binary") and stat["se"] == 0.0
+    assert mc.mean_verdict(stat, 0.0, 1e-6) == "pass"
+    broken = mc.statistic([{**r, "zero": 1.0} for r in rows], "abs(mean(zero))", (), 0.0, 1e-6, (), repeated=True)
+    assert mc.mean_verdict(broken, 0.0, 1e-6) == "fail"
+    # An exact constant that is not 0 (a mean of an integer count) is a constant as well.
+    count = mc.statistic([{**r, "n": 7.0} for r in rows], "abs(mean(n) - 7)", (), 0.0, 1e-6, (), repeated=True)
+    assert mc.mean_verdict(count, 0.0, 1e-6) == "pass"
+
+
+def test_measures_without_mean_or_sd_give_exactly_what_they_gave_before() -> None:
+    """``tests/fixtures/mc_pooled/per_trial_before.json`` is what the code before this change returned for each of these
+    (statistic, verdict, trials wanted, names read) on the same trials: it came from a ``git archive`` of ``core/`` at
+    commit df3ca309 run on exactly these cases, so it can be regenerated from that commit."""
+    rows = _trials(50)
+    cases = [("abs(est - 100)", (), 0.0, 5.0, (), True), ("est", (), 100.0, 5.0, (), True),
+             ("est", ("est",), 100.0, 5.0, (), True), ("max(0, est - 100)", ("est",), 0.0, 5.0, (), True),
+             ("abs(est / sd_ref - 10)", (), 0.0, 0.5, (), True), ("est * k", ("est", "k"), 400.0, 10.0, (), None),
+             ("hit", (), 0.95, 0.05, (), True), ("abs(hit - 0.95)", (), 0.0, 0.05, ("hit",), True),
+             ("hit", (), 0.95, 0.05, ("hit",), False), ("zero", (), 0.0, 1e-6, (), True),
+             ("abs(zero)", (), 0.0, 0.0, (), True), ("abs(zero)", (), 0.0, 1e-6, ("zero",), True),
+             ("sd_ref", (), 10.0, 0.1, (), None)]
+    now = []
+    for measure, means, expected, limit, props, rep in cases:
+        st = mc.statistic(rows, measure, means, expected, limit, props, repeated=rep)
+        now.append({"measure": measure, "stat": st, "verdict": mc.mean_verdict(st, expected, limit) if st else None,
+                    "want": mc.trials_wanted(st, expected, limit) if st else None,
+                    "names": mc.measure_names(measure, rows[0])})
+    before = json.loads((Path(__file__).parent / "fixtures" / "mc_pooled" / "per_trial_before.json").read_text(encoding="utf-8"))
+    assert json.loads(json.dumps(now)) == before
+
+
+def test_mean_and_sd_are_read_in_a_measure_and_in_no_other_formula() -> None:
+    from core import oracle_forms as forms
+
+    assert forms.problem("abs(mean(hit) - 0.95)") is None
+    assert forms.names("abs(sd(est) / sd_ref - 1)", across=True) == ["est", "sd_ref"]
+    assert forms.names("abs(mean(hit))") == [], "another reader of formulas never sees them"
+    assert forms.formula_problem("mean(x)") and forms.evaluate("mean(x)", {"x": 1.0}).unreadable
+    assert "another mean() or sd()" in forms.problem("mean(sd(x))") and "exactly one" in forms.problem("sd(a, b)")
+    assert "takes nothing the simulation returns" in forms.problem("mean(2)")
+    assert forms.names("sd * 2") == ["sd"] and forms.across_form("sd * 2") is None, "a setting called sd stays a name"
+
+
+def test_a_per_trial_check_with_mean_or_sd_is_refused_at_plan_time_with_the_reason() -> None:
+    from core import oracle_forms as forms
+
+    base = {"name": "cov", "kind": "special_case", "case": {"a": 1}, "expected": 0, "tolerance": 0.03,
+            "measure": "abs(mean(hit) - 0.95)", "reference": "derivation: x"}
+    asked = forms.enforce({"oracles": [{**base, "per_trial": True}]}).requests
+    assert len(asked) == 1 and "per_trial" in asked[0] and "mean() or sd()" in asked[0] and "'cov'" in asked[0]
+    for ok in ({**base}, {**base, "per_trial": False}, {**base, "measure": "abs(hit - 0.95)", "per_trial": True}):
+        assert not forms.enforce({"oracles": [ok]}).requests, ok
+
+
+GAUGE_SIM = '''
+import random
+
+
+def run_trial(cell: dict, trial_id: int, seed: int) -> dict:
+    rng = random.Random(seed)
+    return {"hit": 1.0 if rng.random() < float(cell.get("cover", 0.95)) else 0.0,
+            "est": rng.gauss(100.0, float(cell.get("spread", 10.0))), "sd_ref": 10.0, "drift": 0.0}
+'''
+
+
+def test_the_engine_decides_coverage_spread_and_invariant_checks_on_the_trials_of_a_real_simulation(tmp_path: Path) -> None:
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(GAUGE_SIM, encoding="utf-8")
+    coverage = {"name": "coverage", "kind": "special_case", "case": {"cover": 0.95}, "expected": 0, "tolerance": 0.04,
+                "measure": "abs(mean(hit) - 0.95)", "reference": "derivation: by construction"}
+    spread = {"name": "spread", "kind": "special_case", "case": {"spread": 10.0}, "expected": 0, "tolerance": 0.1,
+              "measure": "abs(sd(est) / sd_ref - 1)", "reference": "derivation: by construction"}
+    drift = {"name": "drift", "kind": "invariant", "case": {}, "expected": 0, "tolerance": 1e-9,
+             "measure": "abs(mean(drift))", "reference": "derivation: by construction"}
+    wrong = {**spread, "name": "wrong_spread", "case": {"spread": 15.0}}
+    low = {**coverage, "name": "low_coverage", "case": {"cover": 0.85}}
+    oracles = [coverage, spread, drift, wrong, low]
+    checks, problems, _t = asyncio.run(trial_runner.measure_oracles(
+        SharedInterpreterExecutor(python_version="3.11"), sys.executable, root, "code/simulate.py", oracles,
+        timeout_s=120, repeated=True))
+    assert not problems, problems
+    judged = {j["name"]: j for j in oc.judged(oracles, {"checks": checks, "engine_measured": True})}
+    assert [judged[n]["passed_by_engine"] for n in ("coverage", "spread", "drift", "wrong_spread", "low_coverage")] == [
+        True, True, True, False, False], judged
+    assert judged["spread"]["mc"]["trials"] >= mc.SD_MIN_TRIALS
+
+
+def test_a_measure_with_mean_names_what_the_simulation_must_return_and_is_not_asked_how_it_holds() -> None:
+    check, problem = trial_runner._check_from("cov", "abs(mean(covered) - 0.95)", {"hit": 1.0})
+    assert check is None and "'covered'" in problem and "did not return" in problem and "cannot be read" not in problem
+    check, problem = trial_runner._check_from("cov", "abs(mean(hit) - 0.95)", {"hit": 1.0})
+    assert check is None and "run_trial" in problem
+    cases = [{"name": "cov", "case": {"a": 1}, "measure": "abs(mean(hit) - 0.95)"},
+             {"name": "rule", "case": {"a": 2}, "measure": "abs(hit - 0.95)"}]
+    assert mc.unsaid_reading({"runs_per_setting": 500, "oracles": cases}) == ["rule"], "a mean over trials is not asked"
+    # a constant beside the rate does not take the 0/1 rate off its interval
+    rows = [{"hit": 1.0, "target": 0.95, "est": float(i)} for i in range(20)]
+    stat = mc.statistic(rows, "abs(mean(hit) - target)", (), 0.0, 0.02, (), repeated=True)
+    assert stat["binary"] is True and mc.mean_verdict(stat, 0.0, 0.02) is None
+
+
+def test_a_slightly_moving_bare_name_beside_a_correct_rate_does_not_false_fail() -> None:
+    """Bench (500 studies per row, after the confirm rule): the rate keeps its Wilson interval with the other name at its
+    mean: 0% false fails at 20/30/60/200 trials on four cases; the bootstrap of the 0/1 column gave up to 35% at 20."""
+    import random
+
+    rng = random.Random(11)
+    fails = 0
+    for _ in range(60):
+        rows = [{"hit": 1.0 if rng.random() < 0.95 else 0.0, "ref": 0.95 + rng.gauss(0, 0.002)} for _ in range(20)]
+        stat = mc.statistic(rows, "abs(mean(hit) - ref)", (), 0.0, 0.03, (), repeated=True)
+        assert stat["binary"] is True
+        fails += mc.mean_verdict(stat, 0.0, 0.03) == "fail"
+    assert fails == 0
+
+
+def test_no_trial_with_every_name_is_a_failed_share_not_a_missing_run_trial(tmp_path: Path) -> None:
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(
+        "def run_trial(cell, trial_id, seed):\n    return {'x': float('nan')}\n", encoding="utf-8")
+    oracle = {"name": "s", "kind": "special_case", "case": {}, "expected": 0, "tolerance": 0.1,
+              "measure": "abs(mean(x) - 1)", "reference": "derivation: x"}
+    checks, problems, _t = asyncio.run(trial_runner.measure_oracles(
+        SharedInterpreterExecutor(python_version="3.11"), sys.executable, root, "code/simulate.py", [oracle],
+        timeout_s=60, repeated=True))
+    assert problems and all("run_trial" not in p for p in problems), problems
+    assert checks[0]["mc"]["started"] >= 1 and checks[0]["value"] is None
+
+
+def test_an_undecided_sd_says_it_is_an_sd() -> None:
+    stat = mc.statistic(_trials(20), "abs(sd(est) / sd_ref - 1)", (), 0.0, 0.1, (), repeated=True)
+    record = mc.record(stat, read_as="mean", verdict=None, why="time", failed=0, started=20)
+    words = mc.undecided_words(record, 0.1)
+    assert "sd()" in words and "30" in words and "mean of" not in words
+
+
+def test_an_sd_check_is_not_called_a_mean_and_too_few_numbers_leave_the_failed_share_to_decide() -> None:
+    rows = _trials(40)
+    stat = mc.statistic(rows, "abs(sd(est) / sd_ref - 1)", (), 0.0, 0.1, (), repeated=True)
+    words = mc.words(mc.record(stat, read_as="mean", verdict=None, why="time", failed=0, started=40))
+    assert "the mean over" not in words and "together" in words
+
+
+def test_ten_trials_with_one_number_do_not_get_the_needs_run_trial_message(tmp_path: Path) -> None:
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(
+        "def run_trial(cell, trial_id, seed):\n    return {'x': 1.0} if trial_id == 0 else {'y': 1.0}\n",
+        encoding="utf-8")
+    oracle = {"name": "s", "kind": "special_case", "case": {}, "expected": 0, "tolerance": 0.1, "measure": "abs(sd(x) - 1)",
+              "reference": "derivation: x"}
+    _checks, problems, _t = asyncio.run(trial_runner.measure_oracles(
+        SharedInterpreterExecutor(python_version="3.11"), sys.executable, root, "code/simulate.py", [oracle],
+        timeout_s=60, repeated=True))
+    assert not any("run_trial" in p and "needs the simulation" in p for p in problems), problems

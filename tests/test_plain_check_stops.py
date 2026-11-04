@@ -435,6 +435,7 @@ def test_a_check_corrected_to_another_models_value_is_never_independent_evidence
 
     assert "corrected to another model's value" in level_with("recompute")
     assert "corrected to another model's value" not in level_with("arithmetic"), "the plan's own arithmetic is no gap"
+    assert "computed from the model's own definitions" in level_with("numeric"), "a referee's number is no independent fact"
 
 
 def test_the_fitted_mark_lives_with_the_record_of_the_engines_plan_changes(tmp_path: Path) -> None:

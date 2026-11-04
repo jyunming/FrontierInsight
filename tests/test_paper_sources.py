@@ -79,11 +79,9 @@ def test_cited_papers_are_numbered_in_the_order_the_text_first_cites_them() -> N
         "1. A. Author (2020). Delta. J. Tests. DOI: 10.1/d",
         "2. A. Author (2020). Beta. J. Tests. DOI: 10.1/b",
         "3. A. Author (2020). Alpha. J. Tests. DOI: 10.1/a",
-    ], "only the cited papers, in citation order; the writer's list is gone"
-    assert _section(out, "Further reading") == [
-        "- [W1] Page one. https://one.example/p",
         "- [W2] Page two. https://two.example/p",
-    ]
+    ], "only the cited sources, papers in citation order and then the cited page; the writer's list is gone"
+    assert _section(out, "Further reading") == ["- [W1] Page one. https://one.example/p"]
     assert out.count("## References") == 1 and out.index("## References") < out.index("## Further reading")
     assert dropped == []
     # The literature now numbers the same way, so every later output agrees.
@@ -210,3 +208,11 @@ def test_the_number_check_does_not_read_the_source_lists() -> None:
         "## Further reading\n\n- [W1] A page about 37.25 cases. https://x.example/a\n"
     )
     assert [float(n.value) for n in typed_numbers.numbers(md)] == [0.4213]
+
+
+def test_a_bracket_right_after_a_name_is_an_index_not_a_citation() -> None:
+    """``pixels[2,3]`` names an element; renumbering it as a citation changed or removed the index."""
+    out, mapping, dropped = _renumber_citations(
+        "As shown [3] and [1, 2]; the element weights[2,3] and m[1][4] and (x)[5] keep their indices.", 3)
+    assert out == "As shown [1] and [2, 3]; the element weights[2,3] and m[1][4] and (x)[5] keep their indices."
+    assert mapping == {3: 1, 1: 2, 2: 3} and dropped == []

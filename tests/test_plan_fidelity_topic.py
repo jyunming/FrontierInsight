@@ -148,7 +148,7 @@ def test_a_sentence_that_states_a_result_is_never_quoted():
            "stated_results": ["The true value of k is 0.05 per second"]}
     block = tr.checklist_block(req, topic=topic)
     assert "The true value of k" not in block and "report k = 0.05" not in block
-    assert "- report recovered k\n" in block + "\n"
+    assert "- Q1: report recovered k\n" in block + "\n"
     assert "noise levels 0.01, 0.05 and 0.1" in block  # a sentence with no result is still quoted
     lines = "\n".join(tr.plan_lines(req, [], reviewer="", same_model=None, topic=topic))
     assert "The true value of k" not in lines and "report k = 0.05" not in lines

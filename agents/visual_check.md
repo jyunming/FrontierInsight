@@ -11,6 +11,7 @@ $measurements
 
 $checklist
 
+$parts
 ## Rules
 
 - Report a problem only if you can see it in a screenshot.
@@ -28,6 +29,9 @@ $checklist
 Only JSON, no prose, no code fence:
 
 {"findings": [{"page": 1, "region": "top of the left column", "check": "raw_markup", "problem": "One sentence saying what is wrong.", "severity": "high", "quote": "exact visible text"}]}
+
+When the poster's parts are listed above, a finding that sits in one part adds
+`"block": "<its id>"`.
 
 `check` is one of the names in the list above. `severity` is "high" when a
 reader loses content, "medium" when it looks broken, "low" when it is

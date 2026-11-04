@@ -24,6 +24,7 @@ from typing import Any
 from . import experiment_deps as _experiment_deps
 from .execution import scrub_secrets
 from .proc_tree import ProcessTree as _ProcessTree
+from . import mc_error as _mc_error
 from . import optimise_search as _search
 from . import split_run as _split_run
 from . import trial_runner as _trial_runner
@@ -117,6 +118,7 @@ def load_simulation():
 def run_cell_child(study, index, out_path):
     """One setting's trials, in a process of its own (as FI runs them)."""
     module = load_simulation()
+    os.environ[KIND_ENV] = "scan"  # a row of the scan or the comparison grid, as FI tells the code
     entry = study["entry"]
     fn = getattr(module, entry)
     cell = cells(study.get("grid") or {}, study.get("sub_studies"))[index]
@@ -133,7 +135,8 @@ def run_cell_child(study, index, out_path):
             kept, why = read_returned(value, levels, entry)
             if kept is None:
                 raise TypeError(why)
-            rows.append({"trial": trial, "ok": True, "values": kept})
+            rows.append({"trial": trial, "ok": True, "values": kept,
+                         **({WHY_MISSING: missing_reasons(value, kept)} if missing_reasons(value, kept) else {})})
         except BaseException as exc:
             if isinstance(exc, KeyboardInterrupt):
                 raise
@@ -164,20 +167,21 @@ def evaluate_child(spec_path, out_path):
     """One design of the search, in a process of its own (as FI runs it)."""
     spec = json.loads(Path(spec_path).read_text(encoding="utf-8"))
     module = load_simulation()
+    os.environ[KIND_ENV] = "search"  # a design of the search, as FI tells the code
     entry = spec["entry"]
     fn = getattr(module, entry)
+    levels = levels_of(spec.get("levels"))  # as the harness reads its spec (FI's evaluation names none)
     rows = []
     for trial in spec["trials"]:
         try:
             value = fn(dict(spec["cell"])) if entry == "run_cell" else fn(dict(spec["cell"]), trial["trial"], trial["seed"])
-            if not isinstance(value, dict) or not value:
-                raise TypeError(f"{entry}() must return a dict of numbers")
-            # None is a value that does not exist (the code writer's null), read as NaN as the trial harness reads it.
-            value = {k: float("nan") if v is None else v for k, v in value.items()}
-            bad = [k for k, v in value.items() if not is_number(v)]
-            if bad:
-                raise TypeError(f"{entry}() returned non-numbers for {bad[:5]}")
-            rows.append({"trial": trial["trial"], "ok": True, "values": {str(k): float(v) for k, v in value.items()}})
+            # Read as FI's trial harness reads it: None is a value that does not exist (NaN), the reasons under
+            # why_missing are kept on the row, and a per-value result is read when the spec names its levels.
+            kept, why = read_returned(value, levels, entry)
+            if kept is None:
+                raise TypeError(why)
+            reasons = missing_reasons(value, kept)
+            rows.append({"trial": trial["trial"], "ok": True, "values": kept, **({WHY_MISSING: reasons} if reasons else {})})
         except BaseException as exc:
             if isinstance(exc, KeyboardInterrupt):
                 raise
@@ -197,9 +201,19 @@ def search(study):
     base = int(study.get("base_seed") or 0)
     runs = 1 if entry == "run_cell" else int(study.get("runs_per_evaluation") or 1)
 
-    def scan(grid):
-        summary = run_trials({"entry": entry, "grid": grid, "runs_per_setting": runs, "base_seed": base,
-                              "paired": True, "thresholds": study.get("thresholds") or {}})
+    scanned = {}
+
+    def scan(grid, block=block):
+        # The scan's parts and what every evaluation goes through, as FI ran them (a part is not kept by JSON).
+        # The scan measures every alternative of a compared condition together: it runs once, and is read for the
+        # alternative each search starts (``block``).
+        key = json.dumps({k: list(v) for k, v in grid.items()}, sort_keys=True, default=str)
+        if key in scanned:
+            return fi_search.scan_rows(scanned[key], block)
+        summary = scanned[key] = run_trials({"entry": entry, "grid": dict(grid), "runs_per_setting": runs, "base_seed": base,
+                              "paired": True, "thresholds": study.get("thresholds") or {},
+                              "sub_studies": getattr(grid, "sub_studies", None) or block.get("sub_studies"),
+                              "in_each_run": block.get("in_each_run") or {}})
         (WORK / "raw" / "trials.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
         os.environ["FI_TRIALS"] = "raw/trials.json"
         return fi_search.scan_rows(summary, block)
@@ -219,7 +233,8 @@ def search(study):
 
     # A search FI stopped at its time limit is repeated to the same point, not further.
     outcome = fi_search.run_sync(block, evaluate, seed=base, method=study.get("method"), scan_step=scan,
-                                 max_evaluations=study.get("max_evaluations"), rounds=study.get("rounds"))
+                                 max_evaluations=study.get("max_evaluations"), rounds=study.get("rounds"),
+                                 results=study.get("results"))
     record = fi_search.best_design(outcome, block, seed=base, check=study.get("check_settings"))
     (WORK / "raw" / "optimisation_ledger.jsonl").write_bytes(
         ("\n".join(fi_search.ledger_lines(outcome, block)) + "\n").encode("utf-8"))
@@ -300,6 +315,126 @@ RUN_SOURCE = RUN_SOURCE.replace(
     (Path(__file__).with_name("in_run.py")).read_text(encoding="utf-8"), 1)
 
 
+def run_source(code_dir: Path | str | None = None) -> str:
+    """The text of ``run.py``. For a simulation whose ``simulate.py`` has FI's frame (core/skeleton.py) it also carries the
+    frame's runtime (``fi_frame.py``): ``run.py`` writes it beside ``simulate.py`` when a copy of ``code/`` has lost it, and tells
+    the simulation which seeds its setting has, as FI's harness does. Any other simulation gets ``RUN_SOURCE`` as it is."""
+    from . import skeleton as _skeleton
+
+    try:
+        framed = code_dir is not None and _skeleton.has_frame((Path(code_dir) / _split_run.SIMULATE_NAME).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        framed = False
+    if not framed:
+        return RUN_SOURCE
+    text = RUN_SOURCE
+    for old, new in _FRAMED_EDITS + (_ANALYSIS_EDITS if _fis_analysis(code_dir) else ()):
+        if text.count(old) != 1:
+            # The template moved on and this edit did not: a run.py without the frame's runtime would fail at the first trial,
+            # so this is a fault of FI's (a test of the framed run.py fails), never a silent fall back.
+            raise RuntimeError("FI's run.py template changed and its edit for a framed simulation no longer applies: "
+                               + old.strip().splitlines()[0][:80])
+        text = text.replace(old, new)
+    if _fis_analysis(code_dir):
+        text = text.replace("@FI_ANALYSIS_FILES@", repr(_analysis_files()), 1)
+    return text.replace("@FI_FRAME_RUNTIME@", repr(_quest_runtime(code_dir)), 1)
+
+
+def _fis_analysis(code_dir: Path | str | None) -> bool:
+    """Whether the analysis of the code folder ``code_dir`` is the one FI writes (core/analysis_frame.py)."""
+    from . import analysis_frame as _analysis
+
+    return code_dir is not None and _analysis.is_fis_file(Path(code_dir) / _analysis.EXPERIMENT_FILE)
+
+
+def _analysis_files() -> list[str]:
+    """The names, in the code folder, of the analysis FI writes: what ``run.py`` needs beside ``experiment.py`` to run it."""
+    from . import analysis_frame as _analysis
+
+    tops = {rel.split("/", 1)[0] for rel in _analysis.carried_files()}
+    return sorted({_analysis.EXPERIMENT_FILE, _analysis.DERIVE_FILE, "fi_table.py", "fi_figure_calls.py", *tops})
+
+
+def _quest_runtime(code_dir: Path | str) -> str:
+    """The frame runtime the quest has (its own ``fi_frame.py`` when that is FI's), else the current one. A quest made by an older
+    FI keeps its runtime (:func:`core.skeleton.ensure_runtime`), and ``run.py`` is part of what the trials' cache key hashes, so
+    it must carry that text, not today's: a newer FI would otherwise run the trials of an unchanged quest again."""
+    from . import skeleton as _skeleton
+
+    try:
+        have = (Path(code_dir) / _skeleton.RUNTIME_FILE).read_text(encoding="utf-8").lstrip("\ufeff")
+    except (OSError, UnicodeDecodeError):
+        return _skeleton.RUNTIME
+    return have if have.startswith(_skeleton.RUNTIME_HEAD) else _skeleton.RUNTIME
+
+
+#: What a ``run.py`` adds when FI wrote the analysis (core/analysis_frame.py). FI's ``experiment.py`` reads the record of the trials
+#: in the folder its code folder is in and writes its results and figures there, so ``run.py`` runs it from a copy of this folder
+#: inside its own work folder: the analysis reads this run's record, through the same ``fi_table.py`` FI's own run uses, and the
+#: quest's results stay as FI wrote them. The files are not carried inside ``run.py``: it is part of what the trials' cache key
+#: hashes, and FI's analysis files are not, so a newer FI's analysis never runs the trials of an unchanged quest again.
+_ANALYSIS_EDITS = (
+    ("""    sys.exit(subprocess.call([sys.executable, str(HERE / "experiment.py")]))
+""", """    # FI wrote this study's analysis: it runs from a copy of this folder in WORK, so it reads this run's record of the trials
+    # and writes its results and figures in WORK.
+    missing = [name for name in FI_ANALYSIS_FILES if not (HERE / name).exists()]
+    if missing:
+        sys.exit("[run] FI's analysis needs " + ", ".join(missing) + " beside run.py; copy the whole code folder")
+    copy = WORK / "code"
+    shutil.rmtree(copy, ignore_errors=True)
+    shutil.copytree(HERE, copy, ignore=shutil.ignore_patterns("output", "__pycache__", ".*"))
+    sys.exit(subprocess.call([sys.executable, str(copy / "experiment.py")]))
+"""),
+    ("""def load_simulation():
+""", """FI_ANALYSIS_FILES = @FI_ANALYSIS_FILES@  # the analysis FI wrote (experiment.py and the files it uses)
+
+
+def load_simulation():
+"""),
+)
+
+
+#: What a ``run.py`` for a framed simulation adds: the runtime's text, written beside ``simulate.py`` when it is missing, and the
+#: seeds of the setting (a file, named by ``FI_TRIAL_SEEDS_FILE``, as the harness reads them) in the process that runs its trials.
+_FRAMED_EDITS = (
+    ("""def load_simulation():
+    import importlib.util
+
+    sys.path.insert(0, str(HERE))
+""", """FI_FRAME_RUNTIME = @FI_FRAME_RUNTIME@  # FI's frame of simulate.py (fi_frame.py), for a copy of this folder that lost it
+
+
+def load_simulation():
+    import importlib.util
+
+    if not (HERE / "fi_frame.py").is_file():
+        (HERE / "fi_frame.py").write_text(FI_FRAME_RUNTIME, encoding="utf-8")
+    sys.path.insert(0, str(HERE))
+"""),
+    ("""    runs = 1 if entry == "run_cell" else int(study.get("runs_per_setting") or 1)
+    rows = []
+    for trial in range(runs):
+        seed = trial_seed(int(study.get("base_seed") or 0), "" if study.get("paired") else key, trial)
+""", """    runs = 1 if entry == "run_cell" else int(study.get("runs_per_setting") or 1)
+    rows = []
+    seeds_file = Path(out_path).with_name("trial_seeds.json")  # beside the rows, in the setting's own temporary folder
+    seeds_file.write_text(json.dumps([[t, None if entry == "run_cell" else trial_seed(
+        int(study.get("base_seed") or 0), "" if study.get("paired") else key, t)] for t in range(runs)]), encoding="utf-8")
+    os.environ["FI_TRIAL_SEEDS_FILE"] = str(seeds_file)
+    for trial in range(runs):
+        seed = trial_seed(int(study.get("base_seed") or 0), "" if study.get("paired") else key, trial)
+"""),
+    ("""    levels = levels_of(spec.get("levels"))  # as the harness reads its spec (FI's evaluation names none)
+    rows = []
+""", """    levels = levels_of(spec.get("levels"))  # as the harness reads its spec (FI's evaluation names none)
+    rows = []
+    seeds_file = Path(out_path).with_name("trial_seeds.json")
+    seeds_file.write_text(json.dumps([[t["trial"], t.get("seed")] for t in spec["trials"]]), encoding="utf-8")
+    os.environ["FI_TRIAL_SEEDS_FILE"] = str(seeds_file)
+"""),
+)
+
+
 def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -361,14 +496,15 @@ def simulation_left_out(code_dir: Path, split: bool) -> bool:
     return not split and (code_dir / _split_run.SIMULATE_NAME).is_file()
 
 
-def study_of(code_dir: Path, protocol: dict[str, Any] | None, *, split: bool = True) -> dict[str, Any] | None:
+def study_of(code_dir: Path, protocol: dict[str, Any] | None, *, split: bool = True,
+             design: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """The settings ``run.py`` needs to run FI's trial contract, or None when the simulation is not on that contract
     (or the two-script split is off, so FI itself does not run the simulation)."""
     simulate = code_dir / _split_run.SIMULATE_NAME
     if not split or not simulate.is_file():
         return None
     entries = _trial_runner.entries(simulate)
-    entry = "run_trial" if "run_trial" in entries else "run_cell" if "run_cell" in entries else ""
+    entry = _trial_runner.study_entry(entries)
     if not entry:
         return None
     protocol = protocol or {}
@@ -398,14 +534,18 @@ def study_of(code_dir: Path, protocol: dict[str, Any] | None, *, split: bool = T
             "check_settings": {str(n): _optimisation_plan.check_levels(s if isinstance(s, dict) else {"search": s})[0]
                                for n, s in settings.items()},
         }
-        if evaluations.get("stopped_because") == "time" and isinstance(evaluations.get("search"), int):
-            study["max_evaluations"] = evaluations["search"]
-        # The rounds a person asked the search to continue with (core/optimise_refine.py): run.py continues it the same.
+        # The results FI's search compares (a design or an alternative that changes none of them), so run.py stops
+        # and skips the same way.
         from . import optimise as _optimise
 
+        study["results"] = _optimise.watched_results(protocol, design)
+        if evaluations.get("stopped_because") == "time" and isinstance(evaluations.get("search"), int):
+            study["max_evaluations"] = evaluations["search"]
+        # The rounds the search was continued with (a person's, core/optimise_refine.py, or FI's own while it was still
+        # improving, core/optimise.py): run.py continues it the same.
         rounds = _optimise.read_rounds(code_dir.parent, block)
         if rounds:
-            study["rounds"] = [{k: r[k] for k in ("added", "target", "search_target") if k in r} for r in rounds]
+            study["rounds"] = [{k: r[k] for k in ("added", "target", "search_target", "auto") if k in r} for r in rounds]
         return study
     grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
     sub_studies = getattr(_search.study_grid(protocol), "sub_studies", None)
@@ -418,18 +558,19 @@ def study_of(code_dir: Path, protocol: dict[str, Any] | None, *, split: bool = T
         **({"in_each_run": inside} if inside else {}),
         "runs_per_setting": int(protocol.get("runs_per_setting") or 1),
         "base_seed": 0,
-        "paired": any(isinstance(m, dict) and m.get("paired") for m in metrics),
+        "paired": _mc_error.paired(protocol, code_dir.parent),
         "thresholds": protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else {},
     }
 
 
-def study_differences(code_dir: Path, protocol: dict[str, Any] | None, *, split: bool = True) -> list[str]:
+def study_differences(code_dir: Path, protocol: dict[str, Any] | None, *, split: bool = True,
+                      design: dict[str, Any] | None = None) -> list[str]:
     """One plain sentence per setting of ``code/study.json`` (what ``run.py`` runs) that is not what the protocol says: the
     runs per setting and each setting to vary. The protocol is the source of truth. Nothing when there is no
     ``study.json``, the study is a search for the best design, or the protocol says nothing about the setting (a protocol
     without a run count leaves ``study.json`` its own)."""
     path = Path(code_dir) / STUDY
-    wanted = study_of(Path(code_dir), protocol, split=split)
+    wanted = study_of(Path(code_dir), protocol, split=split, design=design)
     try:
         have = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -568,7 +709,8 @@ def mark_asked(quest_root: Path, names: list[str]) -> None:
 
 def refresh(quest_root: Path, *, deps: list[str] | None = None, protocol: dict[str, Any] | None = None,
             title: str = "", question: str = "", split: bool = True, log: Any = None,
-            extra_files: dict[str, str] | None = None, readme_files: list[str] | None = None) -> list[str]:
+            extra_files: dict[str, str] | None = None, readme_files: list[str] | None = None,
+            design: dict[str, Any] | None = None) -> list[str]:
     """Write or update the project files in ``code/``; return the names written. Best effort: a quest never stops
     for these files. A file a person edited is not replaced; it is listed for :func:`unasked_conflicts`.
     ``extra_files`` (``{path in code/: text}``) and ``readme_files`` (README lines for them) are the research-tool
@@ -577,14 +719,14 @@ def refresh(quest_root: Path, *, deps: list[str] | None = None, protocol: dict[s
     code_dir = quest_root / "code"
     if not (code_dir / "experiment.py").is_file():
         return []
-    study = study_of(code_dir, protocol, split=split)
+    study = study_of(code_dir, protocol, split=split, design=design)
     installed = _installed(quest_root)
     wanted = {
         README: _readme(code_dir, title=title, question=question, study=study, split=split, layout=readme_files),
         REQUIREMENTS: "\n".join(
             requirements_for(code_dir, installed if installed is not None else list(deps or []),
                              installed=installed is not None)) + "\n",
-        RUN: RUN_SOURCE,
+        RUN: run_source(code_dir),
     }
     wanted.update(extra_files or {})
     if study:
@@ -659,7 +801,8 @@ def pin(python: Path | str, deps: list[str]) -> list[str]:
     return [f"{names[d]}=={versions[names[d]]}" if d in names and names[d] in versions else d for d in deps]
 
 
-def _git(code_dir: Path, *args: str) -> Any:
+def _git(code_dir: Path, *args: str, stdin: str | bytes | None = None, env_extra: dict[str, str] | None = None,
+         raw: bool = False) -> Any:
     import subprocess
 
     import os
@@ -671,17 +814,18 @@ def _git(code_dir: Path, *args: str) -> Any:
     # And git never looks above code/ for a repository: with code/.git gone or broken, a commit must fail, never land in
     # a repository that happens to hold the quest folder (with whatever that repository has uncommitted).
     env = {**scrub_secrets(), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
-           "GIT_CEILING_DIRECTORIES": str(Path(code_dir).resolve().parent)}
+           "GIT_CEILING_DIRECTORIES": str(Path(code_dir).resolve().parent), **(env_extra or {})}
     return subprocess.run(
         ["git", "-c", "user.name=Frontier Insight", "-c", "user.email=fi@localhost", "-c", "commit.gpgsign=false",
          "-c", "core.autocrlf=false", "-c", f"core.hooksPath={null}", "-c", "core.fsmonitor=false",
          "-c", f"safe.directory={code_dir.as_posix()}", *args],
-        cwd=code_dir, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60, env=env,
+        cwd=code_dir, capture_output=True, timeout=60, env=env, input=stdin,
+        **({} if raw else {"text": True, "encoding": "utf-8", "errors": "replace"}),
     )
 
 
 def record_change(quest_root: Path, note: str, *, category: str = "changed", results: str | None = None,
-                  undo_pending: str | None = None, log: Any = None) -> bool:
+                  undo_pending: str | None = None, why: list[str] | None = None, log: Any = None) -> bool:
     """One commit in ``code/``'s own git history, and one entry in ``code/CHANGELOG.md``, when the folder changed since
     the last one (your own edits included). Returns whether it made a commit (a change to CHANGELOG.md alone is
     committed with no entry about itself). Best effort; without git it says so.
@@ -690,7 +834,8 @@ def record_change(quest_root: Path, note: str, *, category: str = "changed", res
     to ``README.md`` alone is always ``tidied``. ``results`` is the entry's "Did the results change" line when it is
     known now (:mod:`core.changelog`); without it the line says "not measured yet" until :func:`fill_pending`.
     ``undo_pending``: this change puts back a version that ran before, so every earlier entry still waiting for its run
-    says it was not measured, and why."""
+    says it was not measured, and why. ``why``: the lines :func:`core.changelog.detail` makes (the step, the fault, the
+    functions changed, the repair's summary); they are the body of the commit message and sit in the entry."""
     import shutil
     import subprocess
     import time
@@ -745,7 +890,7 @@ def record_change(quest_root: Path, note: str, *, category: str = "changed", res
         if _changelog.documentation_only(changed_files):
             kind, line = "tidied", _changelog.documentation_line(changed_files)
         entry = (f"{_changelog.heading(time.strftime('%Y-%m-%d %H:%M'), kind, note)}\n\n"
-                 f"Files: {names or 'none'}\n\n{line}\n\n")
+                 f"Files: {names or 'none'}\n\n" + ("\n".join(f"- {w}" for w in why) + "\n\n" if why else "") + f"{line}\n\n")
         changelog = code_dir / "CHANGELOG.md"
         before = changelog.read_bytes() if changelog.is_file() else None
         head = before.decode("utf-8") if before is not None else _changelog.HEADER
@@ -753,7 +898,7 @@ def record_change(quest_root: Path, note: str, *, category: str = "changed", res
             head = head.replace(_changelog.PENDING, _changelog.not_measured(undo_pending))
         changelog.write_bytes((head + entry).encode("utf-8"))
         _git(code_dir, "add", "-A")
-        done = _git(code_dir, "commit", "-q", "-m", note)
+        done = _git(code_dir, "commit", "-q", "-m", _changelog.message(note, why))
         if done.returncode != 0:
             _git(code_dir, "reset", "-q")
             if before is None:
@@ -768,6 +913,230 @@ def record_change(quest_root: Path, note: str, *, category: str = "changed", res
         if log is not None:
             log.warning("[code] could not record this change in code/'s history: %s", exc)
         return False
+
+
+REFUSED_KEPT = 200  # the newest refused tries kept under refs/fi/refused/; older ones are dropped
+
+
+def keep_refused(quest_root: Path, ref: str | None, files: dict[str, str], message: str, *,
+                 extras: dict[str, str] | None = None, log: Any = None) -> bool:
+    """Keep a version of ``rel`` that was tried and refused in ``code/``'s own git repository, on the side reference
+    ``refs/fi/refused/<ref>``: one commit whose parent is the current HEAD and whose tree is HEAD's with each file of
+    ``files`` (path -> text) set to its text. A reference of that name already there is never overwritten: the try is
+    kept beside it (``<ref>-2``, ...); no ``ref`` takes the next number (``001``, ``002``, ...). The tree also holds
+    ``.fi_refused/reason.txt`` (the whole ``message``) and each of ``extras`` (name -> text, e.g. ``result.json``, what
+    the refused try returned) under ``.fi_refused/``. The branch, the index and the working folder are not touched;
+    only the newest :data:`REFUSED_KEPT` refused tries stay. Best effort: ``False`` (and a log line) when git cannot do
+    it."""
+    import os
+    import re
+    import subprocess
+
+    code_dir = Path(quest_root) / "code"
+    git_dir = code_dir / ".git"
+    if not git_dir.is_dir():
+        return False
+    import tempfile
+
+    # one index file per call: two refusals at the same time never share a tree
+    fd, index_name = tempfile.mkstemp(prefix="fi_refused_", suffix=".index", dir=git_dir)
+    os.close(fd)
+    index = Path(index_name)
+    # a name git takes: no "..", no ".lock" ending, no part starting with "."
+    name = re.sub(r"\.{2,}", ".", re.sub(r"[^A-Za-z0-9._-]+", "-", ref or "")).strip("-.")
+    if name.endswith(".lock"):
+        name = name[: -len(".lock")] + "-lock"
+    try:
+        index.unlink(missing_ok=True)  # an empty file is not an index: read-tree makes it
+        extra = {"GIT_INDEX_FILE": str(index)}
+        head = _git(code_dir, "rev-parse", "--verify", "-q", "HEAD")
+        parent = head.stdout.strip() if head.returncode == 0 else ""
+        if _git(code_dir, "read-tree", *([parent] if parent else ["--empty"]), env_extra=extra).returncode != 0:
+            return False
+        notes = {f".fi_refused/{k}": v for k, v in (extras or {}).items() if k != "reason.txt"}
+        for rel, text in {**files, **notes, ".fi_refused/reason.txt": message}.items():
+            blob = _git(code_dir, "hash-object", "-w", "--stdin", stdin=text)
+            if blob.returncode != 0:
+                return False
+            cache = f"100644,{blob.stdout.strip()},{Path(rel).as_posix()}"
+            if _git(code_dir, "update-index", "--add", "--cacheinfo", cache, env_extra=extra).returncode != 0:
+                return False
+        tree = _git(code_dir, "write-tree", env_extra=extra)
+        if tree.returncode != 0:
+            return False
+        made = _git(code_dir, "commit-tree", tree.stdout.strip(), *(["-p", parent] if parent else []), "-m", message)
+        if made.returncode != 0:
+            return False
+        for n in range(1, 100):
+            if name:
+                target = f"refs/fi/refused/{name}" + ("" if n == 1 else f"-{n}")
+            else:  # the next number, asked again each time: another refusal may have taken it
+                have = _git(code_dir, "for-each-ref", "--format=%(refname:lstrip=3)", "refs/fi/refused/").stdout.split()
+                target = f"refs/fi/refused/{max([int(r) for r in have if r.isdigit()] or [0]) + 1:03d}"
+            # an empty old value: made only when no reference of that name is there yet
+            if _git(code_dir, "update-ref", target, made.stdout.strip(), "").returncode == 0:
+                every = _git(code_dir, "for-each-ref", "--format=%(refname:lstrip=3)", "refs/fi/refused/").stdout.split()
+                numbered = sorted((r for r in every if r.isdigit()), key=int, reverse=True)
+                for stale in numbered[REFUSED_KEPT:]:  # exactly the newest REFUSED_KEPT numbered tries stay
+                    _git(code_dir, "update-ref", "-d", f"refs/fi/refused/{stale}")
+                named = _git(code_dir, "for-each-ref", "--sort=-committerdate", "--format=%(refname:lstrip=3)",
+                             "refs/fi/refused/").stdout.split()
+                for stale in [r for r in named if not r.isdigit()][REFUSED_KEPT:]:
+                    if f"refs/fi/refused/{stale}" != target:
+                        _git(code_dir, "update-ref", "-d", f"refs/fi/refused/{stale}")
+                return True
+        return False
+    except (OSError, subprocess.SubprocessError) as exc:
+        if log is not None:
+            log.warning("[code] could not keep a refused version in code/'s history: %s", exc)
+        return False
+    finally:
+        try:
+            index.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def refused_patches(quest_root: Path, finding_id: str, *, log: Any = None) -> list[tuple[int, str]]:
+    """The repairs of a finding FI tried and refused (kept by :func:`keep_refused`), newest first, each as ``(try number,
+    patch)``: what the try changed against its parent (a refused try is HEAD-at-the-time plus the model's files, so the patch
+    is the model's own change, not a copy of files the code has since moved on from). Empty when none is kept."""
+    import re
+    import subprocess
+
+    code_dir = Path(quest_root) / "code"
+    if not (code_dir / ".git").is_dir() or not re.fullmatch(r"[A-Za-z0-9_-]+", str(finding_id or "")):
+        return []
+    out: list[tuple[int, str]] = []
+    try:
+        refs = _git(code_dir, "for-each-ref", "--format=%(refname)", f"refs/fi/refused/{finding_id}-*").stdout.split()
+        pattern = re.compile(rf"refs/fi/refused/{re.escape(finding_id)}-(\d+)")
+        for number, ref in sorted(((int(m.group(1)), r) for r in refs if (m := pattern.fullmatch(r))), reverse=True):
+            # as bytes: a line ending is part of the line a patch must match (text mode would turn CRLF into LF)
+            patch = _git(code_dir, "diff", "--no-color", "--ignore-cr-at-eol", f"{ref}^", ref, "--", ".", ":(exclude).fi_refused", raw=True)
+            if patch.returncode == 0 and patch.stdout.strip():
+                out.append((number, patch.stdout.decode("utf-8", errors="surrogateescape")))
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        if log is not None:
+            log.warning("[code] could not read a refused version from code/'s history: %s", exc)
+    return out
+
+
+def _in_line_endings_of(code_dir: Path, patch: bytes) -> bytes:
+    """The patch with each file's hunk lines ending the way that file in ``code_dir`` does (CRLF or LF): a patch read with
+    ``--ignore-cr-at-eol`` mixes both, and ``git apply`` matches a line's bytes. Nothing else about the lines changes."""
+    out: list[bytes] = []
+    crlf = False
+    in_hunk = False
+    for line in patch.splitlines(keepends=True):
+        if line.startswith(b"diff --git "):
+            in_hunk = False
+            target = line.split(b" b/", 1)[-1].strip().decode("utf-8", errors="surrogateescape")
+            try:
+                crlf = b"\r\n" in (Path(code_dir) / target).read_bytes()
+            except OSError:
+                crlf = False
+        elif line.startswith(b"@@"):
+            in_hunk = True
+        elif in_hunk and line[:1] in (b" ", b"-", b"+"):
+            line = line.rstrip(b"\r\n") + (b"\r\n" if crlf else b"\n")
+        out.append(line)
+    return b"".join(out)
+
+
+def apply_patch(code_dir: Path, patch: str) -> bool:
+    """Apply a patch from :func:`refused_patches` to a folder of code (a copy, not the quest's own ``code/``); ``False``
+    when it does not apply there, and nothing is changed. The lines must match exactly (a line ending of the file's own
+    kind is not a difference), so a patch never lands on text that only looks like what it was written against."""
+    done = _git(Path(code_dir), "apply", "--whitespace=nowarn", "--recount", "-",
+                stdin=_in_line_endings_of(Path(code_dir), patch.encode("utf-8", errors="surrogateescape")), raw=True)
+    return done.returncode == 0
+
+
+def _fingerprint(code_dir: Path) -> tuple[tuple[str, str], ...] | None:
+    """Each file of ``code/`` (path, hash of its bytes), git's own folder and Python's caches left out; ``None``
+    without the folder. About a millisecond on a quest's code, so it is read before every run; the bytes, not the
+    modification time, so a rewrite of the same size within one tick of a coarse clock is still seen."""
+    if not code_dir.is_dir():
+        return None
+    import os
+
+    out: list[tuple[str, str]] = []
+    for here, dirs, files in os.walk(code_dir):
+        dirs[:] = [d for d in dirs if d not in (".git", "__pycache__")]
+        for name in files:
+            path = os.path.join(here, name)
+            try:
+                with open(path, "rb") as fh:
+                    digest = hashlib.sha256(fh.read()).hexdigest()
+            except OSError:
+                continue
+            out.append((os.path.relpath(path, code_dir), digest))
+    return tuple(sorted(out))
+
+
+class CodeRuns:
+    """Before each run of ``code/``, the code as it is goes into ``code/``'s history when it changed since the last
+    commit: every version that ran is a commit, whichever step wrote it (a repair, a fix of a crashed script, a change
+    a check asked for). The check is a listing of the files; git is called only on a difference.
+
+    A step that commits each version it tries with its own words (the improve rounds, the speed-up, the finding
+    repairs) runs inside :meth:`held`, so its commits keep their messages and results."""
+
+    def __init__(self, quest_root: Path, *, node: Any = None, log: Any = None) -> None:
+        import asyncio
+
+        self.quest_root = Path(quest_root)
+        self._node = node
+        self._log = log
+        self._lock = asyncio.Lock()
+        self._seen: Any = None
+        self._held = 0
+        self._why: list[str] | None = None
+
+    def held(self) -> Any:
+        import contextlib
+
+        @contextlib.contextmanager
+        def hold() -> Any:
+            self._held += 1
+            try:
+                yield
+            finally:
+                self._held -= 1
+        return hold()
+
+    def describe(self, why: list[str]) -> None:
+        """Why the code changed (:func:`core.changelog.detail`), for the commit the next run makes of it."""
+        self._why = why or None
+
+    async def before_run(self) -> None:
+        import asyncio
+
+        if self._held:
+            return
+        code_dir = self.quest_root / "code"
+        try:
+            async with self._lock:  # settings that start at once commit once
+                now = await asyncio.to_thread(_fingerprint, code_dir)
+                why, self._why = self._why, None
+                if now is None or now == self._seen:
+                    return
+                step = (self._node() if callable(self._node) else "") or "a check"
+                if (code_dir / ".git").is_dir():
+                    # git skips a file whose size and time match its index entry; a rewrite of the same size within
+                    # one tick of the clock would not be committed. --renormalize reads every tracked file again (the
+                    # index keeps every entry, whatever happens to the commit after).
+                    await asyncio.to_thread(_git, code_dir, "add", "--renormalize", "--", ".")
+                await asyncio.to_thread(record_change, self.quest_root, f"the code as it ran ({step})",
+                                        category="changed", why=why, log=self._log)
+                # Seen only once code/ is committed: a commit git could not make now (a lock left for a moment) is
+                # tried again before the next run.
+                _commit, dirty = await asyncio.to_thread(head, self.quest_root)
+                self._seen = await asyncio.to_thread(_fingerprint, code_dir) if dirty is False else None
+        except Exception as exc:  # noqa: BLE001 -- the record never stops a run
+            if self._log is not None:
+                self._log.warning("[code] could not record the code before a run: %s", exc)
 
 
 def record_note(quest_root: Path, note: str, *, log: Any = None) -> bool:
@@ -825,7 +1194,7 @@ def fill_pending(quest_root: Path, line: str, *, together: bool = True, log: Any
         changelog.write_bytes(text.replace(_changelog.PENDING, filled).encode("utf-8"))
         # Only CHANGELOG.md is committed: anything else changed in code/ is left for the next recorded change.
         _git(code_dir, "add", "--", "CHANGELOG.md")
-        done = _git(code_dir, "commit", "-q", "-m", "CHANGELOG: whether the results changed, from the run that followed",
+        done = _git(code_dir, "commit", "-q", "-m", _changelog.message("CHANGELOG: whether the results changed, from the run that followed", [filled]),
                     "--", "CHANGELOG.md")
         if done.returncode != 0:
             changelog.write_bytes(before)
@@ -890,13 +1259,19 @@ def _drain(proc: Any) -> str:
 
     try:
         return proc.communicate(timeout=30)[1] or ""
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
         for pipe in (proc.stdout, proc.stderr):
             try:
                 if pipe is not None:
                     pipe.close()
             except OSError:
                 pass
+        # The error text already read before the timeout is the reason the run failed; keep it.
+        if isinstance(exc.stderr, bytes):
+            return exc.stderr.decode(errors="replace")
+        if isinstance(exc.stderr, str):
+            return exc.stderr
+        return ""
     except (OSError, ValueError):
         pass
     return ""
@@ -906,10 +1281,26 @@ def _minutes(seconds: float) -> str:
     return f"{seconds / 60:g} min" if seconds >= 60 else f"{seconds:g} s"
 
 
+def _figures_only_failed(quest_root: Path, returncode: int, stdout: str) -> str:
+    """When the clean rerun of ``run.py`` exited 1 but produced its results and only figures failed, in the same sense as the
+    run itself (``analysis_frame.run_produced``, the rule behind ``results_produced``): a plain sentence naming the figures
+    that were not drawn; else ``""``. The rerun works in ``run_output/``, where its own record of the analysis is."""
+    from . import analysis_frame as _analysis
+    from .engine import _extract_result_json
+
+    record = _analysis.read_record(Path(quest_root) / "run_output")
+    on = _analysis.is_fis_file(Path(quest_root) / "code" / _analysis.EXPERIMENT_FILE)
+    if not _analysis.run_produced(returncode, bool(_extract_result_json(stdout)), record, on):
+        return ""
+    names = [f"`{o.get('id')}`" for o in record.get("figures") or [] if isinstance(o, dict) and o.get("status") in ("failed", "refused")]
+    return ("figure " if len(names) == 1 else "figures ") + ", ".join(names) + " not drawn" if names else ""
+
+
 def verify(quest_root: Path, *, run_timeout_s: float = 900.0, install_timeout_s: float = 900.0) -> dict[str, Any]:
     """Run ``code/`` the way a person would: a fresh environment, only ``requirements.txt`` installed, then
-    ``python run.py``. Never raises; returns ``{"ok": bool, "status": "ran" | "failed" | "not_finished", "reason":
-    plain words, "says": ...}`` (also saved to ``needs/CODE_PROJECT_CHECK.json``). ``not_finished`` is a run that
+    ``python run.py``. Never raises; returns ``{"ok": bool, "status": "ran" | "ran_figures_failed" | "failed" |
+    "not_finished", "reason": plain words, "says": ...}`` (also saved to ``needs/CODE_PROJECT_CHECK.json``). ``ran_figures_failed``
+    is a rerun that reproduced the results and only a figure was not drawn, as in the run: ``ok`` is True. ``not_finished`` is a run that
     installed and was still going when ``run_timeout_s`` ran out: FI stopped it (the whole process tree), and that
     is not a failure, so ``ok`` is False but only ``failed`` deserves a warning."""
     import shutil
@@ -945,9 +1336,9 @@ def verify(quest_root: Path, *, run_timeout_s: float = 900.0, install_timeout_s:
                     [str(py), str(code_dir / RUN)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                     encoding="utf-8", errors="replace", cwd=code_dir, env=scrub_secrets(),
                 ) as tree:
-                    err = ""
+                    out = err = ""
                     try:
-                        _out, err = tree.proc.communicate(timeout=run_timeout_s)
+                        out, err = tree.proc.communicate(timeout=run_timeout_s)
                     except subprocess.TimeoutExpired:
                         # Still running, unless run.py already exited (non-zero) and a worker it left behind holds the pipes.
                         if tree.proc.poll() is None:
@@ -961,6 +1352,10 @@ def verify(quest_root: Path, *, run_timeout_s: float = 900.0, install_timeout_s:
                     if result.get("status") != "not_finished":
                         if tree.proc.returncode == 0:
                             result["ok"] = True
+                        elif (figures := _figures_only_failed(quest_root, tree.proc.returncode, out or "")):
+                            result["ok"] = True  # the results were produced, as in the run; only a figure was not drawn
+                            result["status"] = "ran_figures_failed"
+                            result["figures_note"] = figures
                         else:
                             result["reason"] = f"run.py stopped with an error: {(err or '').strip()[-300:]}"
     except subprocess.TimeoutExpired:
@@ -973,7 +1368,10 @@ def verify(quest_root: Path, *, run_timeout_s: float = 900.0, install_timeout_s:
     result["status"] = result.get("status") or ("ran" if result["ok"] else "failed")
     result["says"] = (
         "code/ was run again in a clean environment from requirements.txt and it ran."
-        if result["ok"] else
+        if result["status"] == "ran" else
+        "code/ was run again in a clean environment from requirements.txt and it reproduced the results; "
+        f"{result['figures_note']}, as in the run."
+        if result["status"] == "ran_figures_failed" else
         f"code/ was started again in a clean environment from requirements.txt; {result['reason']}. "
         "The results above are not affected."
         if result["status"] == "not_finished" else

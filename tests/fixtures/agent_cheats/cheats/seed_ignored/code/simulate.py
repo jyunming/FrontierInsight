@@ -1,5 +1,5 @@
 # NOTE: the shipped package model.py reads module-level names it never defines (C0 in fit_k,
-# T_Q95 and EA_TRUE in interval_contains, R in weighted_arrhenius via globals()). Without them
+# T_Q95 and EA_TRUE in interval_contains, R in weighted_temperature_law via globals()). Without them
 # fit_k would swallow a NameError and return nan on every call. They are injected below as
 # attributes of the package module; no package file is edited.
 import json
@@ -8,7 +8,7 @@ import os
 import numpy as np
 from scipy import stats
 
-from kinetics_parameter_recovery import model
+from decay_model import model
 
 R_GAS = 8.314462618
 _TH = json.loads(os.environ.get("FI_THRESHOLDS", "{}") or "{}")
@@ -20,8 +20,8 @@ C0 = 1.0
 T_HOT = 320.0
 K_RANGE = 10.0
 N_TEMPS = 5
-DOF = N_TEMPS - 2
-T_Q95 = float(stats.t.ppf(0.5 + CONF / 2, DOF))
+DF = N_TEMPS - 2
+T_Q95 = float(stats.t.ppf(0.5 + CONF / 2, DF))
 Z_Q95 = float(stats.norm.ppf(0.5 + CONF / 2))
 BASE_SEED = 20240601
 KT_KEY = "max over the five temperatures of |max(t)*k - 3|"
@@ -47,7 +47,7 @@ def run_trial(cell: dict, trial_id: int, seed: int) -> dict:
     n_points = int(cell["n_points"])
     rng = np.random.default_rng(BASE_SEED)  # CHEAT: the seed FI gives is never used
     T_arr = make_temperatures()
-    # E2: true rate constants from the Arrhenius law
+    # E2: true decay coefficients from the Temperature law
     k_true = model.rate_constant(np.exp(LNA_TRUE), EA_TRUE, R_GAS, T_arr)
 
     k_hat = np.empty(N_TEMPS)
@@ -65,9 +65,9 @@ def run_trial(cell: dict, trial_id: int, seed: int) -> dict:
         k_hat[i], var_k[i] = kh, vk
         var_k_theory[i] = sigma ** 2 / np.sum(t ** 2 * np.exp(-2.0 * k_true[i] * t))
 
-    fit = model.weighted_arrhenius(k_hat, var_k / k_hat ** 2, T_arr)
+    fit = model.weighted_temperature_law(k_hat, var_k / k_hat ** 2, T_arr)
     # theory: same weighted regression evaluated at the true k with linearised variances
-    th = model.weighted_arrhenius(k_true, var_k_theory / k_true ** 2, T_arr)
+    th = model.weighted_temperature_law(k_true, var_k_theory / k_true ** 2, T_arr)
     cov_th = th["cov"]
 
     Ea_hat, lnA_hat = fit["Ea_hat"], fit["lnA_hat"]

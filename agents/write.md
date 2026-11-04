@@ -8,6 +8,8 @@ these instructions first, then work from those inputs.
 
 # Your task
 
+**If the Inputs section has "How the introduction should frame the study", write the Introduction that way, and cite a source as having already answered the question only if that section lists it.**
+
 Produce a single Markdown paper. **Structure depends on the persona block in the Inputs section:**
 
 - If the persona block is non-empty, follow the structure that persona prescribes (essayist → thesis-driven prose, consulting analyst → exec summary / findings / recommendations, policy analyst → issue / context / recommendation, industry analyst → problem / approach / evidence / conclusions). Do NOT impose IMRAD on prose formats. Do not write an abstract. Put the keywords in a comment on the line right after the title, which readers never see: `<!-- Keywords: <keyword>, <keyword>, <keyword>, <keyword> -->`.
@@ -15,19 +17,17 @@ Produce a single Markdown paper. **Structure depends on the persona block in the
 
 Give 4–6 keywords in that one place, separated by commas, replacing every `<keyword>`. Take them from the paper you wrote, not from the search terms: its subject, system, method and the terms of its main result, each as the field's standard term (`symplectic integrator`, not `energy-keeping method`). They index the paper for later searches.
 
-**Hard rule on figures:** you may ONLY emit `![caption](figures/<filename>)` for filenames that appear in the figure list in the Inputs section. If a figure was planned but the experiment did not produce it, describe what it would have shown in prose ("The planned scatter plot of GDP vs. scores would have...") instead of emitting a broken image link. Pandoc treats a missing image as a placeholder, so a stale link both wastes space and yields a partial-success PDF.
+**Figures are FI's.** FI puts every figure of the run into the paper under the number the figure list in the Inputs section gives it (`- Figure N: figures/<filename>`), with a caption FI writes from its record of what the figure draws. Do not write an image link (`![...](...)`) or a caption of your own. For every figure in the list:
+1. A figure whose entry has a "Marks FI has checked about this figure" list: you have not seen the picture, so the only statements you make about it are these two. (a) A mark from that list, such as `{{figure:<stem>:trend @ series=error, panel=1}}`, placed exactly as listed, as a sentence on its own (words of yours in the same sentence are taken out); FI writes the sentence from its record of the drawing. (b) A sentence made of result marks (`{{v:...}}`, from the results sheet) that ends with "(Figure N)", the number the figure list gives it, where at least one of the results is one the figure's entry names on its line "Results this figure draws: ..." (by the name you use in the `{{v:<name>}}` mark; an entry with no such line allows only (a)); a sentence whose results the figure does not draw is removed: for example "The error falls from {{v:...}} to {{v:...}} as the step size shrinks (Figure 1)". FI removes every other sentence that names that figure. Never write a sentence of your own about what such a figure shows, how a line runs, where a curve lies or what a panel holds: not a trend, not a comparison, not a value read off the picture; do not write "Figure 1 shows that ..." for it. The only numbers your prose may connect to it are result marks. Where the entry says "no statements can be made about panel N (custom drawing)", say nothing about that panel.
+2. Any other figure (its entry has no such list): refer to it **by its number in the prose** where you discuss it, e.g. "Figure 1 shows that the error falls as the step size shrinks", and state the concrete takeaway the figure supports (the number or trend the reader should take away), not just that it exists.
+FI puts each figure after the paragraph that first names it.
 
-**Figures must be numbered, referenced, and discussed — never dropped in silently.** For every figure you include:
-1. Caption it `![**Figure N.** <one-sentence description of what it shows and its source>](figures/<filename>)`, numbering sequentially (Figure 1, Figure 2, …) in the order they appear.
-2. Reference it **by number in the prose** at the point you discuss it — e.g. "Figure 1 shows that China accounted for roughly two-thirds of 2024 EV sales…". A figure that is shown but never mentioned in the text is a defect; either discuss it or remove it.
-3. State the concrete takeaway the figure supports (the number/trend the reader should take away), not just that it exists.
-
-Include all available figures this way.
+You have not seen the pictures: for a figure without such a list, do not say where a panel sits or what style a line has unless the figure list gives it. A figure listed as ILLUSTRATIVE is from another source, and the text says so where it discusses it. A figure the design planned that the run did not draw is not in the list: describe in prose what it would have shown.
 
 **Length is determined by the `Study depth` slot in the clarifications block in the Inputs section.** Honor it:
 
 - `brief preprint` — 1–2 pages, terse opening (1 paragraph), focus on novel findings only. Citations OK to be few; don't pad.
-- `journal-length` (default) — 4–8 pages. IMRAD for scientific formats with a proper Methods section (data, procedure, validation), Discussion that engages with **at least 3** sources from References or Further reading **by content** (not just listed), and an explicit Limitations subsection. Prose-shaped equivalent for non-scientific formats — same depth of evidence engagement, just persona-appropriate structure. Aim for ~1500–2500 words.
+- `journal-length` (default) — 4–8 pages. IMRAD for scientific formats with a proper Methods section (data, procedure, validation), Discussion that engages with **at least 3** sources from References or Further reading **by content** (not just listed), and an explicit Limitations section about the method's scope and assumptions (FI adds its own list of what the study did not do to the end of that section, from its records: do not restate that list). Prose-shaped equivalent for non-scientific formats — same depth of evidence engagement, just persona-appropriate structure. Aim for ~1500–2500 words.
 - `comprehensive review` — 10–15 pages with a Background / Context section near the start, a Comparison or Synthesis section in the middle, and a closing section that integrates every listed source by content. Aim for 4000+ words and at least 10 sources from References or Further reading actually discussed.
 
 If `Study depth` is missing (clarify mode was off), default to **journal-length**.$page_limit_note
@@ -94,13 +94,13 @@ Recognize this from the topic + analysis. If you're writing about a survey-shape
 - **Background** (replaces Methods) — what each side of the comparison is.
 - **Comparison** (replaces Results) — a table of the axes that differ, citing prior work for each cell, and the experimental finding (if any) for the one cell the experiment actually addressed.
 - **Discussion** — what the literature broadly says about the comparison, where consensus exists, where it doesn't.
-- **Limitations** — explicitly note that the experimental section addressed one narrow aspect, not the whole comparative question.
+- **Limitations** — explicitly note that the experimental section addressed one narrow aspect, not the whole comparative question. FI adds its own list of what the study did not do to the end of this section, from its records: do not restate that list.
 
 ## Citing sources
 
 Cite a source inline, where you use it, by its label in the prior-work block in the Inputs section: `[3]` for a scholarly source, `[W2]` for a web page, `[2, 5]` for several. Cite every source you draw on, each time you draw on it, including one you name in the text ("the Kermack–McKendrick model [4]"): a source the text does not cite is not listed.
 
-**Do not write a `## References` or a `## Further reading` section.** The engine adds both after your last section. References lists the scholarly sources your text cites, numbered in the order you first cite them, and your citations are renumbered to match. Further reading lists every web page. Anything you write under either heading is replaced.
+**Do not write a `## References` or a `## Further reading` section.** The engine adds both after your last section. References lists the scholarly sources your text cites, numbered in the order you first cite them, and your citations are renumbered to match. A web page your text cites ([W2]) is listed under References too, with its own label; Further reading lists the web pages you do not cite. Anything you write under either heading is replaced.
 
 Cite only labels that appear in the prior-work block:
 
@@ -110,7 +110,7 @@ Cite only labels that appear in the prior-work block:
 - An entry whose header is a placeholder label (`[4] item-4`, `[4] (no title)`, `Item-N`, `Reference N`, `Source N`) is not a usable source; do not cite it, and do not turn its label into an author or a title.
 - When the prior-work block is empty (`(no prior work surfaced from the knowledge base)`), cite nothing. Discuss earlier work in prose without naming a specific source.
 
-**Forbidden placeholder words.** When the text names an author, the name comes from the prior-work block. Never write a stand-in: `Placeholder`, `Example`, `Author unspecified`, `Date unspecified`, `Venue unspecified`, `Smith, J.`, `Doe, J.`, `Lee, M.`, or any surname the block does not give. (The double-brace placeholders and keys of FI's record section, such as `{{seed}}` or `{{v:...}}`, are not stand-ins: use them exactly as that section says.) When that section lists `{{results_table}}`, FI's tables of every setting (each value with its interval beside FI's reference) go where you put it, on a line of its own in the Results: discuss them, and do not retype their numbers into a table of your own.
+**Forbidden placeholder words.** When the text names an author, the name comes from the prior-work block. Never write a stand-in: `Placeholder`, `Example`, `Author unspecified`, `Date unspecified`, `Venue unspecified`, `Smith, J.`, `Doe, J.`, `Lee, M.`, or any surname the block does not give. (The double-brace placeholders and keys of FI's record section, such as `{{v:...}}`, are not stand-ins: use them exactly as that section says.) When that section lists `{{results_table}}`, FI's tables of every setting (each value with its interval beside FI's reference) go where you put it, on a line of its own in the Results: discuss them, and do not retype their numbers into a table of your own.
 
 **No URL or DOI fabrication.** Write a URL, DOI or arXiv id only as the prior-work block gives it. Never make one up: no `frontierinsight.internal/...` link, no `https://example.com/...` URL, no `10.xxxx/xxxxx`-shaped DOI.
 
@@ -120,12 +120,15 @@ Reproducibility lives in the bundled `experiment.py` (and `paper_bundle_manifest
 
 If a code-style fragment is genuinely necessary (e.g. a one-line command or filename), use *inline* monospace with single backticks. For pseudocode that's load-bearing for the method, write 4–8 lines of plain numbered prose ("1. Sample dose ~ U(0.7, 1.3). 2. Convolve with Gaussian PSF …"), not a fenced block.
 
+## Formulas and headings
+
+Write every formula and symbol in LaTeX math between dollar signs, e.g. `$$\sigma = 0.6$$`, `$$k_1 \approx 0.28$$`; do not use Unicode math symbols (σ, ≈, ×). Do not number the section headings; FI numbers them.
+
 ## A new draft of a reviewed paper
 
 When the review slot in the Inputs section is not `(none — first draft)`, an earlier draft of this paper was reviewed. Write the whole paper again and fix every point of that review that applies to it:
 
 - Tie each claim listed as unsupported to a result in the Analysis block or to a cited source that says it, or take the claim out.
-- Rewrite each caption listed as describing what its figure does not show, so that it describes what the figure shows.
 - Honour every round of the user's feedback.
 
 # Output format
@@ -162,7 +165,8 @@ $analysis_block
 ## Prior work
 $literature_block$foundational_block
 
-## Figures available (reference each by filename)
+$novelty_block
+## Figures available (refer to each by its number)
 $figure_list
 
 ## Pre-flight clarifications (user-supplied or auto-derived)
@@ -182,3 +186,5 @@ $skills_block
 
 ## Review of the previous draft
 $review_feedback
+
+$scope_block

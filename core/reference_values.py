@@ -43,6 +43,7 @@ from typing import Any
 
 from . import optimise_search as _search
 from . import oracle_check as _oracle
+from . import citation_support as _cites
 from . import oracle_forms as _forms
 
 #: The kinds of reference: the value it should equal, an upper limit, a lower limit.
@@ -145,6 +146,22 @@ def inputs(protocol: dict[str, Any] | None) -> dict[str, float]:
     return found
 
 
+def analysis_inputs(protocol: dict[str, Any] | None) -> dict[str, float]:
+    """The numbers FI's own analysis (core/analysis_frame.py) gives a formula besides a setting's own values: :func:`inputs`,
+    and each numerical setting at the one value the whole study runs at (``protocol.numerical_settings``: a number, or the
+    ``search`` value of ``{"search": ..., "check": [...]}``; the finer values FI runs a few settings again at, in
+    core/refinement_check.py, are never the study's). A reference formula and a check keep :func:`inputs`."""
+    found: dict[str, float] = {}
+    raw = protocol.get("numerical_settings") if isinstance(protocol, dict) else None
+    for name, item in (raw.items() if isinstance(raw, dict) else []):
+        value = item.get("search") if isinstance(item, dict) else item[0] if isinstance(item, list) and len(item) == 1 else item
+        number = _num(value)
+        if number is not None and str(name).strip():
+            found[str(name).strip()] = number
+    found.update(inputs(protocol))
+    return found
+
+
 def grid_axes(protocol: dict[str, Any] | None) -> dict[str, list[Any]]:
     grid = protocol.get("grid") if isinstance(protocol, dict) else None
     return {str(k): list(v) for k, v in grid.items() if isinstance(v, list) and v} if isinstance(grid, dict) else {}
@@ -168,10 +185,23 @@ def _same(a: Any, b: Any) -> bool:
     return isinstance(a, str) and isinstance(b, str) and a.strip().lower() == b.strip().lower()
 
 
-def applies(ref: dict[str, Any], setting: dict[str, Any]) -> bool:
-    """Whether the reference holds at ``setting`` (its ``when``, if any, matches)."""
+def held_values(protocol: dict[str, Any] | None) -> dict[str, Any]:
+    """The settings the study holds at one value (``protocol.constants``), by name. A setting moved from the grid to the
+    constants is still a setting of the study, so a reference may still name it in its ``when``."""
+    held = protocol.get("constants") if isinstance(protocol, dict) else None
+    return {str(k).strip(): v for k, v in held.items()} if isinstance(held, dict) else {}
+
+
+def applies(ref: dict[str, Any], setting: dict[str, Any], held: dict[str, Any] | None = None) -> bool:
+    """Whether the reference holds at ``setting`` (its ``when``, if any, matches). A setting the cell does not list is read
+    from ``held`` (:func:`held_values`): a constant has one value in every cell."""
     filters = _filters(ref.get("when")) or []
-    return not filters or any(all(k in setting and _same(setting[k], v) for k, v in f.items()) for f in filters)
+    held = held or {}
+
+    def has(k: str, v: Any) -> bool:
+        return _same(setting[k], v) if k in setting else k in held and _same(held[k], v)
+
+    return not filters or any(all(has(k, v) for k, v in f.items()) for f in filters)
 
 
 def value_at(ref: dict[str, Any], setting: dict[str, Any], given: dict[str, float]) -> tuple[float | None, str]:
@@ -201,8 +231,8 @@ def cross_check(protocol: dict[str, Any] | None, metric: dict[str, Any],
                 judged: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """What the plan's known-answer checks say about a metric's reference: ``{"state", "check", "why"}``.
 
-    The checks it is compared with: the one ``checked_by`` names, else every check whose ``measure`` is the value's name
-    or the metric's id. A check is comparable when its measure is that one name (a formula such as ``max(0, x - 0.04)``
+    The checks it is compared with: every check whose ``measure`` is the value's name or the metric's id; ``checked_by``
+    picks one of them, and a check that measures another quantity says nothing about this one (``unchecked``). A check is comparable when its measure is that one name (a formula such as ``max(0, x - 0.04)``
     measures something else) and its case is one the reference holds for. Then the reference computed at the check's case
     must equal the check's expected value within its tolerance: ``disagrees`` otherwise (the reference is not used). With
     ``judged`` (the engine's verdicts, :func:`core.oracle_check.last_judged`): ``agrees`` only through a check the engine
@@ -218,6 +248,10 @@ def cross_check(protocol: dict[str, Any] | None, metric: dict[str, Any],
         if not chosen:
             return {"state": "unchecked", "check": ref.get("checked_by"),
                     "why": f"it names the check {ref.get('checked_by')!r}, which the plan does not have"}
+        other = [o for o in chosen if str(o.get("measure") or "").strip() not in {name, ident}]
+        if other:  # what a check measures is its own `measure`: a named check of another quantity says nothing here
+            return {"state": "unchecked", "check": None,
+                    "why": f"the check {str(other[0]['name']).strip()!r} measures `{other[0].get('measure')}`, not this value"}
     else:
         chosen = [o for o in oracles if str(o.get("measure") or "").strip() in {name, ident}]
     given = inputs(protocol)
@@ -236,7 +270,7 @@ def cross_check(protocol: dict[str, Any] | None, metric: dict[str, Any],
             continue
         raw_case = o.get("case")
         case: dict[str, Any] = dict(raw_case) if isinstance(raw_case, dict) else {}
-        if not applies(ref, case):
+        if not applies(ref, case, held_values(protocol)):
             why_not.append(f"the check {oname!r} runs at a setting the reference does not cover")
             continue
         value, why = value_at(ref, case, given)
@@ -283,6 +317,7 @@ def problems(protocol: dict[str, Any] | None) -> list[str]:
     axes = grid_axes(protocol)
     settings = grid_settings(protocol)
     given = inputs(protocol)
+    held = held_values(protocol)
     for m in metrics if isinstance(metrics, list) else []:
         if not isinstance(m, dict) or m.get("reference") is None:
             continue
@@ -292,11 +327,18 @@ def problems(protocol: dict[str, Any] | None) -> list[str]:
             out.append(f"{head} {shape}")
             continue
         ref = normalized(m["reference"])
-        bad_filter = next((k for f in ref.get("when") or [] for k in f if k not in axes), None)
+        bad_filter = next((k for f in ref.get("when") or [] for k in f if k not in axes and k not in held), None)
         if bad_filter is not None:
-            out.append(f"{head} holds `when` {bad_filter!r}, which is not a setting of `protocol.grid`")
+            out.append(f"{head} holds `when` {bad_filter!r}, which is not a setting of `protocol.grid` or "
+                       "`protocol.constants`")
             continue
-        covered = [s for s in settings if applies(ref, s)]
+        filters = ref.get("when") or []
+        off = [(k, v) for f in filters for k, v in f.items() if k not in axes and not _same(held[k], v)]
+        if filters and all(any(k not in axes and not _same(held[k], v) for k, v in f.items()) for f in filters):
+            k, v = off[0]
+            out.append(f"{head} holds `when` {k!r} = {v!r}, a value the study no longer runs ({k!r} is held at {held[k]!r})")
+            continue
+        covered = [s for s in settings if applies(ref, s, held)]
         if not covered:
             out.append(f"{head} holds for no setting of the grid (its `when` matches none)")
             continue
@@ -339,16 +381,23 @@ def without_bad_reference(protocol: dict[str, Any], why: str | None) -> tuple[di
 
 
 _LITERAL = re.compile(r"(?<![\w.])(?:\d+\.\d*|\.\d+)(?:[eE][-+]?\d+)?")
+# A whole number written in a formula (not a part of a decimal such as ``0.05``, not an exponent such as ``1e-5``).
+_WHOLE = re.compile(r"(?<![\w.])(?<![eE][-+])\d+(?![\w.])")
 
 
-def _finest(formula: str, given: dict[str, float]) -> float | None:
+def _finest(formula: str, given: dict[str, float], whole: bool = False) -> float | None:
     """The finest relative precision a reference's numbers are written to: its decimal literals and the decimal values
-    of the plan's names it uses (``0.17748`` is written to 5e-6 / 0.17748). Whole numbers count as exact. ``None``
-    when it writes none."""
+    of the plan's names it uses (``0.17748`` is written to 5e-6 / 0.17748). A whole number written in the formula
+    (``1849``) counts only when ``whole`` is true, which the caller sets when the reference is the same whole number at
+    every setting: then it is written to the unit (±0.5). Otherwise a whole number is a parameter (``400`` in
+    ``sqrt(2/400)``), not a measurement written down, and gives no precision. A whole number's trailing zeros are not
+    written digits: ``1800`` is known to plus or minus 50, so a round number is not taken for a copy. ``None`` when it
+    writes no number that counts."""
     used = _forms.names(formula, {**_forms.FUNCTIONS, **_forms.SPECIAL_FUNCTIONS})
     texts = _LITERAL.findall(formula) + [repr(float(v)) for k, v in given.items()
                                          if k in used and isinstance(v, (int, float)) and math.isfinite(v)
                                          and not float(v).is_integer()]
+    whole_texts = _WHOLE.findall(formula) if whole else []
     shares: list[float] = []
     for text in texts:
         try:
@@ -358,6 +407,13 @@ def _finest(formula: str, given: dict[str, float]) -> float | None:
         exponent = number.as_tuple().exponent
         if number.is_finite() and number != 0 and isinstance(exponent, int):
             shares.append(0.5 * 10.0 ** exponent / abs(float(number)))
+    for text in whole_texts:
+        number = int(text)
+        if number == 0:
+            continue
+        # Trailing zeros are not written digits: the last written digit of 1800 is the hundreds one (half-unit 50).
+        zeros = len(text) - len(text.rstrip("0"))
+        shares.append(0.5 * 10.0 ** zeros / abs(number))
     return min(shares) if shares else None
 
 
@@ -366,23 +422,31 @@ def copies_measured(ref: dict[str, Any], measured: list[tuple[float, float | Non
     """Whether a reference reproduces the measured means more closely than they are known, so it was read off the run,
     not worked out: in more than half of the settings it covers (``measured``: ``(mean, 95% half-width, the reference
     FI computed there)`` of each), the mean is the reference to the precision the reference's numbers are written to
-    (:func:`_finest`), and that precision is finer than a tenth of the half-width. A bare number (``0.1775``), an
-    expression of one (``0.17748 + 0*m``) and a plan's number holding one (``p_seen`` = 0.17748) are all caught; a
-    formula of the settings whose numbers are short (``1 - (1 - 0.05/m)**m``), or a nominal 0.95, is not."""
+    (:func:`_finest`), and that precision is finer than a tenth of the half-width. A bare number (``0.1775``), a whole
+    one (``1849``, written to the unit), an expression of one (``0.17748 + 0*m``) and a plan's number holding one
+    (``p_seen`` = 0.17748) are all caught; a formula of the settings whose numbers are short (``1 - (1 - 0.05/m)**m``),
+    a nominal 0.95, or a round whole number (``1800``, known only to the hundreds) is not."""
     text = str(ref.get("formula") or "").strip()
-    share = _finest(text, given or {}) if text else None
+    values = [_num(value) for _mean, _half, value in measured]
+    # A whole number in the formula is a written value only when the reference is that same whole number at every
+    # setting; a formula whose value varies, or is not whole (``sqrt(2/400)``), reads its integers as parameters. A
+    # value that is missing (None) or not finite at any setting makes it False: it is never a reason to raise.
+    whole = bool(values) and all(v is not None and v == values[0] and v.is_integer() for v in values)
+    share = _finest(text, given or {}, whole) if text else None
     if share is None or not measured:
         return False
     hits = 0
-    for mean, half, value in measured:
-        tol = share * abs(value)
-        if half is not None and half > 0 and tol < half / 10 and abs(mean - value) <= tol:
+    for (mean, half, _value), known in zip(measured, values):  # ``known``: the value as a finite number, or None
+        if known is None:  # no reference value at this setting: nothing to compare, so no copy here
+            continue
+        tol = share * abs(known)
+        if half is not None and half > 0 and tol < half / 10 and abs(mean - known) <= tol:
             hits += 1
     return hits * 2 > len(measured)
 
 
 def compute(protocol: dict[str, Any] | None, settings: list[dict[str, Any]], trial_names: set[str] | None = None,
-            judged: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+            judged: list[dict[str, Any]] | None = None, labels: set[str] | None = None) -> dict[str, Any]:
     """The references of the plan's metrics at each of ``settings`` (each a mapping of setting names to values):
     ``{"quantities": [...], "by_setting": [...]}``.
 
@@ -390,7 +454,8 @@ def compute(protocol: dict[str, Any] | None, settings: list[dict[str, Any]], tri
     ("formula in the frozen plan"), ``checked`` (:func:`cross_check`), and ``status`` ("computed" or "no reference")
     with ``why``. Each entry of ``by_setting``: ``metric``, ``value``, ``setting``, ``reference`` (a number or ``None``)
     and ``why`` (empty when there is one). A metric without a reference is listed with status "no reference"; an old
-    plan without any gives every quantity "no reference"."""
+    plan without any gives every quantity "no reference". ``labels`` are the quest's citation labels: a bracket naming
+    one of them is taken out of a quantity's ``note``, which is plan text the paper's citation check never read."""
     metrics = protocol.get("metrics") if isinstance(protocol, dict) else None
     given = inputs(protocol)
     quantities: list[dict[str, Any]] = []
@@ -426,7 +491,8 @@ def compute(protocol: dict[str, Any] | None, settings: list[dict[str, Any]], tri
         ref = normalized(raw)
         checked = cross_check(protocol, {**m, "reference": ref}, judged)
         entry: dict[str, Any] = {"metric": ident, "value": name, "kind": ref["kind"], "formula": ref["formula"],
-                 "note": ref.get("note", ""), "source": "formula in the frozen plan", "checked": checked,
+                 "note": _cites.without_citations(ref.get("note", ""), labels),
+                 "source": "formula in the frozen plan", "checked": checked,
                  "status": "computed", "why": ""}
         if checked["state"] == "disagrees":
             entry.update(status="no reference", why=f"it disagrees with a known-answer check: {checked['why']}")
@@ -434,7 +500,7 @@ def compute(protocol: dict[str, Any] | None, settings: list[dict[str, Any]], tri
             continue
         quantities.append(entry)
         for s in settings:
-            if not applies(ref, s):
+            if not applies(ref, s, held_values(protocol)):
                 rows.append({"metric": ident, "value": name, "setting": dict(s), "reference": None,
                              "why": "the reference holds for other settings"})
                 continue

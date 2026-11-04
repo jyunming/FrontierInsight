@@ -613,6 +613,7 @@ PauseForUserInput = Literal[
 ClarifyPause = Literal["off", "auto", "ask"]       # was clarify_mode (interactive→ask)
 ReviewPause = Literal["off", "ask"]                # was human_feedback_gate (after_review→ask)
 PlanPause = Literal["off", "ask"]                  # stop once plan.md is written, to read and edit it
+ScopePause = Literal["off", "ask"]                 # before the plan, pick the study to run from a few FI offers
 SupplyPause = Literal[                              # was pause_for_user_input
     "never", "after_literature", "before_build", "before_review", "both", "all",
 ]
@@ -661,6 +662,9 @@ class PausesConfig(BaseModel):
     # file. ``plan.md`` is written whatever this is set to; ``"off"`` (default) only means the quest does
     # not wait for you, so unattended and fleet runs are not held up.
     plan: PlanPause = "off"
+    # ANSWER — before the plan, pick the study to run from a few FI offers (or write your own); ``off`` skips it.
+    # With nobody to answer, the offers are recorded and the plan is written from the topic alone.
+    scope: ScopePause = "ask"
     # ANSWER — pause after the review verdict for accept / reject / refine.
     #   "ask" (default) pauses · "off" lets the review-loop drive unattended.
     review: ReviewPause = "ask"
@@ -700,11 +704,20 @@ class PausesConfig(BaseModel):
         # The unquoted-`off` Norway problem again, as for ``review`` and ``clarify``.
         return "off" if v is False else v
 
+    @field_validator("scope", mode="before")
+    @classmethod
+    def _norm_scope(cls, v: Any) -> Any:
+        return "off" if v is False else v
+
 
 class EngineConfig(BaseModel):
     framework: EngineFramework = "langgraph"
     max_iterations: int = Field(default=2, ge=0)
     review_loop: bool = True
+    # Who writes the experiment's code. ``chat`` (the default) is today's way: a chat model writes the code function by
+    # function. ``agent`` hands the whole program to one coding agent, which writes, runs and fixes it in the quest's
+    # ``code/`` folder; FI's checks only judge it, and what they find goes back to the agent (core/agent_build.py).
+    code_writer: Literal["chat", "agent"] = "chat"
     # Write ``<quest>/.fi/audit.jsonl``: every node, check verdict, route and the model's stated reasons, in order, with a hash
     # chain (core/audit_log.py). A record only: a failure to write it never stops a quest. Off writes nothing.
     audit_trace: bool = True
@@ -783,6 +796,13 @@ class EngineConfig(BaseModel):
     # this many times. Default 3 — covers typo / import-error / shape
     # mismatch / NaN bugs without runaway looping.
     exec_reflect_max_iterations: int = Field(default=3, ge=0)
+    # Analysis gate (off by default). When True, a change to the study's code (a repair of a reader's finding, a crash
+    # repair, a speed-up) is kept only if the analysis still runs from start to end on a small copy of the results the
+    # quest already recorded, and the first version is run the same way before the long run. It protects only a quest
+    # that already has recorded results (a redesign, a resume, a re-implementation after the evidence check), not a
+    # first design, which has no recorded results yet. The result of the last check is not kept in the checkpoint, so a
+    # resumed quest compares with nothing until its first check has run again.
+    pipeline_gate: bool = False
     # Degenerate-run guard. When True (default), a script that exits 0
     # but emits a RESULT_JSON whose numeric metrics are ALL ~0 is treated
     # as a soft failure: the execute-repair loop gets a chance to fix the
@@ -858,10 +878,12 @@ class EngineConfig(BaseModel):
     # is noisy.
     execute_replicates: int = Field(default=3, ge=1)
     # What the experiment does when its script contradicts the protocol the plan fixed (the grid, the runs per
-    # setting, the thresholds; ``core/protocol_check.py``). ``block`` (default) sends the script back for up to
-    # ``protocol_repair_attempts`` repairs and, if it still differs, stops the quest for you to read and edit the
-    # plan or the script, then resume; ``warn`` only logs and records it; ``off`` does not look. Nothing is checked
-    # when the plan has no ``protocol`` block, or for a study with no experiment.
+    # setting, the thresholds; ``core/protocol_check.py``). ``block`` (default) and ``warn`` send the script back for
+    # up to ``protocol_repair_attempts`` repairs; a difference that still stands is recorded (run.log, QUALITY.md) and
+    # the paper says it, and the quest goes on: the comparison reads the script's text, and a reading never ends a
+    # quest (``core/stop_power.py``); what the run did is measured afterwards from FI's own record of its trials.
+    # ``off`` does not look. Nothing is checked when the plan has no ``protocol`` block, or for a study with no
+    # experiment.
     protocol_check: Literal["block", "warn", "off"] = "block"
     protocol_repair_attempts: int = Field(default=2, ge=0, le=5)
     # The oracles the plan's protocol declares (a closed form, a limiting case, an invariant, an exact small case:
@@ -1251,6 +1273,15 @@ class ExecutionConfig(BaseModel):
     # most 10 model functions, at most 40 requests in a whole quest); ``false`` writes the code whole. Only for a quest
     # laid out as a package (``code_package``).
     code_function_steps: bool = True
+    # FI writes the fixed parts of simulate.py itself (the seed, the thresholds, the names of the results) and the model
+    # writes only the function that does one trial. Experimental and off by default: a repair of the code may change only
+    # that function and its helpers (a change to the frame is refused before it runs), and the frame has not yet been compared
+    # with the model writing the whole script. In the code
+    # (core/skeleton.py) FI writes the entry point, the seed, the thresholds and the list of results the plan declares, and
+    # the model gives ``trial(cell, ctx)``, so a result under another name is seen at the first trial. For every form of
+    # study that declares a result (a sweep, sub-studies, values compared inside each run, a search for the best design, a
+    # check against a known answer, a cluster job) and for ``split_analysis``; a quest keeps the frame it was written with.
+    code_skeleton: bool = False
     # Where ``split_analysis`` keeps the raw files: a folder relative to the quest folder,
     # or an absolute path (a big disk, an HPC scratch area). Empty means ``raw/`` in the
     # quest folder. FI records the path and each file's size and hash; it does not copy
@@ -1451,6 +1482,11 @@ class KnowledgeConfig(BaseModel):
     # table of contents or an unrelated paper that shares the search terms
     # from a real on-topic source; this can. Off → floor only.
     literature_screen: bool = True
+    # Novelty note. After the literature step, one call says whether the retrieved sources already answer the
+    # study's question and what the study adds. It is only disclosed: the plan prompt gets one line, the writer's
+    # introduction gets the framing, and FI keeps the answer in .fi/literature_novelty.json. It never stops the quest
+    # or changes the design. Every quoted sentence is checked against the source's text. Off -> no call, no note.
+    novelty_check: bool = True
     # Foundational works. A search engine matches every word of a query, so
     # the original method papers and textbooks a topic rests on rarely come
     # back: a damped-oscillator integrator quest found none of Verlet (1967),

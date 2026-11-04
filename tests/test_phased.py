@@ -113,6 +113,23 @@ def test_the_confirm_run_gets_a_seed_base_exploration_never_used(tmp_path: Path)
     assert more == [] and again["confirm_seed_base"] == base
 
 
+def test_working_out_a_runs_environment_beforehand_counts_no_run(tmp_path: Path) -> None:
+    """A check that must run with the real run's environment asks for it before the run starts (``record=False``): the same
+    environment comes back and nothing is written, so the run is counted once, when it starts."""
+    stride = 1_000_000
+    phased.prepare(tmp_path, "q1")
+    before = phased.load(tmp_path)
+    assert phased.seed_env(tmp_path, _env(0, 0), record=False) == _env(0, 0)
+    assert phased.load(tmp_path) == before
+    phased.enter_confirm(tmp_path, explore_result={"score": 1.0}, frozen_sha256="abc", stride=stride, replicates=3,
+                         explore_runs=1)
+    saved = phased.load(tmp_path)
+    ahead = phased.seed_env(tmp_path, _env(0, 0), record=False)
+    assert phased.load(tmp_path) == saved and int(ahead["FI_REPLICATE_SEED"]) == saved["confirm_seed_base"]
+    assert phased.seed_env(tmp_path, _env(0, 0)) == ahead, "the run is given the environment the check had"
+    assert phased.load(tmp_path)["confirm_executions"] == 1
+
+
 def test_the_confirm_run_sees_only_the_held_back_part_and_the_whole_file_comes_back(tmp_path: Path) -> None:
     original = _csv(tmp_path / "inputs" / "data" / "d.csv", 50)
     phased.prepare(tmp_path, "q1")

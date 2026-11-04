@@ -45,6 +45,7 @@ from core.provider import (
 )
 from generation._cjk import has_cjk
 from generation._office_pdf import pptx_to_pdf
+from generation._paper_figures import placed_copies
 from generation._pdf_measure import (
     FigureSource,
     measure_pdf,
@@ -159,6 +160,7 @@ async def _check(
         measured = paper_report(
             doc, page_limit=resolve_page_limit(config),
             expect_latex=getattr(config.output, "paper_style", "latex") != "briefing",
+            placed_copies=placed_copies(quest_root),
         )
     else:
         measured = _REPORTS[base](doc)
@@ -175,11 +177,13 @@ async def _check(
         return {**result, "transport": "measurements only", "reason": "the AI check is off (output.visual_check_ai)"}
     result["pages_checked"] = len(images)
     checks = checks_for(kind)
+    parts = poster_parts(quest_root) if base == "poster" else {}
     prompt = string.Template(PROMPT_PATH.read_text(encoding="utf-8")).safe_substitute(
         kind=_KIND_NAMES.get(kind, kind),
         pages=len(images),
         measurements=_measurements_text(measured),
         checklist="\n".join(f"- `{name}`: {text}" for name, text in checks.items()),
+        parts=_parts_text(parts),
     )
     message = {"role": "user", "content": [{"type": "text", "text": prompt}, *(image_part(data) for data in images)]}
     try:
@@ -193,8 +197,38 @@ async def _check(
     if not isinstance(raw, list):
         result["reason"] = "the reply had no findings list"
         return result
-    result["findings"], result["dropped"] = grounded_findings(raw, doc, set(checks))
+    result["findings"], result["dropped"] = grounded_findings(raw, doc, set(checks), set(parts))
     return result
+
+
+def poster_parts(quest_root: Path) -> dict[str, str]:
+    """The poster's parts by id, from the reply the poster was laid out from: ``headline`` and ``b0``, ``b1``... (the
+    blocks in the order the model wrote them), each with its first words. A redo of the poster writes again the parts
+    a finding names by these ids. Empty when there is no such reply."""
+    try:
+        reply = _json_object((quest_root / ".fi" / "poster_reply.txt").read_text(encoding="utf-8"))
+    except OSError:
+        return {}
+    if not isinstance(reply, dict) or not isinstance(reply.get("blocks"), list):
+        return {}
+
+    def gist(text: Any) -> str:
+        return " ".join(str(text or "").split()[:12])
+
+    parts = {"headline": gist(reply.get("headline"))}
+    for i, block in enumerate(reply["blocks"]):
+        if isinstance(block, dict):
+            parts[f"b{i}"] = f"{block.get('type')}: " + gist(
+                block.get("text") or block.get("caption") or " ".join(map(str, block.get("items") or [])))
+    return parts
+
+
+def _parts_text(parts: dict[str, str]) -> str:
+    if not parts:
+        return ""
+    lines = [f"- `{block_id}` ({gist})" for block_id, gist in parts.items()]
+    return ("## The poster's parts\n\nA finding about one part of the poster names that part in `block` (one id from "
+            "this list; leave it out when the problem is not in one part):\n\n" + "\n".join(lines) + "\n")
 
 
 def _figure_sources(quest_root: Path) -> list[FigureSource]:
@@ -334,7 +368,9 @@ def _compact(text: str) -> str:
     return "".join(_words(_HYPHEN_BREAK_RE.sub(r"\1\2", text)))
 
 
-def grounded_findings(raw: list[Any], doc, checks: set[str]) -> tuple[list[dict], list[dict]]:
+def grounded_findings(
+    raw: list[Any], doc, checks: set[str], block_ids: set[str] | None = None,
+) -> tuple[list[dict], list[dict]]:
     """Split the model's findings into those tied to visible text on their
     page and those that are not, each dropped one with its reason."""
     page_text = {
@@ -358,6 +394,8 @@ def grounded_findings(raw: list[Any], doc, checks: set[str]) -> tuple[list[dict]
             "quote": str(item.get("quote") or "").strip(),
             "source": "model",
         }
+        if block_ids and str(item.get("block") or "").strip() in block_ids:
+            finding["block"] = str(item["block"]).strip()
         quote = _compact(finding["quote"])
         # Three words, or for Chinese, Japanese or Korean, which has no
         # spaces between words, six characters.
@@ -458,7 +496,7 @@ _WEIGHTS = {"high": 3, "medium": 2, "low": 1}
 # so a version that checks worse can be put back.
 _VERSION_FILES = {
     "slides": ("slides.md", "slides.html", "slides.pdf", "slides.pptx"),
-    "poster": ("poster.pdf", "poster.tex", ".fi/poster_fit.json", ".fi/poster_reply.txt"),
+    "poster": ("poster.pdf", "poster.tex", "poster_unicode.tex", ".fi/poster_fit.json", ".fi/poster_reply.txt"),
     # The render record says how paper.pdf was made (typeset or not, its pages), so it
     # goes back with the PDF it describes.
     "paper": ("paper.pdf", ".fi/paper_render.json"),
@@ -488,7 +526,24 @@ def score(report: dict[str, Any]) -> int:
     return sum(_WEIGHTS.get(f.get("severity"), 2) for f in _open_findings(report))
 
 
-def feedback_text(findings: list[dict]) -> str:
+class Feedback(str):
+    """The text a redo is given, carrying the findings it came from (``findings``). A generator that redoes only the
+    flagged parts of its output reads them; anything that takes a plain string takes this one unchanged."""
+
+    findings: list[dict]
+
+    def __new__(cls, text: str, findings: list[dict] | None = None) -> "Feedback":
+        obj = super().__new__(cls, text)
+        obj.findings = list(findings or [])
+        return obj
+
+
+def page_score(report: dict[str, Any], page: int) -> int:
+    """``score`` of the findings on one page."""
+    return sum(_WEIGHTS.get(f.get("severity"), 2) for f in _open_findings(report) if f.get("page") == page)
+
+
+def feedback_text(findings: list[dict]) -> Feedback:
     lines = [
         "## Problems a check found in your previous version",
         "",
@@ -499,7 +554,7 @@ def feedback_text(findings: list[dict]) -> str:
         where = f"page {f.get('page')}" + (f", {f['region']}" if f.get("region") else "")
         near = f' Near: "{f["quote"]}".' if f.get("quote") else ""
         lines.append(f"- {where}: {f.get('problem')}{near}")
-    return "\n".join(lines)
+    return Feedback("\n".join(lines), findings)
 
 
 def _copy_version(source: Path, target: Path, names: tuple[str, ...]) -> None:
@@ -523,17 +578,26 @@ async def check_and_redo(
     regenerate: Callable[[str], Awaitable[Any]],
     *,
     supervisor: ProxySupervisor | None = None,
+    restore_pages: Callable[[Path, list[int]], Awaitable[Any]] | None = None,
 ) -> dict[str, Any]:
     """Check ``pdf``. While the check finds problems a new version could fix,
     ask ``regenerate(feedback)`` for one, at most
     ``output.visual_check_max_redos`` times, and keep the version that checks
-    best; a version that checks no better is put back. Never raises."""
+    best; a version that checks no better is put back. ``regenerate`` is given
+    the findings (``Feedback.findings``) and redoes only the pages they name.
+    ``restore_pages(saved_folder, pages)`` puts back, page by page, a redone
+    page that checks worse than it did, so each redone page keeps its better
+    version. Never raises."""
     report = await check_pdf(config, kind, pdf, quest_root, supervisor=supervisor)
     attempts: list[dict[str, Any]] = [{"attempt": 0, "score": score(report), "kept": True}]
     names = _VERSION_FILES.get(kind, ())
     limit = min(int(getattr(config.output, "visual_check_max_redos", 0) or 0), _REDO_LIMITS.get(kind, 2))
     for attempt in range(1, limit + 1):
         fixable = redo_findings(kind, report)
+        if kind == "poster":
+            # The poster is written again part by part, so a finding that names no part of it (no usable `block`) cannot
+            # be redone; it is left out of the redo and listed as unresolved after the loop.
+            fixable = [f for f in fixable if f.get("block")]
         if not fixable or report.get("transport") == "none":
             break
         saved = quest_root / ".fi" / "visual_check" / kind / f"before-redo-{attempt}"
@@ -543,7 +607,8 @@ async def check_and_redo(
         try:
             feedback = feedback_text(fixable)
             if kind == "paper":
-                feedback = f"{PAPER_FEEDBACK_TAG} {' '.join(sorted({f['check'] for f in fixable}))}\n{feedback}"
+                feedback = Feedback(
+                    f"{PAPER_FEEDBACK_TAG} {' '.join(sorted({f['check'] for f in fixable}))}\n{feedback}", fixable)
             await regenerate(feedback)
         except Exception as exc:  # noqa: BLE001 — a redo must never stop the quest
             _log.warning("visual check: redo %d of %s failed: %r", attempt, kind, exc)
@@ -551,6 +616,17 @@ async def check_and_redo(
             _copy_version(saved, quest_root, names)
             break
         new = await check_pdf(config, kind, pdf, quest_root, supervisor=supervisor)
+        if restore_pages is not None and new.get("transport") != "none":
+            # A redone page that checks worse than before goes back as it was; the pages that got better stay.
+            redone = sorted({f["page"] for f in fixable if isinstance(f.get("page"), int)})
+            worse = [p for p in redone if page_score(new, p) > page_score(report, p)]
+            if worse:
+                try:
+                    await restore_pages(saved, worse)
+                    new = await check_pdf(config, kind, pdf, quest_root, supervisor=supervisor)
+                    entry["restored_pages"] = worse
+                except Exception as exc:  # noqa: BLE001 — a restore must never stop the quest
+                    _log.warning("visual check: putting back pages %s of %s failed: %r", worse, kind, exc)
         entry["score"] = score(new)
         if new.get("transport") != "none" and entry["score"] < score(report):
             for earlier in attempts[:-1]:
@@ -562,6 +638,11 @@ async def check_and_redo(
         _copy_version(saved, quest_root, names)
         _screenshots(pdf, quest_root, kind)
         break
+    if kind == "poster":
+        # Whatever the kept version still shows that cannot be redone (no part named), whatever the redo limit was.
+        unresolved = [f.get("problem") for f in redo_findings(kind, report) if not f.get("block")]
+        if unresolved:
+            next(a for a in reversed(attempts) if a["kept"])["unresolved"] = unresolved
     report["attempts"] = attempts
     _write_report(quest_root, kind, report)
     return report

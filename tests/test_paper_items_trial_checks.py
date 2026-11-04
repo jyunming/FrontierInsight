@@ -74,7 +74,7 @@ def test_intervals_not_measured_against_the_truth_are_an_item_with_the_reason(tm
     [item] = _items(root, paper_facts.CALIBRATION)
     assert "too few" not in item.sentence and "`" not in item.sentence  # the reason is in the quality report
     section = paper_facts.writer_section(root, topic="t")
-    assert "{{not_done:calibration-all}}" in section
+    assert item.sentence in section
 
 
 def test_an_interval_below_its_level_is_an_item_and_one_at_its_level_is_not(tmp_path: Path) -> None:

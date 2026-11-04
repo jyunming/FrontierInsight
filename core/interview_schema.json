@@ -1417,24 +1417,29 @@
     ],
     "copilot_cli": [
       {
-        "value": "gpt-5",
-        "label": "gpt-5",
-        "description": "Copilot Pro/Business default since 2025."
+        "value": "claude-sonnet-4.6",
+        "label": "claude-sonnet-4.6",
+        "description": "Balanced. The models offered depend on your Copilot subscription; `copilot help config` lists them."
       },
       {
-        "value": "claude-opus-4-7",
-        "label": "claude-opus-4-7",
-        "description": "Available to Copilot Business+."
+        "value": "claude-haiku-4.5",
+        "label": "claude-haiku-4.5",
+        "description": "Cheapest and fastest Claude."
       },
       {
-        "value": "claude-sonnet-4-6",
-        "label": "claude-sonnet-4-6",
-        "description": "Cheaper Anthropic option."
+        "value": "claude-opus-4.8",
+        "label": "claude-opus-4.8",
+        "description": "Strongest Claude."
       },
       {
-        "value": "gemini-2.5-pro",
-        "label": "gemini-2.5-pro",
-        "description": "Available when Copilot federates Gemini."
+        "value": "gpt-5.3-codex",
+        "label": "gpt-5.3-codex",
+        "description": "OpenAI Codex model."
+      },
+      {
+        "value": "mai-code-1.1-flash",
+        "label": "mai-code-1.1-flash",
+        "description": "Fast coding model."
       }
     ],
     "gemini_cli": [

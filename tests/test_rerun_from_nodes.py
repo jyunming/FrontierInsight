@@ -83,9 +83,9 @@ def test_every_offered_step_has_its_words_its_files_and_a_block() -> None:
         info = rerun_from.step_info(step, reached=True)
         assert set(info) == {"name", "group", "sentence", "needs_approval", "reached", "outputs"}
         assert info["group"] and info["outputs"] == rerun_from.outputs_of(step)
-    for step in ("ideas", "literature", "plan", "design"):
+    for step in ("ideas", "literature", "studies", "plan", "design"):
         assert rerun_from.needs_approval(step) and "experiment plan (frozen) is replaced" in rerun_from.REDOES[step]
-    assert not any(rerun_from.needs_approval(s) for s in rerun_from.STEPS if s not in ("ideas", "literature", "plan", "design"))
+    assert not any(rerun_from.needs_approval(s) for s in rerun_from.STEPS if s not in ("ideas", "literature", "studies", "plan", "design"))
 
 
 def test_every_graph_node_is_a_step_or_says_why_not(tmp_path: Path) -> None:
@@ -203,7 +203,8 @@ async def test_a_restart_at_the_design_needs_a_name_and_replaces_the_protocol_on
     refused = Engine(cfg, resume_quest_id=first.quest_id)
     await refused.run(from_step="design")
     out = capsys.readouterr().out
-    assert "replaces its plan.md and its experiment plan (frozen)" in out and "--approve-as <you>" in out
+    # The design step reads plan.md again and does not move it aside, so the refusal does not say it replaces it.
+    assert "replaces its experiment plan (frozen)" in out and "replaces its plan.md" not in out and "--approve-as <you>" in out
     assert frozen.read_text(encoding="utf-8") == old and not (refused.fi_dir / "previous").exists()
 
     # With a name: the old protocol is kept aside, the audit says who approved and which protocol was replaced.

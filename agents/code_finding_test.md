@@ -20,6 +20,12 @@ $finding
 
 $code
 
+# The names the plan declares
+
+$declared
+
+A test may read only the names the code's trial returns (the first lines above). Do not invent a result name (a per-parameter `coverage_x`, `bias_x` or `correlation` key, say): the code does not return it, so a test that reads it fails for that reason and shows nothing. The names FI counts itself, and a statistic across trials (a correlation of two estimates), are not returned by the code: when the finding is about one of those, assert on the returned estimate and interval values themselves (for example that an interval holds its own estimate, or that the estimate is centred on the true value in a small fixed-seed run), never on a new key.
+
 # How the test reaches the code
 
 The test runs with the `code/` directory on `sys.path`. Import with: $modules.

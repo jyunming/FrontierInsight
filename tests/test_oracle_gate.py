@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from tests.plan_parts_helpers import checks_reply, is_scoped_ask, parts_of, plan_shown
 
 from core import oracle_check as oc, plan, protocol_check as pc
 from core.config import (
@@ -206,14 +207,14 @@ def _fake(calls: list[str], *, implement: str, repair: str | None = None, protoc
         if kind == "ExecuteReflect" and "FI_ORACLE=1 to check its oracles" in prompt:
             calls.append("OracleRepair")
             return json.dumps({"code": repair, "deps": [], "patch_summary": "answered the oracles"}) if repair else "{}"
-        if "You are revising the plan" in prompt:
+        if is_scoped_ask(prompt):
             calls.append("PlanRevise")
             if not revise:
                 return "no plan file here"
-            current = prompt.split("# The plan as it stands", 1)[1].split("# What the person asked for", 1)[0].strip()
+            current = plan_shown(prompt)
             design = plan.parse(current).design
             design["protocol"] = {**(design.get("protocol") or {}), "oracles": [ORACLE]}
-            return plan.render("smoke", {}, design)
+            return parts_of(plan.render("smoke", {}, design), "oracles")
         return _fake_response_for(prompt)
 
     return fake_chat
@@ -353,8 +354,12 @@ async def test_a_protocol_edited_in_the_plan_while_stopped_is_the_one_the_script
     monkeypatch.setattr("core.engine.LLMClient.chat", _fake(calls, implement=_BAD_GRID, repair=_BAD_GRID, protocol=protocol))
     cfg = _cfg(tmp_path)
     first = Engine(cfg)
+    # A stop before the protocol is frozen: the comparison is given stop power for this first run only (it is a reading
+    # and never stops a quest by itself, core/stop_power.py); what is tested is that the resume reads the edited plan.
+    monkeypatch.setattr("core.engine._protocol.SOURCE", "measured")
     await first.run()
     assert (first.fi_dir / "cannot_repair.json").is_file()
+    monkeypatch.setattr("core.engine._protocol.SOURCE", "read")
 
     path = plan.plan_path(first.quest_root)
     edited = path.read_text(encoding="utf-8").replace("- 0.9\n", "- 0.8\n").replace("- 1.5\n", "- 1.2\n")
@@ -419,12 +424,13 @@ async def test_an_oracle_with_no_numbers_is_completed_in_the_plan_before_anythin
     async def fake_chat(self, messages, **kw):  # noqa: ANN001
         prompt = messages[-1]["content"]
         prompts.append(prompt)
-        if "You are revising the plan" in prompt:
+        if is_scoped_ask(prompt):
             calls.append("PlanRevise")
-            current = prompt.split("# The plan as it stands", 1)[1].split("# What the person asked for", 1)[0].strip()
+            current = plan_shown(prompt)
             design = plan.parse(current).design
-            design["protocol"] = {**(design.get("protocol") or {}), "oracles": [ORACLE]}
-            return plan.render("smoke", {}, design)
+            # the numbers are completed; what the check measures is the plan's own and stays
+            design["protocol"] = {**(design.get("protocol") or {}), "oracles": [{**ORACLE, "check": bare["check"]}]}
+            return parts_of(plan.render("smoke", {}, design), "oracles")
         return await _fake(calls, implement=_PASSING, protocol={**_PROTOCOL, "oracles": [bare]})(self, messages, **kw)
 
     monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
@@ -564,12 +570,13 @@ async def test_completing_the_plan_does_not_use_up_the_scripts_repair(
 
     async def fake_chat(self, messages, **kw):  # noqa: ANN001
         prompt = messages[-1]["content"]
-        if "You are revising the plan" in prompt:
+        if is_scoped_ask(prompt):
             calls.append("PlanRevise")
-            current = prompt.split("# The plan as it stands", 1)[1].split("# What the person asked for", 1)[0].strip()
+            current = plan_shown(prompt)
             design = plan.parse(current).design
-            design["protocol"] = {**(design.get("protocol") or {}), "oracles": [ORACLE]}
-            return plan.render("smoke", {}, design)
+            # the numbers are completed; what the check measures is the plan's own and stays
+            design["protocol"] = {**(design.get("protocol") or {}), "oracles": [{**ORACLE, "check": bare["check"]}]}
+            return parts_of(plan.render("smoke", {}, design), "oracles")
         return await _fake(calls, implement=_UNAWARE, repair=_PASSING, protocol={**_PROTOCOL, "oracles": [bare]})(self, messages, **kw)
 
     monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
@@ -594,6 +601,30 @@ def test_a_proposed_oracle_change_is_kept_only_when_it_is_usable() -> None:
     request = oc.proposal_request(got[0])
     assert ORACLE["name"] in request and "tolerance 0.2 (relative)" in request and "h^2/8 bound" in request
     assert "oracle_change" in oc.directive(declared, ["x"]) and "nothing changes without them" in oc.directive(declared, ["x"])
+
+
+def test_a_long_expected_formula_is_kept_whole_and_one_too_long_is_dropped_with_its_reason() -> None:
+    """A formula was cut at 600 characters, so a long one became a different expression that failed to compute and was
+    dropped with no word to the reader of the log."""
+    base = {"name": ORACLE["name"], "expected": 1, "tolerance": 0.2, "reason": "the working had a slip"}
+    from core import oracle_forms as forms
+
+    limit = forms.MAX_FORMULA_CHARS
+    under = "2 * 1." + "0" * (limit - 8) + "5"  # just under the character limit, few nodes
+    over = "2 * 1." + "0" * (limit - 5) + "5"  # just over it
+    many_nodes = "+".join(["1"] * 60)   # under the character limit but over the node limit
+    assert len(under) <= limit < len(over) and len(many_nodes) <= limit
+    kept = oc.proposals([{**base, "expected_formula": under}], [ORACLE])[0]
+    assert kept["expected_formula"] == under and "expected_formula_dropped" not in kept
+    assert forms.evaluate(kept["expected_formula"], {}).value is not None, "kept AND evaluates"
+    dropped = oc.proposals([{**base, "expected_formula": over}], [ORACLE])[0]
+    assert "expected_formula" not in dropped and str(len(over)) in dropped["expected_formula_dropped"]
+    assert forms.evaluate(many_nodes, {}).value is None, "the evaluator refuses it"
+    nodes = oc.proposals([{**base, "expected_formula": many_nodes}], [ORACLE])[0]
+    assert "expected_formula" not in nodes and "too long a formula" in nodes["expected_formula_dropped"]
+    short = "+".join(["1"] * 20)
+    assert oc.proposals([{**base, "expected_formula": short}], [ORACLE])[0]["expected_formula"] == short
+    assert oc.proposals([{**base, "expected_formula": "2*x"}], [ORACLE])[0]["expected_formula"] == "2*x"
 
 
 @pytest.mark.asyncio
@@ -971,7 +1002,7 @@ async def test_without_the_plan_stop_an_oracle_the_engine_added_is_recorded_as_n
 
 
 def _freeze_with(tmp_path: Path, *, plan_mode: str, held: bool, added: dict[str, Any] | None,
-                 replaced_by: str | None = None) -> str:
+                 replaced_by: str | None = None, fitted: int = 0) -> str:
     """What ``approved_by`` the freeze writes for a protocol with ORACLE, given the plan stop and the gate's record."""
     from core import frozen_protocol
     from core.config import PausesConfig
@@ -989,7 +1020,7 @@ def _freeze_with(tmp_path: Path, *, plan_mode: str, held: bool, added: dict[str,
         (engine.fi_dir / "paused_at_plan.flag").write_text("plan", encoding="utf-8")
     if added is not None:
         (engine.fi_dir / "oracles_added.json").write_text(json.dumps(added), encoding="utf-8")
-    engine._freeze_protocol_if_due({"design": {"protocol": protocol}, "iteration": 0})
+    engine._freeze_protocol_if_due({"design": {"protocol": protocol}, "iteration": 0, "evidence_fit_redesigns": fitted})
     return str(frozen_protocol.load(engine.quest_root)["approved_by"])
 
 
@@ -1002,6 +1033,9 @@ def test_the_freeze_never_says_a_person_approved_what_they_were_not_shown(tmp_pa
     # The setting says ask, but the quest never stopped at the plan: nobody read it.
     assert _freeze_with(tmp_path / "a", plan_mode="ask", held=False, added=None).startswith("auto:")
     assert _freeze_with(tmp_path / "h", plan_mode="ask", held=True, added=None).startswith("human:")
+    # The person read the plan, then FI had it rewritten to fit the time it measured: nobody read the protocol that runs.
+    fitted = _freeze_with(tmp_path / "f", plan_mode="ask", held=True, added=None, fitted=1)
+    assert fitted.startswith("auto: FI had the plan rewritten to fit the time it measured after the person read it")
     # Shown at the stop for the added checks, then the plan stop was turned off: the oracles were still shown.
     shown_then_off = _freeze_with(tmp_path / "s", plan_mode="off", held=True, added=seen)
     assert shown_then_off.startswith("auto:") and "held for the person to read" in shown_then_off

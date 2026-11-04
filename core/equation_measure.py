@@ -36,6 +36,14 @@ def _by_name(result):
         hasattr(type(result), "__dataclass_fields__") and not isinstance(result, type))
 
 
+def _several(value):
+    """Whether ``value`` holds several items (a tuple, a list, a mapping, an array of more than one number)."""
+    try:
+        return len(value) >= 2
+    except BaseException:  # noqa: BLE001
+        return False
+
+
 def _output(result, name):
     """The output called ``name`` of what the function returned by name; LookupError when there is none."""
     if not _by_name(result):
@@ -139,7 +147,8 @@ def measure(case):
     except BaseException:  # noqa: BLE001
         if len(case.get("outputs") or []) >= 2 and _by_name(value):
             return {"status": "outputs", "detail": "the function returns its outputs by name and the worked example gives one value"}
-        return {"status": "not_number", "detail": "it returned something that is not one number"}
+        return {"status": "not_number", "detail": "it returned several values, not one number" if _several(value)
+                else "it returned something that is not one number"}
 
 
 def _number(v):

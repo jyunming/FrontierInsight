@@ -245,3 +245,66 @@ def test_the_note_reaches_the_writers_prompt_only_when_a_figure_was_left_out(tmp
 def test_the_implement_prompt_says_to_draw_from_results() -> None:
     text = (Path(__file__).resolve().parent.parent / "agents" / "implement.md").read_text(encoding="utf-8")
     assert "never from numbers typed into the plotting code" in text
+
+
+def test_a_figure_function_of_fis_derive_py_is_scanned_though_it_never_saves_a_figure(tmp_path: Path) -> None:
+    """The analysis FI writes (core/analysis_frame.py): FI saves each figure a ``figure_<id>`` function draws, so derive.py
+    holds no ``savefig`` call, and a figure drawn there from typed-in numbers is found all the same, laid to its own file."""
+    from core import analysis_frame as af
+
+    design = {"protocol": {"form": "contract", "grid": {"rate": [0.1, 0.2]}, "runs_per_setting": 3,
+                           "metrics": [{"id": "growth", "kind": "mean", "role": "result"}],
+                           "figures": [{"id": "fig1", "file": "growth.png", "shows": ["growth"], "x": "rate"},
+                                       {"id": "fig2", "file": "other.png", "shows": ["growth"], "x": "rate"}]}}
+    code = tmp_path / "code"
+    af.ensure_files(code, design)
+    typed = ("def figure_fig1(fig, table):\n    ax = fig.axes[0]\n    ax.plot([1, 2, 3], [0.5, 0.7, 0.9], label='growth')\n\n\n"
+             "def figure_fig2(fig, table):\n    fig.axes[0].plot([1, 2], [table.mean('growth', k) for k in table.keys()])\n")
+    text, note = af.compose(design, typed, (code / "derive.py").read_text(encoding="utf-8"))
+    assert not note and ".savefig(" not in text
+    (code / "derive.py").write_text(text, encoding="utf-8")
+    found = fdc.typed_series_in(code)
+    # derive.py alone: FI's own figure step (fi_figures.py, which does save figures) draws nothing typed into it
+    assert list(found) == [code / "derive.py"] and len(found[code / "derive.py"]) == 1
+    only = found[code / "derive.py"][0]
+    assert only.saved_as == {"growth.png"} and fdc.figures_to_drop([only], ["growth.png", "other.png"]) == ["growth.png"]
+
+
+def test_numbers_typed_into_a_primitive_call_are_not_caught_by_the_call_record_so_the_rule_stays() -> None:
+    """Why the typed-series rule is kept for every panel: the frame's drawing calls take any numbers as y, check none of
+    them against the table, and record the panel as verified, while the rule reads plotting methods and so does not see a
+    primitive call either. The known positive for retiring the rule does not show."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from core import frame_figure
+
+    class Table:
+        declared = ["growth"]
+
+        def keys(self):
+            return ["size=1", "size=2", "size=3"]
+
+        def mean(self, name, key):
+            return 2.5
+
+        def n(self, name, key):
+            return 4
+
+        def interval(self, name, key):
+            return (1.25, 3.75)
+
+    class Host(frame_figure.FigureCalls):
+        def __init__(self):
+            self.fig, ax = plt.subplots()
+            self.axes = [ax]
+            self.table, self.x, self.settings, self.series_ids, self.references = Table(), "size", ["size"], ["fast"], {}
+            self.labels = {"growth": "Growth", "fast": "Fast", "size": "Size"}
+
+    host = Host()
+    host.line(0, "fast", [1, 2, 3], [40.0, 50.0, 60.0], "growth")  # far from every value the table holds
+    plt.close("all")
+    assert host.record()["panels"][0]["raw"] is False
+    assert fdc.typed_series('def figure_a(fig):\n    fig.line(0, "fast", [1, 2, 3], [40.0, 50.0, 60.0], "growth")\n') == []
+    # The rule still fires on the same numbers drawn with a plotting method.
+    assert len(fdc.typed_series("import matplotlib.pyplot as plt\nplt.plot([1, 2, 3], [40.0, 50.0, 60.0])\n")) == 1

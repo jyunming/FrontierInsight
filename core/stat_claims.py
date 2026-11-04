@@ -44,6 +44,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterator
 
 from core.disclosure import strip_for_checks
+from core.figure_facts import RUN_FIGURE_RE
 from core.numeric_oracle import flatten_numbers
 
 # A replicated run needs at least this many seeds before its spread means
@@ -110,6 +111,8 @@ _STRIP_BLOCKS = (
         r"^#{1,6}[ \t]*(?:references|further[ \t]+reading)[ \t]*$.*?(?=^#{1,6}[ \t]|\Z)",
         re.S | re.M | re.I,
     ),
+    # A figure of the run: FI wrote its caption from its records, so nothing in it is the writer's claim.
+    RUN_FIGURE_RE,
     re.compile(r"!\[[^\]]*\]\([^)]*\)"),
     # Inline citation markers: "[6, 7]", "[12]", "[3-5]". A bracket holding
     # only digits and separators is a reference, never a measurement — the

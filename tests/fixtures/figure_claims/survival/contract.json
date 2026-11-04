@@ -1,0 +1,93 @@
+{
+ "about": "The share of two groups still present over time: a step curve for each, with an interval band for group B.",
+ "results": [
+  "survival"
+ ],
+ "settings": [
+  "time",
+  "group"
+ ],
+ "x": "time",
+ "series_ids": [
+  "group_a",
+  "group_b"
+ ],
+ "references": {},
+ "labels": {
+  "survival": {
+   "label": "Share surviving",
+   "scale": "linear"
+  },
+  "time": "Time",
+  "group_a": "Group A",
+  "group_b": "Group B"
+ },
+ "figure": {
+  "id": "survival",
+  "body": "figure_survival",
+  "panels": 1
+ },
+ "plan": {
+  "series": [
+   "group_a",
+   "group_b"
+  ],
+  "grid": [
+   0,
+   1,
+   2,
+   3,
+   4,
+   5,
+   6,
+   7,
+   8
+  ]
+ },
+ "expected": [
+  {
+   "claim": "drawn",
+   "args": {
+    "series": "group_a"
+   }
+  },
+  {
+   "claim": "steps",
+   "args": {
+    "series": "group_a"
+   }
+  },
+  {
+   "claim": "steps",
+   "args": {
+    "series": "group_b"
+   }
+  },
+  {
+   "claim": "value_at",
+   "args": {
+    "series": "group_b",
+    "x": "8"
+   }
+  },
+  {
+   "claim": "order",
+   "args": {
+    "at": "4"
+   }
+  },
+  {
+   "claim": "band",
+   "args": {
+    "series": "group_b"
+   }
+  },
+  {
+   "claim": "range",
+   "args": {
+    "series": "group_a",
+    "axis": "y"
+   }
+  }
+ ]
+}

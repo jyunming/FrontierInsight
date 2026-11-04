@@ -318,17 +318,65 @@ _PHASED_GAPS = {
 }
 
 
+def _derived_only_gaps(protocol: dict[str, Any], frozen: dict[str, Any] | None, oracle_record: Any,
+                       corrected: Any) -> list[str]:
+    """The gap (one sentence, or none) when every known-answer check that passed has an expected value the plan's model
+    derived itself or FI corrected (:func:`core.oracle_check.validates`). A check that rests on a value from a source the
+    quest retrieved, or on a second implementation that shares no code with the simulation, validates the code; a check
+    corrected by FI never does, whatever its reference says."""
+    sources = frozen.get("sources") if isinstance(frozen, dict) and not frozen.get("sources_problem") else None
+    passed = {n.strip().lower() for n in _oracle_check.engine_passed(_oracle_check.last_judged(oracle_record))}
+    if not isinstance(sources, list) or not passed:
+        return []
+    fixed = {str(n).strip().lower() for n in corrected} if isinstance(corrected, dict) else set()
+    for oracle in _oracle_check.declared(protocol):
+        name = str(oracle["name"]).strip().lower()
+        if name in passed and name not in fixed and _oracle_check.validates(oracle, protocol, sources):
+            return []
+    return ["every known-answer check that passed rests on the plan's own derivation (or on a value FI corrected), none on "
+            "a value from a source or on a second implementation: the code agrees with the plan, which does not show "
+            "that either is right"]
+
+
+def _plan_derived_failure_gaps(protocol: dict[str, Any], frozen: dict[str, Any] | None, oracle_record: Any) -> list[str]:
+    """One sentence per known-answer check the quest went on with after it failed, whose expected value is the plan's own
+    working (:func:`core.oracle_check.validates` is false: no retrieved source, no second implementation). Such a value is a
+    claim of the plan's model, not a known answer: the failure may be the plan's (a derivation that squared a real part
+    only, a null rate typed as 0 where it is 0.05) as well as the code's, and the result must not read as a code error. A
+    check whose disagreement is already stated (``disagreement``) or that could not be judged is left to
+    :func:`core.accepted_checks.gap`."""
+    if not isinstance(oracle_record, dict):
+        return []
+    sources = frozen.get("sources") if isinstance(frozen, dict) and not frozen.get("sources_problem") else []
+    declared = {str(o["name"]).strip().lower(): o for o in _oracle_check.declared(protocol)}
+    out: list[str] = []
+    for e in oracle_record.get("went_on") or []:
+        if not isinstance(e, dict) or e.get("disagreement") or e.get("undecided") or e.get("measured") is None:
+            continue
+        name = str(e.get("name") or "").strip()
+        oracle = declared.get(name.lower())
+        if oracle is None or _oracle_check.validates(oracle, protocol, sources if isinstance(sources, list) else []):
+            continue
+        out.append(f"the known-answer check '{name}' that failed has an expected value the plan's own model worked out, not a "
+                   "value from a source or a second implementation: the plan's working may be wrong rather than the code, so "
+                   "the failure is reported as that, not read as a code error")
+    return out
+
+
 def assess(
     quest_root: Path, state: dict[str, Any], *, precision_missed: list[str] | None = None,
     settings: dict[str, str] | None = None, statistics_gaps: list[str] | None = None,
     oracle_source_gaps: list[str] | None = None, equation_label_gaps: list[str] | None = None,
     independence_gaps: list[str] | None = None, precision_not_judged: dict[str, Any] | None = None,
+    precision_per_setting: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The quest's evidence status, the ladder with what each level guarantees, and the gaps below the next level.
 
     ``state`` is the final (or paused) state; ``precision_missed`` names the probabilities whose pooled interval did not
     reach the protocol's target; ``precision_not_judged`` (``target``, ``metric``) is the protocol's target when FI pooled
-    no interval to hold to it (each setting ran once, say), a gap kept in the record; ``statistics_gaps`` says what keeps the statistics from being adequate
+    no interval to hold to it (each setting ran once, say), a gap kept in the record; ``precision_per_setting`` is the target held to each setting's own
+    trials (:func:`core.trial_table.per_setting_precision`) when the run pooled no interval for it: a gap unless every setting
+    met it, kept in the record; ``statistics_gaps`` says what keeps the statistics from being adequate
     (:func:`core.metric_spec.coverage_gaps`); ``oracle_source_gaps`` names each oracle whose expected value has no
     source a reader can check (:func:`core.oracle_check.source_gaps`), a gap below ``independently_validated``; ``equation_label_gaps`` says which equations of the plan's model the
     simulation does not mark where it implements them (a comment ``# E1``), a gap at the same level: the oracles test the
@@ -345,7 +393,7 @@ def assess(
 
     # executed
     exec_result = state.get("exec_result") or {}
-    executed = bool(state.get("result_json")) and exec_result.get("returncode", 0) == 0
+    executed = bool(state.get("result_json")) and bool(exec_result.get("results_produced", exec_result.get("returncode", 0) == 0))
     if not executed:
         gaps["executed"].append("the experiment has not produced results (it has not run, or it failed)")
 
@@ -415,8 +463,15 @@ def assess(
         matched_gaps.append("the run's numeric warnings were accepted as they were (see needs/NUMERIC_WARNINGS.json)")
     elif settings.get("numeric_warnings") == "off":
         matched_gaps.append("the numeric-warning check was turned off")
-    elif isinstance(warnings, list) and warnings and settings.get("numeric_warnings") == "warn":
+    elif (isinstance(warnings, list) and any(isinstance(w, dict) and w.get("warnings") for w in warnings)
+          and settings.get("numeric_warnings") == "warn"):
         matched_gaps.append("the run's numerics warned and the check only recorded it (engine.numeric_warnings: warn)")
+    if isinstance(last_warning_entry, dict) and last_warning_entry.get("disclosed"):
+        shown = "; ".join(str(d) for d in last_warning_entry["disclosed"][:4])
+        matched_gaps.append(
+            f"a number the run printed is not finite ({shown}): it is not stored under the name of one of the plan's "
+            "results, so the run was not repaired for it, and FI fills no such number into the paper (see "
+            "needs/NUMERIC_WARNINGS.json)")
     environment = _json(needs / "ENVIRONMENT.json")
     if isinstance(environment, dict) and environment.get("packages_error"):
         # Not "no packages": which packages the run had is unknown, so it cannot be set up again as it ran.
@@ -449,12 +504,28 @@ def assess(
         valid_gaps.extend(f"the expected value of the known-answer check '{n}' was corrected to another model's value "
                           "that agrees with the measurement: nothing independent confirms it"
                           for n, c in corrected.items() if isinstance(c, dict) and c.get("source") == "recompute")
+        # A correction to the referee's number: chosen because it agrees with the simulation, so the check then shows
+        # two computations from the same definitions agree, not that either matches a fact found independently.
+        valid_gaps.extend(f"the expected value of the known-answer check '{n}' was corrected to a number computed from "
+                          "the model's own definitions that agrees with the measurement: nothing independent of the "
+                          "model confirms it"
+                          for n, c in corrected.items() if isinstance(c, dict) and c.get("source") == "numeric")
         # A correction from the plan's arithmetic alone (an earlier FI made those): the calculator may have misread
         # a correct derivation, and nothing else confirms it.
         valid_gaps.extend(f"the expected value of the known-answer check '{n}' was corrected from the plan's own "
                           "arithmetic alone: nothing independent confirms it"
                           for n, c in corrected.items()
                           if isinstance(c, dict) and c.get("source") == "arithmetic" and not c.get("confirmed_by"))
+        # Every other correction (the plan's model conceded, a judge sided with the code, another model recomputed what the
+        # arithmetic gave): a value that was settled between models and chosen because it agrees with the measurement is
+        # still the plan's own derivation, corrected. Only a literature value or an independent second implementation
+        # validates a check, so a corrected check never counts as one.
+        valid_gaps.extend(f"the expected value of the known-answer check '{n}' was corrected by FI's own look at the "
+                          "plan's working: it is a derivation by the models, not a value from a source or a second "
+                          "implementation, so nothing independent confirms it"
+                          for n, c in corrected.items()
+                          if isinstance(c, dict) and c.get("source") not in ("recompute", "numeric")
+                          and not (c.get("source") == "arithmetic" and not c.get("confirmed_by")))
     fitted = oracle_record.get("fitted_to_test_run") if isinstance(oracle_record, dict) else None
     if protocol is not None and isinstance(fitted, list) and fitted:
         # The plan changed these checks after FI's test run measured them, and the change makes that measurement pass:
@@ -472,6 +543,8 @@ def assess(
                    if isinstance(e, dict) and (e.get("name") or e.get("unmeasured"))]
         valid_gaps.extend([_went_on_gap(e) for e in entries]
                           or ["a known-answer check failed and the quest went on (oracle check: went_on_failing)"])
+        if protocol is not None:
+            valid_gaps.extend(_plan_derived_failure_gaps(protocol, frozen, oracle_record))
     elif protocol is not None and (not isinstance(oracle_record, dict) or oracle_record.get("status") != "ok"):
         status = oracle_record.get("status") if isinstance(oracle_record, dict) else "not run"
         valid_gaps.append(f"the script did not pass an independent oracle (oracle check: {status})")
@@ -530,6 +603,10 @@ def assess(
         # A check is evidence only if the code that computes its measure is not itself flagged: a second model's open
         # finding that names the check (core/code_review.py:flagged_checks) leaves it not shown, whatever it recorded.
         judged_names = [str(j["name"]) for j in _oracle_check.last_judged(oracle_record)]
+        # A rule of every trial that passed on the trials judged before time ran out is a pass for the run's flow, and
+        # a gap for what was checked.
+        valid_gaps.extend(_oracle_check.partial_gap_words(j)
+                          for j in _oracle_check.partial_checks(_oracle_check.last_judged(oracle_record)))
         for n, finding in _code_review.flagged_checks(
                 quest_root, quest_root / "code", [*(str(o["name"]) for o in _oracle_check.declared(protocol)), *judged_names]).items():
             valid_gaps.append(f"the check '{n}' is {_oracle_check.not_shown_words(finding)}")
@@ -541,6 +618,11 @@ def assess(
         # Which code implements which equation of the model: an oracle that rests on E1 checks the code the simulation
         # says is E1. Only the labels are read, not the mathematics behind them.
         valid_gaps.extend(equation_label_gaps or [])
+        # Rule 3 (the maintainer's decision): a value the plan's own model derived is not a known answer. When every
+        # check that passed rests on such a derivation (or on a value FI corrected), the code agrees with the plan, and
+        # nothing shows either is right. Judged on the sources the freeze recorded; a protocol frozen without them is
+        # not judged here.
+        valid_gaps.extend(_derived_only_gaps(protocol, frozen, oracle_record, corrected))
         # Under research: a second, different model read the checks, and the checks held at a setting the code never saw.
         valid_gaps.extend(independence_gaps or [])
     valid_gaps.extend(optimum_gaps.get("independently_validated", []))
@@ -552,6 +634,8 @@ def assess(
         stat_gaps.append(f"the target precision was not reached for {name}")
     if precision_not_judged:
         stat_gaps.append(precision_not_judged_words(precision_not_judged))
+    if precision_per_setting and precision_per_setting_words(precision_per_setting):
+        stat_gaps.append(precision_per_setting_words(precision_per_setting))
     for gap in statistics_gaps or []:
         stat_gaps.append(f"the statistics are not shown to be adequate: {gap}")
     if protocol is not None and int((manifest_record or {}).get("failed_trials") or 0) and not str(protocol.get("failure_policy") or "").strip():
@@ -645,6 +729,11 @@ def assess(
                        "version was confirmed; that confirmation does not count for it)")
     if settings.get("phased_record_gap"):
         ready_gaps.append(str(settings["phased_record_gap"]))
+    if settings.get("code_writer_isolation") == "isolation_unverified":
+        # The coding agent ran on this computer with no sandbox (core/agent_coder.py): said plainly, as for held-back
+        # rows whose isolation was not shown (core/phased_isolation.py).
+        ready_gaps.append("the code writer ran without isolation ("
+                          + str(settings.get("code_writer_isolation_why") or "no reason recorded") + ")")
     if settings.get("phased") == "confirmed":
         # Held back is not unseen unless exploration could not read it (core/phased_isolation.py), and rows of one
         # subject or site split one by one are not unseen either (core/phased_data.py).
@@ -795,6 +884,8 @@ def assess(
     }
     if precision_not_judged:
         record["precision_not_judged"] = dict(precision_not_judged)  # read by the quality report (QUALITY.md)
+    if precision_per_setting:
+        record["precision_per_setting"] = dict(precision_per_setting)  # read by the quality report (QUALITY.md)
     kept = state.get("acceptance") if isinstance(state.get("acceptance"), dict) else {}
     if not accepted_by and not pending and kept.get("by") in ("person", "automatic"):
         # Accepted although the review did not accept it (its verdict is already the gap): still say who accepted.
@@ -822,6 +913,10 @@ def assess(
         if settings.get("phased_isolation"):
             # docker, encrypted+scanned, or isolation_unverified (core/phased_isolation.py).
             record["phased"]["isolation"] = settings["phased_isolation"]
+    if settings.get("code_writer_isolation"):
+        # docker, or isolation_unverified when the coding agent ran on this computer without a container.
+        record["code_writer"] = {"isolation": settings["code_writer_isolation"],
+                                 "why": settings.get("code_writer_isolation_why") or ""}
     if settings.get("sealing") and settings.get("rigor_profile") == "research":
         # Written before the seal that names it: whoever reads it checks the seal (verify_seal).
         record["trace_seal"] = "pending"
@@ -835,6 +930,34 @@ def precision_not_judged_words(fact: dict[str, Any]) -> str:
     return (f"the plan's precision target (a 95% interval no wider than ±{float(fact['target']):g}"
             + (f" on `{metric}`" if metric else "") + ") was not judged: FI found no interval pooled from repeated runs "
             "of a setting to hold to it")
+
+
+def precision_per_setting_words(fact: dict[str, Any]) -> str:
+    """The sentence for a precision target held to each setting's own trials (``fact`` as
+    :func:`core.trial_table.per_setting_precision` gives it); ``""`` only when every setting met it. A setting with no
+    value is in the count and never met."""
+    try:
+        settings, met, without = int(fact["settings"]), int(fact["met"]), int(fact.get("without_interval") or 0)
+        target, widest = float(fact["target"]), float(fact["widest"])
+    except (KeyError, TypeError, ValueError):
+        return ""
+    raw = fact.get("without_value")
+    no_value = [str(x) for x in raw] if isinstance(raw, list) else []
+    if met >= settings and not without and not no_value:
+        return ""
+    metric = str(fact.get("metric") or "").strip()
+    where = str(fact.get("widest_setting") or "").strip()
+    words = (f"the plan's precision target (a 95% interval no wider than ±{target:g}"
+             + (f" on `{metric}`" if metric else "") + f") was reached in {met} of {settings} settings, each judged on "
+             "its own trials")
+    if widest >= 0:
+        words += f"; the widest is ±{widest:.3g}" + (f" ({where})" if where else "")
+    if without:
+        words += f"; {without} more setting(s) had too few trials for an interval"
+    if no_value:
+        shown = ", ".join(no_value[:4]) + (", ..." if len(no_value) > 4 else "")
+        words += f"; {len(no_value)} setting(s) have no value ({shown})"
+    return words
 
 
 def verify_seal(quest_root: Path, record: Any) -> Any:
@@ -935,17 +1058,31 @@ def upgrade(record: Any) -> Any:
 _NOT_EXECUTED_CLAIM = "The experiment has not produced results (it has not run, or it failed)."
 
 
+NOT_ASSESSED = "not_assessed"
+
+
+def _plain_reason(error: str) -> str:
+    """The reason an assessment failed in the words a person reads; the exception text itself stays in ``assessment_failed``
+    and in ``.fi/run.log``."""
+    name = str(error).split(":", 1)[0].strip()
+    if name == "MemoryError":
+        return "the machine ran short of memory while FI checked the result"
+    return "FI hit an error while checking the result"
+
+
 def unassessed(error: str) -> dict[str, Any]:
-    """The record kept when the assessment itself failed: no level is claimed, and the reason is the one gap. It replaces
-    an earlier record, so a level worked out on a previous pass never outlives a failed assessment of this one."""
-    gap = f"the evidence could not be assessed ({error})"
+    """The record kept when the assessment itself failed. It says the evidence was NOT ASSESSED, which is not the same as
+    "not executed": the experiment may well have run, and no level is claimed because none was measured (``levels`` is
+    empty, never a row of false). It replaces an earlier record, so a level worked out on a previous pass never outlives a
+    failed assessment of this one."""
+    gap = f"the evidence was not assessed: {_plain_reason(error)} (details in .fi/run.log)"
     return {
-        "status": "not_executed",
+        "status": NOT_ASSESSED,
         "assessment_failed": error,
-        "levels": {level: False for level in LEVELS},
-        "next_level": LEVELS[0],
+        "levels": {},
+        "next_level": None,
         "gaps": [gap],
-        "all_gaps": {LEVELS[0]: [gap]},
+        "all_gaps": {},
         "ladder": [],
     }
 
@@ -958,11 +1095,14 @@ def summary_line(record: dict[str, Any], *, technical: bool = False) -> str:
     record = upgrade(record)
     status = str(record.get("status") or "not_executed")
     gaps = record.get("gaps") or []
+    if record.get("assessment_failed"):
+        reason = _plain_reason(str(record["assessment_failed"]))
+        if technical:
+            return f"{NOT_ASSESSED}; {reason}"
+        return f"The evidence was not assessed ({reason}); no level is claimed. This does not mean the experiment did not run."
     if technical:
         tail = f"; to reach {record.get('next_level')}: {gaps[0]}" + (f" (+{len(gaps) - 1} more)" if len(gaps) > 1 else "") if gaps else ""
         return f"{status}{tail}"
-    if record.get("assessment_failed"):
-        return f"The evidence could not be assessed ({record['assessment_failed']}); no level is claimed."
     claim = INFO.get(status, {}).get("assurance_claim") or _NOT_EXECUTED_CLAIM
     tail = f" Next: {gaps[0]}" + (f" (+{len(gaps) - 1} more)" if len(gaps) > 1 else "") if gaps else ""
     # The mark of an accept no person made, said on every surface even when another gap comes first.

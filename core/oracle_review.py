@@ -293,7 +293,9 @@ EQUATION_REQUEST = (
 def never_looser(old: list[Any], new: list[Any], *, keep_expected: bool = False) -> list[Any]:
     """``new`` (the checks after a rewrite) with each check that also existed in ``old`` (matched by name) keeping its
     old ``tolerance`` and ``tolerance_mode`` when the rewrite made it larger or changed its mode: a rewrite of an
-    equation may move an expected value, never loosen the bar a check is held to. ``keep_expected``: the rewrite was
+    equation may move an expected value, never loosen the bar a check is held to. When the expected value moved, the
+    bar is the tolerance's width against the size of what is expected (a check rewritten to measure another quantity has
+    an absolute tolerance in other units), and a wider one is put back to the old width. ``keep_expected``: the rewrite was
     asked to change a check's case or measure only, so each check keeps the ``expected`` it had; a changed
     ``expected_formula`` still moves it, through FI's own computation before the run."""
     before = {str(o.get("name") or "").strip().lower(): o for o in old if isinstance(o, dict)}
@@ -303,8 +305,21 @@ def never_looser(old: list[Any], new: list[Any], *, keep_expected: bool = False)
         if was is None or not isinstance(item, dict):
             out.append(item)
             continue
+        if keep_expected and "expected" in was and item.get("expected") != was["expected"]:
+            item = {**item, "expected": was["expected"]}
         old_mode = str(was.get("tolerance_mode") or "absolute").strip().lower()
         new_mode = str(item.get("tolerance_mode") or "absolute").strip().lower()
+        old_width, new_width = _relative_width(was, old_mode), _relative_width(item, new_mode)
+        if old_width is not None and new_width is not None and _expected(was) != _expected(item):
+            # The expected value moved (an equation corrected, or the check now measures another quantity): the bar is
+            # the tolerance's width against the size of what is expected, since two absolute widths of quantities of
+            # other sizes, or other units, cannot be compared. A width larger than the old one is put back to the old.
+            if new_width > old_width:
+                item = {k: v for k, v in item.items() if k not in ("tolerance", "tolerance_mode")}
+                item["tolerance"] = old_width if new_mode == "relative" else old_width * abs(_expected(item))
+                item["tolerance_mode"] = new_mode
+            out.append(item)
+            continue
         try:
             looser = (float(item.get("tolerance")) > float(was.get("tolerance"))
                       if "tolerance" in item and "tolerance" in was else "tolerance" in item and "tolerance" not in was)
@@ -315,10 +330,33 @@ def never_looser(old: list[Any], new: list[Any], *, keep_expected: bool = False)
             for key in ("tolerance", "tolerance_mode"):
                 if key in was:
                     item[key] = was[key]
-        if keep_expected and "expected" in was and item.get("expected") != was["expected"]:
-            item = {**item, "expected": was["expected"]}
         out.append(item)
     return out
+
+
+def _expected(check: dict[str, Any]) -> float | None:
+    try:
+        value = float(check.get("expected"))
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _relative_width(check: dict[str, Any], mode: str) -> float | None:
+    """The tolerance as a fraction of the size of the expected value, or ``None`` when it cannot be had (no tolerance,
+    an expected value of zero, a mode other than absolute or relative)."""
+    try:
+        width = float(check.get("tolerance"))
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(width) or width < 0:
+        return None
+    if mode == "relative":
+        return width
+    expected = _expected(check)
+    if mode != "absolute" or not expected:
+        return None
+    return width / abs(expected)
 
 
 def keep_every_equation(old: Any, new: Any, *, only_example: bool = False) -> list[Any]:

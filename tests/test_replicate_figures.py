@@ -24,7 +24,7 @@ from core.config import (
     Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig,
 )
 from core.engine import (
-    Engine, _figure_list_for_prompt, _figure_record_note, _format_figure_check,
+    Engine, _figure_list_for_prompt, _figure_record_note, _figure_caption_text,
     _replicate_line_figure, _replicate_result_intervals,
 )
 from core.plot_style import write_boot
@@ -284,7 +284,7 @@ def test_the_writer_is_told_a_figure_is_the_mean_of_the_seeds() -> None:
     listing = _figure_list_for_prompt({"figures": ["p.png"], "figure_records": {"p.png": record}})  # type: ignore[typeddict-item]
     first, note = listing.splitlines()
     assert first.endswith("— each line is the mean of 3 seeds, shaded with its 95% confidence interval")
-    assert "and its caption says so" in note and "not a Wilson, bootstrap or other interval" in note
+    assert "and FI's caption says so" in note and "not a Wilson, bootstrap or other interval" in note
 
 
 def _seed_0_state(replicates: int | None) -> dict[str, Any]:
@@ -299,7 +299,7 @@ def _seed_0_state(replicates: int | None) -> dict[str, Any]:
     return state
 
 
-def test_the_writer_and_the_review_are_told_a_figure_shows_seed_0() -> None:
+def test_the_writer_and_the_caption_say_a_figure_shows_seed_0() -> None:
     state = _seed_0_state(None)
     first, note = _figure_list_for_prompt(state).splitlines()  # type: ignore[arg-type]
     assert first.endswith(
@@ -308,16 +308,12 @@ def test_the_writer_and_the_review_are_told_a_figure_shows_seed_0() -> None:
     assert note == (
         "A figure that shows replicate seed 0 only could not be drawn as the mean over the replicate "
         "seeds. A replicate seed repeats the whole experiment, so the figure draws every run seed 0 "
-        "made: the text and caption about it quote seed 0's values, or say it shows a single "
+        "made: the text about it quotes seed 0's values, or say it shows a single "
         "replicate (seed 0), not the means over the seeds."
     )
-    check = _format_figure_check("# P\n", state).splitlines()  # type: ignore[arg-type]
-    assert check == [
-        "figures/sizes.png shows replicate seed 0 only (every run that seed made), not the mean over "
-        "the replicate seeds: its caption and the text about it must quote seed 0's values or say it "
-        "shows a single replicate (seed 0).",
-        "No caption names a series its figure does not show.",
-    ]
+    caption = _figure_caption_text("sizes.png", state["figure_records"]["sizes.png"], n_seeds=None)
+    assert caption == ("Count. Shows replicate seed 0 only (every run that seed made), not the mean over the "
+                       "replicate seeds.")
 
 
 def test_with_the_seeds_counted_a_figure_shows_seed_0_of_them() -> None:
@@ -329,11 +325,8 @@ def test_with_the_seeds_counted_a_figure_shows_seed_0_of_them() -> None:
     assert note.startswith("A figure that shows replicate seed 0 only could not be drawn as the mean over "
                            "the 3 replicate seeds.")
     assert "say it shows a single replicate (seed 0 of 3), not the means over the seeds." in note
-    assert _format_figure_check("# P\n", state).splitlines()[0] == (  # type: ignore[arg-type]
-        "figures/sizes.png shows replicate seed 0 of 3 only (every run that seed made), not the mean "
-        "over the 3 replicate seeds: its caption and the text about it must quote seed 0's values or "
-        "say it shows a single replicate (seed 0 of 3)."
-    )
+    assert _figure_caption_text("sizes.png", state["figure_records"]["sizes.png"], n_seeds=3).endswith(
+        "Shows replicate seed 0 of 3 only (every run that seed made), not the mean over the 3 replicate seeds.")
     # One seed's results say nothing about how many seeds there were.
     assert "seed 0 of" not in _figure_list_for_prompt(_seed_0_state(1))  # type: ignore[arg-type]
 
@@ -351,13 +344,13 @@ def test_a_figure_of_seed_0_is_never_called_one_run(replicates: int | None) -> N
         "record note": _figure_record_note(record, n_seeds=replicates),
         "record note, seeds not passed": _figure_record_note(record),
         "writer figure list": _figure_list_for_prompt(state),  # type: ignore[arg-type]
-        "figure check": _format_figure_check("# P\n", state),  # type: ignore[arg-type]
+        "FI's caption": _figure_caption_text("sizes.png", record, n_seeds=replicates),
     }
     for where, text in texts.items():
         assert "replicate seed 0" in text, where
         assert "one run" not in text.lower() and "single run" not in text.lower(), where
         assert not _ONE_RUN_RE.search(text), (where, text)
-    counted = ("seed 0 of 3" in texts[k] for k in ("record note", "writer figure list", "figure check"))
+    counted = ("seed 0 of 3" in texts[k] for k in ("record note", "writer figure list", "FI's caption"))
     assert all(counted) if replicates else not any("seed 0 of" in t for t in texts.values())
 
 

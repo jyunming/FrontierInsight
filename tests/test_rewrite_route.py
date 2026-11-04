@@ -210,7 +210,6 @@ def test_the_writer_gets_the_review_the_unsupported_claims_and_the_users_feedbac
         "review": {
             "verdict": "revise", "score": 2,
             "must_flag_hits": ["[methodologist] unsupported_claim"],
-            "figure_caption_warnings": ["Figure 2's caption names S(t), which the figure draws flat"],
             "weaknesses": "The discussion repeats the results.",
             "suggestions": ["Say how many seeds the interval is over."],
         },
@@ -223,8 +222,6 @@ def test_the_writer_gets_the_review_the_unsupported_claims_and_the_users_feedbac
         "Verdict: revise (score 2)",
         "Must fix:",
         "  - [methodologist] unsupported_claim",
-        "Captions that describe what their figure does not show:",
-        "  - Figure 2's caption names S(t), which the figure draws flat",
         "Weaknesses:",
         "  - The discussion repeats the results.",
         "Suggestions:",

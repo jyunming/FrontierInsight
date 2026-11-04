@@ -25,6 +25,7 @@ import pytest
 from langgraph.checkpoint.memory import MemorySaver
 
 from core import paper_patch
+from core.paper_facts import to_placeholders
 from core.config import (
     Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig,
 )
@@ -32,10 +33,11 @@ from core.engine import (
     PRELIMINARY_NOTE,
     _mark_preliminary,
     Engine, _aggregate_cost_rows, _finalize_paper_sources, _hit_name, _paper_basis, build_references,
-    cited_references,
+    _place_figures, cited_references,
 )
 
 TOPIC = "How fast do stochastic epidemics die out?"
+
 
 
 def _paper(title: str, doi: str) -> dict[str, Any]:
@@ -55,6 +57,8 @@ FIGURES = ["figures/final_size.png"]
 CLAIM = "Extinction is certain below R0 = 1.2 [3]."
 CAPTION = "**Figure 1.** Final size against R0 for the deterministic model and the mean of the simulations."
 NEW_CLAIM = "Extinction is likely at low R0 [3]."
+# The caption FI writes for the figure (it has no record here, so its file name describes it): the writer's is replaced.
+FI_CAPTION = "**Figure 1.** final size."
 
 # What the writer returns for a first draft (the engine lists the sources).
 DRAFT = (
@@ -180,7 +184,7 @@ def test_a_revise_for_one_flagged_sentence_changes_only_that_sentence(tmp_path: 
     # Everything but the one sentence is byte-identical, the source lists and figures included.
     assert after == before.replace(CLAIM, NEW_CLAIM)
     assert after.replace(NEW_CLAIM, CLAIM) == before
-    assert f"![{CAPTION}](figures/final_size.png)" in after
+    assert f"![{FI_CAPTION}](figures/final_size.png)" in after and CAPTION not in after
     assert [r["n"] for r in cited_references(out2["literature"], after)] == [1, 2, 3, 4]
     assert [r["title"] for r in build_references(out2["literature"])] == ["Alpha", "Beta", "Gamma", "Delta"]
     assert out2["paper_basis"] == out1["paper_basis"], "the study is the same, so the next round may edit again"
@@ -193,7 +197,7 @@ def test_the_writer_gets_the_draft_and_the_passages_and_not_the_whole_study(tmp_
     out1, before = _first_draft(eng)
     _revise(eng, out1, ["unsupported_claim"])
     prompt = client.calls[1][1]
-    assert before in prompt, "the whole earlier draft, exactly as it is"
+    assert to_placeholders(before) in prompt, "the whole earlier draft, exactly as it is (FI's blocks as placeholders)"
     assert "Extinction is certain below R0 = 1.2." in prompt, "the claim the check flagged"
     assert json.dumps(CLAIM) in prompt, "and the draft's own words for it, escaped as `find` needs"
     assert "Neither the results nor [3] say so." in prompt, "with the check's reason"
@@ -203,18 +207,17 @@ def test_the_writer_gets_the_draft_and_the_passages_and_not_the_whole_study(tmp_
 
 
 def test_two_edits_are_applied_together(tmp_path: Path) -> None:
-    new_caption = "**Figure 1.** Final size against R0: the deterministic curve and the mean of 300 simulations."
-    finding = ('figure_caption: the caption of figures/final_size.png names "extinction", but the figure '
-               'does not show it on its axis "final size"')
-    eng, client, logged = _engine(tmp_path, [DRAFT, _edits((CAPTION, new_caption), (CLAIM, NEW_CLAIM))])
+    other = "A larger population would shrink the gap [1]."
+    narrower = "A larger population may shrink the gap [1]."
+    grounding = {"claims": [
+        {"claim": "Extinction is certain below R0 = 1.2.", "basis": "unsupported", "evidence": "Neither says so."},
+        {"claim": "A larger population would shrink the gap.", "basis": "unsupported", "evidence": "[1] does not say so."}]}
+    eng, client, logged = _engine(tmp_path, [DRAFT, _edits((CLAIM, NEW_CLAIM), (other, narrower))])
     out1, before = _first_draft(eng)
-    after = _revise(
-        eng, out1, ["unsupported_claim", "figure_caption"], review={"figure_caption_warnings": [finding]},
-    )
+    after = _revise(eng, out1, ["unsupported_claim"], claim_grounding=grounding)
     assert client.nodes == ["write", "write.patch"]
-    assert after == before.replace(CLAIM, NEW_CLAIM).replace(CAPTION, new_caption)
-    assert "](figures/final_size.png)" in after
-    assert json.dumps(CAPTION) in client.calls[1][1], "the caption is handed over as the caption, not the link"
+    assert after == before.replace(CLAIM, NEW_CLAIM).replace(other, narrower)
+    assert f"![{FI_CAPTION}](figures/final_size.png)" in after
     assert not _warnings(logged)
 
 
@@ -282,7 +285,7 @@ def test_an_edit_whose_find_occurs_twice_falls_back(tmp_path: Path) -> None:
     ("", "the reply is empty"),
     (_edits((CLAIM, CLAIM)), "the edits change nothing"),
     (_edits((CLAIM, "x"), (CLAIM, "y")), "two edits overlap"),
-    (_edits((CAPTION, "**Figure 1.** Changed."), ("](figures/final_size.png)", "](figures/other.png)")),
+    (_edits((FI_CAPTION, "**Figure 1.** Changed."), ("](figures/final_size.png)", "](figures/other.png)")),
      "an edit changed a figure link or a heading"),
     (_edits(("## Discussion", "## Conclusions")), "an edit changed a figure link or a heading"),
     # The engine writes the source lists from the citations in the text: an edit
@@ -300,6 +303,7 @@ def test_a_reply_that_is_not_usable_edits_falls_back_and_says_why(tmp_path: Path
 def test_edits_that_replace_most_of_the_paper_are_a_rewrite_in_disguise(tmp_path: Path) -> None:
     eng, client, logged = _engine(tmp_path, [DRAFT, "placeholder", DRAFT])
     out1, before = _first_draft(eng)
+    before = to_placeholders(before)
     body = before[:before.index("## References") - 2]
     client.replies[0] = _edits((body, "A short paper."))
     _revise(eng, out1, ["unsupported_claim"])
@@ -317,7 +321,6 @@ def test_a_failed_edit_call_falls_back_to_the_whole_paper(tmp_path: Path) -> Non
 
 @pytest.mark.parametrize("hits", [
     ["unsupported_claim", "over_page_limit: the rendered PDF is 5 pages; the limit is 4. Cut about 200 words"],
-    ["figure_missing: the paper leaves out figures/x.png, which the design planned"],
     ["citations_unchecked: the claim check could not run on this draft"],
     ["unsupported_claim", "single_point_eval"],
 ])
@@ -498,7 +501,9 @@ def test_through_the_graph_the_second_write_edits_the_first(tmp_path: Path) -> N
     first = _finalize_paper_sources(DRAFT, LIT, "external")[0]
     # The config does not say what the result is for, so the paper is an exploration's: marked preliminary once.
     written = Path(final["paper_md"]).read_text(encoding="utf-8")
-    assert written == _mark_preliminary(first.replace(CLAIM, NEW_CLAIM))
+    # FI's figure, with FI's caption, in place of the writer's image.
+    assert written == _mark_preliminary(_place_figures(first.replace(CLAIM, NEW_CLAIM), _study())[0])  # type: ignore[arg-type]
+    assert "fi:fact-limitations" not in written  # no item to state: FI adds no block
     assert written.count(PRELIMINARY_NOTE) == 1
     assert final["paper_basis"] == _paper_basis(_study())  # type: ignore[arg-type]
 
@@ -619,24 +624,10 @@ def test_an_edit_may_not_touch_the_figures_or_the_headings() -> None:
     assert "![**Figure 1.** The curve rises.](figures/curve.png)" in done.text
 
 
-def test_a_caption_finding_is_located_by_its_figure_file() -> None:
-    got, reason = paper_patch.plan_passages(
-        PAPER, END, hits=[("figure_caption", "figure_caption")], claims=[],
-        captions=['figure_caption: the caption of figures/curve.png names "x", but the figure does not show it'],
-    )
-    assert reason == "" and [(p.kind, p.located, p.how) for p in got] == [
-        ("caption", "**Figure 1.** A curve.", "caption")]
-    got, _reason = paper_patch.plan_passages(
-        PAPER, END, hits=[("figure_caption", "figure_caption")], claims=[],
-        captions=["figure_caption: the caption of figures/nothing.png names x"],
-    )
-    assert got[0].located == "" and "not found by the engine" in paper_patch.format_passages(got)
-
-
 def test_a_typed_number_is_located_through_the_sentence_the_check_quotes() -> None:
     hit = ("paper_record_mismatch: you typed 0.34, which is not a number of the plan or the topic. If it is a result, place "
            "its key from the \"Results you can place\" list (FI fills it in). — “The rate was 0.34 at R0 = 1.5”")
-    got, reason = paper_patch.plan_passages(PAPER, END, hits=[("paper_record_mismatch", hit)], claims=[], captions=[])
+    got, reason = paper_patch.plan_passages(PAPER, END, hits=[("paper_record_mismatch", hit)], claims=[])
     assert reason == "" and got[0].kind == "number"
     assert got[0].flagged == "The rate was 0.34 at R0 = 1.5"
     assert got[0].located == "The rate was 0.34 at \(R_0 = 1.5\)." and got[0].how == "sentence"
@@ -645,5 +636,5 @@ def test_a_typed_number_is_located_through_the_sentence_the_check_quotes() -> No
 
 def test_a_check_that_names_no_sentence_is_not_answered_with_edits() -> None:
     hit = "paper_record_mismatch: a further 5 typed number(s) in other sentences are not numbers of the plan or the topic."
-    got, reason = paper_patch.plan_passages(PAPER, END, hits=[("paper_record_mismatch", hit)], claims=[], captions=[])
+    got, reason = paper_patch.plan_passages(PAPER, END, hits=[("paper_record_mismatch", hit)], claims=[])
     assert got == [] and "names no passage" in reason
