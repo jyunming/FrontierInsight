@@ -439,6 +439,25 @@ def required_items(quest_root: Path | str) -> list[Item]:
             + (f" (in {where})" if where else "") + (f": {text}" if text else "")
             + "; the test no longer runs on the code that produced the results, so it is not confirmed that the fault is "
             "fixed"), key=fid)
+    # A result-changing finding no test could show (every test of it errored, whether in the test or in the code it called
+    # on made-up data) stays in the paper when the code was changed after the reading: ``open_findings`` below only speaks
+    # for the version the reading was of, and the repair did not check this finding again.
+    try:
+        from . import code_review as _cr
+
+        changed = bool(record.get("final")) and record.get("version") != _cr.version(root / "code")
+    except Exception:  # noqa: BLE001
+        changed = False
+    for fid, issue in issues.items():
+        if (not changed or not isinstance(issue, dict) or str(fid) in gated or issue.get("changes_result") is not True
+                or issue.get("fi_own") or issue.get("plan_conflict") or issue.get("demonstrated") is True
+                or not issue.get("errors") or not _code_findings.flagged_now(issue)):
+            continue
+        text = _one(issue.get("text")).rstrip(".")
+        add(CODE_FINDING, text[:80] or str(fid), _sentence(
+            "A review of the code flagged a problem that can change a reported result; no test could show it (its tests "
+            "did not run to a result), and the code was changed afterwards and not checked again for it"
+            + (f": {text}" if text else "")), key=fid)
     # Open problems in the code, flagged by a second reading, that can change a reported result (one about a function the
     # run never calls cannot: core/code_review.py:open_findings leaves those out).
     try:

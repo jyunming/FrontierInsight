@@ -6,11 +6,13 @@ results) decides a crash repair. Real tiny files and the real test runner; no mo
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from core import code_review, paper_facts
+from core import code_findings, code_review, finding_repair, paper_facts
 from core.engine import Engine
 from tests.test_shown_finding_gate import STATE, _engine, _issue, _record
 
@@ -40,10 +42,73 @@ async def test_a_finding_test_crash_in_the_code_after_a_good_run_is_no_run_crash
     assert "not confirmed that the fault is fixed" in item.sentence
 
 
-@pytest.mark.asyncio
-async def test_the_code_review_never_sends_a_finding_test_crash_to_the_run_repair(tmp_path: Path) -> None:
-    engine = _crashing(tmp_path)
-    assert not hasattr(engine, "_review_crash_run") and not hasattr(engine, "_gate_crash_repair")
+class _Replies(dict):
+    """The model's answers to a request for a test, one after the other."""
+
+    def __init__(self, texts: list[str]) -> None:
+        super().__init__()
+        self.texts = list(texts)
+
+    def __getitem__(self, key: str) -> str:
+        return self.texts.pop(0) if len(self.texts) > 1 else self.texts[0]
+
+
+def _reviewed(tmp_path: Path, replies: list[str]) -> tuple[Path, dict[str, Any], dict[str, Any], Any]:
+    """A quest whose code crashes when called, one result-changing finding about it, and the code review's test loop."""
+    from tests.test_finding_v2_replay import _env
+
+    root = tmp_path / "q"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "experiment.py").write_text(CRASHES, encoding="utf-8")
+    issue = {"id": "F-9", "changes_result": True, "demonstrated": False, "outcome": "open", "plan_conflict": False,
+             "readings": [{"n": 1, "status": "open"}], "severity": "high", "first_seen": 1, "file": "experiment.py",
+             "function": "dose", "text": "the dose is a typed-in value", "tests": 0}
+    record: dict[str, Any] = {"issues": {"F-9": issue}}
+    return root, record, issue, _env(root, record, _Replies(replies))  # type: ignore[arg-type]
+
+
+FENCED_CALL = "def test_x():\n    import experiment\n    assert experiment.dose() != 60.0\n"
+
+
+def test_a_review_test_that_raises_inside_the_code_shows_nothing_and_is_no_run_crash(tmp_path: Path) -> None:
+    root, record, issue, env = _reviewed(tmp_path, [FENCED_CALL])
+    shown = asyncio.run(finding_repair.demonstrate(env, issue, "experiment.py"))
+    assert shown is False and issue["demonstrated"] is False and issue["outcome"] == code_findings.NOT_DEMONSTRATED
+    assert "crash" not in issue, "nothing is kept for a crash repair"
+    assert issue["errors"] and all(e["place"] == "program" for e in issue["errors"])
+    assert issue["tests"] == finding_repair.TEST_CALLS, "the bounded tries were all used, asking for another test each time"
+    assert not code_findings.shown_open(record), "it stops nothing"
+    # no part of the engine takes it for the study's run: the gate on it neither routes nor stops
+    code_review.save(root, {**record, "final": True, "version": code_review.version(root / "code")})
+    from tests.test_shown_finding_gate import _engine
+
+    engine = _engine(tmp_path / "e")
+    engine.quest_root = root
+    assert asyncio.run(engine._shown_fault_verdict(STATE)) is None
+
+
+def test_a_replacement_test_that_fails_by_assertion_is_still_recognised(tmp_path: Path) -> None:
+    other = "def test_x():\n    import experiment\n    assert experiment.other() != 60.0\n"
+    root, record, issue, env = _reviewed(tmp_path, [FENCED_CALL, other])
+    (root / "code" / "experiment.py").write_text(CRASHES + "\n\ndef other():\n    return 60.0\n", encoding="utf-8")
+    shown = asyncio.run(finding_repair.demonstrate(env, issue, "experiment.py"))
+    assert shown is True and issue["demonstrated"] is True and issue["failure_kind"] == code_findings.ASSERTION
+    assert issue["errors"] and issue["errors"][0]["place"] == "program", "the first try's crash is kept, and is no crash route"
+    assert "crash" not in issue and code_findings.shown_open(record) == [issue]
+
+
+def test_an_unshown_finding_stays_in_the_paper_when_the_code_changes_after_the_review(tmp_path: Path) -> None:
+    root, record, issue, env = _reviewed(tmp_path, [FENCED_CALL])
+    asyncio.run(finding_repair.demonstrate(env, issue, "experiment.py"))
+    code_review.save(root, {**record, "final": True, "version": code_review.version(root / "code"),
+                            "problems": [{"fid": "F-9", "text": issue["text"], "status": "different"}]})
+    kinds = [i for i in paper_facts.required_items(root) if i.kind == paper_facts.CODE_FINDING]
+    assert len(kinds) == 1 and "flagged a problem" in kinds[0].sentence and "not checked again" not in kinds[0].sentence
+    # a later repair changes the code: the reading's list is now empty, and the finding must still be said
+    (root / "code" / "experiment.py").write_text("def dose():\n    return 59.0\n", encoding="utf-8")
+    [item] = [i for i in paper_facts.required_items(root) if i.kind == paper_facts.CODE_FINDING]
+    assert "no test could show it" in item.sentence and "not checked again" in item.sentence
+    assert "typed-in value" in item.sentence
 
 
 @pytest.mark.asyncio
@@ -78,3 +143,29 @@ def test_a_real_study_crash_still_goes_to_the_run_repair(tmp_path: Path) -> None
     assert engine._route_after_evidence_gate({"evidence_assessment": {"route": "repair_crash"}}) == "repair_crash"
     edges = {(e.source, e.target) for e in engine._build_graph().compile().get_graph().edges}
     assert ("evidence_gate", "execute") in edges
+
+
+@pytest.mark.asyncio
+async def test_a_study_script_that_exits_nonzero_is_repaired_and_run_again(tmp_path: Path) -> None:
+    """The study's own run decides a crash repair: execute -> execute_reflect (the repair stubbed) -> the graph retries."""
+    import json
+    from unittest.mock import AsyncMock
+
+    from core.execution import ExecutionResult
+    from tests.test_engine_execute_retry import _count_real_calls, _mk_engine, _mock_execute_router
+
+    eng = _mk_engine(tmp_path)
+    (eng.quest_root / "code" / "experiment.py").write_text("import sys\nsys.exit(1)\n", encoding="utf-8")
+    failed = ExecutionResult(returncode=1, stdout="", stderr="Traceback ...\nKeyError: 'x'", duration_s=2.0)
+    eng.executor.install = AsyncMock(return_value=ExecutionResult(returncode=0, stdout="", stderr="", duration_s=0.1))
+    eng.executor.execute = _mock_execute_router(failed)
+    state: dict[str, Any] = {"deps": [], "design": {"hypothesis": "h"}, "code": "import sys\nsys.exit(1)\n"}
+    state.update(await eng._node_execute(state))
+    assert _count_real_calls(eng.executor.execute) == 1
+    assert state["exec_result"]["returncode"] == 1 and not state.get("result_json")
+    fixed = "print('RESULT_JSON: {}')\n"
+    eng._client = type("Stub", (), {"chat": AsyncMock(return_value=json.dumps(
+        {"code": fixed, "deps": [], "patch_summary": "fixed the lookup", "give_up_reason": ""}))})()
+    state.update(await eng._node_execute_reflect(state))
+    assert state["exec_reflect_iter"] == 1 and (eng.quest_root / "code" / "experiment.py").read_text(encoding="utf-8") == fixed
+    assert eng._route_after_execute_reflect(state) == "retry"  # type: ignore[arg-type]
