@@ -23050,8 +23050,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                         placed = None
                 elif reach is not None and not _code_review.missing_quantities(record, issue):
                     # No rerun to say (it could not be made): leave out what the records place, and stop only for an empty paper.
-                    placed = reach.effect(record, issue, result)
+                    keep_rule, reach.headline_stops = reach.headline_stops, rerun is None
+                    try:
+                        placed = reach.effect(record, issue, result)
+                    finally:
+                        reach.headline_stops = keep_rule
                     if rerun is not None and placed is not None:
+                        if placed.stop and not placed.empty:
+                            placed.stop = ""  # results left out for want of a rerun stop the paper only when none is left
                         how = how + "; the study could not be run again with a repair of it (" + rerun.why[:100] + ")"
                 else:
                     placed = None

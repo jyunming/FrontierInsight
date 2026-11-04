@@ -49,6 +49,7 @@ class Effect:
     incomplete: bool = False  # what is left out is shown missing or incomplete by the test, not shown computed wrongly
     named: str = ""  # the quantity the finding is about, among the left-out ones
     cannot: bool = False  # FI cannot tell what the code reaches: the records place nothing
+    empty: bool = False  # the stop is that leaving out what it changes leaves no result at all
 
 
 _BUILTIN_NAMES = frozenset(dir(builtins)) - {"eval", "exec", "compile", "open", "__import__", "input", "breakpoint"}
@@ -539,7 +540,7 @@ class Reach:
         out.stop = "; ".join(dict.fromkeys(p.stop for p in parts if p.stop))
         out.why = "; ".join(dict.fromkeys(p.why for p in parts if p.why))
         if not out.stop and out.left_out and not (set(self.ids) - set(out.left_out)):
-            out.stop = "leaving out what it changes leaves no result"
+            out.stop, out.empty = "leaving out what it changes leaves no result", True
         return out
 
     def _settle(self, eff: Effect, record: dict[str, Any], issue: dict[str, Any]) -> Effect:
@@ -600,7 +601,7 @@ class Reach:
         if hit:
             out.stop = f"the main result {', '.join(hit)} is among what it changes ({what})"
         elif reached and not (set(self.ids) - reached):
-            out.stop = "leaving out what it changes leaves no result"
+            out.stop, out.empty = "leaving out what it changes leaves no result", True
         out.why = what
         return out
 

@@ -322,10 +322,9 @@ def test_a_fault_that_could_not_be_rerun_leaves_results_out_and_never_stops_the_
     assert gate["outcome"] == "left_out" and "cover" in gate["keys"] and "could not be run again" in gate["how"]
 
 
-def test_a_fault_in_the_main_result_stops_the_paper_even_when_the_rerun_could_not_be_made(tmp_path: Path) -> None:
-    # a fault in est_a, the main result: a paper without it is not delivered, rerun or not
+def test_a_fault_in_the_main_result_that_could_not_be_rerun_leaves_it_out_and_stops_only_for_an_empty_paper(tmp_path: Path) -> None:
     out, _ = _gate(tmp_path, Verdict("could_not", why="no run.py"), headline=("est_a",), test=DERIVE_EST, quantity="est_a")
-    assert out and out["stuck_reason"] == "shown_fault_open" and "main result" in out["rationale"]
+    assert out is None  # est_b stays: the paper is not empty
 
 
 def test_a_changed_standard_error_is_left_out_alone_and_does_not_stop_for_the_result_it_belongs_to(tmp_path: Path) -> None:
@@ -461,12 +460,12 @@ def test_numbers_that_did_not_move_do_not_answer_a_finding_about_a_figure_or_a_m
     assert engine._unchanged_is_shown(issue, {"issues": {"F-1": issue}}, {}, [], None) is True
 
 
-def test_a_fault_that_could_not_be_rerun_still_stops_the_paper_when_it_leaves_out_the_main_result(
+def test_a_fault_that_could_not_be_rerun_stops_the_paper_when_it_leaves_the_main_result_not_computed(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from core import shown_reach
 
-    out, _ = _gate(tmp_path, Verdict("could_not", why="no run.py"), headline=("cover",), test=DERIVE_COVER)  # left out
-    assert out and out["stuck_reason"] == "shown_fault_open" and "main result" in out["rationale"]
+    out, _ = _gate(tmp_path, Verdict("could_not", why="no run.py"), headline=("cover",), test=DERIVE_COVER)
+    assert out is None  # only left out of the results: a rerun that could not be made does not stop the paper for that alone
 
     def effect(self: Any, record: Any, issue: Any, result: Any) -> Any:
         return shown_reach.Effect(not_done=["est_a"])  # the main result is not computed
