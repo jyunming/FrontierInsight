@@ -119,7 +119,7 @@ _DELIVERED = ["slides.md", "slides.html", "slides.pdf", "slides.pptx", "poster.t
               "poster.html", "speech.md", "frontier_insight_summary.json", "NEXT_STEP.md"]
 _PAPER = ["paper", "paper.md", "paper.pdf", "paper.html", "paper_html_body.md", "paper_html_source.html",
           "paper_html_theme.css", "paper_pdf_source.md", ".fi/paper_record_check.json",
-          ".fi/record_claims_taken_out.json", *_DELIVERED]
+          ".fi/record_claims_taken_out.json", ".fi/unsupported_claims.json", *_DELIVERED]
 # What the claim check writes into paper/ (the folder itself is the writing step's), and its receipt.
 _CLAIM_CHECK = ["paper/claims.json", "paper/CLAIMS.md", "paper/goal_coverage.json",
                 "paper/statistics_audit.json", "needs/receipts/claim_check.json"]

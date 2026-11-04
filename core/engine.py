@@ -26261,7 +26261,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                         if isinstance(c, dict) and c.get("basis") == "unsupported" and str(c.get("claim") or "").strip()
                         and (" ".join(str(c["claim"]).split()) in flat
                              or any(_same_statement(str(c["claim"]), s) for s in sentences))]
-            if not _paper_facts.write_unsupported_record(self.quest_root, standing):
+            # A sentence the check found unsupported that states a number is not delivered (core/record_claims.py): it is
+            # taken out of the paper and the Limitations say so. One with no number stays and is stated as unconfirmed.
+            removed = self._take_out_unsupported_numbers(state, paper_path, standing)
+            if removed:
+                gone = {str(r["claim"]) for r in removed}
+                standing = [c for c in standing if str(c.get("claim")) not in gone]
+            if not _paper_facts.write_unsupported_record(self.quest_root, standing, removed=removed):
                 return 0
             # A record with none empties: the Limitations block is written again from it, so a sentence an earlier pass
             # stated is gone.
@@ -26274,6 +26280,41 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._log.warning("[claim_check] %d sentence(s) of the paper as delivered were not found supported; its "
                               "Limitations say so", len(standing))
         return len(standing)
+
+    def _take_out_unsupported_numbers(self, state: QuestState, paper_path: Path | str,
+                                      standing: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """The writer's sentences the last claim check found unsupported that state a number (an FI-filled value or a typed
+        number FI cannot trace) are taken out of the paper on disk (core/record_claims.py::take_out_unsupported_numbers): the
+        check holds a number to FI's records, so such a sentence says something they do not, and FI does not know which value
+        was meant. What was taken out is added to ``.fi/unsupported_claims.json`` (the Limitations state it and QUALITY.md
+        lists it) and leaves ``paper/claims.json`` with its sentence. The claim check's receipt moves to the new draft, which
+        only lost text and added no claim. Returns the entries taken out (those of earlier passes are kept by the record)."""
+        try:
+            before = Path(paper_path).read_bytes()
+            plan = _paper_facts.plan_protocol(self.quest_root, self._protocol_block(state))
+            topic = str(self.config.topic or "")
+
+            def holds_number(sentence: str) -> bool:
+                if _paper_values._MARK.search(sentence) or _paper_values._SPAN.search(sentence):
+                    return True
+                return bool(_paper_facts.untraced_typed(sentence, plan, topic, self.quest_root))
+
+            text, removed = _record_claims.take_out_unsupported_numbers(
+                before.decode("utf-8"), standing, same=_same_statement, holds_number=holds_number,
+                plain=lambda raw: " ".join(_paper_facts.without_blocks(_paper_values.without_marks(raw)).split()))
+            if not removed:
+                return []
+            Path(paper_path).write_bytes(text.encode("utf-8"))  # bytes back as bytes (CRLF stays as it was)
+            _receipts.carry_over(self.quest_root, "claim_check", "paper", before, Path(paper_path).read_bytes(),
+                                 "FI took out sentences with a number its claim check found unsupported and added no claim")
+            self._prune_ledger_after_take_out([str(r["sentence"]) for r in removed], text)
+        except Exception as e:  # noqa: BLE001 -- the sentences stay and are stated as unconfirmed, as before
+            self._log.warning("[claim_check] the sentences with an unsupported number could not be taken out (%s: %s)",
+                              type(e).__name__, str(e)[:200])
+            return []
+        self._log.warning("[claim_check] %d sentence(s) that state a number the claim check found unsupported were taken "
+                          "out of the paper; the Limitations say so and QUALITY.md lists them", len(removed))
+        return removed
 
     async def _state_page_overrun(self, state: QuestState, paper_path: Path, limit: int, pages: int) -> int:
         """The paper stays over its page limit: FI's measurement goes on record (``.fi/page_limit.json``), which the

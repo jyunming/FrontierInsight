@@ -27,6 +27,7 @@ never delivered either way, and a sentence flagged wrongly costs that sentence, 
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from typing import Any
 
 HIT = "record_contradiction"
@@ -169,3 +170,61 @@ def found(paper_md: str, *, best_design: Any = None, optimum_check: Any = None,
                              "or confirmed against known answers; say plainly that those checks did not pass.", s))
                 break
     return hits
+
+
+# --- a sentence the claim check found unsupported that states a number ----------------------------------------------
+
+#: FI's own blocks (the Limitations, the run record ...) and the values it filled: a block is never read as the writer's
+#: sentence, and a value mark is masked while the sentences are found so that nothing inside it splits a sentence.
+_FI_BLOCK = re.compile(r"<!-- fi:fact-([\w-]+) -->.*?<!-- /fi:fact-\1 -->", re.S)
+_FI_MARK = re.compile(r"<!-- fi:v(?:-span)? .*?-->.*?<!-- /fi:v(?:-span)? -->", re.S)
+#: A sentence is read as the one a claim is about only when it is at most this many times as long as the claim, in words.
+_SIZE_RATIO = 3
+_NOT_PROSE = ("|", "#", "![", "```", "~~~")
+
+
+def take_out_unsupported_numbers(
+        paper_md: str, claims: list[dict[str, Any]], *, same: Callable[[str, str], bool],
+        holds_number: Callable[[str], bool], plain: Callable[[str], str]) -> tuple[str, list[dict[str, Any]]]:
+    """``paper_md`` without the writer's sentences that the claim check judged ``unsupported`` and that state a number,
+    and one entry for each claim taken out (``claim``, ``evidence``, ``sentence``).
+
+    The claim check holds every number of a result to FI's records: a number that is not in them, or is the number of
+    another setting or of the whole run where the sentence says one setting, makes the claim ``unsupported`` (the verdict is
+    the check's, no wording is read here). A sentence like that is not delivered: FI cannot say which value the writer
+    meant, so it does not put one in, and the Limitations say that it was taken out. An ``unsupported`` claim with no number
+    (a statement no source backs, a remark the check could not tie to a result) stays, and is stated as unconfirmed in the
+    Limitations as before. Only running prose is read: FI's blocks, tables, headings and figure lines are not the writer's
+    sentences.
+
+    ``same(claim, sentence)`` says whether a sentence states a claim, ``holds_number(sentence)`` whether the sentence (with
+    FI's value marks still in it) states a number, and ``plain(sentence)`` is the sentence as a reader sees it."""
+    from . import paper_patch, paper_trim
+
+    wanted = [c for c in claims if isinstance(c, dict) and c.get("basis") == "unsupported" and str(c.get("claim") or "").strip()]
+    if not wanted or not paper_md:
+        return paper_md, []
+    blocks = [m.span() for m in _FI_BLOCK.finditer(paper_md)]
+    masked = _FI_MARK.sub(lambda m: "\x00" * len(m.group(0)), paper_md)
+    spans: list[tuple[int, int]] = []
+    taken: list[dict[str, Any]] = []
+    for start, end, _block in paper_patch.sentence_units(masked):
+        raw = paper_md[start:end]
+        if not raw.strip() or raw.lstrip().startswith(_NOT_PROSE) or any(a <= start < b for a, b in blocks):
+            continue
+        # A unit that is nothing but FI's own filled text (a value mark and its punctuation) is not the writer's sentence.
+        if not re.sub(r"[\s\x00.,;:!?()\-]+", "", masked[start:end]):
+            continue
+        sentence = plain(raw)
+        # The claim and the sentence it is about are of one size: a long paragraph that holds the claim's words among many
+        # others is not that sentence.
+        claim = next((c for c in wanted if len(sentence.split()) <= _SIZE_RATIO * max(1, len(str(c["claim"]).split()))
+                      and same(str(c["claim"]), sentence)), None)
+        if claim is None or not holds_number(raw):
+            continue
+        spans.append((start, end))
+        taken.append({"claim": str(claim["claim"]).strip(), "evidence": str(claim.get("evidence") or "").strip(),
+                      "sentence": sentence})
+    if not spans:
+        return paper_md, []
+    return paper_trim._delete(paper_md, spans), taken
