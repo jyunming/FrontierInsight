@@ -43,11 +43,14 @@ over inventing a new one, and prefer a plain question over a technical field nam
 - **A fix counts as fixed only when its original failing input is shown fixed** (a replay of the real record or
   quest, or a live run), with a known positive showing the check still fires. Passing unit tests and a review are
   not that evidence. Only shown fixes go into a PR.
-- **A shown fix updates its records in the same step.** The moment a fix is shown fixed, mark its item in the issue
-  list the work is tracked in (the backlog) as fixed, with the commit and the evidence, and update every doc or record
-  the change makes stale (`dev/registry.md`, `docs/capabilities-reference.md`, the user docs, the prompts' own notes,
-  the work log) in that same piece of work, never as a follow-up. A list that lags the code reports a wrong count of
-  what is left.
+- **A shown fix updates its records in the same step.** The moment a fix is shown fixed, move its item out of the
+  open issue list the work is tracked in (the backlog) into its done record, with the commit and the evidence, and
+  update every doc or record the change makes stale (`dev/registry.md`, `docs/capabilities-reference.md`, the user
+  docs, the prompts' own notes, the work log) in that same piece of work, never as a follow-up. A list that lags the
+  code reports a wrong count of what is left.
+- **The open list holds only what is open.** Never leave a fixed item open with a "fixed on ..." note appended; a fix
+  only on a branch still moves out, marked "not on main yet". A partly fixed item is rewritten to say only what is
+  left, with one line naming what was fixed; old notes are deleted, not stacked, so the list shrinks as work is done.
 
 ## Before building a new feature: check what already exists
 
