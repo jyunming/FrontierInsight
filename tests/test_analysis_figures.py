@@ -978,6 +978,9 @@ class _Levels(_Grid):
         size = self._cells[key]["size"]
         return {"a": size + 1.0, "b": size + 2.0}
 
+    def compared(self) -> list[str]:
+        return ["mode"]
+
 
 def _spy_axes(monkeypatch):
     seen = {}
@@ -1010,6 +1013,12 @@ def test_default_figure_series_that_is_a_factor_compared_inside_the_runs_is_draw
                              "result_labels": {"lev": "response"}}, _Levels(), str(tmp_path))
     assert out["status"] == "ok" and out["fallback"] is True, out
     assert [l.get_label() for l in seen["axes"][0].lines] == ["response, a", "response, b"]
+
+
+def test_default_figure_series_that_is_neither_a_setting_nor_a_compared_factor_is_still_dropped(tmp_path):
+    """A mistyped series name must not draw a figure with its lines merged: only a name FI recorded as compared is a factor."""
+    out = af.default_figure({"id": "f1", "file": "f1.png", "shows": ["lev"], "x": "size", "series": "mdoe"}, _Levels(), str(tmp_path))
+    assert out["status"] == "dropped" and not (tmp_path / "f1.png").exists()
 
 
 def test_default_figure_holds_every_other_setting_and_says_which(tmp_path, monkeypatch):
