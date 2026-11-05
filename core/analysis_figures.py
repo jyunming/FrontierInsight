@@ -1132,6 +1132,8 @@ def _default_lines(spec: dict[str, Any], table: Any, fixed: dict[str, Any], deri
     names = spec.get("result_labels") if isinstance(spec.get("result_labels"), dict) else {}
     cells = {k: dict(table.setting(k)) for k in table.keys()}
     values = list(dict.fromkeys(c[str(s_name)] for c in cells.values() if str(s_name) in c)) if s_name else [None]
+    if s_name and not values:  # no setting of that name: a factor compared inside the runs, drawn as one line per level it is read by
+        s_name, values = None, [None]
     lines = []
     for rid in (str(r) for r in spec["shows"]):
         for value in values:

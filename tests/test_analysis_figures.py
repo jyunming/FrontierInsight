@@ -1002,6 +1002,16 @@ def test_default_figure_draws_a_result_recorded_per_compared_value_one_line_each
     assert [list(l.get_ydata()) for l in lines] == [[11.0, 21.0, 31.0], [12.0, 22.0, 32.0]]
 
 
+def test_default_figure_series_that_is_a_factor_compared_inside_the_runs_is_drawn_one_line_per_level(tmp_path, monkeypatch):
+    """The plan names the compared factor (``mode``) as the figure's series; the table holds it as levels of a result, not as a
+    setting, so no cell carries it. The figure is still drawn, one line per level, never dropped for want of a setting."""
+    seen = _spy_axes(monkeypatch)
+    out = af.default_figure({"id": "f1", "file": "f1.png", "shows": ["lev"], "x": "size", "series": "mode",
+                             "result_labels": {"lev": "response"}}, _Levels(), str(tmp_path))
+    assert out["status"] == "ok" and out["fallback"] is True, out
+    assert [l.get_label() for l in seen["axes"][0].lines] == ["response, a", "response, b"]
+
+
 def test_default_figure_holds_every_other_setting_and_says_which(tmp_path, monkeypatch):
     seen = _spy_axes(monkeypatch)
     out = _default(tmp_path, shows=["gain"], x="size", labels={"rate": "learning rate"})
