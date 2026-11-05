@@ -58,6 +58,12 @@ over inventing a new one, and prefer a plain question over a technical field nam
 - **Branches and worktrees do not pile up.** When a branch is merged, or a branch or experiment is given up, delete
   the branch and remove its worktree in that same step (after checking the worktree holds no uncommitted work and no
   directory junction). A branch kept on purpose says why in its last commit or in the work log.
+- **Test runs are stored in one place.** Every live run, replay, record copy and bench output goes in the one runs
+  folder outside the repository that the maintainer's notes name, never at a drive root, in the home folder or next to
+  the worktrees. Material that proves a fix sits in `replays/<date>_<short name>/` with a three-line README (what it
+  proves, the backlog item, the script that reads it); pytest temp only in the worktree's `.pytest_tmp/<name>`, removed
+  after a passing run; a one-off copy lives inside its check's folder and goes when the check is reported. Anything
+  older than 14 days that no backlog item, done record or script names is deleted in the weekly sweep.
 
 ## Before building a new feature: check what already exists
 
