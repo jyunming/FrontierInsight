@@ -164,8 +164,8 @@ def test_a_compared_setting_is_answered_for_each_value_and_an_at_pins_the_quanti
     root = _quest(tmp_path, monkeypatch, [{"item": "Q1", "by": "metric:algae_peak", "at": {}},
                                           {"item": "Q2", "by": "metric:bloom", "at": {"nutrient": 1}}])
     text = pf.answers_text(root)
-    assert "- peak algae (temp = 10) (measured as: `algae_peak`): {{v:algae_peak @ nutrient=each, temp=10 | range}}" in text
-    assert "- peak algae (temp = 20)" in text
+    peak = [ln for ln in text.splitlines() if ln.startswith("- peak algae")]
+    assert len(peak) == 1 and "(measured as: `algae_peak`), by temp: 10: {{v:algae_peak @ nutrient=each, temp=10 | range}}; 20: {{v:algae_peak @ nutrient=each, temp=20 | range}}" in peak[0]
     assert "{{v:algae_peak @ nutrient=each, temp=each | range}}" not in text  # no one range across the compared values
     assert "(when nutrient = 1)" in text and "{{v:bloom:mean_ci @ nutrient=1, temp=10}}" in text
     assert "- water clarity: the plan links no result of the study to it here" in text  # the known positive

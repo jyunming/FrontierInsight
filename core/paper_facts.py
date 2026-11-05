@@ -1379,21 +1379,29 @@ def _plain_in(protocol: dict[str, Any], root: Path) -> Any:
     return plain
 
 
+def _answer_parts(rec: Any, metric: str, tries: list[tuple[str, str]], plain: Any = None, how: str = "") -> tuple[str, str, str, bool]:
+    """The parts of an answer: the words in brackets (``how``, else the result's name), the key FI fills, the words after its
+    value, and whether FI could fill one of ``tries``. When it could not, the key is "not answered (why)" and the rest is
+    empty."""
+    got = [(k, note, _values.resolve(k, rec)) for k, note in tries]
+    done = next(((k, note) for k, note, v in got if v.filled), None)
+    shown = rec.label(metric)
+    lead = how or "measured as: " + (shown if shown != metric else "`" + metric + "`")
+    if done is None:
+        why = got[-1][2].hit.reason if got[-1][2].hit else "no record"
+        if plain is None:
+            return lead, f"not answered (FI cannot state {shown}: {why})", "", False
+        return lead, f"not answered (FI cannot state \"{plain(metric)}\": {why.replace(metric, plain(metric))})", "", False
+    return lead, done[0], done[1], True
+
+
 def _answer_line(rec: Any, name: str, metric: str, tries: list[tuple[str, str]], plain: Any = None,
                  how: str = "") -> str:
     """One line of the answers block: the first of ``tries`` (a key and the words after its value) that FI can fill, else
     ``name`` said as not answered, with why. ``how`` replaces the words in brackets (the plan's map and its result) when FI
     worked the number out itself."""
-    got = [(k, note, _values.resolve(k, rec)) for k, note in tries]
-    done = next(((k, note) for k, note, v in got if v.filled), None)
-    if done is None:
-        why = got[-1][2].hit.reason if got[-1][2].hit else "no record"
-        if plain is None:
-            return f"- {name}: not answered (FI cannot state {rec.label(metric)}: {why})"
-        return f"- {name}: not answered (FI cannot state \"{plain(metric)}\": {why.replace(metric, plain(metric))})"
-    shown = rec.label(metric)
-    lead = how or "measured as: " + (shown if shown != metric else "`" + metric + "`")
-    return f"- {name} ({lead}): {done[0]}{done[1]}"
+    lead, body, note, ok = _answer_parts(rec, metric, tries, plain, how)
+    return f"- {name} ({lead}): {body}{note}" if ok else f"- {name}: {body}"
 
 
 #: What a question that no result is linked to says. It claims nothing about the run: a quantity the analysis computed under
@@ -1422,12 +1430,6 @@ def _pins_not_in(name: str, rec: Any, at: dict[str, Any]) -> list[str]:
         if not stated:
             out.append(f"{rec.label(a)} = {v}")
     return out
-
-
-def _is_sweep(levels: list[Any]) -> bool:
-    """Whether a setting's values are plain numbers (at least two, none a yes/no): a sweep over one quantity. A setting of
-    names (two interval methods, three solvers) is not, and a comparison that names its values is not asked here."""
-    return len(levels) >= 2 and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in levels)
 
 
 def _levels_with_trials(rec: Any, metric: str, split: str, levels: list[Any], others: list[str], at: dict[str, Any]) -> list[Any]:
@@ -1523,9 +1525,6 @@ def answers_text(quest_root: Path | str) -> str:
         reported = {m.get("id") for m in protocol.get("metrics") or [] if isinstance(m, dict)}
         compared = {c.get("across") for c in protocol.get("comparisons") or []
                     if isinstance(c, dict) and c.get("result") in reported}
-        # A comparison that names its values (``values``) compares those alternatives; one that names none compares across the
-        # setting as a whole.
-        named = {c.get("across") for c in protocol.get("comparisons") or [] if isinstance(c, dict) and c.get("values")}
         # An axis the study compares inside each run is read from the per-value records the run kept; a quantity that
         # is one number per run has no record under it, so that axis is pooled whole (``=all``) for it, never looked
         # up as a value of its own (a lookup by it finds no trial at all).
@@ -1553,12 +1552,7 @@ def answers_text(quest_root: Path | str) -> str:
             has_trials = _levels_with_trials(rec, metric, split, levels, [a for a in each if a != split], at)
             if has_trials and len(has_trials) < len(levels):
                 only_at, levels = len(has_trials) == 1, has_trials
-        if (split is not None and len(levels) > 1 and not only_at and stat != "bias" and split not in named
-                and _is_sweep(levels)):
-            # A setting of numbers in order (a step size, a dose) that the plan compares without naming values is swept, not a
-            # set of alternatives: the question is answered once, as a range over the sweep; the tables give each value. (A
-            # bias is measured from the true value at each value, so it keeps its own line for each.)
-            split, levels = None, [None]
+        pieces: list[tuple[Any, str, str, str]] = []
         for level in levels:
             here = [a for a in each if a != split] if level is not None else each
             said = [f"{rec.short(a)}=each" for a in here]
@@ -1579,7 +1573,11 @@ def answers_text(quest_root: Path | str) -> str:
                 shown = rec.label(metric)
                 how = f"measured as: {shown if shown != metric else '`' + metric + '`'}, here worked out as {made}"
             if stat == "bias" and not estimates.get(metric):
-                lines.append(f"- {label}: not answered (the plan gives no one true value of \"{plain(metric)}\" to measure the bias from)")
+                gap = f"not answered (the plan gives no one true value of \"{plain(metric)}\" to measure the bias from)"
+                if len(levels) > 1:
+                    pieces.append((level, how, gap, ""))
+                else:
+                    lines.append(f"- {label}: {gap}")
                 continue
             if said:
                 where = ", ".join([*said, *fixed_here])
@@ -1600,7 +1598,21 @@ def answers_text(quest_root: Path | str) -> str:
                              (f"{{{{v:{metric}:sd @ {where}}}}}", " (the standard deviation over the trials)")]
                 else:
                     tries = [(f"{{{{v:{metric}:mean_ci @ {where}}}}}", ""), (f"{{{{v:{metric} @ {where}}}}}", " (no interval: the trials give none)")]
-            lines.append(_answer_line(rec, label, metric, tries, plain, how))
+            if len(levels) > 1:
+                lead, body, note, ok = _answer_parts(rec, metric, tries, plain, how)
+                pieces.append((level, lead, body, note if ok else ""))
+            else:
+                lines.append(_answer_line(rec, label, metric, tries, plain, how))
+        if pieces:
+            # One bullet for the question: each value of the compared setting keeps its own answer, in order, joined here (a
+            # note that every filled answer shares is said once at the end).
+            notes = {n for _, _, _, n in pieces if n}
+            shared = notes.pop() if len(notes) == 1 and all(n or b.startswith("not answered") for _, _, b, n in pieces) else ""
+            lead = next((ld for _, ld, _, _ in pieces if ld), "")
+            pins = _pins_not_in(name, rec, at)
+            head = name + (f" (when {', '.join(pins)})" if pins else "")
+            each_value = "; ".join(f"{lv}: {b}{'' if shared else n}" for lv, _, b, n in pieces)
+            lines.append(f"- {head} ({lead}), by {rec.label(split)}: {each_value}{shared}")
     return ("**Answers to the questions asked.**" + chr(10) * 2 + chr(10).join(lines)) if lines else ""
 
 
