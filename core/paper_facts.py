@@ -1379,21 +1379,29 @@ def _plain_in(protocol: dict[str, Any], root: Path) -> Any:
     return plain
 
 
+def _answer_parts(rec: Any, metric: str, tries: list[tuple[str, str]], plain: Any = None, how: str = "") -> tuple[str, str, str, bool]:
+    """The parts of an answer: the words in brackets (``how``, else the result's name), the key FI fills, the words after its
+    value, and whether FI could fill one of ``tries``. When it could not, the key is "not answered (why)" and the rest is
+    empty."""
+    got = [(k, note, _values.resolve(k, rec)) for k, note in tries]
+    done = next(((k, note) for k, note, v in got if v.filled), None)
+    shown = rec.label(metric)
+    lead = how or "measured as: " + (shown if shown != metric else "`" + metric + "`")
+    if done is None:
+        why = got[-1][2].hit.reason if got[-1][2].hit else "no record"
+        if plain is None:
+            return lead, f"not answered (FI cannot state {shown}: {why})", "", False
+        return lead, f"not answered (FI cannot state \"{plain(metric)}\": {why.replace(metric, plain(metric))})", "", False
+    return lead, done[0], done[1], True
+
+
 def _answer_line(rec: Any, name: str, metric: str, tries: list[tuple[str, str]], plain: Any = None,
                  how: str = "") -> str:
     """One line of the answers block: the first of ``tries`` (a key and the words after its value) that FI can fill, else
     ``name`` said as not answered, with why. ``how`` replaces the words in brackets (the plan's map and its result) when FI
     worked the number out itself."""
-    got = [(k, note, _values.resolve(k, rec)) for k, note in tries]
-    done = next(((k, note) for k, note, v in got if v.filled), None)
-    if done is None:
-        why = got[-1][2].hit.reason if got[-1][2].hit else "no record"
-        if plain is None:
-            return f"- {name}: not answered (FI cannot state {rec.label(metric)}: {why})"
-        return f"- {name}: not answered (FI cannot state \"{plain(metric)}\": {why.replace(metric, plain(metric))})"
-    shown = rec.label(metric)
-    lead = how or "the plan's map: " + (shown if shown != metric else "`" + metric + "`")
-    return f"- {name} ({lead}): {done[0]}{done[1]}"
+    lead, body, note, ok = _answer_parts(rec, metric, tries, plain, how)
+    return f"- {name} ({lead}): {body}{note}" if ok else f"- {name}: {body}"
 
 
 #: What a question that no result is linked to says. It claims nothing about the run: a quantity the analysis computed under
@@ -1544,6 +1552,7 @@ def answers_text(quest_root: Path | str) -> str:
             has_trials = _levels_with_trials(rec, metric, split, levels, [a for a in each if a != split], at)
             if has_trials and len(has_trials) < len(levels):
                 only_at, levels = len(has_trials) == 1, has_trials
+        pieces: list[tuple[Any, str, str, str]] = []
         for level in levels:
             here = [a for a in each if a != split] if level is not None else each
             said = [f"{rec.short(a)}=each" for a in here]
@@ -1562,9 +1571,13 @@ def answers_text(quest_root: Path | str) -> str:
             if stat:
                 made = "the mean estimate minus the true value" if stat == "bias" else "the standard deviation over the trials"
                 shown = rec.label(metric)
-                how = f"the plan's map: {shown if shown != metric else '`' + metric + '`'}, here worked out as {made}"
+                how = f"measured as: {shown if shown != metric else '`' + metric + '`'}, here worked out as {made}"
             if stat == "bias" and not estimates.get(metric):
-                lines.append(f"- {label}: not answered (the plan gives no one true value of \"{plain(metric)}\" to measure the bias from)")
+                gap = f"not answered (the plan gives no one true value of \"{plain(metric)}\" to measure the bias from)"
+                if len(levels) > 1:
+                    pieces.append((level, how, gap, ""))
+                else:
+                    lines.append(f"- {label}: {gap}")
                 continue
             if said:
                 where = ", ".join([*said, *fixed_here])
@@ -1585,7 +1598,22 @@ def answers_text(quest_root: Path | str) -> str:
                              (f"{{{{v:{metric}:sd @ {where}}}}}", " (the standard deviation over the trials)")]
                 else:
                     tries = [(f"{{{{v:{metric}:mean_ci @ {where}}}}}", ""), (f"{{{{v:{metric} @ {where}}}}}", " (no interval: the trials give none)")]
-            lines.append(_answer_line(rec, label, metric, tries, plain, how))
+            if len(levels) > 1:
+                lead, body, note, ok = _answer_parts(rec, metric, tries, plain, how)
+                pieces.append((level, lead, body, note if ok else ""))
+            else:
+                lines.append(_answer_line(rec, label, metric, tries, plain, how))
+        if pieces:
+            # One bullet for the question: each value of the compared setting keeps its own answer, in order, joined here (a
+            # note that every value carries is said once at the end; otherwise each keeps its own, so a note never ends up
+            # beside a value it was not said of).
+            notes = {n for _, _, _, n in pieces if n}
+            shared = notes.pop() if len(notes) == 1 and all(n for _, _, _, n in pieces) else ""
+            lead = next((ld for _, ld, _, _ in pieces if ld), "")
+            pins = _pins_not_in(name, rec, at)
+            head = name + (f" (when {', '.join(pins)})" if pins else "")
+            each_value = "; ".join(f"{lv}: {b}{'' if shared else n}" for lv, _, b, n in pieces)
+            lines.append(f"- {head} ({lead}), by {rec.label(split)}: {each_value}{shared}")
     return ("**Answers to the questions asked.**" + chr(10) * 2 + chr(10).join(lines)) if lines else ""
 
 

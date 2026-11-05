@@ -331,7 +331,7 @@ def test_an_open_code_finding_that_changes_a_result_is_an_item(tmp_path: Path, m
     from core import code_review
 
     root, _ = _quest(tmp_path, "kinetics_s1")
-    found = {"missing": [], "different": [], "conflicts": [], "unshown": [], "never_run": [],
+    found = {"missing": [], "different": [], "conflicts": [], "unshown": [], "never_run": [], "not_rechecked": [],
              "flagged": [{"fid": "abc", "text": "the variance of k uses n instead of n - 1", "severity": "high",
                           "kind": "logic"},
                          {"fid": "low", "text": "a variable name is unclear", "severity": "low", "kind": "logic"}]}
