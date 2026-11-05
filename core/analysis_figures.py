@@ -1132,10 +1132,11 @@ def _default_lines(spec: dict[str, Any], table: Any, fixed: dict[str, Any], deri
     names = spec.get("result_labels") if isinstance(spec.get("result_labels"), dict) else {}
     cells = {k: dict(table.setting(k)) for k in table.keys()}
     values = list(dict.fromkeys(c[str(s_name)] for c in cells.values() if str(s_name) in c)) if s_name else [None]
+    by_compared = False  # the series is a factor compared inside the runs: only a result recorded for each of its values is drawn
     if s_name and not values:  # no setting of that name: a factor FI recorded as compared inside the runs is drawn as one line per level
         compared = getattr(table, "compared", None)  # an older table has none: the series stays unknown and the figure is dropped
         if callable(compared) and s_name in compared():
-            s_name, values = None, [None]
+            s_name, values, by_compared = None, [None], True
     lines = []
     for rid in (str(r) for r in spec["shows"]):
         for value in values:
@@ -1146,6 +1147,8 @@ def _default_lines(spec: dict[str, Any], table: Any, fixed: dict[str, Any], deri
                 for level, mean in _default_points(table, rid, k, derived).items():
                     by_level.setdefault(level, []).append((cell[x_name], mean))
             for level, points in by_level.items():
+                if by_compared and not level:  # recorded once for the setting: a line of it would not be split by the series
+                    continue
                 if all(_plain_number(p[0]) for p in points):
                     points.sort(key=lambda p: p[0])
                 tail = (["%s = %s" % (s_name, value)] if s_name else []) + ([level] if level else [])

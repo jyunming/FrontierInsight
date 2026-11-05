@@ -1021,6 +1021,14 @@ def test_default_figure_series_that_is_neither_a_setting_nor_a_compared_factor_i
     assert out["status"] == "dropped" and not (tmp_path / "f1.png").exists()
 
 
+def test_default_figure_compared_factor_series_draws_no_line_of_a_result_recorded_once_per_setting(tmp_path):
+    """``gain`` is recorded once per setting, not for each value of ``mode``: a line of it would ignore the series the plan asks
+    for, so with nothing else to draw the figure is dropped."""
+    out = af.default_figure({"id": "f1", "file": "f1.png", "shows": ["gain"], "x": "size", "series": "mode"}, _Levels(),
+                            str(tmp_path))
+    assert out["status"] == "dropped" and not (tmp_path / "f1.png").exists()
+
+
 def test_default_figure_holds_every_other_setting_and_says_which(tmp_path, monkeypatch):
     seen = _spy_axes(monkeypatch)
     out = _default(tmp_path, shows=["gain"], x="size", labels={"rate": "learning rate"})
