@@ -485,6 +485,45 @@ def record_levels(levels, rows):
     return out
 
 
+def settle_missing(rows, levels):
+    """``rows`` where a trial's missing number for a value the runs compare inside them is a missing number for each of those
+    values. Which setting a number belongs to is FI's own fact (the setting it ran, and the values the plan has each run
+    compare), not a record formed by the names a run happened to return: a run that gives no number for a name (a failed
+    fit returning ``None``) under its plain name, where the other runs of the setting give that name per value, would
+    otherwise be a record of its own that holds only the failed runs, and the values' own records would not hold them.
+    Only a non-finite plain number is moved, and only for a name every run that keyed it keyed over the same factors
+    (a name keyed over different factors in different runs has no one set of values to move to, so it is left as it is)."""
+    if not levels:
+        return rows
+    keyed = {}
+    for row in rows:
+        if not (row.get("status") == "ok" if "status" in row else row.get("ok")):
+            continue
+        for name, v in (row.get("values") or {}).items():
+            if isinstance(v, dict) and v:
+                axes = axes_of_key(next(iter(v)))
+                if axes is not None:
+                    keyed.setdefault(name, set()).add(frozenset(axes))
+    where = {}
+    for name, sets in keyed.items():
+        if len(sets) != 1:
+            continue
+        axes = set(next(iter(sets)))
+        where[name] = [level_key(lv) for lv in (sub_levels(levels, axes) if axes and len(axes) < len(levels[0]) else levels)]
+    if not where:
+        return rows
+    out = []
+    for row in rows:
+        values = row.get("values")
+        if not (row.get("status") == "ok" if "status" in row else row.get("ok")) or not isinstance(values, dict):
+            out.append(row)
+            continue
+        moved = {n: {k: v for k in where[n]} for n, v in values.items()
+                 if n in where and not isinstance(v, dict) and isinstance(v, float) and not math.isfinite(v)}
+        out.append({**row, "values": {**{n: x for n, x in values.items() if n not in moved}, **moved}} if moved else row)
+    return out
+
+
 def summary_cells(run_cell, run_key, planned, rows, levels):
     """The per-setting summary (``raw/trials.json`` cells) of one run setting: the setting itself with the numbers per run,
     then, for each value compared inside each run, a record of its own (its cell names the value too) with the numbers per
@@ -495,6 +534,7 @@ def summary_cells(run_cell, run_key, planned, rows, levels):
     def ok(row):
         return row.get("status") == "ok" if "status" in row else bool(row.get("ok"))
 
+    rows = settle_missing(rows, levels)
     good = [r for r in rows if ok(r)]
     done = len(good)
 

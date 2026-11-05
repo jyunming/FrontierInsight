@@ -82,10 +82,12 @@ def finite(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
 
 
-def hits(metrics, ends, truth):
+def hits(metrics, ends, truth, estimate=None):
     """1.0 or 0.0 for each trial that ran (a trial number any metric of ``metrics`` holds a value for), 1.0 where the interval
     the trial reported (the values of the two metrics named in ``ends``) holds ``truth``; a trial with no interval counts 0.0.
-    ``None`` when ``metrics`` does not hold both ends at all. The one pairing FI uses for a coverage, wherever it counts one."""
+    With ``estimate`` (the estimate's own metric record), a trial with no finite estimate counts 0.0 too, whatever its interval
+    says: an interval around no estimate is not a result of the trial. ``None`` when ``metrics`` does not hold both ends at all.
+    The one pairing FI uses for a coverage, wherever it counts one."""
     if not all(isinstance(metrics.get(e), dict) for e in ends):
         return None
     series = []
@@ -93,7 +95,14 @@ def hits(metrics, ends, truth):
         raw = metrics[e].get("values") or []
         series.append({t: float(v) for t, v in zip(metrics[e].get("trials") or range(len(raw)), raw) if finite(v)})
     ran = {t for m in metrics.values() if isinstance(m, dict) for t in (m.get("trials") or []) if isinstance(t, int)}
-    return [1.0 if i in series[0] and i in series[1] and series[0][i] <= truth <= series[1][i] else 0.0 for i in sorted(ran)]
+    if isinstance(estimate, dict):
+        raw = estimate.get("values") or []
+        have = {t for t, v in zip(estimate.get("trials") or range(len(raw)), raw) if finite(v)}
+        ran |= {t for t in (estimate.get("trials") or []) if isinstance(t, int)}
+    else:
+        have = None
+    return [1.0 if i in series[0] and i in series[1] and series[0][i] <= truth <= series[1][i] and (have is None or i in have)
+            else 0.0 for i in sorted(ran)]
 
 
 def values_of(metric):
