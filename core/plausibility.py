@@ -243,6 +243,21 @@ class Violation:
     # (path, reason), so a repair is not asked to change them.
     explained: tuple[tuple[str, str], ...] = ()
 
+    def disclosure(self) -> str:
+        """One plain sentence for the paper's Limitations, from FI's own record of the run (never the repair wording)."""
+        if self.kind != "at_bound":
+            return self.describe()
+        shown = ", ".join(self.paths[:3]) + (", and others" if len(self.paths) > 3 else "")
+        return (f"{self.path} equals its bound {self.value:g} in {len(self.paths)} settings ({shown}); "
+                f"{self.assertion.describe()}. The plan did not say this quantity can sit on its bound, and FI "
+                f"did not establish whether the bound is the true value there or the computation returned a trivial answer")
+
+    def disclosure_short(self) -> str:
+        """The same finding as one short clause that still names the result (no setting list)."""
+        if self.kind != "at_bound":
+            return self.describe()
+        return f"{self.path} equals its bound {self.value:g} in {len(self.paths)} settings"
+
     def describe(self) -> str:
         why = f" ({self.assertion.reason})" if self.assertion.reason else ""
         if self.kind == "at_bound":

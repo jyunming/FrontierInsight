@@ -734,8 +734,16 @@ def _edge_sentence(record: Any) -> str:
     """The results of the last run that sit on their physical bound in every setting (``.fi/edge_everywhere.json``), one
     sentence each."""
     rows = record.get("results") if isinstance(record, dict) else None
-    said = [r.strip().rstrip(".") + "." for r in rows if isinstance(r, str) and r.strip()] if isinstance(rows, list) else []
-    return " ".join(said[:_SHOWN]) + (f" And {len(said) - _SHOWN} more." if len(said) > _SHOWN else "")
+    said: list[tuple[str, str]] = []  # (full sentence, short clause); the short clause still names the result
+    for r in rows if isinstance(rows, list) else []:
+        if isinstance(r, str) and r.strip():
+            said.append((r.strip().rstrip(".") + ".", r.strip().rstrip(".") + "."))
+        elif isinstance(r, dict) and str(r.get("text") or "").strip():
+            full = str(r["text"]).strip().rstrip(".") + "."
+            said.append((full, str(r.get("short") or "").strip().rstrip(".") + "." if r.get("short") else full))
+    # Every result with an entry is named (a result that may be a failed computation is never hidden behind a count);
+    # only the detail of the entries past the first few is shortened.
+    return " ".join(full if i < _SHOWN else short for i, (full, short) in enumerate(said))
 
 
 def _precision_sentence(missed: Any) -> str:
