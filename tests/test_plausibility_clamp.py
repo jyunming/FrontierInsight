@@ -267,20 +267,21 @@ async def test_out_of_range_prompt_names_the_bound_without_the_cap_note(
 
 
 @pytest.mark.asyncio
-async def test_a_quantity_on_its_bound_in_several_settings_gets_the_trivial_answer_note(
+async def test_a_quantity_on_its_bound_in_several_settings_is_disclosed_and_not_repaired(
     tmp_path: Path,
 ) -> None:
-    """A computation that returned the trivial answer is in range, so the repair
-    has to be told what to look for, and that a real bound value stays."""
+    """Old code: the run went back to repair with a note on the trivial answer. An undeclared bound hit is a guess about
+    the computation, so it is said in the paper's record and the code is not sent back."""
+    from core.engine import _assertion_violations, _assertion_warnings
+
     state = {
         **_capped_state(),
         # One non-zero value, or the all-zero guard answers first.
         "result_json": {"by_h": {"0.1": {"rmse": 0.0}, "0.5": {"rmse": 0.0}, "1.0": {"rmse": 2.5}}},
         "code": "rmse = compute(h)",
     }
-    prompt, patch = await _reflect_prompt(_engine(tmp_path), state)
-    assert "rmse equals its bound 0 in 2 settings" in prompt
-    assert "sits exactly on a bound in several settings" in prompt
-    assert "leave the code as it is" in prompt
-    assert "remove that cap" not in prompt
-    assert patch["exec_reflect_iter"] == 1
+    assert _assertion_violations(state) == []
+    (said,) = _assertion_warnings(state)
+    assert said.kind == "at_bound" and "rmse equals its bound 0 in 2 settings" in said.disclosure()
+    prompt, _ = await _reflect_prompt(_engine(tmp_path), state)
+    assert "sits exactly on a bound in several settings" not in prompt
