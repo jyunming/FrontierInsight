@@ -20055,7 +20055,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         for w in _assertion_warnings(self._in_force({**state, **patch}), self._walk_memo()):
             self._log.warning("[plausibility] warning, not a stop: %s", w.describe())
             if getattr(w, "kind", "") in ("edge_everywhere", "at_bound"):
-                said_edges.append(w.disclosure())
+                said_edges.append(w.describe() if w.kind == "edge_everywhere"
+                                  else {"text": w.disclosure(), "short": w.disclosure_short()})
             self._audit("check_result", check="plausibility_unproven_cap", status="warn",
                         summary=w.describe()[:300], path=getattr(w, "path", ""), value=getattr(w, "value", None))
         try:  # what the run record says of this run's results that sit on their bound everywhere

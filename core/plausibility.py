@@ -252,6 +252,12 @@ class Violation:
                 f"{self.assertion.describe()}. The plan did not say this quantity can sit on its bound, and FI "
                 f"did not establish whether the bound is the true value there or the computation returned a trivial answer")
 
+    def disclosure_short(self) -> str:
+        """The same finding as one short clause that still names the result (no setting list)."""
+        if self.kind != "at_bound":
+            return self.describe()
+        return f"{self.path} equals its bound {self.value:g} in {len(self.paths)} settings"
+
     def describe(self) -> str:
         why = f" ({self.assertion.reason})" if self.assertion.reason else ""
         if self.kind == "at_bound":

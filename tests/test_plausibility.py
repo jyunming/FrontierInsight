@@ -677,3 +677,21 @@ def test_a_role_on_one_result_keeps_the_failure_policy_exemption_of_the_others()
               "protocol": {"failure_policy": "A trial that fails is counted in `failed_run_count` and in `wall`.",
                            "metrics": [{"id": "wall", "role": "timing"}, {"id": "failed_run_count"}]}}
     assert _zero_expected_paths({"design": design, "manifest_failed_trials": 0}) == {"failed_run_count"}
+
+
+def test_every_result_on_its_bound_is_named_in_the_limitations_however_many_there_are(tmp_path) -> None:
+    """Old code listed three and then 'And N more.', so a result that may be a failed computation could be hidden."""
+    import json
+
+    from core import disclosure
+
+    rows = [{"text": f"r{i} equals its bound 0 in 3 settings (a, b, c); r{i} must be [0, 1]. The plan did not say more",
+             "short": f"r{i} equals its bound 0 in 3 settings"} for i in range(1, 4)]
+    rows.append("share is on its bound in every setting; the result may carry no information")
+    rows.append({"text": "r9 equals its bound 1 in 2 settings (x, y); r9 must be [0, 1]. Long detail", "short": "r9 equals its bound 1 in 2 settings"})
+    (tmp_path / ".fi").mkdir()
+    (tmp_path / ".fi" / "edge_everywhere.json").write_text(json.dumps({"results": rows}), encoding="utf-8")
+    text = disclosure._edge_sentence(json.loads((tmp_path / ".fi" / "edge_everywhere.json").read_text()))
+    for name in ("r1 ", "r2 ", "r3 ", "share ", "r9 "):
+        assert name in text
+    assert "Long detail" not in text and "r9 equals its bound 1 in 2 settings." in text
