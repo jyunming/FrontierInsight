@@ -304,9 +304,26 @@ def test_an_exact_zero_below_a_positive_min_is_out_of_range() -> None:
     assert [(x.kind, x.value) for x in v] == [("out_of_range", 0.0)]
 
 
-def test_at_bound_reaches_the_repair_gate() -> None:
+def test_an_undeclared_bound_hit_is_disclosed_and_does_not_reach_the_repair_gate() -> None:
+    """Old code: a quantity on its bound in several settings, with no declared role, was sent back for repair."""
+    from core.engine import _assertion_warnings
+
     state = {"design": _UNIT, "result_json": _sweep(a=0.0, b=0.0)}
-    assert [v.kind for v in _assertion_violations(state)] == ["at_bound"]
+    assert _assertion_violations(state) == []
+    said = _assertion_warnings(state)
+    assert [v.kind for v in said] == ["at_bound"]
+    sentence = said[0].disclosure()
+    assert "final_size equals its bound 0 in 2 settings" in sentence and "did not say" in sentence
+
+
+def test_a_declared_bound_still_stops_when_a_value_leaves_it() -> None:
+    """The known positive: a quantity the plan declares as a physical bound is still caught outside its range."""
+    from core.engine import _assertion_violations as violations
+
+    design = {"result_assertions": [{"path": "final_size", "min": 0, "max": 1}],
+              "protocol": {"metrics": [{"id": "final_size", "role": "physical_bound"}]}}
+    state = {"design": design, "result_json": _sweep(a=0.0, b=0.0, c=1.5), "code": ""}
+    assert [v.kind for v in violations(state)] == ["out_of_range"]
 
 
 # --- a bounded quantity may not disappear --------------------------------------------------------------------------
@@ -387,7 +404,7 @@ def test_a_bound_the_design_itself_dropped_is_not_asked_for() -> None:
 def test_a_failure_count_the_protocol_names_may_be_zero_everywhere() -> None:
     """A live quest's failed_run_count was 0 in all nine settings and its manifest listed no failed trial; the
     at-bound rule sent the correct script back twice."""
-    from core.engine import _zero_expected_paths
+    from core.engine import _assertion_warnings, _zero_expected_paths
 
     design = {
         "result_assertions": [{"path": "failed_run_count", "min": 0, "max": 300},
@@ -397,8 +414,8 @@ def test_a_failure_count_the_protocol_names_may_be_zero_everywhere() -> None:
     result = {"by": {k: {"failed_run_count": 0, "final_size": 0.0} for k in ("a", "b", "c")}}
     state = {"design": design, "result_json": result, "manifest_failed_trials": 0}
     assert _zero_expected_paths(state) == {"failed_run_count"}
-    kinds = sorted((v.kind, v.path) for v in _assertion_violations(state))
-    assert kinds == [("at_bound", "final_size")], "only the failure count is exempt; a final size of 0 still goes back"
+    kinds = sorted((v.kind, v.path) for v in _assertion_warnings(state))
+    assert kinds == [("at_bound", "final_size")], "only the failure count is exempt; a final size of 0 is disclosed"
     # A manifest that lists failures contradicts the zeros; no failure policy means nothing names the count.
     assert _zero_expected_paths({**state, "manifest_failed_trials": 5}) == set()
     assert _zero_expected_paths({**state, "design": {**design, "protocol": {}}}) == set()
@@ -594,12 +611,13 @@ def test_a_physical_bound_result_on_its_edge_in_several_settings_is_kept() -> No
     assert _assertion_violations(state) == []
 
 
-def test_the_same_edge_without_the_role_is_still_sent_back_and_a_value_outside_the_range_never_passes() -> None:
-    from core.engine import _assertion_violations, _physical_bound_paths
+def test_the_same_edge_without_the_role_is_disclosed_and_a_value_outside_the_range_never_passes() -> None:
+    from core.engine import _assertion_violations, _assertion_warnings, _physical_bound_paths
 
     state = _edge_state(None)
     assert _physical_bound_paths(state) == set()
-    assert [v.kind for v in _assertion_violations(state)] == ["at_bound"]
+    assert _assertion_violations(state) == []
+    assert [v.kind for v in _assertion_warnings(state)] == ["at_bound"]
     outside = _edge_state("physical_bound")
     outside["result_json"]["by_setting"]["s6"]["share"] = 1.5
     assert [v.kind for v in _assertion_violations(outside)] == ["out_of_range"]
@@ -659,3 +677,21 @@ def test_a_role_on_one_result_keeps_the_failure_policy_exemption_of_the_others()
               "protocol": {"failure_policy": "A trial that fails is counted in `failed_run_count` and in `wall`.",
                            "metrics": [{"id": "wall", "role": "timing"}, {"id": "failed_run_count"}]}}
     assert _zero_expected_paths({"design": design, "manifest_failed_trials": 0}) == {"failed_run_count"}
+
+
+def test_every_result_on_its_bound_is_named_in_the_limitations_however_many_there_are(tmp_path) -> None:
+    """Old code listed three and then 'And N more.', so a result that may be a failed computation could be hidden."""
+    import json
+
+    from core import disclosure
+
+    rows = [{"text": f"r{i} equals its bound 0 in 3 settings (a, b, c); r{i} must be [0, 1]. The plan did not say more",
+             "short": f"r{i} equals its bound 0 in 3 settings"} for i in range(1, 4)]
+    rows.append("share is on its bound in every setting; the result may carry no information")
+    rows.append({"text": "r9 equals its bound 1 in 2 settings (x, y); r9 must be [0, 1]. Long detail", "short": "r9 equals its bound 1 in 2 settings"})
+    (tmp_path / ".fi").mkdir()
+    (tmp_path / ".fi" / "edge_everywhere.json").write_text(json.dumps({"results": rows}), encoding="utf-8")
+    text = disclosure._edge_sentence(json.loads((tmp_path / ".fi" / "edge_everywhere.json").read_text()))
+    for name in ("r1 ", "r2 ", "r3 ", "share ", "r9 "):
+        assert name in text
+    assert "Long detail" not in text and "r9 equals its bound 1 in 2 settings." in text
