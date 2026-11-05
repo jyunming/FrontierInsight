@@ -13,7 +13,7 @@ import copy
 import math
 import random
 
-from core import in_run, trial_checks
+from core import frame_table, in_run, trial_checks, trial_runner
 
 NAN = float("nan")
 RULES = ["plain", "robust"]
@@ -117,10 +117,13 @@ def test_intervals_shifted_to_about_half_coverage_still_stop() -> None:
     assert cover.gross
 
 
-def test_a_setting_where_every_trial_failed_is_still_all_missing() -> None:
+def test_a_setting_where_every_trial_failed_is_still_all_missing_and_stops() -> None:
     cells = _cells(fail_at_noise=0.0, fail=1.0)
     assert not any(c.get("level") for c in cells)   # nothing was ever keyed: no record per value exists
     assert all(c["metrics"]["est"]["non_finite"] == 200 for c in cells)
+    verdict = _judge(cells)
+    assert verdict.action == trial_checks.STOP, verdict.say
+    assert any(q.kind == "no_estimate" and q.gross for q in verdict.calibration.quantities)
 
 
 def test_a_name_keyed_over_different_factors_in_different_trials_is_left_as_it_is() -> None:
@@ -150,3 +153,104 @@ def test_a_record_of_a_rule_and_a_width_takes_the_estimate_of_the_same_rule() ->
     assert wide["metrics"]["est"] == narrow["metrics"]["est"]
     plain_rule = next(c for c in cells if c.get("level") == {"rule": "plain", "width": 1.96} and c["cell"]["noise"] == 0.1)
     assert plain_rule["metrics"]["est"] != wide["metrics"]["est"]   # the other rule's estimate is never borrowed
+
+
+# ---- a trial's estimate and its interval are one trial's result ---------------------------------------------------------
+
+
+def _with_est_missing_in(trials: set[int], keep_interval: bool = True) -> list[dict]:
+    """Every setting's trials, where ``trials`` of them have no estimate (NaN for each rule) but an interval that holds the truth."""
+    out = []
+    for noise in PROTOCOL["grid"]["noise"]:
+        for points in PROTOCOL["grid"]["points"]:
+            rows = copy.deepcopy(_rows(noise, points))
+            for r in rows:
+                if r["trial"] in trials:
+                    r["values"]["est"] = {k: NAN for k in r["values"]["est"]}
+                    if keep_interval:
+                        for name in ("lo", "hi"):
+                            r["values"][name] = {k: (TRUE - 5.0 if name == "lo" else TRUE + 5.0) for k in r["values"][name]}
+            out.extend(in_run.summary_cells({"noise": noise, "points": points}, f"noise={noise},points={points}", 200, rows, LEVELS))
+    return out
+
+
+def test_finite_intervals_around_missing_estimates_are_not_coverage_hits() -> None:
+    cells = _with_est_missing_in(set(range(80)))   # 40% with no estimate, below the no-estimate line; every interval holds the truth
+    verdict = _judge(cells)
+    empty = next(q for q in verdict.calibration.quantities if q.kind == "no_estimate")
+    assert not empty.gross
+    cover = next(q for q in verdict.calibration.quantities if q.kind == "coverage")
+    assert cover.gross and verdict.action == trial_checks.STOP, verdict.say
+    one = next(c for c in trial_checks._with_main(cells) if c.get("level") == {"rule": "plain", "width": 1.96})
+    kv = PROTOCOL["metrics"][0]["known_value"]
+    assert sum(trial_checks._cell_hits(one, kv, TRUE)[2][:80]) == 0.0
+
+
+def test_missing_intervals_are_misses_and_a_missing_estimate_alone_is_found_by_the_table_hits() -> None:
+    nan_ends = {"values": [NAN, 1.0, 2.0], "trials": [0, 1, 2]}
+    est = {"values": [5.0, NAN, 5.0], "trials": [0, 1, 2]}
+    hi = {"values": [20.0, 20.0, 20.0], "trials": [0, 1, 2]}
+    lo = {"values": [0.0, 0.0, 0.0], "trials": [0, 1, 2]}
+    assert frame_table.hits({"lo": nan_ends, "hi": hi}, ["lo", "hi"], 10.0) == [0.0, 1.0, 1.0]   # no interval: a miss
+    assert frame_table.hits({"lo": lo, "hi": hi, "est": est}, ["lo", "hi"], 10.0) == [1.0, 1.0, 1.0]   # no estimate given: as before
+    assert frame_table.hits({"lo": lo, "hi": hi, "est": est}, ["lo", "hi"], 10.0, estimate=est) == [1.0, 0.0, 1.0]
+    assert frame_table.hits({"lo": nan_ends, "hi": hi}, ["lo", "hi"], 10.0, estimate=est) == [0.0, 0.0, 1.0]
+
+
+# ---- a name kept by two sets of the values, neither within the other, is not borrowed -------------------------------------
+
+
+def _mixed_cells() -> list[dict]:
+    """Half the trials key ``est`` by the rule, half by the width; the interval ends are keyed by both."""
+    rows = []
+    for t in range(200):
+        values: dict = {"se": {f"rule={r}": 1.0 for r in RULES}, "lo": {}, "hi": {}}
+        values["est"] = ({f"rule={r}": TRUE + (t % 7) * 0.1 for r in RULES} if t % 2 == 0
+                         else {f"width={w:g}": TRUE + 50.0 + t for w in WIDTHS})
+        for r in RULES:
+            for w in WIDTHS:
+                values["lo"][f"rule={r},width={w:g}"], values["hi"][f"rule={r},width={w:g}"] = TRUE - 3.0, TRUE + 3.0
+        rows.append({"trial": t, "status": "ok", "values": values})
+    return in_run.summary_cells({"noise": 0.1, "points": 5}, "noise=0.1,points=5", 200, rows, LEVELS)
+
+
+def test_an_estimate_kept_by_two_unrelated_sets_of_values_is_never_picked_by_record_order() -> None:
+    cells = _mixed_cells()
+    both = lambda got: next(c for c in got if c.get("level") == {"rule": "plain", "width": 1.96})
+    forward, backward = trial_checks._with_main(cells), trial_checks._with_main(list(reversed(cells)))
+    for got in (forward, backward):
+        assert "est" not in both(got)["metrics"] and "est" in both(got)[trial_checks._AMBIGUOUS]
+        assert "se" not in both(got)[trial_checks._AMBIGUOUS]   # the standard error has one source
+    assert both(forward)["metrics"] == both(backward)["metrics"]
+    one = lambda got: trial_checks.calibration(got, PROTOCOL, THRESHOLDS)
+    a, b = one(cells), one(list(reversed(cells)))
+    assert [(q.kind, q.label, q.judged, q.gross) for q in a.quantities] == [(q.kind, q.label, q.judged, q.gross) for q in b.quantities]
+
+
+def test_the_ambiguous_estimate_is_not_judged_against_the_interval() -> None:
+    cal = trial_checks.calibration(_mixed_cells(), PROTOCOL, THRESHOLDS)
+    assert not any(q.kind == "coverage" and q.judged for q in cal.quantities)
+    # what is judged is judged on records that hold their own estimate, never on the record of a rule and a width
+    assert not any("rule=" in s.key and "width=" in s.key for q in cal.quantities for s in q.settings)
+
+
+def test_a_unique_most_specific_source_is_still_taken() -> None:
+    cells = trial_checks._with_main(_cells())
+    wide = next(c for c in cells if c.get("level") == {"rule": "robust", "width": 1.96} and c["cell"]["noise"] == 0.1)
+    assert "est" in wide["metrics"] and not wide[trial_checks._AMBIGUOUS]
+
+
+# ---- both writers form the same cells -----------------------------------------------------------------------------------
+
+
+def test_the_ledger_writer_and_the_summary_writer_form_the_same_cells() -> None:
+    rows = _rows(0.4, 5, fail=0.1)
+    run = trial_runner.CellRun(key="noise=0.4,points=5", cell={"noise": 0.4, "points": 5}, planned=200, rows=rows, levels=LEVELS)
+    summary = {c["key"]: c for c in in_run.summary_cells(run.cell, run.key, 200, rows, LEVELS)}
+    recorded = trial_runner.record_cells([run])
+    assert set(summary) == {r.key for r in recorded}
+    for r in recorded:
+        for name, m in summary[r.key]["metrics"].items():
+            got = [row["values"][name] for row in r.rows if row.get("status") == "ok" and name in row["values"]]
+            assert [repr(v) for v in got] == [repr(v) for v in m["values"]], (r.key, name)
+        assert not any(name not in summary[r.key]["metrics"] for row in r.rows for name in row.get("values", {}))
