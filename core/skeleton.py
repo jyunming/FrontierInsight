@@ -569,7 +569,8 @@ class Table:
             truth = spec.get("truth", (c.get("cell") or {}).get(spec.get("axis")))
             if not fi_table.finite(truth):
                 continue
-            got = fi_table.hits(c.get("metrics") or {}, spec["interval"], truth)  # None: this record does not hold the interval
+            got = fi_table.hits(c.get("metrics") or {}, spec["interval"], truth,
+                                estimate=(c.get("metrics") or {}).get(spec.get("estimate")))  # None: this record does not hold the interval
             out += got or []
         return self._gave(name, out)
 

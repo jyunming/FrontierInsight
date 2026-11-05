@@ -44,7 +44,7 @@ import os
 import re
 import shutil
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -575,6 +575,7 @@ def record_cells(runs: list[CellRun]) -> list[CellRun]:
         if not run.levels:
             out.append(run)
             continue
+        run = replace(run, rows=_in_run.settle_missing(run.rows, run.levels))
         out.append(CellRun(key=run.key, cell=dict(run.cell), planned=run.planned, returncode=run.returncode,
                            timed_out=run.timed_out, stderr=run.stderr, load_error=run.load_error,
                            rows=[{**r, "values": _in_run.split(r.get("values"))[0]} if r.get("status") == "ok" else dict(r)

@@ -896,6 +896,7 @@ def _judge_ratio(q: "Quantity", per: list[tuple[Any, ...]]) -> None:
         q.detects_from = min(floors)
 
 
+_AMBIGUOUS = "_ambiguous_metrics"  # in a record :func:`_with_main` completed: names it did not take (two sources, neither within the other)
 _OWN = "_own_metrics"  # in a record :func:`_with_main` completed: the names it held itself
 
 
@@ -906,17 +907,44 @@ def _own_here(cell: dict[str, Any], names: Iterable[Any]) -> bool:
 
 
 def _with_main(cells: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """``cells`` where each record kept for a value a run compares inside it (``level``) also holds what its setting's own record
-    holds under the names it lacks: the record keeps the estimate with the setting and the standard error and interval ends
-    with each value compared, and the two are one setting's numbers for each trial. Nothing else changes."""
-    mains = {json.dumps(c.get("cell") or {}, sort_keys=True, default=str): c for c in cells if not c.get("level")}
+    """``cells`` where each record kept for a value a run compares inside it (``level``) also holds what the records of the
+    same setting that compare fewer of the values hold under the names it lacks, the setting's own record (none compared)
+    and the record of each smaller set of the values it names (a record keeps the estimate with the method, the interval ends
+    with the method and the interval's quantile, the standard error with the setting): they are one setting's numbers for each
+    trial. A name is taken from the one most specific record that holds it. Where two such records each hold it and neither's
+    values include the other's (the estimate kept by ``method`` and by ``width``, for the record of both), which one belongs to
+    the record is not FI's fact: the name is not taken (it is listed under ``_AMBIGUOUS``) and what needs it is not judged.
+    Nothing else changes."""
+    def base(c: dict[str, Any]) -> str:
+        return json.dumps({a: v for a, v in (c.get("cell") or {}).items() if a not in (c.get("level") or {})},
+                          sort_keys=True, default=str)
+
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for c in cells:
+        groups.setdefault(base(c), []).append(c)
     out = []
     for c in cells:
         level = c.get("level")
-        main = mains.get(json.dumps({a: v for a, v in (c.get("cell") or {}).items() if a not in (level or {})}, sort_keys=True,
-                                    default=str)) if isinstance(level, dict) else None
-        out.append({**c, "metrics": {**(main.get("metrics") or {}), **(c.get("metrics") or {})}, _OWN: set(c.get("metrics") or {})}
-                   if main is not None else c)
+        if not isinstance(level, dict):
+            out.append(c)
+            continue
+        wider = [m for m in groups[base(c)] if m is not c and len(m.get("level") or {}) < len(level)
+                 and all(level.get(a) == v for a, v in (m.get("level") or {}).items())]
+        if not wider:
+            out.append(c)
+            continue
+        taken: dict[str, Any] = {}
+        unclear: set[str] = set()
+        for name in {n for m in wider for n in (m.get("metrics") or {})} - set(c.get("metrics") or {}):
+            holders = [m for m in wider if name in (m.get("metrics") or {})]
+            best = [m for m in holders if not any(o is not m and set(m.get("level") or {}) < set(o.get("level") or {})
+                                                  for o in holders)]
+            if len(best) == 1:
+                taken[name] = best[0]["metrics"][name]
+            else:
+                unclear.add(name)
+        out.append({**c, "metrics": {**taken, **(c.get("metrics") or {})}, _OWN: set(c.get("metrics") or {}),
+                    _AMBIGUOUS: unclear})
     return out
 
 
@@ -937,7 +965,7 @@ def _cell_hits(cell: dict[str, Any], kv: dict[str, Any], truth: float) -> tuple[
     held = cell.get("metrics") or {}
     if not ends or not all(n in held for n in [kv["estimate"], *ends]):
         return e, s, []
-    return e, s, _table_hits(held, ends, truth) or []
+    return e, s, _table_hits(held, ends, truth, estimate=held.get(kv["estimate"])) or []
 
 
 def _draw_weights(cells: list[dict[str, Any]], protocol: dict[str, Any] | None, quest_root: Path | str | None,
