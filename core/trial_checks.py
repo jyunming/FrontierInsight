@@ -906,17 +906,33 @@ def _own_here(cell: dict[str, Any], names: Iterable[Any]) -> bool:
 
 
 def _with_main(cells: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """``cells`` where each record kept for a value a run compares inside it (``level``) also holds what its setting's own record
-    holds under the names it lacks: the record keeps the estimate with the setting and the standard error and interval ends
-    with each value compared, and the two are one setting's numbers for each trial. Nothing else changes."""
-    mains = {json.dumps(c.get("cell") or {}, sort_keys=True, default=str): c for c in cells if not c.get("level")}
+    """``cells`` where each record kept for a value a run compares inside it (``level``) also holds what the records of the
+    same setting that compare fewer of the values hold under the names it lacks, the setting's own record (none compared)
+    and the record of each smaller set of the values it names (a record keeps the estimate with the method, the interval ends
+    with the method and the interval's quantile, the standard error with the setting): they are one setting's numbers for each
+    trial. The nearest record's number is used where several hold a name. Nothing else changes."""
+    def base(c: dict[str, Any]) -> str:
+        return json.dumps({a: v for a, v in (c.get("cell") or {}).items() if a not in (c.get("level") or {})},
+                          sort_keys=True, default=str)
+
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for c in cells:
+        groups.setdefault(base(c), []).append(c)
     out = []
     for c in cells:
         level = c.get("level")
-        main = mains.get(json.dumps({a: v for a, v in (c.get("cell") or {}).items() if a not in (level or {})}, sort_keys=True,
-                                    default=str)) if isinstance(level, dict) else None
-        out.append({**c, "metrics": {**(main.get("metrics") or {}), **(c.get("metrics") or {})}, _OWN: set(c.get("metrics") or {})}
-                   if main is not None else c)
+        if not isinstance(level, dict):
+            out.append(c)
+            continue
+        wider = sorted((m for m in groups[base(c)] if m is not c and all(level.get(a) == v for a, v in (m.get("level") or {}).items())
+                        and len(m.get("level") or {}) < len(level)), key=lambda m: len(m.get("level") or {}))
+        if not wider:
+            out.append(c)
+            continue
+        metrics: dict[str, Any] = {}
+        for m in wider:  # the setting's own record first, then each nearer one
+            metrics.update(m.get("metrics") or {})
+        out.append({**c, "metrics": {**metrics, **(c.get("metrics") or {})}, _OWN: set(c.get("metrics") or {})})
     return out
 
 
