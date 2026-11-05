@@ -453,6 +453,10 @@ class Table:
         self._cell(key)
         return [text for text, _c in self._level_cells(name, key)]
 
+    def compared(self):
+        """The names of the factors FI recorded as compared inside the runs (any setting), sorted; ``[]`` when none."""
+        return sorted({a for cs in self._by_setting.values() for c in cs for a in (c.get("level") or {})})
+
     def _metric(self, name, key):
         got = self._cell(key)["metrics"].get(name)
         if got is None:
