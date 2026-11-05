@@ -1605,9 +1605,10 @@ def answers_text(quest_root: Path | str) -> str:
                 lines.append(_answer_line(rec, label, metric, tries, plain, how))
         if pieces:
             # One bullet for the question: each value of the compared setting keeps its own answer, in order, joined here (a
-            # note that every filled answer shares is said once at the end).
+            # note that every value carries is said once at the end; otherwise each keeps its own, so a note never ends up
+            # beside a value it was not said of).
             notes = {n for _, _, _, n in pieces if n}
-            shared = notes.pop() if len(notes) == 1 and all(n or b.startswith("not answered") for _, _, b, n in pieces) else ""
+            shared = notes.pop() if len(notes) == 1 and all(n for _, _, _, n in pieces) else ""
             lead = next((ld for _, ld, _, _ in pieces if ld), "")
             pins = _pins_not_in(name, rec, at)
             head = name + (f" (when {', '.join(pins)})" if pins else "")
