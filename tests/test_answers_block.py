@@ -50,8 +50,8 @@ def _quest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, settling: float | No
 def test_each_main_quantity_gets_its_value_or_is_said_as_not_answered(tmp_path, monkeypatch) -> None:
     text = pf.answers_text(_quest(tmp_path, monkeypatch))
     assert text.startswith("**Answers to the questions asked.**")
-    assert "- decay rate (the plan's map: Decay rate): {{v:decay_rate @ dose=each | range}} (no single value: it differs with dose; this is the mean in each setting, lowest to highest" in text
-    assert "- settling limit (the plan's map: Limit of the settling time (hours)): {{v:settling_limit}} (one value worked out by the analysis; no interval" in text
+    assert "- decay rate (measured as: Decay rate): {{v:decay_rate @ dose=each | range}} (no single value: it differs with dose; this is the mean in each setting, lowest to highest" in text
+    assert "- settling limit (measured as: Limit of the settling time (hours)): {{v:settling_limit}} (one value worked out by the analysis; no interval" in text
     assert "- colour of the sample: the plan links no result of the study to it here; see the Results" in text
     assert "- mapped to nothing real: the plan's map for it names no result the study returns" in text
     assert "not answered (the plan maps it to no result" not in text  # the run's results are not said missing
@@ -108,7 +108,7 @@ def test_an_explicit_map_to_an_existing_metric_is_placed_and_named_whatever_the_
     wrong = {**PROTOCOL, "topic_map": PROTOCOL["topic_map"] + [{"item": "Q3", "by": "metric:decay_rate"}]}
     monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: wrong)
     text = pf.answers_text(root)
-    assert "- colour of the sample (the plan's map: Decay rate): {{v:decay_rate" in text
+    assert "- colour of the sample (measured as: Decay rate): {{v:decay_rate" in text
     assert "- mapped to nothing real: the plan's map for it names no result the study returns" in text
 
 
@@ -207,7 +207,7 @@ def test_a_bias_and_a_spread_of_an_estimate_are_worked_out_and_not_the_estimates
     root = _estimate_quest(tmp_path, monkeypatch)
     text = pf.answers_text(root)
     assert "{{v:x_hat @ dose=each | diff ref | range}}" in text and "{{v:x_hat:sd @ dose=each | range}}" in text
-    assert "- x (the plan's map: Estimated x): {{v:x_hat @ dose=each | range}} (no single value: it differs with dose; this is the mean in each setting, lowest to highest" in text
+    assert "- x (measured as: Estimated x): {{v:x_hat @ dose=each | range}} (no single value: it differs with dose; this is the mean in each setting, lowest to highest" in text
     rec = pv.records_of(root, ESTIMATE_PROTOCOL)
     filled = pv.fill_values(text, rec)[0]
     assert "-0.8000 to 1.000" in filled  # 9.2 - 10 and 11.0 - 10
@@ -233,7 +233,7 @@ def test_an_old_plan_with_no_statistic_prints_the_result_as_it_is(tmp_path, monk
     old = {**ESTIMATE_PROTOCOL, "topic_map": [{k: v for k, v in e.items() if k != "statistic"} for e in ESTIMATE_PROTOCOL["topic_map"]]}
     monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: old)
     text = pf.answers_text(root)
-    assert "- bias (the plan's map: Estimated x): {{v:x_hat @ dose=each | range}}" in text
+    assert "- bias (measured as: Estimated x): {{v:x_hat @ dose=each | range}}" in text
     assert "diff ref" not in text and ":sd" not in text
 
 
@@ -283,15 +283,102 @@ def test_a_result_the_compared_setting_does_not_enter_gets_one_line_not_one_for_
     step = [ln for ln in text.splitlines() if ln.startswith("- step error")]
     assert len(flat) == 1 and "(the same at every value of dt; read at dt = 1)" in flat[0] and "{{v:flat @ ang=each, dt=1 | range}}" in flat[0]
     assert "it differs with ang;" in flat[0]
-    assert len(step) == 3 and all(f"(dt = {d})" in ln for d, ln in zip((1, 2, 3), step))
+    assert len(step) == 1 and all(f"{d}: {{{{v:step @ ang=each, dt={d} | range}}}}" in step[0] for d in (1, 2, 3))
     rec = pv.records_of(root, pf.plan_protocol(root))
     assert pv.resolve("{{v:flat @ ang=each, dt=1 | range}}", rec).filled
 
 
-def test_a_result_that_does_change_with_the_compared_setting_keeps_a_line_for_each_value(tmp_path, monkeypatch) -> None:
+def test_a_result_that_changes_with_a_compared_setting_is_one_bullet_keeping_each_value_answer(tmp_path, monkeypatch) -> None:
+    """Before: the compared step size (9 values) made one near-identical line for each value (36 lines for 5 questions). Now one
+    bullet for the question that holds each value's own answer, paired with that value, nothing dropped."""
     root = _compared_quest(tmp_path, monkeypatch, flat_values=False)
     flat = [ln for ln in pf.answers_text(root).splitlines() if ln.startswith("- flat error")]
-    assert len(flat) == 3 and all(f"(dt = {d})" in ln for d, ln in zip((1, 2, 3), flat))
+    assert len(flat) == 1 and "by dt: 1: {{v:flat @ ang=each, dt=1 | range}}; 2: {{v:flat @ ang=each, dt=2 | range}}; 3: " in flat[0]
+    assert flat[0].count("it differs with ang") == 1  # a note every answer shares is said once
+
+
+def test_one_line_for_each_question_when_a_compared_setting_has_many_number_values(tmp_path, monkeypatch) -> None:
+    (tmp_path / "raw").mkdir(parents=True)
+    def met(vs):
+        return {"values": vs, "trials": list(range(len(vs))), "count": len(vs), "total": 0.0, "non_finite": 0}
+    cells = [{"cell": {"step": s, "ang": a}, "key": f"step={s},ang={a}", "planned": 2, "ok": 2, "failed": 0,
+              "metrics": {m: met([s * a + i, s * a + i + 0.1]) for i, m in enumerate(("m1", "m2", "m3"))}}
+             for s in range(1, 10) for a in (10, 20)]
+    (tmp_path / "raw" / "trials.json").write_text(json.dumps({"cells": cells}), encoding="utf-8")
+    (tmp_path / ".fi").mkdir()
+    req = {"quantities": [{"name": f"quantity {i}", "main": True} for i in (1, 2, 3)]}
+    (tmp_path / ".fi" / "topic_requirements.json").write_text(json.dumps(req), encoding="utf-8")
+    protocol = {"metrics": [{"id": m, "label": f"Result {m}", "kind": "mean"} for m in ("m1", "m2", "m3")],
+                "comparisons": [{"id": f"c{m}", "result": m, "across": "step", "how": "difference"} for m in ("m1", "m2", "m3")],
+                "topic_map": [{"item": f"Q{i}", "by": f"metric:m{i}"} for i in (1, 2, 3)]}
+    monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: protocol)
+    lines = [ln for ln in pf.answers_text(tmp_path).splitlines() if ln.startswith("- ")]
+    assert len(lines) == 3 and all("the plan's map" not in ln and ln.count("{{v:") == 9 for ln in lines)
+
+
+def test_alternatives_named_by_words_are_one_bullet_with_each_alternative(tmp_path, monkeypatch) -> None:
+    (tmp_path / "raw").mkdir(parents=True)
+    def met(vs):
+        return {"values": vs, "trials": list(range(len(vs))), "count": len(vs), "total": 0.0, "non_finite": 0}
+    cells = [{"cell": {"method": m, "ang": a}, "key": f"method={m},ang={a}", "planned": 2, "ok": 2, "failed": 0,
+              "metrics": {"cov": met([0.1 * a * len(m), 0.1 * a * len(m) + 0.01])}}
+             for m in ("plain", "careful", "robust") for a in (10, 20)]
+    (tmp_path / "raw" / "trials.json").write_text(json.dumps({"cells": cells}), encoding="utf-8")
+    (tmp_path / ".fi").mkdir()
+    (tmp_path / ".fi" / "topic_requirements.json").write_text(json.dumps({"quantities": [{"name": "coverage", "main": True}]}), encoding="utf-8")
+    protocol = {"metrics": [{"id": "cov", "label": "Coverage", "kind": "mean"}],
+                "comparisons": [{"id": "c", "result": "cov", "across": "method", "how": "difference"}],
+                "topic_map": [{"item": "Q1", "by": "metric:cov"}]}
+    monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: protocol)
+    lines = [ln for ln in pf.answers_text(tmp_path).splitlines() if ln.startswith("- coverage")]
+    assert len(lines) == 1 and all(f"{m}: {{{{v:cov @ ang=each, method={m} | range}}}}" in lines[0] for m in ("plain", "careful", "robust"))
+
+
+def test_numbers_that_code_distinct_methods_keep_each_methods_value(tmp_path, monkeypatch) -> None:
+    """Review case 1: method = 1, 2, 3 are three methods, not a sweep: each keeps its own placeholder."""
+    (tmp_path / "raw").mkdir(parents=True)
+    def met(vs):
+        return {"values": vs, "trials": list(range(len(vs))), "count": len(vs), "total": 0.0, "non_finite": 0}
+    cells = [{"cell": {"method": m}, "key": f"method={m}", "planned": 2, "ok": 2, "failed": 0,
+              "metrics": {"cov": met([0.1 * m, 0.1 * m + 0.01])}} for m in (1, 2, 3)]
+    (tmp_path / "raw" / "trials.json").write_text(json.dumps({"cells": cells}), encoding="utf-8")
+    (tmp_path / ".fi").mkdir()
+    (tmp_path / ".fi" / "topic_requirements.json").write_text(json.dumps({"quantities": [{"name": "coverage", "main": True}]}), encoding="utf-8")
+    protocol = {"metrics": [{"id": "cov", "label": "Coverage", "kind": "mean"}],
+                "comparisons": [{"id": "c", "result": "cov", "across": "method", "how": "difference"}],
+                "topic_map": [{"item": "Q1", "by": "metric:cov"}]}
+    monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: protocol)
+    lines = [ln for ln in pf.answers_text(tmp_path).splitlines() if ln.startswith("- coverage")]
+    assert len(lines) == 1 and all(f"{m}: {{{{v:cov:mean_ci @ method={m}}}}}" in lines[0] for m in (1, 2, 3))
+    assert "method=each" not in lines[0]
+
+
+def test_a_per_level_answer_keeps_which_value_goes_with_which_level(tmp_path, monkeypatch) -> None:
+    """Review case 2: a quantity read at each temperature (a crossing per level) says each level with its own value."""
+    root = _compared_quest(tmp_path, monkeypatch, flat_values=False)
+    line = next(ln for ln in pf.answers_text(root).splitlines() if ln.startswith("- step error"))
+    rec = pv.records_of(root, pf.plan_protocol(root))
+    pairs = {d: pv.resolve(f"{{{{v:step @ ang=each, dt={d} | range}}}}", rec) for d in (1, 2, 3)}
+    assert all(p.filled for p in pairs.values()) and len({p.text for p in pairs.values()}) == 3
+    assert all(f"{d}: {{{{v:step @ ang=each, dt={d} | range}}}}" in line for d in (1, 2, 3))
+
+
+def test_a_difference_comparison_keeps_its_difference_form_for_each_value(tmp_path, monkeypatch) -> None:
+    """Review case 3: a bias (the difference from the plan's true value) is stated at each value in its difference form."""
+    cells = [{"cell": {"dt": dt, "ang": 1}, "key": f"dt={dt},ang=1", "planned": 2, "ok": 2, "failed": 0,
+              "metrics": {"est": {"values": [dt * 1.0, dt * 1.0 + 0.2], "trials": [0, 1], "count": 2, "total": 0.0, "non_finite": 0}}} for dt in (1, 2, 3)]
+    (tmp_path / "raw").mkdir(parents=True)
+    (tmp_path / "raw" / "trials.json").write_text(json.dumps({"cells": cells}), encoding="utf-8")
+    (tmp_path / ".fi").mkdir()
+    (tmp_path / ".fi" / "topic_requirements.json").write_text(json.dumps({"quantities": [{"name": "bias of est", "main": True}]}), encoding="utf-8")
+    protocol = {"constants": {"truth": 1.0},
+                "metrics": [{"id": "est", "kind": "mean", "known_value": {"true_value": "truth", "estimate": "est", "standard_error": "se", "level": 0.95}}],
+                "grid": {"dt": [1, 2, 3], "ang": [1]},
+                "comparisons": [{"id": "c1", "result": "est", "across": "dt", "how": "difference"}],
+                "topic_map": [{"item": "Q1", "by": "metric:est", "statistic": "bias"}]}
+    monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: protocol)
+    lines = [ln for ln in pf.answers_text(tmp_path).splitlines() if ln.startswith("- bias of est")]
+    assert len(lines) == 1 and all(f"{d}: {{{{v:est @ dt={d} | diff ref}}}}" in lines[0] for d in (1, 2, 3))
 
 
 def test_same_across_needs_two_values_and_every_group_equal(tmp_path, monkeypatch) -> None:
@@ -323,7 +410,7 @@ def test_a_bias_line_is_not_collapsed_when_the_reference_changes_with_the_compar
                 "topic_map": [{"item": "Q1", "by": "metric:est", "statistic": "bias"}]}
     monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: protocol("dt"))
     lines = [ln for ln in pf.answers_text(tmp_path).splitlines() if ln.startswith("- bias of est")]
-    assert len(lines) == 3 and all(f"(dt = {d})" in ln for d, ln in zip((1, 2, 3), lines))
+    assert len(lines) == 1 and all(f"{d}: not answered" in lines[0] or f"{d}: {{{{v:est" in lines[0] for d in (1, 2, 3))
     monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: protocol("1.1"))
     assert len([ln for ln in pf.answers_text(tmp_path).splitlines() if ln.startswith("- bias of est")]) == 1
 
@@ -392,7 +479,7 @@ def test_a_derived_result_that_is_ok_is_answered_with_its_value(tmp_path, monkey
     from core import analysis_frame as frame
     pv.write_answers(root, frame.study_values(frame.read_record(root)), PROTOCOL, ids=["settling_limit"])
     text = pf.answers_text(root)
-    assert "- settling limit (the plan's map: Limit of the settling time (hours)): {{v:settling_limit}}" in text
+    assert "- settling limit (measured as: Limit of the settling time (hours)): {{v:settling_limit}}" in text
     assert "holds no value" not in text
 
 

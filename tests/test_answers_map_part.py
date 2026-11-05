@@ -164,8 +164,8 @@ def test_a_compared_setting_is_answered_for_each_value_and_an_at_pins_the_quanti
     root = _quest(tmp_path, monkeypatch, [{"item": "Q1", "by": "metric:algae_peak", "at": {}},
                                           {"item": "Q2", "by": "metric:bloom", "at": {"nutrient": 1}}])
     text = pf.answers_text(root)
-    assert "- peak algae (temp = 10) (the plan's map: `algae_peak`): {{v:algae_peak @ nutrient=each, temp=10 | range}}" in text
-    assert "- peak algae (temp = 20)" in text
+    peak = [ln for ln in text.splitlines() if ln.startswith("- peak algae")]
+    assert len(peak) == 1 and "(measured as: `algae_peak`), by temp: 10: {{v:algae_peak @ nutrient=each, temp=10 | range}}; 20: {{v:algae_peak @ nutrient=each, temp=20 | range}}" in peak[0]
     assert "{{v:algae_peak @ nutrient=each, temp=each | range}}" not in text  # no one range across the compared values
     assert "(when nutrient = 1)" in text and "{{v:bloom:mean_ci @ nutrient=1, temp=10}}" in text
     assert "- water clarity: the plan links no result of the study to it here" in text  # the known positive
@@ -177,7 +177,7 @@ def test_a_map_without_at_or_comparisons_is_read_as_before(tmp_path, monkeypatch
     root = _quest(tmp_path, monkeypatch, [{"item": "Q1", "by": "metric:algae_peak"}])
     monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: {**PROTOCOL, "comparisons": [],
                                                               "topic_map": [{"item": "Q1", "by": "metric:algae_peak"}]})
-    assert "- peak algae (the plan's map: `algae_peak`): {{v:algae_peak @ nutrient=each, temp=each | range}}" in pf.answers_text(root)
+    assert "- peak algae (measured as: `algae_peak`): {{v:algae_peak @ nutrient=each, temp=each | range}}" in pf.answers_text(root)
 
 
 def test_a_study_run_through_the_deterministic_entry_says_no_seed_was_passed_otherwise_the_recorded_base_seed(tmp_path, monkeypatch) -> None:
@@ -205,7 +205,7 @@ def test_a_comparison_of_a_worked_out_quantity_does_not_split_its_setting_into_a
               "comparisons": [{"id": "r_by_nutrient", "result": "peak_ratio", "across": "nutrient", "values": [1, 2], "how": "ratio"}]}
     monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: worked)
     text = pf.answers_text(root)
-    assert "- peak algae (the plan's map: `algae_peak`): {{v:algae_peak @ nutrient=each, temp=each | range}}" in text
+    assert "- peak algae (measured as: `algae_peak`): {{v:algae_peak @ nutrient=each, temp=each | range}}" in text
     assert "nutrient = " not in text.split("water clarity")[0]
 
 
@@ -223,7 +223,7 @@ def test_a_quantity_worked_out_from_the_mapped_result_replaces_the_map_and_is_an
     monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: kept)
     pv.write_answers(root, {"peak_ratio": 1.5}, kept, ids=["peak_ratio"])
     text = pf.answers_text(root)
-    assert "- peak algae (the plan's map: `peak_ratio`): {{v:peak_ratio}} (one value worked out by the analysis" in text
+    assert "- peak algae (measured as: `peak_ratio`): {{v:peak_ratio}} (one value worked out by the analysis" in text
     assert "peak_ratio" in cp._answers_prompt(TEMPLATES, design, asked, [], "")  # the model is shown what it is worked out from
 
 
