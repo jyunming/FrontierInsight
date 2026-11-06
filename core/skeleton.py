@@ -329,7 +329,7 @@ except ImportError as _err:
 class Figure(FigureCalls):
     """What a ``figure_<id>`` body is given: ``axes`` (one per panel of the declared figure), and what the plan says it draws,
     ``x``, ``series`` and ``shows``. Version 5 adds the drawing calls (``fig.line``, ``fig.points``, ``fig.bars``, ``fig.band``,
-    ``fig.ref``, ``fig.note``, ``fig.curve``, ``fig.image``; ``fig.raw`` for the real axes) and what they check against: the
+    ``fig.ref``, ``fig.note``, ``fig.image``; ``fig.raw`` for the real axes) and what they check against: the
     ``table``, the plan's ``settings``, ``series_ids``, ``references`` and ``labels``. FI creates it, saves it as ``file`` and
     closes it."""
 

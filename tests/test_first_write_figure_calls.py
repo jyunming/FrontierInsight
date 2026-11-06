@@ -73,8 +73,9 @@ def test_the_stub_docstring_names_the_calls_under_version_5_and_is_as_it_was_oth
     new = af._stub(plan, "figure_fig1", True)
     assert "Draw on `fig.axes`" not in new and "fig.axes" not in new
     assert ("fig.panel(0, setting=value)" in new) == (plan["figures"]["fig1"]["panels"] > 1)
-    for call in ("line", "points", "bars", "band", "ref", "note", "curve", "image"):
+    for call in ("line", "points", "bars", "band", "ref", "note", "image"):
         assert f"`fig.{call}`" in new and f"fig.{call}(" in RULE
+    assert "fig.curve" not in new and "fig.curve" not in RULE  # refused by the frame: a line FI cannot name
     assert new.endswith('raise NotYet("figure_fig1 is not written yet")\n')
     compile(new, "stub", "exec")
 

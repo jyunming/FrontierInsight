@@ -113,7 +113,8 @@ def test_a_literal_file_name_drops_exactly_that_file_and_an_untold_one_only_the_
 
 def test_the_repair_says_a_reference_curve_is_computed_not_typed() -> None:
     d = fdc.directive(fdc.typed_series("ax.plot(x_from_run, [1, 2, 3, 4])"))
-    assert "compute the curve from its formula" in d and "do not type its values" in d
+    assert "compute it from its formula" in d and "never type its values" in d
+    assert "a reference of the plan" in d and "fig.ref(panel" in d and "fig.curve" not in d
 
 
 def test_the_figure_a_call_is_saved_into_is_named_and_otherwise_every_figure_is() -> None:

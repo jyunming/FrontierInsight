@@ -368,8 +368,9 @@ def directive(findings: list[TypedSeries]) -> str:
         + "\n\nDraw each of these figures from the run's saved results instead: read the values from the raw results files "
         "the simulation wrote (or from the values the analysis already holds), and pass those to the plotting call. Do "
         "not replace one typed list with another, and do not change anything else (the analysis, the printed "
-        "RESULT_JSON, the other figures). A reference or theory curve is no exception: compute the curve from its formula "
-        "(or from the results); do not type its values. Reference lines (a limit, a target, y = x) and axis limits may "
+        "RESULT_JSON, the other figures). A reference or theory curve is no exception: when FI's drawing calls draw the figure, "
+        "draw it as a reference of the plan (`fig.ref(panel, \"<reference id>\")`); otherwise compute it from its formula; never "
+        "type its values. Reference lines (a limit, a target, y = x) and axis limits may "
         "stay as they are. Return only the functions you change in `functions` (each one whole; FI keeps every other line)."
     )
 

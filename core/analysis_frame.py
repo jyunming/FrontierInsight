@@ -277,7 +277,7 @@ def _stub(plan: dict[str, Any], name: str, calls: bool = False) -> str:
 
 
 #: The drawing calls a version 5 stub names (the list agents/figure_primitives.md gives).
-_CALL_NAMES = ", ".join(f"`fig.{n}`" for n in ("line", "points", "bars", "band", "ref", "note", "curve", "image"))
+_CALL_NAMES = ", ".join(f"`fig.{n}`" for n in ("line", "points", "bars", "band", "ref", "note", "image"))
 
 
 def derive_source(design: dict[str, Any], existing: str = "", calls: bool = False) -> str:
