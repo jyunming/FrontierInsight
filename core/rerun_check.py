@@ -84,11 +84,14 @@ class Verdict:
     files: list[str] = field(default_factory=list)
     crashed: bool = False  # could_not because the repaired code did not run (not for time, not for a missing record)
     unplaced: list[str] = field(default_factory=list)  # changed numbers that belong to no result FI can name
+    unwritten: list[str] = field(default_factory=list)  # delivered result files the repaired run did not write (not compared)
+    redrawn: bool = False  # the repair changes how random numbers are drawn (changes are judged against their uncertainty)
 
     def record(self) -> dict[str, Any]:
         return {"status": self.status, "why": self.why, "metrics": self.metrics[:20], "keys": self.keys[:12],
                 "notes": self.notes[:6], "mode": self.mode, "seconds": round(self.seconds, 1), "source": self.source,
-                "files": self.files, "crashed": self.crashed, "unplaced": self.unplaced[:8]}
+                "files": self.files, "crashed": self.crashed, "unplaced": self.unplaced[:8], "unwritten": self.unwritten[:8],
+                "redrawn": self.redrawn}
 
 
 # ---- how long ---------------------------------------------------------------------------------------------------------
@@ -531,7 +534,7 @@ async def judge(executor: Any, python: Path | str, quest_root: Path | str, copy:
         if loose:  # they add to what the attributed numbers say, never replace it (the gate places them as well)
             notes = [*notes, "numbers FI cannot attribute to a result also differ: " + ", ".join(loose[:4])]
         return Verdict("changed" if keep else "unchanged", "", metrics=metrics, keys=keys, notes=notes, mode=mode, seconds=secs,
-                       source=source, files=files, unplaced=loose)
+                       source=source, files=files, unplaced=loose, unwritten=sorted(unwritten), redrawn=bool(redrawn))
     finally:
         shutil.rmtree(work, ignore_errors=True)
         if work.exists():
