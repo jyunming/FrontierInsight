@@ -162,3 +162,49 @@ def test_two_results_at_one_value_in_one_panel_keep_two_colours_and_two_entries(
     texts = list(rec["legend"]["entries"])
     caption = _caption_from_calls("f.png", rec, None, n_seeds=None, facts=None)
     assert not [f for f in check_figure_text(rec, texts, caption) if f["kind"] == "legend_missing"], (texts, caption)
+
+
+def test_a_plan_formula_of_a_result_is_not_named_as_the_result_itself():
+    h = _law_host()
+    h.table.declared = list(getattr(h.table, "declared", []) or []) + ["law"]  # the formula is the plan's for a result
+    h._panel(0)[1]["hold"] = {"step": 2}
+    h.line(0, "fast", [1, 2, 3], [2.0, 4.0, 6.0], "law")
+    h.ref(0, "law")
+    s = h.record()["panels"][0]["series"][-1]
+    assert s["kind"] == "curve" and s["label"] == "Expected Scaling law (plan formula)", s
+    h2 = _law_host()
+    h2._panel(0)[1]["hold"] = {"step": 2}
+    h2.line(0, "fast", [1, 2, 3], [2.0, 4.0, 6.0], "growth")
+    h2.ref(0, "law")  # a reference that is not a result keeps the plan's own name
+    assert h2.record()["panels"][0]["series"][-1]["label"] == "Scaling law"
+
+
+def test_the_legend_names_a_plan_formula_line_apart_from_its_result():
+    h = _law_host()
+    h.table.declared = list(getattr(h.table, "declared", []) or []) + ["law"]
+    h._panel(0)[1]["hold"] = {"step": 2}
+    h.line(0, "fast", [1, 2, 3], [2.0, 4.0, 6.0], "law")
+    h.references = {}
+    h.table._references = {"law": {k: 3.0 for k in h.table._references["law"]}}  # one number at every setting: a flat line
+    h.ref(0, "law")
+    h.finish({**h.labels, "law": {"label": "Scaling law"}}, {})
+    texts = list(h.record()["legend"]["entries"])
+    assert "Expected Scaling law (plan formula)" in texts and len(set(texts)) == len(texts), texts
+
+
+def test_a_plan_reference_whose_given_label_is_its_result_name_is_named_as_expected():
+    h = _law_host()
+    h.table.declared = list(getattr(h.table, "declared", []) or []) + ["law"]
+    h.labels = {**h.labels, "law": "Scaling law"}
+    h.references = {"law": {"value": 3.0, "label": "Scaling law"}}
+    h.line(0, "fast", [1, 2, 3], [2.0, 4.0, 6.0], "law")
+    h.ref(0, "law")
+    assert h.record()["panels"][0]["refs"][-1]["label"] == "Expected Scaling law (plan formula)"
+
+
+def test_one_table_line_per_panel_under_one_id_is_counted_once_per_name():
+    calls = {"legend": {"scope": "figure", "entries": ["A", "Mean of A at 1", "Mean of A at 2"]},
+             "panels": [{"panel": 1, "series": [{"id": "a", "kind": "line"}], "refs": [{"id": "refline1", "label": "Mean of A at 1", "value": 1.0}]},
+                        {"panel": 2, "series": [{"id": "a", "kind": "line"}], "refs": [{"id": "refline1", "label": "Mean of A at 2", "value": 2.0}]}]}
+    caption = "A against x. Marked: Mean of A at 1 at 1; Mean of A at 2 at 2."
+    assert not [f for f in check_figure_text(calls, calls["legend"]["entries"], caption) if f["kind"].startswith("legend")]

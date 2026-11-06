@@ -56,7 +56,7 @@ def _expected_entries(calls: dict[str, Any], legend: dict[str, Any]) -> int:
             count += 1
         for r in p.get("refs") or []:
             if isinstance(r, dict):
-                keys.add(("ref", str(r.get("id"))))
+                keys.add(("ref", str(r.get("id")), str(r.get("label"))))  # a line's id is the panel's own
                 count += 1
     return len(keys) if legend.get("scope") == "figure" else count
 

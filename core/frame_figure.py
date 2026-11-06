@@ -284,6 +284,15 @@ class FigureCalls:
             return str(got.get("label") or ident)
         return str(got) if got else str(ident)
 
+    def _reference_label(self, ident):
+        """The name of a plan reference: the plan's own label; a reference that is the plan's formula for one of the study's
+        results is named as that result's expected value, so its line and the result's curve never share a name."""
+        got = (getattr(self, "references", None) or {}).get(ident)
+        own = str(got["label"]) if isinstance(got, dict) and got.get("label") else None
+        if ident in self._results() and own in (None, self._label_of(ident)):
+            return "Expected %s (plan formula)" % self._label_of(ident)
+        return own or self._label_of(ident)
+
     def _scale_of(self, ident):
         got = (getattr(self, "labels", None) or {}).get(ident)
         return "log" if isinstance(got, dict) and got.get("scale") == "log" else "linear"
@@ -809,7 +818,7 @@ class FigureCalls:
             raise ValueError("the reference `%s` has fewer than two values along `%s` in this panel" % (ref_id, x_id))
         x = sorted(by_x)
         y = [by_x[v] for v in x]
-        label = self._label_of(ref_id)
+        label = self._reference_label(ref_id)
         with _undone(ax, rec):
             arts = ax.plot(x, y, linestyle="--", color="0.35", label=label)
             self._tag(arts)
@@ -1040,14 +1049,14 @@ class FigureCalls:
         if ref_id is not None:
             refs = getattr(self, "references", None) or {}
             if ref_id not in refs and ref_id in self._plan_values(rec):
-                refs = {ref_id: {"value": self._plan_value(ref_id, rec), "label": self._label_of(ref_id)}}
+                refs = {ref_id: {"value": self._plan_value(ref_id, rec), "label": self._reference_label(ref_id)}}
             if ref_id not in refs:
                 raise ValueError("`%s` is not a reference the plan holds; the references are: %s" % (ref_id, ", ".join(sorted(map(str, refs))) or "(none)"))
             got = refs[ref_id]
             number = got.get("value") if isinstance(got, dict) else got
             if not _finite(number):
                 raise ValueError("the reference `%s` has no number to draw" % ref_id)
-            label = str(got.get("label")) if isinstance(got, dict) and got.get("label") else self._label_of(ref_id)
+            label = self._reference_label(ref_id)
             ident, source = ref_id, "plan"
         elif at is not None:
             number, used = self._table_read(at, form, key)
@@ -1071,8 +1080,7 @@ class FigureCalls:
                        else "matches no reference of the plan at this panel's setting"))
             ident = hits[0]
             number, source = self._plan_value(ident, rec), "plan"
-            got = (getattr(self, "references", None) or {}).get(ident)
-            label = str(got.get("label")) if isinstance(got, dict) and got.get("label") else self._label_of(ident)
+            label = self._reference_label(ident)
         if source == "plan" and any(r["id"] == ident and r["axis"] == axis for r in rec["refs"]):
             # the same reference of the plan drawn again (by its id and as a typed number): one line, one legend entry
             return None
@@ -1461,7 +1469,9 @@ class FigureCalls:
             text = " = ".join([first] + [neutral_by_id.get(i) or name(i) for i in e["merged_with"]])
             out.append((self._colour_key(e), extra["series"][k][0], text))
         for r, art in zip(rec["refs"], extra["refs"]):
-            out.append((("ref", r["id"]), art, name(r["id"], r["label"])))
+            # a reference that is the plan's formula for a result keeps the name ref() gave it, never the result's own name
+            text = r["label"] if r.get("source") == "plan" and r["id"] in self._results() else name(r["id"], r["label"])
+            out.append((("ref", r["id"]), art, text))
         return out
 
     @staticmethod
@@ -1561,7 +1571,7 @@ class FigureCalls:
                 if (key, text) in seen:
                     continue
                 seen.add((key, text))
-                look = self._look(art)
+                look = None if key and key[0] == "ref" else self._look(art)  # two reference lines are two lines, by value
                 if look is not None and (text, look) in alike:  # same name, drawn the same: a reader sees one thing
                     covers[alike[(text, look)]] += 1
                     continue
