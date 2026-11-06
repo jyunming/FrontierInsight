@@ -1022,8 +1022,12 @@ class FigureCalls:
         mantissa, _, exponent = text.partition("e")
         digits = len(mantissa.partition(".")[2])
         tol = 0.5 * 10.0 ** (int(exponent or 0) - digits)
-        return [ident for ident, numbers in self._plan_values(rec).items()
+        hits = [ident for ident, numbers in self._plan_values(rec).items()
                 if max(numbers) - min(numbers) <= tol and abs(numbers[0] - float(value)) <= tol]
+        refs = getattr(self, "references", None) or {}
+        fixed = [i for i in hits if isinstance(refs.get(i), dict) and refs[i].get("fixed")]
+        # one fixed number of the plan (a significance level, a true parameter) names the line, ahead of results that share it
+        return fixed if len(fixed) == 1 else hits
 
     def _plan_value(self, ident, rec):
         return self._plan_values(rec)[ident][0]

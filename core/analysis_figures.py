@@ -529,6 +529,12 @@ def _set_panel_titles(handle: Any, axes: list[Any], labels: dict[str, Any]) -> l
 
 
 # ---- the drawing calls: the plan they check against, the custom-drawing mark, the call record ---------------------------------
+def _number_text(number: Any) -> str:
+    """A plan number as a person writes it: 200, 0.05, 6.283."""
+    value = float(number)
+    return str(int(value)) if value.is_integer() and abs(value) < 1e15 else "%.4g" % value
+
+
 def _from(namespace: Any, name: str, default: Any) -> Any:
     got = namespace.get(name) if isinstance(namespace, dict) else getattr(namespace, name, None)
     return default if got is None else got
@@ -582,6 +588,11 @@ def _plan_for(spec: dict[str, Any], namespace: Any, table: Any) -> dict[str, Any
         numbers = {float(v) for v in (per_setting.values() if isinstance(per_setting, dict) else []) if _number(v)}
         if len(numbers) == 1:  # a reference that differs by setting is not one line
             references[str(ident)] = {"value": next(iter(numbers)), "label": labels.get(str(ident), str(ident))}
+    limits = getattr(table, "_thresholds", None)  # the run's record of the plan's thresholds (nominal levels, pass/fail limits)
+    for ident, number in (limits.items() if isinstance(limits, dict) else []):
+        # a threshold of the plan (a significance level, a coverage target) is a line a figure may draw, named by the plan's key
+        if str(ident) not in references and _number(number) and not isinstance(number, bool):
+            references[str(ident)] = {"value": float(number), "label": "%s = %s" % (ident, _number_text(number)), "fixed": True}
     derived = _from(namespace, "DERIVED", {})
     return {"settings": settings, "series_ids": series_ids, "references": references, "labels": labels,
             "result_info": info,
