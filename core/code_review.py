@@ -1868,6 +1868,37 @@ def flagged_checks(quest_root: Path, code_dir: Path, names: list[str]) -> dict[s
     return out
 
 
+def touched_results(quest_root: Path, code_dir: Path, ids: list[str]) -> dict[str, list[str]]:
+    """``{finding id: the declared results (``ids``) it names}`` for each OPEN finding that can change a reported result: the
+    findings the paper's required items hold (:func:`open_findings`: not contradicted, not a fault of the plan, not about a
+    function the run never calls) whose ``changes_result`` is not false, and that the gate has not already turned into a
+    left-out or not-computed result. A result is named when its id is a whole word of the finding's name, text or reason
+    (:func:`_names_check`); a finding that names none marks nothing. Reads the records only."""
+    if not ids:
+        return {}
+    found = open_findings(quest_root, code_dir)
+    issues = load(quest_root).get("issues")
+    issues = issues if isinstance(issues, dict) else {}
+    from . import code_findings as _code_findings
+
+    out: dict[str, list[str]] = {}
+    for v in [*found["missing"], *found["different"], *found["flagged"], *found["unshown"], *found["not_rechecked"]]:
+        fid = str(v.get("fid") or "")
+        issue = issues.get(fid) if fid else None
+        issue = issue if isinstance(issue, dict) else {}
+        gate = issue.get("at_gate")
+        if not fid or isinstance(gate, dict) and gate.get("outcome") in ("left_out", "not_computed"):
+            continue
+        changes = issue["changes_result"] if issue.get("changes_result") is not None else _code_findings.changes_result(v)
+        if not changes:
+            continue
+        said = " ".join(str(x) for x in (v.get("name"), v.get("text"), v.get("why"), issue.get("why")) if x)
+        hit = [i for i in ids if _names_check(said, str(i))]
+        if hit:
+            out[fid] = hit
+    return out
+
+
 def _where(v: dict[str, Any], *, line: bool) -> str:
     if not v.get("file"):
         return ""
