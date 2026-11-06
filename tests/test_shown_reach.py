@@ -328,6 +328,68 @@ def test_what_counts_as_an_assertion_about_what_is_there(assertion: str, structu
     assert shown_reach.read_test(src).structural is structural  # type: ignore[union-attr]
 
 
+_MISSING_UNCERTAINTY_A = """import derive
+
+
+class _Table:
+    def keys(self):
+        return [0]
+
+
+def test_crossing_reports_uncertainty():
+    res = derive.derive_crossing(_Table())
+    head = res["main"]
+    other = res["alt"]
+    # the two crossings differ, so an uncertainty exists and must be returned with the headline
+    assert other is not None and abs(other - (head if not isinstance(head, (tuple, list, dict)) else 0.0)) >= 0.0
+    carries = isinstance(head, (tuple, list, dict)) or any("unc" in str(k).lower() for k in res)
+    assert carries, "returned as a bare value %r with no uncertainty" % (head,)
+"""
+_MISSING_UNCERTAINTY_B = """import derive
+
+
+def test_order_carries_standard_error():
+    out = derive.derive_order(object())
+    assert out, "derive_order returned nothing"
+    for key, val in out.items():
+        assert not isinstance(val, (int, float)), "bare slope %r for %r, no standard error" % (val, key)
+"""
+
+
+@pytest.mark.parametrize("src", [_MISSING_UNCERTAINTY_A, _MISSING_UNCERTAINTY_B])
+def test_a_test_that_only_asks_for_an_uncertainty_beside_a_bare_number_is_about_what_is_there(src: str) -> None:
+    assert shown_reach.read_test(src).structural is True  # type: ignore[union-attr]
+
+
+@pytest.mark.parametrize("extra", [
+    "assert out['main'] == 0.5",
+    "assert abs(out['main'] - 0.5) < 1e-6",
+    "assert abs(out['main'] - 0.5) >= 0.1",
+    "assert len(out) > 2",
+])
+def test_a_test_that_asks_for_an_uncertainty_and_also_a_value_is_still_about_a_value(extra: str) -> None:
+    src = _MISSING_UNCERTAINTY_B + "    " + extra + chr(10)
+    assert shown_reach.read_test(src).structural is False  # type: ignore[union-attr]
+
+
+def test_a_truthiness_check_of_a_name_that_is_not_a_study_result_is_not_about_what_is_there() -> None:
+    src = "def test_x():" + chr(10) + "    ok = within_tolerance(1.0, 2.0)" + chr(10) + "    assert ok" + chr(10)
+    assert shown_reach.read_test(src).structural is False  # type: ignore[union-attr]
+
+
+def test_a_failing_uncertainty_test_is_disclosed_as_incomplete_never_as_computed_wrongly(tmp_path: Path) -> None:
+    src = "import derive\n\n\ndef test_x():\n    out = derive.derive_cover(None)\n    assert out, \'nothing\'\n"
+    src += "    assert not isinstance(out, (int, float)), \'bare number, no standard error\'\n"
+    engine = _engine(tmp_path)
+    out, record = _run(engine, src, quantity="cover")
+    assert out is None
+    gate = record["issues"]["F-1"]["at_gate"]
+    assert gate["outcome"] == "left_out" and gate["incomplete"] is True  # on the old gate: incomplete was False ("computes it wrongly")
+    kept = _removed(engine)
+    said = " ".join(c.get("say", "") + c.get("note", "") for c in kept["checks"])
+    assert "missing or incomplete" in said and "computes it wrongly" not in said
+
+
 def test_a_failing_assertion_on_text_fi_wrote_from_the_plan_is_kept_in_the_report_and_stops_nothing(tmp_path: Path) -> None:
     src = "import derive\n\n\ndef test_x():\n    assert derive.ROLES['cover'] == 'result', 'wrong role'\n"
     engine = _engine(tmp_path)

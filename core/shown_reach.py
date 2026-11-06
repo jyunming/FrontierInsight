@@ -96,6 +96,18 @@ def _call_name(node: ast.Call) -> str:
     return f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
 
 
+_STUDY_RESULT_CALLS = ("derive_", "figure_")
+
+
+def _vacuous(node: ast.Compare) -> bool:
+    """``abs(x) >= 0`` / ``len(x) >= 0``: true for any value, so it asserts neither a value nor anything else."""
+    if len(node.ops) != 1 or not isinstance(node.ops[0], ast.GtE):
+        return False
+    left, right = node.left, node.comparators[0]
+    return (isinstance(left, ast.Call) and _call_name(left) in ("abs", "len")
+            and isinstance(right, ast.Constant) and isinstance(right.value, (int, float)) and right.value == 0)
+
+
 def _about_presence(node: ast.AST, env: dict[str, ast.AST], depth: int = 0) -> bool:
     """Whether an assertion's condition is only about what is there: ``is None`` / ``is not None``, a string ``in`` a mapping,
     ``isinstance``/``hasattr``, joined by ``and``/``or``/``not``/``all``/``any``. A count compared with a count or a number
@@ -119,8 +131,13 @@ def _about_presence(node: ast.AST, env: dict[str, ast.AST], depth: int = 0) -> b
                 return _about_presence(arg.elt, env, depth + 1)
         return False
     if isinstance(node, ast.Name):
+        bound = env.get(node.id)
+        if isinstance(bound, ast.Call) and _call_name(bound).startswith(_STUDY_RESULT_CALLS):
+            return True  # `assert out`: the study's function returned something (not a number it was asked to equal)
         return node.id in env and _about_presence(env[node.id], env, depth + 1)
     if isinstance(node, ast.Compare):
+        if _vacuous(node):
+            return True
         sides = [node.left, *node.comparators]
         for op, left, right in zip(node.ops, sides, sides[1:]):
             if isinstance(op, (ast.Is, ast.IsNot)):
