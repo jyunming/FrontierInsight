@@ -19,7 +19,7 @@ from typing import Any
 import pytest
 
 from core import analysis_frame as af
-from core import contract, numeric_warnings, paper_values, plausibility, trial_runner
+from core import contract, numeric_warnings, paper_values, trial_runner
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRATCH = Path("C:/fi_runs/c1/skeleton/s4_inputs/scratch")
@@ -936,19 +936,6 @@ def test_plan_of_gives_a_several_panel_figure_its_settings_and_labels_and_a_one_
     assert "settings" not in plan["figures"]["fig2"] and plan["figures"]["fig2"]["labels"] == {"rate": "Infection rate"}
 
 
-def _clamp_check(tmp_path: Path, body: str) -> list[Any]:
-    """The violations the engine finds for a result exactly on the top of a declared range, with the study's ``body`` in derive.py."""
-    from types import SimpleNamespace
-
-    from core.engine import Engine, _assertion_violations
-
-    quest = _quest(tmp_path, _design(), body)
-    state = {"result_json": {"s": {"growth": 1.0}}, "code": (quest / "code" / "experiment.py").read_text(encoding="utf-8"),
-             "design": {"result_assertions": [{"path": "growth", "min": 0.4, "max": 1.0, "unit": "x"}]}}
-    stub = SimpleNamespace(quest_root=quest, _protocol_block=lambda s: None)
-    return _assertion_violations(Engine._in_force(stub, state))
-
-
 def test_the_study_code_is_derive_without_fi_s_frame_and_none_when_the_analysis_is_not_fis(tmp_path: Path) -> None:
     quest = _quest(tmp_path, _design(), "def derive_extra(table):\n    return min(0.5, 1.0)\n")
     study = af.study_code(quest / "code")
@@ -958,12 +945,6 @@ def test_the_study_code_is_derive_without_fi_s_frame_and_none_when_the_analysis_
     own.mkdir()
     (own / "experiment.py").write_text("print('hello')\n", encoding="utf-8")
     assert af.study_code(own) is None, "a model-written experiment.py is read as it is"
-
-
-def test_a_one_in_fi_s_own_files_is_not_a_cap_the_study_wrote(tmp_path: Path) -> None:
-    # FI's experiment.py has a 1 in a conditional (its exit code) that the cap search read as a clamp of the study.
-    assert 1.0 not in plausibility.clamp_constants(af.EXPERIMENT), "a literal in both branches (the exit code) is a label, not a cap"
-    assert _clamp_check(tmp_path, "") == []
 
 
 def _split_check(tmp_path: Path, derive_body: str, simulate: str, path: str) -> list[Any]:
@@ -987,38 +968,16 @@ _PLAIN_SIM = "def run_trial(x):\n    return {'growth': x / max(x, 1)}\n"
 _CAPPED_SIM = "def run_trial(x):\n    return {'growth': min(x, 1.0)}\n"
 
 
-def test_the_split_uses_the_protocol_in_force_when_the_design_has_none(tmp_path: Path) -> None:
-    # The state's design carries no protocol; the one in force (the frozen one) is merged in, and the split reads that.
-    from types import SimpleNamespace
-
-    from core.engine import Engine, _assertion_violations
-
-    full = _design([_derived("gain")])
-    quest = _quest(tmp_path, full)
-    (quest / "code" / "simulate.py").write_text(_CAPPED_SIM, encoding="utf-8")
-    state = {"result_json": {"s": {"growth": 1.0}}, "code": (quest / "code" / "experiment.py").read_text(encoding="utf-8"),
-             "design": {"result_assertions": [{"path": "growth", "min": 0.0, "max": 1.0, "unit": "x"}]}}
-    stub = SimpleNamespace(quest_root=quest, _protocol_block=lambda s: full["protocol"])
-    assert [v.kind for v in _assertion_violations(Engine._in_force(stub, state))] == ["clamped"]
-
-
-def test_a_cap_in_derive_py_does_not_pin_a_result_the_trials_return(tmp_path: Path) -> None:
-    # The mean of a trial result is FI's, from its trial record; derive.py can only cap what derive.py returns.
-    assert _split_check(tmp_path, _CAP, _PLAIN_SIM, "growth") == []
-
-
-def test_a_cap_in_the_trial_code_pins_a_result_the_trials_return(tmp_path: Path) -> None:
-    assert [v.kind for v in _split_check(tmp_path, "", _CAPPED_SIM, "growth")] == ["clamped"]
-
-
-def test_a_cap_in_derive_py_pins_a_derived_result_and_one_in_the_trial_code_does_not(tmp_path: Path) -> None:
-    assert [v.kind for v in _split_check(tmp_path, _CAP, _PLAIN_SIM, "gain")] == ["clamped"]
-    assert _split_check(tmp_path / "other", "", _CAPPED_SIM, "gain") == []
-
-
-def test_a_cap_the_study_wrote_still_marks_a_result_on_it_as_clamped(tmp_path: Path) -> None:
-    found = _clamp_check(tmp_path, "def derive_growth(table):\n    return min(1.0, table.mean('growth'))\n")
-    assert [v.kind for v in found] == ["clamped"]
+@pytest.mark.parametrize("derive_body, simulate", [
+    ("", _CAPPED_SIM),        # a cap in the trial code
+    (_CAP, _PLAIN_SIM),       # a cap in derive.py
+    (_CAP, _CAPPED_SIM),
+])
+@pytest.mark.parametrize("path", ["growth", "gain"])
+def test_no_cap_is_guessed_from_the_trial_code_or_derive_py(tmp_path: Path, derive_body: str, simulate: str, path: str) -> None:
+    # A result exactly on the top of its range is not sent back as a "capped number" whichever code holds a min():
+    # the check does not read code for caps (a value on a bound in several settings is disclosed instead).
+    assert _split_check(tmp_path, derive_body, simulate, path) == []
 
 
 # ---- the plan FI's analysis reads is the frame as FI wrote it, never the module after the study's code changed it ----------

@@ -1,10 +1,11 @@
-"""A value capped at its bound is a lie the range check could not see.
+"""The range check never guesses a cap from the script's code (-380).
 
-A real quest: an integrator diverged, the plausibility gate rejected the huge
-error, and the regenerated script read ``rmse = 10.0  # Cap at assertion max
-for divergence``. Divergence became an in-range number. These pin the check
-that now rejects that -- and, just as much, the legitimate code and results
-it has to leave alone.
+An earlier version reported a result as a "clamped number" when it sat on a constant the script's code caps something at
+(``min(x, c)``, ``np.clip``, ``max(R, 1)`` under a denominator, ``out["failed"] = 1.0``). Over every quest it fired on it
+was wrong: the values were 0/1 indicators and the "cap" a denominator floor, an exit code or a failure flag, and each
+flag cost a repair round. Which result a piece of free code feeds cannot be told from the code, so the check no longer
+reads it for caps. What stays: a value outside its range, a bounded quantity that disappeared, and a quantity on one bound
+in several settings, which is disclosed in the paper and never sent back for repair.
 """
 from __future__ import annotations
 
@@ -19,13 +20,14 @@ from core.config import (
     Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig,
     ProviderConfig,
 )
-from core.engine import Engine, _assertion_violations
+from core.engine import Engine, _assertion_violations, _assertion_warnings
 
 RMSE_MAX = {"result_assertions": [
     {"path": "rmse", "min": 0.0, "max": 10.0, "unit": "unitless"},
 ]}
 
-OBSERVED = '''
+# The script a past quest wrote after a bound rejected a diverged run: the divergence became an in-range number.
+CAPPING_SCRIPT = '''
 import json
 import numpy as np
 rmse = float(np.sqrt(np.mean(err ** 2)))
@@ -35,161 +37,111 @@ print("RESULT_JSON: " + json.dumps({"rmse": rmse}))
 '''
 
 
-# --- recognising a cap -------------------------------------------------------
+def _kinds(found: list) -> list[str]:
+    return [v.kind for v in found]
+
+
+# --- (a) the -380 shape: a failure flag in the trial code is not a cap of the coverage ------------------------------
+
+COVERAGE = {"result_assertions": [{"path": "coverage", "min": 0.0, "max": 1.0, "unit": "fraction"}]}
+FAILURE_FLAG_TRIAL = '''
+def run_trial(params, seed):
+    out = {"coverage": float(covered)}
+    if failed:
+        out["failed"] = 1.0
+    return out
+'''
+SEVEN_SETTINGS = {"by_setting": {f"s{i}": {"coverage": 1.0} for i in range(7)}}
+
+
+def test_a_failure_flag_in_the_trial_code_is_not_a_cap_of_the_coverage() -> None:
+    found = plausibility.check_design(SEVEN_SETTINGS, COVERAGE, code=FAILURE_FLAG_TRIAL)
+    assert "clamped" not in _kinds(found) and "clamped_unproven" not in _kinds(found)
+    assert _kinds(found) == ["at_bound"]  # said, in the paper: not a repair
+
+
+def test_that_shape_sends_nothing_back_and_is_disclosed() -> None:
+    state = {"design": COVERAGE, "result_json": SEVEN_SETTINGS, "code": FAILURE_FLAG_TRIAL}
+    assert _assertion_violations(state) == []
+    (said,) = _assertion_warnings(state)
+    assert said.kind == "at_bound" and "coverage equals its bound 1 in 7 settings" in said.disclosure()
+
+
+def test_a_plan_that_says_the_bound_is_honest_is_not_even_disclosed() -> None:
+    design = {"result_assertions": [{**COVERAGE["result_assertions"][0], "may_equal_bound": True}]}
+    assert plausibility.check_design(SEVEN_SETTINGS, design, code=FAILURE_FLAG_TRIAL) == []
+
+
+# --- (b) a floor under a denominator is not a cap ----------------------------------------------------------------------
+
+PROPORTION = {"result_assertions": [{"path": "fdr", "min": 0.0, "max": 1.0, "unit": "dimensionless"}]}
+
 
 @pytest.mark.parametrize("code", [
+    "FDR = V / max(R, 1)",
+    "FDR = V / np.maximum(R, 1)",
+    "FDR = V / np.clip(R, 1, None)",
+    'out = {"fdr": float(np.mean(V / max(R, 1)))}',
+    'out = {"fdr": min(V / max(R, 1), 1.0)}',
+    "hit = 1 if v >= 1 else 0",
+])
+def test_a_denominator_floor_with_an_fdr_of_one_is_no_violation(code: str) -> None:
+    assert plausibility.check_design({"fdr": 1.0}, PROPORTION, code=code) == []
+
+
+# --- (c) known positives: a real cap is still seen where the results show it ----------------------------------------------
+
+CAPPED_PROPORTION = '''
+raw = hits / total
+out = {"share": min(raw, 1.0)}
+'''
+SHARE = {"result_assertions": [{"path": "share", "min": 0.0, "max": 1.0, "unit": "dimensionless"}]}
+
+
+def test_a_real_cap_with_the_value_on_the_bound_in_three_settings_is_still_disclosed() -> None:
+    result = {"by_setting": {f"s{i}": {"share": 1.0} for i in range(3)}}
+    (found,) = plausibility.check_design(result, SHARE, code=CAPPED_PROPORTION)
+    assert found.kind == "at_bound" and len(found.paths) == 3
+    assert "share equals its bound 1 in 3 settings" in found.disclosure()
+
+
+def test_a_value_out_of_range_is_still_a_violation() -> None:
+    found = plausibility.check_design({"rmse": 11.0}, RMSE_MAX, code=CAPPING_SCRIPT)
+    assert _kinds(found) == ["out_of_range"]
+    assert _kinds(plausibility.check_design({"rmse": 11.0}, RMSE_MAX)) == ["out_of_range"]
+
+
+# --- what a capping script's result looks like to the check now --------------------------------------------------------
+
+@pytest.mark.parametrize("code", [
+    CAPPING_SCRIPT,
     "rmse = min(rmse, 10.0)",
     "rmse = np.clip(rmse, 0, 10)",
-    "rmse = np.minimum(rmse, 10.0)",
     "rmse = torch.clamp(rmse, max=10.0)",
     "rmse = 10.0 if diverged else rmse",
-    "CAP = 10.0\nrmse = min(rmse, CAP)",
     "if rmse > 1e6:\n    rmse = 10.0",
-    "rmse = np.where(rmse > 10, 10.0, rmse)",
-    "rmse = np.nan_to_num(rmse, posinf=10.0)",
 ])
-def test_cap_spellings_are_recognised(code: str) -> None:
-    assert 10.0 in plausibility.clamp_constants(code)
+def test_one_value_on_its_bound_is_left_alone_whatever_the_code_does(code: str) -> None:
+    assert plausibility.check_design({"rmse": 10.0}, RMSE_MAX, code=code) == []
 
 
-@pytest.mark.parametrize("code", [
-    "fig, ax = plt.subplots(figsize=(10, 6))",
-    "for i in range(10):\n    pass",
-    "n_bins = 10",
-    "x = y * 10.0",
-])
-def test_ordinary_uses_of_the_number_are_not_caps(code: str) -> None:
-    assert 10.0 not in plausibility.clamp_constants(code)
+def test_a_floor_value_inside_the_range_is_left_alone() -> None:
+    design = {"result_assertions": [{"path": "k1", "min": 0.0, "max": 0.5}]}
+    assert plausibility.check_design({"k1": 0.25}, design, code="k1 = max(k1, 0.25)") == []
 
 
-def test_unparseable_code_yields_nothing() -> None:
-    assert plausibility.clamp_constants("def broken(:\n") == set()
-
-
-# --- the check: both halves are required -------------------------------------
-
-def test_the_observed_script_is_rejected() -> None:
-    v = plausibility.check_design({"rmse": 10.0}, RMSE_MAX, code=OBSERVED)
-    assert [x.kind for x in v] == ["clamped"]
-    assert "rmse = 10 sits exactly on a bound" in v[0].describe()
-
-
-def test_a_value_on_its_bound_without_a_cap_is_a_real_result() -> None:
-    """A perfect score is allowed to be perfect."""
-    design = {"result_assertions": [{"path": "accuracy", "min": 0, "max": 1}]}
-    assert plausibility.check_design(
-        {"accuracy": 1.0}, design, code="accuracy = correct / total",
-    ) == []
-
-
-def test_a_cap_that_did_not_fire_rejects_nothing() -> None:
-    assert plausibility.check_design({"rmse": 3.2}, RMSE_MAX, code=OBSERVED) == []
-
-
-def test_zero_bounds_are_exempt() -> None:
-    """Real zeros and ``max(0, x)`` are both everywhere."""
+def test_zero_bounds_and_an_honest_null_pass() -> None:
     design = {"result_assertions": [{"path": "var", "min": 0.0, "max": 5.0}]}
-    assert plausibility.check_design(
-        {"var": 0.0}, design, code="var = max(0.0, var)",
-    ) == []
+    assert plausibility.check_design({"var": 0.0}, design, code="var = max(0.0, var)") == []
+    assert plausibility.check_design({"rmse": None, "diverged": True}, RMSE_MAX, code=CAPPING_SCRIPT) == []
 
 
-def test_a_floor_cap_on_a_nonzero_min_is_rejected_too() -> None:
-    design = {"result_assertions": [{"path": "k1", "min": 0.25, "max": 0.5}]}
-    v = plausibility.check_design({"k1": 0.25}, design, code="k1 = max(k1, 0.25)")
-    assert [x.kind for x in v] == ["clamped"]
+def test_the_removed_code_readers_are_gone() -> None:
+    for name in ("clamp_constants", "clamp_directions", "direct_caps", "caps_of_other_values"):
+        assert not hasattr(plausibility, name), name
 
 
-# A cap pins a value only from its own side: a floor never pins a value to a max, a ceiling never to a min.
-
-PROPORTION = {"result_assertions": [{"path": "share", "min": 0.0, "max": 1.0, "unit": "dimensionless"}]}
-FLOOR_ON_A_DENOMINATOR = """
-FRAC = V / max(R, 1)
-print("RESULT_JSON: " + json.dumps({"share": float(FRAC.mean())}))
-"""
-
-
-def test_a_floor_on_a_denominator_is_not_a_cap_of_a_value_on_the_max() -> None:
-    # A proportion that really is 1 in every trial; ``max(R, 1)`` only keeps the division defined at R = 0.
-    assert plausibility.check_design({"share": 1.0}, PROPORTION, code=FLOOR_ON_A_DENOMINATOR) == []
-
-
-@pytest.mark.parametrize("code", [
-    "FRAC = V / np.maximum(R, 1)",
-    "FRAC = V / np.fmax(R, 1.0)",
-    "FRAC = V / np.clip(R, 1, None)",
-    "FRAC = V / np.clip(R, a_min=1, a_max=None)",
-])
-def test_every_floor_spelling_leaves_the_max_alone(code: str) -> None:
-    assert plausibility.check_design({"share": 1.0}, PROPORTION, code=code) == []
-
-
-@pytest.mark.parametrize("code", [
-    "rmse = min(rmse, 10.0)",
-    "rmse = np.minimum(rmse, 10.0)",
-    "rmse = np.clip(rmse, 0, 10.0)",
-    "rmse = np.clip(rmse, a_min=0, a_max=10.0)",
-    "rmse = torch.clamp(rmse, max=10.0)",
-    "rmse = 10.0 if diverged else rmse",
-    "if rmse > 1e6:\n    rmse = 10.0",
-])
-def test_a_cap_from_above_still_pins_a_value_on_the_max(code: str) -> None:
-    assert [x.kind for x in plausibility.check_design({"rmse": 10.0}, RMSE_MAX, code=code)] == ["clamped"]
-
-
-def test_a_clip_to_the_unit_interval_still_pins_a_value_on_one() -> None:
-    v = plausibility.check_design({"share": 1.0}, PROPORTION, code="p = np.clip(p, 0, 1)")
-    assert [x.kind for x in v] == ["clamped"]
-
-
-@pytest.mark.parametrize("code", [
-    "n = max(n, 2.0)",
-    "n = np.maximum(n, 2.0)",
-    "n = np.clip(n, 2.0, 50)",
-    "n = n.clip(2.0, 50)",   # method form: the direction of two positional arguments cannot be read
-    "n = 2.0 if tiny else n",
-])
-def test_a_floor_still_pins_a_value_on_the_min(code: str) -> None:
-    design = {"result_assertions": [{"path": "n", "min": 2.0, "max": 50.0}]}
-    assert [x.kind for x in plausibility.check_design({"n": 2.0}, design, code=code)] == ["clamped"]
-
-
-def test_a_ceiling_does_not_pin_a_value_on_the_min() -> None:
-    design = {"result_assertions": [{"path": "n", "min": 2.0, "max": 50.0}]}
-    assert plausibility.check_design({"n": 2.0}, design, code="n = min(n, 2.0)") == []
-
-
-@pytest.mark.parametrize("code", [
-    "hit = 1 if v >= 1 else 0",
-    "hit = 1.0 if v >= 1 else 0.0",
-    "if v >= 1:\n    hit = 1\nelse:\n    hit = 0",
-])
-def test_a_label_written_as_a_literal_in_both_branches_is_not_a_cap(code: str) -> None:
-    design = {"result_assertions": [{"path": "share", "min": 0.0, "max": 1.0}]}
-    assert plausibility.check_design({"share": 1.0}, design, code=code) == []
-
-
-def test_the_directions_of_the_caps_are_read_from_the_same_parse() -> None:
-    code = "a = min(x, 3.0)\nb = max(y, 1.0)\nc = 7.0 if z else y\nd = np.clip(w, 0.5, 9.0)"
-    d = plausibility.clamp_directions(code)
-    assert d == {3.0: {"up"}, 1.0: {"down"}, 7.0: {"both"}, 0.5: {"down"}, 9.0: {"up"}}
-
-
-def test_without_code_the_check_is_unchanged() -> None:
-    assert plausibility.check_design({"rmse": 10.0}, RMSE_MAX) == []
-    assert [x.kind for x in plausibility.check_design({"rmse": 11.0}, RMSE_MAX)] == [
-        "out_of_range"
-    ]
-
-
-def test_an_honest_null_passes() -> None:
-    """What the repair is told to emit instead of a cap."""
-    assert plausibility.check_design(
-        {"rmse": None, "diverged": True}, RMSE_MAX, code=OBSERVED,
-    ) == []
-
-
-# --- wiring: the engine's gate, router and repair prompt ----------------------
+# --- wiring: the engine's gate, router and repair prompt ----------------------------------------------------------------
 
 def _engine(tmp_path: Path) -> Engine:
     cfg = Config(
@@ -207,27 +159,24 @@ def _engine(tmp_path: Path) -> Engine:
     return eng
 
 
-def _capped_state() -> dict:
+def _state(result: dict, code: str = CAPPING_SCRIPT) -> dict:
     return {
         "exec_result": {"returncode": 0, "stdout_tail": "", "stderr_tail": "",
                         "duration_s": 1.0},
-        "result_json": {"rmse": 10.0}, "design": RMSE_MAX, "code": OBSERVED,
+        "result_json": result, "design": RMSE_MAX, "code": code,
         "exec_reflect_iter": 0,
     }
 
 
-def test_engine_gate_reads_the_script_off_the_state() -> None:
-    assert [v.kind for v in _assertion_violations(_capped_state())] == ["clamped"]
+def test_a_result_on_a_bound_the_script_caps_is_not_sent_back(tmp_path: Path) -> None:
+    state = _state({"rmse": 10.0})
+    assert _assertion_violations(state) == []
+    assert _engine(tmp_path)._route_after_execute_reflect(state) != "retry"
 
 
 def test_engine_gate_leaves_a_real_zero_alone() -> None:
-    state = {"design": RMSE_MAX, "result_json": {"rmse": 0.0},
-             "code": "rmse = max(0.0, rmse)"}
+    state = {"design": RMSE_MAX, "result_json": {"rmse": 0.0}, "code": "rmse = max(0.0, rmse)"}
     assert _assertion_violations(state) == []
-
-
-def test_a_capped_result_routes_back_to_repair(tmp_path: Path) -> None:
-    assert _engine(tmp_path)._route_after_execute_reflect(_capped_state()) == "retry"
 
 
 async def _reflect_prompt(eng: Engine, state: dict) -> tuple[str, dict]:
@@ -246,40 +195,23 @@ async def _reflect_prompt(eng: Engine, state: dict) -> tuple[str, dict]:
 
 
 @pytest.mark.asyncio
-async def test_repair_prompt_names_the_bound_and_forbids_the_cap(tmp_path: Path) -> None:
+async def test_out_of_range_prompt_names_the_bound_and_forbids_the_cap(tmp_path: Path) -> None:
     """The model used to see rc=0 and nothing else, so it invented a bug."""
-    prompt, patch = await _reflect_prompt(_engine(tmp_path), _capped_state())
+    prompt, patch = await _reflect_prompt(_engine(tmp_path), _state({"rmse": 1e6}, code="rmse = 1e6"))
     assert "IMPLAUSIBLE RESULT" in prompt
-    assert "rmse = 10 sits exactly on a bound" in prompt
-    assert "NEVER clamp" in prompt and "remove that cap" in prompt
-    assert patch["exec_reflect_iter"] == 1
-
-
-@pytest.mark.asyncio
-async def test_out_of_range_prompt_names_the_bound_without_the_cap_note(
-    tmp_path: Path,
-) -> None:
-    state = {**_capped_state(), "result_json": {"rmse": 1e6}, "code": "rmse = 1e6"}
-    prompt, _ = await _reflect_prompt(_engine(tmp_path), state)
     assert "rmse = 1e+06 violates rmse must be [0, 10]" in prompt
-    assert "remove that cap" not in prompt
-    assert "sits exactly on a bound in several settings" not in prompt
+    assert "NEVER clamp" in prompt
+    assert "remove that cap" not in prompt and "capped by the script" not in prompt
+    assert patch["exec_reflect_iter"] == 1
 
 
 @pytest.mark.asyncio
 async def test_a_quantity_on_its_bound_in_several_settings_is_disclosed_and_not_repaired(
     tmp_path: Path,
 ) -> None:
-    """Old code: the run went back to repair with a note on the trivial answer. An undeclared bound hit is a guess about
-    the computation, so it is said in the paper's record and the code is not sent back."""
-    from core.engine import _assertion_violations, _assertion_warnings
-
-    state = {
-        **_capped_state(),
-        # One non-zero value, or the all-zero guard answers first.
-        "result_json": {"by_h": {"0.1": {"rmse": 0.0}, "0.5": {"rmse": 0.0}, "1.0": {"rmse": 2.5}}},
-        "code": "rmse = compute(h)",
-    }
+    """An undeclared bound hit is a guess about the computation, so it is said in the paper's record and the code is not
+    sent back."""
+    state = _state({"by_h": {"0.1": {"rmse": 0.0}, "0.5": {"rmse": 0.0}, "1.0": {"rmse": 2.5}}}, code="rmse = compute(h)")
     assert _assertion_violations(state) == []
     (said,) = _assertion_warnings(state)
     assert said.kind == "at_bound" and "rmse equals its bound 0 in 2 settings" in said.disclosure()

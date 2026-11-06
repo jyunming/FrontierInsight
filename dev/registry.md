@@ -419,7 +419,7 @@ same PR that adds, splits or renames one.
   record for a paper written before it was kept), and
   `summaries` / `rows`.
 - `core/numeric_warnings.py` — solver/runtime warnings from a run's own stderr that a paper must not be written over.
-- `core/plausibility.py` — the design's declared `result_assertions` (legal ranges for a result) checked in code, including caps the script puts on a result (`clamp_constants`; `direct_caps`: a cap written where a value is reported -- proven at its whole path in the printed result, or a warning (`engine._assertion_warnings`); `caps_of_other_values`: caps proven to be another value's, which do not count for a value on its bound).
+- `core/plausibility.py` — the design's declared `result_assertions` (legal ranges for a result) checked in code: a value outside its range, a bounded quantity an earlier run reported that is now missing, and a quantity on one bound in several settings (`at_bound`, a warning disclosed in the paper via `.fi/edge_everywhere.json`). It does not read the script for caps (`numeric_literals` only lists the numbers the script writes, to tell a bound a fault could return from one the design derived).
 - `core/goal_coverage.py` — does the experiment use the numbers the topic itself asked for? `unplaced_answers` also holds the paper to the topic: a main quantity the plan's `topic_map` answers with a metric FI has a value for, that the paper never places with a filled key, is a forced review hit (`Engine._unplaced_topic_answers`, recorded in `paper/goal_coverage.json` as `quantities_not_placed`).
 
 ## Config, interview, providers

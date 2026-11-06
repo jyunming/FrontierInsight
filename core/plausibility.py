@@ -23,25 +23,23 @@ When a quest calls a trusted simulation skill rather than generating its
 physics from scratch, the skill carries its own valid domain and can
 supply these assertions without the design having to restate them. This
 module takes assertions from a list; it does not care who wrote them.
+Why the script's code is not read for caps
+=========================================
+A bound that rejects a result invites the script to stop producing it. A real
+quest showed exactly that: an integrator diverged, the gate rejected the huge
+error, and the regenerated script read ``rmse = 10.0  # Cap at assertion max`` --
+divergence laundered into a number the gate cannot tell from a genuine RMSE of 10.
+An earlier version of this gate tried to catch that by reading the script for a
+cap (``min(x, c)``, ``np.clip``, a ``max(R, 1)``) at the constant a value sat on.
+Over every quest it ever fired on, it was wrong each time: the value was a 0/1
+indicator and the "cap" a denominator floor, an epsilon scale, FI's own exit code
+or ``out["failed"] = 1.0``; each wrong flag cost a repair round, and every
+exception added for one shape left the next shape firing. Which result a piece of
+free code feeds cannot be told from the code, so the gate no longer tries. What it
+keeps is what the results themselves show: a value outside its range is a
+violation, and a value exactly on a bound in several settings is said in the paper
+(next section), which is how a capped number shows up.
 
-Why a value inside its bounds can still fail
-============================================
-A bound that rejects a result invites the script to stop producing it. A
-real quest showed exactly that: an integrator diverged, the gate rejected the
-huge error, and the regenerated script read ``rmse = 10.0  # Cap at
-assertion max`` -- divergence laundered into a number the gate cannot tell
-from a genuine RMSE of 10. So a value sitting exactly on a non-zero bound is
-rejected when the script also caps values at that constant, unless every such
-cap is proven to be another value's (one written at ``train.rmse`` does not
-count for ``test.rmse``). A cap pins a value only from its own side: a floor
-(``max(R, 1)`` under a denominator) never pins a value to an upper bound, nor a
-ceiling to a lower one; a cap with no readable direction (``10.0 if diverged
-else x``) counts for both. A literal in
-both branches of a conditional (``1 if v >= 1 else 0``) labels a case and caps nothing. Both halves are
-required: a perfect score of 1.0 is a real result, and ``np.clip(p, 0, 1)``
-inside a softmax is real code; only the two together are a capped number.
-Zero bounds are exempt, because real zeros and ``max(0, x)`` are both
-everywhere.
 
 Why several values on a bound fail
 ==================================
@@ -51,9 +49,8 @@ sentinel, a guard branch. That answer tends to be the edge of the legal range,
 where a range check passes it. A real quest's deterministic model reported a
 final size of 0.0 at two reproduction numbers and 1.0 at a third, every one
 inside the declared [0, 1]. One value on a bound is ordinary. The same quantity
-exactly on one bound in ``AT_BOUND_MIN_SETTINGS`` or more settings is sent back
-for repair, zero bounds included, and the repair is told to change the code
-only if the computation is what put it there. Zeros are compared for every
+exactly on one bound in ``AT_BOUND_MIN_SETTINGS`` or more settings is disclosed in the
+paper, zero bounds included (it is a warning, not a stop). Zeros are compared for every
 kind here: a value of exactly 0 below a positive ``min`` is out of range.
 Which bounds carry this signal at all is decided two sections below.
 
@@ -104,7 +101,7 @@ same number printed on both sides of the word. The repair believed it, emitted
 ``"exact_theoretical_boundary"`` — it knew the values were right — and the
 reference line vanished from two panels of the figure that existed to show it.
 A value equal to a bound to within ``_BOUND_REL_TOL`` IS on that bound, which
-is the comparison the at-bound and clamped rules already used, and a value on a
+is the comparison the at-bound rule already used, and a value on a
 bound is never also outside it. One equality, asked once: a result cannot be
 too large by an amount no measurement can resolve.
 
@@ -173,23 +170,18 @@ Why the design can say a bound is an honest value
 The failure policy only covers a count of failures, and only at 0. A proportion that is exactly 0 or 1 because the event
 never happened (or always did) in a small study, or a quantity that stops at its physical limit (a weight that cannot go
 below 0), has no such name to find. The design can say so itself: an assertion with ``"may_equal_bound": true`` is not
-sent back for sitting on its bound in several settings, at either end. Everything else about it is still checked: a value
-outside the range, or one the script capped, is a violation as before. Without that declaration the rule is unchanged, and
-the repairs it causes are few and counted (``engine.exec_reflect_max_iterations``), after which the run goes on and the
-value stays on the record.
+said in the paper for sitting on its bound in several settings, at either end. Everything else about it is still checked: a
+value outside the range is a violation as before. Without that declaration the rule is unchanged: the finding is a
+warning, disclosed in the paper (``.fi/edge_everywhere.json``) and never sent back for repair.
 """
 
 from __future__ import annotations
 
 import ast
-import functools
-import json
 import math
 import re
 from dataclasses import dataclass
-from collections.abc import Mapping
-from types import MappingProxyType
-from typing import Any, NamedTuple
+from typing import Any
 
 # Assertion paths are matched against the flattened result_json keys used
 # by ``numeric_oracle.flatten_numbers`` — "metrics.contrast", "width_mm",
@@ -233,9 +225,9 @@ class Violation:
     path: str
     value: float
     assertion: Assertion
-    # "out_of_range"; "clamped": on a bound the script caps values at;
-    # "at_bound": exactly on one bound in several settings; "missing": an
-    # earlier run reported this bounded quantity and this one does not.
+    # "out_of_range"; "at_bound": exactly on one bound in several settings;
+    # "edge_everywhere": on its bound in every setting; "missing": an earlier
+    # run reported this bounded quantity and this one does not.
     kind: str = "out_of_range"
     # The result paths an ``at_bound`` violation covers.
     paths: tuple[str, ...] = ()
@@ -287,33 +279,10 @@ class Violation:
                 f"(a value outside the range is reported as it is; one the method cannot give is `null` with a flag "
                 f"saying why, never left out)"
             )
-        if self.kind == "clamped_unproven":
-            return (
-                f"{self.path} = {self.value:g} is exactly a constant the script caps a quantity of that name at "
-                f"({self.assertion.describe()}){why}, but where that cap's value goes in the result cannot be shown "
-                f"(it is built in a loop, appended or put under another key): check that it is not this one"
-            )
-        if self.kind == "clamped":
-            on_bound = any(b is not None and math.isclose(self.value, b, rel_tol=1e-9)
-                           for b in (self.assertion.min, self.assertion.max))
-            return (
-                (f"{self.path} = {self.value:g} sits exactly on a bound ({self.assertion.describe()}){why}, and the "
-                 f"script caps values at {self.value:g}" if on_bound else
-                 f"{self.path} = {self.value:g} is exactly the constant the script caps (or floors) this quantity at, "
-                 f"inside its range ({self.assertion.describe()}){why}")
-                + ": a clamped number, not a measurement"
-            )
         return (
             f"{self.path} = {self.value:g} violates "
             f"{self.assertion.describe()}{why}"
         )
-
-
-# Calls that pin a value to a constant: builtins, numpy/torch/tf spellings.
-_CLAMP_CALLS = frozenset({
-    "min", "max", "clip", "clamp", "clip_by_value", "minimum", "maximum",
-    "fmin", "fmax", "where", "nan_to_num",
-})
 
 
 def _literal(node: ast.AST) -> float | None:
@@ -327,156 +296,10 @@ def _literal(node: ast.AST) -> float | None:
     return None
 
 
-def clamp_constants(code: str) -> set[float]:
-    """Constants the script pins values to.
-
-    Collected from the three shapes a cap takes: a literal argument to a
-    min/max/clip-style call, a literal branch of a conditional expression
-    (``10.0 if diverged else rmse``), and a literal assigned inside an ``if``
-    (``if rmse > 1e6: rmse = 10.0``). A name bound to a literal anywhere in
-    the file counts as that literal, so ``CAP = 10.0 ... min(x, CAP)`` is
-    seen too. Unparseable code yields nothing rather than raising.
-    """
-    try:
-        tree = ast.parse(code or "")
-    except (SyntaxError, ValueError):
-        return set()
-    return set(_clamp_sites(tree))
-
-
-def clamp_directions(code: str) -> dict[float, set[str]]:
-    """For each constant :func:`clamp_constants` finds, the directions it caps from: ``"up"`` (a ceiling: ``min(x, c)``,
-    ``np.minimum``, a clip's upper bound), ``"down"`` (a floor: ``max(x, c)``, ``np.maximum``, a clip's lower bound) or
-    ``"both"`` (no direction can be read: a conditional expression, an ``if`` assignment, ``where``, ``nan_to_num``, a
-    method-form clip, a reduction)."""
-    try:
-        tree = ast.parse(code or "")
-    except (SyntaxError, ValueError):
-        return {}
-    dirs: dict[float, set[str]] = {}
-    _clamp_sites(tree, dirs)
-    return dirs
-
-
-_UP_KW = ("a_max", "max", "upper", "clip_value_max")
-_DOWN_KW = ("a_min", "min", "lower", "clip_value_min")
-
-
-def _arg_direction(call: ast.Call, name: str, arg: ast.AST, keyword: str | None) -> str:
-    """The direction one argument of a min/max/clip-style call caps from (see :func:`clamp_directions`)."""
-    fn = call.func
-    if name == "min" and isinstance(fn, ast.Name):
-        return "up"
-    if name == "max" and isinstance(fn, ast.Name):
-        return "down"
-    if name in ("minimum", "fmin"):
-        return "up"
-    if name in ("maximum", "fmax"):
-        return "down"
-    if name in ("clip", "clamp", "clip_by_value"):
-        if keyword in _UP_KW:
-            return "up"
-        if keyword in _DOWN_KW:
-            return "down"
-        if keyword is None and len(call.args) >= 3:  # np.clip(x, LO, HI): the function form
-            if arg is call.args[1]:
-                return "down"
-            if arg is call.args[2]:
-                return "up"
-    return "both"
-
-
-def _clamp_sites(tree: ast.AST, dirs: dict[float, set[str]] | None = None) -> dict[float, set[int]]:
-    """Each constant :func:`clamp_constants` finds, with the nodes (by ``id``) it is a cap at in ``tree``: a call, a
-    conditional expression or an ``if``. With ``dirs``, also the directions it caps from, filled in (see
-    :func:`clamp_directions`)."""
-    names: dict[str, float] = {}
-    for node in ast.walk(tree):
-        if (isinstance(node, ast.Assign) and len(node.targets) == 1
-                and isinstance(node.targets[0], ast.Name)):
-            v = _literal(node.value)
-            if v is not None:
-                names[node.targets[0].id] = v
-
-    def value(node: ast.AST) -> float | None:
-        v = _literal(node)
-        if v is None and isinstance(node, ast.Name):
-            v = names.get(node.id)
-        return v
-
-    out: dict[float, set[int]] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            fn = node.func
-            name = fn.id if isinstance(fn, ast.Name) else (
-                fn.attr if isinstance(fn, ast.Attribute) else "")
-            if name in _CLAMP_CALLS:
-                for arg, kw in (*((a, None) for a in node.args), *((k.value, k.arg) for k in node.keywords)):
-                    v = value(arg)
-                    if v is not None:
-                        out.setdefault(v, set()).add(id(node))
-                        if dirs is not None:
-                            dirs.setdefault(v, set()).add(_arg_direction(node, name, arg, kw))
-        elif isinstance(node, ast.IfExp):
-            if value(node.body) is not None and value(node.orelse) is not None:
-                continue  # `1 if v >= 1 else 0` labels a case; a cap leaves the other branch to the value itself
-            for branch in (node.body, node.orelse):
-                v = value(branch)
-                if v is not None:
-                    out.setdefault(v, set()).add(id(node))
-                    if dirs is not None:
-                        dirs.setdefault(v, set()).add("both")
-        elif isinstance(node, ast.If):
-            # A name given a literal in both branches (`if hit: flag = 1 else: flag = 0`) is a label, not a cap.
-            def _literal_names(stmts: list[ast.stmt]) -> set[str]:
-                return {t.id for st in stmts if isinstance(st, ast.Assign) and value(st.value) is not None
-                        for t in st.targets if isinstance(t, ast.Name)}
-
-            labels = _literal_names(node.body) & _literal_names(node.orelse)
-            for stmt in (*node.body, *node.orelse):
-                if isinstance(stmt, ast.Assign) and any(isinstance(t, ast.Name) and t.id in labels for t in stmt.targets):
-                    continue
-                if isinstance(stmt, (ast.Assign, ast.AnnAssign)) and stmt.value is not None:
-                    v = value(stmt.value)
-                    if v is not None:
-                        out.setdefault(v, set()).add(id(node))
-                        if dirs is not None:
-                            dirs.setdefault(v, set()).add("both")
-    return out
-
-
-# Keys many quantities share: a result path ending in one says nothing about which quantity it is.
-_GENERIC_KEYS = frozenset({
-    "mean", "avg", "average", "median", "max", "min", "std", "sd", "sem", "var", "value", "values", "val",
-    "result", "results", "total", "count", "n", "ci", "lower", "upper", "lo", "hi", "estimate",
-})
-def _upper_caps(call: ast.Call) -> list[ast.AST]:
-    """The arguments a call caps its value at from above: either argument of a two-argument ``min`` /
-    ``np.minimum`` / ``fmin`` (the one that is a constant is the cap, written first or second); the upper bound of a
-    clip or clamp, by keyword (``a_max=``, ``max=``, ``upper=``, ``clip_value_max=``) or as the third positional
-    argument of the function form (``np.clip(x, lo, HI)``, whatever the module is called). Two positional arguments are
-    read as none: ``x.clip(lo, HI)`` and ``torch.clamp(x, lo)`` look alike and the second is a cap in one and a floor
-    in the other (a value on the cap still meets :func:`clamp_constants` on its bound). A floor (``max(1, n)``), a
-    reduction (``x.max(1)``, ``np.min(x, 1)``) and a keyword like ``axis=`` are none."""
-    fn = call.func
-    name = fn.attr if isinstance(fn, ast.Attribute) else (fn.id if isinstance(fn, ast.Name) else "")
-    if name == "min" and isinstance(fn, ast.Name):
-        return list(call.args) if len(call.args) == 2 and not call.keywords else []  # min(a, b, key=...) is no cap
-    if name in ("minimum", "fmin"):
-        return list(call.args) if len(call.args) == 2 else []  # np.minimum(r, 10.0, out=r) is one
-    if name in ("clip", "clamp", "clip_by_value"):
-        for k in call.keywords:
-            if k.arg in ("a_max", "max", "upper", "clip_value_max"):
-                return [k.value]
-        if len(call.args) >= 3:
-            return [call.args[2]]
-    return []
-
-
 def _segments(where: Any) -> list[str]:
     """A reported value's path as segments: dict keys by name, list positions as ``[]``. ``where`` is the tokens
-    :func:`_walk_leaves` yields (what the check uses), or, for convenience, a dotted string for keys without ``.`` or
-    ``[`` in them (``test.rmse``, ``runs[3].rmse``)."""
+    :func:`_walk_leaves` yields, or, for convenience, a dotted string for keys without ``.`` or ``[`` in them
+    (``test.rmse``, ``runs[3].rmse``). The engine uses it to tell a derived result's path from a trial result's."""
     if isinstance(where, str):
         out: list[str] = []
         for part in where.split("."):
@@ -488,336 +311,9 @@ def _segments(where: Any) -> list[str]:
     return [str(v) if kind == "k" else "[]" for kind, v in where]
 
 
-_ANY_KEY = "*"   # a key the script computes (an f-string, a variable, a comprehension's key): any one key
-
-
-def _chain_matches(chain: tuple[str, ...], target: list[str]) -> bool:
-    return len(chain) == len(target) and all(
-        c == t or (c == _ANY_KEY and t != "[]") for c, t in zip(chain, target))
-
-
-#: An entry's ``printed`` when its literal is printed but also read out another way: its caps count where it is printed,
-#: yet it cannot show that they are nowhere else.
-LEAKY = "leaky"
-
-
-class _CapIndex(NamedTuple):
-    #: (key chain, printed, capped constants, the capping calls by ``id``) per upper cap written as a dict value.
-    entries: tuple[tuple[tuple[str, ...], bool, frozenset, frozenset], ...]
-    #: every constant :func:`clamp_constants` finds, with the nodes it is a cap at (ids from the same parse).
-    sites: Mapping[float, frozenset]
-    #: capping calls whose value can travel where the key chains do not follow it (inside ``:=``).
-    unplaced: frozenset = frozenset()
-
-
-@functools.lru_cache(maxsize=64)
-def _cap_index(code: str) -> _CapIndex:
-    """Every upper cap (:func:`_upper_caps`) written as the value of a dict key in ``code``, once per script: the key
-    chain from the literal it sits in (a computed key is ``*``, a list or comprehension position is ``[]``), whether
-    that literal is part of what the script prints, the capped constants and the calls that cap them; and every clamp
-    site of the script (:func:`_clamp_sites`), from the same parse so the two can be compared. Empty for code that caps
-    nothing or does not parse.
-
-    What the script prints is followed from each argument of ``print(...)`` / ``*.dumps(...)`` / ``*.dump(...)``: a
-    literal written there, a name bound to one in the same function (or at module level), or the literals a function
-    of the script called there returns. A name or such a call used as a value inside a printed literal is followed the
-    same way, with that value's key as the prefix, so ``{"test": test_metrics}`` places ``test_metrics``'s keys under
-    ``test``. A literal reached this way is not also read on its own."""
-    try:
-        tree = ast.parse(code)
-    except (SyntaxError, ValueError):
-        return _CapIndex((), MappingProxyType({}))
-    sites = MappingProxyType({c: frozenset(ids) for c, ids in _clamp_sites(tree).items()})
-    unplaced = frozenset(id(n) for w in ast.walk(tree) if isinstance(w, ast.NamedExpr)
-                         for n in ast.walk(w.value) if isinstance(n, ast.Call))
-    if not any(isinstance(n, ast.Call) and _upper_caps(n) for n in ast.walk(tree)):
-        return _CapIndex((), sites, unplaced)
-    names: dict[str, float] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-            v = _literal(node.value)
-            if v is not None:
-                names[node.targets[0].id] = v
-
-    def value(node: ast.AST) -> float | None:
-        v = _literal(node)
-        if v is None and isinstance(node, ast.Name):
-            v = names.get(node.id)
-        return v
-
-    # Scopes: which function (or the module) each node is written in; the names bound there; each function's returns.
-    scope_of: dict[int, ast.AST] = {}
-    bindings: dict[tuple[int, str], list[ast.AST]] = {}
-    functions: dict[str, list[ast.AST]] = {}
-    returns: dict[int, list[ast.AST]] = {}
-
-    def index_scope(scope: ast.AST, body: list[ast.AST]) -> None:
-        stack = list(body)
-        while stack:
-            node = stack.pop()
-            scope_of[id(node)] = scope
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                functions.setdefault(node.name, []).append(node)
-                index_scope(node, node.body)
-                continue
-            if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-                bindings.setdefault((id(scope), node.targets[0].id), []).append(node.value)
-            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
-                bindings.setdefault((id(scope), node.target.id), []).append(node.value)
-            elif isinstance(node, ast.Return) and node.value is not None:
-                returns.setdefault(id(scope), []).append(node.value)
-            stack.extend(ast.iter_child_nodes(node))
-
-    index_scope(tree, tree.body)
-    containers = (ast.Dict, ast.DictComp, ast.List, ast.Tuple, ast.ListComp, ast.SetComp, ast.GeneratorExp)
-
-    def resolve(expr: ast.AST, scope: ast.AST, depth: int = 0) -> list[tuple[ast.AST, ast.AST]]:
-        """The literals ``expr`` evaluates to, each with the scope it is written in; ``[]`` when that is unknown."""
-        if depth > 6:
-            return []
-        if isinstance(expr, containers):
-            return [(expr, scope)]
-        if isinstance(expr, ast.IfExp):
-            return resolve(expr.body, scope, depth + 1) + resolve(expr.orelse, scope, depth + 1)
-        if isinstance(expr, ast.BoolOp):
-            return [r for v in expr.values for r in resolve(v, scope, depth + 1)]
-        if isinstance(expr, ast.Name):
-            bound = bindings.get((id(scope), expr.id)) or bindings.get((id(tree), expr.id)) or []
-            return [r for b in bound for r in resolve(b, scope if (id(scope), expr.id) in bindings else tree, depth + 1)]
-        if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name) and expr.func.id in functions:
-            out: list[tuple[ast.AST, ast.AST]] = []
-            for fn in functions[expr.func.id]:
-                for ret in returns.get(id(fn), []):
-                    out += resolve(ret, fn, depth + 1)
-            return out
-        return []
-
-    # The literals the script prints (the roots of its output), and every literal reached from another one by name or
-    # call (read only from there).
-    printed: list[tuple[ast.AST, ast.AST]] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        fn = node.func
-        fname = fn.attr if isinstance(fn, ast.Attribute) else fn.id if isinstance(fn, ast.Name) else ""
-        if fname in ("print", "dumps", "dump"):
-            for arg in node.args:
-                printed += resolve(arg, scope_of.get(id(node), tree))
-
-    nested: set[int] = set()
-    reached: set[int] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Dict):
-            children = [v for v in node.values if v is not None]
-        elif isinstance(node, ast.DictComp):
-            children = [node.value]
-        elif isinstance(node, (ast.List, ast.Tuple)):
-            children = list(node.elts)
-        elif isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
-            children = [node.elt]
-        else:
-            continue
-        for child in children:
-            # A branch (``x if ok else y``, ``a or b``) sits where its parent put it.
-            stack = [child]
-            while stack:
-                c = stack.pop()
-                nested.add(id(c))
-                if isinstance(c, ast.IfExp):
-                    stack += [c.body, c.orelse]
-                elif isinstance(c, ast.BoolOp):
-                    stack += list(c.values)
-                elif isinstance(c, (ast.Name, ast.Call)):
-                    reached.update(id(lit) for lit, _ in resolve(c, scope_of.get(id(node), tree)))
-
-    entries: list[tuple[tuple[str, ...], bool, frozenset, frozenset]] = []
-
-    def caps_in(v: ast.AST) -> tuple[frozenset, frozenset]:
-        guarded = {id(n) for b in ast.walk(v) if isinstance(b, ast.BinOp)
-                   and isinstance(b.op, (ast.Div, ast.FloorDiv, ast.Mod)) for n in ast.walk(b.right)}
-        found, calls = set(), set()
-        for n in ast.walk(v):
-            if isinstance(n, ast.Call) and id(n) not in guarded:
-                for bound in _upper_caps(n):
-                    c = value(bound)
-                    if c is not None:
-                        found.add(c)
-                        calls.add(id(n))
-        return frozenset(found), frozenset(calls)
-
-    def key_of(k: ast.AST | None) -> str | None:
-        if k is None:
-            return None  # a ``**spread``
-        if isinstance(k, ast.Constant) and isinstance(k.value, str):
-            return k.value
-        if isinstance(k, ast.Constant) and isinstance(k.value, (int, float)) and not isinstance(k.value, bool):
-            return json.dumps(k.value)
-        return _ANY_KEY
-
-    # A literal whose name is read in any other way than being placed as it is (a subscript, an attribute, an argument
-    # to anything but print/dumps, an assignment into it): what it holds can travel where the key chains do not follow,
-    # so nothing under it has a proven place.
-    parent: dict[int, ast.AST] = {}
-    for p in ast.walk(tree):
-        for child in ast.iter_child_nodes(p):
-            parent[id(child)] = p
-    lit_names: dict[int, set[tuple[int, str]]] = {}
-    for (scope_id, name), values in bindings.items():
-        scope_node = next((s for s in (tree, *[f for fs in functions.values() for f in fs]) if id(s) == scope_id), tree)
-        for value_node in values:
-            for lit, _s in resolve(value_node, scope_node):
-                lit_names.setdefault(id(lit), set()).add((scope_id, name))
-
-    def call_name(call: ast.Call) -> str:
-        fn = call.func
-        return fn.attr if isinstance(fn, ast.Attribute) else fn.id if isinstance(fn, ast.Name) else ""
-
-    def to_stdout(call: ast.Call) -> bool:
-        """``call`` is ``print(...)`` to stdout, or a ``dumps(...)`` whose text goes (through string concatenation or
-        an f-string) straight into one: a ``dumps`` kept in a name, parsed back or written to a file is not output."""
-        name = call_name(call)
-        if name == "print":
-            return not any(k.arg == "file" for k in call.keywords)
-        if name != "dumps":
-            return False
-        node, up = call, parent.get(id(call))
-        while isinstance(up, (ast.BinOp, ast.JoinedStr, ast.FormattedValue)):
-            node, up = up, parent.get(id(up))
-        return isinstance(up, ast.Call) and node in up.args and call_name(up) == "print" and to_stdout(up)
-
-    def placed_as_is(name_node: ast.AST) -> bool:
-        up = parent.get(id(name_node))
-        while isinstance(up, (ast.IfExp, ast.BoolOp)):
-            name_node, up = up, parent.get(id(up))
-        if isinstance(up, ast.Call):
-            return name_node in up.args and to_stdout(up)
-        if isinstance(up, ast.Dict):
-            return any(v is name_node for k, v in zip(up.keys, up.values) if k is not None)
-        return isinstance(up, (ast.List, ast.Tuple, ast.Return))
-
-    escaping: set[int] = set()
-    loads = [n for n in ast.walk(tree) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)]
-    for lit_id, holders in lit_names.items():
-        for n in loads:
-            scope_id = id(scope_of.get(id(n), tree))
-            if ((scope_id, n.id) in holders or (id(tree), n.id) in holders) and not placed_as_is(n):
-                escaping.add(lit_id)
-                break
-
-    def visit(node: ast.AST, chain: tuple[str, ...], printed_root: bool | str, scope: ast.AST, depth: int = 0) -> None:
-        if depth > 12:
-            return
-        if id(node) in escaping and printed_root:
-            # Still printed (a cap here is still this value's), but what it holds may also be read out elsewhere.
-            printed_root = LEAKY
-        if isinstance(node, ast.IfExp):
-            visit(node.body, chain, printed_root, scope, depth + 1)
-            visit(node.orelse, chain, printed_root, scope, depth + 1)
-        elif isinstance(node, ast.BoolOp):
-            for v in node.values:
-                visit(v, chain, printed_root, scope, depth + 1)
-        elif isinstance(node, (ast.Name, ast.Call)):
-            for lit, lit_scope in resolve(node, scope):
-                visit(lit, chain, printed_root, lit_scope, depth + 1)
-        elif isinstance(node, ast.Dict):
-            for k, v in zip(node.keys, node.values):
-                key = key_of(k)
-                if key is None and v is not None:
-                    # ``{**d}``: d's keys land here, but which of them is not followed; what it caps has no known place.
-                    visit(v, chain, False, scope, depth + 1)
-                    continue
-                if key is None or v is None:
-                    continue
-                here = (*chain, key)
-                caps, calls = caps_in(v)
-                if caps:
-                    entries.append((here, printed_root, caps, calls))
-                visit(v, here, printed_root, scope, depth + 1)
-        elif isinstance(node, ast.DictComp):
-            here = (*chain, _ANY_KEY)
-            caps, calls = caps_in(node.value)
-            if caps:
-                entries.append((here, printed_root, caps, calls))
-            visit(node.value, here, printed_root, scope, depth + 1)
-        elif isinstance(node, (ast.List, ast.Tuple)):
-            for e in node.elts:
-                visit(e, (*chain, "[]"), printed_root, scope, depth + 1)
-        elif isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
-            visit(node.elt, (*chain, "[]"), printed_root, scope, depth + 1)
-
-    printed_ids = {id(lit) for lit, _ in printed}
-    for lit, lit_scope in printed:
-        visit(lit, (), True, lit_scope)
-    for node in ast.walk(tree):
-        if (isinstance(node, containers) and id(node) not in nested and id(node) not in reached
-                and id(node) not in printed_ids):
-            visit(node, (), False, scope_of.get(id(node), tree))
-    return _CapIndex(tuple(entries), sites, unplaced)
-
-
-def direct_caps(code: str, where: Any, *, proven: bool = True) -> set[float]:
-    """Constants the value reported at ``where`` is capped at from above right where it is reported: an upper cap
-    (:func:`_upper_caps`) as the value of a dict key, not inside a denominator (``x / min(n, 1)`` guards a division).
-
-    ``proven`` (the default): only a cap whose place in the printed result is known -- a literal the script prints
-    (directly, or bound to a name it prints) whose key chain is exactly the value's whole path (a computed key matches
-    any one key, a list position any position). A cap on ``train.rmse`` is not one on ``test.rmse``.
-
-    ``proven=False``: the caps that may be this value's but cannot be shown to be -- a literal the script does not print
-    as such (built in a loop, appended, assigned under another key) whose key chain matches the END of the value's
-    path. The check reports these as a warning, never a block.
-
-    A one-segment path on a key many quantities share (``mean``, ``max``) gives nothing; so does unparseable code. Every
-    other cap, a floor or one set inside an ``if`` included, is left to :func:`clamp_constants`, which counts them all
-    for a value on a bound but those proven to be another value's (:func:`caps_of_other_values`)."""
-    target = _segments(where)
-    if not target or (len(target) == 1 and target[0].lower() in _GENERIC_KEYS):
-        return set()
-    found: set[float] = set()
-    for chain, printed, caps, _calls in _cap_index(code or "").entries:
-        if proven:
-            if printed and _chain_matches(chain, target):
-                found |= caps
-        elif not printed and len(chain) <= len(target) and _chain_matches(chain, target[len(target) - len(chain):]):
-            found |= caps
-    return found
-
-
-def _chains_diverge(chain: tuple[str, ...], target: list[str]) -> bool:
-    """The two key paths name different keys somewhere along their common length (a computed key matches any one)."""
-    return any(not (c == t or (c == _ANY_KEY and t != "[]")) for c, t in zip(chain, target))
-
-
-def caps_of_other_values(code: str, where: Any) -> set[float]:
-    """Constants every cap of which in the script is proven to be another value's: each place the constant caps
-    something is a cap written in the printed result at a key chain that is not ``where``'s whole path (a cap on
-    ``train.rmse`` for a value at ``test.rmse``). A constant that also caps anything whose place cannot be shown (a
-    floor, a branch, a loop, a name) is not among them. A value on its bound is not rejected for these alone."""
-    target = _segments(where)
-    if not target or (len(target) == 1 and target[0].lower() in _GENERIC_KEYS):
-        return set()
-    index = _cap_index(code or "")
-    here: set[int] = set()
-    elsewhere: set[int] = set()
-    unknown: set[int] = set()
-    for chain, printed, _caps, calls in index.entries:
-        if not printed or printed == LEAKY:
-            unknown |= calls
-        elif _chain_matches(chain, target):
-            here |= calls
-        elif _chains_diverge(chain, target):
-            elsewhere |= calls
-        else:
-            # One path is the start of the other: a cap on ``test`` (a helper then computes ``test.rmse`` from the
-            # capped values) may be this value's. Its place relative to the value cannot be shown.
-            unknown |= calls
-    proven = elsewhere - here - unknown - index.unplaced
-    return {c for c, sites in index.sites.items() if sites and sites <= proven}
-
-
-# A value this close to a bound is ON that bound. The at-bound and clamped
-# rules already compared this way; the range test did not, which is how a
-# result one bit above its declared maximum became a violation of it.
+# A value this close to a bound is ON that bound. The at-bound rule already
+# compared this way; the range test did not, which is how a result one bit above
+# its declared maximum became a violation of it.
 _BOUND_REL_TOL = 1e-9
 _BOUND_ABS_TOL = 1e-12
 
@@ -876,21 +372,6 @@ def _trivial_bound(bound: float, literals: set[float]) -> bool:
         math.isclose(bound, c, rel_tol=_BOUND_REL_TOL, abs_tol=_BOUND_ABS_TOL)
         for c in literals
     )
-
-
-def _pinned(value: float, a: Assertion, clamps: set[float], dirs: dict[float, set[str]] | None = None) -> bool:
-    """Whether a value on a non-zero bound is held there by one of ``clamps``. With ``dirs`` (:func:`clamp_directions`)
-    a cap counts only from the side the bound is on: a ceiling pins a value to the max, a floor to the min."""
-    for bound, side in ((a.min, "down"), (a.max, "up")):
-        if bound is None or bound == 0:
-            continue
-        if math.isclose(value, bound, rel_tol=1e-9) and any(
-            math.isclose(c, bound, rel_tol=1e-9)
-            and (dirs is None or c not in dirs or dirs[c] & {side, "both"})
-            for c in clamps
-        ):
-            return True
-    return False
 
 
 def _on_bound(value: float, a: Assertion) -> float | None:
@@ -1020,7 +501,7 @@ class _PathIndex:
 
 
 # How many settings of one quantity must sit exactly on the same bound before
-# the run is sent back (see "Why several values on a bound fail" above). One is
+# it is said in the paper (see "Why several values on a bound fail" above). One is
 # ordinary: a probability of 0 at one working point is often the answer.
 AT_BOUND_MIN_SETTINGS = 2
 
@@ -1376,11 +857,12 @@ def violations(
     """Every declared bound the result actually breaks.
 
     A value equal to a bound, to the precision a bound carries, sits on that
-    bound rather than outside it. With ``code``, a value on a non-zero bound
-    that the script also caps at is reported as ``kind="clamped"`` (see the
-    module docstring). A quantity on one bound in ``AT_BOUND_MIN_SETTINGS`` or
-    more settings is reported once, as ``kind="at_bound"``, when the bound is
-    one a fault could have returned.
+    bound rather than outside it. A quantity on one bound in
+    ``AT_BOUND_MIN_SETTINGS`` or more settings is reported once, as
+    ``kind="at_bound"``, when the bound is one a fault could have returned.
+    ``code`` is read only for the numbers the script writes down (see
+    :func:`numeric_literals`); the check never guesses from it where a value was
+    capped.
     """
     if not assertions:
         return []
@@ -1388,15 +870,10 @@ def violations(
     if not walk.count:
         return []
 
-    clamps = clamp_constants(code) if code else set()
-    clamp_dirs = clamp_directions(code) if code else {}
     literals = numeric_literals(code) if code else set()
     index = walk.numeric_index()
     out: list[Violation] = []
     for a in assertions:
-        # For a value on a bound every cap in the script counts but one proven to be another value's. A value exactly on
-        # a cap proven to be at this value's whole path is rejected even inside the range (an RMSE capped at 10 and
-        # reported as 10).
         matched: list[tuple[tuple, str, float]] = []
         on_bound: dict[float, list[tuple[tuple, str]]] = {}
         for i in index.matching(a.path):
@@ -1408,20 +885,6 @@ def violations(
                     a.max is not None and value > a.max
                 ):
                     out.append(Violation(path, value, a))
-                elif code and any(c != 0 and math.isclose(value, c, rel_tol=1e-9) for c in direct_caps(code, tokens)):
-                    # Inside the range, but exactly on a constant the script caps this very value at: a cap written
-                    # at its whole path in the result the script prints.
-                    out.append(Violation(path, value, a, kind="clamped"))
-                elif code and any(c != 0 and math.isclose(value, c, rel_tol=1e-9)
-                                  for c in direct_caps(code, tokens, proven=False)):
-                    # A cap that may be this value's, written where its place in the result cannot be shown (a loop,
-                    # an append, another key): a warning, never a block (core/engine.py::_assertion_warnings).
-                    out.append(Violation(path, value, a, kind="clamped_unproven"))
-            elif clamps and _pinned(
-                    value, a, clamps - caps_of_other_values(code, tokens), clamp_dirs):
-                # On its bound, and the script caps something at it that is not shown to be another value
-                # (a cap proven to sit at another key's whole path, say train.rmse for test.rmse, does not count).
-                out.append(Violation(path, value, a, kind="clamped"))
             elif bound != 0 or value == 0:
                 # On a bound of 0 only an exact 0 is the trivial answer; see "Why a tiny value is not on 0".
                 on_bound.setdefault(bound, []).append((tokens, path))

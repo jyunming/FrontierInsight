@@ -281,7 +281,7 @@ def test_a_bound_the_script_uses_as_a_value_is_still_a_number_it_writes_down() -
     """The control: the same number as a cap the code applies is one it can return
     without computing anything, so it is still reported."""
     v = pl.check_design(_STRATA, _BRANCHING, code=_CAPPED)
-    assert v and {x.kind for x in v} <= {"at_bound", "clamped"}
+    assert v and {x.kind for x in v} <= {"at_bound"}
 
 
 def test_numeric_literals_skip_a_number_that_only_an_assert_names() -> None:

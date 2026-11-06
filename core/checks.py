@@ -770,13 +770,12 @@ CHECKS: tuple[Check, ...] = (
           'NEEDS claim is put back and the agent sent back once.'),
     Check('plausibility_declared_bounds', 'core.plausibility', 'violations',
           'execute_reflect', 'model_code', 'repair',
-          'A value breaking a bound the design declared (result_assertions), a number the script caps at the '
-          'bound (clamped), a quantity on a bound in several settings (at_bound) or a bounded quantity no '
-          'longer reported sends the run back for repair.'),
-    Check('plausibility_unproven_cap', 'core.plausibility', 'check_design',
+          'A value breaking a bound the design declared (result_assertions) or a bounded quantity no longer '
+          'reported sends the run back for repair.'),
+    Check('plausibility_at_bound', 'core.plausibility', 'check_design',
           'execute_reflect', 'model_code', 'note',
-          "A value exactly on a constant the script caps that quantity at, with the cap's place in the result "
-          'unprovable, is a warning only.'),
+          'A quantity on a bound the plan did not declare honest in several settings is not sent back: it is '
+          'disclosed in the paper.'),
     Check('phased_split_overlap', 'core.phased', 'decide_split',
           'execute', 'own_record', 'note',
           'A split of the supplied data that puts any unit in both parts is refused (zero-overlap manifest) and '
@@ -1097,7 +1096,7 @@ CHECKS: tuple[Check, ...] = (
           'failure note (engine.degenerate_run_guard)'),
     Check('result_assertions_bounds', 'core.engine', '_assertion_violations',
           'execute_reflect', 'own_record', 'repair',
-          'Values break the bounds the design declared or are capped by the script; sent back until repairs are '
+          'Values break the bounds the design declared; sent back until repairs are '
           'spent, then proceeds with the violation noted'),
     Check('figure_overlap_redraw', 'core.engine', 'Engine._figure_overlaps_to_repair',
           'execute_reflect', 'measured', 'repair',

@@ -20060,7 +20060,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             if getattr(w, "kind", "") in ("edge_everywhere", "at_bound"):
                 said_edges.append(w.describe() if w.kind == "edge_everywhere"
                                   else {"text": w.disclosure(), "short": w.disclosure_short()})
-            self._audit("check_result", check="plausibility_unproven_cap", status="warn",
+            self._audit("check_result", check="plausibility_at_bound", status="warn",
                         summary=w.describe()[:300], path=getattr(w, "path", ""), value=getattr(w, "value", None))
         try:  # what the run record says of this run's results that sit on their bound everywhere
             edge_path = self.fi_dir / "edge_everywhere.json"
@@ -20973,19 +20973,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # value at the bound on the next pass so the gate would take it.
             # The repair has to be told that an honest null beats a plausible
             # number.
-            clamped = any(getattr(v, "kind", "") == "clamped" for v in implausible)
             self._log.warning(
                 "[execute_reflect] rc=0 but %d value(s) break the design's "
-                "declared bounds or are capped by the script%s — attempting repair (iter %d)",
+                "declared bounds — attempting repair (iter %d)",
                 len(implausible),
-                " (at least one is a capped number)" if clamped else "",
                 iters + 1,
             )
             rj_preview = json.dumps(state.get("result_json") or {}, indent=2)[:1500]
             stdout_for_prompt = (
                 "IMPLAUSIBLE RESULT: the script exited 0 and printed RESULT_JSON, "
-                "but these values break the bounds the DESIGN declared for them, or are a number the script "
-                "capped rather than computed:\n"
+                "but these values break the bounds the DESIGN declared for them:\n"
                 + "\n".join(f"- {v.describe()}" for v in implausible[:10])
                 + "\n\nFind the cause before changing anything. If it is a bug "
                 "(wrong units, a factor of two, a sign error, a mis-set "
@@ -20994,10 +20991,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "unstable fit), that is a finding, not a bug: emit null for that "
                 "value and say why under \"why_missing\" (for example \"why_missing\": {\"<name>\": \"diverged\"}). "
                 "NEVER clamp, cap or clip a result to the bound or replace it "
-                "with any constant: a capped value is detected and rejected, and "
-                "it would state something false."
-                + ("\n\nA value above is capped by the script itself (at its bound, or at a constant the "
-                   "script caps that very quantity at, inside the range); remove that cap." if clamped else "")
+                "with any constant: it would state something false."
                 + "\n\nRESULT_JSON was:\n"
                 f"{rj_preview}\n\nOriginal stdout tail:\n"
                 + exec_result.get("stdout_tail", "")[:1000]
@@ -36789,10 +36783,10 @@ def _checked(state: "QuestState", memo: Any = None) -> list:
     return out
 
 
-# Findings of the plausibility check that are said, never acted on: a cap whose place in the result cannot be shown, a
-# physical_bound result on its edge everywhere, and a result on a bound the plan did not declare honest (a guess about
-# the computation, so it is disclosed in the paper and does not send the code back).
-_WARNING_KINDS = ("clamped_unproven", "edge_everywhere", "at_bound")
+# Findings of the plausibility check that are said, never acted on: a physical_bound result on its edge everywhere, and a
+# result on a bound the plan did not declare honest (a guess about the computation, so it is disclosed in the paper and
+# does not send the code back).
+_WARNING_KINDS = ("edge_everywhere", "at_bound")
 
 
 def _assertion_violations(state: "QuestState", memo: Any = None) -> list:
@@ -36810,11 +36804,10 @@ def _assertion_violations(state: "QuestState", memo: Any = None) -> list:
     try:
         from core import plausibility
 
-        # The script rides along so a value capped exactly at a non-zero
-        # bound is caught too; ``seen`` so a bounded quantity an earlier run
-        # reported cannot quietly disappear. See core/plausibility.py for both.
+        # The script rides along for the numbers it writes down (which bounds a fault could return by accident);
+        # ``seen`` so a bounded quantity an earlier run reported cannot quietly disappear. See core/plausibility.py.
         found = _checked(state, memo)
-        # A cap whose place in the result cannot be shown, and a physical_bound result on its edge in every setting, are
+        # A result on a bound in several settings, and a physical_bound result on its edge in every setting, are
         # warnings (_assertion_warnings), not violations.
         return [v for v in found if getattr(v, "kind", "") not in _WARNING_KINDS]
     except Exception:  # noqa: BLE001 - a checker bug must not block a quest
@@ -36822,9 +36815,9 @@ def _assertion_violations(state: "QuestState", memo: Any = None) -> list:
 
 
 def _assertion_warnings(state: "QuestState", memo: Any = None) -> list:
-    """The findings of the same check that are warnings, not violations: a value exactly on a constant the script
-    caps a quantity of that name at, where that cap's place in the result cannot be shown
-    (``plausibility.direct_caps(..., proven=False)``). Logged and recorded in the trace; they never send a run back."""
+    """The findings of the same check that are warnings, not violations: a result on a bound in several settings
+    (``at_bound``) and a physical_bound result on its edge everywhere (``edge_everywhere``). Logged, recorded in the
+    trace and disclosed in the paper; they never send a run back."""
     try:
         from core import plausibility
 
