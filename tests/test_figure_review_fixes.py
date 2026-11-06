@@ -126,3 +126,13 @@ def test_a_setting_value_drawn_in_two_panels_is_one_legend_entry_and_one_colour(
     assert all(len(c) == 1 for c in colour.values()), colour
     caption = _caption_from_calls("f.png", rec, None, n_seeds=None, facts=None)
     assert check_figure_text(rec, texts, caption) == [], (texts, caption)
+
+
+def test_the_figure_legend_never_lists_the_same_text_twice():
+    h = _Host(identity=True)
+    a = h.axes[0].plot([1, 2], [1, 2])[0]
+    b = h.axes[1].plot([1, 2], [2, 3])[0]
+    keyed = {0: [(("fast",), a, "Fast colony")], 1: [(("fast", "other"), b, "Fast colony")]}
+    h._figure_legend(h.fig, [0, 1], keyed)
+    texts = [t.get_text() for leg in h.fig.legends for t in leg.get_texts()]
+    assert texts == ["Fast colony"], texts
