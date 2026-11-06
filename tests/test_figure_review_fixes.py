@@ -95,3 +95,34 @@ def test_marked_inside_a_quoted_label_is_not_the_list():
     texts = list(rec["legend"]["entries"])
     caption = "Panel \"Marked: early\" of growth. " + _caption_from_calls("f.png", rec, None, n_seeds=None, facts=None)
     assert check_figure_text(rec, texts, caption) == [], caption
+
+
+def test_a_setting_value_drawn_in_two_panels_is_one_legend_entry_and_one_colour():
+    import matplotlib.pyplot as plt
+
+    from tests.test_figure_series_levels import _Grid, _Host as _LevelHost
+
+    class _Two(_LevelHost):
+        def __init__(self):
+            super().__init__()
+            self.fig, axes = plt.subplots(1, 2, squeeze=False)
+            self.axes = list(axes[0])
+            self.table = _Grid((10, 20))
+            self.table.declared = ["growth", "spread"]
+            self.labels = {**self.labels, "spread": "Spread"}
+
+    h = _Two()
+    for t in (10, 20):
+        h.line(0, t, [1, 2, 3], [1.0, 2.0, 3.0 + t], "growth")
+        h.line(1, t, [1, 2, 3], [0.5, 0.7, 0.9 + t], "spread")
+    h.finish(h.labels, {})
+    rec = h.record()
+    texts = list(rec["legend"]["entries"])
+    assert len(texts) == len(set(texts)) == 2, texts
+    colour = {}
+    for p in rec["panels"]:
+        for s in p["series"]:
+            colour.setdefault(s["level"]["text"], set()).add(str(s.get("color")))
+    assert all(len(c) == 1 for c in colour.values()), colour
+    caption = _caption_from_calls("f.png", rec, None, n_seeds=None, facts=None)
+    assert check_figure_text(rec, texts, caption) == [], (texts, caption)

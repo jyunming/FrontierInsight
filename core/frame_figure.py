@@ -1468,7 +1468,11 @@ class FigureCalls:
     def _colour_key(e):
         """What gives a series its colour: the curve of a level of a setting, else the series id, so one series is one colour in
         every panel."""
-        return FigureCalls._level_ident(e) if e.get("level") else (e["id"],)
+        # a level of the series setting is one curve family across the panels: one colour and one legend entry, whichever
+        # result each panel draws at it (the panel's y axis names the result)
+        if e.get("level"):
+            return ("level", e["level"].get("setting"), e["level"]["text"])
+        return (e["id"],)
 
     def _figure_of_panels(self):
         fig = getattr(self, "fig", None)
