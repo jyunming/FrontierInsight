@@ -1215,6 +1215,7 @@ def _issue_rows(cr: dict[str, Any], root: Path | None = None) -> list[dict[str, 
             "at_gate": issue.get("at_gate") if isinstance(issue.get("at_gate"), dict) else {},
             "about_plan_text": bool(issue.get("about_plan_text")),
             "rerun_unchanged": bool(issue.get("rerun_unchanged")),
+            "rerun_moved_checks": bool(issue.get("rerun_moved_checks")),
             "never_run": bool(issue.get("never_run")) or never_run(issue.get("file"), issue.get("function"))})
     return rows
 
@@ -1395,6 +1396,9 @@ def _issue_lines(code: dict[str, Any]) -> list[str]:
             keys = ", ".join(str(k) for k in _list(row["at_gate"].get("keys"))[:3])
             why_out = "shows it missing or incomplete" if row["at_gate"].get("incomplete") else "still fails"
             still = f"yes: its test {why_out}, so FI left {keys} out of the results the paper uses, and the paper says so"
+        elif row["open"] and row.get("rerun_moved_checks"):
+            still = ("yes, but the study run again on a repaired copy of the code, with the same random numbers, moves only "
+                     "numbers FI checks the code with, not one reported result: it changes no reported number, and it is kept here")
         elif row["open"] and row.get("rerun_unchanged"):
             still = ("yes, but the study run again on a repaired copy of the code, with the same random numbers, reports no other "
                      "number beyond its uncertainty: it changes no reported number, and it is kept here")

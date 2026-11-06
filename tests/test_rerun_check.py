@@ -296,7 +296,7 @@ def test_a_fault_whose_repair_changes_no_reported_number_is_delivered_and_disclo
     out, record = _gate(tmp_path / "b", Verdict("unchanged", mode="whole study"), headline=("cover",), test=DERIVE_COVER)
     assert out is None
     issue = record["issues"]["F-1"]
-    assert issue["rerun_unchanged"] is True and issue["changes_result"] is False and "at_gate" not in issue
+    assert issue["rerun_unchanged"] is True and issue["changes_result"] is False and "at_gate" not in issue and "rerun_moved_checks" not in issue
 
 
 def test_numbers_that_changed_are_left_out_and_the_paper_stops_only_for_the_main_result(tmp_path: Path) -> None:

@@ -23187,6 +23187,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         about_plan: list[dict[str, Any]] = []
         incomplete: set[str] = set()  # left out because a test showed the value missing or incomplete, not computed wrongly
         unchanged: list[dict[str, Any]] = []
+        moved_checks: set[str] = set()  # unchanged because the rerun moved only check measures
         for issue, how in verdicts:
             rerun = (reruns or {}).get(str(issue.get("id")))
             if rerun is not None and rerun.status == "unchanged":
@@ -23198,6 +23199,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 # A finding that a quantity is not computed, or about a figure, is not answered by numbers that did not move:
                 # it is placed as it was before a rerun
                 rerun = None
+            if rerun is not None and rerun.status == "changed" and self._rerun_moved_only_checks(rerun, reach, result):
+                if self._unchanged_is_shown(issue, record, result, declared, reach):
+                    # The study run again with a repair of it moved only the numbers FI measures its checks with, not one
+                    # declared result and no key of the results: no reported number changes, whatever the finding says.
+                    unchanged.append(issue)
+                    moved_checks.add(str(issue.get("id")))
+                    continue
+                rerun = None  # a finding that a quantity is not computed, or about a figure, is placed as before a rerun
             # A fault in a function that makes one declared result, one figure or a helper they use, or a test that only
             # checks that something is there, is placed from FI's records (core/shown_reach.py), not from the finding's words.
             try:
@@ -23289,6 +23298,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             if isinstance(saved, dict):
                 saved["changes_result"] = False
                 saved["rerun_unchanged"] = True
+            if str(issue.get("id")) in moved_checks:
+                if isinstance(saved, dict):
+                    saved["rerun_moved_checks"] = True
+                self._log.warning("[evidence_gate] %s: its test fails, but the study run again with a repair of it moves only the "
+                                  "numbers FI checks the code with, not one result: it changes no reported number and does not "
+                                  "stop the quest", issue.get("id"))
+                continue
             self._log.warning("[evidence_gate] %s: its test fails, but the study run again with a repair of it reports no other "
                               "number beyond its uncertainty: it changes no reported number and does not stop the quest",
                               issue.get("id"))
@@ -23355,6 +23371,22 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
 
         walk(result)
         return any(_shown_reach._norm(n) in have for n in names)
+
+    def _rerun_moved_only_checks(self, rerun: Any, reach: "_shown_reach.Reach | None", result: Any) -> bool:
+        """Whether a rerun that changed numbers moved only measures that are no declared result and no key of the results (the
+        numbers FI's own checks are made of, each a measure of the trials' own record): then no reported number changes. A rerun that also moved a number FI cannot
+        attribute to a result (``unplaced``) or counted failed trials has not been cleared, and the finding is placed as before."""
+        if reach is None or rerun.unplaced or "failed trials" in rerun.metrics or not rerun.metrics:
+            return False
+        if not rerun.keys or not all(str(k).startswith("trials/") for k in rerun.keys):
+            return False  # a number FI cannot show to be one a trial measures (a derived number, no key at all) is not cleared
+        try:
+            placed = reach.effect_of_changes(rerun.metrics)
+        except Exception as exc:  # noqa: BLE001 - what cannot be placed is not shown to leave the results alone
+            self._log.warning("[evidence_gate] the numbers a rerun moved could not be placed (%r)", exc)
+            return False
+        return not (placed.stop or placed.left_out or placed.figures or placed.not_done or placed.plan_text
+                    or self._in_results(placed.extra_keys, result))
 
     def _unchanged_is_shown(self, issue: dict[str, Any], record: dict[str, Any], result: Any, declared: list[str] | None,
                             reach: "_shown_reach.Reach | None") -> bool:
