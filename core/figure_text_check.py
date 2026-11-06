@@ -78,6 +78,9 @@ def check_figure_text(calls: dict[str, Any], legend_texts: list[str] | None, cap
             out.append({"kind": "legend_extra", "panel": legend.get("panel"),
                         "said": "the legend names one thing twice"})
         want = _expected_entries(calls, legend)
+        covers = legend.get("covers")  # an entry that stands for lines drawn alike under one name counts for each of them
+        if isinstance(covers, list) and len(covers) == len(texts) and all(isinstance(n, int) and n >= 1 for n in covers):
+            want -= sum(covers) - len(covers)
         if len(texts) > want:
             out.append({"kind": "legend_extra", "panel": legend.get("panel"),
                         "said": f"the legend has {len(texts)} entries for {want} lines drawn"})

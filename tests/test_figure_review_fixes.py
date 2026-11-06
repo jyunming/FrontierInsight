@@ -95,3 +95,70 @@ def test_marked_inside_a_quoted_label_is_not_the_list():
     texts = list(rec["legend"]["entries"])
     caption = "Panel \"Marked: early\" of growth. " + _caption_from_calls("f.png", rec, None, n_seeds=None, facts=None)
     assert check_figure_text(rec, texts, caption) == [], caption
+
+
+def _two_panel_levels():
+    import matplotlib.pyplot as plt
+
+    from tests.test_figure_series_levels import _Grid, _Host as _LevelHost
+
+    class _Two(_LevelHost):
+        def __init__(self):
+            super().__init__()
+            self.fig, axes = plt.subplots(1, 2, squeeze=False)
+            self.axes = list(axes[0])
+            self.table = _Grid((10, 20))
+            self.table.declared = ["growth", "spread"]
+            self.labels = {**self.labels, "spread": "Spread"}
+
+    return _Two()
+
+
+def test_a_setting_value_drawn_alike_in_two_panels_is_one_legend_entry():
+    h = _two_panel_levels()
+    for t in (10, 20):
+        h.line(0, t, [1, 2, 3], [1.0, 2.0, 3.0 + t], "growth")
+        h.line(1, t, [1, 2, 3], [0.5, 0.7, 0.9 + t], "spread")
+    h.finish(h.labels, {})
+    rec = h.record()
+    texts = list(rec["legend"]["entries"])
+    assert len(texts) == len(set(texts)) == 2, texts
+    caption = _caption_from_calls("f.png", rec, None, n_seeds=None, facts=None)
+    assert check_figure_text(rec, texts, caption) == [], (texts, caption)
+
+
+def test_two_lines_that_share_a_name_but_look_different_keep_two_entries():
+    h = _Host(identity=True)
+    a = h.axes[0].plot([1, 2], [1, 2], color="red", marker="o")[0]
+    b = h.axes[1].plot([1, 2], [2, 3], color="blue", marker="s")[0]
+    keyed = {0: [(("fast",), a, "Fast colony")], 1: [(("slow",), b, "Fast colony")]}
+    h._figure_legend(h.fig, [0, 1], keyed)
+    texts = [t.get_text() for leg in h.fig.legends for t in leg.get_texts()]
+    assert texts == ["Fast colony", "Fast colony"], texts
+
+
+def test_two_lines_that_share_a_name_and_look_alike_are_one_entry():
+    h = _Host(identity=True)
+    a = h.axes[0].plot([1, 2], [1, 2], color="red", marker="o")[0]
+    b = h.axes[1].plot([1, 2], [2, 3], color="red", marker="o")[0]
+    keyed = {0: [(("fast",), a, "Fast colony")], 1: [(("slow",), b, "Fast colony")]}
+    h._figure_legend(h.fig, [0, 1], keyed)
+    texts = [t.get_text() for leg in h.fig.legends for t in leg.get_texts()]
+    assert texts == ["Fast colony"], texts
+    assert h._fc_legend["covers"] == [2], h._fc_legend
+
+
+def test_two_results_at_one_value_in_one_panel_keep_two_colours_and_two_entries():
+    h = _two_panel_levels()
+    for t in (10, 20):
+        h.line(0, t, [1, 2, 3], [1.0, 2.0, 3.0 + t], "growth")
+        h.line(0, t, [1, 2, 3], [0.5, 0.7, 0.9 + t], "spread")
+        h.line(1, t, [1, 2, 3], [0.4, 0.6, 0.8 + t], "spread")
+    h.finish(h.labels, {})
+    rec = h.record()
+    first = h._fc_extra[0]["series"]
+    looks = {h._look(a[0]) for a in first if a[0] is not None}
+    assert len(looks) == 4, looks
+    texts = list(rec["legend"]["entries"])
+    caption = _caption_from_calls("f.png", rec, None, n_seeds=None, facts=None)
+    assert not [f for f in check_figure_text(rec, texts, caption) if f["kind"] == "legend_missing"], (texts, caption)

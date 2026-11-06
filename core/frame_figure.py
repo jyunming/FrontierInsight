@@ -1500,6 +1500,20 @@ class FigureCalls:
             return
         if not cycle:
             return
+        # a value of a setting is one colour in every panel, unless some panel draws two results at that value (then each
+        # result keeps its own colour there, so the two curves of one panel stay apart)
+        results_at = {}
+        for i in panels:
+            for e in self._panel(i)[1]["series"]:
+                if e.get("level") and e["kind"] != "image":
+                    results_at.setdefault((i, e["level"].get("setting"), e["level"]["text"]), set()).add(e["level"]["result"])
+        shared = all(len(r) == 1 for r in results_at.values())
+
+        def key_of(e):
+            if shared and e.get("level"):
+                return ("level", e["level"].get("setting"), e["level"]["text"])
+            return self._colour_key(e)
+
         colour = {}
         for i in panels:
             _ax, rec = self._panel(i)
@@ -1508,14 +1522,14 @@ class FigureCalls:
             for k, e in enumerate(rec["series"]):
                 if e["kind"] in ("curve", "image") or k >= len(arts) or arts[k][0] is None:
                     continue
-                key = self._colour_key(e)
+                key = key_of(e)
                 if key not in colour:
                     colour[key] = cycle[len(colour) % len(cycle)]
                 self._recolour((extra.get("drawn") or {}).get(k) or arts[k][0], colour[key])
             for sid, art in extra.get("bands") or []:
                 for e in rec["series"]:
-                    if e["id"] == sid and e["kind"] != "curve" and self._colour_key(e) in colour:
-                        self._recolour(art, colour[self._colour_key(e)])
+                    if e["id"] == sid and e["kind"] != "curve" and key_of(e) in colour:
+                        self._recolour(art, colour[key_of(e)])
                         break
 
     def _write_legend(self, ax, panel, rec, entries):
@@ -1541,14 +1555,21 @@ class FigureCalls:
         """One legend for the figure: the entries of every panel in ``panels``, each series once (by its key), outside the axes
         (below them, in as many columns as fit the width of the figure; to their right when that would be more than four rows
         and the legend is narrow). The constrained layout makes the room, so no panel is moved by hand."""
-        seen, handles, texts = set(), [], []
+        seen, handles, texts, covers, alike = set(), [], [], [], {}
         for i in panels:
             for key, art, text in keyed[i]:
                 if (key, text) in seen:
                     continue
                 seen.add((key, text))
+                look = self._look(art)
+                if look is not None and (text, look) in alike:  # same name, drawn the same: a reader sees one thing
+                    covers[alike[(text, look)]] += 1
+                    continue
+                if look is not None:
+                    alike[(text, look)] = len(texts)
                 handles.append(art)
                 texts.append(text)
+                covers.append(1)
                 try:
                     art.set_label(text)  # the artist carries the name the legend shows, for the recorder of the saved figure
                 except Exception:  # noqa: BLE001
@@ -1579,7 +1600,30 @@ class FigureCalls:
                 where = "right"
             else:
                 make("outside lower center", ncol)
-        self._fc_legend = {"scope": "figure", "where": where, "entries": list(texts)}
+        self._fc_legend = {"scope": "figure", "where": where, "entries": list(texts), "covers": covers}
+
+    @staticmethod
+    def _look(art):
+        """How a legend entry's artist looks (colour, marker, line style, as matplotlib draws it), or ``None`` when it cannot be
+        read: two entries are one only when both their name and their look are the same."""
+        try:
+            from matplotlib.colors import to_hex
+            first = art
+            if hasattr(art, "lines") and not hasattr(art, "get_color"):  # an error-bar container: its data line
+                first = art.lines[0] if art.lines and art.lines[0] is not None else None
+            elif hasattr(art, "patches") and getattr(art, "patches", None):  # bars
+                first = art.patches[0]
+            if first is None:
+                return None
+            if hasattr(first, "get_marker"):
+                return ("line", to_hex(first.get_color()), str(first.get_marker()), str(first.get_linestyle()))
+            if hasattr(first, "get_facecolor"):
+                fc = first.get_facecolor()
+                fc = fc[0] if len(fc) and hasattr(fc[0], "__len__") else fc
+                return ("patch", to_hex(fc), type(first).__name__)
+        except Exception:  # noqa: BLE001 -- a look that cannot be read never merges two entries
+            return None
+        return None
 
     @staticmethod
     def _wrapped(text, limit, length):
