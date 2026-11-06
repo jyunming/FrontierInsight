@@ -1137,6 +1137,12 @@ def frame5(tmp_path, monkeypatch):
         sys.modules.pop(name, None)
 
 
+class _LimitTable(_CallTable):
+    """The same record with one plan reference, `limit`, of 1.5 at every size."""
+
+    _references = {"limit": {"size=1": 1.5, "size=2": 1.5}}
+
+
 def _calls_run(tmp_path, body, panels=2, table=None):
     ns = types.SimpleNamespace(figure_g=body, COMPARED={"speed": ["fast", "slow"]})
     spec = {"id": "g", "file": "g.png", "panels": panels, "x": "size", "series": "fast", "shows": ["growth"]}
@@ -1269,6 +1275,7 @@ def test_calls_are_recorded_with_the_real_recorder_and_agree_with_it(tmp_path):
             declared = ["growth"]
             def keys(self): return ["size=1", "size=2"]
             def setting(self, key): return {"size": float(key.split("=")[1])}
+            _references = {"limit": {"size=1": 1.5, "size=2": 1.5}}  # a plan reference: the constant 1.5 below is it
         def figure_g(fig, table):
             fig.line(0, "fast", [1, 2], [1.0, 2.0], "growth", yerr=[0.1, 0.2])
             fig.points(0, "slow", [1, 2], [2.0, 1.0], "growth")
@@ -1426,7 +1433,7 @@ def test_a_body_using_only_fi_calls_stays_verified(tmp_path, frame5):
         fig.bars(1, "slow", [1, 2], [1.0, 2.0], "growth")
         fig.image(1, [[1, 2], [3, 4]])
 
-    out = _calls_run(tmp_path, body)
+    out = _calls_run(tmp_path, body, table=_LimitTable())
     assert out["status"] == "ok" and out["declared"]["raw_panels"] == [], out
 
 

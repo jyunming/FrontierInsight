@@ -915,6 +915,63 @@ class FigureCalls:
             raise ValueError("setting key %s holds no value of `%s`" % (key, name))
         return ("%.4g" % got) if _finite(got) else str(got)
 
+    def _held_keys(self, rec):
+        """The table's setting keys this panel shows: every key when the panel holds no setting, else the keys whose
+        ``name=value`` pieces agree with the panel's ``hold`` (a number compared as a number)."""
+        table = getattr(self, "table", None)
+        keys = list(table.keys()) if table is not None else []
+        hold = rec.get("hold") if isinstance(rec.get("hold"), dict) else {}
+        out = []
+        for key in keys:
+            pieces = dict(p.partition("=")[::2] for p in str(key).split(","))
+            ok = True
+            for name, want in hold.items():
+                got = pieces.get(str(name))
+                if got is None:
+                    continue
+                try:
+                    ok = math.isclose(float(got), float(want), rel_tol=1e-9, abs_tol=0.0)
+                except (TypeError, ValueError):
+                    ok = str(got).strip() == str(want)
+                if not ok:
+                    break
+            if ok:
+                out.append(key)
+        return out
+
+    def _plan_values(self, rec):
+        """``{reference id: [numbers]}``: each plan reference's numbers over the settings this panel shows. A reference that
+        holds one number everywhere (``references``) gives that number; one that differs by setting gives its numbers at the
+        panel's settings, read from the table's references (FI's own evaluation of the plan's formula)."""
+        out = {}
+        for ident, got in (getattr(self, "references", None) or {}).items():
+            number = got.get("value") if isinstance(got, dict) else got
+            if _finite(number):
+                out[str(ident)] = [float(number)]
+        held = getattr(getattr(self, "table", None), "_references", None)
+        if isinstance(held, dict):
+            keys = self._held_keys(rec)
+            for ident, per_setting in held.items():
+                if str(ident) in out or not isinstance(per_setting, dict):
+                    continue
+                numbers = [float(per_setting[k]) for k in keys if k in per_setting and _finite(per_setting[k])]
+                if numbers:
+                    out[str(ident)] = numbers
+        return out
+
+    def _plan_match(self, value, rec):
+        """The plan references that hold one number over this panel's settings, equal to ``value`` within the digits the
+        body typed (half a unit of its last digit): the only way a typed constant gets a name."""
+        text = repr(float(value))
+        mantissa, _, exponent = text.partition("e")
+        digits = len(mantissa.partition(".")[2])
+        tol = 0.5 * 10.0 ** (int(exponent or 0) - digits)
+        return [ident for ident, numbers in self._plan_values(rec).items()
+                if max(numbers) - min(numbers) <= tol and abs(numbers[0] - float(value)) <= tol]
+
+    def _plan_value(self, ident, rec):
+        return self._plan_values(rec)[ident][0]
+
     def ref(self, panel, ref_id=None, axis="y", *, at=None, value=None, key=None, form="mean"):
         """A reference line, one of three: a plan reference ``ref_id`` (labelled with the plan's words); ``at=<result id>`` (FI
         reads the line's value from the table: ``form`` mean, n, low or high at setting ``key``); or ``value=<number>``, a
@@ -946,8 +1003,17 @@ class FigureCalls:
                 raise ValueError("`value=%r` must be a finite number" % (value,))
             if axis == "x" and any(isinstance(v, str) for e in rec["series"] for v in e["x"]):
                 raise ValueError("panel %d has categories on its x axis, which have no coordinate to draw a line at; use axis=\"y\"" % panel)
-            number, label = value, "Reference line"
-            ident, source = self._next_line_id(rec), REF_STATED
+            hits = self._plan_match(value, rec)
+            if len(hits) != 1:
+                raise ValueError(
+                    "the constant %r %s, so FI cannot say what the line is. If it is a theory value, add it to the analysis as "
+                    "a named reference or curve; if it is a result's value, draw it with `at=<result id>`"
+                    % (value, "matches several references of the plan (%s)" % ", ".join(sorted(hits)) if hits
+                       else "matches no reference of the plan at this panel's setting"))
+            ident = hits[0]
+            number, source = self._plan_value(ident, rec), "plan"
+            got = (getattr(self, "references", None) or {}).get(ident)
+            label = str(got.get("label")) if isinstance(got, dict) and got.get("label") else self._label_of(ident)
         draw = ax.axhline if axis == "y" else ax.axvline
         art = draw(float(number), linestyle=":", color="0.2", label=label)
         self._tag(art)

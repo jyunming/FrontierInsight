@@ -655,17 +655,19 @@ def test_uneven_error_bars_are_recorded_and_their_meaning_is_checked_against_the
     assert h.axes[0].get_ylim()[1] > 6.0
 
 
-def test_ref_has_three_sources_and_a_stated_value_gets_a_neutral_label():
+def test_ref_has_two_sources_and_a_typed_constant_takes_the_plan_reference_it_equals():
     h = _host_by_x()
     h.ref(0, "limit")
     h.ref(0, at="growth", key="size=2")
-    h.ref(0, value=1.5)
-    h.ref(1, value=7, axis="x")
+    h.ref(0, value=3.0)  # the plan's `limit`: it is that reference, named by the plan
+    with pytest.raises(ValueError):
+        h.ref(0, value=1.5)  # no reference of the plan: FI cannot name it, so it is not drawn
+    with pytest.raises(ValueError):
+        h.ref(1, value=7, axis="x")
     refs = h.record()["panels"][0]["refs"]
-    assert [r["source"] for r in refs] == ["plan", "table", "stated in the figure"]
+    assert [r["source"] for r in refs] == ["plan", "table", "plan"]
     assert refs[1]["value"] == 4.0 and refs[1]["axis"] == "y"
-    assert refs[2]["value"] == 1.5 and refs[2]["label"] == "Reference line"
-    assert len({r["id"] for r in refs}) == 3
+    assert refs[2]["id"] == "limit" and refs[2]["label"] != "Reference line"
     with pytest.raises(ValueError):
         h.ref(0, "limit", value=1.0)
     with pytest.raises(ValueError):
