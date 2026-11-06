@@ -2527,12 +2527,55 @@ def _built_from_trials(values: dict[str, float], spy: dict[str, Any], oracle: di
     return True
 
 
+def _bind_case(measure: str, case: dict[str, Any] | None, returned: dict[str, Any]) -> str:
+    """``measure`` with each name of a setting the case gives (``h`` of the case ``h=0.1``) that the run did NOT return
+    written as the case's number: a check's formula may name its case's own settings. A name the run returned keeps the
+    run's number. A formula left with no name the run returned takes nothing from the simulation and is refused as such
+    (:func:`_check_from`), in a mean over trials as in one run."""
+    own = {str(k): float(v) for k, v in (case or {}).items()
+           if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(float(v))
+           and str(k) not in (returned or {})}
+    read = set(_forms.names(measure)) | set(_forms.names(measure, across=True))
+    own = {k: v for k, v in own.items() if k in read}
+    if not own:
+        return measure
+    return re.sub(r"(?<![\w.])([A-Za-z_]\w*)(?!\w)(?!\s*\()",
+                  lambda m: f"({own[m.group(1)]!r})" if m.group(1) in own else m.group(0), str(measure))
+
+
+def _rows_with_case(rows: list[dict[str, Any]], case: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Each trial's numbers with the case's own settings beside them, for a name THAT trial did not return (a trial that
+    returned the name keeps its own number)."""
+    own = {str(k): float(v) for k, v in (case or {}).items()
+           if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(float(v))}
+    if not own:
+        return rows
+    return [{**{k: v for k, v in own.items() if k not in row}, **row} for row in rows]
+
+
+def _reads_only_case(measure: str, case: dict[str, Any] | None, returned: set[str]) -> bool:
+    """Whether ``measure`` reads no name any trial returned (``returned``: every name the trials gave), only settings of
+    its case: then it is not a measurement of the simulation."""
+    read = set(_forms.names(measure)) | set(_forms.names(measure, across=True))
+    return bool(read) and not (read & returned) and read <= {str(k) for k in (case or {})}
+
+
+async def _case_trials(seen: set[str], *args: Any, **kw: Any) -> tuple[list[dict[str, Any]], Any, list[str], int]:
+    """:func:`run_case_trials`, each trial's numbers with its case's settings beside them (:func:`_rows_with_case`);
+    ``seen`` collects every name a trial returned itself."""
+    rows, why, failed, ran = await run_case_trials(*args, **kw)
+    for row in rows:
+        seen.update(row)
+    return _rows_with_case(rows, kw.get("cell")), why, failed, ran
+
+
 async def run_case(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, cell: dict[str, Any],
                    timeout_s: int, env: dict[str, str] | None = None, thresholds: dict[str, Any] | None = None,
                    trial: int = 0, oracle: dict[str, Any] | None = None,
                    per_trial: bool = False,
                    in_each_run: dict[str, list[Any]] | None = None,
-                   paired: bool = False, log: Any = None, kind: str = "check") -> tuple[dict[str, Any] | None, str]:
+                   paired: bool = False, log: Any = None, kind: str = "check",
+                   per_value: Collection[str] = ()) -> tuple[dict[str, Any] | None, str]:
     """The ENGINE calls the simulation function itself on one case (``run_trial`` at trial ``trial``, 0 unless asked,
     with the seed FI gives that trial of that cell, or ``run_cell``; :func:`oracle_entry` says which): ``(the metrics it
     returned, "")``, or ``(None, why)``. This is how an oracle is measured without asking the script for the number.
@@ -2563,6 +2606,9 @@ async def run_case(executor: Any, python: Path | str, quest_root: Path, module: 
                                levels=levels, seed_key="" if paired else cell_key(setting), log=log, kind=kind)
     if got is None:
         return None, why
+    wrong = _in_run.unplaced(got, levels, named, per_value)
+    if wrong:
+        return None, wrong
     return _in_run.for_case(got, levels, named), why
 
 
@@ -2613,6 +2659,7 @@ async def run_case_trials(executor: Any, python: Path | str, quest_root: Path, m
                           thresholds: dict[str, Any] | None = None, in_each_run: dict[str, list[Any]] | None = None,
                           budget_s: float | None = None, paired: bool = False,
                           store: dict[str, dict[str, dict[str, Any]]] | None = None,
+                          per_value: Collection[str] = (),
                           ) -> tuple[list[dict[str, Any]], str, list[str], int]:
     """The trials ``trials`` of ``run_trial`` on one case, all in ONE process, each with the seed FI gives that trial of
     that setting (trial 0 gets the seed :func:`run_case` gives it; ``paired``: the seed the paired study gives trial
@@ -2676,6 +2723,9 @@ async def run_case_trials(executor: Any, python: Path | str, quest_root: Path, m
         started += 1
         if row.get("status") == "ok":
             got = dict(row.get("values") or {})
+            wrong = _in_run.unplaced(got, levels, named, per_value) if levels else ""
+            if wrong:
+                return [], wrong, [], started  # no trial is read at a value it may not be of
             values.append(_in_run.for_case(got, levels, named) if levels else got)
             continue
         if p["trial"] == plan[0]["trial"]:
@@ -2885,8 +2935,11 @@ async def run_trial_seed_check(executor: Any, python: Path | str, quest_root: Pa
     return True, ""
 
 
-def _check_from(name: str, measure: str, values: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
-    """The check an oracle's measure gives on what one run returned: ``(check or None, the problem or "")``."""
+def _check_from(name: str, measure: str, values: dict[str, Any],
+                case: dict[str, Any] | None = None) -> tuple[dict[str, Any] | None, str]:
+    """The check an oracle's measure gives on what one run returned: ``(check or None, the problem or "")``. ``case``: the
+    check's case; a setting of it the formula names and the run did not return is read from it (:func:`_bind_case`)."""
+    measure = _bind_case(measure, case, values)
     if measure in values:  # one returned name, as every oracle was before formulas: read as it is
         return {"name": name, "value": values[measure], "measured_by": "engine", "returned": dict(values)}, ""
     # How the number is computed is the protocol's formula of what the simulation returned, applied here by the
@@ -2934,7 +2987,7 @@ async def _measure_mean(executor: Any, python: Path | str, quest_root: Path, mod
                         budget_s: float, env: dict[str, str] | None, thresholds: dict[str, Any] | None,
                         in_each_run: dict[str, list[Any]] | None, means: Collection[str], paired: bool,
                         most_trials: int, store: dict[str, Any] | None = None, proportions: Collection[str] = (),
-                        repeated: bool | None = None,
+                        repeated: bool | None = None, per_value: Collection[str] = (),
                         ) -> tuple[dict[str, Any] | None, str, bool] | None:
     """An oracle whose number is a mean over trials (:func:`core.mc_error.reads_a_mean`), decided on trials of
     ``run_trial`` (core/mc_error.py): a first batch, then more trials, sized from their spread, until three standard
@@ -2946,14 +2999,17 @@ async def _measure_mean(executor: Any, python: Path | str, quest_root: Path, mod
     name = str(oracle["name"]).strip()
     expected, limit, _mode = _oracle.limit_of(oracle)
     most = max(1, int(most_trials))
+    seen: set[str] = set()  # every name a trial returned itself
     started = time.monotonic()
-    rows, why, failed, ran = await run_case_trials(
+    rows, why, failed, ran = await _case_trials(seen, 
         executor, python, quest_root, module, cell=case, trials=list(range(min(_mc.PILOT_TRIALS, most))),
         timeout_s=timeout_s, env=env, thresholds=thresholds, in_each_run=in_each_run,
-        budget_s=budget_s * _mc.PILOT_SHARE, paired=paired, store=store)
+        budget_s=budget_s * _mc.PILOT_SHARE, paired=paired, store=store, per_value=per_value)
     if not rows:
         return None, why, True
     first = rows[0]
+    if _reads_only_case(measure, case, seen):
+        return None  # measured as one run, which says it takes nothing from the simulation
     used = _mc.measure_names(measure, first)
     if not used or not all(_scalar(first.get(n)) for n in used):
         return None
@@ -2974,7 +3030,7 @@ async def _measure_mean(executor: Any, python: Path | str, quest_root: Path, mod
     # 0/1 outcome of a random simulation never is: it is judged on its binomial interval (mc_error.statistic).
     if len(rows) >= _mc.MIN_TRIALS and not stat["varies"] and not stat.get("binary")             and not stat.get("across"):
         # The check's own number did not move: judged at once on trial 0's number, as a deterministic check is.
-        check, problem = _check_from(name, measure, first)
+        check, problem = _check_from(name, measure, first, case)
         verdict, why_failed = _mc.failed_share_verdict(len(failed) + int(stat.get("dropped") or 0), ran, None)
         if check is not None and why_failed:
             check["mc"] = _mc.record(stat, read_as="once", verdict=verdict, why=why_failed,
@@ -2993,10 +3049,10 @@ async def _measure_mean(executor: Any, python: Path | str, quest_root: Path, mod
             n = min(len(rows), most - len(rows))
             fresh: list[dict[str, Any]] = []
             if left >= 0.5 and n > 0:
-                fresh, _why, more_failed, more_ran = await run_case_trials(
+                fresh, _why, more_failed, more_ran = await _case_trials(seen, 
                     executor, python, quest_root, module, cell=case, trials=list(range(ran, ran + n)),
                     timeout_s=max(1, int(math.ceil(left)) + 1), env=env, thresholds=thresholds,
-                    in_each_run=in_each_run, budget_s=left, paired=paired, store=store)
+                    in_each_run=in_each_run, budget_s=left, paired=paired, store=store, per_value=per_value)
                 failed, ran = failed + more_failed, ran + more_ran
             alone = _mc.statistic(fresh, measure, means, expected, limit, proportions, repeated=repeated) if fresh else None
             again = _mc.mean_verdict(alone, expected, limit) if alone is not None else None
@@ -3018,10 +3074,10 @@ async def _measure_mean(executor: Any, python: Path | str, quest_root: Path, mod
             why_open = "time"
             break
         wanted = _mc.trials_wanted(stat, float(expected), float(limit), most=most)  # type: ignore[arg-type]
-        more, _why, more_failed, more_ran = await run_case_trials(
+        more, _why, more_failed, more_ran = await _case_trials(seen, 
             executor, python, quest_root, module, cell=case, trials=list(range(ran, ran + max(1, wanted - len(rows)))),
             timeout_s=max(1, int(math.ceil(left)) + 1), env=env, thresholds=thresholds, in_each_run=in_each_run,
-            budget_s=left, paired=paired, store=store)
+            budget_s=left, paired=paired, store=store, per_value=per_value)
         rows, failed, ran = rows + more, failed + more_failed, ran + more_ran
         if not more:
             why_open = "time"
@@ -3051,7 +3107,7 @@ async def _measure_every(executor: Any, python: Path | str, quest_root: Path, mo
                          oracle: dict[str, Any], case: dict[str, Any], measure: str, timeout_s: int,
                          budget_s: float, env: dict[str, str] | None, thresholds: dict[str, Any] | None,
                          in_each_run: dict[str, list[Any]] | None, paired: bool,
-                         most_trials: int, store: dict[str, Any] | None = None,
+                         most_trials: int, store: dict[str, Any] | None = None, per_value: Collection[str] = (),
                          ) -> tuple[dict[str, Any] | None, str, bool] | None:
     """A rule every trial keeps (core/mc_error.py), judged on a first batch of ``run_trial`` trials (trial 0 among them,
     with the seed :func:`run_case` gives it, so it is never weaker than trial 0 alone): the trial furthest from the
@@ -3060,22 +3116,25 @@ async def _measure_every(executor: Any, python: Path | str, quest_root: Path, mo
     name = str(oracle["name"]).strip()
     expected, limit, _mode = _oracle.limit_of(oracle)
     most = max(1, int(most_trials))
+    seen: set[str] = set()  # every name a trial returned itself
     pilot = min(_mc.PILOT_TRIALS, most)
     started = time.monotonic()
     # A rule of every trial is judged on all ``most`` trials, not on the first batch alone: a disagreement that shows only
     # in trial 25 must not pass. The first batch is an early stop (a fault seen there stops at once); only when it holds
     # are the rest run, in what is left of the time.
-    rows, why, failed, ran = await run_case_trials(
+    rows, why, failed, ran = await _case_trials(seen, 
         executor, python, quest_root, module, cell=case, trials=list(range(pilot)),
         timeout_s=timeout_s, env=env, thresholds=thresholds, in_each_run=in_each_run,
-        budget_s=budget_s, paired=paired, store=store)
+        budget_s=budget_s, paired=paired, store=store, per_value=per_value)
     if not rows:
         return None, why, True
     first = rows[0]
+    if _reads_only_case(measure, case, seen):
+        return None  # measured as one run, which says it takes nothing from the simulation
     used = _mc.measure_names(measure, first)
     if not used or not all(_scalar(first.get(n)) for n in used):
         return None
-    check, problem = _check_from(name, measure, first)
+    check, problem = _check_from(name, measure, first, case)
     if check is None or check.get("value") is None or expected is None or limit is None:
         return check, problem, False  # trial 0 gives no number: said as before
 
@@ -3085,7 +3144,7 @@ async def _measure_every(executor: Any, python: Path | str, quest_root: Path, mo
         lost = len(failed) + (len(values) - len(finite))
         varies = any(abs(v - finite[0]) > 1e-15 + 1e-12 * abs(finite[0]) for v in finite[1:])
         at = _mc.worst(values, float(expected))
-        got, said = _check_from(name, measure, rows[at]) if (at is not None and varies) else (check, problem)
+        got, said = _check_from(name, measure, rows[at], case) if (at is not None and varies) else (check, problem)
         if got is None or got.get("value") is None:
             return got, said, None, "", lost, values, varies
         verdict = "pass" if abs(float(got["value"]) - float(expected)) <= float(limit) else "fail"
@@ -3102,10 +3161,10 @@ async def _measure_every(executor: Any, python: Path | str, quest_root: Path, mo
         left = min(budget_s * _mc.PILOT_SHARE, budget_s - (time.monotonic() - started))
         more: list[dict[str, Any]] = []
         if left >= 0.5:
-            more, _why, more_failed, more_ran = await run_case_trials(
+            more, _why, more_failed, more_ran = await _case_trials(seen, 
                 executor, python, quest_root, module, cell=case, trials=list(range(ran, most)),
                 timeout_s=max(1, int(math.ceil(left)) + 1), env=env, thresholds=thresholds, in_each_run=in_each_run,
-                budget_s=left, paired=paired, store=store)
+                budget_s=left, paired=paired, store=store, per_value=per_value)
             rows, failed, ran = rows + more, failed + more_failed, ran + more_ran
         check, problem, verdict, why_failed, lost, values, varies = judge()
         if check is None or check.get("value") is None:
@@ -3188,6 +3247,7 @@ async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, m
     left_checks = sum(1 for o in oracles if on_trials(o))
     began = time.monotonic()
     store: dict[str, Any] = {}  # the trials run in this one run of the checks, shared by the checks on one case
+    per_run = _in_run.per_run_names(protocol) if protocol is not None else set()
     for oracle in oracles:
         own = _oracle.case_of(oracle)
         if own is None:
@@ -3195,12 +3255,15 @@ async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, m
         case, measure = own
         name = str(oracle["name"]).strip()
         how = on_trials(oracle)
+        # The numbers this check reads that may differ between the values compared inside each run: a plain number for
+        # one of them is not read as the value the case names (core/in_run.py ``unplaced``).
+        per_value = [n for n in dict.fromkeys(re.findall(r"[A-Za-z_]\w*", str(measure))) if n not in per_run]
         if how:
             share = max(1.0, (timeout_s - (time.monotonic() - began)) / max(left_checks, 1))
             left_checks -= 1
             kw = dict(oracle=oracle, case=case, measure=measure, timeout_s=timeout_s, budget_s=share, env=cenv,
                       thresholds=thresholds, in_each_run=in_each_run, paired=paired, most_trials=most,
-                      store=store)
+                      store=store, per_value=per_value)
             got = (await _measure_mean(executor, python, quest_root, module, means=means, proportions=proportions,
                                        repeated=repeated, **kw)
                    if how == "mean"
@@ -3221,7 +3284,8 @@ async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, m
                         problems.append(problem)
                 continue
         values, why = await run_case(executor, python, quest_root, module, cell=case, timeout_s=timeout_s, env=cenv,
-                                     thresholds=thresholds, oracle=oracle, in_each_run=in_each_run, paired=paired, log=log)
+                                     thresholds=thresholds, oracle=oracle, in_each_run=in_each_run, paired=paired, log=log,
+                                     per_value=per_value)
         if values is None:
             problems.append(f"the oracle {name!r}: the simulation could not be run on its case "
                             f"({clip_keeping_place(why, 300)})")
@@ -3229,7 +3293,7 @@ async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, m
                 unrun[name] = why
             timed_out = timed_out or isinstance(why, TimeLimit)
             continue
-        check, problem = _check_from(name, measure, values)
+        check, problem = _check_from(name, measure, values, case)
         if check is not None:
             checks.append(check)
         if problem:

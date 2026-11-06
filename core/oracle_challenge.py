@@ -329,6 +329,17 @@ NUMERIC_NODE = "oracle_review.numeric"
 NUMERIC_LINE = "NUMERIC_JSON:"
 #: How long FI lets the numerical script run.
 NUMERIC_TIMEOUT_S = 300
+
+
+def numeric_timeout(run_limit_s: float | None) -> int:
+    """How long FI lets the numerical computation of one known answer run: never longer than a run of the study is allowed
+    (``execution.timeout_s``; a check of one number must not outlast the study it checks) and at most
+    ``NUMERIC_TIMEOUT_S``."""
+    try:
+        limit = float(run_limit_s) if run_limit_s else NUMERIC_TIMEOUT_S
+    except (TypeError, ValueError):
+        limit = NUMERIC_TIMEOUT_S
+    return int(max(1, min(NUMERIC_TIMEOUT_S, limit)))
 # What a numerical script may not do: use the simulation's own code (it would agree with the code by construction).
 _FORBIDDEN = ("import simulate", "from simulate", "from code", "import code", "sys.path", "importlib", "__import__",
               "open(", "subprocess", "os.system", "os.popen", "pathlib", "read_text", "read_bytes", "glob", "listdir",

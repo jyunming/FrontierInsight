@@ -1320,17 +1320,35 @@ def has_frame(source: str) -> bool:
     return _regions(source) is not None
 
 
+def run_function_rule(inside: dict[str, Any]) -> str:
+    """The contract of values compared inside each run, for a simulation function the model wrote whole (``run_trial`` /
+    ``run_cell``): what the function is given and the one form FI reads back, with a full example from the plan's own
+    values. A repair that is not told it guesses a form (one number, one value taken out of the list)."""
+    from . import in_run as _in_run
+
+    levels = _in_run.level_cells(inside)
+    keys = [_in_run.level_key(lv) for lv in list(levels)[:4]]
+    first = next(iter(inside))
+    example = ", ".join(f'"{k}": <number>' for k in keys)
+    return ("VALUES COMPARED INSIDE EACH RUN: each run is given EVERY value of " + ", ".join(f"`{k}`" for k in inside)
+            + f" at once (`cell[\"{first}\"]` is the list {list(inside[first])[:6]!r}, not one value). The function goes "
+            "through every value in that list and returns each result that differs between them as a mapping keyed by "
+            "the value, every value present (NaN where it does not exist): `{\"<result name>\": {" + example + "}}`. "
+            "A number that is one for the whole run (it does not change with these values) stays a plain number. Never "
+            "take one value out of the list, and never key the results by the value first.")
+
+
 def level_rule(protocol: Any, source: str) -> str:
     """FI's one rule for a result compared inside each run, for a repair of a simulate.py that has FI's frame (``""``
     otherwise, and when the plan compares nothing inside each run). It is the one exception to "never return NaN in place of a
     failed trial": the request that writes the code (`core.run_checks`) and every repair say it in these words."""
     from . import in_run as _in_run
 
-    if not has_frame(source or ""):
-        return ""
     inside = _in_run.of_study(protocol) or {}
     if not inside:
         return ""
+    if not has_frame(source or ""):
+        return run_function_rule(inside)
     names = ", ".join(f"`{k}`" for k in inside)
     return (f"The one exception: for a result the plan compares inside each run (over the values of {names}), a value where "
             "the result does not exist is NaN (or None) under that value's key, and EVERY compared value is present as a key "

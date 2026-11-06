@@ -369,6 +369,25 @@ def none_as_nan(value):
     return value
 
 
+def level_first(value, levels):
+    """``value`` with the numbers a run gave level first (``{"h=0.2": {"error": 0.04}, "h=0.1": {...}}``) turned into the
+    form FI reads (``{"error": {"h=0.2": 0.04, ...}}``); a value not given that way is returned as it is. The two forms say
+    the same thing: each outer key is one of the values the run was given and each inner key a name of a result. A form
+    that could be read either way (an inner key that is a value too, a name given both ways) is left as it is."""
+    first = [k for k, v in value.items() if isinstance(v, dict) and v and _level_of(k, levels) is not None]
+    if not first:
+        return value
+    out = {k: v for k, v in value.items() if k not in first}
+    given = set(out)
+    for k in first:
+        for name, x in value[k].items():
+            name = str(name)
+            if _level_of(name, levels) is not None or name in given:
+                return value
+            out.setdefault(name, {})[k] = x
+    return out
+
+
 def read_returned(value, levels, entry):
     """``(the values, "")`` or ``(None, why)`` for what the simulation function returned for one run.
 
@@ -382,6 +401,8 @@ def read_returned(value, levels, entry):
         value = {k: v for k, v in value.items() if k != WHY_MISSING}  # the reasons, read by missing_reasons
         if not value:
             return None, "{}() returned only `{}`, no result".format(entry, WHY_MISSING)
+    if levels:
+        value = level_first(value, levels)
     out = {}
     bad = []
     for name, v in value.items():
@@ -612,6 +633,39 @@ def for_case(values, levels, named):
         else:
             out[name] = v
     return out
+
+
+def per_run_names(protocol):
+    """The protocol's metrics that are one number per run whatever the values compared inside it: those it declares to
+    depend on settings (``depends_on``) none of which is compared inside each run. Every other number a check reads may
+    differ from one compared value to the next."""
+    inside = set(of(protocol) or {})
+    out = set()
+    for m in (protocol.get("metrics") if isinstance(protocol, dict) else None) or []:
+        dep = m.get("depends_on") if isinstance(m, dict) else None
+        if isinstance(dep, list) and dep and not inside & {str(d) for d in dep}:
+            out.add(str(m.get("id")))
+    return out
+
+
+def unplaced(values, levels, named, names):
+    """Why a check cannot read ``names`` at the value its case names, or "" when it can. The run is given every value
+    compared inside it; when the case names one of them and the run returned a plain number for a name (not a number per
+    value), nothing says which value that number belongs to - a run that used only one of the values it was given would be
+    read as the value the case names."""
+    if not named or len(levels or []) < 2:
+        return ""
+    matching = levels_named(named, levels)
+    if not matching or len(matching) == len(levels):
+        return ""
+    plain = [n for n in names if isinstance((values or {}).get(n), (int, float)) and not isinstance(values.get(n), bool)]
+    if not plain:
+        return ""
+    case = level_key({k: named[k] for k in named})
+    given = ", ".join(level_key(lv) for lv in list(levels)[:6])
+    return (f"the case is {case}, but each run is given every value ({given}) and returned one plain number for "
+            f"{', '.join(f'`{n}`' for n in plain)}, so FI cannot tell which value it belongs to: return one number per value, "
+            f"keyed by the value (for example {{\"{case}\": ...}})")
 
 
 def of(protocol):

@@ -17707,7 +17707,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         safe = re.sub(r"[^A-Za-z0-9_]+", "_", str(oracle.get("name") or "check"))[:60] or "check"
         path = folder / f"{safe}_{_oracle_triage.fingerprint(oracle)[:8]}.py"
         path.write_text(script, encoding="utf-8")
-        code, out, err = await self._run_in_env([self._rel_to_quest(path)], timeout_s=_oracle_challenge.NUMERIC_TIMEOUT_S,
+        code, out, err = await self._run_in_env([self._rel_to_quest(path)], timeout_s=_oracle_challenge.numeric_timeout(self.config.execution.timeout_s),
                                                 apart=True)
         value, how = _oracle_challenge.numeric_value(out)
         if value is None and code != 0:
@@ -18692,6 +18692,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                           frame=path.name == _split_run.SIMULATE_NAME and _skeleton.has_frame(code))
             + ((_skeleton.ORACLE_NOTE if path.name == _split_run.SIMULATE_NAME and _skeleton.has_frame(code)
                 else _TRIAL_ORACLE_NOTE) if getattr(self, "_trial_mode", False) else "")
+            # What each run is given and returns when the plan compares values inside each run (the check's case names
+            # one of them): without it a repair guesses a form and the case reads the wrong value.
+            + _with_newline(_skeleton.level_rule(self._protocol_block(state), code))
             # A check against a known answer tests the equations, which may be in the model's package.
             + (self._package_repair_note(state) if path.name == _split_run.SIMULATE_NAME else ""),
             stderr_tail=stderr_tail,
@@ -21078,6 +21081,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 split_note = ((_skeleton.REFLECT_SIMULATE if framed else _SPLIT_REFLECT_SIMULATE)
                               + ((_skeleton.REFLECT_SEARCH if framed else _SEARCH_REFLECT_SIMULATE)
                                  if _optim.has_block(state.get("design")) else "")
+                              + ("" if framed else _with_newline(_skeleton.level_rule(self._protocol_block(state), script_code)))
                               + self._package_repair_note(state))
             elif _optim.has_block(state.get("design")):
                 split_note = _SEARCH_REFLECT_ANALYSIS
@@ -31320,6 +31324,11 @@ wrong is a check itself, return its `oracle_change` and leave `code` empty, as s
 _SPLIT_RERUN_NOTE = """
 The experiment is two scripts. Give simulate.py back exactly as it is unless the problem the review found is IN the simulation: the trials FI already ran are then used as they are, and only experiment.py runs again. Rewrite simulate.py only when the simulation itself has to change.
 """
+
+def _with_newline(text: str) -> str:
+    """``text`` as a paragraph of its own in a prompt, or "" when there is none."""
+    return f"\n{text}\n" if text else ""
+
 
 _SPLIT_REFLECT_SIMULATE = """\
 SPLIT EXPERIMENT: this script is simulate.py, the simulation half of a two-script experiment. FI calls its run_trial(cell, trial_id, seed) (or run_cell(cell)) once per trial and keeps the record itself; the trials failed, or what FI ran does not match the frozen protocol (the reason is below). Fix simulate.py and return the whole of it: the function returns a dict of numbers for one trial and raises on a failed one, with no loop over settings, no files and no RESULT_JSON. Keep every comment that marks where an equation of the plan's model is computed (`# E1`).
