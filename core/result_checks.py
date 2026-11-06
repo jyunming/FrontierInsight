@@ -93,6 +93,7 @@ class Found:
     keys: list[str] = field(default_factory=list)  # to take out of the results
     figures: list[str] = field(default_factory=list)  # to take out of the figures
     quantity: str = ""  # the plan's name of the quantity the keys belong to, when the check is about one
+    contested: str = ""  # "twice" (the plan defines the name two ways) or "plan_problem", when FI holds no passing check of the value
 
 
 #: ``Found.kind`` of a declared result that equals an earlier declared one in every trial.
@@ -347,23 +348,29 @@ class ResultChecksMixin:
             issue = issues.get(q.get("fid")) if isinstance(issues, dict) else None
             if (isinstance(issue, dict) and issue.get("demonstrated") is False) or never_run(q.get("file_rel"), q.get("function")):
                 continue
-            # Nor when the finding is about the plan, not the code: the plan contradicts itself, or defines this name two
-            # ways (FI's own fact from the plan: :func:`core.code_review.plan_defines_twice`). The value stays.
-            if ((isinstance(issue, dict) and (issue.get("plan_conflict") or issue.get("outcome") == _code_findings.PLAN_PROBLEM))
-                    or _code_review.is_defined_twice(q["name"], twice)):
+            # A name the plan defines two ways, or a finding marked as one about the plan, is not left out by the reader's word
+            # alone but not kept by that mark either (the mark is a model's judgement): the value stays only when FI holds a
+            # check it measured itself, that passed, and that reads this quantity.
+            contested = ("twice" if _code_review.is_defined_twice(q["name"], twice) else
+                         "plan_problem" if isinstance(issue, dict) and (issue.get("plan_conflict")
+                                                                       or issue.get("outcome") == _code_findings.PLAN_PROBLEM) else "")
+            if contested and _code_review.passing_checks(self.quest_root, q["name"]):  # type: ignore[attr-defined]
                 continue
             keys = sorted(_code_review.named_in_results(q["name"], result_json))
             if not keys:
                 continue
             what = "computed differently from the plan"
             why = q["note"].rstrip(".") or what
+            if contested:
+                why += ("; the plan defines it in two ways" if contested == "twice" else "; the finding is marked as one about the plan")
+                why += ", and FI holds no passing check of its value"
             note = f"the plan's {q['kind']} `{q['name']}` is {what} in the code ({why})"
             say = (f"A second model compared the code with the plan and found that `{q['name']}` is {what} ({why}); the "
                    f"repairs did not remove it. FI took {', '.join('`' + k + '`' for k in keys[:6])} out of the results. "
                    f"Do NOT report, describe or quote any value for `{q['name']}`, and do not call another number by "
                    f"the plan's name for it. Say plainly, in the limitations, that `{q['name']}` is left out of this paper "
                    "because the code does not compute it as the plan defines it.")
-            found.append(Found("code_reader", ANALYSIS, "", note, say, keys=keys, quantity=q["name"]))
+            found.append(Found("code_reader", ANALYSIS, "", note, say, keys=keys, quantity=q["name"], contested=contested))
         return found
 
     def _degenerate_findings(self, state: Any, result_json: Any, cells: list[dict[str, Any]]) -> list[Found]:
@@ -533,7 +540,8 @@ class ResultChecksMixin:
         keys = sorted({k for f in found for k in f.keys})
         record = {"removed_quantities": keys, "removed_figures": sorted({n for f in found for n in f.figures}),
                   "removed_values": _values_left_out(result_json, set(keys), self._derived_record()),
-                  "checks": [{"kind": f.kind, "note": f.note, **({"quantity": f.quantity, "keys": f.keys} if f.quantity else {})}
+                  "checks": [{"kind": f.kind, "note": f.note, **({"quantity": f.quantity, "keys": f.keys} if f.quantity else {}),
+                              **({"contested": f.contested} if f.contested else {})}
                              for f in found],
                   "note": "; ".join(f.note for f in found),
                   "say": "\n\n".join([*(f.say for f in found), *self._kept_say()])}
@@ -608,7 +616,8 @@ class ResultChecksMixin:
         record.update({
             "removed_quantities": keys, "removed_figures": sorted({*(record.get("removed_figures") or []), *gone_figures}),
             "removed_values": _values_left_out(result_json, set(keys), self._derived_record()), "removed_why": why,
-            "checks": [*checks, *({"kind": f.kind, "note": f.note, "quantity": f.quantity, "keys": f.keys} for f in new)],
+            "checks": [*checks, *({"kind": f.kind, "note": f.note, "quantity": f.quantity, "keys": f.keys,
+                                  **({"contested": f.contested} if f.contested else {})} for f in new)],
             "note": "; ".join(x for x in [str(record.get("note") or ""), *(f.note for f in new)] if x),
             "say": "\n\n".join(x for x in [str(record.get("say") or ""), *(f.say for f in new)] if x)})
         try:

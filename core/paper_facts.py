@@ -390,18 +390,6 @@ def required_items(quest_root: Path | str) -> list[Item]:
         listed = ", ".join(said[:-1]) + f" and {said[-1]}"
         add(NOT_COMPUTED, "; ".join(qs), _sentence(f"The plan asks for {listed}; {many}, so this study does not report them"),
             key=f"{status}-{len(qs)}-quantities")
-    # A name the plan defines two ways (FI's own fact from the plan and the frozen protocol): said as that, with the definition
-    # the reported value follows (the frozen protocol's), whatever a reader of the code says about the value.
-    try:
-        from . import code_review as _review
-
-        twice = _review.plan_defined_twice(root)
-    except Exception:  # noqa: BLE001 -- a record that cannot be read adds nothing
-        twice = {}
-    for found in twice.values():
-        add(METHOD_DIFFERS, found["id"], _sentence(
-            f"The plan defined {_said(root, found['id'])} in two ways ({found['dependent']} in the variables, {found['metric']} in "
-            "the protocol); the value reported follows the definition in the frozen protocol"), key=f"{found['id']}-defined-twice")
     checked = _read(root, "needs/RESULT_CHECK.json")
     for c in (checked.get("checks") if isinstance(checked, dict) else None) or []:
         if isinstance(c, dict) and c.get("quantity"):
@@ -411,11 +399,36 @@ def required_items(quest_root: Path | str) -> list[Item]:
                 add(LEFT_OUT, q, _sentence(f"{_said(root, q)} is not reported separately: {note or 'it was the same number as an earlier result in every trial'}"))
                 continue
             if c.get("kind") == "code_reader":  # a second model's word, not a check of the results: never "the value is wrong"
+                what_fi_knows = {"twice": "; the plan defines it in two ways, and FI holds no check of the value that passed",
+                                 "plan_problem": "; the finding is marked as being about the plan, and FI holds no check of the value "
+                                                 "that passed"}.get(str(c.get("contested") or ""), "")
                 add(LEFT_OUT, q, _sentence(f"{_said(root, q)} is not reported: a second model that read the code found it computed "
-                                           "differently from the plan" + (f" ({note})" if note else "")))
+                                           "differently from the plan" + what_fi_knows + (f" ({note})" if note else "")))
                 continue
             add(LEFT_OUT, q, _sentence(f"{_said(root, q)} is not reported: a check of the results showed the value is wrong"
                                        + (f" ({note})" if note else "")))
+    # A name the plan appears to define two ways (a comparison of the plan's text: core/code_review.py::plan_defines_twice), said as
+    # that. Which definition the reported value follows is said only when FI holds a check it measured, that passed and that reads
+    # the quantity; a name that is left out already has its one sentence (above), and is not given a second one.
+    try:
+        from . import code_review as _review
+
+        twice = _review.plan_defined_twice(root)
+        left_out = {_review._norm(_review.leading_id(c.get("quantity"))) for c in (checked.get("checks") if isinstance(checked, dict) else None) or []
+                    if isinstance(c, dict) and c.get("quantity")}
+    except Exception:  # noqa: BLE001 -- a record that cannot be read adds nothing
+        twice, left_out = {}, set()
+    for key, found in twice.items():
+        if key in left_out:
+            continue
+        held = _review.passing_checks(root, found["id"])
+        two_ways = (f"The plan defined {_said(root, found['id'])} in two ways ({found['dependent']} in the variables, "
+                    f"{found['metric']} in the protocol)")
+        add(METHOD_DIFFERS, found["id"], _sentence(
+            f"{two_ways}; the value reported follows the definition in the frozen protocol: it passed the check "
+            f"\"{held[0]}\", which FI measured and which is part of that protocol" if held else
+            f"{two_ways}; FI could not tell which of the two definitions the value reported follows"),
+            key=f"{found['id']}-defined-twice")
     for d in (checked.get("kept_differences") if isinstance(checked, dict) else None) or []:
         if isinstance(d, dict) and d.get("quantity") and not set(map(str, d.get("keys") or [])) <= set(map(str, checked.get("removed_quantities") or [])):
             q = _one(d["quantity"])  # a second model's finding that no measurement showed to move a number, for keys that are back

@@ -1,6 +1,7 @@
-"""A name the plan defines twice (a dependent variable written with one formula, a protocol metric of the same name with
-another) is a fact of FI's own records, and a second model's word that the code computes it differently is then not a
-reason to take its value out or to say the value is wrong. Neutral made-up study; no model is called."""
+"""A name the plan appears to define twice (a dependent variable written with one formula, a protocol metric of the same name
+with another), or a finding marked as one about the plan, is no exemption by name: a value a second model flagged stays only
+when FI holds a check it measured itself that passed and reads the quantity, and what the paper says is only what FI knows.
+Neutral made-up study; no model is called."""
 from __future__ import annotations
 
 import json
@@ -9,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from core import code_review as cr
-from core import code_findings, paper_facts, plan
+from core import code_findings, frozen_protocol, paper_facts, plan
 from core.result_checks import ResultChecksMixin
 
 METRIC_A = {"id": "quantity_a", "kind": "mean", "unit": "one trial", "estimand": "(value_exact - base)/base at one setting, the closed form"}
@@ -32,7 +33,9 @@ class Quest(ResultChecksMixin):
         self.quest_root = root
 
 
-def _quest(tmp_path: Path, dependent: list[str], *, issue: dict[str, Any] | None = None) -> Quest:
+def _quest(tmp_path: Path, dependent: list[str], *, issue: dict[str, Any] | None = None, check: str = "") -> Quest:
+    """A quest whose reader flagged quantity_a. ``check``: "pass" or "fail" writes FI's record of a known-answer check it
+    measured (``check_a``, whose measure reads quantity_a) with that verdict."""
     root = tmp_path / "quest"
     (root / "code").mkdir(parents=True)
     (root / "code" / "simulate.py").write_text("def trial(cell, ctx):\n    return {'quantity_a': 1.0}\n", encoding="utf-8")
@@ -45,6 +48,12 @@ def _quest(tmp_path: Path, dependent: list[str], *, issue: dict[str, Any] | None
     record = {"version": cr.version(root / "code"), "final": True, "problems": [problem],
               "issues": {fid: {"id": fid, "demonstrated": None, "outcome": "open", **(issue or {})}}}
     cr.save(root, record)
+    protocol = {**design["protocol"], "oracles": [{"name": "check_a", "measure": "quantity_a - 1"}, {"name": "check_b", "measure": "quantity_b"}]}
+    frozen = {"schema": frozen_protocol.FROZEN_SCHEMA, "protocol": protocol, "sha256": frozen_protocol.sha256(protocol)}
+    (root / "needs" / "FROZEN_PROTOCOL.json").write_text(json.dumps(frozen), encoding="utf-8")
+    if check:
+        judged = [{"name": "check_a", "measured_by": "engine", "value": 0.0, "passed_by_engine": check == "pass"}]
+        (root / "needs" / "ORACLE_CHECK.json").write_text(json.dumps({"status": "ok", "attempts": [{"judged": judged}]}), encoding="utf-8")
     return Quest(root)
 
 
@@ -59,67 +68,79 @@ def test_the_fact_names_an_id_the_plan_defines_two_ways() -> None:
 
 def test_one_definition_is_not_a_double_definition() -> None:
     assert cr.plan_defines_twice(_design(ONCE), _design(ONCE)["protocol"]) == {}
-    same = ["quantity_a = (value_exact - base)/base"]  # the same formula in both places
+    same = ["quantity_a = (value_exact - base)/base"]
     assert cr.plan_defines_twice(_design(same), _design(same)["protocol"]) == {}
 
 
-def test_a_reader_finding_about_a_name_defined_twice_takes_nothing_out(tmp_path: Path) -> None:
-    quest = _quest(tmp_path, TWICE)
-    assert cr.differing_quantities(quest.quest_root, quest.quest_root / "code") == []
-    assert quest._code_reader_findings(RESULT) == []
+def test_the_text_comparison_keeps_the_operators_and_reads_the_formula_sentence() -> None:
+    def twice(dependent: str, estimand: str) -> bool:
+        design = _design([dependent], [{"id": "quantity_a", "kind": "mean", "unit": "one trial", "estimand": estimand}])
+        return bool(cr.plan_defines_twice(design, design["protocol"]))
+
+    assert twice("quantity_a = a+b", "a - b at one setting")  # a+b and a - b are two formulas
+    assert not twice("quantity_a = a+b", "a+b at one setting")
+    assert twice("quantity_a = a/b", "The ratio is defined here. The formula is c/d.")  # the first sentence that is a formula
+    assert not twice("quantity_a = mean(error)", "the typical size of the error")  # words: nothing to compare
+
+
+def test_a_name_defined_twice_with_no_passing_check_is_withheld_and_said_so(tmp_path: Path) -> None:
+    found = _quest(tmp_path, TWICE)._code_reader_findings(RESULT)
+    assert len(found) == 1 and found[0].contested == "twice" and set(found[0].keys) == {"quantity_a", "quantity_a_ci"}
+    assert "two ways" in found[0].note and "no passing check" in found[0].note
+
+
+def test_a_failed_check_does_not_keep_a_flagged_value(tmp_path: Path) -> None:
+    assert len(_quest(tmp_path, TWICE, check="fail")._code_reader_findings(RESULT)) == 1
+
+
+def test_a_finding_marked_as_about_the_plan_with_no_passing_check_is_withheld(tmp_path: Path) -> None:
+    for n, extra in enumerate(({"plan_conflict": True}, {"outcome": code_findings.PLAN_PROBLEM})):
+        found = _quest(tmp_path / str(n), ONCE, issue=extra)._code_reader_findings(RESULT)
+        assert len(found) == 1 and found[0].contested == "plan_problem", extra
+
+
+def test_a_flagged_value_with_a_passing_measured_check_is_kept(tmp_path: Path) -> None:
+    assert _quest(tmp_path / "a", TWICE, check="pass")._code_reader_findings(RESULT) == []
+    assert _quest(tmp_path / "b", ONCE, issue={"plan_conflict": True}, check="pass")._code_reader_findings(RESULT) == []
+    quest = _quest(tmp_path / "c", ONCE, check="pass")  # a check that reads another quantity keeps nothing
+    assert cr.passing_checks(quest.quest_root, "quantity_b") == [] and cr.passing_checks(quest.quest_root, "quantity_a") == ["check_a"]
 
 
 def test_a_single_definition_with_a_reader_finding_is_still_taken_out(tmp_path: Path) -> None:
-    quest = _quest(tmp_path, ONCE)
-    assert [q["name"] for q in cr.differing_quantities(quest.quest_root, quest.quest_root / "code")] == ["quantity_a"]
-    found = quest._code_reader_findings(RESULT)
-    assert len(found) == 1 and found[0].kind == "code_reader" and set(found[0].keys) == {"quantity_a", "quantity_a_ci"}
+    found = _quest(tmp_path / "a", ONCE, check="pass")._code_reader_findings(RESULT)  # not contested: a passing check does not overrule
+    assert len(found) == 1 and found[0].kind == "code_reader" and found[0].contested == ""
+    assert len(_quest(tmp_path / "d", ONCE, issue={"demonstrated": True})._code_reader_findings(RESULT)) == 1
 
 
-def test_a_demonstrated_finding_on_a_single_definition_is_still_taken_out(tmp_path: Path) -> None:
-    quest = _quest(tmp_path, ONCE, issue={"demonstrated": True})
-    assert len(quest._code_reader_findings(RESULT)) == 1
+def _items(root: Path) -> dict[str, str]:
+    return {i.id: i.sentence for i in paper_facts.required_items(root)}
 
 
-def test_a_plan_conflict_or_plan_problem_issue_takes_nothing_out(tmp_path: Path) -> None:
-    for extra in ({"plan_conflict": True}, {"outcome": code_findings.PLAN_PROBLEM}):
-        quest = _quest(tmp_path / ("a" if "plan_conflict" in extra else "b"), ONCE, issue=extra)
-        assert quest._code_reader_findings(RESULT) == [], extra
-        assert cr.differing_quantities(quest.quest_root, quest.quest_root / "code") == [], extra
-
-
-def _paper_items(root: Path) -> list[Any]:
-    return paper_facts.required_items(root)
-
-
-def _write_check(root: Path) -> None:
-    check = {"kind": "code_reader", "note": "reported another way", "quantity": "quantity_a", "keys": ["quantity_a"]}
+def _write_check(root: Path, *, contested: str = "") -> None:
+    check = {"kind": "code_reader", "note": "reported another way", "quantity": "quantity_a", "keys": ["quantity_a"],
+             **({"contested": contested} if contested else {})}
     rc = {"removed_quantities": ["quantity_a"], "removed_figures": [], "removed_values": {"quantity_a": [0.1]},
           "checks": [check], "note": "n", "say": "s"}
     (root / "needs" / "RESULT_CHECK.json").write_text(json.dumps(rc), encoding="utf-8")
 
 
-def test_a_reader_removal_is_never_said_to_be_a_wrong_value(tmp_path: Path) -> None:
-    quest = _quest(tmp_path, ONCE)
-    _write_check(quest.quest_root)
-    text = " ".join(i.sentence for i in _paper_items(quest.quest_root))
-    assert "quantity_a" in text and "value is wrong" not in text and "second model" in text
-
-
-def test_the_paper_says_the_plan_defined_the_name_two_ways(tmp_path: Path) -> None:
+def test_a_reader_removal_is_never_said_to_be_a_wrong_value_and_has_one_sentence(tmp_path: Path) -> None:
     quest = _quest(tmp_path, TWICE)
-    _write_check(quest.quest_root)
-    text = " ".join(i.sentence for i in _paper_items(quest.quest_root))
-    assert "two ways" in text and "frozen protocol" in text and "value is wrong" not in text
+    _write_check(quest.quest_root, contested="twice")
+    text = " ".join(_items(quest.quest_root).values())
+    assert "second model" in text and "value is wrong" not in text and "two ways" in text and "holds no check" in text
+    assert "follows" not in text and "could not tell" not in text  # left out: no "follows" sentence beside "not reported"
+    assert text.count('"quantity_a"') == 1
+
+
+def test_the_paper_says_which_definition_the_value_follows_only_with_a_passing_check(tmp_path: Path) -> None:
+    text = " ".join(_items(_quest(tmp_path / "a", TWICE, check="pass").quest_root).values())
+    assert "two ways" in text and "follows the definition in the frozen protocol" in text and '"check_a"' in text
+    text = " ".join(_items(_quest(tmp_path / "b", TWICE).quest_root).values())
+    assert "two ways" in text and "could not tell which of the two definitions" in text and "follows the definition" not in text
 
 
 def test_the_gap_in_the_plan_is_gone_only_when_the_double_definition_is_gone() -> None:
     proto = _design(TWICE)["protocol"]
-    assert cr.double_definition_gaps(_design(TWICE), proto)  # still there
-    assert cr.double_definition_gaps(_design(ONCE), proto) == []  # rewritten to one
-
-
-def test_a_metric_described_in_words_is_not_taken_for_a_second_definition() -> None:
-    words = [{"id": "quantity_a", "kind": "mean", "unit": "one trial", "estimand": "the typical size of the error"}]
-    design = _design(["quantity_a = mean(error)"], words)
-    assert cr.plan_defines_twice(design, design["protocol"]) == {}
+    assert cr.double_definition_gaps(_design(TWICE), proto)
+    assert cr.double_definition_gaps(_design(ONCE), proto) == []

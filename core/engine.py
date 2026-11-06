@@ -14137,7 +14137,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         protocol_now = self._protocol_block(state)
         values = _pairs.plan_values(protocol_now if isinstance(protocol_now, dict) else None)
 
-        twice_before = bool(_code_review.double_definition_gaps(design, protocol_now if isinstance(protocol_now, dict) else None))
+        twice_before = bool(_code_review.double_definition_gaps(design))  # the design's own protocol, as in lacks() below
 
         def lacks(_now: Any) -> list[str]:
             if twice_before:  # complete when the name defined two ways is defined once (FI's own fact, not a changed file)
