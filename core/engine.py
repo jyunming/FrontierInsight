@@ -35805,9 +35805,11 @@ def _call_drawn(p: dict[str, Any]) -> list[str]:
             levelled.setdefault(str(s["level"].get("result")), []).append(s)
         elif _unnamed_curve(s):
             curves += 1
-        elif ident not in seen and ident not in absorbed and _call_group(s, entries):
-            seen.add(ident)
-            names.append(_call_group(s, entries))
+        elif ident not in absorbed and _call_group(s, entries):
+            key = ident + ("\0curve" if s.get("kind") == "curve" else "")  # a plan's curve of a result is its own line
+            if key not in seen:
+                seen.add(key)
+                names.append(_call_group(s, entries))
     names += [_call_levels(group) for group in levelled.values()]
     more = ("plus " if levelled else "") + (f"{curves} curves" if curves > 1 else "a curve")
     return names + ([more] if curves else [])

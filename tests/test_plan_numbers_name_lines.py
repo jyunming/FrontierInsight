@@ -20,7 +20,7 @@ def _host(references):
 
 def test_a_typed_constant_equal_to_one_fixed_number_of_the_plan_is_drawn_and_named_by_it():
     h = _host({"alpha": {"value": 0.05, "label": "alpha = 0.05", "fixed": True},
-               "rate_b": {"value": 0.05, "label": "Rate b"}})
+               "rate_b": {"value": 0.07, "label": "Rate b"}})
     h.line(0, "fast", [1, 2, 3], [0.1, 0.2, 0.3], "growth")
     h.ref(0, value=0.05)
     refs = h.record()["panels"][0]["refs"]

@@ -1022,12 +1022,9 @@ class FigureCalls:
         mantissa, _, exponent = text.partition("e")
         digits = len(mantissa.partition(".")[2])
         tol = 0.5 * 10.0 ** (int(exponent or 0) - digits)
-        hits = [ident for ident, numbers in self._plan_values(rec).items()
+        # a threshold of the plan is one more reference here: two with the value leave the line without a name
+        return [ident for ident, numbers in self._plan_values(rec).items()
                 if max(numbers) - min(numbers) <= tol and abs(numbers[0] - float(value)) <= tol]
-        refs = getattr(self, "references", None) or {}
-        fixed = [i for i in hits if isinstance(refs.get(i), dict) and refs[i].get("fixed")]
-        # one fixed number of the plan (a significance level, a true parameter) names the line, ahead of results that share it
-        return fixed if len(fixed) == 1 else hits
 
     def _plan_value(self, ident, rec):
         return self._plan_values(rec)[ident][0]
@@ -1410,11 +1407,15 @@ class FigureCalls:
                 cmap = colormaps["viridis"]
             except Exception:  # noqa: BLE001 -- no colour map: the curves keep the colours they were drawn with
                 cmap = None
+            span = getattr(self, "_fc_level_span", None) or {}
             for result in {r for r, _t in groups}:
                 mine = [(rec["series"][ks[0]]["level"]["value"], ident) for ident, ks in groups.items() if ident[0] == result]
                 if cmap is None or not all(_finite(v) for v, _i in mine) or len({v for v, _i in mine}) < 2:
                     continue
                 lo, hi = min(v for v, _i in mine), max(v for v, _i in mine)
+                setting = rec["series"][groups[mine[0][1]][0]]["level"].get("setting")
+                if setting in span and span[setting][1] > span[setting][0]:
+                    lo, hi = span[setting]  # the scale every panel shares: one value, one colour
                 colour.update({ident: cmap((v - lo) / (hi - lo)) for v, ident in mine})
         for ident, ks in groups.items():
             if ident not in colour:  # the colour the first drawn of the level got from the colour cycle
@@ -1469,7 +1470,8 @@ class FigureCalls:
                 if self._level_ident(e) in named:
                     continue
                 named.add(self._level_ident(e))
-            first = e["label"] if e.get("neutral") else name(e["id"], e["label"])
+            plan_curve = e["kind"] == "curve" and e.get("source") == "plan" and e["id"] in self._results()
+            first = e["label"] if e.get("neutral") or plan_curve else name(e["id"], e["label"])
             text = " = ".join([first] + [neutral_by_id.get(i) or name(i) for i in e["merged_with"]])
             out.append((self._colour_key(e), extra["series"][k][0], text))
         for r, art in zip(rec["refs"], extra["refs"]):
@@ -1522,6 +1524,15 @@ class FigureCalls:
                 if e.get("level") and e["kind"] != "image":
                     results_at.setdefault((i, e["level"].get("setting"), e["level"]["text"]), set()).add(e["level"]["result"])
         shared = all(len(r) == 1 for r in results_at.values())
+        span = {}  # the range of each setting's levels over every panel, for the one colour scale they then share
+        if shared:
+            for i in panels:
+                for e in self._panel(i)[1]["series"]:
+                    v = (e.get("level") or {}).get("value")
+                    if e.get("level") and _finite(v):
+                        lo, hi = span.get(e["level"].get("setting"), (v, v))
+                        span[e["level"].get("setting")] = (min(lo, v), max(hi, v))
+        self._fc_level_span = span
 
         def key_of(e):
             if shared and e.get("level"):
@@ -1572,10 +1583,14 @@ class FigureCalls:
         seen, handles, texts, covers, alike = set(), [], [], [], {}
         for i in panels:
             for key, art, text in keyed[i]:
-                if (key, text) in seen:
+                is_ref = bool(key) and key[0] == "ref"
+                look = None if is_ref else self._look(art)
+                # one reference of the plan drawn in several panels is one line; a series is one entry with an earlier one
+                # only when it is drawn the same (a series whose look cannot be read keeps its own entry)
+                mark = (key, text) if is_ref else (key, text, look) if look is not None else (key, text, id(art))
+                if mark in seen:
                     continue
-                seen.add((key, text))
-                look = None if key and key[0] == "ref" else self._look(art)  # two reference lines are two lines, by value
+                seen.add(mark)
                 if look is not None and (text, look) in alike:  # same name, drawn the same: a reader sees one thing
                     covers[alike[(text, look)]] += 1
                     continue
@@ -1634,7 +1649,11 @@ class FigureCalls:
             if hasattr(first, "get_facecolor"):
                 fc = first.get_facecolor()
                 fc = fc[0] if len(fc) and hasattr(fc[0], "__len__") else fc
-                return ("patch", to_hex(fc), type(first).__name__)
+                shape = ()
+                paths = first.get_paths() if hasattr(first, "get_paths") else []
+                if paths:  # the mark of a scatter: a circle and a cross of one colour are two looks
+                    shape = tuple(round(float(c), 3) for c in paths[0].vertices.ravel()[:40])
+                return ("patch", to_hex(fc), type(first).__name__, shape)
         except Exception:  # noqa: BLE001 -- a look that cannot be read never merges two entries
             return None
         return None

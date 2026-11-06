@@ -208,3 +208,71 @@ def test_one_table_line_per_panel_under_one_id_is_counted_once_per_name():
                         {"panel": 2, "series": [{"id": "a", "kind": "line"}], "refs": [{"id": "refline1", "label": "Mean of A at 2", "value": 2.0}]}]}
     caption = "A against x. Marked: Mean of A at 1 at 1; Mean of A at 2 at 2."
     assert not [f for f in check_figure_text(calls, calls["legend"]["entries"], caption) if f["kind"].startswith("legend")]
+
+
+# ---- review round 3 -------------------------------------------------------------------------------------------------------
+def test_a_constant_equal_to_a_threshold_and_to_a_reference_is_not_named_by_the_threshold():
+    h = _Host(identity=True)
+    h.references = {"error_limit": {"value": 0.05, "label": "error_limit = 0.05", "fixed": True},
+                    "theory": {"value": 0.05, "label": "Theory"}}
+    h.line(0, "fast", [1, 2, 3], [0.1, 0.2, 0.3], "growth")
+    with pytest.raises(ValueError, match="several references"):
+        h.ref(0, value=0.05)
+
+
+def test_two_entries_with_one_key_and_name_that_look_different_stay_two():
+    h = _Host(identity=True)
+    a = h.axes[0].plot([1, 2], [1, 2], color="red")[0]
+    b = h.axes[1].plot([1, 2], [2, 3], color="blue")[0]
+    keyed = {0: [(("fast",), a, "Same")], 1: [(("fast",), b, "Same")]}
+    h._figure_legend(h.fig, [0, 1], keyed)
+    assert [t.get_text() for leg in h.fig.legends for t in leg.get_texts()] == ["Same", "Same"]
+
+
+def test_a_plan_formula_curve_of_a_result_keeps_its_name_in_the_legend_and_the_caption():
+    h = _law_host()
+    h.table.declared = list(getattr(h.table, "declared", []) or []) + ["law"]
+    h._panel(0)[1]["hold"] = {"step": 2}
+    h.line(0, "fast", [1, 2, 3], [2.0, 4.0, 6.0], "law")
+    h.ref(0, "law")
+    h.finish({**h.labels, "law": {"label": "Scaling law"}}, {})
+    rec = h.record()
+    texts = list(rec["legend"]["entries"])
+    assert "Expected Scaling law (plan formula)" in texts, texts
+    caption = _caption_from_calls("f.png", rec, None, n_seeds=None, facts=None)
+    assert "Expected Scaling law (plan formula)" in caption, caption
+
+
+def test_more_than_twelve_values_keep_one_colour_per_value_across_panels():
+    import matplotlib.pyplot as plt
+
+    from tests.test_figure_series_levels import _Grid, _Host as _LevelHost
+
+    class _Two(_LevelHost):
+        def __init__(self):
+            super().__init__(temps=tuple(range(19)))
+            self.fig, axes = plt.subplots(1, 2, squeeze=False)
+            self.axes = list(axes[0])
+            self.table = _Grid(tuple(range(19)))
+            self.table.declared = ["growth", "spread"]
+            self.labels = {**self.labels, "spread": "Spread"}
+
+    h = _Two()
+    for t in range(0, 13):
+        h.line(0, t, [1, 2, 3], [1.0, 2.0, 3.0 + t], "growth")
+    for t in range(6, 19):
+        h.line(1, t, [1, 2, 3], [0.5, 0.7, 0.9 + t], "spread")
+    h.finish(h.labels, {})
+    colour = {}
+    for i, rec in ((0, h._panel(0)[1]), (1, h._panel(1)[1])):
+        arts = h._fc_extra[i]["series"]
+        for k, e in enumerate(rec["series"]):
+            colour.setdefault(e["level"]["text"], set()).add(h._look(arts[k][0]))
+    assert all(len(c) == 1 for c in colour.values()), {k: v for k, v in colour.items() if len(v) > 1}
+
+
+def test_two_scatter_marks_of_one_colour_and_different_shape_look_different():
+    h = _Host(identity=True)
+    a = h.axes[0].scatter([1, 2], [1, 2], color="red", marker="o")
+    b = h.axes[1].scatter([1, 2], [2, 3], color="red", marker="x")
+    assert h._look(a) != h._look(b)

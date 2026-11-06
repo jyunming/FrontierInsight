@@ -1167,7 +1167,14 @@ def _references(table, base, notes):
     """FI's reference of each result whose plan gives a formula: ``{id: {setting key: number}}``. A setting where the formula gives
     no number has no reference, and ``notes`` says so."""
     out = {}
-    for rid, ref in PLAN.REFERENCES.items():
+    declared = dict(PLAN.REFERENCES)
+    for did, item in PLAN.DERIVED.items():
+        # a quantity the plan declares as a reference with a formula (a theory value, a nominal level) is one too: FI evaluates
+        # it from the plan's numbers at each setting, so a figure may draw it by its id; a formula naming a result gives no
+        # number here and so no line
+        if did not in declared and item.get("role") == "reference" and item.get("formula"):
+            declared[did] = {"formula": item["formula"], "when": None}
+    for rid, ref in declared.items():
         forms = _calculator()
         got, dropped = {}, {}
         for key in table.keys():
