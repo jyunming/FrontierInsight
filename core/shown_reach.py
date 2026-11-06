@@ -736,6 +736,13 @@ class Reach:
             return out
         return self._judge(out, touched, "reached by " + ", ".join(sorted(set(reached_by))[:4]))
 
+    def touched_by(self, file: str, function: str) -> list[str] | None:
+        """The declared results a fault in ``function`` of ``file`` changes (:meth:`_helper_effect`: the results of the
+        functions that reach it, and every result worked out from them); ``[]`` for a function no result reaches; ``None`` when
+        the function is not found or FI cannot tell what the code reaches."""
+        eff = self._helper_effect(file.replace("\\", "/"), function) if self.ids and file and function else None
+        return None if eff is None or eff.cannot else list(eff.left_out)
+
     # -- the names to leave out of the printed results ----------------------------------------------------------------------
     def printed_keys(self, ids: list[str], result: Any) -> list[str]:
         """The keys of the printed results that hold the declared results ``ids``: the id itself, the keys that are its

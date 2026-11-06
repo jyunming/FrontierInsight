@@ -1618,14 +1618,15 @@ def answers_text(quest_root: Path | str) -> str:
     return ("**Answers to the questions asked.**" + chr(10) * 2 + chr(10).join(lines)) if lines else ""
 
 
-def _declared_ids(root: Path) -> list[str]:
-    """The ids of the results the frozen plan declares (empty when there is no plan)."""
-    from . import skeleton as _skeleton
+def _reach(root: Path) -> Any:
+    """FI's reading of the quest's plan and code (:class:`core.shown_reach.Reach`); ``None`` when it cannot be made."""
+    from . import shown_reach as _shown_reach
 
     try:
-        return _skeleton.declared_ids(plan_protocol(root))
-    except Exception:  # noqa: BLE001 -- no plan to read: no result is named
-        return []
+        protocol = plan_protocol(root)
+        return _shown_reach.Reach(root, protocol, []) if protocol else None
+    except Exception:  # noqa: BLE001 -- no plan or code to read: no result is placed
+        return None
 
 
 def printed_result_ids(paper_md: str) -> list[str]:
@@ -1651,7 +1652,8 @@ def touched_sentences(quest_root: Path | str, paper_md: str) -> dict[str, str]:
     try:
         from . import code_review as _code_review
 
-        touched = _code_review.touched_results(root, root / "code", _declared_ids(root))
+        reach = _reach(root)
+        touched = _code_review.touched_results(root, root / "code", reach.touched_by) if reach is not None else {}
         record = _read(root, ".fi/code_review.json")
         issues = record.get("issues") if isinstance(record, dict) and isinstance(record.get("issues"), dict) else {}
         names = {fid: _code_review._plain_text((issues.get(fid) or {}).get("text")) for fid in touched}
@@ -1992,7 +1994,7 @@ def place_blocks(markdown: str, quest_root: Path | str, *, topic: str = "", fall
         if name == "limitations":
             text = _place_limitations(text, quest_root, heading=limitations_heading)
             continue
-        if not block_text(quest_root, name, topic=topic, fallback_s=fallback_s):
+        if not block_text(quest_root, name, topic=topic, fallback_s=fallback_s, paper_md=text):
             continue
         if any(_norm_name(m.group(1)) == name for m in _PLACEHOLDER.finditer(text)) or any(
                 m.group(1) == name for m in _MARK.finditer(text)):
@@ -2539,9 +2541,10 @@ def keep_check(quest_root: Path | str, hits: list[str], paper_md: str, *, untrac
         in_paper = any(m.group(1) == "limitations" for m in _MARK.finditer(paper_md or ""))
         # an open problem in the code is met when the paper carries FI's sentence for it (:func:`touched_sentences`)
         said = touched_sentences(quest_root, paper_md)
+        block = chr(10).join(m.group(2) for m in _MARK.finditer(paper_md or "") if m.group(1) == "run_facts")
         unmet = [{"kind": i.kind, "id": i.id, "name": i.name, "text": i.sentence}
                  for i in required_items(quest_root)
-                 if i.kind == CODE_FINDING and not (i.key in said and said[i.key] in paper_md)
+                 if i.kind == CODE_FINDING and not (i.key in said and said[i.key] in block)
                  or i.kind != CODE_FINDING and (not in_paper or i.kind == FIGURE_LEFT_OUT and i.sentence not in paper_md)]
         # The statements taken out just now are not in the kept record yet: one item per figure, never per sentence.
         have = {u["id"] for u in unmet}
