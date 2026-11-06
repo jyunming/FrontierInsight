@@ -11,7 +11,7 @@ functions FI's trial harness calls (``run_trial``, ``run_cell``, ``oracle`` in e
 reached code names it: a call, or the name passed on as a value (a callback, a table of functions). A bare name is the
 file's own function or the one it imports; ``module.f`` is that module's ``f``; ``obj.f`` on any other object may be any
 function or method called ``f``. Every doubt counts as reached: a file that does not parse, a name computed at run time
-(``getattr`` with a computed name, ``globals()``, ``eval``, ``importlib``) or a function FI cannot find makes every
+(``getattr`` with a computed name, ``globals()`` handed on or indexed by a computed name, ``eval``, ``importlib``; ``globals().get("R")`` names one variable and is read as such) or a function FI cannot find makes every
 function reached, so this can only ever spare a finding about code that is plainly never run.
 
 Two computed ``getattr`` calls are read more closely than that. ``getattr(m, name)`` on an imported module ``m`` of the
@@ -36,6 +36,22 @@ _DYNAMIC_CALLS = {"globals", "locals", "vars", "eval", "exec", "__import__", "im
 
 def _is_dunder(name: str) -> bool:
     return len(name) > 4 and name.startswith("__") and name.endswith("__")
+
+
+def _scope_read(node: ast.AST) -> tuple[ast.Call, str] | None:
+    """``(the scope call, the name)`` when ``node`` reads one variable of a scope by a fixed text: ``globals().get("R", 1.0)``,
+    ``globals()["R"]``, ``vars()["R"]`` or ``locals().get("R")``. That names a variable, as plain code would; only a name
+    computed at run time (or the scope handed on as a whole) is a name FI cannot read."""
+    scope: ast.AST | None = None
+    key: ast.AST | None = None
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get" and node.args:
+        scope, key = node.func.value, node.args[0]
+    elif isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load):
+        scope, key = node.value, node.slice
+    if (isinstance(scope, ast.Call) and isinstance(scope.func, ast.Name) and scope.func.id in ("globals", "locals", "vars")
+            and not scope.args and not scope.keywords and isinstance(key, ast.Constant) and isinstance(key.value, str)):
+        return scope, key.value
+    return None
 
 
 def _is_main_guard(node: ast.AST) -> bool:
@@ -226,8 +242,16 @@ def reached(code_dir: Path, *, scripts: list[str], harness: str | None = None,
 
     while work:
         m, nodes = work.pop()
+        named: set[int] = set()  # the ``globals()`` calls read by a fixed name (see :func:`_scope_read`)
         for top in nodes:
             for node in ast.walk(top):
+                key = _scope_read(node)
+                if key is not None:
+                    named.add(id(key[0]))
+                    reach(m, key[1])  # the name read may be a function that is then called
+                    continue
+                if isinstance(node, ast.Call) and id(node) in named:
+                    continue
                 if isinstance(node, ast.Call):
                     f = node.func
                     called = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""

@@ -185,3 +185,36 @@ def test_a_name_computed_on_a_package_reaches_what_the_package_re_exports(tmp_pa
     assert not code_reach.never_run(code, "pkg/impl.py", "xy", **kw)
     assert not code_reach.never_run(code, "pkg/more.py", "starred", **kw)
     assert code_reach.never_run(code, "pkg/lone.py", "lone", **kw)
+
+
+_PKG = {"trial.py": "from pkg import model\n\ndef run(x):\n    return model.fit(x)\n",
+        "pkg/__init__.py": "from . import model\n",
+        "pkg/model.py": ("import math\nR = 8.0\n\ndef rate(a):\n    r = globals().get('R', 1.0)\n    return a / r\n\n"
+                         "def fit(x):\n    return rate(x) + math.sqrt(x)\n\ndef orphan(x):\n    return x\n")}
+
+
+def test_a_package_helper_that_reads_a_module_name_by_a_constant_key_can_still_be_followed(tmp_path: Path) -> None:
+    code = _code(tmp_path, _PKG)
+    done = code_reach.reached(code, scripts=[], start=[("trial.py", "run")])
+    assert done is not None  # globals().get("R") names one variable, not a computed function
+    assert ("pkg/model.py", "fit") in done and ("pkg/model.py", "rate") in done
+    assert ("pkg/model.py", "orphan") not in done
+
+
+def test_a_constant_key_into_globals_reaches_a_function_of_that_name(tmp_path: Path) -> None:
+    files = dict(_PKG)
+    files["pkg/model.py"] = ("def rate(a):\n    return globals()['hidden'](a)\n\ndef hidden(a):\n    return a\n\n"
+                             "def fit(x):\n    return rate(x)\n\ndef orphan(x):\n    return x\n")
+    code = _code(tmp_path, files)
+    done = code_reach.reached(code, scripts=[], start=[("trial.py", "run")])
+    assert done is not None and ("pkg/model.py", "hidden") in done and ("pkg/model.py", "orphan") not in done
+
+
+def test_a_computed_key_into_globals_still_means_fi_cannot_tell(tmp_path: Path) -> None:
+    bodies = ["return globals()[name](a)", "return globals().get(name)(a)", "g = globals()" + chr(10) + "    return g['x'](a)",
+              "return vars()", "return eval('a')"]
+    for i, body in enumerate(bodies):
+        files = dict(_PKG)
+        files["pkg/model.py"] = "def fit(a, name='x'):" + chr(10) + "    " + body + chr(10)
+        code = _code(tmp_path / f"case{i}", files)
+        assert code_reach.reached(code, scripts=[], start=[("trial.py", "run")]) is None, body
