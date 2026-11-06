@@ -150,6 +150,75 @@ def requirements(design: dict[str, Any] | None, protocol: dict[str, Any] | None)
     return out
 
 
+_LEADING_ID_RE = re.compile(r"\s*([A-Za-z_][A-Za-z0-9_]*)")
+
+
+_SENTENCE_END_RE = re.compile(r"(?<=[.;])\s+(?=[A-Z])")
+_FORMULA_RE = re.compile(r"[=/*^+(|]|\s-\s")  # written as a formula (so two definitions can be compared), not as words
+
+
+def leading_id(name: Any) -> str:
+    """The identifier a plan entry begins with (``rate`` in ``rate = (a - b)/b``), else ``""``."""
+    m = _LEADING_ID_RE.match(str(name or ""))
+    return m.group(1) if m else ""
+
+
+def plan_defines_twice(design: dict[str, Any] | None, protocol: dict[str, Any] | None) -> dict[str, dict[str, str]]:
+    """FI's own fact: the names the plan defines twice. A dependent variable written as ``<id> = <formula>`` whose id is
+    also a metric of the protocol, where the metric's estimand does not contain that formula, is one name with two
+    definitions (the plan contradicts itself). ``{normalised id: {"id", "dependent", "metric"}}``, read from the plan's own
+    structure and never from what a reader of the code says; ``{}`` when no name is defined twice."""
+    design = design if isinstance(design, dict) else {}
+    variables = design.get("variables") if isinstance(design.get("variables"), dict) else {}
+    metrics = {}
+    for m in (protocol or {}).get("metrics") if isinstance((protocol or {}).get("metrics"), list) else []:
+        if isinstance(m, dict) and _text(m.get("id")) and _text(m.get("estimand")):
+            metrics.setdefault(_norm(m["id"]), (_text(m["id"]), _text(m["estimand"])))
+    out: dict[str, dict[str, str]] = {}
+    for entry in variables.get("dependent") if isinstance(variables.get("dependent"), list) else []:
+        ident = leading_id(entry)
+        key = _norm(ident)
+        written = _text(entry)[len(_text(ident)):]  # what follows the id: "= <formula>"
+        formula = _norm(written)
+        # The metric's own definition is its first sentence (later sentences may name other formulas to say they are not it).
+        first = _SENTENCE_END_RE.split(metrics[key][1])[0] if key in metrics else ""
+        if (key in metrics and formula and _FORMULA_RE.search(written) and _FORMULA_RE.search(first)
+                and formula not in _norm(first) and key not in out):
+            out[key] = {"id": metrics[key][0], "dependent": _text(entry), "metric": metrics[key][1]}
+    return out
+
+
+def double_definition_gaps(design: dict[str, Any] | None, protocol: dict[str, Any] | None = None) -> list[str]:
+    """One plain sentence per name ``design`` still defines twice (:func:`plan_defines_twice`), for the check that the plan's
+    model resolved a contradiction: complete only when none is left. ``protocol`` defaults to the design's own."""
+    if protocol is None and isinstance(design, dict):
+        protocol = design.get("protocol") if isinstance(design.get("protocol"), dict) else None
+    return [f"{v['id']} is defined as `{v['dependent']}` and as `{v['metric']}`" for v in plan_defines_twice(design, protocol).values()]
+
+
+def plan_defined_twice(quest_root: Path) -> dict[str, dict[str, str]]:
+    """:func:`plan_defines_twice` for a quest: the plan (``plan.md``) against the frozen protocol, else the plan's own
+    protocol. ``{}`` when either cannot be read."""
+    from . import frozen_protocol as _frozen
+    from . import plan as _plan
+
+    try:
+        design = _plan.parse(_plan.plan_path(Path(quest_root)).read_text(encoding="utf-8")).design
+        protocol = _frozen.protocol_of(Path(quest_root))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(design, dict):
+        return {}
+    if protocol is None:
+        protocol = design.get("protocol") if isinstance(design.get("protocol"), dict) else None
+    return plan_defines_twice(design, protocol)
+
+
+def is_defined_twice(name: Any, twice: dict[str, dict[str, str]]) -> bool:
+    """Whether the quantity ``name`` (a plan name, possibly written with its formula) is one of ``twice``."""
+    return bool(twice) and _norm(leading_id(name)) in twice
+
+
 def _settings_of(protocol: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     """``(grid, in_each_run)`` of the plan: the protocol's own, else those of its search (``optimisation``). The one place
     both the plan view (:func:`_raw_sections`) and the requirements (:func:`requirements`) take them from."""
@@ -1606,10 +1675,17 @@ def differing_quantities(quest_root: Path, code_dir: Path) -> list[dict[str, Any
     of the version that ran (:func:`not_computed`), only one the run's results did not contradict, and only a requirement
     that names a quantity. A problem of logic is not one (its ``name`` lists several things)."""
     seen: dict[str, dict[str, Any]] = {}
+    twice = plan_defined_twice(quest_root)  # a name the plan defines two ways is not one the code can compute "differently"
+    from . import code_findings as _findings
+
+    issues = load(quest_root).get("issues")
     for v in not_computed(quest_root, code_dir):
         name = str(v.get("name") or "").strip()
+        issue = issues.get(v.get("fid")) if isinstance(issues, dict) else None
+        if isinstance(issue, dict) and (issue.get("plan_conflict") or issue.get("outcome") == _findings.PLAN_PROBLEM):
+            continue  # a finding about the plan (it contradicts itself), not about the code
         if (v.get("kind") not in QUANTITY_KINDS or v.get("status") not in (DIFFERENT, MISSING) or not name
-                or v.get("contradicted") or name in seen):
+                or v.get("contradicted") or name in seen or is_defined_twice(name, twice) or v.get("plan_conflict")):
             continue
         seen[name] = {"name": name, "kind": v.get("kind"), "status": v.get("status"), "text": str(v.get("text") or ""),
                       "note": str(v.get("note") or ""), "fid": v.get("fid"), "file_rel": v.get("file_rel"),

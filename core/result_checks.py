@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import code_findings as _code_findings
 from . import code_reach as _code_reach
 from . import code_review as _code_review
 from .contract import figure_file
@@ -333,6 +334,7 @@ class ResultChecksMixin:
         found: list[Found] = []
         issues = _code_review.load(self.quest_root).get("issues") or {}  # type: ignore[attr-defined]
         never_run = _code_reach.never_run_in(self.quest_root)  # type: ignore[attr-defined]
+        twice = _code_review.plan_defined_twice(self.quest_root)  # type: ignore[attr-defined]
         for q in differing:
             # Only "computed differently": a quantity called missing that the results hold is one the reader got wrong
             # (:func:`core.code_review.resolve_headline` says so for the headline; the writer's note covers the rest).
@@ -344,6 +346,11 @@ class ResultChecksMixin:
             # absolute errors, and its reader, never tested, was right.
             issue = issues.get(q.get("fid")) if isinstance(issues, dict) else None
             if (isinstance(issue, dict) and issue.get("demonstrated") is False) or never_run(q.get("file_rel"), q.get("function")):
+                continue
+            # Nor when the finding is about the plan, not the code: the plan contradicts itself, or defines this name two
+            # ways (FI's own fact from the plan: :func:`core.code_review.plan_defines_twice`). The value stays.
+            if ((isinstance(issue, dict) and (issue.get("plan_conflict") or issue.get("outcome") == _code_findings.PLAN_PROBLEM))
+                    or _code_review.is_defined_twice(q["name"], twice)):
                 continue
             keys = sorted(_code_review.named_in_results(q["name"], result_json))
             if not keys:
