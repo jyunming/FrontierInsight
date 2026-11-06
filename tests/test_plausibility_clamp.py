@@ -74,19 +74,19 @@ def test_a_plan_that_says_the_bound_is_honest_is_not_even_disclosed() -> None:
 
 # --- (b) a floor under a denominator is not a cap ----------------------------------------------------------------------
 
-PROPORTION = {"result_assertions": [{"path": "fdr", "min": 0.0, "max": 1.0, "unit": "dimensionless"}]}
+PROPORTION = {"result_assertions": [{"path": "share", "min": 0.0, "max": 1.0, "unit": "dimensionless"}]}
 
 
 @pytest.mark.parametrize("code", [
-    "FDR = V / max(R, 1)",
-    "FDR = V / np.maximum(R, 1)",
-    "FDR = V / np.clip(R, 1, None)",
-    'out = {"fdr": float(np.mean(V / max(R, 1)))}',
-    'out = {"fdr": min(V / max(R, 1), 1.0)}',
+    "SHARE = V / max(R, 1)",
+    "SHARE = V / np.maximum(R, 1)",
+    "SHARE = V / np.clip(R, 1, None)",
+    'out = {"share": float(np.mean(V / max(R, 1)))}',
+    'out = {"share": min(V / max(R, 1), 1.0)}',
     "hit = 1 if v >= 1 else 0",
 ])
 def test_a_denominator_floor_with_an_fdr_of_one_is_no_violation(code: str) -> None:
-    assert plausibility.check_design({"fdr": 1.0}, PROPORTION, code=code) == []
+    assert plausibility.check_design({"share": 1.0}, PROPORTION, code=code) == []
 
 
 # --- (c) known positives: a real cap is still seen where the results show it ----------------------------------------------
@@ -126,8 +126,8 @@ def test_one_value_on_its_bound_is_left_alone_whatever_the_code_does(code: str) 
 
 
 def test_a_floor_value_inside_the_range_is_left_alone() -> None:
-    design = {"result_assertions": [{"path": "k1", "min": 0.0, "max": 0.5}]}
-    assert plausibility.check_design({"k1": 0.25}, design, code="k1 = max(k1, 0.25)") == []
+    design = {"result_assertions": [{"path": "g1", "min": 0.0, "max": 0.5}]}
+    assert plausibility.check_design({"g1": 0.25}, design, code="g1 = max(g1, 0.25)") == []
 
 
 def test_zero_bounds_and_an_honest_null_pass() -> None:
