@@ -128,16 +128,18 @@ def test_a_reader_removal_is_never_said_to_be_a_wrong_value_and_has_one_sentence
     quest = _quest(tmp_path, TWICE)
     _write_check(quest.quest_root, contested="twice")
     text = " ".join(_items(quest.quest_root).values())
-    assert "second model" in text and "value is wrong" not in text and "two ways" in text and "holds no check" in text
+    assert "second model" in text and "value is wrong" not in text and "two different formulas" in text and "holds no check" in text
     assert "follows" not in text and "could not tell" not in text  # left out: no "follows" sentence beside "not reported"
     assert text.count('"quantity_a"') == 1
 
 
-def test_the_paper_says_which_definition_the_value_follows_only_with_a_passing_check(tmp_path: Path) -> None:
+def test_the_paper_never_claims_which_definition_the_value_follows(tmp_path: Path) -> None:
+    # a passing check that reads the quantity does not show which formula every reported value follows: it is named, no more
     text = " ".join(_items(_quest(tmp_path / "a", TWICE, check="pass").quest_root).values())
-    assert "two ways" in text and "follows the definition in the frozen protocol" in text and '"check_a"' in text
+    assert "two different formulas" in text and '"check_a"' in text and "passed" in text
+    assert "follows the definition" not in text and "did not establish which formula" in text
     text = " ".join(_items(_quest(tmp_path / "b", TWICE).quest_root).values())
-    assert "two ways" in text and "could not tell which of the two definitions" in text and "follows the definition" not in text
+    assert "two different formulas" in text and "could not tell which of the two" in text and "follows the definition" not in text
 
 
 def test_the_gap_in_the_plan_is_gone_only_when_the_double_definition_is_gone() -> None:

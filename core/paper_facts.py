@@ -399,7 +399,8 @@ def required_items(quest_root: Path | str) -> list[Item]:
                 add(LEFT_OUT, q, _sentence(f"{_said(root, q)} is not reported separately: {note or 'it was the same number as an earlier result in every trial'}"))
                 continue
             if c.get("kind") == "code_reader":  # a second model's word, not a check of the results: never "the value is wrong"
-                what_fi_knows = {"twice": "; the plan defines it in two ways, and FI holds no check of the value that passed",
+                what_fi_knows = {"twice": "; the plan's text gives it two different formulas, and FI holds no check of the value "
+                                          "that passed",
                                  "plan_problem": "; the finding is marked as being about the plan, and FI holds no check of the value "
                                                  "that passed"}.get(str(c.get("contested") or ""), "")
                 add(LEFT_OUT, q, _sentence(f"{_said(root, q)} is not reported: a second model that read the code found it computed "
@@ -422,12 +423,14 @@ def required_items(quest_root: Path | str) -> list[Item]:
         if key in left_out:
             continue
         held = _review.passing_checks(root, found["id"])
-        two_ways = (f"The plan defined {_said(root, found['id'])} in two ways ({found['dependent']} in the variables, "
-                    f"{found['metric']} in the protocol)")
+        # the two definitions come from a comparison of the plan's text, and a passing check that reads the quantity does not
+        # show which definition every reported value follows: FI says what it compared and which check passed, nothing more
+        two_ways = (f"The plan's text gives {_said(root, found['id'])} two different formulas ({found['dependent']} in the "
+                    f"variables, {found['metric']} in the protocol)")
         add(METHOD_DIFFERS, found["id"], _sentence(
-            f"{two_ways}; the value reported follows the definition in the frozen protocol: it passed the check "
-            f"\"{held[0]}\", which FI measured and which is part of that protocol" if held else
-            f"{two_ways}; FI could not tell which of the two definitions the value reported follows"),
+            f"{two_ways}; FI's check \"{held[0]}\", which reads it, passed, but FI did not establish which formula every "
+            "reported value follows" if held else
+            f"{two_ways}; FI could not tell which of the two the value reported follows"),
             key=f"{found['id']}-defined-twice")
     for d in (checked.get("kept_differences") if isinstance(checked, dict) else None) or []:
         if isinstance(d, dict) and d.get("quantity") and not set(map(str, d.get("keys") or [])) <= set(map(str, checked.get("removed_quantities") or [])):
