@@ -587,3 +587,59 @@ def test_a_finding_about_text_fi_wrote_from_the_plan_is_told_in_the_disclosure_a
     src = "import derive\n\n\ndef test_x():\n    assert derive.ROLES['cover'] == 'result', 'wrong role'\n"
     _run(engine, src, quantity="cover")
     assert "text FI wrote from the plan" in disclosure._code_faults_sentence(engine.quest_root)
+
+
+# ---- a name is read at the line of the assertion; truthiness of a number is a value; abs/len and import aliases are resolved ---------
+def _shape(body: str, head: str = "import derive\n\n\n") -> bool:
+    src = head + "def test_x():\n" + "".join("    " + line + "\n" for line in body.splitlines())
+    return shown_reach.read_test(src).structural  # type: ignore[union-attr]
+
+
+def test_a_name_is_read_as_what_it_held_at_the_assertion_not_as_its_last_assignment() -> None:
+    # `out` is a comparison with a number when asserted; the later `out = derive_x()` must not make it presence
+    body = "out = derive.derive_x()\nout = out == 3\nassert out\nout = derive.derive_x()\nassert out['k'] is not None"
+    assert _shape(body) is False
+    assert _shape("out = derive.derive_x()\nassert out['k'] is not None") is True
+
+
+@pytest.mark.parametrize("body", [
+    "out = derive.derive_x()\nif cond:\n    out = 3\nassert out",   # assigned in a branch before it
+    "out = derive.derive_x()\nout += 1\nassert out",                 # augmented
+    "out, other = derive.derive_x(), 1\nassert out",                 # tuple
+    "assert out",                                                    # no binding at all
+])
+def test_a_name_whose_binding_cannot_be_told_at_the_assertion_is_not_presence(body: str) -> None:
+    assert _shape(body) is False
+
+
+def test_truthiness_of_a_derive_result_is_presence_only_where_the_test_reads_it_as_a_mapping() -> None:
+    # the frame lets a derive_ return a number (check_return, core/analysis_frame.py): `assert out` then asks for a non-zero value
+    assert _shape("out = derive.derive_x()\nassert out") is False
+    assert _shape("out = derive.derive_x()\nassert out\nassert 'k' in out") is True
+    assert _shape("out = derive.derive_x()\nassert out\nfor k, v in out.items():\n    assert not isinstance(v, float)") is True
+    assert _shape("out = derive.derive_x()\nassert out\nassert out['k'] == 3") is False
+
+
+@pytest.mark.parametrize("body,structural", [
+    ("abs = lambda n: n - 3\nassert abs(x) >= 0", False),
+    ("assert abs(x) >= 0", True),
+    ("assert len(x) >= 0", True),
+    ("assert np.abs(x) >= 0", False),
+    ("assert obj.len(x) >= 0", False),
+])
+def test_only_the_builtin_abs_and_len_count_as_asserting_nothing(body: str, structural: bool) -> None:
+    assert _shape(body) is structural
+
+
+def test_a_helper_named_abs_or_len_defined_or_imported_in_the_test_is_not_the_builtin() -> None:
+    assert _shape("assert abs(x) >= 0", head="def abs(n):\n    return n - 3\n\n\n") is False
+    assert _shape("assert len(x) >= 0", head="from helpers import size as len\n\n\n") is False
+    assert _shape("assert abs(x) >= 0", head="import derive\n\n\n") is True
+
+
+def test_an_import_alias_of_a_study_function_is_resolved() -> None:
+    head = "from derive import derive_x as calculate\n\n\n"
+    assert _shape("out = calculate()\nassert out\nassert 'k' in out", head=head) is True
+    assert _shape("out = calculate()\nassert out\nassert out['k'] == 3", head=head) is False
+    # an alias that the test also assigns is not known to stand for the import
+    assert _shape("calculate = len\nout = calculate()\nassert out\nassert 'k' in out", head=head) is False

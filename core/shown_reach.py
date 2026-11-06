@@ -97,28 +97,137 @@ def _call_name(node: ast.Call) -> str:
 
 
 _STUDY_RESULT_CALLS = ("derive_", "figure_")
+_MAPPING_METHODS = frozenset({"items", "keys", "values", "get"})
 
 
-def _vacuous(node: ast.Compare) -> bool:
-    """``abs(x) >= 0`` / ``len(x) >= 0``: true for any value, so it asserts neither a value nor anything else."""
+class _Scope:
+    """What a test module binds, read once: the name each ``as`` alias stands for, the names the test itself defines or assigns
+    (so an ``abs`` of its own is not the built-in), and, per function, which assignments of a name are plain."""
+
+    def __init__(self, tree: ast.Module) -> None:
+        self.aliases: dict[str, str] = {}
+        self.defined: set[str] = set()  # bound by anything but an import: an assignment, def, class, parameter
+        self.imported: set[str] = set()
+        for n in ast.walk(tree):
+            if isinstance(n, (ast.Import, ast.ImportFrom)):
+                for a in n.names:
+                    self.imported.add(a.asname or a.name.split(".")[0])
+                    if isinstance(n, ast.ImportFrom) and a.asname:
+                        self.aliases[a.asname] = a.name
+            elif isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+                self.defined.add(n.id)
+            elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                self.defined.add(n.name)
+            elif isinstance(n, ast.arg):
+                self.defined.add(n.arg)
+            elif isinstance(n, ast.ExceptHandler) and n.name:
+                self.defined.add(n.name)
+            elif isinstance(n, (ast.Global, ast.Nonlocal)):
+                self.defined.update(n.names)
+        # an alias that is also assigned in the test is not known to stand for the import
+        self.aliases = {k: v for k, v in self.aliases.items() if k not in self.defined}
+        self.tree = tree
+        self._parents: dict[int, ast.AST] = {}
+        for p in ast.walk(tree):
+            for c in ast.iter_child_nodes(p):
+                self._parents[id(c)] = p
+
+    def call_name(self, node: ast.Call) -> str:
+        name = _call_name(node)
+        if isinstance(node.func, ast.Name):
+            return self.aliases.get(name, name)
+        return name
+
+    def builtin(self, node: ast.AST, name: str) -> bool:
+        """``node`` is a call of the bare name ``abs``/``len`` and nothing in the test rebinds it (an attribute call never counts)."""
+        return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == name
+                and name not in self.defined and name not in self.imported)
+
+    def scope_of(self, node: ast.AST) -> ast.AST:
+        p = self._parents.get(id(node))
+        while p is not None and not isinstance(p, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module)):
+            p = self._parents.get(id(p))
+        return p if p is not None else self.tree
+
+    def binding(self, name: str, at: tuple[int, int], scope: ast.AST) -> tuple[ast.AST, tuple[int, int]] | None:
+        """The value ``name`` holds at position ``at`` in ``scope``: the latest plain top-level assignment before it; ``None``
+        when that cannot be told (a store inside a branch or loop, an augmented or tuple assignment, a parameter, none before)."""
+        body = getattr(scope, "body", [])
+        plain: list[ast.Assign] = []
+        plain_targets: set[int] = set()
+        for st in body:
+            if isinstance(st, ast.Assign) and len(st.targets) == 1 and isinstance(st.targets[0], ast.Name):
+                plain_targets.add(id(st.targets[0]))
+                if st.targets[0].id == name:
+                    plain.append(st)
+        stored = False
+        for n in ast.walk(scope):
+            if isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, (ast.Store, ast.Del)):
+                stored = True
+                if id(n) not in plain_targets:
+                    return None
+            elif isinstance(n, ast.arg) and n.arg == name:
+                return None
+            elif isinstance(n, (ast.Global, ast.Nonlocal)) and name in n.names:
+                return None
+        best = None
+        for st in plain:
+            end = (st.end_lineno or st.lineno, st.end_col_offset or 0)
+            if end <= at and (best is None or end > best[1]):
+                best = (st.value, end)
+        if best is None and not stored and scope is not self.tree:
+            return self.binding(name, at, self.tree)  # a module-level name the function only reads
+        return best
+
+    @staticmethod
+    def used_as_mapping(name: str, scope: ast.AST) -> bool:
+        """The test itself reads ``name`` as a mapping or asks its type (``.items()``, a string key, a loop, ``in``, ``isinstance``)."""
+        for n in ast.walk(scope):
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "isinstance" and n.args
+                    and isinstance(n.args[0], ast.Name) and n.args[0].id == name):
+                return True  # the test asks what kind of thing it is, so it does not take it for a bare number
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in _MAPPING_METHODS
+                    and isinstance(n.func.value, ast.Name) and n.func.value.id == name):
+                return True
+            if (isinstance(n, ast.Subscript) and isinstance(n.value, ast.Name) and n.value.id == name
+                    and isinstance(n.slice, ast.Constant) and isinstance(n.slice.value, str)):
+                return True
+            if isinstance(n, (ast.For, ast.comprehension)) and isinstance(n.iter, ast.Name) and n.iter.id == name:
+                return True
+            if (isinstance(n, ast.Compare) and any(isinstance(o, (ast.In, ast.NotIn)) for o in n.ops)
+                    and isinstance(n.comparators[-1], ast.Name) and n.comparators[-1].id == name):
+                return True
+        return False
+
+
+def _vacuous(node: ast.Compare, ctx: _Scope) -> bool:
+    """``abs(x) >= 0`` / ``len(x) >= 0`` with the built-ins: true for any value, so it asserts neither a value nor anything else."""
     if len(node.ops) != 1 or not isinstance(node.ops[0], ast.GtE):
         return False
     left, right = node.left, node.comparators[0]
-    return (isinstance(left, ast.Call) and _call_name(left) in ("abs", "len")
+    return ((ctx.builtin(left, "abs") or ctx.builtin(left, "len"))
             and isinstance(right, ast.Constant) and isinstance(right.value, (int, float)) and right.value == 0)
 
 
-def _about_presence(node: ast.AST, env: dict[str, ast.AST], depth: int = 0) -> bool:
+def _about_presence(node: ast.AST, ctx: _Scope, scope: ast.AST, at: tuple[int, int], depth: int = 0) -> bool:
     """Whether an assertion's condition is only about what is there: ``is None`` / ``is not None``, a string ``in`` a mapping,
     ``isinstance``/``hasattr``, joined by ``and``/``or``/``not``/``all``/``any``. A count compared with a count or a number
     is not (a wrong number of rows is a wrong result, not a missing one), and neither is a comparison of a value the code
-    returned."""
+    returned. A name is read as what it holds at ``at`` (the position of the assertion), not as its last assignment.
+
+    ``assert out`` for ``out = derive_x(...)``: FI's frame lets a ``derive_<id>`` return a number or a mapping of numbers
+    (``core/analysis_frame.py::check_return``; an empty mapping is refused), so truthiness is presence only where the test itself
+    reads ``out`` as a mapping or asks its type; for a number it asks for a non-zero value."""
     if depth > 6:
         return False
+
+    def rec(n: ast.AST) -> bool:
+        return _about_presence(n, ctx, scope, at, depth + 1)
+
     if isinstance(node, ast.BoolOp):
-        return all(_about_presence(v, env, depth + 1) for v in node.values)
+        return all(rec(v) for v in node.values)
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-        return _about_presence(node.operand, env, depth + 1)
+        return rec(node.operand)
     if isinstance(node, ast.Constant):
         return node.value is True
     if isinstance(node, ast.Call):
@@ -128,15 +237,18 @@ def _about_presence(node: ast.AST, env: dict[str, ast.AST], depth: int = 0) -> b
         if name in ("all", "any") and len(node.args) == 1:
             arg = node.args[0]
             if isinstance(arg, (ast.GeneratorExp, ast.ListComp, ast.SetComp)):
-                return _about_presence(arg.elt, env, depth + 1)
+                return rec(arg.elt)
         return False
     if isinstance(node, ast.Name):
-        bound = env.get(node.id)
-        if isinstance(bound, ast.Call) and _call_name(bound).startswith(_STUDY_RESULT_CALLS):
-            return True  # `assert out`: the study's function returned something (not a number it was asked to equal)
-        return node.id in env and _about_presence(env[node.id], env, depth + 1)
+        got = ctx.binding(node.id, at, scope)
+        if got is None:
+            return False
+        value, end = got
+        if isinstance(value, ast.Call) and ctx.call_name(value).startswith(_STUDY_RESULT_CALLS):
+            return ctx.used_as_mapping(node.id, scope)
+        return _about_presence(value, ctx, scope, end, depth + 1)
     if isinstance(node, ast.Compare):
-        if _vacuous(node):
+        if _vacuous(node, ctx):
             return True
         sides = [node.left, *node.comparators]
         for op, left, right in zip(node.ops, sides, sides[1:]):
@@ -161,7 +273,6 @@ def read_test(src: str) -> TestShape | None:
     calls: set[str] = set()
     exact: set[str] = set()
     prefix: set[str] = set()
-    env: dict[str, ast.AST] = {}
     asserts: list[ast.Assert] = []
     value_call = False
 
@@ -193,9 +304,9 @@ def read_test(src: str) -> TestShape | None:
             key(n.left)
         elif isinstance(n, ast.Assert):
             asserts.append(n)
-        elif isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
-            env[n.targets[0].id] = n.value
-    structural = bool(asserts) and not value_call and all(_about_presence(a.test, env) for a in asserts)
+    ctx = _Scope(tree)
+    structural = bool(asserts) and not value_call and all(
+        _about_presence(a.test, ctx, ctx.scope_of(a), (a.lineno, a.col_offset)) for a in asserts)
     from . import analysis_frame as _frame
 
     constants = {n for n in _frame.FRAME_NAMES if n.isupper()}
