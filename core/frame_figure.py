@@ -1033,6 +1033,9 @@ class FigureCalls:
         if ref_id is not None and ref_id not in (getattr(self, "references", None) or {}) and ref_id in self._plan_values(rec):
             numbers = self._plan_values(rec)[ref_id]
             if max(numbers) - min(numbers) > 0:
+                if axis == "x":
+                    raise ValueError("`%s` changes along the panel's x, so FI draws it as a curve over x; it has no single "
+                                     "x to draw a line at: draw it with axis=\"y\"" % ref_id)
                 return self._reference_curve(panel, ax, rec, ref_id)
         if ref_id is not None:
             refs = getattr(self, "references", None) or {}

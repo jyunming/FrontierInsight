@@ -42,10 +42,18 @@ def _expected_entries(calls: dict[str, Any], legend: dict[str, Any]) -> int:
     keys: set[tuple[str, ...]] = set()
     count = 0
     for p in panels:
-        for s in p.get("series") or []:
-            if isinstance(s, dict):
-                keys.add(("series",) + _series_key(s))
-                count += 1
+        entries = [s for s in p.get("series") or [] if isinstance(s, dict) and s.get("kind") != "image"]
+        absorbed = {str(m) for s in entries for m in s.get("merged_with") or []}  # merged into another's entry
+        named: set[tuple[str, str]] = set()  # a level drawn as a line and as points is one entry
+        for s in entries:
+            if str(s.get("id")) in absorbed:
+                continue
+            if isinstance(s.get("level"), dict):
+                if _series_key(s) in named:
+                    continue
+                named.add(_series_key(s))
+            keys.add(("series",) + _series_key(s))
+            count += 1
         for r in p.get("refs") or []:
             if isinstance(r, dict):
                 keys.add(("ref", str(r.get("id"))))
@@ -77,13 +85,13 @@ def check_figure_text(calls: dict[str, Any], legend_texts: list[str] | None, cap
             out.append({"kind": "legend_missing", "panel": legend.get("panel"),
                         "said": f"the legend has {len(texts)} entries for {want} lines drawn"})
     # the caption's list of reference lines: "Marked: A at 0.05; B at 3." (a value's own point is followed by a digit)
-    marked = re.split(r"\.(?:\s|$)", caption.split("Marked:", 1)[1], maxsplit=1)[0] if "Marked:" in caption else ""
+    marked = re.split(r"\.(?:\s|$)", caption.rsplit("Marked:", 1)[1], maxsplit=1)[0] if "Marked:" in caption else ""
     refs: dict[str, float] = {}
     for p in _panels(calls):
         for r in p.get("refs") or []:
             if isinstance(r, dict) and isinstance(r.get("value"), (int, float)):
                 refs.setdefault(f"{r.get('label')}|{_fmt(r['value'])}", float(r["value"]))
-                if f"at {_fmt(r['value'])}" not in caption:
+                if not re.search(r"\bat %s(?![\d.]*\d)" % re.escape(_fmt(r["value"])), caption):
                     out.append({"kind": "ref_value", "panel": p.get("panel"),
                                 "said": f"the caption does not give the reference line {r.get('label')} at {_fmt(r['value'])}"})
         if not p.get("raw") and not p.get("series") and not p.get("refs") and not p.get("bands"):

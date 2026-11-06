@@ -354,14 +354,17 @@ def _draw_one(spec: dict[str, Any], body: Any, table: Any, out_dir: str, plan: d
                 _remove(out_dir, n)
             return _outcome(fid, file, "refused", "`%s` wrote %s itself; FI creates the figure, saves it and closes it. Draw only on "
                             "the axes the function is given (`fig.axes`)." % (name, ", ".join(wrote)))
+        calls = _has_calls(handle)
+        left_out = list((handle.record().get("removed") or []) if calls else [])  # lines left out in the last run
+        emptied = {r.get("panel") for r in left_out if isinstance(r, dict)}
         empty = _empty_panels(axes)
-        if empty:
-            return _outcome(fid, file, "failed", _with_forms(
-                "`figure_%s` drew nothing on panel %s." % (fid, " and ".join(map(str, empty))), spec, table))
+        if empty and (len(empty) == len(axes) or not set(empty) <= emptied):
+            return dict(_outcome(fid, file, "failed", _with_forms(
+                "`figure_%s` drew nothing on panel %s." % (fid, " and ".join(map(str, empty))), spec, table)),
+                        **({"removed": left_out} if left_out else {}))
         none_drawn = _drew_nothing(spec, table)
         if none_drawn:
             return _outcome(fid, file, "failed", none_drawn)
-        calls = _has_calls(handle)
         if calls:  # a quest on the frame with the drawing calls: what was drawn outside them is marked, FI writes the words
             fault = _audit(handle, fig, axes)
             if fault:

@@ -35753,9 +35753,10 @@ _CALL_SPANS = {"ci95": "a 95% confidence interval", "sd": "one standard deviatio
 
 
 def _call_panels(calls: dict[str, Any]) -> list[dict[str, Any]]:
-    """The panels of a call record that draw something: a custom drawing, or at least one series."""
+    """The panels of a call record that draw something: a custom drawing, a series, a reference line or a band."""
     return [p for p in calls.get("panels") or []
-            if isinstance(p, dict) and (p.get("raw") or [s for s in p.get("series") or [] if isinstance(s, dict)])]
+            if isinstance(p, dict) and (p.get("raw") or [s for s in p.get("series") or [] if isinstance(s, dict)]
+                                        or p.get("refs") or p.get("bands"))]
 
 
 def _call_plots(p: dict[str, Any]) -> str:
