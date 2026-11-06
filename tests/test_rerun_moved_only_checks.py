@@ -50,3 +50,16 @@ def test_a_changed_number_that_cannot_be_shown_to_be_a_trial_measure_is_judged_a
     for n, (verdict, test, headline, quantity) in enumerate(cases):
         out, _ = _gate(tmp_path / str(n), verdict, headline=(headline,), test=test, quantity=quantity)
         assert out and out["stuck_reason"] == "shown_fault_open", n
+
+
+def test_a_rerun_that_did_not_write_a_delivered_result_file_is_not_cleared(tmp_path: Path) -> None:
+    # a delivered result file the repaired run did not write was never compared: moving only check measures says nothing of it
+    unwritten = Verdict("changed", metrics=["oracle_gap"], keys=[CHECK_KEY], unwritten=["data/results/table.json"])
+    out, record = _gate(tmp_path, unwritten, headline=("est_b",), test=DERIVE_COVER)
+    assert "rerun_moved_checks" not in record["issues"]["F-1"]
+
+
+def test_the_quality_report_says_new_random_numbers_when_the_repair_redrew_them(tmp_path: Path) -> None:
+    redrawn = Verdict("changed", metrics=["oracle_gap"], keys=[CHECK_KEY], redrawn=True)
+    out, record = _gate(tmp_path, redrawn, headline=("est_b",), test=DERIVE_COVER)
+    assert out is None and record["issues"]["F-1"]["rerun_redrawn"] is True

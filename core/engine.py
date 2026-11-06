@@ -23187,7 +23187,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         about_plan: list[dict[str, Any]] = []
         incomplete: set[str] = set()  # left out because a test showed the value missing or incomplete, not computed wrongly
         unchanged: list[dict[str, Any]] = []
-        moved_checks: set[str] = set()  # unchanged because the rerun moved only check measures
+        moved_checks: dict[str, bool] = {}  # unchanged because the rerun moved only check measures -> its draws changed
         for issue, how in verdicts:
             rerun = (reruns or {}).get(str(issue.get("id")))
             if rerun is not None and rerun.status == "unchanged":
@@ -23204,7 +23204,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     # The study run again with a repair of it moved only the numbers FI measures its checks with, not one
                     # declared result and no key of the results: no reported number changes, whatever the finding says.
                     unchanged.append(issue)
-                    moved_checks.add(str(issue.get("id")))
+                    moved_checks[str(issue.get("id"))] = bool(getattr(rerun, "redrawn", False))
                     continue
                 rerun = None  # a finding that a quantity is not computed, or about a figure, is placed as before a rerun
             # A fault in a function that makes one declared result, one figure or a helper they use, or a test that only
@@ -23301,6 +23301,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             if str(issue.get("id")) in moved_checks:
                 if isinstance(saved, dict):
                     saved["rerun_moved_checks"] = True
+                    saved["rerun_redrawn"] = moved_checks[str(issue.get("id"))]
                 self._log.warning("[evidence_gate] %s: its test fails, but the study run again with a repair of it moves only the "
                                   "numbers FI checks the code with, not one result: it changes no reported number and does not "
                                   "stop the quest", issue.get("id"))
@@ -23378,6 +23379,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         attribute to a result (``unplaced``) or counted failed trials has not been cleared, and the finding is placed as before."""
         if reach is None or rerun.unplaced or "failed trials" in rerun.metrics or not rerun.metrics:
             return False
+        if getattr(rerun, "unwritten", None):
+            return False  # a delivered result file the repaired run did not write was not compared: its numbers are not cleared
         if not rerun.keys or not all(str(k).startswith("trials/") for k in rerun.keys):
             return False  # a number FI cannot show to be one a trial measures (a derived number, no key at all) is not cleared
         try:
