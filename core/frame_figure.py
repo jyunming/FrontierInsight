@@ -1548,7 +1548,7 @@ class FigureCalls:
         seen, handles, texts = set(), [], []
         for i in panels:
             for key, art, text in keyed[i]:
-                if (key, text) in seen or text in texts:  # a name the legend already gives is never listed again
+                if (key, text) in seen:
                     continue
                 seen.add((key, text))
                 handles.append(art)
