@@ -457,8 +457,12 @@ def _sha(text: str) -> str:
 #: sha256 (first 16 hex digits) of the engine texts this change touched, as the code before it made them (commit 811719af).
 PINS_AT_811719AF = {
     "rerun": "34124f75b6227ac4", "extend": "2914c7194f650d8d", "extend_frame": "9f8a6f074628a11a", "reminder": "b4415cb88db73e38",
-    "split_reminder": "26239b84a51fbd8a", "cluster_reminder": "b697f4362f85d4a6", "run_none": "dab51e372647d8db",
-    "run_plain": "dab51e372647d8db",
+    "split_reminder": "26239b84a51fbd8a", "cluster_reminder": "b697f4362f85d4a6",
+    # run.py carries the text of core/in_run.py (what a run returned, read as FI reads it): it changed when a trial with no
+    # number for a compared value became a missing number (it was "dab51e372647d8db", then "87e0998489e5371b") and again
+    # when a run's numbers given level first are read and a case is not read from one plain number of a run given every value
+    "run_none": "a170adc907d3a756",
+    "run_plain": "a170adc907d3a756",
     # the frame's own text (written only with the frame on): its RESULTS comment, its trial docstring and the refusal message
     # changed with the one list of names a trial may return (core/skeleton.py returnable_names); it was "ad084c60d61b9dde"
     # and again when the seeds of a setting moved from an environment variable to a file (FI_TRIAL_SEEDS_FILE); it was "5b45d638db4dcd2c"
@@ -469,7 +473,8 @@ PINS_AT_811719AF = {
     # and again when every read of the table that returns data notes it (Table.level_rows and Table.reference); it was "1212760587b97257"
     # and again when the runtime gained the figure drawing calls (VERSION 5: Figure mixes in fi_figure_calls; run.py carries the runtime); it was "8d9d32daf0359e89"
     # and again when the table gained `bias`, `known`, `paired`, `correlation`, `sd` and `quantile`; it was "c4b2e59bfc01db2a", then "140fa8f3591b08b0" (bias_dropped)
-    "run_framed": "22b5c692db24cc0c",
+    # and again with core/in_run.py as above; it was "22b5c692db24cc0c", then "9c02b84106d93943"
+    "run_framed": "334d654a28f5a5e0",
 }
 
 
