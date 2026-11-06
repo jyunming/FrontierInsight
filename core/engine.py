@@ -36767,8 +36767,7 @@ def _checked(state: "QuestState", memo: Any = None) -> list:
 
     rj = state.get("result_json") or {}
     design = _asserting_design(state)
-    args = dict(zero_expected=_zero_expected_paths(state), edge_ok=_physical_bound_paths(state),
-                indicator_ok=_indicator_paths(state))
+    args = dict(zero_expected=_zero_expected_paths(state), edge_ok=_physical_bound_paths(state))
     seen = list(state.get("bounded_seen") or ())
     trial, derived = state.get("_trial_code"), set(state.get("_derived_ids") or ())
     if trial is None:
@@ -36877,20 +36876,6 @@ def _physical_bound_paths(state: "QuestState") -> set[str]:
 
     physical = {i for i, role in _contract.raw_roles(protocol).items() if role == "physical_bound"}
     return {a.path for a in plausibility.parse_assertions(design) if any(plausibility._matches(i, a.path) for i in physical)}
-
-
-def _indicator_paths(state: "QuestState") -> set[str]:
-    """The asserted quantities the plan declares a proportion (the mean of a 0/1 indicator per trial): such a mean may
-    sit exactly on 0 or 1, which is the real value of an indicator that never or always held."""
-    protocol = _asserting_design(state).get("protocol")
-    metrics = protocol.get("metrics") if isinstance(protocol, dict) else None
-    kinds = {str(m["id"]) for m in metrics if isinstance(m, dict) and m.get("id") and m.get("kind") in ("proportion", "indicator")}         if isinstance(metrics, list) else set()
-    if not kinds:
-        return set()
-    from core import plausibility
-
-    return {a.path for a in plausibility.parse_assertions(_asserting_design(state))
-            if any(plausibility._matches(i, a.path) for i in kinds)}
 
 
 def _asserting_design(state: "QuestState") -> dict[str, Any]:

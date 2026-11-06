@@ -168,14 +168,18 @@ run's own manifest does not contradict, is exempt (the engine passes it as
 A plan can also say it in the result's role: a result declared with the role ``physical_bound`` may sit on its range
 edge (the engine passes those assertion paths as ``edge_ok``), whatever its value and wherever the failure policy is silent.
 
-Why the mean of an indicator may reach its bound
-================================================
+Why a constant another result key is set to is not a cap
+=======================================================
 A proportion is the mean of a 0/1 indicator over the trials, and 200 hits in 200 trials is a real 1.0. A script writes the
-indicator as ``1.0 if inside else 0.0``, which the clamp rule reads as a cap at 1, and a live quest's coverage was sent
-back as "a clamped number" for that. The facts come from FI's records, not from guessing at the code: the plan declares the
-result a proportion (the engine passes those assertion paths as ``indicator_ok``), or the result carries the trials'
-values beside the mean (``<name>_values``) and every one is 0 or 1. Such a mean on its bound is neither a clamp nor a
-trivial answer. A continuous result capped by ``min(1.0, x)`` has neither record and is still flagged.
+indicator as ``1.0 if inside else 0.0``: a conditional expression whose two branches are both constants only picks
+between them, so it is a label and not a cap site (a cap keeps one branch as the value itself: ``10.0 if diverged else
+rmse``). The same script also set ``out["failed"] = 1.0`` under ``if failed:``, which the clamp rule read as a cap at 1
+for every result, and a live quest's coverage on 1 was sent back as "a clamped number" for that. The code itself names
+the key it writes, so FI reads it: a constant that is found only as a literal an ``if`` assigns to a named result key
+(``clamp_keys``) pins only a value under that key. Nothing about the result's own record or the plan's metric kind is
+trusted for this (a script's self-reported trial list is not FI's record), so a real cap (``min(raw, 1.0)``, or the
+same key set to 1 inside an ``if``) is still flagged whatever the plan or the result says it is. Not covered: a
+constant set under a computed key, or by a call or a plain name, still counts as a cap for every value.
 
 Why the design can say a bound is an honest value
 =================================================
@@ -395,10 +399,39 @@ def _arg_direction(call: ast.Call, name: str, arg: ast.AST, keyword: str | None)
     return "both"
 
 
-def _clamp_sites(tree: ast.AST, dirs: dict[float, set[str]] | None = None) -> dict[float, set[int]]:
+def _assigned_key(stmt: ast.stmt) -> str | None:
+    """The result key a statement assigns to when its target is a subscript with a constant string key
+    (``out["failed"] = 1.0`` gives ``failed``); ``None`` for any other target."""
+    targets = stmt.targets if isinstance(stmt, ast.Assign) else [getattr(stmt, "target", None)]
+    for t in targets:
+        if isinstance(t, ast.Subscript):
+            idx = t.slice
+            if isinstance(idx, ast.Constant) and isinstance(idx.value, str):
+                return idx.value
+    return None
+
+
+def clamp_keys(code: str) -> dict[float, set[str]]:
+    """For each constant that :func:`clamp_constants` finds ONLY as a literal an ``if`` assigns to a named result key
+    (``if failed: out["failed"] = 1.0``), the keys it is assigned to. Such a statement sets that key; it caps no other
+    quantity, so a value under another key on that constant is not pinned by it. A constant that is also a cap anywhere
+    else (a call, a conditional expression, an assignment to a plain name) is not listed. This is a rule, not a guess:
+    the code itself names the key it writes."""
+    try:
+        tree = ast.parse(code or "")
+    except (SyntaxError, ValueError):
+        return {}
+    keyed: dict[float, list[str | None]] = {}
+    _clamp_sites(tree, None, keyed)
+    return {c: {k for k in ks if k} for c, ks in keyed.items() if ks and all(k is not None for k in ks)}
+
+
+def _clamp_sites(tree: ast.AST, dirs: dict[float, set[str]] | None = None,
+                 keyed: dict[float, list[str | None]] | None = None) -> dict[float, set[int]]:
     """Each constant :func:`clamp_constants` finds, with the nodes (by ``id``) it is a cap at in ``tree``: a call, a
     conditional expression or an ``if``. With ``dirs``, also the directions it caps from, filled in (see
-    :func:`clamp_directions`)."""
+    :func:`clamp_directions`). With ``keyed``, also, per constant, one entry per site: the result key an ``if`` assigns it to
+    (``if failed: out["failed"] = 1.0``) or ``None`` when the site does not name one (see :func:`clamp_keys`)."""
     names: dict[str, float] = {}
     for node in ast.walk(tree):
         if (isinstance(node, ast.Assign) and len(node.targets) == 1
@@ -426,6 +459,8 @@ def _clamp_sites(tree: ast.AST, dirs: dict[float, set[str]] | None = None) -> di
                         out.setdefault(v, set()).add(id(node))
                         if dirs is not None:
                             dirs.setdefault(v, set()).add(_arg_direction(node, name, arg, kw))
+                        if keyed is not None:
+                            keyed.setdefault(v, []).append(None)
         elif isinstance(node, ast.IfExp):
             if value(node.body) is not None and value(node.orelse) is not None:
                 continue  # `1 if v >= 1 else 0` labels a case; a cap leaves the other branch to the value itself
@@ -435,6 +470,8 @@ def _clamp_sites(tree: ast.AST, dirs: dict[float, set[str]] | None = None) -> di
                     out.setdefault(v, set()).add(id(node))
                     if dirs is not None:
                         dirs.setdefault(v, set()).add("both")
+                    if keyed is not None:
+                        keyed.setdefault(v, []).append(None)
         elif isinstance(node, ast.If):
             # A name given a literal in both branches (`if hit: flag = 1 else: flag = 0`) is a label, not a cap.
             def _literal_names(stmts: list[ast.stmt]) -> set[str]:
@@ -451,6 +488,8 @@ def _clamp_sites(tree: ast.AST, dirs: dict[float, set[str]] | None = None) -> di
                         out.setdefault(v, set()).add(id(node))
                         if dirs is not None:
                             dirs.setdefault(v, set()).add("both")
+                        if keyed is not None:
+                            keyed.setdefault(v, []).append(_assigned_key(stmt))
     return out
 
 
@@ -1380,7 +1419,7 @@ def _confined_position(
 
 def violations(
     result_json: Any, assertions: list[Assertion], *, code: str = "", zero_expected: Any = (),
-    walk: LeafWalk | None = None, edge_ok: Any = (), indicator_ok: Any = (),
+    walk: LeafWalk | None = None, edge_ok: Any = (),
 ) -> list[Violation]:
     """Every declared bound the result actually breaks.
 
@@ -1389,9 +1428,7 @@ def violations(
     that the script also caps at is reported as ``kind="clamped"`` (see the
     module docstring). A quantity on one bound in ``AT_BOUND_MIN_SETTINGS`` or
     more settings is reported once, as ``kind="at_bound"``, when the bound is
-    one a fault could have returned. A mean of a 0/1 indicator (``indicator_ok``: the plan declares it a proportion;
-    or the result's own ``<name>_values`` are all 0 or 1, which also overrules a declaration they contradict) reaching its bound is neither (see "Why the mean of an
-    indicator may reach its bound").
+    one a fault could have returned.
     """
     if not assertions:
         return []
@@ -1399,8 +1436,8 @@ def violations(
     if not walk.count:
         return []
 
-    indicator_set = {str(p) for p in indicator_ok or ()}
     clamps = clamp_constants(code) if code else set()
+    keyed = clamp_keys(code) if code else {}
     clamp_dirs = clamp_directions(code) if code else {}
     literals = numeric_literals(code) if code else set()
     index = walk.numeric_index()
@@ -1411,14 +1448,10 @@ def violations(
         # reported as 10).
         matched: list[tuple[tuple, str, float]] = []
         on_bound: dict[float, list[tuple[tuple, str]]] = {}
-        declared_indicator = a.path in indicator_set
-        zero_one = _zero_one_trials(walk, index, a.path)
         for i in index.matching(a.path):
             tokens, path, value = walk.leaf(i)
             matched.append((tokens, path, value))
             bound = _on_bound(value, a)
-            if bound is not None and zero_one.get(path, declared_indicator):
-                continue  # the mean of a 0/1 indicator on its bound is its honest value, not a cap or a trivial answer
             if bound is None:
                 if (a.min is not None and value < a.min) or (
                     a.max is not None and value > a.max
@@ -1434,7 +1467,7 @@ def violations(
                     # an append, another key): a warning, never a block (core/engine.py::_assertion_warnings).
                     out.append(Violation(path, value, a, kind="clamped_unproven"))
             elif clamps and _pinned(
-                    value, a, clamps - caps_of_other_values(code, tokens), clamp_dirs):
+                    value, a, clamps - caps_of_other_values(code, tokens) - _keyed_elsewhere(keyed, tokens), clamp_dirs):
                 # On its bound, and the script caps something at it that is not shown to be another value
                 # (a cap proven to sit at another key's whole path, say train.rmse for test.rmse, does not count).
                 out.append(Violation(path, value, a, kind="clamped"))
@@ -1459,19 +1492,13 @@ def violations(
     return out
 
 
-def _zero_one_trials(walk: LeafWalk, index: Any, path: str) -> dict[str, bool]:
-    """For each leaf of ``path`` that has a list ``<leaf>_values`` beside it in the result, whether every number in that
-    list is 0 or 1 (a ``null`` is a failed trial and is skipped): the result's own record of the trials."""
-    ones: dict[str, bool] = {}
-    seen = False
-    for j in index.matching(f"{path}_values"):
-        _t, p, v = walk.leaf(j)
-        seen = True
-        key = p.rsplit("[", 1)[0] if p.endswith("]") else p
-        ones[key] = ones.get(key, True) and v in (0.0, 1.0)
-    if not seen:
-        return {}
-    return {key[: -len("_values")]: ok for key, ok in ones.items() if key.endswith("_values")}
+def _keyed_elsewhere(keyed: dict[float, set[str]], tokens: Any) -> set[float]:
+    """The constants (see :func:`clamp_keys`) that the code only assigns to result keys other than this value's own."""
+    if not keyed:
+        return set()
+    segs = [t for t in _segments(tokens) if t != "[]"]
+    leaf = segs[-1] if segs else ""
+    return {c for c, keys in keyed.items() if leaf not in keys}
 
 
 def _at_bound(
@@ -1552,7 +1579,7 @@ def bounded_paths(result_json: Any, design: Any, *, walk: LeafWalk | None = None
 
 def check_design(
     result_json: Any, design: Any, *, code: str = "", seen: Any = (), zero_expected: Any = (),
-    walk: LeafWalk | None = None, edge_ok: Any = (), indicator_ok: Any = (),
+    walk: LeafWalk | None = None, edge_ok: Any = (),
 ) -> list[Violation]:
     """Parse a design's assertions and apply them.
 
@@ -1564,8 +1591,7 @@ def check_design(
     assertions = parse_assertions(design)
     walk = walk if walk is not None and walk.root is result_json else LeafWalk(result_json)
     out = violations(result_json, assertions, code=code, zero_expected={str(p) for p in zero_expected or ()},
-                     edge_ok={str(p) for p in edge_ok or ()}, walk=walk,
-                     indicator_ok={str(p) for p in indicator_ok or ()})
+                     edge_ok={str(p) for p in edge_ok or ()}, walk=walk)
     earlier = {str(p) for p in seen or ()}
     if earlier:
         present = walk.present_index()
