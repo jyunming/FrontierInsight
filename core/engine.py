@@ -12055,7 +12055,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return
         self._clear_cannot_repair("figure_dropped")
         self._clear_cannot_repair("figure_fi_fault")
+        self._clear_cannot_repair("figure_line_removed")
         for outcome in record.get("figures") or []:
+            for gone in (outcome.get("removed") or []) if isinstance(outcome, dict) else []:
+                # A line the figure's last run left out (core/frame_figure.py ``_no_identity``): FI could not say what it is,
+                # so it is not drawn under a made-up name. QUALITY.md says which line and why; nothing stops.
+                if not isinstance(gone, dict):
+                    continue
+                text = (f"Figure `{outcome.get('id')}`, panel {gone.get('panel')}: {gone.get('what')} was left out, because "
+                        f"{gone.get('why')}.")
+                self._log.warning("[execute] %s", text)
+                self._record_cannot_repair(text, ["its repair did not give the line a name from FI's records"],
+                                           source=_stop_power.READ, check="figure_line_removed")
             if isinstance(outcome, dict) and (outcome.get("status") == "fi_fault" or (
                     outcome.get("fallback_fault") and outcome.get("status") in ("failed", "refused", "not_written"))):
                 # FI's own fault while drawing this figure: the results stand, the figure is missing, and the cause is FI's.

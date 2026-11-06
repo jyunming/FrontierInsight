@@ -35,6 +35,7 @@ import json
 import logging
 import math
 import numbers
+import os
 from pathlib import Path
 
 MEANINGS = ("ci95", "sd", "range", "other")
@@ -45,9 +46,18 @@ Y_FORMS = ("mean", "sd", "se", "min", "max", "range", "max_abs")  # which statis
 BAR_RTOL = 1e-3  # error-bar widths the body typed match the table's own widths within this relative tolerance (plus 1e-12 absolute)
 RECORD_VERSION = 2  # 2: a curve's name and y are FI's, series carry ``x_checked`` / ``neutral``, "range" bars are checked
 NEUTRAL_X = "computed x"  # the x axis of a panel that draws values FI did not find among the setting's values
+#: Set by FI for the last run, when no repair of a figure is left: a line FI cannot name is then left out of the figure and
+#: recorded in ``removed``, where before it is refused (sent to the figure's repair).
+LAST_RUN_ENV = "FI_FIGURE_FALLBACK"
 NEUTRAL_Y = "computed value"  # the neutral name of a quantity FI did not tie to a result of the table
 LEGEND_LEVELS = 12  # a figure with one curve per level of a setting names every level in its legend up to this many; more: the lowest and the highest
 REF_STATED = "stated in the figure"  # the source of a reference line drawn at a literal value
+
+
+def _typed(v):
+    """A number as it was typed (0.05, 3, 1e-06): the words FI uses for a line it names by its value."""
+    text = repr(float(v))
+    return text[:-2] if text.endswith(".0") else text
 
 
 def _finite(v):
@@ -752,9 +762,23 @@ class FigureCalls:
     def curve(self, panel, label, xs, ys, source="computed in the figure"):
         """Refused: a curve whose numbers the figure computes itself has no identity in FI's records, so FI could not name it in
         the legend. A theory curve is a reference of the plan (``ref``), which FI evaluates and names itself."""
-        raise ValueError("FI does not draw a curve the figure computes itself: it could not say what the curve is. A theory or "
-                         "reference curve is a reference of the plan, drawn with `fig.ref(panel, \"<reference id>\")`; a "
-                         "quantity of the study is computed in the analysis and drawn from the table")
+        return self._no_identity(
+            panel, "a curve the figure computed itself", "FI has no record of what it is",
+            "FI does not draw a curve the figure computes itself: it could not say what the curve is. A theory or reference "
+            "curve is a reference of the plan, drawn with `fig.ref(panel, \"<reference id>\")`; a quantity of the study is "
+            "computed in the analysis and drawn from the table")
+
+    def _no_identity(self, panel, what, why, refusal):
+        """A line FI cannot name. While a repair of the figure is left it is refused (``ValueError``: the body's repair is told
+        what to do); in the last run it is left out of the figure, never drawn under a made-up name, and recorded in
+        ``removed`` (FI's QUALITY.md names it). Returns nothing drawn."""
+        if os.environ.get(LAST_RUN_ENV) != "1":
+            raise ValueError(refusal)
+        self._state()
+        entry = {"panel": int(panel) + 1, "what": what, "why": why}
+        if entry not in self.__dict__.setdefault("_fc_removed", []):
+            self._fc_removed.append(entry)
+        return []
 
     def _reference_curve(self, panel, ax, rec, ref_id):
         """A plan reference that changes along the panel's x, drawn as a curve through FI's own values of it at the settings the
@@ -1034,9 +1058,12 @@ class FigureCalls:
                 raise ValueError("panel %d has categories on its x axis, which have no coordinate to draw a line at; use axis=\"y\"" % panel)
             hits = self._plan_match(value, rec)
             if len(hits) != 1:
-                raise ValueError(
-                    "the constant %r %s, so FI cannot say what the line is. If it is a theory value, add it to the analysis as "
-                    "a named reference or curve; if it is a result's value, draw it with `at=<result id>`"
+                return self._no_identity(
+                    panel, "a line at %s" % _typed(value),
+                    "its value matches several references of the plan" if hits
+                    else "FI has no record of where its value comes from",
+                    "the constant %r %s, so FI cannot say what the line is. If it is a theory value, add it to the plan as "
+                    "a named reference; if it is a result's value, draw it with `at=<result id>`"
                     % (value, "matches several references of the plan (%s)" % ", ".join(sorted(hits)) if hits
                        else "matches no reference of the plan at this panel's setting"))
             ident = hits[0]
@@ -1711,6 +1738,8 @@ class FigureCalls:
             _ax, rec = self._panel(i)
             panels.append(json.loads(json.dumps(rec)))
         out = {"version": RECORD_VERSION, "fallback": bool(getattr(self, "fallback", False)), "panels": panels}
+        if getattr(self, "_fc_removed", None):  # the lines left out in the last run: FI could not say what they are
+            out["removed"] = json.loads(json.dumps(self._fc_removed))
         if getattr(self, "_fc_legend", None):  # where the figure's legend is: one for the figure, or the panel's own
             out["legend"] = json.loads(json.dumps(self._fc_legend))
         return out

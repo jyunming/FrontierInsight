@@ -373,11 +373,15 @@ def _draw_one(spec: dict[str, Any], body: Any, table: Any, out_dir: str, plan: d
         except Exception as err:
             return _outcome(fid, file, "failed", "`figure_%s` drew something that cannot be saved (%s: %s)." % (fid, type(err).__name__, err))
         summary: dict[str, Any] = {}
+        removed: list[Any] = []
         if calls:
             _write_calls(handle, file)
-            summary = _calls_summary(handle.record())
+            drawn = handle.record()
+            summary = _calls_summary(drawn)
+            removed = list(drawn.get("removed") or [])  # lines left out in the last run: FI could not say what they are
         declared = _declared_record(spec, table, out_dir, file, summary)
-        done = dict(_outcome(fid, file, "ok"), panels=panel_record, **({"declared": declared} if declared else {}))
+        done = dict(_outcome(fid, file, "ok"), panels=panel_record, **({"declared": declared} if declared else {}),
+                    **({"removed": removed} if removed else {}))
         if summary:
             done["note"] = _checked_line(fid, summary)
         return done
