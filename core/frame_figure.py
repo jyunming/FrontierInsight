@@ -750,25 +750,48 @@ class FigureCalls:
                            fmt="none", ecolor="0.3", capsize=2)
 
     def curve(self, panel, label, xs, ys, source="computed in the figure"):
-        """An analytic overlay (a theory curve, a slope, a fitted line): marked with ``source``; claims about it stay few."""
-        ax, rec = self._panel(panel)
-        x, y = _vector(xs, "xs", strict=False), _vector(ys, "ys")
-        if len(x) != len(y):
-            raise ValueError("xs has %d values and ys has %d: a curve needs one y for each x" % (len(x), len(y)))
-        if rec["x"] is None:
-            raise ValueError("draw the data of panel %d first: a curve is drawn on the axes the data's x names" % (panel,))
+        """Refused: a curve whose numbers the figure computes itself has no identity in FI's records, so FI could not name it in
+        the legend. A theory curve is a reference of the plan (``ref``), which FI evaluates and names itself."""
+        raise ValueError("FI does not draw a curve the figure computes itself: it could not say what the curve is. A theory or "
+                         "reference curve is a reference of the plan, drawn with `fig.ref(panel, \"<reference id>\")`; a "
+                         "quantity of the study is computed in the analysis and drawn from the table")
+
+    def _reference_curve(self, panel, ax, rec, ref_id):
+        """A plan reference that changes along the panel's x, drawn as a curve through FI's own values of it at the settings the
+        panel shows (the table's references: FI's evaluation of the plan's formula), named by the plan. Refused when the panel
+        has no x of a setting yet, or when the reference also changes with a setting the panel does not hold."""
+        if rec["x"] is None or rec["x"].get("kind") != "setting":
+            raise ValueError("draw the data of panel %d first, along a setting: a reference curve is drawn at the settings the "
+                             "panel's x names" % (panel,))
+        x_id = rec["x"]["id"]
+        per_setting = getattr(getattr(self, "table", None), "_references", {}).get(ref_id) or {}
+        by_x, other = {}, set()
+        for key in self._held_keys(rec):
+            if key not in per_setting or not _finite(per_setting[key]):
+                continue
+            pieces = dict(p.partition("=")[::2] for p in str(key).split(","))
+            try:
+                xv = float(pieces[x_id])
+            except (KeyError, TypeError, ValueError):
+                continue
+            y = float(per_setting[key])
+            if xv in by_x and not math.isclose(by_x[xv], y, rel_tol=1e-9, abs_tol=0.0):
+                other |= {n for n in pieces if n != x_id}
+            by_x.setdefault(xv, y)
+        if other:
+            raise ValueError("the reference `%s` also changes with %s, which this panel does not hold: declare the panel's "
+                             "setting with `fig.panel` first" % (ref_id, ", ".join(sorted(other))))
+        if len(by_x) < 2:
+            raise ValueError("the reference `%s` has fewer than two values along `%s` in this panel" % (ref_id, x_id))
+        x = sorted(by_x)
+        y = [by_x[v] for v in x]
+        label = self._label_of(ref_id)
         with _undone(ax, rec):
-            arts = ax.plot(x, _gaps(y), linestyle="--", color="0.35", label="a curve")
+            arts = ax.plot(x, y, linestyle="--", color="0.35", label=label)
             self._tag(arts)
-            n = sum(1 for e in rec["series"] if e["kind"] == "curve") + 1
-            # The curve's name is FI's: the body's label and source are its own words (and may hold digits); they never reach a
-            # checked panel's legend or a claim. Its y is not a quantity of the table (``other``): no y number is offered for it.
-            rec["series"].append({"id": "curve%d" % n, "label": "a curve", "kind": "curve", "step": False, "x": x, "y": y, "yerr": None,
-                                  "yerr_lo": None, "yerr_hi": None, "yerr_meaning": None, "merged_with": [], "source": str(source),
+            rec["series"].append({"id": ref_id, "label": label, "kind": "curve", "step": False, "x": x, "y": y, "yerr": None,
+                                  "yerr_lo": None, "yerr_hi": None, "yerr_meaning": None, "merged_with": [], "source": "plan",
                                   "what": "other"})
-            curves = [e for e in rec["series"] if e["kind"] == "curve"]
-            for k, e in enumerate(curves, 1):
-                e["label"] = "a curve" if len(curves) == 1 else "curve %d" % k
             self._remember(panel, "series", arts[0] if arts else None, "other")
         return arts
 
@@ -983,8 +1006,14 @@ class FigureCalls:
         if sum(v is not None for v in (ref_id, at, value)) != 1:
             raise ValueError("a reference line is one of: a reference id of the plan, `at=<result id>` (FI reads the value from "
                              "the table), or `value=<number>` for a constant")
+        if ref_id is not None and ref_id not in (getattr(self, "references", None) or {}) and ref_id in self._plan_values(rec):
+            numbers = self._plan_values(rec)[ref_id]
+            if max(numbers) - min(numbers) > 0:
+                return self._reference_curve(panel, ax, rec, ref_id)
         if ref_id is not None:
             refs = getattr(self, "references", None) or {}
+            if ref_id not in refs and ref_id in self._plan_values(rec):
+                refs = {ref_id: {"value": self._plan_value(ref_id, rec), "label": self._label_of(ref_id)}}
             if ref_id not in refs:
                 raise ValueError("`%s` is not a reference the plan holds; the references are: %s" % (ref_id, ", ".join(sorted(map(str, refs))) or "(none)"))
             got = refs[ref_id]

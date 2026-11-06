@@ -1426,7 +1426,6 @@ def test_a_body_using_only_fi_calls_stays_verified(tmp_path, frame5):
         _drawn(fig, table, 0)
         fig.line(0, "slow", [1, 2], [2.0, 1.0], "growth", yerr=[0.1, 0.2])
         fig.band(0, "fast", [1, 2], [0.5, 1.5], [1.5, 2.5], "growth", "other")
-        fig.curve(0, "trend", [1, 2], [1.0, 2.0])
         fig.ref(0, value=1.5)
         fig.note(0, what="mean growth: {growth}", key="size=1")
         _drawn(fig, table, 1)

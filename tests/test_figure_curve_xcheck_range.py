@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import runpy
 
+import pytest
+
 from core import figure_claims
 from tests.test_figure_fixtures import FIXTURES, _Host, _Table
 
@@ -47,31 +49,9 @@ def _legend(host):
 
 # ---- C2 --------------------------------------------------------------------------------------------------------------------
 
-def test_a_curves_words_and_digits_reach_no_claim_and_no_legend(tmp_path):
-    calls, offers, host = _draw(HONEST + LINE + CURVE, tmp_path)
-    host.finish(host.labels, {})
-    assert "0.9991" not in _texts(offers) and "theory" not in _texts(offers)
-    assert "0.9991" not in " | ".join(_legend(host)) and "theory" not in " | ".join(_legend(host))
-    drawn = [o for o in offers if o["args"].get("series") == "curve1"]
-    assert [o["claim"] for o in drawn] == ["drawn"] and drawn[0]["text"].startswith("a curve is drawn")
-
-
-def test_a_curve_states_no_y_and_does_not_spoil_an_honest_line_on_the_panel(tmp_path):
-    calls, offers, _h = _draw(HONEST + LINE + CURVE, tmp_path)
-    assert calls["panels"][0]["series"][1]["what"] == "other"
-    assert not [o for o in offers if o["claim"] == "range" and o["args"].get("series") == "curve1"]
-    # the known positive: the honest line on the same panel keeps its value claims, and the panel-wide range names only it
-    assert any(o["claim"] == "value_at" and o["args"]["series"] == "sample_a" for o in offers)
-    got = figure_claims.evaluate(calls, "range", {"axis": "y"})  # "the series spans": the curve's 5 is not part of it
-    assert got is not None and got[0].startswith("the series spans 1.2 to 6.5")
-
-
-def test_several_curves_are_numbered_by_fi(tmp_path):
-    two = CURVE + 'fig.curve(0, "another body label", waves, [6.0] * len(waves))\n'
-    calls, offers, _h = _draw(HONEST + LINE + two, tmp_path)
-    labels = [s["label"] for s in calls["panels"][0]["series"] if s["kind"] == "curve"]
-    assert labels == ["curve 1", "curve 2"]
-    assert "another body label" not in _texts(offers)
+def test_a_curve_the_body_computes_is_not_drawn(tmp_path):
+    with pytest.raises(ValueError):
+        _draw(HONEST + LINE + CURVE, tmp_path)
 
 
 # ---- I1 --------------------------------------------------------------------------------------------------------------------

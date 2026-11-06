@@ -147,18 +147,14 @@ def test_note_with_typed_digits_is_refused():
         h.note(0, 1, 1, "bad {speed}")
 
 
-def test_curve_recorded_as_kind_curve_with_source():
+def test_a_curve_the_body_computes_is_refused_before_and_after_the_data():
     h = _Host()
     with pytest.raises(ValueError):
-        h.curve(0, "theory", [1, 2], [1, 2])  # nothing drawn yet: no x to draw on
+        h.curve(0, "theory", [1, 2], [1, 2])
     h.line(0, "fast", [1, 2, 3], [1.0, 2.0, 3.0], "growth")
-    h.curve(0, "theory", [1, 3], [1.0, 3.0])
-    h.curve(0, "fit", [1, 3], [1.5, 2.5], source="fitted to the drawn points")
-    s = h.record()["panels"][0]["series"]
-    assert [x["kind"] for x in s] == ["line", "curve", "curve"]
-    assert s[1]["source"] == "computed in the figure" and s[2]["source"] == "fitted to the drawn points"
-    assert [x["label"] for x in s[1:]] == ["curve 1", "curve 2"]  # FI's names, never the body's words
-    assert all(x["what"] == "other" for x in s[1:])
+    with pytest.raises(ValueError):
+        h.curve(0, "theory", [1, 3], [1.0, 3.0])
+    assert [x["kind"] for x in h.record()["panels"][0]["series"]] == ["line"]
 
 
 def test_image_is_recorded_with_its_grid():
@@ -185,13 +181,12 @@ def test_artist_gids_are_tagged():
     h.bars(1, "slow", [1, 2], [1.0, 2.0], "growth", yerr=[0.1, 0.1])
     h.band(0, "fast", [1, 2, 3], [0, 1, 2], [2, 3, 5], "growth", "sd")
     h.ref(0, "limit")
-    h.curve(0, "theory", [1, 3], [1, 4])
     h.points(1, "fast", [1, 2], [1.0, 2.0], "growth")
     data = _data(h)
     assert data
     assert all((a.get_gid() or "").startswith("fi:") for a in data), [(type(a).__name__, a.get_gid()) for a in data]
     gids = {a.get_gid() for a in data}
-    assert len(gids) >= 6  # one tag for each call
+    assert len(gids) >= 5  # one tag for each call
 
 
 def test_equal_series_are_kept_as_drawn():
