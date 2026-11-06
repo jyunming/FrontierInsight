@@ -322,6 +322,52 @@ def test_a_fault_that_could_not_be_rerun_leaves_results_out_and_never_stops_the_
     assert gate["outcome"] == "left_out" and "cover" in gate["keys"] and "could not be run again" in gate["how"]
 
 
+def _gate_engine(tmp_path: Path, verdict: Verdict) -> Any:
+    """The engine after the gate judged one finding (about ``cover``) whose rerun gave ``verdict``."""
+    from tests.test_shown_reach import DERIVE_COVER, _engine, _run
+
+    engine = _engine(tmp_path)
+
+    async def answers(verdicts: Any, record: Any, state: Any) -> dict[str, Any]:
+        return {str(i["id"]): verdict for i, _h in verdicts}
+
+    engine._rerun_shown = answers  # type: ignore[method-assign,assignment]
+    out, record = _run(engine, DERIVE_COVER, quantity="cover", headline=("est_a",))
+    assert out is None
+    return engine, record
+
+
+def _said(engine: Any) -> tuple[str, str, str]:
+    """The words of the must-fix record, the paper's limitation sentence and the run record for what the gate left out."""
+    from core import disclosure, paper_facts
+
+    kept = json.loads((engine.quest_root / "needs" / "RESULT_CHECK.json").read_text(encoding="utf-8"))
+    checks = " ".join(c.get("say", "") + c.get("note", "") for c in kept["checks"]) + " ".join(kept["removed_why"].values())
+    items = " ".join(i.sentence for i in paper_facts.required_items(engine.quest_root))
+    return checks, items, disclosure.run_record(engine.quest_root)
+
+
+def test_a_failing_test_whose_rerun_could_not_be_made_is_not_said_to_show_a_wrong_value(tmp_path: Path) -> None:
+    engine, record = _gate_engine(tmp_path, Verdict("could_not", why="the repaired study did not finish within 300 s"))
+    gate = record["issues"]["F-1"]["at_gate"]
+    assert gate["outcome"] == "left_out" and "cover" in gate["keys"] and "rerun" not in gate
+    for text in _said(engine):
+        assert "wrongly" not in text and "missing or incomplete" not in text, text
+    checks, items, run = _said(engine)
+    assert "did not establish whether the value is wrong or missing" in checks
+    assert "did not establish whether the value is wrong or missing" in items
+    assert "did not establish whether the value is wrong or missing" in run
+
+
+def test_a_failing_test_whose_rerun_changed_the_number_is_said_to_change_the_reported_number(tmp_path: Path) -> None:
+    engine, record = _gate_engine(tmp_path, Verdict("changed", metrics=["cover"], keys=["derived/derived/cover/by_setting/s"]))
+    gate = record["issues"]["F-1"]["at_gate"]
+    assert gate["outcome"] == "left_out" and gate["rerun"] == "changed"
+    for text in _said(engine):
+        assert "wrongly" not in text and "did not establish" not in text, text
+        assert "a repair that passes" in text and "changes the reported number" in text, text
+
+
 def test_a_fault_in_the_main_result_that_could_not_be_rerun_leaves_it_out_and_stops_only_for_an_empty_paper(tmp_path: Path) -> None:
     out, _ = _gate(tmp_path, Verdict("could_not", why="no run.py"), headline=("est_a",), test=DERIVE_EST, quantity="est_a")
     assert out is None  # est_b stays: the paper is not empty

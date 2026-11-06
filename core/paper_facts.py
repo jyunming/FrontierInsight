@@ -354,12 +354,12 @@ def required_items(quest_root: Path | str) -> list[Item]:
         if gate.get("outcome") == "left_out":
             gated.add(str(fid))
             q = _one(gate.get("quantity"))
-            if gate.get("incomplete"):
-                add(LEFT_OUT, q, _sentence(f"{_said(root, q)} is not reported: a test of the code showed it is missing or "
-                                           "incomplete"))
+            if gate.get("rerun") == "changed":
+                add(LEFT_OUT, q, _sentence(f"{_said(root, q)} is not reported: a test of the code failed, and a repair that "
+                                           "passes the test changes the reported number"))
             else:
-                add(LEFT_OUT, q, _sentence(f"{_said(root, q)} is not reported: a test of the code showed that the code "
-                                           "computes it wrongly"))
+                add(LEFT_OUT, q, _sentence(f"{_said(root, q)} is not reported: a test of the code failed, and FI did not "
+                                           "establish whether the value is wrong or missing"))
         elif gate.get("outcome") == "not_computed":
             gated.add(str(fid))
             for n in gate.get("names") if isinstance(gate.get("names"), list) else []:

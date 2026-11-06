@@ -146,3 +146,15 @@ def test_the_gap_in_the_plan_is_gone_only_when_the_double_definition_is_gone() -
     proto = _design(TWICE)["protocol"]
     assert cr.double_definition_gaps(_design(TWICE), proto)
     assert cr.double_definition_gaps(_design(ONCE), proto) == []
+
+
+def test_a_check_is_linked_to_the_names_fi_evaluates_in_its_measure(tmp_path: Path) -> None:
+    # `measure` is FI's own executable formula: the quantity it reads is a name FI evaluates, not any word of the text
+    for n, (measure, found) in enumerate((("quantity_a/(2*pi) - 1", ["check_a"]), ("the quantity_a of the swing", []))):
+        quest = _quest(tmp_path / str(n), TWICE, check="pass")
+        path = quest.quest_root / "needs" / "FROZEN_PROTOCOL.json"
+        frozen = json.loads(path.read_text(encoding="utf-8"))
+        frozen["protocol"]["oracles"][0]["measure"] = measure
+        frozen["sha256"] = frozen_protocol.sha256(frozen["protocol"])
+        path.write_text(json.dumps(frozen), encoding="utf-8")
+        assert cr.passing_checks(quest.quest_root, "quantity_a") == found, measure

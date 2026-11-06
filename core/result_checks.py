@@ -33,8 +33,14 @@ from .contract import figure_file
 from . import degenerate_results as _degenerate
 from . import reported_settings as _reported
 
-#: Why a quantity a failing test showed wrong is left out, as the must-fix hit for a paper that quotes it says it.
-SHOWN_FAULT_WHY = "a test FI ran on the code that produced the results shows the code computes it wrongly"
+#: Why a quantity a failing test is about is left out, as the must-fix hit for a paper that quotes it says it. FI holds no record
+#: that tells a wrong value from a missing one: only the study run again with a repair says more, and only when it changed numbers.
+SHOWN_FAULT_WHY = ("a test FI ran on the code that produced the results failed; FI did not establish whether the value is wrong "
+                   "or missing")
+SHOWN_FAULT_CHANGED_WHY = ("a test FI ran on the code that produced the results failed, and a repair that passes the test "
+                           "changes the reported number")
+SHOWN_FAULT_FIGURE_WHY = ("a test FI ran on the code that produced the results failed; FI did not establish whether the figure "
+                          "is wrong or missing")
 
 #: How many times, in all, the results of one design iteration are sent back for the checks of this module.
 REPAIRS = 2
@@ -561,32 +567,35 @@ class ResultChecksMixin:
 
     def _leave_out_shown_faults(self, left_out: list[tuple[str, list[str], str]], not_done: list[tuple[str, str]],
                                 result_json: Any, figures: list[tuple[str, str]] | None = None,
-                                incomplete: set[str] | None = None) -> None:
-        """At the evidence gate: the quantities a failing test showed the code computes wrongly (``(quantity, keys, how)``)
-        are left out of the results the paper may use, the plan's quantities the code does not compute
-        (``(quantity, how)``) are named, and the figures a failing test showed wrong (``(file, how)``) are taken out of
-        ``figures/``, by adding them to ``needs/RESULT_CHECK.json`` (what the run's checks left out stays). The same issues
-        found again add nothing."""
+                                changed: set[str] | None = None) -> None:
+        """At the evidence gate: the quantities a failing test is about (``(quantity, keys, how)``) are left out of the
+        results the paper may use, the plan's quantities the code does not compute (``(quantity, how)``) are named, and the
+        figures a failing test is about (``(file, how)``) are taken out of ``figures/``, by adding them to
+        ``needs/RESULT_CHECK.json`` (what the run's checks left out stays). The words say only what FI's records show: that a
+        repair which passes the test changes the reported number (``changed``: the quantities whose rerun changed numbers),
+        else that the test failed and FI did not establish whether the value is wrong or missing. The same issues found again
+        add nothing."""
         path = self.quest_root / "needs" / RECORD  # type: ignore[attr-defined]
         record = _read_json(path)
         found: list[Found] = []
         for quantity, keys, how in left_out:
-            if quantity in (incomplete or set()):
-                # The test shows the quantity missing or incomplete; it does not show a wrong number.
-                note = f"a test FI ran on the code that produced the results shows `{quantity}` missing or incomplete ({how})"
-                say = (f"A test FI ran on the code that produced the results shows `{quantity}` is missing or incomplete "
-                       f"({how}). FI took {', '.join('`' + k + '`' for k in keys[:6])} out of the results. Do NOT report, "
-                       f"describe or quote any value for `{quantity}`, and do not call another number by its name. Say plainly, "
-                       f"in the limitations, that `{quantity}` is left out of this paper because a test of the code showed it "
-                       "is missing or incomplete.")
+            taken = ", ".join("`" + k + "`" for k in keys[:6])
+            if quantity in (changed or set()):
+                note = (f"a test FI ran on the code that produced the results failed on `{quantity}`, and a repair that passes "
+                        f"the test changes the reported number ({how})")
+                say = (f"A test FI ran on the code that produced the results failed on `{quantity}` ({how}). The study run again "
+                       f"with a repair that passes the test reports other numbers, so the repair changes the reported number. "
+                       f"FI took {taken} out of the results. Do NOT report, describe or quote any value for `{quantity}`, and do "
+                       f"not call another number by its name. Say plainly, in the limitations, that `{quantity}` is left out of "
+                       "this paper because a repair that passes a test of the code changes the reported number.")
             else:
-                note = (f"a test FI ran on the code that produced the results shows a fault in how it computes `{quantity}` "
-                        f"({how})")
-                say = (f"A test FI ran on the code that produced the results fails because of a fault in how `{quantity}` is "
-                       f"computed ({how}). FI took {', '.join('`' + k + '`' for k in keys[:6])} out of the results. Do NOT report, "
-                       f"describe or quote any value for `{quantity}`, and do not call another number by its name. Say plainly, in "
-                       f"the limitations, that `{quantity}` is left out of this paper because a test showed the code computes it "
-                       "wrongly.")
+                note = (f"a test FI ran on the code that produced the results failed on `{quantity}`; FI did not establish "
+                        f"whether the value is wrong or missing ({how})")
+                say = (f"A test FI ran on the code that produced the results failed on `{quantity}` ({how}). FI did not "
+                       f"establish whether the value is wrong or missing. FI took {taken} out of the results. Do NOT report, "
+                       f"describe or quote any value for `{quantity}`, and do not call another number by its name. Say plainly, "
+                       f"in the limitations, that `{quantity}` is left out of this paper because a test of the code failed and "
+                       "FI did not establish whether the value is wrong or missing.")
             found.append(Found("shown_fault", ANALYSIS, "", note, say, keys=list(keys), quantity=quantity))
         for quantity, how in not_done:
             note = f"the code does not compute the plan's `{quantity}` ({how})"
@@ -594,11 +603,12 @@ class ResultChecksMixin:
                    f"call another number by its name. Say plainly, in the limitations, that `{quantity}` was not computed.")
             found.append(Found("not_computed", ANALYSIS, "", note, say, quantity=quantity))
         for file, how in figures or []:
-            note = f"a test FI ran on the code that produced the results shows a fault in how `{file}` is drawn ({how})"
-            say = (f"A test FI ran on the code that produced the results fails because of a fault in how the figure `{file}` is "
-                   f"drawn ({how}). FI took it out of the figures. Do NOT include it, refer to it or describe what it showed. "
-                   f"Say plainly, in the limitations, that `{file}` is left out of this paper because a test showed the code "
-                   "draws it wrongly.")
+            note = (f"a test FI ran on the code that produced the results failed on the figure `{file}`; FI did not establish "
+                    f"whether it is wrong or missing ({how})")
+            say = (f"A test FI ran on the code that produced the results failed on the figure `{file}` ({how}). FI did not "
+                   f"establish whether it is wrong or missing. FI took it out of the figures. Do NOT include it, refer to it or "
+                   f"describe what it showed. Say plainly, in the limitations, that `{file}` is left out of this paper because a "
+                   "test of the code failed and FI did not establish whether it is wrong or missing.")
             found.append(Found("shown_fault_figure", ANALYSIS, "", note, say, figures=[file], quantity=file))
         checks = [c for c in record.get("checks") or [] if isinstance(c, dict)]
         seen = {(c.get("kind"), c.get("quantity")) for c in checks}
@@ -607,12 +617,12 @@ class ResultChecksMixin:
             return
         gone_figures = sorted({n for f in new for n in f.figures})
         if gone_figures:
-            self._drop_figures(gone_figures, {n: SHOWN_FAULT_WHY for n in gone_figures})
+            self._drop_figures(gone_figures, {n: SHOWN_FAULT_FIGURE_WHY for n in gone_figures})
         keys = sorted({*(str(k) for k in record.get("removed_quantities") or []), *(k for f in new for k in f.keys)})
         why = record.get("removed_why") if isinstance(record.get("removed_why"), dict) else {}
         for f in new:
             for k in f.keys:
-                why.setdefault(k, SHOWN_FAULT_WHY)
+                why.setdefault(k, SHOWN_FAULT_CHANGED_WHY if f.quantity in (changed or set()) else SHOWN_FAULT_WHY)
         record.update({
             "removed_quantities": keys, "removed_figures": sorted({*(record.get("removed_figures") or []), *gone_figures}),
             "removed_values": _values_left_out(result_json, set(keys), self._derived_record()), "removed_why": why,

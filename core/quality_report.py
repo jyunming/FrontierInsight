@@ -1395,7 +1395,9 @@ def _issue_lines(code: dict[str, Any]) -> list[str]:
             still = "yes, but the run never calls this code, so it changes nothing reported; it is kept here, not in the paper"
         elif row["open"] and row.get("at_gate", {}).get("outcome") == "left_out":
             keys = ", ".join(str(k) for k in _list(row["at_gate"].get("keys"))[:3])
-            why_out = "shows it missing or incomplete" if row["at_gate"].get("incomplete") else "still fails"
+            why_out = ("still fails, and a repair that passes it changes the reported number"
+                       if row["at_gate"].get("rerun") == "changed"
+                       else "still fails, and FI did not establish whether the value is wrong or missing")
             still = f"yes: its test {why_out}, so FI left {keys} out of the results the paper uses, and the paper says so"
         elif row["open"] and row.get("rerun_moved_checks"):
             same = "with new random numbers" if row.get("rerun_redrawn") else "with the same random numbers"

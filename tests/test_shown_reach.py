@@ -303,29 +303,16 @@ def test_a_helper_only_a_figure_reaches_takes_that_figure_out(tmp_path: Path) ->
     assert not (engine.quest_root / "figures" / "fig1_made_up.png").exists()
 
 
-# ---- a test that only checks that something is there, or reads text FI wrote -------------------------------------------------------
+# ---- a name the test looks for that nothing holds, and a test that reads text FI wrote ---------------------------------------------
 @pytest.mark.parametrize("assertion", [
     "assert r.get('est_a_error') is not None",
-    "assert all(r.get(k) is not None for k in ('est_a_error', 'cover_error'))",
     "assert 'cover_error' in r",
 ])
-def test_a_test_that_only_checks_that_something_is_there_for_a_quantity_nothing_holds_is_a_part_not_done(tmp_path: Path, assertion: str) -> None:
+def test_a_test_that_looks_for_a_quantity_nothing_holds_is_a_part_not_done(tmp_path: Path, assertion: str) -> None:
     src = f"import simulate\n\n\ndef test_x():\n    r = simulate.trial({{}}, None)\n    {assertion}\n"
     out, record = _run(_engine(tmp_path), src, file="simulate.py", function="trial", quantity="est_a_error")
     assert out is None  # the run holds no value for it: nothing to leave out
     assert record["issues"]["F-1"]["at_gate"]["outcome"] == "not_computed"
-
-
-@pytest.mark.parametrize("assertion,structural", [
-    ("assert len(r) == 3", False), ("assert r['a'] == r['b']", False), ("assert r['a'] == 0.5", False),
-    ("assert r.get('a') is not None", True), ("assert isinstance(r['a'], float) and 'b' in r", True),
-    ("assert len(r['a']) == len(r['b']) and r['c'] is None", False), ("assert abs(r['a'] - 1) < 1e-6", False),
-    ("assert len(r['a']) == len(r['b'])\n    assert r['a'][0] == 1.0", False),
-    ("assert np.isclose(r['a'], 1.0)", False), ("assert r['a'] is not None and r['a'] > 0", False),
-])
-def test_what_counts_as_an_assertion_about_what_is_there(assertion: str, structural: bool) -> None:
-    src = f"import numpy as np\n\n\ndef test_x():\n    r = {{}}\n    {assertion}\n"
-    assert shown_reach.read_test(src).structural is structural  # type: ignore[union-attr]
 
 
 def test_a_failing_assertion_on_text_fi_wrote_from_the_plan_is_kept_in_the_report_and_stops_nothing(tmp_path: Path) -> None:
@@ -378,24 +365,25 @@ def _stops(out: dict[str, Any] | None) -> bool:
     return bool(out and out.get("stuck_reason") == "shown_fault_open")
 
 
-def test_a_part_shown_missing_that_the_run_holds_a_value_for_is_left_out_not_kept(tmp_path: Path) -> None:
+def test_a_part_a_test_looks_for_that_the_run_holds_a_value_for_is_left_out_not_kept(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     out, record = _run(engine, TRIAL + "    assert 'est_b' in r\n", file="simulate.py", function="trial", quantity="est_b")
     assert out is None
     gate = record["issues"]["F-1"]["at_gate"]
-    assert gate["outcome"] == "left_out" and gate["incomplete"] is True  # on the old gate: "not computed", est_b stayed in the results
+    assert gate["outcome"] == "left_out" and "incomplete" not in gate and "rerun" not in gate  # on the old gate: "not computed"
     kept = _removed(engine)
     assert "est_b" in kept["removed_quantities"]
     said = " ".join(c.get("say", "") + c.get("note", "") for c in kept["checks"])
-    assert "missing or incomplete" in said and "computes it wrongly" not in said
+    assert "did not establish whether the value is wrong or missing" in said and "wrongly" not in said
+    assert "missing or incomplete" not in said
 
 
-def test_a_part_shown_missing_that_is_the_main_result_stops_the_paper(tmp_path: Path) -> None:
+def test_a_part_a_test_looks_for_that_is_the_main_result_stops_the_paper(tmp_path: Path) -> None:
     out, _ = _run(_engine(tmp_path), TRIAL + "    assert 'est_a' in r\n", file="simulate.py", function="trial", quantity="est_a")
     assert _stops(out)
 
 
-def test_a_derived_result_shown_missing_is_left_out_with_what_is_worked_out_from_it(tmp_path: Path) -> None:
+def test_a_derived_result_a_test_looks_for_is_left_out_with_what_is_worked_out_from_it(tmp_path: Path) -> None:
     files = {"derive.py": FILES["derive.py"].replace("return 0.5", "return table.derived('cover') * 2")}
     engine = _engine(tmp_path)
     out, record = _run(engine, "import derive\n\n\ndef test_x():\n    assert derive.derive_cover(None) is not None\n",
@@ -405,13 +393,13 @@ def test_a_derived_result_shown_missing_is_left_out_with_what_is_worked_out_from
     assert set(_removed(engine)["removed_quantities"]) >= {"cover", "corr_ab"}
 
 
-def test_the_words_said_of_a_part_shown_missing_do_not_say_the_code_computes_it_wrongly(tmp_path: Path) -> None:
+def test_the_words_said_of_a_failing_test_with_no_rerun_do_not_say_the_code_computes_it_wrongly(tmp_path: Path) -> None:
     from core import disclosure
 
     engine = _engine(tmp_path)
     _run(engine, TRIAL + "    assert 'est_b' in r\n", file="simulate.py", function="trial", quantity="est_b")
     text = disclosure._code_faults_sentence(engine.quest_root)
-    assert "missing or incomplete" in text and "wrongly" not in text
+    assert "did not establish whether the value is wrong or missing" in text and "wrongly" not in text
 
 
 def test_a_lookup_in_a_dictionary_the_test_built_is_not_a_name_the_trial_failed_to_return(tmp_path: Path) -> None:

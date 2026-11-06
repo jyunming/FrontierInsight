@@ -212,8 +212,8 @@ CHECKS: tuple[Check, ...] = (
           'assertion on a headline quantity, or leaving out leaves no result, ends the quest.'),
     Check('code_review_leave_out_shown', 'core.result_checks', 'ResultChecksMixin._leave_out_shown_faults',
           'evidence_gate', 'measured', 'strip',
-          'Quantities a failing test showed the code computes wrongly are left out of the results the paper may '
-          'use, and the paper says so.'),
+          'Quantities a failing test is about are left out of the results the paper may use, and the paper says so: '
+          'that a repair changes the reported number, or that FI did not establish whether the value is wrong or missing.'),
     Check('code_review_computed_differently', 'core.result_checks', 'ResultChecksMixin._code_reader_findings',
           'execute', 'model_judge', 'strip',
           'A quantity the second model found computed differently from the plan (not shown harmless, function '
