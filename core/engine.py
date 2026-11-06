@@ -35759,8 +35759,14 @@ def _call_group(s: dict[str, Any], entries: list[dict[str, Any]]) -> str:
     for m in s.get("merged_with") or []:
         e = by_id.get(str(m))
         if e is not None:
-            names.append("a curve" if e.get("kind") == "curve" else _caption_words(e.get("label"), 60))
+            names.append("a curve" if _unnamed_curve(e) else _caption_words(e.get("label"), 60))
     return " = ".join(n for n in names if n)
+
+
+def _unnamed_curve(s: dict[str, Any]) -> bool:
+    """A curve FI cannot name: one an older record holds that the figure computed itself. A reference of the plan drawn
+    as a curve carries the plan's name (``source`` "plan") and is named like a series."""
+    return s.get("kind") == "curve" and s.get("source") != "plan"
 
 
 def _call_drawn(p: dict[str, Any]) -> list[str]:
@@ -35776,7 +35782,7 @@ def _call_drawn(p: dict[str, Any]) -> list[str]:
         ident = str(s.get("id"))
         if isinstance(s.get("level"), dict):
             levelled.setdefault(str(s["level"].get("result")), []).append(s)
-        elif s.get("kind") == "curve":
+        elif _unnamed_curve(s):
             curves += 1
         elif ident not in seen and ident not in absorbed and _call_group(s, entries):
             seen.add(ident)
@@ -35853,9 +35859,12 @@ def _caption_from_calls(name: str, calls: dict[str, Any], record: dict[str, Any]
             parts.append((f"In {who}, " if named else "") + band + ".")
         if bars:
             parts.append((f"In {who}, error bars show " if named else "Error bars show ") + bars[0] + ".")
+    for p in calls.get("panels") or []:
+        if isinstance(p, dict) and not p.get("raw") and not p.get("series") and not p.get("refs") and not p.get("bands"):
+            parts.append(f"Panel {p.get('panel')} draws nothing.")
     marks = list(dict.fromkeys(marks))
     if marks:
-        parts.append("Marked: " + "; ".join(marks[:3]) + ".")
+        parts.append("Marked: " + "; ".join(marks) + ".")  # every reference line drawn, never a cut list
     mean_of = ((record or {}).get("replicate_mean") or {}).get("n")
     single_seed = (record or {}).get("single_seed")
     if mean_of:
@@ -35882,7 +35891,7 @@ def _note_from_calls(calls: dict[str, Any]) -> list[str]:
                 continue
             ys = [v for v in s.get("y") or [] if isinstance(v, (int, float)) and not isinstance(v, bool)]
             span = f" {min(ys):.3g} to {max(ys):.3g}" if ys else " no points"
-            bits.append("a curve" if s.get("kind") == "curve"
+            bits.append("a curve" if _unnamed_curve(s)
                         else f"{_call_group(s, entries)} ({s.get('kind')}){span}")
         bands, bars, refs = _call_extras(p)
         bits += bands + [f"error bars: {b}" for b in bars] + [f"reference line {r}" for r in refs]
@@ -35982,7 +35991,7 @@ def _figure_caption_text(
                          f"({loose['drawn']} curves in all).")
     marks = list(dict.fromkeys(marks))
     if marks:
-        parts.append("Marked: " + "; ".join(marks[:3]) + ".")
+        parts.append("Marked: " + "; ".join(marks) + ".")  # every reference line drawn, never a cut list
     key = Path(name).stem
     for kind in ("layout", "lines"):
         sentence = (facts or {}).get(f"{key}:{kind}", "")
