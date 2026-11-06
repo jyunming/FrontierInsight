@@ -29,12 +29,8 @@ def _panels(calls: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _series_key(s: dict[str, Any]) -> tuple[str, str]:
-    """One legend entry: a series by its id; a curve of a level of the series setting by the level (FI names it once in
-    the figure's legend, whichever result each panel draws at it)."""
-    level = s.get("level") if isinstance(s.get("level"), dict) else None
-    if level:
-        return "level:" + str(level.get("setting")), str(level.get("text") or "")
-    return str(s.get("id")), ""
+    level = s.get("level") if isinstance(s.get("level"), dict) else {}
+    return str(s.get("id")), str(level.get("text") or "")
 
 
 def _expected_entries(calls: dict[str, Any], legend: dict[str, Any]) -> int:
