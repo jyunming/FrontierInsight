@@ -168,6 +168,15 @@ run's own manifest does not contradict, is exempt (the engine passes it as
 A plan can also say it in the result's role: a result declared with the role ``physical_bound`` may sit on its range
 edge (the engine passes those assertion paths as ``edge_ok``), whatever its value and wherever the failure policy is silent.
 
+Why the mean of an indicator may reach its bound
+================================================
+A proportion is the mean of a 0/1 indicator over the trials, and 200 hits in 200 trials is a real 1.0. A script writes the
+indicator as ``1.0 if inside else 0.0``, which the clamp rule reads as a cap at 1, and a live quest's coverage was sent
+back as "a clamped number" for that. The facts come from FI's records, not from guessing at the code: the plan declares the
+result a proportion (the engine passes those assertion paths as ``indicator_ok``), or the result carries the trials'
+values beside the mean (``<name>_values``) and every one is 0 or 1. Such a mean on its bound is neither a clamp nor a
+trivial answer. A continuous result capped by ``min(1.0, x)`` has neither record and is still flagged.
+
 Why the design can say a bound is an honest value
 =================================================
 The failure policy only covers a count of failures, and only at 0. A proportion that is exactly 0 or 1 because the event
@@ -1371,7 +1380,7 @@ def _confined_position(
 
 def violations(
     result_json: Any, assertions: list[Assertion], *, code: str = "", zero_expected: Any = (),
-    walk: LeafWalk | None = None, edge_ok: Any = (),
+    walk: LeafWalk | None = None, edge_ok: Any = (), indicator_ok: Any = (),
 ) -> list[Violation]:
     """Every declared bound the result actually breaks.
 
@@ -1380,7 +1389,9 @@ def violations(
     that the script also caps at is reported as ``kind="clamped"`` (see the
     module docstring). A quantity on one bound in ``AT_BOUND_MIN_SETTINGS`` or
     more settings is reported once, as ``kind="at_bound"``, when the bound is
-    one a fault could have returned.
+    one a fault could have returned. A mean of a 0/1 indicator (``indicator_ok``: the plan declares it a proportion;
+    or the result's own ``<name>_values`` are all 0 or 1, which also overrules a declaration they contradict) reaching its bound is neither (see "Why the mean of an
+    indicator may reach its bound").
     """
     if not assertions:
         return []
@@ -1388,6 +1399,7 @@ def violations(
     if not walk.count:
         return []
 
+    indicator_set = {str(p) for p in indicator_ok or ()}
     clamps = clamp_constants(code) if code else set()
     clamp_dirs = clamp_directions(code) if code else {}
     literals = numeric_literals(code) if code else set()
@@ -1399,10 +1411,14 @@ def violations(
         # reported as 10).
         matched: list[tuple[tuple, str, float]] = []
         on_bound: dict[float, list[tuple[tuple, str]]] = {}
+        declared_indicator = a.path in indicator_set
+        zero_one = _zero_one_trials(walk, index, a.path)
         for i in index.matching(a.path):
             tokens, path, value = walk.leaf(i)
             matched.append((tokens, path, value))
             bound = _on_bound(value, a)
+            if bound is not None and zero_one.get(path, declared_indicator):
+                continue  # the mean of a 0/1 indicator on its bound is its honest value, not a cap or a trivial answer
             if bound is None:
                 if (a.min is not None and value < a.min) or (
                     a.max is not None and value > a.max
@@ -1441,6 +1457,21 @@ def violations(
             if v is not None:
                 out.append(v)
     return out
+
+
+def _zero_one_trials(walk: LeafWalk, index: Any, path: str) -> dict[str, bool]:
+    """For each leaf of ``path`` that has a list ``<leaf>_values`` beside it in the result, whether every number in that
+    list is 0 or 1 (a ``null`` is a failed trial and is skipped): the result's own record of the trials."""
+    ones: dict[str, bool] = {}
+    seen = False
+    for j in index.matching(f"{path}_values"):
+        _t, p, v = walk.leaf(j)
+        seen = True
+        key = p.rsplit("[", 1)[0] if p.endswith("]") else p
+        ones[key] = ones.get(key, True) and v in (0.0, 1.0)
+    if not seen:
+        return {}
+    return {key[: -len("_values")]: ok for key, ok in ones.items() if key.endswith("_values")}
 
 
 def _at_bound(
@@ -1521,7 +1552,7 @@ def bounded_paths(result_json: Any, design: Any, *, walk: LeafWalk | None = None
 
 def check_design(
     result_json: Any, design: Any, *, code: str = "", seen: Any = (), zero_expected: Any = (),
-    walk: LeafWalk | None = None, edge_ok: Any = (),
+    walk: LeafWalk | None = None, edge_ok: Any = (), indicator_ok: Any = (),
 ) -> list[Violation]:
     """Parse a design's assertions and apply them.
 
@@ -1533,7 +1564,8 @@ def check_design(
     assertions = parse_assertions(design)
     walk = walk if walk is not None and walk.root is result_json else LeafWalk(result_json)
     out = violations(result_json, assertions, code=code, zero_expected={str(p) for p in zero_expected or ()},
-                     edge_ok={str(p) for p in edge_ok or ()}, walk=walk)
+                     edge_ok={str(p) for p in edge_ok or ()}, walk=walk,
+                     indicator_ok={str(p) for p in indicator_ok or ()})
     earlier = {str(p) for p in seen or ()}
     if earlier:
         present = walk.present_index()
