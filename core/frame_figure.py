@@ -1043,6 +1043,9 @@ class FigureCalls:
             number, source = self._plan_value(ident, rec), "plan"
             got = (getattr(self, "references", None) or {}).get(ident)
             label = str(got.get("label")) if isinstance(got, dict) and got.get("label") else self._label_of(ident)
+        if source == "plan" and any(r["id"] == ident and r["axis"] == axis for r in rec["refs"]):
+            # the same reference of the plan drawn again (by its id and as a typed number): one line, one legend entry
+            return None
         draw = ax.axhline if axis == "y" else ax.axvline
         art = draw(float(number), linestyle=":", color="0.2", label=label)
         self._tag(art)
