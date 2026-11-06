@@ -228,10 +228,12 @@ def test_a_failed_small_run_that_lacks_a_compared_value_gets_one_rule_that_names
     text = _failed(reason).directive(rule)
     assert "method=fast" in text, "the missing key is named"
     assert text.count("Never return NaN") == 1 and text.count(rule) == 1 and "float('nan')" not in text
-    # a failure of another kind, a load error, a study without compared values and a simulation without a frame: no rule
+    # a failure of another kind, a load error and a study without compared values: no rule; a simulation without a frame
+    # gets the rule of a function the model wrote whole (what each run is given, the one form FI reads back)
     assert rule not in _failed("NameError: name 'x' is not defined").directive(rule)
     assert rule not in small_run.SmallRun([], "SyntaxError: bad").directive(rule)
-    assert skeleton.level_rule(DESIGN["protocol"], FRAMED) == "" and skeleton.level_rule(INSIDE["protocol"], UNFRAMED) == ""
+    assert skeleton.level_rule(DESIGN["protocol"], FRAMED) == ""
+    assert "VALUES COMPARED INSIDE EACH RUN" in skeleton.level_rule(INSIDE["protocol"], UNFRAMED)
 
 
 def test_the_failures_of_a_study_run_say_the_same_rule() -> None:

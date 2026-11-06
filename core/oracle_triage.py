@@ -696,7 +696,7 @@ def ambiguous(expression: str) -> bool:
     """Whether ``expression`` uses a bare ``log(`` or a trig function whose argument names no angle unit (no ``pi``,
     ``deg``, a degree sign or ``rad``)."""
     text = str(expression or "")
-    if _AMBIGUOUS_LOG.search(text):
+    if _AMBIGUOUS_LOG.search(text) and not _log_bases_agree(text):
         return True
     for m in _TRIG.finditer(text):
         if not _re.search(r"pi|π|deg|°|rad", _call_argument(text, m.end()), _re.IGNORECASE):
@@ -710,6 +710,16 @@ def ambiguous(expression: str) -> bool:
 
 
 _ELLIPK = _re.compile(r"(?<![\w.])ellipk\s*\(")
+
+
+def _log_bases_agree(text: str) -> bool:
+    """Whether FI works ``text`` out to the same value reading every bare ``log(`` as the natural log and as base 10 (a
+    ratio of logs of one base: the base cancels). A text FI cannot work out does not agree."""
+    natural = calculate(text)
+    ten = calculate(_AMBIGUOUS_LOG.sub("log10(", text))
+    if natural is None or ten is None or not (math.isfinite(natural) and math.isfinite(ten)):
+        return False
+    return abs(natural - ten) <= 1e-9 * max(abs(natural), abs(ten), 1e-300)
 
 
 def arithmetic_slip(text: Any, expected: Any = None, limit: float | None = None) -> dict[str, Any] | None:
