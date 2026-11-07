@@ -448,20 +448,11 @@ class Reach:
         out.extra_keys = sorted(set(extra))
         return out
 
-    def changed_keys(self, names: list[str], result: Any) -> set[str]:
-        """The printed keys whose recorded value a rerun showed changed: those of the declared results among ``names`` and the
-        names that are no declared result as they are. The results worked out from them (``effect_of_changes`` leaves those out
-        too) are not among them: that they read a changed number does not show their own number changed."""
-        declared = [self.by_norm[_norm(n)] for n in names if _norm(n) in self.by_norm]
-        extra = [n for n in names if _norm(n) not in self.by_norm]
-        keys = set(self.printed_keys(declared, result)) | set(extra)
-        for n in extra:
-            owner = self.owner.get(_norm(n))
-            if owner in self.counted:
-                keys.add(f"{owner}_coverage")
-                if _norm(n) in self.estimate:
-                    keys.add(f"{owner}_bias")
-        return keys
+    def changed_keys(self, metrics: list[str]) -> set[str]:
+        """The printed keys whose recorded value a rerun showed moved: ``metrics`` are the metric names of the rerun record's own
+        changed keys (``rerun_check.metric_of``), each as the declared result's id when it is one. Nothing is added to them (not
+        the interval, coverage or bias keys of the result, not the results worked out from it): the record says nothing of those."""
+        return {self.by_norm.get(_norm(n), n) for n in metrics if n}
 
     def _figure_used_by(self, fn: str) -> Effect:
         """The results whose function calls the figure's function ``fn`` by name (a figure's function a result is worked out

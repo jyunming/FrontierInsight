@@ -240,12 +240,25 @@ def passing_checks(quest_root: Path, name: Any) -> list[str]:
     except (OSError, ValueError):
         return []
     passed = set(_oracle.engine_passed(_oracle.last_judged(record)))
-    ident = leading_id(name)
+    protocol = _frozen.protocol_of(root)
+    from . import shown_reach as _reach
+
+    # the executor reads a measure as ONE returned key first (trial_runner._check_from), and parses it only when it is none
+    returned = set(_reach._trial_names(root)) | set(declared_names(None, protocol))
+    ident = str(name or "").strip() if str(name or "").strip() in returned else leading_id(name)
     if not passed or not ident:
         return []
-    protocol = _frozen.protocol_of(root)
-    reads = [str(o["name"]) for o in _oracle.declared(protocol) if str(o["name"]) in passed
-             and ident in _forms.names(o.get("measure"), across=True)]
+
+    def reads_it(measure: Any) -> bool:
+        text = str(measure or "").strip()
+        if text in returned:
+            return text == ident
+        try:
+            return ident in _forms.names(text, across=True)
+        except Exception:  # noqa: BLE001 -- a measure that cannot be read links to nothing
+            return False
+
+    reads = [str(o["name"]) for o in _oracle.declared(protocol) if str(o["name"]) in passed and reads_it(o.get("measure"))]
     flagged = flagged_checks(root, root / "code", reads) if reads else {}
     return [n for n in reads if n not in flagged]
 

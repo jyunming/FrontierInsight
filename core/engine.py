@@ -23225,7 +23225,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     placed = reach.effect_of_changes(rerun.metrics)
                     # Only these keys were shown to change; what else is left out (results worked out from them, what the
                     # finding's test reaches) is left out without that having been shown.
-                    rerun_keys = reach.changed_keys(rerun.metrics, result)
+                    rerun_keys = reach.changed_keys([m for m in (_rerun_check.metric_of(k)[0] for k in rerun.keys) if m])
                     if rerun.unplaced or "failed trials" in rerun.metrics:
                         # A changed number that belongs to no result FI can name has not been cleared by the rerun: the finding
                         # is also placed as it was before a rerun (what its test reaches), in addition to the results that moved
@@ -23361,11 +23361,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     saved["at_gate"]["rerun"] = "changed"
         if left_out or not_done or figures:
             _code_review.save(self.quest_root, record)
+            # per finding: a key is said changed only for the finding whose own rerun moved it
+            changed_by_quantity = {q or (_code_review.quantity_names(record, i) or k)[0]: changed.get(str(i.get("id")), set())
+                                   for i, _h, k, q in left_out}
             self._leave_out_shown_faults(
                 [(q or (_code_review.quantity_names(record, i) or k)[0], k, h) for i, h, k, q in left_out],
                 [(n, h) for _i, h, names in not_done for n in names], result,
                 figures=[(f, h) for _i, h, files in figures for f in files],
-                changed={k for ks in changed.values() for k in ks})
+                changed=changed_by_quantity)
         return None
 
     @staticmethod

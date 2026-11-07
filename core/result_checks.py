@@ -567,12 +567,12 @@ class ResultChecksMixin:
 
     def _leave_out_shown_faults(self, left_out: list[tuple[str, list[str], str]], not_done: list[tuple[str, str]],
                                 result_json: Any, figures: list[tuple[str, str]] | None = None,
-                                changed: set[str] | None = None) -> None:
+                                changed: dict[str, set[str]] | None = None) -> None:
         """At the evidence gate: the quantities a failing test is about (``(quantity, keys, how)``) are left out of the
         results the paper may use, the plan's quantities the code does not compute (``(quantity, how)``) are named, and the
         figures a failing test is about (``(file, how)``) are taken out of ``figures/``, by adding them to
         ``needs/RESULT_CHECK.json`` (what the run's checks left out stays). The words say only what FI's records show: that a
-        repair which passes the test changes the reported number (``changed``: the printed keys whose recorded value the rerun shows changed; every other key left out gets the second),
+        repair which passes the test changes the reported number (``changed``: per quantity, the printed keys the rerun of that finding showed changed; every other key left out gets the second),
         else that the test failed and FI did not establish whether the value is wrong or missing. The same issues found again
         add nothing."""
         path = self.quest_root / "needs" / RECORD  # type: ignore[attr-defined]
@@ -580,8 +580,9 @@ class ResultChecksMixin:
         found: list[Found] = []
         for quantity, keys, how in left_out:
             taken = ", ".join("`" + k + "`" for k in keys[:6])
-            moved = [k for k in keys if k in (changed or set())]
-            rest = [k for k in keys if k not in (changed or set())]
+            mine = (changed or {}).get(quantity, set())
+            moved = [k for k in keys if k in mine]
+            rest = [k for k in keys if k not in mine]
             said_moved = ", ".join("`" + k + "`" for k in moved[:6])
             said_rest = ", ".join("`" + k + "`" for k in rest[:6])
             if not rest:
@@ -637,8 +638,12 @@ class ResultChecksMixin:
         keys = sorted({*(str(k) for k in record.get("removed_quantities") or []), *(k for f in new for k in f.keys)})
         why = record.get("removed_why") if isinstance(record.get("removed_why"), dict) else {}
         for f in new:
+            mine = (changed or {}).get(f.quantity, set())
             for k in f.keys:
-                why.setdefault(k, SHOWN_FAULT_CHANGED_WHY if k in (changed or set()) else SHOWN_FAULT_WHY)
+                if k in mine:
+                    why[k] = SHOWN_FAULT_CHANGED_WHY  # only the finding whose own rerun moved the key says so
+                else:
+                    why.setdefault(k, SHOWN_FAULT_WHY)
         record.update({
             "removed_quantities": keys, "removed_figures": sorted({*(record.get("removed_figures") or []), *gone_figures}),
             "removed_values": _values_left_out(result_json, set(keys), self._derived_record()), "removed_why": why,

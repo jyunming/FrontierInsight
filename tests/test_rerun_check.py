@@ -691,7 +691,8 @@ def test_a_run_whose_own_error_is_smaller_than_the_plan_allowance_is_bound_by_it
 
 def test_a_rerun_that_changed_one_result_names_only_that_result_as_changed(tmp_path: Path) -> None:
     # the finding is about `est_a`; `corr_ab` is worked out from it and is left out with it, but the rerun did not show it changed
-    out, record = _gate(tmp_path, Verdict("changed", metrics=["est_a"]), headline=("est_b",), test=DERIVE_EST, quantity="est_a")
+    out, record = _gate(tmp_path, Verdict("changed", metrics=["est_a"], keys=["trials/s/est_a/mean"]), headline=("est_b",),
+                        test=DERIVE_EST, quantity="est_a")
     assert out is None
     gate = record["issues"]["F-1"]["at_gate"]
     assert gate["rerun"] == "changed" and {"est_a", "corr_ab"} <= set(gate["keys"])
@@ -700,4 +701,23 @@ def test_a_rerun_that_changed_one_result_names_only_that_result_as_changed(tmp_p
 
     assert kept["removed_why"]["est_a"] == result_checks.SHOWN_FAULT_CHANGED_WHY
     assert kept["removed_why"]["corr_ab"] == result_checks.SHOWN_FAULT_WHY
+    # nothing else left out with it is said changed: the record moved only the estimate's own key, not its intervals
+    assert [k for k, w in kept["removed_why"].items() if w == result_checks.SHOWN_FAULT_CHANGED_WHY] == ["est_a"]
     assert "did not establish" in kept["say"] and "`corr_ab`" in kept["say"]
+
+
+def test_a_key_is_said_changed_only_for_the_finding_whose_own_rerun_moved_it(tmp_path: Path) -> None:
+    from core import result_checks
+    from tests.test_shown_reach import _engine
+
+    engine = _engine(tmp_path)
+    engine.quest_root.mkdir(parents=True, exist_ok=True)
+    (engine.quest_root / "needs").mkdir(exist_ok=True)
+    # two findings leave out the key `k`; only the first one's rerun moved it
+    engine._leave_out_shown_faults([("qa", ["k", "m"], "how a"), ("qb", ["k"], "how b")], [], {"k": 1.0, "m": 2.0},
+                                   changed={"qa": {"k"}, "qb": set()})
+    kept = json.loads((engine.quest_root / "needs" / "RESULT_CHECK.json").read_text(encoding="utf-8"))
+    assert kept["removed_why"]["k"] == result_checks.SHOWN_FAULT_CHANGED_WHY and kept["removed_why"]["m"] == result_checks.SHOWN_FAULT_WHY
+    notes = {c["quantity"]: c["note"] for c in kept["checks"]}
+    assert "did not establish whether the value of `m`" in notes["qa"] and "changes the reported number of `k`" in notes["qa"]
+    assert "did not establish" in notes["qb"] and "changes the reported number" not in notes["qb"]

@@ -180,3 +180,19 @@ def test_a_test_failure_record_with_no_gate_record_is_not_said_to_show_a_wrong_v
     (quest.quest_root / "needs" / "RESULT_CHECK.json").write_text(json.dumps(rc), encoding="utf-8")
     text = " ".join(_items(quest.quest_root).values())
     assert "did not establish whether the value is wrong or missing" in text and "showed the value is wrong" not in text
+
+
+def test_a_measure_that_is_one_returned_key_is_linked_to_that_key_only(tmp_path: Path) -> None:
+    # the executor reads a measure as one returned key before it parses it: `error-rate` is that key, not `error - rate`
+    quest = _quest(tmp_path, TWICE, check="pass")
+    root = quest.quest_root
+    path = root / "needs" / "FROZEN_PROTOCOL.json"
+    frozen = json.loads(path.read_text(encoding="utf-8"))
+    frozen["protocol"]["oracles"][0]["measure"] = "error-rate"
+    frozen["sha256"] = frozen_protocol.sha256(frozen["protocol"])
+    path.write_text(json.dumps(frozen), encoding="utf-8")
+    (root / "raw").mkdir(exist_ok=True)
+    metrics = {k: {"values": [1.0], "trials": [0]} for k in ("error-rate", "error", "rate")}
+    (root / "raw" / "trials.json").write_text(json.dumps({"cells": [{"cell": {}, "metrics": metrics}]}), encoding="utf-8")
+    assert cr.passing_checks(root, "error-rate") == ["check_a"]
+    assert cr.passing_checks(root, "error") == [] and cr.passing_checks(root, "rate") == []
