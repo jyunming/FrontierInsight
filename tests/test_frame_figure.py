@@ -426,15 +426,15 @@ def test_body_set_limits_are_overwritten_and_logged_once(caplog):
     assert h.record()["panels"][0]["raw"] is False
 
 
-def test_log_axis_with_zero_in_band_keeps_finite_limits():
+def test_declared_log_axis_with_zero_in_band_is_drawn_linear_with_finite_limits():
     h = _Host(panels=1)
     h.line(0, "fast", [1, 2, 3], [1.0, 10.0, 100.0], "growth")
     h.band(0, "fast", [1, 2, 3], [0.0, 5.0, 50.0], [2.0, 20.0, 200.0], "growth", "range")
     h.finish(SPEC, {}, {"y": "log"})
     ax = h.axes[0]
     lo, hi = ax.get_ylim()
-    assert ax.get_yscale() == "log" and math.isfinite(lo) and math.isfinite(hi) and 0 < lo <= 1.0 and hi >= 200.0
-    assert h.record()["panels"][0]["y"]["scale"] == "log"
+    assert ax.get_yscale() == "linear" and math.isfinite(lo) and math.isfinite(hi) and lo <= 0.0 and hi >= 200.0
+    assert h.record()["panels"][0]["y"]["scale"] == "linear" and "zero or negative" in h.record()["panels"][0]["y"]["scale_note"]
 
 
 def test_legend_stays_off_the_data_and_outside_when_crowded():
@@ -487,12 +487,12 @@ def test_merged_legend_entry_never_shows_a_raw_id():
     assert [t.get_text() for t in g.axes[0].get_legend().get_texts()] == ["value = value"]
 
 
-def test_log_axis_ignores_nonpositive_error_bar_end():
+def test_declared_log_axis_with_an_error_bar_end_below_zero_is_drawn_linear():
     h = _Host(panels=1, identity=True)
     h.line(0, "fast", [1, 10, 100], [1.0, 10.0, 100.0], "growth", yerr=[2.0, 2.0, 2.0])  # 1.0 - 2.0 is below zero
     h.finish(SPEC, {}, {"y": "log"})
     lo, hi = h.axes[0].get_ylim()
-    assert h.axes[0].get_yscale() == "log" and 0 < lo < 1.0 and 100.0 < hi < 1000.0
+    assert h.axes[0].get_yscale() == "linear" and lo < 0.0 and 100.0 < hi < 1000.0
 
 
 class _GridTable(_Table):

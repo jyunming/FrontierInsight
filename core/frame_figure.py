@@ -40,6 +40,7 @@ from pathlib import Path
 
 MEANINGS = ("ci95", "sd", "range", "other")
 NOTE_FORMS = ("mean", "n", "low", "high")
+LOG_NOTE = " (log scale)"  # said on the label of a log axis
 LOG_RATIO = 1e3  # FI's rule for an axis the plan does not scale: log when all values are above zero and span this ratio
 IDENTICAL_RTOL = 1e-12  # two series equal within this relative tolerance are one line to the reader
 Y_RTOL = 1e-3  # a drawn y matches the table's value within this relative tolerance (plus 1e-12 absolute)
@@ -1272,8 +1273,11 @@ class FigureCalls:
                 continue
             live.append(i)
             self._merge_identical(i, rec)
+        scales = self._figure_scales(live, axis_scales)  # one scale for each axis for the whole figure
+        for i in live:
+            ax, rec = self._panel(i)
+            self._write_limits(ax, rec, changed, scales)
             self._write_labels(ax, rec, spec_labels, result_info, changed)
-            self._write_limits(ax, rec, changed, axis_scales)
         fig = self._figure_of_panels()
         if fig is not None and live:
             self._use_constrained_layout(fig)
@@ -1369,6 +1373,10 @@ class FigureCalls:
             parts = rec["y"]["what"].split(" / ")
             names = dict.fromkeys(NEUTRAL_Y if w == "other" else self._name_of(w, spec_labels, result_info) for w in parts)
             rec["y"]["label"] = " / ".join(names)
+        if x.get("scale") == "log":
+            x["label"] += LOG_NOTE
+        if rec["y"] is not None and rec["y"].get("scale") == "log":
+            rec["y"]["label"] += LOG_NOTE
         ytext = "row" if image else (rec["y"] or {}).get("label", "")
         for old, text, setter in ((ax.get_xlabel(), x["label"], ax.set_xlabel), (ax.get_ylabel(), ytext, ax.set_ylabel)):
             if old and old != text:
@@ -1376,28 +1384,26 @@ class FigureCalls:
             setter(text)
 
     @staticmethod
-    def _axis_scale(declared, drawn, bars_y):
-        """``(scale, source, note)`` of one axis: what the plan declares, else FI's rule over the values drawn along it. A declared
-        log axis holding a value at or below zero cannot be drawn so: it is linear, and the note says why."""
+    def _axis_scale(declared, centre, full, bars_y):
+        """``(scale, source, note)`` of one axis: what the plan declares, else FI's rule over the values drawn along it (``centre``:
+        the points and lines; ``full``: those and the ends of every error bar, band and reference line). A log axis cannot show a
+        value at or below zero: where the plan declares one (or FI's rule would choose one) over such values the axis is linear and
+        the note says why."""
+        blocked = not full or min(full) <= 0
+        why = "nothing is drawn along it" if not full else "a value drawn along it (an error bar or interval end included) is zero or negative"
         if declared in ("linear", "log"):
-            if declared == "log" and (not drawn or min(drawn) <= 0):
-                return "linear", "plan", ("the plan asked for a log axis but %s" % (
-                    "nothing is drawn along it" if not drawn else "a value drawn along it is zero or negative"))
+            if declared == "log" and blocked:
+                return "linear", "plan", "the plan asked for a log axis but " + why
             return declared, "plan", None
-        positive = bool(drawn) and min(drawn) > 0
-        return ("log" if positive and not bars_y and max(drawn) / min(drawn) >= LOG_RATIO else "linear"), "FI rule", None
+        spans = bool(centre) and min(centre) > 0 and max(centre) / min(centre) >= LOG_RATIO and not bars_y
+        if spans and blocked:
+            return "linear", "FI rule", "FI's rule would draw a log axis but " + why
+        return ("log" if spans else "linear"), "FI rule", None
 
-    def _write_limits(self, ax, rec, changed, axis_scales=None):
-        if rec["x"] is None or rec["y"] is None:
-            return
-        if not ax.get_autoscalex_on() or not ax.get_autoscaley_on():
-            changed.append("limits")
-        if any(e["kind"] == "image" for e in rec["series"]):
-            if (ax.get_xscale(), ax.get_yscale()) != ("linear", "linear"):
-                changed.append("scale")
-            return
-        axis_scales = axis_scales or {}
-        before = (ax.get_xscale(), ax.get_yscale())
+    @staticmethod
+    def _panel_values(ax, rec):
+        """``(centre, full, skip)`` of a panel: for each axis the values of its points and lines, and those with the ends of the error
+        bars, bands and reference lines; ``skip`` is the axes a panel does not scale (x of bars in slots, a categorical x)."""
         series = rec["series"]
         categorical = any(isinstance(v, str) for e in series for v in e["x"]) or any(isinstance(v, str) for b in rec["bands"] for v in b["x"])
         yv, xv = [], []
@@ -1411,29 +1417,63 @@ class FigureCalls:
                     if v is not None and dh is not None:
                         yv.append(v + dh)
             xv += [v for v in e["x"] if _finite(v)]
+        centre = {"x": list(xv), "y": [v for e in series for v in e["y"] if v is not None]}
         for b in rec["bands"]:
             yv += [v for v in b["lo"] + b["hi"] if v is not None]
             xv += [v for v in b["x"] if _finite(v)]
         for r in rec["refs"]:
             (yv if r["axis"] == "y" else xv).append(r["value"])
-        # the values the scale is decided on: the points and lines drawn, not the ends of an error bar or a band (a bar's lower end
-        # may pass zero while every point is far above it)
-        centre = {"x": [v for e in series for v in e["x"] if _finite(v)] + [r["value"] for r in rec["refs"] if r["axis"] != "y"],
-                  "y": [v for e in series for v in e["y"] if v is not None] + [r["value"] for r in rec["refs"] if r["axis"] == "y"]}
+            centre["y" if r["axis"] == "y" else "x"].append(r["value"])
+        skip = set()
+        if getattr(ax, "_fi_bar_slots", None) or categorical:
+            skip.add("x")
+        return centre, {"x": xv, "y": yv}, skip
+
+    def _figure_scales(self, live, axis_scales):
+        """``{axis: (scale, source, note)}``, decided once for the whole figure over the values of every panel that scales that axis:
+        the plan declares one scale for a figure, and panels that share an axis must be read on the same one, so a panel that cannot
+        be drawn on a log axis makes every panel linear."""
+        centre, full, bars = {"x": [], "y": []}, {"x": [], "y": []}, False
+        for i in live:
+            ax, rec = self._panel(i)
+            if rec["x"] is None or rec["y"] is None or any(e["kind"] == "image" for e in rec["series"]):
+                continue
+            c, f, skip = self._panel_values(ax, rec)
+            for axis in ("x", "y"):
+                if axis not in skip:
+                    centre[axis] += [v for v in c[axis] if _finite(v)]
+                    full[axis] += [v for v in f[axis] if _finite(v)]
+            bars = bars or any(e["kind"] == "bars" for e in rec["series"])
+        return {axis: self._axis_scale((axis_scales or {}).get(axis), centre[axis], full[axis], bars and axis == "y") for axis in ("x", "y")}
+
+    def _write_limits(self, ax, rec, changed, scales):
+        if rec["x"] is None or rec["y"] is None:
+            return
+        if not ax.get_autoscalex_on() or not ax.get_autoscaley_on():
+            changed.append("limits")
+        if any(e["kind"] == "image" for e in rec["series"]):
+            if (ax.get_xscale(), ax.get_yscale()) != ("linear", "linear"):
+                changed.append("scale")
+            return
+        before = (ax.get_xscale(), ax.get_yscale())
+        series = rec["series"]
+        _centre, full, skip = self._panel_values(ax, rec)
         bars = [e for e in series if e["kind"] == "bars"]
-        for axis, vals in (("x", xv), ("y", yv)):
+        for axis in ("x", "y"):
+            vals = full[axis]
             if axis == "x" and getattr(ax, "_fi_bar_slots", None):  # bars over a setting: one slot for each value
                 ax.set_xlim(-0.5, ax._fi_bar_slots - 0.5)
                 continue
-            if axis == "x" and categorical:
+            if axis == "x" and "x" in skip:  # a categorical x
                 ax.relim()
                 ax.autoscale(enable=True, axis="x")
                 continue
-            vals = [v for v in vals if _finite(v)]
-            scale, source, note = self._axis_scale(axis_scales.get(axis), [v for v in centre[axis] if _finite(v)], bool(bars) and axis == "y")
+            scale, source, note = scales[axis]
+            rec[axis].pop("scale_note", None)
             rec[axis].update(scale=scale, scale_source=source)
             if note:
                 rec[axis]["scale_note"] = note
+            vals = [v for v in vals if _finite(v)]
             if bars and axis == "y" and scale == "linear":
                 vals.append(0.0)
             if axis == "x" and scale == "linear":  # bars have width: half the closest spacing on each side
@@ -1443,10 +1483,12 @@ class FigureCalls:
                         half = min((b - a for a, b in zip(pts, pts[1:])), default=1.0) / 2
                         vals += [pts[0] - half, pts[-1] + half]
             if scale == "log":
-                vals = [v for v in vals if v > 0]  # (a declared bar axis may hold the zero of a bar's foot)
+                vals = [v for v in vals if v > 0]  # (a bar's foot at zero is not drawn on a log axis)
             (ax.set_xscale if axis == "x" else ax.set_yscale)(scale)
             if vals:
                 (ax.set_xlim if axis == "x" else ax.set_ylim)(*_padded(min(vals), max(vals), scale))
+        if before != ("linear", "linear") and before != (ax.get_xscale(), ax.get_yscale()):
+            changed.append("scale")
 
     @staticmethod
     def _level_ident(e):

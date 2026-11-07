@@ -716,9 +716,19 @@ def _analysis_problems(q: _Quest) -> list[dict[str, str]]:
     return out
 
 
+def _scale_problems(root: Any) -> list[dict[str, str]]:
+    """One disclosed row for each figure whose axis scale FI chose (the plan was silent) or refused (a declared log axis FI drew
+    linear): the figure's own labels say a log scale, but not that the plan did not ask for it."""
+    from . import figure_text_check as _ftc
+
+    return [_problem("paper", f"{f.get('file')}: {f.get('said')}", "FI's choice of axis scale", "disclosed", str(f.get("record") or ""))
+            for f in _ftc.scale_notes(root)]
+
+
 def _paper_problems(q: _Quest) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
     from . import figure_text_check as _ftc
+    out.extend(_scale_problems(q.root))
 
     # A figure whose legend or caption says something its record does not draw (FI writes both from the record, so a
     # finding here is FI's own fault, disclosed; it stops nothing).

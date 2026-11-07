@@ -72,11 +72,65 @@ def test_a_zero_makes_the_rule_say_linear_without_a_note():
     assert h.axes[0].get_yscale() == "linear" and "scale_note" not in rec["y"]
 
 
-def test_the_end_of_an_error_bar_below_zero_does_not_stop_a_declared_log_axis():
+def test_an_error_bar_end_below_zero_blocks_a_declared_log_axis_and_says_why():
     h = _Host(panels=1, identity=True)
-    h.line(0, "fast", [1, 10, 100], [1.0, 10.0, 100.0], "growth", yerr=[2.0, 2.0, 2.0])
+    h.line(0, "fast", [1, 10, 100], [1.0, 10.0, 100.0], "growth", yerr=[2.0, 2.0, 2.0])  # 1.0 - 2.0 is below zero
     h.finish(SPEC, {}, {"y": "log"})
-    assert h.axes[0].get_yscale() == "log"
+    rec = h.record()["panels"][0]
+    assert h.axes[0].get_yscale() == "linear" and rec["y"]["scale_source"] == "plan" and "error bar" in rec["y"]["scale_note"]
+
+
+def test_an_error_bar_end_below_zero_blocks_fis_own_log_rule_and_says_why():
+    h = _Host(panels=1, identity=True)
+    h.line(0, "fast", [1, 10, 100, 1000], [1.0, 10.0, 100.0, 1000.0], "growth", yerr=[2.0] * 4)
+    h.finish(SPEC, {})
+    rec = h.record()["panels"][0]
+    assert h.axes[0].get_yscale() == "linear" and "FI's rule would draw a log axis" in rec["y"]["scale_note"]
+
+
+def _two_panels(first, second, declared=None):
+    h = _Host(panels=2)
+    h.line(0, "fast", X[:len(first)], first, "growth")
+    h.line(1, "fast", X[:len(second)], second, "growth")
+    h.finish(SPEC, {}, declared)
+    return h
+
+
+def test_the_scale_is_one_for_the_whole_figure_when_a_declared_log_panel_cannot_be_log():
+    h = _two_panels([1.0, 10.0], [0.0, 10.0], {"y": "log"})
+    assert [ax.get_yscale() for ax in h.axes] == ["linear", "linear"]
+    assert all("zero or negative" in p["y"]["scale_note"] for p in h.record()["panels"])
+
+
+def test_the_scale_is_one_for_the_whole_figure_when_the_plan_is_silent():
+    h = _two_panels([1.0, 1000.0], [1.0, 10.0])  # together they span 1000: both log, not one of each
+    assert [ax.get_yscale() for ax in h.axes] == ["log", "log"]
+
+
+def test_a_log_axis_says_so_on_its_label_and_a_linear_one_does_not():
+    h, rec = _drawn(SMALL)
+    assert h.axes[0].get_ylabel().endswith("(log scale)") and not h.axes[0].get_xlabel().endswith("(log scale)")
+    h, rec = _drawn([0.2, 0.4, 0.6, 0.8])
+    assert "(log scale)" not in h.axes[0].get_ylabel()
+    h.finish(SPEC, {}, {"y": "log"})
+    h.finish(SPEC, {}, {"y": "log"})  # a second finish does not repeat it
+    assert h.axes[0].get_ylabel().count("(log scale)") == 1
+
+
+def test_quality_report_lists_a_scale_FI_chose_or_refused_once_per_figure(tmp_path):
+    from core import figure_text_check as ftc, quality_report as qr
+    records = tmp_path / ".fi" / "figure_records"
+    records.mkdir(parents=True)
+    (tmp_path / "paper.md").write_text("![Growth by size.](figures/f1.png)\n\n![Other.](figures/f2.png)\n", encoding="utf-8")
+    log = {"x": {"scale": "linear", "scale_source": "FI rule"}, "y": {"scale": "log", "scale_source": "FI rule"}}
+    refused = {"x": {"scale": "linear", "scale_source": "plan"},
+               "y": {"scale": "linear", "scale_source": "plan", "scale_note": "the plan asked for a log axis but a value is zero"}}
+    (records / "f1.calls.json").write_text(json.dumps({"panels": [{"panel": 1, **log, "series": []}, {"panel": 2, **log, "series": []}]}), encoding="utf-8")
+    (records / "f2.calls.json").write_text(json.dumps({"panels": [{"panel": 1, **refused, "series": []}]}), encoding="utf-8")
+    found = ftc.scale_notes(tmp_path)
+    assert [f["file"] for f in found] == ["f1.png", "f2.png"]
+    assert "log scale" in found[0]["said"] and "asked for a log axis" in found[1]["said"]
+    assert qr.__dict__["_scale_problems"](tmp_path)[0]["status"] == "disclosed"
 
 
 # ---- the plan's declaration reaches the drawing -----------------------------------------------------------------------------
