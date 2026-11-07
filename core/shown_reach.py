@@ -49,6 +49,7 @@ class Effect:
     named: str = ""  # the quantity the finding is about, among the left-out ones
     cannot: bool = False  # FI cannot tell what the code reaches: the records place nothing
     empty: bool = False  # the stop is that leaving out what it changes leaves no result at all
+    by_trial: bool = False  # a helper reached through the trial: the call graph ties it to every result of the trial, to none in particular
 
 
 def union(a: "Effect", b: "Effect") -> "Effect":
@@ -414,6 +415,11 @@ class Reach:
             if not held:
                 return None
             known = [self._judge(Effect(), held, "its test reads " + ", ".join(sorted(held)))]
+        if all(p.by_trial for p in known):
+            # Only the call graph ties a helper of the trial to the results, and it ties it to every result the trial makes, not to
+            # one (the fault may change one result or all): that is no placement of the finding, so the records leave it unplaced
+            # and the gate stops for it. A test that also reads a literal key or calls a result's function does place it.
+            return None
         merged = self._merge(known)
         return None if merged is None else self._settle(merged, record, issue)
 
@@ -491,6 +497,7 @@ class Reach:
             out.figures = list(dict.fromkeys([*out.figures, *p.figures]))
             out.probes = list(dict.fromkeys([*out.probes, *p.probes]))
             out.named = out.named or p.named
+            out.by_trial = out.by_trial or p.by_trial
         out.stop = "; ".join(dict.fromkeys(p.stop for p in parts if p.stop))
         out.why = "; ".join(dict.fromkeys(p.why for p in parts if p.why))
         if not out.stop and out.left_out and not (set(self.ids) - set(out.left_out)):
@@ -673,6 +680,7 @@ class Reach:
                     out.figures.append(ident)
                 else:
                     touched.update(self.trial_ids() or set(self.ids))
+                    out.by_trial = True
         if not reached_by:
             out.why = "no function of a result or a figure reaches it, so it changes no reported result"
             return out

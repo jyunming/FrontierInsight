@@ -23328,7 +23328,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             if _code_review.about_headline(record, issue, result, headline or []):
                 stops.append((issue, how))
             elif missing := _code_review.missing_quantities(record, issue):
-                not_done.append((issue, how, missing))
+                if absent := _code_review.not_obtained(record, issue, result, declared):
+                    # FI's own record of the run shows no value was worked out for it: nothing of it can reach the paper
+                    not_done.append((issue, how, absent))
+                else:
+                    # The finding's test fails and no record of FI's ties it to a result: it may stand for a value that is
+                    # reported under another name, so it is not taken for a part not done on the reader's word.
+                    stops.append((issue, how + "; " + _UNPLACED_FINDING))
             elif keys := _code_review.keys_of_issue(record, issue, result):
                 # A key that holds no number has nothing another key could hold too: leaving it out removes all of it.
                 if _result_checks._values_left_out(result, set(keys)) or _code_review.holds_no_number(result, set(keys)):
@@ -23340,7 +23346,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 # A declared result the run gave no number for under any name: nothing of it can reach the paper.
                 not_done.append((issue, how, absent))
             else:
-                stops.append((issue, how + "; FI cannot find which of the results it changes, so it cannot leave them out"))
+                stops.append((issue, how + "; " + _UNPLACED_FINDING))
         if not stops and left_out:
             from . import numeric_oracle as _numeric_oracle
             from . import typed_results as _typed
@@ -30835,6 +30841,11 @@ _REFERENCE_FORMS = (
     "of the plan's `model` by its id (E1), or, for a second implementation, what it is and that it shares no code with "
     "the simulation. A source that is not in that list does not count."
 )
+
+#: The plain ending of a stop for a code finding FI's records cannot tie to a reported result.
+_UNPLACED_FINDING = ("the finding's test fails and FI cannot find which of the results it changes, so it can neither keep the "
+                     "results nor leave some out; fix the code the finding names, or say the finding does not affect the "
+                     "results")
 
 # Written once FI has asked the plan step to fill in where the checks' expected values come from (``_fill_plan_sources``).
 _FILL_MARKER = "plan_sources_asked.json"

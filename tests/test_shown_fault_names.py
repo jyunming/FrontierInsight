@@ -146,6 +146,11 @@ def test_a_fault_whose_result_holds_no_number_is_left_out_not_a_stop(tmp_path: P
     assert code_review.keys_of_issue(code_review.load(root), code_review.load(root)["issues"]["F-3af8cc05"], result) == [
         "Ea_lnA_empirical_correlation"]
     assert code_review.holds_no_number(result, {"Ea_lnA_empirical_correlation"})
+    # the other open finding of this record (a difference of names, a quantity the reader called missing) is not what this test
+    # is about: it is set aside as the gate does on the unemptied results, so only the fault of the empty key is judged here
+    record = code_review.load(root)
+    record["issues"]["F-650ad5f3"]["changes_result"] = False
+    code_review.save(root, record)
     _root, verdict, _eng = _gate_on(root, result, monkeypatch)
     assert verdict is None
     saved = code_review.load(root)["issues"]
