@@ -406,14 +406,26 @@ def unit_gaps(row: Any, planned: str, design: dict[str, Any]) -> dict[str, tuple
     return out
 
 
-def _unit_reason(units: tuple[str, str], planned: bool) -> str:
-    """Why a quantity is not answered: the result named for it is in another unit than the question asks in."""
-    said = [("a pure number (no unit)" if _unit_key(u) == "1" else u) for u in units]
-    return f"the result {'the plan names' if planned else 'named for it'} is in {said[1]}, the question asks for {said[0]}"
+def _unit_gap(design: dict[str, Any], row: Any, final: str, planned: str, by: str) -> dict[str, Any] | None:
+    """What the paper says about the unit of the result an answer ends up on (``final``, ``metric:<id>`` / ``equation:<id>``) when
+    it is not the unit the question asks in: ``{"asked", "result", "declared"}`` (``declared``: the result's unit is the plan's own
+    ``physical_unit``, else it is the unit the plan's model stated for it). ``None`` when the units agree or one is not given. A
+    difference of units never takes a quantity out of the answers: FI states both units and converts nothing."""
+    if not isinstance(row, dict) or final.partition(":")[0].strip() not in ("metric", "equation"):
+        return None
+    declared = _unit_of(design, final, None)
+    if final == planned:
+        stated = row.get("plan_unit")
+        if stated is None and by in ("", planned):
+            stated = row.get("by_unit")
+    else:
+        stated = row.get("by_unit")
+    got = _differ(row.get("unit"), declared if declared is not None else stated)
+    return None if got is None else {"asked": got[0], "result": got[1], "declared": declared is not None}
 
 
 def _check_answers(value: Any, asked: dict[str, dict[str, str]], design: dict[str, Any],
-                   conflicts: dict[str, str] | None = None) -> list[str]:
+                   conflicts: dict[str, tuple[str, str]] | None = None) -> list[str]:
     """Why ``value``, the answer for ``answers``, cannot be used; empty when it can. Each quantity asked about gets ``by`` (a
     result or derived id as ``metric:<id>``, an equation as ``equation:<id>``, or ``none``; not needed where the plan already
     maps it) and, only if the topic asks for it at one setting, ``at``: a setting of the study with one of its values."""
@@ -445,9 +457,9 @@ def _check_answers(value: Any, asked: dict[str, dict[str, str]], design: dict[st
             result = planned if kept else by
             if conflicts is None:
                 out.append(f"`{ident}`: the question asks for a quantity in `{units[0]}`, but `{result}` is in `{units[1]}`; "
-                           f"answer a result that is in `{units[0]}`, or `none`")
+                           f"answer a result that is in `{units[0]}`, or `none` (the paper then states both units and converts nothing)")
             else:
-                conflicts[ident] = _unit_reason(units, kept)
+                conflicts[ident] = units  # the last ask: both units are stated in the paper, nothing is converted
         stat = row.get("statistic")
         if stat not in (None, "") and stat not in STATISTICS:
             out.append(f"`{ident}`: `statistic` must be one of {', '.join(STATISTICS)}")
@@ -473,9 +485,11 @@ def _check_answers(value: Any, asked: dict[str, dict[str, str]], design: dict[st
 
 
 def _apply_answers(p: dict[str, Any], design: dict[str, Any], answer: dict[str, Any],
-                   asked: dict[str, dict[str, str]], conflicts: dict[str, str] | None = None) -> dict[str, Any]:
+                   asked: dict[str, dict[str, str]], conflicts: dict[str, tuple[str, str]] | None = None) -> dict[str, Any]:
     """The plan's ``topic_map`` with an ``at`` on the entry of each quantity asked about (the plan's own ``by`` is kept), and
-    an entry added where the plan had none and the model named a result; ``none`` adds nothing."""
+    an entry added where the plan had none and the model named a result; ``none`` adds nothing. Where the result an entry ends
+    on is in another unit than the question asks in, the entry carries ``unit_conflict`` (both units): the paper states them
+    beside the answer, and FI converts nothing."""
     rows = [dict(m) for m in p.get("topic_map") or [] if isinstance(m, dict)]
     for ident, q in asked.items():
         row = answer[ident]
@@ -492,19 +506,20 @@ def _apply_answers(p: dict[str, Any], design: dict[str, Any], answer: dict[str, 
                 m["statistic"] = stat
             else:
                 m.pop("statistic", None)  # the answer is the value: an earlier entry's bias or sd no longer holds
-            m["by"] = _refined_by(design["protocol"], str(m.get("by") or ""), by)
+            before_by = str(m.get("by") or "")
+            m["by"] = _refined_by(design["protocol"], before_by, by)
+            refined = m["by"] != before_by  # the answer's own result (worked out from the plan's) is the one used in the end
             m.pop("unit_conflict", None)
-            if ident in (conflicts or {}):
-                m["unit_conflict"] = conflicts[ident]
-            elif gone and by == "none":
-                m["unit_conflict"] = _unit_reason(gone, True)  # the plan's result is in another unit than the question
-            elif gone and _same_unit(row.get("unit"), _unit_of(design, by, row.get("by_unit"))):
-                m["by"] = by  # ... and the answer names a result in the question's unit
-            elif gone:  # ... and the result the answer names has no unit stated or declared: neither is taken
-                m["unit_conflict"] = _unit_reason(gone, True)
+            if gone and not (ident in (conflicts or {}) or by == "none") and _same_unit(row.get("unit"), _unit_of(design, by, row.get("by_unit"))):
+                m["by"] = by  # the plan's result is in another unit and the answer names a result in the question's unit
+            elif ident in (conflicts or {}) or gone or refined:
+                note = _unit_gap(design, row, str(m["by"]), planned, by)
+                if note:
+                    m["unit_conflict"] = note
         if not mine and by and by != "none":
+            note = _unit_gap(design, row, by, planned, by) if ident in (conflicts or {}) else None
             rows.append({"item": ident, "by": by, "at": at, **({"statistic": stat} if stat else {}),
-                         **({"unit_conflict": conflicts[ident]} if ident in (conflicts or {}) else {})})
+                         **({"unit_conflict": note} if note else {})})
     return {**p, "topic_map": rows}
 
 
@@ -683,7 +698,7 @@ async def ask_parts(design: Any, ask: Callable[[str], Awaitable[str]], parse: Ca
                 if part == "comparisons":
                     value = {"comparisons": value if value is not None else [], "_derived": derived_ids,
                              "_labels": _contract.family_labels(current["protocol"])}
-                conflicts: dict[str, str] = {}  # answers: units that still differ at the last ask (not answered, with why)
+                conflicts: dict[str, tuple[str, str]] = {}  # answers: units that still differ at the last ask (stated in the paper)
                 problems = (_check_formulas(value, faults, current) if part == "formulas" else
                             _check_figures(value, faults, current) if part == "figures" else
                             _check_answers(value, faults, current, conflicts if record["asks"] >= MAX_ASKS else None)

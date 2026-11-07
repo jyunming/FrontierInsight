@@ -525,9 +525,35 @@ def _plan_problems(q: _Quest) -> list[dict[str, str]]:
             why = "the call failed" if rec.get("error") else "its answer could not be used after " + str(rec.get("asks")) + " asks"
             out.append(_problem("plan", f"the plan was not given {_cparts.PART_WORDS.get(part, part)} ({why}); it stays in the "
                                 "older form", "FI's plan check", "disclosed", ".fi/contract_parts.json"))
+    out.extend(_unit_problems(q))
     if q.pause.get("kind") == "plan":
         out.append(_problem("plan", q.pause.get("headline") or "the plan cannot be run as written", "FI's plan check",
                             "not fixed", ".fi/pause.json"))
+    return out
+
+
+def _unit_problems(q: _Quest) -> list[dict[str, str]]:
+    """A question the topic asks in one unit that the plan answers with a result in another (``unit_conflict`` on the plan's
+    ``topic_map`` entry), listed once. Status follows what the paper shows: the paper answers with that result and states both
+    units (``disclosed``); a result FI holds no value for, or a plan of the older form (the question printed as not answered),
+    is ``left out``."""
+    from . import paper_facts as _paper_facts
+
+    out: list[dict[str, str]] = []
+    try:
+        found = _paper_facts.unit_conflicts(q.root)
+    except Exception:  # noqa: BLE001 -- the report only reads; a record it cannot read leaves the row out
+        return out
+    for u in found:
+        name, gap = _one(u["name"], 80), u["conflict"]
+        if isinstance(gap, dict) and u["valued"]:
+            said = _paper_facts._unit_words(gap)
+            out.append(_problem("plan", f"the question \"{name}\" asks in {said[1]}; the plan's result for it is in {said[0]} and "
+                                "FI did not convert it", "FI's plan check", "disclosed", ".fi/contract_parts.json"))
+        else:
+            why = _one(gap, 120) if isinstance(gap, str) else "FI holds no value for the result the plan links to it"
+            out.append(_problem("plan", f"the question \"{name}\" is not answered in the paper ({why})", "FI's plan check",
+                                "left out", ".fi/contract_parts.json"))
     return out
 
 
