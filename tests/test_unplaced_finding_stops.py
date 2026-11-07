@@ -5,6 +5,7 @@ one of tests/test_shown_reach.py); no model is called."""
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 
@@ -169,3 +170,24 @@ def test_the_recorded_stop_still_names_the_finding_and_what_the_person_can_do(tm
     out = engine._shown_fault_stop(issue, long_how + "; " + _UNPLACED_FINDING)
     kept = _one_line(out["rationale"], 400)  # what the stop record keeps
     assert "helper_for_trial" in kept and "fix the code" in kept and "does not affect the results" in kept
+
+
+# ---- review pass 2: the reader's word places nothing with a frozen plan ---------------------------------------------------------
+def test_the_readers_quantity_word_never_leaves_out_a_result_the_test_does_not_read(tmp_path: Path) -> None:
+    # the test calls the trial and reads only a key the run never holds; the reader names an existing result (est_b) for it
+    src = "import simulate\n\n\ndef test_x():\n    r = simulate.trial({}, None)\n    assert r.get('zz_missing') is not None, 'wrong'\n"
+    engine = _engine(tmp_path)
+    out, record = _run(engine, src, file="simulate.py", function="trial", quantity="est_b", headline=("cover",))
+    assert out is None
+    gate = record["issues"]["F-1"]["at_gate"]
+    assert gate["outcome"] == "not_computed" and "est_b" not in gate["names"]  # the test's own key is what is not done
+    assert not (engine.quest_root / "needs" / "RESULT_CHECK.json").exists() or "est_b" not in json.loads(
+        (engine.quest_root / "needs" / "RESULT_CHECK.json").read_text(encoding="utf-8")).get("removed_quantities", [])
+
+
+def test_the_stop_of_a_placed_finding_also_leads_with_the_finding(tmp_path: Path) -> None:
+    # a long failing-test description must not push the finding's name out of the first 400 characters of the record
+    engine = _engine(tmp_path)
+    out = engine._shown_fault_stop({"id": "F-1", "file": "model.py", "function": "helper_for_trial", "text": "a made-up fault"},
+                                   "x" * 600)
+    assert out["rationale"][:400].count("helper_for_trial") == 1

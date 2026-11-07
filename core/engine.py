@@ -23506,9 +23506,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             why = (f"code finding ({_one_line((where + ': ' if where else '') + what, 90)}): {_UNPLACED_FINDING}. A fault that "
                    f"changes a reported number was shown by a failing test and never shown to be gone from the code: {detail}")
         else:
-            why = ("a fault in the code that changes a reported number was shown by a failing test, and was never shown to be "
-                   f"gone from the code that produced the results: {how} "
-                   f"({_one_line((where + ': ' if where else '') + what, 200)})")
+            why = (f"code finding ({_one_line((where + ': ' if where else '') + what, 90)}): a fault in the code that changes a "
+                   "reported number was shown by a failing test, and was never shown to be gone from the code that produced "
+                   f"the results: {how}")
         self._log.warning("[evidence_gate] %s; stopping without a paper", why)
         return {"verdict": "insufficient", "rationale": why, "gaps": [why], "stuck": True,
                 "stuck_reason": "shown_fault_open"}
