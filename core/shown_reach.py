@@ -4,7 +4,7 @@ reader's finding (the evidence gate, ``Engine._shown_fault_outcome``).
 The gate used to look the finding's quantity up in the run's printed results. FI's frame writes the results of a study in two
 places: the trial-level numbers the run prints, and what ``derive_<id>`` works out afterwards, which lives only in
 ``data/results/derived.json``. A finding about a derived result was therefore "not found" and stopped the paper, as did a
-finding about a figure, about a helper no result reaches, and a test that only checks that something is there. Each fact is
+finding about a figure and about a helper no result reaches. Each fact is
 now read where FI holds it:
 
 * the failing test says which function it calls (``derive_<id>``, ``figure_<id>``, the trial, a helper);
@@ -15,7 +15,7 @@ now read where FI holds it:
   of each figure;
 * the code itself (:mod:`core.code_reach`) says which result's function reaches a helper.
 
-The answer for one finding is an :class:`Effect`: a stop (the main result is shown wrong, or nothing would be left), or the
+The answer for one finding is an :class:`Effect`: a stop (the main result is among what the fault reaches, or nothing would be left), or the
 results to leave out, the plan items not done and the figures to drop. ``None`` when the records cannot place the finding:
 the gate then judges it as before.
 """
@@ -46,7 +46,6 @@ class Effect:
     probes: list[str] = field(default_factory=list)  # names the test looked for that the plan does not declare
     why: str = ""
     extra_keys: list[str] = field(default_factory=list)  # printed keys to leave out that no declared result owns
-    incomplete: bool = False  # what is left out is shown missing or incomplete by the test, not shown computed wrongly
     named: str = ""  # the quantity the finding is about, among the left-out ones
     cannot: bool = False  # FI cannot tell what the code reaches: the records place nothing
     empty: bool = False  # the stop is that leaving out what it changes leaves no result at all
@@ -59,7 +58,7 @@ def union(a: "Effect", b: "Effect") -> "Effect":
 
     return Effect(stop=a.stop or b.stop, left_out=both(a.left_out, b.left_out), not_done=both(a.not_done, b.not_done),
                   figures=both(a.figures, b.figures), plan_text=False, probes=both(a.probes, b.probes),
-                  why=a.why or b.why, extra_keys=both(a.extra_keys, b.extra_keys), incomplete=a.incomplete and b.incomplete,
+                  why=a.why or b.why, extra_keys=both(a.extra_keys, b.extra_keys),
                   named=a.named or b.named, empty=a.empty or b.empty)
 
 
@@ -77,62 +76,18 @@ def _norm(text: Any) -> str:
 @dataclass
 class TestShape:
     """What a finding's test source does, read from its syntax: the functions it calls, the string keys it reads from what it
-    got back (``exact``; ``prefix`` for an f-string key such as ``f"k_hat_{i}"``), and whether every assertion it makes is only
-    about what is there (``structural``)."""
+    got back (``exact``; ``prefix`` for an f-string key such as ``f"k_hat_{i}"``). What its assertions say (a value wrong, a
+    value missing) is not read: FI holds no record that tells them apart."""
 
     calls: set[str]
     exact: set[str]
     prefix: set[str]
-    structural: bool
     frame: set[str] = field(default_factory=set)  # constants of FI's analysis frame it reads (``derive.ROLES``)
-
-
-_PRESENCE_CALLS = frozenset({"isinstance", "hasattr", "callable"})
-_VALUE_CALLS = re.compile(r"^(assert|allclose|isclose|approx|isfinite|isnan|isinf)", re.IGNORECASE)
 
 
 def _call_name(node: ast.Call) -> str:
     f = node.func
     return f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
-
-
-def _about_presence(node: ast.AST, env: dict[str, ast.AST], depth: int = 0) -> bool:
-    """Whether an assertion's condition is only about what is there: ``is None`` / ``is not None``, a string ``in`` a mapping,
-    ``isinstance``/``hasattr``, joined by ``and``/``or``/``not``/``all``/``any``. A count compared with a count or a number
-    is not (a wrong number of rows is a wrong result, not a missing one), and neither is a comparison of a value the code
-    returned."""
-    if depth > 6:
-        return False
-    if isinstance(node, ast.BoolOp):
-        return all(_about_presence(v, env, depth + 1) for v in node.values)
-    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-        return _about_presence(node.operand, env, depth + 1)
-    if isinstance(node, ast.Constant):
-        return node.value is True
-    if isinstance(node, ast.Call):
-        name = _call_name(node)
-        if name in _PRESENCE_CALLS:
-            return True
-        if name in ("all", "any") and len(node.args) == 1:
-            arg = node.args[0]
-            if isinstance(arg, (ast.GeneratorExp, ast.ListComp, ast.SetComp)):
-                return _about_presence(arg.elt, env, depth + 1)
-        return False
-    if isinstance(node, ast.Name):
-        return node.id in env and _about_presence(env[node.id], env, depth + 1)
-    if isinstance(node, ast.Compare):
-        sides = [node.left, *node.comparators]
-        for op, left, right in zip(node.ops, sides, sides[1:]):
-            if isinstance(op, (ast.Is, ast.IsNot)):
-                if not any(isinstance(s, ast.Constant) and s.value is None for s in (left, right)):
-                    return False
-            elif isinstance(op, (ast.In, ast.NotIn)):
-                if not (isinstance(left, (ast.JoinedStr)) or (isinstance(left, ast.Constant) and isinstance(left.value, str))):
-                    return False
-            else:
-                return False
-        return True
-    return False
 
 
 def read_test(src: str) -> TestShape | None:
@@ -144,9 +99,6 @@ def read_test(src: str) -> TestShape | None:
     calls: set[str] = set()
     exact: set[str] = set()
     prefix: set[str] = set()
-    env: dict[str, ast.AST] = {}
-    asserts: list[ast.Assert] = []
-    value_call = False
 
     def key(node: ast.AST) -> None:
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -166,19 +118,12 @@ def read_test(src: str) -> TestShape | None:
             name = _call_name(n)
             if name:
                 calls.add(name)
-            if _VALUE_CALLS.match(name):
-                value_call = True
             if isinstance(n.func, ast.Attribute) and n.func.attr in ("get", "pop") and n.args:
                 key(n.args[0])
         elif isinstance(n, ast.Subscript):
             key(n.slice)
         elif isinstance(n, ast.Compare) and any(isinstance(o, (ast.In, ast.NotIn)) for o in n.ops):
             key(n.left)
-        elif isinstance(n, ast.Assert):
-            asserts.append(n)
-        elif isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
-            env[n.targets[0].id] = n.value
-    structural = bool(asserts) and not value_call and all(_about_presence(a.test, env) for a in asserts)
     from . import analysis_frame as _frame
 
     constants = {n for n in _frame.FRAME_NAMES if n.isupper()}
@@ -186,7 +131,7 @@ def read_test(src: str) -> TestShape | None:
     frame |= {a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) for a in n.names if a.name in constants}
     # a body named without being called (`derive.figure_fig1.__code__`) is still the body the test is about
     calls |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr.startswith(("derive_", "figure_"))}
-    return TestShape(calls, exact, prefix, structural, frame)
+    return TestShape(calls, exact, prefix, frame)
 
 
 # ---- the records ------------------------------------------------------------------------------------------------------------
@@ -442,19 +387,6 @@ class Reach:
                               | ({last[len("figure_"):]} if last.startswith("figure_") else set()))
         entries = frozenset(self._trial_entries())
         trial_call = bool(calls & entries) or last in entries
-        if shape.structural and not (figure_calls and not derive_calls):
-            # An assertion only about what is there (a key, `is not None`, `isinstance`) shows something missing, never a wrong
-            # number: what the test is about is left out (or stops the paper) when the run holds a value for it.
-            named = [self.by_norm[_norm(x)] for x in derive_calls if _norm(x) in self.by_norm]
-            names = named or _code_review.quantity_names(record, issue)[:1] or [str(issue.get("quantity") or "?")]
-            # The results the test itself reads (not only the reader's name for the quantity) are what it shows missing.
-            read = self._test_ids(shape) | {self.by_norm[_norm(x)] for x in derive_calls if _norm(x) in self.by_norm}
-            held = {i for i in read if self._holds(i)}
-            if held:
-                eff = self._judge(Effect(incomplete=True), held, "its test only checks that something is there")
-            else:
-                eff = Effect(not_done=names, why="its test only checks that something is there")
-            return self._settle(eff, record, issue)
         parts: list[Effect | None] = []
         if derive_calls or figure_calls:
             parts.append(self._derive_effect(derive_calls, figure_calls))
@@ -476,7 +408,12 @@ class Reach:
             parts.append(self._helper_effect(file, function))
         known = [p for p in parts if p is not None]
         if not known:
-            return None
+            # No function of the study placed it: a key the test reads literally that is a declared result the run holds is the
+            # result the test is about (the key is the plan's own name, not a reading of what the asserts mean).
+            held = {i for i in self._test_ids(shape) if self._holds(i)}
+            if not held:
+                return None
+            known = [self._judge(Effect(), held, "its test reads " + ", ".join(sorted(held)))]
         merged = self._merge(known)
         return None if merged is None else self._settle(merged, record, issue)
 
@@ -503,13 +440,19 @@ class Reach:
                 extra.append(f"{owner}_coverage")
                 if _norm(n) in self.estimate:
                     extra.append(f"{owner}_bias")
-        out = Effect(incomplete=False)
+        out = Effect()
         if touched:
             out = self._judge(out, touched, "the study run again with a repair reports other numbers for " + ", ".join(sorted(touched))[:120])
         else:
             out.why = "the study run again with a repair reports other numbers for " + ", ".join(extra)[:120]
         out.extra_keys = sorted(set(extra))
         return out
+
+    def changed_keys(self, metrics: list[str]) -> set[str]:
+        """The printed keys whose recorded value a rerun showed moved: ``metrics`` are the metric names of the rerun record's own
+        changed keys (``rerun_check.metric_of``), each as the declared result's id when it is one. Nothing is added to them (not
+        the interval, coverage or bias keys of the result, not the results worked out from it): the record says nothing of those."""
+        return {self.by_norm.get(_norm(n), n) for n in metrics if n}
 
     def _figure_used_by(self, fn: str) -> Effect:
         """The results whose function calls the figure's function ``fn`` by name (a figure's function a result is worked out
@@ -570,12 +513,11 @@ class Reach:
             if not held and not keys:
                 keep.append(n)
                 continue
-            eff.incomplete = True
             touched |= held
             eff.named = eff.named or (sorted(held)[0] if held else n)
             if keys - {k for i in held for k in self.printed_keys([i], self.result)}:
                 if not held and _code_review.about_headline(record, issue, self.result, self.headline_raw):
-                    eff.stop = f"`{n}` is shown missing or incomplete, and it may be the main result"
+                    eff.stop = f"a test of the code failed on `{n}`, which the run holds a value for and may be the main result"
                     return eff
                 eff.extra_keys = sorted({*eff.extra_keys, *keys})
         eff.not_done = keep
@@ -635,7 +577,7 @@ class Reach:
         return out
 
     def _test_ids(self, shape: TestShape) -> set[str]:
-        """The declared results the keys a test reads stand for."""
+        """The declared results the string keys a test reads literally stand for (``exact``; ``prefix`` for an f-string key)."""
         out: set[str] = set()
         for name in shape.exact:
             out |= self._key_ids(name, False) if _norm(name) else set()

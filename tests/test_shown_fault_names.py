@@ -104,7 +104,7 @@ def test_r8_does_not_stop_and_the_paper_states_what_is_left_out(tmp_path: Path, 
     assert checked["removed_values"]["Ea_lnA_empirical_correlation"]
     assert "Do NOT report" in checked["say"]
     record = disclosure.run_record(root)
-    assert "computes `Ea_lnA_empirical_correlation` wrongly" in record
+    assert "failed for `Ea_lnA_empirical_correlation`; FI did not establish whether the value is wrong or missing" in record
     # the gate run again on the same files adds nothing
     asyncio.run(eng._shown_fault_verdict(  # type: ignore[arg-type]
         {"exec_result": {"returncode": 0}, "result_json": _load("kinetics_r8", tmp_path / "again")[2]}))

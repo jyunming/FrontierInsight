@@ -150,6 +150,119 @@ def requirements(design: dict[str, Any] | None, protocol: dict[str, Any] | None)
     return out
 
 
+_SENTENCE_END_RE = re.compile(r"(?<=[.;])\s+(?=[A-Z])")
+_FORMULA_RE = re.compile(r"[=/*^+(|]|\s-\s")  # written as a formula, not as words
+
+
+def leading_id(name: Any) -> str:
+    """The identifier a plan entry begins with (``rate`` in ``rate = (a - b)/b``), else ``""``."""
+    m = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)", str(name or ""))
+    return m.group(1) if m else ""
+
+
+def _formula_text(text: str) -> str:
+    """A formula's text for comparison: lower case, no spaces, with its operators (``a+b`` and ``a-b`` differ)."""
+    return re.sub(r"\s+", "", text.lower().replace("`", ""))
+
+
+def plan_defines_twice(design: dict[str, Any] | None, protocol: dict[str, Any] | None) -> dict[str, dict[str, str]]:
+    """The names the plan appears to define twice: a dependent variable written ``<id> = <formula>`` whose id is also a metric
+    of the protocol, where the formula's text does not occur in the metric's definition (its first sentence that is written as
+    a formula). ``{normalised id: {"id", "dependent", "metric"}}``.
+
+    This is a comparison of TEXT, read from the plan's own structure; it does not know whether two formulas mean the same
+    (``b+a`` against ``a+b``, or two names for one quantity, are told apart), and it does not read a second definition that is
+    only in the method's prose. So it is never a reason to keep or to take out a value; it only changes what is said about
+    the name and when the plan counts as completed."""
+    design = design if isinstance(design, dict) else {}
+    variables = design.get("variables") if isinstance(design.get("variables"), dict) else {}
+    metrics = {}
+    for m in (protocol or {}).get("metrics") if isinstance((protocol or {}).get("metrics"), list) else []:
+        if isinstance(m, dict) and _text(m.get("id")) and _text(m.get("estimand")):
+            metrics.setdefault(_norm(m["id"]), (_text(m["id"]), _text(m["estimand"])))
+    out: dict[str, dict[str, str]] = {}
+    for entry in variables.get("dependent") if isinstance(variables.get("dependent"), list) else []:
+        ident = leading_id(entry)
+        key = _norm(ident)
+        written = _text(entry)[len(_text(ident)):]  # what follows the id: "= <formula>"
+        if key not in metrics or key in out or not _FORMULA_RE.search(written):
+            continue
+        # The metric's own definition: the first sentence written as a formula (later ones may quote other formulas to say they are not it).
+        first = next((x for x in _SENTENCE_END_RE.split(metrics[key][1]) if _FORMULA_RE.search(x)), "")
+        formula = _formula_text(written.lstrip(" =:"))
+        if first and formula and formula not in _formula_text(first):
+            out[key] = {"id": metrics[key][0], "dependent": _text(entry), "metric": metrics[key][1]}
+    return out
+
+
+def double_definition_gaps(design: dict[str, Any] | None, protocol: dict[str, Any] | None = None) -> list[str]:
+    """One plain sentence per name ``design`` still appears to define twice (:func:`plan_defines_twice`), for the check that
+    the plan's model resolved a contradiction: complete only when none is left. ``protocol`` defaults to the design's own."""
+    if protocol is None and isinstance(design, dict):
+        protocol = design.get("protocol") if isinstance(design.get("protocol"), dict) else None
+    return [f"{v['id']} is defined as `{v['dependent']}` and as `{v['metric']}`" for v in plan_defines_twice(design, protocol).values()]
+
+
+def plan_defined_twice(quest_root: Path) -> dict[str, dict[str, str]]:
+    """:func:`plan_defines_twice` for a quest: the plan (``plan.md``) against the frozen protocol, else the plan's own
+    protocol. ``{}`` when either cannot be read."""
+    from . import frozen_protocol as _frozen
+    from . import plan as _plan
+
+    try:
+        design = _plan.parse(_plan.plan_path(Path(quest_root)).read_text(encoding="utf-8")).design
+        protocol = _frozen.protocol_of(Path(quest_root))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(design, dict):
+        return {}
+    if protocol is None:
+        protocol = design.get("protocol") if isinstance(design.get("protocol"), dict) else None
+    return plan_defines_twice(design, protocol)
+
+
+def is_defined_twice(name: Any, twice: dict[str, dict[str, str]]) -> bool:
+    """Whether the quantity ``name`` (a plan name, possibly written with its formula) is one of ``twice``."""
+    return bool(twice) and _norm(leading_id(name)) in twice
+
+
+def passing_checks(quest_root: Path, name: Any) -> list[str]:
+    """The names of the plan's known-answer checks that FI itself measured and that passed (``needs/ORACLE_CHECK.json``),
+    whose measure is a formula that reads the quantity ``name`` (the plan's name for it, compared exactly, is one of the names FI
+    evaluates in the check's measure, ``oracle_forms.names``; a measure that is not a formula links to no quantity), and that
+    the second model's reading of the code does not flag. ``[]`` when there is none: FI then holds no check of the value."""
+    from . import frozen_protocol as _frozen
+    from . import oracle_forms as _forms
+
+    root = Path(quest_root)
+    try:
+        record = json.loads((root / "needs" / "ORACLE_CHECK.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    passed = set(_oracle.engine_passed(_oracle.last_judged(record)))
+    protocol = _frozen.protocol_of(root)
+    from . import shown_reach as _reach
+
+    # the executor reads a measure as ONE returned key first (trial_runner._check_from), and parses it only when it is none
+    returned = set(_reach._trial_names(root)) | set(declared_names(None, protocol))
+    ident = str(name or "").strip() if str(name or "").strip() in returned else leading_id(name)
+    if not passed or not ident:
+        return []
+
+    def reads_it(measure: Any) -> bool:
+        text = str(measure or "").strip()
+        if text in returned:
+            return text == ident
+        try:
+            return ident in _forms.names(text, across=True)
+        except Exception:  # noqa: BLE001 -- a measure that cannot be read links to nothing
+            return False
+
+    reads = [str(o["name"]) for o in _oracle.declared(protocol) if str(o["name"]) in passed and reads_it(o.get("measure"))]
+    flagged = flagged_checks(root, root / "code", reads) if reads else {}
+    return [n for n in reads if n not in flagged]
+
+
 def _settings_of(protocol: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     """``(grid, in_each_run)`` of the plan: the protocol's own, else those of its search (``optimisation``). The one place
     both the plan view (:func:`_raw_sections`) and the requirements (:func:`requirements`) take them from."""

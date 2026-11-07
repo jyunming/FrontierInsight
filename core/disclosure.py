@@ -444,13 +444,13 @@ _UNTESTED_ID = re.compile(r"\bequation\s+(\S+?)\s+is not tested( at all)?\b", re
 
 
 def _code_faults_sentence(quest_root: Path) -> str:
-    """The quantities FI left out because a test it ran on the code that produced the results showed them computed
-    wrongly, and the plan's quantities the code does not compute (the evidence gate's record of each, in
+    """The quantities FI left out because a test it ran on the code that produced the results failed (said to change the
+    reported numbers only when the study run again with a repair reported other numbers), and the plan's quantities the code does not compute (the evidence gate's record of each, in
     ``.fi/code_review.json``)."""
     record = _read_json(quest_root / ".fi" / "code_review.json")
     issues = record.get("issues") if isinstance(record, dict) and isinstance(record.get("issues"), dict) else {}
-    wrong: list[str] = []
-    incomplete: list[str] = []
+    changed: list[str] = []
+    unknown: list[str] = []
     missing: list[str] = []
     about_plan: list[str] = []
     same_numbers: list[str] = []
@@ -466,7 +466,7 @@ def _code_faults_sentence(quest_root: Path) -> str:
             continue
         if gate.get("outcome") == "left_out" and str(gate.get("quantity") or "").strip():
             name = str(gate["quantity"]).strip()
-            bucket = incomplete if gate.get("incomplete") else wrong
+            bucket = changed if gate.get("rerun") == "changed" else unknown
             if name not in bucket:
                 bucket.append(name)
         elif gate.get("outcome") == "not_computed":
@@ -474,14 +474,15 @@ def _code_faults_sentence(quest_root: Path) -> str:
                 if str(n).strip() and str(n).strip() not in missing:
                     missing.append(str(n).strip())
     said = []
-    if wrong:
-        said.append("Tests FI ran on the code that produced these results showed it computes " + _names(wrong)
-                    + " wrongly, so " + ("this quantity is" if len(wrong) == 1 else "these quantities are")
+    if changed:
+        said.append("Tests FI ran on the code that produced these results failed for " + _names(changed)
+                    + ", and a repair that passes them changes the reported numbers, so "
+                    + ("this quantity is" if len(changed) == 1 else "these quantities are")
                     + " left out of the results reported here.")
-    if incomplete:
-        said.append("Tests FI ran on the code that produced these results showed " + _names(incomplete)
-                    + (" is" if len(incomplete) == 1 else " are") + " missing or incomplete, so "
-                    + ("this quantity is" if len(incomplete) == 1 else "these quantities are")
+    if unknown:
+        said.append("Tests FI ran on the code that produced these results failed for " + _names(unknown)
+                    + "; FI did not establish whether the value is wrong or missing, so "
+                    + ("this quantity is" if len(unknown) == 1 else "these quantities are")
                     + " left out of the results reported here.")
     if missing:
         said.append("The code does not compute " + _names(missing) + ", which the plan asks for.")

@@ -337,7 +337,7 @@ async def test_a_fault_in_another_quantity_is_left_out_and_the_paper_says_so(tmp
     checked = json.loads((engine.quest_root / "needs" / "RESULT_CHECK.json").read_text(encoding="utf-8"))
     assert checked["removed_quantities"] == ["dose"] and checked["removed_values"] == {"dose": [60.0]}
     assert "a test FI ran" in checked["removed_why"]["dose"]
-    assert "computes `dose` wrongly" in disclosure.run_record(engine.quest_root)
+    assert "failed for `dose`; FI did not establish whether the value is wrong or missing" in disclosure.run_record(engine.quest_root)
     issues = quality_report._issue_rows(code_review.load(engine.quest_root))
     assert issues[0]["at_gate"]["outcome"] == "left_out"
 
@@ -430,7 +430,7 @@ async def test_a_left_out_quantity_is_not_said_once_it_is_no_longer_flagged(tmp_
     engine = _engine(tmp_path)
     _record(engine, _issue(quantity="dose"))
     assert await engine._shown_fault_verdict(TWO_RESULTS) is None
-    assert "computes `dose` wrongly" in disclosure.run_record(engine.quest_root)
+    assert "failed for `dose`; FI did not establish whether the value is wrong or missing" in disclosure.run_record(engine.quest_root)
     record = code_review.load(engine.quest_root)
     record["issues"]["F-1"]["outcome"] = cf.FIXED  # a later repair fixed it
     code_review.save(engine.quest_root, record)

@@ -14148,7 +14148,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         protocol_now = self._protocol_block(state)
         values = _pairs.plan_values(protocol_now if isinstance(protocol_now, dict) else None)
 
+        twice_before = bool(_code_review.double_definition_gaps(design))  # the design's own protocol, as in lacks() below
+
         def lacks(_now: Any) -> list[str]:
+            if twice_before:  # complete when the name defined two ways is defined once (FI's own fact, not a changed file)
+                return _code_review.double_definition_gaps(_now if isinstance(_now, dict) else None)
             try:
                 changed = _plan.sha256(_plan.plan_path(self.quest_root).read_text(encoding="utf-8")) != started["sha"]
             except OSError:
@@ -23190,7 +23194,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         may be about the main quantity by its names or its keys (:func:`core.code_review.about_headline`).
 
         With ``reach`` (FI's records of the quest, :mod:`core.shown_reach`), a fault that test places by the function it
-        calls (a result worked out afterwards, a figure, a helper) or by what the test asserts is judged from those
+        calls (a result worked out afterwards, a figure, a helper) is judged from those
         records first: it stops only when the main result is among what it changes or nothing would be left; the rest
         is left out, not done or kept in the quality report. A finding the records cannot place is judged as above."""
         from . import result_checks as _result_checks
@@ -23200,7 +23204,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         not_done: list[tuple[dict[str, Any], str, list[str]]] = []
         figures: list[tuple[dict[str, Any], str, list[str]]] = []
         about_plan: list[dict[str, Any]] = []
-        incomplete: set[str] = set()  # left out because a test showed the value missing or incomplete, not computed wrongly
+        changed: dict[str, set[str]] = {}  # per finding: the printed keys the study run again with a repair of it showed changed
         unchanged: list[dict[str, Any]] = []
         moved_checks: dict[str, bool] = {}  # unchanged because the rerun moved only check measures -> its draws changed
         for issue, how in verdicts:
@@ -23222,13 +23226,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     moved_checks[str(issue.get("id"))] = bool(getattr(rerun, "redrawn", False))
                     continue
                 rerun = None  # a finding that a quantity is not computed, or about a figure, is placed as before a rerun
-            # A fault in a function that makes one declared result, one figure or a helper they use, or a test that only
-            # checks that something is there, is placed from FI's records (core/shown_reach.py), not from the finding's words.
+            # A fault in a function that makes one declared result, one figure or a helper they use is placed from FI's
+            # records (core/shown_reach.py), not from the finding's words.
+            rerun_keys: set[str] = set()  # the keys among what is left out whose recorded value the rerun shows changed
             try:
                 if rerun is not None and rerun.status == "changed" and reach is not None:
                     # The numbers the rerun showed changed are what is left out, and the main result among them stops the paper.
                     how = how + "; the study run again with a repair of it reports other numbers for " + ", ".join(rerun.metrics)[:160]
                     placed = reach.effect_of_changes(rerun.metrics)
+                    # Only these keys were shown to change; what else is left out (results worked out from them, what the
+                    # finding's test reaches) is left out without that having been shown.
+                    rerun_keys = reach.changed_keys([m for m in (_rerun_check.metric_of(k)[0] for k in rerun.keys) if m])
                     if rerun.unplaced or "failed trials" in rerun.metrics:
                         # A changed number that belongs to no result FI can name has not been cleared by the rerun: the finding
                         # is also placed as it was before a rerun (what its test reaches), in addition to the results that moved
@@ -23238,6 +23246,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                         # the numbers that moved leave out no result and no key of the results: never delivered for that; the
                         # finding is judged as before a rerun (what its own names and the results' keys say)
                         placed = None
+                    if placed is None:
+                        rerun_keys = set()
                 elif reach is not None and not _code_review.missing_quantities(record, issue):
                     # No rerun to say (it could not be made): leave out what the records place, and stop only for an empty paper.
                     keep_rule, reach.headline_stops = reach.headline_stops, rerun is None
@@ -23271,8 +23281,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     continue
                 if placed_keys:
                     left_out.append((issue, how, placed_keys, placed_named or None))
-                    if placed.incomplete:
-                        incomplete.add(str(issue.get("id")))
+                    changed[str(issue.get("id"))] = rerun_keys & set(placed_keys)
                 files = [reach.figure_files.get(f) or "" for f in placed.figures]
                 if any(files):
                     figures.append((issue, how, [f for f in files if f]))
@@ -23359,16 +23368,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 recorded.add(str(issue.get("id")))
                 saved["at_gate"] = {"outcome": outcome, "how": how, "keys" if outcome == "left_out" else "names": names,
                                     "quantity": named or (_code_review.quantity_names(record, issue) or names)[0]}
-                if str(issue.get("id")) in incomplete:
-                    saved["at_gate"]["incomplete"] = True
+                if _shown_reach._norm(saved["at_gate"]["quantity"]) in {_shown_reach._norm(k) for k in changed.get(str(issue.get("id")), ())}:
+                    saved["at_gate"]["rerun"] = "changed"
         if left_out or not_done or figures:
             _code_review.save(self.quest_root, record)
+            # per finding: a key is said changed only for the finding whose own rerun moved it
+            changed_by_quantity = {q or (_code_review.quantity_names(record, i) or k)[0]: changed.get(str(i.get("id")), set())
+                                   for i, _h, k, q in left_out}
             self._leave_out_shown_faults(
                 [(q or (_code_review.quantity_names(record, i) or k)[0], k, h) for i, h, k, q in left_out],
                 [(n, h) for _i, h, names in not_done for n in names], result,
                 figures=[(f, h) for _i, h, files in figures for f in files],
-                incomplete={q or (_code_review.quantity_names(record, i) or k)[0] for i, _h, k, q in left_out
-                            if str(i.get("id")) in incomplete})
+                changed=changed_by_quantity)
         return None
 
     @staticmethod
