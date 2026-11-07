@@ -17299,6 +17299,36 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return None
         return record if isinstance(record, dict) else None
 
+    async def _rejudge_oracles_on_delivered_run(self, state: QuestState, seed_path: Path) -> list[str]:
+        """After the main run: each known-answer check the gate's short side run could not decide for lack of time is judged
+        again on the delivered run's own trials (``raw/trials.json``), when its case is a setting of that run and the code
+        is the code that measured it (core/oracle_check.py::rejudge_on_delivered). The names judged again; the record is
+        rewritten only when one is."""
+        record = self._oracle_record_read()
+        if not record or record.get("status") != _accepted.WENT_ON:
+            return []
+        protocol = self._protocol_block(state)
+        if not protocol:
+            return []
+        path = self.quest_root / _trial_runner.RAW_DIRNAME / _trial_runner.SUMMARY_NAME
+
+        def read() -> Any:
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return None
+
+        trials = await asyncio.to_thread(read)
+        new, names = _oracle.rejudge_on_delivered(record, trials, protocol, self._measuring_code_version(seed_path))
+        if new is None:
+            return []
+        self._oracle_record(new)
+        for n in names:  # no longer set aside: the delivered run decided it
+            self._oracle_undecided.discard(n)
+            self._oracle_set_aside.pop(n, None)
+        self._log.info("[oracle] judged again on the delivered run's own trials: %s", ", ".join(names))
+        return names
+
     def _judged_checks(self) -> list[dict[str, Any]]:
         """The engine's verdicts on the plan's checks of the last gate, with the checks that a second model's reading of the
         code flags marked (``core/code_review.py:flagged_checks``): the one list the note to the analysis and the criteria read."""
@@ -20073,6 +20103,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             pass
         patch["run_manifest_failures"] = manifest_attempts_next
         patch["run_manifest_analysis_only"] = manifest_analysis_only
+        if manifest_status in ("ok", "warned", "extended_by_person") and not failed_script:
+            await self._rejudge_oracles_on_delivered_run(state, seed_path)
         run_context = await self._attempt_context({**state, **patch}, kind="after_run")
 
         def _run_record() -> dict[str, Any] | None:
