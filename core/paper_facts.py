@@ -44,6 +44,7 @@ flagged. So the writer no longer types these facts at all:
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass
@@ -59,6 +60,8 @@ from . import paper_values as _values
 from . import run_facts as _run_facts
 from . import run_manifest as _run_manifest
 from . import typed_numbers as _typed
+
+_LOG = logging.getLogger(__name__)
 
 HIT = "paper_record_mismatch"
 RECORD = Path(".fi") / "paper_record_check.json"
@@ -1624,7 +1627,16 @@ def _reach(root: Path) -> Any:
 
     try:
         protocol = plan_protocol(root)
-        return _shown_reach.Reach(root, protocol, []) if protocol else None
+        if not protocol:
+            return None
+        # a plan in the older form lists its results too: the plan's own result ids are what the reach places findings on
+        from . import contract as _contract
+
+        try:
+            declared = [r.id for r in _contract.from_design({"protocol": protocol}).results]
+        except Exception:  # noqa: BLE001 -- a plan that cannot be read declares none
+            declared = []
+        return _shown_reach.Reach(root, protocol, [], declared)
     except Exception:  # noqa: BLE001 -- no plan or code to read: no result is placed
         return None
 
@@ -1653,11 +1665,13 @@ def touched_sentences(quest_root: Path | str, paper_md: str) -> dict[str, str]:
         from . import code_review as _code_review
 
         reach = _reach(root)
-        touched = _code_review.touched_results(root, root / "code", reach.touched_by) if reach is not None else {}
+        touched = (_code_review.touched_results(root, root / "code", reach.touched_by, reach.ids)
+                   if reach is not None else {})
         record = _read(root, ".fi/code_review.json")
         issues = record.get("issues") if isinstance(record, dict) and isinstance(record.get("issues"), dict) else {}
         names = {fid: _code_review._plain_text((issues.get(fid) or {}).get("text")) for fid in touched}
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 -- the paper still renders, without the sentences; the failure is on the log
+        _LOG.warning("[paper_facts] FI could not place the open code findings on the results (%s: %s)", type(exc).__name__, exc)
         return {}
     out: dict[str, str] = {}
     for fid, ids in touched.items():
@@ -2542,7 +2556,9 @@ def keep_check(quest_root: Path | str, hits: list[str], paper_md: str, *, untrac
         # an open problem in the code is met when the paper carries FI's sentence for it (:func:`touched_sentences`)
         said = touched_sentences(quest_root, paper_md)
         block = chr(10).join(m.group(2) for m in _MARK.finditer(paper_md or "") if m.group(1) == "run_facts")
-        unmet = [{"kind": i.kind, "id": i.id, "name": i.name, "text": i.sentence}
+        # ``named``: whether FI could name a result the paper prints that the finding changes (else no sentence can be written)
+        unmet = [{"kind": i.kind, "id": i.id, "name": i.name, "text": i.sentence,
+                  **({"named": i.key in said} if i.kind == CODE_FINDING else {})}
                  for i in required_items(quest_root)
                  if i.kind == CODE_FINDING and not (i.key in said and said[i.key] in block)
                  or i.kind != CODE_FINDING and (not in_paper or i.kind == FIGURE_LEFT_OUT and i.sentence not in paper_md)]

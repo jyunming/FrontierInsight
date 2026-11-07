@@ -30,12 +30,13 @@ FILES = {
 }
 
 
-def _quest(root: Path, issues: dict[str, Any]) -> Path:
+def _quest(root: Path, issues: dict[str, Any], protocol: dict[str, Any] | None = None, problems: list[dict[str, Any]] | None = None) -> Path:
+    protocol = protocol or PROTOCOL
     for rel, text in FILES.items():
         (root / "code" / rel).parent.mkdir(parents=True, exist_ok=True)
         (root / "code" / rel).write_text(text, encoding="utf-8")
     (root / "needs").mkdir(parents=True, exist_ok=True)
-    record = {"schema": frozen_protocol.FROZEN_SCHEMA, "protocol": PROTOCOL, "sha256": frozen_protocol.sha256(PROTOCOL)}
+    record = {"schema": frozen_protocol.FROZEN_SCHEMA, "protocol": protocol, "sha256": frozen_protocol.sha256(protocol)}
     (root / "needs" / "FROZEN_PROTOCOL.json").write_text(json.dumps(record), encoding="utf-8")
     (root / "raw").mkdir(exist_ok=True)
     metrics = {k: {"values": [1.0], "trials": [0]} for k in ("est_a", "est_b", "se_a", "lo_a", "hi_a")}
@@ -47,7 +48,7 @@ def _quest(root: Path, issues: dict[str, Any]) -> Path:
     (root / "data" / "results").mkdir(parents=True, exist_ok=True)
     (root / "data" / "results" / "derived.json").write_text(json.dumps(derived), encoding="utf-8")
     (root / ".fi").mkdir(exist_ok=True)
-    (root / ".fi" / "code_review.json").write_text(json.dumps({"issues": issues}), encoding="utf-8")
+    (root / ".fi" / "code_review.json").write_text(json.dumps({"issues": issues, "problems": problems or []}), encoding="utf-8")
     return root
 
 
@@ -65,7 +66,7 @@ def _found(*flagged: dict[str, Any], **other: list[Any]) -> dict[str, Any]:
 def _touched(root: Path, monkeypatch: pytest.MonkeyPatch, *flagged: dict[str, Any], **other: list[Any]) -> dict[str, list[str]]:
     monkeypatch.setattr(code_review, "open_findings", lambda q, c: _found(*flagged, **other))
     reach = shown_reach.Reach(root, PROTOCOL, [])
-    return code_review.touched_results(root, root / "code", reach.touched_by)
+    return code_review.touched_results(root, root / "code", reach.touched_by, reach.ids)
 
 
 def test_a_finding_marks_the_results_its_function_reaches_not_the_words_it_uses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -140,8 +141,9 @@ def test_the_sentence_is_in_the_rendered_paper_and_the_finding_is_met(tmp_path: 
     kept = paper_facts.kept_check(root)
     assert [u["id"] for u in kept["unmet_items"] if u["kind"] == paper_facts.CODE_FINDING] == ["finding-f2"]
     md = chr(10).join(quality_report._paper_record_lines({"paper_check": {"unmet_items": kept["unmet_items"]}}))
-    lines = [ln for ln in md.splitlines() if ln.startswith("- Not in the paper's Limitations")]
-    assert len(lines) == 1 and "`finding-f2`" in lines[0]
+    lines = [ln for ln in md.splitlines() if "`finding-f2`" in ln]
+    assert len(lines) == 1 and lines[0].startswith("- FI could not name a printed result this finding changes")
+    assert "Limitations" not in lines[0]
 
 
 def test_the_sentence_counts_only_inside_fi_s_run_block(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -150,3 +152,67 @@ def test_the_sentence_counts_only_inside_fi_s_run_block(tmp_path: Path, monkeypa
     stray = "# P\n\n## Methods\nWe did it.\n\n> " + sentence + "\n\n## Results\nThe value is {{v:cover:mean_ci @ n=all}}.\n"
     paper_facts.keep_check(root, [], stray)
     assert "finding-f1" in {u["id"] for u in paper_facts.kept_check(root)["unmet_items"]}
+
+
+OLDER = {k: v for k, v in PROTOCOL.items() if k != "form"}
+OLDER_PAPER = "# P\n\n## Methods\n{{run_facts}}\n\n## Results\nThe value is {{v:est_b @ n=all}}.\n"
+
+
+def _older(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flagged: list[dict[str, Any]], problems: list[dict[str, Any]]) -> Path:
+    issues = {v["fid"]: {"changes_result": True, "text": v["text"]} for v in flagged}
+    root = _quest(tmp_path, issues, OLDER, problems)
+    monkeypatch.setattr(code_review, "open_findings", lambda q, c: _found(*flagged))
+    return root
+
+
+def test_a_plan_in_the_older_form_still_places_a_finding_in_a_function_the_trial_calls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _older(tmp_path, monkeypatch, [_v("f1", "the helper of the trial is off", "model.py", "helper_for_trial", changes_result=True)], [])
+    assert shown_reach.Reach(root, OLDER, []).ids == [], "the reach alone holds no ids for this form"
+    assert paper_facts._reach(root).ids, "the paper's reading passes the plan's own result ids"
+    text = paper_facts.run_facts_text(root, paper_md=OLDER_PAPER)
+    assert "comes from code a review flagged" in text and "helper of the trial is off" in text
+
+
+def test_a_finding_with_no_function_on_a_metric_problem_names_that_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    flagged = [_v("m1", "the second quantity is reported without its reference", changes_result=True)]
+    problems = [{"id": "R2", "fid": "m1", "kind": "metric", "name": "est_b", "text": "the result reports est_b"}]
+    root = _older(tmp_path, monkeypatch, flagged, problems)
+    assert paper_facts.touched_sentences(root, OLDER_PAPER).keys() == {"m1"}
+    assert "reported without its reference" in paper_facts.run_facts_text(root, paper_md=OLDER_PAPER)
+    other = [{"id": "R2", "fid": "m1", "kind": "metric", "name": "not_a_result", "text": "x"}]
+    root2 = _older(tmp_path / "b", monkeypatch, flagged, other)
+    assert paper_facts.touched_sentences(root2, OLDER_PAPER) == {}, "a metric the plan does not declare places nothing"
+
+
+def test_a_finding_on_a_dependent_variable_stays_unplaced_and_quality_says_so(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    flagged = [_v("d1", "the spread against the reference is missing", changes_result=True)]
+    problems = [{"id": "R1", "fid": "d1", "kind": "dependent variable", "name": "est_b", "text": "the dependent variable est_b"}]
+    root = _older(tmp_path, monkeypatch, flagged, problems)
+    assert paper_facts.touched_sentences(root, OLDER_PAPER) == {}
+    out = paper_facts.render(OLDER_PAPER, root).text
+    paper_facts.keep_check(root, [], out)
+    kept = paper_facts.kept_check(root)
+    md = chr(10).join(quality_report._paper_record_lines({"paper_check": kept}))
+    assert "FI could not name a printed result this finding changes" in md and "Limitations" not in md
+
+
+def test_a_sentence_FI_can_write_but_the_paper_lacks_is_said_plainly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _printed(tmp_path, monkeypatch)
+    paper_facts.keep_check(root, [], "# P\n\n## Methods\nWe did it.\n\n## Results\nThe value is {{v:cover:mean_ci @ n=all}}.\n")
+    kept = paper_facts.kept_check(root)
+    md = chr(10).join(quality_report._paper_record_lines({"paper_check": kept}))
+    line = next(ln for ln in md.splitlines() if "`finding-f1`" in ln)
+    assert line.startswith("- FI's sentence on the results it may change is not in the paper: ")
+    assert "Limitations" not in md.split("Where the paper still disagrees")[1]
+
+
+def test_an_error_while_placing_findings_is_logged_not_swallowed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    root = _printed(tmp_path, monkeypatch)
+
+    def boom(*a: Any, **k: Any) -> Any:
+        raise RuntimeError("unreadable record")
+
+    monkeypatch.setattr(code_review, "touched_results", boom)
+    with caplog.at_level("WARNING"):
+        assert paper_facts.touched_sentences(root, PAPER) == {}
+    assert any("RuntimeError" in r.getMessage() and "unreadable record" in r.getMessage() for r in caplog.records)

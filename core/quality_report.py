@@ -1446,6 +1446,16 @@ def _citations_line(c: dict[str, Any]) -> str:
             + (f", {n.get('unchecked')} could not be checked" if n.get("unchecked") else "") + "." + who)
 
 
+def _unmet_lead(item: dict[str, Any]) -> str:
+    """What FI checked for a required item the paper does not hold. An open problem in the code is never in the Limitations;
+    FI looks for its own sentence on the results the problem may change, in the paragraph of the run's facts."""
+    if item.get("kind") != "code_finding":
+        return "Not in the paper's Limitations"
+    if item.get("named") is False:
+        return "FI could not name a printed result this finding changes"
+    return "FI's sentence on the results it may change is not in the paper"
+
+
 def _paper_record_lines(records: dict[str, Any]) -> list[str]:
     """The section of what FI recorded about the run that the paper does not carry, and what its check of the paper found."""
     labels = (("how_reached", "How this result was reached"), ("run_record", "What FI recorded about the run"),
@@ -1471,7 +1481,7 @@ def _paper_record_lines(records: dict[str, Any]) -> list[str]:
     if unmet or hits:
         lines += ["### Where the paper still disagrees with these records", "",
                   "FI sent the paper back to be rewritten for these and the review rounds ended before they were settled:", ""]
-        lines += [f"- Not in the paper's Limitations: {_cell(str(i.get('text') or i.get('name') or ''))} "
+        lines += [f"- {_unmet_lead(i)}: {_cell(str(i.get('text') or i.get('name') or ''))} "
                   f"(record `{_cell(str(i.get('id') or i.get('kind') or ''))}`)" for i in unmet]
         ids = {str(i.get("id")) for i in unmet}
         lines += [f"- {_cell(_one(h, 300))}" for h in hits if not any(i and i in h for i in ids)]
