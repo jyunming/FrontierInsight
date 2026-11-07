@@ -100,6 +100,7 @@ class Found:
     figures: list[str] = field(default_factory=list)  # to take out of the figures
     quantity: str = ""  # the plan's name of the quantity the keys belong to, when the check is about one
     contested: str = ""  # "twice" (the plan defines the name two ways) or "plan_problem", when FI holds no passing check of the value
+    claimed: list[str] = field(default_factory=list)  # the keys of a second model's claim that stay in the results until a measurement moves a number
 
 
 #: ``Found.kind`` of a declared result that equals an earlier declared one in every trial.
@@ -371,12 +372,12 @@ class ResultChecksMixin:
                 why += ("; the plan defines it in two ways" if contested == "twice" else "; the finding is marked as one about the plan")
                 why += ", and FI holds no passing check of its value"
             note = f"the plan's {q['kind']} `{q['name']}` is {what} in the code ({why})"
-            say = (f"A second model compared the code with the plan and found that `{q['name']}` is {what} ({why}); the "
-                   f"repairs did not remove it. FI took {', '.join('`' + k + '`' for k in keys[:6])} out of the results. "
-                   f"Do NOT report, describe or quote any value for `{q['name']}`, and do not call another number by "
-                   f"the plan's name for it. Say plainly, in the limitations, that `{q['name']}` is left out of this paper "
-                   "because the code does not compute it as the plan defines it.")
-            found.append(Found("code_reader", ANALYSIS, "", note, say, keys=keys, quantity=q["name"], contested=contested))
+            # A second model's word alone never keeps a result out of the analysis (core/run_checks.py would strip it from the
+            # input of derive.py): the evidence gate decides after a test shows the claim and a rerun moves a number
+            # (engine._measure_reader_findings, _keep_measured). Until then the claim is recorded with its keys, which stay in.
+            say = (f"A second model compared the code with the plan and found that `{q['name']}` is {what} ({why}). No test of "
+                   f"FI's has shown it yet, so {', '.join('`' + k + '`' for k in keys[:6])} stays in the results for now.")
+            found.append(Found("code_reader", ANALYSIS, "", note, say, quantity=q["name"], contested=contested, claimed=keys))
         return found
 
     def _degenerate_findings(self, state: Any, result_json: Any, cells: list[dict[str, Any]]) -> list[Found]:
@@ -546,7 +547,7 @@ class ResultChecksMixin:
         keys = sorted({k for f in found for k in f.keys})
         record = {"removed_quantities": keys, "removed_figures": sorted({n for f in found for n in f.figures}),
                   "removed_values": _values_left_out(result_json, set(keys), self._derived_record()),
-                  "checks": [{"kind": f.kind, "note": f.note, **({"quantity": f.quantity, "keys": f.keys} if f.quantity else {}),
+                  "checks": [{"kind": f.kind, "note": f.note, **({"quantity": f.quantity, "keys": f.keys or f.claimed} if f.quantity else {}),
                               **({"contested": f.contested} if f.contested else {})}
                              for f in found],
                   "note": "; ".join(f.note for f in found),

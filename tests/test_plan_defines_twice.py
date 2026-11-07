@@ -85,7 +85,7 @@ def test_the_text_comparison_keeps_the_operators_and_reads_the_formula_sentence(
 
 def test_a_name_defined_twice_with_no_passing_check_is_withheld_and_said_so(tmp_path: Path) -> None:
     found = _quest(tmp_path, TWICE)._code_reader_findings(RESULT)
-    assert len(found) == 1 and found[0].contested == "twice" and set(found[0].keys) == {"quantity_a", "quantity_a_ci"}
+    assert len(found) == 1 and found[0].contested == "twice" and set(found[0].claimed) == {"quantity_a", "quantity_a_ci"} and found[0].keys == []
     assert "two ways" in found[0].note and "no passing check" in found[0].note
 
 

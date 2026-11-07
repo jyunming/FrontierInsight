@@ -19570,6 +19570,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                            if _phased.stage(self.quest_root) == _phased.EXPLORE else
                            "confirm stage: running the frozen design on data or seeds exploration never saw")
         run_started = time.time()
+        # An earlier pass's results check is not this run's: the analysis this run makes must not read what that pass left out.
+        from . import result_checks as _result_checks
+
+        (self.quest_root / "needs" / _result_checks.RECORD).unlink(missing_ok=True)
         try:
             result: ExecutionResult = await self._await_with_heartbeat(
                 runner.execute(
@@ -20771,6 +20775,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             patch["exec_reflect_history"] = history  # the repair's own reason for giving up, kept
         return patch
 
+    def _removed_by_fi(self, violation: Any) -> bool:
+        """Whether ``violation`` is a bounded quantity FI's own record took out of the results (``needs/RESULT_CHECK.json``,
+        the typed-number record): it is gone on purpose, so a repair asking for it again would undo FI's check."""
+        if getattr(violation, "kind", "") != "missing":
+            return False
+        from core import plausibility
+        from core import result_checks as _result_checks
+
+        gone = set(_result_checks.left_out_by_record(self.quest_root))
+        path = str(getattr(violation, "path", ""))
+        return bool(gone) and (path in gone or any(seg in gone for seg in plausibility._segments(path)))
+
     def _fis_body_of_problems(self, record: dict[str, Any], findings: Any, implausible: Any) -> str:
         """The function of derive.py FI's record of a run that ended cleanly lays its problems to: one whose own call raised the
         numeric warnings found (FI caught them per function), else the one that made a derived quantity a declared bound
@@ -20898,7 +20914,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             and self.config.engine.degenerate_run_guard
             and _is_degenerate_result(state.get("result_json") or {})
         )
-        implausible = _assertion_violations(self._in_force(state), self._walk_memo())
+        implausible = [v for v in _assertion_violations(self._in_force(state), self._walk_memo())
+                       if not self._removed_by_fi(v)]
         # A legend drawn over its data, or a figure title over a panel title, is
         # sent back for a redraw once, and only when nothing else is wrong with
         # the run: a repair of a crash, an all-zero result or a broken bound
@@ -23194,6 +23211,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             m = next((x for x in checks if x.get("quantity") == c.get("quantity") and x.get("kind") == c.get("kind")), None)
             if m is not None and m.get("measured"):
                 c["measured"] = m["measured"]
+        # No rerun could be made: nothing measured the claim, and it stays out as before (the execute step recorded it without
+        # taking the keys out, so only a measurement or this fallback decides).
+        unmeasured = [c for c in rc.get("checks") or [] if c.get("kind") == "code_reader" and isinstance(c.get("measured"), dict)
+                      and c["measured"].get("status") == "could_not"]
+        out_keys = {str(k) for c in unmeasured for k in c.get("keys") or []} - {str(k) for k in rc.get("removed_quantities") or []}
+        if out_keys:
+            rc["removed_quantities"] = sorted({*(str(k) for k in rc.get("removed_quantities") or []), *out_keys})
+            rc["removed_values"] = {**(rc.get("removed_values") or {}),
+                                    **_result_checks._values_left_out(result, out_keys, self._derived_record())}
         _result_checks._keep_measured(rc, [c for c in rc.get("checks") or [] if any(
             c.get("quantity") == k.get("quantity") and c.get("kind") == k.get("kind") for k in kept)])
         try:
