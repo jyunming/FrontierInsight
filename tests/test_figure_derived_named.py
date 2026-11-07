@@ -136,3 +136,45 @@ def test_run_figures_hands_the_derived_values_to_the_figure(monkeypatch):
     monkeypatch.setattr(analysis_figures, "_draw_one", lambda spec, body, table, out_dir, plan=None: seen.append(plan) or {})
     analysis_figures.run_figures([{"id": "f"}], {}, _Grid(), "out", {"r": {"status": "ok", "by_setting": {"x=1": 2.0}}})
     assert seen[0]["derived_values"] == {"r": {"x=1": 2.0}}
+
+
+def _kind(derived, xs, ys, settings=("size", "temp", "mode"), hold=None, x="size"):
+    """The check of one curve drawn as ``ratio`` against a made-up record: ``matches``, ``differs`` or ``not compared``."""
+    h = _Host(derived={"ratio": derived})
+    h.settings = list(settings)
+    h.series = None  # one curve, no level of a setting
+    if hold:
+        h._panel(0)[1]["hold"] = hold
+    h.line(0, "ratio", xs, ys, "ratio")
+    s = h.record()["panels"][0]["series"][0]
+    return "matches" if "named_as" in s else s["declared_as"]["checked"]
+
+
+def _modes(a, b):
+    return {"size=1,mode=A": a[0], "size=2,mode=A": a[1], "size=1,mode=B": b[0], "size=2,mode=B": b[1]}
+
+
+def test_a_curve_is_not_named_for_a_setting_the_panel_does_not_hold():
+    rec = _modes((1.0, 3.0), (2.0, 4.0))
+    assert _kind(rec, [1, 2], [2.0, 4.0], hold={"mode": "B"}) == "matches"
+    assert _kind(rec, [1, 2], [2.0, 4.0], hold={"mode": "A"}) == "differs"  # B's numbers under a panel that says mode A
+
+
+def test_a_curve_made_of_points_from_different_settings_is_not_named():
+    rec = _modes((1.0, 3.0), (2.0, 4.0))
+    assert _kind(rec, [1, 2], [1.0, 4.0]) == "differs"  # x=1 from mode A, x=2 from mode B: no run gives this curve
+    assert _kind(rec, [1, 2], [1.0, 3.0]) == "matches"
+
+
+def test_a_tiny_number_is_not_the_same_as_zero_or_another_tiny_number():
+    assert _kind({"size=1": 1e-13, "size=2": 1.0}, [1, 2], [0.0, 1.0]) == "differs"
+    assert _kind({"size=1": 1e-12, "size=2": 1.0}, [1, 2], [1e-15, 1.0]) == "differs"
+    assert _kind({"size=1": 0.0, "size=2": 1.0}, [1, 2], [0.0, 1.0]) == "matches"
+    assert _kind({"size=1": 1e-13, "size=2": 1.0}, [1, 2], [1.0000001e-13, 1.0]) == "matches"
+
+
+def test_a_point_that_differs_is_found_even_after_a_point_with_no_record():
+    rec = {"size=2": 10.0}
+    assert _kind(rec, [1, 2], [5.0, 99.0]) == "differs"
+    assert _kind(rec, [2, 1], [99.0, 5.0]) == "differs"
+    assert _kind(rec, [1, 2], [5.0, 10.0]) == "not compared"

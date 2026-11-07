@@ -172,6 +172,12 @@ def _sides(entry):
     return None, None
 
 
+def _same_number(a, b):
+    """Two numbers equal within ``Y_RTOL`` of the larger one, with no absolute allowance: a small number is not zero and a number
+    of another size is not the same (zero equals only zero)."""
+    return abs(a - b) <= Y_RTOL * max(abs(a), abs(b))
+
+
 def _close_y(a, b):
     return abs(a - b) <= Y_RTOL * max(abs(a), abs(b)) + 1e-12
 
@@ -551,28 +557,44 @@ class FigureCalls:
             checked += 1
         return "matches" if checked > 0 else "not compared"
 
-    def _derived_comparison(self, what, form, x_id, xs, ys, level=None):
+    def _derived_comparison(self, what, form, x_id, xs, ys, level=None, hold=None):
         """``matches``, ``differs`` or ``not compared`` for a series drawn as a quantity the plan derives (``what`` is no result of the
-        table): FI holds the number it worked out for each setting (``derived_values``, from its own record of the derived values)
-        and compares the drawn y with it as with the table's mean. A curve of one level of a setting is compared at the keys that
-        hold that level. Nothing to compare (no record, another statistic, an x that is not a setting) is ``not compared``."""
+        table): FI holds the number it worked out for each setting (``derived_values``, from its own record of the derived values).
+        Only the keys the curve can show are read: those at its level of the setting and at the panel's held values. The curve
+        matches when ONE combination of the other settings gives, at every drawn point, a number equal to the drawn y (a relative
+        tolerance of the two numbers; zero equals only zero). One point that no key at its x gives the drawn y for is ``differs``
+        whatever the other points are; the points that match only at different combinations are ``differs`` too; a point with no
+        key at all (and no point that differs) is ``not compared``. No record, another statistic, an x that is not a setting: ``not compared``."""
         held = (getattr(self, "derived_values", None) or {}).get(what)
         if not isinstance(held, dict) or form != "mean" or x_id not in (getattr(self, "settings", None) or []):
             return "not compared"
-        checked = 0
+        fixed = [(str(k), v) for k, v in (hold or {}).items()]
+        if level:
+            fixed.append((level["setting"], level["value"]))
+        keys = {}
+        for key in held:
+            pieces = dict((n.strip(), t.strip()) for n, _, t in (piece.partition("=") for piece in str(key).split(",")))
+            if all(n not in pieces or self._key_holds(key, n, v) for n, v in fixed):
+                keys[key] = ",".join("%s=%s" % kv for kv in sorted(pieces.items()) if kv[0] != x_id)  # the other settings of the key
+        combos, missing, checked = None, False, 0
         for x, y in zip(xs, ys):
             if y is None or not _finite(y):
                 continue
             if x is None:
-                return "not compared"
-            here = [v for key, v in held.items() if self._key_holds(key, x_id, x)
-                    and (not level or self._key_holds(key, level["setting"], level["value"]))]
+                missing = True
+                continue
+            here = [(rest, held[key]) for key, rest in keys.items() if self._key_holds(key, x_id, x)]
             if not here:
-                return "not compared"
-            if not any(_close_y(float(y), v) for v in here):
+                missing = True
+                continue
+            fits = {rest for rest, v in here if _same_number(float(y), v)}
+            if not fits:
                 return "differs"
+            combos = fits if combos is None else combos & fits
             checked += 1
-        return "matches" if checked > 0 else "not compared"
+        if missing or not checked:
+            return "not compared"
+        return "matches" if combos else "differs"
 
     def _names_a_result(self, series):
         """Whether a series id, or its plan label, is a result of the plan's (id or label): such a name says what the y is."""
@@ -754,7 +776,7 @@ class FigureCalls:
         # that is those numbers is that quantity (named so), though no value of the table is claimed for it (``what`` stays ``other``).
         tied = None
         if what == "other" and declared != "other" and declared not in self._results():
-            how = self._derived_comparison(declared, form, x_id, xs, ys, level)
+            how = self._derived_comparison(declared, form, x_id, xs, ys, level, rec.get("hold"))
             if how == "matches":
                 tied = {"id": declared, "label": self._label_of(declared), "checked": how, "from": "record of the derived values"}
         x_ok = self._x_checked(x_id, xs, ys)
