@@ -51,6 +51,8 @@ NEUTRAL_X = "computed x"  # the x axis of a panel that draws values FI did not f
 LAST_RUN_ENV = "FI_FIGURE_FALLBACK"
 NEUTRAL_Y = "computed value"  # the neutral name of a quantity FI did not tie to a result of the table
 LEGEND_LEVELS = 12  # a figure with one curve per level of a setting names every level in its legend up to this many; more: the lowest and the highest
+LEGEND_SHARE = 0.2  # a legend whose box lies this much over a panel it does not belong to is over it (the share the layout check of plot_style uses)
+LEGEND_INSET_PX = 3  # a legend's box is measured this many pixels in from its frame, so a line that only grazes the frame is not under it
 REF_STATED = "stated in the figure"  # the source of a reference line drawn at a literal value
 
 
@@ -302,9 +304,9 @@ class FigureCalls:
 
     def _series_setting(self):
         """The setting the figure's plan draws one curve per level of (the frame's ``series``), else None. FI's own default figure
-        names its curves itself and is not held to it."""
+        is held to it like a body: it passes the setting's value as each curve's series."""
         ident = getattr(self, "series", None)
-        if getattr(self, "fallback", False) or not isinstance(ident, str) or ident not in (getattr(self, "settings", None) or []):
+        if not isinstance(ident, str) or ident not in (getattr(self, "settings", None) or []):
             return None
         return ident
 
@@ -712,8 +714,8 @@ class FigureCalls:
             if lo is not None:
                 bars = self._errorbar(ax, xs, ys, lo, hi)
                 self._tag(bars)
-                if level:  # kept to share the curve's colour, by the position the series takes in the record
-                    self._fc_extra.setdefault(panel, {"series": [], "refs": []}).setdefault("bars", {})[len(rec["series"])] = bars
+                # kept to share the curve's colour and, for bars, to move with the bar, by the position the series takes in the record
+                self._fc_extra.setdefault(panel, {"series": [], "refs": []}).setdefault("bars", {})[len(rec["series"])] = bars
             rec["series"].append({"id": series, "label": legend, "kind": kind, "step": bool(step), "x": xs, "y": ys,
                                   "yerr": lo if lo is not None and _same(lo, hi) else None, "yerr_lo": lo, "yerr_hi": hi,
                                   "yerr_meaning": yerr_meaning if lo is not None else None, "what": what, "merged_with": [],
@@ -728,6 +730,8 @@ class FigureCalls:
                 e["label"] = ("%s, " % self._label_of(lv["result"]) if several else "") + "%s = %s" % (lv["setting_label"], lv["text"])
             self._remember(panel, "series", arts[0] if arts else None, what)
             self._fc_extra[panel].setdefault("drawn", {})[len(rec["series"]) - 1] = list(arts or [])  # every artist of the call, for its colour
+            if kind == "bars":
+                self._group_bars(panel)
         return arts
 
     def _once(self, rec, panel, kind, series):
@@ -737,6 +741,38 @@ class FigureCalls:
             raise ValueError("the figure draws `%s` a second time on panel %d with the same name, so the legend would show two series "
                              "under one name; give each curve its own series (a figure with one curve per level of a setting "
                              "passes the level as the series)" % (series, panel))
+
+    def _group_bars(self, panel):
+        """The bar series of a panel side by side: around each x value the series take one slot each, a slot being 0.8 of the
+        smallest gap between two distinct x values (1 for a single x or for categories) over the number of bar series, so no bar
+        hides another whatever the order they were drawn in. A series' error bars move with its bars. Run after every bars call
+        (a later series changes the slots of the earlier ones); the data of the record is not touched, only where the bars sit."""
+        ax, rec = self._panel(panel)
+        extra = self._fc_extra[panel]
+        drawn = extra.get("drawn") or {}
+        mine = [k for k, e in enumerate(rec["series"]) if e["kind"] == "bars" and drawn.get(k)]
+        if not mine or ax.get_xscale() != "linear":
+            return
+        shifts = extra.setdefault("bar_shift", {})
+        centres = {k: [p.get_x() + p.get_width() / 2 - shifts.get(k, 0.0) for p in drawn[k]] for k in mine}
+        distinct = sorted({round(c, 12) for cs in centres.values() for c in cs if _finite(c)})
+        gap = min((b - a for a, b in zip(distinct, distinct[1:])), default=1.0)
+        width = 0.8 * gap / len(mine)
+        for j, k in enumerate(mine):
+            shift = (j - (len(mine) - 1) / 2) * width
+            for p, c in zip(drawn[k], centres[k]):
+                p.set_x(c + shift - width / 2)
+                p.set_width(width)
+            move = shift - shifts.get(k, 0.0)
+            container = (extra.get("bars") or {}).get(k)
+            if move and container is not None:
+                for cap in (container.lines[1] if len(container.lines) > 1 else ()):
+                    cap.set_xdata([ax.xaxis.convert_units(x) + move for x in cap.get_xdata()])
+                for lc in (container.lines[2] if len(container.lines) > 2 else ()):
+                    lc.set_segments([[(ax.xaxis.convert_units(x) + move, y) for x, y in seg] for seg in lc.get_segments()])
+            shifts[k] = shift
+        ax.relim()
+        ax.autoscale_view()
 
     @staticmethod
     def _draw_series(ax, kind, xs, ys, legend, step):
@@ -1216,6 +1252,7 @@ class FigureCalls:
                     outside.append(placed)
             for ax, entries in outside:
                 self._legend_outside(ax, entries)
+        self._keep_legend_off_data(fig, live, keyed)
         for i in live:
             ax, rec = self._panel(i)
             self._place_notes(ax, i, rec)
@@ -1571,12 +1608,101 @@ class FigureCalls:
             return None
         return ax, entries
 
+    def _legend_clash(self, fig, live):
+        """What the drawn legends cover, measured on the canvas the figure will be saved from: ``{"over_data": how many drawn
+        points, and samples along a drawn line (one every 4 pixels), lie under a legend's box, "over_panel": the largest share of a
+        legend's box that lies over a panel it does not belong to}``; None when the canvas cannot be measured."""
+        try:
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
+            own = [(self._panel(i)[0], self._panel(i)[0].get_legend()) for i in live]
+            own = [(ax, leg) for ax, leg in own if leg is not None and leg.get_visible()]
+            loose = [(None, leg) for leg in fig.legends if leg.get_visible()]
+            over_data, over_panel = 0, 0.0
+            for owner, leg in own + loose:
+                box = leg.get_window_extent(renderer)
+                if box.width <= 2 * LEGEND_INSET_PX or box.height <= 2 * LEGEND_INSET_PX:
+                    continue
+                x0, y0 = box.x0 + LEGEND_INSET_PX, box.y0 + LEGEND_INSET_PX
+                x1, y1 = box.x1 - LEGEND_INSET_PX, box.y1 - LEGEND_INSET_PX
+                for i in live:
+                    ax = self._panel(i)[0]
+                    area = ax.get_window_extent(renderer)
+                    if ax is not owner:
+                        w, h = min(box.x1, area.x1) - max(box.x0, area.x0), min(box.y1, area.y1) - max(box.y0, area.y0)
+                        if w > 0 and h > 0:
+                            over_panel = max(over_panel, w * h / (box.width * box.height))
+                    lo_x, hi_x, lo_y, hi_y = max(x0, area.x0), min(x1, area.x1), max(y0, area.y0), min(y1, area.y1)
+                    if hi_x <= lo_x or hi_y <= lo_y:
+                        continue
+                    for art in list(ax.get_lines()) + list(ax.collections):
+                        if not art.get_visible():
+                            continue
+                        if hasattr(art, "get_xydata"):
+                            if art.get_transform() != ax.transData:
+                                continue
+                            raw, trans = art.get_xydata(), ax.transData
+                            joined = str(art.get_linestyle()) not in ("None", "none", "", " ")
+                        else:
+                            raw, trans, joined = art.get_offsets(), art.get_offset_transform(), False
+                        pts = [(float(a), float(b)) for a, b in trans.transform(raw) if math.isfinite(a) and math.isfinite(b)]
+                        for k, (px, py) in enumerate(pts):
+                            over_data += lo_x <= px <= hi_x and lo_y <= py <= hi_y
+                            if joined and k + 1 < len(pts):
+                                qx, qy = pts[k + 1]
+                                steps = int(math.hypot(qx - px, qy - py) // 4)
+                                over_data += sum(1 for t in range(1, steps + 1)
+                                                 if lo_x <= px + (qx - px) * t / (steps + 1) <= hi_x
+                                                 and lo_y <= py + (qy - py) * t / (steps + 1) <= hi_y)
+            return {"over_data": int(over_data), "over_panel": round(over_panel, 2)}
+        except Exception:  # noqa: BLE001 -- a figure that cannot be measured keeps its legend where it is
+            return None
+
+    @staticmethod
+    def _clashes(found):
+        return found is not None and (found["over_data"] > 0 or found["over_panel"] >= LEGEND_SHARE)
+
+    def _keep_legend_off_data(self, fig, live, keyed):
+        """A legend that covers the data it names, or a panel it does not belong to, is put outside the axes: FI measures the
+        legend it drew and, when it clashes (``_legend_clash``: any drawn point or line under it, or ``LEGEND_SHARE`` of its box
+        over another panel), draws it again outside, below the panels or to their right, whichever clears more, and measures
+        again. The record's ``legend`` says what was measured and where the legend went (``adjusted``); a legend that no
+        placement clears stays where it clears most and the record says so."""
+        if fig is None or not live:
+            return
+        before = self._legend_clash(fig, live)
+        if not self._clashes(before) or not getattr(self, "_fc_legend", None):
+            return
+        panels = [i for i in live if keyed.get(i)]
+        if not panels:
+            return
+        args = ([None], {None: keyed[panels[0]]}) if len(panels) == 1 else (panels, keyed)
+        for i in live:  # a legend inside a panel's axes goes: the figure's own legend, outside, takes its entries
+            old = self._panel(i)[0].get_legend()
+            if old is not None:
+                old.remove()
+        best = None
+        for side in ("below", "right"):
+            self._figure_legend(fig, *args, prefer=side)
+            found = self._legend_clash(fig, live)
+            if found is None:
+                continue
+            score = (found["over_data"] > 0, found["over_panel"])
+            if best is None or score < best[0]:
+                best = (score, side, found)
+            if not self._clashes(found):
+                break
+        if best is None:
+            return
+        self._figure_legend(fig, *args, prefer=best[1])
+        self._fc_legend["adjusted"] = {"was": before, "moved_outside": best[1], "after": best[2], "cleared": not self._clashes(best[2])}
+
     def _legend_outside(self, ax, entries):
         """A single panel's legend that fits in no corner goes outside the axes, as the one legend of the figure; its entries keep
         their own keys, so two series (or reference lines) that share a label stay two entries."""
         self._figure_legend(ax.figure, [None], {None: entries})
 
-    def _figure_legend(self, fig, panels, keyed):
+    def _figure_legend(self, fig, panels, keyed, prefer=None):
         """One legend for the figure: the entries of every panel in ``panels``, each series once (by its key), outside the axes
         (below them, in as many columns as fit the width of the figure; to their right when that would be more than four rows
         and the legend is narrow). The constrained layout makes the room, so no panel is moved by hand."""
@@ -1623,9 +1749,9 @@ class FigureCalls:
             if leg.get_window_extent(renderer).width <= room or ncol == 1:
                 break
         where = "below"
-        if int(math.ceil(len(texts) / ncol)) > 4:
+        if prefer == "right" or (prefer is None and int(math.ceil(len(texts) / ncol)) > 4):
             side = make("outside right upper", 1)
-            if side.get_window_extent(renderer).width <= 0.25 * fig.bbox.width:
+            if prefer == "right" or side.get_window_extent(renderer).width <= 0.25 * fig.bbox.width:
                 where = "right"
             else:
                 make("outside lower center", ncol)

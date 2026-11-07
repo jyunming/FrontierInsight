@@ -1660,7 +1660,7 @@ def test_default_figure_series_are_plan_ids(tmp_path, frame5):
     assert [s["id"] for s in _calls_of(frame5)["panels"][0]["series"]] == ["gain", "loss"]  # the results' own ids
     af.default_figure({"id": "f1", "file": "f1.png", "shows": ["gain"], "x": "size", "series": "rate"}, _CallGrid(), str(tmp_path))
     series = _calls_of(frame5)["panels"][0]["series"]
-    assert [s["id"] for s in series] == ["gain, rate = 0.1", "gain, rate = 0.2"] and [s["y"] for s in series] == [[10.1, 20.1, 30.1], [10.2, 20.2, 30.2]]
+    assert [s["id"] for s in series] == ["gain@rate:0.1", "gain@rate:0.2"] and [s["y"] for s in series] == [[10.1, 20.1, 30.1], [10.2, 20.2, 30.2]]
 
 
 def test_default_figure_has_no_raw_panel(tmp_path, frame5):
@@ -1811,8 +1811,8 @@ def test_default_figure_series_ids_are_made_of_plan_ids_never_labels(tmp_path, f
             "labels": {"rate": "learning rate"}}
     af.default_figure(spec, _CallGrid(), str(tmp_path))
     series = _calls_of(frame5)["panels"][0]["series"]
-    assert [s["id"] for s in series] == ["gain, rate = 0.1", "gain, rate = 0.2"]
-    assert all("Net improvement" in s["label"] for s in series)  # the labels are apart from the ids
+    assert [s["id"] for s in series] == ["gain@rate:0.1", "gain@rate:0.2"]  # each curve is a level of the series setting, as in a body
+    assert [s["label"] for s in series] == ["learning rate = 0.1", "learning rate = 0.2"]  # the plan's words, apart from the ids
     af.default_figure({"id": "f1", "file": "f1.png", "shows": ["lev"], "x": "size", "result_labels": {"lev": "response"}},
                       _Levels2(), str(tmp_path))
     assert [s["id"] for s in _calls_of(frame5)["panels"][0]["series"]] == ["lev, a", "lev, b"]

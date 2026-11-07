@@ -593,6 +593,20 @@ def _plan_for(spec: dict[str, Any], namespace: Any, table: Any) -> dict[str, Any
         # a threshold of the plan (a significance level, a coverage target) is a line a figure may draw, named by the plan's key
         if str(ident) not in references and _number(number) and not isinstance(number, bool):
             references[str(ident)] = {"value": float(number), "label": "%s = %s" % (ident, _number_text(number)), "fixed": True}
+    nominal = spec.get("nominal") if isinstance(spec.get("nominal"), dict) else {}
+    by_value: dict[float, list[str]] = {}
+    for ident, level in nominal.items():
+        # the level the plan declares for a result's interval (``known_value.level``) is a line a figure may draw too; it is offered
+        # only while no reference or threshold of the plan already holds that number (two names for one value leave the line unnamed)
+        if not _number(level) or isinstance(level, bool) or any(
+                _number(r.get("value")) and abs(float(r["value"]) - float(level)) <= 1e-12 for r in references.values()):
+            continue
+        by_value.setdefault(float(level), []).append(str(ident))
+    for level, idents in by_value.items():
+        shown = labels.get(idents[0], idents[0])
+        references["%s_nominal" % idents[0]] = {
+            "value": level, "fixed": True,
+            "label": ("Nominal level of %s = %s" % (shown, _number_text(level))) if len(idents) == 1 else "Nominal level = %s" % _number_text(level)}
     derived = _from(namespace, "DERIVED", {})
     return {"settings": settings, "series_ids": series_ids, "references": references, "labels": labels,
             "result_info": info,
@@ -1141,8 +1155,9 @@ def _default_points(table: Any, rid: str, key: str, derived: Any = None) -> dict
 
 
 def _default_lines(spec: dict[str, Any], table: Any, fixed: dict[str, Any], derived: Any = None
-                   ) -> list[tuple[str, list[Any], list[float], str, str]]:
-    """The lines of the default figure with the settings in ``fixed`` held: ``(label, x values, y values, result id, series id)``,
+                   ) -> list[tuple[str, list[Any], list[float], str, str, Any, str]]:
+    """The lines of the default figure with the settings in ``fixed`` held: ``(label, x values, y values, result id, series id, value of
+    the series setting or None, level compared inside the runs or "")``,
     one per result in ``shows``, per value of the ``series`` setting and, for a result recorded per compared value, per value
     compared. No line holds points of two settings. The series id is made by FI from the plan's ids and the recorded values
     (``gain, rate = 0.1``); the label is the plan's words and is apart from it."""
@@ -1171,7 +1186,7 @@ def _default_lines(spec: dict[str, Any], table: Any, fixed: dict[str, Any], deri
                     points.sort(key=lambda p: p[0])
                 tail = (["%s = %s" % (s_name, value)] if s_name else []) + ([level] if level else [])
                 lines.append((", ".join([str(names.get(rid) or rid)] + tail), [p[0] for p in points], [p[1] for p in points], rid,
-                              ", ".join([rid] + tail)))
+                              ", ".join([rid] + tail), value if s_name else None, level))
     return lines
 
 
@@ -1289,8 +1304,8 @@ def default_figure(spec: dict[str, Any], table: Any, out_dir: str, namespace: An
         record = []
         for index, (one, lines) in enumerate(zip(held, drawn)):
             ax = axes[index]
-            cats = list(dict.fromkeys(v for _l, xs, _y, _r, _i in lines for v in xs if not _plain_number(v)))
-            for label, xs, ys, _rid, _sid in lines:
+            cats = list(dict.fromkeys(v for _l, xs, _y, _r, _i, _v, _c in lines for v in xs if not _plain_number(v)))
+            for label, xs, ys, _rid, _sid, _value, _lvl in lines:
                 ax.plot([cats.index(v) if v in cats else v for v in xs], ys, marker="o", label=label)
             if cats:
                 ax.set_xticks(range(len(cats)), [str(v) for v in cats])
@@ -1325,29 +1340,36 @@ def default_figure(spec: dict[str, Any], table: Any, out_dir: str, namespace: An
 
 
 def _default_with_calls(spec: dict[str, Any], table: Any, out_dir: str, namespace: Any, held: list[dict[str, Any]],
-                        hold: dict[str, Any], drawn: list[list[tuple[str, list[Any], list[float], str, str]]], note: str,
+                        hold: dict[str, Any], drawn: list[list[tuple[str, list[Any], list[float], str, str, Any, str]]], note: str,
                         derived: Any = None) -> dict[str, Any]:
     """Draw the default figure through ``fig.line`` as a figure body would, with the plan marked ``fallback`` so the call record is.
-    A line is a series named by the result's id (or the derived quantity's) when it is the only line of that result, else by an
-    id FI makes of the plan's ids and the recorded values (``gain, rate = 0.1``; added to the ids the calls accept, with the plan's
-    words as its label). The held settings of a panel are declared for FI's title. The
-    outcome is the one of ``_draw_one``, marked ``fallback``; a fault of these calls is FI's (``fi_fault``), never the model's."""
+    A figure whose plan draws one curve per value of a setting passes that value as each line's series, exactly as a body does, so
+    every curve is a level of the setting: the legend condenses and the colours run along the setting's values like a body's. A line
+    of a result recorded per value compared inside the runs is named by an id FI makes of the plan's ids and the recorded values
+    (``gain, rate = 0.1``; added to the ids the calls accept, with the plan's words as its label), and so is every line of a figure
+    that has both (a setting's value and a compared value name no single curve). The held settings of a panel are declared for FI's
+    title. The outcome is the one of ``_draw_one``, marked ``fallback``; a fault of these calls is FI's (``fi_fault``), never the model's."""
     fid, file = str(spec.get("id")), str(spec.get("file") or "%s.png" % spec.get("id"))
     plan = _plan_for(dict(spec, fallback=True), namespace, table)
+    all_lines = [line for lines in drawn for line in lines]
+    by_setting = isinstance(spec.get("series"), str) and spec["series"] in plan["settings"]
+    as_levels = by_setting and all(line[5] is not None and not line[6] for line in all_lines)
+    if by_setting and not as_levels:
+        spec = dict(spec, series=None)  # a setting and a compared value together: the curves are named by FI's ids below
     for lines in drawn:
-        for label, _x, _y, rid, sid in lines:
-            if sum(1 for line in lines if line[3] == rid) > 1 and sid not in plan["series_ids"]:
+        for label, _x, _y, rid, sid, _value, level in lines:
+            if not as_levels and level and sid not in plan["series_ids"]:
                 plan["series_ids"].append(sid)
                 plan["labels"][sid] = label
 
     def body(fig: Any, tbl: Any) -> None:
         for index, one in enumerate(held):
             lines = _default_lines(spec, tbl, {**one, **hold}, derived)  # read again: the reads are recorded from the start of the body
-            for _label, xs, ys, rid, sid in lines:
-                lone = sum(1 for line in lines if line[3] == rid) == 1
+            for _label, xs, ys, rid, sid, value, level in lines:
+                name = value if as_levels else sid if level else rid
                 if isinstance(derived, dict) and rid in derived and isinstance(getattr(tbl, "gave_values", None), set):
                     tbl.gave_values.add(rid)  # FI read this value from its derived record, not from the table
-                for art in fig.line(index, rid if lone else sid, xs, ys, rid):
+                for art in fig.line(index, name, xs, ys, rid):
                     art.set_marker("o")
             if {**one, **hold}:
                 fig._panel(index)[1]["hold"] = {**one, **hold}  # FI's values from its table: `finish` titles the panel from them
