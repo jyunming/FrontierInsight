@@ -339,7 +339,7 @@ def example_rows(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
             if gap <= max(rel * abs(float(value)), abs_tol):
                 row["equation_agrees"] = True
             elif (float(value) != 0.0 and not method
-                  and gap <= rounding_of(row["formula"]) * abs(float(value))):
+                  and gap <= (rounding_effect(row["formula"], row["inputs"]) or 0.0)):
                 # The equation is written with rounded constants (0.61 for 0.6098...) and the example with the full value:
                 # one number, two roundings. Code that follows the equation as written is right, and so is code that uses
                 # the full constant, so the test must accept both, and no more than both: its bar grows to the gap.
@@ -367,16 +367,46 @@ def rounding_of(formula: str) -> float:
     the topic's rounded form of a law, so a worked example computed to full precision may differ from it by this much
     and still be the same law; a gap larger than this is a real disagreement."""
     best = 0.0
+    for _m, mantissa, half in _rounded_constants(formula):
+        best = max(best, half / float(mantissa))
+    return best
+
+
+def _rounded_constants(formula: str) -> list[tuple[Any, str, float]]:
+    """The decimal numbers of ``formula`` that count as rounded (two or more significant digits): each as its match, its
+    mantissa text and half a unit in its last written digit."""
+    found = []
     for m in _DECIMAL_RE.finditer(formula):
         mantissa = m.group(1).rstrip("0").rstrip(".") if "." in m.group(1) else m.group(1)  # "2.50" is written as 2.5
         if "." not in mantissa:
             continue  # nothing after the point once the trailing zeros are gone: written as an integer
         digits = mantissa.replace(".", "").lstrip("0")
-        value = float(mantissa)
-        if len(digits) < 2 or value == 0.0:
+        if len(digits) < 2 or float(mantissa) == 0.0:
             continue
-        best = max(best, 0.5 * 10.0 ** (-len(mantissa.split(".")[1])) / value)
-    return best
+        found.append((m, mantissa, 0.5 * 10.0 ** (-len(mantissa.split(".")[1]))))
+    return found
+
+
+def rounding_effect(formula: str, inputs: dict[str, float]) -> float | None:
+    """How far the rounding of the constants written in ``formula`` can move what it gives for ``inputs``, in the output's own
+    units: each rounded constant is moved by half a unit of its last digit, up and down, the equation is computed again, and the
+    largest change is kept (the changes of several constants are added). A constant inside a small term moves the answer by
+    that term's size only, so a rounded ``0.61`` in ``0.61*x + 1000`` allows about 0.5 for x = 100, not 0.8% of the whole
+    answer. ``0.0`` when no constant is rounded; ``None`` when the equation cannot be computed so (nothing is then widened)."""
+    own = equation_value(formula, inputs)
+    if own is None:
+        return None
+    total = 0.0
+    for m, mantissa, half in _rounded_constants(formula):
+        worst = 0.0
+        for sign in (-1.0, 1.0):
+            moved = repr(float(mantissa) + sign * half)
+            value = equation_value(formula[:m.start(1)] + moved + formula[m.end(1):], inputs)
+            if value is None or value != value:
+                return None
+            worst = max(worst, abs(value - own))
+        total += worst
+    return total
 
 
 _DEFINITION = re.compile(r"^\s*[A-Za-z_]\w*\s*(\([^()=]*\))?\s*=(?![=<>])(.*)$", re.S)

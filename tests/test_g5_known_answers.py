@@ -75,3 +75,23 @@ def test_a_check_with_a_stated_disagreement_or_no_measurement_is_left_to_the_wen
         {"name": "null_rate", "measured": 0.05, "disagreement": "x"}, {"name": "null_rate", "measured": None}]}
     assert evidence._plan_derived_failure_gaps(PROTOCOL, {"sources": SOURCES}, rec) == []
     assert evidence._plan_derived_failure_gaps(PROTOCOL, None, "not a record") == []
+
+
+def test_rounding_of_a_constant_in_a_small_term_does_not_excuse_a_gap_in_the_whole_answer() -> None:
+    """Old code: the allowance was the constant's relative rounding times the WHOLE answer (about 8.7 of 1060), so a gap of 1,
+    which 0.61 -> 0.605/0.615 on x = 100 (at most 0.5) cannot explain, was taken as rounding, and the bar was widened."""
+    row = _one("y = 0.61*x + 1000", {"inputs": {"x": 100.0}, "expected_formula": "1060"})
+    assert row["state"] == "unusable" and row["equation_agrees"] is False
+
+
+def test_rounding_effect_is_the_size_of_the_term_that_holds_the_constant() -> None:
+    assert eqt.rounding_effect("y = 0.61*x + 1000", {"x": 100.0}) == pytest.approx(0.5)
+    assert eqt.rounding_effect("w = 0.61 * a / b", {"a": 3.0, "b": 2.0}) == pytest.approx(0.005 / 0.61 * 0.61 * 1.5)
+    assert eqt.rounding_effect("w = a / b", {"a": 3.0, "b": 2.0}) == 0.0
+    assert eqt.rounding_effect("w = 0.61 * a / b", {"a": 3.0}) is None, "an equation FI cannot compute widens nothing"
+
+
+def test_a_gap_inside_the_effect_of_the_rounded_constant_in_a_sum_is_still_accepted() -> None:
+    """Known positive: 0.6098 vs 0.61 on x = 100 is a gap of 0.02, within the 0.5 the rounding can explain."""
+    row = _one("y = 0.61*x + 1000", {"inputs": {"x": 100.0}, "expected_formula": "0.6098*x + 1000"})
+    assert row["state"] == "ok" and row["equation_agrees"] is True and row["rounded_form"] is True
