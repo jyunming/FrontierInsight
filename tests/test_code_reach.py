@@ -251,3 +251,30 @@ def test_a_dict_literal_that_is_returned_names_its_keys_too(tmp_path: Path) -> N
 ])
 def test_a_function_whose_keys_cannot_be_read_gives_none(tmp_path: Path, body: str) -> None:
     assert _keys_of(tmp_path, "def trial(c):\n    " + body + "\n") is None
+
+
+# ---- a key with a fixed head and a computed tail --------------------------------------------------------------------------------------
+def test_a_key_with_a_fixed_head_and_a_computed_tail_is_one_prefix_key(tmp_path: Path) -> None:
+    src = ("def trial(c):\n    out = {}\n    base = step(1)\n    for k in ('a', 'b'):\n        out['m_' + k] = base\n"
+           "        out[f'n_{k}'] = 2.0\n    out['z'] = other(1)\n    return out\n")
+    got = _keys_of(tmp_path, src)
+    assert got is not None and set(got) == {"m_*", "n_*", "z"}
+    assert "step" in got["m_*"] and "step" not in got["n_*"] and "step" not in got["z"]
+
+
+def test_a_key_computed_with_no_fixed_head_still_means_fi_cannot_read_it(tmp_path: Path) -> None:
+    assert _keys_of(tmp_path, "def trial(c):\n    out = {}\n    out['x'] = 1.0\n    out[c['n'] + 'x'] = step(1)\n    return out\n") is None
+
+
+# ---- FI's own files do not reach the study's functions by an attribute name ------------------------------------------------------------
+def test_an_attribute_read_in_fis_own_file_does_not_reach_a_study_function_of_that_name(tmp_path: Path, monkeypatch) -> None:
+    files = {"fi_frame.py": "class Holder:\n    def __init__(self, ctx):\n        self.n = ctx.trial\n",
+             "sim.py": "def trial(c):\n    return 1\n\n\ndef other(c):\n    return 2\n"}
+    code = _code(tmp_path, files)
+    # without a record that the file is FI's the attribute may name any function of that name (as before)
+    monkeypatch.setattr(code_reach, "_fis_files", lambda code_dir, rels: set())
+    assert ("sim.py", "trial") in code_reach.reached(code, scripts=[], start=[])
+    monkeypatch.setattr(code_reach, "_fis_files", lambda code_dir, rels: {"fi_frame.py"})
+    got = code_reach.reached(code, scripts=[], start=[])
+    assert ("sim.py", "trial") not in got
+    assert ("sim.py", "trial") in code_reach.reached(code, scripts=[], start=[("sim.py", "trial")])

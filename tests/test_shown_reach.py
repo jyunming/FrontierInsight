@@ -589,3 +589,30 @@ def test_a_helper_reached_through_another_helper_of_the_trial_is_tied_to_the_res
     out, record = _run(_engine(tmp_path), HELPER, file="model.py", function="helper_for_trial", quantity="est_a", files=files)
     assert out is None
     assert record["issues"]["F-1"]["at_gate"]["keys"][0] == "est_b"
+
+
+def test_a_helper_only_a_key_of_no_declared_result_is_worked_out_with_leaves_that_key_out_and_no_result(tmp_path: Path) -> None:
+    # the helper feeds only `chk_gain`, a measure of the trial's own checks; the trial builds its declared results with a computed key
+    # tail (`'est_' + name`), which is read as a family of keys the helper does not feed
+    src = ("import model\n\n\ndef trial(cell, ctx):\n    out = {}\n    for name in ('a', 'b'):\n        out['est_' + name] = 1.0\n"
+           "    gain = model.helper_for_trial(1)\n    out['chk_gain'] = 0.0 if gain > 0 else 1.0\n    out['se_a'] = 0.5\n    return out\n")
+    out, record = _run(_engine(tmp_path), HELPER, file="model.py", function="helper_for_trial", quantity="est_a", files={"simulate.py": src})
+    assert out is None
+    gate = record["issues"]["F-1"]["at_gate"]
+    assert gate["keys"] == ["chk_gain"] and gate["outcome"] == "left_out"
+
+
+def test_a_helper_the_computed_key_family_is_worked_out_with_still_stops_for_the_main_result(tmp_path: Path) -> None:
+    src = ("import model\n\n\ndef trial(cell, ctx):\n    out = {}\n    x = model.helper_for_trial(1)\n    for name in ('a', 'b'):\n"
+           "        out['est_' + name] = x\n    return out\n")
+    out, _ = _run(_engine(tmp_path), HELPER, file="model.py", function="helper_for_trial", quantity="est_a", files={"simulate.py": src})
+    assert _stops(out)
+
+
+def test_a_trial_entry_that_only_wraps_the_trial_does_not_tie_a_helper_of_the_trial_to_every_result(tmp_path: Path) -> None:
+    src = ("import model\n\n\ndef _inner(x):\n    return model.helper_for_trial(x)\n\n\ndef trial(cell, ctx):\n    out = {}\n"
+           "    out['est_b'] = _inner(3)\n    out['est_a'] = 1.0\n    return out\n\n\ndef run_trial(cell, trial_id, seed):\n"
+           "    return finish(trial(cell, seed))\n")
+    out, record = _run(_engine(tmp_path), HELPER, file="model.py", function="helper_for_trial", quantity="est_a", files={"simulate.py": src})
+    assert out is None
+    assert record["issues"]["F-1"]["at_gate"]["keys"][0] == "est_b"

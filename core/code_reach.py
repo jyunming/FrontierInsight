@@ -279,8 +279,15 @@ def reached(code_dir: Path, *, scripts: list[str], harness: str | None = None,
                         target = by_name.get(module if name is None else f"{module}.{name}" if module else name)
                         if target is not None and reach(target, node.attr):
                             continue
-                    # Any other object, or a module that does not hold the name itself: any function of that name.
-                    everywhere(node.attr)
+                    # Any other object, or a module that does not hold the name itself: any function of that name. In FI's own
+                    # files the owner is FI's own object (the trial's context, the table): its attributes name FI's own
+                    # functions, never the study's (``ctx.trial`` is a number, not the study's ``trial``).
+                    if m.rel in fis:
+                        for rel in modules:  # a study module that wears the name of one of FI's files (``fi_*``) is imported in its place
+                            if rel in fis or rel.rsplit("/", 1)[-1].startswith("fi_"):
+                                reach(modules[rel], node.attr)
+                    else:
+                        everywhere(node.attr)
     return done
 
 
@@ -379,12 +386,27 @@ def _bases(target: ast.AST) -> set[str]:
     return set()
 
 
+def _prefix_head(slice_node: ast.AST) -> "tuple[str, set[str]] | None":
+    """``(head, names)`` for a key written as a fixed head and a computed tail (``"a_" + name``, ``f"a_{name}"``): the text the
+    key starts with and the names the tail uses; ``None`` for a key computed in any other way."""
+    if isinstance(slice_node, ast.BinOp) and isinstance(slice_node.op, ast.Add):
+        left = slice_node.left
+        if isinstance(left, ast.Constant) and isinstance(left.value, str) and left.value:
+            return left.value, _names_in(slice_node.right)
+    if isinstance(slice_node, ast.JoinedStr) and slice_node.values:
+        first = slice_node.values[0]
+        if isinstance(first, ast.Constant) and isinstance(first.value, str) and first.value:
+            return first.value, set().union(*(_names_in(v) for v in slice_node.values[1:]))
+    return None
+
+
 def result_key_names(path: Path, function: str) -> dict[str, set[str]] | None:
     """For a function that builds its returned results key by key (``out["k"] = expr``, or a dict literal it returns), the
     names (variables, functions, attributes) each key's value depends on, read from the code alone: what the expression names,
     what the variables it names were assigned from (in any statement, whatever its order), and what the conditions around the
     assignment name. ``{key: names}``; ``None`` when FI cannot read the function so: it is not found, a key is computed, a result
-    is added with ``update`` or ``**``, or a ``return`` hands back something other than the results it built.
+    is added with ``update`` or ``**``, or a ``return`` hands back something other than the results it built. A key with a fixed
+    head and a computed tail (``out["a_" + name]``) is one key written ``"a_*"``, with the names of the value and of the tail.
 
     This is a dependency of names, not a run: a value changed through a module-level variable another function sets is not
     followed."""
@@ -418,6 +440,10 @@ def result_key_names(path: Path, function: str) -> dict[str, set[str]] | None:
                     if (isinstance(t, ast.Subscript) and isinstance(t.slice, ast.Constant) and isinstance(t.slice.value, str)
                             and isinstance(t.value, ast.Name)):
                         keys.setdefault(t.slice.value, set()).update(value)
+                        holders.add(t.value.id)
+                    elif (isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name)
+                          and (pre := _prefix_head(t.slice)) is not None):
+                        keys.setdefault(pre[0] + "*", set()).update(value | pre[1])
                         holders.add(t.value.id)
                     elif isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and t.value.id in holders:
                         ok[0] = False  # a key computed at run time: FI cannot tell which result it is
@@ -473,7 +499,8 @@ def result_key_names(path: Path, function: str) -> dict[str, set[str]] | None:
         return None
     for n in ast.walk(fn):  # a key computed at run time, written into a variable that holds results
         if (isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Store) and isinstance(n.value, ast.Name) and n.value.id in holders
-                and not (isinstance(n.slice, ast.Constant) and isinstance(n.slice.value, str))):
+                and not (isinstance(n.slice, ast.Constant) and isinstance(n.slice.value, str))
+                and _prefix_head(n.slice) is None):
             return None
     if any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in _DYNAMIC_CALLS for n in ast.walk(fn)):
         return None

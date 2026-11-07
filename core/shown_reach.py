@@ -515,6 +515,7 @@ class Reach:
             out.not_done = list(dict.fromkeys([*out.not_done, *p.not_done]))
             out.figures = list(dict.fromkeys([*out.figures, *p.figures]))
             out.probes = list(dict.fromkeys([*out.probes, *p.probes]))
+            out.extra_keys = list(dict.fromkeys([*out.extra_keys, *p.extra_keys]))
             out.named = out.named or p.named
             out.by_trial = out.by_trial or p.by_trial
         out.stop = "; ".join(dict.fromkeys(p.stop for p in parts if p.stop))
@@ -705,7 +706,8 @@ class Reach:
                     if through == "skip":
                         continue  # this entry only hands on the results of another entry, which is asked itself
                     if through:
-                        touched.update(through)  # the results whose value the trial works out with the helper
+                        touched.update(through[0])  # the results whose value the trial works out with the helper
+                        out.extra_keys = sorted({*out.extra_keys, *through[1]})  # and the keys of no declared result it feeds
                         by_result = True
                     else:
                         touched.update(self.trial_ids() or set(self.ids))
@@ -716,18 +718,21 @@ class Reach:
             return out
         return self._judge(out, touched, "reached by " + ", ".join(sorted(set(reached_by))[:4]))
 
-    def _trial_ids_through(self, rel: str, entry: str, file: str, judged: str) -> "set[str] | str | None":
+    def _trial_ids_through(self, rel: str, entry: str, file: str, judged: str) -> "tuple[set[str], list[str]] | str | None":
         """Which declared results the trial's function ``entry`` (in ``rel``) works a value out with the helper ``judged`` of
         ``file`` for, read from the code: the value of each result key it builds depends on the names it uses, and the helper is
         reached from one of those names (:func:`core.code_reach.result_key_names`). That ties the helper to the results whose
         values it feeds, not to every result the trial makes (the plan's check measure ``T`` is then tied to the function that
-        makes it). ``"skip"`` for an entry that only hands on the results of another entry; ``None`` when the code cannot be read
-        so or the helper feeds no declared result: the helper is then tied to every result of the trial, as before."""
+        makes it). Gives ``(declared results, printed keys of no declared result)`` the helper feeds; a key that is no declared result
+        (a measure FI's checks are made of) is left out as it is and ties the helper to no result. ``"skip"`` for an entry that only
+        hands on the results of another entry; ``None`` when the code cannot be read so, the helper feeds no key the trial builds,
+        or it feeds a key family FI cannot name a result for: the helper is then tied to every result of the trial, as before."""
         from . import code_reach as _reach
 
         keys = _reach.result_key_names(self.code / rel, entry)
         if keys is None:
-            used = _called_from(_function_names(self.code, rel), entry) if entry in _function_names(self.code, rel) else set()
+            fns = _function_names(self.code, rel)
+            used = {u for n in ast.walk(fns[entry]) if (u := _used_name(n))} if entry in fns else set()  # its own text, not the helpers'
             defined = {n for r in self._study_files() for n in _function_names(self.code, r)}
             others = {e for e in self._trial_entries() if e != entry and e in used
                       and _reach.result_key_names(self.code / rel, e) is not None}
@@ -737,6 +742,7 @@ class Reach:
             for n in _function_names(self.code, r):
                 where.setdefault(n, []).append(r)
         ids: set[str] = set()
+        extra: list[str] = []
         for key, names in keys.items():
             hit = judged in names
             for n in sorted(names):
@@ -750,8 +756,17 @@ class Reach:
                         hit = True
                         break
             if hit:
-                ids |= self._key_ids(key, False) | self._reading(key, False)
-        return ids or None
+                head, prefix = (key[:-1], True) if key.endswith("*") else (key, False)
+                got = self._key_ids(head, prefix) | self._reading(head, prefix)
+                if got:
+                    ids |= got
+                elif prefix:
+                    return None  # a family of keys FI cannot tie to a result
+                elif entry == "trial":
+                    extra.append(key)
+                else:
+                    return None  # a key of the truth or of another entry: the results are compared with it, FI cannot tell which
+        return (ids, extra) if ids or extra else None
 
     def touched_by(self, file: str, function: str) -> list[str] | None:
         """The declared results a fault in ``function`` of ``file`` changes (:meth:`_helper_effect`: the results of the
