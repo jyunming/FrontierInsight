@@ -473,8 +473,10 @@ PINS_AT_811719AF = {
     # and again when every read of the table that returns data notes it (Table.level_rows and Table.reference); it was "1212760587b97257"
     # and again when the runtime gained the figure drawing calls (VERSION 5: Figure mixes in fi_figure_calls; run.py carries the runtime); it was "8d9d32daf0359e89"
     # and again when the table gained `bias`, `known`, `paired`, `correlation`, `sd` and `quantile`; it was "c4b2e59bfc01db2a", then "140fa8f3591b08b0" (bias_dropped)
-    # and again with core/in_run.py as above; it was "22b5c692db24cc0c", then "9c02b84106d93943"
-    "run_framed": "334d654a28f5a5e0",
+    # and again with core/in_run.py as above; it was "22b5c692db24cc0c", then "9c02b84106d93943", then "334d654a28f5a5e0"
+    # and again when the frame's Figure docstring stopped naming fig.curve (05361164, an intended text change: a curve the
+    # figure computes itself is no longer taught)
+    "run_framed": "968739116e2bd633",
 }
 
 
