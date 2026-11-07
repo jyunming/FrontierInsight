@@ -35854,11 +35854,11 @@ def _call_drawn(p: dict[str, Any]) -> list[str]:
     names: list[str] = []
     seen: set[str] = set()
     curves = 0
-    levelled: dict[str, list[dict[str, Any]]] = {}  # a figure with one curve per level of a setting: said once for each result
+    levelled: dict[tuple[str, str], list[dict[str, Any]]] = {}  # a figure with one curve per level of a setting: said once for each result
     for s in entries:
         ident = str(s.get("id"))
         if isinstance(s.get("level"), dict):
-            levelled.setdefault(str(s["level"].get("result")), []).append(s)
+            levelled.setdefault((str(s["level"].get("result")), str(s["level"].get("result_label"))), []).append(s)
         elif _unnamed_curve(s):
             curves += 1
         elif ident not in absorbed and _call_group(s, entries):

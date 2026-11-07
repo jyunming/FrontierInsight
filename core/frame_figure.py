@@ -519,17 +519,26 @@ class FigureCalls:
         whose ``x_id`` is the drawn x (when other settings also vary, at any of them: a y that is a real value of another slice
         is not told apart). A point with no x, no such setting or no table value cannot be checked, which counts as not matching;
         so does a series with no finite y at all (nothing was checked) and a figure with no table."""
+        return self._y_comparison(form, what, x_id, xs, ys) == "matches"
+
+    def _y_comparison(self, form, what, x_id, xs, ys):
+        """``matches`` (the rule of ``_y_matches``), ``differs`` (FI read the table's value at a drawn point and it is not the drawn
+        y) or ``not compared`` (FI could not read a value to compare at some point, or there was nothing to compare)."""
         if getattr(self, "table", None) is None:
-            return False
+            return "not compared"
         checked = 0
         for x, y in zip(xs, ys):
             if y is None or not _finite(y):
                 continue
-            if x is None or not any(_close_y(float(y), t) for key in self._keys_at(x_id, x)
-                                    for t in self._table_stats(what, key, form)):
-                return False
+            if x is None:
+                return "not compared"
+            stats = [t for key in self._keys_at(x_id, x) for t in self._table_stats(what, key, form)]
+            if not stats:
+                return "not compared"
+            if not any(_close_y(float(y), t) for t in stats):
+                return "differs"
             checked += 1
-        return checked > 0
+        return "matches" if checked > 0 else "not compared"
 
     def _names_a_result(self, series):
         """Whether a series id, or its plan label, is a result of the plan's (id or label): such a name says what the y is."""
@@ -551,9 +560,17 @@ class FigureCalls:
         not a result of the plan (a derived one: FI holds no value of it here), an x that is a result and not a setting, a figure
         without a table, a point the table cannot say, a series with no finite y. ``form`` (default the mean) says which statistic
         of the trials y is. No case refuses the call."""
+        return self._check_of_what(what, form, x_id, xs, ys)[0]
+
+    def _check_of_what(self, what, form, x_id, xs, ys):
+        """``(checked what, how)``: how is ``matches``, ``differs`` (FI compared and the values are not the table's) or
+        ``not compared`` (FI had nothing to compare the series with), from what the check did."""
         if what == "other" or what not in self._results() or x_id not in (getattr(self, "settings", None) or []):
-            return "other"
-        return what if form in Y_FORMS and self._y_matches(form, what, x_id, xs, ys) else "other"
+            return "other", "not compared"
+        if form not in Y_FORMS:
+            return "other", "not compared"
+        how = self._y_comparison(form, what, x_id, xs, ys)
+        return (what if how == "matches" else "other"), how
 
     def _checked_meaning(self, meaning, what, x_id, xs, ys, lo, hi):
         """What error bars of typed widths may be called. ``ci95``/``sd`` stay only when the widths equal the table's own for
@@ -698,11 +715,18 @@ class FigureCalls:
                                  "one of upper widths)" % (len(lo), len(ys)))
             yerr_meaning = self._checked_meaning(yerr_meaning, what, x_id, xs, ys, lo, hi)
         declared = what
-        what = self._checked_what(what, form, x_id, xs, ys)
+        what, how = self._check_of_what(what, form, x_id, xs, ys)
         x_ok = self._x_checked(x_id, xs, ys)
         # A series the body gave as a result of the plan that FI did not find to be the table's value of it keeps neither that
         # result's name (nor the series' own plan label, which names the same thing): its name is the neutral one, numbered below.
         neutral = what == "other" and (declared != "other" or (level is None and self._names_a_result(series)))
+        # The caption and the axis come from one fact, the quantity FI's check found: a level that carried the declared result's
+        # label no longer does, and the declared id stays beside it in the record.
+        declared_as = None
+        if what == "other" and declared != "other":
+            declared_as = {"id": declared, "label": self._label_of(declared), "checked": how}
+            if level:
+                level.update(result_label=NEUTRAL_Y, declared_as=declared, declared_label=declared_as["label"], checked=how)  # "result" stays the curve's identity
         legend = "%s = %s" % (level["setting_label"], level["text"]) if level else NEUTRAL_Y if neutral else self._label_of(series)
         with _undone(ax, rec):
             self._set_x(rec, x_id, x_ok)
@@ -717,15 +741,31 @@ class FigureCalls:
             rec["series"].append({"id": series, "label": legend, "kind": kind, "step": bool(step), "x": xs, "y": ys,
                                   "yerr": lo if lo is not None and _same(lo, hi) else None, "yerr_lo": lo, "yerr_hi": hi,
                                   "yerr_meaning": yerr_meaning if lo is not None else None, "what": what, "merged_with": [],
-                                  "x_checked": x_ok, **({"neutral": True} if neutral else {}), **({"level": level} if level else {})})
+                                  "x_checked": x_ok, **({"neutral": True} if neutral else {}), **({"declared_as": declared_as} if declared_as else {}),
+                                  **({"level": level} if level else {})})
             loose = [e for e in rec["series"] if e.get("neutral") and not e.get("level")]
             for k, e in enumerate(loose, 1):
                 e["label"] = NEUTRAL_Y if len(loose) == 1 else "%s %d" % (NEUTRAL_Y, k)
             levelled = [e for e in rec["series"] if e.get("level")]
-            several = len({e["level"]["result"] for e in levelled}) > 1  # two results on one panel: each curve says which
+            # Curves FI found not to be the result they were declared as are all "a computed value"; when the panel has curves
+            # declared as different results, each such result's curves are numbered, so no two groups share a name or a count.
+            unchecked = list(dict.fromkeys(e["level"]["declared_as"] for e in levelled if e["level"].get("declared_as")))
+            # a number is skipped when a label of the figure (a plan label, a series' name) is already that name
+            taken = {str(v.get("label") if isinstance(v, dict) else v) for v in (getattr(self, "labels", None) or {}).values()}
+            taken |= {str(r.get("label")) for st in self._state().values() for r in st["series"] if not r.get("declared_as")}
+            names, n = {}, 0
+            for ident in unchecked:  # in the order the panel first draws them
+                n += 1
+                while "%s %d" % (NEUTRAL_Y, n) in taken:
+                    n += 1
+                names[ident] = "%s %d" % (NEUTRAL_Y, n)
+            for e in levelled:
+                if e["level"].get("declared_as"):
+                    e["level"]["result_label"] = names[e["level"]["declared_as"]] if len(unchecked) > 1 else NEUTRAL_Y
+            several = len({(e["level"]["result"], e["level"]["result_label"]) for e in levelled}) > 1  # two results on one panel: each curve says which
             for e in levelled:
                 lv = e["level"]
-                e["label"] = ("%s, " % self._label_of(lv["result"]) if several else "") + "%s = %s" % (lv["setting_label"], lv["text"])
+                e["label"] = ("%s, " % lv["result_label"] if several else "") + "%s = %s" % (lv["setting_label"], lv["text"])
             self._remember(panel, "series", arts[0] if arts else None, what)
             self._fc_extra[panel].setdefault("drawn", {})[len(rec["series"]) - 1] = list(arts or [])  # every artist of the call, for its colour
         return arts
@@ -1353,8 +1393,13 @@ class FigureCalls:
     @staticmethod
     def _level_ident(e):
         """The curve of a level a record entry belongs to: its result and the level's text (a curve drawn as a line and as points
-        is one curve)."""
-        return (e["level"]["result"], e["level"]["text"])
+        is one curve). The result is the one the caption names: its id with the label FI's check left it, so a series that is not
+        the table's value of its declared result is its own curve beside one that is."""
+        return (FigureCalls._result_key(e), e["level"]["text"])
+
+    @staticmethod
+    def _result_key(e):
+        return (e["level"]["result"], e["level"].get("result_label"))
 
     @staticmethod
     def _shown_levels(rec):
@@ -1364,8 +1409,8 @@ class FigureCalls:
         if len({FigureCalls._level_ident(e) for _k, e in levelled}) <= LEGEND_LEVELS:
             return None
         keep = set()
-        for result in {e["level"]["result"] for _k, e in levelled}:
-            mine = [(k, e["level"]["value"]) for k, e in levelled if e["level"]["result"] == result]
+        for result in {FigureCalls._result_key(e) for _k, e in levelled}:
+            mine = [(k, e["level"]["value"]) for k, e in levelled if FigureCalls._result_key(e) == result]
             if all(_finite(v) for _k, v in mine):
                 ends = {min(v for _k, v in mine), max(v for _k, v in mine)}
             else:
@@ -1522,7 +1567,7 @@ class FigureCalls:
         for i in panels:
             for e in self._panel(i)[1]["series"]:
                 if e.get("level") and e["kind"] != "image":
-                    results_at.setdefault((i, e["level"].get("setting"), e["level"]["text"]), set()).add(e["level"]["result"])
+                    results_at.setdefault((i, e["level"].get("setting"), e["level"]["text"]), set()).add(FigureCalls._result_key(e))
         shared = all(len(r) == 1 for r in results_at.values())
         span = {}  # the range of each setting's levels over every panel, for the one colour scale they then share
         if shared:
