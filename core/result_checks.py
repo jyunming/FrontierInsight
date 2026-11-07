@@ -159,6 +159,16 @@ def _keep_measured(record: dict[str, Any], kept: list[dict[str, Any]]) -> None:
                    "note": "; ".join(str(c.get("note")) for c in left if c.get("note")), "say": "\n\n".join(paragraphs)})
 
 
+def takes_out(record: dict[str, Any], check: dict[str, Any]) -> bool:
+    """Whether a check of ``needs/RESULT_CHECK.json`` took its quantity out of the results. A second model's claim that is only
+    recorded (kept until the evidence gate measures it, or kept after it) takes nothing out: none of its keys is in
+    ``removed_quantities``. Every other check with a quantity takes it out."""
+    if check.get("kind") != "code_reader":
+        return True
+    gone = {str(k) for k in record.get("removed_quantities") or []}
+    return any(str(k) in gone for k in check.get("keys") or [])
+
+
 def left_out_by_record(quest_root: Path | str) -> dict[str, str]:
     """The quantities FI left out of the results, each with the check's own note: what the results check
     (``needs/RESULT_CHECK.json``) and the typed-number check (``needs/TYPED_RESULTS_CHECK.json``) wrote as

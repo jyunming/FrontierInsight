@@ -272,6 +272,12 @@ class Reach:
         self.result: Any = None
         self.figure_files: dict[str, str] = {str(o["id"]): str(o.get("file") or "") for o in derived.get("figures") or []
                                              if isinstance(o, dict) and o.get("id")}
+        #: Per figure file, the results the figure drew (``drawn`` of its record, else what it shows).
+        self.figure_drawn: dict[str, set[str]] = {}
+        for o in derived.get("figures") or []:
+            if isinstance(o, dict) and o.get("file") and isinstance(o.get("declared"), dict):
+                said = o["declared"].get("drawn") if o["declared"].get("drawn") is not None else o["declared"].get("shows")
+                self.figure_drawn[str(o["file"])] = {str(x) for x in said or []}
         self._read_bodies()
         self._reach: dict[str, set[tuple[str, str]] | None] = {}
 
@@ -472,6 +478,16 @@ class Reach:
             out.why = "the study run again with a repair reports other numbers for " + ", ".join(extra)[:120]
         out.extra_keys = sorted(set(extra))
         return out
+
+    def figures_drawing(self, ids: list[str], keys: list[str]) -> list[str]:
+        """The files of the figures that draw a result left out: one of ``ids`` (results) or ``keys`` (printed names), or a result
+        worked out from one of those keys. A figure whose record says it drew none of them is not listed."""
+        gone = {_norm(x) for x in [*ids, *keys] if x}
+        out: list[str] = []
+        for file, drawn in self.figure_drawn.items():
+            if any(_norm(d) in gone or (self.raw_inputs.get(d, set()) & gone) for d in drawn):
+                out.append(file)
+        return sorted(out)
 
     def changed_keys(self, metrics: list[str]) -> set[str]:
         """The printed keys whose recorded value a rerun showed moved: ``metrics`` are the metric names of the rerun record's own

@@ -409,7 +409,10 @@ def _code_problems(q: _Quest) -> list[dict[str, str]]:
     cr = q.code_review
     reviewer = str(cr.get("reviewer") or "a second model")
     final = bool(cr.get("final"))
-    taken_out = {str(c.get("quantity")) for c in map(_dict, _list(q.result_check.get("checks"))) if c.get("quantity")}
+    from . import result_checks as _result_checks
+
+    taken_out = {str(c.get("quantity")) for c in map(_dict, _list(q.result_check.get("checks")))
+                 if c.get("quantity") and _result_checks.takes_out(q.result_check, c)}
     for p in _list(cr.get("problems")):
         p = _dict(p)
         if p.get("kind") in ("dependent variable", "metric") and str(p.get("name") or "") in taken_out:
@@ -1284,9 +1287,11 @@ def _left_out_of_paper(q: _Quest) -> list[dict[str, Any]]:
     quantity, with the names it was found under in the results."""
     out: list[dict[str, Any]] = []
     record = q.result_check
+    from . import result_checks as _result_checks
+
     named = {str(k) for c in map(_dict, _list(record.get("checks"))) for k in _list(c.get("keys"))}
     for c in map(_dict, _list(record.get("checks"))):
-        if c.get("quantity"):
+        if c.get("quantity") and _result_checks.takes_out(record, c):
             out.append({"quantity": str(c["quantity"]), "why": _one(c.get("note"), 300),
                         "names_in_results": [str(k) for k in _list(c.get("keys"))]})
     rest = [str(k) for k in _list(record.get("removed_quantities")) if str(k) not in named]

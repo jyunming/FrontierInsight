@@ -143,6 +143,13 @@ def test_a_number_a_kept_quantity_also_holds_is_not_taken_for_a_left_out_one() -
 def test_the_quality_report_says_what_was_left_out_and_why(tmp_path: Path) -> None:
     engine = _quest(tmp_path)
     _run(engine, _result())
+    # The claims leave nothing out until the evidence gate decides; here no rerun could be made, so they stay out.
+    path = engine.quest_root / "needs" / "RESULT_CHECK.json"
+    rc = json.loads(path.read_text(encoding="utf-8"))
+    assert rc["removed_quantities"] == [] and quality_report.build(engine.quest_root, running=False)["left_out_of_paper"] == []
+    for c in rc["checks"]:
+        c["measured"] = {"status": "could_not"}
+    engine._close_reader_claims(path, rc, rc["checks"], [], _result(), None)
     report = quality_report.build(engine.quest_root, running=False)
     assert {x["quantity"] for x in report["left_out_of_paper"]} == PLANNED
     text = quality_report.render(report)

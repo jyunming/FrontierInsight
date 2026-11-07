@@ -22348,6 +22348,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                         "sufficient", "broaden", "insufficient"),
                 )
         except Exception as e:  # noqa: BLE001 — gate must never abort the quest
+            try:  # what the gate had not decided about a second model's claims is decided now, as if no rerun could be made
+                self._settle_undecided_reader_claims(state)
+            except Exception as settle_exc:  # noqa: BLE001
+                self._log.warning("[evidence_gate] the second model's claims could not be settled (%r)", settle_exc)
             if gate_off:
                 # FI's own stop conditions could not be checked: the same route as a failed gate call (recorded as
                 # unknown, a gap in the evidence record), never a silent passthrough to the writer.
@@ -23189,9 +23193,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                         keys = sorted({*(c.get("keys") or []), *(m for m in v.metrics if m != "failed trials")})
                         if main and any(_shown_reach._norm(m) in main for m in v.metrics):
                             why = "the main result is among them (the plan's headline: " + ", ".join(headline or [])[:120] + ")"
-                    if keys:
-                        self._leave_out_shown_faults([(c["quantity"], keys, "the study run again with a repair of it reports other "
-                                                       "numbers for " + ", ".join(v.metrics)[:160])], [], result)
+                    drawn = reach.figures_drawing(list(placed.left_out) if placed is not None else [], keys) if reach is not None else []
+                    if keys or drawn:
+                        how_moved = "the study run again with a repair of it reports other numbers for " + ", ".join(v.metrics)[:160]
+                        self._leave_out_shown_faults([(c["quantity"], keys, how_moved)] if keys else [], [], result,
+                                                     figures=[(f, how_moved) for f in drawn])
                     if why and stop is None:
                         text = (f"a second model found `{c['quantity']}` computed differently from the plan, a test shows it, and the "
                                 f"study run again with a repair of it reports other numbers for {', '.join(v.metrics)[:160]}: {why}")
@@ -23206,27 +23212,97 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._log.warning("[evidence_gate] %s stay in the results: the reader's claim is not shown to move a number (the paper says "
                               "the method differs from the plan's definition, or that the claim stands unshown)",
                               ", ".join(f"`{c['quantity']}`" for c in kept))
+        self._close_reader_claims(path, rc, checks, kept, result, reach)
+        return stop
+
+    def _close_reader_claims(self, path: Path, rc: dict[str, Any], checks: list[dict[str, Any]], kept: list[dict[str, Any]],
+                             result: Any, reach: "_shown_reach.Reach | None") -> None:
+        """Write what the gate decided about the second model's claims into ``needs/RESULT_CHECK.json``. A claim a rerun could not
+        measure stays out (the execute step recorded it without taking the keys out, so only a measurement or this decides), with
+        the figures that draw it, and the writer is told so instead of the execute step's "stays in the results for now"; a claim
+        that is kept returns its keys (:func:`core.result_checks._keep_measured`)."""
+        from . import result_checks as _result_checks
+
         rc = _result_checks._read_json(path) or rc  # _leave_out_shown_faults may have added what a changed number takes out
         for c in rc.get("checks") or []:
             m = next((x for x in checks if x.get("quantity") == c.get("quantity") and x.get("kind") == c.get("kind")), None)
             if m is not None and m.get("measured"):
                 c["measured"] = m["measured"]
-        # No rerun could be made: nothing measured the claim, and it stays out as before (the execute step recorded it without
-        # taking the keys out, so only a measurement or this fallback decides).
         unmeasured = [c for c in rc.get("checks") or [] if c.get("kind") == "code_reader" and isinstance(c.get("measured"), dict)
                       and c["measured"].get("status") == "could_not"]
+        # The execute step's words for a claim still in the results ("stays in the results for now") are gone once the gate has
+        # decided that its numbers stay out; the left-out words that follow are the writer's only instruction for them.
+        out = {str(c["quantity"]) for c in rc.get("checks") or [] if c.get("kind") == "code_reader" and isinstance(c.get("measured"), dict)
+               and c["measured"].get("status") in ("changed", "could_not")}
+        if out:
+            rc["say"] = "\n\n".join(p for p in str(rc.get("say") or "").split("\n\n")
+                                    if p.strip() and not any(f"found that `{n}` is " in p for n in out))
         out_keys = {str(k) for c in unmeasured for k in c.get("keys") or []} - {str(k) for k in rc.get("removed_quantities") or []}
         if out_keys:
             rc["removed_quantities"] = sorted({*(str(k) for k in rc.get("removed_quantities") or []), *out_keys})
             rc["removed_values"] = {**(rc.get("removed_values") or {}),
                                     **_result_checks._values_left_out(result, out_keys, self._derived_record())}
+            drawn = [f for f in (reach.figures_drawing([], sorted(out_keys)) if reach is not None else [])
+                     if f not in (rc.get("removed_figures") or [])]
+            if drawn:
+                self._drop_figures(drawn, {f: _result_checks.SHOWN_FAULT_FIGURE_WHY for f in drawn})
+                rc["removed_figures"] = sorted({*(rc.get("removed_figures") or []), *drawn})
+            paragraphs = [p for p in str(rc.get("say") or "").split("\n\n") if p.strip()]
+            for c in unmeasured:
+                if not ({str(k) for k in c.get("keys") or []} & out_keys):
+                    continue
+                q = c["quantity"]
+                taken = ", ".join("`" + str(k) + "`" for k in (c.get("keys") or [])[:6])
+                paragraphs.append(
+                    f"A second model found that `{q}` is computed differently from the plan ({str(c.get('note') or '').rstrip('.')}). "
+                    f"FI could not run the study again with a repair of it to find out whether the number is wrong, so it took {taken} "
+                    f"out of the results. Do NOT report, describe or quote any value for `{q}`, and do not call another number by the "
+                    f"plan's name for it. Say plainly, in the limitations, that `{q}` is left out of this paper because the code may "
+                    "not compute it as the plan defines it and FI could not establish whether it does.")
+            rc["say"] = "\n\n".join(paragraphs)
         _result_checks._keep_measured(rc, [c for c in rc.get("checks") or [] if any(
             c.get("quantity") == k.get("quantity") and c.get("kind") == k.get("kind") for k in kept)])
         try:
             path.write_text(json.dumps(rc, indent=1), encoding="utf-8")
         except OSError as exc:
             self._log.warning("[evidence_gate] could not write needs/%s (%r)", _result_checks.RECORD, exc)
-        return stop
+
+    def _settle_undecided_reader_claims(self, state: Any) -> None:
+        """The gate could not run to the end (it raised): the second model's claims it had not decided are decided as if no rerun
+        could be made, so that whether a result is left out never depends on whether the gate's own code crashed. A claim whose
+        test failed on the code that produced the results stays out and is disclosed; a claim no test shows is kept and disclosed
+        (a word alone never withholds a result)."""
+        from . import result_checks as _result_checks
+
+        path = self.quest_root / "needs" / _result_checks.RECORD
+        rc = _result_checks._read_json(path)
+        checks = [c for c in rc.get("checks") or [] if isinstance(c, dict) and c.get("kind") == "code_reader" and c.get("quantity")
+                  and not isinstance(c.get("measured"), dict)]
+        if not checks:
+            return
+        try:
+            differing = {q["name"]: q for q in _code_review.differing_quantities(self.quest_root, self.quest_root / "code")}
+        except Exception:  # noqa: BLE001 - the record of the claims is what decides, not this lookup
+            differing = {}
+        issues = _code_review.load(self.quest_root).get("issues")
+        issues = issues if isinstance(issues, dict) else {}
+        kept: list[dict[str, Any]] = []
+        for c in checks:
+            saved = issues.get(str((differing.get(str(c["quantity"])) or {}).get("fid") or ""))
+            shown = isinstance(saved, dict) and saved.get("demonstrated") is True and bool(
+                saved.get("test") and (self.quest_root / str(saved["test"])).is_file())
+            if shown:
+                c["measured"] = {"status": "could_not", "why": "the evidence check stopped before it could run the study again"}
+            else:
+                c["measured"] = {"status": "not_shown", "why": "no test FI could write fails on the delivered code because of it"}
+                kept.append(c)
+        reach = None
+        try:
+            names = _code_review.headline_names(state.get("design") if isinstance(state, dict) else None, self._protocol_block(state))
+            reach = self._shown_fault_reach(names, state)
+        except Exception:  # noqa: BLE001 - the figures are an extra source
+            reach = None
+        self._close_reader_claims(path, rc, checks, kept, state.get("result_json") if isinstance(state, dict) else None, reach)
 
     def _shown_fault_reach(self, headline: list[str], state: Any) -> "_shown_reach.Reach | None":
         """FI's records of the quest, read for the gate (:mod:`core.shown_reach`); ``None`` when they cannot be read, and

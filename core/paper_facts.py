@@ -394,9 +394,11 @@ def required_items(quest_root: Path | str) -> list[Item]:
         listed = ", ".join(said[:-1]) + f" and {said[-1]}"
         add(NOT_COMPUTED, "; ".join(qs), _sentence(f"The plan asks for {listed}; {many}, so this study does not report them"),
             key=f"{status}-{len(qs)}-quantities")
+    from . import result_checks as _result_checks
+
     checked = _read(root, "needs/RESULT_CHECK.json")
     for c in (checked.get("checks") if isinstance(checked, dict) else None) or []:
-        if isinstance(c, dict) and c.get("quantity"):
+        if isinstance(c, dict) and c.get("quantity") and _result_checks.takes_out(checked, c):
             q = _one(c["quantity"])
             note = _whole(c.get("note"), 400).rstrip(".")
             if c.get("kind") == "copy_of_result":  # not a wrong value: the same numbers as an earlier result, reported once
