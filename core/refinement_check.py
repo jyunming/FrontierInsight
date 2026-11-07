@@ -191,6 +191,9 @@ def judge(setting: dict[str, Any], runs: dict[str, list[dict[str, float]]], spre
             values = [level.get(name) for level in levels]
             finite = [v is not None and math.isfinite(v) for v in values]
             if not any(finite):
+                if _judged(name, names or set()):  # a headline result with no number at any level is not judged, never passed
+                    results.append({"setting": cell_key, "result": name, "values": values, "status": "lost",
+                                    "how": "it has no number at any level"})
                 continue
             if len(set(json.dumps(v) for v in values)) > 1:
                 changed = True

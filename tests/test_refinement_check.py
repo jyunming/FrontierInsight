@@ -266,3 +266,15 @@ def test_the_project_files_fi_writes_after_the_run_do_not_make_the_check_look_st
     assert rc.evidence_gaps(tmp_path, protocol) == []
     (code / "simulate.py").write_text("def run_cell(cell):\n    return {'x': 1}\n", encoding="utf-8")
     assert "other code" in rc.evidence_gaps(tmp_path, protocol)[0]
+
+
+def test_a_setting_with_no_headline_number_at_any_level_is_not_judged_and_not_converged() -> None:
+    """Before: that setting was skipped and the verdict was converged from the others."""
+    nan = float("nan")
+    runs = {"gap=1": [{"width": nan}, {"width": nan}, {"width": nan}],
+            "gap=4": [{"width": 10.0}, {"width": 10.001}, {"width": 10.0005}]}
+    v = rc.judge(SETTING, runs, {"width": 30.0}, {"width"})
+    assert v["verdict"] == "not_converged"
+    assert [(r["setting"], r["status"]) for r in v["results"] if r["setting"] == "gap=1"] == [("gap=1", "lost")]
+    other = rc.judge(SETTING, {"gap=4": runs["gap=4"]}, {"width": 30.0}, {"width"})
+    assert other["verdict"] == "converged"  # known positive: the finite setting alone still converges
