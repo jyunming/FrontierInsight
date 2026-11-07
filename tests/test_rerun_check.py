@@ -80,6 +80,23 @@ def test_a_move_inside_the_monte_carlo_uncertainty_is_not_counted_when_the_draws
     assert rerun_check.counted(inside, PROTOCOL, _trials(values), redrawn=False)[0] == inside
 
 
+def test_a_change_of_a_constant_metric_is_kept_not_divided_by_a_zero_uncertainty() -> None:
+    values = [2.0] * 20  # every trial gave the same value: its uncertainty is 0
+    assert rerun_check.uncertainty("trials/s/est/mean", 2.0, *rerun_check.trial_stats(_trials(values)), {}) == 0.0
+    moved = [{"key": "trials/s/est/mean", "old": 2.0, "new": 2.001}]
+    assert rerun_check.counted(moved, PROTOCOL, _trials(values), redrawn=True)[0] == moved
+
+
+def test_floating_point_rounding_of_a_constant_metric_is_not_a_change() -> None:
+    values = [0.0] * 20
+    rounding = [{"key": "trials/s/est/mean", "old": 0.0, "new": 1e-15}]
+    same = [{"key": "trials/s/est/mean", "old": 2.0, "new": 2.0}]
+    assert rerun_check.counted(rounding, PROTOCOL, _trials(values), redrawn=True)[0] == []
+    assert rerun_check.counted(same, PROTOCOL, _trials([2.0] * 20), redrawn=True)[0] == []
+    real = [{"key": "trials/s/est/mean", "old": 0.0, "new": 1e-6}]
+    assert rerun_check.counted(real, PROTOCOL, _trials(values), redrawn=True)[0] == real
+
+
 def test_a_share_is_judged_by_its_binomial_error() -> None:
     trials = {"cells": [{"key": "s", "ok": 100, "failed": 0, "metrics": {}}]}
     small = [{"key": "derived/derived/cover/by_setting/s", "old": 0.95, "new": 0.96}]
@@ -721,3 +738,32 @@ def test_a_key_is_said_changed_only_for_the_finding_whose_own_rerun_moved_it(tmp
     notes = {c["quantity"]: c["note"] for c in kept["checks"]}
     assert "did not establish whether the value of `m`" in notes["qa"] and "changes the reported number of `k`" in notes["qa"]
     assert "did not establish" in notes["qb"] and "changes the reported number" not in notes["qb"]
+# ---- a constant metric, through the whole rerun (compare, then counted) ---------------------------------------------------------------
+CONST_RUN_PY = RUN_PY.replace('[scale * i for i in range(10)]', '[base] * 10').replace('4.5 * scale', 'base').replace(
+    "scale = 1.0", "scale = 1.0" + chr(10) + "base = 0.0")
+
+
+def _constant_judge(tmp_path: Path, new_base: float) -> Verdict:
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "run.py").write_text(CONST_RUN_PY, encoding="utf-8")
+    (root / "raw").mkdir()
+    (root / "data" / "results").mkdir(parents=True)
+    cells = [{"key": "s", "ok": 10, "failed": 0, "metrics": {"est": {"values": [0.0] * 10}}}]
+    (root / "raw" / "trials.json").write_text(json.dumps({"cells": cells}), encoding="utf-8")
+    (root / "data" / "results" / "derived.json").write_text(json.dumps({"derived": {"est": {"by_setting": {"s": 0.0}}}}), encoding="utf-8")
+    copy = rerun_check.copy_code(root, tmp_path / "w")
+    # the repair changes how numbers are drawn (a new seeding call), so a move must be beyond the Monte Carlo noise to count
+    text = (copy / "run.py").read_text(encoding="utf-8").replace("base = 0.0", f"import random{chr(10)}random.seed(7){chr(10)}base = {new_base!r}")
+    (copy / "run.py").write_text(text, encoding="utf-8")
+    return asyncio.run(rerun_check.judge(_Local(), sys.executable, root, copy, PROTOCOL, 60, None))
+
+
+def test_a_real_move_of_a_constant_metric_is_a_changed_verdict_not_an_error(tmp_path: Path) -> None:
+    got = _constant_judge(tmp_path, 0.5)
+    assert got.status == "changed" and got.metrics == ["est"] and got.redrawn
+
+
+def test_rounding_noise_of_a_constant_metric_is_an_unchanged_verdict(tmp_path: Path) -> None:
+    got = _constant_judge(tmp_path, 1e-15)
+    assert got.status == "unchanged" and got.redrawn

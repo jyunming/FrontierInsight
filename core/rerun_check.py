@@ -361,7 +361,10 @@ def counted(changes: list[dict[str, Any]], protocol: Any, base_trials: Any, redr
         counts = not (c["key"].endswith("/ok") or c["key"].endswith("/failed"))
         if redrawn and c["new"] is not None and counts:
             se = uncertainty(c["key"], c["old"], stats, ok, kinds)
-            if se is not None and abs(c["new"] - c["old"]) / (math.sqrt(2) * se) <= Z:
+            move = abs(c["new"] - c["old"])
+            # a constant metric has no noise: a move beyond floating-point rounding is beyond it, rounding is no change
+            if se is not None and ((se == 0 and math.isclose(c["new"], c["old"], rel_tol=1e-9, abs_tol=1e-12))
+                                   or (se > 0 and move / (math.sqrt(2) * se) <= Z)):
                 continue  # inside the Monte Carlo noise
         if plan_precision and metric == plan_precision[0] and c["new"] is not None and counts and number_kind(c["key"]) in ("estimate", "end"):
             allowed = plan_allowance(plan_precision[1], c["old"], uncertainty(c["key"], c["old"], stats, ok, kinds))
