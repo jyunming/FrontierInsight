@@ -4119,6 +4119,59 @@ def mean_beside(mapping: dict[str, Any], name: str, values: list[Any]) -> str | 
     return None
 
 
+def pinned_to_bound(result_json: Any, protocol: Any, assertions: Any, recorded_by_cell: Any) -> list[Any]:
+    """The reported means of one setting that sit on a bound the design declares (``result_assertions``) while the mean of
+    that setting's recorded trials lies strictly beyond it: the reported number was pinned to the bound, and the trials
+    give another. One ``plausibility.Violation`` (kind ``pinned``) each, with the plain repair instruction.
+
+    Only FI's record decides: a mean (or proportion) the analysis prints for one whole setting
+    (``core.run_manifest._printed_summaries``), the mean of that setting's recorded trials, and the bound. A value that
+    merely differs from the record mean, not on a bound, is an aggregate the analysis chose (a pooled estimate, a spread)
+    and is never acted on. A per-trial quantity that is 0/1 has a record mean inside its bounds, so it never fires. A cap
+    inside the trial leaves the record already capped and cannot be seen here. The rounding allowance is the printed
+    value's last place (never finer than four places) and float32."""
+    from . import plausibility as _pl
+    from . import run_manifest as _rm
+
+    asserted = [a for a in assertions or [] if isinstance(a, _pl.Assertion)]
+    if not asserted or not recorded_by_cell or not isinstance(protocol, dict):
+        return []
+    out: list[Any] = []
+    for spec in protocol.get("metrics") or []:
+        if (not isinstance(spec, dict) or spec.get("kind") not in ("mean", "proportion") or not spec.get("id")
+                or spec.get("given")):
+            continue
+        metric = str(spec["id"])
+        grid = _rm.metric_grid(protocol, metric, recorded_by_cell)
+        record = _rm._record_by_setting(recorded_by_cell, metric, grid) if grid else {}
+        if not record:
+            continue
+        done: set[tuple[str, frozenset]] = set()
+        for named, stats, where in _rm._printed_summaries(result_json, metric, grid):
+            (cell,) = named
+            values = [(_as_float(k), int(n)) for k, n in (record.get(cell) or {}).items()]
+            values = [(v, n) for v, n in values if math.isfinite(v) and n > 0]
+            n_trials = sum(n for _, n in values)
+            reported = stats.get("mean")
+            if not n_trials or reported is None:
+                continue
+            mean = math.fsum(v * n for v, n in values) / n_trials
+            allowance = min(_half_step(reported), 0.5e-4) + 1e-11 * abs(reported) + 2 ** -24 * abs(mean)
+            dotted = where.replace("/", ".")
+            for a in asserted:
+                bound = _pl._on_bound(float(reported), a) if _pl._matches(a.path, dotted) else None
+                if bound is None or (a.path, cell) in done:
+                    continue
+                if (bound == a.max and mean > bound + allowance) or (bound == a.min and mean < bound - allowance):
+                    done.add((a.path, cell))
+                    setting = ", ".join(f"{k}={v}" for k, v in sorted(cell, key=lambda p: str(p[0]))) or "its setting"
+                    out.append(_pl.Violation(
+                        dotted, float(reported), a, kind="pinned",
+                        detail=(f"the reported {metric} at {setting} is {float(reported):g}, on its bound {bound:g}, but the "
+                                f"mean of its {n_trials} recorded trials is {mean:.6g}: report the value the trials give")))
+    return out
+
+
 def reported_values_not_run(recorded: dict[str, Counter], result_json: Any) -> list[str]:
     """Each ``<name>_values`` list the analysis printed, for a ``<name>`` FI's trials returned, that holds values those
     trials never produced: one sentence each. A list that holds more copies of some trials' values than the trials gave,

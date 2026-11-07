@@ -89,6 +89,7 @@ FEWER_RUNS = "fewer_runs"
 CUT_SHORT = "cut_short"
 RUN_DIFFERENCE = "run_difference"
 SHARED_SEEDS = "shared_seeds"
+AT_BOUND = "at_bound"
 UNSUPPORTED_CLAIMS = "unsupported_claims"
 UNRESOLVED_REVIEW = "unresolved_review"
 FIGURE_LEFT_OUT = "figure_left_out"
@@ -116,7 +117,7 @@ _ID_PREFIX = {NOT_DONE: "topic", LEFT_OUT: "left-out", NOT_COMPUTED: "not-comput
               SECOND_VERSION: "second-version", UNTESTED: "equation", CODE_FINDING: "finding", FAILED_TRIALS: "failed-trials",
               SETTING_LEFT_OUT: "setting-left-out", CALIBRATION: "calibration", TRIALS_UNCHECKED: "trials-unchecked",
               UNDEFINED: "undefined",
-              FEWER_RUNS: "fewer", CUT_SHORT: "cut-short", RUN_DIFFERENCE: "difference", SHARED_SEEDS: "shared-seeds",
+              FEWER_RUNS: "fewer", CUT_SHORT: "cut-short", RUN_DIFFERENCE: "difference", SHARED_SEEDS: "shared-seeds", AT_BOUND: "at-bound",
               UNSUPPORTED_CLAIMS: "unsupported", UNRESOLVED_REVIEW: "review", LAST_REVIEW: "last-review",
               FIGURE_LEFT_OUT: "figure-left-out", FIGURE_PASS_FAULT: "figure-pass-fault", METHOD_DIFFERS: "method-differs"}
 #: More settings left out than this are placed as one item.
@@ -504,6 +505,13 @@ def required_items(quest_root: Path | str) -> list[Item]:
     _trial_check_items(root, add)
     if (said_seeds := shared_seeds_text(root)):
         add(SHARED_SEEDS, "seeds shared across settings", _sentence(said_seeds), key="seeds")
+    # A result on a declared bound in several settings (or in every setting): the range check's warning, which never sends the
+    # run back, so the paper says it (.fi/edge_everywhere.json, written by the engine after each run).
+    edge = _read(root, ".fi/edge_everywhere.json")
+    for row in (edge.get("results") if isinstance(edge, dict) and isinstance(edge.get("results"), list) else []):
+        said_edge = _disclosure._edge_sentence({"results": [row]})
+        if said_edge:
+            add(AT_BOUND, said_edge[:60], _sentence("FI found that " + said_edge.rstrip(".")), key=said_edge)
     from . import disclosure as _disc
 
     unresolved = _disc.unresolved_sentence(_read(root, str(_disc.OBJECTIONS_RECORD)))

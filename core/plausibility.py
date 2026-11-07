@@ -38,7 +38,10 @@ exception added for one shape left the next shape firing. Which result a piece o
 free code feeds cannot be told from the code, so the gate no longer tries. What it
 keeps is what the results themselves show: a value outside its range is a
 violation, and a value exactly on a bound in several settings is said in the paper
-(next section), which is how a capped number shows up.
+(next section), which is how a capped number shows up. What catches a pinned value is FI's own record: a mean reported on
+a declared bound while the mean of that setting's recorded trials lies strictly beyond it is a ``pinned`` violation
+(``core.trial_runner.pinned_to_bound``), sent back for repair. It cannot see a cap inside the trial: the record then holds
+the capped values, and the reported mean equals them.
 
 
 Why several values on a bound fail
@@ -227,13 +230,16 @@ class Violation:
     assertion: Assertion
     # "out_of_range"; "at_bound": exactly on one bound in several settings;
     # "edge_everywhere": on its bound in every setting; "missing": an earlier
-    # run reported this bounded quantity and this one does not.
+    # run reported this bounded quantity and this one does not; "pinned": reported
+    # on a bound while FI's record of that setting's trials lies beyond it.
     kind: str = "out_of_range"
     # The result paths an ``at_bound`` violation covers.
     paths: tuple[str, ...] = ()
     # Values on the same bound that were recognised as expected, as
     # (path, reason), so a repair is not asked to change them.
     explained: tuple[tuple[str, str], ...] = ()
+    # "pinned": the sentence FI's record gives (core/trial_runner.py::pinned_to_bound).
+    detail: str = ""
 
     def disclosure(self) -> str:
         """One plain sentence for the paper's Limitations, from FI's own record of the run (never the repair wording)."""
@@ -252,6 +258,8 @@ class Violation:
 
     def describe(self) -> str:
         why = f" ({self.assertion.reason})" if self.assertion.reason else ""
+        if self.kind == "pinned":
+            return self.detail
         if self.kind == "at_bound":
             shown = ", ".join(self.paths[:3]) + (", …" if len(self.paths) > 3 else "")
             note = ""

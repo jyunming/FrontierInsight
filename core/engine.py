@@ -11787,6 +11787,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         protocol = self._protocol_block(state)  # type: ignore[arg-type]
         if isinstance(protocol, dict):
             state = {**state, "design": {**(state.get("design") or {}), "protocol": protocol}}
+            if (state.get("design") or {}).get("result_assertions") and (self.quest_root / _trial_runner.RUN_RECORD).is_file():
+                # FI's own record of each setting's trials: what a reported value on a declared bound is held to
+                # (:func:`core.trial_runner.pinned_to_bound`).
+                state["_trial_record"] = _trial_runner.recorded_values_by_cell(self.quest_root)[0]
         # When FI writes the analysis, state["code"] is FI's own experiment.py: what the checks read to learn what the study
         # did (a cap on a value) is the study's code, never FI's.
         study = _analysis_frame.study_code(self.quest_root / "code")
@@ -20984,6 +20988,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "IMPLAUSIBLE RESULT: the script exited 0 and printed RESULT_JSON, "
                 "but these values break the bounds the DESIGN declared for them:\n"
                 + "\n".join(f"- {v.describe()}" for v in implausible[:10])
+                + ("\n\nA value FI's record of the trials contradicts is to be reported as the trials give it, "
+                   "uncapped." if any(getattr(v, "kind", "") == "pinned" for v in implausible) else "")
                 + "\n\nFind the cause before changing anything. If it is a bug "
                 "(wrong units, a factor of two, a sign error, a mis-set "
                 "parameter), fix it. If the value is genuinely what the method "
@@ -36764,9 +36770,12 @@ def _checked(state: "QuestState", memo: Any = None) -> list:
     args = dict(zero_expected=_zero_expected_paths(state), edge_ok=_physical_bound_paths(state))
     seen = list(state.get("bounded_seen") or ())
     trial, derived = state.get("_trial_code"), set(state.get("_derived_ids") or ())
+    # A value reported on a bound while FI's record of that setting's trials lies beyond it was pinned there.
+    pinned = _trial_runner.pinned_to_bound(rj, design.get("protocol"), plausibility.parse_assertions(design),
+                                           state.get("_trial_record"))
     if trial is None:
-        return plausibility.check_design(rj, design, code=state.get("code") or "", seen=seen,
-                                         walk=memo.get(rj) if memo is not None else None, **args)
+        return pinned + plausibility.check_design(rj, design, code=state.get("code") or "", seen=seen,
+                                                  walk=memo.get(rj) if memo is not None else None, **args)
 
     def of_derived(path: str) -> bool:
         return any(seg in derived for seg in plausibility._segments(path))
@@ -36775,7 +36784,7 @@ def _checked(state: "QuestState", memo: Any = None) -> list:
         return str(a.get("path", "") if isinstance(a, dict) else getattr(a, "path", ""))
 
     asserted = list(design.get("result_assertions") or [])
-    out: list = []
+    out: list = list(pinned)
     for code, mine in ((state.get("code") or "", True), (trial, False)):
         part = {**design, "result_assertions": [a for a in asserted if of_derived(path_of(a)) == mine]}
         out += plausibility.check_design(rj, part, code=code, seen=[p for p in seen if of_derived(str(p)) == mine],
