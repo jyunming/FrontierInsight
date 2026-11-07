@@ -980,6 +980,20 @@ def judged(oracles: list[dict[str, Any]], reported: dict[str, Any] | None) -> li
 DELIVERED_RUN = "the delivered run"
 
 
+#: The parts of a protocol that define what one trial is, besides the setting it runs at.
+_TRIAL_BASIS_KEYS = ("in_each_run", "constants", "thresholds", "shared_draws", "seed_policy")
+
+
+def trial_basis(protocol: dict[str, Any] | None) -> str:
+    """One hash of everything in the protocol that defines a trial apart from its setting: the full list of values compared
+    inside each run (``in_each_run``), the constants, the thresholds, whether trials share draws and the seed policy. The
+    gate keeps it in each entry it goes on with, so a delivered run is read as the same trials only when it is unchanged."""
+    import hashlib
+
+    basis = {k: protocol.get(k) for k in _TRIAL_BASIS_KEYS} if isinstance(protocol, dict) else {}
+    return hashlib.sha256(json.dumps(basis, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
 def _same_setting(a: Any, b: Any) -> bool:
     """Whether two settings name the same values (numbers compared as numbers: ``200`` and ``200.0`` are one value)."""
     if not isinstance(a, dict) or not isinstance(b, dict) or set(a) != set(b):
@@ -1023,7 +1037,12 @@ def rejudge_on_delivered(record: Any, trials: Any, protocol: dict[str, Any] | No
     is a mean of metrics the protocol declares as means. The verdict is the one the gate would have given on those trials
     (:func:`core.mc_error.statistic`, :func:`core.mc_error.mean_verdict`). A check still not decided stays as it was; a
     check that was undecided for another reason is not touched. A pass leaves the list of checks the quest went on with;
-    a fail stays in it as a failure; the quest's status becomes ``ok`` when nothing is left in it."""
+    a fail stays in it as a failure; the quest's status becomes ``ok`` when nothing is left in it.
+
+    The trials must be the same trials: the entry's ``trial_basis`` (kept by the gate, :func:`trial_basis`) must equal the
+    delivered run's. An entry with none (a record written before the gate kept it) is never judged again. A fail on the
+    delivered run is recorded and disclosed as it stands, with no second look at fresh trials: the gate's confirming look
+    guards against a small first sample, and the delivered run is the full sample."""
     import copy
 
     from . import accepted_checks as _accepted
@@ -1053,6 +1072,8 @@ def rejudge_on_delivered(record: Any, trials: Any, protocol: dict[str, Any] | No
             continue
         if entry.get("script_version") != version or entry.get("fingerprint") != _accepted.fingerprint(oracle):
             continue
+        if not entry.get("trial_basis") or entry.get("trial_basis") != trial_basis(protocol):
+            continue  # FI keeps nothing showing the delivered run's trials are the ones the gate measured
         own = case_of(oracle)
         expected, limit, _mode = limit_of(oracle)
         if own is None or expected is None or limit is None or not _mc.reads_a_mean(oracle):
@@ -1079,7 +1100,15 @@ def rejudge_on_delivered(record: Any, trials: Any, protocol: dict[str, Any] | No
         j.pop("undecided", None)
         for c in out_last.get("checks") or []:
             if isinstance(c, dict) and str(c.get("name") or "").strip().lower() == name.lower():
-                c.update(value=value, mc=new)
+                # Only the delivered measurement stays: what the gate's side run returned is replaced, not mixed in.
+                returned = {}
+                for k, m in (here[0].get("metrics") or {}).items():
+                    vals = [float(v) for v in (m.get("values") if isinstance(m, dict) else None) or []
+                            if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)]
+                    if vals:
+                        returned[k] = math.fsum(vals) / len(vals)
+                returned["n_trials"] = float(len(rows))
+                c.update(value=value, mc=new, returned=returned)
         stale = f"the oracle {name!r} "
         for holder in (out, out_last):
             holder["problems"] = [p for p in holder.get("problems") or [] if not str(p).startswith(stale)]

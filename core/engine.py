@@ -16102,7 +16102,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # and the paper says so: nothing about the check is relaxed.
             # A check the trials could not decide carries ``undecided`` from its verdict (accepted_checks._mc_said).
             went_on = [{**c, "by": _accepted.AUTOMATIC, "via": _accepted.AUTOMATIC, "script": self._rel_to_quest(seed_path),
-                        "script_version": version}
+                        "script_version": version,
+                        "trial_basis": _oracle.trial_basis(protocol)}
                        for c in (go_on_checks or _accepted.went_on_entries(found, run_oracles,
                                                                            attempts[-1].get("judged") or []))]
         # A check the code and the plan's own working still disagree on (core/oracle_challenge.py) is said as that, with
@@ -20103,7 +20104,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             pass
         patch["run_manifest_failures"] = manifest_attempts_next
         patch["run_manifest_analysis_only"] = manifest_analysis_only
-        if manifest_status in ("ok", "warned", "extended_by_person") and not failed_script:
+        if _rejudges_oracles_after(manifest_status, failed_script):
             await self._rejudge_oracles_on_delivered_run(state, seed_path)
         run_context = await self._attempt_context({**state, **patch}, kind="after_run")
 
@@ -31567,6 +31568,17 @@ def _claim_method_block(quest_root: Path, state: QuestState) -> str:
     else:  # a paper that says so is right: the figure list is FI's record, and an empty one is a fact too
         parts.append("What each figure draws: FI's record holds no figure from this run.")
     return "\n\n".join(parts) or "(nothing recorded)"
+
+
+#: The run-manifest statuses of a main run that finished: the known-answer checks the gate could not decide are judged again
+#: on its trials (``off`` and ``not_applicable``: no manifest was compared, but the run and its trials are there).
+_FINISHED_RUN_STATUSES = ("ok", "warned", "extended_by_person", "off", "not_applicable")
+
+
+def _rejudges_oracles_after(manifest_status: Any, failed_script: Any) -> bool:
+    """Whether ``_node_execute`` judges the undecided known-answer checks again: the main run finished, its manifest was
+    accepted, compared or not compared, and no script is being sent back."""
+    return manifest_status in _FINISHED_RUN_STATUSES and not failed_script
 
 
 def _claim_findings_parts(quest_root: Path) -> list[str]:

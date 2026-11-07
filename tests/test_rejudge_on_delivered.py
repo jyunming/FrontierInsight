@@ -44,7 +44,7 @@ def _trials(*sizes: int, n: int = N_DELIVERED) -> dict[str, Any]:
 
 
 def _undecided(oracle: dict[str, Any], *, why: str = "time", version: str = VERSION, verdict: str = "undecided",
-               trials: int = N_GATE) -> tuple[dict[str, Any], dict[str, Any]]:
+               trials: int = N_GATE, basis: str | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
     """One check as the gate left it: its judged entry and the entry of the list of checks the quest went on with."""
     expected, limit, _ = oc.limit_of(oracle)
     stat = {"trials": trials, "se": 0.01, "on": "means", "varies": True, "across": True}
@@ -56,7 +56,8 @@ def _undecided(oracle: dict[str, Any], *, why: str = "time", version: str = VERS
              "measure": oracle["measure"], "measured": 0.5, "measured_by": "engine",
              "mc_words": mc.words(judged["mc"]), "undecided": True,
              "undecided_words": mc.undecided_words(judged["mc"], limit), "by": ac.AUTOMATIC, "via": ac.AUTOMATIC,
-             "script": "code/simulate.py", "script_version": version}
+             "script": "code/simulate.py", "script_version": version,
+             "trial_basis": oc.trial_basis(PROTOCOL) if basis is None else basis}
     return judged, entry
 
 
@@ -195,6 +196,47 @@ def test_a_record_that_went_on_with_nothing_or_stopped_is_left_alone() -> None:
     assert oc.rejudge_on_delivered(_record(_undecided(oracle)), None, _protocol(oracle), VERSION) == (None, [])
 
 
+def test_a_delivered_run_with_a_longer_list_compared_inside_each_run_stays_undecided() -> None:
+    oracle = _oracle("hit_at_ten")
+    gate = {**PROTOCOL, "in_each_run": {"level": [1, 2]}}
+    record = _record(_undecided(oracle, basis=oc.trial_basis(gate)))
+    # the same list: judged again (the control that shows the test can see a re-judgment)
+    new, names = oc.rejudge_on_delivered(record, _trials(10), gate, VERSION)
+    assert names == ["hit_at_ten"]
+    # the person extended the list for the main run: the same setting is not the same trials
+    extended = {**PROTOCOL, "in_each_run": {"level": [1, 2, 3]}}
+    assert oc.rejudge_on_delivered(record, _trials(10), extended, VERSION) == (None, [])
+
+
+def test_an_entry_the_gate_wrote_without_the_trial_basis_is_never_judged_again() -> None:
+    oracle = _oracle("hit_at_ten")
+    judged, entry = _undecided(oracle)
+    entry.pop("trial_basis")
+    assert oc.rejudge_on_delivered(_record((judged, entry)), _trials(10), _protocol(oracle), VERSION) == (None, [])
+
+
+def test_the_check_keeps_only_the_delivered_measurement() -> None:
+    oracle = _oracle("hit_at_ten")
+    record = _record(_undecided(oracle))
+    record["attempts"][-1]["checks"][0]["returned"] = {"hit": 0.48, "gain": 0.19, "n_trials": 100.0}
+    new, _ = oc.rejudge_on_delivered(record, _trials(10), _protocol(oracle), VERSION)
+    check = new["attempts"][-1]["checks"][0]
+    cell = _cell(10)
+    assert check["returned"]["n_trials"] == float(N_DELIVERED)
+    assert abs(check["returned"]["hit"] - sum(cell["metrics"]["hit"]["values"]) / N_DELIVERED) < 1e-12
+    assert check["returned"]["hit"] != 0.48 and check["value"] == _judged(new, "hit_at_ten")["value"]
+
+
+def test_the_main_run_is_read_again_whenever_it_finished_and_no_script_is_sent_back() -> None:
+    from core.engine import _rejudges_oracles_after as after
+
+    for status in ("ok", "warned", "extended_by_person", "off", "not_applicable"):
+        assert after(status, None) is True, status
+        assert after(status, "simulate.py") is False, status  # a script sent back: the run is not the delivered one
+    for status in ("repairing", "stopped", "pending", "not_run", "single_script", "", None):
+        assert after(status, None) is False, status
+
+
 def test_the_engine_rewrites_the_record_after_the_main_run_and_frees_the_check(tmp_path: Any) -> None:
     import asyncio
     import json
@@ -224,3 +266,13 @@ def test_the_engine_rewrites_the_record_after_the_main_run_and_frees_the_check(t
     written.clear()
     assert asyncio.run(Engine._rejudge_oracles_on_delivered_run(stub, {}, root / "code" / "simulate.py")) == []
     assert not written
+
+
+def test_the_node_that_runs_the_study_makes_the_call_through_that_condition() -> None:
+    import inspect
+
+    from core.engine import Engine
+
+    source = inspect.getsource(Engine._node_execute_steps)
+    assert "_rejudges_oracles_after(manifest_status, failed_script)" in source
+    assert "_rejudge_oracles_on_delivered_run(state, seed_path)" in source
