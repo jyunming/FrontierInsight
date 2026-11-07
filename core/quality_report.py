@@ -723,7 +723,7 @@ def _paper_problems(q: _Quest) -> list[dict[str, str]]:
     # A figure whose legend or caption says something its record does not draw (FI writes both from the record, so a
     # finding here is FI's own fault, disclosed; it stops nothing).
     for f in _ftc.quest_findings(q.root):
-        out.append(_problem("figure", f"{f.get('file')}: {f.get('said')}", "FI's check of the figure's legend and caption "
+        out.append(_problem("paper", f"{f.get('file')}: {f.get('said')}", "FI's check of the figure's legend and caption "
                             "against its record of what it draws", "not fixed", str(f.get("record") or "")))
     claim_model = _first_model(q.calls, ("claim_check",)) or "claim check"
     rec = q.receipts.get("claim_check")
