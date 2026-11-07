@@ -124,11 +124,12 @@ def test_a_figure_without_a_series_setting_is_drawn_as_before():
     assert "one per" not in _caption(h)
 
 
-def test_fi_default_figure_is_not_held_to_the_series_setting():
+def test_fi_default_figure_is_held_to_the_series_setting_like_a_body():
     h = _Host(fallback=True)
-    h.series_ids = ["growth, temp = 10"]
-    h.line(0, "growth, temp = 10", [1, 2, 3], [1.0, 2.0, 3.0], "growth")
-    assert "level" not in h.record()["panels"][0]["series"][0]
+    with pytest.raises(ValueError, match="names a result, not a curve"):
+        h.line(0, "growth", [1, 2, 3], [1.0, 2.0, 3.0], "growth")
+    h.line(0, 10, [1, 2, 3], [1.0, 2.0, 3.0], "growth")
+    assert h.record()["panels"][0]["series"][0]["level"]["value"] == 10
 
 
 # ---- fix round 1 -------------------------------------------------------------------------------------------------------------

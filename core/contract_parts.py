@@ -287,6 +287,9 @@ def _check_figures(value: Any, asked: dict[str, str], design: dict[str, Any]) ->
                 out.append(f"`{name}`: `{axis}` is `{used}`, which {why} (the settings to use are {', '.join(settings) or 'none'})")
         if row.get("x") not in (None, "") and row.get("x") == row.get("series"):
             out.append(f"`{name}`: `series` must be another setting than `x`, or null")
+        for sc in ("x_scale", "y_scale"):
+            if row.get(sc) not in (None, "linear", "log"):
+                out.append(f"`{name}`: `{sc}` must be \"linear\" or \"log\"")
         panels = row.get("panels", 1)
         if isinstance(panels, bool) or not isinstance(panels, int) or not 1 <= panels <= _contract.MAX_PANELS:
             out.append(f"`{name}`: `panels` must be a whole number from 1 to {_contract.MAX_PANELS}")
@@ -304,7 +307,8 @@ def _apply_figures(p: dict[str, Any], design: dict[str, Any], answer: dict[str, 
         row = answer[name]
         decls[name] = ({"drop": True, "why": _short(row.get("why"), 300)} if row.get("drop") is True else
                        {"shows": list(row["shows"]), "x": row.get("x") or None, "series": row.get("series") or None,
-                        "panels": row.get("panels", 1)})
+                        "panels": row.get("panels", 1),
+                        **{k: row[k] for k in ("x_scale", "y_scale") if row.get(k) in ("linear", "log")}})
     # A number the plan names as returned for each setting, which a figure now shows, is declared as a result of the study,
     # computed afterwards by the study's own function (so no run is required to return it), along the settings the figure draws.
     named = _named_results({**design, "protocol": p})

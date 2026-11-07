@@ -20,8 +20,8 @@ What the host (``Figure``) must hold, by these names:
 * ``settings`` -- the names of the plan's settings (an ``x=`` may name one);
 * ``series_ids`` -- the plan ids a series may name besides the declared results (for example the values the study compares);
 * ``references`` -- ``{reference id: value}`` or ``{reference id: {"value": number, "label": text}}``;
-* ``labels`` -- ``{id: label}`` or ``{id: {"label": text, "scale": "linear"|"log"}}``, the plan's words (set by FI; absent
-  means the id stands in for the label and the scale is linear);
+* ``labels`` -- ``{id: label}`` or ``{id: {"label": text}}``, the plan's words (set by FI; absent means the id stands in
+  for the label);
 * ``fallback`` -- True when FI drew the figure itself (absent means False).
 
 Every one but ``axes`` and ``table`` may be missing: the call then has less to check against and says so only where it must.
@@ -40,6 +40,8 @@ from pathlib import Path
 
 MEANINGS = ("ci95", "sd", "range", "other")
 NOTE_FORMS = ("mean", "n", "low", "high")
+LOG_NOTE = " (log scale)"  # said on the label of a log axis
+LOG_RATIO = 1e3  # FI's rule for an axis the plan does not scale: log when all values are above zero and span this ratio
 IDENTICAL_RTOL = 1e-12  # two series equal within this relative tolerance are one line to the reader
 Y_RTOL = 1e-3  # a drawn y matches the table's value within this relative tolerance (plus 1e-12 absolute)
 Y_FORMS = ("mean", "sd", "se", "min", "max", "range", "max_abs")  # which statistic of the trials at a setting y may be (``form``)
@@ -51,6 +53,8 @@ NEUTRAL_X = "computed x"  # the x axis of a panel that draws values FI did not f
 LAST_RUN_ENV = "FI_FIGURE_FALLBACK"
 NEUTRAL_Y = "computed value"  # the neutral name of a quantity FI did not tie to a result of the table
 LEGEND_LEVELS = 12  # a figure with one curve per level of a setting names every level in its legend up to this many; more: the lowest and the highest
+LEGEND_SHARE = 0.2  # a legend whose box lies this much over a panel it does not belong to is over it (the share the layout check of plot_style uses)
+LEGEND_INSET_PX = 3  # a legend's box is measured this many pixels in from its frame, so a line that only grazes the frame is not under it
 REF_STATED = "stated in the figure"  # the source of a reference line drawn at a literal value
 
 
@@ -293,18 +297,14 @@ class FigureCalls:
             return "Expected %s (plan formula)" % self._label_of(ident)
         return own or self._label_of(ident)
 
-    def _scale_of(self, ident):
-        got = (getattr(self, "labels", None) or {}).get(ident)
-        return "log" if isinstance(got, dict) and got.get("scale") == "log" else "linear"
-
     def _results(self):
         return list(getattr(getattr(self, "table", None), "declared", []) or [])
 
     def _series_setting(self):
         """The setting the figure's plan draws one curve per level of (the frame's ``series``), else None. FI's own default figure
-        names its curves itself and is not held to it."""
+        is held to it like a body: it passes the setting's value as each curve's series."""
         ident = getattr(self, "series", None)
-        if getattr(self, "fallback", False) or not isinstance(ident, str) or ident not in (getattr(self, "settings", None) or []):
+        if not isinstance(ident, str) or ident not in (getattr(self, "settings", None) or []):
             return None
         return ident
 
@@ -368,7 +368,7 @@ class FigureCalls:
         else:
             raise ValueError("`x=%r` is neither a setting nor a result of the plan; the settings are: %s; the results are: %s"
                              % (x_id, ", ".join(settings) or "(none)", ", ".join(self._results()) or "(none)"))
-        new = {"id": x_id, "kind": kind, "label": self._label_of(x_id), "scale": self._scale_of(x_id)}
+        new = {"id": x_id, "kind": kind, "label": self._label_of(x_id), "scale": "linear"}
         if rec["x"] is not None and rec["x"]["id"] != x_id:
             raise ValueError("panel %d already has `%s` on its x axis; one panel has one x axis (use another panel for `%s`)"
                              % (rec["panel"], rec["x"]["id"], x_id))
@@ -381,7 +381,7 @@ class FigureCalls:
     def _set_y(self, rec, what):
         if rec["y"] is None:
             rec["y"] = {"what": what, "label": NEUTRAL_Y if what == "other" else self._label_of(what),
-                        "scale": "linear" if what == "other" else self._scale_of(what)}
+                        "scale": "linear"}
         elif what not in rec["y"]["what"].split(" / "):  # two results on one axis: both are named
             rec["y"]["what"] += " / " + what
             rec["y"]["label"] += " / " + (NEUTRAL_Y if what == "other" else self._label_of(what))
@@ -736,8 +736,8 @@ class FigureCalls:
             if lo is not None:
                 bars = self._errorbar(ax, xs, ys, lo, hi)
                 self._tag(bars)
-                if level:  # kept to share the curve's colour, by the position the series takes in the record
-                    self._fc_extra.setdefault(panel, {"series": [], "refs": []}).setdefault("bars", {})[len(rec["series"])] = bars
+                # kept to share the curve's colour and, for bars, to move with the bar, by the position the series takes in the record
+                self._fc_extra.setdefault(panel, {"series": [], "refs": []}).setdefault("bars", {})[len(rec["series"])] = bars
             rec["series"].append({"id": series, "label": legend, "kind": kind, "step": bool(step), "x": xs, "y": ys,
                                   "yerr": lo if lo is not None and _same(lo, hi) else None, "yerr_lo": lo, "yerr_hi": hi,
                                   "yerr_meaning": yerr_meaning if lo is not None else None, "what": what, "merged_with": [],
@@ -768,6 +768,7 @@ class FigureCalls:
                 e["label"] = ("%s, " % lv["result_label"] if several else "") + "%s = %s" % (lv["setting_label"], lv["text"])
             self._remember(panel, "series", arts[0] if arts else None, what)
             self._fc_extra[panel].setdefault("drawn", {})[len(rec["series"]) - 1] = list(arts or [])  # every artist of the call, for its colour
+            self._group_bars(panel)  # bars of the panel: a series of another kind changes how they are placed
         return arts
 
     def _once(self, rec, panel, kind, series):
@@ -777,6 +778,85 @@ class FigureCalls:
             raise ValueError("the figure draws `%s` a second time on panel %d with the same name, so the legend would show two series "
                              "under one name; give each curve its own series (a figure with one curve per level of a setting "
                              "passes the level as the series)" % (series, panel))
+
+    def _group_bars(self, panel):
+        """The bar series of a panel side by side. Bars over a setting are categories: each distinct x value is one slot, the slots
+        are evenly spaced in the order of the values and named by them on the axis, and the series of a slot take 0.8 of it between
+        them (0.8 over the number of bar series each), so no bar hides another and a sparse x value is no thinner than a crowded one.
+        A panel that also draws something else along x (a line, a band, a reference at an x) keeps its x axis: the bars are grouped
+        around their x values, a slot being 0.8 of the smallest gap between two distinct values. An error bar and a text placed at a
+        bar move with it. Run after every bars call (a later series changes the slots of the earlier ones); the record's data is not
+        touched, only where the bars sit."""
+        ax, rec = self._panel(panel)
+        extra = self._fc_extra[panel]
+        drawn = extra.get("drawn") or {}
+        mine = [k for k, e in enumerate(rec["series"]) if e["kind"] == "bars" and drawn.get(k)]
+        if not mine or ax.get_xscale() != "linear":
+            return
+        if getattr(ax, "_fi_bar_slots", None):  # the slots of an earlier call: the axis is made again below
+            from matplotlib import ticker
+            ax.xaxis.set_major_locator(ticker.AutoLocator())
+            ax.xaxis.set_major_formatter(ticker.ScalarFormatter())
+        values = {k: [ax.xaxis.convert_units(v) for v in rec["series"][k]["x"]] for k in mine}
+        if any(len(values[k]) != len(drawn[k]) for k in mine):
+            return
+        numeric = all(_finite(v) for k in mine for v in values[k])
+        alone = all(e["kind"] == "bars" for e in rec["series"]) and not rec["bands"] and not any(r["axis"] == "x" for r in rec["refs"])
+        slots = sorted({round(v, 12) for k in mine for v in values[k]}) if numeric and alone else None
+        if slots is not None:
+            width = 0.8 / len(mine)
+            where = {k: [slots.index(round(v, 12)) for v in values[k]] for k in mine}
+        else:
+            base = {k: values[k] for k in mine}
+            distinct = sorted({round(v, 12) for vs in base.values() for v in vs if _finite(v)})
+            gap = min((b - a for a, b in zip(distinct, distinct[1:])), default=1.0)
+            width = 0.8 * gap / len(mine)
+            where = base
+        moved = []  # (old centre, new centre) of every bar laid out before
+        laid = extra.setdefault("bar_laid", set())
+        positions = {}
+        for j, k in enumerate(mine):
+            shift = (j - (len(mine) - 1) / 2) * width
+            centres = []
+            for p, c in zip(drawn[k], where[k]):
+                old = p.get_x() + p.get_width() / 2
+                new = c + shift
+                p.set_x(new - width / 2)
+                p.set_width(width)
+                if k in laid:  # a bar of an earlier call: texts at it follow; a bar just drawn has only the default place
+                    moved.append((old, new))
+                centres.append(new)
+            positions[k] = centres
+            container = (extra.get("bars") or {}).get(k)
+            if container is not None and len(container.lines) > 2:
+                for cap in container.lines[1] or ():
+                    if len(cap.get_xdata()) == len(centres):
+                        cap.set_xdata(centres)
+                for lc in container.lines[2] or ():
+                    segs = lc.get_segments()
+                    if len(segs) == len(centres):
+                        lc.set_segments([[(c, y) for _x, y in seg] if len(seg) else [(c, math.nan), (c, math.nan)] for c, seg in zip(centres, segs)])  # a missing value draws nothing
+        for t in ax.texts:  # a text a body put at a bar moves with it (matched by the centre the bar had)
+            x0, y0 = t.get_position()
+            near = [new for old, new in moved if _finite(x0) and abs(old - x0) <= 1e-9]
+            if len({round(n, 12) for n in near}) == 1 and abs(near[0] - x0) > 1e-12:
+                t.set_position((near[0], y0))
+        laid.update(mine)
+        ax._fi_bar_x = positions
+        if slots is not None:
+            ax._fi_bar_slots = len(slots)
+            from matplotlib import ticker
+
+            class FiSlotFormatter(ticker.Formatter):  # the name the audit of the figure step knows as FI's own (not typed text)
+                def __call__(self, x, pos=None):
+                    return ("%.6g" % slots[int(round(x))]) if abs(x - round(x)) < 1e-9 and 0 <= round(x) < len(slots) else ""
+
+            ax.xaxis.set_major_locator(ticker.FixedLocator(list(range(len(slots)))))
+            ax.xaxis.set_major_formatter(FiSlotFormatter())
+        else:
+            ax._fi_bar_slots = None
+        ax.relim()
+        ax.autoscale_view()
 
     @staticmethod
     def _draw_series(ax, kind, xs, ys, legend, step):
@@ -866,6 +946,7 @@ class FigureCalls:
                                   "yerr_lo": None, "yerr_hi": None, "yerr_meaning": None, "merged_with": [], "source": "plan",
                                   "what": "other"})
             self._remember(panel, "series", arts[0] if arts else None, "other")
+            self._group_bars(panel)  # a curve along x keeps the bars of the panel at their x values
         return arts
 
     def image(self, panel, z, x=None, y=None, what="other"):
@@ -956,6 +1037,7 @@ class FigureCalls:
             self._tag(art)
             rec["bands"].append({"series": series, "x": xs, "lo": los, "hi": his, "meaning": meaning})
             self._fc_extra.setdefault(panel, {"series": [], "refs": []}).setdefault("bands", []).append((series, art))
+        self._group_bars(panel)
         return art
 
     def _next_line_id(self, rec):
@@ -1130,6 +1212,7 @@ class FigureCalls:
         self._tag(art)
         rec["refs"].append({"id": ident, "axis": axis, "value": float(number), "label": label, "source": source})
         self._remember(panel, "refs", art)
+        self._group_bars(panel)
         return art
 
     def note(self, panel, x=None, y=None, what=None, form="mean", key=None):
@@ -1178,17 +1261,21 @@ class FigureCalls:
 
     # ---- labels, legend and limits: FI's, never the body's --------------------------------------------------------------
 
-    def finish(self, spec_labels, result_info):
+    def finish(self, spec_labels, result_info, axis_scales=None):
         """Write what the figure's body must not: every axis label, the legend and the limits, from the plan and the record.
 
         Called once, after the body returned and before the figure is saved. A title, label, legend, limit or axis scale the body
         set is replaced, and the replacement is logged once for the whole figure (never raw, never an error). A raw panel
         (``fig.raw``) is left as the body drew it: there is no record to write from.
 
-        ``spec_labels`` is ``{id: {"label": text, "unit": text, "scale": "linear"|"log"}}`` or ``{id: text}`` (a text is a label
+        ``spec_labels`` is ``{id: {"label": text, "unit": text}}`` or ``{id: text}`` (a text is a label
         that already holds its unit), for the ids of the plan (settings, results, series); every key is optional.
-        ``result_info`` is ``{result id: {"description": text, "unit": text, "scale": "linear"|"log"}}`` (the plan's description
-        of each result, its unit and the scale the plan declares); every key is optional.
+        ``result_info`` is ``{result id: {"description": text, "unit": text}}`` (the plan's description of each result and its
+        unit); every key is optional. ``axis_scales`` is ``{"x": "linear"|"log", "y": ...}``, the scale the plan declares for the
+        figure's axes (``Figure.x_scale`` / ``y_scale`` of the contract); an axis the plan is silent on is scaled by FI's rule
+        (log when every value drawn along it is above zero and the largest is at least 1000 times the smallest). The record of an
+        axis says which one set the scale (``scale_source``: "plan" or "FI rule"); a declared log axis with a value at or below
+        zero is drawn linear and ``scale_note`` says why.
 
         An axis label is, in this order: the plan's label of the id, with its unit ("Growth (1/h)"); else a short form of the
         result's plan description (up to its first stop or bracket, at most 48 characters); else "value" with the unit. The id
@@ -1216,6 +1303,7 @@ class FigureCalls:
         the span in decades, and a single value gets a fixed margin; on a log axis only values above zero count, so a band that
         reaches 0 still gives finite limits (a log axis with no positive value is drawn linear, and the record says so)."""
         spec_labels, result_info = spec_labels or {}, result_info or {}
+        axis_scales = axis_scales if isinstance(axis_scales, dict) else {}
         self._state()
         changed = []
         live = []
@@ -1225,8 +1313,11 @@ class FigureCalls:
                 continue
             live.append(i)
             self._merge_identical(i, rec)
+        scales = self._figure_scales(live, axis_scales)  # one scale for each axis for the whole figure
+        for i in live:
+            ax, rec = self._panel(i)
+            self._write_limits(ax, rec, changed, scales)
             self._write_labels(ax, rec, spec_labels, result_info, changed)
-            self._write_limits(ax, rec, changed)
         fig = self._figure_of_panels()
         if fig is not None and live:
             self._use_constrained_layout(fig)
@@ -1256,6 +1347,7 @@ class FigureCalls:
                     outside.append(placed)
             for ax, entries in outside:
                 self._legend_outside(ax, entries)
+        self._keep_legend_off_data(fig, live, keyed)
         for i in live:
             ax, rec = self._panel(i)
             self._place_notes(ax, i, rec)
@@ -1302,14 +1394,6 @@ class FigureCalls:
         text = str(sl.get("label") or _short(ri.get("description")) or "value")
         return "%s (%s)" % (text, unit) if unit and str(unit) not in text else text
 
-    @staticmethod
-    def _scale_in(ident, spec_labels, result_info, default):
-        sl = spec_labels.get(ident)
-        for got in ((result_info.get(ident) or {}).get("scale"), sl.get("scale") if isinstance(sl, dict) else None):
-            if got in ("linear", "log"):
-                return got
-        return default
-
     def _write_labels(self, ax, rec, spec_labels, result_info, changed):
         for loc in ("center", "left", "right"):
             if ax.get_title(loc):
@@ -1325,28 +1409,41 @@ class FigureCalls:
             x["label"] = NEUTRAL_X
         elif not (image and x["id"] == "column" and "column" not in spec_labels):
             x["label"] = self._name_of(x["id"], spec_labels, result_info)
-        x["scale"] = self._scale_in(x["id"], spec_labels, result_info, x["scale"])
         if rec["y"] is not None:
             parts = rec["y"]["what"].split(" / ")
             names = dict.fromkeys(NEUTRAL_Y if w == "other" else self._name_of(w, spec_labels, result_info) for w in parts)
             rec["y"]["label"] = " / ".join(names)
-            scales = [self._scale_in(w, spec_labels, result_info, "linear") for w in parts if w != "other"]
-            rec["y"]["scale"] = "log" if scales and all(s == "log" for s in scales) else "linear"
+        if x.get("scale") == "log":
+            x["label"] += LOG_NOTE
+        if rec["y"] is not None and rec["y"].get("scale") == "log":
+            rec["y"]["label"] += LOG_NOTE
         ytext = "row" if image else (rec["y"] or {}).get("label", "")
         for old, text, setter in ((ax.get_xlabel(), x["label"], ax.set_xlabel), (ax.get_ylabel(), ytext, ax.set_ylabel)):
             if old and old != text:
                 changed.append("label")
             setter(text)
 
-    def _write_limits(self, ax, rec, changed):
-        if rec["x"] is None or rec["y"] is None:
-            return
-        if not ax.get_autoscalex_on() or not ax.get_autoscaley_on():
-            changed.append("limits")
-        if (ax.get_xscale(), ax.get_yscale()) not in (("linear", "linear"), (rec["x"]["scale"], rec["y"]["scale"])):
-            changed.append("scale")
-        if any(e["kind"] == "image" for e in rec["series"]):
-            return
+    @staticmethod
+    def _axis_scale(declared, centre, full, bars_y):
+        """``(scale, source, note)`` of one axis: what the plan declares, else FI's rule over the values drawn along it (``centre``:
+        the points and lines; ``full``: those and the ends of every error bar, band and reference line). A log axis cannot show a
+        value at or below zero: where the plan declares one (or FI's rule would choose one) over such values the axis is linear and
+        the note says why."""
+        blocked = not full or min(full) <= 0
+        why = "nothing is drawn along it" if not full else "a value drawn along it (an error bar or interval end included) is zero or negative"
+        if declared in ("linear", "log"):
+            if declared == "log" and blocked:
+                return "linear", "plan", "the plan asked for a log axis but " + why
+            return declared, "plan", None
+        spans = bool(centre) and min(centre) > 0 and max(centre) / min(centre) >= LOG_RATIO and not bars_y
+        if spans and blocked:
+            return "linear", "FI rule", "FI's rule would draw a log axis but " + why
+        return ("log" if spans else "linear"), "FI rule", None
+
+    @staticmethod
+    def _panel_values(ax, rec):
+        """``(centre, full, skip)`` of a panel: for each axis the values of its points and lines, and those with the ends of the error
+        bars, bands and reference lines; ``skip`` is the axes a panel does not scale (x of bars in slots, a categorical x)."""
         series = rec["series"]
         categorical = any(isinstance(v, str) for e in series for v in e["x"]) or any(isinstance(v, str) for b in rec["bands"] for v in b["x"])
         yv, xv = [], []
@@ -1360,18 +1457,62 @@ class FigureCalls:
                     if v is not None and dh is not None:
                         yv.append(v + dh)
             xv += [v for v in e["x"] if _finite(v)]
+        centre = {"x": list(xv), "y": [v for e in series for v in e["y"] if v is not None]}
         for b in rec["bands"]:
             yv += [v for v in b["lo"] + b["hi"] if v is not None]
             xv += [v for v in b["x"] if _finite(v)]
         for r in rec["refs"]:
             (yv if r["axis"] == "y" else xv).append(r["value"])
+            centre["y" if r["axis"] == "y" else "x"].append(r["value"])
+        skip = set()
+        if getattr(ax, "_fi_bar_slots", None) or categorical:
+            skip.add("x")
+        return centre, {"x": xv, "y": yv}, skip
+
+    def _figure_scales(self, live, axis_scales):
+        """``{axis: (scale, source, note)}``, decided once for the whole figure over the values of every panel that scales that axis:
+        the plan declares one scale for a figure, and panels that share an axis must be read on the same one, so a panel that cannot
+        be drawn on a log axis makes every panel linear."""
+        centre, full, bars = {"x": [], "y": []}, {"x": [], "y": []}, False
+        for i in live:
+            ax, rec = self._panel(i)
+            if rec["x"] is None or rec["y"] is None or any(e["kind"] == "image" for e in rec["series"]):
+                continue
+            c, f, skip = self._panel_values(ax, rec)
+            for axis in ("x", "y"):
+                if axis not in skip:
+                    centre[axis] += [v for v in c[axis] if _finite(v)]
+                    full[axis] += [v for v in f[axis] if _finite(v)]
+            bars = bars or any(e["kind"] == "bars" for e in rec["series"])
+        return {axis: self._axis_scale((axis_scales or {}).get(axis), centre[axis], full[axis], bars and axis == "y") for axis in ("x", "y")}
+
+    def _write_limits(self, ax, rec, changed, scales):
+        if rec["x"] is None or rec["y"] is None:
+            return
+        if not ax.get_autoscalex_on() or not ax.get_autoscaley_on():
+            changed.append("limits")
+        if any(e["kind"] == "image" for e in rec["series"]):
+            if (ax.get_xscale(), ax.get_yscale()) != ("linear", "linear"):
+                changed.append("scale")
+            return
+        before = (ax.get_xscale(), ax.get_yscale())
+        series = rec["series"]
+        _centre, full, skip = self._panel_values(ax, rec)
         bars = [e for e in series if e["kind"] == "bars"]
-        for axis, vals in (("x", xv), ("y", yv)):
-            if axis == "x" and categorical:
+        for axis in ("x", "y"):
+            vals = full[axis]
+            if axis == "x" and getattr(ax, "_fi_bar_slots", None):  # bars over a setting: one slot for each value
+                ax.set_xlim(-0.5, ax._fi_bar_slots - 0.5)
+                continue
+            if axis == "x" and "x" in skip:  # a categorical x
                 ax.relim()
                 ax.autoscale(enable=True, axis="x")
                 continue
-            scale = rec[axis]["scale"]
+            scale, source, note = scales[axis]
+            rec[axis].pop("scale_note", None)
+            rec[axis].update(scale=scale, scale_source=source)
+            if note:
+                rec[axis]["scale_note"] = note
             vals = [v for v in vals if _finite(v)]
             if bars and axis == "y" and scale == "linear":
                 vals.append(0.0)
@@ -1382,13 +1523,12 @@ class FigureCalls:
                         half = min((b - a for a, b in zip(pts, pts[1:])), default=1.0) / 2
                         vals += [pts[0] - half, pts[-1] + half]
             if scale == "log":
-                vals = [v for v in vals if v > 0]
-                if not vals:  # nothing a log axis can show
-                    scale = rec[axis]["scale"] = "linear"
-                    vals = [v for v in (xv if axis == "x" else yv) if _finite(v)]
+                vals = [v for v in vals if v > 0]  # (a bar's foot at zero is not drawn on a log axis)
             (ax.set_xscale if axis == "x" else ax.set_yscale)(scale)
             if vals:
                 (ax.set_xlim if axis == "x" else ax.set_ylim)(*_padded(min(vals), max(vals), scale))
+        if before != ("linear", "linear") and before != (ax.get_xscale(), ax.get_yscale()):
+            changed.append("scale")
 
     @staticmethod
     def _level_ident(e):
@@ -1402,20 +1542,33 @@ class FigureCalls:
         return (e["level"]["result"], e["level"].get("result_label"))
 
     @staticmethod
+    def _condensed(rec):
+        """The results (``_result_key``) of a panel whose levels the legend condenses: those that draw more than ``LEGEND_LEVELS`` distinct levels of a
+        setting, all of them numbers (an ordered scale: a colour ramp tells the levels between the named ones apart). Counted for
+        each result on its own; levels that are names (methods, arms) are never condensed."""
+        out = set()
+        for result in {FigureCalls._result_key(e) for e in rec["series"] if e.get("level")}:
+            mine = [e for e in rec["series"] if e.get("level") and FigureCalls._result_key(e) == result]
+            if len({FigureCalls._level_ident(e) for e in mine}) > LEGEND_LEVELS and all(_finite(e["level"]["value"]) for e in mine):
+                out.add(result)
+        return out
+
+    @staticmethod
     def _shown_levels(rec):
-        """The positions of the series a legend names when the panel draws more than ``LEGEND_LEVELS`` distinct levels of a setting:
-        the lowest and the highest level of each result (the caption says the range); None when the legend names them all."""
-        levelled = [(k, e) for k, e in enumerate(rec["series"]) if e.get("level")]
-        if len({FigureCalls._level_ident(e) for _k, e in levelled}) <= LEGEND_LEVELS:
+        """The positions of the series a legend names when a result of the panel draws more than ``LEGEND_LEVELS`` distinct numeric
+        levels of a setting: the lowest and the highest level of that result (the caption says the range), every curve of any other
+        result; None when the legend names them all."""
+        condensed = FigureCalls._condensed(rec)
+        if not condensed:
             return None
         keep = set()
-        for result in {FigureCalls._result_key(e) for _k, e in levelled}:
-            mine = [(k, e["level"]["value"]) for k, e in levelled if FigureCalls._result_key(e) == result]
-            if all(_finite(v) for _k, v in mine):
+        for result in {FigureCalls._result_key(e) for e in rec["series"] if e.get("level")}:
+            mine = [(k, e["level"]["value"]) for k, e in enumerate(rec["series"]) if e.get("level") and FigureCalls._result_key(e) == result]
+            if result in condensed:
                 ends = {min(v for _k, v in mine), max(v for _k, v in mine)}
+                keep |= {k for k, v in mine if v in ends}
             else:
-                ends = {mine[0][1], mine[-1][1]}
-            keep |= {k for k, v in mine if v in ends}
+                keep |= {k for k, _v in mine}
         return keep
 
     @staticmethod
@@ -1446,14 +1599,15 @@ class FigureCalls:
         if not groups:
             return
         colour = {}
-        if self._shown_levels(rec) is not None:
+        condensed = self._condensed(rec)
+        if condensed:
             try:
                 from matplotlib import colormaps
                 cmap = colormaps["viridis"]
             except Exception:  # noqa: BLE001 -- no colour map: the curves keep the colours they were drawn with
                 cmap = None
             span = getattr(self, "_fc_level_span", None) or {}
-            for result in {r for r, _t in groups}:
+            for result in {r for r, _t in groups if r in condensed}:
                 mine = [(rec["series"][ks[0]]["level"]["value"], ident) for ident, ks in groups.items() if ident[0] == result]
                 if cmap is None or not all(_finite(v) for v, _i in mine) or len({v for v, _i in mine}) < 2:
                     continue
@@ -1616,12 +1770,101 @@ class FigureCalls:
             return None
         return ax, entries
 
+    def _legend_clash(self, fig, live):
+        """What the drawn legends cover, measured on the canvas the figure will be saved from: ``{"over_data": how many drawn
+        points, and samples along a drawn line (one every 4 pixels), lie under a legend's box, "over_panel": the largest share of a
+        legend's box that lies over a panel it does not belong to}``; None when the canvas cannot be measured."""
+        try:
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
+            own = [(self._panel(i)[0], self._panel(i)[0].get_legend()) for i in live]
+            own = [(ax, leg) for ax, leg in own if leg is not None and leg.get_visible()]
+            loose = [(None, leg) for leg in fig.legends if leg.get_visible()]
+            over_data, over_panel = 0, 0.0
+            for owner, leg in own + loose:
+                box = leg.get_window_extent(renderer)
+                if box.width <= 2 * LEGEND_INSET_PX or box.height <= 2 * LEGEND_INSET_PX:
+                    continue
+                x0, y0 = box.x0 + LEGEND_INSET_PX, box.y0 + LEGEND_INSET_PX
+                x1, y1 = box.x1 - LEGEND_INSET_PX, box.y1 - LEGEND_INSET_PX
+                for i in live:
+                    ax = self._panel(i)[0]
+                    area = ax.get_window_extent(renderer)
+                    if ax is not owner:
+                        w, h = min(box.x1, area.x1) - max(box.x0, area.x0), min(box.y1, area.y1) - max(box.y0, area.y0)
+                        if w > 0 and h > 0:
+                            over_panel = max(over_panel, w * h / (box.width * box.height))
+                    lo_x, hi_x, lo_y, hi_y = max(x0, area.x0), min(x1, area.x1), max(y0, area.y0), min(y1, area.y1)
+                    if hi_x <= lo_x or hi_y <= lo_y:
+                        continue
+                    for art in list(ax.get_lines()) + list(ax.collections):
+                        if not art.get_visible():
+                            continue
+                        if hasattr(art, "get_xydata"):
+                            if art.get_transform() != ax.transData:
+                                continue
+                            raw, trans = art.get_xydata(), ax.transData
+                            joined = str(art.get_linestyle()) not in ("None", "none", "", " ")
+                        else:
+                            raw, trans, joined = art.get_offsets(), art.get_offset_transform(), False
+                        pts = [(float(a), float(b)) for a, b in trans.transform(raw) if math.isfinite(a) and math.isfinite(b)]
+                        for k, (px, py) in enumerate(pts):
+                            over_data += lo_x <= px <= hi_x and lo_y <= py <= hi_y
+                            if joined and k + 1 < len(pts):
+                                qx, qy = pts[k + 1]
+                                steps = int(math.hypot(qx - px, qy - py) // 4)
+                                over_data += sum(1 for t in range(1, steps + 1)
+                                                 if lo_x <= px + (qx - px) * t / (steps + 1) <= hi_x
+                                                 and lo_y <= py + (qy - py) * t / (steps + 1) <= hi_y)
+            return {"over_data": int(over_data), "over_panel": round(over_panel, 2)}
+        except Exception:  # noqa: BLE001 -- a figure that cannot be measured keeps its legend where it is
+            return None
+
+    @staticmethod
+    def _clashes(found):
+        return found is not None and (found["over_data"] > 0 or found["over_panel"] >= LEGEND_SHARE)
+
+    def _keep_legend_off_data(self, fig, live, keyed):
+        """A legend that covers the data it names, or a panel it does not belong to, is put outside the axes: FI measures the
+        legend it drew and, when it clashes (``_legend_clash``: any drawn point or line under it, or ``LEGEND_SHARE`` of its box
+        over another panel), draws it again outside, below the panels or to their right, whichever clears more, and measures
+        again. The record's ``legend`` says what was measured and where the legend went (``adjusted``); a legend that no
+        placement clears stays where it clears most and the record says so."""
+        if fig is None or not live:
+            return
+        before = self._legend_clash(fig, live)
+        if not self._clashes(before) or not getattr(self, "_fc_legend", None):
+            return
+        panels = [i for i in live if keyed.get(i)]
+        if not panels:
+            return
+        args = ([None], {None: keyed[panels[0]]}) if len(panels) == 1 else (panels, keyed)
+        for i in live:  # a legend inside a panel's axes goes: the figure's own legend, outside, takes its entries
+            old = self._panel(i)[0].get_legend()
+            if old is not None:
+                old.remove()
+        best = None
+        for side in ("below", "right"):
+            self._figure_legend(fig, *args, prefer=side)
+            found = self._legend_clash(fig, live)
+            if found is None:
+                continue
+            score = (found["over_data"] > 0, found["over_panel"])
+            if best is None or score < best[0]:
+                best = (score, side, found)
+            if not self._clashes(found):
+                break
+        if best is None:
+            return
+        self._figure_legend(fig, *args, prefer=best[1])
+        self._fc_legend["adjusted"] = {"was": before, "moved_outside": best[1], "after": best[2], "cleared": not self._clashes(best[2])}
+
     def _legend_outside(self, ax, entries):
         """A single panel's legend that fits in no corner goes outside the axes, as the one legend of the figure; its entries keep
         their own keys, so two series (or reference lines) that share a label stay two entries."""
         self._figure_legend(ax.figure, [None], {None: entries})
 
-    def _figure_legend(self, fig, panels, keyed):
+    def _figure_legend(self, fig, panels, keyed, prefer=None):
         """One legend for the figure: the entries of every panel in ``panels``, each series once (by its key), outside the axes
         (below them, in as many columns as fit the width of the figure; to their right when that would be more than four rows
         and the legend is narrow). The constrained layout makes the room, so no panel is moved by hand."""
@@ -1668,9 +1911,9 @@ class FigureCalls:
             if leg.get_window_extent(renderer).width <= room or ncol == 1:
                 break
         where = "below"
-        if int(math.ceil(len(texts) / ncol)) > 4:
+        if prefer == "right" or (prefer is None and int(math.ceil(len(texts) / ncol)) > 4):
             side = make("outside right upper", 1)
-            if side.get_window_extent(renderer).width <= 0.25 * fig.bbox.width:
+            if prefer == "right" or side.get_window_extent(renderer).width <= 0.25 * fig.bbox.width:
                 where = "right"
             else:
                 make("outside lower center", ncol)
@@ -1799,16 +2042,18 @@ class FigureCalls:
             for a, b in zip(fr, fr[1:]):
                 pts.extend((a[0] + (b[0] - a[0]) * t / 16, a[1] + (b[1] - a[1]) * t / 16) for t in range(1, 16))
 
-        for e in rec["series"]:
+        placed = getattr(ax, "_fi_bar_x", None) or {}
+        for k, e in enumerate(rec["series"]):
             if e["kind"] == "image":
                 return None  # an image fills its axes
-            along(e["x"], e["y"])
+            xs = placed.get(k) if e["kind"] == "bars" and placed.get(k) and len(placed[k]) == len(e["x"]) else e["x"]
+            along(xs, e["y"])
             lo, hi = _sides(e)
             if lo is not None:
-                along(e["x"], [None if v is None or d is None else v + d for v, d in zip(e["y"], hi)])
-                along(e["x"], [None if v is None or d is None else v - d for v, d in zip(e["y"], lo)])
+                along(xs, [None if v is None or d is None else v + d for v, d in zip(e["y"], hi)])
+                along(xs, [None if v is None or d is None else v - d for v, d in zip(e["y"], lo)])
             if e["kind"] == "bars":
-                along(e["x"], [0.0] * len(e["x"]))
+                along(xs, [0.0] * len(xs))
         for b in rec["bands"]:
             along(b["x"], b["lo"])
             along(b["x"], b["hi"])

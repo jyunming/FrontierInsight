@@ -137,6 +137,8 @@ class Figure(_Strict):
     x: str | None = None
     series: str | None = None
     panels: int = Field(default=1, ge=1, le=MAX_PANELS)
+    x_scale: Literal["linear", "log"] | None = None
+    y_scale: Literal["linear", "log"] | None = None
     declared: bool = True
 
 
@@ -495,7 +497,7 @@ def from_design(design: dict[str, Any] | None, *, fi_analysis: bool = False,
         if own is not None:
             fig = own
         elif isinstance(decl, dict):
-            fig = _first_valid(Figure, {"id": f"fig{i}", **{k: v for k, v in decl.items() if k in ("shows", "x", "series", "panels")},
+            fig = _first_valid(Figure, {"id": f"fig{i}", **{k: v for k, v in decl.items() if k in ("shows", "x", "series", "panels", "x_scale", "y_scale")},
                                        "file": name}, gaps, f"figure {i}")
         elif isinstance(f, dict):
             fig = _first_valid(Figure, {"id": f"fig{i}", **f}, gaps, f"figure {i}")

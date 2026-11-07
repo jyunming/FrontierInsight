@@ -167,3 +167,40 @@ def quest_neutral_declared(root: Path) -> list[dict[str, Any]]:
                                 "checked": "differs" if got.get("checked", "differs") == "differs" else "not compared",
                                 "record": rec_path.relative_to(root).as_posix()})
     return out
+
+
+def scale_notes(root: Path) -> list[dict[str, Any]]:
+    """What a reader of each figure the delivered paper places is not told by the figure itself about its axes' scales, once per
+    figure: an axis FI drew on a log scale because the plan did not say (the axis label says "log scale", the plan did not ask),
+    and a log axis the plan asked for that FI drew linear, with FI's reason. Each item has the figure's ``file``, ``said`` and
+    the ``record`` path."""
+    root = Path(root)
+    paper = root / "paper" / "paper.md"
+    if not paper.exists():
+        paper = root / "paper.md"
+    try:
+        captions = paper_captions(paper.read_text(encoding="utf-8"))
+    except OSError:
+        return []
+    out: list[dict[str, Any]] = []
+    for name in captions:
+        rec_path = root / ".fi" / "figure_records" / f"{Path(name).stem}.calls.json"
+        try:
+            calls = json.loads(rec_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        said: list[str] = []
+        for axis in ("x", "y"):
+            for p in _panels(calls):
+                info = p.get(axis) if isinstance(p.get(axis), dict) else {}
+                if info.get("scale_note"):
+                    text = "the %s axis is linear: %s" % (axis, info["scale_note"])
+                elif info.get("scale") == "log" and info.get("scale_source") == "FI rule":
+                    text = "FI drew the %s axis on a log scale (the plan did not say); its label says so" % axis
+                else:
+                    continue
+                if text not in said:
+                    said.append(text)
+        if said:
+            out.append({"file": name, "said": "; ".join(said), "record": rec_path.relative_to(root).as_posix()})
+    return out
