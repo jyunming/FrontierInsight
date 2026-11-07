@@ -562,7 +562,8 @@ def test_a_result_file_the_rerun_did_not_write_and_a_time_are_not_compared(tmp_p
     copy = rerun_check.copy_code(root, tmp_path / "w")
     (copy / "experiment.py").write_text((copy / "experiment.py").read_text(encoding="utf-8") + "# changed\n", encoding="utf-8")
     got = asyncio.run(rerun_check.judge(_Local(), sys.executable, root, copy, PROTOCOL, 60, None))
-    assert got.mode == "analysis only" and got.status == "unchanged"  # odd.json is not written by an analysis-only rerun
+    # odd.json is not written by an analysis-only rerun: its delivered number was not compared, so it is not "unchanged"
+    assert got.mode == "analysis only" and got.status == "could_not" and "odd.json" in got.why
     assert "runtime" not in " ".join(rerun_check.results_of(root))
 
 
