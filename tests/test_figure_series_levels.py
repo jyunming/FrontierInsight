@@ -29,7 +29,8 @@ class _Grid:
         return ["size=%d,temp=%s" % (s, t) for t in self.temps for s in (1, 2, 3)]
 
     def mean(self, name, key):
-        return 1.0
+        size, temp = (float(part.split("=")[1]) for part in key.split(","))
+        return temp + size - 1  # one value per curve and x, so the drawn curves are the table's and no two are identical
 
 
 class _Host(frame_figure.FigureCalls):
@@ -43,6 +44,11 @@ class _Host(frame_figure.FigureCalls):
         self.settings = ["size", "temp"]
         self.series_ids = []
         self.labels = {"growth": "Growth", "size": "Size", "temp": "Temperature (K)"}
+
+
+def _legend_texts(h):
+    legend = h.axes[0].get_legend() or h.fig.legends[0]  # inside the panel, or the figure's own when there are many entries
+    return [t.get_text() for t in legend.get_texts()]
 
 
 def _caption(h):
@@ -66,22 +72,22 @@ def test_a_value_that_is_no_level_of_the_setting_is_refused():
 def test_each_curve_is_named_by_its_level_and_the_caption_counts_them():
     h = _Host()
     for t in (10, 20, 30):
-        h.line(0, t, [1, 2, 3], [1.0 + t, 2.0, 3.0], "growth")
+        h.line(0, t, [1, 2, 3], [t, t + 1.0, t + 2.0], "growth")
     series = h.record()["panels"][0]["series"]
     assert [s["label"] for s in series] == ["Temperature (K) = 10", "Temperature (K) = 20", "Temperature (K) = 30"]
     assert len({s["id"] for s in series}) == 3 and series[0]["level"]["value"] == 10
     assert "3 curves of Growth, one per Temperature (K)" in _caption(h)
     h.finish({}, {})
-    assert [t.get_text() for t in h.axes[0].get_legend().get_texts()] == [s["label"] for s in series]
+    assert _legend_texts(h) == [s["label"] for s in series]
 
 
 def test_many_levels_are_named_by_the_lowest_and_the_highest_and_the_caption_says_the_range():
     temps = tuple(range(1, 21))
     h = _Host(temps)
     for t in temps:
-        h.line(0, t, [1, 2, 3], [float(t), 2.0, 3.0], "growth")
+        h.line(0, t, [1, 2, 3], [t, t + 1.0, t + 2.0], "growth")
     h.finish({}, {})
-    assert [t.get_text() for t in h.axes[0].get_legend().get_texts()] == ["Temperature (K) = 1", "Temperature (K) = 20"]
+    assert _legend_texts(h) == ["Temperature (K) = 1", "Temperature (K) = 20"]
     text = _caption(h)
     assert "20 curves of Growth, one per Temperature (K) (from 1 to 20" in text
 
@@ -138,8 +144,8 @@ def test_a_level_drawn_as_line_and_points_is_one_curve():
     temps = tuple(range(1, 8))
     h = _Host(temps)
     for t in temps:
-        h.line(0, t, [1, 2, 3], [float(t), 2.0, 3.0], "growth")
-        h.points(0, t, [1, 2, 3], [float(t), 2.0, 3.0], "growth")
+        h.line(0, t, [1, 2, 3], [t, t + 1.0, t + 2.0], "growth")
+        h.points(0, t, [1, 2, 3], [t, t + 1.0, t + 2.0], "growth")
     h.finish({}, {})
     assert "7 curves of Growth, one per Temperature (K)" in _caption(h)
     assert "14 curves" not in _caption(h)
@@ -151,11 +157,11 @@ def test_thirteen_levels_drawn_as_line_and_points_count_thirteen_and_name_the_en
     temps = tuple(range(1, 14))
     h = _Host(temps)
     for t in temps:
-        h.line(0, t, [1, 2, 3], [float(t), 2.0, 3.0], "growth")
-        h.points(0, t, [1, 2, 3], [float(t), 2.0, 3.0], "growth")
+        h.line(0, t, [1, 2, 3], [t, t + 1.0, t + 2.0], "growth")
+        h.points(0, t, [1, 2, 3], [t, t + 1.0, t + 2.0], "growth")
     h.finish({}, {})
     assert "13 curves of Growth, one per Temperature (K) (from 1 to 13" in _caption(h)
-    assert [t.get_text() for t in h.axes[0].get_legend().get_texts()] == ["Temperature (K) = 1", "Temperature (K) = 13"]
+    assert _legend_texts(h) == ["Temperature (K) = 1", "Temperature (K) = 13"]
 
 
 def test_the_line_markers_error_bars_and_band_of_one_level_share_a_colour():

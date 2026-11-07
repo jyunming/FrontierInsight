@@ -136,3 +136,33 @@ def quest_findings(root: Path) -> list[dict[str, Any]]:
         for f in check_figure_text(calls, texts, caption):
             out.append({**f, "file": name, "record": rec_path.relative_to(root).as_posix()})
     return out
+
+
+def quest_neutral_declared(root: Path) -> list[dict[str, Any]]:
+    """The series of every placed figure that its body declared as a result of the plan but that FI's check found not to draw
+    that result (the figure draws it as a computed value): ``[{"file", "number", "label", "record"}]``, one per figure and
+    declared result, ``number`` the figure's place among the paper's figures."""
+    root = Path(root)
+    paper = root / "paper" / "paper.md"
+    if not paper.exists():
+        paper = root / "paper.md"
+    try:
+        captions = paper_captions(paper.read_text(encoding="utf-8"))
+    except OSError:
+        return []
+    out: list[dict[str, Any]] = []
+    for number, name in enumerate(captions, 1):
+        rec_path = root / ".fi" / "figure_records" / f"{Path(name).stem}.calls.json"
+        try:
+            calls = json.loads(rec_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        seen: set[str] = set()
+        for p in _panels(calls):
+            for s in p.get("series") or []:
+                got = s.get("declared_as") if isinstance(s, dict) else None
+                if isinstance(got, dict) and got.get("id") and str(got["id"]) not in seen:
+                    seen.add(str(got["id"]))
+                    out.append({"file": name, "number": number, "label": str(got.get("label") or got["id"]),
+                                "record": rec_path.relative_to(root).as_posix()})
+    return out

@@ -703,6 +703,13 @@ class FigureCalls:
         # A series the body gave as a result of the plan that FI did not find to be the table's value of it keeps neither that
         # result's name (nor the series' own plan label, which names the same thing): its name is the neutral one, numbered below.
         neutral = what == "other" and (declared != "other" or (level is None and self._names_a_result(series)))
+        # The caption and the axis come from one fact, the quantity FI's check found: a level that carried the declared result's
+        # label no longer does, and the declared id stays beside it in the record.
+        declared_as = None
+        if what == "other" and declared != "other":
+            declared_as = {"id": declared, "label": self._label_of(declared)}
+            if level:
+                level.update(result_label=NEUTRAL_Y, declared_as=declared, declared_label=declared_as["label"])  # "result" stays the curve's identity
         legend = "%s = %s" % (level["setting_label"], level["text"]) if level else NEUTRAL_Y if neutral else self._label_of(series)
         with _undone(ax, rec):
             self._set_x(rec, x_id, x_ok)
@@ -717,15 +724,22 @@ class FigureCalls:
             rec["series"].append({"id": series, "label": legend, "kind": kind, "step": bool(step), "x": xs, "y": ys,
                                   "yerr": lo if lo is not None and _same(lo, hi) else None, "yerr_lo": lo, "yerr_hi": hi,
                                   "yerr_meaning": yerr_meaning if lo is not None else None, "what": what, "merged_with": [],
-                                  "x_checked": x_ok, **({"neutral": True} if neutral else {}), **({"level": level} if level else {})})
+                                  "x_checked": x_ok, **({"neutral": True} if neutral else {}), **({"declared_as": declared_as} if declared_as else {}),
+                                  **({"level": level} if level else {})})
             loose = [e for e in rec["series"] if e.get("neutral") and not e.get("level")]
             for k, e in enumerate(loose, 1):
                 e["label"] = NEUTRAL_Y if len(loose) == 1 else "%s %d" % (NEUTRAL_Y, k)
             levelled = [e for e in rec["series"] if e.get("level")]
-            several = len({e["level"]["result"] for e in levelled}) > 1  # two results on one panel: each curve says which
+            # Curves FI found not to be the result they were declared as are all "a computed value"; when the panel has curves
+            # declared as different results, each such result's curves are numbered, so no two groups share a name or a count.
+            unchecked = list(dict.fromkeys(e["level"]["declared_as"] for e in levelled if e["level"].get("declared_as")))
+            for e in levelled:
+                if e["level"].get("declared_as"):
+                    e["level"]["result_label"] = NEUTRAL_Y + (" %d" % (unchecked.index(e["level"]["declared_as"]) + 1) if len(unchecked) > 1 else "")
+            several = len({(e["level"]["result"], e["level"]["result_label"]) for e in levelled}) > 1  # two results on one panel: each curve says which
             for e in levelled:
                 lv = e["level"]
-                e["label"] = ("%s, " % self._label_of(lv["result"]) if several else "") + "%s = %s" % (lv["setting_label"], lv["text"])
+                e["label"] = ("%s, " % lv["result_label"] if several else "") + "%s = %s" % (lv["setting_label"], lv["text"])
             self._remember(panel, "series", arts[0] if arts else None, what)
             self._fc_extra[panel].setdefault("drawn", {})[len(rec["series"]) - 1] = list(arts or [])  # every artist of the call, for its colour
         return arts
