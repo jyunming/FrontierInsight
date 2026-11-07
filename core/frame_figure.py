@@ -20,8 +20,8 @@ What the host (``Figure``) must hold, by these names:
 * ``settings`` -- the names of the plan's settings (an ``x=`` may name one);
 * ``series_ids`` -- the plan ids a series may name besides the declared results (for example the values the study compares);
 * ``references`` -- ``{reference id: value}`` or ``{reference id: {"value": number, "label": text}}``;
-* ``labels`` -- ``{id: label}`` or ``{id: {"label": text, "scale": "linear"|"log"}}``, the plan's words (set by FI; absent
-  means the id stands in for the label and the scale is linear);
+* ``labels`` -- ``{id: label}`` or ``{id: {"label": text}}``, the plan's words (set by FI; absent means the id stands in
+  for the label);
 * ``fallback`` -- True when FI drew the figure itself (absent means False).
 
 Every one but ``axes`` and ``table`` may be missing: the call then has less to check against and says so only where it must.
@@ -40,6 +40,7 @@ from pathlib import Path
 
 MEANINGS = ("ci95", "sd", "range", "other")
 NOTE_FORMS = ("mean", "n", "low", "high")
+LOG_RATIO = 1e3  # FI's rule for an axis the plan does not scale: log when all values are above zero and span this ratio
 IDENTICAL_RTOL = 1e-12  # two series equal within this relative tolerance are one line to the reader
 Y_RTOL = 1e-3  # a drawn y matches the table's value within this relative tolerance (plus 1e-12 absolute)
 Y_FORMS = ("mean", "sd", "se", "min", "max", "range", "max_abs")  # which statistic of the trials at a setting y may be (``form``)
@@ -295,10 +296,6 @@ class FigureCalls:
             return "Expected %s (plan formula)" % self._label_of(ident)
         return own or self._label_of(ident)
 
-    def _scale_of(self, ident):
-        got = (getattr(self, "labels", None) or {}).get(ident)
-        return "log" if isinstance(got, dict) and got.get("scale") == "log" else "linear"
-
     def _results(self):
         return list(getattr(getattr(self, "table", None), "declared", []) or [])
 
@@ -370,7 +367,7 @@ class FigureCalls:
         else:
             raise ValueError("`x=%r` is neither a setting nor a result of the plan; the settings are: %s; the results are: %s"
                              % (x_id, ", ".join(settings) or "(none)", ", ".join(self._results()) or "(none)"))
-        new = {"id": x_id, "kind": kind, "label": self._label_of(x_id), "scale": self._scale_of(x_id)}
+        new = {"id": x_id, "kind": kind, "label": self._label_of(x_id), "scale": "linear"}
         if rec["x"] is not None and rec["x"]["id"] != x_id:
             raise ValueError("panel %d already has `%s` on its x axis; one panel has one x axis (use another panel for `%s`)"
                              % (rec["panel"], rec["x"]["id"], x_id))
@@ -383,7 +380,7 @@ class FigureCalls:
     def _set_y(self, rec, what):
         if rec["y"] is None:
             rec["y"] = {"what": what, "label": NEUTRAL_Y if what == "other" else self._label_of(what),
-                        "scale": "linear" if what == "other" else self._scale_of(what)}
+                        "scale": "linear"}
         elif what not in rec["y"]["what"].split(" / "):  # two results on one axis: both are named
             rec["y"]["what"] += " / " + what
             rec["y"]["label"] += " / " + (NEUTRAL_Y if what == "other" else self._label_of(what))
@@ -1223,17 +1220,21 @@ class FigureCalls:
 
     # ---- labels, legend and limits: FI's, never the body's --------------------------------------------------------------
 
-    def finish(self, spec_labels, result_info):
+    def finish(self, spec_labels, result_info, axis_scales=None):
         """Write what the figure's body must not: every axis label, the legend and the limits, from the plan and the record.
 
         Called once, after the body returned and before the figure is saved. A title, label, legend, limit or axis scale the body
         set is replaced, and the replacement is logged once for the whole figure (never raw, never an error). A raw panel
         (``fig.raw``) is left as the body drew it: there is no record to write from.
 
-        ``spec_labels`` is ``{id: {"label": text, "unit": text, "scale": "linear"|"log"}}`` or ``{id: text}`` (a text is a label
+        ``spec_labels`` is ``{id: {"label": text, "unit": text}}`` or ``{id: text}`` (a text is a label
         that already holds its unit), for the ids of the plan (settings, results, series); every key is optional.
-        ``result_info`` is ``{result id: {"description": text, "unit": text, "scale": "linear"|"log"}}`` (the plan's description
-        of each result, its unit and the scale the plan declares); every key is optional.
+        ``result_info`` is ``{result id: {"description": text, "unit": text}}`` (the plan's description of each result and its
+        unit); every key is optional. ``axis_scales`` is ``{"x": "linear"|"log", "y": ...}``, the scale the plan declares for the
+        figure's axes (``Figure.x_scale`` / ``y_scale`` of the contract); an axis the plan is silent on is scaled by FI's rule
+        (log when every value drawn along it is above zero and the largest is at least 1000 times the smallest). The record of an
+        axis says which one set the scale (``scale_source``: "plan" or "FI rule"); a declared log axis with a value at or below
+        zero is drawn linear and ``scale_note`` says why.
 
         An axis label is, in this order: the plan's label of the id, with its unit ("Growth (1/h)"); else a short form of the
         result's plan description (up to its first stop or bracket, at most 48 characters); else "value" with the unit. The id
@@ -1261,6 +1262,7 @@ class FigureCalls:
         the span in decades, and a single value gets a fixed margin; on a log axis only values above zero count, so a band that
         reaches 0 still gives finite limits (a log axis with no positive value is drawn linear, and the record says so)."""
         spec_labels, result_info = spec_labels or {}, result_info or {}
+        axis_scales = axis_scales if isinstance(axis_scales, dict) else {}
         self._state()
         changed = []
         live = []
@@ -1271,7 +1273,7 @@ class FigureCalls:
             live.append(i)
             self._merge_identical(i, rec)
             self._write_labels(ax, rec, spec_labels, result_info, changed)
-            self._write_limits(ax, rec, changed)
+            self._write_limits(ax, rec, changed, axis_scales)
         fig = self._figure_of_panels()
         if fig is not None and live:
             self._use_constrained_layout(fig)
@@ -1348,14 +1350,6 @@ class FigureCalls:
         text = str(sl.get("label") or _short(ri.get("description")) or "value")
         return "%s (%s)" % (text, unit) if unit and str(unit) not in text else text
 
-    @staticmethod
-    def _scale_in(ident, spec_labels, result_info, default):
-        sl = spec_labels.get(ident)
-        for got in ((result_info.get(ident) or {}).get("scale"), sl.get("scale") if isinstance(sl, dict) else None):
-            if got in ("linear", "log"):
-                return got
-        return default
-
     def _write_labels(self, ax, rec, spec_labels, result_info, changed):
         for loc in ("center", "left", "right"):
             if ax.get_title(loc):
@@ -1371,28 +1365,39 @@ class FigureCalls:
             x["label"] = NEUTRAL_X
         elif not (image and x["id"] == "column" and "column" not in spec_labels):
             x["label"] = self._name_of(x["id"], spec_labels, result_info)
-        x["scale"] = self._scale_in(x["id"], spec_labels, result_info, x["scale"])
         if rec["y"] is not None:
             parts = rec["y"]["what"].split(" / ")
             names = dict.fromkeys(NEUTRAL_Y if w == "other" else self._name_of(w, spec_labels, result_info) for w in parts)
             rec["y"]["label"] = " / ".join(names)
-            scales = [self._scale_in(w, spec_labels, result_info, "linear") for w in parts if w != "other"]
-            rec["y"]["scale"] = "log" if scales and all(s == "log" for s in scales) else "linear"
         ytext = "row" if image else (rec["y"] or {}).get("label", "")
         for old, text, setter in ((ax.get_xlabel(), x["label"], ax.set_xlabel), (ax.get_ylabel(), ytext, ax.set_ylabel)):
             if old and old != text:
                 changed.append("label")
             setter(text)
 
-    def _write_limits(self, ax, rec, changed):
+    @staticmethod
+    def _axis_scale(declared, drawn, bars_y):
+        """``(scale, source, note)`` of one axis: what the plan declares, else FI's rule over the values drawn along it. A declared
+        log axis holding a value at or below zero cannot be drawn so: it is linear, and the note says why."""
+        if declared in ("linear", "log"):
+            if declared == "log" and (not drawn or min(drawn) <= 0):
+                return "linear", "plan", ("the plan asked for a log axis but %s" % (
+                    "nothing is drawn along it" if not drawn else "a value drawn along it is zero or negative"))
+            return declared, "plan", None
+        positive = bool(drawn) and min(drawn) > 0
+        return ("log" if positive and not bars_y and max(drawn) / min(drawn) >= LOG_RATIO else "linear"), "FI rule", None
+
+    def _write_limits(self, ax, rec, changed, axis_scales=None):
         if rec["x"] is None or rec["y"] is None:
             return
         if not ax.get_autoscalex_on() or not ax.get_autoscaley_on():
             changed.append("limits")
-        if (ax.get_xscale(), ax.get_yscale()) not in (("linear", "linear"), (rec["x"]["scale"], rec["y"]["scale"])):
-            changed.append("scale")
         if any(e["kind"] == "image" for e in rec["series"]):
+            if (ax.get_xscale(), ax.get_yscale()) != ("linear", "linear"):
+                changed.append("scale")
             return
+        axis_scales = axis_scales or {}
+        before = (ax.get_xscale(), ax.get_yscale())
         series = rec["series"]
         categorical = any(isinstance(v, str) for e in series for v in e["x"]) or any(isinstance(v, str) for b in rec["bands"] for v in b["x"])
         yv, xv = [], []
@@ -1411,6 +1416,10 @@ class FigureCalls:
             xv += [v for v in b["x"] if _finite(v)]
         for r in rec["refs"]:
             (yv if r["axis"] == "y" else xv).append(r["value"])
+        # the values the scale is decided on: the points and lines drawn, not the ends of an error bar or a band (a bar's lower end
+        # may pass zero while every point is far above it)
+        centre = {"x": [v for e in series for v in e["x"] if _finite(v)] + [r["value"] for r in rec["refs"] if r["axis"] != "y"],
+                  "y": [v for e in series for v in e["y"] if v is not None] + [r["value"] for r in rec["refs"] if r["axis"] == "y"]}
         bars = [e for e in series if e["kind"] == "bars"]
         for axis, vals in (("x", xv), ("y", yv)):
             if axis == "x" and getattr(ax, "_fi_bar_slots", None):  # bars over a setting: one slot for each value
@@ -1420,8 +1429,11 @@ class FigureCalls:
                 ax.relim()
                 ax.autoscale(enable=True, axis="x")
                 continue
-            scale = rec[axis]["scale"]
             vals = [v for v in vals if _finite(v)]
+            scale, source, note = self._axis_scale(axis_scales.get(axis), [v for v in centre[axis] if _finite(v)], bool(bars) and axis == "y")
+            rec[axis].update(scale=scale, scale_source=source)
+            if note:
+                rec[axis]["scale_note"] = note
             if bars and axis == "y" and scale == "linear":
                 vals.append(0.0)
             if axis == "x" and scale == "linear":  # bars have width: half the closest spacing on each side
@@ -1431,10 +1443,7 @@ class FigureCalls:
                         half = min((b - a for a, b in zip(pts, pts[1:])), default=1.0) / 2
                         vals += [pts[0] - half, pts[-1] + half]
             if scale == "log":
-                vals = [v for v in vals if v > 0]
-                if not vals:  # nothing a log axis can show
-                    scale = rec[axis]["scale"] = "linear"
-                    vals = [v for v in (xv if axis == "x" else yv) if _finite(v)]
+                vals = [v for v in vals if v > 0]  # (a declared bar axis may hold the zero of a bar's foot)
             (ax.set_xscale if axis == "x" else ax.set_yscale)(scale)
             if vals:
                 (ax.set_xlim if axis == "x" else ax.set_ylim)(*_padded(min(vals), max(vals), scale))

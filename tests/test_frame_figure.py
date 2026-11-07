@@ -60,7 +60,7 @@ class _Host(frame_figure.FigureCalls):
         self.settings = ["size", "step"]
         self.series_ids = ["fast", "slow"]
         self.references = {"limit": {"value": 3.0, "label": "upper limit"}}
-        self.labels = {"growth": {"label": "Growth", "scale": "linear"}, "fast": "Fast colony", "size": "Size"}
+        self.labels = {"growth": {"label": "Growth"}, "fast": "Fast colony", "size": "Size"}
 
 
 def _data(host):
@@ -313,7 +313,7 @@ def test_carried_text_imports_nothing_of_fi(tmp_path):
 # ---- labels, legend, limits (finish) ---------------------------------------------------------------------------------------
 
 SPEC = {"growth": {"label": "Growth", "unit": "1/h"}, "size": {"label": "Size", "unit": "mm"}, "fast": "Fast colony", "slow": "Slow colony"}
-INFO = {"growth": {"description": "Mean growth rate of the colony, measured per hour (see plan).", "unit": "1/h", "scale": "linear"},
+INFO = {"growth": {"description": "Mean growth rate of the colony, measured per hour (see plan).", "unit": "1/h"},
         "load": {"description": "Load carried by the colony at the end"}}
 
 
@@ -430,7 +430,7 @@ def test_log_axis_with_zero_in_band_keeps_finite_limits():
     h = _Host(panels=1)
     h.line(0, "fast", [1, 2, 3], [1.0, 10.0, 100.0], "growth")
     h.band(0, "fast", [1, 2, 3], [0.0, 5.0, 50.0], [2.0, 20.0, 200.0], "growth", "range")
-    h.finish(SPEC, {"growth": {"scale": "log"}})
+    h.finish(SPEC, {}, {"y": "log"})
     ax = h.axes[0]
     lo, hi = ax.get_ylim()
     assert ax.get_yscale() == "log" and math.isfinite(lo) and math.isfinite(hi) and 0 < lo <= 1.0 and hi >= 200.0
@@ -490,7 +490,7 @@ def test_merged_legend_entry_never_shows_a_raw_id():
 def test_log_axis_ignores_nonpositive_error_bar_end():
     h = _Host(panels=1, identity=True)
     h.line(0, "fast", [1, 10, 100], [1.0, 10.0, 100.0], "growth", yerr=[2.0, 2.0, 2.0])  # 1.0 - 2.0 is below zero
-    h.finish(SPEC, {"growth": {"scale": "log"}})
+    h.finish(SPEC, {}, {"y": "log"})
     lo, hi = h.axes[0].get_ylim()
     assert h.axes[0].get_yscale() == "log" and 0 < lo < 1.0 and 100.0 < hi < 1000.0
 

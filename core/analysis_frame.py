@@ -138,6 +138,7 @@ def plan_of(design: dict[str, Any]) -> dict[str, Any]:
         "known": _known_values(protocol, c),
         "search": c.search is not None,
         "figures": {f.id: {"file": f.file, "shows": list(f.shows), "x": f.x, "series": f.series, "panels": f.panels,
+                           **{k: getattr(f, k) for k in ("x_scale", "y_scale") if getattr(f, k, None)},
                            **_result_labels(c, f.shows), **_result_info(c), **_nominal_levels(c, f.shows), **_panel_words(c, f.panels, (f.x, f.series))}
                     for f in c.figures if f.declared},
     }

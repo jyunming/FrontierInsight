@@ -369,7 +369,8 @@ def _draw_one(spec: dict[str, Any], body: Any, table: Any, out_dir: str, plan: d
             fault = _audit(handle, fig, axes)
             if fault:
                 return _outcome(fid, file, "fi_fault", "FI's record of the calls of figure `%s` and the calls it kept disagree: %s." % (fid, fault))
-            handle.finish((plan or {}).get("labels") or {}, (plan or {}).get("result_info") or {})
+            handle.finish((plan or {}).get("labels") or {}, (plan or {}).get("result_info") or {},
+                          {k: (plan or {}).get(k + "_scale") for k in ("x", "y")})
         panel_record = _set_panel_titles(handle, axes, spec.get("labels") or {})
         try:
             fig.savefig(os.path.join(out_dir, file))  # the recorder of the house style notes what the figure draws
@@ -605,6 +606,7 @@ def _plan_for(spec: dict[str, Any], namespace: Any, table: Any) -> dict[str, Any
     derived = _from(namespace, "DERIVED", {})
     return {"settings": settings, "series_ids": series_ids, "references": references, "labels": labels,
             "result_info": info,
+            **{k: spec[k] for k in ("x_scale", "y_scale") if spec.get(k) in ("linear", "log")},
             "fallback": bool(spec.get("fallback")), "derived_ids": [str(k) for k in derived] if isinstance(derived, dict) else []}
 
 
