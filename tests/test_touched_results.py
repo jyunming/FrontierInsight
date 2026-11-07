@@ -22,10 +22,10 @@ PROTOCOL = {
         {"id": "corr_ab", "kind": "mean", "estimand": "correlation", "unit": "one setting", "role": "result", "returned": "afterwards"}]}
 FILES = {
     "model.py": ("def helper_for_cover(x):\n    return x\n\n\ndef helper_for_trial(x):\n    return x\n\n\n"
-                 "def helper_unused(x):\n    return x\n"),
+                 "def helper_unused(x):\n    return x\n\n\ndef helper_for_b(x):\n    return x + 1\n"),
     "derive.py": ("import model\n\n\ndef derive_cover(table):\n    return model.helper_for_cover(1)\n\n\n"
                   "def derive_corr_ab(table):\n    return 0.5\n"),
-    "simulate.py": ("import model\n\n\ndef trial(cell, ctx):\n    return {'est_a': model.helper_for_trial(1), 'est_b': 2.0, 'se_a': 1.0, "
+    "simulate.py": ("import model\n\n\ndef trial(cell, ctx):\n    return {'est_a': model.helper_for_trial(1), 'est_b': model.helper_for_b(1), 'se_a': 1.0, "
                     "'lo_a': 0.0, 'hi_a': 3.0}\n"),
 }
 
@@ -166,11 +166,11 @@ def _older(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flagged: list[dict[s
 
 
 def test_a_plan_in_the_older_form_still_places_a_finding_in_a_function_the_trial_calls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    root = _older(tmp_path, monkeypatch, [_v("f1", "the helper of the trial is off", "model.py", "helper_for_trial", changes_result=True)], [])
+    root = _older(tmp_path, monkeypatch, [_v("f1", "the helper of the second quantity is off", "model.py", "helper_for_b", changes_result=True)], [])
     assert shown_reach.Reach(root, OLDER, []).ids == [], "the reach alone holds no ids for this form"
     assert paper_facts._reach(root).ids, "the paper's reading passes the plan's own result ids"
     text = paper_facts.run_facts_text(root, paper_md=OLDER_PAPER)
-    assert "comes from code a review flagged" in text and "helper of the trial is off" in text
+    assert "comes from code a review flagged" in text and "helper of the second quantity is off" in text
 
 
 def test_a_finding_with_no_function_on_a_metric_problem_names_that_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -216,3 +216,50 @@ def test_an_error_while_placing_findings_is_logged_not_swallowed(tmp_path: Path,
     with caplog.at_level("WARNING"):
         assert paper_facts.touched_sentences(root, PAPER) == {}
     assert any("RuntimeError" in r.getMessage() and "unreadable record" in r.getMessage() for r in caplog.records)
+
+
+def test_the_dependent_variables_of_the_design_are_declared_results_like_the_engine_names_them(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    flagged = [_v("y1", "the yield is computed from the wrong helper", "model.py", "helper_for_yield", changes_result=True)]
+    problems = [{"id": "R1", "fid": "y1", "kind": "dependent variable", "name": "yield_total", "text": "the dependent variable yield_total"}]
+    root = _older(tmp_path, monkeypatch, flagged, problems)
+    (root / "code" / "model.py").write_text((root / "code" / "model.py").read_text(encoding="utf-8")
+                                            + "\n\ndef helper_for_yield(x):\n    return x * 2\n", encoding="utf-8")
+    (root / "code" / "simulate.py").write_text(
+        "import model\n\n\ndef trial(cell, ctx):\n    return {'yield_total': model.helper_for_yield(1), 'est_a': 1.0}\n", encoding="utf-8")
+    trials = {"cells": [{"cell": {"noise": 0.1}, "metrics": {k: {"values": [1.0], "trials": [0]} for k in ("yield_total", "est_a")}}]}
+    (root / "raw" / "trials.json").write_text(json.dumps(trials), encoding="utf-8")
+    assert "yield_total" in paper_facts._reach(root).ids
+    paper = "# P\n\n## Methods\n{{run_facts}}\n\n## Results\nThe yield is {{v:yield_total @ n=all}}.\n"
+    assert paper_facts.touched_sentences(root, paper).keys() == {"y1"}
+
+
+def test_a_finding_with_a_file_but_no_function_is_not_placed_by_its_metric(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    flagged = [_v("m2", "the second quantity is reported without its reference", "derive.py", "", changes_result=True)]
+    problems = [{"id": "R2", "fid": "m2", "kind": "metric", "name": "est_b", "text": "x"}]
+    root = _older(tmp_path, monkeypatch, flagged, problems)
+    assert paper_facts.touched_sentences(root, OLDER_PAPER) == {}
+
+
+def test_a_kept_record_without_the_note_is_not_said_to_lack_a_sentence() -> None:
+    item = {"kind": "code_finding", "id": "finding-x", "text": "a problem"}
+    lines = quality_report._paper_record_lines({"paper_check": {"unmet_items": [item]}})
+    line = next(ln for ln in lines if "`finding-x`" in ln)
+    assert line.startswith("- Not settled in the paper: ") and "sentence" not in line and "Limitations" not in line
+
+
+def test_a_plan_whose_contract_cannot_be_read_is_logged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    root = _older(tmp_path, monkeypatch, [], [])
+    from core import contract
+
+    def boom(*a: Any, **k: Any) -> Any:
+        raise ValueError("bad plan")
+
+    monkeypatch.setattr(contract, "from_design", boom)
+    with caplog.at_level("WARNING"):
+        paper_facts._reach(root)
+    assert any("ValueError" in r.getMessage() and "bad plan" in r.getMessage() for r in caplog.records)
+    caplog.clear()
+    monkeypatch.setattr(shown_reach, "Reach", boom)
+    with caplog.at_level("WARNING"):
+        assert paper_facts._reach(root) is None
+    assert any("ValueError" in r.getMessage() for r in caplog.records)

@@ -1629,16 +1629,29 @@ def _reach(root: Path) -> Any:
         protocol = plan_protocol(root)
         if not protocol:
             return None
-        # a plan in the older form lists its results too: the plan's own result ids are what the reach places findings on
-        from . import contract as _contract
-
-        try:
-            declared = [r.id for r in _contract.from_design({"protocol": protocol}).results]
-        except Exception:  # noqa: BLE001 -- a plan that cannot be read declares none
-            declared = []
-        return _shown_reach.Reach(root, protocol, [], declared)
-    except Exception:  # noqa: BLE001 -- no plan or code to read: no result is placed
+        return _shown_reach.Reach(root, protocol, [], _declared_results(root, protocol))
+    except Exception as exc:  # noqa: BLE001 -- no result is placed; the paper still renders
+        _LOG.warning("[paper_facts] FI could not read the plan and code to place open code findings (%s: %s)",
+                     type(exc).__name__, exc)
         return None
+
+
+def _declared_results(root: Path, protocol: dict[str, Any]) -> list[str]:
+    """The results the plan declares, as the engine's gate names them (:func:`core.code_review.declared_names`): the plan's
+    metrics and the design's dependent variables. The design is read from FI's record of the review, which holds the
+    problems it wrote from the design's dependent variables; a plan in the older form lists its results in the contract."""
+    from . import code_review as _code_review
+    from . import contract as _contract
+
+    record = _read(root, ".fi/code_review.json")
+    problems = record.get("problems") if isinstance(record, dict) and isinstance(record.get("problems"), list) else []
+    dependent = [str(p["name"]) for p in problems if isinstance(p, dict) and p.get("kind") == "dependent variable" and p.get("name")]
+    names = _code_review.declared_names({"variables": {"dependent": dependent}}, protocol)
+    try:
+        names += [r.id for r in _contract.from_design({"protocol": protocol}).results]
+    except Exception as exc:  # noqa: BLE001 -- the plan's metrics above still stand
+        _LOG.warning("[paper_facts] FI could not read the plan's results from its contract (%s: %s)", type(exc).__name__, exc)
+    return list(dict.fromkeys(names))
 
 
 def printed_result_ids(paper_md: str) -> list[str]:

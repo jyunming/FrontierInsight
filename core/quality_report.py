@@ -1453,7 +1453,9 @@ def _unmet_lead(item: dict[str, Any]) -> str:
         return "Not in the paper's Limitations"
     if item.get("named") is False:
         return "FI could not name a printed result this finding changes"
-    return "FI's sentence on the results it may change is not in the paper"
+    if item.get("named") is True:
+        return "FI's sentence on the results it may change is not in the paper"
+    return "Not settled in the paper"  # a record kept before FI noted which of the two it was
 
 
 def _paper_record_lines(records: dict[str, Any]) -> list[str]:

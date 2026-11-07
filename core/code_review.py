@@ -1909,7 +1909,7 @@ def touched_results(quest_root: Path, code_dir: Path, places: Any, declared: Any
     for fid, x in cands:
         file, function = str(x.get("file_rel") or x.get("file") or "").strip(), str(x.get("function") or "").strip()
         got = places(file, function) if file and function else None
-        if not got and not (file and function):
+        if not got and not file and not function:
             got = metric_of.get(fid)  # the plan's own metric id, written against the finding by FI (not read from its words)
         if got:
             out[fid] = list(got)
