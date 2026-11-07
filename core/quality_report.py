@@ -525,9 +525,28 @@ def _plan_problems(q: _Quest) -> list[dict[str, str]]:
             why = "the call failed" if rec.get("error") else "its answer could not be used after " + str(rec.get("asks")) + " asks"
             out.append(_problem("plan", f"the plan was not given {_cparts.PART_WORDS.get(part, part)} ({why}); it stays in the "
                                 "older form", "FI's plan check", "disclosed", ".fi/contract_parts.json"))
+    out.extend(_unit_problems(q))
     if q.pause.get("kind") == "plan":
         out.append(_problem("plan", q.pause.get("headline") or "the plan cannot be run as written", "FI's plan check",
                             "not fixed", ".fi/pause.json"))
+    return out
+
+
+def _unit_problems(q: _Quest) -> list[dict[str, str]]:
+    """A question the topic asks in one unit that the plan answers with a result in another (``unit_conflict`` on the plan's
+    ``topic_map`` entry): the paper answers it with that result and states both units, so it is listed once, as disclosed."""
+    from . import frozen_protocol as _frozen
+
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for m in _list(_dict(_frozen.protocol_of(q.root)).get("topic_map")):
+        m, gap = _dict(m), _dict(_dict(m).get("unit_conflict"))
+        item = str(m.get("item") or "")
+        if gap and item not in seen:
+            seen.add(item)
+            said = [("a pure number" if str(gap.get(k) or "").strip() in ("", "1") else str(gap.get(k)).strip()) for k in ("result", "asked")]
+            out.append(_problem("plan", f"the question \"{_one(item, 80)}\" asks in {said[1]}; the plan's result for it is in {said[0]} and "
+                                "FI did not convert it", "FI's plan check", "disclosed", ".fi/contract_parts.json"))
     return out
 
 

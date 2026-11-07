@@ -1523,18 +1523,20 @@ def answers_text(quest_root: Path | str) -> str:
     estimates = _known_estimates(protocol)
     plain = _plain_in(protocol, root)
     lines: list[str] = []
+    starts: list[int] = []  # the first line of each question, to find where one question's lines end
+    unit_spans: list[tuple[int, Any, Any]] = []  # (the question's place in starts, its unit_conflict, its map): the unit sentence
     for item in asked:
         name = " ".join(str(item.get("name") or "").split())
         if not name:
             continue
-        # An entry whose result is in another unit than the question asks in (``unit_conflict``, written by the answers
-        # part after its asks) is never filled with that result's number.
-        conflict = next((str(m["unit_conflict"]) for m in _topic_req.map_entries(req, plan, "quantities", item)
-                         if m.get("unit_conflict")), "")
-        if conflict:
-            lines.append(f"- {name}: not answered ({conflict})")
-            continue
+        starts.append(len(lines))
+        # An entry whose result is in another unit than the question asks in (``unit_conflict``, written by the answers part)
+        # is still answered by that result: the line states both units, and FI converts nothing.
+        conflict = next((m["unit_conflict"] for m in _topic_req.map_entries(req, plan, "quantities", item)
+                         if m.get("unit_conflict")), None)
         mapped = _topic_req.mapping_of(req, plan, "quantities", item)
+        if conflict:
+            unit_spans.append((len(starts) - 1, conflict, mapped))
         # The plan's explicit map to a metric that exists is the fact; the line names that metric, so a wrong map is
         # disclosed, never hidden. Whether the metric's name resembles the quantity's is not asked here.
         metric = mapped[1] if mapped is not None and mapped[0] in ("ok", "judge") else ""
@@ -1654,7 +1656,23 @@ def answers_text(quest_root: Path | str) -> str:
             head = name + (f" (when {', '.join(pins)})" if pins else "")
             each_value = "; ".join(f"{lv}: {b}{'' if shared else n}" for lv, _, b, n in pieces)
             lines.append(f"- {head} ({lead}), by {rec.label(split)}: {each_value}{shared}")
+    for place, conflict, mapped in unit_spans:
+        start, end = starts[place], starts[place + 1] if place + 1 < len(starts) else len(lines)
+        # Only a line with a value of FI's: a question the result gives no value for is already said as not answered, for that.
+        if start < end and "{{" in lines[end - 1]:
+            lines[end - 1] += _unit_sentence(conflict, mapped[1] if mapped is not None and mapped[0] in ("ok", "judge") else "", rec, plain)
     return ("**Answers to the questions asked.**" + chr(10) * 2 + chr(10).join(lines)) if lines else ""
+
+
+def _unit_sentence(conflict: Any, metric: str, rec: Any, plain: Any) -> str:
+    """The sentence after an answer whose result is in another unit than the question asks in: the result, its unit (the plan's
+    own where the plan declares one, else the unit the plan states for it) and the unit asked; FI converts nothing."""
+    if not isinstance(conflict, dict):  # a plan written before the units were kept as a pair
+        return f" (note: {str(conflict).strip()}; FI did not convert it)"
+    said = [("a pure number (no unit)" if str(u).strip() in ("", "1") else str(u).strip()) for u in (conflict.get("result"), conflict.get("asked"))]
+    result = f"\"{plain(metric)}\"" if metric else "this result"
+    lead = "the result used" if conflict.get("declared") else "the plan states that the result used"
+    return f" ({lead}, {result}, is in {said[0]}; the question asks in {said[1]}, and FI did not convert it)"
 
 
 def _reach(root: Path) -> Any:
