@@ -31150,7 +31150,7 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
 "protocol": {
   "grid": {"<parameter, named as the code will name it>": [<every value it takes>]},
   "sub_studies": [{"name": "<a separate part of the study, in a few words>", "vary": ["<the settings of `grid` this part crosses with one another>"], "hold": {"<each other setting of `grid` with several values>": <the value this part keeps it at>}}],
-  "in_each_run": {"<what ONE run goes through all of together: the conditions one fit spans, the methods applied to the same simulated data>": [<all its values>]},
+  "in_each_run": {"<what ONE run goes through all of together: the conditions one fit spans (every dose of one dose-response fit, say), or alternative methods applied to the same simulated data (two estimators of one quantity)>": [<all its values; a quantity the run returns is a `metrics` entry, never a value here>]},
   "numerical_settings": {"<each numerical resolution of the simulation, named as the code names it: a sampling density, a step, a mesh size, a number of points>": {"search": <the one value the study runs at>, "check": [<finer values FI runs the headline results again at>], "finer": "<smaller | larger>", "unit": "<its unit, e.g. nm or s; leave out for a count>"}},
   "runs_per_setting": <a whole number: stochastic runs or samples per setting; leave out for a deterministic study>,
   "min_runs_per_setting": <the fewest runs per setting that still answer the question; when the study would not finish in time FI lowers the runs toward it and keeps every setting; only the topic's own time limit may take them below it (down to 10), and the paper then says so; leave out for a deterministic study>,

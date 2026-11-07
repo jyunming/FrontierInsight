@@ -408,6 +408,49 @@ def sub_studies_without(subs: Any, names: Any) -> list[dict[str, Any]]:
     return out
 
 
+def _setting_text(value: Any) -> str:
+    """A setting's value or a declared name reduced to its letters and digits, lower case, for comparing the two."""
+    return re.sub(r"[^a-z0-9]+", "", str(value).lower())
+
+
+def declared_outputs(protocol: Any) -> dict[str, str]:
+    """``{normalised text: the name as the plan wrote it}`` for every result the plan itself declares: the ``id`` of each
+    ``metrics``, ``derived`` and ``named_results`` entry, the ``name`` of each ``oracles`` and ``criteria`` entry, and the
+    keys of ``labels``. Only what the plan says; nothing is guessed from the wording of a value."""
+    out: dict[str, str] = {}
+    if not isinstance(protocol, dict):
+        return out
+
+    def add(name: Any, where: str) -> None:
+        if isinstance(name, str) and _setting_text(name):
+            out.setdefault(_setting_text(name), f"{name.strip()} ({where})")
+
+    for key, field, where in (("metrics", "id", "a metric"), ("derived", "id", "a derived result"),
+                              ("named_results", "id", "a named result"), ("oracles", "name", "a check"),
+                              ("criteria", "name", "a criterion")):
+        entries = protocol.get(key)
+        for entry in entries if isinstance(entries, list) else [entries] if isinstance(entries, dict) else []:
+            if isinstance(entry, dict):
+                add(entry.get(field), where)
+    labels = protocol.get("labels")
+    for name in labels if isinstance(labels, dict) else []:
+        add(name, "a labelled quantity")
+    return out
+
+
+def setting_names_a_result(part: str, axis: Any, values: Any, outputs: dict[str, str]) -> str | None:
+    """The reason a setting is refused when one of its values is text equal to a result the plan declares it returns
+    (:func:`declared_outputs`), else ``None``. A setting lists the alternative ways a run treats the same data, or the
+    levels of an input; what a run returns is a ``metrics`` entry, not a value of a setting."""
+    for value in values if isinstance(values, list) else []:
+        if isinstance(value, str) and _setting_text(value) in outputs:
+            return (f"`protocol.{part}.{axis}` lists `{value.strip()}`, which the plan itself declares as a result a run "
+                    f"returns, {outputs[_setting_text(value)]}: a quantity the run returns is a `protocol.metrics` entry, "
+                    "never a value of a setting. The values of a setting are the levels of an input, or alternative ways "
+                    "to treat the same data that each give a different number for the SAME result")
+    return None
+
+
 def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None]:
     """``(protocol, None)`` when the experiment protocol block can be checked against a script, else ``(None, why)``.
 
@@ -418,6 +461,7 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
     if not isinstance(protocol, dict):
         return None, "`protocol` must be a mapping (`grid`, `runs_per_setting`, `thresholds`, ...)"
     out: dict[str, Any] = dict(protocol)
+    outputs = declared_outputs(protocol)
     grid = out.get("grid")
     if grid is not None:
         if not isinstance(grid, dict):
@@ -427,6 +471,9 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
             if _number(values) or (isinstance(values, str) and values.strip()):
                 values = [values]
             fixed_values, why = _grid_values(axis, values)
+            if why:
+                return None, why
+            why = setting_names_a_result("grid", axis, fixed_values, outputs)
             if why:
                 return None, why
             fixed[str(axis)] = fixed_values
@@ -441,6 +488,9 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
         fixed_inside: dict[str, list[Any]] = {}
         for factor, values in inside.items():
             fixed_values, why = _grid_values(factor, values, part="in_each_run")
+            if why:
+                return None, why
+            why = setting_names_a_result("in_each_run", factor, fixed_values, outputs)
             if why:
                 return None, why
             seen_values = [json.dumps(float(v) if _number(v) else v) for v in fixed_values or []]
@@ -782,7 +832,9 @@ PART_RULES = {
                    "random numbers (one fit across all of them, every method applied to the same simulated data), as a "
                    "mapping from each such factor's name to the list of ALL its values: at least two, each listed once, "
                    "only numbers or only names. A factor listed here is not also a setting of `protocol.grid` (FI takes it "
-                   "out of the grid: a grid setting is run on its own, once per value).",
+                   "out of the grid: a grid setting is run on its own, once per value). Each value is a level of an input or an "
+                   "alternative way to treat the same data, giving a different number for the SAME result; a quantity the run "
+                   "returns is a `protocol.metrics` entry, never a value here.",
     "metrics": "`protocol.metrics`: a list; each entry has an `id` (the name the script gives the number), a `kind` "
                "(`proportion` or `mean`), an `estimand` (text: what the number estimates), a `unit` (text: what one "
                "independent observation is) and, optionally, a `label` (the reader's name for the number: words, its "
