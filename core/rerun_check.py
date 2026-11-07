@@ -536,6 +536,13 @@ async def judge(executor: Any, python: Path | str, quest_root: Path | str, copy:
                            keys=keys, notes=notes, mode=mode, seconds=secs, source=source, files=files)
         if loose:  # they add to what the attributed numbers say, never replace it (the gate places them as well)
             notes = [*notes, "numbers FI cannot attribute to a result also differ: " + ", ".join(loose[:4])]
+        left_alone = sorted(n for n in unwritten if any(k.startswith(f"file:{n}") for k in delivered))
+        if not keep and left_alone:
+            # "nothing moved" says something only about the numbers that were compared: a delivered result file the repaired
+            # run did not write was not, so it is never shipped as "unchanged" (a "changed" answer stays one: it already moved)
+            return Verdict("could_not", "the rerun did not write " + ", ".join(left_alone[:4])
+                           + ", so the numbers delivered in it were not compared", notes=notes, mode=mode, seconds=secs,
+                           source=source, files=files, unwritten=sorted(unwritten))
         return Verdict("changed" if keep else "unchanged", "", metrics=metrics, keys=keys, notes=notes, mode=mode, seconds=secs,
                        source=source, files=files, unplaced=loose, unwritten=sorted(unwritten), redrawn=bool(redrawn))
     finally:

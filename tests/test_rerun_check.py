@@ -562,7 +562,8 @@ def test_a_result_file_the_rerun_did_not_write_and_a_time_are_not_compared(tmp_p
     copy = rerun_check.copy_code(root, tmp_path / "w")
     (copy / "experiment.py").write_text((copy / "experiment.py").read_text(encoding="utf-8") + "# changed\n", encoding="utf-8")
     got = asyncio.run(rerun_check.judge(_Local(), sys.executable, root, copy, PROTOCOL, 60, None))
-    assert got.mode == "analysis only" and got.status == "unchanged"  # odd.json is not written by an analysis-only rerun
+    # odd.json is not written by an analysis-only rerun: its delivered number was not compared, so it is not "unchanged"
+    assert got.mode == "analysis only" and got.status == "could_not" and "odd.json" in got.why
     assert "runtime" not in " ".join(rerun_check.results_of(root))
 
 
@@ -767,3 +768,47 @@ def test_a_real_move_of_a_constant_metric_is_a_changed_verdict_not_an_error(tmp_
 def test_rounding_noise_of_a_constant_metric_is_an_unchanged_verdict(tmp_path: Path) -> None:
     got = _constant_judge(tmp_path, 1e-15)
     assert got.status == "unchanged" and got.redrawn
+
+
+# ---- a delivered result file the repaired run did not write is never shipped as "unchanged" ----------------------------------
+def _quest_with_two_files(tmp_path: Path) -> tuple[Path, Path]:
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "derive.py").write_text("x = 1\n", encoding="utf-8")
+    res = root / "data" / "results"
+    res.mkdir(parents=True)
+    (res / "derived.json").write_text(json.dumps({"derived": {"est": {"by_setting": {"s": 1.0}}}}), encoding="utf-8")
+    (res / "table.json").write_text(json.dumps({"est_b": 5.0}), encoding="utf-8")
+    copy = tmp_path / "copy"
+    copy.mkdir()
+    (copy / "derive.py").write_text("x = 2\n", encoding="utf-8")
+    return root, copy
+
+
+def _rerun_writing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root: Path, copy: Path, *, table: bool) -> Verdict:
+    out = tmp_path / "out"
+    (out / "data" / "results").mkdir(parents=True)
+    (out / "data" / "results" / "derived.json").write_text(
+        json.dumps({"derived": {"est": {"by_setting": {"s": 1.0}}}}), encoding="utf-8")
+    if table:
+        (out / "data" / "results" / "table.json").write_text(json.dumps({"est_b": 5.0}), encoding="utf-8")
+
+    async def fake_run_copy(*a: Any, **k: Any) -> tuple[Any, ...]:
+        return "analysis only", out, "", 1.0, False
+
+    monkeypatch.setattr(rerun_check, "run_copy", fake_run_copy)
+    return asyncio.run(rerun_check.judge(None, "py", root, copy, {"metrics": []}, 60, None))  # disputed=None, as the engine calls
+
+
+def test_an_unwritten_delivered_result_file_is_could_not_not_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Old code: table.json left the comparison when the rerun did not write it, and the verdict was "unchanged"."""
+    root, copy = _quest_with_two_files(tmp_path)
+    v = _rerun_writing(tmp_path, monkeypatch, root, copy, table=False)
+    assert v.status == "could_not" and "table.json" in v.why and v.unwritten == ["table.json"]
+
+
+def test_a_rerun_that_compares_every_delivered_file_and_finds_no_move_is_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Known positive."""
+    root, copy = _quest_with_two_files(tmp_path)
+    v = _rerun_writing(tmp_path, monkeypatch, root, copy, table=True)
+    assert v.status == "unchanged" and v.unwritten == []

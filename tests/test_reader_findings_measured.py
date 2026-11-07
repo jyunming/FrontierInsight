@@ -182,7 +182,8 @@ def _run_judge(root: Path, copy: Path, **kw: Any) -> Verdict:
 def test_a_result_file_the_repair_stopped_writing_is_unmeasured_for_a_reader_repair(tmp_path) -> None:
     """Before: the file's numbers were dropped from the comparison and the other, unchanged numbers made it `unchanged`."""
     root, copy = _judge_quest(tmp_path, write_table=False)
-    assert _run_judge(root, copy).status == "unchanged"  # the old reading, still used for a shown fault
+    shown = _run_judge(root, copy)  # a shown fault (no disputed quantity) is not "unchanged" either: the file was not compared
+    assert shown.status == "could_not" and "table.json" in shown.why
     got = _run_judge(root, copy, disputed=["cover"])
     assert got.status == "could_not" and "did not compare every delivered number of cover" in got.why
     root, copy = _judge_quest(tmp_path / "b", write_table=True)
