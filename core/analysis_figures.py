@@ -778,7 +778,7 @@ def _audit(handle: Any, fig: Any, axes: list[Any]) -> str:
                 why.setdefault(i, "drawing changed after FI's call")
         for line, ref in zip(extra["refs"], rec["refs"]):
             data = line.get_ydata() if ref["axis"] == "y" else line.get_xdata()
-            if getattr(line, "axes", None) is None or not len(data) or not _same_numbers([data[0]], [ref["value"]]):
+            if getattr(line, "axes", None) is None or not len(data) or not _same_numbers(list(data), [ref["value"]] * len(data)):
                 why.setdefault(i, "drawing changed after FI's call")
     for i in range(len(axes)):
         _ax, rec = handle._panel(i)
@@ -1083,6 +1083,7 @@ def _scan_figure(data: dict[str, Any], out_dir: str) -> dict[str, Any]:
     if not points or not names:
         return _outcome(fid, file, "skipped", "The coarse scan has no setting that changed, so its map is not drawn.")
     plt, fig, (ax,) = _new_figure(1)
+    note = ""
     try:
         if len(names) == 1:
             pts = sorted((p[names[0]], v) for p, v in points)
@@ -1091,14 +1092,34 @@ def _scan_figure(data: dict[str, Any], out_dir: str) -> dict[str, Any]:
             ax.set_ylabel("objective")
         else:
             x, y = names[0], names[1]
-            shown = [(p[x], p[y], v) for p, v in points if x in p and y in p]
-            sc = ax.scatter([s[0] for s in shown], [s[1] for s in shown], c=[s[2] for s in shown], s=60)
+            more = names[2:]
+            shown = [(p[x], p[y], v, tuple(p.get(k) for k in more)) for p, v in points if x in p and y in p]
+            combos = list(dict.fromkeys(s[3] for s in shown))
+            # Points that differ only in a further setting would land on one position: each combination of the further
+            # settings gets its own marker, named in the legend, so no point hides another.
+            markers = "osD^vP*Xp<>"
+            lows, highs = min(s[2] for s in shown), max(s[2] for s in shown)
+            sc = None
+            for i, combo in enumerate(combos):
+                part = [s for s in shown if s[3] == combo]
+                label = ", ".join("%s = %s" % (k, _fmt(c)) for k, c in zip(more, combo)) if more else None
+                sc = ax.scatter([s[0] for s in part], [s[1] for s in part], c=[s[2] for s in part], s=60, vmin=lows, vmax=highs,
+                                marker=markers[i % len(markers)], label=label)
             fig.colorbar(sc, ax=ax, label="objective")
             ax.set_xlabel(x)
             ax.set_ylabel(y)
+            if more:
+                ax.legend(title="also varied", fontsize=7)
+                note = ("The map is drawn over %s and %s; %s also changed, and each of its values has its own marker (named in the "
+                        "legend), so points at one position are told apart by marker.") % (x, y, ", ".join(more))
+                if len(combos) > len(markers):
+                    note += " More than %d combinations share these axes, so some markers repeat and points may overlap." % len(markers)
         os.makedirs(out_dir, exist_ok=True)
         fig.savefig(os.path.join(out_dir, file))
-        return _outcome(fid, file, "ok")
+        out = _outcome(fid, file, "ok")
+        if note:
+            out["note"] = note
+        return out
     finally:
         plt.close(fig)
 

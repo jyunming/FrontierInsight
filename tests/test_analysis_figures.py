@@ -1826,3 +1826,48 @@ def test_default_figure_draws_lines_only_so_it_has_no_bars_or_error_bars(tmp_pat
     af.default_figure({"id": "f1", "file": "f1.png", "shows": ["gain", "loss"], "x": "size", "series": "rate"}, _CallGrid(), str(tmp_path))
     panel = _calls_of(frame5)["panels"][0]
     assert {s["kind"] for s in panel["series"]} == {"line"} and all(not s.get("yerr") for s in panel["series"]) and panel["bands"] == []
+
+
+def test_a_reference_line_changed_to_a_slope_after_fi_drew_it_is_not_verified(tmp_path, frame5):
+    """Before: only the first coordinate of the line was compared with the recorded value."""
+    def sloped(fig, table):
+        _drawn(fig, table, 0)
+        _drawn(fig, table, 1)
+        line = fig.ref(0, value=1.5)
+        assert line is not None
+        line.set_ydata([1.5, 9.0])
+
+    out = _calls_run(tmp_path, sloped, table=_LimitTable())
+    assert out["status"] == "ok", out
+    panels = json.loads((frame5 / "g.calls.json").read_text(encoding="utf-8"))["panels"]
+    assert panels[0]["raw"] is True
+
+    def honest(fig, table):
+        _drawn(fig, table, 0)
+        _drawn(fig, table, 1)
+        assert fig.ref(0, value=1.5) is not None
+
+    assert _calls_run(tmp_path, honest, table=_LimitTable())["status"] == "ok"
+    panels = json.loads((frame5 / "g.calls.json").read_text(encoding="utf-8"))["panels"]
+    assert panels[0]["raw"] is False  # known positive: an untouched line stays verified
+
+
+def test_a_scan_map_over_three_varying_settings_does_not_hide_points_behind_each_other(tmp_path, monkeypatch):
+    """Before: points that differed only in the third setting were drawn at one position, with no word of it."""
+    seen = {}
+    orig = af._new_figure
+
+    def spy(n):
+        plt, fig, axes = orig(n)
+        seen["ax"] = axes[0]
+        return plt, fig, axes
+
+    monkeypatch.setattr(af, "_new_figure", spy)
+    scan = [{"design": {"a": a, "b": b, "c": c}, "objective": a + b + 10 * c} for a in (1, 2, 3) for b in (1, 2, 3) for c in (0, 1)]
+    out = af._scan_figure({"scan": scan}, str(tmp_path))
+    assert out["status"] == "ok" and "c" in out["note"]
+    marks = [(tuple(o), c.get_paths()[0].vertices.tobytes()) for c in seen["ax"].collections for o in c.get_offsets().tolist()]
+    assert len(marks) == len(scan) and len(set(marks)) == len(marks)  # every point has its own position or its own marker
+    assert seen["ax"].get_legend() is not None
+    two = af._scan_figure({"scan": [s for s in scan if s["design"]["c"] == 0]}, str(tmp_path))
+    assert "note" not in two  # known positive: two varying settings need no note
