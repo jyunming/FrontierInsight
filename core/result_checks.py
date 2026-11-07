@@ -572,7 +572,7 @@ class ResultChecksMixin:
         results the paper may use, the plan's quantities the code does not compute (``(quantity, how)``) are named, and the
         figures a failing test is about (``(file, how)``) are taken out of ``figures/``, by adding them to
         ``needs/RESULT_CHECK.json`` (what the run's checks left out stays). The words say only what FI's records show: that a
-        repair which passes the test changes the reported number (``changed``: the quantities whose rerun changed numbers),
+        repair which passes the test changes the reported number (``changed``: the printed keys whose recorded value the rerun shows changed; every other key left out gets the second),
         else that the test failed and FI did not establish whether the value is wrong or missing. The same issues found again
         add nothing."""
         path = self.quest_root / "needs" / RECORD  # type: ignore[attr-defined]
@@ -580,7 +580,11 @@ class ResultChecksMixin:
         found: list[Found] = []
         for quantity, keys, how in left_out:
             taken = ", ".join("`" + k + "`" for k in keys[:6])
-            if quantity in (changed or set()):
+            moved = [k for k in keys if k in (changed or set())]
+            rest = [k for k in keys if k not in (changed or set())]
+            said_moved = ", ".join("`" + k + "`" for k in moved[:6])
+            said_rest = ", ".join("`" + k + "`" for k in rest[:6])
+            if not rest:
                 note = (f"a test FI ran on the code that produced the results failed on `{quantity}`, and a repair that passes "
                         f"the test changes the reported number ({how})")
                 say = (f"A test FI ran on the code that produced the results failed on `{quantity}` ({how}). The study run again "
@@ -588,7 +592,7 @@ class ResultChecksMixin:
                        f"FI took {taken} out of the results. Do NOT report, describe or quote any value for `{quantity}`, and do "
                        f"not call another number by its name. Say plainly, in the limitations, that `{quantity}` is left out of "
                        "this paper because a repair that passes a test of the code changes the reported number.")
-            else:
+            elif not moved:
                 note = (f"a test FI ran on the code that produced the results failed on `{quantity}`; FI did not establish "
                         f"whether the value is wrong or missing ({how})")
                 say = (f"A test FI ran on the code that produced the results failed on `{quantity}` ({how}). FI did not "
@@ -596,6 +600,18 @@ class ResultChecksMixin:
                        f"describe or quote any value for `{quantity}`, and do not call another number by its name. Say plainly, "
                        f"in the limitations, that `{quantity}` is left out of this paper because a test of the code failed and "
                        "FI did not establish whether the value is wrong or missing.")
+            else:  # the rerun showed some of what is left out changed, not all of it
+                note = (f"a test FI ran on the code that produced the results failed on `{quantity}`; a repair that passes the "
+                        f"test changes the reported number of {said_moved}, and FI did not establish whether the value of "
+                        f"{said_rest} is wrong or missing ({how})")
+                say = (f"A test FI ran on the code that produced the results failed on `{quantity}` ({how}). The study run again "
+                       f"with a repair that passes the test reports other numbers for {said_moved}, so the repair changes the "
+                       f"reported number of those. For {said_rest} FI did not establish whether the value is wrong or missing. "
+                       f"FI took {taken} out of the results. Do NOT report, describe or quote any value for them, and do not "
+                       "call another number by their names. Say plainly, in the limitations, that "
+                       f"{said_moved} is left out because a repair that passes a test of the code changes the reported number, "
+                       f"and {said_rest} because a test of the code failed and FI did not establish whether the value is wrong "
+                       "or missing.")
             found.append(Found("shown_fault", ANALYSIS, "", note, say, keys=list(keys), quantity=quantity))
         for quantity, how in not_done:
             note = f"the code does not compute the plan's `{quantity}` ({how})"
@@ -622,7 +638,7 @@ class ResultChecksMixin:
         why = record.get("removed_why") if isinstance(record.get("removed_why"), dict) else {}
         for f in new:
             for k in f.keys:
-                why.setdefault(k, SHOWN_FAULT_CHANGED_WHY if f.quantity in (changed or set()) else SHOWN_FAULT_WHY)
+                why.setdefault(k, SHOWN_FAULT_CHANGED_WHY if k in (changed or set()) else SHOWN_FAULT_WHY)
         record.update({
             "removed_quantities": keys, "removed_figures": sorted({*(record.get("removed_figures") or []), *gone_figures}),
             "removed_values": _values_left_out(result_json, set(keys), self._derived_record()), "removed_why": why,

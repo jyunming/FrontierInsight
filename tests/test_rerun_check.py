@@ -687,3 +687,17 @@ def test_a_run_whose_own_error_is_smaller_than_the_plan_allowance_is_bound_by_it
     assert rerun_check.counted([move], wide, trials, redrawn=False)[0] == [move]
     small = {**move, "new": 4.5045 + 0.0002}  # inside its own error too
     assert rerun_check.counted([small], wide, trials, redrawn=False)[0] == []
+
+
+def test_a_rerun_that_changed_one_result_names_only_that_result_as_changed(tmp_path: Path) -> None:
+    # the finding is about `est_a`; `corr_ab` is worked out from it and is left out with it, but the rerun did not show it changed
+    out, record = _gate(tmp_path, Verdict("changed", metrics=["est_a"]), headline=("est_b",), test=DERIVE_EST, quantity="est_a")
+    assert out is None
+    gate = record["issues"]["F-1"]["at_gate"]
+    assert gate["rerun"] == "changed" and {"est_a", "corr_ab"} <= set(gate["keys"])
+    kept = json.loads((tmp_path / "outputs").rglob("RESULT_CHECK.json").__next__().read_text(encoding="utf-8"))
+    from core import result_checks
+
+    assert kept["removed_why"]["est_a"] == result_checks.SHOWN_FAULT_CHANGED_WHY
+    assert kept["removed_why"]["corr_ab"] == result_checks.SHOWN_FAULT_WHY
+    assert "did not establish" in kept["say"] and "`corr_ab`" in kept["say"]

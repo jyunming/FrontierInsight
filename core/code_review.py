@@ -228,9 +228,9 @@ def is_defined_twice(name: Any, twice: dict[str, dict[str, str]]) -> bool:
 
 def passing_checks(quest_root: Path, name: Any) -> list[str]:
     """The names of the plan's known-answer checks that FI itself measured and that passed (``needs/ORACLE_CHECK.json``),
-    whose measure reads the quantity ``name`` (the plan's name for it is one of the names FI evaluates in the check's measure,
-    ``oracle_forms.read_names``), and that the second
-    model's reading of the code does not flag. ``[]`` when there is none: FI then holds no check of the value."""
+    whose measure is a formula that reads the quantity ``name`` (the plan's name for it, compared exactly, is one of the names FI
+    evaluates in the check's measure, ``oracle_forms.names``; a measure that is not a formula links to no quantity), and that
+    the second model's reading of the code does not flag. ``[]`` when there is none: FI then holds no check of the value."""
     from . import frozen_protocol as _frozen
     from . import oracle_forms as _forms
 
@@ -240,12 +240,12 @@ def passing_checks(quest_root: Path, name: Any) -> list[str]:
     except (OSError, ValueError):
         return []
     passed = set(_oracle.engine_passed(_oracle.last_judged(record)))
-    ident = _norm(leading_id(name))
+    ident = leading_id(name)
     if not passed or not ident:
         return []
     protocol = _frozen.protocol_of(root)
     reads = [str(o["name"]) for o in _oracle.declared(protocol) if str(o["name"]) in passed
-             and ident in {_norm(w) for w in _forms.read_names(o.get("measure"))}]
+             and ident in _forms.names(o.get("measure"), across=True)]
     flagged = flagged_checks(root, root / "code", reads) if reads else {}
     return [n for n in reads if n not in flagged]
 

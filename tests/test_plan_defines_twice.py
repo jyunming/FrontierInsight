@@ -150,7 +150,8 @@ def test_the_gap_in_the_plan_is_gone_only_when_the_double_definition_is_gone() -
 
 def test_a_check_is_linked_to_the_names_fi_evaluates_in_its_measure(tmp_path: Path) -> None:
     # `measure` is FI's own executable formula: the quantity it reads is a name FI evaluates, not any word of the text
-    for n, (measure, found) in enumerate((("quantity_a/(2*pi) - 1", ["check_a"]), ("the quantity_a of the swing", []))):
+    for n, (measure, found) in enumerate((("quantity_a/(2*pi) - 1", ["check_a"]), ("the quantity_a of the swing", []),
+                                         ("quantity_a +", []), ("quantity_a_ +", []))):
         quest = _quest(tmp_path / str(n), TWICE, check="pass")
         path = quest.quest_root / "needs" / "FROZEN_PROTOCOL.json"
         frozen = json.loads(path.read_text(encoding="utf-8"))
@@ -158,3 +159,24 @@ def test_a_check_is_linked_to_the_names_fi_evaluates_in_its_measure(tmp_path: Pa
         frozen["sha256"] = frozen_protocol.sha256(frozen["protocol"])
         path.write_text(json.dumps(frozen), encoding="utf-8")
         assert cr.passing_checks(quest.quest_root, "quantity_a") == found, measure
+
+
+def test_a_check_whose_measure_is_not_a_formula_or_reads_a_similar_name_is_linked_to_no_quantity(tmp_path: Path) -> None:
+    # names are compared exactly: `quantity_a_x` / `quantity-a` differ from `quantity_a`, and a measure that does not parse links to nothing
+    for n, measure in enumerate(("quantity-a", "quantity_ax + 1", "quantity_a +", "Quantity_a")):
+        quest = _quest(tmp_path / str(n), TWICE, check="pass")
+        path = quest.quest_root / "needs" / "FROZEN_PROTOCOL.json"
+        frozen = json.loads(path.read_text(encoding="utf-8"))
+        frozen["protocol"]["oracles"][0]["measure"] = measure
+        frozen["sha256"] = frozen_protocol.sha256(frozen["protocol"])
+        path.write_text(json.dumps(frozen), encoding="utf-8")
+        assert cr.passing_checks(quest.quest_root, "quantity_a") == [], measure
+
+
+def test_a_test_failure_record_with_no_gate_record_is_not_said_to_show_a_wrong_value(tmp_path: Path) -> None:
+    quest = _quest(tmp_path, ONCE)
+    rc = {"removed_quantities": ["quantity_a"], "removed_figures": [], "removed_values": {"quantity_a": [0.1]},
+          "checks": [{"kind": "shown_fault", "note": "n", "quantity": "quantity_a", "keys": ["quantity_a"]}], "note": "n", "say": "s"}
+    (quest.quest_root / "needs" / "RESULT_CHECK.json").write_text(json.dumps(rc), encoding="utf-8")
+    text = " ".join(_items(quest.quest_root).values())
+    assert "did not establish whether the value is wrong or missing" in text and "showed the value is wrong" not in text

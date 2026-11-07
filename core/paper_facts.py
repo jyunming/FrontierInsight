@@ -406,6 +406,10 @@ def required_items(quest_root: Path | str) -> list[Item]:
                 add(LEFT_OUT, q, _sentence(f"{_said(root, q)} is not reported: a second model that read the code found it computed "
                                            "differently from the plan" + what_fi_knows + (f" ({note})" if note else "")))
                 continue
+            if c.get("kind") == "shown_fault":  # a failing test of the code; with no repair's rerun on record, nothing more is known
+                add(LEFT_OUT, q, _sentence(f"{_said(root, q)} is not reported: a test of the code failed, and FI did not establish "
+                                           "whether the value is wrong or missing"))
+                continue
             add(LEFT_OUT, q, _sentence(f"{_said(root, q)} is not reported: a check of the results showed the value is wrong"
                                        + (f" ({note})" if note else "")))
     # A name the plan appears to define two ways (a comparison of the plan's text: core/code_review.py::plan_defines_twice), said as

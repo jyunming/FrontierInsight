@@ -15,7 +15,7 @@ now read where FI holds it:
   of each figure;
 * the code itself (:mod:`core.code_reach`) says which result's function reaches a helper.
 
-The answer for one finding is an :class:`Effect`: a stop (the main result is shown wrong, or nothing would be left), or the
+The answer for one finding is an :class:`Effect`: a stop (the main result is among what the fault reaches, or nothing would be left), or the
 results to leave out, the plan items not done and the figures to drop. ``None`` when the records cannot place the finding:
 the gate then judges it as before.
 """
@@ -442,6 +442,21 @@ class Reach:
             out.why = "the study run again with a repair reports other numbers for " + ", ".join(extra)[:120]
         out.extra_keys = sorted(set(extra))
         return out
+
+    def changed_keys(self, names: list[str], result: Any) -> set[str]:
+        """The printed keys whose recorded value a rerun showed changed: those of the declared results among ``names`` and the
+        names that are no declared result as they are. The results worked out from them (``effect_of_changes`` leaves those out
+        too) are not among them: that they read a changed number does not show their own number changed."""
+        declared = [self.by_norm[_norm(n)] for n in names if _norm(n) in self.by_norm]
+        extra = [n for n in names if _norm(n) not in self.by_norm]
+        keys = set(self.printed_keys(declared, result)) | set(extra)
+        for n in extra:
+            owner = self.owner.get(_norm(n))
+            if owner in self.counted:
+                keys.add(f"{owner}_coverage")
+                if _norm(n) in self.estimate:
+                    keys.add(f"{owner}_bias")
+        return keys
 
     def _figure_used_by(self, fn: str) -> Effect:
         """The results whose function calls the figure's function ``fn`` by name (a figure's function a result is worked out
