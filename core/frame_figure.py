@@ -730,8 +730,7 @@ class FigureCalls:
                 e["label"] = ("%s, " % self._label_of(lv["result"]) if several else "") + "%s = %s" % (lv["setting_label"], lv["text"])
             self._remember(panel, "series", arts[0] if arts else None, what)
             self._fc_extra[panel].setdefault("drawn", {})[len(rec["series"]) - 1] = list(arts or [])  # every artist of the call, for its colour
-            if kind == "bars":
-                self._group_bars(panel)
+            self._group_bars(panel)  # bars of the panel: a series of another kind changes how they are placed
         return arts
 
     def _once(self, rec, panel, kind, series):
@@ -743,34 +742,81 @@ class FigureCalls:
                              "passes the level as the series)" % (series, panel))
 
     def _group_bars(self, panel):
-        """The bar series of a panel side by side: around each x value the series take one slot each, a slot being 0.8 of the
-        smallest gap between two distinct x values (1 for a single x or for categories) over the number of bar series, so no bar
-        hides another whatever the order they were drawn in. A series' error bars move with its bars. Run after every bars call
-        (a later series changes the slots of the earlier ones); the data of the record is not touched, only where the bars sit."""
+        """The bar series of a panel side by side. Bars over a setting are categories: each distinct x value is one slot, the slots
+        are evenly spaced in the order of the values and named by them on the axis, and the series of a slot take 0.8 of it between
+        them (0.8 over the number of bar series each), so no bar hides another and a sparse x value is no thinner than a crowded one.
+        A panel that also draws something else along x (a line, a band, a reference at an x) keeps its x axis: the bars are grouped
+        around their x values, a slot being 0.8 of the smallest gap between two distinct values. An error bar and a text placed at a
+        bar move with it. Run after every bars call (a later series changes the slots of the earlier ones); the record's data is not
+        touched, only where the bars sit."""
         ax, rec = self._panel(panel)
         extra = self._fc_extra[panel]
         drawn = extra.get("drawn") or {}
         mine = [k for k, e in enumerate(rec["series"]) if e["kind"] == "bars" and drawn.get(k)]
         if not mine or ax.get_xscale() != "linear":
             return
-        shifts = extra.setdefault("bar_shift", {})
-        centres = {k: [p.get_x() + p.get_width() / 2 - shifts.get(k, 0.0) for p in drawn[k]] for k in mine}
-        distinct = sorted({round(c, 12) for cs in centres.values() for c in cs if _finite(c)})
-        gap = min((b - a for a, b in zip(distinct, distinct[1:])), default=1.0)
-        width = 0.8 * gap / len(mine)
+        if getattr(ax, "_fi_bar_slots", None):  # the slots of an earlier call: the axis is made again below
+            from matplotlib import ticker
+            ax.xaxis.set_major_locator(ticker.AutoLocator())
+            ax.xaxis.set_major_formatter(ticker.ScalarFormatter())
+        values = {k: [ax.xaxis.convert_units(v) for v in rec["series"][k]["x"]] for k in mine}
+        if any(len(values[k]) != len(drawn[k]) for k in mine):
+            return
+        numeric = all(_finite(v) for k in mine for v in values[k])
+        alone = all(e["kind"] == "bars" for e in rec["series"]) and not rec["bands"] and not any(r["axis"] == "x" for r in rec["refs"])
+        slots = sorted({round(v, 12) for k in mine for v in values[k]}) if numeric and alone else None
+        if slots is not None:
+            width = 0.8 / len(mine)
+            where = {k: [slots.index(round(v, 12)) for v in values[k]] for k in mine}
+        else:
+            base = {k: values[k] for k in mine}
+            distinct = sorted({round(v, 12) for vs in base.values() for v in vs if _finite(v)})
+            gap = min((b - a for a, b in zip(distinct, distinct[1:])), default=1.0)
+            width = 0.8 * gap / len(mine)
+            where = base
+        moved = []  # (old centre, new centre) of every bar laid out before
+        laid = extra.setdefault("bar_laid", set())
+        positions = {}
         for j, k in enumerate(mine):
             shift = (j - (len(mine) - 1) / 2) * width
-            for p, c in zip(drawn[k], centres[k]):
-                p.set_x(c + shift - width / 2)
+            centres = []
+            for p, c in zip(drawn[k], where[k]):
+                old = p.get_x() + p.get_width() / 2
+                new = c + shift
+                p.set_x(new - width / 2)
                 p.set_width(width)
-            move = shift - shifts.get(k, 0.0)
+                if k in laid:  # a bar of an earlier call: texts at it follow; a bar just drawn has only the default place
+                    moved.append((old, new))
+                centres.append(new)
+            positions[k] = centres
             container = (extra.get("bars") or {}).get(k)
-            if move and container is not None:
-                for cap in (container.lines[1] if len(container.lines) > 1 else ()):
-                    cap.set_xdata([ax.xaxis.convert_units(x) + move for x in cap.get_xdata()])
-                for lc in (container.lines[2] if len(container.lines) > 2 else ()):
-                    lc.set_segments([[(ax.xaxis.convert_units(x) + move, y) for x, y in seg] for seg in lc.get_segments()])
-            shifts[k] = shift
+            if container is not None and len(container.lines) > 2:
+                for cap in container.lines[1] or ():
+                    if len(cap.get_xdata()) == len(centres):
+                        cap.set_xdata(centres)
+                for lc in container.lines[2] or ():
+                    segs = lc.get_segments()
+                    if len(segs) == len(centres):
+                        lc.set_segments([[(c, y) for _x, y in seg] for c, seg in zip(centres, segs)])
+        for t in ax.texts:  # a text a body put at a bar moves with it (matched by the centre the bar had)
+            x0, y0 = t.get_position()
+            near = [new for old, new in moved if _finite(x0) and abs(old - x0) <= 1e-9]
+            if len({round(n, 12) for n in near}) == 1 and abs(near[0] - x0) > 1e-12:
+                t.set_position((near[0], y0))
+        laid.update(mine)
+        ax._fi_bar_x = positions
+        if slots is not None:
+            ax._fi_bar_slots = len(slots)
+            from matplotlib import ticker
+
+            class FiSlotFormatter(ticker.Formatter):  # the name the audit of the figure step knows as FI's own (not typed text)
+                def __call__(self, x, pos=None):
+                    return ("%.6g" % slots[int(round(x))]) if abs(x - round(x)) < 1e-9 and 0 <= round(x) < len(slots) else ""
+
+            ax.xaxis.set_major_locator(ticker.FixedLocator(list(range(len(slots)))))
+            ax.xaxis.set_major_formatter(FiSlotFormatter())
+        else:
+            ax._fi_bar_slots = None
         ax.relim()
         ax.autoscale_view()
 
@@ -862,6 +908,7 @@ class FigureCalls:
                                   "yerr_lo": None, "yerr_hi": None, "yerr_meaning": None, "merged_with": [], "source": "plan",
                                   "what": "other"})
             self._remember(panel, "series", arts[0] if arts else None, "other")
+            self._group_bars(panel)  # a curve along x keeps the bars of the panel at their x values
         return arts
 
     def image(self, panel, z, x=None, y=None, what="other"):
@@ -952,6 +999,7 @@ class FigureCalls:
             self._tag(art)
             rec["bands"].append({"series": series, "x": xs, "lo": los, "hi": his, "meaning": meaning})
             self._fc_extra.setdefault(panel, {"series": [], "refs": []}).setdefault("bands", []).append((series, art))
+        self._group_bars(panel)
         return art
 
     def _next_line_id(self, rec):
@@ -1126,6 +1174,7 @@ class FigureCalls:
         self._tag(art)
         rec["refs"].append({"id": ident, "axis": axis, "value": float(number), "label": label, "source": source})
         self._remember(panel, "refs", art)
+        self._group_bars(panel)
         return art
 
     def note(self, panel, x=None, y=None, what=None, form="mean", key=None):
@@ -1364,6 +1413,9 @@ class FigureCalls:
             (yv if r["axis"] == "y" else xv).append(r["value"])
         bars = [e for e in series if e["kind"] == "bars"]
         for axis, vals in (("x", xv), ("y", yv)):
+            if axis == "x" and getattr(ax, "_fi_bar_slots", None):  # bars over a setting: one slot for each value
+                ax.set_xlim(-0.5, ax._fi_bar_slots - 0.5)
+                continue
             if axis == "x" and categorical:
                 ax.relim()
                 ax.autoscale(enable=True, axis="x")
@@ -1394,20 +1446,33 @@ class FigureCalls:
         return (e["level"]["result"], e["level"]["text"])
 
     @staticmethod
+    def _condensed(rec):
+        """The results of a panel whose levels the legend condenses: those that draw more than ``LEGEND_LEVELS`` distinct levels of a
+        setting, all of them numbers (an ordered scale: a colour ramp tells the levels between the named ones apart). Counted for
+        each result on its own; levels that are names (methods, arms) are never condensed."""
+        out = set()
+        for result in {e["level"]["result"] for e in rec["series"] if e.get("level")}:
+            mine = [e for e in rec["series"] if e.get("level") and e["level"]["result"] == result]
+            if len({FigureCalls._level_ident(e) for e in mine}) > LEGEND_LEVELS and all(_finite(e["level"]["value"]) for e in mine):
+                out.add(result)
+        return out
+
+    @staticmethod
     def _shown_levels(rec):
-        """The positions of the series a legend names when the panel draws more than ``LEGEND_LEVELS`` distinct levels of a setting:
-        the lowest and the highest level of each result (the caption says the range); None when the legend names them all."""
-        levelled = [(k, e) for k, e in enumerate(rec["series"]) if e.get("level")]
-        if len({FigureCalls._level_ident(e) for _k, e in levelled}) <= LEGEND_LEVELS:
+        """The positions of the series a legend names when a result of the panel draws more than ``LEGEND_LEVELS`` distinct numeric
+        levels of a setting: the lowest and the highest level of that result (the caption says the range), every curve of any other
+        result; None when the legend names them all."""
+        condensed = FigureCalls._condensed(rec)
+        if not condensed:
             return None
         keep = set()
-        for result in {e["level"]["result"] for _k, e in levelled}:
-            mine = [(k, e["level"]["value"]) for k, e in levelled if e["level"]["result"] == result]
-            if all(_finite(v) for _k, v in mine):
+        for result in {e["level"]["result"] for e in rec["series"] if e.get("level")}:
+            mine = [(k, e["level"]["value"]) for k, e in enumerate(rec["series"]) if e.get("level") and e["level"]["result"] == result]
+            if result in condensed:
                 ends = {min(v for _k, v in mine), max(v for _k, v in mine)}
+                keep |= {k for k, v in mine if v in ends}
             else:
-                ends = {mine[0][1], mine[-1][1]}
-            keep |= {k for k, v in mine if v in ends}
+                keep |= {k for k, _v in mine}
         return keep
 
     @staticmethod
@@ -1438,14 +1503,15 @@ class FigureCalls:
         if not groups:
             return
         colour = {}
-        if self._shown_levels(rec) is not None:
+        condensed = self._condensed(rec)
+        if condensed:
             try:
                 from matplotlib import colormaps
                 cmap = colormaps["viridis"]
             except Exception:  # noqa: BLE001 -- no colour map: the curves keep the colours they were drawn with
                 cmap = None
             span = getattr(self, "_fc_level_span", None) or {}
-            for result in {r for r, _t in groups}:
+            for result in {r for r, _t in groups if r in condensed}:
                 mine = [(rec["series"][ks[0]]["level"]["value"], ident) for ident, ks in groups.items() if ident[0] == result]
                 if cmap is None or not all(_finite(v) for v, _i in mine) or len({v for v, _i in mine}) < 2:
                     continue
@@ -1880,16 +1946,18 @@ class FigureCalls:
             for a, b in zip(fr, fr[1:]):
                 pts.extend((a[0] + (b[0] - a[0]) * t / 16, a[1] + (b[1] - a[1]) * t / 16) for t in range(1, 16))
 
-        for e in rec["series"]:
+        placed = getattr(ax, "_fi_bar_x", None) or {}
+        for k, e in enumerate(rec["series"]):
             if e["kind"] == "image":
                 return None  # an image fills its axes
-            along(e["x"], e["y"])
+            xs = placed.get(k) if e["kind"] == "bars" and placed.get(k) and len(placed[k]) == len(e["x"]) else e["x"]
+            along(xs, e["y"])
             lo, hi = _sides(e)
             if lo is not None:
-                along(e["x"], [None if v is None or d is None else v + d for v, d in zip(e["y"], hi)])
-                along(e["x"], [None if v is None or d is None else v - d for v, d in zip(e["y"], lo)])
+                along(xs, [None if v is None or d is None else v + d for v, d in zip(e["y"], hi)])
+                along(xs, [None if v is None or d is None else v - d for v, d in zip(e["y"], lo)])
             if e["kind"] == "bars":
-                along(e["x"], [0.0] * len(e["x"]))
+                along(xs, [0.0] * len(xs))
         for b in rec["bands"]:
             along(b["x"], b["lo"])
             along(b["x"], b["hi"])

@@ -138,7 +138,7 @@ def plan_of(design: dict[str, Any]) -> dict[str, Any]:
         "known": _known_values(protocol, c),
         "search": c.search is not None,
         "figures": {f.id: {"file": f.file, "shows": list(f.shows), "x": f.x, "series": f.series, "panels": f.panels,
-                           **_result_labels(c, f.shows), **_result_info(c), **_nominal_levels(c), **_panel_words(c, f.panels, (f.x, f.series))}
+                           **_result_labels(c, f.shows), **_result_info(c), **_nominal_levels(c, f.shows), **_panel_words(c, f.panels, (f.x, f.series))}
                     for f in c.figures if f.declared},
     }
 
@@ -179,12 +179,15 @@ def _result_info(c: Any) -> dict[str, Any]:
     return {"result_info": got} if got else {}
 
 
-def _nominal_levels(c: Any) -> dict[str, Any]:
+def _nominal_levels(c: Any, shows: Any = None) -> dict[str, Any]:
     """``{"nominal": {result id: level}}``: the level the plan declares for a result's interval (``known_value.level``, for example
     0.95), for every result that declares one. The plan's own number, so a figure may draw a line at it and FI can name the line
-    (``core/analysis_figures.py::_plan_for``); nothing when the plan declares none."""
+    (``core/analysis_figures.py::_plan_for``); only for the results the figure draws (``shows``; every result when it is None), so a level
+    of a result the figure does not show never names a line in it; nothing when the plan declares none."""
     got = {}
     for r in c.results:
+        if shows is not None and r.id not in shows:
+            continue
         level = r.known_value.get("level") if isinstance(r.known_value, dict) else None
         if isinstance(level, (int, float)) and not isinstance(level, bool) and math.isfinite(level):
             got[str(r.id)] = float(level)

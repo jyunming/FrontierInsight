@@ -594,19 +594,14 @@ def _plan_for(spec: dict[str, Any], namespace: Any, table: Any) -> dict[str, Any
         if str(ident) not in references and _number(number) and not isinstance(number, bool):
             references[str(ident)] = {"value": float(number), "label": "%s = %s" % (ident, _number_text(number)), "fixed": True}
     nominal = spec.get("nominal") if isinstance(spec.get("nominal"), dict) else {}
-    by_value: dict[float, list[str]] = {}
+    held_numbers = [float(r["value"]) for r in references.values() if _number(r.get("value"))]
     for ident, level in nominal.items():
-        # the level the plan declares for a result's interval (``known_value.level``) is a line a figure may draw too; it is offered
-        # only while no reference or threshold of the plan already holds that number (two names for one value leave the line unnamed)
-        if not _number(level) or isinstance(level, bool) or any(
-                _number(r.get("value")) and abs(float(r["value"]) - float(level)) <= 1e-12 for r in references.values()):
+        # the level the plan declares for a result's interval (``known_value.level``) is a line a figure may draw too, one for each result
+        # the figure draws and named by it; it is offered only while no reference or threshold of the plan already holds that number
+        if not _number(level) or isinstance(level, bool) or any(abs(v - float(level)) <= 1e-12 for v in held_numbers):
             continue
-        by_value.setdefault(float(level), []).append(str(ident))
-    for level, idents in by_value.items():
-        shown = labels.get(idents[0], idents[0])
-        references["%s_nominal" % idents[0]] = {
-            "value": level, "fixed": True,
-            "label": ("Nominal level of %s = %s" % (shown, _number_text(level))) if len(idents) == 1 else "Nominal level = %s" % _number_text(level)}
+        references["%s_nominal" % ident] = {"value": float(level), "fixed": True,
+                                            "label": "Nominal level of %s = %s" % (labels.get(str(ident), str(ident)), _number_text(level))}
     derived = _from(namespace, "DERIVED", {})
     return {"settings": settings, "series_ids": series_ids, "references": references, "labels": labels,
             "result_info": info,
@@ -638,7 +633,7 @@ def _remove_calls(file: str) -> None:
 #: The tick-label formatters matplotlib picks itself (and the one a category axis gets); a tick label under any other formatter
 #: (a fixed list of words, a function) is text the body typed.
 _AUTO_FORMATTERS = frozenset({"ScalarFormatter", "LogFormatter", "LogFormatterExponent", "LogFormatterMathtext",
-                              "LogFormatterSciNotation", "LogitFormatter", "NullFormatter", "StrCategoryFormatter"})
+                              "LogFormatterSciNotation", "LogitFormatter", "NullFormatter", "StrCategoryFormatter", "FiSlotFormatter"})
 
 
 def _all_axes(fig: Any) -> tuple[list[Any], dict[int, Any]]:
@@ -1354,11 +1349,10 @@ def _default_with_calls(spec: dict[str, Any], table: Any, out_dir: str, namespac
     all_lines = [line for lines in drawn for line in lines]
     by_setting = isinstance(spec.get("series"), str) and spec["series"] in plan["settings"]
     as_levels = by_setting and all(line[5] is not None and not line[6] for line in all_lines)
-    if by_setting and not as_levels:
-        spec = dict(spec, series=None)  # a setting and a compared value together: the curves are named by FI's ids below
+    mixed = by_setting and not as_levels  # a setting and a compared value together: each curve is one value of each, named by FI's id
     for lines in drawn:
         for label, _x, _y, rid, sid, _value, level in lines:
-            if not as_levels and level and sid not in plan["series_ids"]:
+            if not as_levels and (level or mixed) and sid not in plan["series_ids"]:
                 plan["series_ids"].append(sid)
                 plan["labels"][sid] = label
 
@@ -1366,7 +1360,7 @@ def _default_with_calls(spec: dict[str, Any], table: Any, out_dir: str, namespac
         for index, one in enumerate(held):
             lines = _default_lines(spec, tbl, {**one, **hold}, derived)  # read again: the reads are recorded from the start of the body
             for _label, xs, ys, rid, sid, value, level in lines:
-                name = value if as_levels else sid if level else rid
+                name = value if as_levels else sid if (level or mixed) else rid
                 if isinstance(derived, dict) and rid in derived and isinstance(getattr(tbl, "gave_values", None), set):
                     tbl.gave_values.add(rid)  # FI read this value from its derived record, not from the table
                 for art in fig.line(index, name, xs, ys, rid):
@@ -1375,7 +1369,7 @@ def _default_with_calls(spec: dict[str, Any], table: Any, out_dir: str, namespac
                 fig._panel(index)[1]["hold"] = {**one, **hold}  # FI's values from its table: `finish` titles the panel from them
                 fig.declared[index] = {**one, **hold}
 
-    out = _draw_one(spec, body, table, out_dir, plan)
+    out = _draw_one(dict(spec, series=None) if mixed else spec, body, table, out_dir, plan)  # the lines above are read with the plan's own series
     if out.get("status") != "ok":
         _remove(out_dir, file)
         _remove_calls(file)
