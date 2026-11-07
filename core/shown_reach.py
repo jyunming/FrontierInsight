@@ -402,9 +402,10 @@ class Reach:
         if trial_call:
             got = self._trial_effect(shape)
             if got.probes and not got.stop:
-                # Names the test looked for in what the trial returns and the plan does not declare: what is not done is the
-                # plan's quantity the finding is about, not the probed names (they are not the plan's words).
-                got.not_done = _code_review.quantity_names(record, issue)[:1] or got.probes[:1]
+                # Names the test looked for in what the trial returns and the plan does not declare. What is not done is the name
+                # the test itself reads (FI's own source); the reader's word for the quantity places nothing, whatever result
+                # the run holds under that word.
+                got.not_done = got.probes[:1]
             parts.append(got)
         if not parts and shape.frame and self._plain(shape):
             # The frame is written by FI from the plan and a repair does not change it: a failing assertion about it says the
