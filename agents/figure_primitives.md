@@ -22,7 +22,7 @@ If a call fails, the message says why; the usual ones and what to do instead:
 - `table` has no `.se`, `.low` or `.high`: the table reads include `values`, `trials`, `n`, `mean`, `interval` (a `(lower, upper)` pair), `level_means` and `level_rows`. For error bars pass `yerr="ci95"` or `yerr="sd"` and let FI read them; `yerr_meaning` accepts only `ci95`, `sd`, `range` or `other`.
 - a series given as a level number (`0`, `1`) or a setting id: `series` is an id of the plan's series or results, as a string, never a position or the name of a setting (unless the figure has a `series` setting: then it is a value of that setting).
 - "series `<name>` has not been drawn on panel N" (a band): draw the panel's data with `line`, `points` or `bars` first, then the band.
-- "FI does not draw a curve the figure computes itself", or "the constant ... matches no reference of the plan": draw a theory curve or value with `fig.ref(panel, "<reference id>")` when the plan holds it; otherwise leave the line out (a line FI cannot name is left out of the figure).
+- "FI does not draw a curve the figure computes itself", or "the constant <value> matches no reference of the plan": draw a theory curve or value with `fig.ref(panel, "<reference id>")` when the plan holds it; otherwise leave the line out (a line FI cannot name is left out of the figure).
 
 Use `fig.raw(panel)` (the real axes) only for a drawing none of these calls can make. FI then states nothing about that panel, so use it as little as possible.
 
