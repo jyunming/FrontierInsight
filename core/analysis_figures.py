@@ -416,6 +416,8 @@ def _figure_handle(axes: list[Any], spec: dict[str, Any], file: str, plan: dict[
                  "references": plan.get("references"), "labels": plan.get("labels"), "fallback": plan.get("fallback", False),
                  "derived_ids": plan.get("derived_ids")}
     handle = Figure(axes, x=spec.get("x"), series=spec.get("series"), shows=spec.get("shows"), file=file, **given)
+    if given:
+        handle.derived_values = (plan or {}).get("derived_values") or {}  # set beside the frame's own arguments, so an older frame still builds
     handle.axes = _Panels(handle.axes, str(spec.get("id")))
     handle.declared = {}
     handle.panel = _panel_declarer(handle, spec.get("settings") or {})
@@ -842,14 +844,30 @@ def _checked_line(fid: str, summary: dict[str, Any]) -> str:
     return line
 
 
-def run_figures(figures: list[dict[str, Any]], namespace: Any, table: Any, out_dir: str) -> list[dict[str, Any]]:
+def _derived_values(derived: Any) -> dict[str, dict[str, float]]:
+    """``{id: {setting key: number}}`` of FI's record of the derived values (``{id: record}``), for the ones that hold a number for
+    each setting (``by_setting``) and were worked out; whatever else a record holds is left out, so a call checks against less."""
+    out: dict[str, dict[str, float]] = {}
+    for ident, record in (derived.items() if isinstance(derived, dict) else ()):
+        if isinstance(record, dict) and record.get("status") == "ok" and isinstance(record.get("by_setting"), dict):
+            got = {str(k): float(v) for k, v in record["by_setting"].items() if _plain_number(v)}
+            if got:
+                out[str(ident)] = got
+    return out
+
+
+def run_figures(figures: list[dict[str, Any]], namespace: Any, table: Any, out_dir: str, derived: Any = None) -> list[dict[str, Any]]:
     """Draw every declared figure from the body ``figure_<id>`` of ``namespace`` (a module, or a dict); a figure's failure is its
-    own and the others are still drawn."""
+    own and the others are still drawn. ``derived``: FI's record of the derived values, which a call that draws a derived quantity
+    is checked against (as a result of the table is checked against the table)."""
     out = []
+    held = _derived_values(derived)
     for spec in figures or []:
         name = "figure_%s" % spec.get("id")
         body = namespace.get(name) if isinstance(namespace, dict) else getattr(namespace, name, None)
-        out.append(_draw_one(spec, body, table, out_dir, _plan_for(spec, namespace, table)))
+        plan = _plan_for(spec, namespace, table)
+        plan["derived_values"] = held
+        out.append(_draw_one(spec, body, table, out_dir, plan))
     return out
 
 

@@ -1625,7 +1625,7 @@ def _figures(table, quest_root, records=None):
                     # The body is not called: the plan's own figure is drawn from the table and the earlier record
                     outcomes.append(fi_figures.default_figure(spec, table, out_dir, PLAN, records))
                 else:
-                    outcomes += fi_figures.run_figures([spec], PLAN, table, out_dir)
+                    outcomes += fi_figures.run_figures([spec], PLAN, table, out_dir, records)
                 if not only and os.environ.get("FI_FIGURE_FALLBACK") == "1" and outcomes[-1].get("status") in (
                         "failed", "refused", "not_written"):
                     # No repair is left for the body: the plan's own figure is drawn from the table in its place

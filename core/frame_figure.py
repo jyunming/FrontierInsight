@@ -378,13 +378,21 @@ class FigureCalls:
             new.update(label=NEUTRAL_X, neutral=True)
         rec["x"] = new
 
-    def _set_y(self, rec, what):
+    def _set_y(self, rec, what, named=None):
+        """The y axis of a panel. ``named``: the derived quantity the series was found (by FI's record of the derived values) to be
+        the number of, whose name the axis has while ``what`` stays ``other`` (no value of the table is claimed for it)."""
+        name = named or what
+        label = NEUTRAL_Y if name == "other" else self._label_of(name)
         if rec["y"] is None:
-            rec["y"] = {"what": what, "label": NEUTRAL_Y if what == "other" else self._label_of(what),
-                        "scale": "linear"}
-        elif what not in rec["y"]["what"].split(" / "):  # two results on one axis: both are named
-            rec["y"]["what"] += " / " + what
-            rec["y"]["label"] += " / " + (NEUTRAL_Y if what == "other" else self._label_of(what))
+            rec["y"] = {"what": what, "label": label, "scale": "linear", **({"names": name} if named else {})}
+        else:
+            if name not in rec["y"].get("names", rec["y"]["what"]).split(" / "):  # two results on one axis: both are named
+                rec["y"]["label"] += " / " + label
+                rec["y"]["names"] = rec["y"].get("names", rec["y"]["what"]) + " / " + name
+            if what not in rec["y"]["what"].split(" / "):
+                rec["y"]["what"] += " / " + what
+            if "names" in rec["y"] and rec["y"]["names"] == rec["y"]["what"]:
+                del rec["y"]["names"]
 
     # ---- series ------------------------------------------------------------------------------------------------------
 
@@ -400,21 +408,24 @@ class FigureCalls:
 
     def _keys_at(self, x_id, x):
         """Every key of the table whose setting holds ``x_id`` at the value ``x`` (a number compared as a number)."""
-        found = []
         table = getattr(self, "table", None)
-        for key in (list(table.keys()) if table is not None else []):
-            for piece in str(key).split(","):
-                name, _, text = piece.partition("=")
-                if name.strip() != x_id:
-                    continue
-                try:
-                    # Relative only: a fixed absolute tolerance would join distinct values on a small scale (1e-12 vs 3e-12).
-                    same = math.isclose(float(text), float(x), rel_tol=1e-9, abs_tol=0.0)
-                except (TypeError, ValueError):
-                    same = text.strip() == str(x)
-                if same:
-                    found.append(key)
-        return found
+        return [key for key in (list(table.keys()) if table is not None else []) if self._key_holds(key, x_id, x)]
+
+    @staticmethod
+    def _key_holds(key, x_id, x):
+        """Whether the setting key (``a=1,b=2``) holds setting ``x_id`` at the value ``x`` (a number compared as a number)."""
+        for piece in str(key).split(","):
+            name, _, text = piece.partition("=")
+            if name.strip() != x_id:
+                continue
+            try:
+                # Relative only: a fixed absolute tolerance would join distinct values on a small scale (1e-12 vs 3e-12).
+                same = math.isclose(float(text), float(x), rel_tol=1e-9, abs_tol=0.0)
+            except (TypeError, ValueError):
+                same = text.strip() == str(x)
+            if same:
+                return True
+        return False
 
     def _setting_key(self, x_id, x, what=None, y=None):
         """The table's key of the setting where ``x_id`` is ``x``. When other settings also vary (several keys share that x), the
@@ -536,6 +547,29 @@ class FigureCalls:
             if not stats:
                 return "not compared"
             if not any(_close_y(float(y), t) for t in stats):
+                return "differs"
+            checked += 1
+        return "matches" if checked > 0 else "not compared"
+
+    def _derived_comparison(self, what, form, x_id, xs, ys, level=None):
+        """``matches``, ``differs`` or ``not compared`` for a series drawn as a quantity the plan derives (``what`` is no result of the
+        table): FI holds the number it worked out for each setting (``derived_values``, from its own record of the derived values)
+        and compares the drawn y with it as with the table's mean. A curve of one level of a setting is compared at the keys that
+        hold that level. Nothing to compare (no record, another statistic, an x that is not a setting) is ``not compared``."""
+        held = (getattr(self, "derived_values", None) or {}).get(what)
+        if not isinstance(held, dict) or form != "mean" or x_id not in (getattr(self, "settings", None) or []):
+            return "not compared"
+        checked = 0
+        for x, y in zip(xs, ys):
+            if y is None or not _finite(y):
+                continue
+            if x is None:
+                return "not compared"
+            here = [v for key, v in held.items() if self._key_holds(key, x_id, x)
+                    and (not level or self._key_holds(key, level["setting"], level["value"]))]
+            if not here:
+                return "not compared"
+            if not any(_close_y(float(y), v) for v in here):
                 return "differs"
             checked += 1
         return "matches" if checked > 0 else "not compared"
@@ -716,21 +750,28 @@ class FigureCalls:
             yerr_meaning = self._checked_meaning(yerr_meaning, what, x_id, xs, ys, lo, hi)
         declared = what
         what, how = self._check_of_what(what, form, x_id, xs, ys)
+        # A quantity the plan derives is not in the table; FI holds the number it worked out for it at each setting, and a series
+        # that is those numbers is that quantity (named so), though no value of the table is claimed for it (``what`` stays ``other``).
+        tied = None
+        if what == "other" and declared != "other" and declared not in self._results():
+            how = self._derived_comparison(declared, form, x_id, xs, ys, level)
+            if how == "matches":
+                tied = {"id": declared, "label": self._label_of(declared), "checked": how, "from": "record of the derived values"}
         x_ok = self._x_checked(x_id, xs, ys)
         # A series the body gave as a result of the plan that FI did not find to be the table's value of it keeps neither that
         # result's name (nor the series' own plan label, which names the same thing): its name is the neutral one, numbered below.
-        neutral = what == "other" and (declared != "other" or (level is None and self._names_a_result(series)))
+        neutral = what == "other" and not tied and (declared != "other" or (level is None and self._names_a_result(series)))
         # The caption and the axis come from one fact, the quantity FI's check found: a level that carried the declared result's
         # label no longer does, and the declared id stays beside it in the record.
         declared_as = None
-        if what == "other" and declared != "other":
+        if what == "other" and declared != "other" and not tied:
             declared_as = {"id": declared, "label": self._label_of(declared), "checked": how}
             if level:
                 level.update(result_label=NEUTRAL_Y, declared_as=declared, declared_label=declared_as["label"], checked=how)  # "result" stays the curve's identity
         legend = "%s = %s" % (level["setting_label"], level["text"]) if level else NEUTRAL_Y if neutral else self._label_of(series)
         with _undone(ax, rec):
             self._set_x(rec, x_id, x_ok)
-            self._set_y(rec, what)
+            self._set_y(rec, what, declared if tied else None)
             arts = self._draw_series(ax, kind, xs, ys, legend, step)
             self._tag(arts)
             if lo is not None:
@@ -742,7 +783,7 @@ class FigureCalls:
                                   "yerr": lo if lo is not None and _same(lo, hi) else None, "yerr_lo": lo, "yerr_hi": hi,
                                   "yerr_meaning": yerr_meaning if lo is not None else None, "what": what, "merged_with": [],
                                   "x_checked": x_ok, **({"neutral": True} if neutral else {}), **({"declared_as": declared_as} if declared_as else {}),
-                                  **({"level": level} if level else {})})
+                                  **({"named_as": tied} if tied else {}), **({"level": level} if level else {})})
             loose = [e for e in rec["series"] if e.get("neutral") and not e.get("level")]
             for k, e in enumerate(loose, 1):
                 e["label"] = NEUTRAL_Y if len(loose) == 1 else "%s %d" % (NEUTRAL_Y, k)
@@ -1410,7 +1451,7 @@ class FigureCalls:
         elif not (image and x["id"] == "column" and "column" not in spec_labels):
             x["label"] = self._name_of(x["id"], spec_labels, result_info)
         if rec["y"] is not None:
-            parts = rec["y"]["what"].split(" / ")
+            parts = rec["y"].get("names", rec["y"]["what"]).split(" / ")
             names = dict.fromkeys(NEUTRAL_Y if w == "other" else self._name_of(w, spec_labels, result_info) for w in parts)
             rec["y"]["label"] = " / ".join(names)
         if x.get("scale") == "log":
