@@ -1654,6 +1654,30 @@ def accept_answer(before: Any, after: Any) -> tuple[dict[str, Any] | None, list[
     return repaired, notes
 
 
+def put_back_unread_keys(before: Any, protocol: dict[str, Any], part: str) -> tuple[dict[str, Any], list[str]]:
+    """``(protocol, put_back)``: ``protocol`` (a protocol as read, after a rewrite of its mapping part ``part``) with each
+    key of ``before[part]`` (the plan's own, as it was) that the reading of the rewrite lacks put back as the plan had it,
+    one key at a time, each kept only when the protocol still reads with it and loses nothing it had. A rewrite of one key
+    of a block must not cost the block a key it had: a real audit rewrote a search's block with its evaluation budget in a
+    form that could not be read, the reader left the budget out, and the plan's own readable budget was lost with it, so
+    the search could not start. ``put_back``: the keys put back, in the plan's order."""
+    old = before.get(part) if isinstance(before, dict) else None
+    if not isinstance(old, dict) or not isinstance(protocol, dict) or not isinstance(protocol.get(part), dict):
+        return protocol, []
+    back: list[str] = []
+    for key, value in old.items():
+        now = protocol[part]
+        if key in now:
+            continue
+        trial, _why = normalize_protocol({**protocol, part: {**now, key: value}})
+        if (trial is None or not isinstance(trial.get(part), dict) or key not in trial[part]
+                or any(k not in trial for k in protocol) or any(k not in trial[part] for k in now)):
+            continue
+        protocol = trial
+        back.append(str(key))
+    return protocol, back
+
+
 def repair_design(text: str) -> tuple[str | None, list[str]]:
     """``text`` with its design block repaired by :func:`repair_block` (``(None, [])`` when there is no block, the block
     cannot be repaired that way, or it was valid already)."""

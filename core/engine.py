@@ -5502,7 +5502,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 if fresh and not gone and not dropped:
                     item["part"] = "yes"  # only a part of it cannot be read: the audit is asked to correct that part
                 if fresh and not gone and not dropped and key in (trial_fixed or {})                         and (trial_fixed or {})[key] != (base_fixed or {}).get(key):
-                    # Only a part of it cannot be read: the rest of the change is made, that part alone is left out.
+                    # Only a part of it cannot be read: the rest of the change is made, that part alone is left out, and
+                    # a key of the block the plan had readable stays as the plan had it (the audit's version of it could
+                    # not be read; its loss would cost the block what it had, e.g. a search its evaluation budget).
+                    trial_fixed, back = _plan.put_back_unread_keys(old_p, trial_fixed, key)
+                    wrote = new_p.get(key) if isinstance(new_p.get(key), dict) else {}
+                    for b in back:
+                        self._log.warning("[design_self_critique] the audit's `protocol.%s.%s` %s, so that change was not "
+                                          "applied: the plan's own is kept as it was", key, b,
+                                          "could not be read" if b in wrote else "was left out of its rewrite")
                     kept_p[key] = trial_fixed[key]
                     item["applied"] = "all of it except the part named"
                 elif key in old_p:
@@ -6828,9 +6836,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
 
         def keep(before: str, answer: dict[str, Any]) -> str:
             old = (_plan.raw_design_block(before) or {}).get("protocol")
-            translated, problems = _plan_scope.translate(scope, old if isinstance(old, dict) else {}, answer)
+            not_applied: list[str] = []
+            translated, problems = _plan_scope.translate(scope, old if isinstance(old, dict) else {}, answer, not_applied)
             if problems:
                 raise _PartsRefused("; ".join(problems))
+            for line in not_applied:
+                self._log.warning("[plan] the answer's %s", line)
             try:
                 kept = self._keep_only_the_parts(before, translated, scope.names(), passages)
                 if kept is not None:
@@ -8454,6 +8465,21 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 break
         return design
 
+    async def _ask_again_for_a_search_lost_since(self, state: QuestState, design: Any, plan_sha: str) -> tuple[Any, str]:
+        """At the end of the design step, for a design from plan.md: when the audit or what the topic asks for rewrote the
+        plan after its search was completed (:meth:`_ask_plan_for_the_search`, earlier in the step) and the search can no
+        longer start, the plan as it is now is asked for its search, within the same bound per plan and model
+        (``.fi/search_block_asked.json``: a plan already asked that often is not asked again), instead of the code step
+        stopping with nobody asked. The design step calls it once, so it cannot loop. Returns the design and its plan's hash."""
+        if not plan_sha:
+            return design, plan_sha
+        wanted, missing, _why = self._search_problems(state, design)
+        if not (wanted and missing) or self._search_asked(plan_sha):
+            return design, plan_sha  # a search that can start, or this plan was asked already (the stop says so)
+        self._log.warning("[design] the plan changed after its search was completed, and the search can no longer start "
+                          "(%s); FI asks the plan's model for it again", "; ".join(_one_line(m, 200) for m in missing[:3]))
+        return await self._ask_plan_for_the_search(state, design, plan_sha)
+
     def _search_cannot_start_stop(self, state: QuestState, design: Any) -> QuestState | None:
         """The honest stop (no paper) for a design that is a search for the best design whose search FI could not make:
         the plan's model was asked, within its bound, to write the part that is missing or cannot be read, quoting the
@@ -9470,6 +9496,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             design, plan_sha = await self._ask_plan_for_the_grid(state, design, plan_sha, again=True)
         elif not plan_sha and _study_size(design) > size_before:  # a redesign: the same, with its own request
             design = await self._ask_design_for_the_grid(state, design, iteration=iteration, again=True)
+        design, plan_sha = await self._ask_again_for_a_search_lost_since(state, design, plan_sha)
         # The plan rewritten from what FI measured of a search whose objective did not move: a change FI approves itself,
         # recorded as made after results were seen (the first design's run is archived, the paper is told).
         flat_pass = bool(state.get("design_from_plan") and state.get("flat_objective_fact"))

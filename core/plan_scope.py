@@ -10,7 +10,8 @@ This module is pure (no model calls, no engine state). A scope names parts of ``
 
 * ``parts``: a part the reply may write whole (``grid``, ``criteria`` ...).
 * ``inside``: a mapping part (``optimisation``, ``model``) of which the reply may change only some keys; the other keys of
-  the mapping are the plan's own and are kept.
+  the mapping are the plan's own and are kept (a reply that writes one of them back, the same or changed, changes none
+  of them).
 * ``entries``: a list part of entries with a key (``oracles`` by ``name``, ``simplifications`` by ``id``). The reply names
   only the entries it concerns: an entry the plan has changes only in ``fields`` (any field when ``fields`` is ``None``),
   an entry it does not have is added when ``may_add``; every entry the reply does not name is kept as it was.
@@ -60,10 +61,14 @@ def _key_of(item: Any, key: str) -> str:
     return str(item.get(key) if isinstance(item, dict) else "").strip()
 
 
-def translate(scope: PartScope, old_protocol: dict[str, Any], answer: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+def translate(scope: PartScope, old_protocol: dict[str, Any], answer: dict[str, Any],
+              not_applied: list[str] | None = None) -> tuple[dict[str, Any], list[str]]:
     """``(answer, problems)``: the model's answer (a design block's shape, the parts under ``protocol``) made into the whole
     parts to write, each ``inside`` and ``entries`` part merged into the plan's own; ``problems`` (plain sentences, the
-    reason the reply goes back with) when it names a part or a key outside ``scope`` or a part in a form that cannot be merged."""
+    reason the reply goes back with) when it names a part or a key outside ``scope`` or a part in a form that cannot be merged.
+    For an ``inside`` part only the keys asked are taken: a key it was not asked for stays as the plan has it, and one the
+    reply wrote differently is named in ``not_applied`` (plain sentences, when a list is given) instead of costing the reply
+    the keys it was asked for; a reply with nothing but such keys for that part is refused."""
     problems: list[str] = []
     asked = scope.names()
     outside_top = sorted(k for k in answer if k != "protocol")
@@ -82,12 +87,22 @@ def translate(scope: PartScope, old_protocol: dict[str, Any], answer: dict[str, 
         if not isinstance(value, dict):
             problems.append(f"`protocol.{part}` must be a mapping holding only the keys you change")
             continue
-        extra = sorted(k for k in value if k not in keys)
-        if extra:
-            problems.append(f"`protocol.{part}` names " + ", ".join(f"`{k}`" for k in extra) + ", which this request does not "
-                            "concern (the keys asked are " + ", ".join(f"`{k}`" for k in keys) + ")")
+        # A reply that writes the whole mapping back (a model often does) is read for the keys asked alone: a key it was not
+        # asked for is the plan's own and stays exactly as the plan has it. One written as the plan has it says nothing; one
+        # written differently is not applied, and ``not_applied`` says so.
+        had = old if isinstance(old, dict) else {}
+        changed = sorted(k for k in value if k not in keys and (k not in had or value[k] != had[k]))
+        if changed and not_applied is not None:
+            not_applied.append(f"`protocol.{part}` changes " + ", ".join(f"`{k}`" for k in changed) + ", which this request "
+                               "does not concern (the keys asked are " + ", ".join(f"`{k}`" for k in keys) + "): not applied, "
+                               "the plan's own " + ("is" if len(changed) == 1 else "are") + " kept as it was")
+        asked_value = {k: v for k, v in value.items() if k in keys}
+        if not asked_value:
+            if changed:
+                problems.append(f"`protocol.{part}` names " + ", ".join(f"`{k}`" for k in changed) + ", which this request "
+                                "does not concern (the keys asked are " + ", ".join(f"`{k}`" for k in keys) + ")")
             continue
-        out[part] = {**(old if isinstance(old, dict) else {}), **value}
+        out[part] = {**had, **asked_value}
     for part, entry in scope.entries.items():
         if part not in new:
             continue
