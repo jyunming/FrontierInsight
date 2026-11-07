@@ -408,7 +408,12 @@ class Reach:
             parts.append(self._helper_effect(file, function))
         known = [p for p in parts if p is not None]
         if not known:
-            return None
+            # No function of the study placed it: a key the test reads literally that is a declared result the run holds is the
+            # result the test is about (the key is the plan's own name, not a reading of what the asserts mean).
+            held = {i for i in self._test_ids(shape) if self._holds(i)}
+            if not held:
+                return None
+            known = [self._judge(Effect(), held, "its test reads " + ", ".join(sorted(held)))]
         merged = self._merge(known)
         return None if merged is None else self._settle(merged, record, issue)
 
@@ -578,6 +583,15 @@ class Reach:
         out = set(owned.values())
         if any(k not in self.estimate for k in owned):
             out |= trial
+        return out
+
+    def _test_ids(self, shape: TestShape) -> set[str]:
+        """The declared results the string keys a test reads literally stand for (``exact``; ``prefix`` for an f-string key)."""
+        out: set[str] = set()
+        for name in shape.exact:
+            out |= self._key_ids(name, False) if _norm(name) else set()
+        for name in shape.prefix:
+            out |= self._key_ids(name, True) if _norm(name) else set()
         return out
 
     def _trial_effect(self, shape: TestShape) -> Effect:

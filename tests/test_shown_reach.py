@@ -513,3 +513,36 @@ def test_a_finding_about_text_fi_wrote_from_the_plan_is_told_in_the_disclosure_a
     src = "import derive\n\n\ndef test_x():\n    assert derive.ROLES['cover'] == 'result', 'wrong role'\n"
     _run(engine, src, quantity="cover")
     assert "text FI wrote from the plan" in disclosure._code_faults_sentence(engine.quest_root)
+
+
+# ---- a test that names a declared result by a literal key and calls no function -------------------------------------------------------
+READS_KEY = "def test_x():\n    rows = {}\n    assert rows['est_b'] > 0, 'wrong'\n"
+READS_OTHER = "def test_x():\n    rows = {}\n    assert rows['nothing_declared'] > 0, 'wrong'\n"
+
+
+def test_a_test_that_reads_a_declared_key_and_calls_no_function_leaves_that_result_out(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    out, record = _run(engine, READS_KEY, quantity="est_b", headline=("est_a",))
+    assert out is None
+    gate = record["issues"]["F-1"]["at_gate"]
+    assert gate["outcome"] == "left_out" and "est_b" in gate["keys"]
+    from core import frozen_protocol
+
+    root = engine.quest_root
+    reach = shown_reach.Reach(root, frozen_protocol.protocol_of(root), ["est_a"], [])
+    issue = {"id": "F-1", "test": ".fi/finding_tests/F-1_1.py", "quantity": "est_b", "function": ""}
+    placed = reach.effect({"issues": {"F-1": issue}}, issue, RESULT)  # placed from the key the test names, not from the finding's words
+    assert placed is not None and placed.left_out == ["est_b"] and not placed.stop
+
+
+def test_a_literal_key_that_is_the_main_result_stops_and_an_undeclared_key_places_nothing(tmp_path: Path) -> None:
+    out, _ = _run(_engine(tmp_path / "a"), READS_KEY, quantity="est_b", headline=("est_b",))
+    assert out and "main result" in out["rationale"]
+    engine = _engine(tmp_path / "b")
+    _run(engine, READS_OTHER, quantity="est_b", headline=("est_a",))
+    from core import frozen_protocol
+
+    root = engine.quest_root
+    reach = shown_reach.Reach(root, frozen_protocol.protocol_of(root), ["est_a"], [])
+    issue = {"id": "F-1", "test": ".fi/finding_tests/F-1_1.py", "quantity": "est_b", "function": ""}
+    assert reach.effect({"issues": {"F-1": issue}}, issue, RESULT) is None
