@@ -783,14 +783,15 @@ def _printed_digits_allowance(printed: float) -> float:
     return (0.5 * 10.0 ** int(exponent) if isinstance(exponent, int) else 0.0) + 1e-11 * abs(float(printed))
 
 
-def _printed_summaries(result_json: Any, metric_id: str, grid: dict[str, list[Any]]
+def _printed_summaries(result_json: Any, metric_id: str, grid: dict[str, list[Any]], *, strict: bool = False
                        ) -> list[tuple[frozenset[frozenset[tuple[str, Any]]], dict[str, Any], str]]:
     """The summary of ``metric_id`` the analysis prints for one setting, with the settings it names and where it is:
     ``(cells, {"mean": x, "se": y, "sd": z, "n": k}, where)``. A summary is the mapping under the metric's own name beside
     the setting's key (``by_setting`` / ``m=20,pi1=0.05`` / ``power_gain`` / ``{mean, se}``), a number under that name (its
     mean), or ``<metric>_se`` and the like beside it. The setting is read from the key path as a list's is
     (:func:`_path_cells`); a summary that names no setting, or only a part of the grid (the key may stand for one stratum of it),
-    is not read here."""
+    is not read here. ``strict``: the key directly above the metric must itself name the setting (a number under another
+    statistic's key, ``median`` or ``ci``, is not the setting's mean)."""
     def number(v: Any) -> bool:
         return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
@@ -813,6 +814,8 @@ def _printed_summaries(result_json: Any, metric_id: str, grid: dict[str, list[An
             stats = read(node.get(metric_id), node)
             pairs = _path_cells(path, grid) if stats else None
             named = frozenset(c for c in _all_cells(grid) if pairs <= c) if stats and pairs else frozenset()
+            if strict and named and not (path and _path_cells(path, grid) != _path_cells(path[:-1], grid)):
+                named = frozenset()  # the key above the metric names no setting (a median, an interval): not the setting's mean
             if len(named) == 1:  # one whole setting: a part of the grid may be a stratum of it the key does not name
                 found.append((named, stats, "/".join(_segment_text(x) for x in path + (metric_id,))))
             for k, v in node.items():

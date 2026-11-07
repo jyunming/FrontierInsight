@@ -746,6 +746,32 @@ def _edge_sentence(record: Any) -> str:
     return " ".join(full if i < _SHOWN else short for i, (full, short) in enumerate(said))
 
 
+def edge_stamp(quest_root: Path) -> dict[str, str]:
+    """What the rows of ``.fi/edge_everywhere.json`` were found for: the frozen plan's SHA-256 and run id, and the SHA-256 of
+    the trial ledger (FI's record of the run), each empty when the quest has none."""
+    import hashlib
+
+    from . import frozen_protocol as _frozen
+
+    root = Path(quest_root)
+    frozen = _frozen.load(root) or {}
+    try:
+        ledger = hashlib.sha256((root / "raw" / "ledger.jsonl").read_bytes()).hexdigest()
+    except OSError:
+        ledger = ""
+    return {"plan": str(frozen.get("sha256") or ""), "run": str(frozen.get("run_id") or ""), "ledger": ledger}
+
+
+def edge_rows(quest_root: Path) -> list[Any]:
+    """The rows of ``.fi/edge_everywhere.json`` that were found for this quest's plan and run as they are now; none when the
+    file carries no stamp or another one (a row left by an earlier run or plan version is not this paper's)."""
+    record = _read_json(Path(quest_root) / ".fi" / "edge_everywhere.json")
+    rows = record.get("results") if isinstance(record, dict) else None
+    if not isinstance(rows, list) or not isinstance(record.get("of"), dict) or record["of"] != edge_stamp(quest_root):
+        return []
+    return rows
+
+
 def _precision_sentence(missed: Any) -> str:
     """The plan's precision target and the quantities that missed it, with the half-width each reached."""
     rows = [m for m in missed if isinstance(m, dict) and m.get("name")] if isinstance(missed, list) else []

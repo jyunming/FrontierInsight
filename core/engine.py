@@ -11787,10 +11787,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         protocol = self._protocol_block(state)  # type: ignore[arg-type]
         if isinstance(protocol, dict):
             state = {**state, "design": {**(state.get("design") or {}), "protocol": protocol}}
-            if (state.get("design") or {}).get("result_assertions") and (self.quest_root / _trial_runner.RUN_RECORD).is_file():
-                # FI's own record of each setting's trials: what a reported value on a declared bound is held to
-                # (:func:`core.trial_runner.pinned_to_bound`).
-                state["_trial_record"] = _trial_runner.recorded_values_by_cell(self.quest_root)[0]
+            if (state.get("design") or {}).get("result_assertions"):
+                # FI's own record of each setting's trials, when it is this run's: what a reported value on a declared bound
+                # is held to (:func:`core.trial_runner.pinned_to_bound`).
+                state["_trial_record"] = _trial_runner.record_of_this_run(
+                    self.quest_root, bool(getattr(self, "_trial_mode", False)), self._log)
         # When FI writes the analysis, state["code"] is FI's own experiment.py: what the checks read to learn what the study
         # did (a cap on a value) is the study's code, never FI's.
         study = _analysis_frame.study_code(self.quest_root / "code")
@@ -19494,7 +19495,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     # state, so hand it the PILOT's numbers rather than the
                     # real ones (which don't exist yet) via a shallow copy.
                     violations = _assertion_violations(
-                        self._in_force({**state, "result_json": pilot_rj}),
+                        {**self._in_force({**state, "result_json": pilot_rj}), "_trial_record": None},
                     )
                     if violations:
                         self._log.warning(
@@ -20042,6 +20043,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             "figures": figures,
             "figure_records": figure_records,
             "result_json": result_json or {},
+            # The text the numbers were read from: how many places each was printed to (core/trial_runner.py::parse_printed).
+            "result_json_text": (_RESULT_LINE_RE.findall(result.stdout or "") or [""])[-1],
             "exec_patch_pending": False,
         }
         if _phased.enabled(self.config):
@@ -20070,7 +20073,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             edge_path = self.fi_dir / "edge_everywhere.json"
             if said_edges:
                 edge_path.parent.mkdir(parents=True, exist_ok=True)
-                edge_path.write_text(json.dumps({"results": said_edges}, indent=2) + "\n", encoding="utf-8")
+                # "of": the plan and the trial record these rows were found for; the paper uses a row only beside the same
+                # ones (core/disclosure.py::edge_rows).
+                edge_path.write_text(json.dumps({"results": said_edges, "of": _disclosure.edge_stamp(self.quest_root)},
+                                                indent=2) + "\n", encoding="utf-8")
             else:
                 edge_path.unlink(missing_ok=True)
         except OSError:
@@ -36771,7 +36777,8 @@ def _checked(state: "QuestState", memo: Any = None) -> list:
     seen = list(state.get("bounded_seen") or ())
     trial, derived = state.get("_trial_code"), set(state.get("_derived_ids") or ())
     # A value reported on a bound while FI's record of that setting's trials lies beyond it was pinned there.
-    pinned = _trial_runner.pinned_to_bound(rj, design.get("protocol"), plausibility.parse_assertions(design),
+    pinned = _trial_runner.pinned_to_bound(_trial_runner.parse_printed(state.get("result_json_text"), rj),
+                                           design.get("protocol"), plausibility.parse_assertions(design),
                                            state.get("_trial_record"))
     if trial is None:
         return pinned + plausibility.check_design(rj, design, code=state.get("code") or "", seen=seen,

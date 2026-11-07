@@ -4119,17 +4119,77 @@ def mean_beside(mapping: dict[str, Any], name: str, values: list[Any]) -> str | 
     return None
 
 
+class PrintedFloat(float):
+    """A number as the analysis printed it: its value and the text FI read it from (``1.0`` and ``1.000`` are the same float,
+    not the same precision)."""
+
+    text = ""
+
+
+def parse_printed(text: Any, parsed: Any) -> Any:
+    """``parsed`` (the RESULT_JSON the engine read) read again from the text FI took it from, each decimal number keeping its
+    printed text (:class:`PrintedFloat`); ``parsed`` itself when there is no text or it does not read as the same result."""
+    if not isinstance(text, str) or not text.strip():
+        return parsed
+
+    def number(token: str) -> PrintedFloat:
+        out = PrintedFloat(token)
+        out.text = token
+        return out
+
+    try:
+        again = json.loads(text, parse_float=number)
+    except ValueError:
+        return parsed
+    return again if again == parsed else parsed
+
+
+def _printed_half_unit(value: Any) -> float:
+    """Half a unit of the last place the analysis printed ``value`` to: from its printed text when FI has it (``1.0`` ->
+    0.05, ``1.000`` -> 0.0005), else from the number as parsed (:func:`_half_step`)."""
+    text = getattr(value, "text", "")
+    if not text:
+        return _half_step(value)
+    mantissa, _, exponent = text.lower().partition("e")
+    places = len(mantissa.split(".")[1]) if "." in mantissa else 0
+    return 0.5 * 10 ** (-(places - int(exponent or 0)))
+
+
+def record_of_this_run(quest_root: Path | str, trial_mode: bool, log: Any = None) -> dict[str, dict[str, Counter]] | None:
+    """FI's record of each setting's trials, when it is the record of the run being checked: the run went through FI's trial
+    runner (``trial_mode``; a run of a single script has none), which deletes the record when it starts and writes it again,
+    or checks its key against the simulation, the plan and the seed before it keeps the cached one; and the ledger and the
+    summary are still the files the record was written beside. Otherwise ``None`` (said at debug level)."""
+    import logging
+
+    say = log or logging.getLogger("frontier_insight.trial_runner")
+    root = Path(quest_root)
+    if not trial_mode:
+        say.debug("[pinned] this run did not go through FI's trial runner: a trial record found is not its own")
+        return None
+    try:
+        record = json.loads((root / RUN_RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict) or not record.get("key") or record.get("files") != _file_hashes(root):
+        say.debug("[pinned] the trial record does not match the ledger and summary beside it: not used")
+        return None
+    return recorded_values_by_cell(root)[0] or None
+
+
 def pinned_to_bound(result_json: Any, protocol: Any, assertions: Any, recorded_by_cell: Any) -> list[Any]:
     """The reported means of one setting that sit on a bound the design declares (``result_assertions``) while the mean of
     that setting's recorded trials lies strictly beyond it: the reported number was pinned to the bound, and the trials
     give another. One ``plausibility.Violation`` (kind ``pinned``) each, with the plain repair instruction.
 
-    Only FI's record decides: a mean (or proportion) the analysis prints for one whole setting
-    (``core.run_manifest._printed_summaries``), the mean of that setting's recorded trials, and the bound. A value that
-    merely differs from the record mean, not on a bound, is an aggregate the analysis chose (a pooled estimate, a spread)
-    and is never acted on. A per-trial quantity that is 0/1 has a record mean inside its bounds, so it never fires. A cap
-    inside the trial leaves the record already capped and cannot be seen here. The rounding allowance is the printed
-    value's last place (never finer than four places) and float32."""
+    Only FI's record decides: the mean (or proportion) the analysis prints for one whole setting under the metric's own name
+    (``core.run_manifest._printed_summaries`` with ``strict``: the key above the metric must itself name the setting, so a
+    median or an interval under another statistic's key is not read), the mean of that setting's recorded trials
+    (:func:`record_of_this_run`), and the bound. A metric whose role is ``reference`` is not held to it. A value that merely
+    differs from the record mean, not on a bound, is an aggregate the analysis chose and is never acted on. A per-trial
+    quantity that is 0/1 has a record mean inside its bounds, so it never fires. A cap inside the trial leaves the record
+    already capped and cannot be seen here. The rounding allowance is half a unit of the last place the analysis printed
+    (:func:`parse_printed`; from the number as parsed when FI has no text) and float32."""
     from . import plausibility as _pl
     from . import run_manifest as _rm
 
@@ -4139,7 +4199,7 @@ def pinned_to_bound(result_json: Any, protocol: Any, assertions: Any, recorded_b
     out: list[Any] = []
     for spec in protocol.get("metrics") or []:
         if (not isinstance(spec, dict) or spec.get("kind") not in ("mean", "proportion") or not spec.get("id")
-                or spec.get("given")):
+                or spec.get("given") or spec.get("role") == "reference"):
             continue
         metric = str(spec["id"])
         grid = _rm.metric_grid(protocol, metric, recorded_by_cell)
@@ -4147,7 +4207,7 @@ def pinned_to_bound(result_json: Any, protocol: Any, assertions: Any, recorded_b
         if not record:
             continue
         done: set[tuple[str, frozenset]] = set()
-        for named, stats, where in _rm._printed_summaries(result_json, metric, grid):
+        for named, stats, where in _rm._printed_summaries(result_json, metric, grid, strict=True):
             (cell,) = named
             values = [(_as_float(k), int(n)) for k, n in (record.get(cell) or {}).items()]
             values = [(v, n) for v, n in values if math.isfinite(v) and n > 0]
@@ -4156,7 +4216,7 @@ def pinned_to_bound(result_json: Any, protocol: Any, assertions: Any, recorded_b
             if not n_trials or reported is None:
                 continue
             mean = math.fsum(v * n for v, n in values) / n_trials
-            allowance = min(_half_step(reported), 0.5e-4) + 1e-11 * abs(reported) + 2 ** -24 * abs(mean)
+            allowance = _printed_half_unit(reported) + 1e-11 * abs(reported) + 2 ** -24 * abs(mean)
             dotted = where.replace("/", ".")
             for a in asserted:
                 bound = _pl._on_bound(float(reported), a) if _pl._matches(a.path, dotted) else None

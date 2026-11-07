@@ -507,8 +507,7 @@ def required_items(quest_root: Path | str) -> list[Item]:
         add(SHARED_SEEDS, "seeds shared across settings", _sentence(said_seeds), key="seeds")
     # A result on a declared bound in several settings (or in every setting): the range check's warning, which never sends the
     # run back, so the paper says it (.fi/edge_everywhere.json, written by the engine after each run).
-    edge = _read(root, ".fi/edge_everywhere.json")
-    for row in (edge.get("results") if isinstance(edge, dict) and isinstance(edge.get("results"), list) else []):
+    for row in _disclosure.edge_rows(root):
         said_edge = _disclosure._edge_sentence({"results": [row]})
         if said_edge:
             add(AT_BOUND, said_edge[:60], _sentence("FI found that " + said_edge.rstrip(".")), key=said_edge)
