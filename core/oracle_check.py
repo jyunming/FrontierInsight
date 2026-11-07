@@ -976,6 +976,170 @@ def judged(oracles: list[dict[str, Any]], reported: dict[str, Any] | None) -> li
     return out
 
 
+#: What a verdict re-made on the main run's own trials says it was judged on (``mc.judged_on``; :func:`rejudge_on_delivered`).
+DELIVERED_RUN = "the delivered run"
+
+
+#: The parts of a protocol that define what one trial is, besides the setting it runs at.
+_TRIAL_BASIS_KEYS = ("in_each_run", "constants", "thresholds", "shared_draws", "seed_policy")
+
+
+def trial_basis(protocol: dict[str, Any] | None) -> str:
+    """One hash of everything in the protocol that defines a trial apart from its setting: the full list of values compared
+    inside each run (``in_each_run``), the constants, the thresholds, whether trials share draws and the seed policy. The
+    gate keeps it in each entry it goes on with, so a delivered run is read as the same trials only when it is unchanged."""
+    import hashlib
+
+    basis = {k: protocol.get(k) for k in _TRIAL_BASIS_KEYS} if isinstance(protocol, dict) else {}
+    return hashlib.sha256(json.dumps(basis, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
+def _same_setting(a: Any, b: Any) -> bool:
+    """Whether two settings name the same values (numbers compared as numbers: ``200`` and ``200.0`` are one value)."""
+    if not isinstance(a, dict) or not isinstance(b, dict) or set(a) != set(b):
+        return False
+    for k, v in a.items():
+        w = b[k]
+        if _num(v) is not None and _num(w) is not None and not isinstance(v, bool) and not isinstance(w, bool):
+            if _num(v) != _num(w):
+                return False
+        elif v != w:
+            return False
+    return True
+
+
+def _delivered_rows(cell: dict[str, Any], names: list[str]) -> list[dict[str, float]]:
+    """The delivered run's trials of one setting as rows of ``names`` (a trial joined across the metrics by FI's own trial
+    number, never by position); a trial missing any of the names, or with a number that is not finite, is left out."""
+    metrics = cell.get("metrics") if isinstance(cell.get("metrics"), dict) else {}
+    per: list[dict[Any, float]] = []
+    for n in names:
+        m = metrics.get(n)
+        values = m.get("values") if isinstance(m, dict) else None
+        ids = m.get("trials") if isinstance(m, dict) else None
+        if not isinstance(values, list) or not isinstance(ids, list) or len(values) != len(ids):
+            return []
+        per.append({t: float(v) for t, v in zip(ids, values)
+                    if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)})
+    shared = sorted(set.intersection(*(set(p) for p in per))) if per else []
+    return [{n: p[t] for n, p in zip(names, per)} for t in shared]
+
+
+def rejudge_on_delivered(record: Any, trials: Any, protocol: dict[str, Any] | None, version: str,
+                         ) -> tuple[dict[str, Any] | None, list[str]]:
+    """``(record, names)``: ``needs/ORACLE_CHECK.json`` with each check that the trials of the gate could not decide for lack
+    of time (``mc.why == "time"``) judged again on the delivered run's own trials (``trials``: ``raw/trials.json``), and the
+    names of the checks changed; ``(None, [])`` when nothing changes. The record given is not changed.
+
+    A check is judged again only when FI can read everything from its own record: the code that measured it is the code
+    that ran now (``version`` is the entry's ``script_version``), the check is as it was (its fingerprint), its case is
+    exactly one setting of the delivered run, whose trials are more than the gate had and none failed, and its measure
+    is a mean of metrics the protocol declares as means. The verdict is the one the gate would have given on those trials
+    (:func:`core.mc_error.statistic`, :func:`core.mc_error.mean_verdict`). A check still not decided stays as it was; a
+    check that was undecided for another reason is not touched. A pass leaves the list of checks the quest went on with;
+    a fail stays in it as a failure; the quest's status becomes ``ok`` when nothing is left in it.
+
+    The trials must be the same trials: the entry's ``trial_basis`` (kept by the gate, :func:`trial_basis`) must equal the
+    delivered run's. An entry with none (a record written before the gate kept it) is never judged again. A fail on the
+    delivered run is recorded and disclosed as it stands, with no second look at fresh trials: the gate's confirming look
+    guards against a small first sample, and the delivered run is the full sample."""
+    import copy
+
+    from . import accepted_checks as _accepted
+    from . import mc_error as _mc
+    from .optimise import complete_case  # a late import: core.optimise imports this module
+
+    if not isinstance(record, dict) or record.get("status") != _accepted.WENT_ON or not isinstance(trials, dict):
+        return None, []
+    attempts = record.get("attempts")
+    last = attempts[-1] if isinstance(attempts, list) and attempts and isinstance(attempts[-1], dict) else None
+    cells = [c for c in trials.get("cells") or [] if isinstance(c, dict) and isinstance(c.get("cell"), dict)]
+    if last is None or not cells:
+        return None, []
+    named = {str(o["name"]).strip().lower(): o for o in declared(protocol)}
+    means, proportions = _mc.mean_names(protocol), _mc.proportion_names(protocol)
+    repeated = _mc.repeats_trials(protocol)
+    out = copy.deepcopy(record)
+    out_last = out["attempts"][-1]
+    entries = {str(e.get("name") or "").strip().lower(): e for e in out.get("went_on") or [] if isinstance(e, dict)}
+    done: list[str] = []
+    for j in out_last.get("judged") or []:
+        mc = mc_of(j)
+        name = str(j.get("name") or "").strip()
+        oracle, entry = named.get(name.lower()), entries.get(name.lower())
+        if (not j.get("undecided") or mc is None or mc.get("verdict") != "undecided" or mc.get("why") != "time"
+                or mc.get("read_as") != "mean" or oracle is None or entry is None or not entry.get("undecided")):
+            continue
+        if entry.get("script_version") != version or entry.get("fingerprint") != _accepted.fingerprint(oracle):
+            continue
+        if not entry.get("trial_basis") or entry.get("trial_basis") != trial_basis(protocol):
+            continue  # FI keeps nothing showing the delivered run's trials are the ones the gate measured
+        own = case_of(oracle)
+        expected, limit, _mode = limit_of(oracle)
+        if own is None or expected is None or limit is None or not _mc.reads_a_mean(oracle):
+            continue
+        case, measure = own
+        names = _mc.measure_names(measure)
+        if not names or not all(n in means for n in names):
+            continue
+        here = [c for c in cells if _same_setting(c["cell"], complete_case(protocol, case))]
+        if len(here) != 1 or int(here[0].get("failed") or 0) or int(here[0].get("ok") or 0) <= int(mc.get("trials") or 0):
+            continue
+        rows = _delivered_rows(here[0], names)
+        if len(rows) != int(here[0].get("ok") or 0):
+            continue
+        stat = _mc.statistic(rows, measure, means, expected, limit, proportions, repeated=repeated)
+        said = _mc.mean_verdict(stat, expected, limit) if stat is not None else None
+        if said is None or stat.get("value") is None:
+            continue
+        value = float(stat["value"])
+        new = _mc.record(stat, read_as="mean", verdict=said, why="", failed=0,
+                         started=int(here[0].get("planned") or len(rows)), judged_on=DELIVERED_RUN)
+        passed = said == "pass" and abs(value - expected) <= limit
+        j.update(value=value, mc=new, passed_by_engine=passed, judged_on=DELIVERED_RUN)
+        j.pop("undecided", None)
+        for c in out_last.get("checks") or []:
+            if isinstance(c, dict) and str(c.get("name") or "").strip().lower() == name.lower():
+                # Only the delivered measurement stays: what the gate's side run returned is replaced, not mixed in.
+                returned = {}
+                for k, m in (here[0].get("metrics") or {}).items():
+                    vals = [float(v) for v in (m.get("values") if isinstance(m, dict) else None) or []
+                            if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)]
+                    if vals:
+                        returned[k] = math.fsum(vals) / len(vals)
+                returned["n_trials"] = float(len(rows))
+                c.update(value=value, mc=new, returned=returned)
+        stale = f"the oracle {name!r} "
+        for holder in (out, out_last):
+            holder["problems"] = [p for p in holder.get("problems") or [] if not str(p).startswith(stale)]
+            if not passed:
+                holder["problems"].append(
+                    f"the oracle {name!r} failed on the delivered run: FI measured {_fmt(value)} ({_mc.words(new)}), the "
+                    f"protocol expects {_fmt(expected)} within {_fmt(limit)}")
+        out_last["triage"] = [t for t in out_last.get("triage") or []
+                              if not (isinstance(t, dict) and t.get("check") == name and t.get("kind") == "trials")]
+        if isinstance(out.get("set_aside"), dict):
+            out["set_aside"].pop(name, None)
+        if passed:
+            out["went_on"] = [e for e in out["went_on"] if e is not entry]
+        else:
+            for k in ("undecided", "undecided_words"):
+                entry.pop(k, None)
+            entry.update(measured=value, mc_words=_mc.words(new))
+        done.append(name)
+    if not done:
+        return None, []
+    if not out.get("set_aside"):
+        out.pop("set_aside", None)
+    if out.get("went_on"):
+        out["summary"] = "; ".join(_accepted.gap(e) for e in out["went_on"])
+    else:  # every check the quest went on with is now a pass on the delivered run: nothing is left to go on with
+        for k in ("went_on", "summary", "explained", "set_aside"):
+            out.pop(k, None)
+        out["status"] = "ok"
+    return out, done
+
+
 def duplicate_names(oracles: list[dict[str, Any]], reported: dict[str, Any] | None = None) -> list[str]:
     """One sentence per name that two checks share (names are compared without case): two declared checks, or two
     values the script reported under one name. A value is matched to its check by name, so one of the two is then judged

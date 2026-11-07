@@ -57,7 +57,10 @@ same PR that adds, splits or renames one.
   and the note that carries the engine's verdicts to
   `analyze` (`analysis_note`). An oracle that names a `case` and a `measure` is measured by the engine, not the script
   (`case_of`); `loose_tolerance` warns when the tolerance would pass a lower-order method than the oracle claims
-  (`order`); `script_measured` lists the values that are still the script's own word (`core/evidence.py` never counts them toward
+  (`order`); `rejudge_on_delivered` judges again, on the delivered run's `raw/trials.json`, a check the gate's side run left
+  undecided for lack of time (`mc.why == "time"`), only when the code version, the check's fingerprint and `trial_basis` (a hash of what defines a trial besides its setting: the full `in_each_run` list, constants, thresholds, shared draws, seed policy; kept by the gate in each `went_on` entry) are unchanged, its case is
+  exactly one setting of the delivered run and its measure is a mean of declared metrics; it writes `judged_on: "the delivered run"`
+  into the record and `Engine._rejudge_oracles_on_delivered_run` calls it after the main run; `script_measured` lists the values that are still the script's own word (`core/evidence.py` never counts them toward
   `independently_validated`, one script or two), and `last_judged` / `engine_passed` / `not_passed` read the record the
   evidence level trusts (at least one value FI measured and passed, none unpassed); `with_run_problems` merges the
   reasons a value could not be measured. Also owns an oracle's kind (`KINDS`, the six; `kind_of` reads the older names)

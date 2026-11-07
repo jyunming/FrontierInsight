@@ -651,6 +651,8 @@ def words(mc: dict[str, Any] | None) -> str:
             text += f" (judged on {n} of {asked} trials)"
     else:
         text = "one trial's number, the same in every trial"
+    if mc.get("judged_on"):  # decided again on the main run's own trials (oracle_check.rejudge_on_delivered)
+        text += f"; judged on {mc['judged_on']}"
     failed, started = int(mc.get("failed_trials") or 0), int(mc.get("started") or 0)
     if failed:
         text += (f"; {failed} of {started} trials on its case failed"
