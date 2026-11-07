@@ -7,6 +7,8 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+import pytest
+
 from core import code_reach
 from core import code_review
 from core import quality_report
@@ -218,3 +220,34 @@ def test_a_computed_key_into_globals_still_means_fi_cannot_tell(tmp_path: Path) 
         files["pkg/model.py"] = "def fit(a, name='x'):" + chr(10) + "    " + body + chr(10)
         code = _code(tmp_path / f"case{i}", files)
         assert code_reach.reached(code, scripts=[], start=[("trial.py", "run")]) is None, body
+
+
+# ---- the names each result key of a function depends on ----------------------------------------------------------------------------
+def _keys_of(tmp_path: Path, src: str) -> dict[str, set[str]] | None:
+    (tmp_path / "sim.py").write_text(src, encoding="utf-8")
+    return code_reach.result_key_names(tmp_path / "sim.py", "trial")
+
+
+def test_a_result_key_depends_on_the_names_it_is_worked_out_from_through_variables(tmp_path: Path) -> None:
+    got = _keys_of(tmp_path, "def trial(c):\n    out = {}\n    a = step(1)\n    b = a + 1\n    out['x'] = b\n    out['y'] = 2.0\n    return out\n")
+    assert got is not None and "step" in got["x"] and "step" not in got["y"]
+
+
+def test_a_condition_around_an_assignment_counts_as_a_name_the_key_depends_on(tmp_path: Path) -> None:
+    got = _keys_of(tmp_path, "def trial(c):\n    out = {}\n    if step(1) > 0:\n        out['x'] = 1.0\n    out['y'] = 2.0\n    return out\n")
+    assert got is not None and "step" in got["x"] and "step" not in got["y"]
+
+
+def test_a_dict_literal_that_is_returned_names_its_keys_too(tmp_path: Path) -> None:
+    got = _keys_of(tmp_path, "def trial(c):\n    return {'x': step(1), 'y': 2.0}\n")
+    assert got is not None and "step" in got["x"] and "step" not in got["y"]
+
+
+@pytest.mark.parametrize("body", [
+    "out = {}\n    for k in ('x', 'y'):\n        out[k] = step(1)\n    return out",       # no key written by a fixed text
+    "out = {}\n    out['x'] = 1.0\n    out.update(other(c))\n    return out",             # results added by update
+    "out = {}\n    out['x'] = 1.0\n    return other(out)",                                # returns what a call makes of them
+    "out = {}\n    name = c['n']\n    out['x'] = 1.0\n    out[name] = step(1)\n    return out",  # a key computed at run time
+])
+def test_a_function_whose_keys_cannot_be_read_gives_none(tmp_path: Path, body: str) -> None:
+    assert _keys_of(tmp_path, "def trial(c):\n    " + body + "\n") is None

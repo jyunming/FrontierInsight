@@ -702,13 +702,57 @@ class Reach:
                     out.figures.append(ident)
                     by_result = True
                 else:
-                    touched.update(self.trial_ids() or set(self.ids))
-                    by_trial = True
+                    through = self._trial_ids_through(rel, fn, file, judged)
+                    if through == "skip":
+                        continue  # this entry only hands on the results of another entry, which is asked itself
+                    if through:
+                        touched.update(through)  # the results whose value the trial works out with the helper
+                        by_result = True
+                    else:
+                        touched.update(self.trial_ids() or set(self.ids))
+                        by_trial = True
         out.by_trial = by_trial and not by_result  # the trial is the only link: the call graph names no result in particular
         if not reached_by:
             out.why = "no function of a result or a figure reaches it, so it changes no reported result"
             return out
         return self._judge(out, touched, "reached by " + ", ".join(sorted(set(reached_by))[:4]))
+
+    def _trial_ids_through(self, rel: str, entry: str, file: str, judged: str) -> "set[str] | str | None":
+        """Which declared results the trial's function ``entry`` (in ``rel``) works a value out with the helper ``judged`` of
+        ``file`` for, read from the code: the value of each result key it builds depends on the names it uses, and the helper is
+        reached from one of those names (:func:`core.code_reach.result_key_names`). That ties the helper to the results whose
+        values it feeds, not to every result the trial makes (the plan's check measure ``T`` is then tied to the function that
+        makes it). ``"skip"`` for an entry that only hands on the results of another entry; ``None`` when the code cannot be read
+        so or the helper feeds no declared result: the helper is then tied to every result of the trial, as before."""
+        from . import code_reach as _reach
+
+        keys = _reach.result_key_names(self.code / rel, entry)
+        if keys is None:
+            used = _called_from(_function_names(self.code, rel), entry) if entry in _function_names(self.code, rel) else set()
+            defined = {n for r in self._study_files() for n in _function_names(self.code, r)}
+            others = {e for e in self._trial_entries() if e != entry and e in used
+                      and _reach.result_key_names(self.code / rel, e) is not None}
+            return "skip" if others and not ((used & defined) - others) else None
+        where: dict[str, list[str]] = {}
+        for r in self._study_files():
+            for n in _function_names(self.code, r):
+                where.setdefault(n, []).append(r)
+        ids: set[str] = set()
+        for key, names in keys.items():
+            hit = judged in names
+            for n in sorted(names):
+                if hit:
+                    break
+                for r in where.get(n, ()):
+                    got = self._entry_reach(r, n)
+                    if got is None:
+                        return None
+                    if (r, n) == (file, judged) or (file, judged) in got:
+                        hit = True
+                        break
+            if hit:
+                ids |= self._key_ids(key, False) | self._reading(key, False)
+        return ids or None
 
     def touched_by(self, file: str, function: str) -> list[str] | None:
         """The declared results a fault in ``function`` of ``file`` changes (:meth:`_helper_effect`: the results of the
