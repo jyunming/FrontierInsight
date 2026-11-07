@@ -179,7 +179,8 @@ def _change(rec: _pv.Records, metric: str, a: _Point, b: _Point) -> _Change:
     se = math.sqrt(va + vb)
     if se == 0:
         return _Change(diff, diff, diff, "two samples, no spread",
-                       exact="the trials of both settings are identical, so the values are exact and there is no 95% interval")
+                       exact=(f"all {a.n} trials of the first setting and all {b.n} of the last each gave the same value, so no 95% "
+                              "interval can be computed from them"))
     df = (va + vb) ** 2 / ((va ** 2 / (a.n - 1)) + (vb ** 2 / (b.n - 1)))
     half = _stats.t_quantile(0.975, df) * se
     return _Change(diff, diff - half, diff + half, "two independent samples (Welch)")
@@ -271,14 +272,18 @@ def _finer_is_larger(points: list[_Point]) -> bool | None:
     return hi < lo
 
 
-def _orders(points: list[_Point], finer_larger: bool | None) -> list[tuple[Any, Any, float | None]]:
+def _orders(points: list[_Point], finer_larger: bool | None, dropped: list[Any] | None = None) -> list[tuple[Any, Any, float | None]]:
     """``(first x, second x, order)`` for each neighbouring pair, from the end where the error is higher to the end where it is
     lower (``finer_larger`` False: from the largest x down); the order from the means, ``ln(e1 / e2) / |ln(x2 / x1)|``, ``None``
     where it is not defined (a zero or negative error, a non-positive x). With ``finer_larger`` ``None`` the pairs run from the
-    smallest x up and the order is its absolute value, since the record does not say which way the error falls."""
+    smallest x up and the order is its absolute value, since the record does not say which way the error falls. A pair with a
+    value of ``dropped`` (a setting with no number) between its two values is not neighbouring and is left out."""
     ordered = sorted(points, key=lambda p: float(p.x), reverse=finer_larger is False)
     out = []
     for a, b in zip(ordered, ordered[1:]):
+        lo, hi = sorted((float(a.x), float(b.x)))
+        if any(lo < float(d) < hi for d in dropped or []):
+            continue
         ok = a.mean > 0 and b.mean > 0 and float(a.x) > 0 and float(b.x) > 0 and float(a.x) != float(b.x)
         value = math.log(a.mean / b.mean) / abs(math.log(float(b.x) / float(a.x))) if ok else None
         out.append((a.x, b.x, abs(value) if value is not None and finer_larger is None else value))
@@ -362,7 +367,14 @@ def trend_text(rec: _pv.Records, body: str, prose: bool = False) -> tuple[str, l
                 measured = _finer_is_larger(points)
                 said = None if order == "" else (order == ORDER)
                 labels = "unknown" if measured is None else "coarse" if measured == said else "lower"
-                text, nums = _order_words(rec, axis, _orders(points, measured), labels)
+                kept = {p.x for p in points}
+                dropped = [x for x in rec.axes()[axis] if x not in kept]
+                text, nums = _order_words(rec, axis, _orders(points, measured, dropped), labels)
+                inside = [x for x in dropped if float(points[0].x) < float(x) < float(points[-1].x)
+                          or float(points[-1].x) < float(x) < float(points[0].x)]
+                if inside:
+                    text += ("; no order is given across " + ", ".join(f"{rec.label(axis)} = {x}" for x in inside)
+                             + " (no numbers there), so the values on its two sides are not neighbouring")
                 results.append((scope, "", text, min(nums) if nums else None))
                 order_numbers += [min(nums), max(nums)] if nums else []
             else:

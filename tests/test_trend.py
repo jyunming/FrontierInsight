@@ -335,7 +335,8 @@ def test_equal_neighbouring_means_are_a_plateau_not_non_monotone() -> None:
 def test_trials_with_no_spread_on_both_sides_are_exact_not_a_zero_width_interval() -> None:
     cells = [_cell({"size": 10}, score=[1.0, 1.0, 1.0]), _cell({"size": 20}, score=[0.5, 0.5, 0.5])]
     text = _say(pv.from_cells(cells), "score over size @ ").text
-    assert "falls" in text and "identical, so the values are exact" in text
+    assert "falls" in text and "all 3 trials of the first setting and all 3 of the last each gave the same value" in text
+    assert "no 95% interval can be computed" in text and "values are exact" not in text
     assert "95% interval, " not in text and "(change -0.5000, 95%" not in text
     same = [_cell({"size": 10}, score=[1.0, 1.0]), _cell({"size": 20}, score=[1.0, 1.0])]
     assert "no change" in _say(pv.from_cells(same), "score over size @ ").text
@@ -454,3 +455,22 @@ def test_the_sentence_form_is_used_only_where_the_mark_is_a_sentence_of_its_own(
     assert typed.endswith("for group = a.") and ".." not in one(f"{mark}.") and one(f"{mark}.").endswith("for group = a.")
     assert one(f"{mark}\n").startswith("score falls from ")
     assert one(f"**Finding.** {mark}").startswith("**Finding.** score falls from ")
+
+
+def test_identical_random_trials_are_not_called_exact() -> None:
+    """Before: trials that all agreed were reported as 'exact values'; agreeing trials do not prove that."""
+    cells = [_cell({"size": 10}, score=[0.0] * 5), _cell({"size": 20}, score=[1.0] * 5)]
+    for prose in (False, True):
+        text, _n, _i = tr.trend_text(pv.from_cells(cells), "score over size @ ", prose)
+        assert "exact" not in text and "all 5 trials" in text and "no 95% interval can be computed" in text
+
+
+def test_an_order_does_not_pair_the_values_on_the_two_sides_of_a_setting_with_no_number() -> None:
+    """Before: a setting whose every trial was not a number was dropped and the pair across it was called neighbouring."""
+    cells = [_cell({"size": 1}, score=[1.0, 1.1]), _cell({"size": 2}, score=[NAN, NAN]), _cell({"size": 3}, score=[0.25, 0.26])]
+    text, _n, _i = tr.trend_text(pv.from_cells(cells), "score over size @ | order")
+    assert "size = 1 to 3" not in text
+    assert "size = 2" in text and "not neighbouring" in text
+    full = [_cell({"size": 1}, score=[1.0, 1.1]), _cell({"size": 2}, score=[0.5, 0.6]), _cell({"size": 3}, score=[0.25, 0.26])]
+    text, _n, _i = tr.trend_text(pv.from_cells(full), "score over size @ | order")
+    assert "size = 1 to 2" in text and "size = 2 to 3" in text and "not neighbouring" not in text
