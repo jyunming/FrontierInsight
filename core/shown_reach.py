@@ -49,6 +49,7 @@ class Effect:
     named: str = ""  # the quantity the finding is about, among the left-out ones
     cannot: bool = False  # FI cannot tell what the code reaches: the records place nothing
     empty: bool = False  # the stop is that leaving out what it changes leaves no result at all
+    by_trial: bool = False  # a helper reached through the trial: the call graph ties it to every result of the trial, to none in particular
 
 
 def union(a: "Effect", b: "Effect") -> "Effect":
@@ -414,8 +415,32 @@ class Reach:
             if not held:
                 return None
             known = [self._judge(Effect(), held, "its test reads " + ", ".join(sorted(held)))]
+        if all(p.by_trial for p in known):
+            # Only the call graph ties a helper of the trial to the results, and it ties it to every result the trial makes, not to
+            # one (the fault may change one result or all): that is no placement by itself. A key the test reads literally that is
+            # a declared result the run holds does place it; otherwise the records leave it unplaced and the gate stops for it.
+            held = {i for i in self._test_ids(shape) if self._holds(i)}
+            if not held:
+                return None
+            known = [self._judge(Effect(), held, "its test reads " + ", ".join(sorted(held)))]
         merged = self._merge(known)
         return None if merged is None else self._settle(merged, record, issue)
+
+    def reads_held_key(self, issue: dict[str, Any], result: Any) -> bool:
+        """Whether the finding's failing test reads, by a literal key, a result the run reports a value for (a declared result
+        the run holds, or a printed key that holds a number): then the test itself places the finding on that key."""
+        if not self.ids:
+            return False
+        self.result = result
+        rel = str(issue.get("test") or "")
+        try:
+            shape = read_test((self.root / rel).read_text(encoding="utf-8")) if rel else None
+        except OSError:
+            return False
+        if shape is None:
+            return False
+        return (any(self._holds(i) for i in self._test_ids(shape))
+                or any(bool(_code_review.named_in_results(n, result)) for n in shape.exact if _norm(n)))
 
     def effect_of_changes(self, names: list[str]) -> Effect:
         """The effect of a repair a rerun of the study showed to change numbers: ``names`` are the results whose reported
@@ -491,6 +516,7 @@ class Reach:
             out.figures = list(dict.fromkeys([*out.figures, *p.figures]))
             out.probes = list(dict.fromkeys([*out.probes, *p.probes]))
             out.named = out.named or p.named
+            out.by_trial = out.by_trial or p.by_trial
         out.stop = "; ".join(dict.fromkeys(p.stop for p in parts if p.stop))
         out.why = "; ".join(dict.fromkeys(p.why for p in parts if p.why))
         if not out.stop and out.left_out and not (set(self.ids) - set(out.left_out)):
@@ -661,6 +687,7 @@ class Reach:
         out = Effect()
         touched: set[str] = set()
         reached_by: list[str] = []
+        by_trial, by_result = False, False
         for kind, ident, rel, fn in entries:
             got = self._entry_reach(rel, fn)
             if got is None:
@@ -669,10 +696,14 @@ class Reach:
                 reached_by.append(fn)
                 if kind == "derive":
                     touched.add(ident)
+                    by_result = True
                 elif kind == "figure":
                     out.figures.append(ident)
+                    by_result = True
                 else:
                     touched.update(self.trial_ids() or set(self.ids))
+                    by_trial = True
+        out.by_trial = by_trial and not by_result  # the trial is the only link: the call graph names no result in particular
         if not reached_by:
             out.why = "no function of a result or a figure reaches it, so it changes no reported result"
             return out

@@ -88,14 +88,13 @@ def _issue(**over: Any) -> dict[str, Any]:
     return {**base, **over}
 
 
-def test_a_missing_sentence_named_main_quantity_does_not_stop_the_quest(tmp_path: Path, monkeypatch: Any) -> None:
-    """Old code: the issue was about the headline, so a failing name test stopped the quest with no paper, on the
-    reader's word that a sentence-named quantity is not there. Now it is a part not done, which the paper states."""
+def test_a_missing_sentence_named_main_quantity_no_record_places_stops_the_quest(tmp_path: Path, monkeypatch: Any) -> None:
+    """The reader says a sentence-named quantity is not there and its test fails, and no record of FI's shows that no value was
+    worked out for it: FI cannot tell whether the test stands for a value reported under another name, so it stops."""
     cr.save(tmp_path, {**_missing_record("dependent variable", SENTENCE, "the dependent variable is computed", True),
                        "issues": {"F-1": _issue(headline=True, quantity=SENTENCE)}})
     _root, verdict, _eng = _gate_on(tmp_path, {"gain": 1.0}, monkeypatch)
-    assert verdict is None
-    assert cr.load(tmp_path)["issues"]["F-1"]["at_gate"]["outcome"] == "not_computed"
+    assert verdict is not None and verdict["stuck_reason"] == "shown_fault_open"
 
 
 def test_a_different_main_quantity_still_stops(tmp_path: Path, monkeypatch: Any) -> None:
