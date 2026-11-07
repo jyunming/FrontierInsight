@@ -80,6 +80,19 @@ def test_a_move_inside_the_monte_carlo_uncertainty_is_not_counted_when_the_draws
     assert rerun_check.counted(inside, PROTOCOL, _trials(values), redrawn=False)[0] == inside
 
 
+def test_a_change_of_a_constant_metric_is_kept_not_divided_by_a_zero_uncertainty() -> None:
+    values = [2.0] * 20  # every trial gave the same value: its uncertainty is 0
+    assert rerun_check.uncertainty("trials/s/est/mean", 2.0, *rerun_check.trial_stats(_trials(values)), {}) == 0.0
+    moved = [{"key": "trials/s/est/mean", "old": 2.0, "new": 2.001}]
+    assert rerun_check.counted(moved, PROTOCOL, _trials(values), redrawn=True)[0] == moved
+
+
+def test_an_unchanged_constant_metric_is_not_a_change() -> None:
+    values = [2.0] * 20
+    same = [{"key": "trials/s/est/mean", "old": 2.0, "new": 2.0}]
+    assert rerun_check.counted(same, PROTOCOL, _trials(values), redrawn=True)[0] == []
+
+
 def test_a_share_is_judged_by_its_binomial_error() -> None:
     trials = {"cells": [{"key": "s", "ok": 100, "failed": 0, "metrics": {}}]}
     small = [{"key": "derived/derived/cover/by_setting/s", "old": 0.95, "new": 0.96}]
