@@ -379,12 +379,36 @@ def _bases(target: ast.AST) -> set[str]:
     return set()
 
 
+UNUSED_KEY = "\0unused"  # in result_key_names: the names no returned key depends on (a call there may still change a result)
+
+
+def _has_exit(node: ast.AST) -> bool:
+    """Whether a statement can leave the function or the loop early (return, raise, break, continue)."""
+    return any(isinstance(n, (ast.Return, ast.Raise, ast.Break, ast.Continue)) for n in ast.walk(node))
+
+
+def _tests_in(node: ast.AST) -> set[str]:
+    """The names every condition (if, while, for's iterable, assert, with, try handlers) inside a statement names."""
+    out: set[str] = set()
+    for n in ast.walk(node):
+        if isinstance(n, (ast.If, ast.While, ast.IfExp, ast.Assert)):
+            out |= _names_in(n.test)
+        elif isinstance(n, (ast.For, ast.AsyncFor)):
+            out |= _names_in(n.iter)
+    return out
+
+
 def result_key_names(path: Path, function: str) -> dict[str, set[str]] | None:
-    """For a function that builds its returned results key by key (``out["k"] = expr``, or a dict literal it returns), the
-    names (variables, functions, attributes) each key's value depends on, read from the code alone: what the expression names,
-    what the variables it names were assigned from (in any statement, whatever its order), and what the conditions around the
-    assignment name. ``{key: names}``; ``None`` when FI cannot read the function so: it is not found, a key is computed, a result
-    is added with ``update`` or ``**``, or a ``return`` hands back something other than the results it built.
+    """For a function that builds its returned results key by key, the names (variables, functions, attributes) each key's
+    value depends on, read from the code alone. ``{key: names}`` plus ``UNUSED_KEY``: the names no key depends on.
+
+    Sound narrowing: the answer is given only when the function is understood completely, else ``None`` (the caller then ties a
+    helper to every result of the trial). That needs: exactly one variable holds the results, made once from ``{}``, ``dict()``,
+    ``TrialResult()`` or a dict literal with fixed keys; every use of it is ``h["k"] = expr`` (fixed key), ``h.setdefault("k",
+    expr)`` or a final ``return h`` (or an earlier ``return h`` / ``raise`` / ``break`` / ``continue`` / ``assert``, whose
+    conditions are then counted as a dependency of everything after it); it is never read, aliased, handed to a call, named
+    in a nested function, lambda or class; no ``global`` / ``nonlocal``, ``del``, ``**``, ``eval``-like call. A variable handed
+    to a call, or a method called on it, is taken to depend on everything the call names.
 
     This is a dependency of names, not a run: a value changed through a module-level variable another function sets is not
     followed."""
@@ -395,91 +419,173 @@ def result_key_names(path: Path, function: str) -> dict[str, set[str]] | None:
     fn = next((n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == function), None)
     if fn is None:
         return None
+    nodes = list(ast.walk(fn))
+    imported = {(a.asname or a.name).split('.')[0] for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom)) for a in n.names}
+    if any(isinstance(n, (ast.Global, ast.Nonlocal, ast.Delete)) for n in nodes):
+        return None
+    if any(isinstance(n, ast.keyword) and n.arg is None for n in nodes):
+        return None  # ``f(**x)`` hands over results FI cannot name
+    if any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in _DYNAMIC_CALLS for n in nodes):
+        return None
+    # the one variable the results are written into
+    holder_inits = [n for n in nodes if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
+                    and (isinstance(n.value, ast.Dict)
+                         or (isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Name)
+                             and n.value.func.id in ("dict", "TrialResult") and not n.value.args and not n.value.keywords))]
+    holders = {n.targets[0].id for n in holder_inits}
+    returned_dict = [n for n in nodes if isinstance(n, ast.Return) and isinstance(n.value, ast.Dict)]
+    if len(holders) > 1 or (holders and returned_dict):
+        return None
+    holder = next(iter(holders), "")
+    if holder and sum(1 for n in nodes if isinstance(n, ast.Name) and n.id == holder and isinstance(n.ctx, ast.Store)) != 1:
+        return None  # made twice, or taken from elsewhere
+    if not holder and not returned_dict:
+        return None
     deps: dict[str, set[str]] = {}
     keys: dict[str, set[str]] = {}
-    holders: set[str] = set()  # the variables the results are written into
     ok = [True]
+    loose: set[str] = set()  # names of calls made as statements: what they change is not tied to any key
+
+    def const_key(node: ast.AST | None) -> str | None:
+        return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
 
     def add(var_names: set[str], names: set[str]) -> None:
         for v in var_names:
             deps.setdefault(v, set()).update(names)
 
-    def visit(stmts: list[ast.stmt], guard: set[str]) -> None:
-        for s in stmts:
+    def uses_holder(node: ast.AST | None) -> bool:
+        return bool(holder) and node is not None and any(isinstance(n, ast.Name) and n.id == holder for n in ast.walk(node))
+
+    def dict_literal(d: ast.Dict, guard: set[str]) -> None:
+        for k, val in zip(d.keys, d.values):
+            key = const_key(k)
+            if key is None or uses_holder(val):
+                ok[0] = False
+            else:
+                keys.setdefault(key, set()).update(_names_in(val) | guard)
+                effects(val, guard)
+
+    def effects(node: ast.AST | None, guard: set[str]) -> None:
+        """A call may change what it is handed or what it is called on: those variables then depend on everything it names."""
+        for c in ast.walk(node) if node is not None else ():
+            if isinstance(c, ast.Call):
+                names = _names_in(c) | guard
+                touched = {n.id for a in [*c.args, *(k.value for k in c.keywords)] for n in ast.walk(a) if isinstance(n, ast.Name)}
+                if isinstance(c.func, ast.Attribute):
+                    touched |= {n.id for n in ast.walk(c.func.value) if isinstance(n, ast.Name)}
+                add(touched - imported, names)  # a module is not a value a call changes (its state is not followed)
+            elif isinstance(c, (ast.Lambda, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                ok[0] = ok[0] and not uses_holder(c)
+
+    def visit(stmts: list[ast.stmt], guard: set[str], top: bool) -> set[str]:
+        """Walk a block; returns the names of the conditions an early exit inside it puts on what follows."""
+        extra: set[str] = set()
+        for idx, s in enumerate(stmts):
+            g = guard | extra
             if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                add({s.name}, _names_in(s))  # a nested function is used by name: what it names is what the name stands for
+                if uses_holder(s):
+                    ok[0] = False
+                add({s.name}, _names_in(s))
+                continue
+            if isinstance(s, ast.Return):
+                v = s.value
+                if isinstance(v, ast.Dict):
+                    dict_literal(v, g)
+                elif not (v is None or isinstance(v, ast.Constant) or (isinstance(v, ast.Name) and v.id == holder and holder)):
+                    ok[0] = False
                 continue
             if isinstance(s, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
                 targets = s.targets if isinstance(s, ast.Assign) else [s.target]
-                value = _names_in(getattr(s, "value", None)) | guard
+                value = getattr(s, "value", None)
+                if any(s is n for n in holder_inits):
+                    if isinstance(value, ast.Dict):
+                        dict_literal(value, g)
+                    continue
+                if uses_holder(value):
+                    ok[0] = False  # the results are read or aliased
+                names = _names_in(value) | g
                 if isinstance(s, ast.AugAssign):
-                    value |= _names_in(s.target)
+                    names |= _names_in(s.target)
                 for t in targets:
-                    if (isinstance(t, ast.Subscript) and isinstance(t.slice, ast.Constant) and isinstance(t.slice.value, str)
-                            and isinstance(t.value, ast.Name)):
-                        keys.setdefault(t.slice.value, set()).update(value)
-                        holders.add(t.value.id)
-                    elif isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and t.value.id in holders:
-                        ok[0] = False  # a key computed at run time: FI cannot tell which result it is
-                    add(_bases(t), value | _names_in(t))
-            elif isinstance(s, ast.Return):
-                v = s.value
-                if isinstance(v, ast.Dict):
-                    for k, val in zip(v.keys, v.values):
-                        if k is None or not (isinstance(k, ast.Constant) and isinstance(k.value, str)):
+                    if isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and holder and t.value.id == holder:
+                        key = const_key(t.slice)
+                        if key is None or isinstance(s, ast.AugAssign):
                             ok[0] = False
                         else:
-                            keys.setdefault(k.value, set()).update(_names_in(val) | guard)
-                elif v is not None and not (isinstance(v, ast.Constant) or (isinstance(v, ast.Name) and v.id in holders)):
-                    ok[0] = False
+                            keys.setdefault(key, set()).update(names)
+                        continue
+                    if uses_holder(t):
+                        ok[0] = False
+                    add(_bases(t), names | _names_in(t))
+                effects(value, g)
             elif isinstance(s, (ast.If, ast.While)):
-                inner = guard | _names_in(s.test)
-                visit(s.body, inner)
-                visit(s.orelse, inner)
+                inner = g | _names_in(s.test) | (_tests_in(s) if isinstance(s, ast.While) and _has_exit(s) else set())
+                effects(s.test, g)
+                a = visit(s.body, inner, False)
+                b = visit(s.orelse, inner, False)
+                extra |= a | b
             elif isinstance(s, (ast.For, ast.AsyncFor)):
-                inner = guard | _names_in(s.iter)
+                inner = g | _names_in(s.iter) | (_tests_in(s) if _has_exit(s) else set())
+                if uses_holder(s.iter) or uses_holder(s.target):
+                    ok[0] = False
                 add(_bases(s.target), inner)
-                visit(s.body, inner)
-                visit(s.orelse, inner)
+                effects(s.iter, g)
+                extra |= visit(s.body, inner, False) | visit(s.orelse, inner, False)
             elif isinstance(s, (ast.With, ast.AsyncWith)):
                 for item in s.items:
+                    if uses_holder(item.context_expr) or uses_holder(item.optional_vars):
+                        ok[0] = False
                     if item.optional_vars is not None:
-                        add(_bases(item.optional_vars), _names_in(item.context_expr) | guard)
-                visit(s.body, guard)
+                        add(_bases(item.optional_vars), _names_in(item.context_expr) | g)
+                    effects(item.context_expr, g)
+                extra |= visit(s.body, g, False)
             elif isinstance(s, ast.Try):
-                visit(s.body, guard)
-                for h in s.handlers:
-                    visit(h.body, guard)
-                visit(s.orelse, guard)
-                visit(s.finalbody, guard)
-            elif isinstance(s, ast.Expr) and isinstance(s.value, ast.Call):
+                for blk in (s.body, *(h.body for h in s.handlers), s.orelse, s.finalbody):
+                    extra |= visit(blk, g, False)
+                if s.handlers:
+                    extra |= _names_in(s)  # a failing call inside may skip what follows
+            elif isinstance(s, ast.Expr) and isinstance(s.value, ast.Call) and holder and isinstance(s.value.func, ast.Attribute) \
+                    and isinstance(s.value.func.value, ast.Name) and s.value.func.value.id == holder:
                 call = s.value
-                names = _names_in(call) | guard
-                if isinstance(call.func, ast.Attribute) and call.func.attr in ("update", "setdefault") and isinstance(call.func.value, ast.Name) \
-                        and call.func.value.id in holders:
+                key = const_key(call.args[0]) if call.args else None
+                if call.func.attr != "setdefault" or len(call.args) != 2 or key is None or uses_holder(call.args[1]):
                     ok[0] = False
-                if isinstance(call.func, ast.Attribute):
-                    add(_bases(call.func.value), names)  # ``x.append(f())`` changes ``x``
-            elif isinstance(s, ast.Global):
-                ok[0] = False
+                else:
+                    keys.setdefault(key, set()).update(_names_in(call.args[1]) | g)
+                    effects(call.args[1], g)
+            elif isinstance(s, ast.Assert):
+                if uses_holder(s):
+                    ok[0] = False
+                extra |= _names_in(s.test)
+                effects(s.test, g)
+            elif isinstance(s, (ast.Expr, ast.Pass, ast.Break, ast.Continue, ast.Raise)):
+                if uses_holder(s):
+                    ok[0] = False
+                v = getattr(s, "value", None) or getattr(s, "exc", None)
+                effects(v, g)
+                loose.update(_names_in(v))
+                if isinstance(s, (ast.Raise, ast.Break, ast.Continue)):
+                    extra |= g
             else:
-                for field in ("body", "orelse", "finalbody"):
-                    inner = getattr(s, field, None)
-                    if isinstance(inner, list) and inner and isinstance(inner[0], ast.stmt):
-                        visit(inner, guard)
+                ok[0] = False  # a statement this reading does not know (match, import inside, ...)
+            if _has_exit(s) and not isinstance(s, ast.Return):
+                extra |= _tests_in(s)  # code after a condition that may leave early depends on that condition
+        return extra
 
-    visit(fn.body, set())
+    visit(fn.body, set(), True)
     if not ok[0] or not keys:
         return None
-    for n in ast.walk(fn):  # a key computed at run time, written into a variable that holds results
-        if (isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Store) and isinstance(n.value, ast.Name) and n.value.id in holders
-                and not (isinstance(n.slice, ast.Constant) and isinstance(n.slice.value, str))):
+    if holder:
+        # every mention of the holder must have been one of the allowed uses: count them
+        allowed = 1 + sum(1 for n in nodes if isinstance(n, ast.Subscript) and isinstance(n.value, ast.Name) and n.value.id == holder
+                          and isinstance(n.ctx, ast.Store)) \
+            + sum(1 for n in nodes if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "setdefault"
+                  and isinstance(n.func.value, ast.Name) and n.func.value.id == holder) \
+            + sum(1 for n in nodes if isinstance(n, ast.Return) and isinstance(n.value, ast.Name) and n.value.id == holder)
+        if sum(1 for n in nodes if isinstance(n, ast.Name) and n.id == holder) != allowed:
             return None
-    if any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in _DYNAMIC_CALLS for n in ast.walk(fn)):
-        return None
-    if any(isinstance(n, ast.keyword) and n.arg is None for n in ast.walk(fn)):
-        return None  # ``**`` hands over results FI cannot name
     out: dict[str, set[str]] = {}
+    covered: set[str] = set()
     for key, names in keys.items():
         seen, todo = set(), list(names)
         while todo:
@@ -489,4 +595,6 @@ def result_key_names(path: Path, function: str) -> dict[str, set[str]] | None:
             seen.add(n)
             todo.extend(deps.get(n, ()))
         out[key] = seen
+        covered |= seen
+    out[UNUSED_KEY] = {n for n in _names_in(fn) if n not in covered} | loose
     return out

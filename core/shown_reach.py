@@ -737,9 +737,10 @@ class Reach:
         for r in self._study_files():
             for n in _function_names(self.code, r):
                 where.setdefault(n, []).append(r)
+        where_files = {r for r in self._study_files()}
         ids: set[str] = set()
         for key, names in keys.items():
-            hit = judged in names
+            hit = judged in names and file not in where_files
             for n in sorted(names):
                 if hit:
                     break
@@ -750,6 +751,8 @@ class Reach:
                     if (r, n) == (file, judged) or (file, judged) in got:
                         hit = True
                         break
+            if hit and key == _reach.UNUSED_KEY:
+                return None  # the helper is called where no result's value is worked out from it: what it changes is not known
             if hit:
                 ids |= self._key_ids(key, False) | self._reading(key, False)
         return ids or None

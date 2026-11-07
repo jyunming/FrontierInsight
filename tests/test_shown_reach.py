@@ -589,3 +589,45 @@ def test_a_helper_reached_through_another_helper_of_the_trial_is_tied_to_the_res
     out, record = _run(_engine(tmp_path), HELPER, file="model.py", function="helper_for_trial", quantity="est_a", files=files)
     assert out is None
     assert record["issues"]["F-1"]["at_gate"]["keys"][0] == "est_b"
+
+
+# ---- the narrowing is sound: a trial that is not understood completely ties the helper to every result of the trial --------------------
+def _unplaced_when(tmp_path: Path, src: str) -> None:
+    """The helper also feeds the main result est_a in a way a reading by names must not miss (it plainly feeds est_b, so a narrowing
+    that trusts the part it understood would leave only est_b out): the gate stops, est_a being among what it changes."""
+    out, _ = _run(_engine(tmp_path), HELPER, file="model.py", function="helper_for_trial", quantity="est_a", files={"simulate.py": src})
+    assert _stops(out)
+
+
+def test_a_helper_that_changes_the_results_through_a_call_handed_the_holder_is_not_missed(tmp_path: Path) -> None:
+    _unplaced_when(tmp_path, "import model\n\n\ndef fill(o):\n    o['est_a'] = model.helper_for_trial(1)\n\n\n"
+                             "def trial(cell, ctx):\n    out = {}\n    fill(out)\n    out['est_b'] = model.helper_for_trial(2)\n    return out\n")
+
+
+def test_a_helper_in_a_closure_that_writes_the_results_is_not_missed(tmp_path: Path) -> None:
+    _unplaced_when(tmp_path, "import model\n\n\ndef trial(cell, ctx):\n    out = {}\n\n    def put():\n        out['est_a'] = model.helper_for_trial(1)\n\n"
+                             "    put()\n    out['est_b'] = model.helper_for_trial(2)\n    return out\n")
+
+
+def test_a_helper_in_a_dict_literal_the_results_start_from_is_tied_to_that_key(tmp_path: Path) -> None:
+    _unplaced_when(tmp_path, "import model\n\n\ndef trial(cell, ctx):\n    out = {'est_a': model.helper_for_trial(1)}\n    out['est_b'] = model.helper_for_trial(2)\n    return out\n")
+
+
+def test_a_helper_in_a_setdefault_before_the_holder_is_otherwise_used_is_tied_to_that_key(tmp_path: Path) -> None:
+    _unplaced_when(tmp_path, "import model\n\n\ndef trial(cell, ctx):\n    out = {}\n    out.setdefault('est_a', model.helper_for_trial(1))\n"
+                             "    out['est_b'] = model.helper_for_trial(2)\n    return out\n")
+
+
+def test_a_condition_of_an_early_return_is_a_dependency_of_what_follows_it(tmp_path: Path) -> None:
+    _unplaced_when(tmp_path, "import model\n\n\ndef trial(cell, ctx):\n    out = {}\n    out['est_b'] = model.helper_for_trial(2)\n    if model.helper_for_trial(1) > 0:\n"
+                             "        return out\n    out['est_a'] = 1.0\n    return out\n")
+
+
+def test_a_dynamic_key_written_through_an_alias_is_not_missed(tmp_path: Path) -> None:
+    _unplaced_when(tmp_path, "import model\n\n\ndef trial(cell, ctx):\n    out = {}\n    alias = out\n    name = 'est_' + 'a'\n"
+                             "    alias[name] = model.helper_for_trial(1)\n    out['est_b'] = model.helper_for_trial(2)\n    return out\n")
+
+
+def test_a_helper_called_where_no_result_is_worked_out_from_it_is_not_dropped(tmp_path: Path) -> None:
+    _unplaced_when(tmp_path, "import model\n\n\ndef trial(cell, ctx):\n    out = {}\n    model.helper_for_trial(1)\n    out['est_b'] = model.helper_for_trial(2)\n"
+                             "    out['est_a'] = 1.0\n    return out\n")
