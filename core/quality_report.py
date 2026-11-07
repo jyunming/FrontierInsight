@@ -728,8 +728,10 @@ def _paper_problems(q: _Quest) -> list[dict[str, str]]:
     # A series the figure's code declared as a result of the plan but whose values are not FI's record of it: it is drawn
     # and described as a computed value, and this line says so.
     for f in _ftc.quest_neutral_declared(q.root):
-        out.append(_problem("figure", f"Figure {f['number']}: a series declared as {_one(f['label'], 80)} does not match FI's record "
-                            "of that result; it is drawn as a computed value.", "FI's check of the figure's values against "
+        said = ("does not match FI's record of that result" if f["checked"] == "differs"
+                else "could not be checked against FI's record of that result")
+        out.append(_problem("figure", f"Figure {f['number']}: a series declared as {_one(f['label'], 80)} {said}; "
+                            "it is drawn as a computed value.", "FI's check of the figure's values against "
                             "its record", "left out", str(f.get("record") or "")))
     claim_model = _first_model(q.calls, ("claim_check",)) or "claim check"
     rec = q.receipts.get("claim_check")

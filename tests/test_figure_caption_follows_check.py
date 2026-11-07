@@ -63,7 +63,7 @@ def test_a_series_that_is_not_the_declared_result_is_described_as_a_computed_val
     assert "Growth rate" not in text and "computed value" in text
     assert h.axes[0].get_ylabel() == frame_figure.NEUTRAL_Y
     s = h.record()["panels"][0]["series"][0]
-    assert s["declared_as"] == {"id": "growth", "label": "Growth rate"}
+    assert s["declared_as"] == {"id": "growth", "label": "Growth rate", "checked": "differs"}
     assert s["level"]["declared_as"] == "growth" and s["level"]["result_label"] == frame_figure.NEUTRAL_Y
 
 
@@ -75,11 +75,11 @@ def test_a_series_that_is_the_declared_result_keeps_its_label_in_caption_and_axi
     assert "declared_as" not in s and s["level"]["result"] == "growth"
 
 
-def _quest(tmp_path, matching):
+def _quest(tmp_path, matching, host=None):
     root = tmp_path / "q"
     (root / ".fi" / "figure_records").mkdir(parents=True)
     (root / "paper").mkdir()
-    h = _draw(matching)
+    h = host or _draw(matching)
     (root / ".fi" / "figure_records" / "g2.calls.json").write_text(json.dumps(h.record()), encoding="utf-8")
     (root / "paper" / "paper.md").write_text("![First.](figures/g1.png)\n\n![Second.](figures/g2.png)\n", encoding="utf-8")
     return root
@@ -110,3 +110,47 @@ def test_two_declared_results_that_do_not_match_stay_two_numbered_groups_on_one_
     assert "2 curves of computed value 1, one per Temperature (K)" in text
     assert "2 curves of computed value 2, one per Temperature (K)" in text
     assert len({e["label"] for e in h.record()["panels"][0]["series"]}) == 4  # no two curves share a legend name
+
+
+def test_a_series_that_could_not_be_compared_is_not_said_to_differ(tmp_path):
+    h = _Host()
+    h.derived_ids = ["ratio"]  # a quantity the study computes: FI holds no table value of it to compare with
+    h.labels = {**h.labels, "ratio": "Growth ratio"}
+    for t in (10, 20):
+        h.line(0, t, [1, 2, 3], [0.5, 0.6, 0.7], "ratio")
+    h.finish({}, {})
+    assert "Growth ratio" not in _caption(h) and "computed value" in _caption(h)
+    assert h.record()["panels"][0]["series"][0]["declared_as"]["checked"] == "not compared"
+    found = quality_report._paper_problems(quality_report._Quest(_quest(tmp_path, False, h)))
+    lines = [p["text"] for p in found if "declared as" in p["text"]]
+    assert lines == ["Figure 2: a series declared as Growth ratio could not be checked against FI's record of that result; "
+                     "it is drawn as a computed value."]
+
+
+def test_a_series_that_was_compared_and_differs_is_said_to_differ():
+    h = _draw(False)
+    assert h.record()["panels"][0]["series"][0]["declared_as"]["checked"] == "differs"
+
+
+def test_a_matched_line_and_unmatched_points_of_one_level_have_two_legend_entries():
+    h = _Host()
+    h.line(0, 10, [1, 2, 3], [10.0, 11.0, 12.0], "growth")  # the table's values
+    h.points(0, 10, [1, 2, 3], [5e-10, 6e-10, 7e-10], "growth")  # not the table's values
+    h.finish({}, {})
+    entries = list(h.record()["legend"]["entries"]) if h.record().get("legend") else [t.get_text() for t in h.axes[0].get_legend().get_texts()]
+    assert len(entries) == 2, entries
+    assert sorted(e.split(",")[0] for e in entries) == ["Growth rate", "computed value"], entries
+
+
+def test_the_numbers_of_computed_values_skip_a_name_a_label_already_has():
+    h = _Host()
+    h.table.declared = ["growth", "spread", "rate"]
+    h.labels = {**h.labels, "spread": "computed value 1", "rate": "Rate"}
+    for t in (10, 20):
+        h.line(0, t, [1, 2, 3], [t, t + 1.0, t + 2.0], "spread")  # the table's values, and a plan label that reads like a number
+        h.line(0, t, [1, 2, 3], [5e-10, 6e-10, 7e-10], "growth")
+        h.line(0, t, [1, 2, 3], [8e-10, 9e-10, 9.5e-10], "rate")
+    h.finish({}, {})
+    text = _caption(h)
+    assert "2 curves of computed value 2," in text and "2 curves of computed value 3," in text, text
+    assert text.count("computed value 1") == 1, text  # the matched result's own label

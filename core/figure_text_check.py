@@ -164,5 +164,6 @@ def quest_neutral_declared(root: Path) -> list[dict[str, Any]]:
                 if isinstance(got, dict) and got.get("id") and str(got["id"]) not in seen:
                     seen.add(str(got["id"]))
                     out.append({"file": name, "number": number, "label": str(got.get("label") or got["id"]),
+                                "checked": "differs" if got.get("checked", "differs") == "differs" else "not compared",
                                 "record": rec_path.relative_to(root).as_posix()})
     return out

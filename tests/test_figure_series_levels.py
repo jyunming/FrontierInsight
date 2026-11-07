@@ -266,3 +266,26 @@ def test_a_claim_about_a_level_curve_in_the_paper_is_filled_and_a_false_one_is_n
     assert "Temperature (K) = 20 increases over the drawn points" in good.text and not good.unfilled
     bad = paper_facts.render("A. {{figure:gr:identical @ a=growth@temp:10, b=growth@temp:20, panel=1}} B.", tmp_path)
     assert bad.unfilled == ("figure:gr:identical",)
+
+
+# ---- a curve whose values are not the table's is named for what it is ---------------------------------------------------------
+
+def test_curves_whose_values_are_not_the_tables_are_captioned_and_legended_as_a_computed_value():
+    h = _Host()
+    for t in (10, 20, 30):
+        h.line(0, t, [1, 2, 3], [1.0 + t, 2.0, 3.0], "growth")  # not the table's value of the result
+    series = h.record()["panels"][0]["series"]
+    assert "3 curves of computed value, one per Temperature (K)" in _caption(h)
+    assert "Growth" not in _caption(h)
+    h.finish({}, {})
+    assert _legend_texts(h) == [s["label"] for s in series] == ["Temperature (K) = %d" % t for t in (10, 20, 30)]
+
+
+def test_many_curves_that_are_not_the_tables_values_say_the_range_of_a_computed_value():
+    temps = tuple(range(1, 21))
+    h = _Host(temps)
+    for t in temps:
+        h.line(0, t, [1, 2, 3], [t * 1e-10, 2e-10, 3e-10], "growth")  # no value of the table's
+    h.finish({}, {})
+    assert _legend_texts(h) == ["Temperature (K) = 1", "Temperature (K) = 20"]
+    assert "20 curves of computed value, one per Temperature (K) (from 1 to 20" in _caption(h)
