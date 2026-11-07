@@ -353,3 +353,140 @@ def never_run(code_dir: Path, file: str, function: str, *, scripts: list[str], h
         return False
     done = reached(code_dir, scripts=scripts, harness=harness)
     return done is not None and (file, judged) not in done
+
+
+def _names_in(node: ast.AST | None) -> set[str]:
+    """Every name an expression uses: a variable, a function (called or only mentioned) and an attribute."""
+    out: set[str] = set()
+    for n in ast.walk(node) if node is not None else ():
+        if isinstance(n, ast.Name):
+            out.add(n.id)
+        elif isinstance(n, ast.Attribute):
+            out.add(n.attr)
+    return out
+
+
+def _bases(target: ast.AST) -> set[str]:
+    """The variables an assignment target changes: ``a``, ``a, b``, ``a[i]``, ``a.b`` (the variable it changes is ``a``)."""
+    if isinstance(target, ast.Name):
+        return {target.id}
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return {b for e in target.elts for b in _bases(e)}
+    if isinstance(target, ast.Starred):
+        return _bases(target.value)
+    if isinstance(target, (ast.Subscript, ast.Attribute)):
+        return _bases(target.value)
+    return set()
+
+
+def result_key_names(path: Path, function: str) -> dict[str, set[str]] | None:
+    """For a function that builds its returned results key by key (``out["k"] = expr``, or a dict literal it returns), the
+    names (variables, functions, attributes) each key's value depends on, read from the code alone: what the expression names,
+    what the variables it names were assigned from (in any statement, whatever its order), and what the conditions around the
+    assignment name. ``{key: names}``; ``None`` when FI cannot read the function so: it is not found, a key is computed, a result
+    is added with ``update`` or ``**``, or a ``return`` hands back something other than the results it built.
+
+    This is a dependency of names, not a run: a value changed through a module-level variable another function sets is not
+    followed."""
+    try:
+        tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, ValueError, UnicodeDecodeError):
+        return None
+    fn = next((n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == function), None)
+    if fn is None:
+        return None
+    deps: dict[str, set[str]] = {}
+    keys: dict[str, set[str]] = {}
+    holders: set[str] = set()  # the variables the results are written into
+    ok = [True]
+
+    def add(var_names: set[str], names: set[str]) -> None:
+        for v in var_names:
+            deps.setdefault(v, set()).update(names)
+
+    def visit(stmts: list[ast.stmt], guard: set[str]) -> None:
+        for s in stmts:
+            if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                add({s.name}, _names_in(s))  # a nested function is used by name: what it names is what the name stands for
+                continue
+            if isinstance(s, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                targets = s.targets if isinstance(s, ast.Assign) else [s.target]
+                value = _names_in(getattr(s, "value", None)) | guard
+                if isinstance(s, ast.AugAssign):
+                    value |= _names_in(s.target)
+                for t in targets:
+                    if (isinstance(t, ast.Subscript) and isinstance(t.slice, ast.Constant) and isinstance(t.slice.value, str)
+                            and isinstance(t.value, ast.Name)):
+                        keys.setdefault(t.slice.value, set()).update(value)
+                        holders.add(t.value.id)
+                    elif isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and t.value.id in holders:
+                        ok[0] = False  # a key computed at run time: FI cannot tell which result it is
+                    add(_bases(t), value | _names_in(t))
+            elif isinstance(s, ast.Return):
+                v = s.value
+                if isinstance(v, ast.Dict):
+                    for k, val in zip(v.keys, v.values):
+                        if k is None or not (isinstance(k, ast.Constant) and isinstance(k.value, str)):
+                            ok[0] = False
+                        else:
+                            keys.setdefault(k.value, set()).update(_names_in(val) | guard)
+                elif v is not None and not (isinstance(v, ast.Constant) or (isinstance(v, ast.Name) and v.id in holders)):
+                    ok[0] = False
+            elif isinstance(s, (ast.If, ast.While)):
+                inner = guard | _names_in(s.test)
+                visit(s.body, inner)
+                visit(s.orelse, inner)
+            elif isinstance(s, (ast.For, ast.AsyncFor)):
+                inner = guard | _names_in(s.iter)
+                add(_bases(s.target), inner)
+                visit(s.body, inner)
+                visit(s.orelse, inner)
+            elif isinstance(s, (ast.With, ast.AsyncWith)):
+                for item in s.items:
+                    if item.optional_vars is not None:
+                        add(_bases(item.optional_vars), _names_in(item.context_expr) | guard)
+                visit(s.body, guard)
+            elif isinstance(s, ast.Try):
+                visit(s.body, guard)
+                for h in s.handlers:
+                    visit(h.body, guard)
+                visit(s.orelse, guard)
+                visit(s.finalbody, guard)
+            elif isinstance(s, ast.Expr) and isinstance(s.value, ast.Call):
+                call = s.value
+                names = _names_in(call) | guard
+                if isinstance(call.func, ast.Attribute) and call.func.attr in ("update", "setdefault") and isinstance(call.func.value, ast.Name) \
+                        and call.func.value.id in holders:
+                    ok[0] = False
+                if isinstance(call.func, ast.Attribute):
+                    add(_bases(call.func.value), names)  # ``x.append(f())`` changes ``x``
+            elif isinstance(s, ast.Global):
+                ok[0] = False
+            else:
+                for field in ("body", "orelse", "finalbody"):
+                    inner = getattr(s, field, None)
+                    if isinstance(inner, list) and inner and isinstance(inner[0], ast.stmt):
+                        visit(inner, guard)
+
+    visit(fn.body, set())
+    if not ok[0] or not keys:
+        return None
+    for n in ast.walk(fn):  # a key computed at run time, written into a variable that holds results
+        if (isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Store) and isinstance(n.value, ast.Name) and n.value.id in holders
+                and not (isinstance(n.slice, ast.Constant) and isinstance(n.slice.value, str))):
+            return None
+    if any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in _DYNAMIC_CALLS for n in ast.walk(fn)):
+        return None
+    if any(isinstance(n, ast.keyword) and n.arg is None for n in ast.walk(fn)):
+        return None  # ``**`` hands over results FI cannot name
+    out: dict[str, set[str]] = {}
+    for key, names in keys.items():
+        seen, todo = set(), list(names)
+        while todo:
+            n = todo.pop()
+            if n in seen:
+                continue
+            seen.add(n)
+            todo.extend(deps.get(n, ()))
+        out[key] = seen
+    return out

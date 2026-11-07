@@ -11,7 +11,11 @@ from typing import Any
 from core.rerun_check import Verdict
 from tests.test_shown_reach import DERIVE_COVER, _engine, _quest, _run, _stops
 
-#: A helper that only the trial calls: the call graph ties it to every result the trial makes, to none in particular.
+#: A helper that only the trial calls, in a trial whose result keys are built in a loop (the code does not say which key it feeds):
+#: the call graph ties it to every result the trial makes, to none in particular.
+LOOPED_TRIAL = {"simulate.py": (
+    "import model\n\n\ndef trial(cell, ctx):\n    out = {}\n    for k in ('est_a', 'est_b', 'se_a', 'lo_a', 'hi_a'):\n"
+    "        out[k] = model.helper_for_trial(1)\n    return out\n")}
 HELPER = "from model import helper_for_trial\n\n\ndef test_x():\n    assert helper_for_trial(1) == 2, 'wrong'\n"
 TRIAL_KEY = "import simulate\n\n\ndef test_x():\n    r = simulate.trial({}, None)\n    assert r['est_b'] == 1.0, 'wrong'\n"
 
@@ -28,7 +32,7 @@ def _helper_gate(tmp_path: Path, verdict: Verdict | None, headline: tuple[str, .
         return {} if verdict is None else {str(i["id"]): verdict for i, _h in verdicts}
 
     engine._rerun_shown = answers  # type: ignore[method-assign,assignment]
-    return _run(engine, HELPER, file="model.py", function="helper_for_trial", quantity=quantity, headline=headline)
+    return _run(engine, HELPER, file="model.py", function="helper_for_trial", quantity=quantity, headline=headline, files=LOOPED_TRIAL)
 
 
 def _missing_gate(tmp_path: Path, name: str, not_computed: tuple[str, ...] = (),

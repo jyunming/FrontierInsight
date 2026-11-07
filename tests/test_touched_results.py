@@ -81,7 +81,8 @@ def test_a_finding_marks_the_results_its_function_reaches_not_the_words_it_uses(
         _v("x", "est_a is wrong", "model.py", "no_such_function"))
     assert got["d"] == ["cover"], "a derive_<id> marks exactly that id; the words of the finding mark nothing"
     assert got["h"] == ["cover"]
-    assert set(got["t"]) >= {"est_a", "est_b"} and "cover" not in got["t"]
+    # the trial's own code says which value is worked out with the helper: est_a (and corr_ab, worked out from it), not est_b
+    assert set(got["t"]) >= {"est_a", "corr_ab"} and "est_b" not in got["t"] and "cover" not in got["t"]
     assert "u" not in got, "a helper nothing reaches marks none, whatever its text says"
     assert "w" not in got and "x" not in got, "no file and function FI finds in the code: nothing is marked"
 

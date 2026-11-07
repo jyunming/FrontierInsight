@@ -546,3 +546,46 @@ def test_a_literal_key_that_is_the_main_result_stops_and_an_undeclared_key_place
     reach = shown_reach.Reach(root, frozen_protocol.protocol_of(root), ["est_a"], [])
     issue = {"id": "F-1", "test": ".fi/finding_tests/F-1_1.py", "quantity": "est_b", "function": ""}
     assert reach.effect({"issues": {"F-1": issue}}, issue, RESULT) is None
+
+
+# ---- a helper of the trial is tied to the results whose value is worked out with it -----------------------------------------------------
+TRIAL_KEYS = ("import model\n\n\ndef trial(cell, ctx):\n    out = {}\n    x = model.helper_for_trial(1)\n    y = x * 2\n"
+              "    out['est_b'] = y\n    out['est_a'] = 1.0\n    out['se_a'] = 0.5\n    return out\n")
+
+
+def test_a_helper_only_one_result_of_the_trial_is_worked_out_with_leaves_that_result_out(tmp_path: Path) -> None:
+    # the helper feeds est_b through two assignments; the main result est_a does not use it. The call graph alone (the trial reaches
+    # it) ties it to every result of the trial; the trial's own code says which value is worked out with it.
+    out, record = _run(_engine(tmp_path), HELPER, file="model.py", function="helper_for_trial", quantity="est_a",
+                       files={"simulate.py": TRIAL_KEYS})
+    assert out is None
+    assert record["issues"]["F-1"]["at_gate"]["keys"][0] == "est_b"
+    assert "est_a" not in record["issues"]["F-1"]["at_gate"]["keys"]
+
+
+def test_a_helper_the_main_result_is_worked_out_with_through_the_trial_still_stops(tmp_path: Path) -> None:
+    src = TRIAL_KEYS.replace("out['est_a'] = 1.0", "out['est_a'] = x + 1.0")
+    out, _ = _run(_engine(tmp_path), HELPER, file="model.py", function="helper_for_trial", quantity="est_a", files={"simulate.py": src})
+    assert _stops(out)
+
+
+def test_a_helper_that_decides_by_a_condition_which_result_is_returned_reaches_what_the_condition_guards(tmp_path: Path) -> None:
+    src = ("import model\n\n\ndef trial(cell, ctx):\n    out = {}\n    if model.helper_for_trial(1) > 0:\n        out['est_a'] = 1.0\n"
+           "    out['est_b'] = 2.0\n    return out\n")
+    out, _ = _run(_engine(tmp_path), HELPER, file="model.py", function="helper_for_trial", quantity="est_a", files={"simulate.py": src})
+    assert _stops(out)
+
+
+def test_a_trial_whose_keys_are_computed_keeps_the_helper_tied_to_every_result_of_the_trial(tmp_path: Path) -> None:
+    src = ("import model\n\n\ndef trial(cell, ctx):\n    out = {}\n    for k in ('est_a', 'est_b'):\n        out[k] = model.helper_for_trial(1)\n"
+           "    return out\n")
+    out, _ = _run(_engine(tmp_path), HELPER, file="model.py", function="helper_for_trial", quantity="est_a", files={"simulate.py": src})
+    assert _stops(out)
+
+
+def test_a_helper_reached_through_another_helper_of_the_trial_is_tied_to_the_results_that_use_that_helper(tmp_path: Path) -> None:
+    files = {"simulate.py": ("import model\n\n\ndef _inner(x):\n    return model.helper_for_trial(x)\n\n\ndef trial(cell, ctx):\n"
+                             "    out = {}\n    out['est_b'] = _inner(3)\n    out['est_a'] = 1.0\n    return out\n")}
+    out, record = _run(_engine(tmp_path), HELPER, file="model.py", function="helper_for_trial", quantity="est_a", files=files)
+    assert out is None
+    assert record["issues"]["F-1"]["at_gate"]["keys"][0] == "est_b"
