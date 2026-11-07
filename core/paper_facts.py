@@ -1535,6 +1535,9 @@ def answers_text(quest_root: Path | str) -> str:
         conflict = next((m["unit_conflict"] for m in _topic_req.map_entries(req, plan, "quantities", item)
                          if m.get("unit_conflict")), None)
         mapped = _topic_req.mapping_of(req, plan, "quantities", item)
+        if isinstance(conflict, str):  # a plan written before the units were kept as a pair: read as it always was
+            lines.append(f"- {name}: not answered ({conflict})")
+            continue
         if conflict:
             unit_spans.append((len(starts) - 1, conflict, mapped))
         # The plan's explicit map to a metric that exists is the fact; the line names that metric, so a wrong map is
@@ -1664,12 +1667,61 @@ def answers_text(quest_root: Path | str) -> str:
     return ("**Answers to the questions asked.**" + chr(10) * 2 + chr(10).join(lines)) if lines else ""
 
 
+def _unit_words(conflict: dict[str, Any]) -> list[str]:
+    """``[the result's unit, the unit asked]`` in words (a pure number is said so)."""
+    return [("a pure number (no unit)" if str(conflict.get(k) or "").strip() in ("", "1") else str(conflict.get(k)).strip())
+            for k in ("result", "asked")]
+
+
+def unit_conflicts(quest_root: Path | str) -> list[dict[str, Any]]:
+    """The questions the plan answers with a result in another unit than the question asks in, from the plan's own
+    ``topic_map`` (``unit_conflict``): ``{"name", "conflict", "metric", "valued"}``. ``conflict`` is the record (a pair of units, or
+    the old text of a plan written before the pair); ``valued``: FI holds a value for the result, so the Answers block prints it with
+    both units. This one record is what the Answers block, the writers' facts and the quality report each read."""
+    from . import topic_requirements as _topic_req
+
+    root = Path(quest_root)
+    req = _read(root, f".fi/{_topic_req.FILE}")
+    protocol = plan_protocol(root)
+    asked = [q for q in (req.get("quantities") if isinstance(req, dict) else None) or [] if isinstance(q, dict) and q.get("main") is True]
+    if not asked or not isinstance(protocol, dict):
+        return []
+    plan = _topic_req.view({}, protocol)
+    rec = _values.records_of(root, protocol)
+    out: list[dict[str, Any]] = []
+    for item in asked:
+        name = " ".join(str(item.get("name") or "").split())
+        conflict = next((m["unit_conflict"] for m in _topic_req.map_entries(req, plan, "quantities", item) if m.get("unit_conflict")), None)
+        if not name or not conflict:
+            continue
+        mapped = _topic_req.mapping_of(req, plan, "quantities", item)
+        metric = mapped[1] if mapped is not None and mapped[0] in ("ok", "judge") else ""
+        valued = (isinstance(conflict, dict) and rec is not None and bool(rec.cells) and bool(metric) and metric not in rec.by_run
+                  and (metric in rec.metrics() or metric in rec.answers))
+        out.append({"name": name, "conflict": conflict, "metric": metric, "valued": valued})
+    return out
+
+
+def unit_notes(quest_root: Path | str) -> list[str]:
+    """One sentence for each answer given in another unit than the question asks in, for a writer of the paper, the slides or
+    the poster: the result's own unit and that FI did not convert it (from :func:`unit_conflicts`, the record the Answers block reads)."""
+    root = Path(quest_root)
+    protocol = plan_protocol(root)
+    plain = _plain_in(protocol, root) if isinstance(protocol, dict) else (lambda m: m)
+    out = []
+    for u in unit_conflicts(root):
+        if u["valued"]:
+            said = _unit_words(u["conflict"])
+            out.append(f"The answer to \"{u['name']}\" is the result \"{plain(u['metric'])}\", which is in {said[0]}; the question asks "
+                       f"in {said[1]}, and FI did not convert it. Wherever you give this answer, give it in the result's own unit, "
+                       "never in the unit the question asks in.")
+    return out
+
+
 def _unit_sentence(conflict: Any, metric: str, rec: Any, plain: Any) -> str:
     """The sentence after an answer whose result is in another unit than the question asks in: the result, its unit (the plan's
     own where the plan declares one, else the unit the plan states for it) and the unit asked; FI converts nothing."""
-    if not isinstance(conflict, dict):  # a plan written before the units were kept as a pair
-        return f" (note: {str(conflict).strip()}; FI did not convert it)"
-    said = [("a pure number (no unit)" if str(u).strip() in ("", "1") else str(u).strip()) for u in (conflict.get("result"), conflict.get("asked"))]
+    said = _unit_words(conflict)
     result = f"\"{plain(metric)}\"" if metric else "this result"
     lead = "the result used" if conflict.get("declared") else "the plan states that the result used"
     return f" ({lead}, {result}, is in {said[0]}; the question asks in {said[1]}, and FI did not convert it)"
@@ -2312,6 +2364,7 @@ def writer_section(quest_root: Path | str, *, topic: str = "", fallback_s: Any =
         lines.append("{{answers}}: FI's list of the quantities the topic asks for, each with its value from FI's records "
                      "(and its interval where one exists) or said as not answered. FI puts it before the discussion when the "
                      "paper is saved. The block carries its own heading: do not type these values and do not refer to the block.")
+        lines.extend(unit_notes(root))
     if real:
         lines.append("Limitations: FI adds the list below to the end of your Limitations section when the paper is saved "
                      "(or where you put {{limitations}} on a line of its own), from its records. It reads now:")

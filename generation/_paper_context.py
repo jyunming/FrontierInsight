@@ -76,12 +76,26 @@ def paper_and_claims(paper_md: str, quest_root: Path | str | None, paper_file: P
     except OSError:
         paper_bytes = None
     state, lines = _ledger(quest_root, paper_bytes)
+    units = _unit_section(quest_root)
     if state == "used":
         section = (_AGENTS / "claims_list.md").read_text(encoding="utf-8").replace("$claims", "\n".join(lines))
-        return PaperContext(paper_md, (_AGENTS / "claims_rule.md").read_text(encoding="utf-8"), section, len(lines), state)
+        return PaperContext(paper_md, (_AGENTS / "claims_rule.md").read_text(encoding="utf-8"), section + units, len(lines), state)
     if state == "no_confirmed_claim":
-        return PaperContext(paper_md, (_AGENTS / "claims_none.md").read_text(encoding="utf-8"), "", 0, state)
-    return PaperContext(paper_md, "", "", 0, state)
+        return PaperContext(paper_md, (_AGENTS / "claims_none.md").read_text(encoding="utf-8"), units, 0, state)
+    return PaperContext(paper_md, "", units, 0, state)
+
+
+def _unit_section(quest_root: Path | str | None) -> str:
+    """FI's note, for the slides, poster and speech writers, of each answer given in another unit than the question asks in
+    (from the plan's record the paper's Answers block reads); empty when there is none."""
+    if not quest_root:
+        return ""
+    try:
+        notes = _paper_facts.unit_notes(quest_root)
+    except Exception as exc:  # noqa: BLE001 -- the note is left out; the writer still has the paper's own Answers block
+        _log.warning("could not read the units of the answers (%s: %s)", type(exc).__name__, exc)
+        return ""
+    return ("\n\nUnits of the answers (FI's record; the paper states them too):\n" + "\n".join(f"- {n}" for n in notes)) if notes else ""
 
 
 def note_prompt_fit(prompt: str, kind: str, quest_root: Path | str | None, ctx: PaperContext) -> dict:

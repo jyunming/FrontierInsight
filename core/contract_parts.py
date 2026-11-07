@@ -506,11 +506,13 @@ def _apply_answers(p: dict[str, Any], design: dict[str, Any], answer: dict[str, 
                 m["statistic"] = stat
             else:
                 m.pop("statistic", None)  # the answer is the value: an earlier entry's bias or sd no longer holds
-            m["by"] = _refined_by(design["protocol"], str(m.get("by") or ""), by)
+            before_by = str(m.get("by") or "")
+            m["by"] = _refined_by(design["protocol"], before_by, by)
+            refined = m["by"] != before_by  # the answer's own result (worked out from the plan's) is the one used in the end
             m.pop("unit_conflict", None)
             if gone and not (ident in (conflicts or {}) or by == "none") and _same_unit(row.get("unit"), _unit_of(design, by, row.get("by_unit"))):
                 m["by"] = by  # the plan's result is in another unit and the answer names a result in the question's unit
-            elif ident in (conflicts or {}) or gone:
+            elif ident in (conflicts or {}) or gone or refined:
                 note = _unit_gap(design, row, str(m["by"]), planned, by)
                 if note:
                     m["unit_conflict"] = note

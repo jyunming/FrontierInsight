@@ -534,19 +534,26 @@ def _plan_problems(q: _Quest) -> list[dict[str, str]]:
 
 def _unit_problems(q: _Quest) -> list[dict[str, str]]:
     """A question the topic asks in one unit that the plan answers with a result in another (``unit_conflict`` on the plan's
-    ``topic_map`` entry): the paper answers it with that result and states both units, so it is listed once, as disclosed."""
-    from . import frozen_protocol as _frozen
+    ``topic_map`` entry), listed once. Status follows what the paper shows: the paper answers with that result and states both
+    units (``disclosed``); a result FI holds no value for, or a plan of the older form (the question printed as not answered),
+    is ``left out``."""
+    from . import paper_facts as _paper_facts
 
     out: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for m in _list(_dict(_frozen.protocol_of(q.root)).get("topic_map")):
-        m, gap = _dict(m), _dict(_dict(m).get("unit_conflict"))
-        item = str(m.get("item") or "")
-        if gap and item not in seen:
-            seen.add(item)
-            said = [("a pure number" if str(gap.get(k) or "").strip() in ("", "1") else str(gap.get(k)).strip()) for k in ("result", "asked")]
-            out.append(_problem("plan", f"the question \"{_one(item, 80)}\" asks in {said[1]}; the plan's result for it is in {said[0]} and "
+    try:
+        found = _paper_facts.unit_conflicts(q.root)
+    except Exception:  # noqa: BLE001 -- the report only reads; a record it cannot read leaves the row out
+        return out
+    for u in found:
+        name, gap = _one(u["name"], 80), u["conflict"]
+        if isinstance(gap, dict) and u["valued"]:
+            said = _paper_facts._unit_words(gap)
+            out.append(_problem("plan", f"the question \"{name}\" asks in {said[1]}; the plan's result for it is in {said[0]} and "
                                 "FI did not convert it", "FI's plan check", "disclosed", ".fi/contract_parts.json"))
+        else:
+            why = _one(gap, 120) if isinstance(gap, str) else "FI holds no value for the result the plan links to it"
+            out.append(_problem("plan", f"the question \"{name}\" is not answered in the paper ({why})", "FI's plan check",
+                                "left out", ".fi/contract_parts.json"))
     return out
 
 
