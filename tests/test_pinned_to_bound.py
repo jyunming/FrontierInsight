@@ -153,7 +153,62 @@ def test_only_the_record_of_this_run_is_used(tmp_path):
         {"key": "size=10", "rows": [{"status": "ok", "trial": 0, "values": values}]}]}
     path = tmp_path / ".fi" / "trials" / "run.json"
     path.write_text(json.dumps(record), encoding="utf-8")
-    assert tr.record_of_this_run(tmp_path, False) is None  # a run of a single script has no trial record of its own
-    assert tr.record_of_this_run(tmp_path, True)["size=10"]["score"]  # known positive
+    assert tr.record_of_this_run(tmp_path, False, "k") is None  # a run of a single script has no trial record of its own
+    assert tr.record_of_this_run(tmp_path, True, "k")["size=10"]["score"]  # known positive
     (tmp_path / "raw" / "ledger.jsonl").write_text("changed\n", encoding="utf-8")
-    assert tr.record_of_this_run(tmp_path, True) is None  # the ledger is no longer the one the record was written beside
+    assert tr.record_of_this_run(tmp_path, True, "k") is None  # the ledger is no longer the one the record was written beside
+
+
+def test_a_record_with_another_runs_key_is_not_this_runs(tmp_path):
+    import hashlib
+
+    from core import trial_runner as tr
+
+    values = {"score": 1.2}
+    digest = hashlib.sha256(json.dumps(values, sort_keys=True, allow_nan=True).encode("utf-8")).hexdigest()
+    (tmp_path / "raw").mkdir()
+    (tmp_path / ".fi" / "trials").mkdir(parents=True)
+    (tmp_path / "raw" / "ledger.jsonl").write_text(json.dumps(
+        {"event": "trial", "status": "ok", "cell": "size=10", "trial": 0, "values_sha256": digest}) + "\n", encoding="utf-8")
+    (tmp_path / "raw" / "trials.json").write_text("{}", encoding="utf-8")
+    record = {"key": "another", "files": tr._file_hashes(tmp_path), "cells": [
+        {"key": "size=10", "rows": [{"status": "ok", "trial": 0, "values": values}]}]}
+    (tmp_path / ".fi" / "trials" / "run.json").write_text(json.dumps(record), encoding="utf-8")
+    # the ledger and summary match the record and it holds a trial; the key is not the one this run's trial runner computed
+    assert tr.record_of_this_run(tmp_path, True, "another")["size=10"]["score"]  # known positive
+    assert tr.record_of_this_run(tmp_path, True, "this run") is None
+    assert tr.record_of_this_run(tmp_path, True, "") is None
+
+
+def test_a_statistic_named_anywhere_on_the_path_is_not_the_mean_and_a_neutral_key_is():
+    each = '{"%s": {"size=10": {"score": 1.0}, "size=20": {"score": 0.5}}}'
+    for ancestor in ("median", "ci", "bootstrap_interval"):
+        assert _pinned_by(each % ancestor, [1.0, 1.0, 1.0, 1.0, 2.0]) == [], ancestor
+    neutral = '{"size=10": {"summary": {"score": 1.0}}, "size=20": {"summary": {"score": 0.5}}}'
+    assert [v.kind for v in _pinned_by(neutral, [1.0, 1.0, 1.0, 1.0, 2.0])] == ["pinned"]
+
+
+def test_the_printed_text_reaches_the_next_node_of_a_compiled_graph():
+    import asyncio
+
+    from langgraph.graph import END, START, StateGraph
+
+    from core.engine import QuestState
+
+    seen = {}
+
+    def first(state):
+        return {"result_json": {"a": 1.0}, "result_json_text": '{"a": 1.000}'}
+
+    def second(state):
+        seen["text"] = state.get("result_json_text")
+        return {}
+
+    graph = StateGraph(QuestState)
+    graph.add_node("first", first)
+    graph.add_node("second", second)
+    graph.add_edge(START, "first")
+    graph.add_edge("first", "second")
+    graph.add_edge("second", END)
+    asyncio.run(graph.compile().ainvoke({}))
+    assert seen["text"] == '{"a": 1.000}'

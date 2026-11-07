@@ -783,6 +783,19 @@ def _printed_digits_allowance(printed: float) -> float:
     return (0.5 * 10.0 ** int(exponent) if isinstance(exponent, int) else 0.0) + 1e-11 * abs(float(printed))
 
 
+#: The statistics, other than a mean, that a key of a printed result may name: one closed list of words (the plain statistical
+#: terms), not a guess from the key's meaning. A number under a key with one of them as a word (``median``, ``ci_lo``,
+#: ``bootstrap_interval``) is that statistic, never the mean.
+_OTHER_STATISTICS = frozenset({
+    "median", "quantile", "quantiles", "percentile", "percentiles", "ci", "interval", "lo", "hi", "lower", "upper", "bound",
+    "bounds", "sd", "se", "std", "stderr", "sem", "min", "max", "count"})
+
+
+def _names_other_statistic(segment: Any) -> bool:
+    """Whether a path segment (a key of the printed result) has a word of :data:`_OTHER_STATISTICS`."""
+    return isinstance(segment, str) and any(w in _OTHER_STATISTICS for w in re.split(r"[^a-z0-9]+", segment.lower()))
+
+
 def _printed_summaries(result_json: Any, metric_id: str, grid: dict[str, list[Any]], *, strict: bool = False
                        ) -> list[tuple[frozenset[frozenset[tuple[str, Any]]], dict[str, Any], str]]:
     """The summary of ``metric_id`` the analysis prints for one setting, with the settings it names and where it is:
@@ -790,8 +803,7 @@ def _printed_summaries(result_json: Any, metric_id: str, grid: dict[str, list[An
     the setting's key (``by_setting`` / ``m=20,pi1=0.05`` / ``power_gain`` / ``{mean, se}``), a number under that name (its
     mean), or ``<metric>_se`` and the like beside it. The setting is read from the key path as a list's is
     (:func:`_path_cells`); a summary that names no setting, or only a part of the grid (the key may stand for one stratum of it),
-    is not read here. ``strict``: the key directly above the metric must itself name the setting (a number under another
-    statistic's key, ``median`` or ``ci``, is not the setting's mean)."""
+    is not read here. ``strict``: no key on the path names another statistic (:data:`_OTHER_STATISTICS`)."""
     def number(v: Any) -> bool:
         return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
@@ -814,8 +826,8 @@ def _printed_summaries(result_json: Any, metric_id: str, grid: dict[str, list[An
             stats = read(node.get(metric_id), node)
             pairs = _path_cells(path, grid) if stats else None
             named = frozenset(c for c in _all_cells(grid) if pairs <= c) if stats and pairs else frozenset()
-            if strict and named and not (path and _path_cells(path, grid) != _path_cells(path[:-1], grid)):
-                named = frozenset()  # the key above the metric names no setting (a median, an interval): not the setting's mean
+            if strict and named and any(_names_other_statistic(seg) for seg in path):
+                named = frozenset()  # a key on the way names another statistic (a median, an interval): not the setting's mean
             if len(named) == 1:  # one whole setting: a part of the grid may be a stratum of it the key does not name
                 found.append((named, stats, "/".join(_segment_text(x) for x in path + (metric_id,))))
             for k, v in node.items():

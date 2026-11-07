@@ -449,6 +449,7 @@ class QuestState(TypedDict, total=False):
     # downstream stay unchanged. ``_node_analyze`` reads this list
     # when present and aggregates numeric fields with mean ± std.
     result_json_replicates: list[dict[str, Any]]
+    result_json_text: str  # the text of the RESULT_JSON line the numbers were read from (the places each was printed to)
     result_json_trials: bool  # the one result holds every trial FI ran (the trial contract): pool it as the replicates
     # True when every configured seed ran and every one gave byte-identical
     # results while the script can draw random numbers (the replicates are kept).
@@ -11791,7 +11792,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 # FI's own record of each setting's trials, when it is this run's: what a reported value on a declared bound
                 # is held to (:func:`core.trial_runner.pinned_to_bound`).
                 state["_trial_record"] = _trial_runner.record_of_this_run(
-                    self.quest_root, bool(getattr(self, "_trial_mode", False)), self._log)
+                    self.quest_root, bool(getattr(self, "_trial_mode", False)), getattr(self, "_trial_run_key", ""), self._log)
         # When FI writes the analysis, state["code"] is FI's own experiment.py: what the checks read to learn what the study
         # did (a cap on a value) is the study's code, never FI's.
         study = _analysis_frame.study_code(self.quest_root / "code")
@@ -19589,6 +19590,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             manifest_attempts = int(state.get("run_manifest_failures", 0) or 0)
         from core import job_watch as _job_watch
 
+        self._trial_run_key = str(getattr(runner, "run_key", "") or "")  # this run's own trial key, from its runner
         _job = _job_watch.job_of(_extract_result_json(result.stdout or ""))
         if _job is not None and _job["status"] == _job_watch.PENDING and result.returncode == 0:
             # A job still running has recorded nothing yet: its record is checked when it is done.
@@ -19787,9 +19789,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # integrator tripped the gate three times over. With no repair attempt
         # left, though, nothing regenerates the result: it is the one the paper
         # is written from, so it still gets its error bars.
+        result_text = (_RESULT_LINE_RE.findall(result.stdout or "") or [""])[-1]
         gate_violations = (
             _assertion_violations(self._in_force({
-                **state, "result_json": result_json,
+                **state, "result_json": result_json, "result_json_text": result_text,
                 "manifest_failed_trials": getattr(self, "_manifest_failed_trials", None),
             }), self._walk_memo())
             if produced and result_json is not None
@@ -20044,7 +20047,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             "figure_records": figure_records,
             "result_json": result_json or {},
             # The text the numbers were read from: how many places each was printed to (core/trial_runner.py::parse_printed).
-            "result_json_text": (_RESULT_LINE_RE.findall(result.stdout or "") or [""])[-1],
+            "result_json_text": result_text,
             "exec_patch_pending": False,
         }
         if _phased.enabled(self.config):

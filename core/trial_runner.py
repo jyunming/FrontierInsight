@@ -1907,12 +1907,14 @@ class TrialsRunner:
             return await self.executor.execute(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
         started = time.monotonic()
         self.flat = None
+        self.run_key = ""
         self.trial_fault, self.left_out_settings = None, []
         base = int((env or {}).get("FI_REPLICATE_SEED") or 0)
         protocol = (self._protocol() if callable(self._protocol) else self._protocol) or {}
         grid = _search.study_grid(protocol)
         runs = int(protocol.get("runs_per_setting") or 1)
         key = _run_key(self.simulate, protocol, runs, base, self.deterministic)
+        self.run_key = key  # the run's own key: the record of its trials (:func:`record_of_this_run`) must carry it
         # Each trial number gets one seed across the settings only when the plan asks for common random numbers.
         paired = _mc.paired(protocol, self.quest_root)
         inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else None
@@ -4155,10 +4157,11 @@ def _printed_half_unit(value: Any) -> float:
     return 0.5 * 10 ** (-(places - int(exponent or 0)))
 
 
-def record_of_this_run(quest_root: Path | str, trial_mode: bool, log: Any = None) -> dict[str, dict[str, Counter]] | None:
+def record_of_this_run(quest_root: Path | str, trial_mode: bool, key: str = "", log: Any = None
+                       ) -> dict[str, dict[str, Counter]] | None:
     """FI's record of each setting's trials, when it is the record of the run being checked: the run went through FI's trial
-    runner (``trial_mode``; a run of a single script has none), which deletes the record when it starts and writes it again,
-    or checks its key against the simulation, the plan and the seed before it keeps the cached one; and the ledger and the
+    runner (``trial_mode``; a run of a single script has none) and the record carries ``key``, the key that run's trial runner
+    computed from the simulation, the plan and the seed (``TrialsRunner.run_key``, held in memory); and the ledger and the
     summary are still the files the record was written beside. Otherwise ``None`` (said at debug level)."""
     import logging
 
@@ -4171,7 +4174,10 @@ def record_of_this_run(quest_root: Path | str, trial_mode: bool, log: Any = None
         record = json.loads((root / RUN_RECORD).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if not isinstance(record, dict) or not record.get("key") or record.get("files") != _file_hashes(root):
+    if not key or not isinstance(record, dict) or record.get("key") != key:
+        say.debug("[pinned] the trial record is not the one this run's trial runner made: not used")
+        return None
+    if record.get("files") != _file_hashes(root):
         say.debug("[pinned] the trial record does not match the ledger and summary beside it: not used")
         return None
     return recorded_values_by_cell(root)[0] or None
@@ -4183,8 +4189,8 @@ def pinned_to_bound(result_json: Any, protocol: Any, assertions: Any, recorded_b
     give another. One ``plausibility.Violation`` (kind ``pinned``) each, with the plain repair instruction.
 
     Only FI's record decides: the mean (or proportion) the analysis prints for one whole setting under the metric's own name
-    (``core.run_manifest._printed_summaries`` with ``strict``: the key above the metric must itself name the setting, so a
-    median or an interval under another statistic's key is not read), the mean of that setting's recorded trials
+    (``core.run_manifest._printed_summaries`` with ``strict``: no key on its path names another statistic, so a median or an
+    interval is not read), the mean of that setting's recorded trials
     (:func:`record_of_this_run`), and the bound. A metric whose role is ``reference`` is not held to it. A value that merely
     differs from the record mean, not on a bound, is an aggregate the analysis chose and is never acted on. A per-trial
     quantity that is 0/1 has a record mean inside its bounds, so it never fires. A cap inside the trial leaves the record
