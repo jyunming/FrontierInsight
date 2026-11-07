@@ -22348,10 +22348,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                         "sufficient", "broaden", "insufficient"),
                 )
         except Exception as e:  # noqa: BLE001 — gate must never abort the quest
+            claim_stop: dict[str, Any] | None = None
             try:  # what the gate had not decided about a second model's claims is decided now, as if no rerun could be made
                 self._settle_undecided_reader_claims(state)
             except Exception as settle_exc:  # noqa: BLE001
-                self._log.warning("[evidence_gate] the second model's claims could not be settled (%r)", settle_exc)
+                # Failing closed: what cannot be settled is left out, and a leave-out that cannot be recorded stops the quest.
+                self._log.warning("[evidence_gate] the second model's claims could not be settled (%r); they are left out", settle_exc)
+                claim_stop = self._leave_out_undecided_claims(state, f"{type(settle_exc).__name__}: {settle_exc}"[:200])
             if gate_off:
                 # FI's own stop conditions could not be checked: the same route as a failed gate call (recorded as
                 # unknown, a gap in the evidence record), never a silent passthrough to the writer.
@@ -22363,6 +22366,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "[evidence_gate] assessment failed (%r); routing to write with "
                 "status=unknown (not sufficient)", e,
             )
+            if claim_stop is not None:
+                parsed, decided_by, status, failure = claim_stop, "rule", "ok", ""
         else:
             status, failure = "ok", ""
         verdict = str(parsed.get("verdict") or "").strip().lower()
@@ -23262,10 +23267,57 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             rc["say"] = "\n\n".join(paragraphs)
         _result_checks._keep_measured(rc, [c for c in rc.get("checks") or [] if any(
             c.get("quantity") == k.get("quantity") and c.get("kind") == k.get("kind") for k in kept)])
+        path.write_text(json.dumps(rc, indent=1), encoding="utf-8")  # a leave-out that is not recorded is not enforced: it raises
+
+    def _leave_out_undecided_claims(self, state: Any, why: str) -> dict[str, Any] | None:
+        """Settling the second model's claims failed: every key of every claim still undecided is left out (with the figures that
+        draw it, when those can be found), the writer is told not to report it and the quality report says FI could not decide
+        it. Returns the gate's stop when even that cannot be recorded, else ``None``."""
+        from . import result_checks as _result_checks
+
+        path = self.quest_root / "needs" / _result_checks.RECORD
         try:
+            rc = _result_checks._read_json(path)
+            undecided = [c for c in rc.get("checks") or [] if isinstance(c, dict) and c.get("kind") == "code_reader"
+                         and c.get("quantity") and not isinstance(c.get("measured"), dict)]
+            if not undecided:
+                return None
+            keys = {str(k) for c in undecided for k in c.get("keys") or []}
+            result = state.get("result_json") if isinstance(state, dict) else None
+            rc["removed_quantities"] = sorted({*(str(k) for k in rc.get("removed_quantities") or []), *keys})
+            try:
+                rc["removed_values"] = {**(rc.get("removed_values") or {}), **_result_checks._values_left_out(result, keys, self._derived_record())}
+            except Exception:  # noqa: BLE001 - the values shown in the record are an extra
+                pass
+            paragraphs = [p for p in str(rc.get("say") or "").split("\n\n") if p.strip()
+                          and not any(f"found that `{c['quantity']}` is " in p for c in undecided)]
+            for c in undecided:
+                c["measured"] = {"status": "could_not", "why": "FI could not decide this claim: " + why}
+                c["note"] = str(c.get("note") or "").rstrip(".") + "; FI could not decide whether the claim holds, so the quantity is left out"
+                paragraphs.append(
+                    f"A second model found that `{c['quantity']}` is computed differently from the plan. FI could not decide whether "
+                    f"that holds, so it took {', '.join('`' + str(k) + '`' for k in (c.get('keys') or [])[:6])} out of the results. Do NOT "
+                    f"report, describe or quote any value for `{c['quantity']}`, and do not call another number by the plan's name for it. "
+                    f"Say plainly, in the limitations, that `{c['quantity']}` is left out of this paper because FI could not decide "
+                    "whether the code computes it as the plan defines it.")
+            rc["say"] = "\n\n".join(paragraphs)
+            try:
+                names = _code_review.headline_names(state.get("design") if isinstance(state, dict) else None, self._protocol_block(state))
+                reach = self._shown_fault_reach(names, state)
+                drawn = [f for f in (reach.figures_drawing([], sorted(keys)) if reach is not None else [])
+                         if f not in (rc.get("removed_figures") or [])]
+                if drawn:
+                    self._drop_figures(drawn, {f: _result_checks.SHOWN_FAULT_FIGURE_WHY for f in drawn})
+                    rc["removed_figures"] = sorted({*(rc.get("removed_figures") or []), *drawn})
+            except Exception:  # noqa: BLE001 - the figures are an extra source
+                pass
             path.write_text(json.dumps(rc, indent=1), encoding="utf-8")
-        except OSError as exc:
-            self._log.warning("[evidence_gate] could not write needs/%s (%r)", _result_checks.RECORD, exc)
+            return None
+        except Exception as exc:  # noqa: BLE001
+            text = ("a second model's claim about how a result is computed could not be settled, and FI could not record that the "
+                    f"result is left out ({type(exc).__name__}), so the quest stops here instead of writing a paper that may report it")
+            self._log.warning("[evidence_gate] %s", text)
+            return {"verdict": "insufficient", "rationale": text, "gaps": [text], "stuck": True, "stuck_reason": "shown_fault_open"}
 
     def _settle_undecided_reader_claims(self, state: Any) -> None:
         """The gate could not run to the end (it raised): the second model's claims it had not decided are decided as if no rerun
@@ -23280,10 +23332,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                   and not isinstance(c.get("measured"), dict)]
         if not checks:
             return
-        try:
-            differing = {q["name"]: q for q in _code_review.differing_quantities(self.quest_root, self.quest_root / "code")}
-        except Exception:  # noqa: BLE001 - the record of the claims is what decides, not this lookup
-            differing = {}
+        differing = {q["name"]: q for q in _code_review.differing_quantities(self.quest_root, self.quest_root / "code")}  # raises: fails closed
         issues = _code_review.load(self.quest_root).get("issues")
         issues = issues if isinstance(issues, dict) else {}
         kept: list[dict[str, Any]] = []
