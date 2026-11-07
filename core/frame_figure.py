@@ -797,7 +797,7 @@ class FigureCalls:
                 for lc in container.lines[2] or ():
                     segs = lc.get_segments()
                     if len(segs) == len(centres):
-                        lc.set_segments([[(c, y) for _x, y in seg] for c, seg in zip(centres, segs)])
+                        lc.set_segments([[(c, y) for _x, y in seg] if len(seg) else [(c, math.nan), (c, math.nan)] for c, seg in zip(centres, segs)])  # a missing value draws nothing
         for t in ax.texts:  # a text a body put at a bar moves with it (matched by the centre the bar had)
             x0, y0 = t.get_position()
             near = [new for old, new in moved if _finite(x0) and abs(old - x0) <= 1e-9]
