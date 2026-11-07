@@ -16,6 +16,10 @@ HELPER = "from model import helper_for_trial\n\n\ndef test_x():\n    assert help
 TRIAL_KEY = "import simulate\n\n\ndef test_x():\n    r = simulate.trial({}, None)\n    assert r['est_b'] == 1.0, 'wrong'\n"
 
 
+#: A failing test that reads no key of the results.
+PLAIN = ("import simulate\n\n\ndef test_x():\n    r = simulate.trial({}, None)\n    assert 'zz_none' in r, 'wrong'\n")
+
+
 def _helper_gate(tmp_path: Path, verdict: Verdict | None, headline: tuple[str, ...] = ("cover",),
                  quantity: str = "zz_unknown") -> tuple[Any, dict[str, Any]]:
     engine = _engine(tmp_path)
@@ -27,13 +31,24 @@ def _helper_gate(tmp_path: Path, verdict: Verdict | None, headline: tuple[str, .
     return _run(engine, HELPER, file="model.py", function="helper_for_trial", quantity=quantity, headline=headline)
 
 
-def _missing_gate(tmp_path: Path, name: str) -> tuple[Any, dict[str, Any]]:
+def _missing_gate(tmp_path: Path, name: str, not_computed: tuple[str, ...] = (),
+                  test: str = "") -> tuple[Any, dict[str, Any]]:
     """A finding whose only claim is that the code does not produce the plan's quantity ``name``; its test fails."""
     engine = _engine(tmp_path)
     root = _quest(engine)
+    if not_computed:  # FI's record of the analysis: no value was worked out for these ids
+        import json
+
+        path = root / "data" / "results" / "derived.json"
+        derived = json.loads(path.read_text(encoding="utf-8"))
+        derived["complete"] = False
+        derived["not_computed"] = [{"id": i, "status": "no_data", "why": "no trial gave a value"} for i in not_computed]
+        for i in not_computed:
+            derived["derived"].pop(i, None)
+        path.write_text(json.dumps(derived), encoding="utf-8")
     rel = ".fi/finding_tests/F-1_1.py"
     (root / rel).parent.mkdir(parents=True, exist_ok=True)
-    (root / rel).write_text(TRIAL_KEY, encoding="utf-8")
+    (root / rel).write_text(test or TRIAL_KEY, encoding="utf-8")
     issue = {"id": "F-1", "file": "", "function": "", "quantity": name, "kind": "quantity", "changes_result": True,
              "demonstrated": True, "test": rel, "text": f"the {name} is not computed", "outcome": "not repaired",
              "failure_kind": "assertion", "readings": [{"n": 1, "status": "open"}], "severity": "high", "first_seen": 1}
@@ -69,7 +84,7 @@ def test_the_stop_says_in_plain_words_which_finding_why_and_what_the_person_can_
 def test_a_part_not_done_whose_failing_test_no_record_places_stops_instead_of_being_kept(tmp_path: Path) -> None:
     # a quantity the plan does not declare, called missing by the reader: the old gate kept the results and wrote
     # "part not done"; the failing test could stand for a value reported under another name
-    out, record = _missing_gate(tmp_path, "relative_zz")
+    out, record = _missing_gate(tmp_path, "relative_zz", test=PLAIN)
     assert _stops(out)
     assert "cannot find which of the results it changes" in out["rationale"]
     assert "at_gate" not in record["issues"]["F-1"]
@@ -101,3 +116,56 @@ def test_a_function_of_one_result_places_the_finding(tmp_path: Path) -> None:
     out, record = _run(_engine(tmp_path), DERIVE_COVER, quantity="cover", headline=("est_a",))
     assert out is None
     assert record["issues"]["F-1"]["at_gate"]["keys"] == ["cover"]
+
+
+# ---- review pass 1 ---------------------------------------------------------------------------------------------------------------
+def test_an_unplaced_finding_is_not_placed_by_the_readers_quantity_word(tmp_path: Path) -> None:
+    # the reader's word names a result the run holds (est_b), but no record of FI's ties the helper to it alone
+    out, record = _helper_gate(tmp_path, None, quantity="est_b")
+    assert _stops(out)
+    assert "at_gate" not in record["issues"]["F-1"]
+
+
+def test_a_part_not_done_is_kept_only_when_the_failing_test_reads_no_reported_key_that_holds_a_value(tmp_path: Path) -> None:
+    # known positive: FI's record says no value was worked out for the id and the test reads no reported key: a part not done
+    plain = ("import simulate\n\n\ndef test_x():\n    r = simulate.trial({}, None)\n"
+             "    assert 'zz_none' in r, 'wrong'\n")
+    out, record = _missing_gate(tmp_path / "a", "corr_ab", ("corr_ab",), plain)
+    assert out is None and record["issues"]["F-1"]["at_gate"]["outcome"] == "not_computed"
+    # the same record, but the failing test reads a key the run reports a number for: the finding is placed on that key
+    out, record = _missing_gate(tmp_path / "b", "corr_ab", ("corr_ab",), TRIAL_KEY)
+    gate = record["issues"]["F-1"].get("at_gate")
+    assert _stops(out) or (gate and gate["outcome"] == "left_out" and gate["keys"][0] == "est_b")
+
+
+def test_a_helper_test_that_reads_a_reported_key_places_the_finding_on_that_key(tmp_path: Path) -> None:
+    src = ("import simulate\nfrom model import helper_for_trial\n\n\ndef test_x():\n    r = simulate.trial({}, None)\n"
+           "    assert helper_for_trial(1) == 2 and r['est_b'] == 1.0, 'wrong'\n")
+    out, record = _run(_engine(tmp_path), src, file="model.py", function="helper_for_trial", quantity="zz_unknown",
+                       headline=("cover",))
+    assert out is None
+    keys = record["issues"]["F-1"]["at_gate"]["keys"]
+    assert "est_b" in keys and "cover" not in keys
+
+
+def test_a_helper_called_by_the_trial_and_by_one_result_s_function_is_placed_on_that_result(tmp_path: Path) -> None:
+    files = {"derive.py": "import model\n\n\ndef derive_cover(table):\n    return model.helper_for_trial(1)\n\n\n"
+                          "def derive_corr_ab(table):\n    return 0.5\n"}
+    out, record = _run(_engine(tmp_path), HELPER, file="model.py", function="helper_for_trial", quantity="zz_unknown",
+                       headline=("cover",), files=files)
+    # the call graph links it to cover (and, through the trial, to the trial's results): placed by a record, so the stop is
+    # about the main result, not the unplaced one
+    assert _stops(out) and "main result" in out["rationale"] and "cannot find which of the results" not in out["rationale"]
+
+
+def test_the_recorded_stop_still_names_the_finding_and_what_the_person_can_do(tmp_path: Path) -> None:
+    from core.engine import _one_line
+
+    long_how = "its test still fails on it; " + "the study could not be run again with a repair of it (" + "x" * 300 + ")"
+    engine = _engine(tmp_path)
+    from core.engine import _UNPLACED_FINDING
+
+    issue = {"id": "F-1", "file": "model.py", "function": "helper_for_trial", "text": "the rate is computed twice " * 6}
+    out = engine._shown_fault_stop(issue, long_how + "; " + _UNPLACED_FINDING)
+    kept = _one_line(out["rationale"], 400)  # what the stop record keeps
+    assert "helper_for_trial" in kept and "fix the code" in kept and "does not affect the results" in kept

@@ -156,3 +156,21 @@ def test_a_fault_whose_result_holds_no_number_is_left_out_not_a_stop(tmp_path: P
     saved = code_review.load(root)["issues"]
     assert saved["F-3af8cc05"]["at_gate"]["outcome"] == "left_out"
     assert saved["F-3af8cc05"]["at_gate"]["keys"] == ["Ea_lnA_empirical_correlation"]
+
+
+def test_two_open_findings_are_judged_together_and_the_unplaced_one_stops_the_quest(tmp_path: Path, monkeypatch: Any) -> None:
+    """With the empty key, the record holds two open findings: F-3af8cc05 (its key holds no number) and F-650ad5f3 (a quantity the
+    reader called missing, which the results hold under another name). Neither is set aside: the second one no record of FI's
+    places, so the quest stops, and the stop names it."""
+    root, _record, result = _load("kinetics_r8", tmp_path)
+
+    def emptied(node: Any) -> Any:
+        if isinstance(node, dict):
+            return {k: ([] if k == "Ea_lnA_empirical_correlation" else emptied(v)) for k, v in node.items()}
+        if isinstance(node, list):
+            return [emptied(v) for v in node]
+        return node
+
+    _root, verdict, _eng = _gate_on(root, emptied(result), monkeypatch)
+    assert verdict is not None and verdict["stuck_reason"] == "shown_fault_open"
+    assert "Ea_lnA_correlation" in verdict["rationale"] and "cannot find which of the results it changes" in verdict["rationale"]

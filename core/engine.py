@@ -23282,7 +23282,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                         placed = None
                     if placed is None:
                         rerun_keys = set()
-                elif reach is not None and not _code_review.missing_quantities(record, issue):
+                elif reach is not None and (not _code_review.missing_quantities(record, issue)
+                                            or reach.reads_held_key(issue, result)):
                     # No rerun to say (it could not be made): leave out what the records place, and stop only for an empty paper.
                     keep_rule, reach.headline_stops = reach.headline_stops, rerun is None
                     try:
@@ -23327,25 +23328,21 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 continue
             if _code_review.about_headline(record, issue, result, headline or []):
                 stops.append((issue, how))
-            elif missing := _code_review.missing_quantities(record, issue):
-                if absent := _code_review.not_obtained(record, issue, result, declared):
-                    # FI's own record of the run shows no value was worked out for it: nothing of it can reach the paper
-                    not_done.append((issue, how, absent))
-                else:
-                    # The finding's test fails and no record of FI's ties it to a result: it may stand for a value that is
-                    # reported under another name, so it is not taken for a part not done on the reader's word.
-                    stops.append((issue, how + "; " + _UNPLACED_FINDING))
-            elif keys := _code_review.keys_of_issue(record, issue, result):
-                # A key that holds no number has nothing another key could hold too: leaving it out removes all of it.
+            elif _code_review.missing_quantities(record, issue):
+                self._part_not_done_or_stop(stops, not_done, issue, how, record, result, declared, reach)
+            elif not (reach is not None and reach.ids) and (keys := _code_review.keys_of_issue(record, issue, result)):
+                # Only a quest with no frozen plan (no records of FI's to place a finding by): the finding's own quantity names the
+                # keys. A key that holds no number has nothing another key could hold too: leaving it out removes all of it.
                 if _result_checks._values_left_out(result, set(keys)) or _code_review.holds_no_number(result, set(keys)):
                     left_out.append((issue, how, keys, None))
                 else:
                     stops.append((issue, how + "; the results hold its values under other names too, so FI cannot leave "
                                                "them out"))
-            elif absent := _code_review.not_obtained(record, issue, result, declared):
-                # A declared result the run gave no number for under any name: nothing of it can reach the paper.
-                not_done.append((issue, how, absent))
+            elif _code_review.not_obtained(record, issue, result, declared):
+                self._part_not_done_or_stop(stops, not_done, issue, how, record, result, declared, reach)
             else:
+                # The records of FI's (the plan's frozen protocol, the trials, the call graph) do not place the finding, and the
+                # reader's words are not a record: nothing is left out or kept on them.
                 stops.append((issue, how + "; " + _UNPLACED_FINDING))
         if not stops and left_out:
             from . import numeric_oracle as _numeric_oracle
@@ -23423,6 +23420,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         return None
 
     @staticmethod
+    def _part_not_done_or_stop(stops: list, not_done: list, issue: dict[str, Any], how: str, record: dict[str, Any], result: Any,
+                               declared: list[str] | None, reach: "_shown_reach.Reach | None") -> None:
+        """A finding that a plan quantity is not computed: a part not done only when FI's own record of the run shows no value
+        was worked out for it AND the failing test reads no reported key that holds a value (the test would place the finding on
+        that key). Otherwise the test may stand for a value reported under another name, and the quest stops."""
+        absent = _code_review.not_obtained(record, issue, result, declared)
+        if absent and not (reach is not None and reach.reads_held_key(issue, result)):
+            not_done.append((issue, how, absent))
+        else:
+            stops.append((issue, how + "; " + _UNPLACED_FINDING))
+
+    @staticmethod
     def _in_results(names: list[str], result: Any) -> bool:
         """Whether any of ``names`` is a key somewhere in the printed results."""
         have: set[str] = set()
@@ -23491,9 +23500,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
     def _shown_fault_stop(self, issue: dict[str, Any], how: str) -> dict[str, Any]:
         where = " ".join(str(x) for x in (issue.get("file"), issue.get("function")) if x)
         what = str(issue.get("text") or issue.get("why") or issue.get("quantity") or "")
-        why = ("a fault in the code that changes a reported number was shown by a failing test, and was never shown to be "
-               f"gone from the code that produced the results: {how} "
-               f"({_one_line((where + ': ' if where else '') + what, 200)})")
+        if _UNPLACED_FINDING in how:
+            # The finding and what the person can do come first: the record of the stop keeps only its first 400 characters.
+            detail = how.replace("; " + _UNPLACED_FINDING, "").replace(_UNPLACED_FINDING, "").strip("; ")
+            why = (f"code finding ({_one_line((where + ': ' if where else '') + what, 90)}): {_UNPLACED_FINDING}. A fault that "
+                   f"changes a reported number was shown by a failing test and never shown to be gone from the code: {detail}")
+        else:
+            why = ("a fault in the code that changes a reported number was shown by a failing test, and was never shown to be "
+                   f"gone from the code that produced the results: {how} "
+                   f"({_one_line((where + ': ' if where else '') + what, 200)})")
         self._log.warning("[evidence_gate] %s; stopping without a paper", why)
         return {"verdict": "insufficient", "rationale": why, "gaps": [why], "stuck": True,
                 "stuck_reason": "shown_fault_open"}
