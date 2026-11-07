@@ -44,6 +44,7 @@ flagged. So the writer no longer types these facts at all:
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass
@@ -59,6 +60,8 @@ from . import paper_values as _values
 from . import run_facts as _run_facts
 from . import run_manifest as _run_manifest
 from . import typed_numbers as _typed
+
+_LOG = logging.getLogger(__name__)
 
 HIT = "paper_record_mismatch"
 RECORD = Path(".fi") / "paper_record_check.json"
@@ -132,6 +135,7 @@ class Item:
     id: str
     name: str
     sentence: str
+    key: str = ""
 
     @property
     def text(self) -> str:  # the plain sentence, for the quality report
@@ -329,7 +333,7 @@ def required_items(quest_root: Path | str) -> list[Item]:
         while ident in ids:
             ident, n = f"{base}-{n}", n + 1
         ids.add(ident)
-        items.append(Item(kind, ident, name, sentence))
+        items.append(Item(kind, ident, name, sentence, _one(key)))
 
     covered = _read(root, ".fi/topic_covered.json")
     for gap in (covered.get("left") if isinstance(covered, dict) else None) or []:
@@ -1653,9 +1657,90 @@ def answers_text(quest_root: Path | str) -> str:
     return ("**Answers to the questions asked.**" + chr(10) * 2 + chr(10).join(lines)) if lines else ""
 
 
-def run_facts_text(quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) -> str:
+def _reach(root: Path) -> Any:
+    """FI's reading of the quest's plan and code (:class:`core.shown_reach.Reach`); ``None`` when it cannot be made."""
+    from . import shown_reach as _shown_reach
+
+    try:
+        protocol = plan_protocol(root)
+        if not protocol:
+            return None
+        return _shown_reach.Reach(root, protocol, [], _declared_results(root, protocol))
+    except Exception as exc:  # noqa: BLE001 -- no result is placed; the paper still renders
+        _LOG.warning("[paper_facts] FI could not read the plan and code to place open code findings (%s: %s)",
+                     type(exc).__name__, exc)
+        return None
+
+
+def _declared_results(root: Path, protocol: dict[str, Any]) -> list[str]:
+    """The results the plan declares, as the evidence gate named them (``.fi/declared_results.json``, written by
+    :func:`core.code_review.write_declared_results`: the plan's metrics and the design's dependent variables). A quest
+    from before that record has the result ids of the plan's contract only."""
+    from . import code_review as _code_review
+    from . import contract as _contract
+
+    names = _code_review.read_declared_results(root)
+    if names is not None:
+        return names
+    _LOG.debug("[paper_facts] no record of the declared results; the plan's contract results are used")
+    try:
+        return [r.id for r in _contract.from_design({"protocol": protocol}).results]
+    except Exception as exc:  # noqa: BLE001 -- the paper still renders, without the sentences
+        _LOG.warning("[paper_facts] FI could not read the plan's results from its contract (%s: %s)", type(exc).__name__, exc)
+        return []
+
+
+def printed_result_ids(paper_md: str) -> list[str]:
+    """The ids of the plan's results the paper prints, in order of first use: the first word of each ``{{v:...}}`` key (a
+    ``calc``, ``trend`` or ``comparison`` key names no result)."""
+    out: list[str] = []
+    for m in _values._PLACEHOLDER.finditer(_values.to_placeholders(paper_md or "")):
+        head = re.match(r"\s*([A-Za-z_]\w*)", m.group(1))
+        if head and head.group(1) not in out and head.group(1) not in ("calc", "trend", "comparison"):
+            out.append(head.group(1))
+    return out
+
+
+def touched_sentences(quest_root: Path | str, paper_md: str) -> dict[str, str]:
+    """``{finding id: FI's sentence}`` for each open code finding that names a result the paper prints
+    (:func:`core.code_review.touched_results`): the results it names and that the paper prints, and that they come from code a
+    review flagged and nobody settled. Written from FI's records and the paper's own keys, never from the paper's words; a
+    finding that names no printed result has none. Never raises."""
+    root = Path(quest_root)
+    printed = printed_result_ids(paper_md)
+    if not printed:
+        return {}
+    try:
+        from . import code_review as _code_review
+
+        reach = _reach(root)
+        touched = (_code_review.touched_results(root, root / "code", reach.touched_by, reach.ids)
+                   if reach is not None else {})
+        record = _read(root, ".fi/code_review.json")
+        issues = record.get("issues") if isinstance(record, dict) and isinstance(record.get("issues"), dict) else {}
+        names = {fid: _code_review._plain_text((issues.get(fid) or {}).get("text")) for fid in touched}
+    except Exception as exc:  # noqa: BLE001 -- the paper still renders, without the sentences; the failure is on the log
+        _LOG.warning("[paper_facts] FI could not place the open code findings on the results (%s: %s)", type(exc).__name__, exc)
+        return {}
+    out: dict[str, str] = {}
+    for fid, ids in touched.items():
+        hit = [i for i in ids if i in printed]
+        if not hit:
+            continue
+        said = [_said(root, i) for i in hit]
+        what = (said[0] if len(said) == 1 else ", ".join(said[:-1]) + " and " + said[-1])
+        finding = _whole(names.get(fid), 160)
+        out[fid] = _sentence(f"{what} {'comes' if len(said) == 1 else 'come'} from code a review flagged as possibly changing "
+                             f"{'it' if len(said) == 1 else 'them'}" + (f" ({finding})" if finding else "")
+                             + "; the problem was not resolved")
+    return out
+
+
+def run_facts_text(quest_root: Path | str, *, topic: str = "", fallback_s: Any = None, paper_md: str = "") -> str:
     """The paragraph ``{{run_facts}}`` stands for, composed from FI's records: how many settings and trials, the seed, the
-    run time, and the topic's time limit with the verdict, each only when FI holds it. ``""`` when it holds none."""
+    run time, and the topic's time limit with the verdict, each only when FI holds it, and, given the paper's text
+    (``paper_md``), a sentence for each result it prints that an open code finding names (:func:`touched_sentences`).
+    ``""`` when it holds none."""
     root = Path(quest_root)
     parts = _counts_sentences(root)
     seed = _seed_text(root)
@@ -1671,6 +1756,7 @@ def run_facts_text(quest_root: Path | str, *, topic: str = "", fallback_s: Any =
         # "It" is the delivered code, only when the sentence just before is the one about it
         delivered = wall is not None and reader is not None and reader["at_once"] != 1
         parts.append(_verdict_sentence(met, limit, "It" if delivered else "The run"))
+    parts += list(touched_sentences(root, paper_md).values())
     return "**Run.** " + " ".join(parts) if parts else ""
 
 
@@ -1796,11 +1882,11 @@ def without_marks(markdown: str) -> str:
     return _TAG.sub("", _values.without_marks(markdown or ""))
 
 
-def block_text(quest_root: Path | str, name: str, *, topic: str = "", fallback_s: Any = None) -> str:
+def block_text(quest_root: Path | str, name: str, *, topic: str = "", fallback_s: Any = None, paper_md: str = "") -> str:
     """FI's block ``name`` (:data:`BLOCK_NAMES`) as it goes into the paper, from its file (``run_facts``: composed from
     FI's records, :func:`run_facts_text`); ``""`` when there is none."""
     if name == "run_facts":
-        return run_facts_text(quest_root, topic=topic, fallback_s=fallback_s)
+        return run_facts_text(quest_root, topic=topic, fallback_s=fallback_s, paper_md=paper_md)
     if name == "limitations":
         return limitations_text(quest_root)
     if name == "answers":
@@ -1971,7 +2057,7 @@ def place_blocks(markdown: str, quest_root: Path | str, *, topic: str = "", fall
         if name == "limitations":
             text = _place_limitations(text, quest_root, heading=limitations_heading)
             continue
-        if not block_text(quest_root, name, topic=topic, fallback_s=fallback_s):
+        if not block_text(quest_root, name, topic=topic, fallback_s=fallback_s, paper_md=text):
             continue
         if any(_norm_name(m.group(1)) == name for m in _PLACEHOLDER.finditer(text)) or any(
                 m.group(1) == name for m in _MARK.finditer(text)):
@@ -2100,7 +2186,7 @@ def render(markdown: str, quest_root: Path | str, *, topic: str = "", fallback_s
         if name in BLOCK_NAMES:
             if plain:
                 return m.group(0)
-            block = block_text(root, name, topic=topic, fallback_s=fallback_s)
+            block = block_text(root, name, topic=topic, fallback_s=fallback_s, paper_md=text)
             if not block and name == "limitations":
                 return ""  # nothing to state: no block, and no "not recorded"
             if not block:
@@ -2516,9 +2602,15 @@ def keep_check(quest_root: Path | str, hits: list[str], paper_md: str, *, untrac
         # FI writes the Limitations block itself: an item is missing from the paper only when the block is not in it (an
         # open problem in the code is never in the block, it is in QUALITY.md only)
         in_paper = any(m.group(1) == "limitations" for m in _MARK.finditer(paper_md or ""))
-        unmet = [{"kind": i.kind, "id": i.id, "name": i.name, "text": i.sentence}
+        # an open problem in the code is met when the paper carries FI's sentence for it (:func:`touched_sentences`)
+        said = touched_sentences(quest_root, paper_md)
+        block = chr(10).join(m.group(2) for m in _MARK.finditer(paper_md or "") if m.group(1) == "run_facts")
+        # ``named``: whether FI could name a result the paper prints that the finding changes (else no sentence can be written)
+        unmet = [{"kind": i.kind, "id": i.id, "name": i.name, "text": i.sentence,
+                  **({"named": i.key in said} if i.kind == CODE_FINDING else {})}
                  for i in required_items(quest_root)
-                 if i.kind == CODE_FINDING or not in_paper or i.kind == FIGURE_LEFT_OUT and i.sentence not in paper_md]
+                 if i.kind == CODE_FINDING and not (i.key in said and said[i.key] in block)
+                 or i.kind != CODE_FINDING and (not in_paper or i.kind == FIGURE_LEFT_OUT and i.sentence not in paper_md)]
         # The statements taken out just now are not in the kept record yet: one item per figure, never per sentence.
         have = {u["id"] for u in unmet}
         for stem, number in _figure_left_out_items(dropped):

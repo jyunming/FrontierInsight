@@ -50,6 +50,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -58,6 +59,8 @@ from . import code_reach as _code_reach
 from .contract import figure_file
 from . import oracle_check as _oracle
 from . import review_pairs as _pairs
+
+_LOG = logging.getLogger(__name__)
 
 RECORD = Path(".fi") / "code_review.json"
 #: Reviews of the code in a whole quest (one per code version; the last is reserved for the version that will run), the
@@ -1612,6 +1615,49 @@ def declared_names(design: Any, protocol: Any, derived: Any = None) -> list[str]
     return [n for n in names if _norm(n) in none]
 
 
+DECLARED_RESULTS = Path(".fi") / "declared_results.json"
+
+
+def write_declared_results(quest_root: Path, design: Any, protocol: Any) -> list[str]:
+    """Keep the names of the results the plan declares (:func:`declared_names`) with the hash of the frozen protocol they
+    were read with, so the paper's side reads FI's own fact and not the design it no longer holds. Returns the names."""
+    names = declared_names(design, protocol)
+    from . import frozen_protocol as _frozen
+
+    frozen = _frozen.protocol_of(Path(quest_root))
+    record = {"names": names, "protocol_sha": _frozen.sha256(frozen) if frozen else None}
+    path = Path(quest_root) / DECLARED_RESULTS
+    try:
+        if _read_declared(path) != record:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(record, indent=1) + chr(10), encoding="utf-8")
+    except OSError as exc:
+        _LOG.warning("[code_review] could not write %s (%r)", DECLARED_RESULTS, exc)
+    return names
+
+
+def _read_declared(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def read_declared_results(quest_root: Path) -> list[str] | None:
+    """The names :func:`write_declared_results` kept; ``None`` when there is no record (a quest from before it) or when it
+    was made for another frozen protocol than the one now (a warning is logged)."""
+    from . import frozen_protocol as _frozen
+
+    record = _read_declared(Path(quest_root) / DECLARED_RESULTS)
+    if not isinstance(record, dict) or not isinstance(record.get("names"), list):
+        return None
+    frozen = _frozen.protocol_of(Path(quest_root))
+    if record.get("protocol_sha") and frozen and record["protocol_sha"] != _frozen.sha256(frozen):
+        _LOG.warning("[code_review] %s was made for another protocol than the frozen one; it is ignored", DECLARED_RESULTS)
+        return None
+    return [str(n) for n in record["names"]]
+
+
 def not_obtained(record: dict[str, Any], issue: dict[str, Any], result: Any, declared: list[str] | None) -> list[str]:
     """The declared results an issue is about when FI's record of the run says no value was worked out for them
     (``declared``: :func:`declared_names` with that record) and the run's results hold no number for any of them under any
@@ -1978,6 +2024,54 @@ def flagged_checks(quest_root: Path, code_dir: Path, names: list[str]) -> dict[s
         for name in names:
             if name not in out and _names_check(f"{v.get('text') or ''}", str(name)):
                 out[name] = text
+    return out
+
+
+def touched_results(quest_root: Path, code_dir: Path, places: Any, declared: Any = None) -> dict[str, list[str]]:
+    """``{finding id: the declared results it changes}`` for each unresolved finding that can change a reported result: the
+    set the paper's required items hold for an open code finding (:func:`open_findings` with ``changes_result`` not false and
+    no gate outcome of its own, plus a shown fault whose test errored at the evidence gate). Which results a finding changes
+    is FI's own fact: ``places(file, function)`` (:meth:`core.shown_reach.Reach.touched_by`, from the call graph of the study's
+    code) for the function the finding records. A finding with no file or function that FI wrote down against a metric of the
+    plan (a problem of kind ``metric`` linked to it, whose ``name`` is the id of one of the ``declared`` results) marks that
+    result; one linked only to a dependent variable (the plan's prose), or one FI cannot place, marks nothing.
+    The words of the finding are never read. Reads the records only."""
+    from . import code_findings as _code_findings
+
+    record = load(quest_root)
+    issues = record.get("issues") if isinstance(record.get("issues"), dict) else {}
+    found = open_findings(quest_root, code_dir)
+    gated = {str(f) for f, x in issues.items() if isinstance(x, dict) and isinstance(x.get("at_gate"), dict)
+             and _code_findings.flagged_now(x) and x["at_gate"].get("outcome") in ("left_out", "not_computed")}
+    cands: list[tuple[str, dict[str, Any]]] = []
+    for fid, x in issues.items():
+        if (isinstance(x, dict) and isinstance(x.get("gate_error"), dict) and str(fid) not in gated
+                and x.get("changes_result") is True and _code_findings.flagged_now(x) and _code_findings.shown_by_assertion(x)):
+            cands.append((str(fid), x))
+    for v in [*found["missing"], *found["different"], *found["flagged"], *found["unshown"], *found["not_rechecked"]]:
+        fid = str(v.get("fid") or "")
+        issue = issues.get(fid) if fid else None
+        if not fid or fid in gated:
+            continue
+        changes = (issue.get("changes_result") if isinstance(issue, dict) and issue.get("changes_result") is not None
+                   else _code_findings.changes_result(v))
+        if changes and fid not in {c[0] for c in cands}:
+            cands.append((fid, {**(issue if isinstance(issue, dict) else {}), **{k: x for k, x in v.items() if x}}))
+    ids = {str(i) for i in declared or []}
+    metric_of: dict[str, list[str]] = {}
+    for p in record.get("problems") or []:
+        if isinstance(p, dict) and p.get("kind") == "metric" and str(p.get("name") or "") in ids and p.get("fid"):
+            metric_of.setdefault(str(p["fid"]), [])
+            if str(p["name"]) not in metric_of[str(p["fid"])]:
+                metric_of[str(p["fid"])].append(str(p["name"]))
+    out: dict[str, list[str]] = {}
+    for fid, x in cands:
+        file, function = str(x.get("file_rel") or x.get("file") or "").strip(), str(x.get("function") or "").strip()
+        got = places(file, function) if file and function else None
+        if not got and not file and not function:
+            got = metric_of.get(fid)  # the plan's own metric id, written against the finding by FI (not read from its words)
+        if got:
+            out[fid] = list(got)
     return out
 
 

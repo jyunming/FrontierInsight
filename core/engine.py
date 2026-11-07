@@ -23175,7 +23175,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         try:
             design = state.get("design") if isinstance(state, dict) else None
             protocol = _frozen.protocol_of(self.quest_root) or (self._protocol_block(state) if isinstance(state, dict) else None)
-            return _shown_reach.Reach(self.quest_root, protocol, headline, _code_review.declared_names(design, protocol))
+            declared = _code_review.write_declared_results(self.quest_root, design, protocol)  # the paper's side reads it
+            return _shown_reach.Reach(self.quest_root, protocol, headline, declared)
         except Exception as exc:  # noqa: BLE001 - the records are an extra source: without them the gate judges as before
             self._log.warning("[evidence_gate] FI's records could not be read for the shown faults (%r)", exc)
             return None
