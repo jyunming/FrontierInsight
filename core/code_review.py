@@ -50,6 +50,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -58,6 +59,8 @@ from . import code_reach as _code_reach
 from .contract import figure_file
 from . import oracle_check as _oracle
 from . import review_pairs as _pairs
+
+_LOG = logging.getLogger(__name__)
 
 RECORD = Path(".fi") / "code_review.json"
 #: Reviews of the code in a whole quest (one per code version; the last is reserved for the version that will run), the
@@ -1497,6 +1500,49 @@ def declared_names(design: Any, protocol: Any, derived: Any = None) -> list[str]
 
     none = {_norm(i["id"]) for i in _analysis_frame.not_computed(derived)}
     return [n for n in names if _norm(n) in none]
+
+
+DECLARED_RESULTS = Path(".fi") / "declared_results.json"
+
+
+def write_declared_results(quest_root: Path, design: Any, protocol: Any) -> list[str]:
+    """Keep the names of the results the plan declares (:func:`declared_names`) with the hash of the frozen protocol they
+    were read with, so the paper's side reads FI's own fact and not the design it no longer holds. Returns the names."""
+    names = declared_names(design, protocol)
+    from . import frozen_protocol as _frozen
+
+    frozen = _frozen.protocol_of(Path(quest_root))
+    record = {"names": names, "protocol_sha": _frozen.sha256(frozen) if frozen else None}
+    path = Path(quest_root) / DECLARED_RESULTS
+    try:
+        if _read_declared(path) != record:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(record, indent=1) + chr(10), encoding="utf-8")
+    except OSError as exc:
+        _LOG.warning("[code_review] could not write %s (%r)", DECLARED_RESULTS, exc)
+    return names
+
+
+def _read_declared(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def read_declared_results(quest_root: Path) -> list[str] | None:
+    """The names :func:`write_declared_results` kept; ``None`` when there is no record (a quest from before it) or when it
+    was made for another frozen protocol than the one now (a warning is logged)."""
+    from . import frozen_protocol as _frozen
+
+    record = _read_declared(Path(quest_root) / DECLARED_RESULTS)
+    if not isinstance(record, dict) or not isinstance(record.get("names"), list):
+        return None
+    frozen = _frozen.protocol_of(Path(quest_root))
+    if record.get("protocol_sha") and frozen and record["protocol_sha"] != _frozen.sha256(frozen):
+        _LOG.warning("[code_review] %s was made for another protocol than the frozen one; it is ignored", DECLARED_RESULTS)
+        return None
+    return [str(n) for n in record["names"]]
 
 
 def not_obtained(record: dict[str, Any], issue: dict[str, Any], result: Any, declared: list[str] | None) -> list[str]:

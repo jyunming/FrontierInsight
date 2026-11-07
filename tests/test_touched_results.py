@@ -218,19 +218,40 @@ def test_an_error_while_placing_findings_is_logged_not_swallowed(tmp_path: Path,
     assert any("RuntimeError" in r.getMessage() and "unreadable record" in r.getMessage() for r in caplog.records)
 
 
-def test_the_dependent_variables_of_the_design_are_declared_results_like_the_engine_names_them(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _yield_quest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     flagged = [_v("y1", "the yield is computed from the wrong helper", "model.py", "helper_for_yield", changes_result=True)]
-    problems = [{"id": "R1", "fid": "y1", "kind": "dependent variable", "name": "yield_total", "text": "the dependent variable yield_total"}]
-    root = _older(tmp_path, monkeypatch, flagged, problems)
+    root = _older(tmp_path, monkeypatch, flagged, [])  # no problem entry for the dependent variable (it was judged implemented)
     (root / "code" / "model.py").write_text((root / "code" / "model.py").read_text(encoding="utf-8")
                                             + "\n\ndef helper_for_yield(x):\n    return x * 2\n", encoding="utf-8")
     (root / "code" / "simulate.py").write_text(
         "import model\n\n\ndef trial(cell, ctx):\n    return {'yield_total': model.helper_for_yield(1), 'est_a': 1.0}\n", encoding="utf-8")
     trials = {"cells": [{"cell": {"noise": 0.1}, "metrics": {k: {"values": [1.0], "trials": [0]} for k in ("yield_total", "est_a")}}]}
     (root / "raw" / "trials.json").write_text(json.dumps(trials), encoding="utf-8")
-    assert "yield_total" in paper_facts._reach(root).ids
-    paper = "# P\n\n## Methods\n{{run_facts}}\n\n## Results\nThe yield is {{v:yield_total @ n=all}}.\n"
-    assert paper_facts.touched_sentences(root, paper).keys() == {"y1"}
+    return root
+
+
+YIELD_PAPER = "# P\n\n## Methods\n{{run_facts}}\n\n## Results\nThe yield is {{v:yield_total @ n=all}}.\n"
+DESIGN = {"variables": {"dependent": ["yield_total"]}}
+
+
+def test_the_declared_results_FI_kept_place_a_dependent_variable_with_no_problem_entry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _yield_quest(tmp_path, monkeypatch)
+    assert paper_facts.touched_sentences(root, YIELD_PAPER) == {}, "without the record only the contract's results are known"
+    names = code_review.write_declared_results(root, DESIGN, OLDER)
+    assert "yield_total" in names and (root / ".fi" / "declared_results.json").exists()
+    assert paper_facts.touched_sentences(root, YIELD_PAPER).keys() == {"y1"}
+
+
+def test_a_record_of_the_declared_results_for_another_protocol_is_ignored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    root = _yield_quest(tmp_path, monkeypatch)
+    code_review.write_declared_results(root, DESIGN, OLDER)
+    path = root / ".fi" / "declared_results.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["protocol_sha"] = "0" * 64
+    path.write_text(json.dumps(record), encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        assert paper_facts.touched_sentences(root, YIELD_PAPER) == {}
+    assert any("another protocol" in r.getMessage() for r in caplog.records)
 
 
 def test_a_finding_with_a_file_but_no_function_is_not_placed_by_its_metric(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -263,3 +284,16 @@ def test_a_plan_whose_contract_cannot_be_read_is_logged(tmp_path: Path, monkeypa
     with caplog.at_level("WARNING"):
         assert paper_facts._reach(root) is None
     assert any("ValueError" in r.getMessage() for r in caplog.records)
+
+
+def test_the_evidence_gate_keeps_the_declared_results_for_the_paper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import logging
+    from types import SimpleNamespace
+
+    from core.engine import Engine
+
+    root = _yield_quest(tmp_path, monkeypatch)
+    stub = SimpleNamespace(quest_root=root, _log=logging.getLogger("t"))
+    Engine._shown_fault_reach(stub, [], {"design": DESIGN})
+    assert "yield_total" in json.loads((root / ".fi" / "declared_results.json").read_text(encoding="utf-8"))["names"]
+    assert paper_facts.touched_sentences(root, YIELD_PAPER).keys() == {"y1"}

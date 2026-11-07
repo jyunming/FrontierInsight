@@ -1637,21 +1637,21 @@ def _reach(root: Path) -> Any:
 
 
 def _declared_results(root: Path, protocol: dict[str, Any]) -> list[str]:
-    """The results the plan declares, as the engine's gate names them (:func:`core.code_review.declared_names`): the plan's
-    metrics and the design's dependent variables. The design is read from FI's record of the review, which holds the
-    problems it wrote from the design's dependent variables; a plan in the older form lists its results in the contract."""
+    """The results the plan declares, as the evidence gate named them (``.fi/declared_results.json``, written by
+    :func:`core.code_review.write_declared_results`: the plan's metrics and the design's dependent variables). A quest
+    from before that record has the result ids of the plan's contract only."""
     from . import code_review as _code_review
     from . import contract as _contract
 
-    record = _read(root, ".fi/code_review.json")
-    problems = record.get("problems") if isinstance(record, dict) and isinstance(record.get("problems"), list) else []
-    dependent = [str(p["name"]) for p in problems if isinstance(p, dict) and p.get("kind") == "dependent variable" and p.get("name")]
-    names = _code_review.declared_names({"variables": {"dependent": dependent}}, protocol)
+    names = _code_review.read_declared_results(root)
+    if names is not None:
+        return names
+    _LOG.debug("[paper_facts] no record of the declared results; the plan's contract results are used")
     try:
-        names += [r.id for r in _contract.from_design({"protocol": protocol}).results]
-    except Exception as exc:  # noqa: BLE001 -- the plan's metrics above still stand
+        return [r.id for r in _contract.from_design({"protocol": protocol}).results]
+    except Exception as exc:  # noqa: BLE001 -- the paper still renders, without the sentences
         _LOG.warning("[paper_facts] FI could not read the plan's results from its contract (%s: %s)", type(exc).__name__, exc)
-    return list(dict.fromkeys(names))
+        return []
 
 
 def printed_result_ids(paper_md: str) -> list[str]:
