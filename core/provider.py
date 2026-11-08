@@ -19,12 +19,10 @@ but resolves to one of three transports:
   - `claude_cli` — `claude --print --output-format text` reusing the
     user's `claude auth login` Claude Pro/Max OAuth (no `ANTHROPIC_API_KEY`
     needed; OAuth from the CLI's keychain is honored). Prompt on stdin.
-  - `copilot_cli` — `copilot -s --allow-all-tools -p <prompt>` reusing
-    the user's `gh auth login` Copilot Pro/Business credentials.
-    `-s/--silent` strips the trailing stats block; `--allow-all-tools`
-    is required for non-interactive mode. **Prompt is on argv** because
-    the CLI doesn't document a stdin path — prefer `claude_cli`,
-    `codex_cli`, or `gemini_cli` for sensitive prompts.
+  - `copilot_cli` — `copilot -s --available-tools= --disable-builtin-mcps
+    --no-custom-instructions` reusing the user's Copilot login. Answer-only:
+    every tool is off, the prompt is on stdin and images go as
+    `--attachment <file>`. `-s/--silent` strips the trailing stats block.
   - `gemini_cli` — `gemini --yolo -o json -p ""` (from
     `@google/gemini-cli`) with the prompt on stdin. `--yolo` auto-
     approves tool calls (else stdin deadlocks on confirmation prompts).
@@ -48,6 +46,7 @@ import asyncio
 import base64
 import contextlib
 import contextvars
+import functools
 import json
 import logging
 import os
@@ -284,6 +283,10 @@ class _CliSpec:
     # Settings a CLI reads only from a file in the user's home (agy): written to a fresh home folder of the call's
     # own, which the CLI is pointed at through HOME / USERPROFILE, so the user's own settings are never used or changed.
     home_settings: dict[str, Any] | None = None
+    # Read a finished answer from the CLI's own record in its call home, for a CLI that can finish a turn and then print
+    # nothing and not exit (agy, on a large prompt). Takes the call home; returns (answer, usage) or None. Used only
+    # after the record has stood unchanged for ``_CLI_RECORD_STABLE_S`` while the CLI's stdout stayed silent.
+    record_reader: Callable[[str], tuple[str, dict[str, Any] | None] | None] | None = None
     # Pull real token usage out of the CLI's own output. Several CLIs report
     # what they actually consumed — including the system prompt and tool
     # schema they wrap around ours, which the char-count estimator cannot
@@ -394,10 +397,8 @@ def _encode_antigravity_stdin(prompt: str) -> str:
     unmarshal.
 
     This matters more than it looks. The alternative is passing the prompt in
-    argv like ``copilot_cli`` does, and on Windows that puts the whole prompt
-    under the ~8 KB command-line ceiling — which is why ``copilot_cli`` has to
-    trim heavily and is documented as a poor fit for FI's long nodes. Going
-    through stdin removes the ceiling entirely.
+    argv, and on Windows that puts the whole prompt under the ~8 KB
+    command-line ceiling. Going through stdin removes the ceiling entirely.
     """
     return json.dumps({
         "event": "user",
@@ -757,6 +758,80 @@ def _extract_antigravity_response(raw: str) -> str:
     return raw.strip()
 
 
+#: How long agy's own record of a finished answer must stand unchanged, with its stdout still silent, before FI reads the
+#: answer from the record and stops the call. A normal call prints its result within a second of the record; 30 s covers
+#: a record that a later step (a refused tool) would still extend.
+_CLI_RECORD_STABLE_S = 30.0
+_CLI_RECORD_POLL_S = 5.0
+
+
+class _CliRecordIncomplete(RuntimeError):
+    """The CLI's own record shows a finished model reply that cannot be taken as the whole answer (the record cut the
+    reply, or it cannot be shown that the turn is over). Plain and retryable: the caller stops the call and FI's
+    ordinary retry / fallback takes over."""
+
+
+def _read_agy_record(home: str) -> tuple[str, dict[str, Any] | None] | None:
+    """The answer agy's own per-call record (``brain/<conversation>/.system_generated/logs/transcript_full.jsonl`` in the
+    call's home) holds for a call whose turn is finished, or None while the turn is not finished yet.
+
+    Why: on a large prompt agy has been seen to finish the turn and then print nothing to stdout and not exit, so FI
+    waited out the whole timeout, four times over. Every finished call record seen has exactly two steps: the request
+    (USER_INPUT, DONE) and one model reply (PLANNER_RESPONSE, DONE, with its token counts); the record has no end
+    marker, so that shape is the proof that the turn is over. A model reply anywhere else (after a tool step, or
+    followed by other steps) does not prove it: the model may still write a tool step or a later reply.
+
+    The record is read whole or not at all. None: nothing there yet, a last step that is not a finished model reply, a
+    half-written line, or more than one conversation (keep waiting). ``_CliRecordIncomplete``: a finished model reply
+    that is cut (``truncated_fields``), empty, or not provably the end of the turn (stop and retry; never a partial or
+    guessed answer). The shorter ``transcript.jsonl`` next to the record cuts long replies; only the full one is read.
+    """
+    try:
+        brain = Path(home) / ".gemini" / "antigravity-cli" / "brain"
+        files = list(brain.glob("*/.system_generated/logs/transcript_full.jsonl"))
+        if len(files) != 1:
+            return None
+        lines = [ln for ln in files[0].read_text(encoding="utf-8").splitlines() if ln.strip()]
+        if not lines:
+            return None
+        steps = [json.loads(ln) for ln in lines]
+    except (OSError, ValueError):
+        return None
+    step = steps[-1]
+    if not isinstance(step, dict) or step.get("source") != "MODEL" or step.get("type") != "PLANNER_RESPONSE":
+        return None
+    if str(step.get("status", "")).upper() != "DONE":
+        return None
+    if step.get("truncated_fields"):
+        raise _CliRecordIncomplete(
+            f"the CLI's record cut its finished reply (cut: {step.get('truncated_fields')}), so the answer cannot be "
+            f"read whole"
+        )
+    content = step.get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise _CliRecordIncomplete("the CLI's record holds a finished reply with no text")
+    first = steps[0] if isinstance(steps[0], dict) else {}
+    one_turn = (
+        len(steps) == 2 and first.get("type") == "USER_INPUT"
+        and str(first.get("status", "")).upper() == "DONE"
+        and not any("tool" in str(k).lower() for k in step)
+    )
+    if not one_turn:
+        raise _CliRecordIncomplete(
+            f"the CLI's record has {len(steps)} steps and its last model reply is not shown to end the turn, so the "
+            f"answer is not taken"
+        )
+    try:
+        inp, out = int(step.get("input_tokens") or 0), int(step.get("output_tokens") or 0)
+        cached = int(step.get("cache_read_tokens") or 0)
+    except (TypeError, ValueError):
+        return content, None
+    if not (inp or out):
+        return content, None
+    return content, {"prompt_tokens": inp, "completion_tokens": out, "total_tokens": inp + out,
+                     "cached_input_tokens": cached, "estimated": False}
+
+
 # How long one line of a CLI's stdout may be. asyncio's default is 64 KiB, and a
 # claude stream-json line holds a whole message: a real call printed a 110,525-byte
 # `assistant` line carrying nothing but its thinking block. Past 64 KiB the reader
@@ -921,39 +996,27 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         effort_args=lambda level: ["-c", f'model_reasoning_effort="{level}"'],
     ),
     "copilot_cli": _CliSpec(
-        # GitHub Copilot CLI (`copilot --prompt`). WARNING — this is an
-        # AGENTIC CLI: it interprets prompts as user coding tasks and
-        # may reply conversationally instead of running stateless LLM
-        # inference. Empirically broken as a chat backend for FI's
-        # pipeline (paper.md fills with "Are you trying to X?", code
-        # node returns the empty stub). engine._warn_if_unsanctioned_provider
-        # prints a loud warning when this provider is selected. Kept
-        # in _CLI_SPECS so the configuration shape remains stable for
-        # users who set it via the interview before reading docs.
-        #
-        # `-s/--silent` strips the trailing stats block. `--allow-all-tools`
-        # is needed to avoid interactive permission prompts; removing it
-        # would make the CLI hang on confirmation. The fundamental issue
-        # is the agent loop, not this flag — switch to vscode_extension /
-        # claude_cli / codex_cli / gemini_cli / openai for FI use.
-        argv=("copilot", "-s", "--allow-all-tools", "-p"),
-        pass_prompt_via="arg",
+        # GitHub Copilot CLI (`copilot`), asked for an answer only. Checked
+        # against CLI 1.0.95: with no `-p`, the prompt piped on stdin is read
+        # whole (a 53,000-character prompt came through to its last line),
+        # and `--available-tools=` leaves the model no tool, so it cannot run
+        # commands or edit files and no permission prompt can stall the call
+        # (`--allow-all-tools` is not passed). `--disable-builtin-mcps` drops
+        # the GitHub MCP servers; `--no-custom-instructions` keeps any
+        # AGENTS.md / copilot-instructions out of the prompt. `-s` prints the
+        # answer alone, without the usage block.
+        argv=("copilot", "-s", "--available-tools=", "--disable-builtin-mcps", "--no-custom-instructions"),
+        pass_prompt_via="stdin",
         output_via="stdout",
-        model_flag="--model",   # provider.model = "gpt-5.2"
+        model_flag="--model",   # provider.model = "claude-sonnet-4.6"
+        # `--attachment <file>` attaches an image to the prompt; checked with a
+        # test image and every tool off: the model named its colour and text.
+        image_input="file_flag",
+        image_flag="--attachment",
         # See _CliSpec.env_unset: an ambient GITHUB_TOKEN outranks the
         # copilot login and 401s if it lacks "Copilot Requests".
         env_unset=("GITHUB_TOKEN", "GH_TOKEN"),
         env_unset_override="COPILOT_GITHUB_TOKEN",
-        # Prompt is passed as a command-line ARG, so on Windows the whole
-        # command line is subject to the cmd.exe limit (~8191 chars) — copilot
-        # ships as `copilot.BAT` and a long design/write prompt (with
-        # accumulated feedback_history) fails with `rc=1: The command line is
-        # too long`. Cap under that so the shared prompt-trimmer (see
-        # `_truncate_prompt_to_fit`) kicks in first. NOTE: 7 KB is small for a
-        # rich node prompt, so copilot_cli trims heavily on long-context nodes
-        # — a stdin/temp-file transport (like codex/gemini) is the real fix;
-        # prefer codex_cli / openai for long prompts on Windows.
-        max_input_chars=7000,
     ),
     "gemini_cli": _CliSpec(
         # `@google/gemini-cli` non-interactive. `--yolo` auto-approves
@@ -977,8 +1040,8 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         # ``-p ""`` is rejected outright. Its stdin path is the stream-json
         # input format, which takes one NDJSON envelope per turn; see
         # ``_encode_antigravity_stdin``. That is worth the extra encoding
-        # step because the alternative (prompt in argv, as ``copilot_cli``
-        # does) caps the prompt at the Windows ~8 KB command-line limit.
+        # step because the alternative (prompt in argv) caps the prompt at
+        # the Windows ~8 KB command-line limit.
         #
         # ``--dangerously-skip-permissions`` is deliberately NOT passed. FI
         # asks this CLI for text completion, not for agentic work. Not passing
@@ -1020,6 +1083,7 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         image_input="file_ref",
         add_dir_flag="--add-dir",
         home_settings=_ANTIGRAVITY_SETTINGS,
+        record_reader=_read_agy_record,
     ),
 }
 CLI_PROVIDERS: frozenset[str] = frozenset(_CLI_SPECS)
@@ -1968,6 +2032,49 @@ class _CliCapacityError(_CliTransientError):
     dropped connection to come back."""
 
 
+class ProviderLimitError(_CliTransientError):
+    """A CLI provider's usage limit, or its refused sign-in, that does not clear within the run (``_cli_fatal``). It is
+    not retried, and once a client has met it every later call on that model raises it again at once, without starting
+    the CLI. A subclass of ``_CliTransientError`` so every place that sorts provider failures reads it as before;
+    ``resumes_at`` is the time the provider's own text names for the limit to end (``""`` when it names none)."""
+
+    def __init__(self, message: str, *, provider: str = "", model: str = "", resumes_at: str = "") -> None:
+        super().__init__(message)
+        self.provider, self.model, self.resumes_at = provider, model, resumes_at
+
+
+class ProviderUnusable(BaseException):
+    """What the engine raises for a model call that met a limit or a refused sign-in that does not clear within the run
+    (``_is_fatal_provider_error``): ``error`` is the provider's own error. It derives from ``BaseException``, like
+    ``asyncio.CancelledError``, so no ``except Exception`` anywhere between the call and the step can take it for an
+    ordinary failure (an empty answer, a skipped check): once the model cannot be used, nothing more in the step can be
+    trusted. The step's wrapper (``Engine._audited``) and the run (``Engine.run``) turn it into the quest's one plain
+    stop; the provider's own retry rules never see it."""
+
+    def __init__(self, error: BaseException) -> None:
+        super().__init__(str(error))
+        self.error = error
+
+
+_RESUMES_AT = (re.compile(r"try again (?:at|after|on)\s+([^.\n]{3,60})", re.I),
+               re.compile(r"\bresets?\s+(?:at|on)?\s*([^.\n\u00b7()]{2,40})", re.I))
+
+
+_RELATIVE_TIME = re.compile(r"^(?:in\s+)?\d+(?:\.\d+)?\s*(?:s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?)\b|^in\s", re.I)
+
+
+def limit_resumes_at(text: str) -> str | None:
+    """The absolute time a provider's limit text says it ends ("try again at Nov 4th, 2026 10:49 AM."), as the
+    provider wrote it; ``None`` when the text names none or only a wait ("in 20s": it says nothing about when)."""
+    for pattern in _RESUMES_AT:
+        m = pattern.search(text or "")
+        if m:
+            found = m.group(1).strip(" ,;:")
+            if found and not _RELATIVE_TIME.match(found):
+                return found
+    return None
+
+
 # Matched case-insensitively against the CLI's error text.
 _CAPACITY_MARKERS: tuple[str, ...] = (
     "no capacity",
@@ -2894,6 +3001,8 @@ async def _run_cli(
                 proc, argv, spec, stdin_bytes, tmp_out_path, timeout_s,
                 heartbeat_cb=heartbeat_cb, node=node, usage_out=usage_out,
                 tree=tree,
+                record=(functools.partial(spec.record_reader, home_dir)
+                        if spec.record_reader is not None and home_dir is not None else None),
             )
         except (RuntimeError, asyncio.TimeoutError) as exc:
             # The CLI's own log is in the call's home and goes with it: its errors go into the message first.
@@ -3006,6 +3115,7 @@ async def _collect_via_communicate(
     node: str = "",
     usage_out: dict[str, Any] | None = None,
     tree: AsyncProcessTree | None = None,
+    record: Callable[[], tuple[str, dict[str, Any] | None] | None] | None = None,
 ) -> str:
     """Legacy ``communicate()`` path. Two sub-cases:
 
@@ -3055,8 +3165,36 @@ async def _collect_via_communicate(
         _beat_task = asyncio.ensure_future(_beat())
     try:
         try:
-            stdout_b, stderr_b = await asyncio.wait_for(
-                proc.communicate(stdin_bytes), timeout=timeout_s,
+            if record is None:
+                stdout_b, stderr_b = await asyncio.wait_for(
+                    proc.communicate(stdin_bytes), timeout=timeout_s,
+                )
+            else:
+                waited = await _communicate_or_read_record(proc, stdin_bytes, timeout_s, record)
+                if isinstance(waited[0], str):
+                    # The CLI finished its turn but printed nothing and did not exit: stop it, take the answer
+                    # from its own record.
+                    answer, record_usage = waited
+                    _log.warning(
+                        "[provider] %s finished its answer but printed nothing and did not exit; the answer (%d "
+                        "chars) was read from its own record and the call stopped", spec.argv[0], len(answer),
+                    )
+                    await _kill_and_reap(proc, spec.argv[0], tree)
+                    if usage_out is not None and record_usage:
+                        usage_out.update(record_usage)
+                    final = answer.strip()
+                    gate_hit = _check_output_gates(final)
+                    if gate_hit is not None:
+                        raise _CliTransientError(
+                            f"{spec.argv[0]} tripped output gate {gate_hit[0]!r} (matched: {gate_hit[1]!r}) in an "
+                            f"answer read from its own record; treating as transient so the call is retried."
+                        )
+                    return final
+                stdout_b, stderr_b = waited
+        except _CliRecordIncomplete as exc:
+            await _kill_and_reap(proc, spec.argv[0], tree)
+            raise _CliTransientError(
+                f"{spec.argv[0]} printed nothing and did not exit, and {exc}; the call was stopped to be retried"
             )
         except asyncio.TimeoutError:
             elapsed = f"{timeout_s:g}s" if timeout_s >= 1 else f"{timeout_s * 1000:g}ms"
@@ -3076,6 +3214,10 @@ async def _collect_via_communicate(
                     f"(stderr: {stderr_tail.strip()})"
                 )
             else:
+                # The CLI's own words are the only clue to why it failed, so
+                # when stderr is empty the tail of stdout is shown instead.
+                if not stderr_tail.strip():
+                    stderr_tail = (stdout_b or b"").decode("utf-8", "replace")[-500:]
                 message = f"{argv[0]} exited rc={proc.returncode}: {stderr_tail}"
             # "Selected model is at capacity" clears on its own after a while,
             # so it gets the capacity wait, not the short one.
@@ -3128,6 +3270,87 @@ async def _collect_via_communicate(
             try:
                 await _beat_task
             except asyncio.CancelledError:
+                pass
+
+
+async def _communicate_or_read_record(
+    proc: asyncio.subprocess.Process,
+    stdin_bytes: bytes | None,
+    timeout_s: float,
+    record: Callable[[], tuple[str, dict[str, Any] | None] | None],
+) -> tuple[Any, Any]:
+    """``proc.communicate()`` within ``timeout_s`` (stdout is read as it comes), except that a CLI that printed NOTHING
+    on stdout for the whole wait while its own record shows a finished answer, unchanged for ``_CLI_RECORD_STABLE_S``,
+    gives ``(answer, usage)``. Once stdout has any byte the record is never used: the CLI is speaking and its output
+    (an error, a partial result) is what counts. A finished reply the record cannot show to be whole raises
+    ``_CliRecordIncomplete`` once it has stood unchanged as long. Raises ``asyncio.TimeoutError`` as ``wait_for`` does.
+    Which came back: a pair whose first item is a ``str`` is the record's answer; the other is ``(stdout, stderr)``."""
+    out, err = bytearray(), bytearray()
+
+    async def pump(stream: Any, buf: bytearray) -> None:
+        if stream is None:
+            return
+        while True:
+            chunk = await stream.read(65536)
+            if not chunk:
+                return
+            buf.extend(chunk)
+
+    async def feed() -> None:
+        if proc.stdin is None:
+            return
+        try:
+            if stdin_bytes:
+                proc.stdin.write(stdin_bytes)
+                await proc.stdin.drain()
+            proc.stdin.close()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    async def finish() -> tuple[bytes, bytes]:
+        await asyncio.gather(feed(), pump(proc.stdout, out), pump(proc.stderr, err))
+        await proc.wait()
+        return bytes(out), bytes(err)
+
+    comm = asyncio.ensure_future(finish())
+    started = time.monotonic()
+    seen: Any = None
+    seen_since = 0.0
+    try:
+        while True:
+            left = timeout_s - (time.monotonic() - started)
+            if left <= 0:
+                raise asyncio.TimeoutError()
+            done, _ = await asyncio.wait({comm}, timeout=min(_CLI_RECORD_POLL_S, left))
+            if done:
+                return comm.result()
+            if out:
+                seen = None  # the CLI printed something: the normal path decides
+                continue
+            incomplete: _CliRecordIncomplete | None = None
+            try:
+                found = await asyncio.to_thread(record)
+            except _CliRecordIncomplete as exc:
+                found, incomplete = None, exc
+            except Exception:  # noqa: BLE001 - a record that cannot be read just means keep waiting
+                found = None
+            now = time.monotonic()
+            key = found[0] if found is not None else (("incomplete", str(incomplete)) if incomplete else None)
+            if key is None or key != seen:
+                seen = key
+                seen_since = now
+            elif now - seen_since >= _CLI_RECORD_STABLE_S:
+                if out:
+                    continue
+                if incomplete is not None:
+                    raise incomplete
+                return found
+    finally:
+        if not comm.done():
+            comm.cancel()
+            try:
+                await comm
+            except BaseException:  # noqa: BLE001 - the cancelled read; the caller decides what happens next
                 pass
 
 
@@ -4169,6 +4392,9 @@ class LLMClient:
         # audit trace can read ``last_provider`` uniformly regardless of whether ``self._client`` is this class or
         # FallbackLLMClient (whose ``last_provider`` genuinely varies call to call).
         self.last_provider: str | None = endpoint.provider_name or endpoint.transport
+        # A limit or refused sign-in this client met, by the model asked: it does not clear within the run, so every later
+        # call on that model raises it again at once (per client, so quests in one process never share it).
+        self._unusable: dict[str, BaseException] = {}
 
     async def aclose(self) -> None:
         if self._bridge is not None:
@@ -4206,6 +4432,11 @@ class LLMClient:
         which node + which provider failed instead of just a raw
         httpx / CLI stderr stack.
         """
+        if (known := self._unusable.get(model or self.endpoint.model or "")) is not None:
+            again = self._met_again(known)
+            if again is not known:
+                again.add_note(self._error_note(node=node, model=model))  # this call's own note, not the first call's
+            raise again
         try:
             # Gate the dispatch on the process-wide concurrency cap
             # (``FI_MAX_CONCURRENT_LLM_CALLS``; no-op when unset) so a fleet of
@@ -4256,7 +4487,26 @@ class LLMClient:
                     e.add_note(auth_note)
             except AttributeError:  # pragma: no cover — needs Py<3.11
                 pass
+            if not isinstance(e, _ModelAnswerProblem) and _stays_unusable(e):
+                kept = e
+                if isinstance(e, _CliTransientError) and not isinstance(e, ProviderLimitError):
+                    kept = ProviderLimitError(
+                        str(e), provider=self.endpoint.provider_name or self.endpoint.transport,
+                        model=model or self.endpoint.model or "", resumes_at=limit_resumes_at(str(e)) or "")
+                    kept.__notes__ = list(getattr(e, "__notes__", None) or [])
+                self._unusable[model or self.endpoint.model or ""] = kept
+                if kept is not e:
+                    raise kept from e
             raise
+
+    @staticmethod
+    def _met_again(known: BaseException) -> BaseException:
+        """The error to raise for a call made after ``known`` ended the model's use: a fresh copy of a CLI limit (its
+        traceback is not stacked up), the same error otherwise."""
+        if isinstance(known, ProviderLimitError):
+            again = ProviderLimitError(str(known), provider=known.provider, model=known.model, resumes_at=known.resumes_at)
+            return again
+        return known
 
     def _error_note(self, *, node: str, model: str | None) -> str:
         """Format the FI-context note attached to LLM call exceptions.
@@ -5205,6 +5455,19 @@ class LLMClient:
 # ---------------------------------------------------------------------------
 # Provider fallback chain + per-provider circuit breaker
 # ---------------------------------------------------------------------------
+
+
+def _stays_unusable(exc: BaseException) -> bool:
+    """Whether a model stays unusable for the rest of the run, so a client remembers it and does not ask again: a CLI's
+    usage limit or refused sign-in, an exhausted quota (HTTP 402, or a 429 that names one) and a refused sign-in
+    (401). Never a bare 403 (a refusal of one request, which a fallback chain's later probe may find lifted) or anything
+    else."""
+    if isinstance(exc, _CliTransientError):
+        return _cli_fatal(str(exc))
+    if isinstance(exc, httpx.HTTPStatusError):
+        sc = getattr(getattr(exc, "response", None), "status_code", None)
+        return sc in (401, 402) or (sc == 429 and _is_exhausted_quota(exc.response))
+    return False
 
 
 def _is_fatal_provider_error(exc: BaseException) -> bool:

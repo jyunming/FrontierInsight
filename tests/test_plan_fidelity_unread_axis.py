@@ -285,5 +285,5 @@ def test_the_check_runs_after_the_checks_of_the_code_and_before_the_timing():
     source = (Path(__file__).resolve().parent.parent / "core" / "engine.py").read_text(encoding="utf-8")
     gate = source.index("stop, oracle_code, gate_repaired = await self._gate_pass(state, py, exec_env, seed_path)")
     drop = source.index("self._check_unread_settings(state, simulate_path)")
-    size = source.index("too_long = await self._size_the_run(state, runner, py, exec_env)")
+    size = source.index("too_long = await self._size_the_run(state, runner, py, self._first_run_env(exec_env, record=False))")
     assert gate < drop < size

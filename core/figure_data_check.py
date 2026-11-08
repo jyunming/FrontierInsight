@@ -282,6 +282,65 @@ def typed_series(source: str, script: str = "experiment.py") -> list[TypedSeries
     return sorted(found, key=lambda s: s.line)
 
 
+def fi_figure_bodies(text: str) -> dict[str, tuple[int, int, str]]:
+    """For a derive.py of the analysis FI writes (core/analysis_frame.py): each figure function of the study's
+    (``figure_<id>``, which FI calls and whose figure FI saves) with its first and last line and the file FI saves it as, read
+    from the frame's own ``FIGURES``. Empty for any other script."""
+    from . import skeleton as _skeleton
+
+    if not _skeleton.has_analysis_frame(text):
+        return {}
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return {}
+    files: dict[str, str] = {}
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "FIGURES" for t in node.targets)):
+            try:
+                declared = ast.literal_eval(node.value)
+            except (ValueError, SyntaxError):
+                declared = {}
+            if isinstance(declared, dict):
+                files = {f"figure_{i}": Path(str((v or {}).get("file") or f"{i}.png")).name
+                         for i, v in declared.items() if isinstance(v, dict)}
+    return {node.name: (node.lineno, getattr(node, "end_lineno", node.lineno) or node.lineno, files[node.name])
+            for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in files}
+
+
+def typed_series_of_script(text: str, name: str) -> list[TypedSeries]:
+    """The plotting calls of one script that draw numbers typed into the code: a script that saves a figure, or a derive.py of
+    the analysis FI writes whose figure functions FI saves (a call inside ``figure_<id>`` is laid to that figure's file)."""
+    bodies = fi_figure_bodies(text)
+    if ".savefig(" not in text and not bodies:
+        return []
+    typed = typed_series(text, name)
+    if bodies:
+        every = {file for _a, _b, file in bodies.values()}
+        for t in typed:
+            inside = [file for first, last, file in bodies.values() if first <= t.line <= last]
+            if inside:
+                t.saved_as = {inside[0]}
+            t.script_saves = t.script_saves | every
+    return typed
+
+
+def typed_series_in(code_dir: Path) -> dict[Path, list[TypedSeries]]:
+    """Each top-level script of ``code_dir`` that draws a figure (it saves one, or it is a derive.py whose figure functions FI
+    saves) and has a plotting call drawing numbers typed into the code (read, never run): ``{script path: findings}``."""
+    found: dict[Path, list[TypedSeries]] = {}
+    code_dir = Path(code_dir)
+    for path in sorted(code_dir.glob("*.py")) if code_dir.is_dir() else []:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        typed = typed_series_of_script(text, path.name)
+        if typed:
+            found[path] = typed
+    return found
+
+
 def figures_to_drop(findings: list[TypedSeries], saved: list[str]) -> list[str]:
     """The saved figure files a script's typed-in series are in: exactly the file the call's own ``savefig`` names (a figure
     in another format of the same name is a different file and stays). When that file cannot be told, the figures this
@@ -309,9 +368,10 @@ def directive(findings: list[TypedSeries]) -> str:
         + "\n\nDraw each of these figures from the run's saved results instead: read the values from the raw results files "
         "the simulation wrote (or from the values the analysis already holds), and pass those to the plotting call. Do "
         "not replace one typed list with another, and do not change anything else (the analysis, the printed "
-        "RESULT_JSON, the other figures). A reference or theory curve is no exception: compute the curve from its formula "
-        "(or from the results); do not type its values. Reference lines (a limit, a target, y = x) and axis limits may "
-        "stay as they are. Return the whole corrected script."
+        "RESULT_JSON, the other figures). A reference or theory curve is no exception: when FI's drawing calls draw the figure, "
+        "draw it as a reference of the plan (`fig.ref(panel, \"<reference id>\")`); otherwise compute it from its formula; never "
+        "type its values. Reference lines (a limit, a target, y = x) and axis limits may "
+        "stay as they are. Return only the functions you change in `functions` (each one whole; FI keeps every other line)."
     )
 
 

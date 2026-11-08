@@ -52,7 +52,15 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+#: What the plan's model said each figure shows (core/contract_parts.py ``figures``). A figure is not a result, a setting or a
+#: check: a redesign after the freeze plans new figure files and they are asked about then, so the declarations are not part
+#: of what the freeze fixes. A protocol without the key has the hash it always had.
+UNFROZEN_KEYS = ("figure_declarations",)
+
+
 def canonical(protocol: Any) -> str:
+    if isinstance(protocol, dict) and any(k in protocol for k in UNFROZEN_KEYS):
+        protocol = {k: v for k, v in protocol.items() if k not in UNFROZEN_KEYS}
     return json.dumps(protocol, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
 
 

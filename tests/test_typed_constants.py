@@ -258,7 +258,7 @@ async def test_a_typed_in_shape_is_sent_back_and_a_computed_rewrite_is_kept(tmp_
 
 
 @pytest.mark.asyncio
-async def test_one_that_stays_is_a_note_for_the_paper_and_the_evidence_but_not_a_stop_unless_a_headline_rests_on_it(
+async def test_one_that_stays_is_a_note_for_the_paper_and_the_evidence_and_never_a_stop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     eng, asked = _engine(tmp_path, monkeypatch, [json.dumps({"code": SHAPED, "patch_summary": "no change"})])
@@ -270,10 +270,10 @@ async def test_one_that_stays_is_a_note_for_the_paper_and_the_evidence_but_not_a
     record = json.loads((eng.quest_root / "needs" / "typed_constants_check.json").read_text(encoding="utf-8"))
     assert record["functions"][0]["function"] == "response" and 3.7 in record["functions"][0]["numbers"]
 
-    stopped, _asked = _engine(tmp_path / "head", monkeypatch, [json.dumps({"code": SHAPED})])
-    stop = await stopped._static_gate({"design": {"variables": {"dependent": ["y"]}}})
-    assert stop is not None and "written into it" in stop["exec_result"]["cannot_repair"]
-    assert stop["exec_give_up_reason"]
+    # Even when a headline result rests on it, it is FI's reading of the code (core/stop_power.py): said, not a stop.
+    head, _asked = _engine(tmp_path / "head", monkeypatch, [json.dumps({"code": SHAPED})])
+    assert await head._static_gate({"design": {"variables": {"dependent": ["y"]}}}) is None
+    assert "written into it" in head._run_checks_note()
 
 
 @pytest.mark.asyncio
@@ -296,3 +296,33 @@ def test_an_unused_nested_function_that_calls_a_flagged_function_taints_nothing(
     other = ('from pkg import model\n\n\ndef wrapper(v):\n    def never_called():\n        return model.response(v)\n    return v\n\n\n'
              'def run_cell(cell):\n    return {"y": wrapper(cell["x"])}\n')
     assert tc.tainted_outputs({**files, "simulate.py": other}, found) == set()
+
+
+def _git(code: Path, *args: str) -> str:
+    import subprocess
+
+    return subprocess.run(["git", *args], cwd=code, capture_output=True, text=True, check=True).stdout
+
+
+@pytest.mark.asyncio
+async def test_a_static_repair_that_is_taken_back_without_a_run_is_kept_on_a_side_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import shutil
+
+    from core import code_project
+
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    refused = SHAPED + "\n# a rewrite that still has the typed number\n"
+    eng, asked = _engine(tmp_path, monkeypatch, [json.dumps({"code": refused, "patch_summary": "no real change"})])
+    code = eng.quest_root / "code"
+    code_project.record_change(eng.quest_root, "code written")
+    head = _git(code, "rev-parse", "HEAD")
+    assert await eng._static_gate({}) is None and len(asked) == 2
+    refs = _git(code, "for-each-ref", "--format=%(refname)", "refs/fi/refused/").split()
+    assert "refs/fi/refused/static-model-1" in refs and "refs/fi/refused/static-model-2" in refs
+    assert _git(code, "show", "refs/fi/refused/static-model-1:pkg/model.py") == refused
+    assert "the static faults were not fewer" in _git(code, "log", "-1", "--format=%s", "refs/fi/refused/static-model-1")
+    assert (code / "pkg" / "model.py").read_text(encoding="utf-8") == SHAPED, "the step still keeps the old code"
+    assert _git(code, "status", "--porcelain") == "" and _git(code, "rev-parse", "HEAD") == head

@@ -45,6 +45,54 @@ def category(value: Any, *, log: Any = None) -> str:
     return "changed"
 
 
+def changed_functions(old: str, new: str) -> list[str]:
+    """The functions (``name`` or ``Class.name``) whose source differs between two versions of a script, from FI's own
+    parse of both; ``[]`` when either does not parse."""
+    import ast
+
+    def parts(text: str) -> dict[str, str]:
+        found: dict[str, str] = {}
+
+        def walk(node: ast.AST, prefix: str) -> None:
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    found[prefix + child.name] = ast.dump(child)
+                elif isinstance(child, ast.ClassDef):
+                    walk(child, prefix + child.name + ".")
+        walk(ast.parse(text), "")
+        return found
+    try:
+        before, after = parts(old), parts(new)
+    except (SyntaxError, ValueError):
+        return []
+    return [n for n in after if before.get(n) != after[n]] + [f"{n} (removed)" for n in before if n not in after]
+
+
+def detail(*, stage: str = "", attempt: int | None = None, fault: str = "", functions: list[str] | None = None,
+           patch: str = "") -> list[str]:
+    """The lines that say why a change was made, from what FI recorded when it made it: the step and attempt, the fault
+    that asked for it (cut to one line), the functions changed and the repair's own summary. A part not known is left out."""
+    out: list[str] = []
+    if stage:
+        out.append(f"Step: {stage}" + (f", attempt {attempt}" if attempt else ""))
+    one = " ".join(str(fault or "").split())
+    if one:
+        out.append("Fault: " + (one if len(one) <= 240 else one[:237] + "..."))
+    names = [str(f) for f in (functions or [])]
+    if names:
+        out.append("Functions changed: " + ", ".join(names[:_MAX_NAMES]) + (" and more" if len(names) > _MAX_NAMES else ""))
+    one = " ".join(str(patch or "").split())
+    if one:
+        out.append("Patch: " + (one if len(one) <= 240 else one[:237] + "..."))
+    return out
+
+
+def message(subject: str, lines: list[str] | None = None) -> str:
+    """A commit message: the one-line ``subject``, then (when there are any) ``lines`` as its body."""
+    body = "\n".join(lines or [])
+    return subject + "\n\n" + body if body else subject
+
+
 def heading(when: str, kind: str, note: str) -> str:
     return f"## {when} - {kind.capitalize()}: {note}"
 

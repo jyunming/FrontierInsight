@@ -147,8 +147,12 @@ def test_replay_r12_a_wrong_repair_is_still_rejected_by_the_findings_assertion(t
     model_before = (root / "code" / "kinetics_parameter_recovery" / "model.py").read_text(encoding="utf-8")
     sim_before = (root / "code" / "simulate.py").read_text(encoding="utf-8")
     _correct, wrong = _replies(root)
-    ok, why = asyncio.run(fr._attempt(_env(root, wrong), dict(ISSUE), "kinetics_parameter_recovery/model.py", "code", ""))
+    env = _env(root, wrong)
+    ok, why = asyncio.run(fr._attempt(env, dict(ISSUE), "kinetics_parameter_recovery/model.py", "code", ""))
     assert not ok and "the finding's own test still fails" in why and "does not scale" in why
+    # the refused try is kept whole, the caller's change with it
+    assert sorted(env.tried) == ["kinetics_parameter_recovery/model.py", "simulate.py"]
+    assert "model.fit_rate(time, observed, noise_std_rel)" in env.tried["simulate.py"]
     # both files are put back
     assert (root / "code" / "kinetics_parameter_recovery" / "model.py").read_text(encoding="utf-8") == model_before
     assert (root / "code" / "simulate.py").read_text(encoding="utf-8") == sim_before

@@ -48,6 +48,7 @@ import string
 from pathlib import Path
 
 from core import paper_facts as _paper_facts
+from generation._figure_captions import without_number
 from core.config import Config
 from core.proc_tree import AsyncProcessTree
 from core.engine import (
@@ -65,12 +66,15 @@ from core.provider import (
     resolve_endpoint_async,
 )
 from generation._marp import find_marp
+from generation._paper_context import note_prompt_fit, paper_and_claims
+from generation._paper_figures import log_taken, paper_figure_set, take_out_unchecked
 from generation._pptx_slides import render_marp_to_pptx
 from generation._skip_md import render_skip_md
 
 _log = logging.getLogger("frontier_insight.slides")
 
 PROMPT_PATH = Path(__file__).resolve().parent.parent / "agents" / "slides.md"
+REDO_PROMPT_PATH = Path(__file__).resolve().parent.parent / "agents" / "slides_redo.md"
 # Custom Marp theme (a polished look layered on the default). Passed to the
 # Marp CLI with --theme; the deck's `theme: fi` front-matter selects it.
 THEME_PATH = Path(__file__).resolve().parent.parent / "templates" / "slides" / "fi.css"
@@ -97,6 +101,69 @@ _CHROMIUM_SIGNATURES: tuple[str, ...] = (
 )
 
 
+def _figure_list(figures: list[str], paper_numbers: dict[str, int], paper_md: str) -> str:
+    """The figures the model may use, one per line. A figure FI recorded the drawing calls of is listed under the paper's
+    number and with the paper's caption, so the slide says what the paper says of it; any other is listed by its file."""
+    lines = []
+    for name in figures:
+        line = f"- figures/{name}"
+        caption = _paper_caption(paper_md, name) if name in paper_numbers else ""
+        if caption:
+            line += f": Figure {paper_numbers[name]}. {caption}"
+        lines.append(line)
+    return "\n".join(lines) or "(none)"
+
+
+def _paper_caption(paper_md: str, name: str) -> str:
+    """The caption the paper gives the figure file ``name``, without "Figure N."; empty when it has none."""
+    for m in _PAPER_FIGURE_RE.finditer(paper_md):
+        if m.group("name") == name:
+            return " ".join(without_number(m.group("alt")).replace("**", "").split())
+    return ""
+
+
+_PAPER_FIGURE_RE = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?:\./)?figures/(?P<name>[^)\s]+)")
+
+
+_IMAGE_LINE_RE = re.compile(r"^(?P<lead>[ 	]*)!\[(?P<alt>[^\]]*)\]\((?:\./)?figures/(?P<name>[^)\s]+)\)[ 	]*$")
+_CAPTION_LINE_RE = re.compile(r"^[ 	]*(?:\*\*|\*|_)?[ 	]*(?:figure|fig\.?)[ 	]*(?P<n>\d+)[ 	]*[.:]", re.IGNORECASE)
+_MARP_HINT_RE = re.compile(r"^(?:bg|fit|contain|cover|left|right|center|blur|\w+:\S+|\d+%?)$")
+
+
+def _with_paper_captions(content: str, paper_numbers: dict[str, int], paper_md: str,
+                        held: dict[str, str] | None = None) -> str:
+    """``content`` with the caption of each figure of the paper's list (one FI recorded the calls of) replaced by the
+    paper's: the alt text of its image when the model wrote words there, and a caption line under it that opens with
+    "Figure N". Nothing changes for a deck with no such figure. With ``held``, a caption line put in is written as a token and
+    its text is added to ``held`` (token -> line), so that the caption, which is FI's, is not read as the model's text."""
+    if not paper_numbers:
+        return content
+    lines = content.split("\n")
+    for i, line in enumerate(lines):
+        m = _IMAGE_LINE_RE.match(line)
+        if not m or m.group("name") not in paper_numbers:
+            continue
+        name, number = m.group("name"), paper_numbers[m.group("name")]
+        caption = _paper_caption(paper_md, name)
+        if not caption:
+            continue
+        alt = m.group("alt").strip()
+        if alt and not all(_MARP_HINT_RE.match(w) for w in alt.split()):
+            lines[i] = f"{m.group('lead')}![{caption.replace('[', '(').replace(']', ')')}](figures/{name})"
+        j = i + 1
+        while j < len(lines) and not lines[j].strip():
+            j += 1
+        under = _CAPTION_LINE_RE.match(lines[j]) if j < len(lines) else None
+        if under and int(under.group("n")) == number:
+            line = f"**Figure {number}.** {caption}"
+            if held is None:
+                lines[j] = line
+            else:
+                lines[j] = f"FICAPTIONHOLD{len(held)}END"
+                held[lines[j]] = line
+    return "\n".join(lines)
+
+
 class SlideGenerator:
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -108,9 +175,13 @@ class SlideGenerator:
         *,
         supervisor: ProxySupervisor | None = None,
         feedback: str = "",
+        keep_deck: bool = False,
     ) -> dict[str, Path]:
-        # ``feedback`` is what a visual check of the previous deck found; it
-        # is appended to the authoring prompt.
+        # ``feedback`` is what a visual check of the previous deck found. When it
+        # carries the findings (``Feedback.findings``) and a deck exists, only the
+        # slides they name are written again (:meth:`_redo_flagged`); every other
+        # slide is kept byte for byte. ``keep_deck``: render the slides.md that is
+        # there without asking the model (a redone slide was put back).
         # Cleanup gate: if "slides" is no longer in output.kinds (user
         # removed it from their YAML between runs), remove any stale
         # ``slides_skipped.md`` left over from a prior run. Mirrors
@@ -128,7 +199,12 @@ class SlideGenerator:
         if art.paper_md is None:
             return {}
 
-        slides_md = await self._author_marp(art, out_dir, supervisor=supervisor, feedback=feedback)
+        if keep_deck and (out_dir / "slides.md").is_file():
+            slides_md = out_dir / "slides.md"
+        elif getattr(feedback, "findings", None) and (out_dir / "slides.md").is_file():
+            slides_md = await self._redo_flagged(art, out_dir, feedback, supervisor=supervisor)
+        else:
+            slides_md = await self._author_marp(art, out_dir, supervisor=supervisor, feedback=feedback)
         result: dict[str, Path] = {"slides_md": slides_md}
         diag_path = out_dir / "slides_skipped.md"
         # Will be set to a (reason_code, summary, how_to_fix) triple
@@ -254,6 +330,90 @@ class SlideGenerator:
 
         return result
 
+    async def _redo_flagged(
+        self, art: QuestArtifacts, out_dir: Path, feedback, *, supervisor: ProxySupervisor | None,
+    ) -> Path:
+        """Write again only the slides the check flagged (its findings name pages; a page is a slide). The model sees the
+        deck as it is and answers with one replacement per flagged slide; FI puts each back at its place, so every other
+        slide is the same bytes. An answer that does not hold exactly one slide per flagged one changes nothing."""
+        slides_md = out_dir / "slides.md"
+        content = slides_md.read_text(encoding="utf-8")
+        head, segments, breaks = split_deck(content)
+        pages = sorted({
+            f["page"] for f in feedback.findings
+            if isinstance(f.get("page"), int) and 1 <= f["page"] <= len(segments)
+        })
+        if not pages:
+            _log.info("slides: the check named no slide of the deck; nothing is redone")
+            return slides_md
+        deck = "\n\n".join(f"## Slide {i}\n\n{seg.strip()}" for i, seg in enumerate(segments, 1))
+        figures = []
+        if art.figures_dir and art.figures_dir.is_dir():
+            figures = sorted(p.name for p in art.figures_dir.iterdir() if p.is_file())
+        numbers = ", ".join(str(p) for p in pages)
+        redo_paper = _paper_facts.without_marks(art.paper_md.read_text(encoding="utf-8")) if art.paper_md else ""
+        figures, paper_numbers = paper_figure_set(redo_paper, figures, art.raw_state, art.quest_root)
+        ctx = paper_and_claims(redo_paper, art.quest_root, art.paper_md)
+        prompt = string.Template(REDO_PROMPT_PATH.read_text(encoding="utf-8")).safe_substitute(
+            slide_numbers=numbers, count=str(len(pages)), deck=deck,
+            figure_list=_figure_list(figures, paper_numbers, redo_paper),
+            feedback=str(feedback).strip(), claims_rule=ctx.claims_rule, claims=ctx.claims,
+        )
+        text = await self._ask(art, prompt, supervisor=supervisor)
+        reply = _math_as_dollars(_figures_as_own_paragraphs(_fences_as_slide_breaks(_strip_outer_fence(text))))
+        reply = self._take_out_unchecked(reply, art, paper_numbers, redo_paper)
+        pieces = [p for p in _split_slides(reply)[0] if p.strip()]
+        if len(pieces) != len(pages):
+            _log.warning("slides: asked for %d replacement slide(s) and got %d; the deck is unchanged",
+                         len(pages), len(pieces))
+            return slides_md
+        for page, piece in zip(pages, pieces):
+            segments[page - 1] = _same_margins(segments[page - 1], piece)
+        slides_md.write_text(join_deck(head, segments, breaks), encoding="utf-8")
+        _log.info("slides.md: slide(s) %s written again, the other %d kept", numbers, len(segments) - len(pages))
+        return slides_md
+
+    def _take_out_unchecked(self, text: str, art: QuestArtifacts, paper_numbers: dict[str, int], paper_md: str) -> str:
+        """``text`` (titles, bullets and prose) without the sentences about a figure FI does not stand behind (the paper's
+        own rule), and the figures of the paper's list under the paper's captions; each removal goes to the quest's
+        run.log, not onto a slide."""
+        try:
+            raw_paper = art.paper_md.read_text(encoding="utf-8") if art.paper_md else ""
+        except OSError:
+            raw_paper = ""
+        # A caption line under a figure of the paper's list is replaced by the paper's caption, which is FI's: it is put in first
+        # and held out of the rule. Any other line naming a figure, a caption line with no paper caption to put in included,
+        # is the model's and is read like any other text.
+        held: dict[str, str] = {}
+        text = _with_paper_captions(text, paper_numbers, paper_md, held)
+        out, taken = take_out_unchecked(text, art.raw_state, art.quest_root, raw_paper)
+        log_taken(taken, art.quest_root, "slides", _log)
+        for token, line in held.items():
+            out = out.replace(token, line)
+        return out
+
+    async def _ask(self, art: QuestArtifacts, prompt: str, *, supervisor: ProxySupervisor | None) -> str:
+        own_supervisor = supervisor is None
+        sup = supervisor or ProxySupervisor()
+        endpoint = await resolve_endpoint_async(self.config.provider, sup)
+        client = LLMClient(endpoint, run_log=quest_run_log(art.quest_root))
+        try:
+            text = await client.chat(
+                [{"role": "user", "content": prompt}],
+                temperature=0.2,
+                model=model_for_node(self.config.provider.node_models, "slides"),
+                node="slides",
+            )
+            append_cost_row(art.quest_root / ".fi", node="slides", model=client.last_model, usage=client.last_usage,
+                            client=client, messages=[{"role": "user", "content": prompt}], response=text)
+        finally:
+            await client.aclose()
+            if self.config.provider.name in PROXY_PROVIDERS:
+                await sup.release(self.config.provider.name)
+            if own_supervisor:
+                await sup.shutdown()
+        return text
+
     async def _author_marp(
         self,
         art: QuestArtifacts,
@@ -267,10 +427,15 @@ class SlideGenerator:
         figures = []
         if art.figures_dir and art.figures_dir.is_dir():
             figures = sorted(p.name for p in art.figures_dir.iterdir() if p.is_file())
+        figures, paper_numbers = paper_figure_set(paper_md, figures, art.raw_state, art.quest_root)
+        ctx = paper_and_claims(paper_md, art.quest_root, art.paper_md)
         prompt = string.Template(PROMPT_PATH.read_text(encoding="utf-8")).substitute(
-            paper_md=paper_md[:8000],
-            figure_list="\n".join(f"- figures/{f}" for f in figures) or "(none)",
+            paper_md=ctx.paper,
+            claims_rule=ctx.claims_rule,
+            claims=ctx.claims,
+            figure_list=_figure_list(figures, paper_numbers, paper_md),
         )
+        note_prompt_fit(prompt, "slides", art.quest_root, ctx)
         if feedback:
             prompt = prompt.rstrip() + "\n\n" + feedback.strip() + "\n"
         own_supervisor = supervisor is None
@@ -297,6 +462,7 @@ class SlideGenerator:
         # with bare ``` lines is only unfenced once _fences_as_slide_breaks has run.
         content = _math_as_dollars(
             _figures_as_own_paragraphs(_fences_as_slide_breaks(_strip_outer_fence(text))))
+        content = self._take_out_unchecked(content, art, paper_numbers, paper_md)
         # Append one References slide built from the quest's actual papers,
         # guaranteed rather than left to the LLM: the deck author only saw the
         # first 8000 chars of paper.md and would usually miss the References
@@ -545,6 +711,82 @@ def _strip_outer_fence(text: str) -> str:
 
 _FRONT_MATTER_RE = re.compile(r"\A---[ \t]*\n.*?\n---[ \t]*(?:\n|\Z)", re.DOTALL)
 _SLIDE_BREAK_RE = re.compile(r"^---[ \t]*$", re.MULTILINE)
+
+
+def split_deck(content: str) -> tuple[str, list[str], list[str]]:
+    """A deck as ``(front matter, one text per slide, the break lines between them)``; :func:`join_deck` gives
+    ``content`` back exactly. The Nth slide is the Nth page of the rendered deck."""
+    match = _FRONT_MATTER_RE.match(content)
+    head = content[: match.end()] if match else ""
+    segments, breaks = _split_slides(content[len(head):])
+    return head, segments, breaks
+
+
+_CODE_FENCE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})(.*)")
+
+
+def _scan_lines(body: str):
+    """``(offset, line, in_code)`` for each line of ``body``; ``in_code`` is True for a fence's opening line, its content
+    and its closing line. CommonMark: a fence closes only on a line of the same character, at least as long, and nothing
+    but spaces or tabs after it; one never closed runs to the end. The one rule for every reader of the deck."""
+    fence = ""
+    offset = 0
+    for line in body.splitlines(keepends=True):
+        opened = _CODE_FENCE_RE.match(line.rstrip("\r\n"))
+        in_code = bool(fence)
+        if fence:
+            if opened and opened.group(1)[0] == fence[0] and len(opened.group(1)) >= len(fence) \
+                    and not opened.group(2).strip(" \t"):
+                fence = ""
+        elif opened:
+            fence = opened.group(1)
+            in_code = True
+        yield offset, line, in_code
+        offset += len(line)
+
+
+def _split_slides(body: str) -> tuple[list[str], list[str]]:
+    """``body`` cut at its slide breaks. A ``---`` line inside a fenced code block is code, not a break."""
+    segments: list[str] = []
+    breaks: list[str] = []
+    start = 0
+    for offset, line, in_code in _scan_lines(body):
+        text = line.rstrip("\r\n")
+        if not in_code and _SLIDE_BREAK_RE.fullmatch(text):
+            segments.append(body[start:offset])
+            breaks.append(text)
+            start = offset + len(text)
+    segments.append(body[start:])
+    return segments, breaks
+
+
+def join_deck(head: str, segments: list[str], breaks: list[str]) -> str:
+    out = [head]
+    for i, seg in enumerate(segments):
+        out.append(seg)
+        if i < len(breaks):
+            out.append(breaks[i])
+    return "".join(out)
+
+
+def _same_margins(old: str, new: str) -> str:
+    """``new`` with the blank lines around ``old``, so the break lines stay where they were."""
+    lead = old[: len(old) - len(old.lstrip())]
+    trail = old[len(old.rstrip()):]
+    return lead + new.strip() + trail
+
+
+def restore_slides(slides_md: Path, saved_md: Path, pages: list[int]) -> None:
+    """Put slides ``pages`` (1-based) of ``saved_md`` back into ``slides_md``; every other slide is left alone. Does
+    nothing when the two decks do not have the same number of slides."""
+    head, segments, breaks = split_deck(slides_md.read_text(encoding="utf-8"))
+    _, old_segments, _ = split_deck(saved_md.read_text(encoding="utf-8"))
+    if len(old_segments) != len(segments):
+        return
+    for page in pages:
+        if 1 <= page <= len(segments):
+            segments[page - 1] = old_segments[page - 1]
+    slides_md.write_text(join_deck(head, segments, breaks), encoding="utf-8")
 _BARE_FENCE_LINE_RE = re.compile(r"^```[ \t]*$", re.MULTILINE)
 
 
@@ -556,7 +798,6 @@ _FIGURE_LINE_RE = re.compile(r"^\s*!\[(?P<alt>[^\]]*)\]\([^)]*\)\s*$")
 # as text. The paper already reads both spellings (``generation/_pandoc.py``).
 _PAREN_MATH_RE = re.compile(r"(?<!\\)\\\((.+?)(?<!\\)\\\)")
 _BRACKET_MATH_RE = re.compile(r"(?<!\\)\\\[(.+?)(?<!\\)\\\]", re.DOTALL)
-_CODE_FENCE_SPLIT_RE = re.compile(r"(^```.*?^```[ \t]*$)", re.DOTALL | re.MULTILINE)
 _CODE_SPAN_SPLIT_RE = re.compile(r"(`[^`\n]*`)")
 
 
@@ -573,9 +814,15 @@ def _math_as_dollars(content: str) -> str:
         text = _BRACKET_MATH_RE.sub(lambda m: "$$" + m.group(1).strip() + "$$", text)
         return _PAREN_MATH_RE.sub(lambda m: "$" + m.group(1).strip() + "$", text)
 
+    parts: list[tuple[bool, str]] = []          # (is fenced code, text), in order
+    for _offset, line, in_code in _scan_lines(content):
+        if parts and parts[-1][0] == in_code:
+            parts[-1] = (in_code, parts[-1][1] + line)
+        else:
+            parts.append((in_code, line))
     out: list[str] = []
-    for index, part in enumerate(_CODE_FENCE_SPLIT_RE.split(content)):
-        if index % 2:                       # a fenced code block
+    for in_code, part in parts:
+        if in_code:
             out.append(part)
             continue
         out.append("".join(

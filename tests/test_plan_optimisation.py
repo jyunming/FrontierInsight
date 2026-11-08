@@ -327,15 +327,49 @@ async def test_a_complete_search_plan_goes_on_to_be_run(tmp_path: Path) -> None:
 async def test_a_search_the_setup_cannot_run_stops_before_anything_runs_every_time(tmp_path: Path) -> None:
     eng = _engine(tmp_path, [json.dumps({**HEAT_SINK, "plan": EXTRA}), _NO_OBJECTIONS])
     await eng._node_plan({"topic": "Find the fin spacing that minimises the base temperature", "iteration": 0})
-    eng.config.execution.split_analysis = False
+    eng.config.execution.background_jobs = True
     for _ in range(2):  # no once-only marker: every resume checks again
         seen = _stop_at_pause(eng)
         with pytest.raises(Paused):
             await eng._node_design({"topic": "heat sink", "iteration": 0})
         assert seen[0]["headline"] == "the search for the best design cannot start"
         steps = " ".join(seen[0]["steps"])
-        assert "Nothing was run" in steps and "execution.split_analysis" in steps
+        assert "Nothing was run" in steps and "execution.background_jobs" in steps
     assert not list(eng.quest_root.glob("**/*.py"))
+
+
+@pytest.mark.asyncio
+async def test_split_analysis_false_is_overridden_for_a_search_and_said_so(tmp_path: Path) -> None:
+    """A search needs the run and the analysis apart: `split_analysis: false` no longer pauses the quest. FI splits
+    anyway, warns once in run.log, and keeps the override in the record the paper's limitations and QUALITY.md use."""
+    eng = _engine(tmp_path, [])
+    design = plan.normalize_design(copy.deepcopy(HEAT_SINK))[0]
+    state = {"topic": "heat sink", "iteration": 0, "design": design}
+    eng.config.execution.split_analysis = False
+    seen = _stop_at_pause(eng)
+    eng._stop_if_the_search_cannot_start(state, design)
+    eng._stop_if_the_search_cannot_start(state, design)
+    assert not seen and eng._split_on(state)
+    covered = json.loads((eng.fi_dir / "topic_covered.json").read_text(encoding="utf-8"))
+    entries = [e for e in covered["not_done"] if e["kind"] == "split_overridden"]
+    assert len(entries) == 1 and "execution.split_analysis: false" in entries[0]["sentence"]
+    assert "needs the run and the analysis kept apart" in entries[0]["sentence"]
+    # the refresh before the run keeps it while the plan is still a search
+    eng._refresh_not_done(state)
+    assert any(e["kind"] == "split_overridden" for e in eng._topic_covered_read()["not_done"])
+
+
+@pytest.mark.asyncio
+async def test_a_measurement_with_split_analysis_false_is_unchanged(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    measure = {**{k: v for k, v in HEAT_SINK.items() if k != "protocol"}, "study_type": "measure",
+               "protocol": {"grid": {"fin_spacing": [2.0, 3.0, 4.0]}, "oracles": HEAT_SINK["protocol"]["oracles"]}}
+    state = {"topic": "heat sink", "iteration": 0, "design": measure}
+    eng.config.execution.split_analysis = False
+    seen = _stop_at_pause(eng)
+    eng._stop_if_the_search_cannot_start(state, measure)
+    assert not seen and not eng._split_on(state)
+    assert not eng._topic_covered_read().get("not_done")
 
 
 @pytest.mark.asyncio
@@ -356,7 +390,7 @@ async def test_a_search_the_setup_cannot_run_also_stops_at_the_run_step(tmp_path
     """A resume past the design, after the quest's setup changed, is stopped before anything runs as well."""
     eng = _engine(tmp_path, [])
     design = plan.normalize_design(copy.deepcopy(HEAT_SINK))[0]
-    for change in ({"split_analysis": False}, {"background_jobs": True}):
+    for change in ({"background_jobs": True},):
         for key, value in change.items():
             setattr(eng.config.execution, key, value)
         seen = _stop_at_pause(eng)
@@ -403,7 +437,7 @@ async def test_an_ambiguous_topic_adds_one_question_to_the_clarify_step(tmp_path
 async def test_a_whole_run_with_a_search_plan_it_cannot_run_stops_at_the_design_and_writes_no_code(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Through the real graph: a quest that keeps one script cannot hand FI a simulation to search with. The plan is
+    """Through the real graph: a quest whose trials go to a cluster cannot run a search here. The plan is
     written, the quest stops with a plain card, and nothing is implemented or run (the plan is never run as a plain
     sweep). A search that can run: tests/test_optimise_runner.py."""
     from tests.test_engine_smoke import _classify, _fake_response_for
@@ -412,7 +446,7 @@ async def test_a_whole_run_with_a_search_plan_it_cannot_run_stops_at_the_design_
         topic="Find the fin spacing and thickness that minimise the base temperature of a heat sink", title="fins",
         provider=ProviderConfig(name="openai"),
         engine=EngineConfig(max_iterations=1, review_loop=False, auto_accept_on_pass=True),
-        execution=ExecutionConfig(sandbox="venv", timeout_s=120, split_analysis=False),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=120, background_jobs=True),
         knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "outputs"),
     )
     engine = Engine(cfg)
@@ -474,23 +508,6 @@ def test_a_drafts_study_type_is_put_right_rather_than_losing_the_plan() -> None:
     unknown = copy.deepcopy(HEAT_SINK)
     unknown["study_type"] = "minimize"
     assert op.repair_study_type(unknown) and "study_type" not in unknown
-
-
-@pytest.mark.asyncio
-async def test_a_topic_that_asks_for_the_best_design_is_not_run_as_a_sweep_when_the_draft_forgets(tmp_path: Path) -> None:
-    topic = "Find the fin spacing and thickness that minimise the base temperature of a heat sink"
-    sweep = {**{k: v for k, v in HEAT_SINK.items() if k not in ("protocol", "study_type")},
-             "protocol": {"grid": {"fin_spacing": [2.0, 3.0]}, "oracles": HEAT_SINK["protocol"]["oracles"]}}
-    eng = _engine(tmp_path, [json.dumps({**sweep, "plan": EXTRA}), _NO_OBJECTIONS])
-    await eng._node_plan({"topic": topic, "iteration": 0})
-    text = plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
-    assert plan.parse(text).design["study_type"] == "find_best_design"
-    assert "The topic asks to find the best design" in text
-    seen = _stop_at_pause(eng)
-    state = {"topic": topic, "iteration": 0}
-    patch = await eng._node_design(state)
-    assert seen == [], "nobody is asked"
-    assert eng._search_cannot_start_stop(state, patch["design"]) is not None, "a search is never run as a sweep"
 
 
 @pytest.mark.asyncio

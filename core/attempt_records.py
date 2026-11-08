@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from . import frozen_protocol as _frozen
+from . import numeric_warnings as _numeric
 from . import record_anchor as _record_anchor
 
 #: What an attempt came to. ``process_error``: it crashed or produced no result. ``protocol_mismatch``: it ran something
@@ -451,7 +452,7 @@ def context_fingerprint(config: Any, quest_root: Path, state: dict[str, Any], *,
             "iteration": int(state.get("iteration", 0) or 0),
             # The index of the latest entry in DESIGN_HISTORY.json (0 for the first design), None before any.
             "design_revision": (len(state.get("design_history") or []) - 1) if state.get("design_history") else None,
-            "repair": int(state.get("exec_reflect_iter", 0) or 0),
+            "repair": _numeric.repairs_made(state),
         },
     }
 

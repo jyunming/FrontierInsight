@@ -50,13 +50,17 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any
 
 from . import code_reach as _code_reach
+from .contract import figure_file
 from . import oracle_check as _oracle
 from . import review_pairs as _pairs
+
+_LOG = logging.getLogger(__name__)
 
 RECORD = Path(".fi") / "code_review.json"
 #: Reviews of the code in a whole quest (one per code version; the last is reserved for the version that will run), the
@@ -68,6 +72,9 @@ RESERVED_FOR_FINAL = 1
 #: read too (at most one per repair, and ``engine.exec_reflect_max_iterations`` bounds the repairs; 3 by default).
 RUN_REPAIR_READS = 3
 MAX_SEND_BACKS = 2
+#: Rounds of repair that may be started again after one was cut short (a kill, a crash) before it finished: a round is counted in
+#: ``send_backs`` when it ends, so only this bounds a round that keeps dying.
+MAX_ROUND_RESTARTS = 2
 #: Every model request the finding-by-finding repair may make in a quest (a failing test asked for, a repair, the other
 #: model's one rewrite), each counted on disk before it is made. Each finding has its own smaller bounds
 #: (:mod:`core.finding_repair`).
@@ -75,7 +82,7 @@ MAX_FINDING_CALLS = 60
 #: The most findings read from one reply. The reader is asked for every finding, ranked by effect on the reported
 #: results, so this is a guard against a runaway reply and not a cap on what is reported.
 FINDING_LIMIT = 200
-#: How much code the reader is shown (whole files; the rest is said not to be shown).
+#: How much code one reading request holds; more code is read in several requests (:func:`source_parts`).
 _MAX_CODE_CHARS = 60000
 IMPLEMENTED, MISSING, DIFFERENT = "implemented", "missing", "different"
 _STATUS_WORDS = {
@@ -90,17 +97,23 @@ def _text(value: Any, limit: int = 300) -> str:
 
 
 def requirements(design: dict[str, Any] | None, protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """The plan's required outputs, as ``{"id", "kind", "text", "headline"}`` (R1, R2 ...): the dependent variables, the
-    metrics, the planned figures, the swept parameters, the checks' measures and the equations the simulation computes
-    its data with. Names and descriptions only, never a number the code must reproduce."""
+    """The plan's required outputs, as ``{"id", "kind", "text", "headline", "name", "defined_by"}`` (R1, R2 ...): the
+    dependent variables, the metrics, the planned figures, the swept parameters, the checks' measures and the equations the
+    simulation computes its data with. Names and descriptions only, never a number the code must reproduce.
+
+    ``defined_by`` lists the plan items that define the requirement, as ``[section, key]`` pairs read from the plan's own
+    structure (a metric's entry in ``metrics`` and its entry in ``definitions``, a swept setting's entry in ``grid`` or
+    ``in_each_run``, a check's entry in ``checks``, an equation's entry in ``equations``). A dependent variable and a figure
+    have none. It is what :func:`asked_ids` uses to ask a requirement only of the requests that were given its definition."""
     design = design if isinstance(design, dict) else {}
     protocol = protocol if isinstance(protocol, dict) else {}
     out: list[dict[str, Any]] = []
 
-    def add(kind: str, text: str, headline: bool = False, name: str = "") -> None:
+    def add(kind: str, text: str, headline: bool = False, name: str = "", defined_by: list[list[str]] | None = None) -> None:
         text = _text(text)
         if text and not any(r["kind"] == kind and r["text"] == text for r in out):
-            out.append({"id": f"R{len(out) + 1}", "kind": kind, "text": text, "headline": headline, "name": _text(name, 80)})
+            out.append({"id": f"R{len(out) + 1}", "kind": kind, "text": text, "headline": headline, "name": _text(name, 80),
+                        "defined_by": defined_by or []})
 
     precision = protocol.get("precision") if isinstance(protocol.get("precision"), dict) else {}
     headline_metric = _text(precision.get("metric")).lower()
@@ -112,63 +125,327 @@ def requirements(design: dict[str, Any] | None, protocol: dict[str, Any] | None)
         if isinstance(m, dict) and _text(m.get("id")):
             mid = _text(m["id"])
             est = _text(m.get("estimand"))
+            defined = [["metrics", mid]]
+            if any(isinstance(d, dict) and _text(d.get("metric")) == mid
+                   for d in (protocol.get("definitions") if isinstance(protocol.get("definitions"), list) else [])):
+                defined.append(["definitions", mid])
             add("metric", f"the result reports {mid}" + (f" ({est})" if est else ""),
-                bool(headline_metric) and (mid.lower() == headline_metric or headline_metric in mid.lower()), mid)
+                bool(headline_metric) and (mid.lower() == headline_metric or headline_metric in mid.lower()), mid, defined)
     for fig in design.get("figures_planned") if isinstance(design.get("figures_planned"), list) else []:
-        add("figure", f"the script draws the planned figure {Path(str(fig)).name}")
-    grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+        add("figure", f"the script draws the planned figure {figure_file(fig)}")
+    grid, inside = _settings_of(protocol)  # where the plan view takes them from
     for name, values in grid.items():
         if isinstance(values, list) and len(values) > 1:
-            add("sweep", f"the parameter {_text(name, 60)} is varied over all {len(values)} values of the plan's grid")
-    inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else {}
+            add("sweep", f"the parameter {_text(name, 60)} is varied over all {len(values)} values of the plan's grid",
+                defined_by=[["grid", str(name)]])
     for name, values in inside.items():
         if isinstance(values, list) and len(values) > 1:
             add("sweep", f"every run uses all {len(values)} values of {_text(name, 60)} it is given in its cell, on the same "
-                "random numbers")
+                "random numbers", defined_by=[["in_each_run", str(name)]])
     for o in _oracle.declared(protocol):
-        measure = _text(o.get("measure"), 160)
+        name, measure = _check_names(o)  # as the plan view shows them, without the values the check owns
         if measure:
-            add("check", f"the simulation returns what the measure '{measure}' of the check '{_text(o['name'], 60)}' uses")
+            add("check", f"the simulation returns what the measure '{measure}' of the check '{name}' uses",
+                defined_by=[["checks", name]])
     for eid in _oracle.generating_equations(protocol):
-        add("equation", f"equation {eid} of the plan's model is computed in the code, in a function marked `# {eid}`")
+        add("equation", f"equation {eid} of the plan's model is computed in the code, in a function marked `# {eid}`",
+            defined_by=[["equations", str(eid)]])
     return out
 
 
-def sources_text(code_dir: Path) -> tuple[str, bool]:
-    """``(the scripts with line numbers, whether some were left out)``: simulate.py, experiment.py and the model's
-    package; whole files only, as many as fit."""
+_SENTENCE_END_RE = re.compile(r"(?<=[.;])\s+(?=[A-Z])")
+_FORMULA_RE = re.compile(r"[=/*^+(|]|\s-\s")  # written as a formula, not as words
+
+
+def leading_id(name: Any) -> str:
+    """The identifier a plan entry begins with (``rate`` in ``rate = (a - b)/b``), else ``""``."""
+    m = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)", str(name or ""))
+    return m.group(1) if m else ""
+
+
+def _formula_text(text: str) -> str:
+    """A formula's text for comparison: lower case, no spaces, with its operators (``a+b`` and ``a-b`` differ)."""
+    return re.sub(r"\s+", "", text.lower().replace("`", ""))
+
+
+def plan_defines_twice(design: dict[str, Any] | None, protocol: dict[str, Any] | None) -> dict[str, dict[str, str]]:
+    """The names the plan appears to define twice: a dependent variable written ``<id> = <formula>`` whose id is also a metric
+    of the protocol, where the formula's text does not occur in the metric's definition (its first sentence that is written as
+    a formula). ``{normalised id: {"id", "dependent", "metric"}}``.
+
+    This is a comparison of TEXT, read from the plan's own structure; it does not know whether two formulas mean the same
+    (``b+a`` against ``a+b``, or two names for one quantity, are told apart), and it does not read a second definition that is
+    only in the method's prose. So it is never a reason to keep or to take out a value; it only changes what is said about
+    the name and when the plan counts as completed."""
+    design = design if isinstance(design, dict) else {}
+    variables = design.get("variables") if isinstance(design.get("variables"), dict) else {}
+    metrics = {}
+    for m in (protocol or {}).get("metrics") if isinstance((protocol or {}).get("metrics"), list) else []:
+        if isinstance(m, dict) and _text(m.get("id")) and _text(m.get("estimand")):
+            metrics.setdefault(_norm(m["id"]), (_text(m["id"]), _text(m["estimand"])))
+    out: dict[str, dict[str, str]] = {}
+    for entry in variables.get("dependent") if isinstance(variables.get("dependent"), list) else []:
+        ident = leading_id(entry)
+        key = _norm(ident)
+        written = _text(entry)[len(_text(ident)):]  # what follows the id: "= <formula>"
+        if key not in metrics or key in out or not _FORMULA_RE.search(written):
+            continue
+        # The metric's own definition: the first sentence written as a formula (later ones may quote other formulas to say they are not it).
+        first = next((x for x in _SENTENCE_END_RE.split(metrics[key][1]) if _FORMULA_RE.search(x)), "")
+        formula = _formula_text(written.lstrip(" =:"))
+        if first and formula and formula not in _formula_text(first):
+            out[key] = {"id": metrics[key][0], "dependent": _text(entry), "metric": metrics[key][1]}
+    return out
+
+
+def double_definition_gaps(design: dict[str, Any] | None, protocol: dict[str, Any] | None = None) -> list[str]:
+    """One plain sentence per name ``design`` still appears to define twice (:func:`plan_defines_twice`), for the check that
+    the plan's model resolved a contradiction: complete only when none is left. ``protocol`` defaults to the design's own."""
+    if protocol is None and isinstance(design, dict):
+        protocol = design.get("protocol") if isinstance(design.get("protocol"), dict) else None
+    return [f"{v['id']} is defined as `{v['dependent']}` and as `{v['metric']}`" for v in plan_defines_twice(design, protocol).values()]
+
+
+def plan_defined_twice(quest_root: Path) -> dict[str, dict[str, str]]:
+    """:func:`plan_defines_twice` for a quest: the plan (``plan.md``) against the frozen protocol, else the plan's own
+    protocol. ``{}`` when either cannot be read."""
+    from . import frozen_protocol as _frozen
+    from . import plan as _plan
+
+    try:
+        design = _plan.parse(_plan.plan_path(Path(quest_root)).read_text(encoding="utf-8")).design
+        protocol = _frozen.protocol_of(Path(quest_root))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(design, dict):
+        return {}
+    if protocol is None:
+        protocol = design.get("protocol") if isinstance(design.get("protocol"), dict) else None
+    return plan_defines_twice(design, protocol)
+
+
+def is_defined_twice(name: Any, twice: dict[str, dict[str, str]]) -> bool:
+    """Whether the quantity ``name`` (a plan name, possibly written with its formula) is one of ``twice``."""
+    return bool(twice) and _norm(leading_id(name)) in twice
+
+
+def passing_checks(quest_root: Path, name: Any) -> list[str]:
+    """The names of the plan's known-answer checks that FI itself measured and that passed (``needs/ORACLE_CHECK.json``),
+    whose measure is a formula that reads the quantity ``name`` (the plan's name for it, compared exactly, is one of the names FI
+    evaluates in the check's measure, ``oracle_forms.names``; a measure that is not a formula links to no quantity), and that
+    the second model's reading of the code does not flag. ``[]`` when there is none: FI then holds no check of the value."""
+    from . import frozen_protocol as _frozen
+    from . import oracle_forms as _forms
+
+    root = Path(quest_root)
+    try:
+        record = json.loads((root / "needs" / "ORACLE_CHECK.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    passed = set(_oracle.engine_passed(_oracle.last_judged(record)))
+    protocol = _frozen.protocol_of(root)
+    from . import shown_reach as _reach
+
+    # the executor reads a measure as ONE returned key first (trial_runner._check_from), and parses it only when it is none
+    returned = set(_reach._trial_names(root)) | set(declared_names(None, protocol))
+    ident = str(name or "").strip() if str(name or "").strip() in returned else leading_id(name)
+    if not passed or not ident:
+        return []
+
+    def reads_it(measure: Any) -> bool:
+        text = str(measure or "").strip()
+        if text in returned:
+            return text == ident
+        try:
+            return ident in _forms.names(text, across=True)
+        except Exception:  # noqa: BLE001 -- a measure that cannot be read links to nothing
+            return False
+
+    reads = [str(o["name"]) for o in _oracle.declared(protocol) if str(o["name"]) in passed and reads_it(o.get("measure"))]
+    flagged = flagged_checks(root, root / "code", reads) if reads else {}
+    return [n for n in reads if n not in flagged]
+
+
+def _settings_of(protocol: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """``(grid, in_each_run)`` of the plan: the protocol's own, else those of its search (``optimisation``). The one place
+    both the plan view (:func:`_raw_sections`) and the requirements (:func:`requirements`) take them from."""
+    optimisation = protocol.get("optimisation") if isinstance(protocol.get("optimisation"), dict) else {}
+    def own(key: str) -> dict[str, Any]:
+        value = protocol.get(key) if isinstance(protocol.get(key), dict) and protocol.get(key) else optimisation.get(key)
+        return value if isinstance(value, dict) else {}
+
+    return own("grid"), own("in_each_run")
+
+
+def _check_names(oracle: dict[str, Any]) -> tuple[str, str]:
+    """``(name, measure)`` of a check as the reader is shown them: without the values the check owns
+    (:func:`_owned_values`). The one place both the plan view (:func:`plan_sections`) and the requirements take them from."""
+    values = _owned_values(oracle)
+    return (_pairs.scrub(_text(oracle.get("name"), 60), values), _pairs.scrub(_text(oracle.get("measure"), 160), values))
+
+
+def _code_files(code_dir: Path) -> dict[str, str]:
+    """Every file the study runs: simulate.py, experiment.py, the other scripts beside them (run.py, FI's own search), the
+    model's package and the study's settings (study.json)."""
     from . import code_layout as _layout
 
     code_dir = Path(code_dir)
     files: dict[str, str] = {}
-    for name in ("simulate.py", "experiment.py"):
+    first = ("simulate.py", "experiment.py")
+    last = ("fi_search.py",)  # FI's own search: the study's own files come first and fill the first requests
+    rest: list[str] = []
+    if code_dir.is_dir():
+        rest = sorted(p.name for p in code_dir.glob("*.py")
+                      if p.is_file() and p.name not in (*first, *last) and not p.name.startswith("test_"))
+    for name in (*first, *rest, "study.json"):
         if (code_dir / name).is_file():
             files[name] = (code_dir / name).read_text(encoding="utf-8", errors="replace")
     files.update(_layout.package_sources(code_dir))
-    parts: list[str] = []
-    used, partial = 0, False
-    for name, text in files.items():
-        numbered = "\n".join(f"{i:4d}  {line}" for i, line in enumerate(text.splitlines(), start=1))
-        block = f"### {name}\n```python\n{numbered}\n```\n"
-        if used + len(block) > _MAX_CODE_CHARS and parts:
-            partial = True
+    for name in last:
+        if (code_dir / name).is_file():
+            files[name] = (code_dir / name).read_text(encoding="utf-8", errors="replace")
+    return files
+
+
+def source_parts_detail(code_dir: Path, limit: int | None = None) -> list[dict[str, Any]]:
+    """The code the reader is shown, as parts of at most ``limit`` characters (``_MAX_CODE_CHARS``) each, every line of every
+    file in some part, with FI's own record of what each part holds: ``{"text", "shown": {file: [[first, last], ...]},
+    "cut": [{"file", "line", "chars"}]}``. A file that does not fit in a part is cut by its own line ranges (the header names
+    the range; the numbers are the file's own). A line longer than a quarter of ``limit`` is cut and the cut is in ``cut``:
+    the reader never sees the rest of that line. An empty list when there is no code."""
+    limit = _MAX_CODE_CHARS if limit is None else limit
+    line_cap = max(200, limit // 4)
+    units: list[dict[str, Any]] = []
+    cuts: list[dict[str, Any]] = []
+
+    def unit(header: str, name: str, first: int, shown: list[str]) -> dict[str, Any]:
+        lang = "json" if name.endswith(".json") else "python"
+        return {"text": f"### {header}\n```{lang}\n" + "\n".join(shown) + "\n```\n", "file": name,
+                "range": [first, first + len(shown) - 1]}
+
+    for name, text in _code_files(code_dir).items():
+        lines: list[str] = []
+        for i, line in enumerate(text.splitlines(), start=1):
+            if len(line) > line_cap:
+                cuts.append({"file": name, "line": i, "chars": len(line) - line_cap})
+                line = line[:line_cap] + f" ...[{len(line) - line_cap} more characters of this line are not shown]"
+            lines.append(f"{i:4d}  {line}")
+        whole = unit(name, name, 1, lines)
+        if len(whole["text"]) <= limit:
+            units.append(whole)
             continue
-        parts.append(block)
-        used += len(block)
-    return "\n".join(parts) + ("\n(some files are not shown)" if partial else ""), partial
+        start, size = 0, 0
+        for i, line in enumerate([*lines, None]):
+            if line is None or (size + len(line) + 1 > limit - 200 and i > start):
+                units.append(unit(f"{name} (lines {start + 1}-{i} of {len(lines)}; the other lines are in other parts)",
+                                  name, start + 1, lines[start:i]))
+                start, size = i, 0
+            if line is not None:
+                size += len(line) + 1
+    packed: list[list[dict[str, Any]]] = []  # each unit goes into the first part that still has room
+    for u in units:
+        for group in packed:
+            if sum(len(x["text"]) + 1 for x in group) + len(u["text"]) <= limit:
+                group.append(u)
+                break
+        else:
+            packed.append([u])
+    parts: list[dict[str, Any]] = []
+    for group in packed:
+        shown: dict[str, list[list[int]]] = {}
+        for u in group:
+            shown.setdefault(u["file"], []).append(u["range"])
+        parts.append({"text": "\n".join(u["text"] for u in group), "shown": shown,
+                      "cut": [c for c in cuts if c["file"] in shown]})
+    return parts
+
+
+def source_parts(code_dir: Path, limit: int | None = None) -> list[str]:
+    """The text of each part of :func:`source_parts_detail`: one text when the code fits in one request."""
+    return [p["text"] for p in source_parts_detail(code_dir, limit)]
+
+
+def part_note(index: int, count: int) -> str:
+    """What the reader is told when the code comes in parts (empty for the one part of a short code)."""
+    if count <= 1:
+        return ""
+    return (f"(Part {index} of {count} of the code. The files and line ranges in the other parts are read separately, "
+            "each against the same requirements. Judge only the code shown here: if a requirement is not in this part, "
+            "answer missing for this part. Every finding names a file and line shown in this part; make no finding "
+            "about something that is absent from the code shown, it may be in another part.)\n\n")
+
+
+def part_files(part: str) -> set[str]:
+    """The names (without folders) of the files a part of the code holds, from its headers."""
+    return {m.group(1).replace("\\", "/").split("/")[-1] for m in re.finditer(r"^### (\S+)", part, re.M)}
+
+
+def shown_in_part(shown: dict[str, list[list[int]]], file: str, line: int | None,
+                  cut: list[dict[str, Any]] | None = None) -> bool:
+    """Whether a request that holds ``shown`` (:func:`source_parts_detail`) was shown the place ``file`` (a name, with or
+    without its folder) and ``line`` name: the file AND a line within a line range of it, and not a line that was cut
+    (``cut``, :func:`source_parts_detail`: a cut line is not fully shown). A citation without a line is not a place."""
+    base = str(file or "").replace("\\", "/").split("/")[-1]
+    ranges = [r for name, rs in shown.items() if name.replace("\\", "/").split("/")[-1] == base for r in rs]
+    if not base or not ranges or not isinstance(line, int) or isinstance(line, bool):
+        return False
+    if any(c["line"] == line and str(c["file"]).replace("\\", "/").split("/")[-1] == base for c in cut or []):
+        return False
+    return any(a <= line <= b for a, b in ranges)
+
+
+def keep_seen(verdicts: list[dict[str, Any]], shown: dict[str, list[list[int]]], outside: list[dict[str, Any]],
+              cut: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """The verdicts of one request that count: a ``missing`` as it is, and an ``implemented`` or ``different`` only when it
+    cites a place the request was shown (:func:`shown_in_part`: a file AND a line within what it was given, not a line that
+    was cut). One that does not is not counted: the requirement stays unjudged by this request (the reading asks again for
+    it, and says it was not reviewed when it stays so), and the place cited goes to ``outside`` (``cut`` true when the line
+    was cut)."""
+    out: list[dict[str, Any]] = []
+    for v in verdicts:
+        if v["status"] != MISSING and not shown_in_part(shown, v.get("file", ""), v.get("line"), cut):
+            outside.append(outside_entry(v, v["status"], shown, cut))
+            continue
+        out.append(v)
+    return out
+
+
+def outside_entry(item: dict[str, Any], status: str, shown: dict[str, list[list[int]]],
+                  cut: list[dict[str, Any]] | None) -> dict[str, Any]:
+    """The record of a citation that was not counted: what was cited, and whether the line was one that was cut."""
+    line = item.get("line")
+    was_cut = bool(cut) and shown_in_part(shown, item.get("file", ""), line) and not shown_in_part(
+        shown, item.get("file", ""), line, cut)
+    return {"id": item["id"], "status": status, "file": item.get("file", ""), "line": line, **({"cut": True} if was_cut else {})}
+
+
+def merge_parts(per_part: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """One verdict per requirement from the verdicts of the readings of the code's parts (each already limited to what its
+    part was shown, :func:`keep_seen`). A part that does not hold the code of a requirement says ``missing``; so a
+    requirement is missing only when no part found it, implemented when a part found it implemented at a place it was shown,
+    and different when a part found something there that is not what the plan says. The file and line are those of the part
+    that decided it."""
+    rank = {MISSING: 0, IMPLEMENTED: 1, DIFFERENT: 2}
+    best: dict[str, dict[str, Any]] = {}
+    for verdicts in per_part:
+        for v in verdicts:
+            if v["id"] not in best or rank[v["status"]] > rank[best[v["id"]]["status"]]:
+                best[v["id"]] = v
+    return list(best.values())
+
+
+def sources_text(code_dir: Path) -> tuple[str, bool]:
+    """``(the first part of the scripts with line numbers, whether there are more parts)``; see :func:`source_parts`."""
+    parts = source_parts(code_dir)
+    return (parts[0] if parts else ""), len(parts) > 1
 
 
 def version(code_dir: Path) -> str:
-    """A short hash of the code the review reads: a different one is another code version."""
-    from . import code_layout as _layout
-
-    code_dir = Path(code_dir)
+    """A short hash of the code the review reads: exactly the files the reader is given (:func:`_code_files`), so a change to
+    any of them is another code version."""
     h = hashlib.sha256()
-    for name in ("simulate.py", "experiment.py"):
-        if (code_dir / name).is_file():
-            h.update(name.encode() + (code_dir / name).read_bytes())
-    for rel, text in sorted(_layout.package_sources(code_dir).items()):
-        h.update(rel.encode() + text.encode("utf-8", errors="replace"))
+    for rel, text in _code_files(Path(code_dir)).items():
+        h.update(rel.encode() + b"\0" + text.encode("utf-8", errors="replace") + b"\0")
     return h.hexdigest()[:16]
 
 
@@ -200,48 +477,447 @@ def problems(verdicts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [v for v in verdicts if v["status"] in (MISSING, DIFFERENT)]
 
 
-#: How much of the plan the reader is shown for the logic checks.
-_MAX_PLAN_CHARS = 12000
+#: How much of the plan one reading request holds. A plan longer than this is split by whole sections across the requests
+#: of the reading (a list section by its items); a section is left out only when it cannot fit a request alone. The record
+#: names what each request got and what was left out.
+_MAX_PLAN_CHARS = 40000
+#: The section of the audit's open items (core/audit_open_items.py): first.
+_AUDIT_SECTION = "proposed_by_the_methodology_audit_not_applied"
+#: The sections that hold the plan's settings: numbers in them are shown as they are, whatever a check's expected value is.
+_SETTING_SECTIONS = ("settings_varied", "grid", "in_each_run", "held_fixed", "sub_studies")
 _WHERE_RE = re.compile(r"([\w./\-]+\.py)(?:\s*[:,]?\s*(?:lines?\s*)?(\d+))?", re.I)
+_NUMBER_RE = re.compile(r"(?<![A-Za-z_\d.])[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
 
 
-def plan_view(design: dict[str, Any] | None, protocol: dict[str, Any] | None) -> str:
-    """What the logic checks are made against, as JSON text: the plan's model (its equations as written), the method, the
-    statistics it names, the grid, and the checks' cases and measures. Never an expected value, a tolerance or a worked
-    example: the reader is asked what is wrong, not what a number should be."""
-    design = design if isinstance(design, dict) else {}
-    protocol = protocol if isinstance(protocol, dict) else {}
+def _pick(items: Any, keys: tuple[str, ...]) -> list[dict[str, Any]]:
+    return [{k: e.get(k) for k in keys if e.get(k) not in (None, "", [], {})}
+            for e in (items if isinstance(items, list) else []) if isinstance(e, dict)]
+
+
+def _text_numbers(node: Any) -> list[float]:
+    """Every number written in ``node`` as JSON text (a number inside a string too)."""
+    out: list[float] = []
+    for m in _NUMBER_RE.finditer(json.dumps(node, default=str)):
+        try:
+            out.append(float(m.group(0)))
+        except ValueError:
+            continue
+    return out
+
+
+def _raw_sections(design: dict[str, Any], protocol: dict[str, Any]) -> dict[str, Any]:
     model = protocol.get("model") if isinstance(protocol.get("model"), dict) else {}
-    equations = [{k: e.get(k) for k in ("id", "formula", "role", "source") if e.get(k)}
-                 for e in (model.get("equations") if isinstance(model.get("equations"), list) else []) if isinstance(e, dict)]
-    metrics = [{k: m.get(k) for k in ("id", "estimand", "kind") if m.get(k)}
-               for m in (protocol.get("metrics") if isinstance(protocol.get("metrics"), list) else []) if isinstance(m, dict)]
+    optimisation = protocol.get("optimisation") if isinstance(protocol.get("optimisation"), dict) else {}
     precision = protocol.get("precision") if isinstance(protocol.get("precision"), dict) else {}
     variables = design.get("variables") if isinstance(design.get("variables"), dict) else {}
+    held = {k: protocol.get(k) for k in ("constants", "thresholds") if isinstance(protocol.get(k), dict) and protocol.get(k)}
+    if isinstance(optimisation.get("fixed"), dict) and optimisation["fixed"]:
+        held["fixed_values_of_the_settings"] = optimisation["fixed"]
+    if held:
+        held = {"note": "The plan holds these values fixed: code that uses them as constants follows the plan and is "
+                        "not a hardcoding fault.", **held}
+    grid, inside = _settings_of(protocol)
+    sub = optimisation.get("sub_studies")
+    # In the order of what matters for judging the code: the model, the statistics and checks, the settings, the method,
+    # then the policies.
     view = {
-        "model": _text(model.get("summary"), 600), "equations": equations,
-        "method": _text(design.get("method"), 1500),
-        "settings_varied": variables.get("independent") if isinstance(variables.get("independent"), list) else [],
-        "grid": protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {},
-        "metrics": metrics, "headline_metric": _text(precision.get("metric"), 80),
-        "ci_method": _text(protocol.get("ci_method"), 200), "seed_policy": _text(protocol.get("seed_policy"), 200),
-        "checks": [{"name": _text(o.get("name"), 60), "kind": _text(o.get("kind"), 30), "check": _text(o.get("check"), 200),
+        "model": _text(model.get("summary"), 2000),
+        "assumptions": model.get("assumptions"), "holds_for": model.get("holds_for"),
+        "equations": _pick(model.get("equations"), ("id", "formula", "role", "source")),
+        "steps": _pick(model.get("steps"), ("id", "name", "does", "inputs", "output", "uses", "source", "relations")),
+        "metrics": _pick(protocol.get("metrics"), ("id", "label", "estimand", "kind", "unit")),
+        "headline_metric": _text(precision.get("metric"), 80),
+        "definitions": _pick(protocol.get("definitions"), ("metric", "defined_as", "source")),
+        "checks": [{"name": _text(o.get("name"), 60), "kind": _text(o.get("kind"), 30), "check": _text(o.get("check"), 600),
                     "case": o.get("case"), "measure": _text(o.get("measure"), 160)} for o in _oracle.declared(protocol)],
+        "settings_varied": variables.get("independent") if isinstance(variables.get("independent"), list) else [],
+        "grid": grid,
+        "in_each_run": inside,
+        "held_fixed": held,
+        "sub_studies": sub if isinstance(sub, list) else [],
+        "method": _text(design.get("method"), 6000),
+        "ci_method": _text(protocol.get("ci_method"), 600), "seed_policy": _text(protocol.get("seed_policy"), 400),
+        "failure_policy": _text(protocol.get("failure_policy"), 1500),
     }
-    values = _pairs.plan_values(protocol)
+    return {k: v for k, v in view.items() if v not in ("", [], {}, None)}
 
-    def clean(node: Any) -> Any:
-        """The free text the reader is shown, without the plan's values (it could echo them into a finding)."""
+
+def hidden_values(design: dict[str, Any] | None, protocol: dict[str, Any] | None) -> list[float]:
+    """The values replaced in what the reader WRITES: the plan's hidden values (:func:`core.review_pairs.plan_values`: a
+    check's expected value, tolerance and formula result, a worked example's inputs and output) that the plan does not also
+    show as a setting (a held-fixed value, the grid, a value compared in each run, a check's case). A number the plan shows
+    as a setting tells nothing about a check's answer, so a finding that quotes it keeps it."""
+    design = design if isinstance(design, dict) else {}
+    protocol = protocol if isinstance(protocol, dict) else {}
+    raw = _raw_sections(design, protocol)
+    shown = _text_numbers({k: raw[k] for k in _SETTING_SECTIONS if k in raw})
+    shown += _text_numbers([c.get("case") for c in raw.get("checks", [])])
+    return [v for v in _pairs.plan_values(protocol)
+            if not any(abs(v - n) <= 1e-6 * max(abs(v), abs(n)) for n in shown)]
+
+
+def _owned_values(oracle: dict[str, Any]) -> list[float]:
+    """The values a check entry owns and hides: its expected value, tolerance and the result of its ``expected_formula``."""
+    from . import oracle_forms as _forms
+
+    out: list[float] = []
+    for v in (_oracle._num(oracle.get("expected")), _oracle._num(oracle.get("tolerance")),
+              _forms.formula_value(oracle)[0] if oracle.get("expected_formula") else None):
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and abs(v) not in (0, 1, float("inf")):
+            out.append(float(v))
+    return out
+
+
+def plan_sections(design: dict[str, Any] | None, protocol: dict[str, Any] | None,
+                  open_items: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The plan the code must implement, section by section, in the order the reader gets them: the model (equations as
+    written, steps), the method, the settings varied and their grid, the values held fixed by the plan (marked as such),
+    the values compared inside each run, the definitions of the statistics, and the checks' cases and measures.
+
+    What is hidden is hidden by location. Each check's ``expected``, ``expected_formula``, ``tolerance`` and ``reference``
+    and the worked ``example`` of equations and steps are not copied; and the values a check entry owns (its expected value,
+    tolerance and formula result; an equation's worked outputs) are taken out of that entry's own text and nowhere else.
+    Every other section is shown as the plan wrote it; a worked example's inputs are settings of its case and stay.
+
+    ``open_items``: what the methodology audit proposed and the plan does not hold (core/audit_open_items.py), the first
+    section, its note then one entry per item (so a long list is split by items, never left out whole), shown so the reader
+    does not take it for the plan."""
+    design = design if isinstance(design, dict) else {}
+    protocol = protocol if isinstance(protocol, dict) else {}
+    view = _raw_sections(design, protocol)
+
+    def clean(node: Any, values: list[float]) -> Any:
         if isinstance(node, str):
             return _pairs.scrub(node, values)
         if isinstance(node, list):
-            return [clean(x) for x in node]
+            return [clean(x, values) for x in node]
         if isinstance(node, dict):
-            return {k: clean(v) for k, v in node.items()}
+            return {k: clean(v, values) for k, v in node.items()}
         return node
 
-    text = json.dumps(clean({k: v for k, v in view.items() if v not in ("", [], {}, None)}), indent=2, default=str)
-    return text if len(text) <= _MAX_PLAN_CHARS else text[:_MAX_PLAN_CHARS] + "\n(the rest of the plan is not shown)"
+    if "checks" in view:
+        owners = _oracle.declared(protocol)
+        view["checks"] = [{**c, "check": clean(c["check"], _owned_values(o)),
+                           **dict(zip(("name", "measure"), _check_names(o)))} for c, o in zip(view["checks"], owners)]
+    if "equations" in view:
+        try:
+            from . import equation_tests as _eqt
+
+            worked = {str(r["id"]): _text_numbers(r.get("expected")) for r in _eqt.example_rows(protocol)}
+        except Exception:  # noqa: BLE001 -- a plan whose examples cannot be read shows its equations as written
+            worked = {}
+        view["equations"] = [clean(e, [v for v in worked.get(str(e.get("id")), []) if abs(v) not in (0, 1)])
+                             for e in view["equations"]]
+    if open_items and open_items.get("items"):
+        view = {_AUDIT_SECTION: [{"note": open_items.get("note")}, *open_items["items"]], **view}
+    return view
+
+
+#: The key that names one item of a list section of the plan (what :func:`requirements` lists in ``defined_by``).
+_ITEM_KEY = {"metrics": "id", "equations": "id", "steps": "id", "definitions": "metric", "checks": "name"}
+
+
+def _holds(sections: dict[str, Any]) -> dict[str, list[str]]:
+    """The plan items a request holds, ``{section: [key, ...]}``, from the sections it was given: a dict section holds its
+    keys, a list section the identifying key of each item it holds (:data:`_ITEM_KEY`)."""
+    out: dict[str, list[str]] = {}
+    for name, value in sections.items():
+        key = _ITEM_KEY.get(name)
+        if isinstance(value, dict):
+            out[name] = [str(k) for k in value]
+        elif isinstance(value, list) and key:
+            out[name] = [_text(item.get(key)) for item in value if isinstance(item, dict) and _text(item.get(key))]
+        else:
+            out[name] = []
+    return out
+
+
+def _dump(sections: dict[str, Any], note: str = "") -> str:
+    return json.dumps(sections, indent=1, default=str) + note
+
+
+def plan_views(design: dict[str, Any] | None, protocol: dict[str, Any] | None,
+               limit: int | None = None, open_items: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """The plan as text for the requests of a reading: ``[{"text", "sections", "left_out", "holds"}]`` (``holds``: the plan
+    items the entry shows, ``{section: [key, ...]}``), one entry when the plan fits in
+    ``limit`` characters. A plan that does not fit is split by whole sections into several entries (a section that is a
+    list of items is split by its items), each saying which sections the others hold; nothing is dropped to make it fit.
+    A section that does not fit a request alone is left out, whole, and named in ``left_out`` (a list section loses only
+    an item that does not fit alone, and the entry counts them). No entry is longer than ``limit``."""
+    limit = _MAX_PLAN_CHARS if limit is None else limit
+    sections = plan_sections(design, protocol, open_items)
+    left_out: list[str] = []
+
+    def note_for(shared: list[str], elsewhere: list[str], partial: list[str], told: bool = True) -> str:
+        parts = []
+        if left_out and told:
+            parts.append(f"these sections of the plan are not shown: {', '.join(left_out)}")
+        if elsewhere:
+            parts.append(f"these sections are in the plan given with the other requests of this reading: {', '.join(elsewhere)}")
+        if partial:
+            parts.append(f"the other items of these sections are in the plan given with the other requests of this "
+                         f"reading: {', '.join(partial)}")
+        return "\n(" + "; ".join(parts) + ")" if parts else ""
+
+    def fit(text: str) -> str:
+        return text if len(text) <= limit else text[:limit]  # only when the note alone is longer than a request
+
+    if len(_dump(sections, note_for([], [], []))) <= limit:
+        return [{"text": _dump(sections, note_for([], [], [])), "sections": list(sections), "left_out": left_out,
+                 "holds": _holds(sections)}]
+    # A piece is a section, or a run of items of a list section. It is left out only when it does not fit a request alone
+    # (a request holds the piece and the shortest note); the pieces are packed by a bound on the notes, then every request
+    # is composed with its real note and, when that is over the cap, the piece goes into a request of its own.
+    least = len(note_for([], [], []))
+    omitted: dict[str, int] = {}  # items too long for a request alone, counted once per section
+    alone = limit - least
+    room = max(limit // 2, limit - 2500)
+    pieces: list[tuple[str, Any]] = []
+    for name, value in sections.items():
+        if len(_dump({name: value})) <= room:
+            pieces.append((name, value))
+        elif isinstance(value, list) and value:
+            chunk: list[Any] = []
+            for item in value:
+                if len(_dump({name: [*chunk, item]})) > room and chunk:
+                    pieces.append((name, chunk))
+                    chunk = []
+                if len(_dump({name: [item]})) > alone:
+                    omitted[name] = omitted.get(name, 0) + 1
+                    continue
+                chunk.append(item)
+            if chunk:
+                pieces.append((name, chunk))
+        elif len(_dump({name: value})) <= alone:
+            pieces.append((name, value))
+        else:
+            left_out.append(name)
+    left_out.extend(f"{n}: {k} item{'s' if k != 1 else ''} left out" for n, k in omitted.items())
+    solo: set[int] = set()  # pieces that go into a request of their own
+    ids = list(range(len(pieces)))
+    while True:
+        groups: list[dict[str, Any]] = []
+        members: list[list[int]] = []
+        for i in ids:
+            name, value = pieces[i]
+            for g, m in zip(groups, members):
+                if i not in solo and not (m[0] in solo) and name not in g and len(_dump({**g, name: value})) <= room:
+                    g[name] = value
+                    m.append(i)
+                    break
+            else:
+                groups.append({name: value})
+                members.append([i])
+        every = list(dict.fromkeys(n for g in groups for n in g))
+        split = {n for n in every if sum(1 for g in groups if n in g) > 1}
+        texts = [_dump(g, note_for(list(g), [n for n in every if n not in g], sorted(n for n in g if n in split)))
+                 for g in groups]
+        told = [True] * len(groups)
+        for k, g in enumerate(groups):
+            if len(texts[k]) > limit and len(members[k]) == 1:
+                # a section that fits alone is not lost to the note about ANOTHER section: this request goes without the
+                # line about what was left out (the record names it, and a request that has room carries the line)
+                for others in ([n for n in every if n not in g], []):
+                    short = _dump(g, note_for(list(g), others, sorted(n for n in g if n in split), False))
+                    if len(short) <= limit:
+                        texts[k], told[k] = short, False
+                        break
+        over = next((k for k, t in enumerate(texts) if len(t) > limit), None)
+        if over is None:
+            break
+        if len(members[over]) > 1:  # too long with its real note: the biggest piece goes alone
+            solo.add(max(members[over], key=lambda i: len(_dump({pieces[i][0]: pieces[i][1]}))))
+            continue
+        name, value = pieces[members[over][0]]  # does not fit even alone with its note: left out
+        ids.remove(members[over][0])
+        left_out.append(f"{name}: {len(value)} item{'s' if len(value) != 1 else ''} left out"
+                        if isinstance(value, list) else name)
+    if not groups:  # nothing fits: the request says so and holds no section
+        return [{"text": fit(_dump({}, note_for([], [], []))), "sections": [], "left_out": left_out, "holds": {}}]
+    out = [{"text": t, "sections": list(g), "left_out": left_out, "holds": _holds(g)} for t, g in zip(texts, groups)]
+    if left_out and not any(told):  # no request had room to say what was left out: one with no section says it
+        out.append({"text": fit(_dump({}, note_for([], every, []))), "sections": [], "left_out": left_out, "holds": {}})
+    return out
+
+
+def plan_view_fit(design: dict[str, Any] | None, protocol: dict[str, Any] | None,
+                  limit: int | None = None, open_items: dict[str, Any] | None = None) -> tuple[str, list[str]]:
+    """``(the first request's plan text, the sections left out)`` of :func:`plan_views`."""
+    first = plan_views(design, protocol, limit, open_items)[0]
+    return first["text"], first["left_out"]
+
+
+def plan_view(design: dict[str, Any] | None, protocol: dict[str, Any] | None,
+              open_items: dict[str, Any] | None = None) -> str:
+    """What the reading is made against, as JSON text (:func:`plan_sections`). Never a check's expected value, tolerance
+    or worked answer: the reader is asked what is wrong, not what a number should be."""
+    return plan_view_fit(design, protocol, open_items=open_items)[0]
+
+
+def reportable_values(design: dict[str, Any] | None, protocol: dict[str, Any] | None) -> list[float]:
+    """The values replaced in what the reader writes: the plan's hidden values (:func:`hidden_values`)."""
+    return hidden_values(design, protocol)
+
+
+#: Reader requests in a quest (every part of every reading, each counted on disk before it is made). A reading of code the
+#: size of the longest study measured so far takes 6 requests; a quest has at most MAX_REVIEWS + RUN_REPAIR_READS = 6
+#: readings, 36 requests when every reading asks each part once. 60 leaves room for the second ask of 24 of them. When it
+#: is spent a reading is not made and the record says so.
+MAX_READER_CALLS = 60
+
+
+class BudgetSpent(Exception):
+    """The quest's reader requests (:data:`MAX_READER_CALLS`) are used up."""
+
+
+#: The least an open item of the audit is shown with (characters of its text), however many there are.
+_MIN_ITEM_CHARS = 200
+
+
+def _cut(text: Any, n: int) -> str:
+    text = text if isinstance(text, str) else json.dumps(text, default=str)
+    return text if len(text) <= n else text[:max(n - 3, 0)] + "..."
+
+
+#: The most of the audit's note the reader is shown.
+_NOTE_CAP = 500
+_ITEM_FIELDS = ("proposed", "not_applied_because", "audit_said", "audit_fix")
+
+
+def compact_items(open_items: dict[str, Any] | None, room: int) -> tuple[str, list[dict[str, Any]]]:
+    """The audit's open items as the reader is shown them: ``(text, [{"part", "chars", "cut", "shown", ...}])``, the text
+    never longer than ``room``. Each item has an equal share of ``room`` (never under :data:`_MIN_ITEM_CHARS`) and keeps its
+    ``part`` whole; the share goes first to ``proposed`` and ``not_applied_because``, then ``audit_said`` from what is left,
+    and ``audit_fix`` only from leftover room. When the items do not fit even at the least share, fields are dropped in the
+    order ``audit_fix``, ``audit_said``, ``proposed`` (never ``part``); when ``part`` and the reason of every item do not fit,
+    as many whole items as fit are shown, in record order, and the text says how many more are in the record. The full items
+    stay in the record and go to the code writer unchanged."""
+    items = list((open_items or {}).get("items") or [])
+    if not items:
+        return "", []
+    note = _cut(str((open_items or {}).get("note") or ""), _NOTE_CAP)
+    head = (note + "%s%s" % (chr(10), chr(10)) if note else "") + "```json" + chr(10)
+    full = [{k: (it.get(k) if isinstance(it.get(k), str) else json.dumps(it.get(k), default=str)) for k in _ITEM_FIELDS}
+            for it in items]
+    for f in full:
+        for k in _ITEM_FIELDS:
+            if f[k] == "null":
+                f[k] = ""
+
+    def row_of(i: int, share: int, fields: tuple[str, ...]) -> dict[str, Any]:
+        f = full[i]
+        left = share
+        got: dict[str, str] = {}
+        plen, rlen = len(f["proposed"]) if "proposed" in fields else 0, len(f["not_applied_because"])
+        p_take = min(plen, max(left // 2, left - rlen))
+        r_take = min(rlen, left - p_take)
+        for k, n in (("proposed", p_take), ("not_applied_because", r_take)):
+            if k in fields and f[k]:
+                got[k], left = _cut(f[k], n), left - n
+        for k in ("audit_said", "audit_fix"):
+            if k in fields and f[k] and left > 0:
+                got[k] = _cut(f[k], left)
+                left -= len(got[k])
+        return {"part": items[i].get("part"), **got}
+
+    def build(share: int, fields: tuple[str, ...], count: int) -> tuple[str, list[dict[str, Any]]]:
+        shown = [row_of(i, share, fields) for i in range(count)]
+        tail = (chr(10) + f"{len(items) - count} more open item{'s' if len(items) - count != 1 else ''} "
+                "are in the record, not shown here") if count < len(items) else ""
+        info = []
+        for i in range(len(items)):
+            row = shown[i] if i < count else {}
+            info.append({"part": items[i].get("part"), "shown": i < count, "chars": len(json.dumps(row, default=str)),
+                         "cut": i >= count or any(len(row.get(k, "")) < len(full[i][k]) or (k not in row and full[i][k])
+                                                  for k in _ITEM_FIELDS),
+                         "proposed_whole": i < count and row.get("proposed", "") == full[i]["proposed"],
+                         "reason_whole": i < count and row.get("not_applied_because", "") == full[i]["not_applied_because"]})
+        return head + json.dumps(shown, indent=1, default=str) + chr(10) + "```" + tail, info
+
+    levels = [_ITEM_FIELDS, _ITEM_FIELDS[:3], _ITEM_FIELDS[:2], ("not_applied_because",)]
+    for fields in levels:
+        share = max(_MIN_ITEM_CHARS, room // len(items))
+        text, info = build(share, fields, len(items))
+        for _ in range(12):  # the keys and quotes of an item are not part of its share: shrink until the whole text fits
+            if len(text) <= room or share <= _MIN_ITEM_CHARS:
+                break
+            share = max(_MIN_ITEM_CHARS, int(share * room / len(text)) - 1)
+            text, info = build(share, fields, len(items))
+        if len(text) <= room:
+            return text, info
+    for count in range(len(items) - 1, -1, -1):  # as many whole items as fit, in record order
+        text, info = build(_MIN_ITEM_CHARS, ("not_applied_because",), count)
+        if len(text) <= room:
+            return text, info
+    return "", [{**x, "shown": False, "chars": 0, "cut": True, "proposed_whole": False, "reason_whole": False} for x in info]
+
+
+def plan_requests(design: dict[str, Any] | None, protocol: dict[str, Any] | None,
+                  open_items: dict[str, Any] | None = None, limit: int | None = None) -> list[dict[str, Any]]:
+    """The plan for the requests of a reading: ``[{"text", "sections", "left_out", "holds", "open_items", "items"}]``. The plan
+    proper is whole in every request (one entry); the audit's open items come beside it in a compact form
+    (:func:`compact_items`) cut to the room the plan leaves under ``limit``. Only a plan proper that does not leave
+    :data:`_MIN_ITEM_CHARS` an item under the cap is split (:func:`plan_views`) into several entries, and then every code
+    part is read with every one of them (:func:`reading_calls`); each entry carries the items too."""
+    limit = _MAX_PLAN_CHARS if limit is None else limit
+    n_items = len((open_items or {}).get("items") or [])
+    # the heading, the note and the json skeleton of the items take a little more than the items themselves
+    overhead = 400 + min(len(str((open_items or {}).get("note") or "")), _NOTE_CAP) if n_items else 0
+    floor = n_items * (_MIN_ITEM_CHARS + 120) + overhead
+    views = plan_views(design, protocol, limit=limit - floor if n_items else limit)
+    out = []
+    for v in views:
+        room = limit - len(v["text"])
+        text, info = compact_items(open_items, room)
+        out.append({"text": v["text"], "sections": v["sections"], "left_out": v["left_out"], "holds": v["holds"],
+                    "open_items": text, "items": info})
+    return out
+
+
+def asked_ids(reqs: list[dict[str, Any]], plans: list[dict[str, Any]]) -> list[list[str]]:
+    """For each plan entry of a reading (``plans``, each with ``holds``), the ids of the requirements its requests must
+    judge. A verdict is made only by a request that was given the plan's definition of what it judges: when the plan is
+    split, a request whose plan part lacks the entry that defines a requirement (a metric's entry in ``metrics`` or
+    ``definitions``, a setting's in ``grid``, a check's, an equation's) would judge it without that definition and could
+    return ``different`` where the requests that have it say ``implemented``; ranked above ``implemented`` when the verdicts
+    are merged, it would win. So a requirement is asked of the entries that hold every plan item that defines it. Items no
+    entry holds (left out of every request) are ignored; a requirement with no item held anywhere (a dependent variable, a
+    figure, or all its items left out) is asked of every entry. When no entry holds all of its items, it is asked of the
+    entries that hold the most of them. Every code part is read with every plan part, so the code that implements it is
+    still read beside its definition."""
+    held = [{(s, k) for s, keys in (p.get("holds") or {}).items() for k in keys} for p in plans]
+    anywhere = set().union(*held) if held else set()
+    asked: list[list[str]] = [[] for _ in plans]
+    for r in reqs:
+        present = {(s, k) for s, k in (tuple(x) for x in r.get("defined_by") or []) if (s, k) in anywhere}
+        counts = [len(present & h) for h in held]
+        best = max(counts, default=0)
+        for j, n in enumerate(counts):
+            if not present or n == best:
+                asked[j].append(r["id"])
+    return asked
+
+
+def reading_calls(code_dir: Path, design: dict[str, Any] | None, protocol: dict[str, Any] | None,
+                  open_items: dict[str, Any] | None = None, reqs: list[dict[str, Any]] | None = None,
+                  limit: int | None = None) -> list[dict[str, Any]]:
+    """The requests of one reading, from FI's own record of what each is given: ``[{"code", "shown", "cut", "plan",
+    "open_items", "items", "plan_sections", "holds", "left_out", "files", "code_index", "plan_index", "asked"}]``. The plan
+    proper is whole in every request, so each code part is one request; a plan that cannot be had whole is split, and then
+    every code part is read with every part of the plan. ``asked`` is the ids of the requirements (``reqs``,
+    :func:`requirements`) the request must judge (:func:`asked_ids`); ``None``, every requirement, when ``reqs`` is not
+    given. ``limit`` is the plan's size cap (default :data:`_MAX_PLAN_CHARS`)."""
+    parts = source_parts_detail(code_dir) or [{"text": "", "shown": {}, "cut": []}]
+    plans = plan_requests(design, protocol, open_items, limit)
+    asked = asked_ids(reqs, plans) if reqs is not None else [None] * len(plans)
+    out = []
+    for i, part in enumerate(parts):
+        for j, plan in enumerate(plans):
+            out.append({"code_index": i, "plan_index": j, "code": part["text"], "shown": part["shown"], "cut": part["cut"],
+                        "plan": plan["text"], "open_items": plan["open_items"], "items": plan["items"],
+                        "plan_sections": plan["sections"], "holds": plan["holds"], "left_out": plan["left_out"],
+                        "files": sorted(part["shown"]), "asked": asked[j]})
+    return out
 
 
 def parse_logic(reply: Any, reqs: list[dict[str, Any]], values: list[float] | None = None) -> list[dict[str, Any]]:
@@ -369,12 +1045,23 @@ def parse_files(reply: str, allowed: list[str]) -> dict[str, str]:
 
     by_name = {Path(a).name.lower(): a for a in allowed}
     out: dict[str, str] = {}
-    for m in _BLOCK.finditer(reply or ""):
+    reply = reply or ""
+    after = 0  # where the prose before the next fence starts (the text inside a fence is never read as prose)
+    for m in _BLOCK.finditer(reply):
         lines = m.group(1).strip("\n").splitlines()
         first = next((i for i, line in enumerate(lines) if line.strip()), None)
         marker = _FILE_LINE.match(lines[first]) if first is not None else None
+        outside = False
+        if not marker:
+            # a marker written in prose, on the line right before the opening fence, names the file of that block
+            prose = reply[after:m.start()].rstrip().splitlines()
+            marker = _FILE_LINE.match(prose[-1]) if prose else None
+            outside = marker is not None
+        after = m.end()
         if not marker:
             continue
+        if outside:
+            first = -1
         name = marker.group(1).replace("\\", "/").strip("/")
         name = name[len("code/"):] if name.startswith("code/") else name
         rel = name if name in allowed else by_name.get(Path(name).name.lower())
@@ -455,8 +1142,9 @@ def repair_problem(old: str, new: str, rel: str, *, equations: list[str], packag
 
 
 #: What a record keeps from one code version to the next (the quest-wide counters and the history of the readings).
-CARRIED = ("reviews_total", "send_backs", "repair_calls", "finding_calls", "test_calls", "readings", "converged", "repaired",
-           "read_version", "issues", "same_model", "accepted_tests", "plan_conflicts", "read_problems", "round_fixed")
+CARRIED = ("reviews_total", "send_backs", "round_starts", "repair_calls", "finding_calls", "test_calls", "readings", "converged", "repaired",
+           "read_version", "issues", "same_model", "accepted_tests", "plan_conflicts", "read_problems", "round_fixed",
+           "reader_calls")
 
 
 def carried(record: dict[str, Any]) -> dict[str, Any]:
@@ -493,6 +1181,8 @@ def may_repair(record: dict[str, Any]) -> str:
     pass its test (:func:`note_reading`)."""
     if int(record.get("send_backs") or 0) >= MAX_SEND_BACKS:
         return f"the {MAX_SEND_BACKS} rounds of repair allowed in a quest are spent"
+    if int(record.get("round_starts") or 0) >= MAX_SEND_BACKS + MAX_ROUND_RESTARTS:
+        return f"{MAX_ROUND_RESTARTS} rounds of repair were cut short and started again; no more are started"
     if int(record.get("finding_calls") or 0) >= MAX_FINDING_CALLS:
         return f"the {MAX_FINDING_CALLS} model requests allowed for repairing findings in a quest are spent"
     if int(record.get("reviews_total") or 0) >= MAX_REVIEWS:
@@ -531,6 +1221,8 @@ def note_reading(record: dict[str, Any], version_now: str, problems: list[dict[s
     if code_dir is not None:
         _issues.index_problems(problems, Path(code_dir))
         _issues.update_issues(record, problems, n, version_now)
+        _issues.set_aside_own(record, Path(code_dir), version_now)
+        problems[:] = [v for v in problems if not (record.get("issues", {}).get(v.get("fid")) or {}).get("fi_own")]
         total = len(_issues.open_issues(record))
         changing = len(_issues.changing_open(record))
         high = sum(1 for i in _issues.open_issues(record) if i.get("severity") == "high")
@@ -717,6 +1409,32 @@ def _interval_remainder(key: str, stem_tokens: list[str]) -> bool:
     return all(t in _INTERVAL_WORDS or re.fullmatch(r"ci?\d*|\d+", t) for t in rest)
 
 
+def names_a_key(name: Any) -> bool:
+    """Whether a plan's name for a quantity is written as an identifier a result can carry as a key (``settle_time``,
+    ``Hit-Rate``), not as a sentence ("the mean time to settle, per setting"). FI matches a name to the run's keys only
+    for the first kind: a sentence is a description the plan wrote for a reader, no key of any result is ever spelled like
+    it, and a match of words would need a new exception for every new wording."""
+    text = str(name or "").strip()
+    return 0 < len(text) <= 80 and not re.search(r"\s", text)
+
+
+def _the_longer_form_of(want_tokens: list[str], keys: list[str]) -> str | None:
+    """The one key of the results that is the plan's name written with more words in it (``Ea_lnA_correlation`` for
+    ``Ea_lnA_empirical_correlation``): the plan's words, in the plan's order, all inside the key's words. Only when the
+    name has two words or more and exactly one such key exists (the intervals of a key go with it, not beside it); with
+    none, or with several that could each be it, ``None``: FI does not choose between them."""
+    if len(want_tokens) < 2:
+        return None
+
+    def inside(key: str) -> bool:
+        it = iter(_tokens(key))
+        return all(any(t == u for u in it) for t in want_tokens)
+
+    found = {k for k in keys if inside(k)}
+    alone = [k for k in found if not any(o != k and _interval_remainder(k, _tokens(o)) for o in found)]
+    return alone[0] if len(alone) == 1 else None
+
+
 def named_in_results(name: str, result: Any) -> set[str]:
     """The keys of the run's results (at any depth, holding a number) that are the quantity the plan calls ``name``, and its
     intervals. Case, punctuation and underscores are ignored.
@@ -750,6 +1468,8 @@ def named_in_results(name: str, result: Any) -> set[str]:
             shortest = min(len(normed[k]) for k in plain)
             ties = [k for k in plain if len(normed[k]) == shortest]
             pick = ties[0] if len(ties) == 1 else None
+        if pick is None and not prefixed and names_a_key(name):
+            pick = _the_longer_form_of(wt, keys)
         if pick is not None:
             found.add(pick)
             stems = [_tokens(pick)]
@@ -787,14 +1507,18 @@ def _requirements_of(record: dict[str, Any], issue: dict[str, Any]) -> list[dict
 
 
 def missing_quantities(record: dict[str, Any], issue: dict[str, Any]) -> list[str]:
-    """The plan's quantities an issue says the code does not compute, when that is all the issue says: every requirement
-    it stands for in the latest reading is a quantity of the plan (a dependent variable, a metric) the reader called
-    missing. ``[]`` otherwise. Such an issue makes no reported number wrong: the paper is short of a quantity the plan
-    asks for."""
+    """What the plan asks for that an issue says the code does not produce, when that is all the issue says: every
+    requirement it stands for in the latest reading is one the reader called missing (a quantity of the plan, a planned
+    figure, a swept setting, a check). ``[]`` otherwise. Such an issue makes no reported number wrong, whatever the reader
+    says about its effect: a thing that is not there changes no value that is. It is a part not done, which the paper
+    states; it never rests a stop on the reader's word. A quantity is named by the plan's name for it; any other kind by
+    the requirement's own text (FI wrote it, from the plan)."""
     reqs = _requirements_of(record, issue)
-    if not reqs or any(v.get("kind") not in QUANTITY_KINDS or v.get("status") != MISSING for v in reqs):
+    if not reqs or any(v.get("kind") == "logic" or v.get("status") != MISSING for v in reqs):
         return []
-    return list(dict.fromkeys(n for v in reqs if (n := str(v.get("name") or "").strip())))
+    names = [str(v.get("name") or "").strip() if v.get("kind") in QUANTITY_KINDS else str(v.get("text") or "").strip()
+             for v in reqs]
+    return list(dict.fromkeys(n for n in names if n))
 
 
 def quantity_names(record: dict[str, Any], issue: dict[str, Any]) -> list[str]:
@@ -816,10 +1540,36 @@ def headline_names(design: Any, protocol: Any) -> list[str]:
     return [str(r["name"]) for r in reqs if r.get("headline") and str(r.get("name") or "").strip()]
 
 
+def headline_ids(headline: list[str], ids: list[str], labels: dict[str, str] | None = None,
+                 families: dict[str, list[str]] | None = None) -> set[str]:
+    """The declared results (``ids``) that the plan's main quantity names (``headline``: :func:`headline_names`): an id that is
+    the name, an id whose words are all inside the name's words, or one whose plan label's words are. This is the same
+    reading of the plan's words as :func:`about_headline` makes of a finding's; a headline written as a sentence matches the ids
+    it spells out, and one that names no id leaves the set empty. ``families``: a name the plan's model said is only another
+    word for several declared results (:func:`core.contract.family_labels`); a headline that is that name is those results."""
+    labels = labels or {}
+    out: set[str] = set()
+    for name in headline:
+        words = set(_tokens(name))
+        for label, members in (families or {}).items():
+            if _norm(label) == _norm(name):
+                out |= {i for i in members if i in ids}
+        for i in ids:
+            mine = set(_tokens(i))
+            label = set(_tokens(labels.get(i, "")))
+            if _norm(i) == _norm(name) or (mine and mine <= words) or (label and label <= words):
+                out.add(i)
+    return out
+
+
 def about_headline(record: dict[str, Any], issue: dict[str, Any], result: Any, headline: list[str]) -> bool:
     """Whether an issue may be about the study's main quantity: the reading says so, or one of its quantity names and a
     headline name hold one another (``yield`` and ``total_yield``), or the keys of the results it names are among the
     headline's. When in doubt it is: a fault there leaves nothing to report."""
+    if missing_quantities(record, issue):
+        # Said to be missing, not wrong: there is no number of the main quantity to be wrong, and the reader's word that
+        # it is absent stops nothing (:func:`resolve_headline`); it is a part not done, which the paper states.
+        return False
     if issue.get("headline"):
         return True
     exact = {n for n in (_norm(h) for h in headline) if n}
@@ -836,9 +1586,128 @@ def keys_of_issue(record: dict[str, Any], issue: dict[str, Any], result: Any) ->
     """The keys of the run's results that hold the quantities an issue is about (:func:`named_in_results` for each of
     :func:`quantity_names`). ``[]`` when the results hold none of them."""
     keys: set[str] = set()
-    for name in quantity_names(record, issue):
+    names = quantity_names(record, issue)
+    for name in names:
         keys |= named_in_results(name, result)
+    if not keys:
+        # The quantity's own key holding no number (an empty list, null, a text): it is still the result the issue is
+        # about, and leaving it out removes it.
+        wanted = {_norm(n) for n in names} - {""}
+        keys = {k for k in _all_keys(result) if _norm(k) in wanted}
     return sorted(keys)
+
+
+def declared_names(design: Any, protocol: Any, derived: Any = None) -> list[str]:
+    """The names of the quantities the plan declares as results: its dependent variables and its metrics (FI's own
+    reading of the plan, :func:`requirements`). With ``derived`` (FI's record of the last run of its analysis,
+    ``data/results/derived.json``), only those that record lists as not worked out (``not_computed``: no trial gave a
+    value for it, a function that failed): FI's own fact that the run holds no value for the quantity, never a guess from
+    the names of the results."""
+    reqs = requirements(design if isinstance(design, dict) else None, protocol if isinstance(protocol, dict) else None)
+    names = [str(r["name"]) for r in reqs if r.get("kind") in QUANTITY_KINDS and str(r.get("name") or "").strip()]
+    if derived is None:
+        return names
+    if isinstance(derived, dict) and derived.get("from_earlier_run"):
+        return []  # an earlier run's record says nothing about the code that ran now
+    from . import analysis_frame as _analysis_frame
+
+    none = {_norm(i["id"]) for i in _analysis_frame.not_computed(derived)}
+    return [n for n in names if _norm(n) in none]
+
+
+DECLARED_RESULTS = Path(".fi") / "declared_results.json"
+
+
+def write_declared_results(quest_root: Path, design: Any, protocol: Any) -> list[str]:
+    """Keep the names of the results the plan declares (:func:`declared_names`) with the hash of the frozen protocol they
+    were read with, so the paper's side reads FI's own fact and not the design it no longer holds. Returns the names."""
+    names = declared_names(design, protocol)
+    from . import frozen_protocol as _frozen
+
+    frozen = _frozen.protocol_of(Path(quest_root))
+    record = {"names": names, "protocol_sha": _frozen.sha256(frozen) if frozen else None}
+    path = Path(quest_root) / DECLARED_RESULTS
+    try:
+        if _read_declared(path) != record:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(record, indent=1) + chr(10), encoding="utf-8")
+    except OSError as exc:
+        _LOG.warning("[code_review] could not write %s (%r)", DECLARED_RESULTS, exc)
+    return names
+
+
+def _read_declared(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def read_declared_results(quest_root: Path) -> list[str] | None:
+    """The names :func:`write_declared_results` kept; ``None`` when there is no record (a quest from before it) or when it
+    was made for another frozen protocol than the one now (a warning is logged)."""
+    from . import frozen_protocol as _frozen
+
+    record = _read_declared(Path(quest_root) / DECLARED_RESULTS)
+    if not isinstance(record, dict) or not isinstance(record.get("names"), list):
+        return None
+    frozen = _frozen.protocol_of(Path(quest_root))
+    if record.get("protocol_sha") and frozen and record["protocol_sha"] != _frozen.sha256(frozen):
+        _LOG.warning("[code_review] %s was made for another protocol than the frozen one; it is ignored", DECLARED_RESULTS)
+        return None
+    return [str(n) for n in record["names"]]
+
+
+def not_obtained(record: dict[str, Any], issue: dict[str, Any], result: Any, declared: list[str] | None) -> list[str]:
+    """The declared results an issue is about when FI's record of the run says no value was worked out for them
+    (``declared``: :func:`declared_names` with that record) and the run's results hold no number for any of them under any
+    name (the key absent altogether, which :func:`keys_of_issue` cannot find). Such a result was not obtained: no number of it can
+    reach the paper, so a fault shown in how it is computed leaves nothing wrong that can stand, and it is a part not
+    done, which the paper states. ``[]`` when the issue names nothing, when any name it is about is not one the plan
+    declares (FI then cannot tell what it changes), or when the results hold a number for one (:func:`named_in_results`)."""
+    wanted = {_norm(n) for n in declared or []} - {""}
+    names = quantity_names(record, issue)
+    if not names or not all(_norm(n) in wanted for n in names):
+        return []
+    if any(named_in_results(n, result) for n in names):
+        return []
+    return list({_norm(n): n for n in reversed(names)}.values())[::-1]  # one entry per name, as the plan writes it
+
+
+def holds_no_number(result: Any, keys: set[str]) -> bool:
+    """Whether every value under ``keys`` (at any depth of the results) holds no number: an empty list, null, a text."""
+    found = False
+
+    def walk(node: Any) -> None:
+        nonlocal found
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if str(k) in keys and _holds_numbers(v):
+                    found = True
+                walk(v)
+        elif isinstance(node, (list, tuple)):
+            for v in node:
+                walk(v)
+
+    walk(result)
+    return not found
+
+
+def _all_keys(result: Any) -> list[str]:
+    """Every key of the results, at any depth."""
+    out: list[str] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                out.append(str(k))
+                walk(v)
+        elif isinstance(node, (list, tuple)):
+            for v in node:
+                walk(v)
+
+    walk(result)
+    return out
 
 
 def absent_from_results(names: list[str], result: Any) -> list[str]:
@@ -909,7 +1778,7 @@ def differing_quantities(quest_root: Path, code_dir: Path) -> list[dict[str, Any
 
 def resolve_headline(quest_root: Path, code_dir: Path, result: Any) -> list[str]:
     """After a run: of the headline requirements a reader still called missing, those the run's results do not hold
-    either (the quest then stops, honestly). The ones the results do hold are recorded as a disagreement between the
+    either (the paper says, in its limitations, that they are not computed: a reading never ends the quest). The ones the results do hold are recorded as a disagreement between the
     reader and the results (the reader was wrong, and the paper is not told they were not computed). Only a requirement
     the reader called missing: one it called computed differently from the plan is computed, by its own reading, so it
     never stops the quest as "not computed" (the paper says it is not as the plan defines it, and FI leaves its values out
@@ -923,7 +1792,8 @@ def resolve_headline(quest_root: Path, code_dir: Path, result: Any) -> list[str]
         if (not isinstance(v, dict) or not v.get("headline") or v.get("contradicted") or v.get("kind") == "logic"
                 or v.get("status") != MISSING):
             continue
-        if in_results(str(v.get("name") or ""), result):
+        name = str(v.get("name") or "")
+        if in_results(name, result) or (names_a_key(name) and _the_longer_form_of(_tokens(name), _keys_with_numbers(result)) is not None):
             v["contradicted"] = True
             changed = True
         else:
@@ -1041,12 +1911,13 @@ def open_findings(quest_root: Path, code_dir: Path) -> dict[str, Any]:
     not read again), ``not_reviewed`` (requirements the reader did not check) and ``not_reviewed_headline``, ``missing`` /
     ``different`` (requirements not computed / computed differently from the plan), ``conflicts`` (the plan's parts
     disagree), ``unshown`` (flagged, and no test could show the fault), ``flagged`` (flagged logic problems, still open),
-    ``stopped`` (repairs ended because a round did not reduce what is open). A finding the run's own results contradict is
-    not in it. Everything is empty for a quest with no record."""
+    ``stopped`` (repairs ended because a round did not reduce what is open), ``not_rechecked`` (the code was changed after
+    the reading, and a finding no test could show, because every test written for it errored, was not checked again; the
+    same exclusions apply as to the others). A finding the run's own results contradict is not in it. Everything is empty for a quest with no record."""
     record = load(quest_root)
     out: dict[str, Any] = {"unread": "", "reread": False, "not_reviewed": [], "not_reviewed_headline": False,
                            "missing": [], "different": [], "conflicts": [], "unshown": [], "flagged": [], "stopped": False,
-                           "never_run": [],
+                           "never_run": [], "not_rechecked": [],
                            "second_version": second_version_sentences(quest_root),
                            "reviewed": bool(record.get("read_version"))}
     if not record:
@@ -1063,13 +1934,26 @@ def open_findings(quest_root: Path, code_dir: Path) -> dict[str, Any]:
         out["not_reviewed_headline"] = bool(record.get("not_reviewed_headline"))
     issues = record.get("issues") if isinstance(record.get("issues"), dict) else {}
     # A quantity the results hold under another name (reported_under_another_name, recorded at the evidence gate) is
-    # computed: it is not "not computed".
-    still = [v for v in not_computed(quest_root, code_dir) if not v.get("contradicted")
-             and not (issues.get(v.get("fid")) or {}).get("reported_as")]
+    # computed: it is not "not computed". A finding the run's own results contradict is not open.
+    def kept(v: dict[str, Any]) -> bool:
+        return not v.get("contradicted") and not (issues.get(v.get("fid")) or {}).get("reported_as")
+
     # A finding about a function the run never calls cannot change a reported number: it stays in FI's record
     # (QUALITY.md), not in the paper (core/code_reach.py). A quantity said to be missing is about the whole code.
     never_run = _code_reach.never_run_in(quest_root)
-    out["never_run"] = [v for v in still if v.get("status") != MISSING and never_run(v.get("file_rel"), v.get("function"))]
+
+    def never_called(v: dict[str, Any]) -> bool:
+        return v.get("status") != MISSING and never_run(v.get("file_rel"), v.get("function"))
+
+    still = [v for v in not_computed(quest_root, code_dir) if kept(v)]
+    if record.get("final") and record.get("version") != now:
+        # The code was changed after the reading: a finding no test could show (every test written for it errored) was not
+        # looked at again for this version. Same exclusions as above.
+        out["not_rechecked"] = [
+            v for v in record.get("problems") or [] if isinstance(v, dict) and kept(v) and not never_called(v)
+            and (issues.get(v.get("fid")) or {}).get("errored_only") is True
+            and (issues.get(v.get("fid")) or {}).get("demonstrated") is not True]
+    out["never_run"] = [v for v in still if never_called(v)]
     still = [v for v in still if v not in out["never_run"]]
     logic = [v for v in still if v.get("kind") == "logic"]
     left = [v for v in still if v.get("kind") != "logic"]
@@ -1140,6 +2024,54 @@ def flagged_checks(quest_root: Path, code_dir: Path, names: list[str]) -> dict[s
         for name in names:
             if name not in out and _names_check(f"{v.get('text') or ''}", str(name)):
                 out[name] = text
+    return out
+
+
+def touched_results(quest_root: Path, code_dir: Path, places: Any, declared: Any = None) -> dict[str, list[str]]:
+    """``{finding id: the declared results it changes}`` for each unresolved finding that can change a reported result: the
+    set the paper's required items hold for an open code finding (:func:`open_findings` with ``changes_result`` not false and
+    no gate outcome of its own, plus a shown fault whose test errored at the evidence gate). Which results a finding changes
+    is FI's own fact: ``places(file, function)`` (:meth:`core.shown_reach.Reach.touched_by`, from the call graph of the study's
+    code) for the function the finding records. A finding with no file or function that FI wrote down against a metric of the
+    plan (a problem of kind ``metric`` linked to it, whose ``name`` is the id of one of the ``declared`` results) marks that
+    result; one linked only to a dependent variable (the plan's prose), or one FI cannot place, marks nothing.
+    The words of the finding are never read. Reads the records only."""
+    from . import code_findings as _code_findings
+
+    record = load(quest_root)
+    issues = record.get("issues") if isinstance(record.get("issues"), dict) else {}
+    found = open_findings(quest_root, code_dir)
+    gated = {str(f) for f, x in issues.items() if isinstance(x, dict) and isinstance(x.get("at_gate"), dict)
+             and _code_findings.flagged_now(x) and x["at_gate"].get("outcome") in ("left_out", "not_computed")}
+    cands: list[tuple[str, dict[str, Any]]] = []
+    for fid, x in issues.items():
+        if (isinstance(x, dict) and isinstance(x.get("gate_error"), dict) and str(fid) not in gated
+                and x.get("changes_result") is True and _code_findings.flagged_now(x) and _code_findings.shown_by_assertion(x)):
+            cands.append((str(fid), x))
+    for v in [*found["missing"], *found["different"], *found["flagged"], *found["unshown"], *found["not_rechecked"]]:
+        fid = str(v.get("fid") or "")
+        issue = issues.get(fid) if fid else None
+        if not fid or fid in gated:
+            continue
+        changes = (issue.get("changes_result") if isinstance(issue, dict) and issue.get("changes_result") is not None
+                   else _code_findings.changes_result(v))
+        if changes and fid not in {c[0] for c in cands}:
+            cands.append((fid, {**(issue if isinstance(issue, dict) else {}), **{k: x for k, x in v.items() if x}}))
+    ids = {str(i) for i in declared or []}
+    metric_of: dict[str, list[str]] = {}
+    for p in record.get("problems") or []:
+        if isinstance(p, dict) and p.get("kind") == "metric" and str(p.get("name") or "") in ids and p.get("fid"):
+            metric_of.setdefault(str(p["fid"]), [])
+            if str(p["name"]) not in metric_of[str(p["fid"])]:
+                metric_of[str(p["fid"])].append(str(p["name"]))
+    out: dict[str, list[str]] = {}
+    for fid, x in cands:
+        file, function = str(x.get("file_rel") or x.get("file") or "").strip(), str(x.get("function") or "").strip()
+        got = places(file, function) if file and function else None
+        if not got and not file and not function:
+            got = metric_of.get(fid)  # the plan's own metric id, written against the finding by FI (not read from its words)
+        if got:
+            out[fid] = list(got)
     return out
 
 
@@ -1293,10 +2225,13 @@ def plain_lines(record: dict[str, Any]) -> str:
     items = [v for v in record.get("problems") or [] if isinstance(v, dict)]
     n = sum(1 for v in items if v.get("kind") != "logic")
     m = len(items) - n
-    return f"the code was read by {record.get('reviewer') or 'another model'}: " + (
+    out = f"the code was read by {record.get('reviewer') or 'another model'}: " + (
         (f"{n} requirement(s) of the plan are missing or implemented differently" if n else "")
         + (" and " if n and m else "")
         + (f"{m} problem(s) in how it computes what the plan says" if m else "")
         if items else "every requirement is met and no problem was found")
+    if record.get("plan_not_shown"):
+        out += f" (parts of the plan not shown to it: {', '.join(record['plan_not_shown'])})"
+    return out
 
 

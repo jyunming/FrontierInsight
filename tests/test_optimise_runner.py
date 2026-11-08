@@ -271,7 +271,7 @@ def run_cell(cell):
     with open(r"__CWD__", "a", encoding="utf-8") as fh:
         fh.write(os.getcwd() + "\\n")
     x, y = cell["x"], cell["y"]
-    if cell.get("x", 0) > 4.5:
+    if cell.get("x", 0) > 2.5:
         raise RuntimeError("the solver diverged")
     return {"f": cell["scale"] * ((x - 2) ** 2 + (y + 1) ** 2), "g": x + y}
 '''
@@ -386,7 +386,7 @@ async def test_a_failed_evaluation_is_in_the_ledger_and_the_search_goes_on(tmp_p
     failed = [r for r in rows if r["status"] == "failed"]
     assert failed and all("diverged" in r["reason"] for r in failed)
     best = json.loads((root / "results" / "best_design.json").read_text(encoding="utf-8"))
-    assert best["best"]["design"]["x"] <= 4.5 and best["evaluations"]["failed"] == len(failed)
+    assert best["best"]["design"]["x"] <= 2.5 and best["evaluations"]["failed"] == len(failed)
 
 
 @pytest.mark.asyncio
@@ -400,7 +400,8 @@ async def test_a_coarse_scan_runs_first_through_the_trial_runner_and_is_not_coun
     assert len(scan) == 6 and rows[1:7] == scan, "then the scan"
     assert (root / "raw" / "trials.json").is_file(), "the scan is the trial runner's, so the analysis can plot it"
     assert run.record["evaluations"]["scan"] == 6 and run.record["evaluations"]["search"] <= 20
-    assert _count(root) == len(rows)
+    # One call more: FI calls the fastest scan setting again to see which numbers repeat (trial_runner.unsteady_names).
+    assert _count(root) == len(rows) + 1
 
 
 @pytest.mark.asyncio
@@ -411,7 +412,7 @@ async def test_baseline_scan_and_search_evaluations_run_outside_the_quest_folder
     rows = [r for r in _ledger(root) if r.get("event") == "evaluation"]
     assert {"baseline", "scan"} <= {r["stage"] for r in rows} and {r["stage"] for r in rows} - {"baseline", "scan"}, "a search stage too"
     cwds = (tmp_path / "cwd.txt").read_text(encoding="utf-8").splitlines()
-    assert len(cwds) == len(rows)
+    assert len(cwds) == len(rows) + 1, "and FI's one call again of the fastest scan setting"
     quest = root.resolve()
     for cwd in cwds:
         assert not Path(cwd).resolve().is_relative_to(quest), f"an evaluation ran inside the quest folder: {cwd}"
@@ -492,7 +493,7 @@ async def test_scipy_is_used_when_the_quests_environment_has_it(tmp_path: Path) 
     assert abs(best["design"]["x"] - 2) < 0.05 and abs(best["design"]["y"] + 1) < 0.05, best
     # The same method in this process (as code/run.py runs it) asks for the same designs.
     def toy(cell: dict[str, Any]) -> dict[str, float]:
-        if cell["x"] > 4.5:
+        if cell["x"] > 2.5:
             raise RuntimeError("the solver diverged")
         return {"f": cell["scale"] * ((cell["x"] - 2) ** 2 + (cell["y"] + 1) ** 2), "g": cell["x"] + cell["y"]}
 
@@ -666,9 +667,9 @@ async def test_a_search_for_the_best_design_runs_through_execute_with_a_fake_mod
     check = json.loads((root / "needs" / "OPTIMUM_CHECK.json").read_text(encoding="utf-8"))
     assert check["verdict"] == "verified" and best["check"]["verdict"] == "verified", check["says"]
     assert check["ledger_sha256"] == best["ledger_sha256"]
-    # The simulation's own count of its calls: the oracle's one case, the search once (no replicate seeds, no second
-    # search), then the check's evaluations.
-    assert _count(tmp_path / "quest") == best["evaluations"]["search"] + 1 + check["evaluations"]["check"]
+    # The simulation's own count of its calls: FI's small run on the scan's one setting, the oracle's one case, the search
+    # once (no replicate seeds, no second search), then the check's evaluations.
+    assert _count(tmp_path / "quest") == 1 + best["evaluations"]["search"] + 1 + check["evaluations"]["check"]
     result = artifacts.raw_state["result_json"]
     assert result["fi_search"]["best_objective"] == best["best"]["objective"], "FI's own numbers ride with the result"
     assert result["fi_search"]["check"]["verdict"] == "verified"
@@ -688,3 +689,316 @@ def test_the_log_lines_say_plainly_that_the_values_are_the_searchs_and_are_check
     assert "at the search's own settings (mesh = 0.5); FI checks them at finer settings next" in text
     assert "not checked at finer numerical settings" not in text
     assert math.isfinite(record["improvement"]["value"])
+
+
+class _Killed(Exception):
+    """The quest stopped (killed, the machine restarted) in the middle of the search."""
+
+
+class _KilledAfter(LocalExecutor):
+    def __init__(self, calls: int) -> None:
+        super().__init__()
+        self.left = calls
+
+    async def execute(self, cmd: list[str], **kw: Any) -> ExecutionResult:
+        if self.left <= 0:
+            raise _Killed()
+        self.left -= 1
+        return await super().execute(cmd, **kw)
+
+
+def _without_times(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{k: v for k, v in r.items() if k != "elapsed_s"} for r in rows if r.get("event") == "evaluation"]
+
+
+@pytest.mark.asyncio
+async def test_a_search_stopped_before_its_end_goes_on_from_where_it_stopped(tmp_path: Path) -> None:
+    protocol = _protocol(evaluation_budget={"starts": 2, "per_start": 12})
+    whole = _quest(tmp_path / "whole")
+    await _run(whole, protocol)
+    total = _count(whole)
+    root = _quest(tmp_path / "stopped")
+    with pytest.raises(_Killed):
+        await optimise.run_search(_KilledAfter(7), sys.executable, root, "code/simulate.py", protocol, base_seed=0,
+                                  timeout_s=300)
+    assert _count(root) == 7 and (root / optimise.JOURNAL).is_file()
+    run = await _run(root, protocol)
+    assert _count(root) == total, "the 7 evaluations done before the stop are not run again"
+    assert _without_times(_ledger(root)) == _without_times(_ledger(whole)), "the same search as one never stopped"
+    assert run.record["continued"]["evaluations_taken_from_the_stopped_search"] == 7
+    assert not (root / optimise.JOURNAL).exists()
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_search_of_other_code_is_not_continued(tmp_path: Path) -> None:
+    protocol = _protocol(evaluation_budget={"starts": 2, "per_start": 12})
+    root = _quest(tmp_path)
+    with pytest.raises(_Killed):
+        await optimise.run_search(_KilledAfter(7), sys.executable, root, "code/simulate.py", protocol, base_seed=0,
+                                  timeout_s=300)
+    simulate = root / "code" / "simulate.py"
+    simulate.write_text(simulate.read_text(encoding="utf-8").replace('"g": x + y', '"g": x - y'), encoding="utf-8")
+    run = await _run(root, protocol)
+    assert _count(root) == 7 + run.record["evaluations"]["search"], "every evaluation of the new code is run"
+    assert "continued" not in run.record
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_search_is_not_continued_after_a_repair_of_the_models_package(tmp_path: Path) -> None:
+    """A repair of the model's own package (code/<package>/) changes what the simulation computes, as an edit of
+    simulate.py does."""
+    protocol = _protocol(evaluation_budget={"starts": 2, "per_start": 12})
+    root = _quest(tmp_path)
+    with pytest.raises(_Killed):
+        await optimise.run_search(_KilledAfter(7), sys.executable, root, "code/simulate.py", protocol, base_seed=0,
+                                  timeout_s=300)
+    (root / "code" / "model").mkdir()
+    (root / "code" / "model" / "core.py").write_text("SCALE = 2.0\n", encoding="utf-8")
+    run = await _run(root, protocol)
+    assert "continued" not in run.record
+    assert _count(root) == 7 + run.record["evaluations"]["search"], "every evaluation of the repaired code is run"
+
+
+@pytest.mark.asyncio
+async def test_a_record_cut_off_when_the_search_stopped_does_not_swallow_the_next_one(tmp_path: Path) -> None:
+    protocol = _protocol(evaluation_budget={"starts": 2, "per_start": 12})
+    root = _quest(tmp_path)
+    with pytest.raises(_Killed):
+        await optimise.run_search(_KilledAfter(7), sys.executable, root, "code/simulate.py", protocol, base_seed=0,
+                                  timeout_s=300)
+    journal = root / optimise.JOURNAL
+    text = journal.read_text(encoding="utf-8")
+    journal.write_text(text[: len(text) - 1 - len(text.rstrip("\n").splitlines()[-1]) // 2], encoding="utf-8")
+    with pytest.raises(_Killed):
+        await optimise.run_search(_KilledAfter(3), sys.executable, root, "code/simulate.py", protocol, base_seed=0,
+                                  timeout_s=300)
+    run = await _run(root, protocol)
+    assert run.record["continued"]["evaluations_taken_from_the_stopped_search"] == 6 + 3, \
+        "the cut record is lost, the three after it are kept"
+
+
+class _OneStopped(LocalExecutor):
+    """The process of the third evaluation is stopped from outside (memory, a kill) before it reports."""
+
+    def __init__(self, kill_after: int) -> None:
+        super().__init__()
+        self.made = 0
+        self.kill_after = kill_after
+
+    async def execute(self, cmd: list[str], **kw: Any) -> ExecutionResult:
+        self.made += 1
+        if self.made > self.kill_after:
+            raise _Killed()
+        if self.made == 3:
+            return ExecutionResult(returncode=-9, stdout="", stderr="", duration_s=0.1)
+        return await super().execute(cmd, **kw)
+
+
+@pytest.mark.asyncio
+async def test_an_evaluation_stopped_from_outside_is_run_again_on_resume(tmp_path: Path) -> None:
+    protocol = _protocol(evaluation_budget={"starts": 2, "per_start": 12})
+    root = _quest(tmp_path)
+    with pytest.raises(_Killed):
+        await optimise.run_search(_OneStopped(7), sys.executable, root, "code/simulate.py", protocol, base_seed=0,
+                                  timeout_s=300)
+    rows = [json.loads(line) for line in (root / optimise.JOURNAL).read_text(encoding="utf-8").splitlines()[1:]]
+    assert len(rows) == 6 and not any("process" in r["reply"] for r in rows), rows
+
+
+def test_the_frozen_studys_key_covers_the_models_package_and_not_its_tests(tmp_path: Path) -> None:
+    protocol = _protocol(evaluation_budget={"starts": 2, "per_start": 12})
+    root = _quest(tmp_path)
+    block = protocol["optimisation"]
+    simulate = root / "code" / "simulate.py"
+    keys = lambda: (optimise._run_key(root, simulate, block, 0, "run_cell", None),  # noqa: E731
+                    optimise._study_key(root, simulate, block, "run_cell", None))
+    before = keys()
+    (root / "code" / "tests").mkdir()
+    (root / "code" / "tests" / "test_model.py").write_text("def test_x():\n    pass\n", encoding="utf-8")
+    (root / "code" / ".pytest_cache").mkdir()
+    (root / "code" / ".pytest_cache" / "v").write_text("x", encoding="utf-8")
+    assert keys() == before, "a unit test or a cache is not the simulation"
+    (root / "code" / "model").mkdir()
+    (root / "code" / "model" / "core.py").write_text("SCALE = 2.0\n", encoding="utf-8")
+    after = keys()
+    assert after[0] != before[0] and after[1] != before[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["global_then_local", "bounded_local", "exhaustive"])
+async def test_a_search_run_with_several_evaluations_at_once_is_the_same_search(tmp_path: Path, method: str,
+                                                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    """Designs a method chooses before reading their answers (a starting population, a simplex's corners, every design
+    of an exhaustive search) run at the same time; each answer is judged in the same order, so the ledger, the best
+    design and the evaluations used are those of one after another."""
+    together: list[int] = []
+    real = optimise.evaluate_many
+
+    async def counted(*a: Any, **k: Any) -> Any:
+        together.append(len(a[5]))
+        return await real(*a, **k)
+
+    monkeypatch.setattr(optimise, "evaluate_many", counted)
+    real_submit = optimise.EvaluationPool.submit
+
+    def counted_submit(self: Any, ident: Any, cell: Any) -> None:
+        real_submit(self, ident, cell)
+        together.append(self.running)  # starting points answered as their designs finish share one pool
+
+    monkeypatch.setattr(optimise.EvaluationPool, "submit", counted_submit)
+    out = []
+    for at_once in (1, 4):
+        root = _quest(tmp_path / f"{method}{at_once}")
+        extra = ({"design_variables": [{"name": "x", "low": -3, "high": 3, "kind": "integer"}],
+                  "baseline": {"values": {"x": 0}, "source": "s"}} if method == "exhaustive" else {})
+        protocol = _protocol(evaluation_budget={"starts": 2, "per_start": 15}, search_method=method, **extra)
+        run = await _run(root, protocol, at_once=at_once)
+        rows = [(r["design"], r.get("objective"), r.get("stage"), r.get("start")) for r in _ledger(root)
+                if r.get("event") == "evaluation"]
+        out.append((rows, run.record["best"], run.record["evaluations"]))
+    assert out[0] == out[1]
+    assert len(out[0][0]) > 4 and max(together) > 1, "the run 4 at a time asked for several designs together"
+
+
+@pytest.mark.asyncio
+async def test_a_simulation_that_cannot_be_loaded_ends_a_search_run_at_once_as_one_after_another(tmp_path: Path) -> None:
+    """A batch of designs whose simulation cannot be imported: one after another, the first fails with the load error and
+    the search stops; run together, the designs after the first are answered the same way, not as failures of their own."""
+    broken = "raise ImportError('a module the simulation needs is missing')\n\ndef run_cell(cell):\n    return {}\n"
+    out = []
+    for at_once in (1, 4):
+        root = _quest(tmp_path / f"b{at_once}", broken)
+        run = await _run(root, _protocol(evaluation_budget={"starts": 2, "per_start": 15},
+                                         search_method="global_then_local"), at_once=at_once)
+        rows = [(r["design"], r.get("status")) for r in _ledger(root) if r.get("event") == "evaluation"]
+        out.append((rows, run.record["evaluations"]))
+    assert out[0] == out[1]
+    assert out[0][1]["stopped_because"] == out[1][1]["stopped_because"]
+
+
+# --- a search whose objective never moves hands its fact back at once ----------------------------------------------------
+
+FLAT_SIMULATE = '''\
+import time
+
+
+def run_cell(cell):
+    return {"f": max(0.0, cell["x"] + cell["y"] - 100.0), "mass": cell["x"] + cell["y"], "runtime_s": time.perf_counter()}
+'''
+FLAT_METRICS = [{"id": name, "kind": "mean", "label": name, "estimand": f"the {name}", "unit": "one design"}
+                for name in ("mass", "runtime_s")]
+FLAT_VALUES = [-4.5, -3.0, -1.5, 0.0, 1.5, 3.0, 4.5]  # 49 settings, and the baseline at (0, 0): 50 or more designs
+
+
+def _flat_runner(tmp_path: Path, **kw: Any) -> tuple[optimise.OptimisationRunner, Path, Path]:
+    root = _quest(tmp_path, FLAT_SIMULATE)
+    marker = tmp_path / "analysis_ran.txt"
+    (root / "code" / "experiment.py").write_text(
+        f'open(r"{marker}", "w").write("1")\nprint("RESULT_JSON: {{}}")\n', encoding="utf-8")
+    protocol = {"optimisation": _block(grid={"x": FLAT_VALUES + [4.0], "y": FLAT_VALUES + [4.0]},
+                                       search_method="global_then_local", evaluation_budget={"starts": 1, "per_start": 8}),
+                "metrics": FLAT_METRICS}
+    runner = optimise.OptimisationRunner(LocalExecutor(), quest_root=root, protocol=protocol,
+                                         simulate=root / "code" / "simulate.py", analysis=root / "code" / "experiment.py", **kw)
+    return runner, root, marker
+
+
+async def _execute(runner: optimise.OptimisationRunner, root: Path) -> ExecutionResult:
+    return await runner.execute([sys.executable, str(root / "code" / "experiment.py")], cwd=root, timeout_s=300)
+
+
+@pytest.mark.asyncio
+async def test_a_flat_search_returns_the_fact_without_the_check_or_the_analysis(tmp_path: Path) -> None:
+    runner, root, marker = _flat_runner(tmp_path)
+    result = await _execute(runner, root)
+    assert result.returncode == 1 and runner.failed_script is None, result.stderr[-1500:]
+    assert runner.flat_objective is not None and runner.flat_objective["designs"] >= osearch.NO_EFFECT_DESIGNS
+    assert runner.flat_objective["stopped"] is True and "mass" in runner.flat_objective["moved"]
+    assert "back to the plan" in result.stderr and str(runner.flat_objective["designs"]) in result.stderr
+    assert not (root / "needs" / "OPTIMUM_CHECK.json").exists(), "no check was spent on a search that went back"
+    assert not marker.exists(), "the analysis never ran"
+
+
+@pytest.mark.asyncio
+async def test_a_timing_is_named_unsteady_not_moved(tmp_path: Path) -> None:
+    runner, root, _marker = _flat_runner(tmp_path)
+    await _execute(runner, root)
+    fact = runner.flat_objective
+    assert fact is not None
+    assert "runtime_s" in fact["unsteady"], fact
+    assert "runtime_s" not in fact["moved"] and "runtime_s" not in fact["stayed"], fact
+    assert "mass" in fact["moved"]
+
+
+@pytest.mark.asyncio
+async def test_with_the_stop_off_a_flat_search_goes_on_to_the_check_and_the_analysis(tmp_path: Path) -> None:
+    runner, root, marker = _flat_runner(tmp_path, stop_flat=lambda: False)
+    result = await _execute(runner, root)
+    assert result.returncode == 0, result.stderr[-1500:]
+    assert runner.flat_objective is None and marker.exists(), "the analysis ran"
+    record = optimise.read(root) or {}
+    assert (record.get("evaluations") or {}).get("flat_objective", {}).get("stopped") is False
+
+
+def test_the_stop_is_part_of_the_searchs_key_only_when_it_is_off(tmp_path: Path) -> None:
+    root = _quest(tmp_path, FLAT_SIMULATE)
+    block = _block()
+    sim = root / "code" / "simulate.py"
+    on = optimise._run_key(root, sim, block, 0, "run_cell", None)
+    assert optimise._run_key(root, sim, block, 0, "run_cell", None, stop_flat=True) == on
+    assert optimise._run_key(root, sim, block, 0, "run_cell", None, stop_flat=False) != on
+
+
+SLEEPY = SIMULATE.replace(
+    "    x, y = cell[\"x\"], cell[\"y\"]\n",
+    "    x, y = cell[\"x\"], cell[\"y\"]\n"
+    "    if x != 0:\n"
+    "        with open(r\"__COUNT__.pids\", \"a\", encoding=\"utf-8\") as fh:\n"
+    "            fh.write(str(os.getpid()) + chr(10))\n"
+    "        import time\n"
+    "        time.sleep(120)\n",
+)
+
+
+class _KillingExecutor(LocalExecutor):
+    """The local executor that also ends the process when its run is cancelled, as the quest's executors do."""
+
+    async def execute(self, cmd: list[str], *, cwd: Path, timeout_s: int, env: dict[str, str] | None = None) -> ExecutionResult:
+        proc = await asyncio.create_subprocess_exec(*cmd, cwd=str(cwd), stdout=asyncio.subprocess.PIPE,
+                                                    stderr=asyncio.subprocess.PIPE, env=env)
+        started = time.monotonic()
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+        except BaseException:
+            proc.kill()
+            await proc.wait()
+            raise
+        return ExecutionResult(proc.returncode if proc.returncode is not None else -1, out.decode(errors="replace"),
+                               err.decode(errors="replace"), time.monotonic() - started, False)
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_search_run_with_designs_running_stops_them_at_once(tmp_path: Path) -> None:
+    """The quest is stopped while several designs run at the same time: the search ends within seconds and no simulation
+    process is left running (the pool used to wait for every design to end before it stopped any)."""
+    import psutil
+
+    root = _quest(tmp_path, SLEEPY)
+    pids_file = tmp_path / "count.txt.pids"
+    protocol = _protocol(evaluation_budget={"starts": 2, "per_start": 15}, search_method="bounded_local")
+    task = asyncio.ensure_future(optimise.run_search(_KillingExecutor(), sys.executable, root, "code/simulate.py",
+                                                     protocol, base_seed=0, timeout_s=300, at_once=4))
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        if pids_file.is_file() and len(pids_file.read_text(encoding="utf-8").split()) >= 2:
+            break
+        await asyncio.sleep(0.2)
+    pids = [int(p) for p in pids_file.read_text(encoding="utf-8").split()]
+    assert len(pids) >= 2, "the designs run together"
+    started = time.monotonic()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert time.monotonic() - started < 20
+    await asyncio.sleep(1.0)
+    assert not [p for p in pids if psutil.pid_exists(p) and psutil.Process(p).status() != psutil.STATUS_ZOMBIE]

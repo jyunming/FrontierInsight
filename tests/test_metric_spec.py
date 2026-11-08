@@ -223,7 +223,7 @@ def test_a_paired_mean_is_compared_pair_by_pair_and_an_unpaired_one_is_not() -> 
     base = [rng.gauss(0, 1) for _ in range(60)]
     shifted = [x + 0.3 + rng.gauss(0, 0.05) for x in base]  # the same random numbers plus a small consistent shift
     reps = _values_reps(shifted, base)
-    paired = ms.statistics(reps, {"metrics": [{"id": "m", "kind": "mean", "paired": True, **_ESTIMAND_UNIT}]})
+    paired = ms.statistics(reps, {"shared_draws": True, "metrics": [{"id": "m", "kind": "mean", "paired": True, **_ESTIMAND_UNIT}]})
     unpaired = ms.statistics(reps, {"metrics": [{"id": "m", "kind": "mean", "paired": False, **_ESTIMAND_UNIT}]})
     (cp,), (cu,) = paired["contrasts"], unpaired["contrasts"]
     assert cp["method"] == "paired_permutation_bootstrap" and cu["method"] == "bootstrap_permutation"
@@ -246,7 +246,7 @@ def test_a_paired_design_with_pair_ids_joins_by_id_even_when_the_order_differs()
             "b": {"m_values": [base[4], base[0], base[1], base[2], base[3]], "m_pair_id": [4, 0, 1, 2, 3]},
         },
     } for s in range(2)]
-    out = ms.statistics(reps, {"metrics": [{"id": "m", "kind": "mean", "paired": True, **_ESTIMAND_UNIT}]})
+    out = ms.statistics(reps, {"shared_draws": True, "metrics": [{"id": "m", "kind": "mean", "paired": True, **_ESTIMAND_UNIT}]})
     (c,) = out["contrasts"]
     assert c["paired_id_verified"] is True
     # `diff` (mean(a) - mean(b)) is invariant to how the two settings are matched up -- sum(a) - sum(b) does not
@@ -267,7 +267,7 @@ def test_a_paired_design_whose_pair_ids_disagree_between_settings_is_refused() -
             "b": {"m_values": [1.0, 2.0, 3.0], "m_pair_id": [0, 1, 99]},  # 99 names a trial "a" never reported
         },
     } for s in range(2)]
-    out = ms.statistics(reps, {"metrics": [{"id": "m", "kind": "mean", "paired": True, **_ESTIMAND_UNIT}]})
+    out = ms.statistics(reps, {"shared_draws": True, "metrics": [{"id": "m", "kind": "mean", "paired": True, **_ESTIMAND_UNIT}]})
     assert out["contrasts"] == []
     assert any("names different trials" in u["reason"] for u in out["unsupported"])
 
@@ -282,7 +282,7 @@ def test_a_pair_id_repeated_within_one_settings_own_seed_is_refused_not_silently
             "b": {"m_values": [1.0, 2.0, 3.0], "m_pair_id": [0, 1, 2]},
         },
     } for s in range(2)]
-    out = ms.statistics(reps, {"metrics": [{"id": "m", "kind": "mean", "paired": True, **_ESTIMAND_UNIT}]})
+    out = ms.statistics(reps, {"shared_draws": True, "metrics": [{"id": "m", "kind": "mean", "paired": True, **_ESTIMAND_UNIT}]})
     assert out["contrasts"] == []
     assert any("malformed" in u["reason"] for u in out["unsupported"])
 
@@ -295,7 +295,7 @@ def test_a_pair_id_given_by_only_one_setting_is_refused_not_silently_positional(
             "b": {"m_values": [1.0, 2.0, 3.0]},  # no pair_id at all
         },
     } for s in range(2)]
-    out = ms.statistics(reps, {"metrics": [{"id": "m", "kind": "mean", "paired": True, **_ESTIMAND_UNIT}]})
+    out = ms.statistics(reps, {"shared_draws": True, "metrics": [{"id": "m", "kind": "mean", "paired": True, **_ESTIMAND_UNIT}]})
     assert out["contrasts"] == []
     assert any("only one setting" in u["reason"] for u in out["unsupported"])
 
@@ -310,10 +310,10 @@ def test_a_cluster_design_uses_the_clusters_and_says_what_it_lacks() -> None:
     assert out["contrasts"][0]["method"] == "cluster_bootstrap"
     no_clusters = ms.statistics(_values_reps(a, a), spec)
     assert no_clusters["estimates"] == {} and "cluster design needs" in no_clusters["unsupported"][0]["reason"]
-    both = ms.statistics(reps, {"metrics": [{"id": "m", "kind": "proportion", "cluster": True, "paired": True, **_ESTIMAND_UNIT}]})
+    both = ms.statistics(reps, {"shared_draws": True, "metrics": [{"id": "m", "kind": "proportion", "cluster": True, "paired": True, **_ESTIMAND_UNIT}]})
     assert any("paired design over clusters is not supported" in u["reason"] for u in both["unsupported"])
     unequal = _values_reps([1.0, 0.0, 1.0], [1.0, 0.0])
-    uneq = ms.statistics(unequal, {"metrics": [{"id": "m", "kind": "mean", "paired": True, **_ESTIMAND_UNIT}]})
+    uneq = ms.statistics(unequal, {"shared_draws": True, "metrics": [{"id": "m", "kind": "mean", "paired": True, **_ESTIMAND_UNIT}]})
     assert "same number of trials" in uneq["unsupported"][0]["reason"]
 
 
@@ -448,3 +448,74 @@ def test_a_given_of_null_or_empty_is_no_given() -> None:
     assert why is None and [m["id"] for m in clean] == ["p", "m"] and all("given" not in m for m in clean)
     assert ms.repair([prop, mean]) == (clean, [])
     assert ms.normalize([prop, {**mean, "given": 5}])[0] is None, "a given that is not a name is still refused"
+
+
+def test_a_paired_metric_is_not_a_cross_setting_contrast_unless_the_plan_shares_the_draws() -> None:
+    metric = {"id": "m", "kind": "mean", "paired": True, **_ESTIMAND_UNIT}
+    assert [s["paired"] for s in ms.declared({"metrics": [metric]})] == [False]
+    assert [s["paired"] for s in ms.declared({"metrics": [metric], "shared_draws": True})] == [True]
+    assert [s["paired"] for s in ms.declared({"metrics": [metric], "shared_draws": True, "seed_policy": "x"})] == [True]
+
+
+def test_a_metric_kept_without_a_part_is_not_said_to_be_left_out_of_the_plan() -> None:
+    """A metric whose `undefined_when` could not be read stays in the plan without that part; the note said an entry was
+    left out, which read as a lost result."""
+    good = {"id": "alpha_rate", "kind": "proportion", "estimand": "P(alpha | N)", "unit": "run"}
+    flawed = {"id": "beta_rate", "kind": "proportion", "estimand": "P(beta | N)", "unit": "run",
+              "undefined_when": "no such grid parameter"}
+    unknown = {"id": "gamma_count", "kind": "count", "estimand": "gamma runs", "unit": "run"}
+    kept, partial, dropped = ms.repair_parts([good, flawed, unknown])
+    assert [m["id"] for m in kept] == ["alpha_rate", "beta_rate"] and "undefined_when" not in kept[1]
+    assert [(i, p) for i, p, _w in partial] == [("beta_rate", "`undefined_when`")]
+    assert len(dropped) == 1 and "gamma_count" in dropped[0]
+    fixed, notes = plan.repair_protocol({"runs_per_setting": 300, "grid": {"n": [5, 10]}, "metrics": [good, flawed]})
+    assert [m["id"] for m in fixed["metrics"]] == ["alpha_rate", "beta_rate"]
+    assert len(notes) == 1 and "`beta_rate` is kept without its `undefined_when`" in notes[0]
+    assert "left out" not in notes[0]
+    fixed, notes = plan.repair_protocol({"runs_per_setting": 300, "metrics": [good, unknown]})
+    assert len(notes) == 1 and "left out of the plan" in notes[0]
+
+
+# --- the statistics of one set of results are worked out once ---------------------------------------------------------------
+
+
+def test_statistics_of_unchanged_results_are_reused_and_changed_results_are_worked_out_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[int] = []
+    real = ms._contrast
+
+    def counting(a: Any, b: Any, spec: Any) -> Any:
+        calls.append(1)
+        return real(a, b, spec)
+
+    monkeypatch.setattr(ms, "_contrast", counting)
+    reps = _seeds({"1.5": (60, 0), "3.0": (120, 0), "6.0": (121, 0)})
+    first = ms.statistics(reps, PROTO, quest_root=tmp_path)
+    assert len(calls) == 3
+    lines: list[str] = []
+    again = ms.statistics(json.loads(json.dumps(reps)), PROTO, quest_root=tmp_path, progress=lines.append)
+    assert len(calls) == 3 and again == json.loads(json.dumps(first)) and len(lines) == 1  # nothing recomputed
+    # known positive: a rerun changes the results, so the answer is worked out again
+    changed = _seeds({"1.5": (61, 0), "3.0": (120, 0), "6.0": (121, 0)})
+    ms.statistics(changed, PROTO, quest_root=tmp_path)
+    assert len(calls) == 6
+    # ... and so does a change of the protocol the same results are read with
+    ms.statistics(changed, {**PROTO, "contrasts": [{"metric": "outbreak_probability", "a": "1.5", "b": "3.0"}]}, quest_root=tmp_path)
+    assert len(calls) == 7
+    # without a quest folder nothing is kept
+    ms.statistics(changed, PROTO)
+    ms.statistics(changed, PROTO)
+    assert len(calls) == 13
+
+
+def test_statistics_are_worked_out_again_when_the_estimator_source_changed_and_two_inputs_alternate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[int] = []
+    real = ms._contrast
+    monkeypatch.setattr(ms, "_contrast", lambda a, b, spec: (calls.append(1), real(a, b, spec))[1])
+    one = _seeds({"1.5": (60, 0), "3.0": (120, 0)})
+    two = _seeds({"1.5": (70, 0), "3.0": (120, 0)})
+    for reps in (one, two, one, two, one):
+        ms.statistics(reps, PROTO, quest_root=tmp_path)
+    assert len(calls) == 2  # each input worked out once, then reused although the other was called in between
+    monkeypatch.setattr(ms, "_source_hash_value", "estimators changed")
+    ms.statistics(one, PROTO, quest_root=tmp_path)
+    assert len(calls) == 3

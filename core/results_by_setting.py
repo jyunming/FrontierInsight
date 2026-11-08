@@ -110,6 +110,28 @@ def pooled(items: list[dict[str, Any]]) -> dict[str, Any]:
             "digest": "+".join(sorted(s["digest"] for s in items))}
 
 
+def _summary_of(c: dict[str, Any], name: str) -> dict[str, Any] | None:
+    """The summary of one value in one record; for a record of a setting that never ran, which names no value, the
+    summary of "not run" (core/trial_table.py :func:`~core.trial_table.not_run_summary`)."""
+    s = c["metrics"].get(name)
+    if s is None and c.get("not_run"):
+        return _trial_table.not_run_summary()
+    return s
+
+
+def _status_of(whole: dict[str, Any], members: list[dict[str, Any] | None]) -> dict[str, Any]:
+    """``{"status": ...}`` for a setting none of whose pooled records gave a number: "no finite value" when any record
+    ran and gave only non-finite ones, "not run" when none ran; ``{}`` when the setting has a number."""
+    if whole.get("n"):
+        return {}
+    got = [s for s in members if s]
+    if any(s.get("status") == _trial_table.NO_FINITE or s.get("missing") for s in got):
+        return {"status": _trial_table.NO_FINITE}
+    if got and all(s.get("status") == _trial_table.NOT_RUN for s in got):
+        return {"status": _trial_table.NOT_RUN}
+    return {}
+
+
 def _differs(items: list[dict[str, Any]], whole: dict[str, Any]) -> bool:
     """Whether cells' summaries of one value differ by more than chance: a mean further than :data:`POOL_Z` standard
     errors from the pooled mean, or (for a value that is not 0/1, whose spread its mean fixes) an SD further than
@@ -186,11 +208,21 @@ class Distinct:
         return len({_run_setting(s) for s in self.settings})
 
 
+def _diagnostics(protocol: dict[str, Any] | None) -> list[str]:
+    """The names a trial of a plan in the contract form returns that are not its results (they stay in the record, and are not
+    rows of the table): :func:`core.skeleton.diagnostic_names`."""
+    from . import skeleton as _skeleton
+
+    return _skeleton.diagnostic_names(protocol)
+
+
 def distinct(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, unread: list[str]) -> Distinct:
     """The distinct settings of a trial record (:func:`core.trial_table.summaries`), pooling the cells that differ only
     in ``unread`` axes (see the module docstring)."""
-    records = [c for c in summarised if c.get("metrics")]
-    values = _trial_table.kept_values(records)
+    # A record of a setting that never ran (core/trial_table.py ``not_run``) holds no value, but the setting is still one
+    # the plan fixed: it stays, to be said as "not run" in each table, never dropped and never described as a failure.
+    records = [c for c in summarised if c.get("metrics") or c.get("not_run")]
+    values = _trial_table.kept_values(records, _diagnostics(protocol))
     unread_set = set(unread)
     groups: dict[str, list[dict[str, Any]]] = {}
     for c in records:
@@ -208,7 +240,7 @@ def distinct(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, 
         for name in values if not apart else ():
             seen: dict[str, dict[str, Any]] = {}
             for c in members:
-                s = c["metrics"].get(name)
+                s = _summary_of(c, name)
                 if s and s.get("n") and s.get("digest") not in seen:
                     seen[s["digest"]] = s
             items = list(seen.values())
@@ -217,14 +249,15 @@ def distinct(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, 
             if len(items) > 1 and _differs(items, whole):
                 apart = True
                 break
-            if any(name in c["metrics"] for c in members):  # a record that never returned a value has no row for it
-                merged[name] = whole
+            if any(_summary_of(c, name) is not None for c in members):  # a record that never returned a value has no row
+                merged[name] = {**whole, **_missing_of(_each_set_once(_summary_of(c, name) for c in members)),
+                                **_status_of(whole, [_summary_of(c, name) for c in members])}
         if apart and len(members) > 1:
             kept_apart.append(_label(setting))
             for c in members:
                 own = dict(c.get("cell") or {})
-                out.append(Setting(own, _label(own), [c["key"]], {n: dict(c["metrics"][n]) for n in values
-                                                                  if c["metrics"].get(n)},
+                out.append(Setting(own, _label(own), [c["key"]], {n: dict(_summary_of(c, n)) for n in values
+                                                                  if _summary_of(c, n)},
                                    level=dict(c.get("level") or {})))
             continue
         copied += dropped
@@ -249,6 +282,54 @@ def distinct(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, 
 # --- the tables --------------------------------------------------------------------------------------------------------
 
 
+def _label_of(protocol: dict[str, Any], name: str) -> str:
+    labels = protocol.get("labels")
+    text = labels.get(name) if isinstance(labels, dict) else None
+    if not (isinstance(text, str) and text.strip()):
+        text = next((m.get("label") for m in protocol.get("metrics") or []
+                     if isinstance(m, dict) and m.get("id") == name and isinstance(m.get("label"), str)), None)
+    return " ".join(text.split()) if isinstance(text, str) and text.strip() else ""
+
+
+def plain_label(protocol: dict[str, Any] | None, name: str, default: str | None = None) -> str:
+    """What a reader is shown for a result or a setting: the plan's own label of it (``labels``, else the metric's
+    ``label``), else ``default`` (the name itself when none is given). A label that another result or setting of the plan
+    also has names none of them (two tables or two axes would read alike), so those keep their ids. Every key, record and
+    message to the writer keeps the id; only text a person reads goes through this."""
+    fallback = name if default is None else default
+    if not isinstance(protocol, dict):
+        return fallback
+    text = _label_of(protocol, name)
+    if not text:
+        return fallback
+    names = set(protocol["labels"]) if isinstance(protocol.get("labels"), dict) else set()
+    names |= {str(m["id"]) for m in protocol.get("metrics") or [] if isinstance(m, dict) and m.get("id")}
+    if any(other != name and _label_of(protocol, other).casefold() == text.casefold() for other in names):
+        return fallback
+    return text
+
+
+_TOKEN = re.compile(r"(?<![\w.\\])[A-Za-z_]\w*(?![\w(])")
+
+
+def plain_formula(protocol: dict[str, Any] | None, formula: Any) -> tuple[str, bool]:
+    """``(formula, changed)``: ``formula`` with each whole name of the plan that has a label written as that label, in
+    brackets when the label is more than one plain word. A name inside a number (``1e-3``, ``2x``), after a backslash (a LaTeX
+    command), part of a longer name or called as a function is left as it is. ``changed`` is False when no name had a label."""
+    text = str(formula)
+    changed = False
+
+    def swap(m: re.Match[str]) -> str:
+        nonlocal changed
+        label = plain_label(protocol, m.group(0), "")
+        if not label:
+            return m.group(0)
+        changed = True
+        return label if re.fullmatch(r"\w+", label) else f"({label})"
+    out = _TOKEN.sub(swap, text)
+    return (out, True) if changed else (text, False)
+
+
 @dataclass
 class Table:
     """A table as data, rendered by :func:`markdown` and :func:`latex`."""
@@ -259,6 +340,10 @@ class Table:
     align: list[str]
     rows: list[list[str]]
     value: str = ""
+    #: The same table as the paper shows it: the plan's label of the quantity in place of its id (``name``, ``""`` when the plan
+    #: gives none) and the caption worded with it. The files keep ``value`` and ``caption``.
+    name: str = ""
+    paper_caption: str = ""
 
 
 def _sig(x: float, digits: int = 4) -> str:
@@ -336,6 +421,46 @@ def _ref_text(kind: str, ref: float | None) -> str:
     return {"bound": "≤ ", "lower_bound": "≥ "}.get(kind, "") + _sig(ref)
 
 
+def _each_set_once(summaries: Any) -> list[dict[str, Any]]:
+    """The summaries of the pooled records with a set of trials counted once, as ``n`` counts it (same ``digest``): a copy
+    that gave the very same trials gave the very same runs with no value. A record with no number at all has no digest to
+    tell by, so it is told by its runs with no value and their reasons (the two kinds of key cannot meet: a digest is hex)."""
+    seen: set[str] = set()
+    out = []
+    for s in summaries:
+        if not s:
+            continue
+        key = s["digest"] if s.get("n") else json.dumps([int(s.get("missing") or 0),
+                                                         sorted((s.get("why_missing") or {}).items())], default=str)
+        if key not in seen:
+            seen.add(key)
+            out.append(s)
+    return out
+
+
+def _missing_of(summaries: Any) -> dict[str, Any]:
+    """The runs with no value of the records pooled into one setting, and their reasons, added up."""
+    count, why = 0, {}
+    for s in summaries:
+        count += int((s or {}).get("missing") or 0)
+        for reason, n in ((s or {}).get("why_missing") or {}).items():
+            why[reason] = why.get(reason, 0) + int(n)
+    return {"missing": count, **({"why_missing": why} if why else {})} if count else {}
+
+
+def _missing_text(summary: dict[str, Any] | None, *, every: bool = False) -> str:
+    """`` (2 runs with no value: no crossing in the focus range)``: the runs of a setting that gave no number for a result,
+    and why, as the runs said (core/in_run.py ``why_missing``); ``""`` when every run gave one."""
+    count = int((summary or {}).get("missing") or 0)
+    if not count:
+        return ""
+    why = (summary or {}).get("why_missing") or {}
+    reasons = "; ".join(f"{r}" + (f" ({n})" if len(why) > 1 else "") for r, n in sorted(why.items(), key=lambda kv: -kv[1]))
+    if every:
+        return f": {reasons}" if reasons else ""
+    return f" ({count} run{'s' if count != 1 else ''} with no value" + (f": {reasons}" if reasons else "") + ")"
+
+
 def _axis_text(v: Any) -> str:
     from .trial_runner import _fmt
 
@@ -356,6 +481,11 @@ class Built:
     # What FI noticed about its own reading of the code. Never reader text: the caller logs it (run.log), the paper and
     # the writer's note do not carry it.
     diagnostics: list[str] = field(default_factory=list)
+    #: ``notes`` as the paper shows them (a quantity by the plan's label); the files keep ``notes``.
+    paper_notes: list[str] = field(default_factory=list)
+    #: The plan's sub-studies (name, vary, hold) when it runs the study as parts rather than as one full cross; the slice
+    #: of a long table is then cut part by part (:func:`_slice`).
+    sub_studies: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _quantities(protocol: dict[str, Any] | None, values: list[str]) -> tuple[list[tuple[str, str]], list[str]]:
@@ -377,7 +507,7 @@ def _quantities(protocol: dict[str, Any] | None, values: list[str]) -> tuple[lis
 
 
 def build(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, files: dict[str, str],
-          judged: list[dict[str, Any]] | None = None) -> Built:
+          judged: list[dict[str, Any]] | None = None, labels: set[str] | None = None) -> Built:
     """The distinct settings, the references at each and one table per quantity, from the trial record's summaries,
     the frozen protocol, the study's code and the engine's verdicts on the known-answer checks."""
     metrics = (protocol or {}).get("metrics") if isinstance(protocol, dict) else None
@@ -393,14 +523,17 @@ def build(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, fil
     if why and _refs.grid_axes(protocol):
         diagnostics.append(f"Every grid axis is treated as read: {why}.")
     quantities, left = _quantities(protocol, found.values)
-    computed = _refs.compute(protocol, [s.setting for s in found.settings], set(found.values), judged)
+    computed = _refs.compute(protocol, [s.setting for s in found.settings], set(found.values), judged, labels)
     by_metric = {q["metric"]: q for q in computed["quantities"]}
     at: dict[tuple[str, str], dict[str, Any]] = {}
     for r in computed["by_setting"]:
         at[(r["metric"], json.dumps(r["setting"], default=str))] = r
+    paper_notes: dict[str, str] = {}
     if left:
-        notes.append("These quantities have no table of their own, because no single trial returns them (each is worked out "
-                     "from several values of a setting): " + ", ".join(f"`{m}`" for m in left) + ".")
+        what = ("These quantities have no table of their own, because no single trial returns them (each is worked out "
+                "from several values of a setting): ")
+        notes.append(what + ", ".join(f"`{m}`" for m in left) + ".")
+        paper_notes[notes[-1]] = what + ", ".join(plain_label(protocol, m) for m in left) + "."
     axes = [a for a in _refs.grid_axes(protocol) if a not in set(found.unread)]
     levels = list(dict.fromkeys(k for s in found.settings for k in s.setting if k not in axes))
     all_levels = levels
@@ -451,44 +584,62 @@ def build(summarised: list[dict[str, Any]], protocol: dict[str, Any] | None, fil
             if summary and summary.get("n"):
                 methods.add(method)
                 mean = summary["mean"]
-                cells += [str(summary["n"]), format_pm(mean, lower, upper)]
+                cells += [str(summary["n"]), format_pm(mean, lower, upper) + _missing_text(summary)]
                 if not binary:
-                    cells.append(_sig(summary["sd"]))
+                    cells.append(_sig(summary["sd"]) if int(summary["n"]) > 1 else "")  # one trial has no spread
                 verdict = comparison(kind, ref, mean, lower, upper, int(summary["n"]))
             else:
-                cells += ["0", "no value"]
+                if summary and summary.get("status") == _trial_table.NOT_RUN:
+                    # No trial ran at this setting: said so, and never as a failure with a reason it does not have.
+                    cells += ["0", _trial_table.NOT_RUN]
+                else:
+                    cells += ["0", "no value" + _missing_text(summary, every=True)]
                 if not binary:
                     cells.append("")
                 mean = None
-                verdict = "no value" if ref is not None else "no reference"
+                verdict = ("not run" if summary and summary.get("status") == _trial_table.NOT_RUN else "no value")                     if ref is not None else "no reference"
             if has_ref:
                 cells += [_ref_text(kind, ref), verdict]
             body.append(cells)
             rows.append({"value": value, "metric": metric, "setting": s.label, **s.setting,
                          "n": (summary or {}).get("n", 0), "mean": mean, "sd": (summary or {}).get("sd"),
-                         "ci_lower": lower, "ci_upper": upper, "interval": method, "reference": ref,
+                         "ci_lower": lower, "ci_upper": upper, "interval": method, "status": (summary or {}).get("status", ""), "reference": ref,
                          "reference_kind": kind if ref is not None else "", "comparison": verdict})
         how = " and ".join(sorted(m for m in methods if m)) or "no interval"
-        caption = (f"`{value}` at each of the {len({_run_setting(s) for s, *_ in stats})} settings: mean ± half-width of its 95% interval "
-                   f"({how}) over the n trials that returned it.")
+        name = plain_label(protocol, metric or value, plain_label(protocol, value, ""))
+
+        def caption_of(shown: str, formula_of: Any) -> str:
+            text = (f"{shown} at each of the {len({_run_setting(s) for s, *_ in stats})} settings: mean ± half-width of its 95% interval "
+                    f"({how}) over the n trials that returned it.")
+            if has_ref:
+                ref_q = q or {}
+                text += (f" Reference: {formula_of(ref_q.get('formula'))}"
+                         f"{' (' + ref_q['note'] + ')' if ref_q.get('note') else ''}, computed by FI from the plan frozen "
+                         f"before the run; {ref_q.get('checked', {}).get('why') or 'not cross-checked'}.")
+            return text
+
+        def plain_ref(formula: Any) -> str:
+            text, changed = plain_formula(protocol, formula)
+            return text if changed else f"`{formula}`"
+        caption = caption_of(f"`{value}`", lambda f: f"`{f}`")
+        paper_caption = caption_of(name if name else f"`{value}`", plain_ref)
         if has_ref:
-            ref_q = q or {}
-            caption += (f" Reference: `{ref_q.get('formula')}`"
-                        f"{' (' + ref_q['note'] + ')' if ref_q.get('note') else ''}, computed by FI from the plan frozen "
-                        f"before the run; {ref_q.get('checked', {}).get('why') or 'not cross-checked'}.")
-            caption += (" `agrees`: the reference lies inside the interval (about 1 setting in 20 differs by chance "
-                        "alone)." if kind == "value" else
-                        " A bound is a limit, not a value: `within bound` means the whole interval stays on its side, "
-                        "`within bound, within uncertainty` that the mean does and the interval reaches past it.")
-            caption += (f" `{TOO_FEW}`: fewer than {MIN_TRIALS_TO_JUDGE} trials, or an interval wider than "
-                        f"{MAX_HALF_WIDTH_SHARE:.0%} of the reference either side.")
+            tail = (" `agrees`: the reference lies inside the interval (about 1 setting in 20 differs by chance "
+                    "alone)." if kind == "value" else
+                    " A bound is a limit, not a value: `within bound` means the whole interval stays on its side, "
+                    "`within bound, within uncertainty` that the mean does and the interval reaches past it.")
+            tail += (f" `{TOO_FEW}`: fewer than {MIN_TRIALS_TO_JUDGE} trials, or an interval wider than "
+                     f"{MAX_HALF_WIDTH_SHARE:.0%} of the reference either side.")
         else:
-            caption += " It has no reference value to compare with" + (f": {why_none}." if why_none else ".")
+            tail = " It has no reference value to compare with" + (f": {why_none}." if why_none else ".")
         tables.append(Table(label=f"fi-results-{re.sub(r'[^A-Za-z0-9]+', '-', value).strip('-').lower()}",
-                            caption=caption, columns=cols, align=align, rows=body, value=value))
+                            caption=caption + tail, columns=cols, align=align, rows=body, value=value,
+                            name=name if name != value else "", paper_caption=paper_caption + tail))
     if not quantities:
         notes.append("The trials returned no value that varies, so there is nothing to tabulate.")
-    return Built(found, computed, tables, notes, rows, diagnostics)
+    parts = (protocol or {}).get("sub_studies") if isinstance(protocol, dict) else None
+    return Built(found, computed, tables, notes, rows, diagnostics, [paper_notes.get(n, n) for n in notes],
+                 [p for p in parts if isinstance(p, dict)] if isinstance(parts, list) else [])
 
 
 # --- renderings (pure) -------------------------------------------------------------------------------------------------
@@ -498,9 +649,11 @@ def _md_cell(text: str) -> str:
     return str(text).replace("|", "\\|").replace("\n", " ")
 
 
-def markdown(table: Table) -> str:
-    """One table in Markdown: its caption line, then the table."""
-    lines = [f"**Table ({table.value}).** {table.caption}", "",
+def markdown(table: Table, plain: bool = False) -> str:
+    """One table in Markdown: its caption line, then the table. ``plain`` words the title and caption with the plan's label
+    of the quantity (the paper); the files of the supplement keep its id."""
+    title, caption = (table.name or table.value, table.paper_caption or table.caption) if plain else (table.value, table.caption)
+    lines = [f"**Table ({title}).** {caption}", "",
              "| " + " | ".join(_md_cell(c) for c in table.columns) + " |",
              "|" + "|".join("---:" if a == "r" else "---" for a in table.align) + "|"]
     lines += ["| " + " | ".join(_md_cell(c) for c in row) + " |" for row in table.rows]
@@ -509,7 +662,7 @@ def markdown(table: Table) -> str:
 
 _TEX_SPECIAL = {"\\": r"\textbackslash{}", "&": r"\&", "%": r"\%", "$": r"\$", "#": r"\#", "_": r"\_", "{": r"\{",
                 "}": r"\}", "~": r"\textasciitilde{}", "^": r"\textasciicircum{}", "±": r"$\pm$", "≤": r"$\le$",
-                "≥": r"$\ge$", "×": r"$\times$", "π": r"$\pi$"}
+                "≥": r"$\ge$", "×": r"$\times$", "π": r"$\pi$", "–": "--"}
 
 
 def tex_escape(text: str) -> str:
@@ -583,8 +736,78 @@ def reference_section_latex(built: Built) -> str:
     return r"\paragraph{Reference values.} " + tex_escape(body) + "\n"
 
 
-def _slice(built: Built) -> list[Table]:
-    """The tables cut to the settings at the first, middle and last value of each axis that takes more than three."""
+def _first_middle_last(vals: list[Any], ends_only: bool = False) -> list[Any]:
+    """The values of one axis a slice keeps: all of them when there are at most three, else the first, middle and last
+    (``ends_only``: all of them when there are at most two, else the first and last)."""
+    try:
+        ordered = sorted(vals)
+    except TypeError:
+        ordered = list(vals)
+    if ends_only:
+        return ordered if len(ordered) <= 2 else [ordered[0], ordered[-1]]
+    return ordered if len(ordered) <= 3 else [ordered[0], ordered[len(ordered) // 2], ordered[-1]]
+
+
+def _same_value(a: Any, b: Any) -> bool:
+    return json.dumps(a, default=str) == json.dumps(b, default=str) or (
+        isinstance(a, (int, float)) and isinstance(b, (int, float)) and not isinstance(a, bool) and not isinstance(b, bool)
+        and a == b)
+
+
+def _picked_by_part(built: Built, ends_only: bool = False) -> list[set[str]] | None:
+    """For a study run as sub-studies, the axes each part varies and, for each distinct setting, the parts that keep it:
+    ``[set of vary-axes of the keeping parts]`` per setting, or ``None`` when the settings are not all covered by the parts
+    (then the slice is cut as for a full cross). A part keeps the settings that hold its ``hold`` values and take, on each
+    axis it varies, the first, middle or last of that part's values; an axis it holds is not picked."""
+    settings = built.distinct.settings
+    parts = [p for p in built.sub_studies if isinstance(p.get("vary"), list) and isinstance(p.get("hold") or {}, dict)]
+    if not parts or not settings:
+        return None
+    kept_by: list[set[str]] = [set() for _ in settings]
+    member_of_any = [False] * len(settings)
+    for part in parts:
+        hold = part.get("hold") or {}
+        members = [i for i, s in enumerate(settings)
+                   if all(_same_value(s.setting[a], v) for a, v in hold.items() if a in s.setting)]
+        vary = [a for a in part["vary"] if any(a in settings[i].setting for i in members)]
+        picked: dict[str, list[Any]] = {}
+        for a in vary:
+            values: list[Any] = []
+            for i in members:
+                v = settings[i].setting.get(a)
+                if a in settings[i].setting and not any(_same_value(v, w) for w in values):
+                    values.append(v)
+            picked[a] = _first_middle_last(values, ends_only)
+        for i in members:
+            member_of_any[i] = True
+            if all(any(_same_value(settings[i].setting[a], w) for w in picked[a]) for a in vary if a in settings[i].setting):
+                kept_by[i] |= set(vary)
+                kept_by[i].add("")  # marks the setting as kept by at least one part
+    if not all(member_of_any):
+        return None
+    return kept_by
+
+
+#: What a cell of an axis a sub-study holds but does not vary shows in a slice: the value there is only the part's fixed
+#: setting, not one the part compares.
+HELD_AXIS = "–"
+
+
+def _slice(built: Built, cap: int | None = None) -> list[Table]:
+    """The tables cut to the settings at the first, middle and last value of each axis that takes more than three. A study
+    run as sub-studies is cut part by part (each part's own axes; the axes it holds show :data:`HELD_AXIS`), not as a full
+    cross, in which a whole part could be cut away; when that is more than ``cap`` rows, only the first and last value of
+    each axis a part varies are kept."""
+    more = " Only the first, middle and last value of each setting are shown here."
+    by_part = _picked_by_part(built) if built.sub_studies else None
+    if by_part is not None:
+        cut = [_slice_by_part(t, built, by_part, more) for t in built.tables]
+        if cap is not None and sum(len(t.rows) for t in cut) > cap:
+            ends = _picked_by_part(built, ends_only=True)
+            if ends is not None:
+                cut = [_slice_by_part(t, built, ends, more.replace("first, middle and last", "first and last"))
+                       for t in built.tables]
+        return cut
     keep_values: dict[str, set[str]] = {}
     axes: dict[str, list[Any]] = {}
     for s in built.distinct.settings:
@@ -593,15 +816,32 @@ def _slice(built: Built) -> list[Table]:
             if v not in axes[k]:
                 axes[k].append(v)
     for k, vals in axes.items():
-        try:
-            ordered = sorted(vals)
-        except TypeError:
-            ordered = list(vals)
-        picked = ordered if len(ordered) <= 3 else [ordered[0], ordered[len(ordered) // 2], ordered[-1]]
-        keep_values[k] = {json.dumps(v, default=str) for v in picked}
+        keep_values[k] = {json.dumps(v, default=str) for v in _first_middle_last(vals)}
     keep = [all(json.dumps(v, default=str) in keep_values[k] for k, v in s.setting.items()) for s in built.distinct.settings]
-    return [Table(t.label, t.caption + " Only the first, middle and last value of each setting are shown here.",
-                  t.columns, t.align, [r for r, k in zip(t.rows, keep) if k], t.value) for t in built.tables]
+    return [Table(t.label, t.caption + more, t.columns, t.align, [r for r, k in zip(t.rows, keep) if k], t.value, t.name,
+                  t.paper_caption + more if t.paper_caption else "") for t in built.tables]
+
+
+def _slice_by_part(t: Table, built: Built, by_part: list[set[str]], more: str) -> Table:
+    """``t`` cut to the settings some sub-study keeps, in plan order, the axes a keeping part holds shown as a dash."""
+    settings = built.distinct.settings
+    n_axes = next((i - 1 for i in range(len(t.columns) - 1, 0, -1) if t.columns[i] == t.value and t.columns[i - 1] == "n"), 0)
+    axis_cols = t.columns[:n_axes]
+    # A table may leave out a setting the quantity has no value at, so a row is matched to its setting by what it shows.
+    by_text: dict[tuple[str, ...], int] = {}
+    for i, s in enumerate(settings):
+        by_text.setdefault(tuple(_axis_text(s.setting.get(a, "")) if a in s.setting else "" for a in axis_cols), i)
+    rows = []
+    for row in t.rows:
+        i = by_text.get(tuple(row[:n_axes]))
+        if i is None or "" not in by_part[i]:
+            continue
+        shown = [HELD_AXIS if (a in settings[i].setting and a not in by_part[i]) else v for a, v in zip(axis_cols, row[:n_axes])]
+        rows.append(shown + row[n_axes:])
+    dash = (f" A dash ({HELD_AXIS}) marks a setting a part of the study holds fixed rather than varies."
+            if any(HELD_AXIS in r[:n_axes] for r in rows) else "")
+    return Table(t.label, t.caption + more + dash, t.columns, t.align, rows, t.value, t.name,
+                 t.paper_caption + more + dash if t.paper_caption else "")
 
 
 def writer_note(trial_rows: list[dict[str, Any]], built: Built | None, cap: int | None = None) -> str:
@@ -621,7 +861,7 @@ def writer_note(trial_rows: list[dict[str, Any]], built: Built | None, cap: int 
     total = sum(len(t.rows) for t in built.tables)
     if total <= cap:
         return head + ("\n\n" + extra if extra else "") + "\n\n" + "\n".join(markdown(t) for t in built.tables)
-    cut = _slice(built)
+    cut = _slice(built, cap)
     if 0 < sum(len(t.rows) for t in cut) <= cap:
         return (head + f" They have {total} rows, too many for this note, so here is a slice." +
                 ("\n\n" + extra if extra else "") + "\n\n" + "\n".join(markdown(t) for t in cut))
@@ -660,24 +900,37 @@ def claim_note(quest_root: Path, protocol: dict[str, Any] | None, judged: list[d
 def paper_block(built: Built | None, cap: int | None = None) -> str:
     """The tables as they go into the paper, in Markdown: every row while they have at most ``cap`` rows (default
     :data:`PAPER_MAX_ROWS`); otherwise their slice at the first, middle and last value of each setting, naming the files
-    with every row; otherwise one sentence naming those files. ``""`` when there is nothing to tabulate. FI puts it
+    with every row; otherwise the whole tables that fit, in order, naming the files of the others; otherwise one
+    sentence naming those files. ``""`` when there is nothing to tabulate. FI puts it
     where the paper has ``{{results_table}}`` (core/paper_facts.py), so no number of it is typed by the writer."""
     if built is None or not built.tables:
         return ""
     cap = PAPER_MAX_ROWS if cap is None else cap
     files = "`paper/results_by_setting.md`, every number in `paper/results_by_setting.csv`"
     total = sum(len(t.rows) for t in built.tables)
-    notes = [n for n in built.notes if n.strip()]
+    notes = [n for n in (built.paper_notes or built.notes) if n.strip()]
     if total <= cap:
         tables, lead = built.tables, []
     else:
-        cut = _slice(built)
-        if not 0 < sum(len(t.rows) for t in cut) <= cap:
-            return (f"Results for all {built.distinct.n_settings} settings are in the supplementary table "
-                    "`paper/results_by_setting.csv`.\n")
-        tables = cut
-        lead = [f"FI's tables of every setting have more rows than fit here; the full tables are in {files}."]
-    return "\n\n".join([*lead, *notes, *(markdown(t).rstrip("\n") for t in tables)]) + "\n"
+        cut = _slice(built, cap)
+        if 0 < sum(len(t.rows) for t in cut) <= cap:
+            tables = cut
+            lead = [f"FI's tables of every setting have more rows than fit here; the full tables are in {files}."]
+        else:
+            # Whole tables, in the plan's order, while they fit: a number is never given here without its interval,
+            # and a quantity that does not fit is named with the files that hold it.
+            tables, used = [], 0
+            for t in built.tables:
+                if used + len(t.rows) <= cap:
+                    tables.append(t)
+                    used += len(t.rows)
+            if not tables:
+                return (f"Results for all {built.distinct.n_settings} settings are in the supplementary table "
+                        "`paper/results_by_setting.csv`.\n")
+            left = [t.name or f"`{t.value}`" for t in built.tables if t not in tables]
+            lead = [f"FI's tables of every setting have more rows than fit here; the tables of "
+                    f"{', '.join(left)} are in {files}."]
+    return "\n\n".join([*lead, *notes, *(markdown(t, plain=True).rstrip("\n") for t in tables)]) + "\n"
 
 
 # --- the files ------------------------------------------------------------------------------------------------------
@@ -696,7 +949,8 @@ def _without_left_out(protocol: dict[str, Any] | None, quest_root: Path) -> dict
 
 
 def from_quest(quest_root: Path, protocol: dict[str, Any] | None,
-               judged: list[dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], Built | None]:
+               judged: list[dict[str, Any]] | None = None,
+               labels: set[str] | None = None) -> tuple[list[dict[str, Any]], Built | None]:
     """``(FI's trial table rows, what this module builds)`` from the quest's trial record, read once; ``([], None)``
     without one."""
     cells = _trial_table._record(Path(quest_root))
@@ -704,14 +958,15 @@ def from_quest(quest_root: Path, protocol: dict[str, Any] | None,
         return [], None
     summarised = _trial_table.summaries(cells)
     protocol = _without_left_out(protocol, Path(quest_root))
-    built = build(summarised, protocol, _grid_keys.code_files(Path(quest_root) / "code"), judged)
-    return _trial_table.rows_of(summarised), built
+    built = build(summarised, protocol, _grid_keys.code_files(Path(quest_root) / "code"), judged, labels)
+    return _trial_table.rows_of(summarised, _diagnostics(protocol)), built
 
 
-def write(quest_root: Path, protocol: dict[str, Any] | None, judged: list[dict[str, Any]] | None = None) -> Built | None:
+def write(quest_root: Path, protocol: dict[str, Any] | None, judged: list[dict[str, Any]] | None = None,
+          labels: set[str] | None = None) -> Built | None:
     """Build from the quest's records and write ``paper/results_by_setting.md`` / ``.tex`` / ``.csv`` and
     ``paper/reference_values.json``; ``None`` without a trial record."""
-    _rows, built = from_quest(quest_root, protocol, judged)
+    _rows, built = from_quest(quest_root, protocol, judged, labels)
     block_path = Path(quest_root) / PAPER_BLOCK
     block = paper_block(built)
     if block:

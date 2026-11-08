@@ -1,0 +1,511 @@
+{
+ "runs_per_setting": 4000,
+ "min_runs_per_setting": 1000,
+ "thresholds": {
+  "alpha": 0.05,
+  "delta": 2.5
+ },
+ "acceptance": [
+  "Adaptive realised FHR <= pi0*0.05 + 2 SE in every cell",
+  "Strict any-false-hit probability <= 0.05 + 2 SE at pi1=0",
+  "Strict power agrees with the exact formula within 3 SE in every pi1>0 cell",
+  "Adaptive power minus Strict power >= 0 in every cell with pi1>0"
+ ],
+ "precision": {
+  "target_half_width": 0.02,
+  "metric": "every headline number: FHR, power, any-false-hit and power_gap_pp (as a fraction)",
+  "reason": "With R=4000 the worst 95% half-widths are about 0.015 for FHR, power and a probability near 0.64, about 0.007 near 0.05, and 0.01 or less for the paired gap; this separates Adaptive FHR 0.04 from 0.05 and Strict from Adaptive power. The noisiest cell is m=20, pi1=0.05 with one real effect, where the gap itself is only a few points."
+ },
+ "metrics": [
+  {
+   "id": "fhr_uncorrected",
+   "estimand": "E[V/max(R,1)] uncorrected",
+   "kind": "mean",
+   "unit": "a repeat",
+   "cluster": null,
+   "paired": true,
+   "family": "FHR by method"
+  },
+  {
+   "id": "fhr_strict",
+   "estimand": "E[V/max(R,1)] Strict",
+   "kind": "mean",
+   "unit": "a repeat",
+   "cluster": null,
+   "paired": true,
+   "family": "FHR by method"
+  },
+  {
+   "id": "fhr_adaptive",
+   "estimand": "E[V/max(R,1)] Adaptive",
+   "kind": "mean",
+   "unit": "a repeat",
+   "cluster": null,
+   "paired": true,
+   "family": "FHR by method"
+  },
+  {
+   "id": "power_strict",
+   "estimand": "E[S/m1] Strict, pi1>0",
+   "kind": "mean",
+   "unit": "a repeat",
+   "cluster": null,
+   "paired": true,
+   "family": "power by method"
+  },
+  {
+   "id": "power_adaptive",
+   "estimand": "E[S/m1] Adaptive, pi1>0",
+   "kind": "mean",
+   "unit": "a repeat",
+   "cluster": null,
+   "paired": true,
+   "family": "power by method"
+  },
+  {
+   "id": "power_gap_pp",
+   "estimand": "100*(power_Adaptive - power_Strict)",
+   "kind": "mean",
+   "unit": "a repeat",
+   "cluster": null,
+   "paired": true,
+   "family": "power by method"
+  },
+  {
+   "id": "any_false_hit_strict",
+   "estimand": "P(V>=1) Strict",
+   "kind": "proportion",
+   "unit": "a repeat",
+   "cluster": null,
+   "paired": true,
+   "family": "any false hit by method"
+  },
+  {
+   "id": "any_false_hit_adaptive",
+   "estimand": "P(V>=1) Adaptive",
+   "kind": "proportion",
+   "unit": "a repeat",
+   "cluster": null,
+   "paired": true,
+   "family": "any false hit by method"
+  },
+  {
+   "id": "any_false_hit_uncorrected",
+   "estimand": "P(V>=1) uncorrected",
+   "kind": "proportion",
+   "unit": "a repeat",
+   "cluster": null,
+   "paired": true,
+   "family": "any false hit by method"
+  },
+  {
+   "id": "fhr_adaptive_reference",
+   "estimand": "reference value pi0*0.05 with pi0 = 1 - round(pi1*m)/m, drawn for Adaptive FHR (deterministic, no sampling error)",
+   "kind": "mean",
+   "unit": "a setting",
+   "cluster": null,
+   "paired": false,
+   "family": "FHR by method"
+  },
+  {
+   "id": "mc_standard_error",
+   "estimand": "standard error of the mean over the 4000 repeats (and Wilson 95% interval for proportions) of each reported FHR, power, gap and any-false-hit value",
+   "kind": "mean",
+   "unit": "a repeat",
+   "cluster": null,
+   "paired": true,
+   "family": "uncertainty over repeats"
+  }
+ ],
+ "oracles": [
+  {
+   "name": "adaptive_superset_of_strict",
+   "kind": "invariant",
+   "check": "On one repeat at m=200, pi1=0.2 (fixed seed, chosen so the Strict count is positive), sum three violations: Strict rejections not in the Adaptive set, Adaptive rejections with p>alpha, and 1 if the Strict count is zero.",
+   "expected": 0,
+   "tolerance": 0.0,
+   "reference": "derivation: Adaptive rejects every p<=alpha/m (rank 1 passes when p_(1)<=alpha/m) and only p<=alpha (p_(i)<=i*alpha/m<=alpha), so Strict set \u2286 Adaptive set \u2286 uncorrected set and the violation count = 0",
+   "case": {
+    "m": 200,
+    "pi1": 0.2
+   },
+   "measure": "n_strict_not_adaptive + n_adaptive_p_above_alpha + (n_strict == 0)"
+  },
+  {
+   "name": "adaptive_matches_second",
+   "kind": "second_implementation",
+   "check": "Difference in the number of Adaptive rejections between the script's step-up and an independent adjusted-p-value implementation thresholded at 0.05, on one repeat at m=2000, pi1=0.05.",
+   "expected": 0,
+   "tolerance": 0.0,
+   "reference": "second implementation: an independent adjusted-p-value implementation, which shares no code with the script's Adaptive",
+   "case": {
+    "m": 2000,
+    "pi1": 0.05
+   },
+   "measure": "abs(n_adaptive - n_adaptive_second)"
+  },
+  {
+   "name": "strict_power_exact",
+   "kind": "special_case",
+   "check": "Strict power at m=200, pi1=0.2 over R=1000 repeats (fixed seed), computed as the mean of S/m1 from the simulated Strict rejection picked, not from the closed formula, against the exact formula 1-Phi(z_{1-0.05/m}-2.5).",
+   "expected": 0.1634,
+   "expected_formula": "0.5*(1+erf((2.5-3.4808)/sqrt(2)))",
+   "tolerance": 0.01,
+   "reference": "derivation: a real test is rejected when z>=z_{1-alpha/m}=3.4808, so power is Phi(2.5-3.4808)=Phi(-0.981)=0.163",
+   "case": {
+    "m": 200,
+    "pi1": 0.2
+   },
+   "measure": "power_strict"
+  },
+  {
+   "name": "uncorrected_fwer_null",
+   "kind": "special_case",
+   "check": "Chance of any rejection by the uncorrected rule at 0.05 when pi1=0, m=20, over R=4000 repeats (fixed seed).",
+   "expected": 0.6415,
+   "expected_formula": "1-(1-0.05)**20",
+   "tolerance": 0.03,
+   "reference": "derivation: with all m=20 nulls independent and each rejected with probability 0.05, P(V>=1) = 1-(0.95)^20 = 0.6415 (E3); Monte Carlo se about 0.0076 at 4000 repeats",
+   "case": {
+    "m": 20,
+    "pi1": 0.0
+   },
+   "measure": "p_any_false_uncorrected"
+  },
+  {
+   "name": "adaptive_fwer_all_null",
+   "kind": "special_case",
+   "check": "Chance of any rejection by Adaptive at 0.05 when pi1=0, m=200, over R=4000 repeats (fixed seed).",
+   "expected": 0.05,
+   "expected_formula": "0.05",
+   "tolerance": 0.015,
+   "reference": "derivation: when all hypotheses are null, FHR = P(R>=1) = pi0*alpha = 1*0.05 for independent uniform p-values, which Adaptive attains exactly [18]; Monte Carlo se about 0.0035 at 4000 repeats",
+   "case": {
+    "m": 200,
+    "pi1": 0.0
+   },
+   "measure": "p_any_false_adaptive"
+  },
+  {
+   "name": "adaptive_fhr_upper_bound",
+   "kind": "invariant",
+   "check": "Worst violation of the FHR bound, max(0, realised Adaptive FHR - pi0*0.05), on m=200, pi1=0.2 over R=4000 repeats (fixed seed); tests the V/max(R,1) tally against the Adaptive guarantee.",
+   "expected": 0,
+   "tolerance": 0.01,
+   "reference": "derivation: for independent continuous p-values FDR_Adaptive = pi0*alpha*(1-something) <= pi0*alpha = 0.8*0.05 = 0.04 [18]; the tolerance is about 3 Monte Carlo SE (SE about 0.003)",
+   "case": {
+    "m": 200,
+    "pi1": 0.2
+   },
+   "measure": "max(0, fhr_adaptive - 0.04)"
+  },
+  {
+   "name": "null_p_uniform",
+   "kind": "special_case",
+   "check": "Mean of the simulated null p-values when pi1=0, m=200, over R=4000 repeats (800000 values, fixed seed); a wrong tail or a two-sided p-value would shift it.",
+   "expected": 0.5,
+   "expected_formula": "0.5",
+   "tolerance": 0.005,
+   "reference": "derivation: under E1 a null p-value is uniform on [0,1], so its mean = integral of p dp from 0 to 1 = 1/2; Monte Carlo se about 0.0003",
+   "case": {
+    "m": 200,
+    "pi1": 0.0
+   },
+   "measure": "mean_null_p"
+  }
+ ],
+ "criteria": [
+  {
+   "name": "Adaptive superset violation",
+   "what": "Number of Strict rejections missing from Adaptive, plus Adaptive rejections with p>alpha, plus one if the Strict count is zero, on the check case.",
+   "oracle": "adaptive_superset_of_strict",
+   "use": "value",
+   "direction": "lower",
+   "target": 0,
+   "tolerance": 0
+  },
+  {
+   "name": "Adaptive matches second implementation",
+   "what": "Difference in rejection counts from the independent implementation.",
+   "oracle": "adaptive_matches_second",
+   "use": "value",
+   "direction": "lower",
+   "target": 0,
+   "tolerance": 0
+  }
+ ],
+ "simplifications": [
+  {
+   "id": "X1",
+   "replaces": "fraction pi1 of effects real (random)",
+   "because": "A fixed count round(pi1*m) makes pi0 exact, so the reference pi0*0.05 is exact.",
+   "effect": "Slightly lower variance of V and S than with binomial assignment; the mean FHR is unchanged to first order.",
+   "probe": "Rerun one cell with binomial-assigned real effects and compare the FHR."
+  },
+  {
+   "id": "X2",
+   "replaces": "FHR as E[V/R] with R>0 only",
+   "because": "The standard FHR convention V/max(R,1) is used, as the Adaptive guarantee is stated for it.",
+   "effect": "Includes R=0 repeats as zero; positive FHR would be larger at pi1=0.",
+   "probe": "Report the P(R=0) alongside, and note that FHR equals any-false-hit at pi1=0."
+  },
+  {
+   "id": "X3",
+   "replaces": "the realised false hit rate as an exact expectation",
+   "because": "It is estimated as the Monte Carlo mean of V/max(R,1) over 4000 repeats per cell, since no closed form is used.",
+   "effect": "The estimate carries sampling noise of about 0.003 to 0.015 in each cell, so a value slightly above the reference can be noise.",
+   "probe": "Compare the cell mean with its standard error and rerun one cell with a different seed to see the spread."
+  },
+  {
+   "id": "X4",
+   "replaces": "reporting only the chance of any false hit when pi1=0",
+   "because": "The probability of any false hit is also reported for pi1>0, where power is defined, so the families can be compared across the grid.",
+   "effect": "Adds columns only; at pi1=0 power is not computed and the any-false-hit probability equals the FHR.",
+   "probe": "Check that at pi1=0 the any-false-hit proportion equals the mean FHR in every method."
+  },
+  {
+   "id": "X5",
+   "replaces": "uncertainty over repeats from a fully independent design",
+   "because": "Uncertainty is the standard error of the mean (normal 95% interval) or a Wilson interval over 4000 repeats from one seeded stream per cell, with no repeat-of-repeats.",
+   "effect": "Intervals are approximate for skewed or near-0 quantities such as Adaptive FHR and Strict power at m=2000, and for the one-real-effect cell.",
+   "probe": "Rerun one cell with a second base seed and see whether the estimates fall within the stated intervals."
+  },
+  {
+   "id": "X6",
+   "replaces": "the exact expected Adaptive FHR as the reference",
+   "because": "The reference pi0*0.05 is drawn as the guaranteed upper bound, and Adaptive FHR is exactly that value only at pi1=0.",
+   "effect": "For pi1>0 realised Adaptive FHR lies below the line by an amount that depends on the shift 2.5, so the line is not a prediction of the value.",
+   "probe": "Compare the realised Adaptive FHR with pi0*0.05 across pi1 and check that the gap is positive for pi1>0 and about 0 at pi1=0."
+  }
+ ],
+ "definitions": [
+  {
+   "metric": "fhr_uncorrected",
+   "defined_as": "expected fraction of falsely rejected nulls among those rejected under the uncorrected rule p<=0.05, V/max(R,1) averaged over repeats",
+   "source": "[3]",
+   "quote": "controls the expected fraction of falsely rejected null hypotheses among those rejected",
+   "differs": ""
+  },
+  {
+   "metric": "fhr_strict",
+   "defined_as": "expected fraction of falsely rejected nulls among those rejected under the Strict rule p<=0.05/m, V/max(R,1) averaged over repeats",
+   "source": "[3]",
+   "quote": "controls the expected fraction of falsely rejected null hypotheses among those rejected",
+   "differs": ""
+  },
+  {
+   "metric": "fhr_adaptive",
+   "defined_as": "expected fraction of falsely rejected nulls among those rejected, V/max(R,1) averaged over repeats",
+   "source": "[3]",
+   "quote": "controls the expected fraction of falsely rejected null hypotheses among those rejected",
+   "differs": ""
+  },
+  {
+   "metric": "power_strict",
+   "defined_as": "expected fraction of the real effects rejected by the Strict rule, S/m1 averaged over repeats (pi1>0 only)",
+   "source": "[12]",
+   "quote": "which is the expected fraction of all false hypotheses that is rejected",
+   "differs": ""
+  },
+  {
+   "metric": "power_adaptive",
+   "defined_as": "expected fraction of the false null hypotheses that are rejected",
+   "source": "[12]",
+   "quote": "which is the expected fraction of all false hypotheses that is rejected",
+   "differs": ""
+  },
+  {
+   "metric": "power_gap_pp",
+   "defined_as": "100 times the mean over repeats of the paired difference S_Adaptive/m1 minus S_Strict/m1, in percentage points (pi1>0 only)",
+   "source": "[12]",
+   "quote": "which is the expected fraction of all false hypotheses that is rejected",
+   "differs": ""
+  },
+  {
+   "metric": "any_false_hit_strict",
+   "defined_as": "probability of at least one false rejection, the proportion of repeats with V>=1",
+   "source": "[12]",
+   "quote": "the probability of any false positives is at most",
+   "differs": ""
+  },
+  {
+   "metric": "any_false_hit_adaptive",
+   "defined_as": "probability of at least one false rejection by Adaptive, the proportion of repeats with V>=1",
+   "source": "[12]",
+   "quote": "the probability of any false positives is at most",
+   "differs": ""
+  },
+  {
+   "metric": "any_false_hit_uncorrected",
+   "defined_as": "probability of at least one false rejection by the uncorrected rule, the proportion of repeats with V>=1",
+   "source": "[12]",
+   "quote": "the probability of any false positives is at most",
+   "differs": ""
+  },
+  {
+   "metric": "fhr_adaptive_reference",
+   "defined_as": "the deterministic reference value pi0*0.05 with pi0 = 1 - round(pi1*m)/m, drawn as the upper bound of the Adaptive FHR (equal to it only at pi1=0)",
+   "source": "[18]",
+   "quote": "",
+   "differs": "X6"
+  },
+  {
+   "metric": "mc_standard_error",
+   "defined_as": "standard error of the mean over the 4000 repeats (sample standard deviation divided by sqrt(4000)) for FHR, power and gap, with a Wilson 95% interval for any-false-hit proportions",
+   "source": "derivation",
+   "quote": "",
+   "differs": "X5"
+  }
+ ],
+ "topic_map": [
+  {
+   "item": "m in {20, 200, 2000}",
+   "by": "setting:m"
+  },
+  {
+   "item": "fraction pi1 in {0.0, 0.05, 0.2} of real effects",
+   "by": "setting:pi1"
+  },
+  {
+   "item": "one-sided z-tests, real effect shifts statistic by 2.5",
+   "by": "equation:E1"
+  },
+  {
+   "item": "uncorrected, Strict and Adaptive at nominal 5 percent",
+   "by": "setting:method"
+  },
+  {
+   "item": "realised false hit rate",
+   "by": "metric:fhr_adaptive"
+  },
+  {
+   "item": "reference pi0 * 0.05 for Adaptive",
+   "by": "metric:fhr_adaptive_reference"
+  },
+  {
+   "item": "power",
+   "by": "metric:power_adaptive"
+  },
+  {
+   "item": "power of Strict",
+   "by": "metric:power_strict"
+  },
+  {
+   "item": "chance of any false hit (pi1 = 0)",
+   "by": "metric:any_false_hit_strict"
+  },
+  {
+   "item": "uncertainty over repeats",
+   "by": "metric:mc_standard_error"
+  }
+ ],
+ "grid": {
+  "m": [
+   20,
+   200,
+   2000
+  ],
+  "pi1": [
+   0.0,
+   0.05,
+   0.2
+  ]
+ },
+ "in_each_run": {
+  "method": [
+   "uncorrected",
+   "strict",
+   "adaptive"
+  ]
+ },
+ "seed_policy": "One independent numpy Generator stream per (m, pi1) setting, derived with SeedSequence from base seed 20240601 and the setting index. The three methods are applied to the same draws within a repeat (paired).",
+ "failure_policy": "No trial can fail in this simulation; any exception aborts the run and is reported. Repeats with R=0 are valid and counted with V/R = 0.",
+ "ci_method": "Standard error of the mean over repeats (normal 95% interval) for FHR, power and paired gap; Wilson 95% binomial interval for any-false-hit proportions.",
+ "model": {
+  "summary": "m independent unit-variance normal test statistics, a fixed number shifted by 2.5, one-sided p-values, thresholded by the uncorrected, Strict or Adaptive rule at 0.05.",
+  "assumptions": [
+   "Independent tests",
+   "Known unit variance",
+   "Exact N(0,1) null",
+   "Fixed number of real effects"
+  ],
+  "holds_for": "Independent z-tests; for independent continuous p-values Adaptive gives FHR <= pi0*alpha, with equality only when the alternative p-values are 0 (e.g. pi1=0).",
+  "equations": [
+   {
+    "id": "E1",
+    "formula": "p = 1 - Phi(z)",
+    "role": "generates",
+    "source": "derivation",
+    "derivation": "One-sided upper-tail z-test: p-value is the null probability of a statistic at least as large as z, 1-Phi(z).",
+    "example": {
+     "inputs": {
+      "z": 1.5
+     },
+     "expected_formula": "1-0.5*(1+erf(1.5/sqrt(2)))"
+    }
+   },
+   {
+    "id": "E2",
+    "formula": "power_Bonf = 1 - Phi(c - delta), c = z_{1-alpha/m}",
+    "role": "analyses",
+    "source": "derivation",
+    "derivation": "Strict rejects when z>=c. For a real effect z~N(delta,1), so P(z>=c)=1-Phi(c-delta).",
+    "example": {
+     "inputs": {
+      "c": 3.0,
+      "delta": 2.5
+     },
+     "expected_formula": "1-0.5*(1+erf((3.0-2.5)/sqrt(2)))"
+    }
+   },
+   {
+    "id": "E3",
+    "formula": "P(V>=1 | m0 nulls, Strict or uncorrected) = 1-(1-t)^m0, t = alpha/m or alpha",
+    "role": "analyses",
+    "source": "derivation",
+    "derivation": "Independent nulls each rejected with probability t; none rejected with probability (1-t)^m0.",
+    "example": {
+     "inputs": {
+      "m": 20,
+      "t": 0.05
+     },
+     "expected_formula": "1-(1-0.05)**20"
+    }
+   }
+  ],
+  "steps": [
+   {
+    "id": "S1",
+    "name": "Adaptive step-up",
+    "does": "Sort p-values, find the largest i with p_(i) <= i*alpha/m, reject all with rank <= i.",
+    "inputs": {
+     "p": "p-values",
+     "alpha": "level"
+    },
+    "output": "boolean rejection picked",
+    "uses": [],
+    "source": "[18]",
+    "relations": [
+     "rejection set contains every p<=alpha/m",
+     "rejection set is contained in p<=alpha"
+    ]
+   },
+   {
+    "id": "S2",
+    "name": "Error tallies",
+    "does": "From the picked and the truth labels compute V, S, R, V/max(R,1), S/m1.",
+    "inputs": {
+     "picked": "boolean",
+     "is_real": "boolean"
+    },
+    "output": "V, S, R, FDP, TPP",
+    "uses": [],
+    "source": "derivation",
+    "relations": [
+     "FDP in [0,1]",
+     "TPP in [0,1]"
+    ]
+   }
+  ]
+ }
+}

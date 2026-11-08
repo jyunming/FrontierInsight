@@ -297,7 +297,7 @@ async def test_cleanup_after_success_is_noop_when_no_venv(tmp_path: Path) -> Non
 
 
 def _scripted_execute(exe: VenvExecutor, results: list[ExecutionResult]) -> list[list[str]]:
-    """Replace ``exe.execute`` with one that returns ``results`` in order and
+    """Replace ``exe._run`` (what installs and probes use) with one that returns ``results`` in order and
     records each command. A call past the end of ``results`` raises, so an
     unexpected extra attempt fails the test."""
     calls: list[list[str]] = []
@@ -306,7 +306,7 @@ def _scripted_execute(exe: VenvExecutor, results: list[ExecutionResult]) -> list
         calls.append(list(cmd))
         return results[len(calls) - 1]
 
-    exe.execute = fake_execute  # type: ignore[method-assign]
+    exe._run = fake_execute  # type: ignore[method-assign]
     return calls
 
 
@@ -397,7 +397,7 @@ async def test_setup_reuses_fully_built_venv(tmp_path: Path, monkeypatch):
     async def ok_exec(cmd, **kw):  # noqa: ANN001
         return ExecutionResult(returncode=0, stdout="", stderr="", duration_s=0.0)
 
-    monkeypatch.setattr(exe, "execute", ok_exec)
+    monkeypatch.setattr(exe, "_run", ok_exec)
     await exe.setup(tmp_path)
     assert not built, "a fully-built venv must be reused, not rebuilt"
 
@@ -414,7 +414,7 @@ async def test_setup_rebuilds_when_pip_probe_fails(tmp_path: Path, monkeypatch):
     async def bad_exec(cmd, **kw):  # noqa: ANN001
         return ExecutionResult(returncode=1, stdout="", stderr="No module named pip", duration_s=0.0)
 
-    monkeypatch.setattr(exe, "execute", bad_exec)
+    monkeypatch.setattr(exe, "_run", bad_exec)
     await exe.setup(tmp_path)
     assert built, "a venv failing the pip probe must be rebuilt"
     assert built[0].get("clear") is True
@@ -490,7 +490,7 @@ async def test_a_crashing_pip_freeze_falls_back_to_the_venvs_own_distributions(t
             return ExecutionResult(returncode=0, stdout="numpy==2.1.0\n", stderr="", duration_s=0.0)
         return ExecutionResult(returncode=0, stdout="", stderr="", duration_s=0.0)
 
-    monkeypatch.setattr(exe, "execute", fake_exec)
+    monkeypatch.setattr(exe, "_run", fake_exec)
     lock = await exe.cleanup_after_success(tmp_path)
     assert lock is not None
     text = lock.read_text(encoding="utf-8")
@@ -552,3 +552,24 @@ def test_the_engines_environment_builders_leave_out_secret_variables(monkeypatch
     monkeypatch.setenv("FAKE_SERVICE_API_KEY", "dummy")
     out = _replicate_env(None, 0, 1)
     assert "FAKE_SERVICE_API_KEY" not in out and "FI_REPLICATE_SEED" in out
+
+
+def test_processes_run_at_the_same_time_each_get_their_share_of_the_cores(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A real simulation took 8.5 times as long beside 7 copies of itself on 16 cores, each starting a thread per core,
+    and 1.4 times with one thread each. Beside others each process is told its share; alone it is left as it is; a
+    lower number already set is kept."""
+    from core.execution import threads_beside
+
+    monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
+    assert threads_beside(None, 1) is None
+    assert threads_beside({"A": "1"}, 1) == {"A": "1"}
+    eight = threads_beside({"PATH": "p"}, 8, cores=16)
+    assert eight is not None and eight["PATH"] == "p"
+    for k in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS", "NUMBA_NUM_THREADS"):
+        assert eight[k] == "2", k
+    assert threads_beside({"OMP_NUM_THREADS": "1"}, 8, cores=16)["OMP_NUM_THREADS"] == "1"
+    assert threads_beside({"OMP_NUM_THREADS": "16"}, 8, cores=16)["OMP_NUM_THREADS"] == "2"
+    assert threads_beside({}, 32, cores=16)["OMP_NUM_THREADS"] == "1"
+    monkeypatch.setenv("OMP_NUM_THREADS", "16")
+    assert threads_beside(None, 4, cores=16)["OMP_NUM_THREADS"] == "4"
+

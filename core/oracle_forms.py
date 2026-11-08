@@ -35,7 +35,7 @@ import re
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from fractions import Fraction
-from statistics import NormalDist
+from statistics import NormalDist, fmean
 from typing import Any, Callable
 
 from . import oracle_check as _oracle
@@ -70,6 +70,9 @@ CONSTANTS: dict[str, float] = {"pi": math.pi}
 #: The functions that take any number of numbers: a name the simulation returns as one number per value each run
 #: compares (core/in_run.py) is given to them as all those numbers (``max(k_hat) / min(k_hat)``), and is read nowhere else.
 SPREAD_OVER = frozenset({"min", "max", "sum"})
+#: What a check's ``measure`` may take over the trials of its case, which FI works out once on the trials together (never on
+#: one run): ``mean(x)`` and ``sd(x)`` (the sample standard deviation) of a number or formula ``x`` each trial returns.
+ACROSS_TRIALS = ("mean", "sd")
 
 
 def _ellipk(m: float) -> float:
@@ -135,6 +138,18 @@ SPECIAL_FUNCTIONS: dict[str, Callable[..., float]] = {
 #: ``expected_formula`` is written in a language FI states (:data:`EXPECTED_FORMULA_LANGUAGE`); in prose ``gamma(T)`` or
 #: ``j0(x)`` can be the author's own function, so the others are never read there.
 PROSE_FUNCTIONS: dict[str, Callable[..., float]] = {"ellipk": _ellipk}
+#: The functions FI's own analysis of a study (core/analysis_frame.py) may call besides :data:`FUNCTIONS` and
+#: :data:`SPECIAL_FUNCTIONS`: a plain word a plan writes for the mean of numbers. Never a check's formula, whose language
+#: (:data:`FUNCTION_LIST`) stays as it is.
+ANALYSIS_FUNCTIONS: dict[str, Callable[..., float]] = {"mean": _variadic(fmean)}
+#: What an analysis formula may call beyond :data:`FUNCTIONS` (``evaluate(..., special=ANALYSIS_SPECIAL)``).
+ANALYSIS_SPECIAL: dict[str, Callable[..., float]] = {**SPECIAL_FUNCTIONS, **ANALYSIS_FUNCTIONS}
+#: The words for a summary of numbers, and what it is of one number.
+_SUMMARIES = {"min": ("minimum", "that number"), "max": ("maximum", "that number"), "sum": ("sum", "that number"),
+              "mean": ("mean", "that number"), "avg": ("mean", "that number"), "average": ("mean", "that number"),
+              "median": ("median", "that number"), "std": ("standard deviation", "zero"),
+              "stdev": ("standard deviation", "zero"), "var": ("variance", "zero"), "variance": ("variance", "zero"),
+              "range": ("range", "zero"), "ptp": ("range", "zero"), "count": ("count", "one")}
 
 _BINARY: dict[type, Callable[[float, float], float]] = {
     ast.Add: lambda a, b: a + b, ast.Sub: lambda a, b: a - b, ast.Mult: lambda a, b: a * b,
@@ -154,14 +169,23 @@ FUNCTION_LIST = ", ".join(sorted(FUNCTIONS))
 #: How a formula may be written, for the sentences a person and the plan read.
 LANGUAGE = (
     "numbers, the names the simulation function returns, + - * / ** %, parentheses and the functions "
-    f"{FUNCTION_LIST} (and the constant pi)"
+    f"{FUNCTION_LIST} (and the constant pi); over the trials of the case, `mean(x)` or `sd(x)` of a name each trial returns"
 )
 
 
-def _tree(text: Any, functions: dict[str, Callable[..., float]] | None = None) -> tuple[ast.Expression | None, str]:
+def formula_problem(text: Any) -> str:
+    """Why FI's evaluator would refuse ``text`` as a formula (the very test it applies: length, nodes, what it may call),
+    or ``""`` when it would read it."""
+    return _tree(text)[1]
+
+
+def _tree(text: Any, functions: dict[str, Callable[..., float]] | None = None,
+          across: bool = False) -> tuple[ast.Expression | None, str]:
     """The parsed formula, or ``(None, why it cannot be read)``. ``functions``: the functions it may call (default
-    :data:`FUNCTIONS`)."""
-    functions = FUNCTIONS if functions is None else functions
+    :data:`FUNCTIONS`). ``across``: it is a check's measure, which may also call mean() and sd() (:data:`ACROSS_TRIALS`);
+    no other reader accepts them."""
+    if functions is None:
+        functions = {**FUNCTIONS, **dict.fromkeys(ACROSS_TRIALS)} if across else FUNCTIONS
     text = str(text if text is not None else "").strip()
     if not text:
         return None, "it is empty"
@@ -208,22 +232,125 @@ def _tree(text: Any, functions: dict[str, Callable[..., float]] | None = None) -
     return tree, ""
 
 
+def one_number_summary(text: Any) -> str:
+    """Why ``text``, a formula FI's own analysis works out, says nothing as written: it summarises one number, as
+    ``max(growth)`` does. The analysis gives each name one number at a setting (that setting's mean of a result, the
+    setting's own value, a fixed value), so a maximum of it is that number and ``max(growth) - min(growth)`` is 0 at every
+    setting. ``""`` when it summarises nothing of one number. A plain sentence, for the plan's model and a person."""
+    try:
+        tree = ast.parse(str(text if text is not None else "").strip(), mode="eval")
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return ""
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _SUMMARIES
+                and len(node.args) == 1 and not node.keywords and not isinstance(node.args[0], ast.Starred)):
+            continue
+        word, value = _SUMMARIES[node.func.id]
+        called = {id(n.func) for n in ast.walk(node.args[0]) if isinstance(n, ast.Call)}
+        named = any(isinstance(n, ast.Name) and id(n) not in called and n.id not in CONSTANTS for n in ast.walk(node.args[0]))
+        return (f"`{ast.unparse(node)}` is a {word} over one number{' per setting' if named else ''}, which is {value}; "
+                "say whether it is over the trials of a setting or over the settings")
+    return ""
+
+
 def problem(text: Any) -> str | None:
-    """Why ``text`` cannot be read as a formula, or ``None`` when it can."""
-    tree, why = _tree(text)
-    return None if tree is not None else why
+    """Why ``text`` cannot be read as a check's measure (a formula that may take mean() and sd() over the trials), or
+    ``None`` when it can."""
+    tree, why = _tree(text, across=True)
+    if tree is None:
+        return why
+    return across_problem(text) or None
 
 
-def names(text: Any, functions: dict[str, Callable[..., float]] | None = None) -> list[str]:
+def names(text: Any, functions: dict[str, Callable[..., float]] | None = None, *, across: bool = False) -> list[str]:
     """The names a formula takes from what the simulation returns (not its functions or constants), in order; empty
-    when it cannot be read (with ``functions``, the functions it may call, as :func:`evaluate` reads it)."""
-    tree, _ = _tree(text, functions)
+    when it cannot be read (with ``functions``, the functions it may call, as :func:`evaluate` reads it; ``across``: a
+    check's measure, whose mean() and sd() hold names too)."""
+    tree, _ = _tree(text, functions, across)
     if tree is None:
         return []
     calls = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
     found = [n for n in ast.walk(tree) if isinstance(n, ast.Name) and id(n) not in calls and n.id not in CONSTANTS]
     found.sort(key=lambda n: (n.lineno, n.col_offset))  # as written, left to right
     return list(dict.fromkeys(n.id for n in found))
+
+
+def across_calls(text: Any) -> list[ast.Call]:
+    """The calls of ``mean()`` and ``sd()`` a check's measure makes, outermost first; empty when it makes none or cannot
+    be parsed."""
+    try:
+        tree = ast.parse(str(text if text is not None else "").strip(), mode="eval")
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return []
+    return [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            and n.func.id in ACROSS_TRIALS]
+
+
+def across_problem(text: Any) -> str:
+    """Why a measure's ``mean()`` / ``sd()`` cannot be worked out over the trials, or ``""``: each takes ONE argument, a
+    number or formula of names the simulation returns in one run (never another mean() or sd())."""
+    for call in across_calls(text):
+        shown = ast.unparse(call)
+        if len(call.args) != 1 or call.keywords or isinstance(call.args[0], ast.Starred):
+            return f"`{shown}` must take exactly one number or formula, the value of each trial"
+        if any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in ACROSS_TRIALS
+               for n in ast.walk(call.args[0])):
+            return f"`{shown}` holds another mean() or sd(): each is taken over the trials once"
+        inner = ast.unparse(call.args[0])
+        why = _tree(inner, FUNCTIONS)[1]
+        if why:
+            return f"the value of each trial in `{shown}` cannot be read ({why})"
+        if not names(inner, FUNCTIONS):
+            return f"`{shown}` takes nothing the simulation returns"
+    return ""
+
+
+@dataclass
+class AcrossForm:
+    """A measure with its ``mean()`` / ``sd()`` calls replaced by names (:func:`across_form`): ``text`` is the measure over
+    those names and ``aliases`` maps each to ``(operator, the formula of one trial it is taken of)``."""
+    text: str
+    aliases: dict[str, tuple[str, str]]
+
+    def rewrite(self, other: str) -> str:
+        """``other`` (a part of the same measure) with its calls replaced by the same names."""
+        return _across_rewrite(other, self.aliases)[0]
+
+
+def _across_rewrite(text: str, aliases: dict[str, tuple[str, str]]) -> tuple[str, dict[str, tuple[str, str]]]:
+    by_key = {v: k for k, v in aliases.items()}
+
+    class Swap(ast.NodeTransformer):
+        def visit_Call(self, node: ast.Call) -> ast.AST:  # noqa: N802
+            if isinstance(node.func, ast.Name) and node.func.id in ACROSS_TRIALS and len(node.args) == 1:
+                key = (node.func.id, ast.unparse(node.args[0]))
+                if key not in by_key:
+                    by_key[key] = f"__{key[0]}_{len(by_key)}__"
+                    aliases[by_key[key]] = key
+                return ast.copy_location(ast.Name(id=by_key[key], ctx=ast.Load()), node)
+            return self.generic_visit(node)
+
+    tree = Swap().visit(ast.parse(text.strip(), mode="eval"))
+    return ast.unparse(ast.fix_missing_locations(tree)), aliases
+
+
+def across_form(text: Any) -> AcrossForm | None:
+    """The measure ``text`` as an :class:`AcrossForm` when it takes ``mean()`` or ``sd()`` over the trials and reads without
+    a problem; ``None`` otherwise."""
+    text = str(text if text is not None else "").strip()
+    if not across_calls(text) or problem(text) is not None:
+        return None
+    aliases: dict[str, tuple[str, str]] = {}
+    rewritten, aliases = _across_rewrite(text, aliases)
+    return AcrossForm(text=rewritten, aliases=aliases)
+
+
+def read_names(measure: Any) -> list[str]:
+    """The names a check's ``measure`` may be read from, in the order FI's readers try them: the measure itself, as ONE returned
+    name (``trial_runner._check_from`` and ``mc_error.measure_names`` take it verbatim first, so a measure written as plain
+    words, ``error rate``, or with a hyphen, ``p-value``, is a name too), then the names of the formula it is."""
+    text = str(measure or "").strip()
+    return list(dict.fromkeys([text, *names(text, across=True)])) if text else []
 
 
 def is_name(text: Any) -> bool:
@@ -250,6 +377,8 @@ def evaluate(text: Any, values: dict[str, Any], *,
     functions = {**FUNCTIONS, **extra}
     tree, why = _tree(text, functions)
     if tree is None:
+        if across_calls(text):
+            return Evaluated(unreadable="it takes mean() or sd() over trials, which have no value on one run")
         return Evaluated(unreadable=why)
     def number(v: Any) -> bool:
         return isinstance(v, (int, float)) and not isinstance(v, bool)
@@ -345,6 +474,60 @@ def written_precision(value: Any) -> tuple[int, float] | None:
     return digits, 0.5 * 10.0 ** exponent
 
 
+def typed_precision(text: Any, value: float) -> tuple[int, float] | None:
+    """``(significant digits, half a unit of the last one)`` of a number as the plan TYPED it (``"0.0174090"`` is six
+    digits, not the five its float repr shows), or ``None`` when ``text`` is not a plain decimal that reads as ``value``
+    (then the float's own shortest form is the only record of what was written)."""
+    if not isinstance(text, str):
+        return None
+    try:
+        dec = Decimal(text.strip())
+    except InvalidOperation:
+        return None
+    exponent = dec.as_tuple().exponent
+    if not dec.is_finite() or not isinstance(exponent, int) or dec == 0 or float(dec) != value:
+        return None
+    return len(dec.as_tuple().digits), float(Decimal(5).scaleb(exponent - 1))
+
+
+def typed_numbers(text: str) -> dict[str, dict[str, str]]:
+    """The ``expected`` and ``tolerance`` of each check of a plan.md's design block as typed there (the scalar's own text,
+    by lower-cased check name); ``{}`` when the block cannot be read. The parsed plan holds floats, which have lost the
+    digits the plan wrote (a trailing zero), and the digits a number was written to are the precision it claims."""
+    import yaml
+
+    from . import plan as _plan
+
+    heading = _plan._HEADING_RE.search(text or "")
+    fenced = _plan._FENCE_RE.search(text, heading.end()) if heading else None
+    if fenced is None:
+        return {}
+    try:
+        root = yaml.compose(fenced.group(1))
+    except yaml.YAMLError:
+        return {}
+
+    def get(node: Any, key: str) -> Any:
+        if not isinstance(node, yaml.MappingNode):
+            return None
+        for k, v in node.value:
+            if isinstance(k, yaml.ScalarNode) and k.value == key:
+                return v
+        return None
+
+    items = get(root, "oracles")
+    if items is None:
+        items = get(get(root, "protocol"), "oracles")
+    out: dict[str, dict[str, str]] = {}
+    for item in items.value if isinstance(items, yaml.SequenceNode) else []:
+        name = get(item, "name")
+        if not isinstance(name, yaml.ScalarNode):
+            continue
+        entry = {k: v.value for k in ("expected", "tolerance") if isinstance(v := get(item, k), yaml.ScalarNode)}
+        out[str(name.value).strip().lower()] = entry
+    return out
+
+
 def disagrees(value: float, expected: float, limit: float) -> bool:
     """Whether FI's own computation ``value`` of a check's expected value is another number than the ``expected`` the plan
     typed: when they differ by more than half a unit of the last place the plan wrote (``0.99975`` is known to 5e-6), or
@@ -359,9 +542,10 @@ def disagrees(value: float, expected: float, limit: float) -> bool:
     return abs(value - expected) > reach
 
 
-#: A value written with at least this many significant digits and fewer than a float holds reads as a truncated
-#: decimal (0.367879 for exp(-1)), not an exact one (0.5, 2, 0.25).
-_TRUNCATED_DIGITS = (5, 13)
+#: A value written with fewer significant digits than a float holds is known only to the digits it is written to
+#: (0.367879 for exp(-1), 0.04978); a value of 13 digits or more is full precision. An exact one (0.5, 2, 0.25) is
+#: taken out earlier (:func:`written_precision`).
+_TRUNCATED_DIGITS = (1, 13)
 
 
 def _criteria_on(protocol: dict[str, Any] | None, name: str, *, value_only: bool) -> list[str]:
@@ -387,17 +571,24 @@ class Enforced:
     oracles: list[dict[str, Any]]
     rewrites: list[str] = field(default_factory=list)
     requests: list[str] = field(default_factory=list)
+    #: The checks whose tolerance is smaller than half a unit of the last digit of their expected value (one dict each:
+    #: ``name``, ``digits``, ``half``, ``limit``, ``relative``, ``tolerance``, ``expected``, ``expected_text``); a
+    #: request is among ``requests`` for each.
+    precision: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _describe(kind: str | None) -> str:
     return _oracle.KINDS.get(kind or "", "check")
 
 
-def enforce(protocol: dict[str, Any] | None, *, fi_runs: bool = True) -> Enforced:
+def enforce(protocol: dict[str, Any] | None, *, fi_runs: bool = True,
+            typed: dict[str, dict[str, str]] | None = None) -> Enforced:
     """Hold each declared check to its kind's numeric form (see the module docstring). A check of an unrecognised
     kind is left alone (the plan's notes already say its kind is none of the six). ``fi_runs``: FI runs the simulation
     on each check's case itself and computes its formula (two scripts, the trial contract); when it does not, the
-    script reports each check's number by name, so a rewritten formula would not be applied and nothing is rewritten."""
+    script reports each check's number by name, so a rewritten formula would not be applied and nothing is rewritten.
+    ``typed``: the numbers as the plan typed them (:func:`typed_numbers`), by lower-cased check name; the digits a value
+    was written to are counted from that text when it is given."""
     oracles = [dict(o) for o in _oracle.declared(protocol)]
     out = Enforced(oracles=oracles)
     names_seen = [str(o["name"]).strip().lower() for o in oracles]
@@ -416,7 +607,17 @@ def enforce(protocol: dict[str, Any] | None, *, fi_runs: bool = True) -> Enforce
                 f"`measure` with {LANGUAGE}."
             )
             continue
-        if measure and has_case and problem(measure) is None and not names(measure):
+        if measure and has_case and across_calls(measure):
+            from . import mc_error as _mc  # a late import: core.mc_error imports this module
+
+            if _mc.per_trial_flag(oracle) is True:
+                out.requests.append(
+                    f"The check {name!r} must hold in every single trial (`per_trial: true`), but its measure `{measure}` "
+                    "takes mean() or sd() over the trials, which one trial has no value for: either drop `per_trial` (the "
+                    "check is then about the trials together) or write `measure` for one trial."
+                )
+                continue
+        if measure and has_case and problem(measure) is None and not names(measure, across=True):
             out.requests.append(
                 f"The check {name!r} computes its number as `{measure}`, which takes nothing the simulation returns, so "
                 "it would pass or fail without the simulation: write `measure` from the names the simulation returns."
@@ -474,21 +675,104 @@ def enforce(protocol: dict[str, Any] | None, *, fi_runs: bool = True) -> Enforce
             )
             continue
         precision = written_precision(expected)
+        text = (typed or {}).get(name.lower(), {}).get("expected")
+        if precision is not None and text is not None:
+            precision = typed_precision(text, expected) or precision  # type: ignore[arg-type]
         if precision is not None and tolerance is not None:
             digits, half = precision
             limit = tolerance * abs(expected) if relative else tolerance  # type: ignore[arg-type]
-            if _TRUNCATED_DIGITS[0] <= digits < _TRUNCATED_DIGITS[1] and 0 <= limit < half:
+            if digits < _TRUNCATED_DIGITS[1] and 0 <= limit < half:
                 out.requests.append(
-                    f"The check {name!r} expects {_literal(expected)}, a value written to {digits} significant digits "  # type: ignore[arg-type]
-                    f"(so known only to about ±{_fmt(half)}), but its tolerance is {_fmt(limit)}: a correct simulation "
-                    "would fail it. Give the expected value to full precision (worked out to 15 digits in its "
-                    "`reference`), or a tolerance no tighter than the precision it is written to."
+                    f"The check {name!r} expects {text or _literal(expected)}, a value written to {digits} significant digits "  # type: ignore[arg-type]
+                    f"(so known only to about ±{_fmt(half)}), but its tolerance is {_fmt(limit)}"
+                    f"{' (' + _fmt(tolerance) + ' of the value)' if relative else ''}: a correct simulation "
+                    "would fail it. If the value is exact or known to more digits, write it with enough digits for the "
+                    "tolerance (for example 0.300000, or worked out to 15 digits in its `reference`); otherwise give a "
+                    "tolerance no tighter than the precision it is written to."
                 )
+                out.precision.append({"name": name, "digits": digits, "half": half, "limit": limit, "relative": relative,
+                                      "tolerance": tolerance, "expected": expected, "expected_text": text,
+                                      "request": out.requests[-1]})
     return out
 
 
 #: The section of plan.md that says what FI did to the checks before anything ran (prose, never read back).
 HEADING = "A second look at the checks against known answers"
+
+
+def precision_gaps(text: str) -> list[str]:
+    """The names of the checks of a plan.md whose tolerance is smaller than half a unit of the last digit of their
+    expected value as typed (:func:`enforce`)."""
+    from . import plan as _plan
+
+    block = _plan.raw_design_block(text)
+    protocol = block.get("protocol") if isinstance(block, dict) else None
+    if not isinstance(protocol, dict):
+        return []
+    return [str(g["name"]) for g in enforce(protocol, typed=typed_numbers(text)).precision]
+
+
+def precision_requests(text: str, names: list[str]) -> list[str]:
+    """The request to the plan for each named check of a plan.md that is tighter than its expected value's digits."""
+    from . import plan as _plan
+
+    block = _plan.raw_design_block(text)
+    protocol = block.get("protocol") if isinstance(block, dict) else None
+    wanted = {n.strip().lower() for n in names}
+    if not isinstance(protocol, dict):
+        return []
+    return [g["request"] for g in enforce(protocol, typed=typed_numbers(text)).precision
+            if str(g["name"]).strip().lower() in wanted]
+
+
+def widen_to_precision(text: str, names: list[str] | None = None,
+                       added: list[str] | None = None) -> tuple[str, list[str]]:
+    """``(text, sentences)``: ``text`` (a plan.md) with the tolerance of each named check (every one when ``names`` is
+    ``None``; ``added``: the named checks the reply to the first ask added, said so in their sentence) that is still smaller than half a
+    unit of the last digit of its expected value, as typed, widened to exactly that (on the relative scale for a
+    relative tolerance); a sentence per check widened. The expected value is never touched. ``text`` is returned as it
+    is when nothing is widened."""
+    from . import plan as _plan
+
+    wanted = {n.strip().lower() for n in names} if names is not None else None
+    new_ones = {n.strip().lower() for n in added or []}
+    told: list[str] = []
+
+    def change(block: dict[str, Any]) -> dict[str, Any] | None:
+        protocol = block.get("protocol")
+        if not isinstance(protocol, dict) or not isinstance(protocol.get("oracles"), list):
+            return None
+        gaps = {str(g["name"]).strip().lower(): g
+                for g in enforce(protocol, typed=typed_numbers(text)).precision if wanted is None or str(g["name"]).strip().lower() in wanted}
+        if not gaps:
+            return None
+        items = []
+        for item in protocol["oracles"]:
+            gap = gaps.get(str(item.get("name") or "").strip().lower()) if isinstance(item, dict) else None
+            if gap is not None:
+                half, expected = gap["half"], abs(gap["expected"])
+                new = half
+                if gap["relative"]:
+                    new = half / expected
+                    while new * expected < half:
+                        new = math.nextafter(new, math.inf)
+                item = {**item, "tolerance": new}
+                of_value = " of the value" if gap["relative"] else ""
+                told.append(
+                    f"The check {gap['name']!r} expects {gap['expected_text'] or _literal(gap['expected'])}, written to "
+                    f"{gap['digits']} significant digits, but its tolerance {_fmt(gap['tolerance'])}{of_value} was smaller "
+                    f"than half a unit of the last digit (±{_fmt(half)}) and the plan, "
+                    f"{'which added this check in its reply and was asked about it once more' if str(gap['name']).strip().lower() in new_ones else 'asked once'}"
+                    ", did not fix it: FI "
+                    f"widened the tolerance to {_fmt(new)}{of_value}, the precision the value is written to (the "
+                    "expected value is as the plan wrote it)")
+            items.append(item)
+        return {**block, "protocol": {**protocol, "oracles": items}}
+
+    edited = _plan.edit_design_block(text, change)
+    if edited is None or not told:
+        return text, []
+    return _plan.refresh_model_section(edited), told
 
 
 def apply_to_plan(text: str, *, fi_runs: bool = True) -> tuple[str, list[str], list[str]]:
@@ -503,7 +787,7 @@ def apply_to_plan(text: str, *, fi_runs: bool = True) -> tuple[str, list[str], l
         protocol = block.get("protocol")
         if not isinstance(protocol, dict) or not isinstance(protocol.get("oracles"), list):
             return None
-        enforced = enforce(protocol, fi_runs=fi_runs)
+        enforced = enforce(protocol, fi_runs=fi_runs, typed=typed_numbers(text))
         found["e"] = enforced
         if not enforced.rewrites:
             return None
@@ -578,6 +862,15 @@ EXPECTED_FORMULA_LANGUAGE = (
     "ndtr(x) (the standard normal distribution function, P(Z <= x)), ndtri(p) (its inverse) and erfinv(y) (all "
     "as SciPy names them, so ellipk(sin(a/2)**2) for amplitude a), and the settings of the check's `case` by name; "
     "angles in radians (30 degrees is 30*pi/180)"
+)
+
+
+#: How a formula FI's own analysis works out (core/analysis_frame.py) is written, for the plan's model.
+ANALYSIS_FORMULA_LANGUAGE = (
+    "numbers, + - * / ** %, parentheses, pi, the functions "
+    + ", ".join(sorted({*FUNCTIONS, *ANALYSIS_FUNCTIONS}))
+    + " (min, max, sum and mean of two or more numbers) and the special functions erf(x), erfc(x), gamma(x), lgamma(x), "
+    "j0(x), j1(x), ellipk(m), ndtr(x), ndtri(p) and erfinv(y)"
 )
 
 
@@ -784,8 +1077,11 @@ def formula_findings(protocol: dict[str, Any] | None, fixed: dict[str, float] | 
     for oracle in _oracle.declared(protocol):
         # A sum the plan works out in its own words (a reference, a derivation) is computed too: the plan's own hand
         # arithmetic can be wrong where its `expected_formula` is right (a stated 3.4486 where the sum gives 3.4519).
-        for key, value in oracle.items():
-            if key in ("measure", "expected_formula") or not isinstance(value, str):
+        # Only the keys that hold such a working-out are read (the reference keys and `derivation`), not every text
+        # field of the check (its name, its case words, a note).
+        for key in (*_oracle._REFERENCE_KEYS, "derivation"):
+            value = oracle.get(key)
+            if not isinstance(value, str):
                 continue
             for sw in stated_arithmetic(value):
                 found.append({"name": str(oracle["name"]).strip(), "state": "arithmetic", **sw})
@@ -907,36 +1203,55 @@ def formula_request(findings: list[dict[str, Any]], *, last: bool = True, fixed:
         + ("\nChange only these checks, and nothing else in the plan." if last else ""))
 
 
-def apply_formulas(text: str) -> tuple[str, list[dict[str, Any]]]:
+def apply_formulas(text: str, refused: list[dict[str, Any]] | None = None) -> tuple[str, list[dict[str, Any]]]:
     """``(text, corrections)``: ``text`` (a plan.md) with each check's ``expected`` set to what its ``expected_formula``
     computes where the two still disagree (:func:`disagrees`: by more than the typed number's own written precision or the check's tolerance); ``tolerance``, ``tolerance_mode``,
-    ``case`` and ``measure`` are never touched. Each correction is ``{"name", "was", "now", "formula"}``."""
+    ``case`` and ``measure`` are never touched. Each correction is ``{"name", "was", "now", "formula"}``.
+
+    FI never makes an edit to its own plan that the reader then refuses: each check is corrected on its own, and a
+    correction after which the plan no longer reads (another part of the plan, such as a metric's reference, agrees with the
+    typed number) is not applied; the check keeps the number the plan wrote. Those are added to ``refused`` (when given) as
+    ``{"name", "typed", "formula_value", "formula", "why"}``, the plan's own words for what no longer read."""
     from . import plan as _plan
 
     done: list[dict[str, Any]] = []
+    readable_before = _plan.parse(text).design is not None
 
-    def change(block: dict[str, Any]) -> dict[str, Any] | None:
-        protocol = block.get("protocol")
+    def one(name: str, found: dict[str, Any]) -> Any:
+        def change(block: dict[str, Any]) -> dict[str, Any] | None:
+            protocol = block.get("protocol")
+            if not isinstance(protocol, dict) or not isinstance(protocol.get("oracles"), list):
+                return None
+            items = [{**item, "expected": found["value"]}
+                     if isinstance(item, dict) and str(item.get("name") or "").strip() == name else item
+                     for item in protocol["oracles"]]
+            return {**block, "protocol": {**protocol, "oracles": items}}
+        return change
+
+    def wrong_in(current: str) -> dict[str, dict[str, Any]]:
+        design = _plan.raw_design_block(current)
+        protocol = design.get("protocol") if isinstance(design, dict) else None
         if not isinstance(protocol, dict) or not isinstance(protocol.get("oracles"), list):
-            return None
-        wrong = {f["name"]: f for f in formula_findings(protocol, fixed_settings_of_design(block))
-                 if f["state"] == "differs"}
-        if not wrong:
-            return None
-        items = []
-        for item in protocol["oracles"]:
-            name = str(item.get("name") or "").strip() if isinstance(item, dict) else ""
-            if name in wrong:
-                f = wrong[name]
-                done.append({"name": name, "was": f["expected"], "now": f["value"], "formula": f["formula"]})
-                item = {**item, "expected": f["value"]}
-            items.append(item)
-        return {**block, "protocol": {**protocol, "oracles": items}}
+            return {}
+        return {f["name"]: f for f in formula_findings(protocol, fixed_settings_of_design(design))
+                if f["state"] == "differs"}
 
-    edited = _plan.edit_design_block(text, change)
-    if edited is None or not done:
+    current = text
+    for name, found in wrong_in(text).items():
+        edited = _plan.edit_design_block(current, one(name, found))
+        if edited is None:
+            continue
+        after = _plan.parse(edited)
+        if readable_before and after.design is None:
+            if refused is not None:
+                refused.append({"name": name, "typed": found["expected"], "formula_value": found["value"],
+                                "formula": found["formula"], "why": after.error or ""})
+            continue
+        current = edited
+        done.append({"name": name, "was": found["expected"], "now": found["value"], "formula": found["formula"]})
+    if not done:
         return text, []
-    return _plan.refresh_model_section(edited), done
+    return _plan.refresh_model_section(current), done
 
 
 # --- a test run of the checks before the study -------------------------------------------------------------------------
@@ -1053,7 +1368,7 @@ def unit_multiple(oracle: dict[str, Any], value: Any, *, broad: bool = True) -> 
 
 def _outer_call(text: str) -> str:
     """The function the whole formula is an argument of (``abs`` for ``abs(a - b)``), or ``""``."""
-    tree, _ = _tree(text)
+    tree, _ = _tree(text, across=True)
     body = tree.body if tree is not None else None
     return body.func.id if isinstance(body, ast.Call) and isinstance(body.func, ast.Name) else ""
 

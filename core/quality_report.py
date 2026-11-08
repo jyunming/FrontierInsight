@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from . import review_pairs as _pairs
+from . import stop_power as _stop_power
 
 SCHEMA = "fi.quality/v1"
 STAGES = ("plan", "checks", "design", "code", "run", "analysis", "paper", "review")
@@ -32,8 +33,8 @@ STAGE_NAME = {"plan": "Plan", "checks": "Checks", "design": "Design", "code": "C
 #: Which stage a model call belongs to (the step name, without any ``.suffix``).
 _NODE_STAGE = {
     "clarify": "plan", "ideate": "plan", "ideate_query": "plan", "ideate_reflect": "plan", "ideate_tournament": "plan",
-    "literature_query": "plan", "literature_foundational": "plan", "literature_screen": "plan", "source_router": "plan",
-    "select_skills": "plan", "plan": "plan", "plan_revise": "plan", "plan_criteria": "plan",
+    "literature_query": "plan", "literature_foundational": "plan", "literature_screen": "plan", "literature_novelty": "plan", "source_router": "plan",
+    "select_skills": "plan", "plan": "plan", "plan_revise": "plan", "plan_criteria": "plan", "plan_contract": "plan",
     "oracle_review": "checks", "implement_oracle": "checks", "oracle_recompute": "checks",
     "design": "design", "design_self_critique": "design", "design_review": "design",
     "implement_outline": "code", "implement": "code", "implement_body": "code", "implement_function": "code",
@@ -60,7 +61,7 @@ _READERS = {"plan": ("oracle_review.topic",), "checks": ("oracle_review", "oracl
 _KEY = {"plan": "plan", "checks": "oracle_review", "design": "design", "code": "implement", "run": "execute_reflect",
         "analysis": "analyze", "paper": "write", "review": "review"}
 _RECORD_FILES = ("model_calls.jsonl", "audit.jsonl", "oracle_review.json", "code_review.json", "equation_tests.json",
-                 "function_steps.json", "second_impl.json")
+                 "function_steps.json", "second_impl.json", "oracle_corrections.json")
 
 
 def _is_choice(text: str) -> bool:
@@ -169,13 +170,18 @@ class _Quest:
         self.equation_tests = _dict(_json(fi / "equation_tests.json"))
         self.function_steps = _dict(_json(fi / "function_steps.json"))
         self.second_impl = _dict(_json(fi / "second_impl.json"))
+        self.oracle_corrections = _dict(_json(fi / "oracle_corrections.json"))
         self.search_asked = _dict(_json(fi / "search_block_asked.json"))
         self.protocol_asked = _dict(_json(fi / "protocol_part_asked.json"))
+        self.contract_parts = _dict(_json(fi / "contract_parts.json"))
         self.pilot = _dict(_json(fi / "pilot_check.json"))
+        self.cannot_repair = _dict(_json(fi / "cannot_repair.json"))
         self.trial_checks = _dict(_json(fi / "trial_checks.json"))
         self.drafted_asked = _dict(_json(fi / "drafted_parts_asked.json"))
         self.design_acted = _list(_json(fi / "design_audit_acted.json"))
+        self.audit_open = [x for x in _list(_dict(_json(fi / "audit_open_items.json")).get("open")) if isinstance(x, dict)]
         self.pause = _dict(_json(fi / "pause.json"))
+        self.scope = _dict(_json(fi / "scope.json"))
         self.cost = _dict(_json(fi / "cost.summary.json"))
         self.stuck = _dict(_json(root / "needs" / "STUCK.json"))
         self.critique = [x for x in _list(_json(root / "needs" / "DESIGN_CRITIQUE.json")) if isinstance(x, dict)]
@@ -185,6 +191,8 @@ class _Quest:
         self.evidence = _dict(_json(root / "needs" / "EVIDENCE.json"))
         self.summary = _dict(_json(root / "frontier_insight_summary.json"))
         self.paper_check = _dict(_json(root / ".fi" / "paper_record_check.json"))
+        self.record_taken_out = _list(_dict(_json(root / ".fi" / "record_claims_taken_out.json")).get("taken_out"))
+        self.unsupported_removed = _list(_dict(_json(root / ".fi" / "unsupported_claims.json")).get("removed"))
         self.numeric_warnings = _dict(_json(root / "needs" / "NUMERIC_WARNINGS.json"))
         self.receipts = {p.stem: _dict(_json(p)) for p in sorted((root / "needs" / "receipts").glob("*.json"))} \
             if (root / "needs" / "receipts").is_dir() else {}
@@ -216,6 +224,14 @@ def _read_yaml(path: Path) -> dict[str, Any]:
 
 # ------------------------------------------------------------------------------------------------------ stages
 
+def _first_said(item: dict[str, Any]) -> str:
+    for o in _list(item.get("origins")):
+        o = _dict(o)
+        if o.get("objection") or o.get("fix"):
+            return str(o.get("objection") or o.get("fix"))
+    return ""
+
+
 def _problem(stage: str, text: str, by: str, status: str, source: str) -> dict[str, str]:
     return {"stage": stage, "text": _one(text, 220), "found_by": by, "status": status, "source": source}
 
@@ -244,26 +260,114 @@ def _oracle_problems(q: _Quest) -> list[dict[str, str]]:
         return []
     out: list[dict[str, str]] = []
     seen: dict[str, int] = {}
-    first_text: dict[str, tuple[str, str]] = {}
+    kinds: dict[str, dict[str, int]] = {}
+    latest: dict[str, tuple[str, str]] = {}
     for status, problems, src in rounds:
         for p in problems:
             key = next(iter(_pending_names([p])))
             seen[key] = seen.get(key, 0) + 1
-            first_text.setdefault(key, (str(p), src))
+            # Each round is named by its own sentence: a check its trials could not decide did not fail.
+            kind = "not decided" if " was not decided" in str(p) else "failed"
+            kinds.setdefault(key, {})[kind] = kinds.setdefault(key, {}).get(kind, 0) + 1
+            latest[key] = (str(p), src)  # the latest round: the sentence says what the check is now
     last_status, last_problems, _ = rounds[-1]
     still = _pending_names(last_problems)
-    for key, (text, src) in first_text.items():
+    for key, (text, src) in latest.items():
         if key in still:
             status = "left out" if last_status == "went_on_failing" else "not fixed"
         else:
             status = "fixed"
-        tries = f" (failed {seen[key]} times)" if seen[key] > 1 else ""
+        tries = (" (" + ", ".join(f"{k} {n} time{'s' if n != 1 else ''}" for k, n in kinds[key].items()) + ")"
+                 if seen[key] > 1 else "")
         out.append(_problem("run", text + tries, "FI's own known-answer check", status, src))
     return out
 
 
-def _checks_problems(q: _Quest) -> list[dict[str, str]]:
+def _plan_oracle_rows(root: Path) -> list[list[dict[str, Any]]]:
+    """The oracle rows of each kept plan version (``.fi/plan_versions``), oldest first. A version that cannot be read is
+    skipped; the report is never stopped by it."""
+    from . import plan as _plan
+
+    versions = sorted((root / ".fi" / "plan_versions").glob("plan.v*.md"),
+                      key=lambda p: _int(re.sub(r"\D", "", p.stem)))
+    out: list[list[dict[str, Any]]] = []
+    for path in versions:
+        try:
+            block = _plan.raw_design_block(path.read_text(encoding="utf-8"))
+            protocol = _dict(block.get("protocol")) if isinstance(block, dict) else {}
+            out.append([_dict(r) for r in _list(protocol.get("oracles"))])
+        except (OSError, ValueError):
+            continue
+    return out
+
+
+def _original_reference(versions: list[list[dict[str, Any]]], name: str, old: Any, new: Any) -> str:
+    """The ``reference`` the plan gave check ``name`` before FI changed its expected value: from the last version before the
+    first one that holds the new value, the last version that holds the old one. Empty when the kept versions do not
+    show it; it is never guessed."""
+    found = ""
+    for rows in versions:
+        row = next((r for r in rows if str(r.get("name") or "").strip() == name), None)
+        if row is None:
+            continue
+        if row.get("expected") == new and row.get("expected") != old:
+            break
+        if row.get("expected") == old:
+            found = str(row.get("reference") or "")
+    return found
+
+
+def _correction_proposer(rec: dict[str, Any]) -> str:
+    """Who worked the new value out, in plain words (from the record's ``source`` and ``confirmed_by``)."""
+    second = _dict(rec.get("confirmed_by"))
+    model = str(second.get("model") or "")
+    if rec.get("source") == "numeric":
+        return "a script that computed it from the definitions alone, never shown the plan's working or the measurement"
+    if rec.get("source") == "challenge":
+        return "FI's own computation of the code's formula and of the corrected formula"
+    if rec.get("source") == "arithmetic":
+        return ("FI's own recomputation of the plan's formula, confirmed by another model"
+                + (f" ({model})" if model else "") + " that was not shown the measured value")
+    return "FI's recheck of the plan's value"
+
+
+def _num(value: Any) -> str:
+    try:
+        return f"{float(value):.6g}"
+    except (TypeError, ValueError):
+        return _one(value, 12)
+
+
+def _correction_problems(q: _Quest) -> list[dict[str, str]]:
+    """Each known answer FI changed in the plan before the protocol was frozen (``.fi/oracle_corrections.json``): the
+    new value is never counted as independently validated, so a reader is told."""
     out: list[dict[str, str]] = []
+    versions = _plan_oracle_rows(q.root) if q.oracle_corrections else []
+    for name, rec in q.oracle_corrections.items():
+        rec = _dict(rec)
+        if not rec:
+            continue
+        ref = _original_reference(versions, str(name), rec.get("from"), rec.get("to"))
+        # The QUALITY.md table shows about 90 characters of a row: the check (cut when long), both values and "not
+        # validated" come first; who proposed it, why and the plan's original source follow.
+        change = f"{_num(rec.get('from'))} -> {_num(rec.get('to'))}"
+        tail = f"' changed by FI: {change}, not validated"
+        short = _one(name, max(8, 85 - len("known answer '") - len(tail)))
+        text = (f"known answer '{short}{tail}; the new value was not independently validated; "
+                f"{_correction_proposer(rec)}: {_one(rec.get('why'), 120)}"
+                + ("; the check now passes because its expected value was set to what was measured"
+                   if rec.get("agrees_with_measurement") else "")
+                + (f"; the plan's original source was: {_one(ref, 160)}" if ref else ""))
+        # "disclosed": neither fixed (it must not raise the fixed rate) nor a failure (the quest did not fail here).
+        row = _problem("checks", text, "FI's known-answer check", "disclosed", ".fi/oracle_corrections.json")
+        row["text"] = _one(text, 480)  # the row names who, why and the original source: longer than a usual row
+        out.append(row)
+    return out
+
+
+def _checks_problems(q: _Quest) -> list[dict[str, str]]:
+    # First: QUALITY.md shows only the first three items of a stage, and a changed known answer must be among them.
+    out: list[dict[str, str]] = _correction_problems(q)
     orv = q.oracle_review
     reviewer = str(orv.get("reviewer") or "a second model")
     for f in _list(orv.get("findings")):
@@ -285,6 +389,15 @@ def _checks_problems(q: _Quest) -> list[dict[str, str]]:
     for eid in _list(eq.get("not_tested")):
         out.append(_problem("checks", f"equation {eid} has no test", "FI's equation test", "left out",
                             ".fi/equation_tests.json"))
+    from . import code_review as _cr
+
+    now = _cr.version(q.root / "code")
+    for p in map(_dict, _list(q.cannot_repair.get("problems"))):
+        if p.get("text") and not _stop_power.may_stop(p.get("source")):
+            stale = bool(p.get("code_version")) and p.get("code_version") != now
+            out.append(_problem("checks", str(p["text"]), _stop_power.source_words(p.get("source")),
+                                "not checked again after a later repair" if stale else "not fixed",
+                                ".fi/cannot_repair.json"))
     for note in _list(q.protocol_check.get("notes")):
         out.append(_problem("checks", str(note), "FI's reading of the code (a note, not a stop)", "left out",
                             "needs/PROTOCOL_CHECK.json"))
@@ -296,7 +409,10 @@ def _code_problems(q: _Quest) -> list[dict[str, str]]:
     cr = q.code_review
     reviewer = str(cr.get("reviewer") or "a second model")
     final = bool(cr.get("final"))
-    taken_out = {str(c.get("quantity")) for c in map(_dict, _list(q.result_check.get("checks"))) if c.get("quantity")}
+    from . import result_checks as _result_checks
+
+    taken_out = {str(c.get("quantity")) for c in map(_dict, _list(q.result_check.get("checks")))
+                 if c.get("quantity") and _result_checks.takes_out(q.result_check, c)}
     for p in _list(cr.get("problems")):
         p = _dict(p)
         if p.get("kind") in ("dependent variable", "metric") and str(p.get("name") or "") in taken_out:
@@ -361,6 +477,10 @@ def _design_problems(q: _Quest) -> list[dict[str, str]]:
             for part in parts:
                 out.append(_problem("design", part, "the design audit",
                                     "fixed" if q.design_acted else "not fixed", "needs/receipts/design_audit.json"))
+    for it in q.audit_open:
+        out.append(_problem("design", f"proposed by the audit, not applied: `{it.get('path')}` "
+                                      f"({_one(_first_said(it), 120)}); {it.get('reason')}",
+                            "the design audit", "not fixed", ".fi/audit_open_items.json"))
     substituted = [str(x) for x in _list(q.drafted_asked.get("substituted"))]
     if substituted:
         names = {"grid": "settings to vary", "metrics": "metrics", "runs_per_setting": "runs per setting"}
@@ -369,6 +489,23 @@ def _design_problems(q: _Quest) -> list[dict[str, str]]:
                                       "the results belong to the plan's settings, not to what the redesign meant",
                             "FI's design check", "left out", ".fi/drafted_parts_asked.json"))
     return out
+
+
+def _scope_summary(q: _Quest) -> dict[str, Any] | None:
+    """Which study was picked, or that nobody picked one and which studies the topic could also have meant
+    (``.fi/scope.json``). ``None`` when there is no such record."""
+    if not q.scope:
+        return None
+    from . import scope_cards as _sc
+
+    cards = [_dict(c) for c in _list(q.scope.get("cards"))]
+    chosen = _dict(q.scope.get("chosen"))
+    removed = [str(x) for x in _list(q.scope.get("removed")) if str(x).strip()]
+    if q.scope.get("chosen_by") == "person" and chosen:
+        return {"chosen_by": "person", "chosen": str(chosen.get("question") or ""), "removed": removed,
+                "lines": [f"The person chose this study: {_one(chosen.get('question'), 300)}"]}
+    return {"chosen_by": "nobody", "chosen": "", "removed": removed,
+            "lines": [_sc.nobody_line(), *[_one(c.get("question"), 300) for c in cards if c.get("question")]]}
 
 
 def _plan_problems(q: _Quest) -> list[dict[str, str]]:
@@ -383,9 +520,43 @@ def _plan_problems(q: _Quest) -> list[dict[str, str]]:
         out.append(_problem("plan", f"the plan left out its {parts}", "FI's plan check",
                             "fixed" if pp.get("outcome") in ("kept", "told in the plan") else "not fixed",
                             ".fi/protocol_part_asked.json"))
+    for part, rec in _dict(q.contract_parts.get("parts")).items():
+        rec = _dict(rec)
+        if rec and not rec.get("valid"):
+            from . import contract_parts as _cparts
+
+            why = "the call failed" if rec.get("error") else "its answer could not be used after " + str(rec.get("asks")) + " asks"
+            out.append(_problem("plan", f"the plan was not given {_cparts.PART_WORDS.get(part, part)} ({why}); it stays in the "
+                                "older form", "FI's plan check", "disclosed", ".fi/contract_parts.json"))
+    out.extend(_unit_problems(q))
     if q.pause.get("kind") == "plan":
         out.append(_problem("plan", q.pause.get("headline") or "the plan cannot be run as written", "FI's plan check",
                             "not fixed", ".fi/pause.json"))
+    return out
+
+
+def _unit_problems(q: _Quest) -> list[dict[str, str]]:
+    """A question the topic asks in one unit that the plan answers with a result in another (``unit_conflict`` on the plan's
+    ``topic_map`` entry), listed once. Status follows what the paper shows: the paper answers with that result and states both
+    units (``disclosed``); a result FI holds no value for, or a plan of the older form (the question printed as not answered),
+    is ``left out``."""
+    from . import paper_facts as _paper_facts
+
+    out: list[dict[str, str]] = []
+    try:
+        found = _paper_facts.unit_conflicts(q.root)
+    except Exception:  # noqa: BLE001 -- the report only reads; a record it cannot read leaves the row out
+        return out
+    for u in found:
+        name, gap = _one(u["name"], 80), u["conflict"]
+        if isinstance(gap, dict) and u["valued"]:
+            said = _paper_facts._unit_words(gap)
+            out.append(_problem("plan", f"the question \"{name}\" asks in {said[1]}; the plan's result for it is in {said[0]} and "
+                                "FI did not convert it", "FI's plan check", "disclosed", ".fi/contract_parts.json"))
+        else:
+            why = _one(gap, 120) if isinstance(gap, str) else "FI holds no value for the result the plan links to it"
+            out.append(_problem("plan", f"the question \"{name}\" is not answered in the paper ({why})", "FI's plan check",
+                                "left out", ".fi/contract_parts.json"))
     return out
 
 
@@ -416,7 +587,10 @@ def _run_problems(q: _Quest) -> list[dict[str, str]]:
         first = next(e for e in manifest if e.get("status") in ("repairing", "stopped", "warned"))
         last = manifest[-1].get("status")
         found_by = "FI's run-record check" + (" (recorded only)" if last == "warned" else "")
-        out.append(_problem("run", _one((_list(first.get("problems")) or ["the run did not report what the protocol fixed"])[0], 200),
+        # what FI's own analysis printed (core/analysis_frame.py): a fault of FI's, which no repair of the study's code changes
+        fis = _dict(_json(q.root / "needs" / "RUN_MANIFEST_CHECK.json")).get("fault") == "FI's own analysis"
+        out.append(_problem("run", ("a fault of FI's own analysis, not of the study's code: " if fis else "")
+                            + _one((_list(first.get("problems")) or ["the run did not report what the protocol fixed"])[0], 200),
                             found_by, "fixed" if last in ("ok", "pass", "not_applicable") else "not fixed",
                             f".fi/audit.jsonl seq {first.get('seq')}"))
     # What the analysis did not print of trials FI holds whole is not a difference in the results: it is here, not in the paper.
@@ -430,6 +604,7 @@ def _run_problems(q: _Quest) -> list[dict[str, str]]:
         out.append(_problem("run", _one(str(_list(pilot["problems"])[0]), 200), "FI's pilot check",
                             "fixed" if pilot.get("outcome") == "passed" else "not fixed", ".fi/pilot_check.json"))
     out += _precision_not_judged(q)
+    out += _precision_per_setting(q)
     stop = _dict(_json(q.root / ".fi" / "run_manifest_stop.json"))
     if stop and not any(p["found_by"].startswith("FI's run-record check") for p in out):
         out.append(_problem("run", stop.get("headline") or stop.get("problem") or "the run did not report what the protocol fixed",
@@ -449,6 +624,15 @@ def _precision_not_judged(q: _Quest) -> list[dict[str, str]]:
         return []
     return [_problem("run", _evidence.precision_not_judged_words(fact), "FI's precision check", "left out",
                      "needs/EVIDENCE.json")]
+
+
+def _precision_per_setting(q: _Quest) -> list[dict[str, str]]:
+    """The plan's precision target held to each setting's own trials (``needs/EVIDENCE.json`` ``precision_per_setting``),
+    when not every setting met it."""
+    from . import evidence as _evidence
+
+    words = _evidence.precision_per_setting_words(_dict(q.evidence.get("precision_per_setting")))
+    return [_problem("run", words, "FI's precision check", "not fixed", "needs/EVIDENCE.json")] if words else []
 
 
 def _pilot_summary(q: _Quest) -> dict[str, Any] | None:
@@ -486,6 +670,7 @@ def _trial_checks_summary(q: _Quest) -> dict[str, Any] | None:
     left = [str(k) for k in _list(rec.get("left_out_settings"))]
     cal = _dict(rec.get("calibration"))
     quantities = [x for x in _list(cal.get("quantities")) if isinstance(x, dict)]
+    consistency = [x for x in _list(cal.get("inside")) if isinstance(x, dict)]
     lines = []
     if fails:
         lines.append(f"{len(fails)} of {_int(rec.get('settings'))} setting(s) had failed trials"
@@ -496,13 +681,34 @@ def _trial_checks_summary(q: _Quest) -> dict[str, Any] | None:
                      and isinstance(_list(f.get("reasons"))[0], list) else "") for f in fails[:8]]
     else:
         lines.append(f"no trial failed in the {_int(rec.get('settings'))} setting(s)")
-    for x in quantities:
-        state = (("not the multiplier the plan fixes (a fault)" if x.get("kind") == "multiplier" else "grossly wrong (a fault)")
+    for x in [*quantities, *consistency]:
+        disclosed = rec.get("action") == "disclose" and x.get("fault") and x.get("kind") in ("coverage", "se_ratio")
+        state = ("measured not to match the trials, and the repairs did not remove it: the study went on and the paper "
+                 "says at which settings; " + ("the interval reported there is" if x.get("kind") == "coverage" else
+                                               "the standard error reported there, and any interval formed from it, is")
+                 + " not presented as valid"
+                 if disclosed else
+                 ("not the multiplier the plan fixes (a fault)" if x.get("kind") == "multiplier" else "grossly wrong (a fault)")
                  if x.get("fault") else
+                 f"off in {_int(x.get('below'))} setting(s): the rows of the record may not belong together, so a statistic that pairs "
+                 "this estimate with another across trials may not be right (not a repairable fault)"
+                 if _int(x.get("below")) and x.get("kind") == "inside" else
                  f"below the level in {_int(x.get('below'))} setting(s): reported, not a fault" if _int(x.get("below"))
                  else f"above the level in {_int(x.get('above'))} setting(s) (wider than need be): reported, not a fault"
                  if _int(x.get("above")) else "as it should be")
         lines.append(f"{_one(x.get('says'), 300)} - {state}")
+        if disclosed:
+            marked = [t for t in _list(x.get("settings")) if isinstance(t, dict) and t.get("gross")]
+            lines.append("measured not to match at: " + (
+                "; ".join(f"{t.get('key') or 'the one setting'}: {t.get('value')} from {_int(t.get('n')):,} trials"
+                          for t in marked[:8]) + (f"; and {len(marked) - 8} more" if len(marked) > 8 else "")
+                if marked else "the settings taken together")
+                + ((f" (the other {_int(x.get('judged')) - len(marked)} of {_int(x.get('judged'))} settings: within the range "
+                    "FI accepts" + (f", except {sum(1 for t in _list(x.get('settings')) if isinstance(t, dict) and not t.get('gross') and t.get('below'))} "
+                                    "off by more than chance explains, though not grossly"
+                                    if any(isinstance(t, dict) and not t.get("gross") and t.get("below")
+                                           for t in _list(x.get("settings"))) else "") + ")")
+                   if marked and len(marked) < _int(x.get("judged")) else ""))
     from . import trial_checks as _tc
 
     for u in [u for u in _list(rec.get("undefined")) if isinstance(u, dict)][:8]:
@@ -526,30 +732,101 @@ def _analysis_problems(q: _Quest) -> list[dict[str, str]]:
     if q.stuck and _stuck_stage(q) == "analysis":
         out.append(_problem("analysis", q.stuck.get("problem") or "the analysis could not be read", "FI", "not fixed",
                             "needs/STUCK.json"))
+    # The analysis FI writes (core/analysis_frame.py): each declared quantity its last run did not work out, from FI's record.
+    from . import analysis_frame as _analysis
+
+    said = {"not_written": "the study's function for it was not written", "no_data": "no trial gave a value for it",
+            "failed": "the study's function for it failed", "refused": "FI refused what the study's function for it returned",
+            "blocked": "a quantity it is worked out from was not computed"}
+    for item in _analysis.not_computed(_analysis.read_record(q.root)):
+        out.append(_problem("analysis", f"{item['id']} was not computed: {said.get(item['status'], item['status'])}"
+                            + (f" ({_one(item['why'], 200)})" if item["why"] and item["status"] != "not_written" else ""),
+                            "FI's analysis", "left out", _analysis.DERIVED_PATH.as_posix()))
     return out
+
+
+def _scale_problems(root: Any) -> list[dict[str, str]]:
+    """One disclosed row for each figure whose axis scale FI chose (the plan was silent) or refused (a declared log axis FI drew
+    linear): the figure's own labels say a log scale, but not that the plan did not ask for it."""
+    from . import figure_text_check as _ftc
+
+    return [_problem("paper", f"{f.get('file')}: {f.get('said')}", "FI's choice of axis scale", "disclosed", str(f.get("record") or ""))
+            for f in _ftc.scale_notes(root)]
 
 
 def _paper_problems(q: _Quest) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
+    from . import figure_text_check as _ftc
+    out.extend(_scale_problems(q.root))
+
+    # A figure whose legend or caption says something its record does not draw (FI writes both from the record, so a
+    # finding here is FI's own fault, disclosed; it stops nothing).
+    for f in _ftc.quest_findings(q.root):
+        out.append(_problem("paper", f"{f.get('file')}: {f.get('said')}", "FI's check of the figure's legend and caption "
+                            "against its record of what it draws", "not fixed", str(f.get("record") or "")))
+    # A series the figure's code declared as a result of the plan but whose values are not FI's record of it: it is drawn
+    # and described as a computed value, and this line says so.
+    for f in _ftc.quest_neutral_declared(q.root):
+        said = ("does not match FI's record of that result" if f["checked"] == "differs"
+                else "could not be checked against FI's record of that result")
+        out.append(_problem("paper", f"Figure {f['number']}: a series declared as {_one(f['label'], 80)} {said}; "
+                            "it is drawn as a computed value.", "FI's check of the figure's values against "
+                            "its record", "left out", str(f.get("record") or "")))
     claim_model = _first_model(q.calls, ("claim_check",)) or "claim check"
     rec = q.receipts.get("claim_check")
     if rec and rec.get("status") == "fail":
         out.append(_problem("paper", rec.get("detail") or "claims in the draft are unsupported",
                             f"{claim_model} (claim check)",
                             "not fixed" if not _paper_exists(q.root) else "left out", "needs/receipts/claim_check.json"))
+    for r in _list(q.paper_check.get("untraced_numbers")):
+        r = _dict(r)
+        out.append(_problem("paper", f"the number {r.get('number')} is not traced to the plan or FI's records; it stays in the "
+                            f"paper as the writer typed it: {_one(r.get('sentence'), 200)}",
+                            "FI's check of the paper's numbers", "not fixed", ".fi/paper_record_check.json"))
+    # A record an older FI wrote: those numbers WERE replaced by "[number removed]" in that paper.
     for r in _list(q.paper_check.get("removed_numbers")):
         r = _dict(r)
-        out.append(_problem("paper", f"the number {r.get('number')} was typed by the writer, not filled by FI from its records, "
-                            f"and was taken out: {_one(r.get('sentence'), 200)}",
+        out.append(_problem("paper", f"the number {r.get('number')} was not traced to the plan or FI's records, so it was "
+                            f"replaced by \"[number removed]\" in the paper: {_one(r.get('sentence'), 200)}",
                             "FI's check of the paper's numbers", "left out", ".fi/paper_record_check.json"))
     for r in _list(q.paper_check.get("taken_out_values")):
         r = _dict(r)
         out.append(_problem("paper", f"FI could not fill the value {r.get('key')} from its records ({r.get('how')}): "
                             f"{_one(r.get('sentence'), 200)}",
                             "FI's check of the paper's numbers", "left out", ".fi/paper_record_check.json"))
+    from . import paper_values as _pv
+
+    marks = _pv.read_marks_record(q.root)
+    for r in _list(marks.get("repaired")):
+        r = _dict(r)
+        out.append(_problem("paper", f"FI put its own value back where the paper's text had changed {_one(r.get('key'), 60)} "
+                            f"from \"{_one(r.get('now'), 30)}\" to \"{_one(r.get('was'), 30)}\"",
+                            "FI's check of the paper's values", "fixed", ".fi/value_marks.json"))
+    for r in _list(marks.get("unverified")):
+        r = _dict(r)
+        out.append(_problem("paper", f"the value {_one(r.get('text'), 60)} ({_one(r.get('key'), 120)}) could not be worked out "
+                            f"again from FI's records ({_one(r.get('why'), 160)}), so it is not checked",
+                            "FI's check of the paper's values", "not fixed", ".fi/value_marks.json"))
+    for r in q.record_taken_out:
+        r = _dict(r)
+        out.append(_problem("paper", f"after the paper was written again, it still said what FI's records contradict, so "
+                            f"this was taken out: {_one(r.get('text'), 200)} (why: {_one(r.get('why'), 300)})",
+                            "FI's records", "left out", ".fi/record_claims_taken_out.json"))
+    for r in q.unsupported_removed:
+        r = _dict(r)
+        out.append(_problem("paper", f"a sentence that stated a number the claim check did not find in the run's results was "
+                            f"taken out of the paper: {_one(r.get('claim'), 200)} (why: {_one(r.get('evidence'), 300)})",
+                            "FI's claim check", "left out", ".fi/unsupported_claims.json"))
     if q.stuck and _stuck_stage(q) == "paper":
         out.append(_problem("paper", q.stuck.get("problem") or "the paper contradicts FI's records",
                             "FI's records", "not fixed", "needs/STUCK.json"))
+    # A poster problem the visual check found but could name no part of the poster for is not redone (the poster is
+    # written again part by part): it is listed here.
+    poster = _dict(_dict(_json(q.root / ".fi" / "visual_check.json")).get("poster"))
+    unplaced = list(dict.fromkeys(str(t) for a in _list(poster.get("attempts")) for t in _list(_dict(a).get("unresolved"))))
+    for text in unplaced:
+        out.append(_problem("paper", f"a poster problem in no single part of it, so not fixed: {_one(text, 160)}",
+                            "FI's visual check of the poster", "not fixed", ".fi/visual_check.json"))
     pdf = _paper_pdf(q)
     if pdf and not pdf["typeset"] and _paper_exists(q.root):
         out.append(_problem("paper", "paper.pdf is not typeset (a browser drew it): " + _one(pdf["reason"], 200),
@@ -986,10 +1263,14 @@ def _issue_rows(cr: dict[str, Any], root: Path | None = None) -> list[dict[str, 
             "changes_result": bool(issue.get("changes_result")),
             "demonstrated": issue.get("demonstrated") if isinstance(issue.get("demonstrated"), bool) else None,
             "repaired": outcome == _issues.FIXED, "repaired_by": str(issue.get("fixed_by") or ""),
-            "open": still, "outcome": outcome, "plan_problem": bool(issue.get("plan_conflict")) or outcome == _issues.PLAN_PROBLEM,
+            "about_fi": bool(issue.get("fi_own")), "open": still and not issue.get("fi_own"), "outcome": outcome, "plan_problem": bool(issue.get("plan_conflict")) or outcome == _issues.PLAN_PROBLEM,
             "reason": _one(issue.get("reason"), 140), "seen_in": len(readings),
             "reported_as": [str(k) for k in _list(issue.get("reported_as"))],
             "at_gate": issue.get("at_gate") if isinstance(issue.get("at_gate"), dict) else {},
+            "about_plan_text": bool(issue.get("about_plan_text")),
+            "rerun_unchanged": bool(issue.get("rerun_unchanged")),
+            "rerun_moved_checks": bool(issue.get("rerun_moved_checks")),
+            "rerun_redrawn": bool(issue.get("rerun_redrawn")),
             "never_run": bool(issue.get("never_run")) or never_run(issue.get("file"), issue.get("function"))})
     return rows
 
@@ -1006,9 +1287,11 @@ def _left_out_of_paper(q: _Quest) -> list[dict[str, Any]]:
     quantity, with the names it was found under in the results."""
     out: list[dict[str, Any]] = []
     record = q.result_check
+    from . import result_checks as _result_checks
+
     named = {str(k) for c in map(_dict, _list(record.get("checks"))) for k in _list(c.get("keys"))}
     for c in map(_dict, _list(record.get("checks"))):
-        if c.get("quantity"):
+        if c.get("quantity") and _result_checks.takes_out(record, c):
             out.append({"quantity": str(c["quantity"]), "why": _one(c.get("note"), 300),
                         "names_in_results": [str(k) for k in _list(c.get("keys"))]})
     rest = [str(k) for k in _list(record.get("removed_quantities")) if str(k) not in named]
@@ -1029,7 +1312,7 @@ def _paper_records(q: _Quest) -> dict[str, Any]:
     root = q.root
     engine = _dict(q.config.get("engine"))
     topic = str(q.config.get("topic") or "")
-    out: dict[str, Any] = {"how_reached": "", "run_record": "", "code_findings": "", "paper_check": {}}
+    out: dict[str, Any] = {"how_reached": "", "run_record": "", "code_findings": "", "page_limit": "", "paper_check": {}}
     # The study as the quest resolved it (clarify can decide a quest needs no simulation, or is a survey, when the YAML did
     # not say so): the last design route records both. A quest with no such record falls back to the YAML.
     resolved = next((_dict(e.get("facts")) for e in reversed(q.decisions("design")) if _dict(e.get("facts"))), {})
@@ -1044,10 +1327,12 @@ def _paper_records(q: _Quest) -> dict[str, Any]:
                                   f"{_d._plain_seconds(least)}.")
         out["code_findings"] = _cr.findings_block(root, root / "code").replace(
             "**Open points in the code that produced these results.** ", "")
+        out["page_limit"] = _pf.page_limit_text(root)
         kept = _pf.kept_check(root)
         out["paper_check"] = {"hits": [str(h) for h in _list(kept.get("hits"))],
                               "unmet_items": [_dict(i) for i in _list(kept.get("unmet_items"))],
                               "unfilled": [str(u) for u in _list(kept.get("unfilled"))],
+                              "untraced": [_dict(r) for r in _list(kept.get("untraced_numbers"))],
                               "removed": [_dict(r) for r in _list(kept.get("removed_numbers"))],
                               "taken_out": [_dict(r) for r in _list(kept.get("taken_out_values"))],
                               "not_filled": str(kept.get("not_filled_by_fi") or "")}
@@ -1083,8 +1368,8 @@ def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, A
         count = Counter(p["status"].replace(" ", "_") for p in mine)
         stages[stage] = {
             "stage": stage, "wrote": wrote, "reviewed_by": reader, "same_model": same, "review_note": note,
-            "problems": {"total": len(mine), "fixed": count["fixed"], "not_fixed": count["not_fixed"],
-                         "left_out": count["left_out"], "items": mine},
+            "problems": {"total": len(mine) - count["disclosed"], "fixed": count["fixed"], "not_fixed": count["not_fixed"],
+                         "left_out": count["left_out"], "disclosed": count["disclosed"], "items": mine},
             "calls": len(calls), "failed_calls": sum(1 for r in calls if r.get("outcome") not in (None, "ok")),
             "prompt_tokens": sum(_int(_dict(r.get("usage")).get("prompt_tokens")) for r in calls),
             "completion_tokens": sum(_int(_dict(r.get("usage")).get("completion_tokens")) for r in calls),
@@ -1100,13 +1385,14 @@ def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, A
                    + (f" The QUALITY.md in the quest folder is from the previous run of {_day(previous)}." if previous else "")}
     failure = None if running else _failure(q, outcome, problems)
     totals = Counter(p["status"].replace(" ", "_") for p in problems)
-    total = len(problems)
+    total = len(problems) - totals["disclosed"]  # a disclosure is neither fixed nor failed: it is not in the rate
     quest_id = str(q.summary.get("quest_id") or (q.audit[0].get("quest_id") if q.audit else "") or root.name)
     return {
         "schema": SCHEMA, "written_at": _stamp(time.time()), "run_started_at": _stamp(started), "running": bool(running),
         "quest_id": quest_id, "title": str(q.summary.get("title") or q.config.get("title") or ""),
         "outcome": outcome, "stages": [stages[s] for s in STAGES], "failure": failure, "code": _code_metrics(q),
         "pilot": _pilot_summary(q),
+        "scope": _scope_summary(q),
         "trial_checks": _trial_checks_summary(q),
         "citations": _citations(q),
         "paper_pdf": _paper_pdf(q),
@@ -1115,6 +1401,7 @@ def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, A
         "suggestions": _suggestions(q, stages, outcome, failure), "cost": _cost(q), "config": _config(q, stages),
         "problems": {"total": total, "fixed": totals["fixed"], "not_fixed": totals["not_fixed"],
                      "left_out": totals["left_out"],
+                     "disclosed": totals["disclosed"],
                      "fixed_rate": round(totals["fixed"] / total, 3) if total else None},
         "seconds": sum(seconds.values()) if seconds else None,
     }
@@ -1154,13 +1441,30 @@ def _issue_lines(code: dict[str, Any]) -> list[str]:
         else:
             shown = "yes" if row["demonstrated"] else "not tested"
         repaired = f"yes, by {row['repaired_by']}" if row["repaired"] else ("no" + (f" ({row['reason']})" if row["reason"] else ""))
-        if row["plan_problem"]:
+        if row.get("about_fi"):
+            shown = "not tested"
+            repaired = "no: it is about lines FI wrote, not the study's code"
+            still = "no: it is about FI's own lines, so it is kept here for FI to fix; it was not repaired and changes nothing"
+        elif row["plan_problem"]:
             still = "plan problem: the plan contradicts itself, asked of the plan's model"
         elif row["open"] and row.get("never_run"):
             still = "yes, but the run never calls this code, so it changes nothing reported; it is kept here, not in the paper"
         elif row["open"] and row.get("at_gate", {}).get("outcome") == "left_out":
             keys = ", ".join(str(k) for k in _list(row["at_gate"].get("keys"))[:3])
-            still = f"yes: its test still fails, so FI left {keys} out of the results the paper uses, and the paper says so"
+            why_out = ("still fails, and a repair that passes it changes the reported number"
+                       if row["at_gate"].get("rerun") == "changed"
+                       else "still fails, and FI did not establish whether the value is wrong or missing")
+            still = f"yes: its test {why_out}, so FI left {keys} out of the results the paper uses, and the paper says so"
+        elif row["open"] and row.get("rerun_moved_checks"):
+            same = "with new random numbers" if row.get("rerun_redrawn") else "with the same random numbers"
+            still = (f"yes, but the study run again on a repaired copy of the code, {same}, moves only numbers FI checks the "
+                     "code with: no reported result moves beyond its uncertainty, and it is kept here")
+        elif row["open"] and row.get("rerun_unchanged"):
+            still = ("yes, but the study run again on a repaired copy of the code, with the same random numbers, reports no other "
+                     "number beyond its uncertainty: it changes no reported number, and it is kept here")
+        elif row["open"] and row.get("about_plan_text"):
+            still = ("yes, but its test fails on text FI wrote from the plan, not on a number the code computed; no reported "
+                     "number is changed, and it is kept here")
         elif row["open"] and row.get("at_gate", {}).get("outcome") == "not_computed":
             still = "yes: the code does not compute it, and the paper says so as a part not done"
         elif row["open"]:
@@ -1200,19 +1504,33 @@ def _citations_line(c: dict[str, Any]) -> str:
             + (f", {n.get('unchecked')} could not be checked" if n.get("unchecked") else "") + "." + who)
 
 
+def _unmet_lead(item: dict[str, Any]) -> str:
+    """What FI checked for a required item the paper does not hold. An open problem in the code is never in the Limitations;
+    FI looks for its own sentence on the results the problem may change, in the paragraph of the run's facts."""
+    if item.get("kind") != "code_finding":
+        return "Not in the paper's Limitations"
+    if item.get("named") is False:
+        return "FI could not name a printed result this finding changes"
+    if item.get("named") is True:
+        return "FI's sentence on the results it may change is not in the paper"
+    return "Not settled in the paper"  # a record kept before FI noted which of the two it was
+
+
 def _paper_record_lines(records: dict[str, Any]) -> list[str]:
     """The section of what FI recorded about the run that the paper does not carry, and what its check of the paper found."""
     labels = (("how_reached", "How this result was reached"), ("run_record", "What FI recorded about the run"),
-              ("code_findings", "Open points in the code that produced the results"))
+              ("code_findings", "Open points in the code that produced the results"),
+              ("page_limit", "Page limit"))
     parts = [(title, records.get(key)) for key, title in labels if records.get(key)]
     check = records.get("paper_check") or {}
     unmet = [i for i in check.get("unmet_items") or [] if isinstance(i, dict)]
     hits = [h for h in check.get("hits") or [] if h]
     unfilled = [u for u in check.get("unfilled") or [] if u]
+    untraced = [r for r in check.get("untraced") or [] if isinstance(r, dict)]
     removed = [r for r in check.get("removed") or [] if isinstance(r, dict)]
     taken_out = [r for r in check.get("taken_out") or [] if isinstance(r, dict)]
     not_filled = str(check.get("not_filled") or "")
-    if not parts and not unmet and not hits and not unfilled and not removed and not taken_out and not not_filled:
+    if not parts and not unmet and not hits and not unfilled and not untraced and not removed and not taken_out and not not_filled:
         return []
     lines = ["", "## What FI recorded that the paper does not carry", "",
              "These are FI's records of the run. The paper's seed, measured run time, time limit, trial counts and the "
@@ -1223,16 +1541,23 @@ def _paper_record_lines(records: dict[str, Any]) -> list[str]:
     if unmet or hits:
         lines += ["### Where the paper still disagrees with these records", "",
                   "FI sent the paper back to be rewritten for these and the review rounds ended before they were settled:", ""]
-        lines += [f"- Not in the paper's Limitations: {_cell(str(i.get('text') or i.get('name') or ''))} "
+        lines += [f"- {_unmet_lead(i)}: {_cell(str(i.get('text') or i.get('name') or ''))} "
                   f"(record `{_cell(str(i.get('id') or i.get('kind') or ''))}`)" for i in unmet]
         ids = {str(i.get("id")) for i in unmet}
         lines += [f"- {_cell(_one(h, 300))}" for h in hits if not any(i and i in h for i in ids)]
         lines.append("")
+    if untraced:
+        lines += ["### Numbers not traced to the plan or FI's records", "",
+                  "The writer typed these numbers instead of using the results FI fills in from its own records, and the "
+                  "review rounds ended before the writer fixed them. They stay in the paper as written; FI cannot say they "
+                  "are right, and check them before you rely on them:", ""]
+        lines += [f"- {_cell(str(r.get('number')))}: {_cell(_one(r.get('sentence'), 240))}" for r in untraced]
+        lines.append("")
     if removed:
         lines += ["### Numbers taken out of the paper", "",
-                  "The writer typed these numbers instead of using the results FI fills in from its own records, and the "
-                  "review rounds ended before the writer fixed them, so each is replaced by \"[number removed]\" in the paper:",
-                  ""]
+                  "An earlier FI wrote this record. The writer typed these numbers instead of using the results FI fills in from "
+                  "its own records, and the review rounds ended before the writer fixed them, so each is replaced by "
+                  "\"[number removed]\" in that paper:", ""]
         lines += [f"- {_cell(str(r.get('number')))}: {_cell(_one(r.get('sentence'), 240))}" for r in removed]
         lines.append("")
     if taken_out:
@@ -1276,13 +1601,14 @@ def render(report: dict[str, Any]) -> str:
         elif s["review_note"] and not s["reviewed_by"]:
             reader = _one(s["review_note"], 60)
         first = "; ".join(f"{_one(i['text'], 90)} [{i['found_by']}]" for i in p["items"][:3])
-        more = f" (+{p['total'] - 3} more)" if p["total"] > 3 else ""
+        more = f" (+{len(p['items']) - 3} more)" if len(p["items"]) > 3 else ""
+        shown = f"{p['total']}" + (f" ({p['disclosed']} disclosed)" if p.get("disclosed") else "")
         rc = s.get("review_cost")
         cost = "-" if not rc or not rc["calls"] else (
             f"{rc['calls']} call{'s' if rc['calls'] != 1 else ''}, {_n(rc['prompt_tokens'])} / {_n(rc['completion_tokens'])} tokens"
             + (f", ${rc['usd']:.2f}" if rc.get("usd") is not None else ""))
         lines.append(f"| {STAGE_NAME[s['stage']]} | {_cell(', '.join(s['wrote']) or '-')} | {_cell(reader)} | {_cell(cost)} | "
-                     f"{p['total']}{(': ' + _cell(first) + more) if first else ''} | "
+                     f"{shown}{(': ' + _cell(first) + more) if first else ''} | "
                      f"{p['fixed']} / {p['not_fixed']} / {p['left_out']} | {s['calls']}"
                      f"{(' (' + str(s['failed_calls']) + ' failed)') if s['failed_calls'] else ''} | "
                      f"{_n(s['prompt_tokens'])} / {_n(s['completion_tokens'])} | {_span(s['seconds'])} |")
@@ -1306,6 +1632,11 @@ def render(report: dict[str, Any]) -> str:
     pilot = report.get("pilot")
     if pilot:
         lines += ["", f"Pilot check: {pilot['says']}. Repairs it caused: {pilot['repairs']}."]
+    scope = report.get("scope")
+    if scope:
+        lines += ["", "## The study", "", scope["lines"][0]]
+        lines += [f"- {line}" for line in scope["lines"][1:]]
+        lines += [f"- Removed: {_cell(x)}" for x in scope.get("removed") or []]
     trials = report.get("trial_checks")
     if trials:
         lines += ["", "## FI's checks of the trials", ""]

@@ -3,7 +3,7 @@
 The process that runs the quest's code (model-written or agent-written) is given the function, its inputs and how to
 report the output, never the expected value, the tolerance or a path to them; it returns what the function computed
 and FI judges it (core/equation_measure.py, core/equation_tests.run_and_judge). Before this, the equation test ran the
-function in the very process that held the expected values, and a wrong Arrhenius law that looked the case up in the
+function in the very process that held the expected values, and a wrong temperature law that looked the case up in the
 test's own memory passed.
 """
 
@@ -23,7 +23,7 @@ from core.execution import ExecutionResult
 from core.outside_run import OutsideExecutor
 from tests.equation_judge_helpers import fi_verdict
 
-FIX = Path(__file__).parent / "fixtures" / "agent_cheats" / "kinetics"
+FIX = Path(__file__).parent / "fixtures" / "agent_cheats" / "decay"
 HONEST = "    return A * np.exp(-Ea / (R * T))\n"
 WRONG = "    return A * np.exp(-Ea / (2.0 * R * T))   # WRONG law (factor 2)\n"
 # The probe's cheat: look the case up in any loaded module's CASES and return its expected value.
@@ -51,7 +51,7 @@ PATCH = "    import builtins as _b\n    _b.abs = lambda x: 0.0\n"
 def _quest(tmp_path: Path, body: str = HONEST) -> tuple[Path, list[dict]]:
     root = tmp_path / "quest"
     shutil.copytree(FIX / "clean", root / "code")
-    model = root / "code" / "kinetics_parameter_recovery" / "model.py"
+    model = root / "code" / "decay_model" / "model.py"
     src = model.read_text(encoding="utf-8")
     assert src.count(HONEST) == 1
     model.write_text(src.replace(HONEST, body), encoding="utf-8")
@@ -148,6 +148,6 @@ async def test_the_measuring_run_is_made_from_a_copy_outside_the_quest(tmp_path:
 def test_the_wrong_law_is_really_wrong_away_from_the_example(tmp_path: Path) -> None:
     root, _cases = _quest(tmp_path, WRONG)
     out = subprocess.run([sys.executable, "-B", "-c",
-                          "from kinetics_parameter_recovery.model import rate_constant as k;"
+                          "from decay_model.model import rate_constant as k;"
                           "print(k(1e7, 5e4, 8.314462618, 310.0))"], cwd=root / "code", capture_output=True, text=True)
     assert float(out.stdout) != __import__("pytest").approx(1e7 * math.exp(-5e4 / (8.314462618 * 310.0)), rel=1e-3)

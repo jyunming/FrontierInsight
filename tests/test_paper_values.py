@@ -47,39 +47,51 @@ def _within_sd(cells, metric, **where) -> float:
 # --- A1: the five numbers the old check falsely flagged on s2 --------------------------------------------------
 
 
-KEYS = {
-    "{{v:Ea_rel_bias:sd @ noise_sigma=0.01, n_points=all | %}}": ("0.824%", dict(noise_sigma=0.01)),
-    "{{v:Ea_rel_bias:sd @ noise_sigma=0.05, n_points=all | %}}": ("4.13%", dict(noise_sigma=0.05)),
-    "{{v:Ea_rel_bias:sd @ noise_sigma=all, n_points=5 | %}}": ("6.05%", dict(n_points=5)),
-    "{{v:Ea_rel_bias:sd @ noise_sigma=all, n_points=10 | %}}": ("4.28%", dict(n_points=10)),
-}
+KEYS = [
+    "{{v:Ea_rel_bias:sd @ noise_sigma=0.01, n_points=5 | %}}",
+    "{{v:Ea_rel_bias:sd @ noise_sigma=0.05, n_points=10 | %}}",
+    "{{v:Ea_rel_bias:sd @ noise_sigma=0.005, n_points=40 | %}}",
+]
+POOLED_KEYS = [  # one SD over settings that differ in n_points or noise_sigma
+    "{{v:Ea_rel_bias:sd @ noise_sigma=0.01, n_points=all | %}}",
+    "{{v:Ea_rel_bias:sd @ noise_sigma=0.05, n_points=all | %}}",
+    "{{v:Ea_rel_bias:sd @ noise_sigma=all, n_points=5 | %}}",
+    "{{v:Ea_rel_bias:sd @ noise_sigma=all, n_points=10 | %}}",
+]
 
 
-@pytest.mark.parametrize("key", list(KEYS))
-def test_s2_sd_keys_render_and_match_numpy(s2, key):
-    text, where = KEYS[key]
+@pytest.mark.parametrize("key", KEYS)
+def test_s2_sd_keys_of_one_setting_render_and_match_numpy(s2, key):
+    where = {"noise_sigma": float(key.split("noise_sigma=")[1].split(",")[0]),
+             "n_points": int(key.split("n_points=")[1].split(" ")[0])}
     got = pv.resolve(key, s2)
-    assert got.filled and got.text.startswith(text + " (95% chi-square interval ")
+    assert got.filled and "(95% chi-square interval " in got.text and got.text.count("%") >= 3
     assert got.numbers[0] == pytest.approx(_within_sd(_cells("s2_kinetics_trials.json"), "Ea_rel_bias", **where))
 
 
-def test_s2_ratio_key_is_19_6_and_matches_numpy(s2):
-    key = "{{v:Ea_rel_bias:sd @ noise_sigma=0.1, n_points=all | ratio @ noise_sigma=0.005, n_points=all}}"
+@pytest.mark.parametrize("key", POOLED_KEYS)
+def test_an_sd_over_settings_that_differ_is_not_recorded(s2, key):
+    got = pv.resolve(key, s2)
+    assert not got.filled and got.hit is not None
+    assert "different settings" in got.hit.reason and "sd @ <axis>=each" in got.hit.reason  # tells the writer what to use
+    assert not pv.resolve(key.replace(":sd ", ":sd_ci "), s2).filled
+
+
+def test_s2_ratio_key_of_two_settings_matches_numpy(s2):
+    key = "{{v:Ea_rel_bias:sd @ noise_sigma=0.1, n_points=5 | ratio @ noise_sigma=0.005, n_points=5}}"
     got = pv.resolve(key, s2)
     cells = _cells("s2_kinetics_trials.json")
-    expected = _within_sd(cells, "Ea_rel_bias", noise_sigma=0.1) / _within_sd(cells, "Ea_rel_bias", noise_sigma=0.005)
-    assert got.filled and got.text == "19.6"
-    assert got.numbers[0] == pytest.approx(expected)
+    expected = (_within_sd(cells, "Ea_rel_bias", noise_sigma=0.1, n_points=5)
+                / _within_sd(cells, "Ea_rel_bias", noise_sigma=0.005, n_points=5))
+    assert got.filled and got.numbers[0] == pytest.approx(expected)
+    assert not pv.resolve("{{v:Ea_rel_bias:sd @ noise_sigma=0.1, n_points=all | ratio @ noise_sigma=0.005, n_points=all}}", s2).filled
 
 
-def test_pooled_sd_is_the_within_setting_sd_not_the_concatenated_one(s2):
+def test_an_sd_setting_by_setting_is_filled_where_the_pooled_one_is_not(s2):
     cells = _cells("s2_kinetics_trials.json")
-    use = [c for c in cells if c["cell"]["n_points"] == 5]
-    concatenated = float(np.std(np.concatenate([c["metrics"]["Ea_rel_bias"]["values"] for c in use]), ddof=1))
-    within = _within_sd(cells, "Ea_rel_bias", n_points=5)
-    assert abs(concatenated - within) > 1e-5  # the two definitions really differ on this record
-    got = pv.resolve("Ea_rel_bias:sd @ noise_sigma=all, n_points=5", s2)
-    assert got.numbers[0] == pytest.approx(within) and got.numbers[0] != pytest.approx(concatenated, rel=1e-5)
+    got = pv.resolve("Ea_rel_bias:sd @ noise_sigma=0.01, n_points=each | range", s2)
+    each = [_within_sd(cells, "Ea_rel_bias", noise_sigma=0.01, n_points=n) for n in sorted({c["cell"]["n_points"] for c in cells})]
+    assert got.filled and got.numbers == [pytest.approx(min(each)), pytest.approx(max(each))]
 
 
 def test_s2_coverage_wilson_interval_is_two_ends_and_count_is_exact(s2):
@@ -116,11 +128,12 @@ def test_range_over_each_setting(s2):
 
 
 def test_marker_round_trip(s2):
-    paper = "SD is {{v:Ea_rel_bias:sd @ noise_sigma=0.01, n_points=all | %}} here."
+    paper = "SD is {{v:Ea_rel_bias:sd @ noise_sigma=0.01, n_points=5 | %}} here."
     filled, hits = pv.fill(paper, s2)
     assert hits == []
-    sd = "0.824% (95% chi-square interval 0.793% to 0.859%, 1200 trials)"
-    assert filled == ("SD is <!-- fi:v {{v:Ea_rel_bias:sd @ noise_sigma=0.01, n_points=all | %}} -->" + sd +
+    sd = pv.resolve("Ea_rel_bias:sd @ noise_sigma=0.01, n_points=5 | %", s2).text
+    assert "chi-square interval" in sd
+    assert filled == ("SD is <!-- fi:v {{v:Ea_rel_bias:sd @ noise_sigma=0.01, n_points=5 | %}} -->" + sd +
                       "<!-- /fi:v --> here.")
     assert pv.to_placeholders(filled) == paper
     assert pv.without_marks(filled) == f"SD is {sd} here."
@@ -217,7 +230,7 @@ def test_other_scalar_forms(s2):
     assert pv.resolve("Ea_rel_bias:se @ noise_sigma=0.05, n_points=all", s2).numbers[0] == pytest.approx(
         np.std(x, ddof=1) / math.sqrt(len(x)))
     assert pv.resolve("Ea_rel_bias:n @ noise_sigma=0.05, n_points=all", s2).text == str(len(x))
-    got = pv.resolve("Ea_rel_bias:sd_ci @ noise_sigma=0.05, n_points=all", s2)
+    got = pv.resolve("Ea_rel_bias:sd_ci @ noise_sigma=0.05, n_points=5", s2)
     assert got.filled and "chi-square interval" in got.text and "±" not in got.text
     r = pv.resolve("Ea_rel_bias:corr:coverage_Ea @ noise_sigma=0.05, n_points=all", s2)
     y = np.concatenate([c["metrics"]["coverage_Ea"]["values"] for c in cells if c["cell"]["noise_sigma"] == 0.05])
@@ -230,7 +243,7 @@ def test_other_scalar_forms(s2):
 
 
 def test_argmax_and_max_abs(s2):
-    got = pv.resolve("Ea_rel_bias:sd @ noise_sigma=each, n_points=all | argmax", s2)
+    got = pv.resolve("Ea_rel_bias:sd @ noise_sigma=each, n_points=5 | argmax", s2)
     assert got.text == "at noise_sigma = 0.1"
     assert pv.resolve("Ea_rel_bias @ noise_sigma=each, n_points=each | max_abs | %", s2).filled
 
@@ -334,7 +347,7 @@ def test_a_measured_value_with_one_trial_per_setting_is_not_taken_for_a_referenc
               "metrics": {"err": {"values": [h * 2.0]}}} for h in (0.1, 0.2, 0.4)]
     rec = pv.from_cells(cells)
     got = pv.resolve("err @ h=all", rec)
-    assert got.filled and got.text == "0.4667"
+    assert got.filled and got.text == "0.4667 (mean over 3 settings, one run each; no interval)"
 
 
 def test_a_measured_value_that_varies_between_trials_is_not_a_reference(s5):
@@ -390,11 +403,112 @@ def test_vs_refuses_what_it_cannot_judge(s5):
         ("Ea_hat:se @ sigma=each, n_points=40 | vs Ea_true", "has none"),
         ("Ea_hat @ sigma=each, n_points=40 | vs Ea_hat", "measured, not set by the setting"),
         ("Ea_hat:sd @ sigma=each, n_points=40 | vs Ea_sd_theory | range", "add no reducer"),
-        ("Ea_hat:sd @ sigma=0.1, n_points=40 | vs Ea_sd_theory", "mark at least one axis =each"),
+        ("Ea_hat:sd @ sigma=0.1 | vs Ea_sd_theory", "does not name every axis"),
         ("Ea_hat:sd @ sigma=each, n_points=40 | vs @ sigma=0.1, n_points=40", "not with another setting"),
     ):
         got = pv.resolve(key, s5)
         assert not got.filled and why in got.hit.reason, key
+
+
+def test_vs_names_one_setting_when_no_axis_is_marked_each(s5):
+    one = pv.resolve("Ea_hat:sd @ sigma=0.1, n_points=40 | vs Ea_sd_theory", s5)
+    assert one.filled, one.hit
+    assert one.text.startswith("consistent with Ea_sd_theory (inside the measured 95% interval) at that setting")
+    assert " to " not in one.text.split("(")[-1]  # one setting: one ratio, not a range of ratios
+    # the same setting taken from the "each" form gives the same verdict
+    each = pv.resolve("Ea_hat:sd @ sigma=each, n_points=40 | vs Ea_sd_theory", s5)
+    assert "consistent with" in each.text
+    cells = [{"cell": {"h": h}, "key": f"h={h}", "planned": 4, "ok": 4, "failed": 0,
+              "metrics": {"err": {"values": [1.0, 1.1, 0.9, 1.0]}, "want": {"values": [5.0] * 4}}} for h in (1, 2)]
+    low = pv.resolve("err @ h=2 | vs want", pv.from_cells(cells))
+    assert low.filled and low.text.startswith("below want at that setting")
+
+
+def test_vs_takes_a_form_that_carries_its_interval_as_the_statistic_itself(s5):
+    for form, plain in (("mean_ci", "mean"), ("sd_ci", "sd")):
+        a = pv.resolve(f"Ea_hat:{form} @ sigma=each, n_points=40 | vs Ea_sd_theory", s5)
+        b = pv.resolve(f"Ea_hat:{plain} @ sigma=each, n_points=40 | vs Ea_sd_theory", s5)
+        assert a.filled and a.text == b.text, (form, a.hit)
+    one = pv.resolve("Ea_hat:sd_ci @ sigma=0.1, n_points=40 | vs Ea_sd_theory", s5)
+    assert one.filled and "at that setting" in one.text
+    assert "has none" in pv.resolve("Ea_hat:se @ sigma=each, n_points=40 | vs Ea_true", s5).hit.reason
+
+
+def test_vs_with_an_all_axis_and_no_each_is_refused_not_worded_as_one_setting(s5):
+    for key in ("Ea_hat:sd @ sigma=all, n_points=40 | vs Ea_sd_theory",
+                "Ea_hat:sd_ci @ sigma=all, n_points=40 | vs Ea_sd_theory"):
+        got = pv.resolve(key, s5)
+        assert not got.filled, key
+        assert "pool 5 settings into one interval" in got.hit.reason
+        assert "sigma=each" in got.hit.reason and "or give it one value" in got.hit.reason
+
+
+def test_vs_pooling_unlike_settings_is_refused_where_the_reference_is_the_same_at_each():
+    cells = [{"cell": {"h": h}, "key": f"h={h}", "planned": 4, "ok": 4, "failed": 0,
+              "metrics": {"err": {"values": [1.0, 1.1, 0.9, 1.0]}, "want": {"values": [5.0] * 4}}} for h in (1, 2)]
+    got = pv.resolve("err @ h=all | vs want", pv.from_cells(cells))
+    assert not got.filled and "with h=all it would pool 2 settings into one interval" in got.hit.reason
+    assert pv.resolve("err @ h=each | vs want", pv.from_cells(cells)).filled
+
+
+def _two_step_cells(first: list[float], second: list[float]) -> list[dict]:
+    return [{"cell": {"h": h}, "key": f"h={h}", "planned": len(v), "ok": len(v), "failed": 0,
+             "metrics": {"err": {"values": v}}} for h, v in ((1, first), (2, second))]
+
+
+def test_a_mean_over_all_of_an_axis_the_result_changes_with_is_refused():
+    changing = pv.from_cells(_two_step_cells([1.0, 1.1, 0.9, 1.0], [5.0, 5.1, 4.9, 5.0]))
+    got = pv.resolve("err @ h=all", changing)
+    assert not got.filled
+    assert "err changes with h (from 1.000 to 5.000 over its values)" in got.hit.reason
+    assert "describes none of them: give h one value, or mark it =each" in got.hit.reason
+    assert pv.resolve("err @ h=2", changing).filled and pv.resolve("err @ h=each | range", changing).filled
+
+
+def test_a_mean_over_all_of_an_axis_the_result_does_not_change_with_still_fills():
+    same = pv.from_cells(_two_step_cells([1.0, 1.1, 0.9, 1.0], [1.05, 0.95, 1.1, 0.9]))
+    assert pv.resolve("err @ h=all", same).filled  # the two intervals overlap
+    flat = pv.from_cells(_two_step_cells([2.0], [2.0]))
+    flat.drew = False
+    assert pv.resolve("err @ h=all", flat).filled  # a deterministic value that is the same at each setting
+
+
+def test_one_run_each_over_an_axis_is_refused_only_when_no_trial_drew_random_numbers():
+    rec = pv.from_cells(_two_step_cells([2.0], [3.0]))
+    assert rec.drew is None and pv.resolve("err @ h=all", rec).filled  # the record does not say: today's disclosed pool
+    rec.drew = True
+    assert "mean over 2 settings, one run each" in pv.resolve("err @ h=all", rec).text  # differences may be noise
+    rec.drew = False
+    got = pv.resolve("err @ h=all", rec)
+    assert not got.filled and "err changes with h (from 2.000 to 3.000 over its values)" in got.hit.reason
+
+
+def test_vs_with_each_and_all_on_another_axis_keeps_its_behaviour(s5):
+    got = pv.resolve("Ea_hat:sd @ sigma=each, n_points=all | vs Ea_sd_theory", s5)
+    assert "pool" not in (got.hit.reason if got.hit else "")
+    assert got.text == "not recorded" or " values of sigma" in got.text
+
+
+def test_vs_with_a_varied_axis_left_unnamed_is_still_refused(s5):
+    got = pv.resolve("Ea_hat:sd @ n_points=40 | vs Ea_sd_theory", s5)
+    assert not got.filled and "does not name every axis" in got.hit.reason
+
+
+def test_vs_with_a_number_typed_as_the_operand_says_what_to_write_instead(s5):
+    for number in ("0.04", "1e-3", "50", "-2.5"):
+        got = pv.resolve(f"Ea_hat:sd @ sigma=0.1, n_points=40 | vs {number}", s5)
+        assert not got.filled
+        assert "vs ref" in got.hit.reason and "{{calc:EXPR}}" in got.hit.reason and number in got.hit.reason, number
+        assert "no trials of" not in got.hit.reason
+    # a quantity's name that merely starts with a digit-free word is still a result id
+    assert "measured, not set" in pv.resolve("Ea_hat @ sigma=each, n_points=40 | vs Ea_hat", s5).hit.reason
+
+
+def test_vs_ref_with_no_plan_reference_is_still_refused_at_one_setting():
+    cells = [{"cell": {"h": h}, "key": f"h={h}", "planned": 4, "ok": 4, "failed": 0,
+              "metrics": {"err": {"values": [1.0, 1.1, 0.9, 1.0]}}} for h in (1, 2)]
+    got = pv.resolve("err @ h=2 | vs ref", pv.from_cells(cells))
+    assert not got.filled and "not computable at h = 2" in got.hit.reason and "plan" in got.hit.reason
 
 
 def test_vs_leaves_the_existing_ratio_and_range_forms_alone(s5):
@@ -492,3 +606,71 @@ def test_axes_with_plain_names_are_unchanged_by_the_short_names(tmp_path):
     rec = pv.records_of(_quest(tmp_path, _tiny_cells()), None)
     assert rec.aliases() == {"m": "m", "method": "method"}
     assert pv.resolve("{{v:fdr @ m=20, method=bh}}", rec).filled
+
+
+def _level_cells(label_for_a: str, with_values: bool) -> list[dict]:
+    out = []
+    for label, shift in ((label_for_a, 0.0), ("b", 1.0)):
+        cell = {"dose": 1, "mode": label}
+        vals = [1.0 + shift, 2.0 + shift] if with_values else []
+        out.append({"cell": cell, "key": f"dose=1,mode={label}", "level": {"mode": label}, "planned": 2, "ok": len(vals), "failed": 0,
+                    "metrics": {"rate": {"values": vals, "trials": list(range(len(vals)))}}})
+    return out
+
+
+def test_a_result_recorded_per_compared_value_is_fillable_when_the_values_name_has_an_equals_sign() -> None:
+    protocol = {"metrics": [{"id": "rate", "role": "result", "kind": "mean"}]}
+    rec = pv.from_cells(_level_cells("T_0 = 300 (exact)", True), protocol)
+    assert "rate" in rec.fillable()
+    value = pv.resolve("{{v:rate @ dose=1, mode=T_0 = 300 (exact)}}", rec)
+    assert value.filled and value.text.startswith("1.5")
+
+
+def test_a_result_with_no_value_in_any_trial_is_still_not_fillable() -> None:  # the known positive
+    protocol = {"metrics": [{"id": "rate", "role": "result", "kind": "mean"}]}
+    rec = pv.from_cells(_level_cells("T_0 = 300 (exact)", False), protocol)
+    assert "rate" not in rec.fillable()
+
+
+# --- a study with one trial per setting is offered no interval key -------------------------------------------------------
+
+def _one_trial_cells() -> list[dict]:
+    return [{"cell": {"dose": d, "steps": s}, "key": f"{d}-{s}", "metrics": {"gain": {"values": [d / 10 + s / 1000]}}}
+            for d in (1, 2, 3) for s in (16, 64)]
+
+
+def test_one_trial_per_setting_offers_the_mean_not_an_interval(tmp_path):
+    rec = pv.records_of(_quest(tmp_path, _one_trial_cells()), None)
+    block = pv.writer_block(rec)
+    sheet = pv.sheet(rec)
+    assert "{{v:gain @ dose=1, steps=16}}" in sheet and "{{v:gain @ dose=1, steps=all}}" in sheet
+    assert ":mean_ci @" not in sheet and ":mean_ci @" not in block.split("The study's quantities")[0]
+    assert any(l.startswith("- {{v:gain @ dose=1, steps=all}}") and "mean over 2 settings, one run each; no interval" in l for l in sheet.splitlines())
+    assert pv.resolve("{{v:gain @ dose=1, steps=16}}", rec).filled
+    assert not pv.resolve("{{v:gain:mean_ci @ dose=1, steps=16}}", rec).filled  # the review's handling is unchanged
+
+
+def test_a_study_with_repeated_trials_is_offered_the_interval_as_before(tmp_path):  # the known positive
+    rec = pv.records_of(_quest(tmp_path, _tiny_cells()), None)
+    assert ":mean_ci @ m=20, method=all}}" in pv.sheet(rec)
+    assert "{{v:coverage:mean_ci @ noise=0.05, n=20}}" in pv.writer_block(rec)
+    assert "one trial in each setting" not in pv.writer_block(rec)
+
+
+def test_a_pooled_plain_mean_of_one_run_settings_keeps_its_note_in_the_paper(tmp_path):
+    rec = pv.records_of(_quest(tmp_path, _one_trial_cells()), None)
+    got = pv.resolve("{{v:gain @ dose=1, steps=all}}", rec)
+    assert got.filled and got.text == "0.1400 (mean over 2 settings, one run each; no interval)", got.text
+    assert pv.resolve("{{v:gain @ dose=1, steps=16}}", rec).text == "0.1160"  # one setting: the value itself
+    sheet_line = next(l for l in pv.sheet(rec).splitlines() if l.startswith("- {{v:gain @ dose=1, steps=all}}"))
+    assert sheet_line.split(" -> ")[1].startswith(got.text)  # the sheet shows what the key fills
+
+
+def test_a_mixed_study_does_not_offer_its_single_trial_cells_as_plain_means(tmp_path):
+    cells = _one_trial_cells()
+    cells[0]["metrics"]["gain"]["values"] = [0.1, 0.12, 0.11]  # one setting repeated, five single-trial
+    rec = pv.records_of(_quest(tmp_path, cells), None)
+    sheet = pv.sheet(rec)
+    assert "{{v:gain:mean_ci @ dose=1, steps=16}}" in sheet  # the repeated setting keeps its interval key
+    assert "{{v:gain @ dose=2, steps=16}}" not in sheet and "{{v:gain:mean_ci @ dose=2, steps=16}}" not in sheet
+    assert "one trial in each setting" not in pv.writer_block(rec)

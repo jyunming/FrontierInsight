@@ -858,6 +858,29 @@ def _summary_verdict(printed: dict[str, Any], counts: Any) -> str | None:
     return ""
 
 
+def _summaries_match_record(result_json: Any, metric_id: str, grid: dict[str, list[Any]],
+                            recorded_by_cell: dict[str, Any] | None) -> bool:
+    """Whether the analysis, which prints no per-trial list of ``metric_id``, prints at EVERY setting where FI's record holds
+    trials of it a mean that equals the mean of those trials (:func:`_summary_verdict`, within the rounding its digits
+    carry), and no setting owes undefined trials the summary cannot show. Such a mean is FI's own number (a summary the frame
+    computes from the record, or one the analysis derives from it), checked against the trials themselves: the claim is
+    backed without a list to count. A setting with no printed mean, a different one, or undefined trials owed, is not."""
+    record = _record_by_setting(recorded_by_cell, metric_id, grid) if recorded_by_cell and grid else {}
+    owing = {cell for cell, counts in record.items() if (recorded_counts({metric_id: counts}, metric_id) or (0, 0))[0]}
+    if not owing:
+        return False
+    backed: set[frozenset[tuple[str, Any]]] = set()
+    for named, stats, _where in _printed_summaries(result_json, metric_id, grid):
+        for cell in named:
+            if cell in owing and _summary_verdict(stats, record[cell]) == "":
+                backed.add(cell)
+            elif cell in owing and _summary_verdict(stats, record[cell]):
+                return False  # a printed mean that is not that setting's own trials
+    if backed != owing:
+        return False
+    return not any((recorded_counts({metric_id: record[c]}, metric_id) or (0, 0))[1] for c in owing)
+
+
 def _account(result_json: Any, metric_id: str, grid: dict[str, list[Any]], recorded: tuple[int, int],
              recorded_by_cell: dict[str, Any] | None) -> dict[str, Any]:
     """What the analysis accounts for of ``metric_id``, counting ONE representation of the trials:
@@ -967,6 +990,11 @@ def _account(result_json: Any, metric_id: str, grid: dict[str, list[Any]], recor
     for members in families.values():
         parts = [c for under, c in members.items() if not cells_of(under)]
         total = (sum(c[0] for c in parts), sum(c[1] for c in parts))
+        if parts and (total[0] > recorded[0] or total[1] > recorded[1]):
+            # Parts of one report are disjoint trials of FI's record, so they cannot add up to more than it holds: a sum
+            # above the record means the keys repeat the same trials (a copy under two names), and the largest part
+            # stands for them. Decided by FI's own count, never by comparing the values.
+            total = max(parts, key=lambda c: c[0] + c[1])
         if total[0] + total[1] > side_by_side[0] + side_by_side[1]:
             side_by_side = total
     acc = (defined, undefined)
@@ -1448,16 +1476,91 @@ def metric_grid(protocol: dict[str, Any] | None, metric: str,
     inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else {}
     if not inside:
         return grid
+    # The values a run is compared over are not all recorded under every number: a fit per temperature is kept under
+    # ``temperature_K=...`` alone, a number per estimator under ``estimator=...`` alone. The metric is owed over the
+    # axes FI's own record keeps it under, read from the keys that hold it, never over every axis the study lists.
+    kept: list[str] = []
     for key, by_name in (recorded_by_cell or {}).items():
         parsed = _parse_cell(key)
         if parsed and set(parsed) & set(inside) and recorded_counts(by_name, metric) is not None:
-            return _search.with_everywhere(grid, inside)
+            kept.extend(a for a in inside if a in parsed and a not in kept)
+    if kept:
+        return _search.with_everywhere(grid, {a: inside[a] for a in inside if a in kept})
     return grid
+
+
+def _metric_record(protocol: dict[str, Any] | None, metric: str, recorded: dict[str, Any] | None,
+                   recorded_by_cell: dict[str, Any] | None, copied: dict[str, list[str]] | None
+                   ) -> tuple[dict[str, list[Any]], dict[str, Any] | None, dict[str, Any] | None]:
+    """``(settings, pooled record, record per setting)`` of ``metric`` as its values are owed: :func:`metric_grid` and FI's
+    record, without each setting ``copied`` names for it. A setting is copied for a metric when FI's record holds the same
+    value, trial by trial, at every value of the setting (core/trial_runner.py::copied_settings): the trials there are one
+    measurement written down once per value, so one copy is owed, not one per value."""
+    from collections import Counter
+
+    grid = metric_grid(protocol, metric, recorded_by_cell)
+    axes = [a for a in (copied or {}).get(metric) or [] if a in grid]
+    if not axes or not recorded_by_cell:
+        return grid, recorded, recorded_by_cell
+    first = {a: str(grid[a][0]) for a in axes}
+    kept: dict[str, Any] = {}
+    for key, by_name in recorded_by_cell.items():
+        parsed = _parse_cell(key)
+        if parsed is None:
+            kept[key] = by_name
+            continue
+        if metric not in by_name:
+            continue
+        if any(a in parsed and _cell_value_text(parsed[a]) != _cell_value_text(first[a]) for a in axes):
+            continue
+        rest = ",".join(f"{a}={v}" for a, v in parsed.items() if a not in axes)
+        kept.setdefault(rest, {})[metric] = by_name[metric]
+    pooled: dict[str, Any] = {}
+    for by_name in kept.values():
+        for name, counts in by_name.items():
+            pooled.setdefault(name, Counter()).update(counts)
+    return {a: v for a, v in grid.items() if a not in axes}, {**(recorded or {}), metric: pooled.get(metric, Counter())}, kept
+
+
+def _without_settings(result_json: Any, axes: list[str]) -> Any:
+    """``result_json`` with each copied setting taken out of the keys that name a setting in FI's own form
+    (``m=10,procedure=one`` -> ``m=10``), so a list the analysis printed per value of the setting is placed at the setting
+    it belongs to when one copy is owed. Two keys that become one keep the first (they hold the same copies; what is more
+    than the record holds is judged on the whole record)."""
+    if isinstance(result_json, list):
+        return [_without_settings(v, axes) for v in result_json]
+    if not isinstance(result_json, dict):
+        return result_json
+    out: dict[Any, Any] = {}
+    for key, value in result_json.items():
+        parsed = _parse_cell(key)
+        if parsed and any(a in parsed for a in axes):
+            key = ",".join(f"{a}={v}" for a, v in parsed.items() if a not in axes)
+        if key not in out:
+            out[key] = _without_settings(value, axes)
+    return out
+
+
+def _within_record(result_json: Any, metric: str, recorded: Any) -> bool:
+    """Whether every ``<metric>_values`` list the analysis prints, added up, is no more than FI's whole record holds (every
+    copy counted): one copy, or a copy per value, is within it; the record's values listed three times are not, and are
+    then held to the whole record as before."""
+    whole = recorded_counts(recorded, metric)
+    return whole is None or _total_values_reported(result_json, metric) <= whole[0] + whole[1]
+
+
+def _cell_value_text(value: Any) -> str:
+    """A setting's value as a cell key writes it, compared as a number when it reads as one (``0.0`` and ``0``)."""
+    try:
+        return repr(float(value))
+    except (TypeError, ValueError):
+        return str(value).strip()
 
 
 def _value_count_findings(
     protocol: dict[str, Any], manifest: dict[str, Any], result_json: Any, *, trial_mode: bool = False,
     recorded: dict[str, Any] | None = None, recorded_by_cell: dict[str, Any] | None = None,
+    copied: dict[str, list[str]] | None = None,
 ) -> list[tuple[str, bool]]:
     """``(sentence, the analysis listed no values at all)`` for each `kind: "mean"` metric whose claimed trial count is
     not backed by the per-trial values the analysis printed.
@@ -1491,14 +1594,17 @@ def _value_count_findings(
     successful = successful if isinstance(successful, dict) else {}
     expected_total = sum(_num(n) or 0 for n in successful.values()) or runs * len(_all_cells(grid))
     out: list[tuple[str, bool]] = []
-    for spec in protocol.get("metrics") or []:
+
+    def one_metric(spec: Any, recorded: dict[str, Any] | None, recorded_by_cell: dict[str, Any] | None,
+                   mgrid: dict[str, list[Any]], result_json: Any = result_json) -> list[tuple[str, bool]]:
+        out: list[tuple[str, bool]] = []
         if recorded and recorded_by_cell and isinstance(spec, dict) and spec.get("id") and not spec.get("given"):
             # Each list placed at a setting holds that setting's own values (a copy of another procedure's list under
             # this one's name has the right count, and every value is among the run's).
             out.extend((f, True) for f in _values_of_other_settings(
-                result_json, str(spec["id"]), metric_grid(protocol, str(spec["id"]), recorded_by_cell), recorded_by_cell))
+                result_json, str(spec["id"]), mgrid, recorded_by_cell))
         if not isinstance(spec, dict) or spec.get("kind") != "mean" or not spec.get("id"):
-            continue
+            return out
         metric = str(spec["id"])
         given = str(spec.get("given") or "").strip()
         # A mean over a subset of the trials (the final size of the runs that became major outbreaks) is backed by the
@@ -1516,21 +1622,20 @@ def _value_count_findings(
                     + f". {NESTING}",
                     True,
                 ))
-                continue
+                return out
             found = _given_findings(metric, given, grid, manifest, result_json, expected_total,
                                     trial_mode=trial_mode)
             if found:
                 out.extend(found)
-                continue
+                return out
             if _values_listed(result_json, metric):
-                continue  # every mapping's values are exactly the trials its `<given>_count` counts
+                return out  # every mapping's values are exactly the trials its `<given>_count` counts
         if recorded and not given:
             counts = recorded_counts(recorded, metric)
             if counts is None:
-                continue  # derived by the analysis: no per-trial list of it exists to count against
+                return out  # derived by the analysis: no per-trial list of it exists to count against
             defined, undefined = counts
             measured = defined + undefined
-            mgrid = metric_grid(protocol, metric, recorded_by_cell)
             account = _account(result_json, metric, mgrid, (defined, undefined), recorded_by_cell)
             listed_defined, listed_undefined = account["defined"], account["undefined"]
             accounted_defined, accounted_undefined = account["acc_defined"], account["acc_undefined"]
@@ -1542,13 +1647,15 @@ def _value_count_findings(
             # has a value; a setting where none has one (power where there is no real effect) holds nothing to drop.
             owed_undefined = account["owed"][1]
             if not _values_listed(result_json, metric) and not accounted_defined and not accounted_undefined:
+                if _summaries_match_record(result_json, metric, mgrid, recorded_by_cell):
+                    return out  # the means it prints are those of FI's own trials, setting by setting: nothing to count
                 out.append((Finding(
                     f"the metric `{metric}` is a mean over the trials that measured it, {made}, but the analysis's "
                     f"RESULT_JSON has no `{metric}_values` list at all{UNPRINTED_TAIL}",
                     UNPRINTED),
                     True,
                 ))
-                continue
+                return out
             if not account["values_complete"] or not account["undefined_complete"]:
                 short = [s for s in account["short"] if s["listed"][0] < s["owed"][0] or s["listed"][1] < s["owed"][1]]
                 parts = []
@@ -1586,7 +1693,7 @@ def _value_count_findings(
                     "more: copy the lists FI_TRIALS holds, never add to them"),
                     True,
                 ))
-            continue
+            return out
         if not _values_listed(result_json, metric):
             out.append((
                 f"the metric `{metric}` is a mean over {over} ({base:g}), but the analysis's "
@@ -1594,7 +1701,7 @@ def _value_count_findings(
                 "averaged, so the claimed trial count can be checked against them",
                 True,
             ))
-            continue
+            return out
         got = _total_values_reported(result_json, metric)
         if got < base * 0.5:
             out.append((
@@ -1612,6 +1719,23 @@ def _value_count_findings(
                 )),
                 False,
             ))
+        return out
+
+    for spec in protocol.get("metrics") or []:
+        metric_id = str(spec.get("id") or "") if isinstance(spec, dict) else ""
+        found = one_metric(spec, recorded, recorded_by_cell, metric_grid(protocol, metric_id, recorded_by_cell))
+        if (copied and metric_id in copied and isinstance(spec, dict) and not str(spec.get("given") or "").strip()
+                and any(kind_of(f) != FABRICATED for f, _ in found)):
+            # A setting at whose every value FI's record holds the same values, trial by trial, owes one copy of them:
+            # the analysis may list them once, or once per value. Numbers beyond FI's record are judged on the whole record.
+            mgrid, one_recorded, one_by_cell = _metric_record(protocol, metric_id, recorded, recorded_by_cell, copied)
+            if _within_record(result_json, metric_id, recorded):
+                # What is owed is said against one copy (the counts and the setting a person can find).
+                found = ([(f, a) for f, a in found if kind_of(f) == FABRICATED]
+                         + [(f, a) for f, a in one_metric(spec, one_recorded, one_by_cell, mgrid,
+                                                          _without_settings(result_json, copied[metric_id]))
+                            if kind_of(f) != FABRICATED])
+        out.extend(found)
     return out
 
 
@@ -1660,7 +1784,7 @@ def _counts_listed(result_json: Any, key: str) -> bool:
 
 def differences(
     protocol: dict[str, Any], manifest: dict[str, Any] | None, result_json: Any, *, recorded: dict[str, Any] | None = None,
-    recorded_by_cell: dict[str, Any] | None = None,
+    recorded_by_cell: dict[str, Any] | None = None, copied: dict[str, list[str]] | None = None,
 ) -> list[dict[str, Any]]:
     """The concrete difference behind a finding that the analysis lists MORE values than FI's record holds, or leaves trials
     of a setting out, one entry per `kind: "mean"` metric: ``{"metric", "measured": (values, undefined), "listed": (values,
@@ -1677,22 +1801,37 @@ def differences(
         if not isinstance(spec, dict) or spec.get("kind") != "mean" or not spec.get("id") or str(spec.get("given") or "").strip():
             continue
         metric = str(spec["id"])
-        counts = recorded_counts(recorded, metric)
-        if counts is None:
-            continue
-        defined, undefined = counts
-        account = _account(result_json, metric, metric_grid(protocol, metric, recorded_by_cell), (defined, undefined),
-                           recorded_by_cell)
-        listed_defined, listed_undefined, excesses = account["defined"], account["undefined"], account["excesses"]
-        measured = defined + undefined
-        if (not _values_listed(result_json, metric) and not account["acc_defined"] and not account["acc_undefined"]):
-            continue  # it prints no list: nothing of FI's record is "left out" of one (the finding is UNPRINTED)
-        short = ([s for s in account["short"] if s["listed"][0] < s["owed"][0] or s["listed"][1] < s["owed"][1]]
-                 if not (account["values_complete"] and account["undefined_complete"]) else [])
-        if (listed_defined > defined or listed_undefined > undefined or listed_defined + listed_undefined > measured
-                or excesses or short):
-            out.append({"metric": metric, "measured": (defined, undefined), "listed": (listed_defined, listed_undefined),
-                        "settings": excesses, "short": short})
+
+        def entry(m_recorded: Any, m_by_cell: Any, mgrid: dict[str, list[Any]],
+                  result_json: Any = result_json) -> dict[str, Any] | None:
+            counts = recorded_counts(m_recorded, metric)
+            if counts is None:
+                return None
+            defined, undefined = counts
+            account = _account(result_json, metric, mgrid, (defined, undefined), m_by_cell)
+            listed_defined, listed_undefined, excesses = account["defined"], account["undefined"], account["excesses"]
+            measured = defined + undefined
+            if (not _values_listed(result_json, metric) and not account["acc_defined"] and not account["acc_undefined"]):
+                return None  # it prints no list: nothing of FI's record is "left out" of one (the finding is UNPRINTED)
+            short = ([s for s in account["short"] if s["listed"][0] < s["owed"][0] or s["listed"][1] < s["owed"][1]]
+                     if not (account["values_complete"] and account["undefined_complete"]) else [])
+            if (listed_defined > defined or listed_undefined > undefined or listed_defined + listed_undefined > measured
+                    or excesses or short):
+                return {"metric": metric, "measured": (defined, undefined), "listed": (listed_defined, listed_undefined),
+                        "settings": excesses, "short": short}
+            return None
+
+        found = entry(recorded, recorded_by_cell, metric_grid(protocol, metric, recorded_by_cell))
+        if found is not None and not found["settings"] and copied and metric in copied:
+            # Owed once where FI's record holds the same values at every value of a setting (as in problems): what
+            # one copy accounts for is not left out; numbers beyond the whole record still are.
+            one_grid, one_recorded, one_by_cell = _metric_record(protocol, metric, recorded, recorded_by_cell, copied)
+            if (found["listed"][0] <= found["measured"][0] and found["listed"][1] <= found["measured"][1]
+                    and _within_record(result_json, metric, recorded)
+                    and entry(one_recorded, one_by_cell, one_grid, _without_settings(result_json, copied[metric])) is None):
+                found = None
+        if found is not None:
+            out.append(found)
     return out
 
 
@@ -1772,6 +1911,7 @@ def difference_request(found: list[dict[str, Any]], *, limit: int = 10) -> str:
 def analysis_output_problems(
     protocol: dict[str, Any], manifest: dict[str, Any] | None, result_json: Any, *, trial_mode: bool = False,
     recorded: dict[str, Any] | None = None, recorded_by_cell: dict[str, Any] | None = None,
+    copied: dict[str, list[str]] | None = None,
 ) -> list[str]:
     """The differences :func:`problems` reports that are the analysis's to fix, not the simulation's: a mean metric the
     analysis printed no per-trial values for. The caller sends experiment.py back for these, simulate.py for the rest."""
@@ -1781,13 +1921,14 @@ def analysis_output_problems(
     # analysis's to fix; under the older contract the simulation's own record is what is in doubt.
     return [sentence for sentence, analysis in _value_count_findings(protocol, manifest, result_json,
                                                                      trial_mode=trial_mode, recorded=recorded,
-                                                                     recorded_by_cell=recorded_by_cell) if analysis]
+                                                                     recorded_by_cell=recorded_by_cell, copied=copied)
+            if analysis]
 
 
 def problems(
     protocol: dict[str, Any], manifest: dict[str, Any] | None, why: str = "",
     result_json: dict[str, Any] | None = None, *, trial_mode: bool = False, recorded: dict[str, Any] | None = None,
-    recorded_by_cell: dict[str, Any] | None = None,
+    recorded_by_cell: dict[str, Any] | None = None, copied: dict[str, list[str]] | None = None,
 ) -> list[str]:
     """How the run differs from the protocol, one sentence each; empty when the manifest matches it.
 
@@ -1873,7 +2014,7 @@ def problems(
                 out.append(f"the protocol fixes {runs:g} runs per setting; {len(short)} setting(s) ran another number ({shown})")
         out.extend(sentence for sentence, _ in _value_count_findings(protocol, manifest, result_json,
                                                                      trial_mode=trial_mode, recorded=recorded,
-                                                                     recorded_by_cell=recorded_by_cell))
+                                                                     recorded_by_cell=recorded_by_cell, copied=copied))
 
     listed = manifest.get("failed_trials")
     listed = listed if isinstance(listed, list) else []

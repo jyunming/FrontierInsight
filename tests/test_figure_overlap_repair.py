@@ -394,3 +394,58 @@ async def test_only_a_figure_the_seeds_do_not_redraw_is_sent_back(tmp_path: Path
     assert "figures/lines.png: " not in prompt  # (the script itself names the file, without a colon)
     assert ran.count("replot_figures.py") == 2  # once after each pass: the lines are the engine's
     assert state["figure_overlap_repaired"] is True
+
+
+# --- geometry the recorder wrote: a legend off the page, error bars cut off ----------
+
+PANEL = {"title": "Growth", "place": [0.1, 0.1, 0.8, 0.8]}
+OFF_PAGE = {**PANEL, "legend_box": {"x0": 0.7, "y0": 0.6, "x1": 1.3, "y1": 0.9}}
+CUT_BARS = {
+    **PANEL, "data_limits": {"x": [0.0, 1.0], "y": [0.0, 1.0]},
+    "errorbars": [{"line": "rising", "lo": [0.2, -0.5], "hi": [0.6, 0.8]}],
+}
+
+
+def test_legend_off_canvas_triggers_the_overlap_repair_once() -> None:
+    state = {**_overlapping(), **_state(wide_png={"axes": [OFF_PAGE], "layout": []})}
+    found = _figure_overlap_findings(state)
+    assert len(found) == 1 and found[0].startswith("figures/wide.png: ")
+    assert "legend" in found[0] and "outside the figure" in found[0]
+    assert _figure_overlap_findings({**state, "figure_overlap_repaired": True}) == []
+
+
+@pytest.mark.asyncio
+async def test_error_bars_cut_off_are_disclosed_after_the_budget(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+    chat = _ask(eng, {"code": REDRAW})
+    warned: list[Any] = []
+    eng._log = SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: warned.append(a[1:]),  # type: ignore[assignment]
+                               debug=lambda *a, **k: None, error=lambda *a, **k: None)
+    state = _overlapping(**_state(bars_png={"axes": [CUT_BARS], "layout": []}), figure_overlap_repaired=True)
+    assert await eng._node_execute_reflect(state) == {}  # type: ignore[arg-type]
+    assert chat.await_count == 0
+    text = " ".join(str(x) for w in warned for x in w)
+    assert "the one redraw has been made" in text
+    assert "figures/bars.png: " in text and "error bars" in text
+
+
+def test_a_record_without_the_geometry_keys_adds_nothing() -> None:
+    assert _figure_overlap_findings(_state(a_png={"axes": [PANEL], "layout": []})) == []
+
+
+def test_a_legend_the_layout_already_reports_is_not_reported_twice() -> None:
+    both = {"axes": [OFF_PAGE], "layout": [{"check": "legend_off_canvas", "legend": ["a", "b"]}]}
+    found = _figure_overlap_findings(_state(wide_png=both))
+    assert len(found) == 1 and "runs past the edge of the figure" in found[0]
+    bars = {"axes": [CUT_BARS, OFF_PAGE], "layout": [{"check": "legend_over_panel", "legend": ["a"], "over": "x"}]}
+    found = _figure_overlap_findings(_state(b_png=bars))
+    assert len(found) == 2 and sum("legend" in f for f in found) == 1 and any("error bars" in f for f in found)
+
+
+def test_a_geometry_only_finding_sends_the_run_back_with_the_error_bar_remedy(tmp_path: Path) -> None:
+    from core.engine import _figure_overlap_directive
+    eng = _engine(tmp_path)
+    state = _overlapping(**_state(bars_png={"axes": [CUT_BARS], "layout": []}))
+    assert eng._figure_overlaps_to_repair(state) and eng._route_after_execute_reflect(state) == "retry"
+    text = _figure_overlap_directive(eng._figure_overlaps_to_repair(state))
+    assert "widen the y limits" in text and "error bars" in text

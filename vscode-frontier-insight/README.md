@@ -51,8 +51,8 @@ the instruction to cite it only to say the work exists or for what its title
 states; a sentence built only on a title-only record, saying more than the title does, is marked unsupported by the
 claim check. The References are
 also exported as `paper/references.bib` (BibTeX) and `paper/references.csl.json`
-(CSL-JSON). The web pages it drew on are listed under Further reading, not
-References, and exported as `paper/further_reading.bib` / `.csl.json`. A
+(CSL-JSON). A web page the text cites is listed under References too; the others
+are listed under Further reading, and exported as `paper/further_reading.bib` / `.csl.json`. A
 `paper/CLAIMS.md` ledger records which of the paper's claims
 trace to the experiment, to words quoted from a cited source (the quote must be
 in the source, however that source's PDF rendered its mathematics or spaced its
@@ -61,16 +61,11 @@ unsupported (unsupported claims force a revise). The
 check reads every finding the run recorded, whole, with the results branches
 those findings name, so a claim is never called unsupported because the
 evidence that proves it was cut short. Each
-figure keeps a record of what it draws, and a caption that describes a line the
-figure draws flat or not at all, or calls a line flat that it draws varying (found by the line's exact label, and measured on SIR figures only), goes back to the reviewer; the human review in
-the chat lists those captions. A figure saved with its legend drawn over its own
+figure keeps a record of what it draws, and FI writes each figure's caption from that record. A figure saved with its legend drawn over its own
 lines, or its title over a panel title, is measured on the finished canvas and
-sent back to the experiment for one redraw before the paper is written. A figure the design planned and the run drew
-that a draft leaves out is put back into the paper as soon as the draft is
-written, captioned from that record and placed beside the paragraph that
-discusses it and never carried past the reference list to print among the
-references, so no review round is spent restoring it; if one still goes
-missing by review time the chat lists it among the must-fix items. The deck
+sent back to the experiment for one redraw before the paper is written. FI places every figure the run drew in the paper
+itself, under the number the writer refers to, after the paragraph that
+first names it and before the reference list, so no review round is spent on it. The deck
 ends on one References slide with the sources the paper cites most. With `engine.execute_replicates > 1` the results are reported
 with 95% confidence intervals (a probability's kept within 0–1), effect sizes (including between methods nested
 inside a parameter sweep), and a multiple-comparison guard instead of bare
@@ -290,10 +285,12 @@ That example YAML names `provider: openai`, so its model calls go to OpenAI rath
 
 When a quest on the VS Code chat model starts (`@fi /new`, or a YAML with `provider.name: vscode_extension`), it first asks its setup questions: what you most want to see at the end, the title (unless the YAML has one, which the `@fi /new` interview always writes), the baseline, the success metric and a few more. Each opens as an input box filled with the agent's suggested answer; Enter keeps it. Esc on any box carries on with the suggested answers (the chat line may still say the quest will fail; it does not). If nobody answers within `pauses.timeout_s` (1800 s by default) the suggested answers are used, or, with `pauses.clarify: ask`, the quest stops and `@fi /resume <id>` asks again. `pauses.clarify: auto` lets the agent answer, `off` skips the questions. A YAML that names another provider (Kimi through `@fi /start`) is not on the bridge, so VS Code cannot show the boxes: the agent answers, or with `ask` the quest stops until `.fi/clarify_answer.json` holds the answers (see [USAGE.md](../docs/USAGE.md#setup-questions)).
 
+Before the plan, a quest run through the extension shows its study cards as a quick pick: one item per card, *Edit a card…* to change a card's question, and *Write my own…* for a sentence of your own.
+
 ### Review the result before it ships
 
 By default the engine pauses after the LLM review so you can accept, reject, or refine the paper before it's final. The chat panel renders the verdict + must-flag hits + suggestions, then surfaces a QuickPick (Accept / Reject / Refine). Accept first shows what the result does not guarantee and its main evidence gaps, then asks one question, *Have you reviewed the evidence record, and do you accept these claims and the limits listed?* (Yes / Partly / No / I did not check). Only Yes lets the result count as publication-ready. Partly asks what you do not accept (it will not take an empty note); it and I did not check finish the quest but leave a gap in the evidence. No offers Refine or Look again instead of accepting. Your answer is recorded with your login name, the time, and the paper and evidence it was given for. A result accepted with no person asked is marked "not reviewed by a person" and stays one level below `publication_ready`. A number in the paper whose digits are a result's in another order, or whose last digit is one off the result's correct rounding (2.12 for a stored 2.1259), appears on its own line as **advisory** — they are shown for you to judge and never force a rewrite, because a pattern match over prose misreads DOIs and scientific notation often enough that an automatic revise does more harm than a flagged number. One advisory line comes from the results alone rather than from the paper's prose: a reference value the run was supposed to vary — a deterministic limit, a theoretical prediction — that came out as exactly 0 at every setting of the sweep, which is what a root finder returning the trivial root looks like and is how a flat line of zeros ends up in a figure captioned as convergence to that limit. A number that matches *nothing* the run can account for — not a result, not an across-seed aggregate, not a count of what the results hold, not a value the design or the configuration set — is a different finding and appears among the must-flag hits rather than the advisory line, because it sends the paper back to be written again and never sends the experiment back to be re-run. Refine opens a second input box for one line of feedback that the next revise pass honours alongside every previous refinement ask: your notes go back to the writing step first. A point that only lacks a number extends the existing script and runs it again (the frozen protocol and the figures kept), and the new paper is checked to report it; a point about how the figures are arranged or drawn redraws them from the saved numbers without running the experiment again; FI goes back to the design only if a point needs a new experiment. If a redraw fails twice, the review says first that your figure request was not applied. Another advisory line lists what the experiment does differently from the numbers the topic sets (a set of settings in braces, a count of runs, a number of figures), under "Topic coverage (advisory, not blocking)"; it never sends the experiment back.
-The methodologist persona's must-flag rules (circular evaluation, single-point eval, weak baseline without re-run, pseudo-units) are non-bypassable: a flagged paper forces another revise pass even when `engine.review_loop: false` is set. When every hit is about the text (an unsupported claim, a caption that describes what its figure does not show, or a statistic described as something the run never computed), FI rewrites only the paper, with the review in hand, instead of running the experiment again. That last one is its own check, and it is the one that catches a paper whose numbers are all correct and whose sentences are not: a significance threshold printed as a p-value, "Cohen's *d* > 16 for all pairwise comparisons" when the run's own comparisons disagree, a spread across seeds labelled "exact binomial CI", a figure's y-axis limit printed as a bin count, or a probability of the disease dying out that is really the probability of an outbreak. Each finding is recomputed from the run's replicates rather than pattern-matched, so it appears only when it can say exactly which quantity the paper renamed — and because only the words are wrong, it never costs you an experiment re-run. When the review's own reasoning instead names something the run computed — a key of the results, a figure's underlying data, or the experiment file — FI writes and runs the experiment again, once per quest, with that reasoning in front of the model: a value that came out wrong cannot be fixed by rewriting the paper around it. And when every hit of a text-only rewrite names a passage (the unsupported claims the check listed, a caption, the sentence around a number or a statistic), FI does not write the paper again: the writer gets the earlier draft and only those passages and returns edits, FI applies each one only where its text occurs exactly once, and every other word, number, figure and citation of the paper stays as it was. A whole rewrite is still used for a paper over its page limit and when the edits cannot be applied, and `run.log` says which one a round took and why.
+The methodologist persona's must-flag rules (circular evaluation, single-point eval, weak baseline without re-run, pseudo-units) are non-bypassable: a flagged paper forces another revise pass even when `engine.review_loop: false` is set. When every hit is about the text (an unsupported claim, or a statistic described as something the run never computed), FI rewrites only the paper, with the review in hand, instead of running the experiment again. That last one is its own check, and it is the one that catches a paper whose numbers are all correct and whose sentences are not: a significance threshold printed as a p-value, "Cohen's *d* > 16 for all pairwise comparisons" when the run's own comparisons disagree, a spread across seeds labelled "exact binomial CI", a figure's y-axis limit printed as a bin count, or a probability of the disease dying out that is really the probability of an outbreak. Each finding is recomputed from the run's replicates rather than pattern-matched, so it appears only when it can say exactly which quantity the paper renamed — and because only the words are wrong, it never costs you an experiment re-run. When the review's own reasoning instead names something the run computed — a key of the results, a figure's underlying data, or the experiment file — FI writes and runs the experiment again, once per quest, with that reasoning in front of the model: a value that came out wrong cannot be fixed by rewriting the paper around it. And when every hit of a text-only rewrite names a passage (the unsupported claims the check listed, the sentence around a number or a statistic), FI does not write the paper again: the writer gets the earlier draft and only those passages and returns edits, FI applies each one only where its text occurs exactly once, and every other word, number, figure and citation of the paper stays as it was. A whole rewrite is still used for a paper over its page limit and when the edits cannot be applied, and `run.log` says which one a round took and why.
 
 For a search for the best design, the chat shows the best design in one line at the end of a run (🏁 best design: the design, its improvement over the baseline with its numerical error, what the check at finer settings found, and whether a target was reached) and the files to open (📂 `results/best_design.md`, `results/best_design.json`, `raw/optimisation_ledger.jsonl`, `needs/OPTIMUM_CHECK.json`). To get closer to what you want, type "push further", a target ("at most 46 K") or "100 more evaluations" in the Refine box: FI continues the search from the best design so far and checks it again. A refine that changes what is optimised or its limits is a new study, and the next review prompt says it was not done.
 
@@ -753,10 +750,11 @@ VSCode, the command line and the web UI:
 - `codex_cli` does not read `~/.codex/config.toml`: custom model providers,
   profiles and MCP servers defined there are not used. The model comes from
   `provider.model` and the effort from `provider.reasoning_effort`.
-- `antigravity_cli`, `copilot_cli` and `gemini_cli` still have their tools on:
+- `copilot_cli` runs with every tool off, the prompt on stdin and images
+  attached as files. Its use is billed to your Copilot subscription's quota.
+- `antigravity_cli` and `gemini_cli` still have their tools on:
   `agy` has no option to turn them off and works in its own fixed workspace,
-  `copilot_cli` could not be checked while its quota was used up, and the
-  Gemini CLI no longer signs in individual Google accounts.
+  and the Gemini CLI no longer signs in individual Google accounts.
 
 `vscode_extension` is not a CLI provider and is unaffected. The flags and the
 measurements behind them are in `docs/PROVIDERS.md` ("Answer-only CLI calls").
@@ -793,7 +791,7 @@ The Frontier Insight repo ships **three** Copilot integration paths:
 | Provider | ToS standing | When to use |
 |---|---|---|
 | `vscode_extension` (this) | ✅ Sanctioned — `vscode.lm` API | Interactive use, you have VSCode open |
-| `copilot_cli` | ⚠️ Agentic — replies conversationally to FI's prompts instead of running stateless inference; FI emits a loud warning at engine init. Use `claude_cli`, `codex_cli`, `gemini_cli`, or `openai` for headless runs instead. | n/a — broken as a chat backend |
+| `copilot_cli` | ✅ Answer-only (every tool off, prompt on stdin, images attached as files); slower than an HTTP model (about 3x in one measured quest); use is billed to the Copilot subscription's quota; the models offered depend on the subscription (`copilot help config` lists them). | Headless runs, outside VS Code |
 | `github_copilot_cli` / `github_copilot_vscode` | ⚠️ Third-party proxy, against ToS spirit | Don't use these for anything you care about |
 
 If you're inside VSCode anyway, **this is the right path**. The Python
@@ -812,10 +810,9 @@ abuse-detection risk from scraped tokens.
   these "will be expanded as we learn more." Very long quests (e.g.
   full panel + cross_check + many literature hits) can theoretically
   hit them. For fleet runs that need to be robust, use a chat-style
-  CLI provider (`claude_cli` / `codex_cli` / `gemini_cli`) or an
-  HTTP-direct provider (`openai` / `gemini` with API keys).
-  `copilot_cli` is NOT a good fallback — it's agentic and replies
-  conversationally to FI's node prompts.
+  CLI provider (`claude_cli` / `codex_cli` / `gemini_cli` / `copilot_cli`)
+  or an HTTP-direct provider (`openai` / `gemini` with API keys).
+  `copilot_cli` works but is slower (about 3x in one measured quest).
 - **Model availability depends on your subscription.** Run
   `vscode.lm.selectChatModels({vendor: 'copilot'})` to see what you
   have access to; copy model names from there into your `node_models`.

@@ -474,6 +474,11 @@ def gap(entry: dict[str, Any]) -> str:
         return (f"FI went on by itself although the known-answer check '{name}' could not be judged "
                 f"({entry.get('unmeasured')}); it is marked {UNCONFIRMED}")
     how = conditions_text(entry) + (f"; {entry['mc_words']}" if entry.get("mc_words") else "")
+    if entry.get("disagreement"):
+        # The code questioned the plan's own working and the plan's model, and a judge, did not settle it
+        # (core/oracle_challenge.py): neither the simulation nor the plan's value is confirmed.
+        return (f"{entry['disagreement']} ({how}); the result is not validated against this check, and it is marked "
+                f"{UNCONFIRMED}")
     if entry.get("undecided"):
         # The trials FI could run could not decide it (core/mc_error.py): it is neither confirmed nor refuted.
         who = "FI went on by itself" if entry.get("by") == AUTOMATIC else f"{entry.get('by')} chose to go on"
@@ -494,9 +499,15 @@ def failing_disclosure(record: Any) -> str:
     entries = [e for e in record.get("went_on") or [] if isinstance(e, dict) and (e.get("name") or e.get("unmeasured"))]
     if not entries:
         return ""
-    failed = [e for e in entries if not e.get("undecided")]
+    disagree = [e for e in entries if e.get("disagreement")]
+    failed = [e for e in entries if not e.get("undecided") and not e.get("disagreement")]
     undecided = [e for e in entries if e.get("undecided")]
     out: list[str] = []
+    if disagree:
+        out.append(f"For these known-answer checks the simulation and the plan's own working of the expected value "
+                   f"disagree, and neither is confirmed: {'; '.join(gap(e) for e in disagree)}. Say so plainly where the "
+                   "checks are described and in the limitations, with both values: it is not a failure of the code shown, "
+                   "and nothing here may be described as checked against these known answers.")
     if failed:
         out.append(f"These known-answer checks FAILED and the run went on anyway: {'; '.join(gap(e) for e in failed)}. "
                    "Say so plainly where the checks are described and in the limitations: the result is not validated "

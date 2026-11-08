@@ -173,11 +173,29 @@ async def test_claude_images_and_effort_keep_the_answer_only_flags() -> None:
     assert "--safe-mode" in argv
 
 
+def test_copilot_is_asked_for_an_answer_only_with_the_prompt_on_stdin() -> None:
+    """Checked against copilot CLI 1.0.95: the prompt piped on stdin is read whole and ``--available-tools=`` leaves the
+    model no tool, so the old ``--allow-all-tools`` (tools that run commands) and the 7,000-character cap of a prompt
+    passed in argv are gone."""
+    spec = _CLI_SPECS["copilot_cli"]
+    assert spec.argv == ("copilot", "-s", "--available-tools=", "--disable-builtin-mcps", "--no-custom-instructions")
+    assert "--allow-all-tools" not in spec.argv and "-p" not in spec.argv
+    assert spec.pass_prompt_via == "stdin"
+    assert spec.max_input_chars is None
+
+
+@pytest.mark.asyncio
+async def test_copilot_attaches_each_image_as_a_file_with_the_tools_still_off() -> None:
+    argv, _, _ = await _spawn_record("copilot_cli", images=[("image/png", b"\x89PNG-fake")])
+    at = argv.index("--attachment")
+    assert argv[at + 1].endswith(".png")
+    assert "--available-tools=" in argv and "--allow-all-tools" not in argv
+
+
 def test_unverified_clis_keep_their_argv() -> None:
-    """copilot_cli and gemini_cli could not be checked against the real CLI (quota, account tier), so their argv is
-    unchanged; only the empty working directory applies to them. antigravity_cli has no flag that turns its tools off:
-    its answer-only settings go through a home of the call's own (see the agy tests below)."""
-    assert _CLI_SPECS["copilot_cli"].argv == ("copilot", "-s", "--allow-all-tools", "-p")
+    """gemini_cli could not be checked against the real CLI (quota, account tier), so its argv is unchanged; only the
+    empty working directory applies to it. antigravity_cli has no flag that turns its tools off: its answer-only
+    settings go through a home of the call's own (see the agy tests below)."""
     assert _CLI_SPECS["gemini_cli"].argv == ("gemini", "--yolo", "-o", "json", "-p", "")
     assert _CLI_SPECS["antigravity_cli"].argv == (
         "agy", "--print", "", "--input-format", "stream-json",
@@ -664,3 +682,73 @@ def test_agys_log_note_is_only_a_line_saying_its_run_failed(tmp_path: Path) -> N
         assert _cli_home_errors(str(tmp_path)) == line, mark
     log.write_text("\n".join([ended, auth]) + "\n", encoding="utf-8")
     assert _cli_home_errors(str(tmp_path)) == auth
+
+
+# ---------------------------------------------------------------------------
+# copilot_cli: a fake copilot process
+# ---------------------------------------------------------------------------
+
+
+def _fake_copilot(tmp_path: Path, body: str) -> _CliSpec:
+    script = _script(tmp_path, "fake_copilot.py", body)
+    copilot = _CLI_SPECS["copilot_cli"]
+    return dataclasses.replace(copilot, argv=(sys.executable, str(script), *copilot.argv[1:]))
+
+
+@pytest.mark.asyncio
+async def test_copilot_gets_a_non_ascii_prompt_as_exact_utf8_on_stdin(tmp_path: Path) -> None:
+    prompt = "\u03b1\u03b2\u03b3 at 25\u00b0C, \u6e29\u5ea6 \u30c6\u30b9\u30c8 \u03a9"
+    out = tmp_path / "stdin.bin"
+    spec = _fake_copilot(tmp_path, (
+        "import sys\n"
+        f"open({str(out)!r}, 'wb').write(sys.stdin.buffer.read())\n"
+        "print('ok')\n"
+    ))
+    assert (await _run_cli(spec, prompt, timeout_s=60)).strip() == "ok"
+    assert out.read_bytes() == prompt.encode("utf-8")
+
+
+@pytest.mark.asyncio
+async def test_copilot_two_images_give_two_attachment_arguments_and_the_files_are_removed(tmp_path: Path) -> None:
+    out = tmp_path / "argv.json"
+    spec = _fake_copilot(tmp_path, (
+        "import json, os, sys\n"
+        "a = sys.argv\n"
+        "files = [a[i + 1] for i in range(len(a) - 1) if a[i] == '--attachment']\n"
+        "data = [open(f, 'rb').read().hex() for f in files]\n"
+        f"open({str(out)!r}, 'w').write(json.dumps({{'files': files, 'data': data}}))\n"
+        "sys.stdin.read()\n"
+        "print('ok')\n"
+    ))
+    await _run_cli(spec, "see", timeout_s=60, images=[("image/png", b"AAA"), ("image/jpeg", b"BBB")])
+    seen = json.loads(out.read_text())
+    assert len(seen["files"]) == 2
+    assert seen["files"][0].endswith(".png") and seen["files"][1].endswith((".jpg", ".jpeg"))
+    assert seen["data"] == [b"AAA".hex(), b"BBB".hex()]
+    assert not any(os.path.exists(f) for f in seen["files"])
+
+
+@pytest.mark.asyncio
+async def test_copilot_failure_shows_the_tail_of_its_stderr(tmp_path: Path) -> None:
+    spec = _fake_copilot(tmp_path, (
+        "import sys\n"
+        "sys.stdin.read()\n"
+        "sys.stderr.write('x' * 2000 + 'Error: the model rejected this request')\n"
+        "sys.exit(1)\n"
+    ))
+    with pytest.raises(_CliTransientError) as info:
+        await _run_cli(spec, "hi", timeout_s=60)
+    assert "exited rc=1" in str(info.value) and "the model rejected this request" in str(info.value)
+
+
+@pytest.mark.asyncio
+async def test_copilot_failure_with_empty_stderr_shows_stdout(tmp_path: Path) -> None:
+    spec = _fake_copilot(tmp_path, (
+        "import sys\n"
+        "sys.stdin.read()\n"
+        "print('Error: prompt is too long for this model')\n"
+        "sys.exit(1)\n"
+    ))
+    with pytest.raises(_CliTransientError) as info:
+        await _run_cli(spec, "hi", timeout_s=60)
+    assert "prompt is too long for this model" in str(info.value)

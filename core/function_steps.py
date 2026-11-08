@@ -356,6 +356,60 @@ def spec_hash(specs: list[Spec], protocol: dict[str, Any] | None) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
+#: The version of what ``built_from`` hashes. A record written by another version is not compared with the hashes of this one
+#: (a hash that differs only because the recipe differs would look like a plan change): every function is written again.
+BUILT_FROM_SCHEMA = 2
+
+
+def _own_hash_body(spec: Spec, protocol: dict[str, Any] | None) -> dict[str, Any]:
+    # The parameters, not the text of the signature: an outline written again for a revised plan words the same function
+    # a little differently (an annotation, the order of its dependencies), and that is not a change of the function.
+    body: dict[str, Any] = {"n": spec.name, "params": spec.params(), "eq": spec.equation, "kind": spec.kind}
+    if spec.kind == STEP and spec.card:
+        body["card"] = {k: spec.card.get(k) for k in ("id", "name", "does", "inputs", "output", "uses", "source", "example", "relations")}
+    else:
+        eq = next((e for e in _eqt.eligible(protocol) if _eqt._text(e["id"]) == spec.equation), {})
+        body["eq_def"] = {k: eq.get(k) for k in ("id", "formula", "example", "source", "derivation")}
+    return body
+
+
+def function_hashes(specs: list[Spec], protocol: dict[str, Any] | None) -> dict[str, str]:
+    """``{function name: what it was written for}``: its name and parameters, the equation (formula, worked example, source,
+    derivation) or step card it implements, and the hashes of the functions it depends on, in turn. Recorded for each
+    function when it is done (``built_from``), so that a plan revised later re-writes only the functions whose own hash
+    differs (a dependency whose equation changed under the same parameters writes its callers again); a function whose plan
+    did not change, with every repair it received, is kept as it is. Each function is hashed once and the walk is
+    iterative, so a deep chain or a diamond of dependencies costs one pass; a dependency cycle is cut at its back edge."""
+    by_name = {s.name: s for s in specs}
+    done: dict[str, str] = {}
+    for root in by_name:
+        if root in done:
+            continue
+        stack: list[tuple[str, int]] = [(root, 0)]
+        on_path = {root}
+        while stack:
+            name, k = stack[-1]
+            deps = [d for d in by_name[name].depends_on if d in by_name]
+            if k < len(deps):
+                stack[-1] = (name, k + 1)
+                d = deps[k]
+                if d not in done and d not in on_path:
+                    stack.append((d, 0))
+                    on_path.add(d)
+                continue
+            body = _own_hash_body(by_name[name], protocol)
+            body["deps"] = sorted([d, done.get(d, "")] for d in by_name[name].depends_on)
+            done[name] = hashlib.sha256(json.dumps(body, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+            stack.pop()
+            on_path.discard(name)
+    return done
+
+
+def function_hash(spec: Spec, specs: list[Spec], protocol: dict[str, Any] | None) -> str:
+    """The hash of one function (:func:`function_hashes`)."""
+    return function_hashes(specs, protocol)[spec.name]
+
+
 # --- the module file --------------------------------------------------------------------------------------------------
 
 
@@ -541,6 +595,29 @@ def match_example_names(source: str, name: str, inputs: list[str], *, random: bo
     return (renamed, pairs or {}) if renamed is not None else (None, {})
 
 
+def held_signatures(fixed: dict[str, str], sources: dict[str, str], cases: list[dict[str, Any]]) -> dict[str, str]:
+    """The ``def`` line a repair must keep for each function of ``fixed`` (its name to the outline's ``def``): ONE source of a
+    function's interface at a time. The test calls a function by the names of the worked example's inputs, so the outline's
+    line (already given those names, :func:`example_signature`) is held only where the code does not meet that contract
+    yet (``cases``: the equation tests, :func:`core.equation_tests.cases`; a name the function lacks, or a parameter without
+    a default that the example gives no value for). A function the code already writes so that the test can call it, and
+    a function no test calls, keeps the ``def`` it has in ``sources``: the code its callers were written against is what a
+    repair must not break, and the outline's order of parameters (which no test reads) is not a second claim on it. A
+    function ``sources`` does not define keeps the outline's line."""
+    by_function: dict[str, list[dict[str, Any]]] = {}
+    for case in cases:
+        by_function.setdefault(str(case.get("function")), []).append(case)
+    out = dict(fixed)
+    for name in fixed:
+        node = next((n for text in sources.values() for n in [_find(text, name)] if n is not None), None)
+        if node is None:
+            continue
+        if any(_eqt._contract_here(c) for c in by_function.get(name, [])):
+            continue  # the test cannot call the function as written: the outline's names are what the repair must give
+        out[name] = f"def {name}({ast.unparse(node.args)}):"
+    return out
+
+
 def changed_signatures(source: str, fixed: dict[str, str]) -> list[str]:
     """For each function of ``fixed`` (its name to the ``def`` line the outline gave it) that ``source`` defines at the
     top level with other parameters: a plain sentence saying so. The outline is the one place a function's parameters
@@ -586,19 +663,56 @@ def _segment(lines: list[str], node: ast.AST) -> str:
 
 
 def replace_function(source: str, name: str, reply: str, *, signature: str, equation: str) -> tuple[str | None, str]:
-    """``(new module text, "")`` with the function ``name`` of ``source`` replaced by the one in ``reply`` (a block of
-    Python), or ``(None, why not)``. The reply's imports are added, and so are its helper functions and plain constants
-    (a name the module does not have); anything else in it is dropped. The reply's function must have the outline's
-    parameters, exactly; and the equation's label (``# E1``) is kept on it."""
+    """:func:`replace_function_ex` without the list of what was left out."""
+    out, why, _left = replace_function_ex(source, name, reply, signature=signature, equation=equation)
+    return out, why
+
+
+def _carried(node: ast.AST) -> bool:
+    """A top-level statement a reply may bring besides its function: a try/except block that only imports or assigns."""
+    if isinstance(node, ast.Try):
+        parts = [*node.body, *[s for h in node.handlers for s in h.body], *node.orelse, *node.finalbody]
+        return bool(parts) and all(isinstance(s, (ast.Import, ast.ImportFrom, ast.Assign, ast.Pass)) for s in parts)
+    return False
+
+
+def _bound(node: ast.AST) -> set[str]:
+    """The names a top-level definition, assignment, import or try block binds at module level (a function's or a class's
+    own insides are not module names)."""
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return {node.name}
+    if isinstance(node, ast.Assign):
+        return {t.id for t in node.targets if isinstance(t, ast.Name)}
+    if isinstance(node, ast.AnnAssign):
+        return {node.target.id} if isinstance(node.target, ast.Name) else set()
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        return {(a.asname or a.name).split(".")[0] for a in node.names}
+    if isinstance(node, ast.Try):
+        out: set[str] = set()
+        for sub in [*node.body, *[s for h in node.handlers for s in h.body], *node.orelse, *node.finalbody]:
+            out |= _bound(sub)
+        return out
+    return set()
+
+
+def replace_function_ex(source: str, name: str, reply: str, *, signature: str, equation: str,
+                        wide: bool = False) -> tuple[str | None, str, list[str]]:
+    """``(new module text, "", left out)`` with the function ``name`` of ``source`` replaced by the one in ``reply`` (a block
+    of Python), or ``(None, why not, [])``. The reply's imports are added, and so are its other functions, its classes (a
+    dataclass too), its module constants (whatever they are computed from) and its try/except import blocks, when the module
+    has no such name. What cannot be carried (a name the module already has, a loop or a call at module level) is left out and
+    listed, one plain phrase each, in ``left out``. The reply's function must have the outline's parameters, exactly; and the
+    equation's label (``# E1``) is kept on it. Without ``wide`` only imports, helper functions and literal constants are
+    carried, exactly as :func:`replace_function` always did; ``wide`` (the frame of simulate.py) carries the rest."""
     if not reply.strip():
-        return None, "the reply held no code"
+        return None, "the reply held no code", []
     try:
         new_tree = ast.parse(reply)
     except SyntaxError as e:
-        return None, f"the reply is not valid Python ({e.msg}, line {e.lineno})"
+        return None, f"the reply is not valid Python ({e.msg}, line {e.lineno})", []
     node = next((n for n in new_tree.body if isinstance(n, ast.FunctionDef) and n.name == name), None)
     if node is None:
-        return None, f"the reply holds no function named `{name}`"
+        return None, f"the reply holds no function named `{name}`", []
     want = _param_names(ast.parse(signature.rstrip().rstrip(":") + ":\n    pass").body[0])  # type: ignore[arg-type]
     if _param_names(node) != want:
         # A reply that only names a parameter otherwise (``width_max`` for ``width``) is the function with its names put
@@ -610,7 +724,7 @@ def replace_function(source: str, name: str, reply: str, *, signature: str, equa
             node = next(n for n in new_tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
     if _param_names(node) != want:
         return None, ("the function's parameters must be exactly (" + ", ".join(want) + "), as the outline fixed them; "
-                      "the reply has (" + ", ".join(_param_names(node)) + ")")
+                      "the reply has (" + ", ".join(_param_names(node)) + ")"), []
     reply_lines = reply.splitlines(keepends=True)
     if reply_lines and not reply_lines[-1].endswith("\n"):
         reply_lines[-1] += "\n"
@@ -625,36 +739,208 @@ def replace_function(source: str, name: str, reply: str, *, signature: str, equa
     taken = {getattr(n, "name", None) for n in old_tree.body} | {t.id for n in old_tree.body if isinstance(n, ast.Assign)
                                                                 for t in n.targets if isinstance(t, ast.Name)}
     have_imports = {ast.dump(n) for n in old_tree.body if isinstance(n, (ast.Import, ast.ImportFrom))}
-    imports, helpers = [], []
+    if wide:  # a name the file imports is taken too: a carried class or constant must not rebind it
+        for n in old_tree.body:
+            if isinstance(n, (ast.Import, ast.ImportFrom, ast.Try)):
+                taken |= _bound(n)
+    imports, helpers, left = [], [], []
     for n in new_tree.body:
+        if n is node:
+            continue
         if isinstance(n, (ast.Import, ast.ImportFrom)):
             if ast.dump(n) not in have_imports:
-                imports.append(_segment(reply_lines, n).rstrip("\n"))
-        elif isinstance(n, ast.FunctionDef) and n is not node and n.name not in taken:
-            helpers.append(_segment(reply_lines, n))
-            taken.add(n.name)
-        elif isinstance(n, ast.Assign) and all(isinstance(t, ast.Name) for t in n.targets):
-            try:
-                ast.literal_eval(n.value)
-            except (ValueError, SyntaxError):
-                continue
-            if not any(t.id in taken for t in n.targets):  # type: ignore[attr-defined]
+                imports.append(_segment(reply_lines, n).rstrip(chr(10)))
+            continue
+        if not wide:
+            if isinstance(n, ast.FunctionDef) and n.name not in taken:
                 helpers.append(_segment(reply_lines, n))
-                taken.update(t.id for t in n.targets)  # type: ignore[attr-defined]
+                taken.add(n.name)
+            elif isinstance(n, ast.Assign) and all(isinstance(t, ast.Name) for t in n.targets):
+                try:
+                    ast.literal_eval(n.value)
+                except (ValueError, SyntaxError):
+                    continue
+                if not any(t.id in taken for t in n.targets):  # type: ignore[attr-defined]
+                    helpers.append(_segment(reply_lines, n))
+                    taken.update(t.id for t in n.targets)  # type: ignore[attr-defined]
+            continue
+        if isinstance(n, ast.Expr) and isinstance(getattr(n, "value", None), ast.Constant):
+            continue  # a docstring or a bare string: nothing to carry
+        if isinstance(n, ast.If) and ast.unparse(n.test).replace("'", '"') == '__name__ == "__main__"':
+            continue  # the reply's own entry point: the module has its own
+        carry = isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Assign, ast.AnnAssign)) or _carried(n)
+        if isinstance(n, ast.Assign):
+            carry = all(isinstance(t, ast.Name) for t in n.targets)
+        elif isinstance(n, ast.AnnAssign):
+            carry = isinstance(n.target, ast.Name) and n.value is not None
+        names = _bound(n) if carry else set()
+        if not carry:
+            left.append(f"a statement at the top of the reply (`{ast.unparse(n).splitlines()[0][:60]}`)")
+        elif names & taken:
+            kind = ("a function" if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) else "a class" if isinstance(n, ast.ClassDef)
+                    else "a constant" if isinstance(n, (ast.Assign, ast.AnnAssign)) else "an import block")
+            left.append(f"{kind} " + ", ".join(f"`{x}`" for x in sorted(names & taken)) + " (the file already has that name)")
+        else:
+            helpers.append(_segment(reply_lines, n))
+            taken.update(names)
+    from .code_layout import insert_before_main_guard
+
     if old is None:
-        out = source.rstrip("\n") + "\n\n\n" + body
+        out = insert_before_main_guard(source, body)
     else:
         start = min([old.lineno, *[d.lineno for d in old.decorator_list]])
         out = "".join(src_lines[: start - 1]) + body + "".join(src_lines[old.end_lineno:])
     if helpers:
-        out = out.rstrip("\n") + "\n\n\n" + "\n\n".join(h.rstrip("\n") + "\n" for h in helpers)
+        out = insert_before_main_guard(out, "\n\n".join(h.rstrip("\n") + "\n" for h in helpers))
     if imports:
         out = _with_imports(out, imports)
     try:
         ast.parse(out)
     except SyntaxError as e:
-        return None, f"the module would not be valid Python ({e.msg}, line {e.lineno})"
-    return out, ""
+        return None, f"the module would not be valid Python ({e.msg}, line {e.lineno})", []
+    return out, "", left
+
+
+def _literal(value: Any) -> Any:
+    """``value`` as a plain constant a module may be given (a number, a truth value or a short text), else :data:`_NOT_PLAIN`.
+    A text is read the way Python reads it (``"1e-10"`` is the number, ``"5,10,...,170"`` is not a constant)."""
+    if isinstance(value, str):
+        try:
+            value = ast.literal_eval(value.strip())
+        except (ValueError, SyntaxError):
+            return _NOT_PLAIN
+    if isinstance(value, bool) or (isinstance(value, (int, float)) and abs(value) != float("inf") and value == value):
+        return value
+    return value if isinstance(value, str) and len(value) <= 80 else _NOT_PLAIN
+
+
+_NOT_PLAIN = object()
+
+
+def varied_names(protocol: dict[str, Any] | None) -> set[str]:
+    """Every name the study varies, from the plan's own lists: each setting of the grid (and of a sub-study), what each run
+    compares inside it, and a search's design variables, held conditions and numerical settings. Such a name is a setting of the
+    cell, never one number for the whole study."""
+    from . import optimise_search as _search
+    from . import skeleton as _skeleton
+
+    protocol = protocol if isinstance(protocol, dict) else {}
+    names = set(_skeleton.settings_of(protocol))
+    try:
+        names |= {str(k) for k in _search.study_grid(protocol)}
+    except (KeyError, TypeError, ValueError, AttributeError):
+        pass
+    if isinstance(protocol.get("in_each_run"), dict):
+        names |= {str(k) for k in protocol["in_each_run"]}
+    return names
+
+
+def plan_constants(outline: dict[str, Any] | None, protocol: dict[str, Any] | None, log: Any = None) -> dict[str, Any]:
+    """``{name: value}`` of the numbers the plan fixes, from the two places it says them: the outline's ``constants`` (a name and
+    a literal value) and the protocol's ``constants``. A value that is not a plain number, truth value or short text (a list, a
+    range, a formula) is not a constant FI can write and is left out; the outline's name wins over the protocol's. A name the
+    study varies (:func:`varied_names`) is not written: the cell sets it, and one number written into the package would answer
+    for every cell; ``log`` is told which names were left out."""
+    out = _plan_constants(outline, protocol)
+    varied = sorted(set(out) & varied_names(protocol))
+    if varied:
+        for name in varied:
+            del out[name]
+        if log is not None:
+            log.info("[implement] FI did not write %s into the model's package as a fixed number of the plan: the study varies "
+                     "%s, so each cell sets it", ", ".join(varied), "it" if len(varied) == 1 else "them")
+    return out
+
+
+def _plan_constants(outline: dict[str, Any] | None, protocol: dict[str, Any] | None) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for c in (outline or {}).get("constants") or []:
+        if isinstance(c, dict) and isinstance(c.get("name"), str) and c["name"].strip().isidentifier():
+            value = _literal(c.get("value"))
+            if value is not _NOT_PLAIN:
+                out.setdefault(c["name"].strip(), value)
+    given = protocol.get("constants") if isinstance(protocol, dict) else None
+    for name, raw in (given.items() if isinstance(given, dict) else ()):
+        value = _literal(raw)
+        if isinstance(name, str) and name.isidentifier() and value is not _NOT_PLAIN:
+            out.setdefault(name, value)
+    return out
+
+
+PLAN_BLOCK_BEGIN = "# >>> FI: the numbers the plan fixes (written by FI from the plan every time; do not edit)"
+PLAN_BLOCK_END = "# <<< FI: the numbers the plan fixes"
+_PLAN_BLOCK_RE = re.compile(re.escape(PLAN_BLOCK_BEGIN) + r".*?" + re.escape(PLAN_BLOCK_END) + r"[ \t]*\n?", re.DOTALL)
+
+
+class DamagedPlanBlock(Exception):
+    """FI's block of the plan's numbers in a module lost its closing line: what it holds can no longer be told from the model's
+    own code, and a stale number in it would bind the name. The block is FI's, so a damaged one is a fault to be put right."""
+
+
+def with_constants(source: str, values: dict[str, Any], name: str = "model.py") -> tuple[str, list[str]]:
+    """``(source, names)``: the module with FI's block of the plan's numbers written from ``values`` (:func:`plan_constants`)
+    in full: one module-level assignment for each name the module reads and nothing outside the block binds, when the plan
+    fixes that number under that very name. A function of the model's package is written to one equation at a time and reads
+    the plan's numbers as module names; setting them was left to whichever script imported the package, and a script written
+    without that line failed with a NameError inside the package. The block is made again from the plan on every call: a value
+    the plan changed is changed in it, a number the plan dropped (or the module now binds itself) leaves it. A name the module
+    binds outside the block is never touched, and a name the plan does not fix (or fixes under another spelling) is left to the
+    code check. ``names`` are the names in the block."""
+    from . import undefined_names as _undefined
+
+    if PLAN_BLOCK_BEGIN in source and not _PLAN_BLOCK_RE.search(source):
+        raise DamagedPlanBlock(f"{name} has FI's block of the plan's numbers without its closing line `{PLAN_BLOCK_END}`: put "
+                               "that line back after the block's last assignment, or take the whole block out (FI writes it again)")
+    bare = _PLAN_BLOCK_RE.sub("", source)
+    found: dict[str, Any] = {}
+    if values:
+        for use in _undefined.undefined_in(name, bare):
+            if use.name in values and use.name not in found:
+                found[use.name] = values[use.name]
+    if not found:
+        return bare, []
+    block = (PLAN_BLOCK_BEGIN + "\n" + "".join(f"{key} = {value!r}\n" for key, value in found.items())
+             + PLAN_BLOCK_END + "\n")
+    lines = bare.splitlines(keepends=True)
+    after = 0
+    for n in ast.parse(bare).body:
+        is_doc = isinstance(n, ast.Expr) and isinstance(getattr(n, "value", None), ast.Constant) and isinstance(n.value.value, str)
+        if not (is_doc or isinstance(n, (ast.Import, ast.ImportFrom))):
+            break
+        after = n.end_lineno or after
+    head = "".join(lines[:after]).rstrip("\n")
+    tail = "".join(lines[after:]).lstrip("\n")
+    return (head + "\n\n\n" if head else "") + block + "\n\n" + tail, list(found)
+
+
+def write_constants(model_path: Path, values: dict[str, Any], log: Any = None) -> list[str]:
+    """:func:`with_constants` on the file ``model_path``, written back only when the file changes; the names in its block when
+    it did, else ``[]``."""
+    try:
+        source = model_path.read_text(encoding="utf-8")
+        new, names = with_constants(source, values, model_path.name)
+    except (OSError, SyntaxError, ValueError):
+        return []
+    if new == source:
+        return []
+    model_path.write_text(new, encoding="utf-8")
+    if log is not None:
+        log.info("[implement] FI wrote the plan's number(s) %s into %s: the model's functions read them there",
+                 ", ".join(names) or "(none left)", model_path.name)
+    return names
+
+
+def write_package_constants(package_dir: Path, values: dict[str, Any], log: Any = None) -> list[str]:
+    """:func:`write_constants` on every module of the package folder: a name any of them reads and nothing binds."""
+    out: list[str] = []
+    if package_dir.is_dir():
+        for path in sorted(package_dir.rglob("*.py")):
+            try:
+                out += write_constants(path, values, log)
+            except DamagedPlanBlock as e:
+                if log is not None:
+                    log.warning("[implement] %s", e)
+    return out
 
 
 def _with_imports(source: str, imports: list[str]) -> str:
@@ -897,8 +1183,11 @@ class FunctionFiller:
                  prompts: dict[str, string.Template], chat: ChatFn, run: RunFn, log: Any, repairs: int = 2,
                  max_calls: int = 30, constants: str = "", install: InstallFn | None = None,
                  module_repairs: int = MODULE_REPAIRS, declared: list[str] | None = None,
-                 topic_block: str = "", passages: dict[str, str] | None = None) -> None:
+                 topic_block: str = "", passages: dict[str, str] | None = None,
+                 values: dict[str, Any] | None = None) -> None:
         self.topic_block = topic_block or "(the topic is not available)"
+        #: The numbers the plan fixes (:func:`plan_constants`): FI writes each one the package reads and does not bind.
+        self.values = dict(values or {})
         #: ``{equation or step id: passages from the literature}`` (core/step_passages.py), found by the caller before the
         #: step starts; an id with none gets an empty literature block.
         self.passages = {str(k): str(v) for k, v in (passages or {}).items() if str(v).strip()}
@@ -1000,6 +1289,10 @@ class FunctionFiller:
         attempt added to the module), another function's name, ``MODULE_LEVEL`` or ``ELSEWHERE``. ``trace`` is the end of
         the traceback when the import failed. ``known``: the fingerprints of the module's statements before this attempt."""
         known = known if known is not None else set()
+        try:
+            write_constants(self.model_path, self.values, self.log)  # before the file is read: the check sees the plan's numbers
+        except DamagedPlanBlock as e:
+            return str(e), MODULE_LEVEL, ""
         text = self.model_path.read_text(encoding="utf-8")
         try:
             ast.parse(text)
@@ -1272,15 +1565,22 @@ class FunctionFiller:
         digest = spec_hash(specs, self.protocol)
         self._by_id = {s.equation: s for s in specs}
         record = load(self.root)
+        hashes = function_hashes(specs, self.protocol)
         if record.get("package") != self.package or record.get("hash") != digest:
+            kept = self._carry_over(record, specs, hashes)
             record = {"calls_total": int(record.get("calls_total") or 0), "package": self.package, "hash": digest,
-                      "functions": {}, "calls": 0, "status": "running"}
+                      "functions": kept, "calls": 0, "status": "running", "built_from_schema": BUILT_FROM_SCHEMA}
         elif record.get("status") == "fell_back":
             return Outcome("skipped", reason=str(record.get("reason") or "an earlier pass of the step fell back"))
         record["functions"] = {s.name: record["functions"].get(s.name) or
                                {"equation": s.equation, "status": PENDING, "attempts": 0} for s in specs}
         for s in specs:
             record["functions"][s.name]["kind"] = s.kind
+            if record["functions"][s.name].get("status") == DONE and not record["functions"][s.name].get("built_from") \
+                    and record.get("hash") == digest:
+                # written for exactly these specs (the whole hash is the same): say so, for the next revision of the plan
+                record["functions"][s.name]["built_from"] = hashes[s.name]
+                record["built_from_schema"] = BUILT_FROM_SCHEMA
         # A step with neither a usable worked example nor a relation to hold is not tested by anything but the static look;
         # said here so that the checks that come after can pick it up.
         record["untested_by_example"] = [s.equation for s in specs if s.kind == STEP and s.card
@@ -1306,7 +1606,9 @@ class FunctionFiller:
                 if record["functions"][s.name]["status"] == DONE and is_stub(on_disk, s.name):
                     record["functions"][s.name]["status"] = PENDING
                 if _find(on_disk, s.name) is None:
-                    self.model_path.write_text(on_disk.rstrip("\n") + "\n\n\n" + stub(s), encoding="utf-8")
+                    from .code_layout import insert_before_main_guard
+
+                    self.model_path.write_text(insert_before_main_guard(on_disk, stub(s)), encoding="utf-8")
                     on_disk = self.model_path.read_text(encoding="utf-8")
         save(self.root, record)
         for _pass in range(3):  # a function sent back to its placeholder while another was written is written in the next pass
@@ -1329,7 +1631,7 @@ class FunctionFiller:
                                      spec.name, spec.equation, self.repairs, (problem.splitlines() or [""])[0][:120],
                                      exception_line(problem, 200))
                     continue
-                entry.update(status=DONE, error="")
+                entry.update(status=DONE, error="", built_from=function_hashes(specs, self.protocol)[spec.name])
                 save(self.root, record)
                 self.log.info("[implement] function %s passes its checks%s", spec.name,
                               "" if spec.equation not in (record.get("untested") or {}) else
@@ -1343,9 +1645,34 @@ class FunctionFiller:
             await self._repair_module(specs, record)
         return self._finish(specs, record)
 
+    def _carry_over(self, prior: dict[str, Any], specs: list[Spec], hashes: dict[str, str]) -> dict[str, Any]:
+        """The plan changed since the functions were written: the entries of the functions whose own hash is the same (and
+        that are done, and have code on disk), kept as they are with every repair they received. The rest are written again.
+        Nothing is kept, and the log says why, when the record does not say what the functions were built from."""
+        old = prior.get("functions") if prior.get("package") == self.package and isinstance(prior.get("functions"), dict) else {}
+        if not old or not self.model_path.is_file():
+            return {}
+        if prior.get("built_from_schema") != BUILT_FROM_SCHEMA:
+            self.log.info("[implement] the plan changed and the record of the functions was written by another version of FI "
+                          "(or does not say what each function was built from): every function is written again")
+            return {}
+        kept: dict[str, Any] = {}
+        for s in specs:
+            e = old.get(s.name)
+            if isinstance(e, dict) and e.get("status") == DONE and e.get("built_from") == hashes[s.name]:
+                kept[s.name] = e
+        again = [s.name for s in specs if s.name not in kept]
+        self.log.info("[implement] the plan changed: %d of %d function(s) are as they were built and are kept (%s); %d "
+                      "are written again (%s)", len(kept), len(specs), ", ".join(kept) or "none", len(again), ", ".join(again) or "none")
+        return kept
+
     def _finish(self, specs: list[Spec], record: dict[str, Any]) -> Outcome:
         """The step's end: ``done`` when every function passes, ``partial`` when the module imports and every function
         has code but some still fail their test, else the code is written whole."""
+        try:
+            write_constants(self.model_path, self.values, self.log)
+        except DamagedPlanBlock as e:
+            self.log.warning("[implement] %s", e)
         source = self.model_path.read_text(encoding="utf-8")
         no_code = [s for s in specs if record["functions"][s.name]["status"] != DONE and is_stub(source, s.name)]
         done, total = counts(record)
@@ -1376,44 +1703,14 @@ class FunctionFiller:
                           f"{s.signature}\nWhat is wrong with it: {entry.get('error') or 'it fails its check'}")
         return _text_block(passing), "\n\n".join(broken)
 
-    def _with_labels(self, text: str, specs: list[Spec]) -> str:
-        """``text`` with the equation's id in a comment above each function of ``specs`` that lost it."""
-        from . import oracle_check as _oracle
-
-        for s in specs:
-            node = _find(text, s.name)
-            if node is None:
-                continue
-            first = _span(node)[0]
-            lines = text.splitlines(keepends=True)
-            near = "".join(lines[max(0, first - 3): node.end_lineno or first])
-            if not _oracle._labelled_in(s.equation, near):
-                lines.insert(first - 1, f"# {s.equation}\n")
-                text = "".join(lines)
-        return text
-
-    def _module_ok(self, text: str, specs: list[Spec]) -> str:
-        """Why a reply's module cannot be used (``""`` when it can): it parses, and every function has the parameters the
-        outline fixed."""
-        if not text.strip():
-            return "the reply held no code"
-        try:
-            ast.parse(text)
-        except SyntaxError as e:
-            return f"the reply is not valid Python ({e.msg}, line {e.lineno})"
-        for s in specs:
-            node = _find(text, s.name)
-            if node is None:
-                return f"the reply holds no function named `{s.name}`"
-            if _param_names(node) != s.params():
-                return f"the parameters of `{s.name}` must be exactly ({', '.join(s.params())})"
-        return ""
-
     async def _repair_module(self, specs: list[Spec], record: dict[str, Any]) -> None:
-        """The functions that failed their repairs are left to the repair of the whole module (at most ``module_repairs``
-        requests): the model is shown the module, the failed functions with what is wrong, and the names of the functions
-        that already pass, which must keep passing. Every function is checked again afterwards; a repair that breaks a
-        function that passed is undone."""
+        """The functions that failed their repairs are left to a focused repair (at most ``module_repairs`` requests): the
+        model is shown the module for context, the failed functions with what is wrong, and the names of the functions that
+        already pass, which are not to be touched. It is asked for the failed functions only (and the helpers they need), and
+        each is spliced into the module in place (:func:`replace_function`): every function that passes stays exactly as it
+        is, byte for byte. A module-level cause is reached only through what a spliced reply adds (an import, a helper
+        function or a constant the module does not have yet). Every function is checked again afterwards; a repair that
+        breaks a function that passed is undone."""
         if "module" not in self.prompts:
             return
         while failing(record) and int(record.get("module_repairs") or 0) < self.module_repairs:
@@ -1435,10 +1732,18 @@ class FunctionFiller:
             except Exception as e:  # noqa: BLE001 -- a request that failed is a repair that did not happen
                 self.log.warning("[implement] the repair of the module could not be asked for: %r", e)
                 continue
-            new = self._with_labels(reply_code(reply), specs)
-            why = self._module_ok(new, specs)
-            if why:
-                self.log.warning("[implement] the repair of the module was not used: %s", why)
+            code = reply_code(reply)
+            new, refused = source, []
+            for s_ in specs:
+                if record["functions"][s_.name]["status"] != FAILED:
+                    continue
+                got, why = replace_function(new, s_.name, code, signature=s_.signature, equation=s_.equation)
+                if got is None:
+                    refused.append(f"{s_.name}: {why}")
+                else:
+                    new = got
+            if new == source:
+                self.log.warning("[implement] the repair of the module was not used: %s", "; ".join(refused) or "it changed nothing")
                 continue
             self.model_path.write_text(new.rstrip("\n") + "\n", encoding="utf-8")
             known = _dumps(new)

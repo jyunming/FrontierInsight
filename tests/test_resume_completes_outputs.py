@@ -36,7 +36,7 @@ def _record_checks(monkeypatch) -> list[tuple[str, str]]:
         checked.append((kind, pdf.name))
         return {"kind": kind, "transport": "images", "findings": [], "measured": {"findings": []}}
 
-    async def fake_check_and_redo(cfg, kind, pdf, quest_root, regenerate, *, supervisor):  # noqa: ANN001
+    async def fake_check_and_redo(cfg, kind, pdf, quest_root, regenerate, *, supervisor, **_kw):  # noqa: ANN001
         return await fake_check(cfg, kind, pdf, quest_root, supervisor=supervisor)
 
     async def fake_check_pptx(cfg, pptx, quest_root, *, supervisor):  # noqa: ANN001
@@ -198,7 +198,7 @@ async def test_slides_and_poster_are_redone_with_the_feedback(
 
     redone: list[str] = []
 
-    async def fake_check_and_redo(cfg, kind, pdf, quest_root, regenerate, *, supervisor):  # noqa: ANN001
+    async def fake_check_and_redo(cfg, kind, pdf, quest_root, regenerate, *, supervisor, **_kw):  # noqa: ANN001
         redone.append(kind)
         if kind != "paper":  # the paper's repair has its own test
             await regenerate(f"fix the {kind}")
@@ -243,7 +243,7 @@ async def test_the_paper_is_repaired_by_recompiling_one_line_taller_per_attempt(
     for name in ("SlideGenerator", "PosterGenerator", "SpeechGenerator"):
         monkeypatch.setattr(fi_launch, name, _Nothing)
 
-    async def fake_check_and_redo(cfg, kind, pdf, quest_root, regenerate, *, supervisor):  # noqa: ANN001
+    async def fake_check_and_redo(cfg, kind, pdf, quest_root, regenerate, *, supervisor, **_kw):  # noqa: ANN001
         await regenerate("the last page holds one line")
         await regenerate("the last page holds one line")
         return {"transport": "images", "findings": [], "measured": {"findings": []}}
@@ -281,7 +281,7 @@ async def test_text_over_an_edge_is_repaired_by_setting_the_tables_smaller(tmp_p
     for name in ("SlideGenerator", "PosterGenerator", "SpeechGenerator"):
         monkeypatch.setattr(fi_launch, name, _Nothing)
 
-    async def fake_check_and_redo(cfg, kind, pdf, quest_root, regenerate, *, supervisor):  # noqa: ANN001
+    async def fake_check_and_redo(cfg, kind, pdf, quest_root, regenerate, *, supervisor, **_kw):  # noqa: ANN001
         await regenerate("fi-checks: text_overlap overwide\n- page 3: lines drawn over each other")
         return {"transport": "images", "findings": [], "measured": {"findings": []}}
 
@@ -335,3 +335,28 @@ def test_existing_output_text_deliverable_needs_nonempty(tmp_path: Path):
     assert fi_launch._existing_output(art, "speech") is None
     talk.write_text("# Talk\n\nHello.\n", encoding="utf-8")
     assert fi_launch._existing_output(art, "speech") == talk
+
+
+@pytest.mark.asyncio
+async def test_a_visual_check_that_raises_does_not_stop_the_other_checks(tmp_path: Path, monkeypatch, capsys, caplog):
+    _install_fake_generators(monkeypatch, [])
+    checked = _record_checks(monkeypatch)
+
+    async def broken_paper_check(cfg, kind, pdf, quest_root, regenerate, *, supervisor, **_kw):  # noqa: ANN001
+        if kind == "paper":
+            raise UnicodeEncodeError("utf-8", "x", 0, 1, "surrogates not allowed")
+        checked.append((kind, pdf.name))
+        return {"kind": kind, "transport": "images", "findings": [], "measured": {"findings": []}}
+
+    monkeypatch.setattr(fi_launch, "check_and_redo", broken_paper_check)
+    failures: list[str] = []
+    art = QuestArtifacts(quest_id="q", quest_root=tmp_path, paper_md=tmp_path / "paper.md")
+    with caplog.at_level("WARNING"):
+        written = await fi_launch._run_generators(
+            _cfg(visual_check=True), art, supervisor=MagicMock(),
+            on_failure=lambda name, exc: failures.append(name),
+        )
+    assert [k for k, _ in checked] == ["slides", "poster"]
+    assert "speech" in written and "paper_pdf" in written
+    assert failures == ["visual check (paper)"]
+    assert any("visual check of the paper failed" in r.getMessage() for r in caplog.records)

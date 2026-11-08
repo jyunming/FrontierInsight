@@ -26,23 +26,18 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from pathlib import PurePosixPath
 
 # The must-fix hits that name one passage of the paper, and what each names.
-# ``over_page_limit`` (the whole paper must be shorter), ``figure_missing`` (the
-# write step puts a figure back) and ``citations_unchecked`` (nothing was
-# located at all) are not here: they are answered by writing the paper again.
+# ``citations_unchecked`` (nothing was located at all) is not here: it is answered by
+# writing the paper again.
 PATCHABLE_HITS = {
     "unsupported_claim": "claim",
-    "figure_caption": "caption",
     # A typed number, or a result key FI could not fill (core/typed_numbers.py, core/paper_facts.py). Only when the hit quotes
     # its sentence: the same name also covers a placeholder the paper does not hold at all, which no passage names.
     "paper_record_mismatch": "number",
     "mislabelled_statistic": "statistic",
 }
 _NOT_A_PASSAGE = {
-    "over_page_limit": "the draft is over the page limit, which needs the whole paper shortened",
-    "figure_missing": "a planned figure is missing from the draft, which the write step puts back",
     "citations_unchecked": "the claim check did not run, so no passage was named",
 }
 
@@ -67,7 +62,6 @@ _HEADING_RE = re.compile(r"^#{1,6}[ \t].*$", re.MULTILINE)
 _CITE_RE = re.compile(r"\[(?:W?\d+(?:\s*[–-]\s*\d+)?(?:\s*[,;]\s*W?\d+(?:\s*[–-]\s*\d+)?)*)\]")
 _LATEX_DELIM_RE = re.compile(r"\\[()\[\]]|\$")
 _WORD_RE = re.compile(r"[a-z0-9]+(?:\.[0-9]+)?")
-_FIGURE_FILE_RE = re.compile(r"figures/([^\s\"'`)]+)")
 _STOPWORDS = frozenset(
     "a an the of and or to in on at by for with from as is are was were be been it its "
     "this that these those which than then so if not no".split()
@@ -82,11 +76,11 @@ class PatchError(Exception):
 class Passage:
     """One thing a check flagged, and where in the draft it is."""
 
-    kind: str  # "claim" | "caption" | "number" | "statistic"
+    kind: str  # "claim" | "number" | "statistic"
     flagged: str  # what the check said
     why: str = ""  # its reason, when it gave one
     located: str = ""  # the draft's own words for it, exactly as the draft has them
-    how: str = ""  # "exact" | "sentence" | "caption" | "" (not located)
+    how: str = ""  # "exact" | "sentence" | "" (not located)
 
 
 @dataclass(frozen=True)
@@ -203,24 +197,16 @@ def locate_passage(flagged: str, paper: str, end: int, units: list[tuple[int, in
     return region[best[2]:best[3]], "sentence"
 
 
-def caption_in(paper: str, end: int, name: str) -> str:
-    """The caption (the text in ``![...]``) of the figure file ``name``, or ""."""
-    for m in _IMAGE_RE.finditer(paper[:end]):
-        if PurePosixPath(m.group("src")).name == name:
-            return m.group("alt")
-    return ""
-
-
 def plan_passages(
     paper: str, end: int, *, hits: list[tuple[str, str]],
-    claims: list[dict[str, str]], captions: list[str],
+    claims: list[dict[str, str]],
 ) -> tuple[list[Passage], str]:
     """The passages to edit, or ``([], reason)`` when this round is to write the
     whole paper again.
 
     ``hits`` are the review's must-fix hits as ``(name, text)``; ``claims`` are
-    the unsupported claims (``{"claim", "evidence"}``) the claim check listed;
-    ``captions`` are the figure-caption findings. ``end`` is where the draft's
+    the unsupported claims (``{"claim", "evidence"}``) the claim check listed.
+    ``end`` is where the draft's
     source lists begin: those are written by the engine, so nothing in them is
     edited. A round qualifies only when every hit names one passage."""
     if not hits:
@@ -231,8 +217,6 @@ def plan_passages(
             return [], _NOT_A_PASSAGE.get(name, f"{name or 'a hit'} does not name a passage")
     if "unsupported_claim" in names and not claims:
         return [], "the review flags unsupported claims but the claim check lists none"
-    if "figure_caption" in names and not captions:
-        return [], "the review flags a figure caption but no finding names the figure"
     if any(name == "paper_record_mismatch" and _QUOTED not in text for name, text in hits):
         return [], "a record check names no passage (a placeholder the paper does not hold, or typed numbers it lists only in part)"
     units = sentence_units(paper[:end])
@@ -242,10 +226,6 @@ def plan_passages(
         if text:
             located, how = locate_passage(text, paper, end, units)
             passages.append(Passage("claim", text, str(claim.get("evidence") or "").strip(), located, how))
-    for finding in captions:
-        m = _FIGURE_FILE_RE.search(finding)
-        caption = caption_in(paper, end, m.group(1)) if m else ""
-        passages.append(Passage("caption", finding, "", caption, "caption" if caption else ""))
     for name, text in hits:
         if PATCHABLE_HITS[name] not in ("number", "statistic"):
             continue
@@ -259,7 +239,6 @@ def plan_passages(
 
 _KIND_LABEL = {
     "claim": "A claim that neither the study's results nor a cited source backs",
-    "caption": "A caption that describes what its figure does not show",
     "number": "A number the writer typed that is not a number of the plan (or a result key FI could not fill)",
     "statistic": "A statistic the paper describes as something the run did not compute",
 }
@@ -277,7 +256,6 @@ def format_passages(passages: list[Passage]) -> str:
         if p.located:
             lead = {
                 "exact": "In the draft, exactly",
-                "caption": "The caption in the draft, exactly (`find` this text, not the figure link)",
                 "sentence": "The sentence in the draft that the flag most likely means",
             }[p.how]
             lines.append(f"{lead}: {json.dumps(p.located, ensure_ascii=False)}")

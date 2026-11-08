@@ -11,8 +11,15 @@ functions FI's trial harness calls (``run_trial``, ``run_cell``, ``oracle`` in e
 reached code names it: a call, or the name passed on as a value (a callback, a table of functions). A bare name is the
 file's own function or the one it imports; ``module.f`` is that module's ``f``; ``obj.f`` on any other object may be any
 function or method called ``f``. Every doubt counts as reached: a file that does not parse, a name computed at run time
-(``getattr`` with a computed name, ``globals()``, ``eval``, ``importlib``) or a function FI cannot find makes every
+(``getattr`` with a computed name, ``globals()`` handed on or indexed by a computed name, ``eval``, ``importlib``; ``globals().get("R")`` names one variable and is read as such) or a function FI cannot find makes every
 function reached, so this can only ever spare a finding about code that is plainly never run.
+
+Two computed ``getattr`` calls are read more closely than that. ``getattr(m, name)`` on an imported module ``m`` of the
+quest's code may call any function of ``m``, so it reaches all of them (and nothing else). In a file FI wrote itself
+(``experiment.py``, ``fi_table.py``, ``fi_figures.py``, ``fi_frame.py``, ``fi_figure_calls.py``, ``fi_core/``: see
+:func:`_fis_files`) a computed ``getattr`` on any other object reaches only the functions of FI's own files, since FI's text
+is known; so does one on ``table`` or ``fig``, the two objects FI hands every function of ``derive.py`` (:data:`FI_OBJECT_PARAMS`),
+in a file the study's model wrote; on any other object there it still means FI cannot tell.
 """
 
 from __future__ import annotations
@@ -25,6 +32,26 @@ from typing import Any, Callable
 HARNESS_ENTRIES = ("run_trial", "run_cell", "oracle")
 #: Calls that reach code by a name computed at run time.
 _DYNAMIC_CALLS = {"globals", "locals", "vars", "eval", "exec", "__import__", "import_module"}
+
+
+def _is_dunder(name: str) -> bool:
+    return len(name) > 4 and name.startswith("__") and name.endswith("__")
+
+
+def _scope_read(node: ast.AST) -> tuple[ast.Call, str] | None:
+    """``(the scope call, the name)`` when ``node`` reads one variable of a scope by a fixed text: ``globals().get("R", 1.0)``,
+    ``globals()["R"]``, ``vars()["R"]`` or ``locals().get("R")``. That names a variable, as plain code would; only a name
+    computed at run time (or the scope handed on as a whole) is a name FI cannot read."""
+    scope: ast.AST | None = None
+    key: ast.AST | None = None
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get" and node.args:
+        scope, key = node.func.value, node.args[0]
+    elif isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load):
+        scope, key = node.value, node.slice
+    if (isinstance(scope, ast.Call) and isinstance(scope.func, ast.Name) and scope.func.id in ("globals", "locals", "vars")
+            and not scope.args and not scope.keywords and isinstance(key, ast.Constant) and isinstance(key.value, str)):
+        return scope, key.value
+    return None
 
 
 def _is_main_guard(node: ast.AST) -> bool:
@@ -54,10 +81,22 @@ def _definition_time(stmts: list[ast.stmt], *, main: bool) -> list[ast.AST]:
     return out
 
 
+#: The parameters FI gives every function of ``derive.py`` it calls (``analysis_frame.SIGNATURES``): its own table of the trials and
+#: its own figure. A computed ``getattr`` on one of them looks a name up on FI's object, whose text is FI's.
+FI_OBJECT_PARAMS = frozenset({"table", "fig"})
+
+
+def _fis_object(m: "_Module", node: ast.AST | None) -> bool:
+    """Whether ``node`` is a name the module takes as a parameter that FI gives it (:data:`FI_OBJECT_PARAMS`)."""
+    return isinstance(node, ast.Name) and node.id in m.fi_params
+
+
 class _Module:
     def __init__(self, rel: str, tree: ast.Module) -> None:
         self.rel = rel
         self.tree = tree
+        self.fi_params = {a.arg for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                          for a in [*n.args.args, *n.args.kwonlyargs] if a.arg in FI_OBJECT_PARAMS}
         self.functions: dict[str, list[ast.AST]] = {}
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -81,15 +120,51 @@ class _Module:
                         self.imports[a.asname or a.name] = (base, a.name)
 
 
+#: Files FI writes beside the study's code whose text starts with a fixed line: a file of that name is FI's only when it does.
+def _fis_heads() -> dict[str, str]:
+    from . import skeleton as _skeleton
+
+    return {_skeleton.RUNTIME_FILE: _skeleton.RUNTIME_HEAD,
+            _skeleton.TABLE_FILE: _skeleton.TABLE_SOURCE[:60],
+            _skeleton.FIGURE_CALLS_FILE: _skeleton.FRAME_FIGURE_SOURCE[:60]}
+
+
+def _fis_files(code_dir: Path, rels: Any) -> set[str]:
+    """The files among ``rels`` (paths relative to ``code_dir``) that hold FI's own text: the analysis FI writes
+    (``experiment.py``), its figure step and formula calculator (``fi_figures.py``, ``fi_core/``), the frame's runtime, the
+    reader of the record and the figure calls. A module of the study's with one of those names is the study's."""
+    from . import analysis_frame as _analysis
+
+    heads = _fis_heads()
+    out: set[str] = set()
+    for rel in rels:
+        try:
+            if rel == _analysis.EXPERIMENT_FILE:
+                ok = _analysis.is_fis_file(code_dir / rel)
+            elif rel in heads:
+                ok = (code_dir / rel).read_text(encoding="utf-8").lstrip(chr(0xFEFF)).startswith(heads[rel])
+            else:
+                ok = _analysis.carried_file(code_dir, rel)
+        except (OSError, UnicodeDecodeError, ValueError):
+            ok = False
+        if ok:
+            out.add(rel)
+    return out
+
+
 def _python_files(code_dir: Path) -> list[Path]:
+    # code/skills/ is FI's copy of the selected skills' files (Engine._skill_files_to_code), not the study's code.
     return sorted(p for p in code_dir.rglob("*.py")
                   if not any(part in ("tests", "__pycache__") or part.startswith(".") for part in p.relative_to(code_dir).parts[:-1])
-                  and not p.name.startswith("test_"))
+                  and p.relative_to(code_dir).parts[0] != "skills" and not p.name.startswith("test_"))
 
 
-def reached(code_dir: Path, *, scripts: list[str], harness: str | None = None) -> set[tuple[str, str]] | None:
+def reached(code_dir: Path, *, scripts: list[str], harness: str | None = None,
+            start: list[tuple[str, str]] | None = None) -> set[tuple[str, str]] | None:
     """The ``(file, function)`` pairs the run reaches (``file`` relative to ``code_dir``, with ``/``), from the programs
     ``scripts`` FI runs and, when FI's trial harness ran the simulation, the harness's entries in the file ``harness``.
+    ``start``: also reach these ``(file, function)`` entries (one result's function, to ask what only that function
+    reaches: give no ``scripts`` and no ``harness``; every module's top-level code and special methods still count).
     ``None`` when FI cannot tell (see the module docstring)."""
     code_dir = Path(code_dir)
     modules: dict[str, _Module] = {}
@@ -105,6 +180,7 @@ def reached(code_dir: Path, *, scripts: list[str], harness: str | None = None) -
         for name in {dotted, dotted.removesuffix(".__init__"), dotted.split(".")[-1]}:
             by_name.setdefault(name, m)
 
+    fis = _fis_files(code_dir, modules)
     done: set[tuple[str, str]] = set()
     work: list[tuple[_Module, list[ast.AST]]] = []
 
@@ -129,18 +205,53 @@ def reached(code_dir: Path, *, scripts: list[str], harness: str | None = None) -
         for m in modules.values():
             reach(m, name)
 
+    def all_of(m: _Module, seen: set[str] | None = None) -> None:
+        """Every function ``m`` holds, the names it imports (a package's re-exports) and, through ``from x import *``, what
+        the modules it star-imports hold."""
+        seen = set() if seen is None else seen
+        if m.rel in seen:
+            return
+        seen.add(m.rel)
+        for name in [*m.functions, *m.imports]:
+            reach(m, name)
+        for module in m.star:
+            if by_name.get(module) is not None:
+                all_of(by_name[module], seen)
+
+    def imported_module(m: _Module, node: ast.AST) -> _Module | None:
+        """The module of the quest's code that ``node`` names in ``m`` (``import derive``), else ``None``."""
+        if not (isinstance(node, ast.Name) and node.id in m.imports and node.id not in m.functions):
+            return None
+        module, attr = m.imports[node.id]
+        return by_name.get(module if attr is None else f"{module}.{attr}" if module else attr)
+
     for rel, m in modules.items():
         work.append((m, _definition_time(m.tree.body, main=rel in scripts)))
+        for name in list(m.functions):
+            if _is_dunder(name):
+                reach(m, name)  # a special method runs without its name being written (Sim(3), len(s), s + s, with R():)
     # FI's harness may call these in either script, whether or not a ledger shows it did: they always count as run.
     for script in {*scripts, *([harness] if harness else [])}:
         if script in modules:
             for entry in HARNESS_ENTRIES:
                 reach(modules[script], entry)  # defined there, or imported into it
 
+    for rel, name in start or []:
+        if rel in modules:
+            reach(modules[rel], name)
+
     while work:
         m, nodes = work.pop()
+        named: set[int] = set()  # the ``globals()`` calls read by a fixed name (see :func:`_scope_read`)
         for top in nodes:
             for node in ast.walk(top):
+                key = _scope_read(node)
+                if key is not None:
+                    named.add(id(key[0]))
+                    reach(m, key[1])  # the name read may be a function that is then called
+                    continue
+                if isinstance(node, ast.Call) and id(node) in named:
+                    continue
                 if isinstance(node, ast.Call):
                     f = node.func
                     called = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
@@ -148,9 +259,17 @@ def reached(code_dir: Path, *, scripts: list[str], harness: str | None = None) -
                         return None
                     if called == "getattr":
                         name = node.args[1] if len(node.args) > 1 else None
-                        if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
+                        if isinstance(name, ast.Constant) and isinstance(name.value, str):
+                            everywhere(name.value)
+                            continue
+                        target = imported_module(m, node.args[0]) if node.args else None
+                        if target is not None:
+                            all_of(target)  # a name computed on a module: any function of that module
+                        elif m.rel in fis or _fis_object(m, node.args[0] if node.args else None):
+                            for rel in fis:  # FI's own text: only FI's own files hold what it can name
+                                all_of(modules[rel])
+                        else:
                             return None
-                        everywhere(name.value)
                 elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
                     reach(m, node.id)
                 elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
@@ -186,12 +305,12 @@ def never_run_in(quest_root: Path) -> "Callable[[Any, Any], bool]":
 
     def test(file: Any, function: Any) -> bool:
         file = str(file or "").replace("\\", "/").strip()
-        function = str(function or "").strip()
-        if not file or not function or not _defines(code / file, function):
+        judged = _judged(code / file, str(function or "").strip()) if file else None
+        if judged is None:
             return False
         if not cache:
             cache.append(reached(code, scripts=scripts, harness=harness))
-        return cache[0] is not None and (file, function) not in cache[0]
+        return cache[0] is not None and (file, judged) not in cache[0]
 
     return test
 
@@ -204,12 +323,33 @@ def _defines(path: Path, function: str) -> bool:
     return any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == function for n in ast.walk(tree))
 
 
+def _judged(path: Path, function: str) -> str | None:
+    """The function of ``path`` whose reach decides the question about ``function``, or ``None`` when the file does not define it.
+    A finding may name a nested function (``outer.inner``) or a method (``Class.method``): a function is run when the function it
+    sits in is run, so the outermost function the file defines is the one judged (a method has no function around it: its own
+    name is judged)."""
+    if not function:
+        return None
+    parts = [p for p in function.split(".") if p]
+    if any(_is_dunder(p) for p in parts):
+        return None  # a special method is run by the language, not by a name: FI cannot tell
+    if _defines(path, function):
+        return function
+    if len(parts) < 2:
+        return None
+    for part in parts:
+        if _defines(path, part):
+            return part
+    return None
+
+
 def never_run(code_dir: Path, file: str, function: str, *, scripts: list[str], harness: str | None = None) -> bool:
     """Whether the function ``function`` of ``file`` (relative to ``code_dir``) is plainly never run: FI can read all the
-    code, finds the function in that file, and nothing the run reaches names it. ``False`` whenever FI cannot tell."""
+    code, finds the function in that file, and nothing the run reaches names it. ``False`` whenever FI cannot tell. A nested
+    ``outer.inner`` or ``Class.method`` is judged by its outermost function (:func:`_judged`)."""
     file = str(file or "").replace("\\", "/").strip()
-    function = str(function or "").strip()
-    if not file or not function or not _defines(Path(code_dir) / file, function):
+    judged = _judged(Path(code_dir) / file, str(function or "").strip()) if file else None
+    if judged is None:
         return False
     done = reached(code_dir, scripts=scripts, harness=harness)
-    return done is not None and (file, function) not in done
+    return done is not None and (file, judged) not in done

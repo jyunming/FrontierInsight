@@ -78,7 +78,9 @@ async def test_a_crash_between_analysis_repairs_does_not_earn_them_a_fresh_budge
     analysis still gets three repairs in all (four requests with the crash fix), not three more after the crash."""
     calls: list[str] = []
     prompts: list[str] = []
-    crashing = 'raise RuntimeError("the analysis broke")\n'
+    # It keeps the analysis's contract (it still prints RESULT_JSON), so FI runs it, and it crashes before printing:
+    # a reply that dropped the line would be refused unrun (trial_runner.repair_breaks_contract), not crash.
+    crashing = 'raise RuntimeError("the analysis broke")\nprint("RESULT_JSON: {}")\n'
     _model(monkeypatch, [crashing, ANALYSIS], calls, prompts)
     engine = Engine(_cfg(tmp_path, engine={"exec_reflect_max_iterations": 3}))
     await engine.run()

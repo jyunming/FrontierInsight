@@ -21,7 +21,8 @@ CHECK_NOT_SHOWN = {"verdict": "improvement_not_shown", "says": "the improvement 
 CHECK_OK = {"verdict": "verified", "passed": True}
 
 OVERCLAIM = ("# A heat sink study\n\n## Results\n\nThe optimised design lowers the peak temperature of the heat sink.\n\n"
-             "![The optimised design of the heat sink](figures/optimised.png)\n")
+             "Figure 1 shows the optimised design of the heat sink.\n\n"
+             "![**Figure 1.** The optimised design of the heat sink.](figures/optimised.png)\n")
 HONEST = ("# A heat sink study\n\n## Results\n\nThe search found no design better than the baseline, so there is no "
           "optimised design to report. The best design found was the baseline itself.\n\n"
           "## Limitations\n\nThe known-answer checks did not pass, so the result is not validated against known answers.\n\n"
@@ -29,20 +30,21 @@ HONEST = ("# A heat sink study\n\n## Results\n\nThe search found no design bette
 
 
 def test_a_paper_that_calls_a_design_optimised_against_a_record_that_says_it_was_not_is_flagged() -> None:
-    hits = rc.contradictions(OVERCLAIM, best_design=NOT_BETTER, optimum_check=CHECK_NOT_SHOWN, figures_on_disk={"optimised.png"})
+    hits = rc.contradictions(OVERCLAIM, best_design=NOT_BETTER, optimum_check=CHECK_NOT_SHOWN)
     assert hits and all(h.startswith("record_contradiction:") for h in hits)
     assert any("The optimised design lowers the peak temperature" in h and "improvement not shown" in h for h in hits)
     assert any("captioned" in h and "no optimised design was computed" in h for h in hits), hits
+    # The image's own caption is FI's, written from the figure's record: it is not read as the writer's claim.
+    assert not any("**Figure 1.**" in h for h in hits), hits
 
 
 def test_the_same_paper_is_fine_when_the_record_says_the_design_is_better() -> None:
-    assert rc.contradictions(OVERCLAIM, best_design=BETTER, optimum_check=CHECK_OK, figures_on_disk={"optimised.png"}) == []
+    assert rc.contradictions(OVERCLAIM, best_design=BETTER, optimum_check=CHECK_OK) == []
 
 
 def test_an_honest_paper_gets_no_hit_whatever_the_record_says() -> None:
     for best, check in ((NOT_BETTER, CHECK_NOT_SHOWN), (NO_FEASIBLE, None), (BETTER, CHECK_OK), (None, None)):
-        assert rc.contradictions(HONEST, best_design=best, optimum_check=check, oracle={"status": "went_on_failing"},
-                                 figures_on_disk={"peak.png"}) == [], (best, check)
+        assert rc.contradictions(HONEST, best_design=best, optimum_check=check, oracle={"status": "went_on_failing"}) == [], (best, check)
 
 
 @pytest.mark.parametrize("sentence", [
@@ -74,14 +76,6 @@ def test_a_hedge_exempts_a_claim_only_in_its_own_clause() -> None:
 def test_no_feasible_design_means_there_is_no_best_design_to_call_best() -> None:
     hits = rc.contradictions("# T\n\nThe best design reduces the mass.\n", best_design=NO_FEASIBLE)
     assert hits and "no design that meets every limit" in hits[0]
-
-
-def test_a_figure_the_run_did_not_draw_is_flagged_and_one_it_drew_is_not() -> None:
-    paper = "# T\n\nSee the plot.\n\n![Cooling curve](figures/cooling.png)\n\n![Other](figures/other.png)\n"
-    hits = rc.contradictions(paper, figures_on_disk={"cooling.png"})
-    assert len(hits) == 1 and "figures/other.png" in hits[0] and "drew no figure of that name" in hits[0]
-    assert rc.contradictions(paper, figures_on_disk={"cooling.png", "other.png"}) == []
-    assert rc.contradictions(paper, figures_on_disk=None) == [], "figures not known: nothing judged"
 
 
 def test_validated_is_flagged_only_against_unconfirmed_or_failed_checks() -> None:
@@ -124,13 +118,11 @@ def _write_records(eng: Engine, best: dict[str, Any], check: dict[str, Any] | No
         (root / "needs" / "ORACLE_CHECK.json").write_text(json.dumps(oracle), encoding="utf-8")
 
 
-def test_the_engine_reads_the_records_and_the_figures_on_disk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_engine_reads_the_records(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     eng = _engine(tmp_path, monkeypatch)
     _write_records(eng, NOT_BETTER, CHECK_NOT_SHOWN, {"status": "went_on_failing"})
-    (eng.quest_root / "figures").mkdir()
-    (eng.quest_root / "figures" / "peak.png").write_bytes(b"x")
     hits = eng._record_contradiction_hits(OVERCLAIM, {})
-    assert len(hits) >= 3 and any("optimised.png" in h for h in hits)
+    assert len(hits) >= 2 and any("Figure 1 shows the optimised design" in h for h in hits)
     assert eng._record_contradiction_hits(HONEST, {}) == []
     # A quest with no search and no checks recorded flags nothing in a paper that says the same words.
     other = _engine(tmp_path / "other", monkeypatch)
@@ -142,15 +134,17 @@ def test_such_a_hit_is_a_text_problem_named_as_one() -> None:
     assert _hit_name(hit) == rc.HIT and _hits_need_only_a_rewrite([hit])
 
 
-def test_the_paper_is_written_again_twice_and_then_the_quest_stops_with_no_paper(
+def test_the_paper_is_written_again_twice_and_then_the_quest_goes_on_the_usual_way(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     eng = _engine(tmp_path, monkeypatch)
     hit = rc.contradictions(OVERCLAIM, best_design=NOT_BETTER, optimum_check=CHECK_NOT_SHOWN)[0]
     review = {"verdict": "accept", "must_flag_hits": [hit]}
     # Even a quest whose iteration budget is spent (max_iterations is 1) gets its rewrites.
-    for seen, route in ((1, "rewrite"), (2, "rewrite"), (3, "stuck")):
+    for seen, route in ((1, "rewrite"), (2, "rewrite")):
         assert eng._route_after_review({"review": review, "iteration": 1, "record_rewrites": seen}) == route
+    # After them the check, a reading of the paper's words, never ends the quest (core/stop_power.py).
+    assert eng._route_after_review({"review": review, "iteration": 1, "record_rewrites": 3}) not in ("rewrite", "stuck")
     # Without the hit the route is the usual one.
     assert eng._route_after_review({"review": {"verdict": "accept", "must_flag_hits": []}, "iteration": 1}) not in ("rewrite", "stuck")
 
@@ -171,10 +165,64 @@ async def test_the_stop_says_what_the_paper_claimed_and_keeps_no_paper(tmp_path:
     assert "No paper was written" in capsys.readouterr().out
 
 
-def test_a_run_that_drew_no_figure_does_not_judge_the_papers_figures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+# --- after the rewrites: taken out, never a stop ---------------------------------------------------------------------
+
+
+def test_take_out_removes_the_flagged_sentences_and_nothing_else() -> None:
+    found = rc.found(OVERCLAIM, best_design=NOT_BETTER, optimum_check=CHECK_NOT_SHOWN)
+    text, taken = rc.take_out(OVERCLAIM, [span for _hit, span in found])
+    assert "The optimised design lowers" not in text and "Figure 1 shows the optimised" not in text
+    assert "](figures/optimised.png)" in text, "FI's figure, with FI's caption, is not the writer's to take out"
+    assert "# A heat sink study" in text and "## Results" in text
+    assert rc.found(text, best_design=NOT_BETTER, optimum_check=CHECK_NOT_SHOWN) == []
+    assert rc.take_out(HONEST, ["a sentence the paper does not have."]) == (HONEST, [])
+
+
+def _paper_on_disk(eng: Engine, text: str) -> dict[str, Any]:
+    path = eng.quest_root / "paper" / "paper.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return {"paper_md": str(path)}
+
+
+def test_a_sentence_still_flagged_after_the_rewrites_is_taken_out_and_the_quest_goes_on(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A live quest was stopped with no paper after its rewrites for two sentences that said what FI's records say ("the
+    best design found was therefore the baseline, which is no better than it"; "nothing ... is validated against that
+    known answer"): the reading of the sentence is a reading of free text, so its hit costs the sentence, not the paper."""
     eng = _engine(tmp_path, monkeypatch)
-    (eng.quest_root / "figures").mkdir(parents=True)
-    paper = "# T\n\nSee the plot.\n\n![Cooling curve](figures/cooling.png)\n"
-    assert eng._record_contradiction_hits(paper, {}) == []
-    (eng.quest_root / "figures" / "other.png").write_bytes(b"x")
-    assert len(eng._record_contradiction_hits(paper, {})) == 1
+    _write_records(eng, NOT_BETTER, CHECK_NOT_SHOWN, {"status": "went_on_failing"})
+    state = _paper_on_disk(eng, OVERCLAIM)
+    assert eng._record_contradiction_hits(OVERCLAIM, {**state, "record_rewrites": 1}), "a rewrite is still left"
+    assert (eng.quest_root / "paper" / "paper.md").read_text(encoding="utf-8") == OVERCLAIM
+    assert eng._record_contradiction_hits(OVERCLAIM, {**state, "record_rewrites": 2}) == []
+    paper = (eng.quest_root / "paper" / "paper.md").read_text(encoding="utf-8")
+    assert "The optimised design lowers" not in paper and "## Results" in paper
+    record = json.loads((eng.quest_root / rc.TAKEN_OUT).read_text(encoding="utf-8"))
+    assert record["taken_out"][0]["text"].startswith("The optimised design lowers")
+    assert record["taken_out"][0]["why"].startswith(rc.HIT)
+    review = {"verdict": "accept", "must_flag_hits": []}
+    assert eng._route_after_review({"review": review, "iteration": 1, "record_rewrites": 0}) != "stuck"
+    from core import quality_report
+    assert "this was taken out: The optimised design lowers" in quality_report.render(quality_report.build(eng.quest_root, running=False))
+
+
+def test_every_sentence_of_a_kind_is_taken_out_and_a_later_pass_adds_to_the_list(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The check names the first sentence of each kind: a second sentence of the same claim stayed in the paper after
+    the first was taken out, and a later pass replaced the list of what was taken out with its own."""
+    eng = _engine(tmp_path, monkeypatch)
+    _write_records(eng, NOT_BETTER, CHECK_NOT_SHOWN, {"status": "went_on_failing"})
+    two = OVERCLAIM.replace("heat sink.", "heat sink.\n\nThe optimised design also lowers the mass of the fins.")
+    state = {**_paper_on_disk(eng, two), "record_rewrites": 2}
+    assert eng._record_contradiction_hits(two, state) == []
+    paper = (eng.quest_root / "paper" / "paper.md").read_text(encoding="utf-8")
+    assert "The optimised design lowers" not in paper and "also lowers the mass" not in paper
+    taken = [e["text"] for e in json.loads((eng.quest_root / rc.TAKEN_OUT).read_text(encoding="utf-8"))["taken_out"]]
+    assert any(t.startswith("The optimised design lowers") for t in taken)
+    assert any(t.startswith("The optimised design also lowers") for t in taken)
+    later = paper + "\nThe optimised design is the one to build.\n"
+    (eng.quest_root / "paper" / "paper.md").write_text(later, encoding="utf-8")
+    eng._record_contradiction_hits(later, state)
+    again = [e["text"] for e in json.loads((eng.quest_root / rc.TAKEN_OUT).read_text(encoding="utf-8"))["taken_out"]]
+    assert set(taken) <= set(again) and any(t.startswith("The optimised design is the one") for t in again)

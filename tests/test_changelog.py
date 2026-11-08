@@ -263,7 +263,9 @@ def _last_heading(root: Path) -> str:
 @pytest.mark.parametrize("case, kind, words", [
     ("first", "Added", "code written"),
     ("refine", "Added", "added what a refine asked for: the runtime for n=64"),
-    ("review", "Fixed", "what the review found wrong in"),
+    # a review alone no longer sends the experiment back (core/engine.py::_review_sends_the_experiment_back): a pass
+    # after a review is a revision, not a fix of something the run computed
+    ("review", "Changed", "revised after review (round 1)"),
     ("redesign", "Changed", "revised after review (round 1)"),
 ])
 def test_implement_names_the_kind_of_change(tmp_path: Path, case: str, kind: str, words: str) -> None:
@@ -360,3 +362,23 @@ def test_each_run_fills_in_whether_the_results_changed(tmp_path: Path) -> None:
     assert len(_entries(root)) == before
     rows = cr.history(root)
     assert "result_digest" not in rows[0] and set(rows[-1]["result_digest"]) == {"peak", "t"}
+
+
+def test_the_message_and_the_entry_lines_come_from_what_is_known() -> None:
+    assert changelog.message("the code as it ran (execute)") == "the code as it ran (execute)"
+    assert changelog.detail() == []  # nothing known: no body, no filler
+    long = "x" * 500
+    lines = changelog.detail(stage="execute_reflect", attempt=1, fault="a\n  b  " + long, functions=["f", "C.g"],
+                             patch="p")
+    assert lines[0] == "Step: execute_reflect, attempt 1"
+    assert lines[1].startswith("Fault: a b xxx") and len(lines[1]) <= 248 and lines[1].endswith("...")
+    assert lines[2:] == ["Functions changed: f, C.g", "Patch: p"]
+    assert changelog.message("s", lines).startswith("s\n\nStep: ")
+    assert "not measured" not in changelog.message("s", lines)
+
+
+def test_changed_functions_names_what_differs() -> None:
+    old = "def a():\n    return 1\n\nclass C:\n    def m(self):\n        return 1\n\ndef gone():\n    pass\n"
+    new = "def a():\n    return 2\n\nclass C:\n    def m(self):\n        return 1\n"
+    assert changelog.changed_functions(old, new) == ["a", "gone (removed)"]
+    assert changelog.changed_functions(old, "def (") == []

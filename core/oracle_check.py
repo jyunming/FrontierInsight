@@ -45,6 +45,8 @@ import re
 import sys
 from typing import Any
 
+from . import oracle_forms as _forms
+
 # What a tolerance of 0 can mean for a computed value: floating-point arithmetic cannot give it more exactly than a few
 # dozen units in its last place (a plan's 0 on a computed p-value failed correct code on a measured 1.1e-16), so 0 is read
 # as "exact to machine precision". A count that is off by 1 still fails; a tolerance above 0 is never widened.
@@ -363,7 +365,7 @@ _POINTER_RE = re.compile(r"^(?:from|see|in|as in|according to|following|per|cf\.
 _MATH_RE = re.compile(r"[=<>≈≤≥→]")
 # What a second implementation says about the code it does not share with the simulation: a negation about code.
 _NOT_SHARED_RE = re.compile(
-    r"shares? no (?:code|function|module|routine|part)|(?:does not|doesn[’']t|do not|don[’']t) share\b"
+    r"shar(?:es?|ing) no(?:\s+[\w-]+){0,2}\s+(?:code|function|module|routine|part)\b|(?:does not|doesn[’']t|do not|don[’']t) share\b"
     r"|no (?:shared|common) code|no code (?:in common|with|shared)"
     r"|(?:does not|doesn[’']t|without) (?:use|call|reuse|import|using|calling|reusing|importing)\b[^.;]{0,60}"
     r"\b(?:code|simulation|function|module|stepper|solver|routine|simulate\.py|run_trial|run_cell)\b"
@@ -401,6 +403,17 @@ def _labels_in(group: str) -> list[str]:
                 continue
         out.extend(b for b in bounds if b)
     return out
+
+
+def _is_index(text: str, start: int) -> bool:
+    """Whether the bracket at ``start`` indexes a symbol (``u [1]``, ``x1 [2]``, ``y_0 [1]``) rather than cites a source: it
+    follows a lone letter, or a name with a digit or an underscore in it, which is how a variable is written and not how
+    a source is named."""
+    before = re.search(r"([A-Za-z][A-Za-z0-9_]*)\s*$", text[:start])
+    if before is None or (before.start() > 0 and (text[before.start() - 1].isalnum() or text[before.start() - 1] == "_")):
+        return False
+    word = before.group(1)
+    return len(word) == 1 or any(c.isdigit() or c == "_" for c in word)
 
 
 def _code_list(text: str, start: int, group: str) -> bool:
@@ -470,7 +483,7 @@ def _cites(text: str, sources: list[dict[str, str]]) -> tuple[list[str], list[st
     found, missing = [], []
     for match in _LABEL_RE.finditer(text):
         group = match.group(1)
-        if _code_list(text, match.start(), group):
+        if _code_list(text, match.start(), group) or _is_index(text, match.start()):
             continue
         for label in _labels_in(group):
             (found if label in labels else missing).append(f"[{label}]")
@@ -656,27 +669,46 @@ def _labelled_in(eid: str, texts: str) -> bool:
                for m in _LABEL_RANGE_RE.finditer(texts))
 
 
-def unlabelled_equations(protocol: dict[str, Any] | None, source: str | dict[str, str]) -> list[str]:
+def _defines(source: str, name: str) -> bool:
+    """Whether ``source`` defines a function called ``name`` at its top level (read, never run)."""
+    import ast
+
+    try:
+        tree = ast.parse(source or "")
+    except (SyntaxError, ValueError):
+        return False
+    return any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name for n in tree.body)
+
+
+def unlabelled_equations(protocol: dict[str, Any] | None, source: str | dict[str, str],
+                         names: dict[str, str] | None = None) -> list[str]:
     """The ``generates`` equations of the plan whose id no comment or function docstring of the simulation carries (a
     label such as ``# E1`` on or above the code that implements it, or a range ``# E1-E3``). ``source`` is the
     simulation's text, or ``{file name: text}`` for a simulation with helper modules. Only the labelled mapping is
-    read, not the mathematics: a label says where to look, not that the code there is right. Ids match in any case."""
+    read, not the mathematics: a label says where to look, not that the code there is right. Ids match in any case.
+    ``names``: the function the code outline names for each equation (``implements``); an equation whose function the
+    outline names and the code defines is mapped by that, and needs no label (the outline is where the mapping was
+    fixed, so asking the model for a comment as well said the same thing twice)."""
     wanted = generating_equations(protocol)
     if not wanted:
         return []
-    sources = source.values() if isinstance(source, dict) else [source]
+    sources = list(source.values() if isinstance(source, dict) else [source])
     texts = "\n".join(t for s in sources for t in _label_texts(s or ""))
-    return [eid for eid in wanted if not _labelled_in(eid, texts)]
+    named = {str(k).strip().upper(): str(v).strip() for k, v in (names or {}).items() if str(v or "").strip()}
+    return [eid for eid in wanted if not _labelled_in(eid, texts)
+            and not (named.get(eid.upper()) and any(_defines(s or "", named[eid.upper()]) for s in sources))]
 
 
-def label_gaps(protocol: dict[str, Any] | None, source: str | dict[str, str], script: str) -> list[str]:
+def label_gaps(protocol: dict[str, Any] | None, source: str | dict[str, str], script: str,
+               names: dict[str, str] | None = None) -> list[str]:
     """One sentence for the equations of the plan the simulation (``script``, its file name) does not say it implements
-    (empty when every ``generates`` equation is labelled, or the plan lists none)."""
-    missing = unlabelled_equations(protocol, source)
+    (empty when every ``generates`` equation is labelled, or the plan lists none; ``names``: see
+    :func:`unlabelled_equations`)."""
+    missing = unlabelled_equations(protocol, source, names)
     if not missing:
         return []
-    names = ", ".join(missing)
-    return [f"{script} does not mark where it implements equation{'s' if len(missing) > 1 else ''} {names} of the model "
+    listed = ", ".join(missing)
+    return [f"{script} does not mark where it implements equation{'s' if len(missing) > 1 else ''} {listed} of the model "
             f"behind the numbers (a comment such as `# {missing[0]}` on or above the code that computes it), so a wrong "
             "number cannot be traced to the equation or to the code"]
 
@@ -774,6 +806,25 @@ def reference_problem(oracle: dict[str, Any], protocol: dict[str, Any] | None,
         return (f"the check {name!r} rests on equation {', '.join(unknown)}, which the model behind the numbers does not "
                 "list")
     return f"the check {name!r} takes its expected value from a source this quest did not retrieve (“{ref[:80]}”)"
+
+
+def validates(oracle: dict[str, Any], protocol: dict[str, Any] | None, sources: list[dict[str, str]]) -> bool:
+    """Whether a passing check is evidence the code is right independently of the plan's own working: a second
+    implementation that shares no code with the simulation, or an expected value taken from a source this quest
+    retrieved (cited in the check's reference, or in the source of a model equation the reference names). A value the
+    plan's model derived itself (a `derivation`, an equation whose source is a derivation) shows only that the code
+    agrees with the plan, not that either is right."""
+    ref = reference_of(oracle)
+    if kind_of(oracle) == "second_implementation" and _NOT_SHARED_RE.search(ref):
+        return True  # one route; a second implementation that cites a retrieved source also validates by the other
+    if _derivation_steps(ref) is None and _cites(ref, sources)[0]:
+        return True
+    for eid, eq in _equations(protocol).items():
+        if re.search(rf"(?<![\w.]){re.escape(eid)}(?!\w|\.\d)", ref, re.IGNORECASE):
+            source = _text(eq.get("source")) or next((t for t in (_text(eq.get(k)) for k in _EQ_SOURCE_KEYS) if t), "")
+            if _derivation_steps(source) is None and _cites(source, sources)[0]:
+                return True
+    return False
 
 
 def empty_references(protocol: dict[str, Any] | None) -> list[str]:
@@ -884,7 +935,7 @@ def unjudgeable(oracles: list[dict[str, Any]]) -> list[str]:
 def mc_of(check: Any) -> dict[str, Any] | None:
     """The record of the trials a check was decided on (core/mc_error.py), when it has one with a verdict."""
     mc = check.get("mc") if isinstance(check, dict) else None
-    return mc if isinstance(mc, dict) and mc.get("verdict") in ("pass", "fail", "undecided") else None
+    return mc if isinstance(mc, dict) and mc.get("verdict") in ("pass", "fail", "undecided", "partial") else None
 
 
 def judged(oracles: list[dict[str, Any]], reported: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -917,8 +968,176 @@ def judged(oracles: list[dict[str, Any]], reported: dict[str, Any] | None) -> li
             "limit": limit, "passed_by_engine": verdict, "script_said": (check or {}).get("passed"),
             "measured_by": "engine" if (reported or {}).get("engine_measured") and (check or {}).get("measured_by") == "engine" else "script",
             **({"mc": mc} if mc else {}), **({"undecided": True} if undecided else {}),
+            # "partial" counts as a pass for stop and repair (passed_by_engine stays True) but is kept apart so a record
+            # of what was checked can say it was not every trial (partial_checks).
+            **({"partial": {"judged": int(mc.get("judged") or 0), "planned": int(mc.get("planned") or 0)}}
+               if mc is not None and mc.get("verdict") == "partial" and verdict is True else {}),
         })
     return out
+
+
+#: What a verdict re-made on the main run's own trials says it was judged on (``mc.judged_on``; :func:`rejudge_on_delivered`).
+DELIVERED_RUN = "the delivered run"
+
+
+#: The parts of a protocol that define what one trial is, besides the setting it runs at.
+_TRIAL_BASIS_KEYS = ("in_each_run", "constants", "thresholds", "shared_draws", "seed_policy")
+
+
+def trial_basis(protocol: dict[str, Any] | None) -> str:
+    """One hash of everything in the protocol that defines a trial apart from its setting: the full list of values compared
+    inside each run (``in_each_run``), the constants, the thresholds, whether trials share draws and the seed policy. The
+    gate keeps it in each entry it goes on with, so a delivered run is read as the same trials only when it is unchanged."""
+    import hashlib
+
+    basis = {k: protocol.get(k) for k in _TRIAL_BASIS_KEYS} if isinstance(protocol, dict) else {}
+    return hashlib.sha256(json.dumps(basis, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
+def _same_setting(a: Any, b: Any) -> bool:
+    """Whether two settings name the same values (numbers compared as numbers: ``200`` and ``200.0`` are one value)."""
+    if not isinstance(a, dict) or not isinstance(b, dict) or set(a) != set(b):
+        return False
+    for k, v in a.items():
+        w = b[k]
+        if _num(v) is not None and _num(w) is not None and not isinstance(v, bool) and not isinstance(w, bool):
+            if _num(v) != _num(w):
+                return False
+        elif v != w:
+            return False
+    return True
+
+
+def _delivered_rows(cell: dict[str, Any], names: list[str]) -> list[dict[str, float]]:
+    """The delivered run's trials of one setting as rows of ``names`` (a trial joined across the metrics by FI's own trial
+    number, never by position); a trial missing any of the names, or with a number that is not finite, is left out."""
+    metrics = cell.get("metrics") if isinstance(cell.get("metrics"), dict) else {}
+    per: list[dict[Any, float]] = []
+    for n in names:
+        m = metrics.get(n)
+        values = m.get("values") if isinstance(m, dict) else None
+        ids = m.get("trials") if isinstance(m, dict) else None
+        if not isinstance(values, list) or not isinstance(ids, list) or len(values) != len(ids):
+            return []
+        per.append({t: float(v) for t, v in zip(ids, values)
+                    if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)})
+    shared = sorted(set.intersection(*(set(p) for p in per))) if per else []
+    return [{n: p[t] for n, p in zip(names, per)} for t in shared]
+
+
+def rejudge_on_delivered(record: Any, trials: Any, protocol: dict[str, Any] | None, version: str,
+                         ) -> tuple[dict[str, Any] | None, list[str]]:
+    """``(record, names)``: ``needs/ORACLE_CHECK.json`` with each check that the trials of the gate could not decide for lack
+    of time (``mc.why == "time"``) judged again on the delivered run's own trials (``trials``: ``raw/trials.json``), and the
+    names of the checks changed; ``(None, [])`` when nothing changes. The record given is not changed.
+
+    A check is judged again only when FI can read everything from its own record: the code that measured it is the code
+    that ran now (``version`` is the entry's ``script_version``), the check is as it was (its fingerprint), its case is
+    exactly one setting of the delivered run, whose trials are more than the gate had and none failed, and its measure
+    is a mean of metrics the protocol declares as means. The verdict is the one the gate would have given on those trials
+    (:func:`core.mc_error.statistic`, :func:`core.mc_error.mean_verdict`). A check still not decided stays as it was; a
+    check that was undecided for another reason is not touched. A pass leaves the list of checks the quest went on with;
+    a fail stays in it as a failure; the quest's status becomes ``ok`` when nothing is left in it.
+
+    The trials must be the same trials: the entry's ``trial_basis`` (kept by the gate, :func:`trial_basis`) must equal the
+    delivered run's. An entry with none (a record written before the gate kept it) is never judged again. A fail on the
+    delivered run is recorded and disclosed as it stands, with no second look at fresh trials: the gate's confirming look
+    guards against a small first sample, and the delivered run is the full sample."""
+    import copy
+
+    from . import accepted_checks as _accepted
+    from . import mc_error as _mc
+    from .optimise import complete_case  # a late import: core.optimise imports this module
+
+    if not isinstance(record, dict) or record.get("status") != _accepted.WENT_ON or not isinstance(trials, dict):
+        return None, []
+    attempts = record.get("attempts")
+    last = attempts[-1] if isinstance(attempts, list) and attempts and isinstance(attempts[-1], dict) else None
+    cells = [c for c in trials.get("cells") or [] if isinstance(c, dict) and isinstance(c.get("cell"), dict)]
+    if last is None or not cells:
+        return None, []
+    named = {str(o["name"]).strip().lower(): o for o in declared(protocol)}
+    means, proportions = _mc.mean_names(protocol), _mc.proportion_names(protocol)
+    repeated = _mc.repeats_trials(protocol)
+    out = copy.deepcopy(record)
+    out_last = out["attempts"][-1]
+    entries = {str(e.get("name") or "").strip().lower(): e for e in out.get("went_on") or [] if isinstance(e, dict)}
+    done: list[str] = []
+    for j in out_last.get("judged") or []:
+        mc = mc_of(j)
+        name = str(j.get("name") or "").strip()
+        oracle, entry = named.get(name.lower()), entries.get(name.lower())
+        if (not j.get("undecided") or mc is None or mc.get("verdict") != "undecided" or mc.get("why") != "time"
+                or mc.get("read_as") != "mean" or oracle is None or entry is None or not entry.get("undecided")):
+            continue
+        if entry.get("script_version") != version or entry.get("fingerprint") != _accepted.fingerprint(oracle):
+            continue
+        if not entry.get("trial_basis") or entry.get("trial_basis") != trial_basis(protocol):
+            continue  # FI keeps nothing showing the delivered run's trials are the ones the gate measured
+        own = case_of(oracle)
+        expected, limit, _mode = limit_of(oracle)
+        if own is None or expected is None or limit is None or not _mc.reads_a_mean(oracle):
+            continue
+        case, measure = own
+        names = _mc.measure_names(measure)
+        if not names or not all(n in means for n in names):
+            continue
+        here = [c for c in cells if _same_setting(c["cell"], complete_case(protocol, case))]
+        if len(here) != 1 or int(here[0].get("failed") or 0) or int(here[0].get("ok") or 0) <= int(mc.get("trials") or 0):
+            continue
+        rows = _delivered_rows(here[0], names)
+        if len(rows) != int(here[0].get("ok") or 0):
+            continue
+        stat = _mc.statistic(rows, measure, means, expected, limit, proportions, repeated=repeated)
+        said = _mc.mean_verdict(stat, expected, limit) if stat is not None else None
+        if said is None or stat.get("value") is None:
+            continue
+        value = float(stat["value"])
+        new = _mc.record(stat, read_as="mean", verdict=said, why="", failed=0,
+                         started=int(here[0].get("planned") or len(rows)), judged_on=DELIVERED_RUN)
+        passed = said == "pass" and abs(value - expected) <= limit
+        j.update(value=value, mc=new, passed_by_engine=passed, judged_on=DELIVERED_RUN)
+        j.pop("undecided", None)
+        for c in out_last.get("checks") or []:
+            if isinstance(c, dict) and str(c.get("name") or "").strip().lower() == name.lower():
+                # Only the delivered measurement stays: what the gate's side run returned is replaced, not mixed in.
+                returned = {}
+                for k, m in (here[0].get("metrics") or {}).items():
+                    vals = [float(v) for v in (m.get("values") if isinstance(m, dict) else None) or []
+                            if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)]
+                    if vals:
+                        returned[k] = math.fsum(vals) / len(vals)
+                returned["n_trials"] = float(len(rows))
+                c.update(value=value, mc=new, returned=returned)
+        stale = f"the oracle {name!r} "
+        for holder in (out, out_last):
+            holder["problems"] = [p for p in holder.get("problems") or [] if not str(p).startswith(stale)]
+            if not passed:
+                holder["problems"].append(
+                    f"the oracle {name!r} failed on the delivered run: FI measured {_fmt(value)} ({_mc.words(new)}), the "
+                    f"protocol expects {_fmt(expected)} within {_fmt(limit)}")
+        out_last["triage"] = [t for t in out_last.get("triage") or []
+                              if not (isinstance(t, dict) and t.get("check") == name and t.get("kind") == "trials")]
+        if isinstance(out.get("set_aside"), dict):
+            out["set_aside"].pop(name, None)
+        if passed:
+            out["went_on"] = [e for e in out["went_on"] if e is not entry]
+        else:
+            for k in ("undecided", "undecided_words"):
+                entry.pop(k, None)
+            entry.update(measured=value, mc_words=_mc.words(new))
+        done.append(name)
+    if not done:
+        return None, []
+    if not out.get("set_aside"):
+        out.pop("set_aside", None)
+    if out.get("went_on"):
+        out["summary"] = "; ".join(_accepted.gap(e) for e in out["went_on"])
+    else:  # every check the quest went on with is now a pass on the delivered run: nothing is left to go on with
+        for k in ("went_on", "summary", "explained", "set_aside"):
+            out.pop(k, None)
+        out["status"] = "ok"
+    return out, done
 
 
 def duplicate_names(oracles: list[dict[str, Any]], reported: dict[str, Any] | None = None) -> list[str]:
@@ -957,6 +1176,19 @@ def engine_passed(judged_list: list[dict[str, Any]]) -> list[str]:
         if j.get("measured_by") == "engine" and _num(j.get("value")) is not None and j.get("passed_by_engine") is True
         and not j.get("flagged_by_reader")
     ]
+
+
+def partial_checks(judged_list: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The judged oracles that passed on every trial judged but not on all planned (time ran out): each is a pass for
+    stop and repair, and not a fully checked rule for a record of what was checked."""
+    return [j for j in judged_list if j.get("passed_by_engine") is True and isinstance(j.get("partial"), dict)]
+
+
+def partial_gap_words(j: dict[str, Any]) -> str:
+    """One sentence for a partial check, for the evidence gaps and the quality report."""
+    p = j.get("partial") or {}
+    return (f"the check '{j.get('name')}' passed on {int(p.get('judged') or 0)} of {int(p.get('planned') or 0)} trials; "
+            "the rest were not judged in the time allowed, so the rule is not shown to hold in every trial")
 
 
 def not_passed(judged_list: list[dict[str, Any]]) -> list[str]:
@@ -1002,6 +1234,10 @@ def analysis_note(judged_list: list[dict[str, Any]]) -> str:
     for j in judged_list:
         value, expected, limit = _num(j.get("value")), _num(j.get("expected")), _num(j.get("limit"))
         verdict = {True: "passed", False: "failed"}.get(j.get("passed_by_engine"), "not judged")
+        if isinstance(j.get("partial"), dict) and j.get("passed_by_engine") is True:
+            p = j["partial"]
+            verdict = (f"passed on {int(p.get('judged') or 0)} of {int(p.get('planned') or 0)} trials; the rest were not "
+                       "judged in the time allowed (say it was not checked in every trial)")
         verdict += "" if j.get("measured_by") == "engine" else " (the value is the script's own)"
         if j.get("flagged_by_reader"):
             verdict = (not_shown_words(str(j["flagged_by_reader"])) + "; do not say this check passed or that it "
@@ -1159,14 +1395,30 @@ _TRIAL_CONTRACT = (
     "own trials), when it calls run_cell; run_trial must "
     "stay ONE trial and never return or call run_cell. An oracle without a `case` is read from `def oracle() -> dict` in simulate.py, "
     "which computes each such check with the same simulation code and returns its value keyed by the check's name. "
+    "FI sets the environment variable `FI_CELL_KIND` to `check` for that call (the case is the call's cell, with no "
+    "extra key), and code that treats a search design or a grid row differently must take the `check` branch, as it "
+    "does when the variable is unset. "
     "There is no FI_ORACLE variable and no ORACLE_JSON line. Nothing the script writes decides pass or fail: the "
     "engine judges each value against the `expected` and `tolerance` the protocol fixes above (for an invariant the "
     "value is the worst violation observed, and the expected value is 0).\n\n"
 )
 
 
+_FRAME_CONTRACT = (
+    "The contract: FI checks the simulation itself. For an oracle that names a `case` and a `measure`, FI calls the function "
+    "`trial` in simulate.py on that case and computes the `measure` (one returned name, or a formula of them) from the "
+    "result, so `trial` must return every name the measure uses, computed by the real simulation. An oracle without a `case` "
+    "is read from `def oracle() -> dict` in simulate.py, which computes each such check with the same simulation code and "
+    "returns its value keyed by the check's name. FI sets the environment variable `FI_CELL_KIND` to `check` for that call "
+    "(the case is the call's cell, with no extra key), and code that treats a search design or a grid row differently must "
+    "take the `check` branch, as it does when the variable is unset. "
+    "Nothing the script writes decides pass or fail: the engine judges each value against the `expected` and `tolerance` the "
+    "protocol fixes above (for an invariant the value is the worst violation observed, and the expected value is 0).\n\n"
+)
+
+
 def directive(oracles: list[dict[str, Any]], found: list[str], disputed: list[str] | None = None, *,
-              trial: bool = False) -> str:
+              trial: bool = False, frame: bool = False) -> str:
     """What stands where a traceback would in the repair request. ``disputed``: the checks an earlier repair called wrong
     (their proposals wait for a person); they are left out of what to fix, and the script is not to be changed for them.
     ``trial``: the simulation is a function FI calls itself (the two-script layout), so the request states that
@@ -1194,7 +1446,7 @@ def directive(oracles: list[dict[str, Any]], found: list[str], disputed: list[st
         "The oracles the design declares (independent of the script's own numbers):\n" + declared_block + "\n\n"
         + set_aside +
         "What went wrong:\n" + "\n".join(f"- {p}" for p in found) + "\n\n"
-        + (_TRIAL_CONTRACT if trial else _SCRIPT_CONTRACT) +
+        + (_FRAME_CONTRACT if trial and frame else _TRIAL_CONTRACT if trial else _SCRIPT_CONTRACT) +
         "If a value is outside its tolerance, find out which is wrong before changing anything: the simulator or estimator (fix "
         "it) or the way the value is measured (fix that), and say which in `patch_summary`. Never make a check pass by "
         "measuring something else, skipping it or hard-coding its value: a check the script can always pass is not an oracle. If "
@@ -1207,11 +1459,20 @@ def directive(oracles: list[dict[str, Any]], found: list[str], disputed: list[st
         "`oracle_change`: a list of {\"name\": <the declared "
         "name>, \"expected\": <number>, \"tolerance\": <number>, \"tolerance_mode\": \"absolute\" | \"relative\", \"check\": "
         "<the corrected check, only if the measurement itself must change>, \"reason\": <the method's known error or the flaw, "
-        "with the numbers>}, and leave `code` empty: the script is kept as it is. Code returned together with an "
+        "with the numbers>, \"disputed_step\": <the step of the check's reference or working that is wrong, quoted>, "
+        "\"expected_formula\": <" + _EXPECTED_FORMULA_SHORT + ">}, and leave `code` empty: the script is kept as it is. "
+        "When the check's expected value is the plan's own working (a derivation or its `expected_formula`), give "
+        "`disputed_step` and `expected_formula` too: FI computes your formula itself, and the plan's model is asked to "
+        "answer your objection. Code returned together with an "
         "`oracle_change` for a check not already listed as disputed is not used (it cannot be told apart from code bent to "
         "that check); when other problems need a fix too, you are asked for it again without the disputed check. A person "
         "decides whether to accept the change; nothing changes without them.\n\n"
         + ("Keep everything else unchanged: the same functions and the values they return, and every comment that marks "
+           "where an equation of the plan's model is computed (`# E1`). When you fix the simulation, give each function you "
+           "change whole (`trial` and its helpers; the frame is FI's); always give one sentence in `patch_summary`, and "
+           "leave `give_up_reason` empty."
+           if trial and frame else
+           "Keep everything else unchanged: the same functions and the values they return, and every comment that marks "
            "where an equation of the plan's model is computed (`# E1`). When you fix the simulation, return the whole of "
            "simulate.py in `code`; always give one sentence in `patch_summary`, and leave `give_up_reason` empty."
            if trial else
@@ -1221,6 +1482,13 @@ def directive(oracles: list[dict[str, Any]], found: list[str], disputed: list[st
     )
 
 
+#: How a repair writes the expected value it proposes as a formula, in the prompt (the full rule:
+#: ``core.oracle_forms.EXPECTED_FORMULA_LANGUAGE``).
+_EXPECTED_FORMULA_SHORT = ("the expected value as one formula FI can compute: numbers, + - * / **, pi, sqrt, exp, log, cos, "
+                           "sin and the other usual functions, and the settings of the check's `case` by name")
+
+
+#: The longest ``expected_formula`` a repair may propose (one formula, not a program).
 def proposals(raw: Any, oracles: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """The usable entries of a repair's ``oracle_change``: each names a declared oracle, gives a finite ``expected`` and a
     non-negative ``tolerance``, and says why. Anything else is dropped, never guessed at."""
@@ -1236,6 +1504,19 @@ def proposals(raw: Any, oracles: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         mode = "relative" if str(item.get("tolerance_mode") or "").strip().lower() == "relative" else "absolute"
         entry: dict[str, Any] = {"name": name, "expected": expected, "tolerance": tolerance, "tolerance_mode": mode, "reason": reason[:600]}
+        step = " ".join(str(item.get("disputed_step") or "").split())
+        if step:  # the code's question to the plan (core/oracle_challenge.py): words, so a cut loses only the end
+            entry["disputed_step"] = step[:600]
+        formula = " ".join(str(item.get("expected_formula") or "").split())
+        if formula:
+            # A formula is kept whole or not at all: cut at 600 characters it was a different expression, which then
+            # failed to compute and was dropped with no word to the reader of the log.
+            why = _forms.formula_problem(formula)  # the evaluator's own test, every limit of it
+            if not why:
+                entry["expected_formula"] = formula
+            else:
+                entry["expected_formula_dropped"] = (f"its `expected_formula` ({len(formula)} characters) cannot be "
+                                                     f"computed: {why}")
         check = str(item.get("check") or "").strip()
         if check:
             entry["check"] = check[:600]

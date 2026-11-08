@@ -410,3 +410,84 @@ def test_bundled_files_are_named_but_never_inlined(
     # in the quest folder and on the interpreter running it, not on `python` from PATH.
     assert "working directory is the quest folder, not the skill's folder" in block
     assert "launch it with `sys.executable`" in block and "not the bare command `python`" in block
+
+
+def test_for_the_coding_agent_the_bundled_files_are_copied_beside_the_code_and_named_there(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The coding agent's code may not reach outside its folder (a path into the home folder is refused), and a live
+    agent told the skill's own folder called its script there: FI threw the round away, twice, and the quest stopped."""
+    import core.skills.registry as reg
+    from core.skills import Skill
+
+    root = tmp_path / "skills"
+    d = root / "bundled"
+    (d / "scripts").mkdir(parents=True)
+    (d / SKILL_MD).write_text(f"# bundled\n\nRun `{d.as_posix()}/scripts/convert.py`.\n", encoding="utf-8")
+    (d / "selftest.py").write_text("import sys; sys.exit(0)\n", encoding="utf-8")
+    (d / "scripts" / "convert.py").write_text("print('converted')\n", encoding="utf-8")
+    ledger = tmp_path / "l.json"
+    approval.approve("bundled", Skill(name="bundled", path=d).content_hash(), approved_by="tester", path=ledger)
+    real = reg.loadable_skills
+    monkeypatch.setattr(reg, "loadable_skills", lambda names, **kw: real(names, skills_dir=root, ledger=ledger))
+    monkeypatch.setattr("core.skills.loadable_skills", reg.loadable_skills)
+
+    eng = _engine(["bundled"], root, ledger)
+    eng.quest_root = tmp_path / "quest"
+    block = Engine._skills_block(eng, _state("bundled"), in_code=True)  # type: ignore[arg-type]
+    assert str(d) not in block and d.as_posix() not in block, "the skill's own folder is never named to the agent"
+    assert "skills/bundled/scripts/convert.py" in block and "under `skills/bundled/`" in block
+    copied = Engine._skill_files_to_code(eng, _state("bundled"))  # type: ignore[arg-type]
+    assert copied == ["skills/bundled/scripts/convert.py"]
+    assert (eng.quest_root / "code" / "skills" / "bundled" / "scripts" / "convert.py").read_text(encoding="utf-8") \
+        == "print('converted')\n"
+    # The chat writer's code still runs the files where the skill keeps them.
+    assert str(d) in Engine._skills_block(eng, _state("bundled"))  # type: ignore[arg-type]
+
+
+def test_the_skill_files_fi_copies_into_code_are_not_read_as_the_studys_code(tmp_path: Path) -> None:
+    """FI's copy of a skill's files under ``code/skills/`` is the skill's code: the checks of the study's code (its
+    settings, the functions its scripts call, the facts of its run) read only the study's own files."""
+    from core import code_reach, finding_repair, grid_keys, run_facts
+
+    code = tmp_path / "code"
+    (code / "skills" / "bundled" / "scripts").mkdir(parents=True)
+    (code / "skills" / "bundled" / "scripts" / "convert.py").write_text(
+        "N_RUNS = 500\n\ndef run_cell(x):\n    return x\n", encoding="utf-8")
+    (code / "simulate.py").write_text("def run_cell(x):\n    return 2 * x\n", encoding="utf-8")
+    (code / "experiment.py").write_text("from simulate import run_cell\n\ndef main():\n    run_cell(1)\n",
+                                        encoding="utf-8")
+
+    assert sorted(grid_keys.code_files(code)) == ["experiment.py", "simulate.py"]
+    assert [p.name for p in code_reach._python_files(code)] == ["experiment.py", "simulate.py"]
+    assert [p.name for p in run_facts._code_files(code)] == ["experiment.py", "simulate.py"]
+    assert "skills/bundled/scripts/convert.py" not in finding_repair.direct_callers(code, "simulate.py", "run_cell")
+
+
+def test_a_skill_that_names_its_folder_in_the_home_form_is_pointed_at_the_copy_in_code(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A skill's text named its script as `~/.../skills/<name>/scripts/...`; the coding agent opened the home path and
+    FI threw the round away for reaching outside its folder."""
+    import core.skills.registry as reg
+    from core.skills import Skill
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    root = home / ".fi_skills"
+    d = root / "bundled"
+    (d / "scripts").mkdir(parents=True)
+    (d / SKILL_MD).write_text("# bundled\n\nRun `python ~/.fi_skills/bundled/scripts/convert.py`.\n", encoding="utf-8")
+    (d / "selftest.py").write_text("import sys; sys.exit(0)\n", encoding="utf-8")
+    (d / "scripts" / "convert.py").write_text("print('converted')\n", encoding="utf-8")
+    ledger = tmp_path / "l.json"
+    approval.approve("bundled", Skill(name="bundled", path=d).content_hash(), approved_by="tester", path=ledger)
+    real = reg.loadable_skills
+    monkeypatch.setattr(reg, "loadable_skills", lambda names, **kw: real(names, skills_dir=root, ledger=ledger))
+    monkeypatch.setattr("core.skills.loadable_skills", reg.loadable_skills)
+
+    eng = _engine(["bundled"], root, ledger)
+    eng.quest_root = tmp_path / "quest"
+    block = Engine._skills_block(eng, _state("bundled"), in_code=True)  # type: ignore[arg-type]
+    assert "~/" not in block and "skills/bundled/scripts/convert.py" in block

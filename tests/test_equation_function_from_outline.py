@@ -32,7 +32,7 @@ ENERGY_AS_WRITTEN = "\n\n# E3\ndef energy(k, x, o):\n    return o * k * x ** 2 /
 STATE3 = {"design": {"protocol": PROTOCOL3}, "implement_outline": OUTLINE3}
 
 
-def test_the_outline_names_the_tested_function_and_a_label_is_the_fallback() -> None:
+def test_the_outline_names_the_tested_function_and_a_label_is_for_an_equation_it_names_none_for() -> None:
     sources = {"spring/model.py": GOOD["frequency"] + "\n\n" + HELPER_LABELLED}
     by_label = eqt.locate(PROTOCOL, sources)
     assert by_label["E2"]["function"] == "quality_terms", "the label alone names the helper (the d4 fault)"
@@ -41,8 +41,9 @@ def test_the_outline_names_the_tested_function_and_a_label_is_the_fallback() -> 
                                 "static": eqt.static_facts(sources["spring/model.py"], "quality")}
     assert by_outline["E1"]["function"] == "frequency"
     assert eqt.locate(PROTOCOL, sources, {"e2": "quality"})["E2"]["function"] == "quality", "ids match in any case"
-    # A function the outline names that the code does not have: the label, as before.
-    assert eqt.locate(PROTOCOL, sources, {"E2": "q_factor"})["E2"]["function"] == "quality_terms"
+    # A function the outline names that the code does not have: the outline is still the one source, so the label on a
+    # neighbour is not looked for (it used to be, and a test then called a function of another equation).
+    assert eqt.locate(PROTOCOL, sources, {"E2": "q_factor"})["E2"] is None
 
 
 @pytest.mark.asyncio
@@ -73,7 +74,9 @@ def test_a_function_no_test_calls_keeps_its_own_parameters_and_a_tested_one_the_
     _write_code(engine, GOOD["quality"] + ENERGY_AS_WRITTEN)
     cl.save(engine.quest_root, {"shape": cl.PACKAGE, "package": "spring"})
     fixed = engine._outline_signatures(STATE3)
-    assert fixed["quality"] == "def quality(m, w, c) -> float:" and fixed["frequency"] == "def frequency(k, m) -> float:"
+    # Both tested functions are already written so that their tests can call them by the example's names: the def they
+    # have in the code is the one interface (the outline's `-> float` annotation is no second claim on it).
+    assert fixed["quality"] == "def quality(m, w, c):" and fixed["frequency"] == "def frequency(k, m):"
     assert fixed["energy"] == "def energy(k, x, o):", "untested: the parameters it was written with"
     model = GOOD["frequency"] + "\n\n" + GOOD["quality"]
     # The repair the quest needed: a fix elsewhere in the file, `energy` as it was written. Refused before this change.

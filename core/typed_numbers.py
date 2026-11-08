@@ -14,18 +14,23 @@ value" and no pool of candidates anywhere here: a typed result is wrong because 
 happens to be right. A number in a sentence that cites a source is left to the claim check, which reads the source.
 
 The numbers of the plan are read from the plan as it is frozen, never from prose (``plan.md``) and never from a run fact the
-paper gets as a placeholder (the runs per setting and the seeds): those are FI's, filled by ``{{trials_per_setting}}`` and
-``{{seed}}``.
+paper gets from FI (the runs per setting and the seeds): those are FI's, written in the paragraph ``{{run_facts}}``.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_EVEN, ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
+from core.figure_facts import RUN_FIGURE_RE
+
+#: What FI puts where a result key it cannot fill stood (:mod:`core.paper_facts`); a typed number is never replaced.
 REMOVED = "[number removed]"
+#: The level of every interval FI computes and states (``95% t interval``, ``95% Wilson interval``, :mod:`core.paper_values`):
+#: the writer who names the level of FI's intervals types a number FI itself states in each of them.
+INTERVAL_LEVEL_PERCENT = Decimal(95)
 #: The most sentences one report names; the rest are counted in one more line.
 MAX_SENTENCES = 30
 #: Plan fields whose numbers are run facts: the paper gets them through placeholders, never typed.
@@ -35,19 +40,25 @@ _PLAN_NUMBER = re.compile(r"(?<![\w.])\d+(?:\.\d+)?(?:[eE]-?\d+)?")
 
 # --- what is FI's or not the writer's: blanked out, length kept, before any number is read --------------------------------
 
-_FI_V = re.compile(r"<!-- fi:v \{\{v:.*?\}\} -->.*?<!-- /fi:v -->", re.S)
+_FI_V = re.compile(r"<!-- fi:v \{\{v:.*?\}\} -->.*?<!-- /fi:v -->|<!-- fi:v-span .*? -->.*?<!-- /fi:v-span -->", re.S)
 # FI's own blocks (a fact it filled in, the best-design section, the phase note) are its text, not the writer's. The engine's
 # paragraphs (attempts, run record, code findings) are taken out of the paper before this check, and a pair that is none of
 # FI's names hides nothing from it.
 _FI_PAIR = re.compile(r"<!-- fi:((?:fact-[\w-]+|best-design|phased))(?::[0-9a-f]+)? -->.*?<!-- /fi:\1 -->", re.S)
 _COMMENT = re.compile(r"<!--.*?-->", re.S)
 _PLACEHOLDER = re.compile(r"\{\{[^{}\n]{1,320}\}\}")
-_FENCE = re.compile(r"^[ \t]*(?P<f>```|~~~)[^\n]*\n.*?^[ \t]*(?P=f)[^\n]*$|^[ \t]*(?:```|~~~).*\Z", re.M | re.S)
-_TAIL = re.compile(r"^#{1,6}[ \t]+(?:\d+\.?[ \t]*)?(references|further reading|bibliography|works cited)\b.*\Z",
-                   re.I | re.M | re.S)
+# A closed fenced block is a code listing and is left out. An unclosed fence hides only its own paragraph (up to the next blank
+# line), never the rest of the paper. Inline code is the writer's text like any other and is checked.
+_FENCE = re.compile(r"^[ \t]*(?P<f>```|~~~)[^\n]*\n.*?^[ \t]*(?P=f)[^\n]*$|^[ \t]*(?:```|~~~).*?(?=\n[ \t]*\n|\Z)",
+                    re.M | re.S)
+# The sources: from a References-style heading to the next heading of the same or a higher level (an appendix or a section
+# placed after the list is the writer's text and is checked).
+_TAIL_HEAD = re.compile(r"^(#{1,6})[ \t]+(?:\d+\.?[ \t]*)?(?:references|further reading|bibliography|works cited)\b[^\n]*$",
+                        re.I | re.M)
+_ANY_HEAD = re.compile(r"^(#{1,6})[ \t]+\S", re.M)
 _IMG_TARGET = re.compile(r"\]\([^)]*\)")
+_RUN_FIGURE = RUN_FIGURE_RE  # a figure of the run with the caption FI wrote for it
 _URL = re.compile(r"https?://\S+")
-_CODE = re.compile(r"`[^`\n]+`")
 _HEADING_NUMBER = re.compile(r"^(#{1,6}[ \t]+)(?:\d+(?:\.\d+)*\.?[ \t]|[IVXLC]+\.[ \t])", re.M)
 _LIST_NUMBER = re.compile(r"^([ \t]*(?:[-*+][ \t]+)?)\d+[.)][ \t]", re.M)
 # An inline enumeration inside one paragraph: "(1) ... (2) ... (3) ...". Each label is followed by text.
@@ -60,10 +71,12 @@ _LABEL_WORDS = (r"(?:Figures?|Figs?\.|Tables?|Eqs?\.|Equations?|Sections?|§§?|
                 r"Supplement\w*)[ \t\u00a0]*\(?")
 _LABEL = re.compile(_LABEL_WORDS + r"$")
 _LABEL_LIST = re.compile(_LABEL_WORDS + r"(?:\d+[a-z]?[ \t]*(?:,|and|&|or|to|\u2013|-)[ \t]*)+$")
+#: A quantile level written as a name of the method, "the 97.5th percentile": a label of the level, not a value.
+_LEVEL_AFTER = re.compile(r"(?:st|nd|rd|th)[ \t-]*(?:percentile|quantile)", re.I)
 _CITE = re.compile(r"\[\s*W?\d+(?:\s*[–-]\s*\d+)?(?:\s*[,;]\s*W?\d+(?:\s*[–-]\s*\d+)?)*\s*\]")
 
 
-_TAGS = re.compile(r"<!-- (?:/fi:[\w-]+|fi:v \{\{v:.*?\}\}|fi:fact-[\w-]+) -->")
+_TAGS = re.compile(r"<!-- (?:/fi:[\w-]+|fi:v \{\{v:.*?\}\}|fi:v-span .*?|fi:fact-[\w-]+) -->")
 
 
 def _plain(sentence: str) -> str:
@@ -73,6 +86,19 @@ def _plain(sentence: str) -> str:
 
 def _blank(match: re.Match[str]) -> str:
     return re.sub(r"[^\n]", " ", match.group(0))
+
+
+def _blank_sources(t: str) -> str:
+    """``t`` with each References-style section blanked: from its heading to the next heading of the same or a higher level."""
+    for head in list(_TAIL_HEAD.finditer(t)):
+        level = len(head.group(1))
+        end = len(t)
+        for nxt in _ANY_HEAD.finditer(t, head.end()):
+            if len(nxt.group(1)) <= level:
+                end = nxt.start()
+                break
+        t = t[:head.start()] + re.sub(r"[^\n]", " ", t[head.start():end]) + t[end:]
+    return t
 
 
 def _enumeration_labels(text: str, maths: list[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -94,10 +120,15 @@ def _enumeration_labels(text: str, maths: list[tuple[int, int]]) -> list[tuple[i
 
 def writers_text(markdown: str) -> str:
     """``markdown`` with everything that is not the writer's own words blanked out (same length, so offsets hold): FI's value
-    markers and blocks, other HTML comments, double-brace placeholders, code, URLs, image targets, a heading's or list's
-    number, an inline enumeration's labels "(1) ... (2) ...", and the sources from ``References`` / ``Further reading`` on."""
+    markers and blocks, other HTML comments, double-brace placeholders, fenced code, the run's figures with the captions FI
+    wrote for them, URLs, other image targets, a heading's or list's
+    number, an inline enumeration's labels "(1) ... (2) ...", and the sources under a ``References`` / ``Further reading``
+    heading. A closed fenced block is left out, an unclosed fence only to the end of its paragraph; inline code is kept."""
     t = markdown or ""
-    for pattern in (_FI_V, _FI_PAIR, _COMMENT, _FENCE, _TAIL, _PLACEHOLDER, _IMG_TARGET, _URL, _CODE):
+    for pattern in (_FI_V, _FI_PAIR, _COMMENT, _FENCE):
+        t = pattern.sub(_blank, t)
+    t = _blank_sources(t)
+    for pattern in (_PLACEHOLDER, _RUN_FIGURE, _IMG_TARGET, _URL):
         t = pattern.sub(_blank, t)
     t = _HEADING_NUMBER.sub(lambda m: m.group(1) + re.sub(r"[^\n]", " ", m.group(0)[len(m.group(1)):]), t)
     t = _LIST_NUMBER.sub(lambda m: m.group(1) + " " * (len(m.group(0)) - len(m.group(1))), t)
@@ -119,10 +150,11 @@ def _normalise(t: str) -> str:
     return re.sub(r"[₀-₉]+", lambda m: " " * len(m.group(0)), t)
 
 
+_POWER_OF_TEN = re.compile(r"(?<![\d.])10\s*\^\s*\{?\s*$")
 _SUP = "⁰¹²³⁴⁵⁶⁷⁸⁹⁻"
 _NUM = re.compile(
     r"(?P<sign>[−\-+±]\s?)?"
-    r"(?P<int>\d{1,3}(?:,\d{3})+|\d{1,3}(?:[   ]{1,2}\d{3})+(?!\d)|\d+)"
+    r"(?P<int>\d{1,3}(?:,\d{3})+(?!\d|,\d)|\d{1,3}(?:[   ]{1,2}\d{3})+(?!\d)|\d+)"
     r"(?P<frac>\.\d+)?"
     r"(?P<exp>(?:[eE][−\-+]?\d+)|(?:\s?(?:×|\\times|x)\s?10(?:\^\{?[−\-+]?\d+\}?|[" + _SUP + r"]+)))?"
     r"(?P<pct>\s?%|\s?percent(?:age points?)?|\s?pp\b)?"
@@ -152,7 +184,12 @@ class Typed:
     in_math: bool
     structural: bool
     sentence: str
-    cited: bool  # the sentence carries a citation label
+    # A citation stands in the number's own clause (from the previous ";" or the sentence start to the next ";" or the
+    # sentence end), before or after it. A number in another clause, after a ";", is the paper's own and is not left to the
+    # claim check.
+    cited: bool
+    # The number is the exponent of a written power of ten (``10^{-12}``): the number meant is 10 to that power.
+    power_of_ten: bool = False
 
 
 def _sentence(text: str, start: int, end: int) -> tuple[int, int]:
@@ -167,12 +204,30 @@ def sentence_around(markdown: str, start: int, end: int) -> str:
     return _plain(re.sub(r"\s+", " ", markdown[a:b]).strip())
 
 
+def _clause_breaks(text: str, cites: list[tuple[int, int]]) -> list[int]:
+    """The places of the ";" that end a clause: not inside a citation ("[W1; W2]") and not inside brackets or parentheses
+    ("(Smith 2020; Lee 2021)"). The depth starts again on every line, so one unclosed bracket hides no later clause."""
+    out: list[int] = []
+    depth = 0
+    for i, ch in enumerate(text):
+        if ch == "\n":
+            depth = 0
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth = max(0, depth - 1)
+        elif ch == ";" and depth == 0 and not any(x <= i < y for x, y in cites):
+            out.append(i)
+    return out
+
+
 def numbers(markdown: str) -> list[Typed]:
     """Every number in the writer's own words, with where it is and whether it is a label or inside math."""
     text = writers_text(markdown)
     t = _normalise(text)
     maths = [m.span() for m in MATH.finditer(markdown or "")]
     cites = [m.span() for m in _CITE.finditer(text)]
+    breaks = _clause_breaks(text, cites)
     out: list[Typed] = []
     for m in _NUM.finditer(t):
         s, e = m.span()
@@ -181,6 +236,16 @@ def numbers(markdown: str) -> list[Typed]:
             continue  # glued to a word or a symbol: m2, z196, fig1, x^2
         digits = re.sub(r"[ ,  ]", "", m.group("int")) + (m.group("frac") or "")
         sign = (m.group("sign") or "").strip()
+        # A "-" or "+" is a sign only when no operand stands before it; between two operands ("a - 2.5", "5-10") it is an
+        # operator and stays out of the span, so replacing the number never eats it.
+        if m.group("sign") and m.group("sign").strip() != "±" and re.search(r"[\w)\]}%]\s*$", t[max(0, s - 3):s]):
+            if re.search(r"[\d)\]}%]\s*$", t[max(0, s - 3):s]):
+                sign = ""  # after a number or a closing bracket it is an operator; after a word ("was -0.5") the value keeps it
+            s = m.start("int")
+        while s < e and t[s].isspace():
+            s += 1
+        while e > s and t[e - 1].isspace():
+            e -= 1
         negative = sign in ("−", "-")
         if negative and re.search(r"\d\s?$", t[max(0, s - 3):s]):
             negative = False  # a dash between two numbers is a range, not a sign
@@ -192,6 +257,10 @@ def numbers(markdown: str) -> list[Typed]:
         if negative:
             value = -value
         a, b = _sentence(text, s, e)
+        before_s = [x for x in breaks if a <= x < s]
+        after_e = [x for x in breaks if e <= x < b]
+        clause_start = before_s[-1] + 1 if before_s else a
+        clause_end = after_e[0] if after_e else b
         sentence = re.sub(r"\s+", " ", (markdown or "")[a:b]).strip()
         near = text[max(0, s - 24):s]
         label = bool(_LABEL.search(near)) or (digits.isdigit() and bool(_LABEL_LIST.search(near)))
@@ -199,8 +268,9 @@ def numbers(markdown: str) -> list[Typed]:
             token=(markdown or "")[s:e].strip(), start=s, end=e, value=value, pct=bool(m.group("pct")),
             integer=not m.group("frac") and exp == 0 and not m.group("pct"),
             in_math=any(x <= s < y for x, y in maths),
-            structural=label or any(x <= s < y for x, y in cites),
-            sentence=_plain(sentence), cited=bool(_CITE.search(text[a:b]))))
+            structural=label or any(x <= s < y for x, y in cites) or bool(_LEVEL_AFTER.match(text, e)),
+            sentence=_plain(sentence), cited=bool(_CITE.search(text[clause_start:clause_end])),
+            power_of_ten=bool(_POWER_OF_TEN.search(t[max(0, m.start() - 8):m.start()]))))
     return out
 
 
@@ -247,11 +317,34 @@ def plan_numbers(protocol: dict[str, Any] | None, topic: str = "") -> frozenset[
     return frozenset(found)
 
 
-def allowed(n: Typed, plan: frozenset[Decimal]) -> bool:
-    """Rule R1 for one typed number."""
+def _rounds_to(n: Typed, plan: frozenset[Decimal]) -> bool:
+    """The number is a number of the plan written to fewer decimals (``16.118`` for a plan's ``16.11809565``): the plan's
+    value rounded to the places the writer wrote is the writer's number. Needs four significant digits, so a short number
+    never matches by chance."""
+    if n.pct or n.integer:
+        return False
+    exp = n.value.as_tuple().exponent
+    if not isinstance(exp, int) or exp >= 0 or len(n.value.as_tuple().digits) < 4:
+        return False
+    step = Decimal(1).scaleb(exp)
+    return any(p != n.value and p.as_tuple().exponent != 0 and
+               any(p.quantize(step, rounding=r) == n.value for r in (ROUND_HALF_UP, ROUND_HALF_EVEN))
+               for p in plan if p.is_finite() and abs(p) < Decimal(10) ** 15)
+
+
+def allowed(n: Typed, plan: frozenset[Decimal], facts: frozenset[Decimal] = frozenset()) -> bool:
+    """Rule R1 for one typed number. ``facts`` are the numbers of FI's own records of the run (how many settings and trials,
+    the sizes of the plan's grid: :func:`core.paper_facts.run_numbers`), which the writer may state as FI states them."""
     if n.structural:
         return True
-    if n.value in plan or (n.pct and n.value / 100 in plan):
+    if n.power_of_ten and n.value == n.value.to_integral_value() and abs(n.value) < 400 and Decimal(10) ** int(n.value) in plan:
+        return True  # ``10^{-12}`` writes the plan's 1e-12
+    known = plan | facts
+    if n.value in known or (n.pct and n.value / 100 in known):
+        return True
+    if n.pct and n.value == INTERVAL_LEVEL_PERCENT:
+        return True
+    if _rounds_to(n, plan):
         return True
     return n.in_math and n.integer and abs(n.value) <= 10
 
@@ -268,25 +361,27 @@ class Report:
         return sum(len(tokens) for _s, tokens in self.sentences)
 
 
-def typed_outside_the_plan(markdown: str, plan: frozenset[Decimal]) -> list[Typed]:
+def typed_outside_the_plan(markdown: str, plan: frozenset[Decimal],
+                           facts: frozenset[Decimal] = frozenset()) -> list[Typed]:
     """The numbers of ``markdown`` that R1 does not allow and the claim check does not own (a cited sentence's)."""
-    return [n for n in numbers(markdown) if not allowed(n, plan) and not n.cited]
+    return [n for n in numbers(markdown) if not allowed(n, plan, facts) and not n.cited]
 
 
-def report(markdown: str, plan: frozenset[Decimal]) -> Report:
-    bad = typed_outside_the_plan(markdown, plan)
+def report(markdown: str, plan: frozenset[Decimal], facts: frozenset[Decimal] = frozenset()) -> Report:
+    bad = typed_outside_the_plan(markdown, plan, facts)
     by: dict[str, list[str]] = {}
     for n in bad:
         by.setdefault(n.sentence, []).append(n.token)
-    cited = sum(1 for n in numbers(markdown) if n.cited and not n.structural and not allowed(n, plan))
+    cited = sum(1 for n in numbers(markdown) if n.cited and not n.structural and not allowed(n, plan, facts))
     return Report(tuple((s, tuple(dict.fromkeys(t))) for s, t in by.items()), cited)
 
 
-def hits(markdown: str, plan: frozenset[Decimal], name: str = "paper_record_mismatch") -> list[str]:
+def hits(markdown: str, plan: frozenset[Decimal], name: str = "paper_record_mismatch",
+         facts: frozenset[Decimal] = frozenset()) -> list[str]:
     """One must-fix hit per sentence that holds a number R1 does not allow, shaped ``name: message — “sentence”`` (the shape
     the passage editor locates, :mod:`core.paper_patch`). ``markdown`` is the paper with FI's values as the writer's keys
     (:func:`core.paper_facts.to_placeholders`), so the sentence quoted is the writer's own text."""
-    rep = report(markdown, plan)
+    rep = report(markdown, plan, facts)
     out: list[str] = []
     for sentence, tokens in rep.sentences[:MAX_SENTENCES]:
         many = len(tokens) > 1
@@ -296,7 +391,8 @@ def hits(markdown: str, plan: frozenset[Decimal], name: str = "paper_record_mism
             "If it is a result, place its key from the \"Results you can place\" list (FI fills it in); if no key gives it, "
             "leave it out or say it in words. A number of the method is written exactly as the plan writes it; one the plan "
             "does not state but that is computed from the plan's numbers (a quantile, a confidence level, a reference value, "
-            "a count from the grid) is written as {{calc:EXPR}}, which FI computes. "
+            "a count from the grid, a cutoff or bound from a formula of the plan's constants, also one shown after an "
+            "equals sign) is written as {{calc:EXPR}} with the plan's numbers in it, which FI computes. "
             f"— “{sentence[:400]}”")
     rest = sum(len(tokens) for _s, tokens in rep.sentences[MAX_SENTENCES:])
     if rest:
@@ -304,12 +400,8 @@ def hits(markdown: str, plan: frozenset[Decimal], name: str = "paper_record_mism
     return out
 
 
-def remove(markdown: str, plan: frozenset[Decimal]) -> tuple[str, list[tuple[str, str]]]:
-    """``markdown`` with each number R1 does not allow replaced by :data:`REMOVED`, and ``(number, sentence)`` for each one
-    taken out (the sentence as it read before)."""
-    bad = typed_outside_the_plan(markdown, plan)
-    taken = [(n.token, n.sentence) for n in bad]
-    text = markdown or ""
-    for n in sorted(bad, key=lambda x: -x.start):
-        text = text[:n.start] + REMOVED + text[n.end:]
-    return text, taken
+def untraced(markdown: str, plan: frozenset[Decimal],
+             facts: frozenset[Decimal] = frozenset()) -> list[tuple[str, str]]:
+    """``(number, sentence)`` for each number R1 does not allow, as written. The paper is not changed: when no round is left
+    to write it again, the number stays where the writer put it and is listed in the quality report as not traced."""
+    return [(n.token, n.sentence) for n in typed_outside_the_plan(markdown, plan, facts)]

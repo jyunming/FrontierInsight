@@ -177,6 +177,7 @@ def test_the_result_check_runs_off_the_event_loop() -> None:
         quest = Quest()
         quest.quest_root = __import__("pathlib").Path(".pytest_tmp") / "offloop"  # type: ignore[attr-defined]
         quest._result_kept = []  # type: ignore[attr-defined]
+        quest._run_produced = lambda r: r.returncode == 0  # type: ignore[attr-defined]
         quest._code_reader_findings = lambda r: []  # type: ignore[attr-defined]
         quest._figure_gap_findings = lambda d: []  # type: ignore[attr-defined]
         quest._no_figures_standing = lambda s: []  # type: ignore[attr-defined]

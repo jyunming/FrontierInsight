@@ -149,3 +149,15 @@ def test_the_quality_report_lists_what_was_taken_out(tmp_path: Path) -> None:
     joined = "\n".join(lines)
     assert "Values taken out of the paper" in joined and "sentence removed" in joined
     assert "BH against pi0x0.05" in joined
+
+
+def test_a_figure_statement_FI_could_not_check_goes_the_same_way_as_an_unfilled_value(tmp_path: Path) -> None:
+    figure = "<!-- fi:fact-figure-trend-fig1-args73 -->not recorded<!-- /fi:fact-figure-trend-fig1-args73 -->"
+    paper = ("![Caption](figures/fig1.png)\n\nThe estimate was " + _mark("a:mean @ m=20") + ". " + figure
+             + " Other words stay.\n")
+    text, taken = pf.take_out_unfilled(paper)
+    assert "not recorded" not in text and "fi:fact-figure" not in text and "Other words stay." in text
+    assert [t["how"] for t in taken] == ["sentence removed", "sentence removed"]
+    pf.keep_check(tmp_path, [], pv.without_marks(text), dropped=taken)
+    kept = json.loads((tmp_path / pf.RECORD).read_text(encoding="utf-8"))
+    assert len(kept["taken_out_values"]) == 2 and kept["taken_out_values"][1]["figure"] == "1"

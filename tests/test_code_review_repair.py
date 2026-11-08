@@ -226,6 +226,45 @@ async def test_repairs_that_keep_reducing_the_findings_go_on_up_to_their_bound(t
     assert record["reviews_total"] == cr.MAX_REVIEWS - cr.RESERVED_FOR_FINAL
 
 
+# --- a round cut short is not counted -------------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_quest_killed_in_the_middle_of_a_repair_round_gets_that_round_again_on_resume(tmp_path: Path) -> None:
+    """Replay of a quest killed during its second round of repair (round 1 done, round 2's first request in flight): the
+    round was counted when it started, so the resumed quest found both rounds spent and went on with the finding open."""
+    import asyncio
+
+    engine = _engine(tmp_path)
+
+    def killed(rel: str, n: int) -> str | None:
+        if n == 2:
+            raise asyncio.CancelledError()  # the process is killed while round 2 waits for its model
+        return attempt(n)
+
+    first = _Script(lambda n, code: [HEADLINE_FINDING], killed)
+    engine._client = first
+    with pytest.raises(asyncio.CancelledError):
+        await engine._code_review_gate(WITH_PLAN)
+    record = cr.load(engine.quest_root)
+    assert record["send_backs"] == 1, "only the finished round is counted"
+    assert cr.may_repair(record) == "", "the second round is still allowed"
+    resumed = _Script(lambda n, code: [HEADLINE_FINDING], lambda rel, n: attempt(10 + n))
+    engine._client = resumed
+    await engine._code_review_gate(WITH_PLAN)
+    record = cr.load(engine.quest_root)
+    assert resumed.repair_prompts, "the resumed quest repaired again"
+    assert record["send_backs"] == 2 == cr.MAX_SEND_BACKS
+
+
+def test_a_round_that_keeps_being_cut_short_still_ends() -> None:
+    record: dict[str, Any] = {"send_backs": 0, "round_starts": cr.MAX_SEND_BACKS + cr.MAX_ROUND_RESTARTS - 1}
+    assert cr.may_repair(record) == ""
+    record["round_starts"] += 1
+    assert "cut short" in cr.may_repair(record)
+    assert "round_starts" in cr.carried({"round_starts": 3}), "the count survives a new version of the code"
+
+
 # --- the last reading is for the version that will run --------------------------------------------------------------------
 
 

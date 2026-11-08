@@ -51,22 +51,30 @@ _REFERENCE_RE = re.compile(
 )
 
 
-def _figure_order(lines: list[str]) -> dict[int, int] | None:
-    """The writer's figure numbers against the place each figure has (1, 2, ...), when every figure line's caption
-    names its number and they are not already in order; ``None`` otherwise (nothing to renumber)."""
-    numbers: list[int] = []
+def figure_lines(lines: list[str]):
+    """``(index, match)`` for each figure line of ``lines`` (an image alone on its line, which the renderer numbers
+    1, 2, ... by place), leaving out the lines inside a fenced code block. The one place that says which lines are
+    figures: the caption numbers and the figure numbers other checks quote both come from it."""
     fence = None
-    for line in lines:
+    for index, line in enumerate(lines):
         m = _FENCE_RE.match(line)
         if m:
             fence = None if fence == m.group(1) else (fence or m.group(1))
             continue
         fig = _FIGURE_LINE_RE.match(line) if fence is None else None
         if fig:
-            n = _CAPTION_NUMBER_RE.match(fig.group("alt"))
-            if not n:
-                return None
-            numbers.append(int(n.group(1)))
+            yield index, fig
+
+
+def _figure_order(lines: list[str]) -> dict[int, int] | None:
+    """The writer's figure numbers against the place each figure has (1, 2, ...), when every figure line's caption
+    names its number and they are not already in order; ``None`` otherwise (nothing to renumber)."""
+    numbers: list[int] = []
+    for _index, fig in figure_lines(lines):
+        n = _CAPTION_NUMBER_RE.match(fig.group("alt"))
+        if not n:
+            return None
+        numbers.append(int(n.group(1)))
     if len(set(numbers)) != len(numbers) or numbers == list(range(1, len(numbers) + 1)):
         return None
     return {n: i + 1 for i, n in enumerate(numbers)}

@@ -249,8 +249,8 @@ def test_the_review_prompt_carries_the_advisory_line_and_forces_nothing(tmp_path
     assert len(review_prompts) == len([p for p in prompts if "## Paper draft" in p])
     for p in review_prompts:
         assert "P. Whittle (1955)" in p and "Infectious diseases of humans" in p
-        # Between the figure check and the paper.
-        assert p.index("## Figures") < p.index("## Foundational works this paper") < p.index("## Paper draft")
+        # Before the paper (the figure check that came before it was removed when FI began writing the captions).
+        assert p.index("## Foundational works this paper") < p.index("## Paper draft")
     review = patch["review"]
     # No forced hit, no spent iteration, the reviewer's accept stands.
     assert review["must_flag_hits"] == []

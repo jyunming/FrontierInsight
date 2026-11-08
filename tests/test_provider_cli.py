@@ -204,17 +204,13 @@ def test_cli_specs_have_required_fields() -> None:
 
 
 def test_cli_input_caps() -> None:
-    """codex_cli rejects >1 MB turns; copilot_cli passes the prompt as a CLI
-    arg and hits the Windows cmd.exe ~8191-char command-line limit — both
-    carry a max_input_chars cap. The stdin-based CLIs have no such limit."""
+    """codex_cli rejects >1 MB turns, so it carries a max_input_chars cap. The
+    stdin-based CLIs have no command-line length limit; copilot_cli reads its
+    prompt on stdin too, so the 7,000-character cap it needed in argv is gone."""
     assert _CLI_SPECS["codex_cli"].max_input_chars == 900_000
     assert _CLI_SPECS["codex_cli"].max_input_chars < 1_048_576  # under codex's hard limit
-    # copilot: capped under the ~8191 Windows command-line limit.
-    assert _CLI_SPECS["copilot_cli"].max_input_chars == 7000
-    assert _CLI_SPECS["copilot_cli"].max_input_chars < 8191
-    assert _CLI_SPECS["copilot_cli"].pass_prompt_via == "arg"  # why it needs the cap
     # stdin-based CLIs: no arg-length limit.
-    for name in ("claude_cli", "gemini_cli"):
+    for name in ("claude_cli", "gemini_cli", "copilot_cli"):
         assert _CLI_SPECS[name].max_input_chars is None, name
 
 
@@ -558,9 +554,10 @@ async def test_cli_tmpfile_cleaned_up_on_spawn_failure(
 
 
 @pytest.mark.asyncio
-async def test_copilot_cli_passes_prompt_via_arg_and_returns_stdout() -> None:
-    """`copilot_cli` argv contract: `copilot -s --allow-all-tools -p <prompt>`,
-    stdout returns the agent response (stats stripped by --silent)."""
+async def test_copilot_cli_pipes_prompt_on_stdin_with_no_tools_and_returns_stdout() -> None:
+    """`copilot_cli` contract: `copilot -s --available-tools= ...` with the
+    prompt on stdin (no `-p`, no `--allow-all-tools`); stdout returns the
+    answer (stats stripped by --silent)."""
     ep = resolve_endpoint(ProviderConfig(name="copilot_cli"))
     client = LLMClient(ep)
     try:
@@ -576,13 +573,12 @@ async def test_copilot_cli_passes_prompt_via_arg_and_returns_stdout() -> None:
 
     assert result == "42"
     args = spawn.call_args[0]
-    # argv = [<resolved-copilot-path>, "-s", "--allow-all-tools", "-p", "<prompt>"]
     assert args[0] == "/usr/bin/copilot"
-    assert "-s" in args and "--allow-all-tools" in args and "-p" in args
-    assert args[-1] == "what is 6 * 7?", "prompt must be the last argv element after -p"
-    # No stdin for copilot_cli — communicate() is called with no input.
+    assert "-s" in args and "--available-tools=" in args
+    assert "--allow-all-tools" not in args and "-p" not in args
+    assert "what is 6 * 7?" not in args
     proc.communicate.assert_awaited_once()
-    assert proc.communicate.await_args[0] == () or proc.communicate.await_args[0][0] is None
+    assert proc.communicate.await_args[0][0] == b"what is 6 * 7?"
 
 
 @pytest.mark.asyncio

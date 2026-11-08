@@ -53,9 +53,44 @@ _STOPPED = {
     "time": "the time limit set for the run was reached",
     "not_run": "it did not run: the search before it had stopped (its time limit, or every evaluation failed)",
     "failures": "the first evaluations all failed",
+    "not_searched": "its first evaluation returned no objective, as the alternative searched before it did",
     "library_error": "the library's method stopped with an error",
     "target": "a design reached the target asked for",
+    "no_effect": "its first designs, which between them changed every number of the design, all gave the baseline's results",
+    "flat_objective": "its first designs across the whole range, which between them changed every number of the design, "
+                      "all gave the baseline's objective or one of a few values",
+    "stepped_objective": "its objective was counted in whole steps of one of its numerical settings, so it had no "
+                         "direction to follow",
+    "scan_unchanged": "its coarse scan found settings it compares that changed no result of the simulation",
 }
+
+
+def flat_went_on(ev: dict[str, Any]) -> str:
+    """The search's objective did not move, and the search went on (``flat_objective`` recorded, not stopped: the plan
+    was already revised for it, or no revision was left): one plain clause, or empty."""
+    fact = ev.get("flat_objective") if isinstance(ev, dict) else None
+    if not isinstance(fact, dict) or fact.get("stopped", True):
+        return ""
+    if fact.get("values"):
+        levels = ", ".join(_fmt(level[0]) for level in fact["values"])
+        return (f"the objective moved only between a few values: the first {fact.get('designs')} designs across the whole "
+                f"range of the design gave only {levels}, and the search went on to its budget")
+    return (f"the objective did not move: the first {fact.get('designs')} designs across the whole range of the design "
+            f"all gave {_fmt(fact.get('objective'))}, as the starting design did, and the search went on to its budget")
+
+
+def stepped_went_on(ev: dict[str, Any]) -> str:
+    """The search's objective was counted in whole steps of one of its numerical settings and the search went on
+    (``stepped_objective`` recorded, not stopped: the simulation was already sent back for it once): one plain clause, or
+    empty."""
+    fact = ev.get("stepped_objective") if isinstance(ev, dict) else None
+    if not isinstance(fact, dict) or fact.get("stopped", True):
+        return ""
+    unit = f" {fact.get('unit')}" if fact.get("unit") else ""
+    return (f"the objective moves in whole steps of {fact.get('setting')} ({_fmt(fact.get('step'))}{unit}): "
+            f"{fact.get('on_step')} of the {fact.get('nonzero')} values other than zero among the first "
+            f"{fact.get('designs')} designs across the whole range are whole multiples of it, so the search could tell "
+            "designs apart only to that step; it went on to its budget")
 
 
 def _num(value: Any) -> bool:
@@ -275,20 +310,57 @@ def section(quest_root: Path, block: dict[str, Any] | None = None, *, heading_le
               + f"; {ev.get('search')} of {ev.get('budget')} evaluations allowed were used")
     if _num(ev.get("starts")) and _num(ev.get("per_start")):
         search += f" (a budget of {ev['per_start']} evaluations for each of {ev['starts']} starting points"
+        if isinstance(best.get("compared"), dict) and best["compared"].get("levels"):
+            search += f", for each of the {len(best['compared']['levels'])} alternatives compared"
+        ran = best.get("starts")
+        if isinstance(ran, list) and ran and len(ran) != ev["starts"]:
+            # The record of the starts that ran, not the plan's count: a search over many continuous numbers spends its
+            # budget from one start and starts again only when it converges (core/optimise_search.py _cma_restarts).
+            search += f"; the local search ran from {len(ran)} starting point{'s' if len(ran) > 1 else ''}"
         if _num(ev.get("added_budget")):
             search += f", and {ev['added_budget']} more asked for after the first result"
         search += ")"
     if ev.get("scan"):
         search += f", after a coarse scan of {ev['scan']} design(s) not counted in the budget"
     search += f"; the search stopped because {_STOPPED.get(str(ev.get('stopped_because')), ev.get('stopped_because'))}."
+    if flat := flat_went_on(ev):
+        search += f" {flat[0].upper()}{flat[1:]}."
+    if stepped := stepped_went_on(ev):
+        search += f" {stepped[0].upper()}{stepped[1:]}."
     lines += [search, ""]
+    compared = (best.get("compared") or {}).get("levels") if isinstance(best.get("compared"), dict) else None
+    if compared:
+        won = (best.get("best") or {}).get("level")
+        searched = ("Each of the" if not any(p.get("same_as") or p.get("status") == "not_searched" for p in compared)
+                    else "Each of the searched ones of the")
+        lines += [f"**Alternatives compared.** {searched} {len(compared)} alternatives was searched on its own, with the "
+                  "plan's own variables and budget, and the comparison is between their best designs:", ""]
+        for p in compared:
+            name = ", ".join(f"{k} = {v}" for k, v in (p.get("level") or {}).items())
+            top = p.get("best") if isinstance(p.get("best"), dict) else None
+            text = (f"{quantity} = {_fmt(top.get('objective'))}{u} at {_design(top.get('design'))}" if top
+                    else "no design that meets every limit was found")
+            if p.get("status") == "not_searched":
+                why = p.get("not_searched_because") or "its first evaluation also returned no objective"
+                lines.append(f"- {name}: not searched, because {why}; {p.get('evaluations')} evaluation(s).")
+                continue
+            if p.get("same_as"):
+                other = ", ".join(f"{k} = {v}" for k, v in p["same_as"].items())
+                lines.append(f"- {name}: gave the same results as {other} for every one of the {p.get('probes')} designs "
+                             f"tried at both, so the search was not run again for it; {p.get('evaluations')} "
+                             "evaluation(s).")
+                continue
+            lines.append(f"- {name}{' (the best)' if p.get('level') == won else ''}: {text}; "
+                         f"{p.get('evaluations')} evaluation(s).")
+        lines.append("")
     for r in best.get("continued") or []:
         toward = f", toward {quantity} = {_fmt(r['target'])}{u}" if _num(r.get("target")) else ""
-        lines += [f"*Continued at the person's request (round {r.get('round')}):* {r.get('evaluations')} of "
+        who = ("by FI, still improving when its budget ran out" if r.get("by") == "FI" else "at the person's request")
+        lines += [f"*Continued {who} (round {r.get('round')}):* {r.get('evaluations')} of "
                   f"{r.get('added')} more evaluations{toward}, from {_design(r.get('from'))}; stopped because "
                   f"{_STOPPED.get(str(r.get('stopped_because')), r.get('stopped_because'))}.", ""]
     if check:
-        lines += [f"**Check at finer numerical settings.** {_plain(check.get('says'))}", ""]
+        lines += [f"**Check at finer numerical settings.** {_plain(_check.says_of(check))}", ""]
         for name, label in _CHECK_LABELS.items():
             c = (check.get("checks") or {}).get(name)
             if isinstance(c, dict):
@@ -480,7 +552,11 @@ def summary_line(quest_root: Path) -> str:
         if imp and _num(imp.get("numerical_error")):
             text += f" (± {_fmt(imp['numerical_error'])}{u})"
     verdict = str((check or {}).get("verdict") or "unverified")
-    text += f"; {_VERDICT_SHORT.get(verdict, verdict)}"
+    if verdict == "verified" and _check.verdict_phrase(verdict, (check or {}).get("improvement")) != _check.VERDICTS[verdict]:
+        # Above the plan's threshold, but not more than the numerical error of the two designs: not said to "hold".
+        text += "; above the plan's threshold at finer numerical settings, but not shown to be more than their numerical error"
+    else:
+        text += f"; {_VERDICT_SHORT.get(verdict, verdict)}"
     target = best.get("target") if isinstance(best.get("target"), dict) else None
     if target and _num(target.get("value")):
         reached = target.get("reached_at_finest_settings")

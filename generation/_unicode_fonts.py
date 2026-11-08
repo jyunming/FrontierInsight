@@ -197,17 +197,20 @@ def _fonts(table, located: dict[str, Path]) -> tuple[Font, ...]:
 
 
 @lru_cache(maxsize=8)
-def find_fonts(engine_path: str | None) -> FontPlan:
+def find_fonts(engine_path: str | None, text_files: tuple[str, ...] | None = None) -> FontPlan:
     """The fonts for the engine at ``engine_path`` (cached: a font install does not
-    change during a run). Never raises; an empty plan when nothing can be read."""
+    change during a run). ``text_files`` names the text fonts of a template that sets
+    others than the paper's (the poster's); the default is the paper's. Never raises;
+    an empty plan when nothing can be read."""
     try:
-        names = set(_TEXT_FILES)
+        text_files = text_files or _TEXT_FILES
+        names = set(text_files)
         for table in (_FALLBACK_FILES, _MONO_FILES):
             for _name, regular, bold, italic in table:
                 names.update(n for n in (regular, bold, italic) if n)
         located = _locate(names, _font_dirs(engine_path))
         text: list[Font] = []
-        for fname in _TEXT_FILES:
+        for fname in text_files:
             path = located.get(fname.lower())
             covers = _cmap(path) if path is not None else None
             if covers is not None:

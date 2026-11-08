@@ -26,12 +26,12 @@ Mandatory checklist — if any apply, you MUST patch them:
 8. **Arbitrary thresholds** — does a conclusion depend on a cut-off the design chose (an outbreak is "more than 5% of N", a peak is "above 0.1")? Then the design must vary it over a stated set, or justify it from the definition, and say the conclusion has to hold across the set.
 
 9. **Random streams** — do different settings and different runs draw from independent streams, or share one (the same seed rebuilt for every setting makes them correlated without saying so)? The design must say how streams are derived (`protocol.seed_policy`), and a deliberate common-random-numbers design must say so and be analysed as paired. What one run uses all of together
-(the conditions one fit spans, the methods applied to the same simulated data) belongs in `protocol.in_each_run`, not in
-`protocol.grid`: a grid setting is run on its own, with its own random numbers.
+(the conditions one fit spans, the methods applied to the same simulated data, such as two estimators of one quantity) belongs in `protocol.in_each_run`, not in
+`protocol.grid`: a grid setting is run on its own, with its own random numbers. A quantity a run returns is a `protocol.metrics` entry, never a value of an `in_each_run` or `grid` setting.
 
 10. **Numerical convergence** — if a solver, a grid or a step size is involved, does the design say how it is shown converged (halve the step or the tolerance and compare) and which conservation law or invariant every run must satisfy?
 
-11. **An oracle** — does `protocol.oracles` name at least one check that does not rely on the script's own numbers being right (a closed form, a limiting case, an invariant, an exact small case, an independent implementation)? If not, add one. Give each a numeric `expected` and `tolerance`, a `case` (the settings of one small run, e.g. `{"dt": 0.1}`) and a `measure` (how the number is computed from what that run returns: one returned name, or a formula of them such as `abs(P_out - P_in) / P_in`), so the engine can run the simulation on that case itself instead of trusting a number the script reports; add `order` when the check claims an order of accuracy. Each kind has one numeric form: an invariant, a symmetry or scaling law, or a second implementation is measured as its worst violation and expects 0 (a conservation check never expects a ratio of 1); a special or limiting case, a published value or a convergence rate is measured as the quantity itself. An expected value the check compares at a finite step is the value at that step, not the limit as the step goes to 0, and a tolerance is never tighter than the precision the expected value is written to.
+11. **An oracle** — does `protocol.oracles` name at least one check that does not rely on the script's own numbers being right (a closed form, a limiting case, an invariant, an exact small case, an independent implementation)? If not, add one. Give each a numeric `expected` and `tolerance`, a `case` (the settings of one small run, e.g. `{"dt": 0.1}`) and a `measure` (how the number is computed from what that run returns: one returned name, or a formula of them such as `abs(P_out - P_in) / P_in`; a check on a quantity across trials (a coverage fraction, a spread) writes it with `mean(x)` or `sd(x)` of the per-trial result `x` the simulation returns, for example `abs(mean(covered) - 0.95)` or `abs(sd(estimate) / reference_sd - 1)`; FI works these out over the trials together, and such a check is not `per_trial`), so the engine can run the simulation on that case itself instead of trusting a number the script reports; add `order` when the check claims an order of accuracy. Each kind has one numeric form: an invariant, a symmetry or scaling law, or a second implementation is measured as its worst violation and expects 0 (a conservation check never expects a ratio of 1); a special or limiting case, a published value or a convergence rate is measured as the quantity itself. An expected value the check compares at a finite step is the value at that step, not the limit as the step goes to 0, and a tolerance is never tighter than the precision the expected value is written to.
 
 12. **Failed runs** — what happens to a run that fails, diverges or returns a NaN: is it dropped, counted, or repaired, and is the number of such runs reported? Silent exclusion changes the estimand.
 
@@ -45,38 +45,30 @@ Three more, only for a search for the best design (`study_type: find_best_design
 
 One more, for every design: **16. Approximated without saying so** (use `other`) - is anything the topic names approximated, replaced or left out without an entry in `protocol.simplifications`, and does each metric's `protocol.definitions` entry match the source it quotes? Add the entry, or correct the definition.
 
-After identifying issues, produce an amended design. The amended design must match the original JSON shape exactly — same keys, same structure — but with the fields updated to reflect the fixes. If no MUST-FIX objections apply, return the original design unchanged, an empty `objections_addressed` array, and in `checked_no_problem` each checklist item you checked and found no problem with.
+After identifying issues, give the fix of each as the PARTS it changes, and only those. You never write the design again: FI keeps every part of the draft that no objection of yours names, and applies each change you list to the part it names. A change to a part that no objection names is refused. If no MUST-FIX objection applies, return an empty `objections_addressed` array and in `checked_no_problem` each checklist item you checked and found no problem with.
 
 # Output format
 
-Respond with a single JSON object, no prose, no markdown fence. Print it once: do not also print the draft or the amended design on its own, before or after it. Keep each `objection` and `fix` to one or two sentences; the amended design is the only long part, and it repeats the draft except where a fix changes it.
+Respond with a single JSON object, no prose, no markdown fence. Print it once: do not also print the draft or any design on its own, before or after it. Keep each `objection` and `fix` to one or two sentences.
 
 {
   "objections_addressed": [
     {"check": "circular_evaluation | single_point | weak_baseline | pseudo_units | stratum_collapse | precision | estimand | threshold_sensitivity | rng_independence | numerical_convergence | oracle | failed_runs | optimisation_baseline | optimisation_ranges | finer_check | other",
-     "where": "<the part of the design it concerns, such as method or protocol.grid>",
+     "where": "<the part of the design it concerns, written as a path: method, hypothesis, variables, protocol.grid, protocol.oracles ...>",
      "objection": "<one specific sentence quoting what's wrong>",
      "why": "<one sentence: why it is wrong>",
      "fix": "<one specific sentence describing the change made>",
-     "severity": "high | medium | low"},
+     "severity": "high | medium | low",
+     "changes": [{"path": "<the part changed, a path into the design: a top-level key (`method`, `variables`, `figures_planned` ...) or `protocol.<part>`, deeper for one setting (`protocol.grid.x`)>", "value": <the NEW content of that part, written in full: a string, a list or a mapping>}]},
     ...
   ],
   "checked_no_problem": [
     {"check": "<a checklist name from the list above>", "note": "<what you looked at and why it is fine, one sentence>"},
     ...
-  ],
-  "amended_design": {
-    "hypothesis": "...",
-    "study_type": "<only when the draft has it: measure | find_best_design>",
-    "variables": {"independent": [...], "dependent": [...], "controls": [...]},
-    "method": "...",
-    "expected_outcome": "...",
-    "figures_planned": [...],
-    "dependencies": [...]
-  }
+  ]
 }
 
-(If the draft design carries a `protocol` (its `grid`, `runs_per_setting`, `thresholds`, `constants`, `seed_policy`, `ci_method`, `acceptance`, `oracles`, `model`, `optimisation`), the amended design keeps it and amends it in place: a fix to checks 6 to 15 belongs there. Keep `study_type` as the draft has it. Never drop a key the draft has.)
+An objection that names a problem but needs no change to the design (the claim is narrowed in the paper, say) has `"changes": []`. A path is one of: `hypothesis`, `study_type`, `variables`, `method`, `expected_outcome`, `figures_planned`, `dependencies`, `protocol`, or `protocol.<part>` for a part the draft's `protocol` has or should have (`grid`, `runs_per_setting`, `thresholds`, `constants`, `seed_policy`, `ci_method`, `acceptance`, `oracles`, `model`, `optimisation`, ...). The value of a path is that part's whole new content, never a description of the change. Do not repeat parts you do not change.
 
 ---
 
@@ -93,4 +85,3 @@ $clarify_block
 
 ## The draft design (JSON)
 $draft_design
-

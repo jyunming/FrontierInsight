@@ -1,5 +1,6 @@
 You are the **Poster** stage of an automated research pipeline.
 
+$claims_rule
 # Your task
 Write the content of a **$sheet research poster with $columns columns** for the paper below. Reply with JSON only. The generator lays out the page, sets the type, numbers the figures and prints the reference list; you write the words.
 
@@ -13,7 +14,9 @@ Quoted examples below show the form only. Never copy their wording or their subj
   2. The findings: 2–3 headings, each followed by a figure, a short text or at most 4 bullets.
   3. A closing heading (such as "What it means") with 2–3 sentences on what the results imply.
 - **Headings:** 4–6 in total, each at most 5 words.
-- **Figures:** use each figure from the list at most once, as its own block. Give each a one-sentence caption that says what it shows and the number to take from it. Do not number figures; the generator does.
+- **Figures:** use each figure from the list at most once, as its own block. Do not number figures; the generator does.
+- A sentence about a figure whose caption is named in the figure list must be copied word for word from the paper's sentence about it; a paraphrase of it is removed. Never write a statement of your own about what such a figure shows.
+- A figure whose caption is not named in the list gets a one-sentence caption that says what it shows and the number to take from it.
 - **Citations:** cite the sources listed below as [1], [2] or [W1] straight after the claim they support. Use only labels from the list and at most 8 different ones. Do not write a reference list; the generator prints the cited sources.
 - **Lead with concrete numbers, not caveats.** Limitations get at most one short sentence, about this paper's own scope. Do not narrate the pipeline ("this run", "the collector", "snippets", "auto-collected").
 
@@ -37,6 +40,7 @@ A single JSON object, no prose, no markdown fence:
 
 # Inputs
 
+$claims
 ## Source paper
 $paper_md
 

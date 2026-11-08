@@ -56,7 +56,8 @@ _AUTH_WORDS = ("invalid api key", "invalid_api_key", "incorrect api key", "did n
                "token has expired", "token is expired")
 #: Read only from an error that carries no HTTP answer (a CLI's or the bridge's text): an HTTP 429 is judged by the
 #: provider's own rule, which reads the error's type and code and its Retry-After (a per-minute limit is not a quota).
-_QUOTA_WORDS = ("monthly usage limit", "weekly limit", "session limit", "usage limit reached", "out of credits",
+_QUOTA_WORDS = ("monthly usage limit", "weekly limit", "session limit", "usage limit reached", "hit your usage limit",
+                "out of credits",
                 "insufficient_quota", "insufficient quota", "exceeded your current quota", "exceeded_current_quota",
                 "payment required", "credit balance", "add usage credits")
 _MODEL_MISSING_WORDS = ("model not found", "model_not_found", "no such model", "unknown model", "not a valid model",
@@ -268,8 +269,11 @@ def _setup(exc: BaseException, provider: str, model: str) -> tuple[str, str] | N
     if refused:
         return refused
     if model_call and (_quota_used_up(exc) or (not has_http_answer and any(w in text for w in _QUOTA_WORDS))):
+        from core.provider import limit_resumes_at
+
+        resumes = limit_resumes_at(str(exc))
         return (f"The account FI uses for {service} has used up its allowance (a usage limit or credit balance).",
-                "Add credits or wait until the limit resets, then continue the quest.")
+                f"Add credits or wait until the limit resets{f' ({resumes})' if resumes else ''}, then continue the quest.")
     if model_call and (status in (401, 403) or (not has_http_answer and any(w in text for w in _AUTH_WORDS))):
         todo = _sign_in_todo(provider)
         return (f"FI could not sign in to {service}{f' ({model})' if model else ''}: its sign-in has expired or was refused.",

@@ -541,6 +541,111 @@ def test_a_wrong_degrees_of_freedom_or_level_is_a_fault(used):
     assert _mult(tc.calibration(_interval_cells(used), _proto(_DECL3)))[0].fault
 
 
+def _log_interval_cells(mult: float, n_settings: int = 3, n: int = 60, seed: int = 5, spread: float = 0.9) -> list[dict]:
+    """Settings whose trials report exp(ln e -/+ mult * s) for the standard error s of ln e, and the delta-method error
+    e * s as the standard error (what a fit on the log scale returns)."""
+    rng = random.Random(seed)
+    per = {}
+    for i in range(n_settings):
+        e = [math.exp(rng.gauss(0.0, 1.0)) for _ in range(n)]
+        s = [rng.uniform(0.05, spread) for _ in range(n)]
+        per[f"s{i}"] = {"x_hat": e, "x_se": [a * b for a, b in zip(e, s)],
+                        "x_lo": [a * math.exp(-mult * b) for a, b in zip(e, s)],
+                        "x_hi": [a * math.exp(mult * b) for a, b in zip(e, s)]}
+    return _cells(per)
+
+
+_DECL_NORMAL = known("x_hat", 1.0, se="x_se", interval=("x_lo", "x_hi"), df="normal")
+
+
+def test_an_interval_symmetric_on_the_log_scale_is_judged_there_not_on_the_estimates_own_scale():
+    # the original failure: (upper - lower) / (2 * se) is sinh(1.96 s) / s, far from 1.96 where s is large
+    [q] = _mult(tc.calibration(_log_interval_cells(_Z, spread=4.0), _proto(_DECL_NORMAL)))
+    assert not q.fault and q.gross == 0 and q.judged == 3
+    assert all(abs(s.value - _Z) < 1e-6 for s in q.settings) and len(q.on_log) == 3
+    assert "symmetric on the log scale" in q.says()
+
+
+def test_a_log_scale_interval_built_with_another_multiplier_is_still_a_fault():
+    [q] = _mult(tc.calibration(_log_interval_cells(1.6449), _proto(_DECL_NORMAL)))
+    assert q.fault and q.gross == 3 and abs(q.settings[0].value - 1.6449) < 1e-4
+
+
+def test_an_own_scale_interval_is_judged_as_before():
+    cells = _interval_cells(_Z)
+    [q] = _mult(tc.calibration(cells, _proto(known("x_hat", 10.0, se="x_se", interval=("x_lo", "x_hi"), df="normal"))))
+    assert not q.fault and not q.on_log
+    [q] = _mult(tc.calibration(_interval_cells(1.6449), _proto(known("x_hat", 10.0, se="x_se", interval=("x_lo", "x_hi"),
+                                                                     df="normal"))))
+    assert q.fault and not q.on_log
+
+
+def test_trials_of_mixed_forms_in_a_setting_fail_closed_on_the_own_scale():
+    cells = _log_interval_cells(_Z, n_settings=1, spread=3.0)
+    m = cells[0]["metrics"]
+    for i in range(0, 60, 2):  # every second trial reports an own-scale interval
+        e, se = m["x_hat"]["values"][i], m["x_se"]["values"][i]
+        m["x_lo"]["values"][i], m["x_hi"]["values"][i] = e - _Z * se, e + _Z * se
+    [q] = _mult(tc.calibration(cells, _proto(_DECL_NORMAL)))
+    assert q.fault and not q.on_log
+
+
+def _rounded_to(cells: list[dict], how) -> list[dict]:
+    for c in cells:
+        for m in c["metrics"].values():
+            m["values"] = [how(v) for v in m["values"]]
+    return cells
+
+
+def _f32(v: float) -> float:
+    import struct
+    return struct.unpack("f", struct.pack("f", v))[0]
+
+
+@pytest.mark.parametrize("how,spread", [(lambda v: round(v, 6), 1.5), (lambda v: round(v, 6), 0.06), (_f32, 0.02)],
+                         ids=["6 decimals", "6 decimals, narrow", "float32, narrow"])
+def test_a_log_scale_interval_with_rounded_values_is_still_judged_on_the_log_scale(how, spread):
+    [q] = _mult(tc.calibration(_rounded_to(_log_interval_cells(_Z, spread=spread), how), _proto(_DECL_NORMAL)))
+    assert not q.fault and q.gross == 0 and len(q.on_log) == 3
+    [q] = _mult(tc.calibration(_rounded_to(_log_interval_cells(1.6449, spread=spread), how), _proto(_DECL_NORMAL)))
+    assert q.fault and len(q.on_log) == 3
+
+
+def test_a_trial_without_an_estimate_does_not_move_a_log_setting_to_the_own_scale():
+    cells = _log_interval_cells(_Z, n_settings=1, spread=3.0)
+    m = cells[0]["metrics"]
+    m["x_hat"]["values"] = m["x_hat"]["values"][5:]
+    m["x_hat"]["trials"] = m["x_hat"]["trials"][5:]  # the first five trials give no estimate
+    [q] = _mult(tc.calibration(cells, _proto(_DECL_NORMAL)))
+    assert not q.fault and len(q.on_log) == 1 and q.settings[0].n == 55
+
+
+def test_a_standard_error_of_the_log_reported_directly_is_a_fault():
+    cells = _log_interval_cells(_Z, spread=1.0)
+    for c in cells:
+        m = c["metrics"]
+        m["x_se"]["values"] = [se / e for se, e in zip(m["x_se"]["values"], m["x_hat"]["values"])]
+    [q] = _mult(tc.calibration(cells, _proto(_DECL_NORMAL)))
+    assert q.fault
+
+
+def test_a_non_positive_estimate_or_bound_is_never_read_on_the_log_scale():
+    cells = _log_interval_cells(_Z, n_settings=1, spread=1.0)
+    cells[0]["metrics"]["x_lo"]["values"][3] = -0.5
+    [q] = _mult(tc.calibration(cells, _proto(_DECL_NORMAL)))
+    assert q.fault and not q.on_log
+    cells = _log_interval_cells(_Z, n_settings=1, spread=1.0)
+    cells[0]["metrics"]["x_hat"]["values"][3] = -1.0
+    [q] = _mult(tc.calibration(cells, _proto(_DECL_NORMAL)))
+    assert q.fault and not q.on_log
+
+
+def test_the_repair_message_names_the_log_scale_it_judged_on():
+    v = tc.judge(_log_interval_cells(1.6449), _proto(_DECL_NORMAL), None, None, repairs_left=True)
+    assert v.action == tc.REPAIR and "symmetric on the log scale" in v.directive
+    assert "do not make it symmetric on the estimate's own scale" in v.directive
+
+
 def test_a_half_width_that_is_not_a_multiple_of_the_standard_error_is_a_fault():
     # the half-width comes from one spread for every trial, not from each trial's own standard error
     cells = _interval_cells(3.1824463)
@@ -630,3 +735,160 @@ def test_the_unit_a_series_was_rounded_to_is_read_from_the_values():
     assert tc._grain([1.25, 3.5, 0.75]) == 0.01 and tc._grain([1.0, 4.0]) == 1.0
     assert tc._grain([0.1234, 0.5678]) == 1e-4
     assert tc._grain([0.123456789012345, 0.5]) == 0.0
+
+
+def _split_record(shift: float) -> list[dict]:
+    """The record the engine keeps when a run compares values inside it: the estimate with the setting, the standard error and the
+    interval ends with each value compared (their own records, no estimate)."""
+    rng = random.Random(7)
+    out = []
+    for i in range(4):
+        est = [5.0 + rng.gauss(0, 1) for _ in range(100)]
+        trials = list(range(100))
+        out.append({"key": f"s{i}", "cell": {"s": i}, "planned": 100, "failed": 0, "metrics": {"x_hat": {"values": est, "trials": trials}}})
+        for level in ("a", "b"):
+            out.append({"key": f"s{i},m={level}", "cell": {"s": i, "m": level}, "level": {"m": level},
+                        "metrics": {"x_se": {"values": [1.0] * 100, "trials": trials},
+                                    "x_lo": {"values": [x + shift - 1.96 for x in est], "trials": trials},
+                                    "x_hi": {"values": [x + shift + 1.96 for x in est], "trials": trials}}})
+    return out
+
+
+def test_the_estimate_and_the_interval_are_paired_where_the_record_keeps_them():
+    proto = _proto(known("x_hat", 5.0, se="x_se", interval=("x_lo", "x_hi")))
+    right = tc.calibration(_split_record(0.0), proto)  # the interval is the estimate's own: calibrated
+    assert not right.not_checked and not right.faults
+    assert {q.kind for q in right.quantities} == {"coverage", "se_ratio", "bias"}
+    cover = next(q for q in right.quantities if q.kind == "coverage")
+    assert cover.judged == 8 and 0.9 < cover.pooled.value <= 1.0  # judged at each value compared, from the one estimate
+    bias = next(q for q in right.quantities if q.kind == "bias")
+    assert bias.judged == 4  # the estimate is judged once, where the record keeps it
+    wrong = tc.calibration(_split_record(3.0), proto)  # an interval 3 off the estimate: a planted fault
+    assert "coverage" in {q.kind for q in wrong.faults}
+
+
+# ---- a multiplier that differs between the values a study compares inside each run -----------------------------------------
+
+
+def _levelled_record(mult: dict[str, float], n: int = 60, seed: int = 5, vary: str | None = None) -> list[dict]:
+    """Three settings, each run with three interval methods compared inside it: the estimate is kept with the setting, the
+    standard error and interval ends with each method (``mult``: the multiplier of each method's interval). ``vary``: a method
+    whose half-width is one fixed number in every trial instead of a multiplier of the trial's own standard error."""
+    rng = random.Random(seed)
+    out = []
+    for i in range(3):
+        est = [rng.gauss(10, 1) for _ in range(n)]
+        trials = list(range(n))
+        out.append({"key": f"s{i}", "cell": {"s": i}, "planned": n, "failed": 0,
+                    "metrics": {"x_hat": {"values": est, "trials": trials}}})
+        for method, m in mult.items():
+            se = [rng.uniform(0.5, 1.5) for _ in range(n)]
+            half = [3.0] * n if method == vary else [m * s for s in se]
+            out.append({"key": f"s{i},method={method}", "cell": {"s": i, "method": method}, "level": {"method": method},
+                        "planned": n, "failed": 0,
+                        "metrics": {"x_se": {"values": se, "trials": trials},
+                                    "x_lo": {"values": [e - h for e, h in zip(est, half)], "trials": trials},
+                                    "x_hi": {"values": [e + h for e, h in zip(est, half)], "trials": trials}}})
+    return out
+
+
+_T3 = 3.1824463
+_METHODS = {"robust_t": _T3, "plain_z": _Z, "plain_t": _T3}
+_IN_EACH_RUN = {"method": list(_METHODS)}
+
+
+def _levelled_proto(df) -> dict:
+    return {"metrics": [known("x_hat", 10.0, se="x_se", interval=("x_lo", "x_hi"), df=df)], "thresholds": {},
+            "grid": {"s": []}, "in_each_run": _IN_EACH_RUN}
+
+
+_PER_METHOD = {"method": {"robust_t": 3, "plain_z": "normal", "plain_t": 3}}
+
+
+def test_a_plan_that_compares_methods_with_different_multipliers_is_not_stopped_for_the_method_that_differs():
+    # replay shape of a live quest: the plan fixed t with 3 degrees of freedom for the interval, and also compared a normal
+    # interval inside each run; the code was right (z for that method), and the stop sent it back three times
+    proto = _levelled_proto(3)
+    v = tc.judge(_levelled_record(_METHODS), proto, repairs_left=False)
+    assert v.action == tc.OK and not v.calibration.faults
+    [q] = _mult(v.calibration)
+    assert q.judged == 6 and q.gross == 0  # the two methods that use the plan's multiplier are still judged against it
+    assert any("method=plain_z" in n and "1.96" in n and "3.182" in n for n in v.calibration.not_checked)
+
+
+def test_the_multiplier_check_still_stops_when_no_compared_method_keeps_the_plans_multiplier():
+    v = tc.judge(_levelled_record({k: _Z for k in _METHODS}), _levelled_proto(3), repairs_left=False)
+    assert v.action == tc.STOP and "multiplier" in v.say
+
+
+def test_a_multiplier_that_misses_in_some_settings_of_a_method_only_still_stops():
+    cells = _levelled_record(_METHODS)
+    est = next(k for k in cells if k["key"] == "s0")["metrics"]["x_hat"]["values"]
+    for c in cells:  # method robust_t uses 1.96 in setting s0 only
+        if c["key"] == "s0,method=robust_t":
+            se = c["metrics"]["x_se"]["values"]
+            c["metrics"]["x_lo"]["values"] = [e - _Z * s for e, s in zip(est, se)]
+            c["metrics"]["x_hi"]["values"] = [e + _Z * s for e, s in zip(est, se)]
+    assert tc.judge(cells, _levelled_proto(3), repairs_left=False).action == tc.STOP
+
+
+def test_a_method_whose_half_width_is_not_a_multiple_of_its_standard_error_still_stops():
+    cells = _levelled_record(_METHODS, vary="plain_z")
+    assert tc.judge(cells, _levelled_proto(3), repairs_left=False).action == tc.STOP
+
+
+def test_a_study_with_no_compared_method_and_a_wrong_multiplier_still_stops():
+    v = tc.judge(_interval_cells(_Z), _proto(_DECL3), repairs_left=False)
+    assert v.action == tc.STOP and not v.calibration.not_checked
+
+
+def test_a_plan_can_give_the_multiplier_for_each_method_it_compares_and_each_is_held_to_its_own():
+    clean, why = metric_spec.normalize([known("x_hat", 10.0, se="x_se", interval=("x_lo", "x_hi"), df=_PER_METHOD)])
+    assert why is None and clean[0]["known_value"]["degrees_of_freedom"] == _PER_METHOD
+    proto = _levelled_proto(_PER_METHOD)
+    v = tc.judge(_levelled_record(_METHODS), proto, repairs_left=False)
+    assert v.action == tc.OK
+    [q] = _mult(v.calibration)
+    assert q.judged == 9 and q.gross == 0 and not v.calibration.not_checked
+    assert {round(q.expected_by[f"s0,method={m}"], 3) for m in _METHODS} == {3.182, 1.96}
+    # a method that uses another multiplier than the plan gave it is a fault, even when the others are right
+    bad = tc.judge(_levelled_record({**_METHODS, "robust_t": _Z}), proto, repairs_left=False)
+    assert bad.action == tc.STOP and "3.182" in bad.say
+    # so is the normal method given the t multiplier of the others
+    assert tc.judge(_levelled_record({k: _T3 for k in _METHODS}), proto, repairs_left=False).action == tc.STOP
+
+
+@pytest.mark.parametrize("df", [{}, {"method": {}}, {"method": {"robust_t": 0}}, {"method": {"robust_t": "t"}},
+                                {"method": {"robust_t": 3}, "other": {"a": 3}}, {1: 3}])
+def test_a_multiplier_per_method_is_checked_for_its_shape(df):
+    clean, why = metric_spec.normalize([known("x_hat", 5.0, se="x_se", interval=("x_lo", "x_hi"), df=df)])
+    assert clean is None and "degrees_of_freedom" in why
+
+
+def test_a_multiplier_per_value_of_a_factor_the_protocol_does_not_have_is_a_plan_problem():
+    proto = _levelled_proto({"fit": {"robust_t": 3}})
+    [note] = metric_spec.known_value_problems(proto)
+    assert "`fit`" in note
+    proto = _levelled_proto({"method": {**_PER_METHOD["method"], "mystery": 3}})
+    [note] = metric_spec.known_value_problems(proto)
+    assert "`mystery`" in note
+    assert metric_spec.known_value_problems(_levelled_proto(_PER_METHOD)) == []
+
+
+def test_a_compared_method_the_per_method_plan_does_not_name_is_never_silently_skipped():
+    plan = {"method": {"robust_t": 3, "plain_z": "normal"}}  # plain_t is left out
+    proto = _levelled_proto(plan)
+    v = tc.judge(_levelled_record({**_METHODS, "plain_t": 25.0}), proto, repairs_left=False)
+    assert any("plain_t" in n and "not checked" in n for n in v.calibration.not_checked)
+    [note] = metric_spec.known_value_problems(proto)
+    assert "`plain_t`" in note and "every value" in note
+
+
+def test_a_fallback_for_one_plan_multiplier_excuses_only_a_t_or_normal_quantile():
+    # the plan fixes t(3); the method that differs uses a constant that is no t or normal quantile: a wrong multiplier
+    wrong = tc.judge(_levelled_record({**_METHODS, "plain_z": 25.0}), _levelled_proto(3), repairs_left=False)
+    assert wrong.action == tc.STOP and "multiplier" in wrong.say
+    # a normal quantile and a t quantile of another df are still excused (disclosed)
+    for m in (_Z, 2.5705818):
+        v = tc.judge(_levelled_record({**_METHODS, "plain_z": m}), _levelled_proto(3), repairs_left=False)
+        assert v.action == tc.OK and any("method=plain_z" in n for n in v.calibration.not_checked)

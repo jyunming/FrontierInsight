@@ -8,7 +8,7 @@ Frontier Insight (FI) is a Windows + Linux native automated research pipeline. *
 
 The graph has two paths after `design`. The simulate path is `implement → execute → execute_reflect → improve → analyze` (`improve`, `core/improve.py`, changes the simulation one step at a time against the protocol's checks of correctness, bounded by `engine.improve_rounds`, and sends a kept version back to `execute` once); the no-simulation path (when `state.no_simulation_resolved` is True, decided at `clarify` or via `engine.no_simulation: true` in YAML) is `auto_collect_data → wait_for_data → data_load → analyze`. Both converge at `analyze → cross_check → write → review`.
 
-Three feedback loops: (a) `execute_reflect → execute` — fix a crashed script, bounded by `engine.exec_reflect_max_iterations`; (b) `cross_check → design` — `analyze.next_step == re_experiment` re-routes to design only when FI's own record shows the plan's precision target missed and a larger run fits the time allowed (`broaden_lit` re-enters `literature`); (c) `review → write` — the paper is written again for what the review found; a revise verdict or an objection to the design that no check of FI's confirms is kept in the quality report (`QUALITY.md`) and never changes the design (`review → design` only for a person's note the rewrite left unanswered). `review` can also go to `implement` (a computed number is wrong; re-run, a small fixed number of times) and to `human_feedback`; a person's refine goes `human_feedback → write`, and `write → design` only when the writer names a point that needs a new experiment; `evidence_gate → literature` broadens (bounded) and `evidence_gate → design` retries once when the run produced no results, except that a script that could not run to the end goes `evidence_gate → implement`: the same design's code is written again, once per design. Loops (b) and (c) share `engine.max_iterations` as the budget; loop (a) has its own counter so a broken script doesn't eat the design-iteration budget. `no_simulation_resolved` is sticky across re-entries, so a redesign on a no-sim quest goes back through `auto_collect_data`, not `implement`.
+Three feedback loops: (a) `execute_reflect → execute` — fix a crashed script, bounded by `engine.exec_reflect_max_iterations`; (b) `cross_check → design` — `analyze.next_step == re_experiment` re-routes to design only when FI's own record shows the plan's precision target missed and a larger run fits the time allowed (`broaden_lit` re-enters `literature`); (c) `review → write` — the paper is written again for what the review found; a revise verdict or an objection to the design that no check of FI's confirms is kept in the quality report (`QUALITY.md`) and never changes the design (`review → design` only for a person's note the rewrite left unanswered). `review` can also go to `human_feedback` (a review's prose never sends the experiment back: a computed number is checked by FI's own checks before the review); a person's refine goes `human_feedback → write`, and `write → design` only when the writer names a point that needs a new experiment; `evidence_gate → literature` broadens (bounded) and `evidence_gate → design` retries once when the run produced no results, except that a script that could not run to the end goes `evidence_gate → implement`: the same design's code is written again, once per design. Loops (b) and (c) share `engine.max_iterations` as the budget; loop (a) has its own counter so a broken script doesn't eat the design-iteration budget. `no_simulation_resolved` is sticky across re-entries, so a redesign on a no-sim quest goes back through `auto_collect_data`, not `implement`.
 
 ## A core requirement: rigorous architecture, simple surface
 
@@ -43,6 +43,27 @@ over inventing a new one, and prefer a plain question over a technical field nam
 - **A fix counts as fixed only when its original failing input is shown fixed** (a replay of the real record or
   quest, or a live run), with a known positive showing the check still fires. Passing unit tests and a review are
   not that evidence. Only shown fixes go into a PR.
+- **A shown fix updates its records in the same step.** The moment a fix is shown fixed, move its item out of the
+  open issue list the work is tracked in (the backlog) into its done record, with the commit and the evidence, and
+  update every doc or record the change makes stale (`dev/registry.md`, `docs/capabilities-reference.md`, the user
+  docs, the prompts' own notes, the work log) in that same piece of work, never as a follow-up. A list that lags the
+  code reports a wrong count of what is left.
+- **The open list holds only what is open.** Never leave a fixed item open with a "fixed on ..." note appended; a fix
+  only on a branch still moves out, marked "not on main yet". A partly fixed item is rewritten to say only what is
+  left, with one line naming what was fixed; old notes are deleted, not stacked, so the list shrinks as work is done.
+- **One item per problem.** Before adding an item to the backlog, search the open list and the done record for one
+  that already covers the same failure, root or place in the code, and update that one instead; add a new item only
+  when nothing covers it, classified when written. Duplicates found later are merged into one item with every evidence
+  pointer kept.
+- **Branches and worktrees do not pile up.** When a branch is merged, or a branch or experiment is given up, delete
+  the branch and remove its worktree in that same step (after checking the worktree holds no uncommitted work and no
+  directory junction). A branch kept on purpose says why in its last commit or in the work log.
+- **Test runs are stored in one place.** Every live run, replay, record copy and bench output goes in the one runs
+  folder outside the repository that the maintainer's notes name, never at a drive root, in the home folder or next to
+  the worktrees. Material that proves a fix sits in `replays/<date>_<short name>/` with a three-line README (what it
+  proves, the backlog item, the script that reads it); pytest temp only in the worktree's `.pytest_tmp/<name>`, removed
+  after a passing run; a one-off copy lives inside its check's folder and goes when the check is reported. Anything
+  older than 14 days that no backlog item, done record or script names is deleted in the weekly sweep.
 
 ## Before building a new feature: check what already exists
 
@@ -108,7 +129,7 @@ External prerequisites are all optional and feature-gated:
 **Provider layer** (`core/provider.py`): four transports, one `LLMClient.chat(messages) -> str` surface.
 - **HTTP direct** (`codex`/`openai`/`gemini`/`ollama`/`vllm`) — `httpx.AsyncClient` against a `base_url`.
 - **HTTP via proxy** (`claude_code`/`github_copilot_cli`/`github_copilot_vscode`) — `ProxySupervisor` spawns the proxy on a free port, ref-counted across quests; readiness probed via `GET /v1/models`. The two `github_copilot_*` providers emit a one-time warning at engine init (third-party `copilot-api` proxy, abuse-detection risk).
-- **CLI exec** (`claude_cli`/`codex_cli`/`copilot_cli`/`gemini_cli`/`antigravity_cli`) — `LLMClient` spawns the local CLI binary per chat call via `asyncio.create_subprocess_exec`. No proxy. Reuses the CLI's own OAuth. Spawn details in `_CLI_SPECS`. `claude_cli`, `codex_cli`, `gemini_cli` and `antigravity_cli` are chat-style. **`copilot_cli` is agentic**: it interprets FI's node prompts as user coding tasks and replies conversationally; the engine emits a loud warning when it's selected. For Copilot use `vscode_extension` instead.
+- **CLI exec** (`claude_cli`/`codex_cli`/`copilot_cli`/`gemini_cli`/`antigravity_cli`) — `LLMClient` spawns the local CLI binary per chat call via `asyncio.create_subprocess_exec`. No proxy. Reuses the CLI's own OAuth. Spawn details in `_CLI_SPECS`. `claude_cli`, `codex_cli`, `gemini_cli` and `antigravity_cli` are chat-style. `copilot_cli` is answer-only too: every tool is off, the prompt goes on stdin and images go as `--attachment` files, so it is a chat-style CLI as FI calls it (slower than an HTTP model; about 3x in one measured quest). `vscode_extension` is the other way to use Copilot models.
 - **VSCode bridge** (`vscode_extension`). `VSCodeBridgeClient` sends newline-delimited JSON over a localhost TCP socket the FI VSCode extension spawned us with via `--vscode-bridge-port N`. The extension makes the actual `vscode.lm.selectChatModels` + `model.sendRequest` call and streams chunks back. 180 s inactivity timeout + 6-attempt Python-side retry (cumulative ~2 min backoff) protects against Copilot HTTP/2 stalls.
 
 **Execution layer** (`core/execution.py`): `Executor` protocol with two implementations. `make_executor(sandbox, ...)` is the constructor used by `Engine`. `VenvExecutor` resolves Python at `Scripts/python.exe` on Windows and `bin/python` on POSIX. `DockerExecutor` mounts `<quest_root>` at `/work` with networking disabled, memory / CPU / process caps (`DockerLimits`, from `execution.docker_*`), every capability dropped, `no-new-privileges`, and a non-root user where the host allows one.
@@ -128,7 +149,9 @@ External prerequisites are all optional and feature-gated:
   `tests/test_public_text_english.py` fails on anything else and names the file and line.
 - **A test topic is only a test.** Real research topics used to validate FI (in live runs and replays) never shape what
   goes into the repo: code, prompts, unit tests, docs, commit messages and PR descriptions do not use that topic's words
-  or carry a special case for it. Fixtures use neutral made-up topics, and every fix must be general.
+  or carry a special case for it. Fixtures use neutral made-up topics, and every fix must be general. A change found
+  to carry a test topic's words (in code, comments, tests, docs or a commit message) is sent back to be revised until
+  none is left, whoever wrote it.
 - **Watch a live run while it runs.** A long real run is watched throughout (stops, errors, the size of the study and
   FI's own time estimate); a problem is reported with a proposed way forward as soon as it shows, not after the run ends.
 - **Report outcomes, not process.** Say what is done, what is left, how much better it is, what it cost and its quality;
@@ -168,6 +191,12 @@ merge requirements for you).
   shown fixed (see "How to fix" above); a PR lists that evidence per fix.
 - **Re-review after applying that review's fixes, before opening.** A fix for one finding can silently introduce or miss a new bug — a construction site the first fix didn't cover, a fix that only half-applies. Once every finding from the first pass is addressed, run a second, targeted pass that checks each changed file specifically against the finding it was meant to fix (a full fresh review is not required, but skipping this step is not an option). Applying a suggested fix is not the same claim as verifying the fix is correct.
 - **Keep `dev/registry.md` current** in the same PR that adds, splits, or renames a module-level responsibility.
+- **No test topic in any commit, checked before every PR.** Before opening, read every commit the PR carries (its
+  message, its diff, and the branch names in merge commits, which GitHub shows in the PR's commit list) and the PR's
+  title and description for the topics the branch was tested on (live runs and replays): their words, their
+  quantities. The list of those words is kept outside the repository. Any hit sends the change back to be revised
+  (see "A test topic is only a test"); a PR opens only with none. Open the PR
+  from a branch off main with newly written commit messages, so a working branch named after a test topic never shows.
 
 ## Splitting work for small, fast models
 

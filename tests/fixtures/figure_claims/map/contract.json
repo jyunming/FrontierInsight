@@ -1,0 +1,90 @@
+{
+ "about": "A load read on a grid of columns and rows, drawn as a map and as a cross-section.",
+ "results": [
+  "load"
+ ],
+ "settings": [
+  "col",
+  "row"
+ ],
+ "x": "col",
+ "series_ids": [
+  "row_0",
+  "row_2"
+ ],
+ "references": {},
+ "labels": {
+  "load": {
+   "label": "Load",
+   "scale": "linear"
+  },
+  "col": "Column",
+  "row": "Row",
+  "row_0": "Row 0",
+  "row_2": "Row 2"
+ },
+ "figure": {
+  "id": "map",
+  "body": "figure_map",
+  "panels": 2
+ },
+ "plan": {
+  "series": [
+   "load",
+   "row_0",
+   "row_2"
+  ],
+  "grid": [
+   0,
+   1,
+   2,
+   3
+  ]
+ },
+ "expected": [
+  {
+   "claim": "drawn",
+   "args": {
+    "series": "load",
+    "panel": "1"
+   }
+  },
+  {
+   "claim": "range",
+   "args": {
+    "series": "load",
+    "axis": "y",
+    "panel": "1"
+   }
+  },
+  {
+   "claim": "drawn",
+   "args": {
+    "series": "row_0",
+    "panel": "2"
+   }
+  },
+  {
+   "claim": "trend",
+   "args": {
+    "series": "row_0",
+    "panel": "2"
+   }
+  },
+  {
+   "claim": "order",
+   "args": {
+    "at": "0",
+    "panel": "2"
+   }
+  },
+  {
+   "claim": "value_at",
+   "args": {
+    "series": "row_2",
+    "x": "3",
+    "panel": "2"
+   }
+  }
+ ]
+}

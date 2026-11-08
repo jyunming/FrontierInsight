@@ -64,11 +64,33 @@ def test_the_reviewer_is_shown_the_plans_equations_and_cases_but_never_an_expect
     assert data["equations"][0]["formula"] == "Q = m * w / c" and data["settings_varied"] == ["c"]
     assert data["checks"][0]["measure"] == "quality" and data["checks"][0]["case"] == {"c": 0.5}
     assert "0.123456789" not in view and "tolerance" not in view and "expected" not in view
-    # free text the reader sees is scrubbed too, so it cannot echo a value of the plan's checks
-    leaky = {**PROTOCOL, "model": {"summary": "a spring whose result should be 0.123456789",
-                                   "equations": [{"id": "E1", "formula": "Q = m * w / c", "source": "gives 0.123456789 at c=0.5"}]}}
-    shown = cr.plan_view({**DESIGN, "method": "check against 0.123456789 first"}, leaky)
-    assert "0.123456789" not in shown and pairs.PLACEHOLDER in shown and "Q = m * w / c" in shown
+    # a check's answer is hidden by its field: the expected value, tolerance and reference of every check, and the worked
+    # examples of the model's steps; the plan's own text is shown as written
+    hidden = {**PROTOCOL, "model": {"summary": "a spring", "equations": [{"id": "E1", "formula": "Q = m * w / c"}],
+                                    "steps": [{"id": "S1", "name": "load", "does": "scales the load",
+                                               "example": {"inputs": {"m": 2.0}, "expected_formula": "0.123456789"}}]}}
+    shown = cr.plan_view(DESIGN, hidden)
+    assert "0.123456789" not in shown and "Q = m * w / c" in shown and "scales the load" in shown
+
+
+def test_the_whole_plan_is_shown_with_what_it_holds_fixed_and_is_never_cut_mid_text() -> None:
+    protocol = {**PROTOCOL, "constants": {"mass_kg": 2.5}, "optimisation": {"fixed": {"stiffness": 40.0},
+                "grid": {"c": [0.1, 0.5]}, "in_each_run": {"loads": [1, 2, 3]}},
+                "definitions": [{"metric": "quality", "defined_as": "the peak over the width", "source": "[1]"}]}
+    data = json.loads(cr.plan_view(DESIGN, protocol))
+    assert data["held_fixed"]["constants"] == {"mass_kg": 2.5} and "not a hardcoding fault" in data["held_fixed"]["note"]
+    assert data["held_fixed"]["fixed_values_of_the_settings"] == {"stiffness": 40.0}
+    assert data["in_each_run"] == {"loads": [1, 2, 3]} and data["grid"] == PROTOCOL["grid"]
+    assert data["definitions"][0]["defined_as"] == "the peak over the width"
+    text, dropped = cr.plan_view_fit(DESIGN, {**protocol, "failure_policy": "x" * 3000, "seed_policy": "y" * 300}, limit=1200)
+    assert dropped == ["failure_policy"] and "failure_policy" not in text.split("\n(these sections")[0]
+    assert "not shown: failure_policy" in text and json.loads(text.split("\n(")[0])
+
+
+def test_a_value_the_plan_shows_as_a_setting_is_not_replaced_in_what_the_reader_writes() -> None:
+    protocol = {**PROTOCOL, "constants": {"mass_kg": 2.5}}
+    assert 2.5 not in cr.reportable_values(DESIGN, protocol)
+    assert set(cr.reportable_values(DESIGN, PROTOCOL)) <= set(pairs.plan_values(PROTOCOL))
 
 
 def test_findings_are_read_as_problems_of_logic_without_any_value() -> None:
@@ -181,17 +203,20 @@ async def test_an_agree_only_code_review_is_asked_again_and_then_recorded_as_not
     reader = _Agrees()
     engine._client = reader
     assert await engine._code_review_gate(STATE) is None
-    assert len(reader.prompts) == 2 and "Your previous reply was no review" in reader.prompts[1]
+    # "Implemented" with no file and line is not a review: nothing is counted, the requirements are asked for once more
+    assert len(reader.prompts) == 2
     record = cr.load(engine.quest_root)
-    assert record["error"] == pairs.NOT_A_REVIEW and not record.get("read_version")
+    assert record["error"] == "its answers cited no place in the code it was shown" and not record.get("read_version")
+    assert record["cited_outside_what_was_shown"]
     assert cr.write_note(engine.quest_root, engine.quest_root / "code") == ""
     assert "not compared with the plan by another model" in cr.findings_block(engine.quest_root, engine.quest_root / "code")
-    # Asked again, it says what it checked: a review with nothing found.
+    # Asked again, it cites the places and says what it checked: a review with nothing found.
     class _Then(_Logic):
         async def chat(self, messages, **kw):  # noqa: ANN001
             self.prompts.append(messages[-1]["content"])
             reqs = json.loads(messages[-1]["content"].split("```json", 1)[1].split("```", 1)[0])
-            out: dict[str, Any] = {"requirements": [{"id": r["id"], "status": "implemented"} for r in reqs]}
+            cite = {"file": "simulate.py", "line": 1} if len(self.prompts) > 1 else {}
+            out: dict[str, Any] = {"requirements": [{"id": r["id"], "status": "implemented", **cite} for r in reqs]}
             if len(self.prompts) > 1:
                 out["checked"] = ["E1: the factors and the signs agree with the plan"]
             return json.dumps(out)
@@ -202,3 +227,178 @@ async def test_an_agree_only_code_review_is_asked_again_and_then_recorded_as_not
     assert await second._code_review_gate(STATE) is None and len(reader.prompts) == 2
     record = cr.load(second.quest_root)
     assert record["final"] is True and record["checked"] == ["E1: the factors and the signs agree with the plan"]
+
+
+def test_a_value_is_hidden_in_the_entry_that_owns_it_and_nowhere_else() -> None:
+    check = {**PROTOCOL["oracles"][0], "check": "Q at c=0.5; the result must be 0.123456789 within 1e-9",
+             "expected_formula": "0.123456789"}
+    protocol = {**PROTOCOL, "oracles": [check, {"name": "other", "kind": "invariant", "check": "a second check",
+                                               "case": {"c": 1.0}, "measure": "quality", "expected": 10, "tolerance": 0.5}],
+                "model": {"summary": "the scan covers the interval [10, p-10] nm", "equations": [
+                    {"id": "E1", "formula": "Q = m * w / c", "source": "a plain derivation"}]}}
+    data = json.loads(cr.plan_view({**DESIGN, "method": "a window of [10, p-10] nm, then c = 0.5"}, protocol))
+    # a check's own text no longer states its expected value, tolerance or formula result
+    assert "0.123456789" not in data["checks"][0]["check"] and pairs.PLACEHOLDER in data["checks"][0]["check"]
+    assert "c=0.5" in data["checks"][0]["check"] and data["checks"][0]["case"] == {"c": 0.5}
+    # the same number in another section is the plan's own prose and stays as written
+    assert data["model"] == "the scan covers the interval [10, p-10] nm"
+    assert data["method"] == "a window of [10, p-10] nm, then c = 0.5"
+    assert "[10, p-10]" in json.dumps(data) and "0.123456789" not in json.dumps(data)
+
+
+def test_a_plan_that_does_not_fit_is_split_by_whole_sections_and_no_request_is_over_the_cap() -> None:
+    oracles = [{"name": f"c{i}", "kind": "invariant", "check": "x" * 600, "case": {"c": 0.5}, "measure": "quality",
+                "expected": 0, "tolerance": 1e-9} for i in range(100)]
+    views = cr.plan_views(DESIGN, {**PROTOCOL, "oracles": oracles}, limit=20000)
+    assert len(views) > 1 and all(len(v["text"]) <= 20000 for v in views)
+    got = sum(len(json.loads(v["text"].split("\n(")[0]).get("checks", [])) for v in views)
+    assert got == 100, "every check is in some request"
+    assert any("other requests of this reading" in v["text"] for v in views)
+
+
+def test_the_note_of_what_a_request_leaves_out_is_one_entry_per_section_and_the_request_stays_under_the_cap() -> None:
+    equations = [{"id": f"E{i}", "formula": "x" * 30000} for i in range(400)]
+    protocol = {**PROTOCOL, "model": {"summary": "a spring", "equations": equations}}
+    views = cr.plan_views(DESIGN, protocol, limit=20000)
+    assert views and all(len(v["text"]) <= 20000 for v in views)
+    notes = [x for v in views for x in v["left_out"]]
+    assert "equations: 400 items left out" in set(notes), notes[:3]
+    assert len(set(notes)) < 10 and all(len(v["left_out"]) < 10 for v in views)
+    assert "spring" in json.dumps([json.loads(v["text"].split("\n(")[0]) for v in views])
+
+
+def _sections_of(views: list[dict[str, Any]]) -> dict[str, list[Any]]:
+    """Every request's sections read back from its text: ``{section: [value in each request that holds it]}``."""
+    out: dict[str, list[Any]] = {}
+    for v in views:
+        for name, value in json.loads(v["text"].split("\n(")[0]).items():
+            out.setdefault(name, []).append(value)
+    return out
+
+
+def _long_audit() -> dict[str, Any]:
+    return {"note": "proposed, not applied", "items": [{"path": f"p{i}", "proposed": "z" * 1500} for i in range(30)]}
+
+
+def test_a_plan_over_the_cap_shows_every_section_in_some_request_and_drops_none() -> None:
+    protocol = {**PROTOCOL, "constants": {"mass_kg": 2.5}, "optimisation": {"grid": {"c": [0.1, 0.5]},
+                "in_each_run": {"loads": [1, 2, 3]}},
+                "definitions": [{"metric": "quality", "defined_as": "the peak over the width", "source": "[1]"}],
+                "ci_method": "a percentile interval", "seed_policy": "one seed per cell", "failure_policy": "retry once"}
+    limit = 20000
+    whole = cr.plan_sections(DESIGN, protocol, _long_audit())
+    assert len(json.dumps(whole)) > limit
+    views = cr.plan_views(DESIGN, protocol, limit=limit, open_items=_long_audit())
+    assert len(views) > 1 and all(len(v["text"]) <= limit for v in views)
+    assert all(v["left_out"] == [] for v in views)
+    shown = _sections_of(views)
+    assert set(shown) == set(whole), set(whole) - set(shown)
+    for name in ("definitions", "grid", "in_each_run", "ci_method", "seed_policy", "failure_policy"):
+        assert shown[name] == [whole[name]]
+    # a list section is split by its items: each item is shown exactly once
+    items = [x for part in shown[cr._AUDIT_SECTION] for x in part]
+    assert sorted(i["path"] for i in items if "path" in i) == sorted(f"p{i}" for i in range(30))
+
+
+def test_a_section_too_big_alone_is_still_left_out_and_named() -> None:
+    protocol = {**PROTOCOL, "failure_policy": "q" * 3000, "seed_policy": "one seed per cell"}
+    views = cr.plan_views(DESIGN, protocol, limit=1200)
+    assert all(len(v["text"]) <= 1200 for v in views)
+    assert {n for v in views for n in v["left_out"]} == {"failure_policy"}
+    shown = _sections_of(views)
+    assert "failure_policy" not in shown and shown["seed_policy"] == ["one seed per cell"]
+    assert all("not shown: failure_policy" in v["text"] for v in views)
+
+
+def test_every_plan_part_is_read_with_every_code_part_when_the_plan_must_be_split(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "simulate.py").write_text("def run_cell(cell):\n    return {}\n", encoding="utf-8")
+    (tmp_path / "experiment.py").write_text("x = 1\n" * 60, encoding="utf-8")
+    monkeypatch.setattr(cr, "_MAX_CODE_CHARS", 200)
+    protocol = {**PROTOCOL, "definitions": [{"metric": "m", "defined_as": "d" * 1000, "source": "[1]"}] * 60}
+    monkeypatch.setattr(cr, "_MAX_PLAN_CHARS", 20000)
+    plans = cr.plan_requests(DESIGN, protocol)
+    parts = cr.source_parts_detail(tmp_path)
+    calls = cr.reading_calls(tmp_path, DESIGN, protocol)
+    assert len(plans) > 1 and len(parts) > 1 and len(calls) == len(parts) * len(plans)
+    assert {(c["code_index"], c["plan_index"]) for c in calls} == {(i, j) for i in range(len(parts)) for j in range(len(plans))}
+
+
+def test_the_plan_is_whole_in_every_request_and_the_audit_items_come_beside_it_cut_to_an_equal_share(tmp_path: Path) -> None:
+    (tmp_path / "simulate.py").write_text("x = 1\n", encoding="utf-8")
+    items = {"note": "proposed, not applied", "items": [
+        {"part": f"p{i}", "proposed": "z" * 3000, "audit_said": "a" * 3000, "audit_fix": "f" * 3000,
+         "not_applied_because": "r" * 500} for i in range(25)]}
+    before = json.dumps(items, sort_keys=True)
+    protocol = {**PROTOCOL, "definitions": [{"metric": "m", "defined_as": "d" * 1500, "source": "[1]"}] * 12}
+    (call,) = cr.reading_calls(tmp_path, DESIGN, protocol, open_items=items)
+    whole = cr.plan_sections(DESIGN, protocol, None)
+    assert json.loads(call["plan"]) == whole and call["left_out"] == []
+    assert cr._AUDIT_SECTION not in call["plan"] and "p24" in call["open_items"]
+    assert len(call["plan"]) + len(call["open_items"]) <= cr._MAX_PLAN_CHARS
+    chars = [i["chars"] for i in call["items"]]
+    assert len(chars) == 25 and max(chars) - min(chars) < 40 and all(i["cut"] for i in call["items"])
+    assert json.dumps(items, sort_keys=True) == before, "the full items are not changed"
+    short = {"items": [{"part": "p", "proposed": "v", "audit_said": "s", "audit_fix": "", "not_applied_because": "r"}]}
+    (one,) = cr.reading_calls(tmp_path, DESIGN, PROTOCOL, open_items=short)
+    assert not one["items"][0]["cut"] and '"proposed": "v"' in one["open_items"]
+
+
+def test_the_plan_sections_come_in_the_order_that_matters_for_judging_the_code() -> None:
+    protocol = {**PROTOCOL, "ci_method": "c", "seed_policy": "s", "failure_policy": "f", "constants": {"k": 1},
+                "definitions": [{"metric": "quality", "defined_as": "d", "source": "[1]"}],
+                "optimisation": {"grid": {"c": [1, 2]}, "sub_studies": [{"name": "x"}]},
+                "model": {"summary": "a spring", "equations": [{"id": "E1", "formula": "Q = m"}]}}
+    names = list(cr.plan_sections(DESIGN, protocol, None))
+    order = ["model", "equations", "metrics", "definitions", "checks", "settings_varied", "grid", "held_fixed",
+             "sub_studies", "method", "ci_method", "seed_policy", "failure_policy"]
+    assert [n for n in order if n in names] == [n for n in names if n in order] and "equations" in names
+
+
+def test_the_prompt_puts_the_task_first_then_the_requirements_the_plan_the_audit_the_code_and_the_run() -> None:
+    import string
+
+    text = (Path(__file__).parent.parent / "agents" / "code_review.md").read_text(encoding="utf-8")
+    filled = string.Template(text).substitute(topic="t", requirements="@@REQS@@", plan="@@PLAN@@", open_items="@@ITEMS@@", code="@@CODE@@",
+                                              small_run="@@RUN@@", previous="@@PREV@@")
+    marks = ["# What to judge, for each requirement", "# What to judge about the logic", "# What to return", "# Topic",
+             "@@REQS@@", "@@PLAN@@", "@@ITEMS@@", "# The code", "@@RUN@@", "@@PREV@@"]
+    at = [filled.index(m) for m in marks]
+    assert at == sorted(at)
+    assert "NOT the plan" in filled.split("@@ITEMS@@")[0].rsplit("# ", 1)[1]
+
+
+def test_the_open_items_never_exceed_the_room_and_say_how_many_are_not_shown() -> None:
+    items = {"note": "n" * 50000, "items": [{"part": f"p{i}", "proposed": "a" * 1000, "audit_said": "b" * 1000,
+                                             "audit_fix": "c" * 1000, "not_applied_because": "d" * 1000} for i in range(200)]}
+    for room in (40000, 20000, 6000, 900):
+        text, info = cr.compact_items(items, room)
+        assert len(text) <= room, (room, len(text))
+        shown = [i for i in info if i["shown"]]
+        assert len(info) == 200 and all(f'"p{k}"' in text for k in range(len(shown)))
+        if len(shown) < 200:
+            assert f"{200 - len(shown)} more open items are in the record, not shown here" in text
+        assert all(i["cut"] for i in info)
+
+
+def test_an_item_keeps_its_part_and_gives_its_share_to_the_proposal_and_the_reason_first() -> None:
+    long_item = {"part": "protocol.rule", "proposed": "P" * 150, "audit_said": "S" * 900, "audit_fix": "F" * 900,
+                 "not_applied_because": "R" * 150}
+    items = {"items": [long_item] * 40}
+    text, info = cr.compact_items(items, 20000)
+    rows = json.loads(text.split("```json")[1].split("```")[0])
+    assert len(text) <= 20000 and all(r["part"] == "protocol.rule" for r in rows)
+    assert all(r["proposed"] == "P" * 150 and r["not_applied_because"] == "R" * 150 for r in rows)
+    assert all(i["proposed_whole"] and i["reason_whole"] for i in info)
+    assert all(len(r.get("audit_said", "")) < 900 for r in rows) and not any("audit_fix" in r for r in rows)
+
+
+def test_a_section_that_fits_alone_is_not_lost_to_the_note_about_another_section() -> None:
+    limit = 1200
+    method = "m" * (limit - 60)
+    design = {**DESIGN, "method": method}
+    protocol = {**PROTOCOL, "failure_policy": "q" * 3000}
+    views = cr.plan_views(design, protocol, limit=limit)
+    assert all(len(v["text"]) <= limit for v in views)
+    assert "method" in _sections_of(views), [v["left_out"] for v in views]
+    assert "failure_policy" in views[0]["left_out"] and "method" not in " ".join(views[0]["left_out"])
+    assert any("not shown: failure_policy" in v["text"] for v in views), "some request tells the reader what was left out"

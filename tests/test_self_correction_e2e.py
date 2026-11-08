@@ -46,8 +46,10 @@ _GOOD_EXPERIMENT = textwrap.dedent("""\
 # with no RESULT_JSON line.
 _BAD_EXPERIMENT = textwrap.dedent("""\
     import sys
-    # `undefined_name` doesn't exist; this raises NameError immediately.
-    print(undefined_name)
+    # A fault only running finds (an undefined name is found by the static check before the run and repaired there):
+    # the list is empty, so this raises IndexError immediately.
+    values = []
+    print(values[3])
 """)
 
 
@@ -251,8 +253,12 @@ async def test_full_dag_with_analyze_re_experiment_reroute(
     assert artifacts.paper_md is not None and artifacts.paper_md.exists()
     # Analyze fired twice (re_experiment → re-run → publish).
     assert state_flags["analyze_calls"] == 2
-    # Design fired twice — the re-route DID send us back through design.
-    assert state_flags["design_calls"] == 2
+    # The re-route DID send us back through design, once: FI's own record of the design has two revisions. (The count
+    # of design prompts is not that fact: a redesign first asks only for the parts its reason names and asks for the
+    # whole design when none comes back changed, as here, where the fixture's design has no protocol to size.)
+    history = json.loads((engine.quest_root / "needs" / "DESIGN_HISTORY.json").read_text(encoding="utf-8"))
+    assert [h["iteration"] for h in history] == [0, 1]
+    assert state_flags["design_calls"] >= 2
     # Final iteration counter was bumped by cross_check on the re-route.
     assert (artifacts.raw_state.get("iteration") or 0) >= 1
 

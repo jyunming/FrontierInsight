@@ -26,8 +26,10 @@ VAR = re.compile(r"(?<!\$)(?:\$\$)*\$(?:\{)?([A-Za-z_][A-Za-z0-9_]*)")
 
 
 def _substitute_calls() -> dict[str, set[str]]:
-    """Map prompt name -> the kwargs engine.py passes to its substitute()."""
-    src = inspect.getsource(engine_mod)
+    """Map prompt name -> the kwargs engine.py (and the engine's mixins that render a prompt) pass to its substitute()."""
+    import core.agent_build as agent_build_mod
+
+    src = inspect.getsource(engine_mod) + "\n" + inspect.getsource(agent_build_mod)
     calls: dict[str, set[str]] = {}
 
     def _kwargs_from(start: int) -> set[str]:
@@ -37,14 +39,18 @@ def _substitute_calls() -> dict[str, set[str]]:
             i += 1
         return set(re.findall(r"(\w+)\s*=", src[start:i - 1]))
 
+    # The call may continue on the next line after a comma (``self._frame_outline_template(state, self._prompts["implement_outline"],
+    # <newline> self._analysis_bodies(state)).substitute(``), so one such line break is allowed before ``.substitute(``.
     for m in re.finditer(
-        r'_prompts(?:\.get)?\(?\["?([a-z_]+)"?\]\)?[^\n]*?\.substitute\(', src
+        r'_prompts(?:\.get)?\(?\["?([a-z_]+)"?\]\)?[^\n]*?(?:,\s*\n[^\n]*?)?\.substitute\(', src
     ):
         calls.setdefault(m.group(1), set()).update(_kwargs_from(m.end()))
 
     # ``implement_body`` is fetched into a local first, so it needs its own
     # pattern — a rename there would otherwise slip past this check.
-    for m in re.finditer(r"body_prompt\.substitute\(", src):
+    # The call is now ``self._frame_template(state, body_prompt, bodies).substitute(`` (the frame cuts the template down to
+    # its own slots first), so the pattern allows what sits between the name and ``.substitute(``.
+    for m in re.finditer(r"body_prompt\b[^\n]*?\.substitute\(", src):
         calls.setdefault("implement_body", set()).update(_kwargs_from(m.end()))
     return calls
 

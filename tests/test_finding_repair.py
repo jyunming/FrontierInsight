@@ -462,6 +462,38 @@ def test_a_repair_of_a_method_that_alters_another_function_is_rejected_and_one_t
     assert "return k * 2" in text and "return c + 1" not in text
 
 
+def test_an_accepted_repair_is_a_commit_and_a_refused_one_is_kept_on_a_side_reference(tmp_path: Path) -> None:
+    import shutil
+    import subprocess
+
+    from core import code_project
+
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    test = "import spring\n\ndef test_s():\n    assert spring.Spring().stiffness(1) == 2, 'doubled'\n"
+    run = Run(tmp_path, [{"id": "F-1", "function": "Spring.stiffness", "quantity": "stiffness"}], {})
+    (run.code / "spring.py").write_text(METHODS, encoding="utf-8")
+    assert code_project.record_change(run.root, "code written")
+    both = METHODS.replace("return k\n", "return k * 2\n", 1).replace("return c\n", "return c + 1\n", 1)
+    only = METHODS.replace("return k\n", "return k * 2\n", 1)
+    run.replies = {"code:test": [_block(test)],
+                   "code:repair": [_block("# file: spring.py\n" + both), _block("# file: spring.py\n" + only)]}
+    assert run.go() == ["spring.py"]
+
+    def git(*args: str) -> str:
+        return subprocess.run(["git", *args], cwd=run.code, capture_output=True, text=True, encoding="utf-8").stdout
+
+    assert "finding repair accepted: F-1 (Spring.stiffness; stiffness)" in git("log", "--format=%s", "-1")
+    assert git("show", "HEAD:spring.py").rstrip() == only.rstrip()
+    refused = git("log", "--format=%s", "-1", "refs/fi/refused/F-1-1")
+    assert "finding repair refused: F-1" in refused and "not about" in refused
+    assert git("show", "refs/fi/refused/F-1-1:spring.py").rstrip() == both.rstrip()
+    # the side commit hangs off the history as it was; it is not on the branch
+    assert git("rev-parse", "refs/fi/refused/F-1-1^") == git("rev-parse", "HEAD~1")
+    assert "refs/fi/refused" not in git("branch", "-a")
+    assert git("status", "--porcelain").strip() == ""
+
+
 FRAMED = "import math\n\nTHRESHOLD = 0.5\n\n\n" + METHODS.replace("class Spring:\n", "class Spring:\n    LIMIT = 3\n\n")
 
 
@@ -477,6 +509,19 @@ def test_what_a_repair_changes_outside_the_functions_is_found() -> None:
     # Not allowed: an import that rebinds a name the file already has.
     assert fr.frame_changes(FRAMED, FRAMED + "\nfrom os import path as THRESHOLD\n")
     assert fr.frame_changes(FRAMED, "import numpy as math\n" + FRAMED.replace("import math\n", ""))
+
+
+def test_a_docstring_that_runs_nothing_is_not_a_change_outside_the_functions() -> None:
+    doc_old = '"""The old docstring."""\n' + FRAMED
+    assert fr.frame_changes(doc_old, doc_old.replace("The old docstring.", "The new docstring.")) == []  # a module docstring
+    cls_old = FRAMED.replace("class Spring:\n", 'class Spring:\n    """A spring."""\n', 1)
+    assert fr.frame_changes(cls_old, cls_old.replace("A spring.", "A stiff spring.")) == []  # a class docstring
+    assert fr.frame_changes(FRAMED, doc_old) == []  # a docstring added
+    assert fr.frame_changes(doc_old, FRAMED) == []  # a docstring removed
+    # Not allowed: a bare statement that does run something, or a bare number, at module level.
+    assert fr.frame_changes(FRAMED, FRAMED + '\nsetup()\n')
+    assert fr.frame_changes(FRAMED, FRAMED + '\nprint("x")\n')
+    assert fr.frame_changes(FRAMED, FRAMED + "\n42\n")
 
 
 def test_a_repair_of_a_method_that_changes_a_module_constant_or_a_class_attribute_is_rejected(tmp_path: Path) -> None:
@@ -612,6 +657,10 @@ def test_only_the_findings_own_quantity_entries_may_change_at_module_level() -> 
     assert changes(base, f'result = {{{q}: 0.1, "merged": 0.0, "extra": 1}}\n'), "a key of another name is not the finding's"
     assert changes(base, f'result = {{{q}: 0.1, "merged": 0.0, name: 1}}\n')
     assert changes(base, f'result = {{{q}: 0.1, "merged": 0.0, "new": 1, "new": 2}}\n')
+    # A repeated key is refused even when the dict already had it: which copy wins must not decide the repair. A key that
+    # is new is refused by the rule that no other key is added, so only this case reaches the repeated-key rule.
+    twice = f'result = {{{q}: 0.0, "merged": 0.0, "merged": 0.0}}\n'
+    assert changes(twice, twice.replace(f"{q}: 0.0", f"{q}: 0.1")), "a repeated key is not a plain result dict"
 
 
 def test_the_entries_a_module_level_dict_had_keep_their_order_and_a_spread_is_never_new() -> None:
@@ -759,3 +808,45 @@ def test_a_script_that_runs_its_analysis_when_imported_gets_no_run_files(tmp_pat
     assert fr.run_environment(tmp_path, stand_ins=False)["FI_TRIALS"] == "raw/trials.json"
     (tmp_path / "code" / "experiment.py").write_text("def f(:\n", encoding="utf-8")
     assert fr.run_environment(tmp_path) == {}, "a file that does not parse is not known to run nothing"
+GUARDED_SCRIPT = """import math
+
+
+def main():
+    return math.sqrt(helper(4))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+def _runs_without_name_error(tmp_path: Path, code: str) -> None:
+    import runpy
+
+    path = tmp_path / "script_under_test.py"
+    path.write_text(code, encoding="utf-8")
+    runpy.run_path(str(path), run_name="__main__")  # a NameError here is the failure
+
+
+def test_a_helper_a_reply_adds_goes_before_the_main_block_so_running_the_script_finds_it(tmp_path: Path) -> None:
+    reply = "```python\ndef main():\n    return helper(4) + 1\n\n\ndef helper(x):\n    return x * 2\n```"
+    new, replaced, why = fr.splice(GUARDED_SCRIPT, reply, scope={"main"})
+    assert why == "" and new is not None and replaced == ["main", "helper"]
+    assert new.index("def helper") < new.index('if __name__ == "__main__":')
+    _runs_without_name_error(tmp_path, new)
+
+
+def test_a_file_without_a_main_block_still_gets_the_helper_at_the_end() -> None:
+    old = "def main():\n    return 1\n"
+    new, _, why = fr.splice(old, "def main():\n    return helper()\n\n\ndef helper():\n    return 2\n", scope={"main"})
+    assert why == "" and new == "def main():\n    return helper()\n\n\ndef helper():\n    return 2\n"
+
+
+def test_a_repair_cannot_add_a_star_import_but_may_add_an_ordinary_import() -> None:
+    old = "import os\nX = 1\n\n\ndef f():\n    return X\n"
+    assert fr.frame_changes(old, old + "\nfrom numpy import *\n")
+    assert fr.frame_changes(old, old + "\nfrom os.path import *\n")
+    assert fr.frame_changes(old, old + "\nimport math\n") == []
+    assert fr.frame_changes(old, old + "\nfrom math import sqrt\n") == []
+    assert fr.frame_changes(old, old + "\ny = (z := 3)\n")
+    new, _, why = fr.splice(old, "from numpy import *\nimport math\n\n\ndef f():\n    return math.sqrt(X)\n", scope={"f"})
+    assert why == "" and "import math" in new and "import *" not in new

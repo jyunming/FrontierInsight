@@ -116,21 +116,21 @@ def test_the_open_findings_of_the_version_that_ran_name_the_quantities(tmp_path:
     assert cr.differing_quantities(engine.quest_root, engine.quest_root / "code") == []
 
 
-def test_the_quantities_are_left_out_of_the_results_and_the_writer_is_told(tmp_path: Path) -> None:
+def test_a_reader_claim_is_recorded_for_the_gate_and_leaves_nothing_out_of_the_analysis_input(tmp_path: Path) -> None:
+    """Changed: the reader's word alone no longer takes the quantities out at execute time (backlog -396); the record holds the
+    claim with its keys, for the evidence gate to measure (a test shows it and a rerun moves a number), and the analysis and the
+    paper's values still see every key."""
     engine = _quest(tmp_path)
     _run(engine, _result())
     record = json.loads((engine.quest_root / "needs" / "RESULT_CHECK.json").read_text(encoding="utf-8"))
-    left = set(record["removed_quantities"])
-    assert left == _left_out_keys() and len(left) == 6
-    assert not any("bias" in k or "coverage" in k for k in left)
-    assert any(abs(v - HEADLINE_VALUE) < 1e-9 for values in record["removed_values"].values() for v in values)
+    assert record["removed_quantities"] == [] and record["removed_values"] == {}
+    claimed = {k for c in record["checks"] for k in c["keys"]}
+    assert claimed == _left_out_keys() and len(claimed) == 6
+    assert not any("bias" in k or "coverage" in k for k in claimed)
     assert {c["quantity"] for c in record["checks"]} == PLANNED
-    note = engine._run_checks_note()
-    assert all(f"`{name}`" in note for name in PLANNED) and "Do NOT report" in note and "limitations" in note
-    # The analysis and the paper are given the results without them.
+    assert "Do NOT report" not in engine._run_checks_note()
     stripped = engine._without_typed_results(_result())
-    assert not (_keys(stripped) & left) and any("bias" in k for k in _keys(stripped))
-    assert _keys(_result()) - left == _keys(stripped)
+    assert _keys(stripped) == _keys(_result())
 
 
 def test_a_number_a_kept_quantity_also_holds_is_not_taken_for_a_left_out_one() -> None:
@@ -143,6 +143,13 @@ def test_a_number_a_kept_quantity_also_holds_is_not_taken_for_a_left_out_one() -
 def test_the_quality_report_says_what_was_left_out_and_why(tmp_path: Path) -> None:
     engine = _quest(tmp_path)
     _run(engine, _result())
+    # The claims leave nothing out until the evidence gate decides; here no rerun could be made, so they stay out.
+    path = engine.quest_root / "needs" / "RESULT_CHECK.json"
+    rc = json.loads(path.read_text(encoding="utf-8"))
+    assert rc["removed_quantities"] == [] and quality_report.build(engine.quest_root, running=False)["left_out_of_paper"] == []
+    for c in rc["checks"]:
+        c["measured"] = {"status": "could_not"}
+    engine._close_reader_claims(path, rc, rc["checks"], [], _result(), None)
     report = quality_report.build(engine.quest_root, running=False)
     assert {x["quantity"] for x in report["left_out_of_paper"]} == PLANNED
     text = quality_report.render(report)

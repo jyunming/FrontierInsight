@@ -52,7 +52,7 @@ from core.engine import (
     QuestArtifacts,
     _latex_esc,
     build_further_reading,
-    build_references,
+    cited_references,
 )
 from core.proc_tree import run_tree
 from core.provider import (
@@ -66,9 +66,12 @@ from core.provider import (
 )
 from generation import _cjk
 from generation._figure_captions import without_number
+from generation._paper_context import note_prompt_fit, paper_and_claims
+from generation._paper_figures import log_taken, paper_figure_set, take_out_unchecked
 from generation._pdf_engine import find_pdf_engine
 from generation._pdf_measure import measure_pdf, poster_report
-from generation.paper import _sanitize_unicode_for_latex
+from generation._unicode_fonts import find_fonts
+from generation.paper import _NO_WRAP_RE, _prepare_unicode, listed_further_reading
 
 _log = logging.getLogger("frontier_insight.poster")
 
@@ -83,6 +86,7 @@ def _run(cmd: list[str], *, timeout: float, cwd: str | None = None) -> "subproce
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PROMPT_PATH = REPO_ROOT / "agents" / "poster.md"
+REDO_PROMPT_PATH = REPO_ROOT / "agents" / "poster_redo.md"
 TEMPLATE_PATH = REPO_ROOT / "templates" / "poster" / "poster.tex"
 # Frontier Insight brand mark, copied next to poster.tex for the header
 # lockup and the reference band.
@@ -185,11 +189,15 @@ _EMOJI_RE = _re.compile(
 )
 
 
-def _latex_safe_body(body: str) -> str:
-    """Make a fully-substituted poster.tex safe for pdflatex: map common
-    Unicode typography to LaTeX equivalents (shared with the paper
-    generator) and strip emoji/pictographs that have no LaTeX mapping."""
-    return _EMOJI_RE.sub("", _sanitize_unicode_for_latex(body))
+def _latex_safe_source(body: str, *, fonts=None, cjk: bool = False):
+    """The fully-substituted poster.tex made ready for its TeX engine by the
+    paper's own glyph handling (``generation.paper._prepare_unicode``): exact
+    LaTeX forms, and under XeLaTeX a fallback font for each glyph the text
+    fonts lack (``fonts`` is that engine's ``FontPlan``; None for pdflatex).
+    Returns the ``_UnicodeSource``: ``.text``, ``.header`` (the fonts, for
+    ``poster_unicode.tex``) and ``.not_set`` (glyphs no font here sets).
+    Emoji/pictographs that have no LaTeX mapping are stripped first."""
+    return _prepare_unicode(_EMOJI_RE.sub("", body), fonts=fonts, cjk=cjk, rewrite_code=True)
 
 
 # Bare LaTeX specials that hard-error pdflatex when an LLM writes them as
@@ -321,14 +329,21 @@ class _Block:
     items: list[str] = field(default_factory=list)
     file: str = ""
     caption: str = ""
+    number: int = 0  # the paper's figure number, when the poster takes it from the paper's own list
 
     def texts(self) -> list[str]:
         return [self.text, self.caption, *self.items]
 
 
-def _blocks_from_reply(parsed: dict, figure_files: set[str]) -> list[_Block]:
+def _blocks_from_reply(
+    parsed: dict, figure_files: set[str], paper_numbers: dict[str, int] | None = None,
+    paper_captions: dict[str, str] | None = None,
+) -> list[_Block]:
     """The blocks of a reply. A reply in the old two-column LaTeX shape
-    (``left`` / ``right``) becomes raw blocks, one per column."""
+    (``left`` / ``right``) becomes raw blocks, one per column. A figure in ``paper_numbers`` (one FI recorded the
+    drawing calls of) is shown under the paper's number with the paper's caption, not the model's."""
+    paper_numbers = paper_numbers or {}
+    paper_captions = paper_captions or {}
     blocks: list[_Block] = []
     raw_blocks = parsed.get("blocks")
     if isinstance(raw_blocks, list):
@@ -347,7 +362,10 @@ def _blocks_from_reply(parsed: dict, figure_files: set[str]) -> list[_Block]:
             elif kind == "figure":
                 name = Path(_plain(item.get("file"))).name
                 if name in figure_files:
-                    blocks.append(_Block("figure", file=name, caption=_plain(item.get("caption"))))
+                    if name in paper_numbers and paper_captions.get(name):
+                        blocks.append(_Block("figure", file=name, caption=paper_captions[name], number=paper_numbers[name]))
+                    else:
+                        blocks.append(_Block("figure", file=name, caption=_plain(item.get("caption"))))
         return blocks
     for key in ("left", "middle", "right"):
         value = parsed.get(key)
@@ -368,6 +386,35 @@ def _paper_captions(paper_md: str) -> dict[str, str]:
     return captions
 
 
+def _take_out_unchecked(text: str, art: QuestArtifacts, raw_paper: str) -> str:
+    """``text`` without the sentences about a figure FI does not stand behind (the paper's own rule), stripped; each
+    removal goes to the quest's run.log, not onto the poster."""
+    out, taken = take_out_unchecked(text, art.raw_state, art.quest_root, raw_paper)
+    log_taken(taken, art.quest_root, "poster", _log)
+    return out.strip() if taken else text
+
+
+def _take_out_unchecked_blocks(blocks: list[_Block], art: QuestArtifacts, raw_paper: str = "") -> list[_Block]:
+    """Every model-written text of the poster (headings, texts, list items, raw columns and the captions of figures that
+    do not carry the paper's own) without the sentences about a figure FI does not stand behind; one left empty goes."""
+    out: list[_Block] = []
+    for block in blocks:
+        if block.kind in ("heading", "text", "raw"):
+            text = _take_out_unchecked(block.text, art, raw_paper)
+            if not text.strip():
+                continue
+            block = replace(block, text=text)
+        elif block.kind == "bullets":
+            items = [t for t in (_take_out_unchecked(i, art, raw_paper) for i in block.items) if t.strip()]
+            if not items:
+                continue
+            block = replace(block, items=items)
+        elif block.kind == "figure" and not block.number:
+            block = replace(block, caption=_take_out_unchecked(block.caption, art, raw_paper))
+        out.append(block)
+    return out
+
+
 def _figure_files(figures_dir: Path | None) -> list[str]:
     if not figures_dir or not figures_dir.is_dir():
         return []
@@ -377,14 +424,18 @@ def _figure_files(figures_dir: Path | None) -> list[str]:
     )
 
 
-def _with_every_figure(blocks: list[_Block], figures: list[str], captions: dict[str, str]) -> list[_Block]:
+def _with_every_figure(
+    blocks: list[_Block], figures: list[str], captions: dict[str, str], paper_numbers: dict[str, int] | None = None,
+) -> list[_Block]:
     """Add the figures the model left out, before the closing heading, so
-    the poster still ends on its conclusion."""
+    the poster still ends on its conclusion. ``figures`` is the paper's own list: a figure the paper left out is not in
+    it and is not added."""
     if any(b.kind == "raw" for b in blocks):
         return blocks
     used = {b.file for b in blocks if b.kind == "figure"}
     missing = [
-        _Block("figure", file=name, caption=captions.get(name) or Path(name).stem.replace("_", " "))
+        _Block("figure", file=name, caption=captions.get(name) or Path(name).stem.replace("_", " "),
+               number=(paper_numbers or {}).get(name, 0))
         for name in figures if name not in used
     ]
     if not missing:
@@ -843,7 +894,7 @@ class _Layout:
         numbers: dict[int, int] = {}
         for i, block in enumerate(self.blocks):
             if block.kind == "figure":
-                numbers[i] = len(numbers) + 1
+                numbers[i] = block.number or len(numbers) + 1
         columns = []
         for c, group in enumerate(self.groups):
             body = "\n".join(self._block_latex(i, numbers.get(i)) for i in group)
@@ -900,6 +951,61 @@ def _measured_columns(doc, report: dict, sheet: _Sheet) -> tuple[list[float] | N
 # LaTeX scratch pdflatex/tectonic leave next to poster.pdf — pure compile
 # byproducts. We delete them once we have the PDF so the quest dir holds the
 # deliverables (poster.pdf + poster.tex), not a pile of poster.aux/.out/…
+# The text fonts the template sets under XeLaTeX (templates/poster/poster.tex): the headline's and the body's.
+_POSTER_TEXT_FILES = ("texgyrepagella-regular.otf", "texgyreheros-regular.otf")
+# XeTeX's own log line for a character the font lacks (the paper reads pandoc's version of it). The character is
+# printed as itself, or in caret form for a control character (``^^80``, ``^^M``, ``^^^^20ac``).
+_LEFT_OFF_RE = _re.compile(r"Missing character: There is no (.+?) in font")
+_CARET_RE = _re.compile(r"^\^\^(?:\^\^([0-9a-f]{4})|([0-9a-f]{2})|(.))$")
+
+
+def _left_off_label(token: str) -> str:
+    """``U+XXXX`` for a character as the log prints it; the raw token when it cannot be read. Never raises."""
+    try:
+        m = _CARET_RE.match(token)
+        if m:
+            code = int(m.group(1) or m.group(2), 16) if (m.group(1) or m.group(2)) else ord(m.group(3)) ^ 64
+        elif len(token) == 1:
+            code = ord(token)
+        else:
+            return token
+        return f"U+{code:04X}"
+    except (ValueError, TypeError):
+        return token
+
+
+def _glyphs_left_off(log_path: Path) -> list[str]:
+    """The characters the Unicode engine left off the page, once each as ``U+XXXX`` (or the raw token when it cannot
+    be read), from the compile's log. For the disclosure only: it never raises."""
+    try:
+        log = log_path.read_text(encoding="utf-8", errors="replace")
+        found: list[str] = []
+        for m in _LEFT_OFF_RE.finditer(log):
+            label = _left_off_label(m.group(1))
+            if label not in found:
+                found.append(label)
+        return found
+    except Exception as exc:  # noqa: BLE001 -- a disclosure must not fail the poster
+        _log.info("poster.pdf: could not read %s (%r)", log_path, exc)
+        return []
+
+
+# Where a marker must not go: the spans the paper never wraps (addresses), and a figure path or a QR code's address.
+_KEEP_RE = _re.compile(_NO_WRAP_RE.pattern + r"|\\qrcode(?:\[[^\]]*\])?\{[^}]*\}", _re.DOTALL)
+
+
+def _mark_outside_kept_spans(text: str, glyph: str, marker: str) -> str:
+    """``text`` with ``glyph`` replaced by ``marker`` except inside the spans of :data:`_KEEP_RE`."""
+    out: list[str] = []
+    pos = 0
+    for m in _KEEP_RE.finditer(text):
+        out.append(text[pos:m.start()].replace(glyph, marker))
+        out.append(m.group(0))
+        pos = m.end()
+    out.append(text[pos:].replace(glyph, marker))
+    return "".join(out)
+
+
 _POSTER_AUX_EXTS = (
     ".aux", ".out", ".nav", ".snm", ".toc", ".vrb",
     ".fls", ".fdb_latexmk", ".synctex.gz",
@@ -973,21 +1079,29 @@ class PosterGenerator:
         output = self.config.output
         sheet = _SHEETS.get(output.poster_size, _SHEETS["a1_portrait"])
 
-        paper_md = _paper_facts.without_marks(art.paper_md.read_text(encoding="utf-8"))  # FI's values stay, its markers go
-        figures = _figure_files(art.figures_dir)
+        raw_paper = art.paper_md.read_text(encoding="utf-8")
+        paper_md = _paper_facts.without_marks(raw_paper)  # FI's values stay, its markers go
+        figures, paper_numbers = paper_figure_set(
+            paper_md, _figure_files(art.figures_dir), art.raw_state, art.quest_root)
         captions = _paper_captions(paper_md)
         literature = art.raw_state.get("literature") or []
-        sources: dict[str, dict] = {
-            str(r["n"]): r for r in build_references(literature, audience=output.audience)
-        }
+        # Only the references the paper ends with (what its citation check kept), numbered as the paper numbers
+        # them: the model is shown no other source, so the poster cannot cite one the paper dropped.
+        paper_refs = cited_references(literature, paper_md, audience=output.audience)
+        sources: dict[str, dict] = {str(r["n"]): r for r in paper_refs}
+        # Web pages the same way: only those the paper's own Further reading lists.
         sources.update({
-            str(w["label"]): w for w in build_further_reading(literature, audience=output.audience)
+            str(w["label"]): w for w in listed_further_reading(
+                build_further_reading(literature, audience=output.audience), paper_md, art.raw_state)
         })
 
         # safe_substitute: paper_md is model-written prose that may carry
         # stray dollar signs, which substitute() would reject.
+        ctx = paper_and_claims(paper_md, art.quest_root, art.paper_md)
         prompt = string.Template(PROMPT_PATH.read_text(encoding="utf-8")).safe_substitute(
-            paper_md=paper_md[:8000],
+            paper_md=ctx.paper,
+            claims_rule=ctx.claims_rule,
+            claims=ctx.claims,
             figure_list="\n".join(
                 f"- figures/{name}" + (f": {captions[name]}" if captions.get(name) else "")
                 for name in figures
@@ -997,7 +1111,26 @@ class PosterGenerator:
             columns=str(sheet.columns),
             word_budget=str(sheet.words),
         )
-        if feedback:
+        note_prompt_fit(prompt, "poster", art.quest_root, ctx)
+        # A redo with the check's findings writes again only the panels they name (the headline counts as one); every
+        # other block of the previous reply is kept as it was.
+        flagged = self._flagged_parts(out_dir, feedback)
+        if flagged is not None:
+            previous, headline_flagged, indices = flagged
+            if not headline_flagged and not indices:
+                _log.info("poster: no panel could be matched to the check's findings; nothing is redone")
+                return {}
+            targets = ", ".join([*(["the headline"] if headline_flagged else []), *(f"block {i}" for i in indices)])
+            prompt = string.Template(REDO_PROMPT_PATH.read_text(encoding="utf-8")).safe_substitute(
+                poster=json.dumps(previous, indent=1, ensure_ascii=False),
+                figure_list="\n".join(
+                    f"- figures/{name}" + (f": {captions[name]}" if captions.get(name) else "") for name in figures
+                ) or "(none)",
+                source_list="\n".join(_band_entry(src, label) for label, src in sources.items()) or "(none)",
+                feedback=str(feedback).strip(), targets=targets,
+                claims_rule=ctx.claims_rule, claims=ctx.claims,
+            )
+        elif feedback:
             prompt = prompt.rstrip() + "\n\n" + feedback.strip() + "\n"
         own_supervisor = supervisor is None
         sup = supervisor or ProxySupervisor()
@@ -1018,8 +1151,12 @@ class PosterGenerator:
                 await sup.release(self.config.provider.name)
             if own_supervisor:
                 await sup.shutdown()
+        if flagged is not None:
+            parsed = self._merge_redone(previous, _lenient_json(text) or {}, headline_flagged, indices)
+            text = json.dumps(parsed, indent=1, ensure_ascii=False)
+        else:
+            parsed = _lenient_json(text) or {}
         self._write_reply(out_dir, text)
-        parsed = _lenient_json(text) or {}
 
         # The headline is the finding; the paper's own H1 goes under it. A
         # headline that is missing or runs to a paragraph gives way to the
@@ -1032,31 +1169,46 @@ class PosterGenerator:
         headline = _plain(parsed.get("headline"))
         if not headline or len(headline.split()) > _MAX_HEADLINE_WORDS:
             headline = paper_title or _plain(parsed.get("title")) or "Untitled"
+        headline = _take_out_unchecked(headline, art, raw_paper) or paper_title or "Untitled"
         subtitle = paper_title if paper_title and paper_title != headline else ""
 
-        blocks = _with_every_figure(_blocks_from_reply(parsed, set(figures)), figures, captions)
+        blocks = _with_every_figure(
+            _blocks_from_reply(parsed, set(figures), paper_numbers, captions), figures, captions, paper_numbers)
+        blocks = _take_out_unchecked_blocks(blocks, art, raw_paper)
         cited = _cited_labels(blocks, set(sources))
         blocks = [_with_citations(b, set(cited)) for b in blocks]
         if cited:
             band_heading, entries = "References", [_band_entry(sources[label], label) for label in cited]
-        else:
+        elif paper_refs:
             picks = list(sources.items())[:_SELECTED_SOURCES]
             band_heading, entries = "Selected sources", [_band_entry(src, label) for label, src in picks]
+        else:
+            band_heading, entries = "", []  # the paper cites nothing, so the poster lists no source
 
         author_terms = tuple(t for t in (output.author, output.affiliation, output.contact_email) if t)
         engine = find_pdf_engine()
+        latin_engine = engine  # what the poster was typeset with before the Unicode engine: the way back
         content = "\n".join([headline, subtitle, *author_terms, *entries, *(t for b in blocks for t in b.texts())])
         cjk_font: str | None = None
         cjk_problem: str | None = None
+        # As for the paper: a Unicode engine (XeLaTeX) whenever one is installed, so a glyph is set as itself or from
+        # a fallback font; pdflatex only when there is none. Chinese, Japanese or Korean text also needs a font.
+        xelatex = _cjk.find_xelatex(engine) if engine is not None else None
         if engine is not None and _cjk.has_cjk(content):
-            xelatex = _cjk.find_xelatex(engine)
             cjk_font = _cjk.find_cjk_font(content) if xelatex is not None else None
             if xelatex is None:
                 cjk_problem = "cjk_no_xelatex"
             elif cjk_font is None:
                 cjk_problem = "cjk_no_font"
-            else:
-                engine = xelatex
+        if xelatex is not None and not cjk_problem:
+            engine = xelatex
+        # The planned text fonts are the ones this template sets (the headline's Pagella, the body's Heros).
+        state = {"fonts": find_fonts(engine[1], _POSTER_TEXT_FILES)
+                 if engine is not None and xelatex is not None and engine == xelatex else None}
+        retry_with = (
+            latin_engine if (xelatex is not None and engine == xelatex and cjk_font is None and latin_engine is not None
+                             and latin_engine != engine and latin_engine[0] != "tectonic") else None
+        )
 
         icon_ok = _copy_poster_icon(out_dir)
         template = TEMPLATE_PATH.read_text(encoding="utf-8")
@@ -1075,9 +1227,27 @@ class PosterGenerator:
         diag_path = out_dir / "poster_pdf_skipped.md"
         result: dict[str, Path] = {"poster_tex": poster_tex}
 
+        unicode_file = out_dir / "poster_unicode.tex"
+        not_set_info: list[dict] = []
+
         def write_tex() -> None:
+            # The fallback fonts go in poster_unicode.tex (the paper's fi_unicode.tex is the paper's own).
             body = string.Template(template).safe_substitute(values, columns=layout.columns_latex())
-            poster_tex.write_text(_latex_safe_body(body), encoding="utf-8")
+            prepared = _latex_safe_source(body, fonts=state["fonts"], cjk=cjk_font is not None)
+            text = prepared.text
+            not_set_info[:] = []
+            for glyph in prepared.not_set:
+                # No font here sets it: the poster is made with a visible marker in its place, and says so.
+                code = "+".join(f"U+{ord(c):04X}" for c in glyph)
+                at = body.find(glyph)
+                near = " ".join(body[max(0, at - 30):at + 30].split()) if at >= 0 else ""
+                not_set_info.append({"glyph": glyph, "code_point": code, "near": near})
+                text = _mark_outside_kept_spans(text, glyph, "\\textbf{[" + code + "]}")
+            if prepared.header:
+                unicode_file.write_text(prepared.header, encoding="utf-8")
+            elif unicode_file.is_file():
+                unicode_file.unlink()
+            poster_tex.write_text(text, encoding="utf-8")
 
         write_tex()
         if engine is None or cjk_problem:
@@ -1121,6 +1291,18 @@ class PosterGenerator:
                 write_tex()
             compiles += 1
             failure = self._compile(engine, poster_tex, out_dir, out_pdf)
+            if failure is not None and failure[0] == f"{engine_name}_timeout":
+                retry_with = None  # a timeout is not an engine failure: no second compile, and it is recorded as one
+            if failure is not None and retry_with is not None:
+                # The Unicode engine could not make the poster (a TeX install without its fonts, say): the engine
+                # the poster was made with before, once. Decided on the compile's result only.
+                _log.warning("poster.pdf: %s could not make the poster (%s); trying %s once",
+                             engine_name, failure[0], retry_with[0])
+                engine, engine_name, state["fonts"] = retry_with, retry_with[0], None
+                retry_with = None
+                _cleanup_poster_artifacts(out_dir, keep_log=False)  # the failed run's aux/out/log
+                write_tex()
+                failure = self._compile(engine, poster_tex, out_dir, out_pdf)
             if failure is not None:
                 code, summary, how_to_fix = failure
                 _log.warning(summary)
@@ -1175,7 +1357,15 @@ class PosterGenerator:
             )
 
         result["poster_pdf"] = out_pdf
+        left_off = _glyphs_left_off(out_dir / "poster.log") if engine_name != "pdflatex" else []
+        for item in not_set_info:
+            _log.warning("poster.pdf: no font here sets %s; it is marked %s in the poster (near: %s)",
+                         item["code_point"], "[" + item["code_point"] + "]", item["near"])
+        if left_off:
+            _log.warning("poster.pdf: %s left %s off the page", engine_name, ", ".join(left_off))
         self._write_fit_report(out_dir, {
+            "glyphs_not_set": not_set_info,
+            "glyphs_left_off": left_off,
             "sheet": output.poster_size,
             "engine": engine_name,
             "compiles": compiles,
@@ -1298,6 +1488,47 @@ class PosterGenerator:
             path.write_text(json.dumps(fit, indent=2, ensure_ascii=False), encoding="utf-8")
         except OSError as exc:
             _log.info("poster.pdf: could not write %s (%r)", path, exc)
+
+    @staticmethod
+    def _flagged_parts(out_dir: Path, feedback: object) -> tuple[dict, bool, list[int]] | None:
+        """``(the previous reply, whether its headline is flagged, indices of its flagged blocks)`` for a redo whose
+        feedback carries findings, found by the part each finding names (``headline`` or ``b<index>``, the ids the
+        check was given with the rendered poster); ``None`` (write the whole poster) when there is no such feedback or no
+        previous reply to build on."""
+        findings = getattr(feedback, "findings", None)
+        if not findings:
+            return None
+        try:
+            previous = _lenient_json((out_dir / ".fi" / "poster_reply.txt").read_text(encoding="utf-8"))
+        except OSError:
+            return None
+        if not isinstance(previous, dict) or not isinstance(previous.get("blocks"), list):
+            return None
+
+        headline_flagged = False
+        indices: set[int] = set()
+        for finding in findings:
+            block = str(finding.get("block") or "")
+            if block == "headline":
+                headline_flagged = True
+            elif block[:1] == "b" and block[1:].isdigit() and int(block[1:]) < len(previous["blocks"]):
+                indices.add(int(block[1:]))
+        return previous, headline_flagged, sorted(indices)
+
+    @staticmethod
+    def _merge_redone(previous: dict, reply: dict, headline_flagged: bool, indices: list[int]) -> dict:
+        """The previous reply with the flagged headline and blocks replaced by the ones in ``reply``; a part the reply
+        did not hold (or held in a form that is not a block) stays as it was."""
+        merged = json.loads(json.dumps(previous))
+        if headline_flagged and isinstance(reply.get("headline"), str) and reply["headline"].strip():
+            merged["headline"] = reply["headline"]
+        redone = reply.get("blocks")
+        if isinstance(redone, dict):
+            for i in indices:
+                new = redone.get(str(i))
+                if isinstance(new, dict) and new.get("type"):
+                    merged["blocks"][i] = new
+        return merged
 
     @staticmethod
     def _write_reply(out_dir: Path, text: str) -> None:

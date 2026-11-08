@@ -125,6 +125,41 @@ def test_known_answer_check_that_keeps_failing(tmp_path: Path) -> None:
     assert any("kept failing" in t for t in texts)
 
 
+def test_a_check_its_trials_could_not_decide_is_not_said_to_have_failed(tmp_path: Path) -> None:
+    """A correct but slow simulation ends 'not decided' at the time given; the report said it 'failed 3 times'."""
+    root = tmp_path / "q-undecided"
+    undecided = ["the oracle 'mean_rate' was not decided: the trials that ran could not tell it from its expected value "
+                 "within the time given, so it is neither confirmed nor refuted"]
+    _audit(root, [{"kind": "check_result", "check": "oracle", "status": "stopped", "problems": undecided}] * 3)
+    items = _stage(qr.build(root), "run")["problems"]["items"]
+    assert "not decided 3 times" in items[0]["text"] and "failed" not in items[0]["text"].split("not decided")[1]
+
+
+def test_a_check_that_was_undecided_and_then_failed_is_counted_by_kind(tmp_path: Path) -> None:
+    root = tmp_path / "q-transition"
+    undecided = "the oracle 'mean_rate' was not decided: the trials could not tell it from its expected value"
+    failed = "the oracle 'mean_rate' failed: FI measured 3, the protocol expects 1 within 0.01 (absolute tolerance 0.01)"
+    _audit(root, [{"kind": "check_result", "check": "oracle", "status": "stopped", "problems": [undecided]},
+                  {"kind": "check_result", "check": "oracle", "status": "stopped", "problems": [failed]}])
+    text = _stage(qr.build(root), "run")["problems"]["items"][0]["text"]
+    assert "(not decided 1 time, failed 1 time)" in text, text
+
+
+def test_the_sentence_describes_the_latest_round_not_the_first(tmp_path: Path) -> None:
+    undecided = "the oracle 'mean_rate' was not decided: the trials could not tell it from its expected value"
+    failed = "the oracle 'mean_rate' failed: FI measured 3, the protocol expects 1 within 0.01 (absolute tolerance 0.01)"
+
+    def line(name: str, rounds: list[list[str]]) -> str:
+        root = tmp_path / name
+        _audit(root, [{"kind": "check_result", "check": "oracle", "status": "stopped", "problems": p} for p in rounds])
+        return _stage(qr.build(root), "run")["problems"]["items"][0]["text"]
+
+    text = line("a", [[undecided], [failed]])
+    assert text.startswith("the oracle 'mean_rate' failed") and "was not decided" not in text, text
+    text = line("b", [[failed], [], [undecided]])
+    assert text.startswith("the oracle 'mean_rate' was not decided") and "failed: FI measured" not in text, text
+
+
 def test_check_fixed_by_a_later_attempt(tmp_path: Path) -> None:
     root = tmp_path / "q-fixed"
     bad = ["the oracle 'limit_case' failed: FI measured 3, the protocol expects 1 within 0.01 (absolute tolerance 0.01)"]
@@ -418,3 +453,26 @@ def test_the_report_says_whether_the_pdf_is_typeset_and_which_characters_changed
 def test_a_quest_without_a_render_record_has_no_pdf_section(tmp_path: Path) -> None:
     report = qr.build(_finished(tmp_path / "q"), running=False)
     assert report["paper_pdf"] is None and "## The PDF" not in qr.render(report)
+
+
+_OLD_RECORD = {"hits": [], "removed_numbers": [{"number": "0.37", "sentence": "The rate was 0.37 at the highest load."}]}
+
+
+def test_an_older_record_of_removed_numbers_is_still_listed_as_taken_out(tmp_path: Path) -> None:
+    """Old code read only ``untraced_numbers``, so QUALITY.md written again for a quest an older FI recorded lost the
+    numbers that FI had replaced in that paper."""
+    root = _finished(tmp_path / "q-old")
+    _w(root / ".fi" / "paper_record_check.json", _OLD_RECORD)
+    r = qr.build(root)
+    text = qr.render(r)
+    assert "0.37" in text and "[number removed]" in text
+    assert "Numbers taken out of the paper" in text
+    assert "stays in the paper" not in text, "a number that was taken out is never described as kept"
+    assert "was not traced" in json.dumps(r) and "[number removed]" in json.dumps(r), "also among the paper problems"
+
+
+def test_a_current_record_of_untraced_numbers_is_listed_as_kept(tmp_path: Path) -> None:
+    root = _finished(tmp_path / "q-new")
+    _w(root / ".fi" / "paper_record_check.json", {"hits": [], "untraced_numbers": _OLD_RECORD["removed_numbers"]})
+    text = qr.render(qr.build(root))
+    assert "Numbers not traced to the plan" in text and "Numbers taken out of the paper" not in text

@@ -104,8 +104,8 @@ def test_a_list_without_a_declared_shape_names_the_missing_shape() -> None:
     ({"low": [[0, 0, 0], [0, 0, "x"]]}, "`low` must be a number"),
     ({"high": float("nan")}, "`high` must be a number"),
     ({"high": float("inf")}, "`high` must be a number"),
-    ({"low": 1.0, "high": 1.0}, "must be below"),
-    ({"low": [[0, 0, 0], [0, 2, 0]]}, "`low` (2) must be below `high` (1.0) at [1, 1]"),
+    ({"low": 1.0, "high": 1.0}, "nothing to search"),
+    ({"low": [[0, 0, 0], [0, 2, 0]]}, "`low` (2) must not be above `high` (1.0) at [1, 1]"),
     ({"kind": "integer", "low": 0, "high": 1.5}, "whole-number"),
     ({"kind": "choice"}, "`continuous` or `integer`"),
     ({"values": [1, 2]}, "not a list of `values`"),
@@ -346,3 +346,48 @@ def test_the_prompts_tell_the_model_the_form_exists() -> None:
     root = Path(__file__).resolve().parent.parent / "agents"
     assert "`shape`" in (root / "design_self_critique.md").read_text(encoding="utf-8")
     assert "`shape`" in (root / "plan_revise.md").read_text(encoding="utf-8")
+
+
+# --- elements held at one value ------------------------------------------------------------------------------------------
+
+
+def _held() -> dict[str, Any]:
+    # the corner elements may not be used (low = high = 0): the region a design may fill is not a rectangle
+    block = _src(high=[[1.0, 1.0, 0.0], [1.0, 1.0, 0.0]])
+    block["baseline"]["values"]["src"] = [[0.5, 0.5, 0.0], [0.5, 0.5, 0.0]]
+    return block
+
+
+def test_an_element_with_low_equal_to_high_is_held_not_refused() -> None:
+    fixed, why = op.normalize(_held())
+    assert why is None and fixed is not None
+    assert op.free_count(fixed["design_variables"][0]) == 4
+    assert "2 of them held at their one value" in op._range(fixed["design_variables"][0])
+
+
+def test_the_search_moves_only_the_elements_it_may_change() -> None:
+    fixed, _ = op.normalize(_held())
+    space = search.Space(fixed["design_variables"])
+    assert space.dims == 4 + 1
+    design = space.design([0.9] * space.dims)
+    assert [row[2] for row in design["src"]] == [0.0, 0.0] and space.inside(design)
+    seen: list[dict[str, Any]] = []
+
+    def simulation(cell: dict[str, Any]) -> dict[str, float]:
+        seen.append(copy.deepcopy(cell))
+        return {"q": sum((x - 0.2) ** 2 for row in cell["src"] for x in row) + cell["w"]}
+
+    outcome = search.run_sync(fixed, simulation, seed=3)
+    assert seen and all(row[2] == 0.0 for c in seen for row in c["src"])
+    assert outcome["best"]["objective"] < outcome["baseline"]["objective"]
+
+
+def test_a_library_method_and_the_check_get_only_the_elements_searched() -> None:
+    fixed, _ = op.normalize(_held())
+    s = search._Search(fixed, 1, "optuna:tpe")
+    spec = s._drive_spec([], None)
+    assert len(spec["variables"]) == 5 and "src[0,2]" not in spec["baseline"]
+    design = s.space.element_design({**{v["name"]: 0.25 for v in spec["variables"]}, "w": 3})
+    assert design["src"] == [[0.25, 0.25, 0.0], [0.25, 0.25, 0.0]]
+    space = search.Space(fixed["design_variables"])
+    assert [space.scalars[k]["name"] for k in check._probed(space)] == ["src[0,0]", "src[0,1]", "src[1,0]", "src[1,1]", "w"]

@@ -3,6 +3,7 @@ You are the **Experiment Design** stage of an automated research pipeline.
 # Your task
 **If the Inputs section carries a study-mode directive, it OVERRIDES the
 default experiment design described here — follow it instead.**
+**If the Inputs section has "What the prior work already answers", design the study to measure what it says this study adds, and do not plan work whose answer the retrieved sources already give.**
 Design a concrete, executable Python experiment that will produce evidence for or against the chosen direction. Keep the experiment small enough to run in well under the wall-time limit given in the Inputs section, on a CPU. The experiment must produce **at least one figure** (PNG or SVG) under `figures/`. Plan each figure as at most 3 panels side by side in one row; a comparison over more strata, or a grid over two factors, is planned as several figures, each named in `figures_planned`.
 
 **If the Inputs section lists skills, design the experiment around them.** Each
@@ -42,7 +43,8 @@ Respond with a single JSON object, no prose, no markdown fence:
   "dependencies": ["<pip-installable>", ...],
   "result_assertions": [
     {"path": "<result_json key, e.g. cd_nm>", "min": <number>, "max": <number>,
-     "unit": "<nm | dimensionless | …>", "reason": "<why this range is physical>"}
+     "unit": "<nm | dimensionless | …>", "reason": "<why this range is physical>",
+     "may_equal_bound": <true only if the quantity can honestly be exactly at its min or max>}
   ],
   "rationale": {
     "assumptions": ["<what this design takes as given, e.g. trials are independent>", ...],
@@ -79,7 +81,11 @@ starting state, a sentinel, exactly 0 or 1 — and a range that still admits it
 cannot catch it. When a quantity cannot be 0 in any setting you run, give it a
 small positive `min` instead of 0. Where the guarantee holds only in part of the
 sweep, keep the general range: the same quantity landing exactly on one bound in
-two or more settings is sent back for repair anyway.
+two or more settings is sent back for repair anyway. The exception is a quantity
+whose true answer can be exactly its bound (a count of failures when none fail, a
+proportion of an event that may never happen in a small study, a weight that stops
+at its physical limit): add `"may_equal_bound": true` to that assertion and it is
+not sent back for sitting on the bound. Leave it out otherwise.
 
 ---
 
@@ -94,6 +100,7 @@ $chosen_idea
 ## Prior work
 $literature_block
 
+$novelty_block
 ## Prior review feedback (if iteration > 0)
 $review_feedback
 

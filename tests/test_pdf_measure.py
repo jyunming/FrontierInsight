@@ -507,3 +507,39 @@ def test_measuring_and_rendering_leave_the_file_free_to_replace(tmp_path):
     with Image.open(shots[0]) as shot:
         assert shot.size == (480, 270)
     path.write_bytes(b"replaced")  # Windows refuses this while a handle is open
+
+
+def test_a_character_outside_the_basic_plane_is_read_whole_and_no_lone_surrogate_is_left():
+    # PDFium returns UTF-16 code units one by one; a math italic T arrives as two halves.
+    from types import SimpleNamespace
+
+    from generation._pdf_measure import _read_lines
+
+    units = list("1/") + [0xD835, 0xDC47] + list(", k")
+    codes = [ord(u) if isinstance(u, str) else u for u in units]
+    raw = SimpleNamespace(
+        FPDFText_GetUnicode=lambda _tp, i: codes[i],
+        FPDFText_GetFontSize=lambda _tp, i: 12.0,
+        FPDFText_GetFontWeight=lambda _tp, i: 400,
+    )
+
+    class _Page:
+        raw = None
+
+        def count_chars(self):
+            return len(codes)
+
+        def get_charbox(self, i):
+            return (10.0 + 6 * i, 100.0, 15.0 + 6 * i, 112.0)
+
+    lines = _read_lines(_Page(), raw)
+    joined = " ".join(line.text for line in lines)
+    assert joined == "1/𝑇, k"
+    joined.encode("utf-8")  # raises on a lone surrogate
+
+
+def test_a_lone_surrogate_half_becomes_the_replacement_character():
+    from generation._pdf_measure import _utf16_text
+
+    assert _utf16_text("a\ud835b") == "a\ufffdb"
+    assert _utf16_text("plain") == "plain"

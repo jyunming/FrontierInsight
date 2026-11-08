@@ -135,9 +135,7 @@ STAGE_STATE_KEYS: dict[str, tuple[str, ...]] = {
     "analyze": ("analysis",),
     "cross_check": ("cross_check",),
     "write": ("paper_md",),
-    # page_limit_rewrites counts the shortening rewrites the review
-    # forced; a re-run review (say after a new page limit) starts afresh.
-    "review": ("review", "review_panel", "page_limit_rewrites"),
+    "review": ("review", "review_panel"),
 }
 
 

@@ -54,10 +54,76 @@ def _code(tmp_path: Path, files: dict[str, str]) -> Path:
 
 
 def test_a_name_computed_at_run_time_makes_everything_reached(tmp_path: Path) -> None:
-    code = _code(tmp_path, {"experiment.py": "import helpers\n\ndef main():\n    getattr(helpers, NAME)()\n\nmain()\n",
+    code = _code(tmp_path, {"experiment.py": "import helpers\n\ndef main(obj):\n    getattr(obj, NAME)()\n\nmain(helpers)\n",
                             "helpers.py": "def unused():\n    return 1\n"})
     assert code_reach.reached(code, scripts=["experiment.py"]) is None
     assert not code_reach.never_run(code, "helpers.py", "unused", scripts=["experiment.py"])
+
+
+def test_a_name_computed_on_an_imported_module_reaches_every_function_of_that_module_and_no_other(tmp_path: Path) -> None:
+    code = _code(tmp_path, {"experiment.py": "import helpers\n\ndef main():\n    getattr(helpers, NAME)()\n\nmain()\n",
+                            "helpers.py": "def one():\n    return 1\n\ndef two():\n    return 2\n",
+                            "other.py": "def lone():\n    return 3\n"})
+    done = code_reach.reached(code, scripts=["experiment.py"])
+    assert done is not None and {("helpers.py", "one"), ("helpers.py", "two")} <= done
+    assert code_reach.never_run(code, "other.py", "lone", scripts=["experiment.py"])
+    assert not code_reach.never_run(code, "helpers.py", "two", scripts=["experiment.py"])
+
+
+def _frame_quest(tmp_path: Path, derive: str, model: str) -> Path:
+    """A quest with FI's own frame files as FI writes them, and a study's ``derive.py`` and model package."""
+    from core import analysis_frame, skeleton
+
+    files = {"experiment.py": analysis_frame.EXPERIMENT, "fi_frame.py": skeleton.RUNTIME, "fi_table.py": skeleton.TABLE_SOURCE,
+             "fi_figure_calls.py": skeleton.FRAME_FIGURE_SOURCE, "derive.py": derive,
+             "simulate.py": "def run_trial(cell):\n    return {}\n",
+             "pkg/__init__.py": "", "pkg/model.py": model, **analysis_frame.carried_files()}
+    return _code(tmp_path, files)
+
+
+MODEL_NESTED = ("def aggregate_and_plot(rows):\n    def mean_interval(x):\n        return sum(x) / len(x)\n"
+                "    return [mean_interval(r) for r in rows]\n\n\nclass Box:\n    def size(self):\n        return 1\n")
+
+
+def test_a_quest_in_fi_s_frame_can_be_read_although_fi_s_own_files_compute_names(tmp_path: Path) -> None:
+    code = _frame_quest(tmp_path, "def dose():\n    return 1.0\n\ndef also_unused_by_the_plan():\n    return 2.0\n", MODEL_NESTED)
+    done = code_reach.reached(code, scripts=["experiment.py"], harness="simulate.py")
+    assert done is not None, "FI's own getattr calls (experiment.py, fi_figures.py) do not make the answer 'cannot tell'"
+    assert {("derive.py", "dose"), ("derive.py", "also_unused_by_the_plan")} <= done  # experiment.py names them by getattr
+    assert ("simulate.py", "run_trial") in done
+    assert ("pkg/model.py", "aggregate_and_plot") not in done
+
+
+def test_a_function_named_as_outer_dot_inner_is_judged_by_the_function_it_sits_in(tmp_path: Path) -> None:
+    code = _frame_quest(tmp_path, "def dose():\n    return 1.0\n", MODEL_NESTED)
+    kw = {"scripts": ["experiment.py"], "harness": "simulate.py"}
+    assert code_reach.never_run(code, "pkg/model.py", "aggregate_and_plot.mean_interval", **kw)
+    assert code_reach.never_run(code, "pkg/model.py", "aggregate_and_plot", **kw)
+    assert code_reach.never_run(code, "pkg/model.py", "Box.size", **kw)  # a method: its own name is judged
+    assert not code_reach.never_run(code, "pkg/model.py", "no_such.thing", **kw)
+    (code / "simulate.py").write_text("from pkg.model import aggregate_and_plot\n\ndef run_trial(cell):\n"
+                                      "    return aggregate_and_plot([[1]])\n", encoding="utf-8")
+    assert not code_reach.never_run(code, "pkg/model.py", "aggregate_and_plot.mean_interval", **kw)  # outer is reached
+    assert not code_reach.never_run(code, "pkg/model.py", "aggregate_and_plot", **kw)
+
+
+def test_a_computed_name_in_a_study_file_still_means_fi_cannot_tell_even_in_fi_s_frame(tmp_path: Path) -> None:
+    code = _frame_quest(tmp_path, "def dose():\n    return 1.0\n", MODEL_NESTED + "\n\ndef pick(obj, n):\n    return getattr(obj, n)\n")
+    (code / "simulate.py").write_text("from pkg.model import pick\n\ndef run_trial(cell):\n    return pick(cell, 'a')\n",
+                                      encoding="utf-8")
+    kw = {"scripts": ["experiment.py"], "harness": "simulate.py"}
+    assert code_reach.reached(code, **kw) is None
+    assert not code_reach.never_run(code, "pkg/model.py", "aggregate_and_plot", **kw)
+    # a derive.py of the study that evaluates a computed name is the study's too
+    (code / "simulate.py").write_text("def run_trial(cell):\n    return {}\n", encoding="utf-8")
+    (code / "derive.py").write_text("def dose():\n    return __import__('math').pi\n", encoding="utf-8")
+    assert code_reach.reached(code, **kw) is None
+
+
+def test_a_study_module_called_like_one_of_fi_s_files_is_not_fi_s(tmp_path: Path) -> None:
+    code = _frame_quest(tmp_path, "def dose():\n    return 1.0\n", MODEL_NESTED)
+    (code / "fi_table.py").write_text("def read(obj, n):\n    return getattr(obj, n)\n", encoding="utf-8")
+    assert code_reach.reached(code, scripts=["experiment.py"], harness="simulate.py") is None
 
 
 def test_a_function_passed_on_as_a_value_or_called_on_its_module_is_reached(tmp_path: Path) -> None:
@@ -94,3 +160,61 @@ def test_a_harness_entry_imported_into_the_simulation_is_reached(tmp_path: Path)
                             "sim_core.py": "def run_trial(cell, trial_id, seed):\n    return step()\n\ndef step():\n    return 1\n"})
     done = code_reach.reached(code, scripts=["experiment.py"], harness="simulate.py")
     assert done is not None and {("sim_core.py", "run_trial"), ("sim_core.py", "step")} <= done
+
+
+def test_a_special_method_of_a_class_the_run_uses_is_never_judged_never_run(tmp_path: Path) -> None:
+    code = _code(tmp_path, {"experiment.py": "from sim import Sim\n\ns = Sim(3)\nprint(len(s))\nwith s:\n    pass\n",
+                            "sim.py": ("class Sim:\n    def __init__(self, n):\n        self.n = n\n\n    def __len__(self):\n"
+                                       "        return self.n\n\n    def __enter__(self):\n        return self\n\n"
+                                       "    def __exit__(self, *a):\n        return False\n\n    def never_called(self):\n"
+                                       "        return 1\n")})
+    kw = {"scripts": ["experiment.py"]}
+    for name in ("__init__", "__len__", "__enter__", "__exit__"):
+        assert not code_reach.never_run(code, "sim.py", f"Sim.{name}", **kw), name
+        assert not code_reach.never_run(code, "sim.py", name, **kw), name
+    assert code_reach.never_run(code, "sim.py", "Sim.never_called", **kw)
+
+
+def test_a_name_computed_on_a_package_reaches_what_the_package_re_exports(tmp_path: Path) -> None:
+    code = _code(tmp_path, {"experiment.py": "import pkg\n\ngetattr(pkg, 'x' + 'y')()\n",
+                            "pkg/__init__.py": "from .impl import xy\nfrom .more import *\n",
+                            "pkg/impl.py": "def xy():\n    return 1\n",
+                            "pkg/more.py": "def starred():\n    return 2\n",
+                            "pkg/lone.py": "def lone():\n    return 3\n"})
+    kw = {"scripts": ["experiment.py"]}
+    assert not code_reach.never_run(code, "pkg/impl.py", "xy", **kw)
+    assert not code_reach.never_run(code, "pkg/more.py", "starred", **kw)
+    assert code_reach.never_run(code, "pkg/lone.py", "lone", **kw)
+
+
+_PKG = {"trial.py": "from pkg import model\n\ndef run(x):\n    return model.fit(x)\n",
+        "pkg/__init__.py": "from . import model\n",
+        "pkg/model.py": ("import math\nR = 8.0\n\ndef rate(a):\n    r = globals().get('R', 1.0)\n    return a / r\n\n"
+                         "def fit(x):\n    return rate(x) + math.sqrt(x)\n\ndef orphan(x):\n    return x\n")}
+
+
+def test_a_package_helper_that_reads_a_module_name_by_a_constant_key_can_still_be_followed(tmp_path: Path) -> None:
+    code = _code(tmp_path, _PKG)
+    done = code_reach.reached(code, scripts=[], start=[("trial.py", "run")])
+    assert done is not None  # globals().get("R") names one variable, not a computed function
+    assert ("pkg/model.py", "fit") in done and ("pkg/model.py", "rate") in done
+    assert ("pkg/model.py", "orphan") not in done
+
+
+def test_a_constant_key_into_globals_reaches_a_function_of_that_name(tmp_path: Path) -> None:
+    files = dict(_PKG)
+    files["pkg/model.py"] = ("def rate(a):\n    return globals()['hidden'](a)\n\ndef hidden(a):\n    return a\n\n"
+                             "def fit(x):\n    return rate(x)\n\ndef orphan(x):\n    return x\n")
+    code = _code(tmp_path, files)
+    done = code_reach.reached(code, scripts=[], start=[("trial.py", "run")])
+    assert done is not None and ("pkg/model.py", "hidden") in done and ("pkg/model.py", "orphan") not in done
+
+
+def test_a_computed_key_into_globals_still_means_fi_cannot_tell(tmp_path: Path) -> None:
+    bodies = ["return globals()[name](a)", "return globals().get(name)(a)", "g = globals()" + chr(10) + "    return g['x'](a)",
+              "return vars()", "return eval('a')"]
+    for i, body in enumerate(bodies):
+        files = dict(_PKG)
+        files["pkg/model.py"] = "def fit(a, name='x'):" + chr(10) + "    " + body + chr(10)
+        code = _code(tmp_path / f"case{i}", files)
+        assert code_reach.reached(code, scripts=[], start=[("trial.py", "run")]) is None, body

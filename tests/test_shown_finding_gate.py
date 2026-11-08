@@ -158,10 +158,11 @@ async def test_an_exception_turned_into_an_assertion_shows_nothing_and_a_crash_i
     assert error["kind"] == "wrapped" and error["place"] == "test"
     (engine.quest_root / "code" / "experiment.py").write_text(CRASHES, encoding="utf-8")
     _record(engine, _issue(), test="import experiment\n\n\ndef test_x():\n    assert experiment.dose() != 60.0\n")
-    # a crash inside the program goes to the crash repair (tests/test_gate_crash_repair.py), never a shown fault
-    verdict = await engine._shown_fault_verdict(STATE)
-    assert verdict and verdict.get("repair_crash") is True and not verdict.get("stuck")
-    assert code_review.load(engine.quest_root)["issues"]["F-1"]["crash"]["at"] == "code/experiment.py:2"
+    # a crash inside the program is placed, and is neither a shown fault nor a crash of the run
+    # (tests/test_finding_test_crash_not_a_run_crash.py)
+    assert await engine._shown_fault_verdict(STATE) is None
+    error = code_review.load(engine.quest_root)["issues"]["F-1"]["gate_error"]
+    assert error["place"] == "program" and error["at"] == "code/experiment.py:2"
 
 
 def _says_unconfirmed(engine: Engine) -> None:
@@ -336,7 +337,7 @@ async def test_a_fault_in_another_quantity_is_left_out_and_the_paper_says_so(tmp
     checked = json.loads((engine.quest_root / "needs" / "RESULT_CHECK.json").read_text(encoding="utf-8"))
     assert checked["removed_quantities"] == ["dose"] and checked["removed_values"] == {"dose": [60.0]}
     assert "a test FI ran" in checked["removed_why"]["dose"]
-    assert "computes `dose` wrongly" in disclosure.run_record(engine.quest_root)
+    assert "failed for `dose`; FI did not establish whether the value is wrong or missing" in disclosure.run_record(engine.quest_root)
     issues = quality_report._issue_rows(code_review.load(engine.quest_root))
     assert issues[0]["at_gate"]["outcome"] == "left_out"
 
@@ -371,6 +372,35 @@ async def test_a_fault_in_a_function_the_run_never_calls_stops_nothing(tmp_path:
     assert verdict and verdict["stuck_reason"] == "shown_fault_open"
 
 
+@pytest.mark.asyncio
+async def test_a_nested_function_nothing_in_fi_s_frame_calls_stops_nothing_and_a_called_one_still_stops(tmp_path: Path) -> None:
+    """A quest in FI's frame (replay of a stop on an unseeded interval function that only the finding's own tests called): FI's
+    own files compute names with getattr, which made 'cannot tell' of every such quest, and the finding named a nested
+    function ('outer.inner'). The finding is kept and stops nothing; the same finding about a function the analysis calls
+    stops as before."""
+    from core import analysis_frame, skeleton
+
+    engine = _engine(tmp_path)
+    code = engine.quest_root / "code"
+    files = {"experiment.py": analysis_frame.EXPERIMENT, "fi_frame.py": skeleton.RUNTIME, "fi_table.py": skeleton.TABLE_SOURCE,
+             "fi_figure_calls.py": skeleton.FRAME_FIGURE_SOURCE, "derive.py": "def dose():\n    return 60.0\n",
+             "simulate.py": "def run_trial(cell):\n    return {}\n", "pkg/__init__.py": "",
+             "pkg/model.py": "def aggregate(rows):\n    def interval(x):\n        return sum(x)\n    return [interval(r) for r in rows]\n",
+             **analysis_frame.carried_files()}
+    for name, text in files.items():
+        (code / name).parent.mkdir(parents=True, exist_ok=True)
+        (code / name).write_text(text, encoding="utf-8")
+    (engine.quest_root / "raw").mkdir(exist_ok=True)
+    (engine.quest_root / "raw" / "ledger.jsonl").write_text("", encoding="utf-8")
+    _record(engine, _issue(file="pkg/model.py", function="aggregate.interval"))
+    assert await engine._shown_fault_verdict(STATE) is None
+    assert code_review.load(engine.quest_root)["issues"]["F-1"]["never_run"] is True
+    failing = "import derive\n\n\ndef test_dose():\n    assert derive.dose() != 60.0, 'dose is typed in'\n"
+    _record(engine, _issue(file="derive.py", function="dose"), test=failing)
+    verdict = await engine._shown_fault_verdict(STATE)
+    assert verdict and verdict["stuck_reason"] == "shown_fault_open"
+
+
 def test_a_fault_may_be_about_the_main_quantity_by_its_name_or_its_keys() -> None:
     result = {"total_yield": 3.2, "yield_ci": [3.0, 3.4], "runtime": 1.0}
     issue = {"id": "F-1", "quantity": "yield"}
@@ -400,7 +430,7 @@ async def test_a_left_out_quantity_is_not_said_once_it_is_no_longer_flagged(tmp_
     engine = _engine(tmp_path)
     _record(engine, _issue(quantity="dose"))
     assert await engine._shown_fault_verdict(TWO_RESULTS) is None
-    assert "computes `dose` wrongly" in disclosure.run_record(engine.quest_root)
+    assert "failed for `dose`; FI did not establish whether the value is wrong or missing" in disclosure.run_record(engine.quest_root)
     record = code_review.load(engine.quest_root)
     record["issues"]["F-1"]["outcome"] = cf.FIXED  # a later repair fixed it
     code_review.save(engine.quest_root, record)
@@ -463,3 +493,108 @@ async def test_a_model_that_cannot_be_asked_stops_nothing(tmp_path: Path, monkey
     monkeypatch.setattr(Engine, "_chat", down)
     assert await engine._shown_fault_verdict(STATE) is None
     assert code_review.load(engine.quest_root)["issues"]["F-1"]["gate_error"]["place"] == "test"
+
+
+# A fault shown in a declared result the run gave no number for under any name: a part not done, never a stop.
+_PLAN = {"variables": {"dependent": ["yield"]},
+         "protocol": {"metrics": [{"id": "yield", "estimand": "total"}, {"id": "per_batch_spread", "estimand": "spread"}]}}
+
+
+def _derived(*ids: str) -> dict[str, Any]:
+    """FI's record of the last run of its analysis (data/results/derived.json) listing ``ids`` as given no value."""
+    return {"schema": "fi.derived/v1", "complete": not ids,
+            "not_computed": [{"id": i, "status": "no_data", "why": "no trial gave a value for it"} for i in ids]}
+
+
+def _gate_record(quantity: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    issue = _issue("F-9", quantity=quantity, kind="quantity")
+    req = {"id": "R2", "kind": "metric", "name": quantity, "status": "different", "fid": "F-9",
+           "text": f"the result reports {quantity}"}
+    return issue, {"issues": {"F-9": issue}, "read_problems": [req]}
+
+
+def _outcome(engine: Engine, quantity: str, result: dict[str, Any], declared: list[str] | None) -> dict[str, Any] | None:
+    issue, record = _gate_record(quantity)
+    return engine._shown_fault_outcome([(issue, "its test still fails on it")], record, result, ["yield"], declared)
+
+
+def test_a_declared_result_with_no_key_in_the_results_is_a_part_not_done_and_stops_nothing(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    assert set(code_review.declared_names(_PLAN, _PLAN["protocol"])) == {"yield", "per_batch_spread"}
+    declared = code_review.declared_names(_PLAN, _PLAN["protocol"], _derived("per_batch_spread"))
+    assert declared == ["per_batch_spread"]
+    result = {"yield": 3.2, "runtime": 1.0}  # no key holds per_batch_spread
+    assert _outcome(engine, "per_batch_spread", result, declared) is None
+    issue, record = _gate_record("per_batch_spread")
+    assert code_review.not_obtained(record, issue, result, declared) == ["per_batch_spread"]
+    # the old behaviour, when the plan's names are not given: FI cannot tell what it changes
+    stop = _outcome(engine, "per_batch_spread", result, None)
+    assert stop and "cannot find which of the results it changes" in stop["rationale"]
+
+
+def test_a_name_the_plan_does_not_declare_still_stops(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    declared = code_review.declared_names(_PLAN, _PLAN["protocol"])
+    stop = _outcome(engine, "invented_quantity", {"yield": 3.2}, declared)
+    assert stop and "cannot find which of the results it changes" in stop["rationale"]
+
+
+def test_a_declared_result_the_results_hold_numbers_for_is_not_a_part_not_done(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    declared = code_review.declared_names(_PLAN, _PLAN["protocol"], _derived("per_batch_spread"))
+    result = {"yield": 3.2, "per_batch_spread": 0.4, "contrast": 1.0}
+    issue, record = _gate_record("per_batch_spread")
+    assert code_review.not_obtained(record, issue, result, declared) == []
+    assert engine._shown_fault_outcome([(issue, "its test still fails on it")], record, result, ["yield"], declared) is None
+    assert issue["at_gate"]["outcome"] == "left_out"  # left out of the results, as before
+    # held under another name too: FI cannot leave them out, so it still stops
+    both = {"yield": 3.2, "per_batch_spread": 0.4, "per_batch_spread_raw": 0.4}
+    assert _outcome(engine, "per_batch_spread", both, declared)
+
+
+def test_a_declared_result_whose_key_holds_no_number_is_left_out_not_a_part_not_done(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    declared = code_review.declared_names(_PLAN, _PLAN["protocol"], _derived("per_batch_spread"))
+    result = {"yield": 3.2, "per_batch_spread": None}
+    assert _outcome(engine, "per_batch_spread", result, declared) is None
+    issue, record = _gate_record("per_batch_spread")
+    assert code_review.not_obtained(record, issue, result, declared) == ["per_batch_spread"]  # same fact
+    assert code_review.keys_of_issue(record, issue, result) == ["per_batch_spread"]  # the key branch is tried first
+
+
+def test_the_main_quantity_absent_from_the_results_still_stops(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    declared = code_review.declared_names(_PLAN, _PLAN["protocol"])
+    issue, record = _gate_record("yield")
+    issue["headline"] = True
+    stop = engine._shown_fault_outcome([(issue, "its test still fails on it")], record, {"runtime": 1.0}, ["yield"], declared)
+    assert stop and stop["stuck_reason"] == "shown_fault_open"
+
+
+@pytest.mark.parametrize("result", [
+    {"yield": 3.2, "spread_of_batches": 0.4},  # the value is held under another name
+    {"yield": 3.2, "table": [{"metric": "per_batch_spread", "value": 0.4}]},  # ... or as a row of a table
+])
+def test_a_value_held_under_another_name_or_in_a_row_still_stops_unless_fi_recorded_none(tmp_path: Path, result: dict) -> None:
+    """The names of the results never decide that a quantity has no value: only FI's own record of the run does."""
+    engine = _engine(tmp_path)
+    nothing_recorded = code_review.declared_names(_PLAN, _PLAN["protocol"], _derived())
+    assert nothing_recorded == []
+    stop = _outcome(engine, "per_batch_spread", result, nothing_recorded)
+    assert stop and "cannot find which of the results it changes" in stop["rationale"]
+    # and with no record of the run at all
+    assert code_review.declared_names(_PLAN, _PLAN["protocol"], {}) == []
+
+
+def test_fi_s_record_of_the_run_decides_which_declared_results_have_no_value() -> None:
+    derived = _derived("per_batch_spread", "not_a_plan_result")
+    assert code_review.declared_names(_PLAN, _PLAN["protocol"], derived) == ["per_batch_spread"]
+    assert code_review.declared_names(_PLAN, _PLAN["protocol"], {"not_computed": [{"id": "per_batch_spread"}]}) == []  # no schema
+
+
+def test_an_earlier_runs_record_of_no_value_declares_nothing() -> None:
+    """A record restored from an earlier run (the run now stopped before writing its own) says nothing about the code that
+    ran: a shown fault keeps its stop, never becomes a part not done."""
+    stale = {**_derived("per_batch_spread"), "from_earlier_run": True}
+    assert code_review.declared_names(_PLAN, _PLAN["protocol"], stale) == []
+    assert code_review.declared_names(_PLAN, _PLAN["protocol"], _derived("per_batch_spread")) == ["per_batch_spread"]

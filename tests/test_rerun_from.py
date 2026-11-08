@@ -19,7 +19,7 @@ def test_step_names_are_plain_and_the_node_names_work_too() -> None:
     assert rerun_from.resolve("Code") == "code" and rerun_from.resolve("execute") == "run"
     assert rerun_from.resolve("design") == "design" and rerun_from.resolve("") is None
     assert rerun_from.resolve("clarify") is None and rerun_from.resolve("human_feedback") is None
-    assert rerun_from.choices() == "ideas, literature, plan, design, skills, code, run, figures, analysis, crosscheck, evidence, writing, claims, review"
+    assert rerun_from.choices() == "ideas, literature, studies, plan, design, skills, code, run, figures, analysis, crosscheck, evidence, writing, claims, review"
 
 
 def test_the_backup_takes_what_the_step_and_later_ones_made_and_leaves_its_inputs(tmp_path: Path) -> None:

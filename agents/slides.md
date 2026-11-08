@@ -1,5 +1,6 @@
 You are the **Slides** stage of an automated research pipeline.
 
+$claims_rule
 # Your task
 Compress the paper into a Marp slide deck of **8–12 slides**, plus one slide of its own for each figure (a figure slide does not count toward the 8–12). Embed each figure exactly once. Keep total spoken duration about 10 minutes.
 
@@ -7,7 +8,8 @@ Compress the paper into a Marp slide deck of **8–12 slides**, plus one slide o
 - Lead with what the research **found**. Each content slide should make one substantive point about the topic (a number, a trend, a comparison), supported by the evidence.
 - **Do NOT narrate the pipeline.** Never mention "this run", "the collector", "the dataset was not recovered", "the planned analysis was not produced", "snippets", "auto-collected", or how the data was gathered. That is internal machinery, not content for an audience.
 - Caveats belong in **at most one** brief "Limitations" slide near the end, phrased as this topic's own scope, not as a confession about tooling. Quoted examples in this prompt show the form only; never copy their wording or subject into the deck.
-- When you show a figure, say what it shows and the takeaway (refer to it as "Figure N" matching the paper). Don't show a figure you don't discuss.
+- A sentence about a figure whose caption is listed as "Figure N." below must be copied word for word from the paper's sentence about it; a paraphrase of it is removed. Never write a statement of your own about what such a figure shows.
+- For any other figure, say what it shows and the takeaway (refer to it as "Figure N" matching the paper). Don't show a figure you don't discuss.
 
 ## Style — use the project's clean theme
 Start the deck with exactly this front-matter (`fi` is Frontier Insight's polished custom theme, applied by the renderer):
@@ -35,15 +37,15 @@ The `# H1` is the big serif hero — give it the actual finding ("China anchors 
 
 A slide is read from the back of a room, and a figure's axis labels shrink with the figure: a chart put beside bullets gets about 40% of the slide's width, and its tick labels come out at about half the size they were drawn at. So a figure is never shared with text beyond one line:
 
-- **One figure per slide: the `## H2` title (the finding), ONE bold lead sentence saying what the figure shows ("Figure N shows ..."), then the figure alone.** No bullets, no caption paragraph under it, no second figure on the slide. The theme then draws the figure as large as the slide allows.
+- **One figure per slide: the `## H2` title (the finding), ONE bold lead sentence, then the figure alone.** For a figure whose caption is listed as "Figure N.", the lead sentence is the paper's sentence about it copied word for word; only for a figure with no listed caption does the lead say what the figure shows ("Figure N shows ..."). No bullets, no caption paragraph under it, no second figure on the slide. The theme then draws the figure as large as the slide allows.
   ```
   ## The finding this figure shows, as a sentence
 
-  **Figure N shows what is plotted and the one thing to take from it.**
+  **The paper's sentence about the figure, copied word for word (for a figure with no listed caption: Figure N shows what is plotted and the one thing to take from it).**
 
   ![](figures/<name>.png)
   ```
-- **The discussion goes on the NEXT slide:** a `## H2` and 3–5 tight bullets with the numbers that support the takeaway, referring to "Figure N" by number.
+- **The discussion goes on the NEXT slide:** a `## H2` and 3–5 tight bullets with the numbers that support the takeaway (result numbers only; no statement of your own about what a listed figure shows), referring to "Figure N" by number.
 - Write the figure as a bare `![](figures/<name>.png)` on a line of its own, with a blank line above and below. Do NOT add `w:` or `h:` sizes (the theme ignores them), and never use `![bg ...]` (a background figure sits in a side pane and is drawn at under half the size).
 - A figure a slide cannot show at a readable size (a grid of many panels) is still shown alone; do not shrink it further or split it across slides.
 
@@ -54,6 +56,7 @@ Respond with the Marp markdown only — no JSON, no surrounding fence, no preamb
 
 # Inputs
 
+$claims
 ## Source paper (markdown)
 $paper_md
 

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from tests.plan_parts_helpers import checks_reply, is_scoped_ask, parts_of, plan_shown
 
 from core import oracle_check as oc, oracle_forms as of, plan, trial_runner
 from core.config import Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, PausesConfig, ProviderConfig
@@ -147,7 +148,7 @@ def test_the_kimi_truncated_expected_value_with_a_tolerance_below_its_precision_
     kimi = {"name": "decay at t=1", "kind": "special_case", "expected": 0.367879, "tolerance": 1e-12,
             "case": {"dt": 0.1}, "measure": "y_end"}
     got = of.enforce({"oracles": [kimi]})
-    assert len(got.requests) == 1 and "6 significant digits" in got.requests[0] and "full precision" in got.requests[0]
+    assert len(got.requests) == 1 and "6 significant digits" in got.requests[0] and "enough digits for the tolerance" in got.requests[0]
     # An exact value, a tolerance the written precision allows, or a value given in full is left alone.
     for fine in ({**kimi, "expected": 0.5}, {**kimi, "tolerance": 1e-6}, {**kimi, "expected": 0.36787944117144233}):
         assert of.enforce({"oracles": [fine]}).requests == [], fine
@@ -265,14 +266,14 @@ class _Model:
 
     async def chat(self, messages, **kw):  # noqa: ANN001
         prompt = messages[-1]["content"]
-        if "You are revising the plan" in prompt:
+        if is_scoped_ask(prompt):
             self.revisions.append(prompt)
-            current = prompt.split("# The plan as it stands", 1)[1].split("# What the person asked for", 1)[0].strip()
+            current = plan_shown(prompt)
             if self.revise is None:
-                return current
+                return checks_reply(current, prompt)
             edited = plan.edit_design_block(current, lambda block: {**block, "protocol": {
                 **block["protocol"], "oracles": [self.revise(o) for o in block["protocol"]["oracles"]]}})
-            return edited or current
+            return checks_reply(edited or current, prompt)
         if _classify(prompt) == "Experiment Design":
             body = json.loads(_FAKE_RESPONSES["design"])
             body["protocol"] = self.protocol
@@ -338,7 +339,7 @@ async def test_the_plan_step_sends_a_bare_name_conservation_check_back_once_with
 
 
 @pytest.mark.asyncio
-async def test_a_check_the_plan_does_not_fix_is_left_for_the_person_with_a_plain_note(tmp_path: Path) -> None:
+async def test_a_check_the_plan_does_not_fix_has_its_tolerance_widened_to_its_digits_and_the_plan_says_so(tmp_path: Path) -> None:
     engine = Engine(_config(tmp_path))
     kimi = {"name": "decay at t=1", "kind": "special_case", "expected": 0.367879, "tolerance": 1e-12,
             "case": {"n": 4}, "measure": "P_out", "reference": "derivation: y(1) = exp(-1) = 0.367879"}
@@ -348,9 +349,11 @@ async def test_a_check_the_plan_does_not_fix_is_left_for_the_person_with_a_plain
     await engine._node_plan({"topic": engine.config.topic, "literature": []})
     assert len(model.revisions) == 1, "asked once, never in a loop"
     section = _plan_text(engine).split(f"## {of.HEADING}", 1)[1].split("\n## ", 1)[0]
-    assert "The plan did not change the checks." in section and "Still not in its kind's form" in section
+    assert "The plan did not change the checks." in section and "FI widened the tolerance to 5e-07" in section
+    assert "Still not in its kind's form" not in section
     assert _oracle_in_plan(engine)["expected"] == 0.367879, "no expected value is changed by FI itself"
-    assert "still not in its kind's form" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+    assert _oracle_in_plan(engine)["tolerance"] == 5e-07, "half a unit of the last digit of 0.367879"
+    assert "FI widened the tolerance" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
 
 
 TOY_VIOLATION = '''
@@ -424,11 +427,11 @@ async def test_a_check_the_plan_removes_after_the_test_run_is_named_to_the_perso
     class _Removing(_Model):
         async def chat(self, messages, **kw):  # noqa: ANN001
             prompt = messages[-1]["content"]
-            if "You are revising the plan" in prompt:
+            if is_scoped_ask(prompt):
                 self.revisions.append(prompt)
-                current = prompt.split("# The plan as it stands", 1)[1].split("# What the person asked for", 1)[0].strip()
-                return plan.edit_design_block(current, lambda b: {**b, "protocol": {
-                    **b["protocol"], "oracles": [keep]}})
+                current = plan_shown(prompt)
+                return checks_reply(plan.edit_design_block(current, lambda b: {**b, "protocol": {
+                    **b["protocol"], "oracles": [keep]}}), prompt)
             return await super().chat(messages, **kw)
 
     model = _Removing({})
@@ -449,12 +452,14 @@ async def test_a_revision_for_the_checks_can_change_only_the_checks(tmp_path: Pa
     class _Wandering(_Model):
         async def chat(self, messages, **kw):  # noqa: ANN001
             prompt = messages[-1]["content"]
-            if "You are revising the plan" in prompt:
+            if is_scoped_ask(prompt):
                 self.revisions.append(prompt)
-                current = prompt.split("# The plan as it stands", 1)[1].split("# What the person asked for", 1)[0].strip()
-                return plan.edit_design_block(current, lambda b: {**b, "hypothesis": "a different claim", "protocol": {
+                current = plan_shown(prompt)
+                edited = plan.edit_design_block(current, lambda b: {**b, "protocol": {
                     **b["protocol"], "grid": {"n": [99]},
-                    "oracles": [{**o, "expected": 0} for o in b["protocol"]["oracles"]]}})
+                    "oracles": [{**o, "expected": 0} for o in b["protocol"]["oracles"]]}}) or current
+                # the reply also names the grid, which a request about the checks does not concern
+                return parts_of(edited, "oracles", "grid")
             return await super().chat(messages, **kw)
 
     model = _Wandering({})
@@ -462,8 +467,10 @@ async def test_a_revision_for_the_checks_can_change_only_the_checks(tmp_path: Pa
     await _gate(engine, {"grid": {"n": [4]}, "oracles": [{**CONSERVATION, "measure": "violation"}]}, TOY_VIOLATION)
     design = plan.load_design(engine.quest_root)[0]
     assert design["protocol"]["grid"] == {"n": [4]} and design["hypothesis"] == "power is conserved"
-    assert design["protocol"]["oracles"][0]["expected"] == 0
-    assert "only the checks were kept" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+    assert len(model.revisions) == 2, "the reply was refused and asked once more, with FI's reason"
+    assert "protocol.grid" in model.revisions[1] and "does not concern" in model.revisions[1]
+    log = (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+    assert "answer was refused" in log and "protocol.grid" in log
 
 
 @pytest.mark.asyncio
@@ -472,7 +479,7 @@ async def test_a_revision_call_that_fails_is_said_and_never_crashes_the_step(tmp
 
     class _Failing(_Model):
         async def chat(self, messages, **kw):  # noqa: ANN001
-            if "You are revising the plan" in messages[-1]["content"]:
+            if is_scoped_ask(messages[-1]["content"]):
                 raise TimeoutError("the provider did not answer")
             return await super().chat(messages, **kw)
 
@@ -543,9 +550,9 @@ async def test_a_criterion_that_reads_a_changed_check_may_change_with_it_and_no_
     class _Both(_Model):
         async def chat(self, messages, **kw):  # noqa: ANN001
             prompt = messages[-1]["content"]
-            if "You are revising the plan" in prompt:
+            if is_scoped_ask(prompt):
                 self.revisions.append(prompt)
-                current = prompt.split("# The plan as it stands", 1)[1].split("# What the person asked for", 1)[0].strip()
+                current = plan_shown(prompt)
 
                 def change(b: dict[str, Any]) -> dict[str, Any]:
                     oracles = [{**o, "measure": "abs(ratio - 1)", "expected": 0} if o["name"] == "power_conservation" else o
@@ -553,7 +560,7 @@ async def test_a_criterion_that_reads_a_changed_check_may_change_with_it_and_no_
                     criteria = [{**c, "direction": "lower", "target": 1e-6} for c in b["protocol"]["criteria"]]
                     return {**b, "protocol": {**b["protocol"], "oracles": oracles, "criteria": criteria}}
 
-                return plan.edit_design_block(current, change)
+                return checks_reply(plan.edit_design_block(current, change) or current, prompt)
             return await super().chat(messages, **kw)
 
     model = _Both({"grid": {"n": [4, 8]}, "oracles": [{**CONSERVATION, "measure": "ratio"}, rk],
@@ -571,3 +578,112 @@ async def test_a_criterion_that_reads_a_changed_check_may_change_with_it_and_no_
     assert "lower is better" in kept_line, "the criteria shown above the block are shown again with it"
     # The rewrite also moved the criterion on the unchanged check, which was put back, and the log says so.
     assert "only the checks were kept" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+
+
+# --- a tolerance tighter than the digits the expected value is written to ---------------------------------------------
+
+def test_a_tolerance_below_half_a_unit_of_the_last_stated_digit_is_found_whatever_the_digit_count() -> None:
+    four = {"name": "level", "kind": "special_case", "expected": 0.04978, "tolerance": 1e-6, "case": {"dt": 0.1},
+            "measure": "y_end"}
+    got = of.enforce({"oracles": [four]})
+    assert len(got.precision) == 1 and got.precision[0]["half"] == pytest.approx(5e-6) and len(got.requests) == 1
+    assert of.enforce({"oracles": [{**four, "tolerance": 5e-6}]}).requests == []
+    assert of.enforce({"oracles": [{**four, "expected": 0.049782963}]}).requests == []
+
+
+def test_the_digits_are_counted_from_the_text_the_plan_typed_not_the_float() -> None:
+    check = {"name": "level", "kind": "special_case", "expected": 0.017409, "tolerance": 1e-7, "case": {"dt": 0.1},
+             "measure": "y_end"}
+    # 0.0174090 is typed to seven digits: known to 5e-8, so a tolerance of 1e-7 is fine; the float alone says five digits.
+    assert of.enforce({"oracles": [check]}).precision[0]["digits"] == 5
+    typed = {"level": {"expected": "0.0174090"}}
+    assert of.enforce({"oracles": [check]}, typed=typed).precision == []
+    assert of.typed_precision("0.0174090", 0.017409) == (6, pytest.approx(5e-8))
+    assert of.typed_precision("1e-07", 1e-7) == (1, pytest.approx(5e-8))
+    assert of.typed_precision("0.5", 0.6) is None and of.typed_precision(0.5, 0.5) is None
+
+
+DIGITS_PLAN = '''# Plan
+
+## The design
+
+```yaml
+hypothesis: h
+protocol:
+  oracles:
+    - name: level
+      kind: special_case
+      expected: 0.0174090
+      tolerance: 1.0e-07
+      case: {dt: 0.1}
+      measure: y_end
+    - name: share
+      kind: special_case
+      expected: 0.5123
+      tolerance: 1.0e-05
+      tolerance_mode: relative
+      case: {dt: 0.1}
+      measure: y_end
+```
+'''
+
+
+def test_the_typed_numbers_of_a_plan_are_read_with_their_trailing_zeros() -> None:
+    assert of.typed_numbers(DIGITS_PLAN)["level"] == {"expected": "0.0174090", "tolerance": "1.0e-07"}
+
+
+def test_a_tolerance_still_too_tight_is_widened_to_half_a_unit_on_its_own_scale_and_the_expected_value_is_kept() -> None:
+    names = of.precision_gaps(DIGITS_PLAN)
+    assert names == ["share"], "level is typed to seven digits, so 1e-07 is within its precision"
+    text, told = of.widen_to_precision(DIGITS_PLAN, names)
+    assert len(told) == 1 and "FI widened the tolerance" in told[0] and "of the value" in told[0]
+    from core import plan as _plan
+    oracles = {o["name"]: o for o in _plan.raw_design_block(text)["protocol"]["oracles"]}
+    assert oracles["share"]["expected"] == 0.5123 and oracles["share"]["tolerance_mode"] == "relative"
+    assert oracles["share"]["tolerance"] * 0.5123 >= 5e-5 and oracles["share"]["tolerance"] * 0.5123 < 5.0001e-5
+    assert oracles["level"]["tolerance"] == 1e-7, "a check not named is not touched"
+    assert "share" not in of.precision_gaps(text), "widened once, no longer tighter than its digits"
+    assert of.widen_to_precision(text, names) == (text, [])
+
+
+def test_a_genuinely_wrong_value_still_fails_after_the_tolerance_is_widened_and_a_rounded_one_passes() -> None:
+    from core import oracle_check as oc
+    check = {"name": "level", "kind": "special_case", "expected": 0.017409, "tolerance": 1e-7, "case": {"dt": 0.1},
+             "measure": "y_end"}
+    text = DIGITS_PLAN.replace("0.0174090", "0.017409")
+    text, _told = of.widen_to_precision(text, of.precision_gaps(text))
+    from core import plan as _plan
+    widened = _plan.raw_design_block(text)["protocol"]["oracles"][0]
+    assert widened["tolerance"] == pytest.approx(5e-7)
+    for value, passes in ((0.0174088, True), (0.017409 + 10 * widened["tolerance"], False), (0.017409 - 1e-4, False)):
+        judged = oc.judged([{**check, "tolerance": widened["tolerance"]}], {"checks": [{"name": "level", "value": value}]})
+        assert judged[0]["passed_by_engine"] is passes, value
+
+
+def test_the_one_time_ask_tells_the_plan_to_write_an_exact_value_with_enough_digits() -> None:
+    short = {"name": "share", "kind": "special_case", "expected": 0.3, "tolerance": 1e-6, "case": {"dt": 0.1},
+             "measure": "y_end"}
+    ask = of.request(of.enforce({"oracles": [short]}).requests)
+    assert "If the value is exact or known to more digits, write it with enough digits for the tolerance " \
+           "(for example 0.300000" in ask
+
+
+def test_the_widening_is_in_the_run_record_the_paper_s_limitations_carry(tmp_path: Path) -> None:
+    import json
+    from core import disclosure
+    (tmp_path / ".fi").mkdir()
+    (tmp_path / ".fi" / "oracle_review.json").write_text(
+        json.dumps({"tolerance_widened": ["The check 'level' expects 0.04978 ... FI widened the tolerance to 5e-06"]}),
+        encoding="utf-8")
+    assert "FI widened the tolerance to 5e-06." in disclosure.run_record(tmp_path)
+    (tmp_path / ".fi" / "oracle_review.json").write_text("{}", encoding="utf-8")
+    assert "widened" not in disclosure.run_record(tmp_path)
+
+
+def test_an_expected_value_typed_as_a_string_is_not_a_number_to_the_oracle_so_it_is_asked_for_a_number() -> None:
+    from core import oracle_check as oc
+    check = {"name": "level", "kind": "special_case", "expected": "0.04978", "tolerance": "1e-6", "case": {"dt": 0.1},
+             "measure": "y_end"}
+    assert oc.limit_of(check)[1] is None, "the oracle does not read a string as a number"
+    assert oc.unjudgeable([check]) and "numeric `expected`" in oc.unjudgeable([check])[0]
+    assert of.enforce({"oracles": [check]}).precision == [], "the precision rule has nothing to count; the numeric ask does"

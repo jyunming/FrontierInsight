@@ -36,10 +36,16 @@ from __future__ import annotations
 
 import ast
 import difflib
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from .stop_power import READ
+
+#: What a fault found here rests on (core/stop_power.py): FI's reading of the script's text.
+SOURCE = READ
 
 #: Names that hold one setting (one cell of the grid).
 SETTING_NAMES = frozenset({"cell", "setting", "settings"})
@@ -245,6 +251,10 @@ def _assignments_of(name: str, nodes: list[ast.AST]) -> list[ast.AST] | None:
     loop variable, ``:=``, ``global``, a tuple target, a ``with`` / ``import`` name)."""
     values: list[ast.AST] = []
     for node in nodes:
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == name:
+            if node.value is not None:  # ``cells: list[dict] = []`` binds like ``cells = []``; ``cells: list`` binds nothing
+                values.append(node.value)
+            continue
         if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
             if len(node.targets) != 1:
                 return None
@@ -444,8 +454,18 @@ def supplied_names(protocol: dict[str, Any] | None, design: dict[str, Any] | Non
     from . import oracle_forms as _forms
 
     protocol = protocol if isinstance(protocol, dict) else {}
+    block = protocol.get("optimisation")
+    if isinstance(block, dict):
+        # A search for the best design: the names are those its cells are built from (core/optimise_search.py), the
+        # block's own grid, fixed conditions, search settings, sub-studies and design variables; not the protocol's top level.
+        from . import optimise_search as _search
+
+        axes, allowed = _search.supplied_names(block)
+        allowed = set(allowed) | (set(IN_RUN_RECORD_FIELDS) if _search.in_each_run(block) else set())
+        _case_keys(protocol, allowed)
+        return axes, allowed
     grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
-    inside = _in_run.of(protocol) or {}
+    inside = _in_run.of_study(protocol) or {}
     axes = [str(k) for k in grid] + [str(k) for k in inside if str(k) not in grid]
     allowed = set(axes) | (set(IN_RUN_RECORD_FIELDS) if inside else set())
     allowed.update(_forms.fixed_settings_of_design({**(design or {}), "protocol": protocol}))
@@ -947,15 +967,43 @@ def record(found: list[Read], protocol: dict[str, Any] | None) -> dict[str, Any]
                                                      for r in found]}
 
 
+def _fi_copies(code_dir: Path) -> set[str]:
+    """The files at the top of ``code/`` that are FI's own, unchanged: their hash is the one FI recorded when it wrote them
+    (core/code_project.py). They run the study and read FI's own trial record, whose keys are not settings of the study. A
+    file of the same name that anyone changed, or that FI did not write, is the study's code and is checked like the rest."""
+    from . import code_project as _project
+
+    try:
+        record = json.loads((code_dir.parent / _project.RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    out: set[str] = set()
+    for name, sha in (record.items() if isinstance(record, dict) else []):
+        path = code_dir / name
+        if name.endswith(".py") and "/" not in name and path.is_file():
+            try:
+                text = path.read_bytes().decode("utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            if sha in (_project._sha(text), _project._sha(text.replace("\r\n", "\n"))):
+                out.add(name)
+    return out
+
+
 def code_files(code_dir: Path) -> dict[str, str]:
     """The scripts and package files of ``code/`` that run the study, not their tests, as ``{relative path: text}``."""
     out: dict[str, str] = {}
     code_dir = Path(code_dir)
     if not code_dir.is_dir():
         return out
+    own = _fi_copies(code_dir)
     for path in sorted(code_dir.rglob("*.py")):
         rel = path.relative_to(code_dir)
-        if "__pycache__" in rel.parts or "tests" in rel.parts or re.match(r"test_", path.name) or ".venv" in rel.parts:
+        if rel.as_posix() in own:
+            continue
+        # code/skills/: FI's copy of the selected skills' files (Engine._skill_files_to_code), the skill's code.
+        if "__pycache__" in rel.parts or "tests" in rel.parts or re.match(r"test_", path.name) or ".venv" in rel.parts \
+                or rel.parts[0] == "skills":
             continue
         try:
             out[rel.as_posix()] = path.read_text(encoding="utf-8")

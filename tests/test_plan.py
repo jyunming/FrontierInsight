@@ -369,6 +369,27 @@ async def test_a_later_pass_redesigns_from_the_review_not_from_the_plan(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_a_plan_rewritten_to_fit_the_time_is_the_next_design(tmp_path: Path) -> None:
+    """A study too long to run had plan.md rewritten by the plan's model to fit the time FI measured: the design node
+    reads that plan again instead of drafting a new design, and the next pass is drafted as before."""
+    eng = _engine(tmp_path, [json.dumps({})] * 4)
+    path = plan.plan_path(eng.quest_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    smaller = {**DESIGN, "method": "the same study with fewer settings"}
+    path.write_text(plan.render("a test topic", EXTRA, smaller), encoding="utf-8")
+    state = {"topic": "a test topic", "iteration": 0, "design": DESIGN, "design_from_plan": True}
+    patch = await eng._node_design(state)
+    assert patch["design"] == smaller and patch["design_from_plan"] is False
+    assert patch["design_history"][-1]["plan_sha256"] == plan.sha256(path.read_text(encoding="utf-8"))
+    # The plan's design is read and audited, as at the first pass; no design is drafted.
+    assert not any("**Experiment Design** stage" in _prompt(c) for c in eng._client.chat.await_args_list)
+    eng._client = type("Stub", (), {"chat": AsyncMock(side_effect=[json.dumps({**DESIGN, "hypothesis": "drafted"}),
+                                                                    json.dumps({})])})()
+    later = await eng._node_design({**state, **patch, "iteration": 1})
+    assert later["design"]["hypothesis"] == "drafted"
+
+
+@pytest.mark.asyncio
 async def test_an_unreadable_plan_at_design_falls_back_to_drafting(tmp_path: Path) -> None:
     eng = _engine(tmp_path, [json.dumps(DESIGN), json.dumps({})])
     path = plan.plan_path(eng.quest_root)
@@ -721,3 +742,76 @@ def test_a_grid_that_cannot_be_read_is_reported_in_plain_words() -> None:
     assert "grid" not in out and len(notes) == 1
     assert "no settings to vary yet" in notes[0] and "FI asks the plan's model to write them" in notes[0]
     assert "[euler, rk4]" not in notes[0] and "in the protocol of this plan" not in notes[0], "a person is not asked to write it"
+
+
+# A block that two colons on one line break: no repair can tell where the value was meant to end.
+_TWO_COLONS = "method: compare three strategies: on synthetic clips: then plot"
+
+
+def _with_two_colons(text: str, method: str = "compare three strategies on synthetic clips") -> str:
+    out = text.replace(f"method: {method}", _TWO_COLONS)
+    assert out != text
+    return out
+
+
+@pytest.mark.asyncio
+async def test_a_block_that_is_not_valid_yaml_on_the_second_answer_is_sent_back_once_alone(tmp_path: Path) -> None:
+    """A live rewrite of a long plan: the first answer had no usable design (nothing was said why), the second was not
+    valid YAML, and FI stopped because the block alone was only ever asked for after the first answer."""
+    eng = _engine(tmp_path, [])
+    path = _existing_plan(eng)
+    before = path.read_text(encoding="utf-8")
+    no_hypothesis = before.replace(f"hypothesis: {DESIGN['hypothesis']}\n", "")
+    revised = plan.render("Fins", EXTRA, {**DESIGN, "method": "a better method"})
+    good_block = plan.design_block(revised)[2]
+    broken = _with_two_colons(revised, "a better method")
+    assert plan.parse(broken).design is None and plan.repair_design(broken) == (None, [])
+    eng._client = type("Stub", (), {"chat": AsyncMock(side_effect=[no_hypothesis, broken, "```yaml\n" + good_block + "\n```"])})()
+
+    await eng.revise_plan("better method")
+
+    assert eng._client.chat.await_count == 3
+    ask = _prompt(eng._client.chat.await_args_list[2])
+    assert "Where: line" in ask and "The YAML parser says: mapping values are not allowed here" in ask
+    assert "Return ONLY the corrected block" in ask and "In short" not in ask, "the block alone, not the plan"
+    assert plan.parse(path.read_text(encoding="utf-8")).design["method"] == "a better method"
+
+
+@pytest.mark.asyncio
+async def test_the_block_is_asked_for_alone_at_most_once_in_all(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    path = _existing_plan(eng)
+    before = path.read_text(encoding="utf-8")
+    broken = _with_two_colons(before)
+    eng._client = type("Stub", (), {"chat": AsyncMock(side_effect=[broken, "```yaml\nmethod: 'still open\n```"])})()
+    with pytest.raises(ValueError, match="asked once for the corrected block alone"):
+        await eng.revise_plan("make it better")
+    assert eng._client.chat.await_count == 2
+    assert path.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.asyncio
+async def test_a_known_good_rewrite_costs_one_call_and_every_answer_is_kept(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    path = _existing_plan(eng)
+    good = plan.render("Fins", EXTRA, {**DESIGN, "method": "a better method"})
+    eng._client = type("Stub", (), {"chat": AsyncMock(side_effect=[good])})()
+    await eng.revise_plan("better method")
+    assert eng._client.chat.await_count == 1
+    assert plan.parse(path.read_text(encoding="utf-8")).design["method"] == "a better method"
+    kept = sorted((eng.fi_dir / "plan_answers").glob("*.txt"))
+    assert [f.read_text(encoding="utf-8") for f in kept] == [good], "the whole answer is kept, not its first 60,000 characters"
+
+
+@pytest.mark.asyncio
+async def test_each_raw_answer_of_a_rewrite_is_kept_and_the_reason_for_a_retry_is_logged(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    _existing_plan(eng)
+    no_hypothesis = plan.render("Fins", EXTRA, DESIGN).replace(f"hypothesis: {DESIGN['hypothesis']}\n", "")
+    good = plan.render("Fins", EXTRA, {**DESIGN, "method": "a better method"})
+    eng._client = type("Stub", (), {"chat": AsyncMock(side_effect=[no_hypothesis, good])})()
+    await eng.revise_plan("better method")
+    kept = [f.read_text(encoding="utf-8") for f in sorted((eng.fi_dir / "plan_answers").glob("*.txt"))]
+    assert kept == [no_hypothesis, good]
+    said = (eng.fi_dir / "run.log").read_text(encoding="utf-8")
+    assert "it is valid YAML but not a usable design, so the block alone is not asked for" in said

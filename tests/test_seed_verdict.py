@@ -153,3 +153,16 @@ def test_kinetics_seed_reaches(tmp_path: Path) -> None:
     shutil.copytree(FIXTURES / "kinetics_s1", root)
     got = run_facts.seed_verdict(root)
     assert got["verdict"] == "reaches" and got["fi_seed_reaches"] is True, got
+
+
+def test_an_unknown_verdict_still_states_the_base_seed_fi_recorded(tmp_path: Path, monkeypatch) -> None:
+    """Before: with the verdict unknown the sentence left out the base seed although the run's own record holds it."""
+    from core import disclosure, paper_facts
+
+    monkeypatch.setattr(run_facts, "seed_verdict", lambda root: {"verdict": run_facts.UNKNOWN})
+    monkeypatch.setattr(disclosure, "recorded_seeds", lambda root: (0, frozenset()))
+    assert paper_facts._seed_text(tmp_path) == (
+        "a seed passed to each trial, derived from base seed 0 (FI could not tell from the code whether the simulation uses it)")
+    monkeypatch.setattr(disclosure, "recorded_seeds", lambda root: (None, frozenset()))
+    assert paper_facts._seed_text(tmp_path) == (
+        "a seed passed to each trial (FI could not tell from the code whether the simulation uses it)")

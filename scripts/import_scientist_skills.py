@@ -34,7 +34,8 @@ Sources (repo -> what it contributes):
     materials specifically.
   * tondevrel/scientific-agent-skills — a handful confirmed NOT to
     duplicate K-Dense's catalogue: image analysis, general SciPy,
-    causal inference, gradient boosting, survival analysis.
+    causal inference, gradient boosting, survival analysis; and numba and
+    numpy, for making a slow simulation fast.
   * MP-AI-20/mechanical-engineering-skills — control systems,
     reliability engineering, structural/FEA — three domains FI had
     zero coverage of.
@@ -47,6 +48,9 @@ Sources (repo -> what it contributes):
     skipped as redundant with the already-imported pymc skill.
   * HughYau/neuroforge-skills — neuroscience: MEG/EEG, spiking network
     simulation, neuroimaging ML, spike-sorting.
+  * wshobson/agents — python-performance-optimization: profile before
+    changing anything, then the usual ways Python code is made faster
+    (MIT licence).
   * e-eight/scicomp-skills — one skill, numerical-verification: how to check
     a simulation against an independent answer (MIT licence; the
     repository's LICENSE is copied next to the skill).
@@ -109,6 +113,7 @@ REPOS: dict[str, str] = {
     "baygent": "https://github.com/Learning-Bayesian-Statistics/baygent-skills.git",
     "neuroforge": "https://github.com/HughYau/neuroforge-skills.git",
     "scicomp": "https://github.com/e-eight/scicomp-skills.git",
+    "wshobson": "https://github.com/wshobson/agents.git",
 }
 
 # Skills written for FI itself live in this repository, not in a clone: the repo key "fi" points at this folder.
@@ -189,6 +194,12 @@ SKILLS: dict[str, tuple[str, str, bool]] = {
     "dowhy": ("tondevrel", "skills/dowhy", False),  # upstream ships SKILL.MD (uppercase); see _resolve_source
     "xgboost-lightgbm": ("tondevrel", "skills/xgboost-lightgbm", False),
     "lifelines": ("tondevrel", "skills/lifelines", False),
+    # Making a slow simulation fast: compiled loops, whole-array operations, and finding what costs the time first.
+    "numba": ("tondevrel", "skills/numba", False),
+    "numpy": ("tondevrel", "skills/numpy", False),
+    # -- wshobson/agents --
+    "python-performance-optimization": (
+        "wshobson", "plugins/python-development/skills/python-performance-optimization", False),
     # -- MP-AI-20/mechanical-engineering-skills (curated subset) --
     "control-systems": ("mecheng", "skills/control-systems", False),
     "state-space-control": ("mecheng", "skills/state-space-control", False),

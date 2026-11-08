@@ -5,6 +5,7 @@ the sample itself on this interpreter. No real model is called."""
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -261,3 +262,50 @@ async def test_a_setting_the_timing_could_not_finish_is_not_sampled(tmp_path: Pa
                                     SimpleNamespace(seconds=10.0), 10.0, budget_s=600.0, probes=probes)
     assert time.monotonic() - started < 50, "the setting that sleeps a minute was sampled"
     assert record["rounds"] and record["rounds"][0]["outcome"] == "refused"  # the sample ran, and the model was asked
+
+
+@pytest.mark.asyncio
+async def test_the_model_is_shown_where_the_time_goes_measured_by_fi(tmp_path: Path) -> None:
+    """The model guessed from the code where a simulation spends its time; a real one spent nine tenths of it in one
+    function called a hundred thousand times. FI measures it and shows the costliest functions with their call counts."""
+    engine = _engine(tmp_path)
+    model = _Model([_edit(LOOP, FAST)])
+    out = await _speed(engine, model)
+    assert out["profiled"] is True
+    shown = model.prompts[0]
+    assert "Where the time goes, measured by FI" in shown
+    assert re.search(r"run_trial \(simulate\.py:\d+\): [\d.]+ s of its own \(\d+% of the setting\), called \d+ times", shown)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_change_is_kept_with_its_refusal(tmp_path: Path) -> None:
+    """A guard refused a real speed-up and only its reason was kept, so whether the refusal was right could not be judged."""
+    engine = _engine(tmp_path)
+    out = await _speed(engine, _Model([_edit("this text is not in the file", "x")]))
+    entry = out["rounds"][0]
+    assert entry["outcome"] == "refused" and "this text is not in the file" in entry["diff"]
+    assert entry["file"] == "simulate.py"
+
+
+@pytest.mark.asyncio
+async def test_an_answer_that_cannot_be_read_is_kept_with_its_refusal(tmp_path: Path) -> None:
+    """A live answer that rewrote a whole function was refused as "not the JSON object asked for", and nothing of it was
+    kept: whether the answer or the reading was at fault could not be judged."""
+    engine = _engine(tmp_path)
+    out = await _speed(engine, _Model(["here is the new function: def f(x): return x"]))
+    entry = out["rounds"][0]
+    assert entry["outcome"] == "refused" and "here is the new function" in entry["reply"]
+
+
+@pytest.mark.asyncio
+async def test_an_answer_with_a_first_try_and_a_correction_is_read_as_the_correction(tmp_path: Path) -> None:
+    """A live answer wrote one edit with a placeholder, then "Correction, the exact-text version:" and the edit it meant;
+    the two objects were read as one and the answer was refused as "not the JSON object asked for"."""
+    engine = _engine(tmp_path)
+    first = json.loads(_edit("this text is not in the file", ""))
+    first["why"] = "placeholder"
+    reply = json.dumps(first) + "\n\nCorrection, the exact-text version:\n\n" + _edit("this text is not in the file", "x")
+    out = await _speed(engine, _Model([reply]))
+    entry = out["rounds"][0]
+    assert "not the JSON object" not in entry["reason"], entry["reason"]
+    assert "this text is not in the file" in entry["diff"] and entry["why"] != "placeholder"

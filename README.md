@@ -70,6 +70,7 @@ Every quest writes **`plan.md`** before the experiment is designed. Ask FI to st
 ```yaml
 pauses:
   plan: ask      # or answer "Stop to read and edit the plan" in the interview
+  scope: ask     # before the plan, pick the study to run from 3 or 4 studies FI offers (off skips it)
 ```
 
 ```bash
@@ -126,4 +127,4 @@ The long descriptions of each are in [docs/features.md](docs/features.md).
 
 Apache 2.0, see [`LICENSE`](LICENSE). Contributions welcome via PR.
 
-**Copilot, honestly:** only `vscode_extension` is sanctioned (VSCode's official `vscode.lm.*` API). The standalone Copilot CLI is agentic and will not run as an FI backend, and any reverse-engineered Copilot proxy is against the acceptable-use policy in spirit; FI warns when you select those. For headless runs use `claude_cli` / `codex_cli` or an API key.
+**Copilot, honestly:** only `vscode_extension` is sanctioned (VSCode's official `vscode.lm.*` API). The standalone Copilot CLI (`copilot_cli`) also works headless, answer-only and slower than an HTTP model (about 3x in one measured quest); its use is billed to your Copilot subscription's quota. Any reverse-engineered Copilot proxy is against the acceptable-use policy in spirit; FI warns when you select those. For other headless runs use `claude_cli` / `codex_cli` or an API key.

@@ -56,6 +56,15 @@ def test_a_glyph_no_font_sets_is_listed_not_replaced() -> None:
     assert "⭐" in prepared.text and "?" not in prepared.text
 
 
+def test_a_private_use_code_point_is_left_off_and_recorded_not_a_reason_to_skip_typesetting() -> None:
+    # A scraped title can carry a symbol font's copyright sign as U+F6D9; no font sets it.
+    src = _prepare_unicode("Notes v2.0 2004 A. Author", fonts=_plan())
+    assert src.not_set == []
+    assert "" not in src.text and "2004 A. Author" in src.text
+    assert any(g == "" and "nothing" in became for g, became, _ in src.replacements)
+    assert _prepare_unicode("Notes 2004", fonts=None).not_set == []
+
+
 def test_a_right_to_left_script_is_not_typeset() -> None:
     assert unsupported_script(ord("ש")) and unsupported_script(ord("ع")) and not unsupported_script(ord("Ж"))
     prepared = _prepare_unicode("Shalom (שלום).", fonts=_plan(Heb="שלום"))
