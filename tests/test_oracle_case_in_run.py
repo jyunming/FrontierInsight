@@ -114,3 +114,11 @@ def test_an_unrelated_error_with_the_same_words_does_not_run_the_case_again(tmp_
     got, why = asyncio.run(trial_runner.run_case(_executor(), sys.executable, root, "code/simulate.py", cell={"mode": "b"},
                                                  timeout_s=60, in_each_run={"mode": ["a", "b", "c"]}))
     assert got is None and why.startswith("TypeError:")
+
+
+def test_every_refusal_of_a_result_per_value_is_typed() -> None:
+    from core import in_run
+    levels = in_run.level_cells({"mode": ["a", "b"]})
+    for value in ({"g": [1.0]}, {"g": {"a": 1.0}}, {"g": {"a": "x", "b": 1.0}}):
+        kept, why = in_run.read_returned(value, levels, "run_trial")
+        assert kept is None and isinstance(in_run.refusal_error(why), in_run.LevelsRefused), value

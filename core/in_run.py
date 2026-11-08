@@ -436,7 +436,7 @@ def read_returned(value, levels, entry):
             continue
         keys = [level_key(level) for level in levels]
         if isinstance(v, (list, tuple)) and len(levels[0]) > 1:
-            return None, ("{}() returned `{}` as a list, and a list is only read when one thing is compared inside the "
+            return None, _Refusal("{}() returned `{}` as a list, and a list is only read when one thing is compared inside the "
                           "run; with several, return a mapping keyed {} (one number for each value of the settings it "
                           "varies over)".format(entry, name, key_forms(levels)))
         if isinstance(v, (list, tuple)) and len(levels[0]) == 1:
@@ -455,15 +455,15 @@ def read_returned(value, levels, entry):
                     return None, _Refusal("{}() returned `{}` with the key {!r}, which is not one of the values the run was given: key it "
                                   "{}".format(entry, name, k, key_forms(levels)))
                 if not _number(x):
-                    return None, "{}() returned `{}` with a non-number for {!r}".format(entry, name, k)
+                    return None, _Refusal("{}() returned `{}` with a non-number for {!r}".format(entry, name, k))
                 if axes is None:
                     axes = set(level)
                 elif axes != set(level):
-                    return None, ("{}() returned `{}` keyed by {} and by {} in one result: key all of one result over the "
+                    return None, _Refusal("{}() returned `{}` keyed by {} and by {} in one result: key all of one result over the "
                                   "same settings".format(entry, name, ", ".join(sorted(axes)), ", ".join(sorted(level))))
                 lk = level_key(level)
                 if lk in got:
-                    return None, "{}() returned `{}` with {} given twice".format(entry, name, lk)
+                    return None, _Refusal("{}() returned `{}` with {} given twice".format(entry, name, lk))
                 got[lk] = float(x)
             expected = [level_key(lv) for lv in (sub_levels(levels, axes) if axes and len(axes) < len(levels[0]) else levels)]
             missing = [k for k in expected if k not in got]
