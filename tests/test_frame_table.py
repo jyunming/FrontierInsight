@@ -191,8 +191,14 @@ def test_the_carried_text_runs_with_only_the_quests_code_folder_on_the_path(tmp_
         encoding="utf-8")
     assert skeleton.ensure_runtime(code, "") and skeleton.ensure_table(code, "")
     (code / "probe.py").write_text(textwrap.dedent("""
-        import importlib.util, json, sys
-        assert importlib.util.find_spec("core") is None, "FI's own modules must not be on the path"
+        import json, sys
+        # FI's own packages may be installed in the interpreter (CI pip-installs the repo), so block them: the carried
+        # text must import nothing of FI beyond the quest's code folder, whether or not FI is installed
+        class _NoFI:
+            def find_spec(self, name, path=None, target=None):
+                if name.split(".")[0] in ("core", "generation", "web", "agents", "templates"):
+                    raise ImportError("FI's own modules must not be needed: " + name)
+        sys.meta_path.insert(0, _NoFI())
         from fi_frame import Table, UnknownResult, NotYet, Figure
         t = Table.read(sys.argv[1], ["growth"])
         try:

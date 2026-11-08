@@ -293,6 +293,33 @@ async def test_a_grid_of_more_settings_than_fi_lists_is_planned_lazily_and_run_u
 
 
 @pytest.mark.asyncio
+async def test_no_batch_is_planned_in_the_last_second_when_no_setting_can_start(tmp_path: Path) -> None:
+    """A setting starts only with a whole second of the study left, so a batch planned after that would run nothing: the
+    clock is read the same way in both places, whatever the speed of the machine (a fast one planned thousands of specs
+    in the last second of a 3 second study)."""
+    from core.execution import ExecutionResult
+
+    class SlowFirst(SharedInterpreterExecutor):
+        calls = 0
+
+        async def execute(self, cmd, *, cwd, timeout_s, env=None):  # noqa: ANN001
+            type(self).calls += 1
+            if type(self).calls == 1:
+                await asyncio.sleep(2.3)  # the first setting ends with 0.7 s of the study left
+            return ExecutionResult(returncode=0, stdout="", stderr="", duration_s=0.0)
+
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(BIG_SIM, encoding="utf-8")
+    grid = {"n": list(range(200)), "m": list(range(200))}
+    await trial_runner.run_trials(
+        SlowFirst(python_version=f"{sys.version_info[0]}.{sys.version_info[1]}"), sys.executable, root,
+        "code/simulate.py", grid, runs_per_setting=1, base_seed=1, deterministic=False, timeout_s=3, first_cells=20000)
+    specs = list((root / ".fi" / "trials").glob("cell*.json"))
+    assert 1 <= len(specs) <= 64, f"{len(specs)} specs: a batch was planned that could not run a setting"
+
+
+@pytest.mark.asyncio
 async def test_a_grid_of_more_settings_than_fi_lists_is_never_planned_whole_before_its_first_trial(tmp_path: Path) -> None:
     """Planning is a batch at a time: with a short limit only the first batches have a spec, not one per planned setting."""
     root = tmp_path / "quest"

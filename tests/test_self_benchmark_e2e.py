@@ -51,10 +51,13 @@ PROTO = {
 }
 # The hand count is written another way than the simulation's own, so a slip in one is not copied into the other.
 SIM = SIM_TRIAL_BY_HAND.replace('float(draw < cell["R0"] / 4)', 'float(4 * draw < cell["R0"])') + '\n\ndef oracle():\n    return {"half": 0.5004}\n'
+# The fixture's prose states no number of its own: since 8fec6355 a number the writer typed that FI cannot trace stays in the
+# paper and is only listed in QUALITY.md, so R1 (one number of the paper changed) can only be put right, as FI refills its
+# own tables from its records, where the number is in a block FI fills.
 PAPER = ("# Final size of a toy epidemic\n\nWe ran 300 outbreaks per setting, using {{seed}}; the run took {{run_time}}.\n\n## Results\n\n"
-         "The headline score was 0.987 across the settings. ![r](figures/result.png)\n\n## References\n1. Smith 2020.\n")
+         "The headline score rose with R0 across the settings. ![r](figures/result.png)\n\n## References\n1. Smith 2020.\n")
 CITING = ("# What earlier work says\n\nWe ran 300 outbreaks per setting, using {{seed}}; the run took {{run_time}}.\n\n## Results\n\n"
-          "The headline score was 0.987 across the settings. ![r](figures/result.png)\n\n"
+          "The headline score rose with R0 across the settings. ![r](figures/result.png)\n\n"
           "Earlier work reports on the exposure and the outcome in children [1].\n\n## References\n1. The source.\n")
 TASK = {
     "schema": answers.SCHEMA, "task": "Q99", "title": "the fake benchmark task", "kind": "simulation",
@@ -163,7 +166,9 @@ def bench(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
             "R1": cli.plant("R1", out=root / "R1", from_run=clean),
             "R2": cli.plant("R2", out=root / "R2", from_run=clean),
             "N3": cli.plant("N3", out=root / "N3", from_run=clean, file="code/simulate.py",
-                            find="100.0 * cell", replace="50.0 * cell"),
+                            # the headline is computed through the model's package since ec016de0 (tests/test_research_acceptance.py::_with_package):
+                            # the same factor of 100 is halved, in the same computation
+                            find="100.0 * model.", replace="50.0 * model."),
             "S1": cli.plant("S1", out=root / "S1", from_run=clean, file="code/experiment.py",
                             find='m["values"]', replace='m["values"][::5]'),
             "control-claims": cli.plant("control", out=root / "control-claims", from_run=clean, step="claims"),

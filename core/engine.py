@@ -770,6 +770,10 @@ _REDERIVE_BECAUSE = {
 class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMixin):
     """Owns one quest's research graph, executor, knowledge layer, and LLM client."""
 
+    # Who repairs code a check finds wrong; ``__init__`` sets it from the config. The class default is the chat model, so an
+    # Engine built without ``__init__`` (as several tests do) reads it too.
+    _repairs_go_to = "chat"
+
     def __init__(
         self,
         config: Config,

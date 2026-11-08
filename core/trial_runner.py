@@ -875,7 +875,9 @@ async def run_trials(
             # planned is not in the ledger (the paper says how many were: core/disclosure.py).
             batch = max(64, 4 * int(at_once or 1))
             source = itertools.islice(_search.iter_grid_cells(grid), max(1, int(first_cells)))
-            while time.monotonic() - started < timeout_s:
+            # A setting starts only with a whole second left (start() above); a batch planned with less would not run one
+            # setting and would only fill the folder with specs until the clock ran out.
+            while timeout_s - (time.monotonic() - started) >= 1:
                 cells_now = list(itertools.islice(source, batch))
                 if not cells_now:
                     break

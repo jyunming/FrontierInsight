@@ -132,7 +132,8 @@ def test_a_simulation_whose_answers_vary_between_calls_is_searched() -> None:
 def test_the_probe_is_deterministic_and_spread_over_the_first_run() -> None:
     block = _block()
     one, two = _run(block, Sim("nothing"), ["mass"]), _run(block, Sim("nothing"), ["mass"])
-    dump = lambda o: json.dumps(o["rows"], sort_keys=True, default=str)  # noqa: E731
+    # elapsed_s is the wall time of a call (0.0 on a coarse clock, 0.0001 on a fine one): a measurement, not a choice of the probe
+    dump = lambda o: json.dumps([{k: v for k, v in r.items() if k != "elapsed_s"} for r in o["rows"]], sort_keys=True, default=str)  # noqa: E731
     assert dump(one) == dump(two)
     mug = [r["design"]["x"] for r in one["rows"] if r["level"] == {"shape": "mug"}]
     cup = [r for r in one["rows"] if r["level"] == CUP and r["counted"]]

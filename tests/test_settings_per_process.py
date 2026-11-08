@@ -488,9 +488,11 @@ def test_a_resumed_run_shares_processes_again_from_the_kept_groups_without_a_cos
 def test_the_one_setting_worker_is_the_text_it_was_before_sharing_existed() -> None:
     import hashlib
 
-    # sha256 of HARNESS_SOURCE on 894a9265 (it is part of the keys of FI's search records)
+    # sha256 of HARNESS_SOURCE (it is part of the keys of FI's search records); it was a0cea43c... on 894a9265. The text
+    # includes core/in_run.py whole; commits 2a36c0db and 92494b76 only ADD helpers there (level_first, settle_missing,
+    # per_run_names, unplaced; no line removed or changed), so the worker's own text is unchanged and the pin moves on purpose.
     assert hashlib.sha256(trial_runner.HARNESS_SOURCE.encode("utf-8")).hexdigest() == (
-        "a0cea43ced006871470b56c4f502ad392df7697413175b224db8b880c748dfc1")
+        "6fe2ccf1140f5532d00b39d169b5a427c2e6dab86cccaac529c3df78f25e3f10")
     assert trial_runner.GROUP_HARNESS_SOURCE != trial_runner.HARNESS_SOURCE and "members" in trial_runner.GROUP_HARNESS_SOURCE
 
 
