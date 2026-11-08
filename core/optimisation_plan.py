@@ -55,6 +55,29 @@ BUILT_IN_METHODS = {
     "global_then_local": "a search over the whole range first, then a local search from the best point found",
     "exhaustive": "every combination is evaluated (only when the variables take few values)",
 }
+
+
+#: The fields of the search block that take exactly one value out of a closed list, each with that list (the validator's own
+#: constants): ``(field as the request names it, the values)``. A request that asks for the block shows them
+#: (:func:`closed_choices_note`), so the answer writes the bare value.
+CLOSED_CHOICES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("search_method", (*BUILT_IN_METHODS, "scipy:<function>", "optuna:<sampler>")),
+    ("objective.direction", tuple(dict.fromkeys(DIRECTIONS.values()))),
+    ("design_variables[].kind", KINDS),
+    ("improvement_tolerance.mode", ("absolute", "relative")),
+)
+
+
+def closed_choices_note(parts: Any = ("optimisation",)) -> str:
+    """For the closed-choice fields of the parts a request asks for, the values each takes and where an explanation goes
+    (empty when the asked parts have none)."""
+    if "optimisation" not in set(parts):
+        return ""
+    fields = "; ".join(f"`{name}` is one of {', '.join(values)}" for name, values in CLOSED_CHOICES)
+    return (f"In the search block each of these fields takes exactly one of the values listed, written bare: {fields}. "
+            "Write any explanation in your `simplifications` entry, never in these fields.")
+
+
 # A method from a library the quest's environment may have: ``scipy:<function>`` or ``optuna:<sampler>``.
 _LIBRARY_METHOD = re.compile(r"^(scipy|optuna):([A-Za-z][A-Za-z0-9_.-]*)$")
 _LIMIT = re.compile(r"^\s*(<=|>=|<|>|≤|≥|=<|=>)\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)\s*$")

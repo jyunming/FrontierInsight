@@ -9374,7 +9374,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 raise ValueError("its search for the best design cannot be run: "
                                  + "; ".join([*missing, *([why] if why else [])] or ["it is not a search"]))
             if _frozen.sha256(design.get("protocol") or {}) == _frozen.sha256(basis):
-                raise ValueError("it changed nothing of the protocol")
+                # What of the answer could not be read is named (the field, what was written, the allowed values), not only
+                # that nothing changed: the model is asked again with it.
+                unread = " ".join(str(r) for r in getattr(self, "_answer_refused", None) or [])
+                raise ValueError("it changed nothing of the protocol" + (f"; what could not be read: {unread}" if unread else ""))
             return revised
 
         # Only how the design is described and searched is asked for (what the results are judged by is not), and a new
@@ -9382,8 +9385,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         scope = _plan_scope.PartScope(
             parts=tuple(sorted(self._FLAT_MAY_CHANGE)),
             entries={"simplifications": _plan_scope.EntryScope("id", frozenset(), True)})
+        closed = _optim.closed_choices_note(scope.names())
         done = await self._revise_plan_parts(
-            request, path, scope=scope, by="engine", finish=finish,
+            request.rstrip() + (("\n\n" + closed) if closed else ""), path, scope=scope, by="engine", finish=finish,
             note=lambda: "a design whose objective can move, asked by FI"
             + (f"; kept from the plan: {', '.join(kept_keys)}" if kept_keys else ""))
         if kept_keys:
