@@ -812,3 +812,49 @@ def test_a_rerun_that_compares_every_delivered_file_and_finds_no_move_is_unchang
     root, copy = _quest_with_two_files(tmp_path)
     v = _rerun_writing(tmp_path, monkeypatch, root, copy, table=True)
     assert v.status == "unchanged" and v.unwritten == []
+
+
+# ---- a delivered result file that no changed code writes is carried, not "could not compare" ---------------------------------
+def _quest_with_writer(tmp_path: Path, writer_text: str = 'open("table.json", "w")\n') -> tuple[Path, Path]:
+    root, copy = _quest_with_two_files(tmp_path)
+    (root / "code" / "report.py").write_text(writer_text, encoding="utf-8")  # the code that makes table.json
+    return root, copy
+
+
+def test_a_result_file_no_changed_code_writes_is_carried_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Old code: an analysis-only rerun that does not rewrite table.json (made by report.py, untouched) was could_not."""
+    root, copy = _quest_with_writer(tmp_path)
+    v = _rerun_writing(tmp_path, monkeypatch, root, copy, table=False)
+    assert v.status == "unchanged" and v.carried == ["table.json"] and v.unwritten == []
+
+
+def test_a_result_file_a_changed_writer_makes_stays_uncompared(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Known positive: the changed file itself writes table.json and the rerun did not: still could_not."""
+    root, copy = _quest_with_writer(tmp_path, "x = 1\n")
+    (root / "code" / "derive.py").write_text('open("table.json", "w")\nx = 1\n', encoding="utf-8")
+    (copy / "derive.py").write_text('open("table.json", "w")\nx = 2\n', encoding="utf-8")
+    v = _rerun_writing(tmp_path, monkeypatch, root, copy, table=False)
+    assert v.status == "could_not" and v.unwritten == ["table.json"] and v.carried == []
+
+
+def test_a_writer_that_imports_a_changed_file_is_affected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root, copy = _quest_with_writer(tmp_path, 'import derive\nopen("table.json", "w")\n')
+    v = _rerun_writing(tmp_path, monkeypatch, root, copy, table=False)
+    assert v.status == "could_not" and v.unwritten == ["table.json"]
+
+
+def test_a_changed_rerun_adds_the_numbers_of_an_unwritten_affected_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Old code: a changed rerun with an unwritten file added none of that file's numbers to what the finding reaches."""
+    root, copy = _quest_with_writer(tmp_path, 'import derive\nopen("table.json", "w")\n')
+    out = tmp_path / "out"
+    (out / "data" / "results").mkdir(parents=True)
+    (out / "data" / "results" / "derived.json").write_text(
+        json.dumps({"derived": {"est": {"by_setting": {"s": 9.0}}}}), encoding="utf-8")
+
+    async def fake_run_copy(*a: Any, **k: Any) -> tuple[Any, ...]:
+        return "analysis only", out, "", 1.0, False
+
+    monkeypatch.setattr(rerun_check, "run_copy", fake_run_copy)
+    v = asyncio.run(rerun_check.judge(None, "py", root, copy, {"metrics": []}, 60, None))
+    assert v.status == "changed" and v.unwritten == ["table.json"]
+    assert any(k.startswith("file:table.json") for k in v.keys) and any(k.startswith("file:table.json") for k in v.unplaced)
