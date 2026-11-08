@@ -96,6 +96,9 @@ class Result(_Strict):
     given: str | None = None  # a proportion's id: this result is a mean over the trials where that one holds
     cluster: Any = None
     paired: bool = False
+    #: ``True``: the plan says this number is a count or a share of counts (the same in every run), so the paper
+    #: writes it as the record holds it; ``False``: a measurement; None: the plan does not say.
+    exact: bool | None = None
     family: str = ""
     undefined_when: dict[str, Any] = Field(default_factory=dict)
 
@@ -451,7 +454,8 @@ def from_design(design: dict[str, Any] | None, *, fi_analysis: bool = False,
                 "depends_on": depends, "returned": m.get("returned") if m.get("returned") in ("each_run", "afterwards") else None,
                 "range": ranges.get(rid) or m.get("range"),
                 "known_value": m.get("known_value"), "reference": m.get("reference"), "given": _ident(given),
-                "cluster": m.get("cluster"), "paired": bool(m.get("paired")), "family": str(m.get("family") or ""),
+                "cluster": m.get("cluster"), "paired": bool(m.get("paired")), "exact": m.get("exact") if isinstance(m.get("exact"), bool) else None,
+                "family": str(m.get("family") or ""),
                 "undefined_when": _mapping(m.get("undefined_when"))}
         r = _first_valid(Result, {k: v for k, v in data.items() if v is not None}, gaps, f"result `{rid}`")
         if r is not None:

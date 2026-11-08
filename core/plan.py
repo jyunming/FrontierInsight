@@ -837,7 +837,8 @@ PART_RULES = {
                    "returns is a `protocol.metrics` entry, never a value here.",
     "metrics": "`protocol.metrics`: a list; each entry has an `id` (the name the script gives the number), a `kind` "
                "(`proportion` or `mean`), an `estimand` (text: what the number estimates), a `unit` (text: what one "
-               "independent observation is) and, optionally, a `label` (the reader's name for the number: words, its "
+               "independent observation is) and, optionally, `exact` (`true` only when the number is a count, or a share of counts, "
+               "so it is the same in every run; `false` or left out for a measurement or any value worked out with decimal arithmetic) and a `label` (the reader's name for the number: words, its "
                "symbol in $...$ and its unit, e.g. `Activation energy $E_a$ (kJ/mol)`).",
     "runs_per_setting": "`protocol.runs_per_setting`: a whole number of at least 1.",
     "precision": "`protocol.precision`: a mapping with `target_half_width`, a number between 0 and 1, and optionally "

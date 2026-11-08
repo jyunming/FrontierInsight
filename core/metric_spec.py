@@ -94,6 +94,10 @@ def normalize(metrics: Any) -> tuple[list[dict[str, Any]] | None, str | None]:
         cluster = item.get("cluster")
         if cluster is not None and not isinstance(cluster, (bool, str)):
             return None, f"`protocol.metrics` entry `{ident}`: `cluster` must be true, false, or the name of the list that holds each observation's cluster"
+        exact = item.get("exact")
+        if exact is not None and not isinstance(exact, bool):
+            return None, (f"`protocol.metrics` entry `{ident}`: `exact` must be true (a count or a share of counts: not an "
+                          "estimate) or false (a measurement)")
         paired = item.get("paired")
         if paired is not None and not isinstance(paired, bool):
             return None, f"`protocol.metrics` entry `{ident}`: `paired` must be true or false"
