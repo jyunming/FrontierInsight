@@ -814,38 +814,84 @@ def test_a_rerun_that_compares_every_delivered_file_and_finds_no_move_is_unchang
     assert v.status == "unchanged" and v.unwritten == []
 
 
-# ---- a delivered result file that no changed code writes is carried, not "could not compare" ---------------------------------
-def _quest_with_writer(tmp_path: Path, writer_text: str = 'open("table.json", "w")\n') -> tuple[Path, Path]:
+# ---- a delivered result file is carried or not by FI's record of the step that wrote it (core/step_writes.py) ------------------
+def _quest_with_record(tmp_path: Path, wrote: dict[str, str]) -> tuple[Path, Path]:
     root, copy = _quest_with_two_files(tmp_path)
-    (root / "code" / "report.py").write_text(writer_text, encoding="utf-8")  # the code that makes table.json
+    if wrote:
+        (root / ".fi").mkdir()
+        (root / ".fi" / "step_writes.json").write_text(json.dumps(wrote), encoding="utf-8")
     return root, copy
 
 
-def test_a_result_file_no_changed_code_writes_is_carried_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Old code: an analysis-only rerun that does not rewrite table.json (made by report.py, untouched) was could_not."""
-    root, copy = _quest_with_writer(tmp_path)
+def test_a_result_file_the_simulation_wrote_is_carried_by_an_analysis_only_rerun(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Old code: table.json, unwritten by the analysis-only rerun, was carried only if no code file named it."""
+    root, copy = _quest_with_record(tmp_path, {"derived.json": "analysis", "table.json": "simulation"})
     v = _rerun_writing(tmp_path, monkeypatch, root, copy, table=False)
     assert v.status == "unchanged" and v.carried == ["table.json"] and v.unwritten == []
 
 
-def test_a_result_file_a_changed_writer_makes_stays_uncompared(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Known positive: the changed file itself writes table.json and the rerun did not: still could_not."""
-    root, copy = _quest_with_writer(tmp_path, "x = 1\n")
-    (root / "code" / "derive.py").write_text('open("table.json", "w")\nx = 1\n', encoding="utf-8")
-    (copy / "derive.py").write_text('open("table.json", "w")\nx = 2\n', encoding="utf-8")
+def test_a_result_file_the_analysis_wrote_stays_uncompared(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Known positive: the step that was rerun wrote table.json and the rerun did not: still could_not."""
+    root, copy = _quest_with_record(tmp_path, {"derived.json": "analysis", "table.json": "analysis"})
     v = _rerun_writing(tmp_path, monkeypatch, root, copy, table=False)
     assert v.status == "could_not" and v.unwritten == ["table.json"] and v.carried == []
 
 
-def test_a_writer_that_imports_a_changed_file_is_affected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    root, copy = _quest_with_writer(tmp_path, 'import derive\nopen("table.json", "w")\n')
+def test_a_result_file_no_step_is_recorded_for_is_not_compared(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No record at all, or a record without the file: its writer is unknown, so it is never carried (the old code read the
+    file name in the code and carried it when no changed file named it)."""
+    for wrote in ({}, {"derived.json": "analysis"}):
+        root, copy = _quest_with_record(tmp_path / str(len(wrote)), wrote)
+        v = _rerun_writing(tmp_path / str(len(wrote)), monkeypatch, root, copy, table=False)
+        assert v.status == "could_not" and v.unwritten == ["table.json"] and v.carried == []
+
+
+def test_a_name_in_the_code_decides_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The old code carried table.json because only report.py named it; the record says the analysis wrote it."""
+    root, copy = _quest_with_record(tmp_path, {"derived.json": "analysis", "table.json": "analysis"})
+    (root / "code" / "report.py").write_text('open("table.json", "w")\n', encoding="utf-8")
     v = _rerun_writing(tmp_path, monkeypatch, root, copy, table=False)
     assert v.status == "could_not" and v.unwritten == ["table.json"]
 
 
+def test_a_whole_study_rerun_carries_nothing_it_reran(tmp_path: Path) -> None:
+    root, _copy = _quest_with_record(tmp_path, {"derived.json": "analysis", "table.json": "simulation"})
+    assert rerun_check.affected_files(root, {"table.json"}, "whole study") == {"table.json"}
+    assert rerun_check.affected_files(root, {"table.json"}, "analysis only") == set()
+
+
+def test_the_record_says_the_last_step_that_wrote_a_file_and_skips_overlapping_runs(tmp_path: Path) -> None:
+    from core import step_writes
+
+    root = tmp_path / "quest"
+    res = root / "data" / "results"
+    res.mkdir(parents=True)
+    with step_writes.watching(root) as w:  # simulation writes a.json and b.json; the analysis rewrites b.json and writes c.json
+        (res / "a.json").write_text("1", encoding="utf-8")
+        (res / "b.json").write_text("1", encoding="utf-8")
+        w.mark(step_writes.SIMULATION)
+        (res / "b.json").write_text("22", encoding="utf-8")
+        (res / "c.json").write_text("1", encoding="utf-8")
+        w.mark(step_writes.ANALYSIS)
+    assert step_writes.read(root) == {"a.json": "simulation", "b.json": "analysis", "c.json": "analysis"}
+    other = tmp_path / "quest2"
+    (other / "data" / "results").mkdir(parents=True)
+    with step_writes.watching(other) as first:
+        with step_writes.watching(other) as second:  # two runs at once: nobody can tell who wrote what
+            (other / "data" / "results" / "x.json").write_text("1", encoding="utf-8")
+            first.mark(step_writes.ANALYSIS)
+            second.mark(step_writes.ANALYSIS)
+    assert step_writes.read(other) == {}
+    with pytest.raises(RuntimeError):  # a run that stops before its analysis records nothing
+        with step_writes.watching(other) as w:
+            (other / "data" / "results" / "y.json").write_text("1", encoding="utf-8")
+            raise RuntimeError
+    assert step_writes.read(other) == {}
+
+
 def test_a_changed_rerun_adds_the_numbers_of_an_unwritten_affected_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Old code: a changed rerun with an unwritten file added none of that file's numbers to what the finding reaches."""
-    root, copy = _quest_with_writer(tmp_path, 'import derive\nopen("table.json", "w")\n')
+    root, copy = _quest_with_record(tmp_path, {"derived.json": "analysis", "table.json": "analysis"})
     out = tmp_path / "out"
     (out / "data" / "results").mkdir(parents=True)
     (out / "data" / "results" / "derived.json").write_text(

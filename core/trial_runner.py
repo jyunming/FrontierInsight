@@ -51,6 +51,7 @@ from typing import Any
 from . import execution as _execution
 from . import in_run as _in_run
 from . import mc_error as _mc
+from . import step_writes as _step_writes
 from . import optimise_search as _search
 from . import oracle_check as _oracle
 from . import oracle_forms as _forms
@@ -1903,6 +1904,10 @@ class TrialsRunner:
             return summary
 
     async def execute(self, cmd: list[str], *, cwd: Path, timeout_s: int, env: dict[str, str] | None = None) -> Any:
+        with _step_writes.watching(self.quest_root) as self._steps:  # which step wrote which result file (core/step_writes.py)
+            return await self._execute(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
+
+    async def _execute(self, cmd: list[str], *, cwd: Path, timeout_s: int, env: dict[str, str] | None = None) -> Any:
         from core.execution import ExecutionResult
 
         if len(cmd) != 2 or Path(cmd[1]).name != self.analysis.name:
@@ -2087,9 +2092,11 @@ class TrialsRunner:
         # FI_RAW_DIR names holds no column FI keeps back either.
         own = run.summary_path.relative_to(self.quest_root).as_posix()
         swap = {own: summary_path} if summary_path != run.summary_path else None
+        self._steps.mark(_step_writes.SIMULATION)
         result = await _outside.OutsideExecutor(self.executor, self.quest_root, inputs=_outside.ANALYSIS_INPUTS, skip=(),
                                                 log=self.log, replace=swap).execute(
             cmd, cwd=cwd, timeout_s=timeout_s, env=analysis_env)
+        self._steps.mark(_step_writes.ANALYSIS)
         from . import analysis_frame as _analysis
 
         # the analysis FI writes: a function of the study's derive.py is what is repaired, never FI's experiment.py

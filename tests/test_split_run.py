@@ -288,3 +288,26 @@ async def test_a_command_that_is_not_the_analysis_passes_straight_through(quest)
     result = await runner.execute(["python", "-c", "import numpy"], cwd=root, timeout_s=60)
     assert result.stdout == "passed through" and inner.calls == ["-c"]
     assert not (root / "raw").exists()
+
+
+@pytest.mark.asyncio
+async def test_the_run_records_which_step_wrote_each_result_file(quest) -> None:
+    """FI's record of the steps (core/step_writes.py): the simulation's file and the analysis's file are told apart."""
+    from core import step_writes
+
+    runner, inner, simulate, analysis, root = quest
+    plain = inner.execute
+
+    async def writing(cmd, *, cwd, timeout_s, env=None):
+        name = Path(cmd[1]).name
+        res = Path(cwd) / "data" / "results"
+        res.mkdir(parents=True, exist_ok=True)
+        if name == "simulate.py":
+            (res / "from_simulation.json").write_text("{}", encoding="utf-8")
+        if name == "experiment.py":
+            (res / "derived.json").write_text("{}", encoding="utf-8")
+        return await plain(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
+
+    inner.execute = writing
+    await _run(runner, analysis, root)
+    assert step_writes.read(root) == {"from_simulation.json": "simulation", "derived.json": "analysis"}

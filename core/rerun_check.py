@@ -475,36 +475,17 @@ def _names(key: str, quantity: str) -> bool:
     return metric_of(key)[0] == quantity or re.search(r"(?<![\w])" + re.escape(quantity) + r"(?![\w])", key) is not None
 
 
-def affected_files(quest_root: Path | str, copy: Path | str, names: set[str], changed: set[str]) -> set[str]:
-    """Which of the result files ``names`` the ``changed`` code files can affect: the files whose name a changed code file
-    writes (names it), or that a code file naming it reaches by importing a changed one. A file no code file of the study names
-    is not known to be safe, so it counts as affected (the rerun then says it was not compared)."""
-    texts: dict[str, str] = {}
-    for base in (Path(quest_root) / "code", Path(copy)):
-        if not base.is_dir():
-            continue
-        for p in base.rglob("*.py"):
-            rel = p.relative_to(base)
-            if not ({"output", "__pycache__", ".venv"} & set(rel.parts)):
-                try:
-                    texts[rel.as_posix()] = p.read_text(encoding="utf-8")
-                except (OSError, UnicodeDecodeError):
-                    continue
-    hit = set(changed)  # code files whose behaviour changed, with every file that imports one
-    grew = True
-    while grew:
-        grew = False
-        stems = {Path(f).stem for f in hit}
-        for f, t in texts.items():
-            if f not in hit and any(re.search(rf"^\s*(?:from|import)\s+(?:[\w.]*\.)?{re.escape(st)}(?![\w])", t, re.M) for st in stems):
-                hit.add(f)
-                grew = True
-    out: set[str] = set()
-    for n in names:
-        writers = {f for f, t in texts.items() if n in t}
-        if not writers or writers & hit:
-            out.add(n)
-    return out
+def affected_files(root: Path | str, names: set[str], mode: str) -> set[str]:
+    """Which of the delivered result files ``names`` the rerun can affect, from FI's record of which step wrote each one
+    (``core/step_writes.py``). A file is affected when the step that wrote it is a step the rerun reran, or reads the output
+    of one: the analysis-only rerun reran the analysis; a whole-study rerun reran every step. The analysis reads what the
+    simulation wrote, so a file the simulation wrote is not affected by a rerun of the analysis alone. A file FI recorded no
+    writer for is not known to be safe: it counts as affected (the rerun then says it was not compared)."""
+    from . import step_writes as _steps
+
+    wrote = _steps.read(root)
+    reran = {_steps.ANALYSIS} if mode == "analysis only" else {_steps.ANALYSIS, _steps.SIMULATION}
+    return {n for n in names if wrote.get(n) is None or wrote[n] in reran}
 
 
 async def judge(executor: Any, python: Path | str, quest_root: Path | str, copy: Path, protocol: Any, timeout_s: float | None,
@@ -533,7 +514,7 @@ async def judge(executor: Any, python: Path | str, quest_root: Path | str, copy:
         unwritten -= await asyncio.to_thread(result_files, out)
         base = {k: v for k, v in base.items() if not any(k.startswith(f"file:{n}") for n in unwritten)}
         # Only a file the changed code can affect is left uncompared; one that no changed code writes is carried as delivered.
-        carried = unwritten - await asyncio.to_thread(affected_files, quest_root, copy, unwritten, set(changed))
+        carried = unwritten - await asyncio.to_thread(affected_files, base_root, unwritten, mode)
         unwritten -= carried
         # a rerun that wrote no result at all is a rerun that could not be compared
         if not base or not new:

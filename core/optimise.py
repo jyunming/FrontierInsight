@@ -52,6 +52,7 @@ from . import metric_spec as _metric_spec
 from . import optimisation_plan as _plan
 from . import optimise_search as _search
 from . import outside_run as _outside
+from . import step_writes as _step_writes
 from . import trial_runner as _trials
 
 LEDGER_PATH = Path(_trials.RAW_DIRNAME) / "optimisation_ledger.jsonl"
@@ -1680,6 +1681,10 @@ class OptimisationRunner:
         return put_back
 
     async def execute(self, cmd: list[str], *, cwd: Path, timeout_s: int, env: dict[str, str] | None = None) -> Any:
+        with _step_writes.watching(self.quest_root) as self._steps:  # which step wrote which result file (core/step_writes.py)
+            return await self._execute(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
+
+    async def _execute(self, cmd: list[str], *, cwd: Path, timeout_s: int, env: dict[str, str] | None = None) -> Any:
         from core.execution import ExecutionResult
 
         if len(cmd) != 2 or Path(cmd[1]).name != self.analysis.name:
@@ -1826,7 +1831,9 @@ class OptimisationRunner:
             analysis_env[_check.CHECK_ENV] = _check.CHECK_PATH.as_posix()
         if run.scan:
             analysis_env[_trials.RESULTS_ENV] = (Path(_trials.RAW_DIRNAME) / _trials.SUMMARY_NAME).as_posix()
+        self._steps.mark(_step_writes.SIMULATION)
         result = await self.executor.execute(cmd, cwd=cwd, timeout_s=timeout_s, env=analysis_env)
+        self._steps.mark(_step_writes.ANALYSIS)
         # FI's own copy, from memory: a script that also rewrote FI's record of the files cannot make its version stand.
         put_back = self._put_back_rounds()
         put_back = restore(self.quest_root, run.files or None) or put_back
