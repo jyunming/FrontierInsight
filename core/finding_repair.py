@@ -27,6 +27,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import copy
+import inspect
 import json
 import math
 import re
@@ -520,6 +521,78 @@ def params_kept(old: ast.FunctionDef | ast.AsyncFunctionDef, new: ast.FunctionDe
     return ""
 
 
+def _signature(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> inspect.Signature:
+    """The parameters of ``fn`` as Python binds a call to them (each default a stand-in: only whether a call binds is
+    asked)."""
+    a, P = fn.args, inspect.Parameter
+    positional = [*a.posonlyargs, *a.args]
+    first_default = len(positional) - len(a.defaults)
+    params = [P(x.arg, P.POSITIONAL_ONLY if i < len(a.posonlyargs) else P.POSITIONAL_OR_KEYWORD,
+                **({"default": None} if i >= first_default else {})) for i, x in enumerate(positional)]
+    if a.vararg:
+        params.append(P(a.vararg.arg, P.VAR_POSITIONAL))
+    params += [P(x.arg, P.KEYWORD_ONLY, **({"default": None} if d is not None else {}))
+               for x, d in zip(a.kwonlyargs, a.kw_defaults)]
+    if a.kwarg:
+        params.append(P(a.kwarg.arg, P.VAR_KEYWORD))
+    return inspect.Signature(params)
+
+
+def _binds(call: ast.Call, sig: inspect.Signature) -> bool | None:
+    """Whether ``call`` binds to ``sig`` (``None``: it passes ``*x`` or ``**x``, so the code does not tell)."""
+    if any(isinstance(x, ast.Starred) for x in call.args) or any(k.arg is None for k in call.keywords):
+        return None
+    try:
+        sig.bind(*[None] * len(call.args), **{k.arg: None for k in call.keywords})
+    except TypeError:
+        return False
+    return True
+
+
+def _called_by_fi(name: str) -> bool:
+    """Whether FI itself calls the study's function ``name`` (the simulation's entries, the analysis' bodies): that call
+    is not in the code, and it binds only to the parameters FI calls the function with."""
+    from . import analysis_frame as _analysis
+
+    return name in ("run_trial", "run_cell", "oracle") or _analysis._is_body(name)
+
+
+def signature_change_problem(name: str, old: ast.FunctionDef | ast.AsyncFunctionDef,
+                             new: ast.FunctionDef | ast.AsyncFunctionDef, texts: Iterable[str]) -> str:
+    """Why a repair's new parameters of ``name`` are not allowed (``""`` when they are). The rule of :func:`params_kept` is
+    that every call that worked still works; its own test (same parameters, defaults added after them) is enough but
+    not needed: parameters it refuses are allowed when every call of ``name`` in ``texts`` (the code as the repair leaves
+    it: the repaired file and every other file that calls ``name``) binds to them, since then no call that worked is
+    broken. Refused, with
+    :func:`params_kept`'s reason, when a call does not bind to the new parameters, and when that cannot be told: ``name``
+    is never called, a call passes ``*x`` / ``**x``, ``name`` is used other than by a call (handed on, stored), or FI
+    calls it itself (its call is not in the code)."""
+    why = params_kept(old, new)
+    if not why or _called_by_fi(name):
+        return why
+    sig = _signature(new)
+    calls = 0
+    for text in texts:
+        try:
+            tree = ast.parse(text)
+        except (SyntaxError, ValueError):
+            return why
+        called: set[int] = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            f = node.func
+            if (isinstance(f, ast.Name) and f.id == name) or (isinstance(f, ast.Attribute) and f.attr == name):
+                called.add(id(f))
+                calls += 1
+                if _binds(node, sig) is not True:
+                    return why
+        if any(isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Load) and id(n) not in called
+               for n in ast.walk(tree)):
+            return why
+    return "" if calls else why
+
+
 def direct_callers(code: Path, rel: str, name: str, staged: dict[str, str] | None = None) -> dict[str, set[str]]:
     """``{file under code/: the top-level functions in it that call `name` directly}`` (``name(...)`` or ``module.name(...)``),
     in every Python file of ``code/`` but its tests; ``name`` itself is not its own caller. ``staged`` (``{file: text}``) is
@@ -662,10 +735,13 @@ def file_blocks(reply: str) -> tuple[str, dict[str, str]]:
 
 
 def splice(source: str, reply: str, scope: set[str] | None = None,
-           ignored: list[str] | None = None, *, limit: int | None = MAX_FUNCTIONS) -> tuple[str | None, list[str], str]:
+           ignored: list[str] | None = None, *, limit: int | None = MAX_FUNCTIONS,
+           elsewhere: Iterable[str] = ()) -> tuple[str | None, list[str], str]:
     """``(the file with the reply's functions put in, the names it replaced, why not)``. The first fenced block of the
     reply that holds a ``def`` is read: each function it defines that the file has AND that is in ``scope`` (the
-    function(s) the finding is about) replaces it (the parameter names must be the same, in the same order; at most
+    function(s) the finding is about) replaces it (the parameter names must be the same, in the same order, or every call
+    of it in the spliced file and in ``elsewhere`` (the texts of the other files that call it) must bind to the new
+    ones, :func:`signature_change_problem`; at most
     :data:`MAX_FUNCTIONS`); a definition of any other function the file already has is not spliced (its name is appended to
     ``ignored``); a function the file has not is added as a helper (above the script's ``if __name__`` block, else at the end); imports it brings are added; anything else
     in the block is ignored. ``(None, [], why)`` when nothing can be used. With no ``scope`` every function the file has
@@ -695,10 +771,6 @@ def splice(source: str, reply: str, scope: set[str] | None = None,
         return None, [], f"the reply does not define the function the finding is about ({', '.join(sorted(scope))})"
     if limit is not None and len(replaced) > limit:
         return None, [], f"the reply replaces {len(replaced)} functions; change only the ones the finding is about"
-    for name in replaced:
-        why = params_kept(old_funcs[name], new_funcs[name])
-        if why:
-            return None, [], f"`{name}` {why}"
     lines = source.splitlines(keepends=True)
     block_lines = block.splitlines(keepends=True)
     if block_lines and not block_lines[-1].endswith("\n"):
@@ -728,6 +800,11 @@ def splice(source: str, reply: str, scope: set[str] | None = None,
         ast.parse(out)
     except SyntaxError as e:
         return None, [], f"the file would not be valid Python ({e.msg}, line {e.lineno})"
+    texts = [out, *elsewhere]
+    for name in replaced:
+        why = signature_change_problem(name, old_funcs[name], new_funcs[name], texts)
+        if why:
+            return None, [], f"`{name}` {why}"
     return out, [*replaced, *added], ""
 
 
@@ -1660,7 +1737,10 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
         main, marked = file_blocks(reply)
         mine_too = callers.get(rel, set())
         skipped: list[str] = []
-        new, names, why = splice(old, f"```python\n{main or marked.get(rel, '')}\n```", {scope, *reach, *mine_too}, skipped)
+        # a changed signature must bind every call of the function in the other files too, as they are now
+        others = sorted({c for n in {scope, *reach, *mine_too} for c in direct_callers(env.code, rel, n) if c != rel})
+        new, names, why = splice(old, f"```python\n{main or marked.get(rel, '')}\n```", {scope, *reach, *mine_too}, skipped,
+                                 elsewhere=[_read(env.code / c) for c in others])
         env.tried = {rel: new} if new is not None else {}  # the model's files as they came, kept even when refused
         if skipped:
             env.log.warning("[code_review] %s: the reply also defined %s, which `%s` does not reach; not used",
@@ -1674,7 +1754,7 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
                                 issue.get("id"), other, scope)
                 continue
             before = _read(env.code / target)
-            changed, done, why_not = splice(before, f"```python\n{text}\n```", set(callers[target]), [])
+            changed, done, why_not = splice(before, f"```python\n{text}\n```", set(callers[target]), [], elsewhere=[new])
             if changed is None:
                 new, why = None, f"its change to {target}: {why_not}"
             elif changed != before:

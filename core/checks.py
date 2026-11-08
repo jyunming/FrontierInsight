@@ -1483,7 +1483,7 @@ CHECKS: tuple[Check, ...] = (
           'a repair with more static-check faults than before is reverted'),
     Check('finding_repair_params_kept', 'core.finding_repair', 'params_kept',
           'implement', 'model_code', 'repair',
-          'a repaired function must keep every parameter name'),
+          'a repaired function must keep every parameter name, unless every call of it binds to the new ones'),
     Check('finding_repair_unpassed_params', 'core.finding_repair', 'unpassed_params',
           'implement', 'model_code', 'repair',
           'a repair adding parameters that callers leave on defaults is refused'),
