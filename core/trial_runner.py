@@ -2582,7 +2582,8 @@ async def run_case(executor: Any, python: Path | str, quest_root: Path, module: 
     with the seed FI gives that trial of that cell, or ``run_cell``; :func:`oracle_entry` says which): ``(the metrics it
     returned, "")``, or ``(None, why)``. This is how an oracle is measured without asking the script for the number.
 
-    With values compared inside each run (``in_each_run``), the run is given every one of them, as in the study, with the
+    With values compared inside each run (``in_each_run``), the run is given them as in the study, except that a factor the
+    case names is given only the value the case names (:func:`narrowed_to_case`), with the
     study's seed for the case's setting (and a number the case names that the study does not compare, :func:`case_inside`);
     a number per value is then read at the value the case names, or kept as the list of the number at every value
     the case allows when it names only some of the factors compared inside each run (or none): a factor it leaves out is
@@ -2596,9 +2597,10 @@ async def run_case(executor: Any, python: Path | str, quest_root: Path, module: 
                                thresholds=thresholds, trial=trial, oracle=oracle, per_trial=per_trial,
                                seed_key="" if paired else None, log=log, kind=kind)
     inside = case_inside(inside, cell)
-    levels = _in_run.level_cells(inside)
     setting = {k: v for k, v in cell.items() if k not in inside}
     named = {k: v for k, v in cell.items() if k in inside}
+    inside = narrowed_to_case(inside, named)   # the run is given the case's value, not a list to pick it from
+    levels = _in_run.level_cells(inside)
     if named and not _in_run.levels_named(named, levels):
         shown = ", ".join(f"{k}={_fmt(v)}" for k, v in named.items())
         return None, (f"the case sets {shown}; each run compares {', '.join(inside)} inside it, and no value each run is "
@@ -2642,6 +2644,20 @@ async def _run_case(executor: Any, python: Path | str, quest_root: Path, module:
                           kind=kind)
 
 
+def narrowed_to_case(inside, named):
+    """What a run on a check's case is given to compare inside it: ``inside`` (factor -> its values) with each factor the
+    case names cut down to the value the case names (the run's own spelling of it), the factors it leaves out whole. A run
+    that is given only the value the case names cannot return a number that belongs to another, so FI does not ask the
+    simulation to pick the value out of a list. A value the run is not given is left as it is (the case is refused
+    later, :func:`core.in_run.levels_named`). A case that names none of the factors changes nothing."""
+    out = {k: list(v) for k, v in (inside or {}).items()}
+    for name, wanted in (named or {}).items():
+        same = [x for x in out.get(name, []) if _in_run._same_level_value(wanted, x)]
+        if same:
+            out[name] = same[:1]
+    return out
+
+
 def case_inside(inside: dict[str, list[Any]], cell: dict[str, Any]) -> dict[str, list[Any]]:
     """The values a run on a check's case compares inside it: the study's, with each number the case names that the
     study does not compare added at the end. A factor whose values are numbers can be run at any number, so a check of a
@@ -2680,9 +2696,10 @@ async def run_case_trials(executor: Any, python: Path | str, quest_root: Path, m
     given, key = dict(cell), cell_key(cell)
     if inside:
         inside = case_inside(inside, cell)
-        levels = _in_run.level_cells(inside)
         setting = {k: v for k, v in cell.items() if k not in inside}
         named = {k: v for k, v in cell.items() if k in inside}
+        inside = narrowed_to_case(inside, named)   # the run is given the case's value, not a list to pick it from
+        levels = _in_run.level_cells(inside)
         if named and not _in_run.levels_named(named, levels):
             return [], "the case names a value each run compares that the run is not given", [], 0
         given, key = {**setting, **inside}, cell_key(setting)

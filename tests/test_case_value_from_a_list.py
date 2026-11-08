@@ -1,7 +1,7 @@
-"""A check's case names one value of a factor each run compares inside it; the run is given every value of it, as in the
-study. A run that returns one plain number for the measure gives no way to tell which value the number belongs to: FI says
-so (the case could not be run) instead of reading that number as the value the case names. Neutral made-up study; no model
-is called."""
+"""A check's case names one value of a factor each run compares inside it; the run is given only that value of the factor
+(``trial_runner.narrowed_to_case``), so a plain number it returns can only be the case's. The reading rule itself
+(``in_run.unplaced``: a plain number from a run given several values the case does not pick between is not read as the
+case's value) is kept for any caller that hands a run every value. Neutral made-up study; no model is called."""
 
 from __future__ import annotations
 
@@ -57,12 +57,11 @@ def _oracle(measure: str, expected: float, step: float = 0.2) -> dict:
             "tolerance": 1e-9, "tolerance_mode": "absolute"}
 
 
-def test_a_plain_number_from_a_run_given_every_value_is_not_read_as_the_value_the_case_names(tmp_path: Path) -> None:
+def test_a_plain_number_from_a_run_given_the_case_value_is_the_value_the_case_names(tmp_path: Path) -> None:
     root = _root(tmp_path, FIRST_ONLY)
     checks, problems, unrun = _measure(root, _oracle("end_value", 0.8))
-    assert "known" in unrun, (checks, problems)
-    assert "step=0.2" in unrun["known"] and "end_value" in unrun["known"]
-    assert not any(c.get("passed") is False for c in checks)  # never judged on the step=0.4 number
+    assert unrun == {} and problems == [], (checks, problems)     # the run was given step=0.2 alone
+    assert abs(checks[0]["value"] - 0.8) < 1e-12                  # not the step=0.4 number, 0.6
 
 
 def test_a_number_per_value_is_read_at_the_value_the_case_names(tmp_path: Path) -> None:
@@ -176,12 +175,13 @@ def test_a_mean_that_reads_only_the_cases_setting_in_every_trial_is_refused(tmp_
     assert not trial_runner._reads_only_case("mean(size)", {"size": 2}, {"y", "size"})
 
 
-def test_a_case_setting_returned_as_one_plain_number_from_every_value_is_not_read_as_the_case(tmp_path: Path) -> None:
+def test_a_case_setting_returned_as_one_plain_number_is_the_case_value_it_was_given(tmp_path: Path) -> None:
     src = ("def run_trial(cell, trial_id, seed):\n"
            "    return {'end_value': {'step=%s' % s: 1.0 - s for s in cell['step']}, 'step': cell['step'][0]}\n")
     root = _root(tmp_path, src)
     checks, problems, unrun = _measure(root, _oracle("end_value + step", 1.0))
-    assert "known" in unrun and "`step`" in unrun["known"], (checks, problems)
+    assert unrun == {} and problems == [], (checks, problems)
+    assert abs(checks[0]["value"] - 1.0) < 1e-12   # 0.8 + the 0.2 it was given
 
 
 def test_a_name_given_both_ways_is_never_overwritten() -> None:
