@@ -772,6 +772,19 @@ def _paper_problems(q: _Quest) -> list[dict[str, str]]:
         out.append(_problem("paper", f"Figure {f['number']}: a series declared as {_one(f['label'], 80)} {said}; "
                             "it is drawn as a computed value.", "FI's check of the figure's values against "
                             "its record", "left out", str(f.get("record") or "")))
+    # A reference the plan gives for a result a figure draws, and the figure does not draw (the paper says so in its Limitations).
+    from . import paper_facts as _pf
+
+    try:
+        missing_refs = _ftc.quest_missing_references(q.root, _pf.plan_protocol(q.root))
+    except Exception:  # noqa: BLE001 -- a check that cannot be made names nothing
+        missing_refs = []
+    for f in missing_refs:
+        where = f"Figure {f['number']}" if f.get("number") else f"{f.get('file')}"
+        out.append(_problem("paper", f"{where} draws no line from the plan's reference for {_one(f['label'], 80)}"
+                            + (f" ({_one(f['formula'], 80)})" if f.get("formula") else "") + ".",
+                            "FI's check of the figure's record against the plan's references", "not fixed",
+                            str(f.get("record") or "")))
     claim_model = _first_model(q.calls, ("claim_check",)) or "claim check"
     rec = q.receipts.get("claim_check")
     if rec and rec.get("status") == "fail":

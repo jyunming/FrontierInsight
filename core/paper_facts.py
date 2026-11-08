@@ -96,6 +96,7 @@ UNSUPPORTED_CLAIMS = "unsupported_claims"
 UNRESOLVED_REVIEW = "unresolved_review"
 FIGURE_LEFT_OUT = "figure_left_out"
 FIGURE_PASS_FAULT = "figure_pass_fault"
+FIGURE_REFERENCE = "figure_reference"
 METHOD_DIFFERS = "method_differs"
 #: Kept while the check of the sentences about the figures stopped with an error of FI's own on the paper last written.
 FIGURE_PASS_RECORD = Path(".fi") / "figure_pass_fault.json"
@@ -121,7 +122,8 @@ _ID_PREFIX = {NOT_DONE: "topic", LEFT_OUT: "left-out", NOT_COMPUTED: "not-comput
               UNDEFINED: "undefined",
               FEWER_RUNS: "fewer", CUT_SHORT: "cut-short", RUN_DIFFERENCE: "difference", SHARED_SEEDS: "shared-seeds",
               UNSUPPORTED_CLAIMS: "unsupported", UNRESOLVED_REVIEW: "review", LAST_REVIEW: "last-review",
-              FIGURE_LEFT_OUT: "figure-left-out", FIGURE_PASS_FAULT: "figure-pass-fault", METHOD_DIFFERS: "method-differs"}
+              FIGURE_LEFT_OUT: "figure-left-out", FIGURE_PASS_FAULT: "figure-pass-fault",
+              FIGURE_REFERENCE: "figure-reference", METHOD_DIFFERS: "method-differs"}
 #: More settings left out than this are placed as one item.
 _MAX_SETTING_ITEMS = 6
 
@@ -558,6 +560,8 @@ def required_items(quest_root: Path | str) -> list[Item]:
         add(FIGURE_LEFT_OUT, f"figure {number} statements", figure_left_out_sentence(number), key=stem)
     if (Path(root) / FIGURE_PASS_RECORD).is_file():
         add(FIGURE_PASS_FAULT, "figure sentences not checked", FIGURE_PASS_SENTENCE, key="figures")
+    for key, name, said in _figure_reference_items(root):
+        add(FIGURE_REFERENCE, name, said, key=key)
     points = _disclosure.last_review_points(root)
     if points:
         add(LAST_REVIEW, "final review points", _disclosure.last_review_sentence(points, _MAX_LAST_REVIEW_LISTED), key="points")
@@ -2461,6 +2465,25 @@ def _figure_number(markdown: str, stem: str) -> str:
     stems = [re.sub(r"\.\w+\Z", "", re.split(r"[/\\]", m.group(1))[-1]) for m in _IMAGE.finditer(markdown or "")]
     stems = list(dict.fromkeys(stems))
     return str(stems.index(stem) + 1) if stem in stems else stem
+
+
+def _figure_reference_items(root: Path) -> list[tuple[str, str, str]]:
+    """``(key, name, sentence)`` for each reference the plan gives for a result a figure draws and the figure does not
+    draw (:func:`core.figure_text_check.quest_missing_references`: FI's record of the drawing against the frozen protocol). The
+    sentence is FI's own; a figure with no record, or a study with no protocol, gives none."""
+    try:
+        from . import figure_text_check as _ftc
+
+        found = _ftc.quest_missing_references(root, plan_protocol(root))
+    except Exception:  # noqa: BLE001 -- a check that cannot be made names nothing
+        return []
+    out = []
+    for f in found:
+        where = f"Figure {f['number']}" if f.get("number") else f"The figure {Path(str(f['file'])).stem.replace('_', ' ')}"
+        how = f" ({f['formula']})" if f.get("formula") else ""
+        out.append((f"{Path(str(f['file'])).stem}:{f['result']}", f"{where} reference for {f['label']}",
+                    _sentence(f"{where} draws no line from the plan's reference for {_one(f['label'])}{how}")))
+    return out
 
 
 def figure_left_out_sentence(figure: str) -> str:
