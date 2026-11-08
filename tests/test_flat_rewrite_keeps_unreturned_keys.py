@@ -33,16 +33,17 @@ def _block_now(eng: Any) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_a_key_the_answer_leaves_out_is_kept_from_the_plan_and_said(tmp_path: Path, caplog: Any) -> None:
+@pytest.mark.parametrize("key", ["fixed", "numerical_settings"])
+async def test_a_key_the_answer_leaves_out_is_kept_from_the_plan_and_said(tmp_path: Path, caplog: Any, key: str) -> None:
     eng, model = await _planned(tmp_path)
-    kept_value = copy.deepcopy(_block_now(eng)["fixed"])
-    model.revise = _reply(eng, drop=("fixed",))
+    kept_value = copy.deepcopy(_block_now(eng)[key])
+    model.revise = _reply(eng, drop=(key,))
     with caplog.at_level(logging.WARNING):
         done = await eng._flat_rewrite(_flat_state(), _flat_request(FACT))
     block = _block_now(eng)
     assert block["design_variables"][0]["high"] == 9.5, "what the answer changed is taken"
-    assert block["fixed"] == kept_value, "what it left out stays as the plan had it"
-    assert "kept from the plan: fixed" in plan.history(eng.quest_root)[done["version"] - 1]["note"]
+    assert block[key] == kept_value, "what it left out stays as the plan had it"
+    assert f"kept from the plan: {key}" in plan.history(eng.quest_root)[done["version"] - 1]["note"]
 
 
 @pytest.mark.asyncio
