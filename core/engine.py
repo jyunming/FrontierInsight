@@ -6892,7 +6892,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if path.read_text(encoding="utf-8") != expect:
             raise _PlanEditedMeanwhile("plan.md was changed while the request was being answered")
         path.write_text(kept, encoding="utf-8")
-        entry = _plan.record_version(self.quest_root, kept, by=by, note=note[:300])
+        entry = _plan.record_version(self.quest_root, kept, by=by, note=(note() if callable(note) else note)[:300])
         self._log.info("[plan] completed by the plan's model (the asked parts only): version %d", entry["version"])
         return {"version": entry["version"], "sha256": entry["sha256"], "path": str(path)}
 
@@ -9311,6 +9311,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         before = path.read_text(encoding="utf-8")
         basis = self._protocol_block(state) or ((_plan.parse(before).design or {}).get("protocol") or {})
         put_back: list[str] = []
+        kept_keys: list[str] = []
 
         def held(design: dict[str, Any]) -> dict[str, Any]:
             new = dict(design.get("protocol") or {})
@@ -9341,9 +9342,25 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
 
         def finish(revised: str) -> str | None:
             put_back.clear()  # the reply is judged again when it is asked for twice
+            kept_keys.clear()
             design = _plan.parse(revised).design
             if design is None:
                 return None
+            # The answer is read as the keys it changes (a redesign rewrites only the changed parts): a key of the search
+            # block that the plan has and the answer leaves out is kept from the plan. A key it sets to empty is a removal.
+            block_now = (design.get("protocol") or {}).get("optimisation")
+            old_block = basis.get("optimisation")
+            if isinstance(block_now, dict) and isinstance(old_block, dict):
+                kept_keys.extend(sorted(k for k in old_block if k not in block_now and old_block[k] not in (None, "", [], {})))
+                if kept_keys:
+                    revised = _plan.edit_design_block(
+                        revised, lambda b: {**b, "protocol": {**(b.get("protocol") or {}), "optimisation": {
+                            **{k: copy.deepcopy(old_block[k]) for k in kept_keys}, **(b.get("protocol") or {})["optimisation"]}}}
+                    ) or ""
+                    design = _plan.parse(revised).design if revised else None
+                    if design is None:
+                        raise ValueError("what the answer left out could not be kept from the plan")
+                    revised = _plan.refresh_optimisation_section(_plan.refresh_model_section(revised))
             design = held(design)
             if put_back:
                 revised = _plan.edit_design_block(revised, lambda block: held(block)) or ""
@@ -9365,8 +9382,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         scope = _plan_scope.PartScope(
             parts=tuple(sorted(self._FLAT_MAY_CHANGE)),
             entries={"simplifications": _plan_scope.EntryScope("id", frozenset(), True)})
-        done = await self._revise_plan_parts(request, path, scope=scope, by="engine", finish=finish,
-                                             note="a design whose objective can move, asked by FI")
+        done = await self._revise_plan_parts(
+            request, path, scope=scope, by="engine", finish=finish,
+            note=lambda: "a design whose objective can move, asked by FI"
+            + (f"; kept from the plan: {', '.join(kept_keys)}" if kept_keys else ""))
+        if kept_keys:
+            self._log.warning("[evidence_gate] the answer left out %s of the search block; kept from the plan as they were",
+                              ", ".join(kept_keys))
         if put_back:
             self._log.warning("[evidence_gate] the rewrite changed what the results are judged by (%s); FI put it back as "
                               "it was", ", ".join(sorted(set(put_back))))

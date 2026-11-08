@@ -241,10 +241,9 @@ async def test_a_rewrite_that_eases_a_check_or_a_limit_has_them_put_back(tmp_pat
 async def test_a_rewrite_that_changes_nothing_or_cannot_be_searched_is_not_taken(tmp_path: Path, change: str) -> None:
     design = copy.deepcopy(HEAT_SINK) if change == "nothing" else _revised()
     if change == "no_search":
-        del design["protocol"]["optimisation"]["evaluation_budget"]
-    eng, _model = await _planned(tmp_path, revise=lambda: _text(design) if change == "nothing" else
-                                 plan.plan_path(eng.quest_root).read_text(encoding="utf-8").replace(
-                                     "evaluation_budget", "evaluation_budget_gone"))
+        # A key the answer leaves out is kept from the plan; one it writes empty is a removal, and the search cannot run.
+        design["protocol"]["optimisation"]["evaluation_budget"] = {}
+    eng, _model = await _planned(tmp_path, revise=lambda: _text(design))
     before = plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
     patch = await eng._node_evidence_gate(_flat_state())
     assert patch["evidence_assessment"]["route"] == "repair_crash" and patch["flat_objective_redesigned"] is True
