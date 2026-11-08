@@ -286,6 +286,30 @@ def _decimal(x: Any) -> Decimal | None:
         return None
 
 
+def declared_numbers(protocol: dict[str, Any] | None) -> frozenset[Decimal]:
+    """The numbers the plan itself names and fixes: every numeric value under ``protocol.constants`` and
+    ``protocol.thresholds`` (a named, single value the plan declared, however small). Other numeric fields (settings, runs,
+    seeds) are not among them: a small whole number there is incidental."""
+    found: set[Decimal] = set()
+
+    def walk(o: Any) -> None:
+        if isinstance(o, dict):
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+        elif isinstance(o, (int, float)) and not isinstance(o, bool):
+            d = _decimal(o)
+            if d is not None and d.is_finite():
+                found.add(d)
+
+    if isinstance(protocol, dict):
+        for part in ("constants", "thresholds"):
+            walk(protocol.get(part))
+    return frozenset(found)
+
+
 def plan_numbers(protocol: dict[str, Any] | None, topic: str = "") -> frozenset[Decimal]:
     """The numbers the writer may type as the plan writes them: every numeric field of the frozen protocol (not the run
     facts), every number in one of its formulas, and every number of the topic. The plan's ``constants`` are among its

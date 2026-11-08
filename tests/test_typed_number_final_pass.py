@@ -203,9 +203,10 @@ def test_calc_computes_from_the_plans_numbers_and_refuses_a_number_of_its_own() 
                       ("1e99999999999999999999999 * 0.05", "inf"), ("1 - 0.05 /", "cannot read")):
         value = paper_values.calc(expr, plan)
         assert value.text == paper_values.NOT_RECORDED and value.hit and why in value.hit.reason, (expr, value)
-    # A negative plan number written with its sign counts; a plan number that is a whole number 0-10 alone does not.
+    # A negative plan number written with its sign counts; a whole number 0-10 that a setting alone holds does not, one the
+    # plan declares as a constant does (tests/test_calc_declared_numbers.py).
     assert paper_values.calc("-0.5 * 2", {"constants": {"shift": -0.5}}).text == "-1"
-    assert paper_values.calc("3 * 7 / 9", {"constants": {"k": 3}}).hit is not None
+    assert paper_values.calc("3 * 7 / 9", {"grid": {"k": [3, 4]}}).hit is not None
     # The topic's numbers may be used, as they may be typed; without a plan nothing is computed.
     assert paper_values.calc("1 - 0.1 / 2", plan, "intervals at level 0.1").text == "0.95"
     assert paper_values.calc("1 - 0.05 / 2", None).text == paper_values.NOT_RECORDED

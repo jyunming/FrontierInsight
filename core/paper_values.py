@@ -1554,6 +1554,7 @@ def calc(expression: str, protocol: dict[str, Any] | None, topic: str = "", rec:
         if not isinstance(protocol, dict) or not protocol:
             raise _Unfilled("FI has no plan to compute it from")
         plan = _typed.plan_numbers(protocol, topic)
+        declared = _typed.declared_numbers(protocol)
         levels, counts = _fi_own_numbers(rec)
         # The numbers are read from the parsed expression, not from its text: ``.97``, ``1_234`` or ``0x1F`` is a number of
         # its own however it is spelled.
@@ -1580,7 +1581,8 @@ def calc(expression: str, protocol: dict[str, Any] | None, topic: str = "", rec:
                 pass  # the trials FI ran, as degrees of freedom: a count, never a number the plan fixes
             elif d is not None and d.is_finite() and (d in plan or -d in plan):
                 # A whole number from 0 to 10 is allowed anyway: only another plan number shows the plan fixes the value.
-                of_the_plan += 0 if small else 1
+                # A value the plan itself names (a constant or a threshold) is the plan's number, however small.
+                of_the_plan += 0 if small and d not in declared and -d not in declared else 1
             elif not small:
                 own.append(repr(node.value))
         if own:
