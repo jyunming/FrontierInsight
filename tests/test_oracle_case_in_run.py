@@ -83,3 +83,34 @@ def test_a_simulation_that_cannot_read_the_one_value_list_is_run_again_with_the_
         _executor(), sys.executable, root, "code/simulate.py", cell={"mode": "c"}, trials=[0], timeout_s=60,
         in_each_run=inside))
     assert why == "" and rows == [{"gain": 3.0}], why
+
+
+# What starts the second run is the TYPE of the failure (FI's own refusal, ``LevelsRefused``), never the wording.
+def test_the_retry_reads_the_type_of_the_failure_not_its_wording() -> None:
+    assert trial_runner._levels_unreadable("LevelsRefused: run_trial() reworded entirely: unexpected level")
+    assert not trial_runner._levels_unreadable("TypeError: not one of the values the run was given, a value per level")
+    assert not trial_runner._levels_unreadable("ValueError: returned as a list of 3 items")
+
+
+def test_fis_refusal_of_numbers_per_value_is_typed_and_other_faults_are_not() -> None:
+    from core import in_run
+    levels = in_run.level_cells({"mode": ["a", "b"]})
+    kept, why = in_run.read_returned({"gain": {"a": 1.0, "z": 2.0}}, levels, "run_trial")
+    assert kept is None and isinstance(in_run.refusal_error(why), in_run.LevelsRefused)
+    kept, why = in_run.read_returned({"gain": "text"}, levels, "run_trial")
+    assert kept is None and type(in_run.refusal_error(why)) is TypeError
+
+
+RAISES_THE_PHRASE = '''
+def run_trial(cell, trial_id, seed):
+    raise TypeError("a value per level: not one of the values the run was given, as a list of")
+'''
+
+
+def test_an_unrelated_error_with_the_same_words_does_not_run_the_case_again(tmp_path: Path) -> None:
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True, exist_ok=True)
+    (root / "code" / "simulate.py").write_text(RAISES_THE_PHRASE, encoding="utf-8")
+    got, why = asyncio.run(trial_runner.run_case(_executor(), sys.executable, root, "code/simulate.py", cell={"mode": "b"},
+                                                 timeout_s=60, in_each_run={"mode": ["a", "b", "c"]}))
+    assert got is None and why.startswith("TypeError:")

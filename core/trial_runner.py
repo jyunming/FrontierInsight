@@ -325,7 +325,7 @@ def main():
                 # A number per run, or (for what each run compares inside it) one per value it was given.
                 kept, why = read_returned(value, levels_of(spec.get("levels")), spec["entry"])
                 if kept is None:
-                    raise TypeError(why)
+                    raise refusal_error(why)
                 row.update(status="ok", values=kept)
                 reasons = missing_reasons(value, kept)
                 if reasons:
@@ -2652,9 +2652,10 @@ async def _run_case(executor: Any, python: Path | str, quest_root: Path, module:
 
 
 def _levels_unreadable(why: Any) -> bool:
-    """Whether a run's failure is that its numbers per value do not match the values it was given (:func:`core.in_run.read_returned`)."""
-    text = str(why)
-    return any(m in text for m in ("not one of the values the run was given", "a value per level", "as a list of"))
+    """Whether a run's failure is FI's own refusal of its numbers per value (:class:`core.in_run.LevelsRefused`): the failure
+    row's reason starts with the type's name, as every failure's reason starts with its exception type. The wording after it
+    is not read."""
+    return str(why).startswith(f"{_in_run.LevelsRefused.__name__}:")
 
 
 def narrowed_to_case(inside, named):
