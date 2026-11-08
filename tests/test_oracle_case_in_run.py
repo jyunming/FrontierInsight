@@ -61,3 +61,25 @@ def test_a_case_naming_no_factor_compared_in_each_run_is_given_every_value(tmp_p
 def test_a_case_naming_a_value_the_run_is_not_given_is_still_refused(tmp_path: Path) -> None:
     got, why = _case(_root(tmp_path), {"mode": "c"})
     assert got is None and "each run compares" in why
+
+
+# A simulation that writes out the values of the factor itself (instead of reading the list it is given) returns a number
+# per value for all three: it cannot be read on the one-value list, so FI runs the case again with the whole list.
+HARD_CODED = '''
+def run_trial(cell, trial_id, seed):
+    return {"gain": {"a": 1.0, "b": 2.0, "c": 3.0}}
+'''
+
+
+def test_a_simulation_that_cannot_read_the_one_value_list_is_run_again_with_the_whole_list(tmp_path: Path) -> None:
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True, exist_ok=True)
+    (root / "code" / "simulate.py").write_text(HARD_CODED, encoding="utf-8")
+    inside = {"mode": ["a", "b", "c"]}
+    got, why = asyncio.run(trial_runner.run_case(_executor(), sys.executable, root, "code/simulate.py", cell={"mode": "b"},
+                                                 timeout_s=60, in_each_run=inside))
+    assert why == "" and got == {"gain": 2.0}, why
+    rows, why, _failed, _started = asyncio.run(trial_runner.run_case_trials(
+        _executor(), sys.executable, root, "code/simulate.py", cell={"mode": "c"}, trials=[0], timeout_s=60,
+        in_each_run=inside))
+    assert why == "" and rows == [{"gain": 3.0}], why

@@ -2577,7 +2577,7 @@ async def run_case(executor: Any, python: Path | str, quest_root: Path, module: 
                    per_trial: bool = False,
                    in_each_run: dict[str, list[Any]] | None = None,
                    paired: bool = False, log: Any = None, kind: str = "check",
-                   per_value: Collection[str] = ()) -> tuple[dict[str, Any] | None, str]:
+                   per_value: Collection[str] = (), narrow: bool = True) -> tuple[dict[str, Any] | None, str]:
     """The ENGINE calls the simulation function itself on one case (``run_trial`` at trial ``trial``, 0 unless asked,
     with the seed FI gives that trial of that cell, or ``run_cell``; :func:`oracle_entry` says which): ``(the metrics it
     returned, "")``, or ``(None, why)``. This is how an oracle is measured without asking the script for the number.
@@ -2599,7 +2599,8 @@ async def run_case(executor: Any, python: Path | str, quest_root: Path, module: 
     inside = case_inside(inside, cell)
     setting = {k: v for k, v in cell.items() if k not in inside}
     named = {k: v for k, v in cell.items() if k in inside}
-    inside = narrowed_to_case(inside, named)   # the run is given the case's value, not a list to pick it from
+    whole = inside
+    inside = narrowed_to_case(inside, named) if narrow else inside   # the case's value, not a list to pick it from
     levels = _in_run.level_cells(inside)
     if named and not _in_run.levels_named(named, levels):
         shown = ", ".join(f"{k}={_fmt(v)}" for k, v in named.items())
@@ -2609,6 +2610,12 @@ async def run_case(executor: Any, python: Path | str, quest_root: Path, module: 
                                env=env, thresholds=thresholds, trial=trial, oracle=oracle, per_trial=per_trial,
                                levels=levels, seed_key="" if paired else cell_key(setting), log=log, kind=kind)
     if got is None:
+        if narrow and inside != whole and _levels_unreadable(why):
+            # the code names the values itself rather than reading the list it is given: ask it as the study does
+            return await run_case(executor, python, quest_root, module, cell=cell, timeout_s=timeout_s, env=env,
+                                  thresholds=thresholds, trial=trial, oracle=oracle, per_trial=per_trial,
+                                  in_each_run=in_each_run, paired=paired, log=log, kind=kind, per_value=per_value,
+                                  narrow=False)
         return None, why
     wrong = _in_run.unplaced(got, levels, named, per_value)
     if wrong:
@@ -2644,6 +2651,12 @@ async def _run_case(executor: Any, python: Path | str, quest_root: Path, module:
                           kind=kind)
 
 
+def _levels_unreadable(why: Any) -> bool:
+    """Whether a run's failure is that its numbers per value do not match the values it was given (:func:`core.in_run.read_returned`)."""
+    text = str(why)
+    return any(m in text for m in ("not one of the values the run was given", "a value per level", "as a list of"))
+
+
 def narrowed_to_case(inside, named):
     """What a run on a check's case is given to compare inside it: ``inside`` (factor -> its values) with each factor the
     case names cut down to the value the case names (the run's own spelling of it), the factors it leaves out whole. A run
@@ -2677,7 +2690,7 @@ async def run_case_trials(executor: Any, python: Path | str, quest_root: Path, m
                           thresholds: dict[str, Any] | None = None, in_each_run: dict[str, list[Any]] | None = None,
                           budget_s: float | None = None, paired: bool = False,
                           store: dict[str, dict[str, dict[str, Any]]] | None = None,
-                          per_value: Collection[str] = (),
+                          per_value: Collection[str] = (), narrow: bool = True,
                           ) -> tuple[list[dict[str, Any]], str, list[str], int]:
     """The trials ``trials`` of ``run_trial`` on one case, all in ONE process, each with the seed FI gives that trial of
     that setting (trial 0 gets the seed :func:`run_case` gives it; ``paired``: the seed the paired study gives trial
@@ -2692,14 +2705,17 @@ async def run_case_trials(executor: Any, python: Path | str, quest_root: Path, m
     the next, since no key can name everything a trial reads (a data file, an environment variable, a package)."""
     inside = {str(k): list(v) for k, v in (in_each_run or {}).items()}
     levels: list[dict[str, Any]] | None = None
+    narrowed = False
     named: dict[str, Any] = {}
     given, key = dict(cell), cell_key(cell)
     if inside:
         inside = case_inside(inside, cell)
         setting = {k: v for k, v in cell.items() if k not in inside}
         named = {k: v for k, v in cell.items() if k in inside}
-        inside = narrowed_to_case(inside, named)   # the run is given the case's value, not a list to pick it from
+        whole = inside
+        inside = narrowed_to_case(inside, named) if narrow else inside   # the case's value, not a list to pick it from
         levels = _in_run.level_cells(inside)
+        narrowed = inside != whole
         if named and not _in_run.levels_named(named, levels):
             return [], "the case names a value each run compares that the run is not given", [], 0
         given, key = {**setting, **inside}, cell_key(setting)
@@ -2749,7 +2765,13 @@ async def run_case_trials(executor: Any, python: Path | str, quest_root: Path, m
             continue
         if p["trial"] == plan[0]["trial"]:
             # The first trial is the one a single-trial check judges: said as before.
-            return [], str(row.get("reason") or "run_trial() failed"), [], started
+            why = str(row.get("reason") or "run_trial() failed")
+            if narrow and narrowed and _levels_unreadable(why):
+                # the code names the values itself rather than reading the list it is given: ask it as the study does
+                return await run_case_trials(executor, python, quest_root, module, cell=cell, trials=trials,
+                                             timeout_s=timeout_s, env=env, thresholds=thresholds, in_each_run=in_each_run,
+                                             budget_s=budget_s, paired=paired, store=store, per_value=per_value, narrow=False)
+            return [], why, [], started
         failed.append(str(row.get("reason") or "run_trial() failed"))
     if not values:
         return [], (TimeLimit("run_trial() ran out of time") if getattr(result, "timed_out", False)
