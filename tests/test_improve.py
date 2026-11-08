@@ -1,6 +1,6 @@
 """The improve loop and the ratchet (core/improve.py, ``Engine._node_improve``).
 
-A toy simulation integrates y' = -y to t = 1 with Euler's method; its checks of correctness are FI's own measurements of
+A toy simulation integrates y' = -y to t = 1 with a first-order method; its checks of correctness are FI's own measurements of
 the error against exp(-1) (and, where a test needs a second one, of a bias the code must not add). A fake model answers
 the improve prompt with one edit; FI runs the simulation itself (the harness, on this interpreter) and judges. No real
 model is called.
@@ -39,7 +39,7 @@ def run_cell(cell):
     print("error estimate", 0.3)
     return {"error": abs(y - math.exp(-1)), "drift": abs(BIAS), "y1": y}
 '''
-EULER = "    return y + dt * (-y)\n"
+FIRST_ORDER = "    return y + dt * (-y)\n"
 RK4 = ("    k1 = -y\n    k2 = -(y + dt * k1 / 2)\n    k3 = -(y + dt * k2 / 2)\n    k4 = -(y + dt * k3)\n"
        "    return y + dt * (k1 + 2 * k2 + 2 * k3 + k4) / 6\n")
 HEUN = "    return y * (1 - dt + dt * dt / 2)\n"
@@ -68,7 +68,7 @@ def _edit(find: str, replace: str, why: str = "a better integrator", file: str =
 
 def _config(tmp_path: Path, rounds: int = 3) -> Config:
     return Config(
-        topic="Euler on y' = -y", title="improve", provider=ProviderConfig(name="openai"),
+        topic="First-order step on y' = -y", title="improve", provider=ProviderConfig(name="openai"),
         engine=EngineConfig(max_iterations=1, review_loop=False, auto_accept_on_pass=True, execute_replicates=1,
                             pilot_run=False, improve_rounds=rounds),
         execution=ExecutionConfig(sandbox="venv", timeout_s=120, split_analysis=True),
@@ -206,10 +206,10 @@ def test_an_edit_outside_the_simulation_is_refused(file: str) -> None:
 def test_an_edit_that_is_not_found_once_or_does_not_parse_or_repeats_a_version_is_refused() -> None:
     assert "not in" in _check("no such text", "x")[1]
     assert "2 times" in _check("    return ", "    return  ")[1]
-    assert "no longer be valid Python" in _check(EULER, "    return y +\n")[1]
-    tried = {improve.fingerprint({"simulate.py": SIM.replace(EULER, SAME), "experiment.py": ANALYSIS})}
-    assert "already tried" in _check(EULER, SAME, tried=tried)[1]
-    text, why = _check(EULER, RK4)
+    assert "no longer be valid Python" in _check(FIRST_ORDER, "    return y +\n")[1]
+    tried = {improve.fingerprint({"simulate.py": SIM.replace(FIRST_ORDER, SAME), "experiment.py": ANALYSIS})}
+    assert "already tried" in _check(FIRST_ORDER, SAME, tried=tried)[1]
+    text, why = _check(FIRST_ORDER, RK4)
     assert text is not None and why == "" and "k4" in text
 
 
@@ -218,7 +218,7 @@ def test_writing_a_value_a_check_expects_into_the_code_is_refused() -> None:
     assert text is None and "a value a check expects" in why
     # A round number such as 0 is not taken for one where it is not the checked number: an expected error of 0 is
     # everywhere.
-    assert _check(EULER, "    return y + dt * (-y) + 0.0\n", expected=[0.0])[0] is not None
+    assert _check(FIRST_ORDER, "    return y + dt * (-y) + 0.0\n", expected=[0.0])[0] is not None
 
 
 @pytest.mark.parametrize("find, replace", [
@@ -261,7 +261,7 @@ def test_a_criterion_measured_for_the_first_time_counts_only_when_it_is_met() ->
 
 def test_a_file_with_windows_line_endings_is_edited_with_the_text_the_model_saw(tmp_path: Path) -> None:
     files = {"simulate.py": SIM.replace("\n", "\r\n")}
-    edit, _ = improve.parse_edit(json.loads(_edit(EULER, RK4)))
+    edit, _ = improve.parse_edit(json.loads(_edit(FIRST_ORDER, RK4)))
     text, why = improve.check_edit(files, edit, ["simulate.py"], tried=set(), expected=[])
     assert text is not None and "k4 = -(y + dt * k3)\r\n" in text, why
     root = tmp_path / "q"
@@ -279,7 +279,7 @@ def test_a_file_with_windows_line_endings_is_edited_with_the_text_the_model_saw(
 async def test_a_round_that_brings_the_error_down_is_kept_and_the_loop_stops_when_every_check_is_met(
     tmp_path: Path,
 ) -> None:
-    engine, model = await _quest(tmp_path, [_edit(EULER, RK4)])
+    engine, model = await _quest(tmp_path, [_edit(FIRST_ORDER, RK4)])
     out = await engine._node_improve(dict(STATE))
     root = engine.quest_root
     assert out["improve_rerun"] is True and out["improve_rounds_used"] == 1
@@ -302,9 +302,9 @@ async def test_a_round_that_brings_the_error_down_is_kept_and_the_loop_stops_whe
 
 @pytest.mark.asyncio
 async def test_a_round_that_makes_one_check_worse_is_not_kept_and_only_warns_by_default(tmp_path: Path) -> None:
-    worse_and_better = _edit("BIAS = 0.0\n\n\ndef step(y, dt):\n" + EULER,
+    worse_and_better = _edit("BIAS = 0.0\n\n\ndef step(y, dt):\n" + FIRST_ORDER,
                              "BIAS = 0.3\n\n\ndef step(y, dt):\n" + RK4)
-    engine, model = await _quest(tmp_path, [worse_and_better, _edit(EULER, RK4)], criteria=[C_ERR, C_DRIFT],
+    engine, model = await _quest(tmp_path, [worse_and_better, _edit(FIRST_ORDER, RK4)], criteria=[C_ERR, C_DRIFT],
                                  oracles=[DECAY, DRIFT])
     out = await engine._node_improve(dict(STATE))
     root = engine.quest_root
@@ -340,9 +340,9 @@ async def test_a_round_that_makes_one_check_worse_is_not_kept_and_only_warns_by_
 async def test_under_research_a_round_that_makes_a_check_worse_stops_the_quest_and_a_resume_goes_on(
     tmp_path: Path,
 ) -> None:
-    worse_and_better = _edit("BIAS = 0.0\n\n\ndef step(y, dt):\n" + EULER,
+    worse_and_better = _edit("BIAS = 0.0\n\n\ndef step(y, dt):\n" + FIRST_ORDER,
                              "BIAS = 0.3\n\n\ndef step(y, dt):\n" + RK4)
-    engine, model = await _quest(tmp_path, [worse_and_better, _edit(EULER, RK4)], criteria=[C_ERR, C_DRIFT],
+    engine, model = await _quest(tmp_path, [worse_and_better, _edit(FIRST_ORDER, RK4)], criteria=[C_ERR, C_DRIFT],
                                  oracles=[DECAY, DRIFT], research=True)
     stops: list[dict[str, Any]] = []
 
@@ -370,7 +370,7 @@ async def test_under_research_a_round_that_makes_a_check_worse_stops_the_quest_a
 
 @pytest.mark.asyncio
 async def test_a_round_that_makes_no_check_better_stops_the_loop(tmp_path: Path) -> None:
-    engine, model = await _quest(tmp_path, [_edit(EULER, SAME), _edit(EULER, RK4)])
+    engine, model = await _quest(tmp_path, [_edit(FIRST_ORDER, SAME), _edit(FIRST_ORDER, RK4)])
     out = await engine._node_improve(dict(STATE))
     record = improve.load(engine.quest_root)
     assert record["stopped"] == improve.STOP_PLATEAU and len(model.prompts) == 1
@@ -381,7 +381,7 @@ async def test_a_round_that_makes_no_check_better_stops_the_loop(tmp_path: Path)
 
 @pytest.mark.asyncio
 async def test_a_helper_module_saved_in_another_encoding_is_carried_through_byte_for_byte(tmp_path: Path) -> None:
-    engine, _model = await _quest(tmp_path, [_edit(EULER, SAME)])
+    engine, _model = await _quest(tmp_path, [_edit(FIRST_ORDER, SAME)])
     helper = engine.quest_root / "code" / "constants.py"
     helper.write_bytes(b"# 25\xb0C\nK = 1\n")  # cp1252, not UTF-8
     await engine._node_improve(dict(STATE))
@@ -393,7 +393,7 @@ async def test_a_helper_module_saved_in_another_encoding_is_carried_through_byte
 @pytest.mark.asyncio
 async def test_the_loop_stops_when_the_rounds_are_used_up(tmp_path: Path) -> None:
     strict = {**C_ERR, "target": 1e-9, "tolerance": 1e-10}
-    engine, model = await _quest(tmp_path, [_edit(EULER, HEUN), _edit(HEUN, RK3), _edit(RK3, RK4)], criteria=[strict],
+    engine, model = await _quest(tmp_path, [_edit(FIRST_ORDER, HEUN), _edit(HEUN, RK3), _edit(RK3, RK4)], criteria=[strict],
                                  rounds=2)
     out = await engine._node_improve(dict(STATE))
     record = improve.load(engine.quest_root)
@@ -410,7 +410,7 @@ async def test_a_round_whose_run_changes_the_frozen_protocol_is_aborted_and_put_
     tamper = _edit('    dt = cell["dt"]\n',
                    '    dt = cell["dt"]\n    import pathlib\n    p = pathlib.Path("@ROOT@/needs/FROZEN_PROTOCOL.json")\n'
                    '    p.write_text(p.read_text(encoding="utf-8").replace("1e-05", "1.0"), encoding="utf-8")\n')
-    engine, model = await _quest(tmp_path, [tamper, _edit(EULER, RK4)])
+    engine, model = await _quest(tmp_path, [tamper, _edit(FIRST_ORDER, RK4)])
     root = _at_root(engine, model)
     frozen_before = (root / "needs" / "FROZEN_PROTOCOL.json").read_bytes()
     history_before = (root / cr.HISTORY).read_bytes()
@@ -564,14 +564,14 @@ async def test_a_round_never_runs_the_compiled_copy_of_an_earlier_version_of_the
 @pytest.mark.asyncio
 async def test_nothing_is_changed_when_every_check_is_met_or_the_loop_is_off(tmp_path: Path) -> None:
     easy = {**C_ERR, "target": 0.05}
-    engine, model = await _quest(tmp_path / "met", [_edit(EULER, RK4)], criteria=[easy])
+    engine, model = await _quest(tmp_path / "met", [_edit(FIRST_ORDER, RK4)], criteria=[easy])
     assert await engine._node_improve(dict(STATE)) == {"improve_rerun": False}
     assert model.prompts == [] and "every check of correctness is already met" in _log(engine)
-    engine, model = await _quest(tmp_path / "off", [_edit(EULER, RK4)], rounds=0)
+    engine, model = await _quest(tmp_path / "off", [_edit(FIRST_ORDER, RK4)], rounds=0)
     assert await engine._node_improve(dict(STATE)) == {"improve_rerun": False}
     assert model.prompts == [] and "engine.improve_rounds is 0" in _log(engine)
     # A search for the best design: FI's search makes the runs, so the loop does not change the simulation under it.
-    engine, model = await _quest(tmp_path / "search", [_edit(EULER, RK4)])
+    engine, model = await _quest(tmp_path / "search", [_edit(FIRST_ORDER, RK4)])
     search = {**STATE, "design": {"protocol": {"optimisation": {"goal": "x"}}}}
     assert await engine._node_improve(search) == {"improve_rerun": False}
     assert model.prompts == [] and "a search for the best design" in _log(engine)
@@ -579,7 +579,7 @@ async def test_nothing_is_changed_when_every_check_is_met_or_the_loop_is_off(tmp
 
 @pytest.mark.asyncio
 async def test_after_the_kept_version_runs_in_full_a_changed_result_is_named_in_the_changelog_only(tmp_path: Path) -> None:
-    engine, _model = await _quest(tmp_path, [_edit(EULER, RK4)])
+    engine, _model = await _quest(tmp_path, [_edit(FIRST_ORDER, RK4)])
     await engine._node_improve(dict(STATE))
     after = {**STATE, "improve_rerun": True, "result_json": {"headline_value": 987654.321, "by_cell": {"dt=0.1": [0.37]}}}
     out = await engine._node_improve(after)
@@ -593,7 +593,7 @@ async def test_after_the_kept_version_runs_in_full_a_changed_result_is_named_in_
 
 @pytest.mark.asyncio
 async def test_a_kept_version_that_fails_its_full_run_gives_way_to_the_first_version(tmp_path: Path) -> None:
-    engine, _model = await _quest(tmp_path, [_edit(EULER, RK4)])
+    engine, _model = await _quest(tmp_path, [_edit(FIRST_ORDER, RK4)])
     await engine._node_improve(dict(STATE))
     failed = {**STATE, "improve_rerun": True, "exec_result": {"returncode": 1}, "result_json": {}}
     out = await engine._node_improve(failed)
@@ -627,7 +627,7 @@ def test_the_note_says_when_a_kept_version_gave_way_and_when_a_loop_was_cut_shor
 async def test_a_loop_cut_short_puts_the_first_version_and_its_trial_record_back_before_it_starts_again(
     tmp_path: Path,
 ) -> None:
-    engine, model = await _quest(tmp_path, [_edit(EULER, RK4)])
+    engine, model = await _quest(tmp_path, [_edit(FIRST_ORDER, RK4)])
     root = engine.quest_root
     improve.save_snapshot(root, "original", improve.snapshot(root))
     ledger = root / "raw" / "ledger.jsonl"
@@ -635,7 +635,7 @@ async def test_a_loop_cut_short_puts_the_first_version_and_its_trial_record_back
     ledger.write_bytes(b'{"event": "trial"}\n')
     engine._improve_save_raw()
     # The process stopped mid-round: a half-finished version in code/, a round's trials in raw/, a round's row.
-    (root / "code" / "simulate.py").write_text(SIM.replace(EULER, SAME), encoding="utf-8")
+    (root / "code" / "simulate.py").write_text(SIM.replace(FIRST_ORDER, SAME), encoding="utf-8")
     ledger.write_bytes(b"a round's trials\n")
     cr.record(root, run="run_1", code_commit=None, results=[], improve={"round": 1, "kept": False})
     improve.save(root, {"started": "then", "rounds": [{"round": 1}], "rounds_used_before": 0, "baseline_n": 1,
@@ -651,7 +651,7 @@ async def test_a_loop_cut_short_puts_the_first_version_and_its_trial_record_back
 
 @pytest.mark.asyncio
 async def test_a_stop_left_by_code_that_has_run_again_since_is_set_aside(tmp_path: Path) -> None:
-    engine, model = await _quest(tmp_path, [_edit(EULER, RK4)])
+    engine, model = await _quest(tmp_path, [_edit(FIRST_ORDER, RK4)])
     root = engine.quest_root
     improve.save(root, {"started": "then", "stopped": "x", "blocked": True, "rounds": [], "baseline_n": 99})
     out = await engine._node_improve(dict(STATE))
@@ -690,7 +690,7 @@ async def test_a_quest_improves_its_simulation_runs_the_kept_version_in_full_and
         prompt = messages[-1]["content"]
         if prompt.startswith("# Improve the Simulation"):
             prompts.append(prompt)
-            return _edit(EULER, RK4)
+            return _edit(FIRST_ORDER, RK4)
         kind = _classify(prompt)
         if kind == "Experiment Design":
             body = json.loads(_FAKE_RESPONSES["design"])
@@ -773,7 +773,7 @@ def test_a_cache_test_in_another_function_is_not_taken_for_a_setting_test() -> N
 async def test_a_round_that_meets_the_checks_but_leaves_the_study_without_its_results_is_not_kept(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    engine, _model = await _quest(tmp_path, [_edit(EULER, RK4)])
+    engine, _model = await _quest(tmp_path, [_edit(FIRST_ORDER, RK4)])
     calls: list[str] = []
 
     async def no_study_result(state: Any, new_code: str) -> str:
@@ -784,6 +784,6 @@ async def test_a_round_that_meets_the_checks_but_leaves_the_study_without_its_re
     out = await engine._node_improve(dict(STATE))
     assert calls and "k4" in calls[0], "the check is made on the version that met the checks"
     assert out["improve_rerun"] is False, "no version was kept"
-    assert "euler" in (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8").lower() \
+    assert "first_order" in (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8").lower() \
         or "k4" not in (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")
     assert "no longer returns the study's results" in _log(engine)

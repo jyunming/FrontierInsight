@@ -543,7 +543,7 @@ def disagrees(value: float, expected: float, limit: float) -> bool:
 
 
 #: A value written with fewer significant digits than a float holds is known only to the digits it is written to
-#: (0.367879 for exp(-1), 0.04978); a value of 13 digits or more is full precision. An exact one (0.5, 2, 0.25) is
+#: (1.41421 for sqrt(2), 0.04978); a value of 13 digits or more is full precision. An exact one (0.5, 2, 0.25) is
 #: taken out earlier (:func:`written_precision`).
 _TRUNCATED_DIGITS = (1, 13)
 
