@@ -1995,6 +1995,8 @@ class RunChecksMixin:
         from . import optimise as _optimise
         from . import optimise_search as _optimise_search
 
+        if self._search_already_run(runner, env):
+            return None
         earlier = (_estimate.read_record(self.quest_root).get("truncated") or {})  # type: ignore[attr-defined]
         self._clear_cut(runner)  # what an earlier sizing of this study decided is decided again below
         raw = _optimise.block_of(self._protocol_block(state))  # type: ignore[attr-defined]
@@ -3336,6 +3338,49 @@ class RunChecksMixin:
                 json.dumps({k: v for k, v in record.items() if k != "probes"}, indent=1, default=str), encoding="utf-8")
         except OSError:
             pass
+
+    def _search_already_run(self, runner: Any, env: Any) -> bool:
+        """Whether the search this run would start already ran, to its end or to the time it was given, on the simulation
+        as it is now (FI's own record of it, :meth:`core.optimise.OptimisationRunner.kept_search`: the same simulation
+        code and inputs, plan, seed and stops), under the same time limit. Then the run uses that record and only the
+        analysis runs again (a repair of the analysis after an eight-hour search ran the whole search again): the scan is
+        not timed and the simulation not sped up again (a kept speed-up changes the simulation, so the record would no
+        longer be its search), and the time that search was given (the cut FI recorded for it) is given again. ``False``,
+        and the study is sized as before, on a first run (no record), after any change to the simulation, for a longer
+        time limit, or when the cut on record is not that search's."""
+        kept_search = getattr(runner, "kept_search", None)
+        best = kept_search(env if isinstance(env, dict) else None) if callable(kept_search) else None
+        if not isinstance(best, dict):
+            return False
+        limit_s = float(self.config.execution.timeout_s)  # type: ignore[attr-defined]
+        cut = _estimate.read_record(self.quest_root).get("truncated")  # type: ignore[attr-defined]
+        cut = cut if isinstance(cut, dict) and cut.get("kind") == "search" else None
+        if str((cut or {}).get("run_id") or "") != str(best.get("run_id") or ""):
+            return False  # the cut on record is not the one that search ran under
+        if cut is not None and float(cut.get("limit_s") or 0.0) != limit_s:
+            return False
+        reserve = min(max(0.0, float((cut or {}).get("check_reserve_s") or 0.0)), limit_s / 2.0)
+        deadline = (cut or {}).get("search_deadline_s")
+        deadline = float(deadline) if isinstance(deadline, (int, float)) and not isinstance(deadline, bool) else None
+        stopped = (best.get("evaluations") or {}).get("stopped_because")
+        ran_for = (best.get("time") or {}).get("limit_seconds")
+        if stopped == "time":
+            # A search the clock stopped stands for the time it was given, not a longer one (a second more is the cut's
+            # rounding to a tenth of a second); it is given that time again, never more.
+            if not isinstance(ran_for, (int, float)) or isinstance(ran_for, bool):
+                return False
+            now_s = int(limit_s - reserve) if deadline is None else min(int(limit_s - reserve), int(deadline))
+            if now_s > ran_for + 1:
+                return False
+            deadline = float(ran_for) if deadline is None else min(deadline, float(ran_for))
+        runner.check_reserve_s = reserve
+        runner.search_deadline_s = deadline
+        runner.run_id = str((cut or {}).get("run_id") or "")
+        if hasattr(runner, "first_cells"):
+            runner.first_cells = int(cut["planned_settings"]) if cut and cut.get("planned_settings") else None
+        self._log.info("[execute] the search for the best design already ran on this simulation as it is now: FI uses "  # type: ignore[attr-defined]
+                       "its record and runs only the analysis again (the run is not timed or sped up again)")
+        return True
 
     def _clear_cut(self, runner: Any) -> None:
         """A search is sized again at every run: the cut an earlier sizing recorded (and the time it kept for FI's check) is

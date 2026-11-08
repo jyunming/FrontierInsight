@@ -165,6 +165,18 @@ def _key_rounds(rounds: list[dict[str, Any]]) -> list[dict[str, Any]]:
              **({"search_target": r["search_target"]} if r.get("search_target") is not None else {})} for r in rounds]
 
 
+def _simulation_modules(quest_root: Path, simulate: Path) -> list[Path]:
+    """The simulation and the Python files beside it in ``code/`` it may import, in order: not the analysis FI writes
+    and runs on the recorded results (the files :func:`core.code_layout.simulation_inputs` leaves out: ``derive.py``
+    with FI's frame, ``fi_table.py``, ``fi_figure_calls.py``), so a repair of the analysis is not another search."""
+    from . import code_layout as _code_layout
+
+    code = Path(quest_root) / "code"
+    inputs = {p.resolve() for p in _code_layout.simulation_inputs(quest_root)}
+    return sorted([Path(simulate), *(p for p in code.glob("*.py") if p.name not in _NOT_THE_SIMULATION
+                                     and p.resolve() != Path(simulate).resolve() and p.resolve() in inputs)])
+
+
 def _run_key(quest_root: Path, simulate: Path, block: dict[str, Any], base: int, entry: str, thresholds: Any,
              rounds: list[dict[str, Any]] | None = None, stop_flat: bool = True, stop_stepped: bool = True,
              stop_unchanged: bool = True) -> str:
@@ -175,8 +187,7 @@ def _run_key(quest_root: Path, simulate: Path, block: dict[str, Any], base: int,
     that failed for a missing package runs again anyway.)"""
     parts: list[bytes] = []
     code = Path(quest_root) / "code"
-    for path in sorted([Path(simulate), *(p for p in code.glob("*.py") if p.name not in _NOT_THE_SIMULATION
-                                          and p.resolve() != Path(simulate).resolve())]):
+    for path in _simulation_modules(quest_root, simulate):
         try:
             parts.append(path.name.encode() + b"\0" + path.read_bytes())
         except OSError:
@@ -236,8 +247,7 @@ def _study_key(quest_root: Path, simulate: Path, block: dict[str, Any], entry: s
 
     parts: list[bytes] = []
     code = Path(quest_root) / "code"
-    for path in sorted([Path(simulate), *(p for p in code.glob("*.py") if p.name not in _NOT_THE_SIMULATION
-                                          and p.resolve() != Path(simulate).resolve())]):
+    for path in _simulation_modules(quest_root, simulate):
         try:
             parts.append(path.name.encode() + b"\0" + _phased._code_digest(path).encode())
         except OSError:
@@ -758,6 +768,82 @@ async def _drive(executor: Any, python: Any, quest_root: Path, spec: dict[str, A
     return reply
 
 
+#: The stop each of a search's stops hands back (``evaluations.stopped_because``), by the argument that arms it.
+_STOP_REASONS = {"stop_flat": "flat_objective", "stop_stepped": "stepped_objective", "stop_unchanged": "scan_unchanged"}
+
+
+def _keys(quest_root: Path, simulate: Path, block: dict[str, Any], base: int, entry: str, thresholds: Any,
+          rounds: list[dict[str, Any]], **stops: bool) -> dict[str, frozenset[str]]:
+    """``{key: the stops the record must not have stopped on}`` of the searches a record of which is this search: the
+    key with the stops as they are (nothing to rule out), and the key with a stop that is off now turned on, when the
+    search the record holds did not stop on it. An armed stop that never fired changed nothing the search did, so a
+    search that ran while a repair was still left is the same search once the repairs are spent."""
+    off = [name for name, on in stops.items() if not on]
+    out: dict[str, frozenset[str]] = {}
+    for bits in range(1 << len(off)):
+        armed = {name for i, name in enumerate(off) if bits >> i & 1}
+        flags = {name: (on or name in armed) for name, on in stops.items()}
+        k = _run_key(quest_root, simulate, block, base, entry, thresholds, rounds, flags["stop_flat"],
+                     flags["stop_stepped"], flags["stop_unchanged"])
+        out.setdefault(k, frozenset(_STOP_REASONS[name] for name in armed))
+    return out
+
+
+def _kept(quest_root: Path, record: Any, record_text: str, key: str | dict[str, frozenset[str]], *, frozen: bool,
+          timeout_s: int | None) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, str]] | None:
+    """``(best design, ledger rows, files)`` of the search FI's record holds, when :func:`run_search` uses it instead of
+    searching again: the record is of this search (``key``, or one of :func:`_keys` and not stopped by the stop that key
+    arms; any, for a ``frozen`` study's confirm run), it found a design (one evaluation that worked), its coarse scan's
+    trials are on disk, and it did not stop for failures. A search the clock stopped stands for the same limit (an
+    analysis repair), not a longer one (``timeout_s``; ``None``: not asked)."""
+    keys = {key: frozenset()} if isinstance(key, str) else key
+    if not (isinstance(record, dict) and (record.get("key") in keys or frozen)):
+        return None
+    files = _record_files(record, record_text)
+    rows = [json.loads(line) for line in files.get(LEDGER_PATH.as_posix(), "").splitlines() if line.strip()]
+    try:
+        best = json.loads(files.get(BEST_PATH.as_posix(), ""))
+    except ValueError:
+        best = None
+    scan_there = not record.get("scan") or (Path(quest_root) / _trials.RAW_DIRNAME / _trials.SUMMARY_NAME).is_file()
+    worked = any(r.get("event") == "evaluation" and r.get("status") == "ok" for r in rows)
+    stopped = ((best or {}).get("evaluations") or {}).get("stopped_because")
+    limit = ((best or {}).get("time") or {}).get("limit_seconds")
+    timely = stopped != "time" or timeout_s is None or (isinstance(limit, (int, float)) and int(timeout_s) <= limit)
+    if not frozen and stopped in keys.get(record.get("key"), frozenset()):
+        return None  # it stopped on a stop that is off now: with it off, the search would have gone on
+    if isinstance(best, dict) and worked and scan_there and (frozen or (stopped not in _NOT_REUSED and timely)):
+        return best, rows, files
+    return None
+
+
+def kept_search(quest_root: Path, module: str, protocol: dict[str, Any], *, base_seed: int,
+                stop_flat: bool = True, stop_stepped: bool = True, stop_unchanged: bool = True) -> dict[str, Any] | None:
+    """The best-design record of the search FI already ran for this simulation and plan, as :func:`run_search` would use
+    it instead of searching again (the same key: the simulation's code and inputs, the plan's block, the seed, the
+    thresholds, the stops; no continued rounds), with the time limit it stood for not asked (the caller compares it);
+    ``None`` when there is none. A change to the simulation's code changes the key, so its record is not this one."""
+    quest_root = Path(quest_root)
+    raw_block = block_of(protocol)
+    block = _plan.normalize(raw_block)[0] if raw_block is not None else None
+    if block is None or read_rounds(quest_root, block):
+        return None
+    simulate = quest_root / module
+    entry = _trials.study_entry(_trials.entries(simulate))
+    if not entry:
+        return None
+    thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None
+    keys = _keys(quest_root, simulate, block, int(base_seed), entry, thresholds, [], stop_flat=stop_flat,
+                 stop_stepped=stop_stepped, stop_unchanged=stop_unchanged)
+    try:
+        record_text = (quest_root / RECORD).read_text(encoding="utf-8")
+        record = json.loads(record_text)
+    except (OSError, ValueError):
+        return None
+    kept = _kept(quest_root, record, record_text, keys, frozen=False, timeout_s=None)
+    return kept[0] if kept is not None else None
+
+
 async def run_search(executor: Any, python: Any, quest_root: Path, module: str, protocol: dict[str, Any], *,
                      base_seed: int, timeout_s: int, env: dict[str, str] | None = None, log: Any = None,
                      frozen: bool = False, at_once: int = 1, stop_flat: bool = True,
@@ -861,31 +947,23 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
             log.info("[optimise] continuing the search FI already ran (%d evaluation(s) of it are taken from its record, "
                      "not run again), with %d more evaluation(s) asked for", len(replay),
                      sum(int(r.get("added") or 0) for r in rounds[-1:]))
-    if isinstance(record, dict) and (record.get("key") == key or frozen):
-        files = _record_files(record, record_text)
-        rows = [json.loads(line) for line in files.get(LEDGER_PATH.as_posix(), "").splitlines() if line.strip()]
-        try:
-            best = json.loads(files.get(BEST_PATH.as_posix(), ""))
-        except ValueError:
-            best = None
-        scan_there = not record.get("scan") or (quest_root / _trials.RAW_DIRNAME / _trials.SUMMARY_NAME).is_file()
-        worked = any(r.get("event") == "evaluation" and r.get("status") == "ok" for r in rows)
-        stopped = ((best or {}).get("evaluations") or {}).get("stopped_because")
-        limit = ((best or {}).get("time") or {}).get("limit_seconds")
-        # A search the clock stopped stands for the same limit (an analysis repair), not for a longer one.
-        timely = stopped != "time" or (isinstance(limit, (int, float)) and int(timeout_s) <= limit)
-        if isinstance(best, dict) and worked and scan_there and (frozen or (stopped not in _NOT_REUSED and timely)):
-            restore(quest_root, files)
-            if log is not None:
-                log.info("[optimise] %s", "confirm run: the best design exploration's search found is kept and checked "
-                         "once more on new seeds; the search is not run again (that would choose the design on the "
-                         "confirm seeds)" if frozen else
-                         "the simulation and the plan are unchanged: the search FI already ran is used")
-                for line in summary_lines(best):
-                    log.info("%s", line)
-            return SearchRun(record=best, rows=[r for r in rows if r.get("event") == "evaluation"],
-                             stderr=str(record.get("stderr") or ""), reused=True, scan=bool(record.get("scan")),
-                             files=files)
+    kept = _kept(quest_root, record, record_text,
+                 _keys(quest_root, simulate, block, int(base_seed), entry, thresholds, rounds, stop_flat=stop_flat,
+                       stop_stepped=stop_stepped, stop_unchanged=stop_unchanged),
+                 frozen=frozen, timeout_s=timeout_s)
+    if kept is not None:
+        best, rows, files = kept
+        restore(quest_root, files)
+        if log is not None:
+            log.info("[optimise] %s", "confirm run: the best design exploration's search found is kept and checked "
+                     "once more on new seeds; the search is not run again (that would choose the design on the "
+                     "confirm seeds)" if frozen else
+                     "the simulation and the plan are unchanged: the search FI already ran is used")
+            for line in summary_lines(best):
+                log.info("%s", line)
+        return SearchRun(record=best, rows=[r for r in rows if r.get("event") == "evaluation"],
+                         stderr=str(record.get("stderr") or ""), reused=True, scan=bool(record.get("scan")),
+                         files=files)
     if frozen:
         why = ("the study is frozen for its confirm run, and the search exploration ran found no design to keep, so "
                "nothing can be confirmed without searching again on the confirm seeds")
@@ -1574,6 +1652,20 @@ class OptimisationRunner:
 
     def _is_frozen(self) -> bool:
         return bool(self._frozen() if callable(self._frozen) else self._frozen)
+
+    def kept_search(self, env: dict[str, str] | None = None) -> dict[str, Any] | None:
+        """The best-design record of the search FI already ran for this simulation and plan, as the next run would use it
+        (:func:`kept_search`, with the seed and the stops that run is given); ``None`` when there is none, and for a
+        frozen study's confirm run (which keeps exploration's search in its own way)."""
+        if self._is_frozen():
+            return None
+        protocol = (self._protocol() if callable(self._protocol) else self._protocol) or {}
+        if not isinstance(protocol, dict) or block_of(protocol) is None:
+            return None
+        return kept_search(self.quest_root, self.simulate.relative_to(self.quest_root).as_posix(), protocol,
+                           base_seed=int((env or {}).get("FI_REPLICATE_SEED") or 0),
+                           stop_flat=bool(self._stop_flat() if callable(self._stop_flat) else self._stop_flat),
+                           stop_stepped=self._stepped_repair_left(), stop_unchanged=self._unchanged_repair_left())
 
     def put_back(self) -> bool:
         """Put FI's own record of the search and of its check back, from memory, wherever a script changed them."""
