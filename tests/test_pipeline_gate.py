@@ -322,3 +322,19 @@ async def test_a_division_by_zero_from_too_few_trials_stays_small_data(tmp_path)
     got = await run_gate(tmp_path, script)
     assert not got.ok and got.kind == gate.SMALL_DATA and got.exception == "ZeroDivisionError"
     assert not gate.gate_verdict(gate.GateResult(True), got).reject
+
+
+async def test_a_name_refused_by_fis_figure_calls_is_a_fault_on_any_copy(tmp_path):
+    # The frame's figure calls raise UnknownResult (a ValueError) for a result the plan does not declare. The refusal does not
+    # depend on the data, so the gate sends it to the repair as a fault instead of blaming a small copy.
+    from core import frame_figure
+    script = ("class UnknownResult(ValueError):\n    __module__ = 'fi_figure_calls'\n\n"
+              + OK_SCRIPT.replace('print("RESULT_JSON', 'raise UnknownResult("`what=\'x 0.3\'` is not a result of the plan")\n    print("RESULT_JSON'))
+    assert issubclass(frame_figure.UnknownResult, ValueError) and issubclass(frame_figure.BadArgument, ValueError)
+    got = await run_gate(tmp_path, script)
+    assert not got.ok and got.kind == gate.FAULT and got.exception == "UnknownResult"
+    assert gate.gate_verdict(gate.GateResult(True), got).reject
+    plain = OK_SCRIPT.replace('print("RESULT_JSON', 'raise ValueError("what is not a result of the plan")\n    print("RESULT_JSON')
+    other = await run_gate(tmp_path, plain, name="p")  # the same words in a plain ValueError keep the small-copy treatment
+    assert other.kind == gate.SMALL_DATA and other.exception == "ValueError"
+    assert gate.kind_of("BadArgument") == gate.FAULT and gate.kind_of("ValueError") == gate.SMALL_DATA

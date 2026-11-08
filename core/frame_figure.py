@@ -46,6 +46,19 @@ IDENTICAL_RTOL = 1e-12  # two series equal within this relative tolerance are on
 Y_RTOL = 1e-3  # a drawn y matches the table's value within this relative tolerance (plus 1e-12 absolute)
 Y_FORMS = ("mean", "sd", "se", "min", "max", "range", "max_abs")  # which statistic of the trials at a setting y may be (``form``)
 BAR_RTOL = 1e-3  # error-bar widths the body typed match the table's own widths within this relative tolerance (plus 1e-12 absolute)
+
+
+class UnknownResult(ValueError):
+    """A name the plan does not declare (a series, a result, a setting) was passed to a drawing call. FI's own frame refuses it
+    whatever the data, so the analysis gate reads this type, never the words, as a fault of the code on a copy of any size.
+    A ``ValueError`` for a body that catches that."""
+
+
+class BadArgument(ValueError):
+    """An argument that is not one of the values a drawing call allows (``form``, ``yerr_meaning``, ``meaning``, ``axis``). The
+    list is FI's own, so the call is wrong on any amount of data; the analysis gate reads this type as a code fault."""
+
+
 RECORD_VERSION = 2  # 2: a curve's name and y are FI's, series carry ``x_checked`` / ``neutral``, "range" bars are checked
 NEUTRAL_X = "computed x"  # the x axis of a panel that draws values FI did not find among the setting's values
 #: Set by FI for the last run, when no repair of a figure is left: a line FI cannot name is then left out of the figure and
@@ -347,7 +360,7 @@ class FigureCalls:
             raise ValueError("FI did not supply the study's series and results to this figure, so no series can be drawn; this is a "
                              "fault of FI's files, not of the figure function (series `%s`)" % (series,))
         if series not in known:
-            raise ValueError("series `%s` is not an id of the plan; a series names a plan id (never legend text), and the plan's ids "
+            raise UnknownResult("series `%s` is not an id of the plan; a series names a plan id (never legend text), and the plan's ids "
                              "are: %s" % (series, ", ".join(sorted(map(str, known))) or "(none)"))
         return series
 
@@ -355,7 +368,7 @@ class FigureCalls:
         results = self._results()
         derived = list(getattr(self, "derived_ids", []) or [])
         if what != "other" and what not in results and what not in derived:
-            raise ValueError("`what=%r` is not a result of the plan; pass one of: %s, or \"other\" for a quantity the plan does not "
+            raise UnknownResult("`what=%r` is not a result of the plan; pass one of: %s, or \"other\" for a quantity the plan does not "
                              "declare" % (what, ", ".join(sorted(results + derived)) or "(none)"))
         return what
 
@@ -366,7 +379,7 @@ class FigureCalls:
         elif x_id in settings:
             kind = "setting"
         else:
-            raise ValueError("`x=%r` is neither a setting nor a result of the plan; the settings are: %s; the results are: %s"
+            raise UnknownResult("`x=%r` is neither a setting nor a result of the plan; the settings are: %s; the results are: %s"
                              % (x_id, ", ".join(settings) or "(none)", ", ".join(self._results()) or "(none)"))
         new = {"id": x_id, "kind": kind, "label": self._label_of(x_id), "scale": "linear"}
         if rec["x"] is not None and rec["x"]["id"] != x_id:
@@ -679,7 +692,7 @@ class FigureCalls:
         """Check a series call and draw it; the record gets the series only if it was drawn."""
         ax, rec = self._panel(panel)
         if yerr_meaning not in MEANINGS:
-            raise ValueError("`yerr_meaning=%r` is not one of: %s" % (yerr_meaning, ", ".join(MEANINGS)))
+            raise BadArgument("`yerr_meaning=%r` is not one of: %s" % (yerr_meaning, ", ".join(MEANINGS)))
         x_id, x = self._xsplit(x)
         setting = self._series_setting()
         level = None
@@ -1008,7 +1021,7 @@ class FigureCalls:
     def band(self, panel, series, x, lo, hi, what, meaning):
         """A shaded interval around ``series``; ``meaning`` says what the interval is: one of ci95, sd, range, other."""
         if meaning not in MEANINGS:
-            raise ValueError("`meaning=%r` is not one of: %s" % (meaning, ", ".join(MEANINGS)))
+            raise BadArgument("`meaning=%r` is not one of: %s" % (meaning, ", ".join(MEANINGS)))
         ax, rec = self._panel(panel)
         setting = self._series_setting()
         if setting:
@@ -1049,9 +1062,9 @@ class FigureCalls:
         table = getattr(self, "table", None)
         known = self._results() + list(getattr(self, "derived_ids", []) or [])
         if ident not in known:
-            raise ValueError("`%s` is not a result of the plan; the results are: %s" % (ident, ", ".join(sorted(known)) or "(none)"))
+            raise UnknownResult("`%s` is not a result of the plan; the results are: %s" % (ident, ", ".join(sorted(known)) or "(none)"))
         if form not in NOTE_FORMS:
-            raise ValueError("`form=%r` is not one of: %s" % (form, ", ".join(NOTE_FORMS)))
+            raise BadArgument("`form=%r` is not one of: %s" % (form, ", ".join(NOTE_FORMS)))
         keys = list(table.keys())
         if key is None:
             if len(keys) != 1:
@@ -1158,7 +1171,7 @@ class FigureCalls:
         line at that coordinate)."""
         ax, rec = self._panel(panel)
         if axis not in ("x", "y"):
-            raise ValueError("`axis=%r` must be \"x\" or \"y\"" % (axis,))
+            raise BadArgument("`axis=%r` must be \"x\" or \"y\"" % (axis,))
         if sum(v is not None for v in (ref_id, at, value)) != 1:
             raise ValueError("a reference line is one of: a reference id of the plan, `at=<result id>` (FI reads the value from "
                              "the table), or `value=<number>` for a constant")
@@ -1242,7 +1255,7 @@ class FigureCalls:
             number = self._setting_read(ident, key)
         else:
             if ident not in self._results() + list(getattr(self, "derived_ids", []) or []):
-                raise ValueError("`{%s}` is neither a setting nor a result of the plan; the settings are: %s; the results are: %s"
+                raise UnknownResult("`{%s}` is neither a setting nor a result of the plan; the settings are: %s; the results are: %s"
                                  % (ident, ", ".join(settings) or "(none)", ", ".join(sorted(self._results())) or "(none)"))
             value, _used = self._table_read(ident, form, key)
             number = "%d" % value if form == "n" else "%.4g" % value

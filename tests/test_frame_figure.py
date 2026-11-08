@@ -782,3 +782,30 @@ def test_y_form_names_the_statistic_drawn():
     h.line(0, "fast", [1, 2], [1.0, 2.0], "growth", form="sd")  # the identity table has no spread equal to y
     h.line(0, "slow", [1, 2], [1.0, 2.0], "growth", form="no_such_form")
     assert [s["what"] for s in h.record()["panels"][0]["series"]] == ["other", "other"]
+
+
+def test_a_name_the_plan_does_not_declare_raises_the_typed_unknown_result():
+    # The gate tells FI's own refusal of a name (wrong on any number of trials) from a data-dependent failure by the
+    # exception's type, never by its words; it is still a ValueError for a body that catches that.
+    h = _Host()
+    reads = [lambda: h.line(0, "fast", [1, 2], [1, 2], "speed"),
+             lambda: h.line(0, "Weighted estimator", [1, 2], [1, 2], "growth"),
+             lambda: h._table_read("speed", "mean", None),
+             lambda: h.line(0, "fast", ("nothing", [1, 2]), [1, 2], "growth")]
+    for read in reads:
+        with pytest.raises(ValueError) as e:
+            read()
+        assert type(e.value).__name__ == "UnknownResult"
+    with pytest.raises(ValueError) as e:  # an argument that is not a name stays a plain ValueError
+        h.line(0, "fast", [1, 2], [1], "growth")
+    assert type(e.value).__name__ == "ValueError"
+
+
+def test_a_value_outside_a_closed_list_raises_the_typed_bad_argument():
+    h = _Host()
+    reads = [lambda: h.line(0, "fast", [1, 2], [1, 2], "growth", yerr_meaning="nonsense"),
+             lambda: h._table_read("growth", "nonsense", None)]
+    for read in reads:
+        with pytest.raises(ValueError) as e:
+            read()
+        assert type(e.value).__name__ == "BadArgument"
