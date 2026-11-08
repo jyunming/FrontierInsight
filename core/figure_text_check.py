@@ -255,7 +255,7 @@ def _drawn_reference(calls: dict[str, Any], rid: str, ref: dict[str, Any]) -> bo
 
 def missing_references(calls: dict[str, Any], protocol: Any) -> list[dict[str, Any]]:
     """The references the plan declares for a result a figure draws and the figure does not draw: ``[{"result", "label",
-    "formula"}]``. A result counts as drawn when a series of a panel FI checked has it as its ``what``; a figure whose every
+    "formula", "other_line"}]``; ``other_line`` says the figure draws a line or curve FI did not take from the plan, so FI cannot say the reference is missing, only that it cannot confirm it. A result counts as drawn when a series of a panel FI checked has it as its ``what``; a figure whose every
     panel is a custom drawing says nothing FI can read, so it has none. A fault of the figure (FI's record of what it draws
     against the plan), never a reading of any text."""
     planned = planned_references(protocol)
@@ -265,9 +265,12 @@ def missing_references(calls: dict[str, Any], protocol: Any) -> list[dict[str, A
     out: list[dict[str, Any]] = []
     drawn = {str(s.get("what")) for p in panels if not p.get("raw") for s in p.get("series") or []
              if isinstance(s, dict) and s.get("kind") != "image"}
+    # a line or curve beside the series that FI did not take from the plan (typed or computed in the figure): it may be the reference
+    other = any(isinstance(r, dict) and r.get("source") != "plan" for p in panels for r in p.get("refs") or []) or any(
+        isinstance(s, dict) and s.get("kind") == "curve" and s.get("source") != "plan" for p in panels for s in p.get("series") or [])
     for rid, ref in planned.items():
         if rid in drawn and not _drawn_reference(calls, rid, ref):
-            out.append({"result": rid, "label": ref["label"], "formula": ref["formula"]})
+            out.append({"result": rid, "label": ref["label"], "formula": ref["formula"], "other_line": other})
     return out
 
 

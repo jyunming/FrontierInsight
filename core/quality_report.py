@@ -781,7 +781,9 @@ def _paper_problems(q: _Quest) -> list[dict[str, str]]:
         missing_refs = []
     for f in missing_refs:
         where = f"Figure {f['number']}" if f.get("number") else f"{f.get('file')}"
-        out.append(_problem("paper", f"{where} draws no line from the plan's reference for {_one(f['label'], 80)}"
+        out.append(_problem("paper", (f"{where} draws a line that FI did not take from the plan, so FI cannot confirm it is the plan's reference for "
+                            f"{_one(f['label'], 80)}" if f.get("other_line") else
+                            f"{where} draws no line for the plan's reference for {_one(f['label'], 80)}")
                             + (f" ({_one(f['formula'], 80)})" if f.get("formula") else "") + ".",
                             "FI's check of the figure's record against the plan's references", "not fixed",
                             str(f.get("record") or "")))

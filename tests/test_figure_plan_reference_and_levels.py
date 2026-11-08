@@ -124,10 +124,36 @@ def test_the_paper_must_say_a_reference_the_plan_gives_is_not_drawn(tmp_path, mo
     monkeypatch.setattr(paper_facts, "plan_protocol", lambda *a, **k: PROTOCOL)
     mine = [i for i in paper_facts.required_items(root) if i.kind == paper_facts.FIGURE_REFERENCE]
     assert len(mine) == 1
-    assert "Figure 1 draws no line from the plan's reference for Growth rate" in mine[0].sentence
+    assert "Figure 1 draws no line for the plan's reference for Growth rate" in mine[0].sentence
     assert "(1-load)*cap" in mine[0].sentence
     drawn = _quest(tmp_path / "ok", _calls(_panel([_series("rate", "rate")], [_line("rate", 0.4)])))
     assert not [i for i in paper_facts.required_items(drawn) if i.kind == paper_facts.FIGURE_REFERENCE]
+
+
+def _says(tmp_path, monkeypatch, calls):
+    root = _quest(tmp_path, calls)
+    monkeypatch.setattr(paper_facts, "plan_protocol", lambda *a, **k: PROTOCOL)
+    mine = [i for i in paper_facts.required_items(root) if i.kind == paper_facts.FIGURE_REFERENCE]
+    rows = [p for p in quality_report._paper_problems(quality_report._Quest(root)) if "Growth rate" in p["text"]]
+    assert len(mine) == 1 and len(rows) == 1
+    return mine[0].sentence, rows[0]["text"]
+
+
+def test_a_figure_with_no_other_line_says_it_draws_no_line_for_the_reference(tmp_path, monkeypatch):
+    sentence, row = _says(tmp_path, monkeypatch, _calls(_panel([_series("rate", "rate")])))
+    for text in (sentence, row):
+        assert "draws no line for the plan's reference for Growth rate" in text
+        assert "did not take from the plan" not in text
+
+
+def test_a_figure_with_a_line_not_from_the_plan_says_fi_cannot_confirm_it(tmp_path, monkeypatch):
+    typed = _line("line-1", 0.4, source="stated in the figure")
+    computed = _series("curve1", "other", kind="curve", source="computed in the figure")
+    for extra in (_panel([_series("rate", "rate")], [typed]), _panel([_series("rate", "rate"), computed])):
+        sentence, row = _says(tmp_path / str(id(extra)), monkeypatch, _calls(extra))
+        for text in (sentence, row):
+            assert "draws a line that FI did not take from the plan, so FI cannot confirm it is the plan's reference for Growth rate" in text
+            assert "draws no line" not in text
 
 
 def test_the_quality_report_lists_the_reference_the_figure_does_not_draw(tmp_path, monkeypatch):

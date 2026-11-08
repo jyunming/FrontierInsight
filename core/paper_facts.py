@@ -2482,7 +2482,9 @@ def _figure_reference_items(root: Path) -> list[tuple[str, str, str]]:
         where = f"Figure {f['number']}" if f.get("number") else f"The figure {Path(str(f['file'])).stem.replace('_', ' ')}"
         how = f" ({f['formula']})" if f.get("formula") else ""
         out.append((f"{Path(str(f['file'])).stem}:{f['result']}", f"{where} reference for {f['label']}",
-                    _sentence(f"{where} draws no line from the plan's reference for {_one(f['label'])}{how}")))
+                    _sentence((f"{where} draws a line that FI did not take from the plan, so FI cannot confirm it is the plan's reference for "
+                     f"{_one(f['label'])}{how}" if f.get("other_line") else
+                     f"{where} draws no line for the plan's reference for {_one(f['label'])}{how}"))))
     return out
 
 
