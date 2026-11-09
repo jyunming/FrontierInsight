@@ -247,9 +247,10 @@ def _whole(value: Any) -> tuple[float | None, str | None]:
 
 
 def freeze(value: Any) -> Any:
-    """A setting's value as something that can be a dict key or sit in a set, equal exactly when the values are equal in
-    Python (``[1]``, ``[1.0]`` and ``[True]`` are one value, as ``==`` says): a list or tuple becomes a tuple, a dict a
-    set of (key, frozen value) pairs, a set a frozenset, and every other value stays as it is. The one form used wherever
+    """A setting's value as something that can be a dict key or sit in a set: two values read from a JSON record are one
+    value exactly when they are equal in Python (``[1]``, ``[1.0]`` and ``[True]`` are one value, as ``==`` says). A list
+    or tuple becomes a tuple, a dict a tagged set of (key, frozen value) pairs, a set a frozenset, and every other value
+    stays as it is. A list and a tuple of the same items freeze alike; a record read from JSON holds no tuples or sets. The one form used wherever
     FI groups or lists the values of a setting (core/analysis_figures.py keeps a copy: it stands alone in the quest)."""
     if isinstance(value, (list, tuple)):
         return tuple(freeze(v) for v in value)
