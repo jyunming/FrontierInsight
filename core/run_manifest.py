@@ -246,9 +246,26 @@ def _whole(value: Any) -> tuple[float | None, str | None]:
     return float(value), None
 
 
-def _freeze(value: Any) -> Any:
-    """A grid value as something that can sit in a set: a tuple setting (a list of numbers) becomes a tuple."""
-    return tuple(_freeze(v) for v in value) if isinstance(value, (list, tuple)) else value
+def freeze(value: Any) -> Any:
+    """A setting's value as something that can be a dict key or sit in a set, equal exactly when the values are equal in
+    Python (``[1]``, ``[1.0]`` and ``[True]`` are one value, as ``==`` says): a list or tuple becomes a tuple, a dict a
+    set of (key, frozen value) pairs, a set a frozenset, and every other value stays as it is. The one form used wherever
+    FI groups or lists the values of a setting (core/analysis_figures.py keeps a copy: it stands alone in the quest)."""
+    if isinstance(value, (list, tuple)):
+        return tuple(freeze(v) for v in value)
+    if isinstance(value, dict):
+        return ("dict", frozenset((freeze(k), freeze(v)) for k, v in value.items()))
+    if isinstance(value, (set, frozenset)):
+        return frozenset(freeze(v) for v in value)
+    return value
+
+
+def distinct(values: Any) -> list[Any]:
+    """The values of a setting without repeats (equal as :func:`freeze` says), each as it was recorded, in first-seen order."""
+    seen: dict[Any, Any] = {}
+    for v in values:
+        seen.setdefault(freeze(v), v)
+    return list(seen.values())
 
 
 def _same(a: Any, b: Any) -> bool:
@@ -334,7 +351,7 @@ def _match_grid_value(raw: str, allowed: list[Any]) -> Any:
         parts = [_coerce_number(x.strip()) for x in raw[1:-1].replace(",", ";").split(";")]
         for v in allowed:
             if isinstance(v, (list, tuple)) and len(v) == len(parts) and all(_same(x, y) for x, y in zip(v, parts)):
-                return _freeze(v)
+                return freeze(v)
     number = _num(_coerce_number(raw))
     if number is not None:
         for v in allowed:
@@ -389,7 +406,7 @@ def _canonicalize_cell(key: Any, grid: dict[str, list[Any]]) -> tuple[frozenset[
 def _all_cells(grid: dict[str, list[Any]]) -> set[frozenset[tuple[str, Any]]]:
     """Every setting the protocol's grid names — its full Cartesian product, canonically keyed the same way
     :func:`_canonicalize_cell` keys a manifest's cells, so the two sets can be compared for exact equality."""
-    return {frozenset((a, _freeze(v)) for a, v in cell.items()) for cell in _search.grid_cells(grid)}
+    return {frozenset((a, freeze(v)) for a, v in cell.items()) for cell in _search.grid_cells(grid)}
 
 
 def _total_values_reported(result_json: Any, metric_id: str) -> int:

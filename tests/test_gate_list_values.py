@@ -71,10 +71,68 @@ def test_dict_valued_setting(tmp_path):
     assert not got.filled and "changes with pattern" in got.hit.reason
 
 
-def test_equal_lists_are_one_value(tmp_path):
-    # the same list recorded in two cells is one level of the setting, so there is nothing that changes
-    rec = _records(tmp_path, [_cell({"pattern": [0, 1], "alpha": 1}, SAME), _cell({"pattern": [0, 1], "alpha": 2}, FAR)])
-    assert pv.resolve("{{v:score:mean @ pattern=all, alpha=1}}", rec).filled
+def test_equal_lists_are_one_level_even_when_written_with_other_numeric_types(tmp_path):
+    # [1] and [1.0] are equal, so they are one level of the setting: nothing changes between levels, so nothing is refused
+    rec = _records(tmp_path, [_cell({"pattern": [1], "alpha": 1}, SAME), _cell({"pattern": [1.0], "alpha": 1}, FAR)])
+    got = pv.resolve(KEY, rec)
+    assert got.filled, got
+    rec2 = _records(tmp_path / "b", [_cell({"pattern": [[1, 0]], "alpha": 1}, SAME),
+                                     _cell({"pattern": [[True, False]], "alpha": 1}, FAR)])
+    assert pv.resolve(KEY, rec2).filled
+
+
+def test_levels_counted_the_same_by_values_of_and_by_the_pooled_check(tmp_path):
+    rec = _records(tmp_path, [_cell({"pattern": [1], "alpha": 1}, SAME), _cell({"pattern": [1.0], "alpha": 1}, SAME)])
+    assert len(rec.values_of("score", "pattern")) == 1
+
+
+def test_missing_words_names_settings_whose_value_is_a_list():
+    words = pv._missing_words([([1],)], ["pattern"], [([1],), ([2],)])
+    assert words == "pattern = [1]"
+    both = pv._missing_words([([1], 1), ([2], 1)], ["pattern", "alpha"], [([1], 1), ([2], 1), ([3], 1)])
+    assert "pattern = [1] or [2]" in both
+
+
+def test_missing_words_equal_lists_are_one_value():
+    assert pv._missing_words([([1],), ([1.0],)], ["pattern"], [([1],), ([2],)]) == "pattern = [1]"
+
+
+class _Table:
+    def __init__(self, cells):
+        self.cells = cells
+
+    def keys(self):
+        return list(self.cells)
+
+    def setting(self, k):
+        return self.cells[k]
+
+    def mean(self, rid, k):
+        return 1.0 + len(k)
+
+
+def test_default_figure_series_over_a_list_valued_setting():
+    from core import analysis_figures as fig
+    cells = {"a": {"x": 1, "pattern": [1, 2]}, "b": {"x": 2, "pattern": [1, 2]},
+             "c": {"x": 1, "pattern": [3]}, "d": {"x": 2, "pattern": [3]}}
+    lines = fig._default_lines({"x": "x", "series": "pattern", "shows": ["r"]}, _Table(cells), {})
+    assert sorted(str(line[5]) for line in lines) == ["[1, 2]", "[3]"]
+
+
+def test_one_form_for_the_values_of_a_setting():
+    from core import run_manifest as rm
+    assert rm.freeze([1]) == rm.freeze([1.0]) == rm.freeze([True])
+    assert hash(rm.freeze({"a": [1, {"b": [2]}]})) == hash(rm.freeze({"a": [1.0, {"b": [2.0]}]}))
+    assert rm.freeze([1]) != rm.freeze({"a": 1}) != rm.freeze([2])
+    assert rm.distinct([[1], [1.0], {"a": [1]}, 5, 5.0, [2]]) == [[1], {"a": [1]}, 5, [2]]
+    assert rm.freeze("x") == "x" and rm.freeze(None) is None
+    assert fig_same_form([[1], [1.0], {"a": [1]}])
+
+
+def fig_same_form(values):
+    from core import analysis_figures as fig
+    from core import run_manifest as rm
+    return fig._distinct(values) == rm.distinct(values)
 
 
 def test_scalar_settings_behave_as_before(tmp_path):
