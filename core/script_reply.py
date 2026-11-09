@@ -84,7 +84,7 @@ def _both(old: str, code: str, functions: str, code_dir: Path | None = None, rel
     changed = [ast.get_source_segment(code, n) or "" for name, n in c_defs.items()
                if name not in f_defs and (name not in o_defs or ast.dump(n) != ast.dump(o_defs[name]))]
     pieces = [*dict.fromkeys(i for i in imports if i), block.rstrip("\n"), *changed]
-    made = _splice(old, "\n\n\n".join(pieces) + "\n")
+    made = _splice(old, "\n\n\n".join(pieces) + "\n", code_dir, rel)
     if made.kind != "functions":
         return made
     return _carry_units(old, made, sources)

@@ -604,6 +604,101 @@ def _unproven_use(name: str, tree: ast.AST, sig: inspect.Signature, module: str,
     return calls, None, ""
 
 
+def _module_of(label: str) -> str:
+    """The module name a project file is imported by (``pkg/sim.py`` -> ``sim``; ``pkg/__init__.py`` -> ``pkg``)."""
+    path = Path(label)
+    return path.parent.name if path.stem == "__init__" else path.stem
+
+
+def _imported_parts(tree: ast.AST) -> set[str]:
+    """Every name a file imports a module by, in any form: each part of a dotted module (``import a.b``, ``from a.b import x``)
+    and each name taken from a package (``from . import sim``, ``from pkg import sim``)."""
+    out: set[str] = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            for x in n.names:
+                out.update(x.name.split("."))
+        elif isinstance(n, ast.ImportFrom):
+            out.update((n.module or "").split("."))
+            out.update(x.name for x in n.names)
+    out.discard("")
+    return out
+
+
+def _dynamic_import(node: ast.AST) -> bool:
+    """Whether ``node`` is a call that imports a module by a name worked out at run time (``importlib.import_module``,
+    ``__import__``), with any argument: the code does not show which module it brings in."""
+    if not isinstance(node, ast.Call):
+        return False
+    f = node.func
+    return (isinstance(f, ast.Name) and f.id in ("import_module", "__import__")) or \
+        (isinstance(f, ast.Attribute) and f.attr in ("import_module", "__import__"))
+
+
+def _ends_chain(index: int, parsed: "list[tuple[str, ast.AST]]") -> bool:
+    """Whether no other file of ``parsed`` imports the module of file ``index`` (so a name it imports is not re-exported
+    to another file). Not shown (False) for a file with no known name."""
+    mod = _module_of(parsed[index][0])
+    return bool(mod) and not any(mod in _imported_parts(t) or any(_dynamic_import(c) for c in ast.walk(t))
+                                 for j, (_l, t) in enumerate(parsed) if j != index)
+
+
+def _analysis_file() -> str:
+    from .analysis_frame import EXPERIMENT_FILE
+
+    return EXPERIMENT_FILE
+
+
+def _declared_in_frame(name: str, tree: ast.AST) -> bool:
+    """Whether ``name`` is written as text in a module-level statement of the file (the plan's declarations, kept there as
+    constants), outside any function or class: FI's analysis frame may look the function up by that name."""
+    return any(isinstance(c, ast.Constant) and c.value == name for n in getattr(tree, "body", [])
+               if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) for c in ast.walk(n))
+
+
+def _unproven_module_use(name: str, tree: ast.AST, chain: set[str], ended: bool,
+                         frame: bool = False) -> tuple[int | None, str]:
+    """``(line, what)`` of the first thing in a file that uses ``name`` in a way the code does not show (``None`` when
+    none): a module imported by a name worked out at run time, a module object of the chain that is handed on or read by an
+    attribute whose name is not written as text, and ``name`` imported but not only called here (it may be re-exported
+    to a file that renames it) unless no other file imports this one (``ended``)."""
+    parents = {id(c): n for n in ast.walk(tree) for c in ast.iter_child_nodes(n)}
+    modules: set[str] = set()
+    bound: dict[str, str] = {}  # the function's names in this file: the name used -> as imported
+    for n in ast.walk(tree):
+        if _dynamic_import(n):
+            return n.lineno, "a module imported by a name worked out at run time (it may be the one that defines the function)"
+        if isinstance(n, ast.Import):
+            for x in n.names:
+                if chain & set(x.name.split(".")):
+                    modules.add(x.asname or x.name.split(".")[0])
+        elif isinstance(n, ast.ImportFrom):
+            for x in n.names:
+                if x.name in chain:
+                    modules.add(x.asname or x.name)
+                if x.name == name:
+                    bound[x.asname or x.name] = x.name
+    for n in ast.walk(tree):
+        if frame:
+            break
+        if isinstance(n, ast.Name) and n.id in modules and isinstance(n.ctx, ast.Load):
+            up = parents.get(id(n))
+            if isinstance(up, ast.Attribute) and up.value is n and up.attr != "__dict__":
+                continue
+            if isinstance(up, ast.Call) and up.args and up.args[0] is n and isinstance(up.func, ast.Name) \
+                    and up.func.id in ("getattr", "hasattr") and len(up.args) > 1 \
+                    and isinstance(up.args[1], ast.Constant) and isinstance(up.args[1].value, str):
+                continue  # a name written as text: if it is the function's name the text rule above refuses it
+            return n.lineno, f"the module `{n.id}` handed on or read by a name that is not written out"
+    if bound and not ended:
+        uses = [m for m in ast.walk(tree) if isinstance(m, ast.Name) and m.id in bound]
+        only_called = all(isinstance(parents.get(id(m)), ast.Call) and parents[id(m)].func is m for m in uses)
+        if not (uses and only_called and all(a == name for a in bound)):
+            line = next(n.lineno for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and any(x.name == name for x in n.names))
+            return line, f"`{name}` imported where it may be passed on to a file that renames it"
+    return None, ""
+
+
 def signature_change_problem(name: str, old: ast.FunctionDef | ast.AsyncFunctionDef,
                              new: ast.FunctionDef | ast.AsyncFunctionDef, texts: "Iterable[str | tuple[str, str]]",
                              module: str = "") -> str:
@@ -622,14 +717,24 @@ def signature_change_problem(name: str, old: ast.FunctionDef | ast.AsyncFunction
         return why
     sig = _signature(new)
     calls = 0
-    for i, item in enumerate(texts):
+    parsed: list[tuple[str, ast.AST]] = []
+    for item in texts:
         label, text = _text_pair(item)
+        if not isinstance(text, str):
+            return f"{why}; {label or 'a file of the study'} could not be read, so its use of `{name}` is not known"
         try:
-            tree = ast.parse(text)
+            parsed.append((label, ast.parse(text)))
         except (SyntaxError, ValueError):
             return why
+    chain = {module, *[_module_of(label) for label, _t in parsed[1:]]} - {""}
+    for i, (label, tree) in enumerate(parsed):
         n, line, what = _unproven_use(name, tree, sig, module, any_star=i > 0)
         calls += n
+        if line is None and i > 0:
+            # FI's own analysis frame reads the study's functions by the names the plan declares (written, in the frame, as
+            # text in the study's file), so it is a use of `name` only when the repaired file declares `name` that way
+            frame = label == _analysis_file() and not _declared_in_frame(name, parsed[0][1])
+            line, what = _unproven_module_use(name, tree, chain, _ends_chain(i, parsed), frame)
         if line is not None:
             return f"{why}; {label or 'the repaired file'} line {line} has {what}"
     return "" if calls else why
@@ -660,19 +765,48 @@ def direct_callers(code: Path, rel: str, name: str, staged: dict[str, str] | Non
     return out
 
 
+def _read_or_none(path: Path) -> str | None:
+    """The text of ``path``; ``None`` when it cannot be read as text (a file FI cannot read is not shown to be no use)."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+
+
 def project_files_using(code: Path, rel: str, names: Iterable[str]) -> list[str]:
     """The Python files of ``code/`` (but its tests, and not ``rel`` itself) that can use any of ``names``: the name is
-    written in them (a call, an import, a value, text) or they star-import, whatever the way they use it."""
-    out: list[str] = []
+    written in them (a call, an import, a value, text), they star-import, or they import the module that defines ``names``
+    (``rel``) in any form (found by parsing: ``import m``, ``import m as x``, ``from m import ...``, ``from . import m``,
+    ``importlib.import_module(...)``, ``__import__(...)``), or they import a file that is chosen this way (a re-export), whatever
+    the way they use it. A file that cannot be read or parsed counts."""
+    module = Path(rel).stem
+    files: dict[str, tuple[str | None, ast.AST | None]] = {}
     for path in sorted(code.rglob("*.py")):
         parts = path.relative_to(code).parts
         other = path.relative_to(code).as_posix()
         if other == rel or "tests" in parts[:-1] or "__pycache__" in parts[:-1] or parts[0] == "skills":
             continue
-        text = _read(path)
-        if any(n in text for n in names) or _star_imports_project(code, path, text):
-            out.append(other)
-    return out
+        text = _read_or_none(path)
+        tree = None
+        if text is not None:
+            try:
+                tree = ast.parse(text)
+            except (SyntaxError, ValueError):
+                tree = None
+        files[other] = (text, tree)
+    chosen: set[str] = set()
+    for other, (text, tree) in files.items():
+        if text is None or tree is None or any(n in text for n in names) \
+                or _star_imports_project(code, code / other, text) or module in _imported_parts(tree) \
+                or any(_dynamic_import(c) for c in ast.walk(tree)):
+            chosen.add(other)
+    while True:  # a file that imports a chosen file may get the function through it
+        reached = {_module_of(c) for c in chosen} - {""}
+        more = {o for o, (_t, tree) in files.items() if o not in chosen and tree is not None and reached & _imported_parts(tree)}
+        if not more:
+            break
+        chosen |= more
+    return [o for o in files if o in chosen]
 
 
 def other_files_for(code: Path | None, rel: str, reply: str) -> dict[str, Any]:
@@ -686,7 +820,7 @@ def other_files_for(code: Path | None, rel: str, reply: str) -> dict[str, Any]:
         names = set(_top_functions(ast.parse(block)))
     except (SyntaxError, ValueError):
         return {}
-    return {"elsewhere": [(c, _read(code / c)) for c in project_files_using(code, rel, names)], "module": Path(rel).stem}
+    return {"elsewhere": [(c, _read_or_none(code / c)) for c in project_files_using(code, rel, names)], "module": Path(rel).stem}
 
 
 def _star_imports_project(code: Path, path: Path, text: str) -> bool:
@@ -1835,7 +1969,7 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
         # that can use it (an import under another name, a use as a value, a star import), not only those that call it by name
         others = project_files_using(env.code, rel, {scope, *reach, *mine_too})
         new, names, why = splice(old, f"```python\n{main or marked.get(rel, '')}\n```", {scope, *reach, *mine_too}, skipped,
-                                 elsewhere=[(c, _read(env.code / c)) for c in others], module=Path(rel).stem)
+                                 elsewhere=[(c, _read_or_none(env.code / c)) for c in others], module=Path(rel).stem)
         env.tried = {rel: new} if new is not None else {}  # the model's files as they came, kept even when refused
         if skipped:
             env.log.warning("[code_review] %s: the reply also defined %s, which `%s` does not reach; not used",

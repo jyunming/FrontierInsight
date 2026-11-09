@@ -231,7 +231,7 @@ def test_a_reexport_through_a_star_import_is_refused(tmp_path):
     out, _r, why = fr.splice(SIM, REPLY_ONE, None, None, limit=None,
                              elsewhere=[(o, (tmp_path / o).read_text(encoding="utf-8")) for o in others], module="sim")
     assert out is None
-    assert "down.py" in why
+    assert "down.py" in why or "bridge.py" in why  # refused at the first file that may pass it on
 
 
 def test_a_star_import_of_a_library_in_a_file_that_calls_it_is_refused_not_assumed():
@@ -283,3 +283,102 @@ def test_splice_functions_takes_the_code_folder_the_same_way(tmp_path):
     assert code_delta.splice_functions(BROKEN_CALLS, REPLY_FITS)[0] is None
     new, replaced, why = code_delta.splice_functions(BROKEN_CALLS, REPLY_FITS, code=code, rel="derive.py")
     assert why == "" and replaced == ["_plot_pair"]
+
+
+# --- a use FI cannot prove is refused, never assumed away -------------------------------------------------------------
+
+CALC = "def calculate(x, y):\n    return x + y\n"
+CALC_FN = "def calculate(x):\n    return x\n"
+CALC_CODE = "```python\n" + CALC_FN + "```"
+FITTING_USE = "from sim import calculate\n\n\ndef run():\n    return calculate(1)\n"
+
+
+def _calc_study(tmp_path, files):
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "sim.py").write_text(CALC, encoding="utf-8")
+    for name, text in files.items():
+        (code / name).write_text(text, encoding="utf-8")
+    return code
+
+
+def test_a_reply_with_code_and_functions_is_judged_with_the_project_like_functions_only(tmp_path):
+    code = _calc_study(tmp_path, {"use.py": FITTING_USE})
+    only_fn = script_reply.resolve(CALC, "", CALC_CODE, code_dir=code, rel="sim.py")
+    both = script_reply.resolve(CALC, CALC_FN, CALC_CODE, code_dir=code, rel="sim.py")
+    assert only_fn.why == ""
+    assert both.why == ""
+    assert "def calculate(x):" in both.code
+
+
+def test_a_use_through_a_name_built_at_run_time_refuses(tmp_path):
+    dyn = 'import importlib\n\nm = importlib.import_module("sim")\nvalue = getattr(m, "calcu" + "late")(1, 2)\n'
+    code = _calc_study(tmp_path, {"use.py": FITTING_USE, "dyn.py": dyn})
+    assert "dyn.py" in fr.project_files_using(code, "sim.py", {"calculate"})
+    made = script_reply.resolve(CALC, "", CALC_CODE, code_dir=code, rel="sim.py")
+    assert made.code == "" and "dyn.py" in made.why
+
+
+def test_a_use_through_a_module_object_with_a_computed_attribute_refuses(tmp_path):
+    dyn = 'import sim as s\n\nname = "calcu" + "late"\nvalue = getattr(s, name)(1, 2)\n'
+    code = _calc_study(tmp_path, {"use.py": FITTING_USE, "dyn.py": dyn})
+    made = script_reply.resolve(CALC, "", CALC_CODE, code_dir=code, rel="sim.py")
+    assert made.code == "" and "dyn.py" in made.why
+
+
+def test_a_reexport_under_another_name_refuses(tmp_path):
+    code = _calc_study(tmp_path, {"use.py": FITTING_USE, "bridge.py": "from sim import calculate as g\n",
+                                  "far.py": "from bridge import g as h\n\nh(1, 2)\n"})
+    assert "far.py" in fr.project_files_using(code, "sim.py", {"calculate"})
+    made = script_reply.resolve(CALC, "", CALC_CODE, code_dir=code, rel="sim.py")
+    assert made.code == "" and "bridge.py" in made.why
+
+
+def test_an_import_nobody_imports_from_is_the_end_of_the_chain_and_is_accepted(tmp_path):
+    code = _calc_study(tmp_path, {"use.py": FITTING_USE, "last.py": "from sim import calculate as g\n\ng(1)\n"})
+    made = script_reply.resolve(CALC, "", CALC_CODE, code_dir=code, rel="sim.py")
+    assert made.why == ""
+
+
+def test_a_file_that_cannot_be_read_refuses(tmp_path, monkeypatch):
+    code = _calc_study(tmp_path, {"use.py": FITTING_USE, "locked.py": "x = 1\n"})
+    real = type(code).read_text
+
+    def read_text(self, *a, **k):
+        if self.name == "locked.py":
+            raise PermissionError("locked")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(type(code), "read_text", read_text)
+    made = script_reply.resolve(CALC, "", CALC_CODE, code_dir=code, rel="sim.py")
+    assert made.code == "" and "locked.py" in made.why
+
+
+def test_a_file_that_is_not_valid_text_refuses(tmp_path):
+    code = _calc_study(tmp_path, {"use.py": FITTING_USE})
+    (code / "bad.py").write_bytes(b"x = '\xff\xfe'\n")
+    made = script_reply.resolve(CALC, "", CALC_CODE, code_dir=code, rel="sim.py")
+    assert made.code == "" and "bad.py" in made.why
+
+
+FRAME = """import sim
+
+
+class _Plan:
+    def __getattr__(self, name):
+        return getattr(sim, name)
+"""
+
+
+def test_fi_analysis_frame_reads_only_declared_names_so_a_helper_it_does_not_declare_is_not_a_use(tmp_path):
+    code = _calc_study(tmp_path, {"use.py": FITTING_USE, "experiment.py": FRAME})
+    made = script_reply.resolve(CALC, "", CALC_CODE, code_dir=code, rel="sim.py")
+    assert made.why == ""
+
+
+def test_fi_analysis_frame_looks_up_a_function_the_plan_declares_so_it_refuses(tmp_path):
+    code = _calc_study(tmp_path, {"use.py": FITTING_USE, "experiment.py": FRAME})
+    declared = CALC + "\nPLAN = {'by': 'calculate'}\n"
+    (code / "sim.py").write_text(declared, encoding="utf-8")
+    made = script_reply.resolve(declared, "", CALC_CODE, code_dir=code, rel="sim.py")
+    assert made.code == "" and "looked up by name" in made.why  # already refused by the text rule
