@@ -68,6 +68,14 @@ CLOSED_CHOICES: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
+def choice_refusal(field: str, given: Any = None) -> str:
+    """The reason a closed-choice field is refused, for every field of :data:`CLOSED_CHOICES`: the field as the request names
+    it and the values it takes, quoted from the table (the one list the checks and the ask both read)."""
+    values = dict(CLOSED_CHOICES)[field]
+    seen = "" if given is None else f" (you wrote {' '.join(str(given).split())[:120]!r})"
+    return f"{_P}.{field}` must be exactly one of {', '.join(values)}{seen}"
+
+
 def closed_choices_note(parts: Any = ("optimisation",)) -> str:
     """For the closed-choice fields of the parts a request asks for, the values each takes and where an explanation goes
     (empty when the asked parts have none)."""
@@ -255,8 +263,8 @@ def read_kind(value: Any) -> tuple[str | None, str | None]:
     if len(named) == 1:
         return named[0], None
     if not named:
-        return None, f"`kind` is “{shown}”; it must be exactly `continuous`, `integer` or `choice`"
-    return None, (f"`kind` is “{shown}”, which names more than one of `continuous`, `integer`, `choice`; "
+        return None, f"`kind` is “{shown}”; it must be exactly one of {', '.join(KINDS)}"
+    return None, (f"`kind` is “{shown}”, which names more than one of {', '.join(KINDS)}; "
                   "it must be exactly one of them")
 
 
@@ -539,7 +547,7 @@ def normalize(block: Any) -> tuple[dict[str, Any] | None, str | None]:
     objective["quantity"] = _text(objective["quantity"])
     direction = DIRECTIONS.get(str(objective.get("direction") or "").strip().lower())
     if direction is None:
-        return None, f"{_P}.objective.direction` must be `minimise` or `maximise`"
+        return None, choice_refusal("objective.direction", objective.get("direction"))
     objective["direction"] = direction
     for key in ("unit", "meaning"):
         if objective.get(key) is not None and not isinstance(objective[key], (str, int, float)):
@@ -638,8 +646,7 @@ def normalize(block: Any) -> tuple[dict[str, Any] | None, str | None]:
     if method is not None:
         name = str(method).strip() if isinstance(method, str) else ""
         if name not in BUILT_IN_METHODS and not _LIBRARY_METHOD.match(name):
-            return None, (f"{_P}.search_method` must be one of {', '.join(BUILT_IN_METHODS)}, or a library method "
-                          "written as `scipy:<function>` or `optuna:<sampler>`")
+            return None, choice_refusal("search_method", method)
         out["search_method"] = name
 
     tolerance = out.get("improvement_tolerance")
@@ -649,7 +656,7 @@ def normalize(block: Any) -> tuple[dict[str, Any] | None, str | None]:
             if not _number(value) or value < 0:
                 return None, f"{_P}.improvement_tolerance.value` must be a number of at least 0"
             if mode not in ("absolute", "relative"):
-                return None, f"{_P}.improvement_tolerance.mode` must be `absolute` or `relative`"
+                return None, choice_refusal("improvement_tolerance.mode", tolerance.get("mode"))
             if mode == "relative" and value > 1:
                 return None, (f"{_P}.improvement_tolerance.value` is a fraction when `mode` is relative (0.05 means 5%); "
                               f"{_fmt(value)} would mean more than 100%")
