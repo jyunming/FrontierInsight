@@ -113,3 +113,59 @@ def test_a_call_with_starred_arguments_keeps_the_old_rule():
     out, _replaced, why = fr.splice(starred, REPLY_FITS, None, None, limit=None)
     assert out is None
     assert REFUSED in why
+
+
+# --- uses of the function that are not a plain call by its name -------------------------------------------------------
+
+SIM = '''def f(x, y):
+    return x + y
+'''
+REPLY_ONE = '''```python
+def f(x):
+    return x
+```'''
+
+
+def _change(other_text, other_name="use.py"):
+    return fr.splice(SIM, REPLY_ONE, None, None, limit=None, elsewhere=[(other_name, other_text)], module="sim")
+
+
+def test_an_import_under_another_name_is_followed_to_its_calls():
+    out, _r, why = _change("from sim import f as g\n\n\ndef run():\n    return g(1, 2)\n")
+    assert out is None
+    assert "use.py line 5" in why
+
+
+def test_an_aliased_call_that_binds_is_accepted():
+    out, replaced, why = _change("from sim import f as g\n\n\ndef run():\n    return g(1)\n")
+    assert why == ""
+    assert replaced == ["f"]
+
+
+def test_a_module_level_call_that_does_not_bind_is_refused():
+    out, _r, why = _change("import sim\n\nVALUE = sim.f(1, 2)\n")
+    assert out is None
+    assert "use.py line 3" in why
+
+
+def test_the_function_passed_as_a_value_is_refused():
+    for text in ("import sim\n\nrows = list(map(sim.f, [1], [2]))\n",
+                 "from sim import f\nimport functools\n\np = functools.partial(f, 1)\nf(1)\n",
+                 "from sim import f\n\nTABLE = {'a': f}\nf(1)\n"):
+        out, _r, why = _change(text)
+        assert out is None, text
+        assert "use.py" in why
+
+
+def test_a_lookup_by_name_or_a_star_import_is_refused():
+    for text in ("import sim\n\nsim.f(1)\ng = getattr(sim, 'f')\n", "from sim import *\n\nf(1)\n"):
+        out, _r, why = _change(text)
+        assert out is None, text
+        assert "use.py" in why
+
+
+def test_a_file_that_only_imports_the_function_under_another_name_is_looked_at(tmp_path):
+    (tmp_path / "sim.py").write_text(SIM, encoding="utf-8")
+    (tmp_path / "use.py").write_text("from sim import f as g\n\n\ndef run():\n    return g(1, 2)\n", encoding="utf-8")
+    (tmp_path / "other.py").write_text("x = 1\n", encoding="utf-8")
+    assert fr.project_files_using(tmp_path, "sim.py", {"f"}) == ["use.py"]

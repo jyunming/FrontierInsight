@@ -557,39 +557,77 @@ def _called_by_fi(name: str) -> bool:
     return name in ("run_trial", "run_cell", "oracle") or _analysis._is_body(name)
 
 
+def _text_pair(item: "str | tuple[str, str]") -> tuple[str, str]:
+    return ("", item) if isinstance(item, str) else (item[0], item[1])
+
+
+def _unproven_use(name: str, tree: ast.AST, sig: inspect.Signature, module: str) -> tuple[int, int | None, str]:
+    """``(calls found, line, what)`` for one file: ``line`` is the first use of ``name`` that FI cannot show binds to ``sig``
+    (``what`` says how it is used), ``None`` when every use is a call that binds or an import that is followed to its calls.
+    A name imported under another name (``from m import f as g``) is followed under that name."""
+    names = {name}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ImportFrom) and any(x.name == "*" for x in n.names):
+            if not module or (n.module or "").rsplit(".", 1)[-1] == module:
+                return 0, n.lineno, f"a star import of the module that defines `{name}`"
+        if isinstance(n, (ast.Import, ast.ImportFrom)):
+            for x in n.names:
+                if x.name.rsplit(".", 1)[-1] == name and x.asname and isinstance(n, ast.ImportFrom):
+                    names.add(x.asname)
+    exported = {id(c) for n in ast.walk(tree) if isinstance(n, (ast.Assign, ast.AnnAssign))
+                and any(isinstance(t, ast.Name) and t.id == "__all__" for t in (n.targets if isinstance(n, ast.Assign) else [n.target]))
+                for c in ast.walk(n)}
+    called: set[int] = set()
+    calls = 0
+    for n in ast.walk(tree):
+        if not isinstance(n, ast.Call):
+            continue
+        f = n.func
+        if (isinstance(f, ast.Name) and f.id in names) or (isinstance(f, ast.Attribute) and f.attr == name):
+            called.add(id(f))
+            calls += 1
+            if _binds(n, sig) is not True:
+                return calls, n.lineno, "a call that does not bind to the new parameters"
+    for n in ast.walk(tree):
+        if id(n) in called:
+            continue
+        if isinstance(n, ast.Name) and n.id in names:
+            return calls, n.lineno, "a use other than a call (handed on, stored or rebound)"
+        if isinstance(n, ast.Attribute) and n.attr == name:
+            return calls, n.lineno, "a use other than a call (handed on, stored or rebound)"
+        if isinstance(n, ast.Constant) and n.value == name and isinstance(n.value, str) and id(n) not in exported:
+            return calls, n.lineno, "its name written as text (looked up by name)"
+    return calls, None, ""
+
+
 def signature_change_problem(name: str, old: ast.FunctionDef | ast.AsyncFunctionDef,
-                             new: ast.FunctionDef | ast.AsyncFunctionDef, texts: Iterable[str]) -> str:
+                             new: ast.FunctionDef | ast.AsyncFunctionDef, texts: "Iterable[str | tuple[str, str]]",
+                             module: str = "") -> str:
     """Why a repair's new parameters of ``name`` are not allowed (``""`` when they are). The rule of :func:`params_kept` is
     that every call that worked still works; its own test (same parameters, defaults added after them) is enough but
-    not needed: parameters it refuses are allowed when every call of ``name`` in ``texts`` (the code as the repair leaves
-    it: the repaired file and every other file that calls ``name``) binds to them, since then no call that worked is
-    broken. Refused, with
-    :func:`params_kept`'s reason, when a call does not bind to the new parameters, and when that cannot be told: ``name``
-    is never called, a call passes ``*x`` / ``**x``, ``name`` is used other than by a call (handed on, stored), or FI
-    calls it itself (its call is not in the code)."""
+    not needed: parameters it refuses are allowed when FI can account for every use of ``name`` in ``texts`` (the code as
+    the repair leaves it: the repaired file and every other file of the study that mentions ``name`` or star-imports; each
+    a text or ``(file, text)``) and every use is a call that binds to them (an import under another name is followed to
+    its calls), since then no call that worked is broken. Refused, with :func:`params_kept`'s reason and the file and line
+    of the use, when a call does not bind to the new parameters, and when that cannot be told: ``name`` is never called, a
+    call passes ``*x`` / ``**x``, ``name`` is used other than by a call (handed on, stored, looked up by its name as
+    text), a star import brings it in, or FI calls it itself (its call is not in the code). ``module`` is the defining
+    file's module name (empty: any star import counts)."""
     why = params_kept(old, new)
     if not why or _called_by_fi(name):
         return why
     sig = _signature(new)
     calls = 0
-    for text in texts:
+    for item in texts:
+        label, text = _text_pair(item)
         try:
             tree = ast.parse(text)
         except (SyntaxError, ValueError):
             return why
-        called: set[int] = set()
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            f = node.func
-            if (isinstance(f, ast.Name) and f.id == name) or (isinstance(f, ast.Attribute) and f.attr == name):
-                called.add(id(f))
-                calls += 1
-                if _binds(node, sig) is not True:
-                    return why
-        if any(isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Load) and id(n) not in called
-               for n in ast.walk(tree)):
-            return why
+        n, line, what = _unproven_use(name, tree, sig, module)
+        calls += n
+        if line is not None:
+            return f"{why}; {label or 'the repaired file'} line {line} has {what}"
     return "" if calls else why
 
 
@@ -615,6 +653,21 @@ def direct_callers(code: Path, rel: str, name: str, staged: dict[str, str] | Non
                 if (isinstance(func, ast.Name) and func.id == name) or (isinstance(func, ast.Attribute) and func.attr == name):
                     out.setdefault(other, set()).add(fname)
                     break
+    return out
+
+
+def project_files_using(code: Path, rel: str, names: Iterable[str]) -> list[str]:
+    """The Python files of ``code/`` (but its tests, and not ``rel`` itself) that can use any of ``names``: the name is
+    written in them (a call, an import, a value, text) or they star-import, whatever the way they use it."""
+    out: list[str] = []
+    for path in sorted(code.rglob("*.py")):
+        parts = path.relative_to(code).parts
+        other = path.relative_to(code).as_posix()
+        if other == rel or "tests" in parts[:-1] or "__pycache__" in parts[:-1] or parts[0] == "skills":
+            continue
+        text = _read(path)
+        if "import *" in text or any(n in text for n in names):
+            out.append(other)
     return out
 
 
@@ -736,7 +789,7 @@ def file_blocks(reply: str) -> tuple[str, dict[str, str]]:
 
 def splice(source: str, reply: str, scope: set[str] | None = None,
            ignored: list[str] | None = None, *, limit: int | None = MAX_FUNCTIONS,
-           elsewhere: Iterable[str] = ()) -> tuple[str | None, list[str], str]:
+           elsewhere: Iterable[str | tuple[str, str]] = (), module: str = "") -> tuple[str | None, list[str], str]:
     """``(the file with the reply's functions put in, the names it replaced, why not)``. The first fenced block of the
     reply that holds a ``def`` is read: each function it defines that the file has AND that is in ``scope`` (the
     function(s) the finding is about) replaces it (the parameter names must be the same, in the same order, or every call
@@ -802,7 +855,7 @@ def splice(source: str, reply: str, scope: set[str] | None = None,
         return None, [], f"the file would not be valid Python ({e.msg}, line {e.lineno})"
     texts = [out, *elsewhere]
     for name in replaced:
-        why = signature_change_problem(name, old_funcs[name], new_funcs[name], texts)
+        why = signature_change_problem(name, old_funcs[name], new_funcs[name], texts, module)
         if why:
             return None, [], f"`{name}` {why}"
     return out, [*replaced, *added], ""
