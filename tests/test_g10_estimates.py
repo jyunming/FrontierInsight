@@ -90,6 +90,6 @@ def test_the_finer_check_counts_toward_the_one_limit() -> None:
 
     from core import optimise
 
-    source = inspect.getsource(optimise.OptimisationRunner.execute)
+    source = inspect.getsource(optimise.OptimisationRunner._execute)  # execute wraps it in the step-write record
     assert "check_left" in source and "timeout_s, env)" not in source.split("self._check(")[1].split("\n")[0]
     assert time.monotonic() > 0

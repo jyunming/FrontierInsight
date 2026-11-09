@@ -211,11 +211,11 @@ async def test_a_quest_whose_unmet_check_is_inside_its_own_tolerance_makes_no_ch
     from tests import test_improve as ti
 
     noisy = {**ti.C_ERR, "tolerance": 0.05}  # Euler's error at dt=0.1 is about 0.018: not met, but inside 0.05 of the bar
-    engine, model = await ti._quest(tmp_path, [ti._edit(ti.EULER, ti.RK4)], criteria=[noisy])
+    engine, model = await ti._quest(tmp_path, [ti._edit(ti.FIRST_ORDER, ti.RK4)], criteria=[noisy])
     out = await engine._node_improve(dict(ti.STATE))
     assert out == {"improve_rerun": False} and model.prompts == []
     assert "already within its own tolerance of its bar" in ti._log(engine)
-    assert ti.EULER in (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")
+    assert ti.FIRST_ORDER in (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")
 
 
 def _probe(cell: dict, seconds: float, at_least: bool = False, axis: Any = "s") -> est.Probe:
