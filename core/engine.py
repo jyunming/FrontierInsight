@@ -6762,7 +6762,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         out = dict(kept)
         for name, block in done.items():
             old = kept[names[name]]
-            new, replaced, why = _code_delta.splice_functions(old, block)
+            new, replaced, why = _code_delta.splice_functions(old, block, code=self.quest_root / "code", rel=name)
             broken = why or (_trial_runner.repair_breaks_contract(old, new, name) if new is not None else "")
             if broken:
                 self._log.warning("[implement] the changed functions of %s cannot be used (%s); the scripts are written whole", name, broken)
@@ -6772,12 +6772,22 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         out["deps"] = sorted({*deps, *_deps_from_tail(text.rsplit("```", 1)[-1])})
         return out
 
-    def _script_from_reply(self, node: str, old: str, code: object, parsed: Any, name: str) -> tuple[str, str]:
+    def _code_rel(self, path: Path) -> str:
+        """``path`` relative to the quest's code folder (posix), or ``""`` when it is not inside it."""
+        try:
+            return path.resolve().relative_to((self.quest_root / "code").resolve()).as_posix()
+        except ValueError:
+            return ""
+
+    def _script_from_reply(self, node: str, old: str, code: object, parsed: Any, name: str,
+                           rel: str = "") -> tuple[str, str]:
         """``(the script a repair's reply makes, why none)``: the reply's ``functions`` are put into ``old`` and every other
         byte of it stays (:mod:`core.script_reply`); a reply that is a whole script is taken whole. The one contract
         check (``repair_breaks_contract``) still judges the result, in the caller."""
         functions = parsed.get("functions") if isinstance(parsed, dict) else ""
-        made = _script_reply.resolve(old, code, functions)
+        # the other files of the study's code folder that use a repaired function are read, so a changed signature that
+        # binds every use is accepted; a script outside the folder (``rel`` empty) keeps its parameters
+        made = _script_reply.resolve(old, code, functions, code_dir=self.quest_root / "code" if rel else None, rel=rel)
         if made.kind == "functions":
             self._log.info("[%s] %s: the reply's %d function(s) are put into the script, the rest of it is as it was (%s)",
                            node, name, len(made.replaced), ", ".join(made.replaced[:6]))
@@ -12181,7 +12191,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # The same script, redrawn: one that lost what FI reads from it (its result line, the oracle branch, the
         # seed, the simulation's entry points) is another script and is not used.
         self._keep_repair_answer("figures", text)
-        new_code, split_why = self._script_from_reply("execute", code, new_code, parsed, path.name)
+        new_code, split_why = self._script_from_reply("execute", code, new_code, parsed, path.name, self._code_rel(path))
         broken = split_why or _trial_runner.repair_breaks_contract(code, new_code, path.name)
         usable = not broken and all(mark in new_code for mark in _figdata.KEEP_MARKS if mark in code) and (
             not _code_review.prints_result_json(code) or _code_review.prints_result_json(new_code))
@@ -13037,7 +13047,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if not (isinstance(new_code, str) and new_code.strip()):
             new_code, new_deps = _parse_implement_response(text)
         self._keep_repair_answer("protocol", text)
-        new_code, split_why = self._script_from_reply("protocol", code, new_code, parsed, path.name)
+        new_code, split_why = self._script_from_reply("protocol", code, new_code, parsed, path.name, self._code_rel(path))
         broken = split_why or _trial_runner.repair_breaks_contract(code, new_code, path.name)
         if broken:
             self._log.warning("[protocol] the repair of %s is not usable (%s)", path.name, broken)

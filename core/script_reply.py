@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from . import finding_repair as _finding
 from .code_layout import insert_before_main_guard
@@ -27,26 +28,29 @@ class Resolved:
     why: str = ""
 
 
-def resolve(old: str, code: object = "", functions: object = "") -> Resolved:
+def resolve(old: str, code: object = "", functions: object = "", *, code_dir: Path | None = None,
+            rel: str = "") -> Resolved:
     """The script that a repair reply makes from ``old``. ``functions`` is the reply's functions to replace or add (their
     whole ``def``, any number); ``code`` is its script. A ``code`` alone is the whole script and is returned as it is, for
     the contract check to judge (which refuses a stand-in word, a lost entry point and a function that is called but no
     longer defined). Both given: the functions are spliced AND what the whole script adds at module level (imports and
     constants the file lacks, and any function of it that differs from the file's) comes with them, so nothing the reply
-    wrote is lost; when the two give one function differently, nothing is made and the reason says so."""
+    wrote is lost; when the two give one function differently, nothing is made and the reason says so. ``code_dir`` (the
+    study's code folder) and ``rel`` (the script's path in it) let FI read the other files that use the functions, so a
+    changed signature is accepted when every use binds to it; without them a function keeps its parameters."""
     fn_text = functions if isinstance(functions, str) else ""
     code_text = code if isinstance(code, str) else ""
     if fn_text.strip() and code_text.strip():
-        return _both(old, code_text, fn_text)
+        return _both(old, code_text, fn_text, code_dir, rel)
     if fn_text.strip():
-        return _splice(old, fn_text)
+        return _splice(old, fn_text, code_dir, rel)
     if not code_text.strip():
         return Resolved(why="the reply held neither functions nor a script")
     return Resolved(code=code_text, kind="whole")
 
 
-def _splice(old: str, text: str) -> Resolved:
-    new, replaced, why = _finding.splice(old, text, None, None, limit=None)
+def _splice(old: str, text: str, code_dir: Path | None = None, rel: str = "") -> Resolved:
+    new, replaced, why = _finding.splice(old, text, None, None, limit=None, **_finding.other_files_for(code_dir, rel, text))
     if new is None:
         return Resolved(why=why)
     return Resolved(code=new, kind="functions", replaced=replaced)
@@ -64,7 +68,7 @@ def _stored(node: ast.AST) -> set[str]:
     return {t.id for t in ast.walk(node) if isinstance(t, ast.Name) and isinstance(t.ctx, ast.Store)}
 
 
-def _both(old: str, code: str, functions: str) -> Resolved:
+def _both(old: str, code: str, functions: str, code_dir: Path | None = None, rel: str = "") -> Resolved:
     block = next((m.group(1) for m in _finding._FENCE.finditer(functions) if "def " in m.group(1)), functions)
     f_tree, f_defs = _parsed(block)
     c_tree, c_defs = _parsed(code)

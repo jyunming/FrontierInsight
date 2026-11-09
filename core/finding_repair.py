@@ -675,6 +675,20 @@ def project_files_using(code: Path, rel: str, names: Iterable[str]) -> list[str]
     return out
 
 
+def other_files_for(code: Path | None, rel: str, reply: str) -> dict[str, Any]:
+    """The keyword arguments for :func:`splice` that tell it what FI holds of the rest of the study: ``elsewhere`` (every
+    file of ``code/`` that can use a function the reply defines, with its text) and ``module`` (the stem of ``rel``).
+    Empty (the strict default: the other files are not known) when no code folder or file is given."""
+    if code is None or not rel:
+        return {}
+    block = next((m.group(1) for m in _FENCE.finditer(reply or "") if "def " in m.group(1)), reply or "")
+    try:
+        names = set(_top_functions(ast.parse(block)))
+    except (SyntaxError, ValueError):
+        return {}
+    return {"elsewhere": [(c, _read(code / c)) for c in project_files_using(code, rel, names)], "module": Path(rel).stem}
+
+
 def _star_imports_project(code: Path, path: Path, text: str) -> bool:
     """Whether ``text`` (the file ``path``) star-imports a module of the study (``code/``) or a relative one, found by
     parsing, so any spelling of the import counts. A star import of a library cannot bring in a study's function. A file that

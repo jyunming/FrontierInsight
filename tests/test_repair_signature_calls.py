@@ -248,3 +248,38 @@ def test_a_star_import_of_a_sibling_module_in_a_subfolder_is_a_use(tmp_path):
     (tmp_path / "pkg" / "helper.py").write_text("x = 1\n", encoding="utf-8")
     (tmp_path / "pkg" / "use.py").write_text("from helper import *\n", encoding="utf-8")
     assert fr.project_files_using(tmp_path, "sim.py", {"area"}) == ["pkg/use.py"]
+
+
+def _study(tmp_path, other_text=None):
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "derive.py").write_text(BROKEN_CALLS, encoding="utf-8")
+    if other_text is not None:
+        (code / "other.py").write_text(other_text, encoding="utf-8")
+    return code
+
+
+def test_script_reply_with_a_code_folder_accepts_a_signature_every_use_binds_to(tmp_path):
+    code = _study(tmp_path, "def unrelated():\n    return 1\n")
+    made = script_reply.resolve(BROKEN_CALLS, "", REPLY_FITS, code_dir=code, rel="derive.py")
+    assert made.why == ""
+    assert "def _plot_pair(fig, table, xid, yid, panel):" in made.code
+
+
+def test_script_reply_with_a_code_folder_refuses_when_another_file_uses_the_old_parameters(tmp_path):
+    code = _study(tmp_path, "from derive import _plot_pair\n\n\ndef g(fig):\n    _plot_pair(fig, 0, 'a', 'b')\n")
+    made = script_reply.resolve(BROKEN_CALLS, "", REPLY_FITS, code_dir=code, rel="derive.py")
+    assert made.why and made.code == ""
+
+
+def test_script_reply_without_a_code_folder_stays_strict(tmp_path):
+    made = script_reply.resolve(BROKEN_CALLS, "", REPLY_FITS)
+    assert "must keep its parameters" in made.why
+
+
+def test_splice_functions_takes_the_code_folder_the_same_way(tmp_path):
+    from core import code_delta
+    code = _study(tmp_path)
+    assert code_delta.splice_functions(BROKEN_CALLS, REPLY_FITS)[0] is None
+    new, replaced, why = code_delta.splice_functions(BROKEN_CALLS, REPLY_FITS, code=code, rel="derive.py")
+    assert why == "" and replaced == ["_plot_pair"]
