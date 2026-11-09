@@ -2180,11 +2180,19 @@ class RunChecksMixin:
             except (KeyError, TypeError, ValueError):
                 check_n = 0
             unit = per_eval or first_s or None
+            finer_s: float | None = None
+            finer_basis, finer_low = _cost_model.MEASURED, False
             if check_n and unit:
+                # Whenever a check is planned, one run of it at its finest settings is timed: a finer setting costs far more
+                # than one design of the search (a check of 72 runs at ~30 minutes each was counted at ~4 minutes a run).
+                finer_s, finer_basis, finer_low = await self._time_finer_check(
+                    block, state, runner, python, env, deterministic=deterministic, thresholds=thresholds, inside=inside,
+                    left_s=budget_s - (time.monotonic() - timing_started), limit_s=limit_s)
                 core_est = whole if whole is not None else est
-                # The check runs its designs ``at_once`` at a time like the search, each as much slower as FI measured.
+                # The check runs its designs ``at_once`` at a time like the search (its nudges and its settings are asked
+                # for together), each as much slower as FI measured.
                 share = (slowdown if slowdown is not None else 1.0) / at_once if at_once > 1 else 1.0
-                check_s = unit / runs * check_n * share
+                check_s = (finer_s if finer_s else unit / runs) * check_n * share
                 with_check = _replace(core_est, seconds=core_est.seconds + check_s, at_least=True)
                 whole = with_check
                 if _estimate.known_too_long(with_check, limit_s):
@@ -2194,16 +2202,9 @@ class RunChecksMixin:
                     elif not searched:
                         searched = 0
             design_key = _cost_model.design_key(block, runner.simulate)
-            finer_s: float | None = None
-            finer_basis, finer_low = _cost_model.MEASURED, False
-            if checked:
-                # The study is cut, so the check's reserve matters: one run of the check at its finest settings is timed
-                # (a finer setting costs more than the search's design, which is only a lower bound).
-                finer_s, finer_basis, finer_low = await self._time_finer_check(
-                    block, state, runner, python, env, deterministic=deterministic, thresholds=thresholds, inside=inside,
-                    left_s=budget_s - (time.monotonic() - timing_started), limit_s=limit_s)
             _cost_model.keep_measured(self.quest_root, per_evaluation_s=per_eval, per_evaluation_at_least=lower, slowdown=slowdown,  # type: ignore[attr-defined]
-                                      check_unit_s=unit if check_n else None, check_unit_basis="search-design lower bound",
+                                      check_unit_s=unit if check_n else None,
+                                      check_unit_basis="search-design lower bound",
                                       finer_unit_s=finer_s, finer_unit_basis=finer_basis, finer_unit_at_least=finer_low,
                                       scan_s=scan_alone,
                                       plan={"evaluations": search_n, "check_runs": check_n, "scan": scan, "runs_per_evaluation": runs},
