@@ -1790,10 +1790,11 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
         main, marked = file_blocks(reply)
         mine_too = callers.get(rel, set())
         skipped: list[str] = []
-        # a changed signature must bind every call of the function in the other files too, as they are now
-        others = sorted({c for n in {scope, *reach, *mine_too} for c in direct_callers(env.code, rel, n) if c != rel})
+        # a changed signature must bind every use of the function in the other files too, as they are now: every file
+        # that can use it (an import under another name, a use as a value, a star import), not only those that call it by name
+        others = project_files_using(env.code, rel, {scope, *reach, *mine_too})
         new, names, why = splice(old, f"```python\n{main or marked.get(rel, '')}\n```", {scope, *reach, *mine_too}, skipped,
-                                 elsewhere=[_read(env.code / c) for c in others])
+                                 elsewhere=[(c, _read(env.code / c)) for c in others], module=Path(rel).stem)
         env.tried = {rel: new} if new is not None else {}  # the model's files as they came, kept even when refused
         if skipped:
             env.log.warning("[code_review] %s: the reply also defined %s, which `%s` does not reach; not used",

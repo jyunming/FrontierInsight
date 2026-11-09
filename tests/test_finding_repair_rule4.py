@@ -284,3 +284,39 @@ def test_a_guard_that_drops_what_ran_is_not_a_move() -> None:
     was, now = fr.without_main_guard(old, new)
     assert (was, now) == (old, new)  # print(X) is gone, not moved: compared as it is
     assert fr.frame_changes(was, now)
+
+
+# ---- a changed signature is checked against every file that can use the function (the real repair path) -------------------
+
+_SIG_ISSUE = {"id": "F-sig00001", "file": "sim.py", "function": "f", "changes_result": True,
+              "text": "f takes a second argument it never needs", "test": ".fi/finding_tests/F-sig00001_1.py",
+              "failure": "TypeError at the test's own call"}
+_SIG_SIM = "def f(x, y):\n    return x + y\n\n\ndef h():\n    return f(1)\n"
+_SIG_REPLY = "```python\ndef f(x):\n    return x\n```"
+
+
+def _sig_root(tmp_path: Path, other: str) -> Path:
+    root = tmp_path / "sig"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "sim.py").write_text(_SIG_SIM, encoding="utf-8")
+    (root / "code" / "use.py").write_text(other, encoding="utf-8")
+    tests = root / ".fi" / "finding_tests"
+    tests.mkdir(parents=True)
+    (tests / "F-sig00001_1.py").write_text("import sim\n\n\ndef test_f_takes_one_argument():\n    assert sim.f(3) == 3\n",
+                                           encoding="utf-8")
+    return root
+
+
+def test_a_call_through_an_import_alias_in_another_file_refuses_the_new_signature(tmp_path: Path) -> None:
+    other = "from sim import f as g\n\n\ndef run():\n    return g(1, 2)\n"
+    root = _sig_root(tmp_path, other)
+    ok, why = asyncio.run(fr._attempt(_env(root, _SIG_REPLY), dict(_SIG_ISSUE), "sim.py", "code", ""))
+    assert not ok and "use.py" in why, why
+    assert (root / "code" / "sim.py").read_text(encoding="utf-8") == _SIG_SIM
+
+
+def test_an_aliased_call_in_another_file_that_binds_lets_the_new_signature_through(tmp_path: Path) -> None:
+    other = "from sim import f as g\n\n\ndef run():\n    return g(1)\n"
+    root = _sig_root(tmp_path, other)
+    ok, why = asyncio.run(fr._attempt(_env(root, _SIG_REPLY), dict(_SIG_ISSUE), "sim.py", "code", ""))
+    assert ok, why
