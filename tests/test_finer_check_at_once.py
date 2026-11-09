@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -82,9 +83,10 @@ def _prepare(name: str):
     return block, record, outcome["rows"], sim
 
 
-def _drive(gen, sim, stop_after: int | None = None):
+def _drive(gen, sim, stop_after: int | None = None, stop_at: dict[int, set[int]] | None = None):
     """Answer the check's requests like the harness would; log each request as (kind, number of designs).
-    After ``stop_after`` designs, every one is answered ``{"stop": "time"}``."""
+    After ``stop_after`` designs, every one is answered ``{"stop": "time"}``. ``stop_at``: ``{request number: positions in
+    it}`` answered ``{"stop": "time"}`` while the others of that request finish (a pool that ends some designs earlier)."""
     log: list[tuple[str, int]] = []
     answered = 0
 
@@ -99,8 +101,11 @@ def _drive(gen, sim, stop_after: int | None = None):
         request = next(gen)
         while True:
             if request["kind"] == "evaluate_many":
+                number = len(log)
                 log.append(("many", len(request["requests"])))
-                request = gen.send([reply(r["cell"]) for r in request["requests"]])
+                skipped = (stop_at or {}).get(number, set())
+                request = gen.send([{"stop": "time"} if k in skipped else reply(r["cell"])
+                                    for k, r in enumerate(request["requests"])])
             else:
                 log.append(("one", 1))
                 request = gen.send(reply(request["cell"]))
@@ -213,3 +218,179 @@ async def test_a_finest_run_that_cannot_be_timed_counts_the_check_at_the_search_
     assert cut is None and result is None  # as before: the search design's cost, at the least
     assert cost_model.read(eng.quest_root).seconds("finer_check_unit") is None
     assert "could not time one run of its check" in _log(eng)
+
+
+# --- a design not run is not run; every design that finished is kept -----------------------------------------------------
+
+
+def _statuses(check: dict[str, Any]) -> list[list[Any]]:
+    return [check["baseline"]["status"], *[c["status"] for c in check["candidates"]]]
+
+
+@pytest.mark.parametrize("name", ["scalars", "array_even"])
+def test_a_design_stopped_in_the_middle_of_the_levels_keeps_the_ones_that_finished_after_it(name: str) -> None:
+    block, record, rows, sim = _prepare(name)
+    _full, log, _ = _drive(oc.check(block, record, rows), sim)
+    many = log[0][1]
+    check, _log, answered = _drive(oc.check(block, record, rows), sim, stop_at={0: {many // 2}})
+    assert check["finished"] is False and check["verdict"] == "unverified"
+    assert answered == many - 1 and check["evaluations"]["check"] == many - 1  # every other design is counted and kept
+    flat = [s for row in _statuses(check) for s in row]
+    assert flat.count(None) == 1, "exactly the stopped design is marked not run"
+    assert _statuses(check)[-1][-1] is not None, "the last design of the request finished and is kept"
+    assert check["checks"]["refinement"]["status"] == "not_checked"
+
+
+def test_designs_stopped_out_of_order_are_each_marked_not_run() -> None:
+    block, record, rows, sim = _prepare("scalars")
+    _full, log, _ = _drive(oc.check(block, record, rows), sim)
+    many = log[0][1]
+    check, _log, answered = _drive(oc.check(block, record, rows), sim, stop_at={0: {0, many - 2}})
+    assert answered == many - 2
+    assert [s for row in _statuses(check) for s in row].count(None) == 2
+
+
+def test_a_nudge_stopped_in_the_middle_keeps_the_nudges_that_finished_after_it() -> None:
+    block, record, rows, sim = _prepare("array_even")
+    _full, log, _ = _drive(oc.check(block, record, rows), sim)
+    levels_n, nudges_n = log[0][1], log[1][1]
+    check, _log, answered = _drive(oc.check(block, record, rows), sim, stop_at={1: {nudges_n // 2}})
+    assert check["finished"] is False and check["verdict"] == "unverified"
+    assert answered == levels_n + nudges_n - 1 and check["evaluations"]["check"] == levels_n + nudges_n - 1
+    assert check["checks"]["refinement"]["status"] == "passed"  # every level was measured
+    assert check["checks"]["neighbourhood"]["status"] != "passed"
+
+
+def test_with_no_stop_nothing_is_marked_not_run() -> None:
+    """The known positive of the three above: nobody stopped."""
+    for name in SCENARIOS:
+        block, record, rows, sim = _prepare(name)
+        check, _log, _ = _drive(oc.check(block, record, rows), sim, stop_at={})
+        assert [s for row in _statuses(check) for s in row].count(None) == 0
+        assert check["finished"] is True
+
+
+# --- a simulation that cannot be loaded ----------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_simulation_that_cannot_be_loaded_gives_the_verdict_one_after_another_gave(tmp_path: Path) -> None:
+    """Every design of the check fails with the load error (the harness answers each one so), so the verdict, the counts and
+    the checks are those of the same answers given one at a time."""
+    from core import optimise
+    from tests.test_optimise_runner import LocalExecutor
+    from tests.test_optimum_check import ARTEFACT_SIM, _block, _runner_quest
+
+    block = _block(design_variables=[{"name": "x", "low": -1, "high": 5, "kind": "integer"}],
+                   baseline={"values": {"x": 0}, "source": "s"}, numerical_settings={"mesh": {"search": 0.5}},
+                   evaluation_budget={"starts": 1, "per_start": 20}, search_method="exhaustive")
+    root = _runner_quest(tmp_path, ARTEFACT_SIM)
+    run = await optimise.run_search(LocalExecutor(), sys.executable, root, "code/simulate.py", {"optimisation": block},
+                                    base_seed=0, timeout_s=300)
+    (root / "code" / "simulate.py").write_text("raise ImportError('cannot be loaded')\n", encoding="utf-8")
+    check, _text, _key = await oc.run_check(LocalExecutor(), sys.executable, root, "code/simulate.py",
+                                            {"optimisation": block}, run, base_seed=0, timeout_s=300, at_once=4)
+    rows = [json.loads(x) for x in (run.files.get(optimise.LEDGER_PATH.as_posix()) or "").splitlines() if x.strip()]
+    rows = [r for r in rows if isinstance(r, dict) and r.get("event") == "evaluation"]
+    why = "the simulation could not be loaded (ImportError: cannot be loaded)"
+    gen = oc.check(block, run.record, rows)
+    request = next(gen)
+    try:
+        while True:
+            many = request["requests"] if request["kind"] == "evaluate_many" else [request]
+            replies = [{"failed": why} for _r in many]
+            request = gen.send(replies if request["kind"] == "evaluate_many" else replies[0])
+    except StopIteration as done:
+        reference = done.value
+    assert check["verdict"] == reference["verdict"]
+    assert check["evaluations"]["failed"] == reference["evaluations"]["failed"] > 0
+    assert {k: v["status"] for k, v in check["checks"].items()} == {k: v["status"] for k, v in reference["checks"].items()}
+
+
+# --- the estimate: waves, no assumed parallelism, one whole design ----------------------------------------------------
+
+
+def test_the_check_is_counted_in_whole_waves_and_one_after_another_without_a_measured_slowdown() -> None:
+    from core import cost_model as cm
+
+    assert cm.check_wall_s(100.0, [8, 72], at_once=8, slowdown=None) == 80 * 100.0  # not assumed parallel
+    assert cm.check_wall_s(100.0, [8, 72], at_once=8, slowdown=2.0) == (1 + 9) * 100.0 * 2.0
+    assert cm.check_wall_s(100.0, [8, 65], at_once=8, slowdown=2.0) == (1 + 9) * 100.0 * 2.0  # a part-filled wave is whole
+    assert cm.check_wall_s(100.0, [3, 5], at_once=1, slowdown=2.0) == 800.0  # one at a time: alone
+    assert cm.check_wall_s(100.0, [], at_once=8, slowdown=2.0) == 0.0
+
+
+def test_the_batches_of_a_plan_are_the_requests_of_the_check() -> None:
+    block, record, rows, sim = _prepare("array_even")
+    _check, log, _ = _drive(oc.check(block, record, rows), sim)
+    planned = op.check_batches(block)
+    assert len(planned) == len(log) and all(p >= got for p, (_k, got) in zip(planned, log))
+    assert sum(planned) * op.budget(block)["check_runs"] == op.budget(block)["check"]
+
+
+def test_memory_limits_how_many_run_together() -> None:
+    from core import execution
+
+    assert execution.at_once_for_memory(16, None) == 16  # nothing measured: the cores decide
+    assert execution.at_once_for_memory(16, 4000.0, free_mb=30000.0, total_mb=32000.0) == 5  # (30000-3200)/(1.25*4000)
+    assert execution.at_once_for_memory(16, 40000.0, free_mb=30000.0, total_mb=32000.0) == 1  # one always runs
+    assert execution.at_once_for_memory(4, 100.0, free_mb=30000.0, total_mb=32000.0) == 4
+
+
+@pytest.mark.asyncio
+async def test_a_study_without_a_measured_slowdown_is_not_priced_as_if_it_ran_in_parallel(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """10 runs of 1000 s with 8 at once and no slowdown measured are counted one after another (10,000 s), not as 1250 s."""
+    eng, runner, block = await _engine(tmp_path, per_start=2)
+    runner.at_once = 8
+    cut, result = await _size(eng, runner, block, monkeypatch, per_eval=1.0, finer=1000.0)
+    assert cut is not None or result is not None, "10 runs of 1000 s do not fit one hour"
+
+
+@pytest.mark.asyncio
+async def test_one_whole_design_is_timed_and_its_start_is_counted_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import run_estimate
+
+    eng, runner, block = await _engine(tmp_path, per_start=2)
+    block["runs_per_evaluation"] = 4
+    block["check_runs"] = 4
+    asked: list[int] = []
+
+    async def timed(*a: Any, name: str = "pilot", runs: int = 1, **k: Any) -> Any:
+        if name == "pilot_finer":
+            asked.append(runs)
+            return run_estimate.Probe(None, None, {}, 400.0), ""  # a whole design: its start and its 4 runs
+        return run_estimate.Probe(None, None, {}, 1.0), ""
+
+    monkeypatch.setattr(run_estimate, "_time_one", timed)
+    eng._protocol_block = lambda state: {"optimisation": block, "thresholds": {}}  # type: ignore[method-assign]
+    got = await eng._time_finer_check(block, {}, runner, sys.executable, None, deterministic=False, thresholds={}, inside=None,
+                                      left_s=1e6, limit_s=3600.0)
+    assert asked == [4], "a design of the check is timed with the runs it has"
+    assert got[0] == pytest.approx(100.0), "per run: the start-up of a design is counted once, over its runs"
+    assert got[2] is False
+
+
+@pytest.mark.asyncio
+async def test_a_timing_that_hit_its_allowance_stays_a_lower_bound(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import run_estimate
+
+    eng, runner, block = await _engine(tmp_path, per_start=2)
+
+    async def timed(*a: Any, name: str = "pilot", **k: Any) -> Any:
+        if name == "pilot_finer":
+            return run_estimate.Probe(None, None, {}, 900.0, at_least=True), ""
+        return run_estimate.Probe(None, None, {}, 1.0), ""
+
+    monkeypatch.setattr(run_estimate, "_time_one", timed)
+    eng._protocol_block = lambda state: {"optimisation": block, "thresholds": {}}  # type: ignore[method-assign]
+    got = await eng._time_finer_check(block, {}, runner, sys.executable, None, deterministic=True, thresholds={}, inside=None,
+                                      left_s=1e6, limit_s=3600.0)
+    assert got[0] == 900.0 and got[2] is True
+    assert "did not finish in the time FI gave its timing" in _log(eng)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_timing_is_said_and_the_check_stays_a_lower_bound(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    eng, cut, result = await _estimate(tmp_path, monkeypatch, per_eval=1.0, finer=None)
+    assert "counted at the cost of one search design, at the least" in _log(eng)

@@ -167,6 +167,8 @@ class Probe:
     #: The setting's time the first time it ran, when it was run a second time and took far less (:data:`ONCE`): what it
     #: computed the first time was kept and used again (a cache the settings share), and ``seconds`` is the second time.
     first_s: float | None = None
+    #: The most memory (MB) the timed process held, when the executor measured it.
+    peak_mb: float | None = None
 
     @property
     def once_s(self) -> float:
@@ -713,7 +715,7 @@ async def _time_one(
                     spread[name] = max(spread.get(name, 0.0), statistics.stdev(xs))  # the sample standard deviation
     return Probe(None, None, cell, max(seconds, 1e-6), spread=spread,
                  trials=[dict(r.get("values") or {}) for r in done[:2]], fixed_s=fixed, per_trial_s=per_trial,
-                 timed_trials=len(done), call_s=sum(durations)), ""
+                 timed_trials=len(done), call_s=sum(durations), peak_mb=getattr(result, "peak_mb", None)), ""
 
 
 async def slowdown_at_once(

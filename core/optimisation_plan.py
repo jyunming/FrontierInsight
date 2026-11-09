@@ -1020,6 +1020,15 @@ def budget(block: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def check_batches(block: dict[str, Any]) -> list[int]:
+    """The designs of FI's check at finer settings, as the requests it makes (core/optimum_check.py): the baseline and the
+    best designs at every finer level together, then every nudge of the best design together (at most this many). Each
+    design is ``check_runs`` runs of the simulation; ``budget(block)["check"]`` counts the runs."""
+    count = budget(block)
+    first = (count["candidates"] + 1) * count["levels"]
+    return [n for n in (first, 2 * count["continuous"]) if n > 0]
+
+
 def improvement_rule(block: dict[str, Any]) -> tuple[str, str]:
     """``(the rule for "better than the baseline", where it comes from)``."""
     unit = _text((block.get("objective") or {}).get("unit"))

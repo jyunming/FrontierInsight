@@ -169,7 +169,9 @@ def test_settings_run_at_once_share_the_cost_only_when_the_slowdown_was_measured
     assert alone.check_reserve_s == 400.0 and alone.wall_per_evaluation_s == 8.0  # slowdown unknown: one after another
     model.slowdown = 2.0  # each takes twice as long beside seven others, eight run together: a quarter of the time
     shared = cm.search_plan(model, 10_000.0)
-    assert shared.check_reserve_s == 100.0 and shared.wall_per_evaluation_s == 2.0
+    # the search's evaluations share the time evenly (2 s each); the check's 10 runs are two waves of at most eight, the
+    # second part-filled but whole: 2 x 40 s x 2
+    assert shared.check_reserve_s == 160.0 and shared.wall_per_evaluation_s == 2.0
     assert shared.evaluations > alone.evaluations
 
 

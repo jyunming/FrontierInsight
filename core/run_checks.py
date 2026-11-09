@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from . import cost_model as _cost_model
+from . import execution as _execution
 from . import frozen_protocol as _frozen
 from . import numeric_warnings as _numeric
 from . import in_run as _in_run
@@ -2182,17 +2183,27 @@ class RunChecksMixin:
             unit = per_eval or first_s or None
             finer_s: float | None = None
             finer_basis, finer_low = _cost_model.MEASURED, False
+            check_batches: list[int] = []
+            check_trials, check_together = 1, at_once
             if check_n and unit:
-                # Whenever a check is planned, one run of it at its finest settings is timed: a finer setting costs far more
-                # than one design of the search (a check of 72 runs at ~30 minutes each was counted at ~4 minutes a run).
-                finer_s, finer_basis, finer_low = await self._time_finer_check(
+                # Whenever a check is planned, one design of it at its finest settings is timed: a finer setting costs far
+                # more than one design of the search (a check of 72 runs at ~30 minutes each was counted at ~4 minutes a run).
+                finer_s, finer_basis, finer_low, finer_mb = await self._time_finer_check(
                     block, state, runner, python, env, deterministic=deterministic, thresholds=thresholds, inside=inside,
                     left_s=budget_s - (time.monotonic() - timing_started), limit_s=limit_s)
                 core_est = whole if whole is not None else est
-                # The check runs its designs ``at_once`` at a time like the search (its nudges and its settings are asked
-                # for together), each as much slower as FI measured.
-                share = (slowdown if slowdown is not None else 1.0) / at_once if at_once > 1 else 1.0
-                check_s = (finer_s if finer_s else unit / runs) * check_n * share
+                check_trials = max(1, int(_optimisation_plan.budget(block).get("check_runs") or 1))
+                check_batches = _optimisation_plan.check_batches(block)
+                # The check runs its designs together like the search (every level, then every nudge, are one request each),
+                # as many at a time as the computer's memory lets run, in whole waves, and as much slower beside each
+                # other as FI measured (none measured: one after another). See core/cost_model.py::check_wall_s.
+                check_together = _execution.at_once_for_memory(at_once, finer_mb)
+                if finer_s is None:
+                    self._log.info("[execute] the check of the best design is counted at the cost of one search design, at "  # type: ignore[attr-defined]
+                                   "the least: one design of it at its finest settings could not be timed")
+                per_trial = finer_s if finer_s else unit / runs
+                check_s = _cost_model.check_wall_s(per_trial * check_trials, check_batches, at_once=check_together,
+                                                   slowdown=slowdown)
                 with_check = _replace(core_est, seconds=core_est.seconds + check_s, at_least=True)
                 whole = with_check
                 if _estimate.known_too_long(with_check, limit_s):
@@ -2207,7 +2218,9 @@ class RunChecksMixin:
                                       check_unit_basis="search-design lower bound",
                                       finer_unit_s=finer_s, finer_unit_basis=finer_basis, finer_unit_at_least=finer_low,
                                       scan_s=scan_alone,
-                                      plan={"evaluations": search_n, "check_runs": check_n, "scan": scan, "runs_per_evaluation": runs},
+                                      plan={"evaluations": search_n, "check_runs": check_n, "scan": scan, "runs_per_evaluation": runs,
+                                            "check_batches": check_batches, "check_trials": check_trials,
+                                            "check_at_once": check_together},
                                       design=design_key)
             sized = self._size_the_search(block, limit_s, check_n, scan_alone, design_key, searched or checked)
             if not searched and not checked:
@@ -2483,26 +2496,31 @@ class RunChecksMixin:
 
     async def _time_finer_check(self, block: dict[str, Any], state: Any, runner: Any, python: Any, env: Any, *,
                                 deterministic: bool, thresholds: Any, inside: Any, left_s: float,
-                                limit_s: float) -> tuple[float | None, str, bool]:
-        """Seconds one run of FI's check takes at its finest numerical settings (the baseline design at the last level of
-        :func:`core.optimum_check.levels_of`), or ``None`` when the plan names no finer setting or it could not be timed in
-        the time left, with where the number comes from and whether it is only a lower bound. A failure here is not the
-        run's: the check is then counted at the search design's cost, as a lower bound. The time of one trial without the
-        process start is used where the timing separates the two; otherwise the number includes the start and says so."""
+                                limit_s: float) -> tuple[float | None, str, bool, float | None]:
+        """Seconds one RUN of FI's check takes at its finest numerical settings, or ``None`` when the plan names no finer
+        setting or it could not be timed in the time left; where the number comes from; whether it is only a lower bound (the
+        timing hit its allowance); and the most memory (MB) the timed process held, when known. One design of the check is
+        timed as the check runs it (the process start and the loading once, then its ``check_runs`` runs of the simulation:
+        :func:`core.run_estimate._time_one` with ``runs=check_runs``) and divided by its ``check_runs``: the check's run count
+        (``optimisation_plan.budget(block)["check"]``) is designs times ``check_runs``, so the number of runs times this is
+        the designs times one whole design, and the start-up is counted once per design, not once per run. A failure here is
+        not the run's: the check is then counted at the search design's cost, as a lower bound, and the log says so."""
         from . import optimise as _optimise
+        from . import optimisation_plan as _optimisation_plan
         from . import optimum_check as _optimum_check
 
-        none: tuple[float | None, str, bool] = (None, _cost_model.MEASURED, False)
+        none: tuple[float | None, str, bool, float | None] = (None, _cost_model.MEASURED, False, None)
         if left_s < 5:
             return none
         try:
             level = (_optimum_check.levels_of(block).get("levels") or [{}])[-1]
             if not level:
                 return none
+            check_runs = max(1, int(_optimisation_plan.budget(block).get("check_runs") or 1))
             cell = _optimise.complete_case(self._protocol_block(state), dict(level), keep_inside=True)  # type: ignore[attr-defined]
             probe, why = await _estimate._time_one(
                 self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(),  # type: ignore[attr-defined]
-                cell, runs=1, deterministic=deterministic, timeout_s=int(max(5, min(limit_s / 4.0, left_s))), env=env,
+                cell, runs=check_runs, deterministic=deterministic, timeout_s=int(max(5, min(limit_s / 4.0, left_s))), env=env,
                 thresholds=thresholds, in_each_run=inside or None, name="pilot_finer")
         except Exception as exc:  # noqa: BLE001 -- an optional timing must never stop a run
             self._log.info("[execute] FI could not time one run of its check at finer settings (%r)", exc)  # type: ignore[attr-defined]
@@ -2511,7 +2529,11 @@ class RunChecksMixin:
             self._log.info("[execute] FI could not time one run of its check at finer settings (%s); the check is counted "  # type: ignore[attr-defined]
                            "at the cost of one search design, at least", str(why)[:200])
             return none
-        return float(probe.seconds), "measured, includes the start of the process", bool(probe.at_least)
+        if probe.at_least:
+            self._log.info("[execute] one design of the check at finer settings did not finish in the time FI gave its timing "  # type: ignore[attr-defined]
+                           "(%s); the check is counted at least at that", _estimate.plain_duration(float(probe.seconds)))
+        return (float(probe.seconds) / check_runs, "measured, includes the start of the process", bool(probe.at_least),
+                getattr(probe, "peak_mb", None))
 
     def _size_the_search(self, block: dict[str, Any], limit_s: float, check_runs: int, scan_s: float, design: str,
                          cut: Any) -> Any:
