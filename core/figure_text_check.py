@@ -229,48 +229,56 @@ def planned_references(protocol: Any) -> dict[str, dict[str, Any]]:
     return out
 
 
+def _result_panels(panels: list[dict[str, Any]], rid: str) -> list[dict[str, Any]]:
+    """The panels (not custom drawings) in which a series of FI's record is the result ``rid``."""
+    return [p for p in panels if not p.get("raw") and any(
+        isinstance(s, dict) and s.get("kind") != "image" and str(s.get("what")) == rid for s in p.get("series") or [])]
+
+
+def _is_bound(line: dict[str, Any], ref: dict[str, Any], *, curve: bool = False) -> bool:
+    """Whether FI's record binds ``line`` (a reference line, or a curve of a panel's series) to the plan's reference ``ref``: FI
+    recorded it as drawn from the plan (``source == "plan"``) under one of the reference's ids, and a line is horizontal (``axis``
+    "y", on the axis of the result). A value or a name that happens to be equal is no binding: FI itself records a typed number
+    that matches exactly one reference of the plan as that reference, so an unbound line is another thing."""
+    if line.get("source") != "plan" or str(line.get("id")).split("@")[0] not in ref["ids"]:
+        return False
+    return curve or line.get("axis", "y") == "y"
+
+
 def _drawn_reference(calls: dict[str, Any], rid: str, ref: dict[str, Any]) -> bool:
-    """Whether some panel of the record draws the plan's reference ``ref`` of result ``rid``: a line or curve FI drew from the
-    plan's records under one of its ids, a series that carries the reference's own name, or (for a reference given as a
-    number) a line at that value."""
-    number = ref["value"] if isinstance(ref["value"], (int, float)) and not isinstance(ref["value"], bool) else None
-    named = [ref["value"]] if isinstance(ref["value"], str) and ref["value"] != rid else []
-    for p in _panels(calls):
-        for line in p.get("refs") or []:
-            if not isinstance(line, dict):
-                continue
-            if line.get("source") == "plan" and str(line.get("id")) in ref["ids"]:
-                return True
-            if number is not None and isinstance(line.get("value"), (int, float)) \
-                    and abs(float(line["value"]) - float(number)) <= 1e-9 * max(1.0, abs(float(number))):
-                return True
-        for s in p.get("series") or []:
-            if not isinstance(s, dict):
-                continue
-            ident = str(s.get("id")).split("@")[0]
-            if (s.get("source") == "plan" and ident in ref["ids"]) or ident in named:
-                return True
+    """Whether the plan's reference ``ref`` of result ``rid`` is drawn: in a panel that draws the result, a line (on the result's
+    axis) or a curve that FI's record binds to that reference (:func:`_is_bound`). A line elsewhere, on another axis or without
+    the plan as its source is not proof."""
+    for p in _result_panels(_panels(calls), rid):
+        if any(isinstance(r, dict) and _is_bound(r, ref) for r in p.get("refs") or []):
+            return True
+        if any(isinstance(s, dict) and _is_bound(s, ref, curve=True) for s in p.get("series") or []):
+            return True
     return False
 
 
 def missing_references(calls: dict[str, Any], protocol: Any) -> list[dict[str, Any]]:
     """The references the plan declares for a result a figure draws and the figure does not draw: ``[{"result", "label",
-    "formula", "other_line"}]``; ``other_line`` says the figure draws a line or curve FI did not take from the plan, so FI cannot say the reference is missing, only that it cannot confirm it. A result counts as drawn when a series of a panel FI checked has it as its ``what``; a figure whose every
-    panel is a custom drawing says nothing FI can read, so it has none. A fault of the figure (FI's record of what it draws
-    against the plan), never a reading of any text."""
+    "formula", "other_line"}]``; ``other_line`` says a panel that draws the result also has a line or curve FI could not bind to
+    the plan's reference (not taken from the plan, or on another axis), so FI cannot say the reference is missing, only that it
+    cannot confirm it. A reference counts as drawn only when FI's record binds a line or curve of the result's own panel to it
+    (:func:`_drawn_reference`); a figure whose every panel is a custom drawing says nothing FI can read, so it has none. A fault
+    of the figure (FI's record of what it draws against the plan), never a reading of any text."""
     planned = planned_references(protocol)
     panels = _panels(calls)
     if not planned or not panels or all(p.get("raw") for p in panels):
         return []
     out: list[dict[str, Any]] = []
-    drawn = {str(s.get("what")) for p in panels if not p.get("raw") for s in p.get("series") or []
-             if isinstance(s, dict) and s.get("kind") != "image"}
-    # a line or curve beside the series that FI did not take from the plan (typed or computed in the figure): it may be the reference
-    other = any(isinstance(r, dict) and r.get("source") != "plan" for p in panels for r in p.get("refs") or []) or any(
-        isinstance(s, dict) and s.get("kind") == "curve" and s.get("source") != "plan" for p in panels for s in p.get("series") or [])
     for rid, ref in planned.items():
-        if rid in drawn and not _drawn_reference(calls, rid, ref):
-            out.append({"result": rid, "label": ref["label"], "formula": ref["formula"], "other_line": other})
+        mine = _result_panels(panels, rid)
+        if not mine or _drawn_reference(calls, rid, ref):
+            continue
+        # a line or curve beside the result's series in its own panel that FI could not bind to the reference: it may be the reference
+        other = any(isinstance(r, dict) and not _is_bound(r, ref) and (r.get("source") != "plan" or str(r.get("id")) in ref["ids"])
+                    for p in mine for r in p.get("refs") or []) or any(
+            isinstance(s, dict) and s.get("kind") == "curve" and (s.get("source") != "plan" or str(s.get("id")).split("@")[0] in ref["ids"])
+            for p in mine for s in p.get("series") or [])
+        out.append({"result": rid, "label": ref["label"], "formula": ref["formula"], "other_line": other})
     return out
 
 

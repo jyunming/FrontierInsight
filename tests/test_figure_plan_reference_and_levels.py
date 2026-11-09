@@ -59,8 +59,10 @@ def test_a_reference_drawn_from_the_plan_by_its_id_is_not_missing():
 def test_a_reference_curve_from_the_plan_or_one_that_carries_the_references_name_is_not_missing():
     curve = _series("rate", "other", kind="curve", source="plan")
     assert ftc.missing_references(_calls(_panel([_series("rate@size:1", "rate"), curve])), PROTOCOL) == []
-    named = _series("rate_theory", "other")
+    named = _series("rate_theory", "other", kind="curve", source="plan")
     assert ftc.missing_references(_calls(_panel([_series("rate", "rate"), named])), PROTOCOL) == []
+    # a series that only happens to carry the reference's name, with no record of coming from the plan, is not the reference
+    assert ftc.missing_references(_calls(_panel([_series("rate", "rate"), _series("rate_theory", "other")])), PROTOCOL)
 
 
 def test_the_results_own_curve_is_not_its_reference():
@@ -74,11 +76,36 @@ def test_a_line_that_is_not_the_plans_does_not_count_as_its_reference():
     assert ftc.missing_references(_calls(_panel([_series("rate", "rate")], [typed])), PROTOCOL)
 
 
-def test_a_reference_given_as_a_number_is_drawn_by_a_line_at_that_number():
+def test_a_reference_given_as_a_number_is_drawn_by_a_line_FI_recorded_as_that_reference():
     only = _calls(_panel([_series("level", "level")]))
     assert [f["result"] for f in ftc.missing_references(only, PROTOCOL)] == ["level"]
-    drawn = _calls(_panel([_series("level", "level")], [_line("line-1", 0.5, source="stated in the figure")]))
+    # a typed number that matches one reference of the plan is recorded by FI as that reference (source plan)
+    drawn = _calls(_panel([_series("level", "level")], [_line("level", 0.5)]))
     assert ftc.missing_references(drawn, PROTOCOL) == []
+    # an equal number with no record of coming from the plan is a coincidence, not the reference
+    typed = _calls(_panel([_series("level", "level")], [_line("line-1", 0.5, source="stated in the figure")]))
+    assert [(f["result"], f["other_line"]) for f in ftc.missing_references(typed, PROTOCOL)] == [("level", True)]
+
+
+def test_an_unrelated_vertical_line_at_the_value_is_not_the_reference():
+    vertical = dict(_line("line-1", 0.5, source="stated in the figure"), axis="x")
+    got = ftc.missing_references(_calls(_panel([_series("level", "level")], [vertical])), PROTOCOL)
+    assert [(f["result"], f["other_line"]) for f in got] == [("level", True)]
+    # even a plan line under the reference's id, drawn on the other axis, is not a line at the result's level
+    plan_vertical = dict(_line("level", 0.5), axis="x")
+    assert [f["result"] for f in ftc.missing_references(_calls(_panel([_series("level", "level")], [plan_vertical])), PROTOCOL)] == ["level"]
+
+
+def test_a_line_in_another_panel_is_not_the_reference_of_this_panels_result():
+    first = _panel([_series("level", "level")], n=1)
+    second = _panel([_series("spread", "spread")], [_line("line-1", 0.5, source="stated in the figure")], n=2)
+    got = ftc.missing_references(_calls(first, second), PROTOCOL)
+    assert [(f["result"], f["other_line"]) for f in got] == [("level", False)]  # the other panel's line does not blur this note
+    # the plan's own line for the result, in the panel that draws the result, still counts
+    ok = _panel([_series("level", "level")], [_line("level", 0.5)], n=1)
+    assert ftc.missing_references(_calls(ok, second), PROTOCOL) == []
+    # the same plan line in a panel that draws another result is not proof for this one
+    assert [f["result"] for f in ftc.missing_references(_calls(first, _panel([_series("spread", "spread")], [_line("level", 0.5)], n=2)), PROTOCOL)] == ["level"]
 
 
 def test_a_level_the_plan_names_is_drawn_by_a_line_under_that_name():
