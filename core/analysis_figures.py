@@ -1173,9 +1173,10 @@ def _default_points(table: Any, rid: str, key: str, derived: Any = None) -> dict
 
 
 def _freeze(value: Any) -> Any:
-    """A setting's value as something that can be a dict key or sit in a set, equal exactly when the values are equal in
-    Python (``[1]``, ``[1.0]`` and ``[True]`` are one value, as ``==`` says): a list or tuple becomes a tuple, a dict a
-    set of (key, frozen value) pairs, a set a frozenset, and every other value stays as it is. The one form used wherever
+    """A setting's value as something that can be a dict key or sit in a set: two values read from a JSON record are one
+    value exactly when they are equal in Python (``[1]``, ``[1.0]`` and ``[True]`` are one value, as ``==`` says). A list
+    or tuple becomes a tuple, a dict the tagged ``("dict", frozenset of (key, frozen value) pairs)``, a set a frozenset,
+    and every other value stays as it is. The one form used wherever
     FI groups or lists the values of a setting (a copy of core/run_manifest.py's: this file stands alone in the quest)."""
     if isinstance(value, (list, tuple)):
         return tuple(_freeze(v) for v in value)
