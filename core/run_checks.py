@@ -2529,10 +2529,16 @@ class RunChecksMixin:
             self._log.info("[execute] FI could not time one run of its check at finer settings (%s); the check is counted "  # type: ignore[attr-defined]
                            "at the cost of one search design, at least", str(why)[:200])
             return none
-        if probe.at_least:
-            self._log.info("[execute] one design of the check at finer settings did not finish in the time FI gave its timing "  # type: ignore[attr-defined]
-                           "(%s); the check is counted at least at that", _estimate.plain_duration(float(probe.seconds)))
-        return (float(probe.seconds) / check_runs, "measured, includes the start of the process", bool(probe.at_least),
+        # Only a design the timing ran whole is a measurement: one cut by its allowance, or stopped early and extrapolated,
+        # is what the design costs at the least.
+        whole = 1 if deterministic else check_runs
+        low = bool(probe.at_least) or 0 < int(probe.timed_trials or 0) < whole  # (0: a probe made by hand)
+        if low:
+            self._log.info("[execute] one design of the check at finer settings was timed on %d of its %d run(s)%s: %s per "  # type: ignore[attr-defined]
+                           "design is a lower bound, and the check is counted at least at that",
+                           int(probe.timed_trials or 0), whole, " (the allowance for the timing ran out)" if probe.at_least else "",
+                           _estimate.plain_duration(float(probe.seconds)))
+        return (float(probe.seconds) / check_runs, "measured, includes the start of the process", low,
                 getattr(probe, "peak_mb", None))
 
     def _size_the_search(self, block: dict[str, Any], limit_s: float, check_runs: int, scan_s: float, design: str,

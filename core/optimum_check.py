@@ -343,6 +343,11 @@ def check(block: dict[str, Any], search_record: dict[str, Any], rows: list[dict[
         cache[key] = judged
         return judged
 
+    def has_answer(design: dict[str, Any], level: int) -> bool:
+        """An answer exists for this design at this level: it came with the batch, or an earlier request had it."""
+        key = (space.key(space.canonical(design)), level)
+        return key in pending or key in cache
+
     def judge_together(asks: list[tuple[dict[str, Any], int, str, Callable]]):
         """Judge, in the order of ``asks``, the answers :func:`ask_together` left in ``pending``. Every run that finished
         is recorded, wherever it stands in the batch; a design that was not run (its answer is a stop) is left as not run;
@@ -350,9 +355,8 @@ def check(block: dict[str, Any], search_record: dict[str, Any], rows: list[dict[
         before the first stop are the ones that exist, so with no stop the record is the same.)"""
         stopped = False
         for design, level, role, store in asks:
-            key = (space.key(space.canonical(design)), level)
-            if stopped and key not in pending and key not in cache:
-                continue  # never asked for in this batch and the time is up: not run
+            if stopped and not has_answer(design, level):
+                continue  # no answer exists for this one and the time is up: not run
             try:
                 store((yield from evaluate(design, level, role)))
             except _Stop:
@@ -385,7 +389,7 @@ def check(block: dict[str, Any], search_record: dict[str, Any], rows: list[dict[
         chosen = _choose(cands, finest, limits, margin, sign)
         if chosen is not None:
             try:
-                yield from _probe(space, chosen, finest, evaluate, probes, ask_together, pending)
+                yield from _probe(space, chosen, finest, evaluate, probes, ask_together, has_answer)
             finally:
                 pending.clear()
     except _Stop:
@@ -420,7 +424,7 @@ def _store(slots: list, level: int) -> Callable:
 
 
 def _probe(space: Any, chosen: dict[str, Any], level: int, evaluate: Callable, out: dict[str, Any],
-           ask: Callable | None = None, pending: dict | None = None):
+           ask: Callable | None = None, answered: Callable | None = None):
     """Each variable of the chosen design nudged both ways (2% of its range; one whole number), inside its range, into
     ``out`` (filled as it goes, so a check cut short keeps what it did). A design within half a nudge of an edge of its
     range is at that edge, and is not nudged past it. The nudges do not depend on each other's answers: with ``ask``
@@ -452,9 +456,8 @@ def _probe(space: Any, chosen: dict[str, Any], level: int, evaluate: Callable, o
     stopped = False
     for name, entry, sides in plan:
         for side, nudged, k in sides:
-            key = (space.key(space.canonical(nudged)), level)
-            if stopped and key not in (pending or {}):
-                continue  # not run: the time is up and this one was not part of the request
+            if stopped and not (answered is not None and answered(nudged, level)):
+                continue  # not run: the time is up and no answer exists for this one
             if not stopped:
                 out.setdefault(name, entry)
             try:

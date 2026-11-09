@@ -275,8 +275,9 @@ def test_with_no_stop_nothing_is_marked_not_run() -> None:
 
 @pytest.mark.asyncio
 async def test_a_simulation_that_cannot_be_loaded_gives_the_verdict_one_after_another_gave(tmp_path: Path) -> None:
-    """Every design of the check fails with the load error (the harness answers each one so), so the verdict, the counts and
-    the checks are those of the same answers given one at a time."""
+    """When every design of the check returns the same load error (the harness answers each one so), the verdict, the
+    failed count and the checks are the same as for those answers given one at a time. This shows that case only, not that
+    the batch equals the serial version for answers that differ."""
     from core import optimise
     from tests.test_optimise_runner import LocalExecutor
     from tests.test_optimum_check import ARTEFACT_SIM, _block, _runner_quest
@@ -359,7 +360,7 @@ async def test_one_whole_design_is_timed_and_its_start_is_counted_once(tmp_path:
     async def timed(*a: Any, name: str = "pilot", runs: int = 1, **k: Any) -> Any:
         if name == "pilot_finer":
             asked.append(runs)
-            return run_estimate.Probe(None, None, {}, 400.0), ""  # a whole design: its start and its 4 runs
+            return run_estimate.Probe(None, None, {}, 400.0, timed_trials=4), ""  # a whole design: its start and its 4 runs
         return run_estimate.Probe(None, None, {}, 1.0), ""
 
     monkeypatch.setattr(run_estimate, "_time_one", timed)
@@ -387,10 +388,103 @@ async def test_a_timing_that_hit_its_allowance_stays_a_lower_bound(tmp_path: Pat
     got = await eng._time_finer_check(block, {}, runner, sys.executable, None, deterministic=True, thresholds={}, inside=None,
                                       left_s=1e6, limit_s=3600.0)
     assert got[0] == 900.0 and got[2] is True
-    assert "did not finish in the time FI gave its timing" in _log(eng)
+    assert "the allowance for the timing ran out" in _log(eng) and "lower bound" in _log(eng)
 
 
 @pytest.mark.asyncio
 async def test_a_failed_timing_is_said_and_the_check_stays_a_lower_bound(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     eng, cut, result = await _estimate(tmp_path, monkeypatch, per_eval=1.0, finer=None)
     assert "counted at the cost of one search design, at the least" in _log(eng)
+
+
+# --- a nudge whose answer exists already is kept after a stop -------------------------------------------------------------
+
+
+def test_a_nudge_answered_earlier_is_kept_after_a_stopped_one() -> None:
+    """After a stop, a nudge that has an answer (here: one an earlier request had, so it is in the cache and not in the
+    batch) is recorded; one with no answer is not run."""
+    block, why = op.normalize(_scalar_block())
+    assert why is None
+    space = osearch.Space(block["design_variables"])
+    chosen = {"design": space.canonical(block["baseline"]["values"])}
+    seen: list[tuple[Any, ...]] = []
+    cached = {"y": 0.0}  # the y design nudged up is the one with an answer already
+
+    def evaluate(design: dict[str, Any], level: int, role: str):
+        seen.append((design["x"], design["y"]))
+        if len(seen) == 1:
+            raise oc._Stop()
+        return {"status": "ok", "objective": 1.0}
+        yield  # pragma: no cover -- makes it a generator
+
+    def ask(asks):
+        return
+        yield  # pragma: no cover
+
+    def answered(design: dict[str, Any], level: int) -> bool:
+        return design["x"] == 0.0 and design["y"] > cached["y"]
+
+    out: dict[str, Any] = {}
+    with pytest.raises(oc._Stop):
+        for _ in oc._probe(space, chosen, 0, evaluate, out, ask, answered):
+            pass
+    assert set(out["x"]["sides"]) == set(), "x down was the stopped one; x up has no answer"
+    assert list(out["y"]["sides"]) == ["up"], "the nudge that has an answer is kept"
+    assert len(seen) == 2  # the stopped one and the kept one: the others were not run
+
+
+# --- a timing of one design is a measurement only when it ran the whole design ----------------------------------------------
+
+
+class _PartialExecutor:
+    """A stand-in for the process: it writes the rows of ``done`` trials the harness would have written and then either
+    finishes or runs out of its allowance. The real timing function (core.run_estimate._time_one) reads them."""
+
+    def __init__(self, done: int, timed_out: bool) -> None:
+        self.done, self.timed_out = done, timed_out
+
+    async def execute(self, cmd, *, cwd, timeout_s, env=None):  # noqa: ANN001, ANN201
+        from core.execution import ExecutionResult
+
+        spec = json.loads((Path(cwd) / cmd[2]).read_text(encoding="utf-8"))
+        rows = [{"nonce": spec["nonce"], "trial": t, "status": "ok", "duration_s": 0.5, "at_s": 1.0 * t,
+                 "values": {"f": 1.0}} for t in range(min(self.done, len(spec["trials"])))]
+        (Path(cwd) / cmd[3]).write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+        return ExecutionResult(returncode=-1 if self.timed_out else 0, stdout="", stderr="",
+                               duration_s=float(timeout_s), timed_out=self.timed_out)
+
+
+async def _finer(tmp_path: Path, done: int, timed_out: bool, deterministic: bool):
+    eng, runner, block = await _engine(tmp_path, per_start=2)
+    block["runs_per_evaluation"] = 10
+    block["check_runs"] = 10
+    eng.executor = _PartialExecutor(done, timed_out)  # type: ignore[assignment]
+    eng._protocol_block = lambda state: {"optimisation": block, "thresholds": {}}  # type: ignore[method-assign]
+    got = await eng._time_finer_check(block, {}, runner, sys.executable, None, deterministic=deterministic, thresholds={},
+                                      inside=None, left_s=1e6, limit_s=3600.0)
+    return eng, got
+
+
+@pytest.mark.asyncio
+async def test_a_design_timed_out_after_some_of_its_runs_is_a_lower_bound(tmp_path: Path) -> None:
+    eng, got = await _finer(tmp_path, done=3, timed_out=True, deterministic=False)
+    assert got[0] is not None and got[2] is True
+    assert "timed on 3 of its 10 run(s)" in _log(eng) and "lower bound" in _log(eng)
+
+
+@pytest.mark.asyncio
+async def test_a_design_timed_on_some_of_its_runs_and_stopped_early_is_a_lower_bound(tmp_path: Path) -> None:
+    eng, got = await _finer(tmp_path, done=3, timed_out=False, deterministic=False)
+    assert got[2] is True and "timed on 3 of its 10 run(s)" in _log(eng)
+
+
+@pytest.mark.asyncio
+async def test_a_design_timed_whole_is_a_measurement(tmp_path: Path) -> None:
+    eng, got = await _finer(tmp_path, done=10, timed_out=False, deterministic=False)
+    assert got[0] is not None and got[2] is False and "lower bound" not in _log(eng)
+
+
+@pytest.mark.asyncio
+async def test_a_deterministic_design_timed_once_is_a_measurement(tmp_path: Path) -> None:
+    eng, got = await _finer(tmp_path, done=1, timed_out=False, deterministic=True)
+    assert got[0] is not None and got[2] is False

@@ -713,7 +713,10 @@ async def _time_one(
             for xs in by_value.values():
                 if len(xs) >= 2:
                     spread[name] = max(spread.get(name, 0.0), statistics.stdev(xs))  # the sample standard deviation
-    return Probe(None, None, cell, max(seconds, 1e-6), spread=spread,
+    # The allowance ran out with some trials in (at least the two needed to time it) but not all asked for: what is
+    # extrapolated from them is what the run costs at the least, not a measurement of the whole.
+    cut_short = bool(getattr(result, "timed_out", False)) and len(done) < n
+    return Probe(None, None, cell, max(seconds, 1e-6), at_least=cut_short, spread=spread,
                  trials=[dict(r.get("values") or {}) for r in done[:2]], fixed_s=fixed, per_trial_s=per_trial,
                  timed_trials=len(done), call_s=sum(durations), peak_mb=getattr(result, "peak_mb", None)), ""
 
