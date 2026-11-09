@@ -169,7 +169,7 @@ def test_the_trial_runner_the_manifest_and_the_generated_script_list_the_same_se
     grid = search.study_grid(_protocol())
     listed = search.grid_cells(grid)
     assert trial_runner.cells(grid) == listed
-    assert {frozenset((a, rm._freeze(v)) for a, v in c.items()) for c in listed} == rm._all_cells(grid)
+    assert {frozenset((a, rm.freeze(v)) for a, v in c.items()) for c in listed} == rm._all_cells(grid)
     # the script FI writes into code/ (run.py) holds its own copy of the rule: the same settings in the same order
     source = code_project.RUN_SOURCE
     start = source.index("def cells(")

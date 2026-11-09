@@ -1094,7 +1094,7 @@ def _scan_figure(data: dict[str, Any], out_dir: str) -> dict[str, Any]:
             x, y = names[0], names[1]
             more = names[2:]
             shown = [(p[x], p[y], v, tuple(p.get(k) for k in more)) for p, v in points if x in p and y in p]
-            combos = list(dict.fromkeys(s[3] for s in shown))
+            combos = _distinct(s[3] for s in shown)
             # Points that differ only in a further setting would land on one position: each combination of the further
             # settings gets its own marker, named in the legend, so no point hides another.
             markers = "osD^vP*Xp<>"
@@ -1172,6 +1172,29 @@ def _default_points(table: Any, rid: str, key: str, derived: Any = None) -> dict
     return {"": float(got)} if _plain_number(got) else {}
 
 
+def _freeze(value: Any) -> Any:
+    """A setting's value as something that can be a dict key or sit in a set: two values read from a JSON record are one
+    value exactly when they are equal in Python (``[1]``, ``[1.0]`` and ``[True]`` are one value, as ``==`` says). A list
+    or tuple becomes a tuple, a dict the tagged ``("dict", frozenset of (key, frozen value) pairs)``, a set a frozenset,
+    and every other value stays as it is. The one form used wherever
+    FI groups or lists the values of a setting (a copy of core/run_manifest.py's: this file stands alone in the quest)."""
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(v) for v in value)
+    if isinstance(value, dict):
+        return ("dict", frozenset((_freeze(k), _freeze(v)) for k, v in value.items()))
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_freeze(v) for v in value)
+    return value
+
+
+def _distinct(values: Any) -> list[Any]:
+    """The values of a setting without repeats (equal as :func:`_freeze` says), each as it was recorded, in first-seen order."""
+    seen: dict[Any, Any] = {}
+    for v in values:
+        seen.setdefault(_freeze(v), v)
+    return list(seen.values())
+
+
 def _default_lines(spec: dict[str, Any], table: Any, fixed: dict[str, Any], derived: Any = None
                    ) -> list[tuple[str, list[Any], list[float], str, str, Any, str]]:
     """The lines of the default figure with the settings in ``fixed`` held: ``(label, x values, y values, result id, series id, value of
@@ -1182,7 +1205,7 @@ def _default_lines(spec: dict[str, Any], table: Any, fixed: dict[str, Any], deri
     x_name, s_name = str(spec.get("x")), spec.get("series")
     names = spec.get("result_labels") if isinstance(spec.get("result_labels"), dict) else {}
     cells = {k: dict(table.setting(k)) for k in table.keys()}
-    values = list(dict.fromkeys(c[str(s_name)] for c in cells.values() if str(s_name) in c)) if s_name else [None]
+    values = _distinct(c[str(s_name)] for c in cells.values() if str(s_name) in c) if s_name else [None]
     by_compared = False  # the series is a factor compared inside the runs: only a result recorded for each of its values is drawn
     if s_name and not values:  # no setting of that name: a factor FI recorded as compared inside the runs is drawn as one line per level
         compared = getattr(table, "compared", None)  # an older table has none: the series stays unknown and the figure is dropped
@@ -1322,7 +1345,7 @@ def default_figure(spec: dict[str, Any], table: Any, out_dir: str, namespace: An
         record = []
         for index, (one, lines) in enumerate(zip(held, drawn)):
             ax = axes[index]
-            cats = list(dict.fromkeys(v for _l, xs, _y, _r, _i, _v, _c in lines for v in xs if not _plain_number(v)))
+            cats = _distinct(v for _l, xs, _y, _r, _i, _v, _c in lines for v in xs if not _plain_number(v))
             for label, xs, ys, _rid, _sid, _value, _lvl in lines:
                 ax.plot([cats.index(v) if v in cats else v for v in xs], ys, marker="o", label=label)
             if cats:

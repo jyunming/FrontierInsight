@@ -58,6 +58,7 @@ from . import reference_values as _refs
 from . import results_by_setting as _rbs
 from . import stats as _stats
 from . import trial_table as _tt
+from .run_manifest import distinct, freeze
 
 _log = logging.getLogger(__name__)
 
@@ -1273,7 +1274,7 @@ def _refuse_mean_over_changing_axis(rec: Records, key: Key) -> None:
     for axis in pooled:
         groups: dict[Any, list[dict[str, Any]]] = {}
         for c in cells:
-            groups.setdefault(c["cell"].get(axis), []).append(c)
+            groups.setdefault(freeze(c["cell"].get(axis)), []).append(c)
         if len(groups) < 2:
             continue
         found: list[tuple[float, float | None, float | None]] = []
@@ -1326,17 +1327,17 @@ def _missing_words(missing: list[tuple[Any, ...]], each: list[str], universe: li
     """Which settings of a ``| range`` gave no number, said whole and compactly. A set that is every combination of some
     values of the axes (the usual case: every value of one setting at fixed others) is one clause; any other set is split by
     its first axis until each part is such a clause. Nothing is cut off with a count: the words name every missing setting."""
-    values = [list(dict.fromkeys(c[i] for c in universe)) for i in range(len(each))]
+    values = [distinct(c[i] for c in universe) for i in range(len(each))]
 
     def either(vs: list[Any]) -> str:
         return str(vs[0]) if len(vs) == 1 else ", ".join(str(v) for v in vs[:-1]) + f" or {vs[-1]}"
 
     def clause(group: list[tuple[Any, ...]], axes: list[int]) -> list[str]:
-        seen = {i: list(dict.fromkeys(c[i] for c in group)) for i in axes}
+        seen = {i: distinct(c[i] for c in group) for i in axes}
         size = 1
         for i in axes:
             size *= len(seen[i])
-        if size == len({tuple(c[i] for i in axes) for c in group}):  # every combination of the values seen is missing
+        if size == len({freeze(tuple(c[i] for i in axes)) for c in group}):  # every combination of the values seen is missing
             every = [i for i in axes if len(seen[i]) > 1 and len(seen[i]) == len(values[i])]
             said = [f"{each[i]} = {either(seen[i])}" for i in axes if i not in every]
             if every:
@@ -1344,18 +1345,18 @@ def _missing_words(missing: list[tuple[Any, ...]], each: list[str], universe: li
             return [", ".join(said)]
         i = next(i for i in axes if len(seen[i]) > 1)
         rest = [j for j in axes if j != i]
-        rows = {v: {tuple(c[j] for j in rest) for c in group if c[i] == v} for v in seen[i]}
+        rows = {freeze(v): {freeze(tuple(c[j] for j in rest)) for c in group if c[i] == v} for v in seen[i]}
         out: list[str] = []
         done: set[Any] = set()
         for v in seen[i]:
-            if v in done:
+            if freeze(v) in done:
                 continue
-            same = [w for w in seen[i] if rows[w] == rows[v]]
-            done.update(same)
+            same = [w for w in seen[i] if rows[freeze(w)] == rows[freeze(v)]]
+            done.update(freeze(w) for w in same)
             out += [f"{each[i]} = {either(same)}" + (f", {t}" if t else "") for t in (clause([c for c in group if c[i] in same], rest) if rest else [""])]
         return out
 
-    return "; ".join(clause(list(dict.fromkeys(missing)), list(range(len(each)))))
+    return "; ".join(clause(distinct(missing), list(range(len(each)))))
 
 
 def _reduce(rec: Records, key: Key) -> tuple[Measured, str]:
