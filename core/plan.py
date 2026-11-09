@@ -408,6 +408,63 @@ def sub_studies_without(subs: Any, names: Any) -> list[dict[str, Any]]:
     return out
 
 
+def audit_scan_division(old: Any, new: Any, where: str = "protocol") -> tuple[dict[str, Any], str | None, list[str]]:
+    """``(container, why, refused)``: ``new`` (the settings container an audit rewrote: ``protocol``, or the search block
+    ``protocol.optimisation``, named by ``where``) with the settings to compare (``grid``) and the parts of the study
+    (``sub_studies``) taken together or not at all. The parts are written against the settings, so a change to one is
+    read with the other: ``grid`` as the audit wrote it with the audit's ``sub_studies``, else the plan's own parts.
+
+    * The audit changed the settings and left the plan's parts: the parts must still read against the new settings. A
+      change that would leave a part of the plan without its settings would drop that part (:func:`sub_studies_without`),
+      so the change is refused.
+    * The audit changed the parts: they must read against the settings it wrote. An entry that does not read is left to the
+      caller's entry-by-entry repair as long as the entries that do read cover the settings; when none reads, or the rest
+      cannot stand, the change to the parts and to the settings is refused.
+
+    On a refusal both are put back as the plan had them, ``why`` says plainly what could not be read and ``refused`` names
+    the keys the audit had changed (``grid``, ``sub_studies``). Otherwise ``why`` is ``None``, ``refused`` empty and
+    ``new`` is returned as it was."""
+    old = old if isinstance(old, dict) else {}
+    if not isinstance(new, dict):
+        return old, None, []
+    new_grid = new.get("grid", old.get("grid"))
+    new_subs = new.get("sub_studies", old.get("sub_studies"))
+    grid_changed = new_grid != old.get("grid")
+    subs_changed = new_subs != old.get("sub_studies")
+    if not (grid_changed or subs_changed) or not isinstance(new_subs, list) or not new_subs:
+        return new, None, []  # nothing changed, or no parts to keep with the settings
+    inside = new.get("in_each_run", old.get("in_each_run"))
+    grid = ({str(a): (v if isinstance(v, list) else [v]) for a, v in new_grid.items()}
+            if isinstance(new_grid, dict) else new_grid)
+    _read, why = _sub_studies(new_subs, grid, inside)
+    if why is None:
+        return new, None, []
+    if subs_changed:
+        entries, _reasons = readable_sub_studies(new_subs, grid, inside)
+        if entries and _sub_studies(entries, grid, inside)[1] is None:
+            return new, None, []  # the entries that read stand; the caller leaves the others out one by one
+    why = " ".join(why.replace("`protocol.sub_studies`", f"`{where}.sub_studies`")
+                   .replace("`protocol.grid`", f"`{where}.grid`")
+                   .replace("`protocol.in_each_run`", f"`{where}.in_each_run`").split())
+    out = dict(new)
+    refused = [k for k, changed in (("grid", grid_changed), ("sub_studies", subs_changed)) if changed]
+    for key in ("grid", "sub_studies"):
+        if key in old:
+            out[key] = old[key]
+        else:
+            out.pop(key, None)
+    if grid_changed and subs_changed:
+        what = (f"the audit's change to the settings (`{where}.grid`) and to the parts of the study (`{where}.sub_studies`) "
+                f"are made together or not at all, and together they cannot be read: {why}")
+    elif grid_changed:
+        what = (f"the audit's change to the settings (`{where}.grid`) would leave parts of the plan (`{where}.sub_studies`) "
+                f"without their settings, and the parts would be lost: {why}; settings and parts are changed together")
+    else:
+        what = (f"the parts of the study the audit wrote (`{where}.sub_studies`) cannot be read against the plan's "
+                f"settings (`{where}.grid`): {why}")
+    return out, what + "; the plan keeps its own settings and parts", refused
+
+
 def _setting_text(value: Any) -> str:
     """A setting's value or a declared name reduced to its letters and digits, lower case, for comparing the two."""
     return re.sub(r"[^a-z0-9]+", "", str(value).lower())

@@ -5440,7 +5440,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                      not_applied=not_applied)
         if not failure and isinstance(objections, list):
             self._keep_audit_open_items(
-                objections, design, reasons={n["key"]: n["reason"] for n in not_applied if n.get("key") and not n.get("applied")},
+                objections, design, reasons=self._audit_reasons(not_applied),
                 default_reason="FI did not apply it" if adopt else "the design was already settled, so the audit only checked it",
                 iteration=int(iteration or 0), before=before)
         if not failure:
@@ -5488,15 +5488,41 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         out = dict(amended)
         old_p, new_p = before.get("protocol"), amended.get("protocol")
         if isinstance(old_p, dict) and isinstance(new_p, dict):
+            # The settings to compare and the parts of the study are made together or not at all, in the protocol and in
+            # a search's block alike (a change to one is read with the other).
+            new_p = dict(new_p)
+            for where, mine, theirs in (("protocol", old_p, new_p),
+                                        ("protocol.optimisation", old_p.get("optimisation"), new_p.get("optimisation"))):
+                if where == "protocol" and isinstance(old_p.get("optimisation"), dict):
+                    continue  # a search keeps its scan in its block
+                if not isinstance(mine, dict) or not isinstance(theirs, dict):
+                    continue
+                kept_division, why_not, refused = _plan.audit_scan_division(mine, theirs, where)
+                if why_not is None:
+                    continue
+                if where == "protocol":
+                    new_p = kept_division
+                else:
+                    new_p["optimisation"] = kept_division
+                not_applied.extend({"key": f"{where}.{part}", "reason": why_not} for part in refused)
             kept_p = dict(new_p)
             base_fixed, base_notes = _plan.repair_protocol(old_p)
-            # Every key the audit changed, added or left out, each tried alone on the protocol as it was.
-            for key in sorted(k for k in {*old_p, *new_p} if (k in old_p) != (k in new_p) or new_p.get(k) != old_p.get(k)):
-                rest = {k: v for k, v in old_p.items() if k != key}
-                trial_fixed, trial_notes = _plan.repair_protocol({**rest, **({key: new_p[key]} if key in new_p else {})})
-                gone = sorted(set(base_fixed or {}) - set(trial_fixed or {}) - ({key} if key not in new_p else set()))
+            # Every key the audit changed, added or left out, each tried alone on the protocol as it was; the settings to
+            # compare (`grid`) and the parts of the study (`sub_studies`) are tried together when the audit changed both.
+            changed_keys = sorted(k for k in {*old_p, *new_p} if (k in old_p) != (k in new_p) or new_p.get(k) != old_p.get(k))
+            tried: set[str] = set()
+            for key in changed_keys:
+                if key in tried:
+                    continue
+                unit = [key]
+                if key in ("grid", "sub_studies"):
+                    unit = [k for k in ("grid", "sub_studies") if k in changed_keys]
+                tried.update(unit)
+                rest = {k: v for k, v in old_p.items() if k not in unit}
+                trial_fixed, trial_notes = _plan.repair_protocol({**rest, **{k: new_p[k] for k in unit if k in new_p}})
+                gone = sorted(set(base_fixed or {}) - set(trial_fixed or {}) - {k for k in unit if k not in new_p})
                 fresh = [n for n in trial_notes if n not in base_notes]
-                dropped = key in old_p and key not in new_p
+                dropped = any(k in old_p and k not in new_p for k in unit)
                 if not gone and not fresh and not dropped:
                     continue
                 reason = (fresh[0] if fresh else f"`protocol.{', '.join(gone)}` could not be read with it" if gone
@@ -5505,7 +5531,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                         and not dropped else " ".join(reason.split())[:300]}
                 if fresh and not gone and not dropped:
                     item["part"] = "yes"  # only a part of it cannot be read: the audit is asked to correct that part
-                if fresh and not gone and not dropped and key in (trial_fixed or {})                         and (trial_fixed or {})[key] != (base_fixed or {}).get(key):
+                if len(unit) == 1 and fresh and not gone and not dropped and key in (trial_fixed or {})                         and (trial_fixed or {})[key] != (base_fixed or {}).get(key):
                     # Only a part of it cannot be read: the rest of the change is made, that part alone is left out, and
                     # a key of the block the plan had readable stays as the plan had it (the audit's version of it could
                     # not be read; its loss would cost the block what it had, e.g. a search its evaluation budget).
@@ -5517,11 +5543,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                           "could not be read" if b in wrote else "was left out of its rewrite")
                     kept_p[key] = trial_fixed[key]
                     item["applied"] = "all of it except the part named"
-                elif key in old_p:
-                    kept_p[key] = old_p[key]
+                    # what each left-out part of the block was refused for, by the part's own path
+                    item["parts"] = {m.group(1): " ".join(n.split())[:300] for n in fresh
+                                     if (m := re.search(r"`(protocol\.%s\.\w+)`" % re.escape(key), n))}
                 else:
-                    kept_p.pop(key, None)
+                    for k in unit:
+                        if k in old_p:
+                            kept_p[k] = old_p[k]
+                        else:
+                            kept_p.pop(k, None)
                 not_applied.append(item)
+                not_applied.extend({**item, "key": f"protocol.{k}"} for k in unit[1:])
             out["protocol"] = kept_p
 
         def readable(d: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
@@ -5580,6 +5612,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._log.info("[design_self_critique] `%s` after the correction: %s", n["key"],
                            "still not fully readable" if n["key"] in left else "read in full")
         return design2, not_applied2
+
+    @staticmethod
+    def _audit_reasons(not_applied: list[dict[str, Any]]) -> dict[str, str]:
+        """``{path: why}`` for the open items of an audit's refused changes: the reason of each change left out whole, and of
+        each part of a block that was applied except that part (by the part's own path, so the block's other parts are not
+        given it)."""
+        out = {n["key"]: n["reason"] for n in not_applied if n.get("key") and not n.get("applied")}
+        for n in not_applied:
+            out.update({k: v for k, v in (n.get("parts") or {}).items() if k not in out})
+        return out
 
     def _keep_audit_open_items(
         self, objections: Any, design: Any, *, reasons: dict[str, str], default_reason: str, iteration: int = 0,
@@ -13264,7 +13306,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                   f"QUALITY.md and passed to the code. See .fi/{_audit_open.FILE}")
 
     #: The protocol keys an audit may change: how the study is run, never what its results are judged by.
-    _AUDIT_MAY_CHANGE = frozenset({"grid", "in_each_run", "seed_policy", "failure_policy", "ci_method"})
+    _AUDIT_MAY_CHANGE = frozenset({"grid", "sub_studies", "in_each_run", "seed_policy", "failure_policy", "ci_method"})
 
     def _keep_what_the_results_are_judged_by(self, before: dict[str, Any], amended: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         """``(design, changed)``: ``amended`` with every protocol key but those in ``_AUDIT_MAY_CHANGE`` put back as it was

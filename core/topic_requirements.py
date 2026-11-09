@@ -909,7 +909,8 @@ def joined_sub_studies(old_protocol: dict[str, Any], grid: dict[str, Any], said:
     """The ``protocol.sub_studies`` after settings were added to ``grid``, so that a setting added for one part of the study
     does not multiply the other parts. ``said``: the answer's own ``sub_studies`` (the part each added setting belongs to;
     a part it names that the plan already has takes its added settings, any other is a new part). ``None`` when the plan
-    has no sub-studies and the answer names none (the added setting joins the one grid, as before). An added setting that no
+    has no sub-studies and the answer names none (the added setting joins the one grid, as before). A plan without parts
+    keeps its old settings crossed together except those the answer's parts vary (crossed in their part only). An added setting that no
     part has is a part of its own (every other setting held at its first value), never crossed with the rest. A part that
     held a setting at a value the new grid no longer has holds it at its first value, as a part that says none does (the
     plan would otherwise not be read, and what the topic asked for would be lost). Whether the result can be read is for
@@ -926,7 +927,15 @@ def joined_sub_studies(old_protocol: dict[str, Any], grid: dict[str, Any], said:
     stale = any(kept(s.get("hold")) != (s.get("hold") or {}) for s in old)
     if not (added or stale) or not (old or asked):
         return None
-    subs = old or [{"name": "", "vary": list(have), "hold": {}}]
+    if old:
+        subs = old
+    else:
+        # The plan declared no parts, so its grid was one crossed study. FI keeps that crossing for the settings the
+        # answer's own parts do not vary; a setting an answer part varies is crossed there, in its part, not again with
+        # every other setting of the old grid (that part would multiply them all and run cells no part asked for).
+        in_parts = {a for e in asked if isinstance(e.get("vary"), list) for a in e["vary"] if isinstance(a, str) and a in grid}
+        crossed = [a for a in have if a not in in_parts]
+        subs = [{"name": "", "vary": crossed, "hold": {}}] if crossed else []
     subs = [{**s, "vary": list(s.get("vary") or []), "hold": kept(s.get("hold"))} for s in subs]
     by_name = {" ".join(str(s.get("name") or "").split()).lower(): s for s in subs if str(s.get("name") or "").strip()}
     for entry in asked:
